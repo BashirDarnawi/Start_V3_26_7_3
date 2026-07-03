@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover">
+    <!-- iOS Safari: prevent automatic detection of phone numbers -->
+    <meta name="format-detection" content="telephone=no">
+    <!-- iOS Safari: status bar style -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <title>Albayan</title>
+    
+    <!-- Security Headers -->
+    <meta http-equiv="X-Content-Type-Options" content="nosniff">
+    <meta http-equiv="X-Frame-Options" content="SAMEORIGIN">
+    <meta http-equiv="X-XSS-Protection" content="1; mode=block">
+    <meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin">
+    <meta http-equiv="Permissions-Policy" content="geolocation=(), microphone=(), camera=()">
+    
+    <!-- Content Security Policy - Production-ready -->
+    <meta http-equiv="Content-Security-Policy" content="
+        default-src 'self';
+        script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://unpkg.com;
+        style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+        font-src 'self' https://fonts.gstatic.com;
+        img-src 'self' data: blob:;
+        connect-src 'self' https:;
+        form-action 'self';
+        base-uri 'self';
+        frame-ancestors 'self';
+    ">
+    
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            colors: {
+              slate: {
+                850: '#151e2e',
+                900: '#0f172a',
+                950: '#020617',
+              },
+            },
+            animation: {
+              'fade-in-up': 'fadeInUp 0.8s cubic-bezier(0.16, 1, 0.3, 1)',
+              'pulse-slow': 'pulse 6s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+              'blob': 'blob 20s infinite alternate',
+              'shimmer': 'shimmer 2.5s linear infinite',
+              'shake': 'shake 0.3s ease-in-out',
+            },
+            keyframes: {
+              fadeInUp: {
+                '0%': { opacity: '0', transform: 'translateY(40px) scale(0.95)' },
+                '100%': { opacity: '1', transform: 'translateY(0) scale(1)' },
+              },
+              blob: {
+                '0%': { transform: 'translate(0px, 0px) scale(1)' },
+                '33%': { transform: 'translate(50px, -50px) scale(1.2)' },
+                '66%': { transform: 'translate(-40px, 20px) scale(0.8)' },
+                '100%': { transform: 'translate(0px, 0px) scale(1)' },
+              },
+              shimmer: {
+                '0%': { backgroundPosition: '-1000px 0' },
+                '100%': { backgroundPosition: '1000px 0' },
+              },
+              shake: {
+                '0%, 100%': { transform: 'translateX(0)' },
+                '25%': { transform: 'translateX(-5px)' },
+                '75%': { transform: 'translateX(5px)' },
+              }
+            }
+          }
+        }
+      }
+    </script>
+    
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    
+    <!-- Lucide Icons CDN -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100">
+    
+    <!-- Background Noise Texture -->
+    <div class="bg-noise"></div>
+    
+    <!-- Aurora Background -->
+    <div id="aurora-bg" class="fixed inset-0 z-0 overflow-hidden pointer-events-none">
+        <div class="absolute top-[-50%] left-[-50%] w-[200%] h-[200%] animate-blob opacity-40 dark:opacity-28 mix-blend-multiply dark:mix-blend-color-dodge filter blur-[110px]">
+            <div class="absolute top-0 left-0 w-full h-full alb-aurora-1 rounded-full animate-blob"></div>
+            <div class="absolute top-0 right-0 w-full h-full alb-aurora-2 rounded-full animate-blob animation-delay-2000"></div>
+            <div class="absolute bottom-0 left-1/2 -translate-x-1/2 w-full h-full alb-aurora-3 rounded-full animate-blob animation-delay-4000"></div>
+        </div>
+        <div class="absolute inset-0 bg-white/30 dark:bg-slate-950/78 backdrop-blur-[2px]"></div>
+    </div>
+    
+    <!-- Loading Screen (outside #app so it persists during render) -->
+    <div id="app-loading-screen" class="fixed inset-0 z-50 flex items-center justify-center p-6 bg-slate-50/95 dark:bg-slate-950/95 backdrop-blur-sm transition-opacity duration-300">
+        <div class="glass-panel w-full max-w-md p-8 rounded-3xl text-center">
+            <div class="w-16 h-16 alb-mark rounded-2xl mx-auto mb-4 flex items-center justify-center text-white text-2xl font-bold">A</div>
+            <h1 class="text-2xl font-bold text-slate-800 dark:text-white">Albayan</h1>
+            <p id="loading-status" class="text-sm text-slate-500 dark:text-slate-300 mt-2">Loading…</p>
+            <div class="spinner" style="margin: 24px auto 0;"></div>
+        </div>
+    </div>
+    
+    <!-- Main App Container -->
+    <div id="app" class="relative z-10"></div>
+    
+    <!-- Notification Container (higher z-index, positioned below sync status) -->
+    <div id="notification-container" class="fixed top-16 right-4 z-50 space-y-2 max-w-sm"></div>
+    
+    <!-- Cloud Sync Status (top position for visibility) -->
+    <div id="sync-status-container" class="fixed top-4 right-4 z-40"></div>
+    
+    <!-- JavaScript -->
+    <script src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+# Secrets — never commit credentials
+.env
+
+# Dependencies
+node_modules/
+
+# Python caches and local databases
+__pycache__/
+*.pyc
+.pycache_tmp/
+server/data/
+*.db
+
+# Generated at runtime by the server
+script.min.js
+
+# Build outputs and caches
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+ios/App/build/
+ios/App/DerivedData/
+
+# OS / editor junk
+.DS_Store
+*.log
+.cursor/
+.claude/settings.local.json
+
+# Logs directory
+logs/

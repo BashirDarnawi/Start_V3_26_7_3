@@ -1,0 +1,21 @@
+[Unit]
+Description=Albayan Web App (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/albayan
+
+# Load environment variables (DATABASE_URL, cookie secure, etc.)
+EnvironmentFile=/etc/albayan/albayan.env
+
+# Use a virtualenv installed at /opt/albayan/server/.venv
+ExecStart=/opt/albayan/server/.venv/bin/uvicorn server.main:app --host 127.0.0.1 --port 8000
+
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+
+

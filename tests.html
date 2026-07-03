@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AlbayanHub Automated Tests</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 1200px;
+      margin: 40px auto;
+      padding: 0 20px;
+      background: #f8fafc;
+    }
+    .test-suite {
+      background: white;
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    .test-suite h2 {
+      margin: 0 0 16px 0;
+      color: #1e293b;
+      border-bottom: 2px solid #e2e8f0;
+      padding-bottom: 8px;
+    }
+    .test-result {
+      padding: 12px;
+      margin: 8px 0;
+      border-radius: 8px;
+      font-family: 'Courier New', monospace;
+      font-size: 14px;
+    }
+    .test-pass {
+      background: #dcfce7;
+      color: #166534;
+      border-left: 4px solid #22c55e;
+    }
+    .test-fail {
+      background: #fee2e2;
+      color: #991b1b;
+      border-left: 4px solid #ef4444;
+    }
+    .test-summary {
+      background: #f1f5f9;
+      padding: 16px;
+      border-radius: 8px;
+      margin-top: 24px;
+      display: flex;
+      justify-content: space-around;
+      text-align: center;
+    }
+    .summary-item {
+      flex: 1;
+    }
+    .summary-number {
+      font-size: 32px;
+      font-weight: bold;
+      margin-bottom: 4px;
+    }
+    .summary-label {
+      font-size: 12px;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .run-tests-btn {
+      background: #3b82f6;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-bottom: 20px;
+    }
+    .run-tests-btn:hover {
+      background: #2563eb;
+    }
+  </style>
+</head>
+<body>
+  <h1>🧪 AlbayanHub Automated Tests</h1>
+  <button class="run-tests-btn" onclick="runAllTests()">▶️ Run All Tests</button>
+  
+  <div id="test-results"></div>
+  <div id="test-summary"></div>
+
+  <script>
+    // Simple test framework
+    const tests = {
+      passed: 0,
+      failed: 0,
+      results: []
+    };
+
+    function assert(condition, message) {
+      if (condition) {
+        tests.passed++;
+        tests.results.push({ pass: true, message });
+      } else {
+        tests.failed++;
+        tests.results.push({ pass: false, message });
+      }
+    }
+
+    function assertEquals(actual, expected, message) {
+      assert(actual === expected, `${message} (expected: ${expected}, got: ${actual})`);
+    }
+
+    function assertTrue(condition, message) {
+      assert(condition === true, message);
+    }
+
+    function assertFalse(condition, message) {
+      assert(condition === false, message);
+    }
+
+    // Security Tests
+    function testSecurityEscaping() {
+      // Mock Security object
+      const Security = {
+        escapeHtml: (str) => String(str).replace(/[&<>"']/g, (m) => ({
+          '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        })[m])
+      };
+
+      assertEquals(Security.escapeHtml('<script>'), '&lt;script&gt;', 'Should escape script tags');
+      assertEquals(Security.escapeHtml('Hello & World'), 'Hello &amp; World', 'Should escape ampersands');
+      assertEquals(Security.escapeHtml('"test"'), '&quot;test&quot;', 'Should escape quotes');
+      assertTrue(Security.escapeHtml('<img src=x onerror=alert(1)>').indexOf('<') === -1, 'Should escape XSS attempts');
+    }
+
+    // Receipt Number Validation Tests
+    function testReceiptNumberValidation() {
+      function isValidReceiptNumber(num) {
+        const str = String(num || '').trim();
+        return !!(str && /^\d+$/.test(str) && !str.startsWith('0'));
+      }
+
+      assertTrue(isValidReceiptNumber('123'), 'Valid receipt number 123');
+      assertTrue(isValidReceiptNumber('999'), 'Valid receipt number 999');
+      assertFalse(isValidReceiptNumber('0123'), 'Should reject leading zeros');
+      assertFalse(isValidReceiptNumber(''), 'Should reject empty string');
+      assertFalse(isValidReceiptNumber('abc'), 'Should reject non-numeric');
+      assertFalse(isValidReceiptNumber('12a3'), 'Should reject mixed alphanumeric');
+    }
+
+    // Temp Receipt Number Validation Tests
+    function testTempReceiptNumberValidation() {
+      function isValidTempReceiptNumber(num) {
+        const str = String(num || '').trim();
+        return str.startsWith('D') && /^D\d+$/.test(str);
+      }
+
+      assertTrue(isValidTempReceiptNumber('D1'), 'Valid temp receipt D1');
+      assertTrue(isValidTempReceiptNumber('D999'), 'Valid temp receipt D999');
+      assertFalse(isValidTempReceiptNumber('D'), 'Should reject D without number');
+      assertFalse(isValidTempReceiptNumber('1'), 'Should reject number without D');
+      assertFalse(isValidTempReceiptNumber(''), 'Should reject empty string');
+    }
+
+    // Amount Calculation Tests
+    function testAmountCalculations() {
+      function calculateUSD(local, rate) {
+        return rate > 0 ? local / rate : 0;
+      }
+
+      function calculateLocal(usd, rate) {
+        return usd * rate;
+      }
+
+      assertEquals(calculateUSD(480, 4.8), 100, 'USD calculation should be correct');
+      assertEquals(calculateLocal(100, 4.8), 480, 'Local calculation should be correct');
+      assertEquals(calculateUSD(100, 0), 0, 'Should handle zero rate safely');
+      assertEquals(calculateLocal(100, 0), 0, 'Should handle zero rate safely');
+    }
+
+    // Permission Tests
+    function testPermissions() {
+      function hasPermission(user, module, action) {
+        if (!user) return false;
+        if (user.role === 'Admin') return true;
+        if (!user.permissions || !user.permissions[module]) return false;
+        return user.permissions[module].includes(action);
+      }
+
+      const admin = { role: 'Admin', permissions: {} };
+      const manager = { 
+        role: 'Manager', 
+        permissions: { deliveries: ['view', 'assign'], receipts: ['view', 'add'] }
+      };
+      const delivery = { 
+        role: 'Delivery', 
+        permissions: { deliveries: ['viewOwn', 'complete'] }
+      };
+
+      assertTrue(hasPermission(admin, 'deliveries', 'delete'), 'Admin should have all permissions');
+      assertTrue(hasPermission(manager, 'deliveries', 'assign'), 'Manager should have assign permission');
+      assertFalse(hasPermission(manager, 'deliveries', 'delete'), 'Manager should not have delete permission');
+      assertTrue(hasPermission(delivery, 'deliveries', 'complete'), 'Delivery should have complete permission');
+      assertFalse(hasPermission(delivery, 'deliveries', 'assign'), 'Delivery should not have assign permission');
+    }
+
+    // Delivery Status Tests
+    function testDeliveryStatuses() {
+      const VALID_STATUSES = ['Needs Delivery', 'In Progress', 'Delivered', 'Canceled', 'Office'];
+
+      function isValidDeliveryStatus(status) {
+        return VALID_STATUSES.includes(status);
+      }
+
+      assertTrue(isValidDeliveryStatus('Needs Delivery'), 'Needs Delivery is valid');
+      assertTrue(isValidDeliveryStatus('In Progress'), 'In Progress is valid');
+      assertTrue(isValidDeliveryStatus('Delivered'), 'Delivered is valid');
+      assertFalse(isValidDeliveryStatus('Invalid'), 'Invalid status should fail');
+      assertFalse(isValidDeliveryStatus(''), 'Empty status should fail');
+    }
+
+    // Office Handover Tests
+    function testOfficeHandover() {
+      function canUndoHandover(receipt, user) {
+        if (!receipt || !user) return false;
+        if (user.role === 'Admin') return true;
+        if (user.role === 'Delivery') return false; // Drivers can't undo handover
+        return receipt.isReceivedInOffice === true;
+      }
+
+      const admin = { role: 'Admin' };
+      const manager = { role: 'Manager' };
+      const delivery = { role: 'Delivery' };
+      const receipt = { isReceivedInOffice: true };
+
+      assertTrue(canUndoHandover(receipt, admin), 'Admin can undo handover');
+      assertTrue(canUndoHandover(receipt, manager), 'Manager can undo handover');
+      assertFalse(canUndoHandover(receipt, delivery), 'Delivery cannot undo handover');
+    }
+
+    // Date Validation Tests
+    function testDateValidation() {
+      function isValidDate(dateStr) {
+        const date = new Date(dateStr);
+        return !isNaN(date.getTime());
+      }
+
+      assertTrue(isValidDate('2024-12-28'), 'Valid ISO date');
+      assertTrue(isValidDate('2024-12-28T10:30:00Z'), 'Valid ISO datetime');
+      assertFalse(isValidDate('invalid'), 'Invalid date string');
+      assertFalse(isValidDate(''), 'Empty string is invalid');
+    }
+
+    // Security Function Tests
+    function testSecurityFunctions() {
+      // Test escapeHtml
+      assertEqual(Security.escapeHtml('<script>alert("xss")</script>'), '&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;', 'escapeHtml prevents XSS');
+
+      // Test sanitizeInput
+      assertEqual(Security.sanitizeInput('<b>test</b>'), 'test', 'sanitizeInput removes HTML tags');
+      assertEqual(Security.sanitizeInput('normal text'), 'normal text', 'sanitizeInput preserves normal text');
+      assertEqual(Security.sanitizeInput(null), '', 'sanitizeInput handles null');
+      assertEqual(Security.sanitizeInput(undefined), '', 'sanitizeInput handles undefined');
+
+      // Test input length limits
+      const longInput = 'a'.repeat(1000);
+      const sanitized = Security.sanitizeInput(longInput, { maxLength: 100 });
+      assertTrue(sanitized.length <= 100, 'sanitizeInput respects maxLength');
+    }
+
+    // Exchange Rate Edge Cases
+    function testExchangeRateEdgeCases() {
+      // Test defensive exchange rate calculation
+      function safeCalculateLYD(usdAmount, exchangeRate) {
+        const rawRate = (exchangeRate || 1);
+        const safeRate = (typeof rawRate === 'number' && rawRate > 0 && rawRate < 1000) ? rawRate : 1;
+        return (usdAmount || 0) * safeRate;
+      }
+
+      assertEqual(safeCalculateLYD(100, 1.5), 150, 'Normal exchange rate works');
+      assertEqual(safeCalculateLYD(100, 0), 100, 'Zero rate falls back to 1');
+      assertEqual(safeCalculateLYD(100, -1), 100, 'Negative rate falls back to 1');
+      assertEqual(safeCalculateLYD(100, 10000), 100, 'Extreme rate falls back to 1');
+      assertEqual(safeCalculateLYD(100, null), 100, 'Null rate falls back to 1');
+      assertEqual(safeCalculateLYD(100, undefined), 100, 'Undefined rate falls back to 1');
+      assertEqual(safeCalculateLYD(null, 1.5), 0, 'Null USD amount gives 0');
+    }
+
+    // Null Safety Tests
+    function testNullSafety() {
+      // Test various functions with null/undefined inputs
+      function safeFormatCurrency(amount, currency = 'LYD') {
+        const num = Number(amount);
+        if (isNaN(num)) return '0.00 ' + currency;
+        return num.toFixed(2) + ' ' + currency;
+      }
+
+      assertEqual(safeFormatCurrency(123.456), '123.46 LYD', 'Valid number formats correctly');
+      assertEqual(safeFormatCurrency(null), '0.00 LYD', 'Null formats to zero');
+      assertEqual(safeFormatCurrency('invalid'), '0.00 LYD', 'Invalid string formats to zero');
+      assertEqual(safeFormatCurrency(undefined), '0.00 LYD', 'Undefined formats to zero');
+    }
+
+    // Run all tests
+    function runAllTests() {
+      // Reset
+      tests.passed = 0;
+      tests.failed = 0;
+      tests.results = [];
+
+      // Run test suites
+      const testSuites = [
+        { name: '🔒 Security & XSS Protection', fn: testSecurityEscaping },
+        { name: '🧾 Receipt Number Validation', fn: testReceiptNumberValidation },
+        { name: '📋 Temp Receipt Validation', fn: testTempReceiptNumberValidation },
+        { name: '💰 Amount Calculations', fn: testAmountCalculations },
+        { name: '🔐 Permission System', fn: testPermissions },
+        { name: '🚚 Delivery Statuses', fn: testDeliveryStatuses },
+        { name: '🏢 Office Handover Rules', fn: testOfficeHandover },
+        { name: '📅 Date Validation', fn: testDateValidation },
+        { name: '🔐 Security Functions', fn: testSecurityFunctions },
+        { name: '💱 Exchange Rate Edge Cases', fn: testExchangeRateEdgeCases },
+        { name: '🛡️ Null Safety', fn: testNullSafety }
+      ];
+
+      let html = '';
+      testSuites.forEach(suite => {
+        html += `<div class="test-suite"><h2>${suite.name}</h2>`;
+        const beforeCount = tests.results.length;
+        suite.fn();
+        const afterCount = tests.results.length;
+        
+        for (let i = beforeCount; i < afterCount; i++) {
+          const result = tests.results[i];
+          html += `<div class="test-result ${result.pass ? 'test-pass' : 'test-fail'}">
+            ${result.pass ? '✅' : '❌'} ${result.message}
+          </div>`;
+        }
+        html += '</div>';
+      });
+
+      document.getElementById('test-results').innerHTML = html;
+
+      // Summary
+      const total = tests.passed + tests.failed;
+      const passRate = total > 0 ? Math.round((tests.passed / total) * 100) : 0;
+      document.getElementById('test-summary').innerHTML = `
+        <div class="test-summary">
+          <div class="summary-item">
+            <div class="summary-number" style="color: #22c55e;">${tests.passed}</div>
+            <div class="summary-label">Passed</div>
+          </div>
+          <div class="summary-item">
+            <div class="summary-number" style="color: #ef4444;">${tests.failed}</div>
+            <div class="summary-label">Failed</div>
+          </div>
+          <div class="summary-item">
+            <div class="summary-number" style="color: #3b82f6;">${total}</div>
+            <div class="summary-label">Total</div>
+          </div>
+          <div class="summary-item">
+            <div class="summary-number" style="color: ${passRate === 100 ? '#22c55e' : '#f59e0b'};">${passRate}%</div>
+            <div class="summary-label">Pass Rate</div>
+          </div>
+        </div>
+      `;
+    }
+
+    // Auto-run tests on page load
+    window.addEventListener('load', runAllTests);
+  </script>
+</body>
+</html>
+

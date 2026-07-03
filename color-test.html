@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Color Test - AdPulse Analytics</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100">
+    
+    <!-- Background Noise Texture -->
+    <div class="bg-noise"></div>
+    
+    <!-- Aurora Background -->
+    <div id="aurora-bg" class="fixed inset-0 z-0 overflow-hidden pointer-events-none">
+        <div class="absolute top-[-50%] left-[-50%] w-[200%] h-[200%] animate-blob opacity-50 dark:opacity-35 mix-blend-multiply dark:mix-blend-color-dodge filter blur-[100px]">
+            <div class="absolute top-0 left-0 w-full h-full bg-gradient-to-r from-purple-400 via-pink-400 to-indigo-500 rounded-full animate-blob"></div>
+            <div class="absolute top-0 right-0 w-full h-full bg-gradient-to-l from-cyan-400 via-blue-400 to-sky-500 rounded-full animate-blob animation-delay-2000"></div>
+            <div class="absolute bottom-0 left-1/2 -translate-x-1/2 w-full h-full bg-gradient-to-t from-violet-400 to-fuchsia-500 rounded-full animate-blob animation-delay-4000"></div>
+        </div>
+        <div class="absolute inset-0 bg-white/20 dark:bg-slate-950/75 backdrop-blur-[2px]"></div>
+    </div>
+    
+    <!-- Main Content -->
+    <div class="relative z-10 container mx-auto px-6 py-12 max-w-6xl">
+        <div class="text-center mb-12">
+            <h1 class="text-5xl font-bold mb-4 bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 bg-clip-text text-transparent">
+                🎨 Color Enhancement Test
+            </h1>
+            <p class="text-lg text-slate-600 dark:text-slate-400">All colors have been restored and enhanced!</p>
+        </div>
+
+        <!-- Status Badges -->
+        <div class="glass-panel rounded-2xl p-8 mb-6">
+            <h2 class="text-2xl font-bold mb-6">Status Badges</h2>
+            <div class="flex flex-wrap gap-4">
+                <span class="status-badge status-pending">Pending</span>
+                <span class="status-badge status-completed">Completed</span>
+                <span class="status-badge status-canceled">Canceled</span>
+                <span class="status-badge status-lost">Lost</span>
+                <span class="status-badge delivery-needs">Needs Delivery</span>
+                <span class="status-badge delivery-progress">In Progress</span>
+                <span class="status-badge delivery-delivered">Delivered</span>
+                <span class="status-badge delivery-office">Office</span>
+                <span class="payment-badge">Payment Method</span>
+                <span class="topup-badge">Top-up</span>
+            </div>
+        </div>
+
+        <!-- Stat Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
+            <div class="glass-panel rounded-2xl p-6 hover:scale-105 transition-transform stat-card">
+                <div class="flex items-start justify-between mb-4">
+                    <div>
+                        <p class="text-sm text-slate-500 font-medium uppercase">Total Revenue</p>
+                        <p class="text-3xl font-bold mt-2">$12,345</p>
+                    </div>
+                    <div class="w-12 h-12 bg-gradient-to-br from-emerald-500 to-teal-600 rounded-xl flex items-center justify-center text-white shadow-lg">
+                        $
+                    </div>
+                </div>
+            </div>
+            <div class="glass-panel rounded-2xl p-6 hover:scale-105 transition-transform stat-card">
+                <div class="flex items-start justify-between mb-4">
+                    <div>
+                        <p class="text-sm text-slate-500 font-medium uppercase">Total Ads</p>
+                        <p class="text-3xl font-bold mt-2">89</p>
+                    </div>
+                    <div class="w-12 h-12 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-xl flex items-center justify-center text-white shadow-lg">
+                        📢
+                    </div>
+                </div>
+            </div>
+            <div class="glass-panel rounded-2xl p-6 hover:scale-105 transition-transform stat-card">
+                <div class="flex items-start justify-between mb-4">
+                    <div>
+                        <p class="text-sm text-slate-500 font-medium uppercase">Pending</p>
+                        <p class="text-3xl font-bold mt-2">23</p>
+                    </div>
+                    <div class="w-12 h-12 bg-gradient-to-br from-amber-500 to-orange-600 rounded-xl flex items-center justify-center text-white shadow-lg">
+                        ⏰
+                    </div>
+                </div>
+            </div>
+            <div class="glass-panel rounded-2xl p-6 hover:scale-105 transition-transform stat-card">
+                <div class="flex items-start justify-between mb-4">
+                    <div>
+                        <p class="text-sm text-slate-500 font-medium uppercase">Completed</p>
+                        <p class="text-3xl font-bold mt-2">66</p>
+                    </div>
+                    <div class="w-12 h-12 bg-gradient-to-br from-blue-500 to-cyan-600 rounded-xl flex items-center justify-center text-white shadow-lg">
+                        ✓
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Buttons -->
+        <div class="glass-panel rounded-2xl p-8 mb-6">
+            <h2 class="text-2xl font-bold mb-6">Buttons</h2>
+            <div class="flex flex-wrap gap-4">
+                <button class="btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold">Primary Button</button>
+                <button class="btn-shine bg-purple-600 text-white px-6 py-3 rounded-xl font-bold">Secondary Button</button>
+                <button class="btn-shine bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold">Success Button</button>
+                <button class="btn-shine bg-rose-600 text-white px-6 py-3 rounded-xl font-bold">Danger Button</button>
+                <button class="btn-shine bg-blue-600 text-white px-6 py-3 rounded-xl font-bold">Info Button</button>
+            </div>
+        </div>
+
+        <!-- Input Fields -->
+        <div class="glass-panel rounded-2xl p-8 mb-6">
+            <h2 class="text-2xl font-bold mb-6">Input Fields</h2>
+            <div class="space-y-4">
+                <input type="text" placeholder="Enter text here..." class="glass-input w-full px-4 py-3 rounded-xl text-slate-900 dark:text-white">
+                <input type="email" placeholder="Email address..." class="glass-input w-full px-4 py-3 rounded-xl text-slate-900 dark:text-white">
+                <textarea placeholder="Message..." class="glass-input w-full px-4 py-3 rounded-xl text-slate-900 dark:text-white" rows="3"></textarea>
+            </div>
+        </div>
+
+        <!-- Reconciliation Status -->
+        <div class="glass-panel rounded-2xl p-8 mb-6">
+            <h2 class="text-2xl font-bold mb-6">Reconciliation Status</h2>
+            <div class="space-y-4">
+                <div class="recon-match p-4 rounded-lg">
+                    <p class="font-semibold">Perfect Match</p>
+                    <p class="text-sm text-slate-600 dark:text-slate-400">Budget: $1000 | Spent: $1000</p>
+                </div>
+                <div class="recon-overspent p-4 rounded-lg">
+                    <p class="font-semibold">Overspent</p>
+                    <p class="text-sm text-slate-600 dark:text-slate-400">Budget: $1000 | Spent: $1200</p>
+                </div>
+                <div class="recon-underspent p-4 rounded-lg">
+                    <p class="font-semibold">Underspent</p>
+                    <p class="text-sm text-slate-600 dark:text-slate-400">Budget: $1000 | Spent: $800</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Audit Log Items -->
+        <div class="glass-panel rounded-2xl p-8 mb-6">
+            <h2 class="text-2xl font-bold mb-6">Audit Log Items</h2>
+            <div class="space-y-4">
+                <div class="audit-log-item audit-login p-4">
+                    <p class="font-semibold">User Login</p>
+                    <p class="text-sm text-slate-600 dark:text-slate-400">Bashir logged in at 2:30 PM</p>
+                </div>
+                <div class="audit-log-item audit-create p-4">
+                    <p class="font-semibold">Ad Created</p>
+                    <p class="text-sm text-slate-600 dark:text-slate-400">New ad created for Customer #123</p>
+                </div>
+                <div class="audit-log-item audit-update p-4">
+                    <p class="font-semibold">Payment Updated</p>
+                    <p class="text-sm text-slate-600 dark:text-slate-400">Receipt #456 payment method changed</p>
+                </div>
+                <div class="audit-log-item audit-delete p-4">
+                    <p class="font-semibold">Customer Deleted</p>
+                    <p class="text-sm text-slate-600 dark:text-slate-400">Customer #789 removed from system</p>
+                </div>
+                <div class="audit-log-item audit-collect p-4">
+                    <p class="font-semibold">Payment Collected</p>
+                    <p class="text-sm text-slate-600 dark:text-slate-400">$500 collected by delivery person</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Loading Spinner -->
+        <div class="glass-panel rounded-2xl p-8 mb-6 text-center">
+            <h2 class="text-2xl font-bold mb-6">Loading Spinner</h2>
+            <div class="flex justify-center">
+                <div class="spinner"></div>
+            </div>
+        </div>
+
+        <!-- Split Payment Item -->
+        <div class="glass-panel rounded-2xl p-8">
+            <h2 class="text-2xl font-bold mb-6">Split Payment Example</h2>
+            <div class="split-payment-item">
+                <div class="flex justify-between items-center">
+                    <div>
+                        <p class="font-semibold">Cash (LYD)</p>
+                        <p class="text-sm text-slate-600 dark:text-slate-400">Collected by Mohammed</p>
+                    </div>
+                    <p class="text-xl font-bold text-indigo-600">500 LYD</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="mt-12 text-center">
+            <p class="text-slate-500">✨ All colors have been enhanced and are now more vibrant! ✨</p>
+            <button onclick="window.location.href='index.html'" class="mt-4 btn-shine bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-8 py-3 rounded-xl font-bold">
+                Go to Main App
+            </button>
+        </div>
+    </div>
+
+</body>
+</html>
+

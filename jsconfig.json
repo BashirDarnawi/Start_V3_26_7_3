@@ -1,0 +1,15 @@
+{
+  // JS-only project (no bundler). This enables better IntelliSense + optional JSDoc typing in Cursor/VSCode
+  // WITHOUT changing runtime behavior or requiring a build step.
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "strict": false
+  },
+  "include": ["script.js", "albayan-types.d.ts"]
+}
+
+

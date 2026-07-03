@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Albayan</string>
+    <string name="title_activity_main">Albayan</string>
+    <string name="package_name">com.albayan.app</string>
+    <string name="custom_url_scheme">com.albayan.app</string>
+</resources>

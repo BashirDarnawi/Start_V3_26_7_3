@@ -1,0 +1,42 @@
+# Albayan Manager - Docker Compose Configuration
+# 
+# SETUP: Create a .env file with your password:
+#   echo "POSTGRES_PASSWORD=YourPassword123" > .env
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: albayan
+      POSTGRES_USER: albayan
+      # SECURITY: POSTGRES_PASSWORD is REQUIRED via .env file (no default for security)
+      # Create .env file with: POSTGRES_PASSWORD=YourSecurePassword123
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Error: POSTGRES_PASSWORD must be set in .env file}
+    volumes:
+      - albayan-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U albayan -d albayan"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  albayan:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      # SECURITY: Set ALBAYAN_COOKIE_SECURE=true in production (requires HTTPS)
+      - ALBAYAN_COOKIE_SECURE=${ALBAYAN_COOKIE_SECURE:-false}
+      - ALBAYAN_DEBUG_MODE=${ALBAYAN_DEBUG_MODE:-false}
+      # SECURITY: DATABASE_URL requires POSTGRES_PASSWORD from .env (no default for security)
+      - DATABASE_URL=postgresql+psycopg://albayan:${POSTGRES_PASSWORD:?Error: POSTGRES_PASSWORD must be set}@db:5432/albayan
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  albayan-postgres:

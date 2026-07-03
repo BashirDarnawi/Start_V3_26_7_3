@@ -1,0 +1,8 @@
+{
+  "appId": "com.albayan.app",
+  "appName": "Albayan",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  }
+}

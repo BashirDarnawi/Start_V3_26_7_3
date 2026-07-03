@@ -1,0 +1,19 @@
+{
+  "name": "start_v3",
+  "version": "1.0.0",
+  "description": "This repo is designed to grow into a **multi‑service platform** (Services Hub) with **Wallet + Subscriptions**, and later a **mobile app** connected to the same backend.   If you are editing the project (human or AI), follow the platform rules here:",
+  "main": "script.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@capacitor/android": "^8.0.0",
+    "@capacitor/cli": "^8.0.0",
+    "@capacitor/core": "^8.0.0",
+    "@capacitor/ios": "^8.0.0"
+  }
+}
