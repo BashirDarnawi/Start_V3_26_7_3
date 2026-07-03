@@ -4,7 +4,6 @@ import os
 import secrets
 import threading
 import traceback
-import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any, Optional
@@ -22,6 +21,7 @@ DEBUG_MODE = os.getenv("ALBAYAN_DEBUG_MODE", "").strip().lower() in {"1", "true"
 from .db import db_conn, get_engine, init_db, json_dumps, json_loads, now_ms
 from .rbac import user_has_permission
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from .schemas import (
     AdminRestoreEntityRequest,
     BootstrapResponse,
@@ -677,11 +677,15 @@ def _auth_user_from_cookie(request: Request) -> Optional[dict[str, Any]]:
             conn.execute(text("DELETE FROM sessions WHERE id = :id"), {"id": session_id})
             return None
 
-        # Update last seen
-        conn.execute(
-            text("UPDATE sessions SET last_seen_at = :ts WHERE id = :id"),
-            {"ts": now_ms(), "id": session_id},
-        )
+        # Update last seen, throttled to once per minute. The frontend polls the
+        # API every ~3 seconds, so writing on every request would generate constant
+        # bookkeeping writes; last_seen_at only needs coarse accuracy.
+        last_seen_at = int(sess.get("last_seen_at") or 0)
+        if now_ms() - last_seen_at > 60_000:
+            conn.execute(
+                text("UPDATE sessions SET last_seen_at = :ts WHERE id = :id"),
+                {"ts": now_ms(), "id": session_id},
+            )
 
         user = (
             conn.execute(
@@ -1028,22 +1032,29 @@ def upsert_entity(entity_type: str, entity_id: str, data: dict[str, Any], user_i
             clean["_created"] = clean.get("_created") or created_at
             clean["createdBy"] = clean.get("createdBy") or created_by
 
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO entities (type, id, data_json, deleted, created_at, created_by, last_modified)
-                    VALUES (:type, :id, :data_json, false, :created_at, :created_by, :last_modified)
-                    """
-                ),
-                {
-                    "type": entity_type,
-                    "id": entity_id,
-                    "data_json": json_dumps(clean),
-                    "created_at": created_at,
-                    "created_by": created_by,
-                    "last_modified": now,
-                },
-            )
+            try:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO entities (type, id, data_json, deleted, created_at, created_by, last_modified)
+                        VALUES (:type, :id, :data_json, false, :created_at, :created_by, :last_modified)
+                        """
+                    ),
+                    {
+                        "type": entity_type,
+                        "id": entity_id,
+                        "data_json": json_dumps(clean),
+                        "created_at": created_at,
+                        "created_by": created_by,
+                        "last_modified": now,
+                    },
+                )
+            except IntegrityError:
+                # Two clients raced to create the same id: the earlier existence
+                # check saw nothing, but another request inserted first. Surface
+                # the same 409 the non-racing duplicate path produces instead of
+                # a raw 500 primary-key violation.
+                raise HTTPException(status_code=409, detail="Record with this ID already exists")
 
     return {
         "id": entity_id,
@@ -1138,22 +1149,6 @@ app = FastAPI(title="Albayan Server", version="1.0.0")
 # This reduces payload sizes for large collections (receipts/ads/customers) and helps under load.
 from starlette.middleware.gzip import GZipMiddleware
 app.add_middleware(GZipMiddleware, minimum_size=1024)
-
-
-def _forward_debug_event(event: dict[str, Any]) -> None:
-    """
-    Best-effort forward a debug NDJSON event to the local ingest server.
-    Only active when DEBUG_MODE is enabled. Never raises.
-    """
-    if not DEBUG_MODE:
-        return
-    try:
-        url = "http://host.docker.internal:7243/ingest/c65e43fd-ebac-4d34-a622-d21a008ad71c"
-        body = json.dumps(event, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
-        urllib.request.urlopen(req, timeout=1).read()
-    except Exception:
-        pass
 
 
 @app.exception_handler(Exception)
@@ -1255,7 +1250,20 @@ def _startup():
     _ensure_minified_script()
     init_db()
     _bootstrap_first_admin_if_empty()
-    
+
+    # Ensure query indexes exist (Postgres only; both are idempotent via
+    # IF NOT EXISTS and no-ops on SQLite). Previously these were manual
+    # scripts that were easy to forget after a fresh deployment, leaving
+    # receipt/delivery lookups as sequential scans.
+    try:
+        from .create_indexes import create_performance_indexes
+        from .add_jsonb_indexes import add_jsonb_indexes
+        create_performance_indexes()
+        add_jsonb_indexes()
+    except Exception as e:
+        print(f"[albayan] Index creation skipped/failed: {type(e).__name__}: {e}")
+
+
     # BEST PRACTICE: Clean up expired sessions on startup
     try:
         with db_conn() as conn:
@@ -1464,45 +1472,65 @@ async def request_context_and_logging(request: Request, call_next):
     return response
 
 
+def _asset_version(path: Path) -> str:
+    """
+    Short cache-busting version for a static asset, derived from the file's
+    mtime and size. Changes whenever the file changes, stable otherwise.
+    """
+    try:
+        st = path.stat()
+        return f"{st.st_mtime_ns:x}{st.st_size:x}"[-16:]
+    except Exception:
+        return "0"
+
+
+def _select_script_source() -> Path:
+    """
+    Serve minified JS only if it's up-to-date; otherwise serve script.js.
+    This prevents stale deployments when rjsmin isn't installed but an old
+    script.min.js exists.
+    """
+    src = SCRIPT_PATH
+    try:
+        if SCRIPT_MIN_PATH.exists() and SCRIPT_PATH.exists():
+            if SCRIPT_MIN_PATH.stat().st_mtime >= SCRIPT_PATH.stat().st_mtime:
+                src = SCRIPT_MIN_PATH
+        elif SCRIPT_MIN_PATH.exists() and not SCRIPT_PATH.exists():
+            src = SCRIPT_MIN_PATH
+    except Exception:
+        # Fail open to script.js
+        src = SCRIPT_PATH
+    return src
+
+
+# Long-lived caching for correctly-versioned asset URLs. index.html itself is
+# always no-store, and it references script.js/style.css with ?v=<version>, so
+# a deploy changes the URLs and clients/CDNs fetch the new files immediately.
+_ASSET_CACHE_HEADERS = {"Cache-Control": "public, max-age=31536000, immutable"}
+_NO_STORE_HEADERS = {
+    "Cache-Control": "no-store, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
 @app.get("/")
 def serve_index(request: Request):
     if not INDEX_PATH.exists():
         raise HTTPException(status_code=500, detail="index.html not found")
+    # Inject cache-busting versions into the asset URLs at serve time. The file
+    # on disk stays unversioned so static serving (Capacitor www/, npx serve)
+    # keeps working unchanged.
     try:
-        print(
-            "[albayan] serve_index host=%s ua=%s"
-            % (
-                str(request.headers.get("host") or "")[:80],
-                str(request.headers.get("user-agent") or "")[:120],
-            )
-        )
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        script_v = _asset_version(_select_script_source())
+        style_v = _asset_version(STYLE_PATH)
+        html = html.replace('src="script.js"', f'src="script.js?v={script_v}"')
+        html = html.replace('href="style.css"', f'href="style.css?v={style_v}"')
+        return HTMLResponse(html, headers=_NO_STORE_HEADERS)
     except Exception:
-        pass
-    # #region agent log
-    _forward_debug_event(
-        {
-            "sessionId": "debug-session",
-            "runId": "audit-pre",
-            "hypothesisId": "SRV",
-            "location": "server/main.py:serve_index",
-            "message": "serve_index",
-            "data": {
-                "host": str(request.headers.get("host") or "")[:80],
-                "ua": str(request.headers.get("user-agent") or "")[:80],
-            },
-            "timestamp": now_ms(),
-        }
-    )
-    # #endregion
-    # Avoid stale UI when using Cloudflare/browser caching (we don't version asset URLs yet).
-    return FileResponse(
-        str(INDEX_PATH),
-        headers={
-            "Cache-Control": "no-store, max-age=0",
-            "Pragma": "no-cache",
-            "Expires": "0",
-        },
-    )
+        # Fail open: serve the file as-is (unversioned assets fall back to no-store).
+        return FileResponse(str(INDEX_PATH), headers=_NO_STORE_HEADERS)
 
 
 @app.get("/api/health")
@@ -1576,24 +1604,6 @@ def debug_ping(request: Request):
         )
     except Exception:
         pass
-    # #region agent log
-    _forward_debug_event(
-        {
-            "sessionId": "debug-session",
-            "runId": "audit-pre",
-            "hypothesisId": "H-PING",
-            "location": "server/main.py:debug_ping",
-            "message": "ping",
-            "data": {
-                "host": str(request.headers.get("host") or "")[:80],
-                "origin": str(request.headers.get("origin") or "")[:120],
-                "ua": str(request.headers.get("user-agent") or "")[:120],
-                "path": str(request.url.path or "")[:120],
-            },
-            "timestamp": now_ms(),
-        }
-    )
-    # #endregion
     # Also return minimal debug info so the user can visually confirm they hit the right server.
     return JSONResponse(
         {
@@ -1718,22 +1728,6 @@ def debug_telemetry(request: Request, payload: dict[str, Any]):
         )
     except Exception:
         pass
-    # #region agent log
-    _forward_debug_event(
-        {
-            "sessionId": "debug-session",
-            "runId": "audit-pre",
-            "hypothesisId": "SRV",
-            "location": "server/main.py:debug_telemetry",
-            "message": "telemetry_hit",
-            "data": {
-                "host": str(request.headers.get("host") or "")[:80],
-                "origin": str(request.headers.get("origin") or "")[:120],
-            },
-            "timestamp": now_ms(),
-        }
-    )
-    # #endregion
     require_same_origin(request)
     try:
         # Minimal shape enforcement + truncation (avoid PII; our client logs should already exclude it)
@@ -1746,7 +1740,8 @@ def debug_telemetry(request: Request, payload: dict[str, Any]):
             "data": payload.get("data") if isinstance(payload.get("data"), dict) else {},
             "timestamp": int(payload.get("timestamp") or now_ms()),
         }
-        _forward_debug_event(safe)
+        # Surface the event in server logs (visible via docker logs / journalctl).
+        print("[albayan] debug_telemetry event: %s" % json.dumps(safe, ensure_ascii=False)[:2000])
     except Exception:
         # Never break the app because of debug telemetry.
         pass
@@ -1755,73 +1750,23 @@ def debug_telemetry(request: Request, payload: dict[str, Any]):
 
 @app.get("/script.js")
 def serve_script(request: Request):
-    # Serve minified JS only if it's up-to-date; otherwise serve script.js.
-    # This prevents stale deployments when rjsmin isn't installed but an old script.min.js exists.
-    src = SCRIPT_PATH
-    try:
-        if SCRIPT_MIN_PATH.exists() and SCRIPT_PATH.exists():
-            if SCRIPT_MIN_PATH.stat().st_mtime >= SCRIPT_PATH.stat().st_mtime:
-                src = SCRIPT_MIN_PATH
-        elif SCRIPT_MIN_PATH.exists() and not SCRIPT_PATH.exists():
-            src = SCRIPT_MIN_PATH
-    except Exception:
-        # Fail open to script.js
-        src = SCRIPT_PATH
+    src = _select_script_source()
     if not src.exists():
         raise HTTPException(status_code=500, detail="script.js not found")
-    try:
-        print(
-            "[albayan] serve_script host=%s ua=%s src=%s"
-            % (
-                str(request.headers.get("host") or "")[:80],
-                str(request.headers.get("user-agent") or "")[:120],
-                str(Path(src).name),
-            )
-        )
-    except Exception:
-        pass
-    # #region agent log
-    _forward_debug_event(
-        {
-            "sessionId": "debug-session",
-            "runId": "audit-pre",
-            "hypothesisId": "SRV",
-            "location": "server/main.py:serve_script",
-            "message": "serve_script",
-            "data": {
-                "host": str(request.headers.get("host") or "")[:80],
-                "ua": str(request.headers.get("user-agent") or "")[:80],
-                "src": str(Path(src).name),
-            },
-            "timestamp": now_ms(),
-        }
-    )
-    # #endregion
-    # Avoid stale JS when using Cloudflare/browser caching (we don't version asset URLs yet).
-    return FileResponse(
-        str(src),
-        media_type="application/javascript",
-        headers={
-            "Cache-Control": "no-store, max-age=0",
-            "Pragma": "no-cache",
-            "Expires": "0",
-        },
-    )
+    # Cache aggressively only when the URL carries the current version
+    # (injected by serve_index); any other request stays uncached for freshness.
+    v = request.query_params.get("v")
+    headers = _ASSET_CACHE_HEADERS if v and v == _asset_version(src) else _NO_STORE_HEADERS
+    return FileResponse(str(src), media_type="application/javascript", headers=headers)
 
 
 @app.get("/style.css")
-def serve_style():
+def serve_style(request: Request):
     if not STYLE_PATH.exists():
         raise HTTPException(status_code=500, detail="style.css not found")
-    return FileResponse(
-        str(STYLE_PATH),
-        media_type="text/css",
-        headers={
-            "Cache-Control": "no-store, max-age=0",
-            "Pragma": "no-cache",
-            "Expires": "0",
-        },
-    )
+    v = request.query_params.get("v")
+    headers = _ASSET_CACHE_HEADERS if v and v == _asset_version(STYLE_PATH) else _NO_STORE_HEADERS
+    return FileResponse(str(STYLE_PATH), media_type="text/css", headers=headers)
 
 
 @app.post("/api/auth/login", response_model=LoginResponse)
