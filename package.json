@@ -1,7 +1,7 @@
 {
   "name": "start_v3",
   "version": "1.0.0",
-  "description": "This repo is designed to grow into a **multi‑service platform** (Services Hub) with **Wallet + Subscriptions**, and later a **mobile app** connected to the same backend.   If you are editing the project (human or AI), follow the platform rules here:",
+  "description": "Albayan platform — vanilla JS web app + FastAPI backend + Capacitor iOS/Android shells. See PLATFORM_FOUNDATION.md for platform rules.",
   "main": "script.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"

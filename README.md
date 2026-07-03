@@ -22,7 +22,7 @@ This is a **COMPLETE** conversion of your React application to vanilla JavaScrip
 - [x] All delivery statuses
 - [x] Refund handling (Full/Partial/None)
 - [x] Exchange rate management with history
-- [x] LocalStorage persistence
+- [x] Local persistence (IndexedDB + localStorage) with optional server mode (FastAPI + PostgreSQL)
 - [x] Dark mode (light/dark/system)
 - [x] Multilingual (English/Arabic with RTL)
 - [x] Responsive design (mobile/tablet/desktop)
@@ -149,52 +149,42 @@ This is a **COMPLETE** conversion of your React application to vanilla JavaScrip
 ## 📁 File Structure
 
 ```
-vanilla_v1/
-├── index.html          # HTML structure with Tailwind CDN
+Start_V3/
+├── index.html          # HTML entry point (Tailwind config, CDN tags)
 ├── style.css           # Complete styling (glass morphism, animations)
-├── script.js           # FULL application logic (~2000+ lines)
+├── script.js           # FULL application logic (~20,000+ lines)
+├── www/                # Copy of the frontend used by the Capacitor mobile apps
+├── android/, ios/      # Capacitor native app shells
+├── server/             # FastAPI backend (auth, RBAC, collections API, PostgreSQL/SQLite)
+├── deploy/             # Hosting configs (Caddy, systemd, AWS notes)
+├── docs/archive/       # Old status/audit reports (historical only — do not trust as current)
 └── README.md           # This file
 ```
 
 ## 🚀 Quick Start
 
-### Option 1: Direct Open
+### Frontend only (local mode)
 ```bash
-cd vanilla_v1
-open index.html
-```
-
-### Option 2: Local Server
-```bash
-# Python
-python3 -m http.server 8000
-
 # Node.js
 npx serve
 
-# PHP
-php -S localhost:8000
+# The app detects there is no backend and runs in local/offline mode
+# (data stored in the browser via IndexedDB). On first run it shows a
+# setup screen to create your admin account.
 ```
 
-### Default Credentials
-
-**Admin:**
-```
-Email: bashirdarnawi@gmail.com
-Password: 123456
-```
-
-**Delivery:**
-```
-Email: alsharif@gmail.com
-Password: 123456
+### Full stack (server mode)
+```bash
+# Requires Docker; creates PostgreSQL + the API + serves the frontend
+docker compose up --build
+# Then visit http://127.0.0.1:8000
 ```
 
-**Employee:**
-```
-Email: mohammed@agency.com
-Password: 123456
-```
+### Credentials
+
+There are no default credentials. Create the first admin either through the
+first-run setup screen (local mode) or with `server/create_admin.py` /
+the `ALBAYAN_BOOTSTRAP_ADMIN_*` environment variables (server mode).
 
 ## 🎯 Complete Feature Documentation
 
@@ -472,7 +462,7 @@ interface AgencyAd extends BaseEntity {
 - Event delegation where possible
 - Debounced search inputs
 - Efficient DOM updates
-- LocalStorage caching
+- IndexedDB + localStorage caching
 
 ### Benchmarks
 - Initial Load: < 500ms
@@ -489,19 +479,13 @@ interface AgencyAd extends BaseEntity {
 5. **Real-time Sync**: Polling-based, not WebSocket
 6. **Type Safety**: No compile-time checks (JavaScript)
 
-## 🔄 Cloud Sync Setup
+## 🔄 Sync
 
-1. Go to Settings
-2. Get a JSONBin.io API key (free tier works)
-3. Create a bin and get the endpoint URL
-4. Enable cloud sync in settings
-5. Enter endpoint and API key
-6. Data will auto-sync every 5 seconds
-
-**Or use URL parameter:**
-```
-?sys_connect=base64({"endpoint":"...","apiKey":"..."})
-```
+Multi-device sync is provided by **server mode**: when the app is served by the
+FastAPI backend it logs in with cookie sessions and polls the server for
+changes every few seconds. The old JSONBin-style "cloud sync" is a legacy
+feature that is force-disabled at startup and kept only for backward
+compatibility with old saved settings.
 
 ## 📝 Changelog from React Version
 
