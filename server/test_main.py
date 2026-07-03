@@ -28,7 +28,9 @@ from server.main import app
 from server.db import db_conn, init_db, json_dumps, now_ms
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
 
-client = TestClient(app)
+# Send an Origin header matching the test host so the CSRF same-origin check
+# (require_same_origin) accepts requests, like a real browser would.
+client = TestClient(app, headers={"Origin": "http://testserver"})
 
 # Test credentials - use environment variables with fallback for CI/local testing
 # In production CI, set these via secrets; locally, defaults are fine for isolated test DBs

@@ -362,13 +362,35 @@ const Security = {
   },
 
   recordLoginAttempt: (identifier) => {
+    const now = Date.now();
+    const windowMs = TIME_CONSTANTS.RATE_LIMIT_WINDOW_MINUTES * TIME_CONSTANTS.MILLISECONDS_PER_MINUTE;
     const attempts = Security.loginAttempts.get(identifier) || [];
-    attempts.push(Date.now());
-    Security.loginAttempts.set(identifier, attempts);
+    // Filter out old attempts before adding new one (prevents unbounded growth)
+    const recentAttempts = attempts.filter(time => now - time < windowMs);
+    recentAttempts.push(now);
+    Security.loginAttempts.set(identifier, recentAttempts);
+
+    // Periodically clean up old entries from the map (every 100 attempts)
+    if (Math.random() < 0.01) {
+      Security._cleanupOldAttempts(windowMs);
+    }
   },
 
   clearLoginAttempts: (identifier) => {
     Security.loginAttempts.delete(identifier);
+  },
+
+  // Clean up old entries from the login attempts map to prevent memory leaks
+  _cleanupOldAttempts: (windowMs) => {
+    const now = Date.now();
+    for (const [identifier, attempts] of Security.loginAttempts.entries()) {
+      const recentAttempts = attempts.filter(time => now - time < windowMs);
+      if (recentAttempts.length === 0) {
+        Security.loginAttempts.delete(identifier);
+      } else {
+        Security.loginAttempts.set(identifier, recentAttempts);
+      }
+    }
   },
 
   // Safe HTML builder - prevents XSS by escaping all dynamic content
@@ -3248,19 +3270,20 @@ async function sanitizeAllCollectionsForRendering() {
 // Ensures old data has all required fields so new features work correctly
 function migrateOldDataFormats() {
   let changed = false;
-  
-  // Migrate Receipts
+
+  // Migrate Receipts - ALWAYS process ALL receipts (including old data)
   if (Array.isArray(state.receipts)) {
     for (const receipt of state.receipts) {
-      if (!receipt || receipt._deleted) continue;
-      
+      if (!receipt) continue;
+      // Process even deleted records to ensure data consistency
+
       // Ensure receipt has isPaid boolean
       if (receipt.isPaid === undefined) {
         const status = String(receipt.status || '').toLowerCase();
         receipt.isPaid = (status === 'paid');
         changed = true;
       }
-      
+
       // Ensure receipt has amountUSD/amountLocal
       if (receipt.amountUSD === undefined && receipt.amount !== undefined) {
         receipt.amountUSD = parseFloat(receipt.amount) || 0;
@@ -3270,41 +3293,66 @@ function migrateOldDataFormats() {
         receipt.amountLocal = parseFloat(receipt.amountLYD) || 0;
         changed = true;
       }
-      
+
       // Ensure serialNumber is consistent with finalReceiptNo
       if (!receipt.serialNumber && receipt.finalReceiptNo) {
         receipt.serialNumber = receipt.finalReceiptNo;
         changed = true;
       }
-      
+
       // Normalize createdAt
       if (!receipt.createdAt && receipt.startDate) {
         receipt.createdAt = receipt.startDate;
         changed = true;
       }
+
+      // Fix delivery status - ensure it's a valid status
+      if (receipt.deliveryStatus) {
+        const validStatuses = ['Office', 'Needs Delivery', 'In Progress', 'Delivered', 'Canceled'];
+        if (!validStatuses.includes(receipt.deliveryStatus)) {
+          receipt.deliveryStatus = 'Office';
+          changed = true;
+        }
+      }
+
+      // Ensure exchangeRate is a number
+      if (receipt.exchangeRate !== undefined && typeof receipt.exchangeRate !== 'number') {
+        receipt.exchangeRate = parseFloat(receipt.exchangeRate) || state.defaultExchangeRate || 1;
+        changed = true;
+      }
+
+      // Ensure editHistory is an array
+      if (receipt.editHistory && !Array.isArray(receipt.editHistory)) {
+        receipt.editHistory = [];
+        changed = true;
+      }
+      if (typeof receipt.editCount !== 'number') {
+        receipt.editCount = Array.isArray(receipt.editHistory) ? receipt.editHistory.length : 0;
+        changed = true;
+      }
     }
   }
-  
-  // Migrate Ads
+
+  // Migrate Ads - ALWAYS process ALL ads (including old data)
   if (Array.isArray(state.ads)) {
     for (const ad of state.ads) {
-      if (!ad || ad._deleted) continue;
-      
+      if (!ad) continue;
+
       // Ensure ad has receiptAllocations array
       if (!Array.isArray(ad.receiptAllocations)) {
         ad.receiptAllocations = [];
-        
+
         // Migrate old single-receipt linking to receiptAllocations
         const linkedReceiptId = ad.fundingReceiptId || ad.receiptId;
         if (linkedReceiptId && (ad.amountUSD || ad.spentUSD)) {
           ad.receiptAllocations.push({
-            receiptId: linkedReceiptId,
+            receiptId: String(linkedReceiptId),
             amountUSD: ad.spentUSD || ad.amountUSD || 0
           });
           changed = true;
         }
       }
-      
+
       // Normalize string IDs in receiptAllocations
       if (Array.isArray(ad.receiptAllocations)) {
         for (const alloc of ad.receiptAllocations) {
@@ -3313,32 +3361,54 @@ function migrateOldDataFormats() {
           }
         }
       }
-      
+
+      // Ensure dueAllocations array exists
+      if (!Array.isArray(ad.dueAllocations)) {
+        ad.dueAllocations = [];
+        // Migrate from linkedDeliveryReceiptId if present
+        if (ad.linkedDeliveryReceiptId && !ad.isPaid) {
+          ad.dueAllocations.push({
+            receiptId: String(ad.linkedDeliveryReceiptId),
+            amountUSD: ad.amountUSD || 0
+          });
+          changed = true;
+        }
+      }
+
       // Ensure ad has customerId
       if (!ad.customerId && ad.customer) {
         ad.customerId = ad.customer;
         changed = true;
       }
-      
+
       // Ensure ad has pageId
       if (!ad.pageId && ad.page) {
         ad.pageId = ad.page;
         changed = true;
       }
-      
+
       // Normalize createdAt
       if (!ad.createdAt && ad.startDate) {
         ad.createdAt = ad.startDate;
         changed = true;
       }
+
+      // Fix delivery status
+      if (ad.deliveryStatus) {
+        const validStatuses = ['Office', 'Needs Delivery', 'In Progress', 'Delivered', 'Canceled'];
+        if (!validStatuses.includes(ad.deliveryStatus)) {
+          ad.deliveryStatus = 'Office';
+          changed = true;
+        }
+      }
     }
   }
-  
-  // Migrate Customers
+
+  // Migrate Customers - ALWAYS process ALL customers
   if (Array.isArray(state.customers)) {
     for (const customer of state.customers) {
-      if (!customer || customer._deleted) continue;
-      
+      if (!customer) continue;
+
       // Ensure phones is an array
       if (!Array.isArray(customer.phones)) {
         if (customer.phone) {
@@ -3348,14 +3418,20 @@ function migrateOldDataFormats() {
         }
         changed = true;
       }
+
+      // Ensure name exists
+      if (!customer.name) {
+        customer.name = 'Unknown';
+        changed = true;
+      }
     }
   }
-  
-  // Migrate Pages
+
+  // Migrate Pages - ALWAYS process ALL pages
   if (Array.isArray(state.pages)) {
     for (const page of state.pages) {
-      if (!page || page._deleted) continue;
-      
+      if (!page) continue;
+
       // Ensure customerIds is an array
       if (!Array.isArray(page.customerIds)) {
         if (page.customerId) {
@@ -3365,17 +3441,25 @@ function migrateOldDataFormats() {
         }
         changed = true;
       }
+
+      // Ensure name exists
+      if (!page.name) {
+        page.name = 'Unnamed Page';
+        changed = true;
+      }
     }
   }
-  
+
   // Assign sequential numbers to all records
   assignSequentialNumbers();
-  
+
   if (changed) {
-    console.log('[Migration] Old data formats updated');
+    console.log('[Migration] Data formats updated for ALL records');
     markAllCollectionsDirty();
+    // Save immediately to persist migrations
+    saveState();
   }
-  
+
   return changed;
 }
 
@@ -3778,20 +3862,25 @@ const RenderQueue = {
     RenderQueue.timer = setTimeout(() => {
       RenderQueue.timer = null;
       // Skip render while scrolling (causes jank)
-        if (document.body?.classList?.contains('is-scrolling')) {
-          RenderQueue.schedule(reason);
-          return;
-        }
+      if (document.body?.classList?.contains('is-scrolling')) {
+        RenderQueue.schedule(reason);
+        return;
+      }
+      // Skip render if another render is in progress
+      if (_renderInProgress) {
+        RenderQueue.schedule(reason);
+        return;
+      }
       // Use RAF for smoother visual updates
       if (RenderQueue.rafId) cancelAnimationFrame(RenderQueue.rafId);
       RenderQueue.rafId = requestAnimationFrame(() => {
         RenderQueue.rafId = null;
         RenderQueue.lastRenderTime = Date.now();
         try {
-        render();
-      } catch (e) {
-        console.warn('RenderQueue failed:', reason, e);
-      }
+          render();
+        } catch (e) {
+          console.warn('RenderQueue failed:', reason, e);
+        }
       });
     }, delay);
   }
@@ -4165,7 +4254,8 @@ function deleteRecord(array, id) {
 }
 
 function getVisibleRecords(array) {
-  return array.filter(item => !item._deleted);
+  if (!Array.isArray(array)) return [];
+  return array.filter(item => item && !item._deleted);
 }
 
 function getRecordType(record) {
@@ -4372,10 +4462,10 @@ function enforceSecretFeaturesGate() {
 // Compute usage stats for a receipt based on ads funded by this receipt
 function getReceiptUsageStats(receipt) {
   // Handle both receipt object and receipt ID
-  const receiptObj = typeof receipt === 'string' 
-    ? state.receipts.find(r => r.id === receipt)
+  const receiptObj = typeof receipt === 'string'
+    ? (state.receipts || []).find(r => r.id === receipt)
     : receipt;
-  
+
   if (!receiptObj) {
     return {
       usedUSD: 0,
@@ -4387,26 +4477,51 @@ function getReceiptUsageStats(receipt) {
       usageStatus: 'Unknown'
     };
   }
-  
+
   // Use consistent ID for all comparisons
   const receiptId = String(receiptObj.id || '');
-  
+
   // Ads that reference this receipt as a funding source
-  const fundedAds = getVisibleRecords(state.ads).filter(
+  // Include both regular receiptAllocations AND dueAllocations (for delivery receipts that became Paid)
+  const fundedAds = getVisibleRecords(state.ads || []).filter(
     ad => ad.recordType !== 'receipt' && (
       String(ad.fundingReceiptId || '') === receiptId ||
       String(ad.receiptId || '') === receiptId ||
-      (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.some(a => String(a.receiptId || '') === receiptId))
+      (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.some(a => String(a.receiptId || '') === receiptId)) ||
+      (Array.isArray(ad.dueAllocations) && ad.dueAllocations.some(a => String(a.receiptId || '') === receiptId)) ||
+      String(ad.linkedDeliveryReceiptId || '') === receiptId
     )
   );
 
-  // Prefer spentUSD if provided, otherwise amountUSD, plus explicit allocations
+  // Calculate used amount from both receiptAllocations and dueAllocations
+  // When a delivery receipt is marked Delivered, ads that used its due amount via dueAllocations
+  // should still count as using the receipt's funds
   const usedUSD = fundedAds.reduce((sum, ad) => {
-    const spend = ad.spentUSD ?? ad.amountUSD ?? 0;
-    const allocSum = Array.isArray(ad.receiptAllocations)
+    // Check receiptAllocations first (normal paid receipt usage)
+    const receiptAllocSum = Array.isArray(ad.receiptAllocations)
       ? ad.receiptAllocations.filter(a => String(a.receiptId || '') === receiptId).reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0)
       : 0;
-    return sum + (allocSum || spend);
+
+    // Check dueAllocations (delivery receipt due amount usage - critical for when receipt becomes Paid)
+    const dueAllocSum = Array.isArray(ad.dueAllocations)
+      ? ad.dueAllocations.filter(a => String(a.receiptId || '') === receiptId).reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0)
+      : 0;
+
+    // Legacy: check linkedDeliveryReceiptId with dueAmountToUseUSD
+    let legacyDueUsage = 0;
+    if (String(ad.linkedDeliveryReceiptId || '') === receiptId && dueAllocSum === 0) {
+      legacyDueUsage = parseFloat(ad.dueAmountToUseUSD) || 0;
+    }
+
+    // Use explicit allocations if available, otherwise fall back to ad spend
+    const explicitAllocations = receiptAllocSum + dueAllocSum + legacyDueUsage;
+    if (explicitAllocations > 0) {
+      return sum + explicitAllocations;
+    }
+
+    // Fall back to spentUSD or amountUSD only if no explicit allocations
+    const spend = ad.spentUSD ?? ad.amountUSD ?? 0;
+    return sum + spend;
   }, 0);
 
   const transfers = receiptObj.transfers || [];
@@ -4437,23 +4552,23 @@ function getReceiptUsageStats(receipt) {
 // Compute usage stats for a DELIVERY receipt's due amount (Not Paid receipts)
 // This tracks how much of the debt/due amount has been used by ads linking to this receipt
 function getDeliveryReceiptDueUsage(receipt) {
-  const receiptObj = typeof receipt === 'string' 
-    ? state.receipts.find(r => r.id === receipt)
+  const receiptObj = typeof receipt === 'string'
+    ? (state.receipts || []).find(r => r.id === receipt)
     : receipt;
-  
+
   if (!receiptObj) {
     return { totalDueUSD: 0, usedDueUSD: 0, remainingDueUSD: 0, fundedAds: [] };
   }
-  
+
   const receiptId = String(receiptObj.id || '');
-  
+
   // Total due amount in USD (convert from LYD using receipt's exchange rate)
   const exchangeRate = receiptObj.exchangeRate || state.defaultExchangeRate || 1;
   const dueAmountLocal = Number(receiptObj.debtAmountLocal ?? receiptObj.amountLocal ?? 0) || 0;
   const totalDueUSD = exchangeRate > 0 ? dueAmountLocal / exchangeRate : 0;
-  
+
   // Find all ads that use this delivery receipt's due amount
-  const fundedAds = getVisibleRecords(state.ads).filter(ad => {
+  const fundedAds = getVisibleRecords(state.ads || []).filter(ad => {
     if (ad._deleted || ad.recordType === 'receipt') return false;
     // Check if ad has dueAllocations pointing to this receipt
     if (Array.isArray(ad.dueAllocations)) {
@@ -4503,6 +4618,89 @@ function formatDateShort(date) {
   }
 }
 
+/**
+ * Get the effective exchange rate for an ad.
+ * Priority order:
+ * 1. Linked delivery receipt's exchange rate (if ad is linked to delivery receipt)
+ * 2. Weighted average from receipt allocations (if ad has multiple funding receipts)
+ * 3. Single funding receipt's exchange rate
+ * 4. Ad's own exchange rate
+ * 5. Default exchange rate from state
+ *
+ * This ensures consistent exchange rate calculations across the application.
+ */
+function getEffectiveExchangeRate(ad) {
+  if (!ad) return state.defaultExchangeRate || 1;
+
+  // 1. For delivery-linked ads, use the linked receipt's rate
+  if (ad.linkedDeliveryReceiptId) {
+    const linkedReceipt = state.receipts.find(r => r.id === ad.linkedDeliveryReceiptId);
+    if (linkedReceipt?.exchangeRate) {
+      return linkedReceipt.exchangeRate;
+    }
+  }
+
+  // 2. Weighted average from receipt allocations (based on amount allocated)
+  if (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length > 0) {
+    let totalAmount = 0;
+    let weightedSum = 0;
+
+    for (const alloc of ad.receiptAllocations) {
+      const receipt = state.receipts.find(r => r.id === alloc.receiptId);
+      const amount = parseFloat(alloc.amountUSD) || 0;
+      const rate = receipt?.exchangeRate;
+
+      if (rate && amount > 0) {
+        weightedSum += rate * amount;
+        totalAmount += amount;
+      }
+    }
+
+    if (totalAmount > 0) {
+      return weightedSum / totalAmount;
+    }
+  }
+
+  // 3. Also check dueAllocations for delivery receipt funding
+  if (Array.isArray(ad.dueAllocations) && ad.dueAllocations.length > 0) {
+    let totalAmount = 0;
+    let weightedSum = 0;
+
+    for (const alloc of ad.dueAllocations) {
+      const receipt = state.receipts.find(r => r.id === alloc.receiptId);
+      const amount = parseFloat(alloc.amountUSD) || 0;
+      const rate = receipt?.exchangeRate;
+
+      if (rate && amount > 0) {
+        weightedSum += rate * amount;
+        totalAmount += amount;
+      }
+    }
+
+    if (totalAmount > 0) {
+      return weightedSum / totalAmount;
+    }
+  }
+
+  // 4. Single funding receipt
+  if (ad.fundingReceiptId) {
+    const receipt = state.receipts.find(r => r.id === ad.fundingReceiptId);
+    if (receipt?.exchangeRate) return receipt.exchangeRate;
+  }
+
+  // 5. Legacy receiptId field
+  if (ad.receiptId) {
+    const receipt = state.receipts.find(r => r.id === ad.receiptId);
+    if (receipt?.exchangeRate) return receipt.exchangeRate;
+  }
+
+  // 6. Ad's own exchange rate
+  if (ad.exchangeRate) return ad.exchangeRate;
+
+  // 7. Fall back to default
+  return state.defaultExchangeRate || 1;
+}
+
 // ==========================================
 // AUTHENTICATION
 // ==========================================
@@ -4514,14 +4712,16 @@ function formatDateShort(date) {
 /** @type {AlbayanServerApiConfig} */
 const SERVER_API = {
   enabledByDefault: window.location.protocol === 'http:' || window.location.protocol === 'https:',
-  requestTimeoutMs: 10000, // Reduced from 15s for faster failure detection
+  requestTimeoutMs: 15000, // 15s for better reliability on slow connections
   // Live sync: automatically refresh changes from other users in server mode (no manual refresh).
   liveSyncEnabled: true,
-  liveSyncIntervalMs: 5000, // Slightly slower to reduce server load
-  usersSyncIntervalMs: 60000,
+  liveSyncIntervalMs: 3000, // 3 seconds for faster real-time sync between devices
+  usersSyncIntervalMs: 30000, // 30 seconds for users list
   // IMPORTANT: Keep this modest to avoid huge responses that can OOM-kill small ECS tasks.
   // Smaller page size = faster individual responses, better progress feedback.
-  pageSize: 500 // Reduced from 1000 for faster individual responses
+  pageSize: 300, // Smaller batches for faster loading
+  // Parallel loading for faster initial load
+  initialLoadConcurrency: 3 // Load 3 collections at once during initial load
 };
 
 function isServerModeEnabled() {
@@ -4965,25 +5165,25 @@ try {
 // Get timeout based on collection type (larger collections need more time)
 function getCollectionTimeout(collection) {
   const timeouts = {
-    receipts: 15000,    // Receipts often have more data - 15 seconds
-    ads: 12000,         // Ads can be large - 12 seconds
-    customers: 10000,   // Customers - 10 seconds
-    pages: 8000,        // Pages - 8 seconds
-    exchangeRateHistory: 5000,  // Small - 5 seconds
-    default: 10000      // Default - 10 seconds
+    receipts: 20000,    // Receipts often have more data - 20 seconds
+    ads: 20000,         // Ads can be large - 20 seconds
+    customers: 15000,   // Customers - 15 seconds
+    pages: 10000,       // Pages - 10 seconds
+    exchangeRateHistory: 8000,  // Small - 8 seconds
+    default: 15000      // Default - 15 seconds
   };
   return timeouts[collection] || timeouts.default;
 }
 
 async function apiLoadCollectionAll(collection) {
   const now = Date.now();
-  
-  // Return cached data immediately if fresh
+
+  // Return cached data immediately if fresh (but only for non-critical refreshes)
   const cache = _collectionCache[collection];
   if (cache && cache.data && (now - cache.timestamp) < CACHE_TTL_MS) {
     return cache.data;
   }
-  
+
   // Request deduplication: if there's already a pending request for this collection, wait for it
   if (_pendingRequests.has(collection)) {
     try {
@@ -4993,44 +5193,59 @@ async function apiLoadCollectionAll(collection) {
       _pendingRequests.delete(collection);
     }
   }
-  
-  // Create the actual request
+
+  // Create the actual request with timeout protection
   const requestPromise = (async () => {
-  const all = [];
-  let offset = 0;
-  const limit = SERVER_API.pageSize;
+    const all = [];
+    let offset = 0;
+    const limit = SERVER_API.pageSize || 300;
     const timeoutMs = getCollectionTimeout(collection);
-    
-  while (true) {
-      // Use retry logic for resilience against transient server errors/timeouts
-      const items = await withRetry(
-        () => apiJson(
-      `/api/collections/${encodeURIComponent(collection)}?limit=${limit}&offset=${offset}&include_deleted=true`,
-      { method: 'GET' },
-          { timeoutMs }
-        ),
-        3, // 3 retries (4 total attempts) for better resilience
-        500 // 500ms base delay (exponential: 0.5s, 1s, 2s)
-    );
-    if (!Array.isArray(items) || items.length === 0) break;
-    for (const entity of items) {
-      if (entity && entity.data) all.push(entity.data);
+    let pageCount = 0;
+    const maxPages = 50; // Safety limit to prevent infinite loops
+
+    while (pageCount < maxPages) {
+      pageCount++;
+      try {
+        // Use retry logic for resilience against transient server errors/timeouts
+        const items = await withRetry(
+          () => apiJson(
+            `/api/collections/${encodeURIComponent(collection)}?limit=${limit}&offset=${offset}&include_deleted=true`,
+            { method: 'GET' },
+            { timeoutMs }
+          ),
+          2, // 2 retries (3 total attempts) - reduced for faster failure
+          300 // 300ms base delay (faster retry)
+        );
+
+        if (!Array.isArray(items) || items.length === 0) break;
+
+        for (const entity of items) {
+          if (entity && entity.data) all.push(entity.data);
+        }
+
+        if (items.length < limit) break;
+        offset += limit;
+      } catch (pageError) {
+        // If we already have some data, return what we have instead of failing completely
+        if (all.length > 0) {
+          console.warn(`[apiLoadCollectionAll] Partial load for ${collection}: got ${all.length} items before error`, pageError?.message);
+          break;
+        }
+        throw pageError;
+      }
     }
-    if (items.length < limit) break;
-    offset += limit;
-  }
-    
+
     // Update cache
     if (_collectionCache[collection]) {
       _collectionCache[collection] = { data: all, timestamp: Date.now() };
     }
-    
-  return all;
+
+    return all;
   })();
-  
+
   // Store the pending request
   _pendingRequests.set(collection, requestPromise);
-  
+
   try {
     const result = await requestPromise;
     return result;
@@ -5142,17 +5357,40 @@ async function serverLoadAllData() {
     }
   };
 
-  // IMPORTANT: Limit concurrency to prevent request storms on refresh.
-  // Load in small batches instead of Promise.all for all collections at once.
+  // Load collections in parallel for faster initial load
+  // Use higher concurrency for initial load, but still limit to avoid overwhelming server
   const results = {};
   const collections = ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory'];
-  const CONCURRENCY = 2;
+  const CONCURRENCY = SERVER_API.initialLoadConcurrency || 3;
+
+  // Show loading progress
+  let loadedCount = 0;
+  const updateProgress = (collection) => {
+    loadedCount++;
+    const pct = Math.round((loadedCount / collections.length) * 100);
+    // Update any loading indicator if present
+    const progressEl = document.getElementById('loading-progress');
+    if (progressEl) progressEl.textContent = `Loading data... ${pct}%`;
+  };
+
   for (let i = 0; i < collections.length; i += CONCURRENCY) {
     const batch = collections.slice(i, i + CONCURRENCY);
-    const batchResults = await Promise.all(batch.map(c => safeLoad(c)));
+    const batchResults = await Promise.all(batch.map(async (c) => {
+      const result = await safeLoad(c);
+      updateProgress(c);
+      return result;
+    }));
     batchResults.forEach((r) => {
       if (r && r.collection) results[r.collection] = r;
     });
+
+    // Apply data immediately after each batch for progressive rendering
+    for (const r of batchResults) {
+      if (r && r.collection && r.data !== null) {
+        state[r.collection] = r.data;
+        markCollectionDirty(r.collection);
+      }
+    }
   }
 
   // Only overwrite collections when we actually received new data.
@@ -5391,7 +5629,8 @@ async function serverLiveSyncOnce() {
     const nextCursor = computeServerCursorFromState();
     _serverLiveSync.cursor = Math.max(_serverLiveSync.cursor || 0, nextCursor);
     state.serverLastSyncAt = new Date().toISOString();
-    if (changed && nextCursor !== prevCursor) RenderQueue.schedule('liveSync(delivery)');
+    // Always re-render when data changed (not just cursor) - ensures edits from admin show immediately
+    if (changed) RenderQueue.schedule('liveSync(delivery)');
     return;
   }
 
@@ -5469,12 +5708,82 @@ async function serverLiveSyncOnce() {
 async function serverLiveSyncTick() {
   if (_serverLiveSync.inFlight) return;
   _serverLiveSync.inFlight = true;
+  updateSyncIndicator('syncing');
   try {
     await serverLiveSyncOnce();
+    updateSyncIndicator('synced');
+  } catch (e) {
+    console.warn('[serverLiveSyncTick] Sync failed:', e?.message || e);
+    updateSyncIndicator('error');
   } finally {
     _serverLiveSync.inFlight = false;
   }
 }
+
+// Visual sync indicator
+function updateSyncIndicator(status) {
+  let indicator = document.getElementById('sync-status-indicator');
+  if (!indicator) {
+    // Create indicator if it doesn't exist
+    indicator = document.createElement('div');
+    indicator.id = 'sync-status-indicator';
+    indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300';
+    document.body.appendChild(indicator);
+  }
+
+  switch (status) {
+    case 'syncing':
+      indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300';
+      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-blue-500 rounded-full animate-pulse mr-2"></span>Syncing...';
+      indicator.style.opacity = '1';
+      break;
+    case 'synced':
+      indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300';
+      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-emerald-500 rounded-full mr-2"></span>Synced';
+      // Fade out after 2 seconds
+      setTimeout(() => {
+        if (indicator) indicator.style.opacity = '0';
+      }, 2000);
+      break;
+    case 'error':
+      indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-rose-100 text-rose-700 dark:bg-rose-900/50 dark:text-rose-300 cursor-pointer';
+      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-rose-500 rounded-full mr-2"></span>Sync failed - Tap to retry';
+      indicator.style.opacity = '1';
+      indicator.onclick = () => manualSyncData();
+      break;
+  }
+}
+
+// Manual sync function for users
+async function manualSyncData() {
+  if (!isServerModeEnabled()) {
+    showNotification('Offline Mode', 'Not connected to server', 'info');
+    return;
+  }
+
+  updateSyncIndicator('syncing');
+  showNotification('Syncing', 'Refreshing data from server...', 'info');
+
+  try {
+    // Clear cache to force fresh data
+    for (const key of Object.keys(_collectionCache)) {
+      _collectionCache[key] = { data: null, timestamp: 0 };
+    }
+    _pendingRequests.clear();
+
+    await serverLoadAllData();
+    updateSyncIndicator('synced');
+    showNotification('Synced', 'Data refreshed successfully', 'success');
+    forceFullRender();
+  } catch (e) {
+    console.error('[manualSyncData] Failed:', e);
+    updateSyncIndicator('error');
+    showNotification('Sync Failed', 'Could not refresh data. Check your connection.', 'error');
+  }
+}
+
+// Expose to window for debugging and manual use
+window.manualSyncData = manualSyncData;
 
 function stopServerLiveSync() {
   if (_serverLiveSync.timer) {
@@ -5483,6 +5792,16 @@ function stopServerLiveSync() {
   }
   _serverLiveSync.inFlight = false;
   _serverLiveSync.startedForUserId = null;
+
+  // Clean up event listeners
+  if (_serverLiveSync.visibilityHandler) {
+    document.removeEventListener('visibilitychange', _serverLiveSync.visibilityHandler);
+    _serverLiveSync.visibilityHandler = null;
+  }
+  if (_serverLiveSync.onlineHandler) {
+    window.removeEventListener('online', _serverLiveSync.onlineHandler);
+    _serverLiveSync.onlineHandler = null;
+  }
 }
 
 function startServerLiveSync() {
@@ -5502,7 +5821,31 @@ function startServerLiveSync() {
   serverLiveSyncTick().catch(() => {});
   _serverLiveSync.timer = setInterval(() => {
     serverLiveSyncTick().catch(() => {});
-  }, SERVER_API.liveSyncIntervalMs || 4000);
+  }, SERVER_API.liveSyncIntervalMs || 3000);
+
+  // Resume sync when tab becomes visible again (after being backgrounded)
+  if (!_serverLiveSync.visibilityHandler) {
+    _serverLiveSync.visibilityHandler = () => {
+      if (document.visibilityState === 'visible' && state.currentUser) {
+        // Tab is now visible - do an immediate sync to catch up
+        console.log('[LiveSync] Tab visible - triggering immediate sync');
+        serverLiveSyncTick().catch(() => {});
+      }
+    };
+    document.addEventListener('visibilitychange', _serverLiveSync.visibilityHandler);
+  }
+
+  // Also sync when network comes back online
+  if (!_serverLiveSync.onlineHandler) {
+    _serverLiveSync.onlineHandler = () => {
+      if (state.currentUser) {
+        console.log('[LiveSync] Network online - triggering immediate sync');
+        showNotification('Back Online', 'Reconnected to server, syncing...', 'info');
+        serverLiveSyncTick().catch(() => {});
+      }
+    };
+    window.addEventListener('online', _serverLiveSync.onlineHandler);
+  }
 }
 
 async function handleLogin(email, password) {
@@ -5572,15 +5915,32 @@ async function handleLogin(email, password) {
       state.currentView = getPostLoginLandingViewForUser(user);
       saveState();
 
-      showNotification('Welcome!', `Logged in as ${Security.escapeHtml(user.name)}`, 'success');
+      showNotification('Welcome!', `Logged in as ${Security.escapeHtml(user.name)}. Loading data...`, 'success');
       render(); // immediately leave the login screen
+
+      // Show loading indicator
+      const loadingOverlay = document.createElement('div');
+      loadingOverlay.id = 'data-loading-overlay';
+      loadingOverlay.className = 'fixed inset-0 bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm z-50 flex items-center justify-center';
+      loadingOverlay.innerHTML = `
+        <div class="text-center">
+          <div class="w-12 h-12 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mx-auto mb-4"></div>
+          <p id="loading-progress" class="text-slate-600 dark:text-slate-300 font-medium">Loading data...</p>
+          <p class="text-xs text-slate-400 mt-2">Please wait while we sync your data</p>
+        </div>
+      `;
+      document.body.appendChild(loadingOverlay);
 
       try {
         await serverLoadAllData();
+        showNotification('Data Loaded', 'All data synchronized successfully', 'success');
       } catch (e) {
         // serverLoadAllData should be tolerant, but keep a belt-and-suspenders guard.
         console.warn('Server data load failed after login:', e);
         showNotification('Server Warning', 'Logged in, but some data failed to load. Try Refresh.', 'warning');
+      } finally {
+        // Remove loading overlay
+        document.getElementById('data-loading-overlay')?.remove();
       }
 
       // Start live sync so other users' changes appear without manual refresh.
@@ -6363,6 +6723,7 @@ function renderSyncStatus() {
 let _lastRenderedView = null;
 let _lastRenderedUserId = null;
 let _renderInProgress = false;
+let _savedScrollPosition = { top: 0, left: 0 };
 
 // Force a full re-render (bypasses partial update optimization)
 function forceFullRender() {
@@ -6371,43 +6732,75 @@ function forceFullRender() {
   render();
 }
 
+// Helper: Lock layout during render to prevent jumps
+function lockLayoutForRender(app) {
+  if (!app) return;
+  // Save current dimensions before render
+  const currentHeight = app.offsetHeight;
+  app.style.setProperty('--app-height', currentHeight + 'px');
+  app.classList.add('is-rendering');
+  document.documentElement.classList.add('is-rendering');
+}
+
+// Helper: Unlock layout after render
+function unlockLayoutAfterRender(app) {
+  if (!app) return;
+  app.classList.remove('is-rendering');
+  document.documentElement.classList.remove('is-rendering');
+  app.style.removeProperty('--app-height');
+}
+
 function render() {
   // Prevent re-entrant rendering
   if (_renderInProgress) return;
   _renderInProgress = true;
-  
-  try {
+
+  // IMPORTANT: Save scroll position BEFORE any DOM changes
+  // Use multiple methods for reliability across browsers
+  _savedScrollPosition = {
+    top: window.pageYOffset || window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0,
+    left: window.pageXOffset || window.scrollX || document.documentElement.scrollLeft || document.body.scrollLeft || 0
+  };
+
   const app = document.getElementById('app');
-  if (!app) return;
-  
+
+  try {
+    if (!app) {
+      _renderInProgress = false;
+      return;
+    }
+
+    // Lock layout to prevent jumps during render
+    lockLayoutForRender(app);
+
     // Hide loading screen on first render
     const loadingScreen = document.getElementById('app-loading-screen');
     if (loadingScreen) loadingScreen.style.display = 'none';
-    
+
     // Determine what we're rendering
     const currentView = state.currentView;
     const currentUserId = state.currentUser?.id;
     const isLoggedIn = !!state.currentUser;
-    
+
     // Check if we can do a partial update (same view, same user)
-    const canPartialUpdate = _lastRenderedView === currentView && 
+    const canPartialUpdate = _lastRenderedView === currentView &&
                              _lastRenderedUserId === currentUserId &&
                              isLoggedIn;
-    
-  if (!state.currentUser) {
-    if (!isServerModeEnabled() && (!Array.isArray(state.users) || state.users.length === 0)) {
-      app.innerHTML = renderFirstRunSetup();
-      attachFirstRunHandlers();
-    } else {
-    app.innerHTML = renderLogin();
-    attachLoginHandlers();
-    }
+
+    if (!state.currentUser) {
+      if (!isServerModeEnabled() && (!Array.isArray(state.users) || state.users.length === 0)) {
+        app.innerHTML = renderFirstRunSetup();
+        attachFirstRunHandlers();
+      } else {
+        app.innerHTML = renderLogin();
+        attachLoginHandlers();
+      }
       _lastRenderedView = null;
       _lastRenderedUserId = null;
-  } else {
-    // Enforce "secret ideas" gating for non-admin users
-    enforceSecretFeaturesGate();
-      
+    } else {
+      // Enforce "secret ideas" gating for non-admin users
+      enforceSecretFeaturesGate();
+
       // For main app, try to update only the content area if possible
       if (canPartialUpdate) {
         // Only update the view content, not the entire app
@@ -6418,16 +6811,34 @@ function render() {
           app.innerHTML = renderMainApp();
         }
       } else {
-    app.innerHTML = renderMainApp();
-  }
-  
+        app.innerHTML = renderMainApp();
+      }
+
       _lastRenderedView = currentView;
       _lastRenderedUserId = currentUserId;
     }
-    
+
     // Use scoped icon creation (faster than full DOM scan)
     IconQueue.schedule(app);
-  renderSyncStatus();
+    renderSyncStatus();
+
+    // IMPORTANT: Restore scroll position AFTER render using double-RAF for reliability
+    // First RAF waits for layout, second ensures paint is complete
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        // Restore scroll position
+        window.scrollTo({
+          left: _savedScrollPosition.left,
+          top: _savedScrollPosition.top,
+          behavior: 'instant' // Use instant to prevent smooth scroll animation
+        });
+        // Unlock layout after scroll is restored
+        unlockLayoutAfterRender(app);
+      });
+    });
+  } catch (e) {
+    console.error('[render] Error:', e);
+    unlockLayoutAfterRender(app);
   } finally {
     _renderInProgress = false;
   }
@@ -7519,7 +7930,13 @@ function renderAnalyticsView() {
   const now = Date.now();
   const last7 = now - 7 * 24 * 60 * 60 * 1000;
 
-  const totalAdRevenue = ads.reduce((sum, ad) => sum + (ad.amountUSD || 0), 0);
+  // Calculate ad revenue - separate paid vs pending/unpaid for clarity
+  const paidAds = ads.filter(ad => ad.isPaid === true || ad.paymentStatus === 'paid');
+  const unpaidAds = ads.filter(ad => ad.isPaid !== true && ad.paymentStatus !== 'paid');
+  const paidAdRevenue = paidAds.reduce((sum, ad) => sum + (ad.amountUSD || 0), 0);
+  const unpaidAdRevenue = unpaidAds.reduce((sum, ad) => sum + (ad.amountUSD || 0), 0);
+  const totalAdRevenue = paidAdRevenue + unpaidAdRevenue;  // Keep for backwards compatibility
+
   const totalReceiptsUSD = receipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
   const paidReceipts = receipts.filter(r => (r.status || '').toLowerCase() === 'paid');
   const pendingReceipts = receipts.filter(r => {
@@ -7528,6 +7945,14 @@ function renderAnalyticsView() {
   });
   const paidUSD = paidReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
   const pendingUSD = pendingReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
+
+  // Calculate actual balance: paid receipts - used funds
+  // This shows how much money from receipts is actually available
+  const totalUsedFromReceipts = paidReceipts.reduce((sum, r) => {
+    const stats = getReceiptUsageStats(r);
+    return sum + (stats.usedUSD || 0);
+  }, 0);
+  const availableReceiptBalance = Math.max(paidUSD - totalUsedFromReceipts, 0);
   
   // Collection status (admin collected vs not collected)
   const collectedReceipts = receipts.filter(r => r.collected);
@@ -7607,9 +8032,35 @@ function renderAnalyticsView() {
 
       <!-- KPI Grid -->
       <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-        ${renderStatCard('Ad Revenue', '$' + totalAdRevenue.toFixed(2), 'dollar-sign', 'from-emerald-500 to-teal-600')}
+        <!-- Show paid ad revenue separately for clarity -->
+        <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform">
+          <div class="absolute inset-0 bg-gradient-to-br from-emerald-500 to-teal-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
+          <div class="flex items-start justify-between relative">
+            <div>
+              <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">Ad Revenue (Paid)</p>
+              <p class="text-2xl font-bold text-slate-800 dark:text-white">$${paidAdRevenue.toFixed(2)}</p>
+              <p class="text-xs text-slate-500 mt-1">Pending: $${unpaidAdRevenue.toFixed(2)}</p>
+            </div>
+            <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg">
+              <i data-lucide="dollar-sign" class="w-6 h-6 text-white"></i>
+            </div>
+          </div>
+        </div>
         ${renderStatCard('Receipts Volume', '$' + totalReceiptsUSD.toFixed(2), 'file-text', 'from-indigo-500 to-purple-600')}
-        ${renderStatCard('Collected (Receipts)', '$' + paidUSD.toFixed(2), 'check-circle', 'from-blue-500 to-cyan-600')}
+        <!-- Show available balance (paid receipts - used) -->
+        <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform">
+          <div class="absolute inset-0 bg-gradient-to-br from-blue-500 to-cyan-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
+          <div class="flex items-start justify-between relative">
+            <div>
+              <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">Available Balance</p>
+              <p class="text-2xl font-bold text-slate-800 dark:text-white">$${availableReceiptBalance.toFixed(2)}</p>
+              <p class="text-xs text-slate-500 mt-1">Used: $${totalUsedFromReceipts.toFixed(2)} / Paid: $${paidUSD.toFixed(2)}</p>
+            </div>
+            <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center shadow-lg">
+              <i data-lucide="piggy-bank" class="w-6 h-6 text-white"></i>
+            </div>
+          </div>
+        </div>
         
         <!-- Collection Status Card -->
         <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform cursor-pointer" onclick="state.receiptCollectedFilter='not-collected';navigateTo('receipts');">
@@ -7764,14 +8215,14 @@ function renderStatCard(title, value, icon, gradient, onClick = '', isActive = f
   const clickClass = clickable ? ' cursor-pointer' : '';
   const clickAttr = clickable ? ` onclick="${onClick}"` : '';
   return `
-    <div class="glass-panel rounded-2xl p-6 hover:scale-105 transition-transform${clickClass}${activeClass}"${clickAttr}>
-      <div class="flex items-start justify-between mb-4">
-        <div>
-          <p class="text-sm text-slate-500 font-medium uppercase">${title}</p>
-          <p class="text-3xl font-bold mt-2">${value}</p>
+    <div class="glass-panel rounded-xl md:rounded-2xl p-3 md:p-6 hover:scale-105 transition-transform${clickClass}${activeClass}"${clickAttr}>
+      <div class="flex items-start justify-between">
+        <div class="min-w-0 flex-1">
+          <p class="text-[10px] md:text-sm text-slate-500 font-medium uppercase truncate">${title}</p>
+          <p class="text-lg md:text-3xl font-bold mt-1 md:mt-2 truncate">${value}</p>
         </div>
-        <div class="w-12 h-12 bg-gradient-to-br ${gradient} rounded-xl flex items-center justify-center text-white shadow-lg">
-          <i data-lucide="${icon}" class="w-6 h-6"></i>
+        <div class="w-8 h-8 md:w-12 md:h-12 bg-gradient-to-br ${gradient} rounded-lg md:rounded-xl flex items-center justify-center text-white shadow-lg flex-shrink-0 ml-2">
+          <i data-lucide="${icon}" class="w-4 h-4 md:w-6 md:h-6"></i>
         </div>
       </div>
     </div>
@@ -8549,49 +9000,32 @@ function renderAdsView() {
             <tbody>
               ${allAds.map((ad, idx) => {
                 const customer = state.customers.find(c => c.id === ad.customerId);
-                const deliveryPerson = ad.deliveryPersonId ? state.users.find(u => u.id === ad.deliveryPersonId) : null;
-                // Get receipt exchange rate - prefer receipt from allocations, then fundingReceiptId, then receiptId
-                // If multiple receipts, calculate average exchange rate
-                let receiptExchangeRate = ad.exchangeRate;
-                if (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length > 0) {
-                  const receiptRates = ad.receiptAllocations
-                    .map(alloc => {
-                      const receipt = state.receipts.find(r => r.id === alloc.receiptId);
-                      return receipt?.exchangeRate;
-                    })
-                    .filter(rate => rate !== undefined && rate !== null);
-                  
-                  if (receiptRates.length > 0) {
-                    // Calculate average exchange rate
-                    const sum = receiptRates.reduce((acc, rate) => acc + rate, 0);
-                    receiptExchangeRate = sum / receiptRates.length;
-                  }
-                } else if (ad.fundingReceiptId) {
-                  const receipt = state.receipts.find(r => r.id === ad.fundingReceiptId);
-                  if (receipt?.exchangeRate) {
-                    receiptExchangeRate = receipt.exchangeRate;
-                  }
-                } else if (ad.receiptId) {
-                  const receipt = state.receipts.find(r => r.id === ad.receiptId);
-                  if (receipt?.exchangeRate) {
-                    receiptExchangeRate = receipt.exchangeRate;
-                  }
-                }
+                // For ads linked to delivery receipts, get delivery status from the receipt (source of truth)
+                const linkedReceipt = ad.linkedDeliveryReceiptId ? state.receipts.find(r => r.id === ad.linkedDeliveryReceiptId) : null;
+                const effectiveDeliveryStatus = linkedReceipt ? (linkedReceipt.deliveryStatus || 'Needs Delivery') : (ad.deliveryStatus || 'Office');
+                const effectiveDeliveryPersonId = linkedReceipt ? linkedReceipt.deliveryPersonId : ad.deliveryPersonId;
+                const deliveryPerson = effectiveDeliveryPersonId ? state.users.find(u => u.id === effectiveDeliveryPersonId) : null;
+                const isLinkedToDeliveryReceipt = !!linkedReceipt;
+                // Use consistent exchange rate calculation
+                const receiptExchangeRate = getEffectiveExchangeRate(ad);
                 // Display number: total - index (so first item = highest number)
                 const adDisplayNum = allAds.length - idx;
                 return `
                   <tr class="border-b border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50">
-                    <td class="py-3 px-2 text-slate-400 font-mono text-xs">${adDisplayNum}</td>
-                    <td class="py-3 px-2">
+                    <td class="py-3 px-2" data-label="#">
+                      <div class="font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || 'Unknown')}</div>
+                      ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
+                    </td>
+                    <td class="py-3 px-2 hidden md:table-cell">
                       <div class="font-medium">${Security.escapeHtml(customer?.name || 'Unknown')}</div>
                       ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
                     </td>
-                    <td class="py-3 px-2 font-bold text-emerald-600">$${ad.amountUSD?.toFixed(2) || '0.00'}</td>
-                    <td class="py-3 px-2">${receiptExchangeRate?.toFixed(2) || ad.exchangeRate?.toFixed(2) || '0.00'}</td>
-                    <td class="py-3 px-2">${ad.amountLocal?.toFixed(2)} LYD</td>
-                    <td class="py-3 px-2"><span class="payment-badge text-xs">${ad.paymentMethod}</span></td>
-                    <td class="py-3 px-2">
-                      <select class="glass-input px-2 py-1 rounded-lg text-xs" onchange="updateAdStatusFromList('${ad.id}', this.value)">
+                    <td class="py-3 px-2 font-bold text-emerald-600" data-label="Amount">$${ad.amountUSD?.toFixed(2) || '0.00'}</td>
+                    <td class="py-3 px-2" data-label="Rate">${receiptExchangeRate?.toFixed(2) || ad.exchangeRate?.toFixed(2) || '0.00'}</td>
+                    <td class="py-3 px-2" data-label="Local">${ad.amountLocal?.toFixed(2)} LYD</td>
+                    <td class="py-3 px-2" data-label="Payment"><span class="payment-badge text-xs">${ad.paymentMethod}</span></td>
+                    <td class="py-3 px-2" data-label="Status">
+                      <select class="glass-input px-2 py-1 rounded-lg text-xs w-full md:w-auto" onchange="updateAdStatusFromList('${ad.id}', this.value)">
                         ${AD_STATUSES.map(s => `<option value="${s}" ${ad.status === s ? 'selected' : ''}>${s}</option>`).join('')}
                       </select>
                       ${ad.isPaid ? '<div class="text-xs text-emerald-600 mt-1">✓ Paid</div>' : ''}
@@ -8602,33 +9036,40 @@ function renderAdsView() {
                         </div>
                       ` : ''}
                     </td>
-                    <td class="py-3 px-2">
-                      <select class="glass-input px-2 py-1 rounded-lg text-xs delivery-${ad.deliveryStatus.toLowerCase().replace(' ', '')}" onchange="updateAdDeliveryStatus('${ad.id}', this.value)">
-                        ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${s}</option>`).join('')}
-                      </select>
+                    <td class="py-3 px-2" data-label="Delivery">
+                      ${isLinkedToDeliveryReceipt ? `
+                        <div class="px-2 py-1 rounded-lg text-xs delivery-${effectiveDeliveryStatus.toLowerCase().replace(' ', '')} bg-slate-100 dark:bg-slate-700">
+                          ${effectiveDeliveryStatus}
+                          <div class="text-[10px] text-slate-400 mt-0.5">via Receipt</div>
+                        </div>
+                      ` : `
+                        <select class="glass-input px-2 py-1 rounded-lg text-xs w-full md:w-auto delivery-${effectiveDeliveryStatus.toLowerCase().replace(' ', '')}" onchange="updateAdDeliveryStatus('${ad.id}', this.value)">
+                          ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${effectiveDeliveryStatus === s ? 'selected' : ''}>${s}</option>`).join('')}
+                        </select>
+                      `}
                       ${deliveryPerson ? `<div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(deliveryPerson.name || '')}</div>` : ''}
                     </td>
-                    <td class="py-3 px-2">
+                    <td class="py-3 px-2" data-label="Serial">
                       ${ad.serialNumber ? `<span class="font-mono text-xs">${ad.serialNumber}</span>` : '-'}
                       ${ad.editCount ? `<button onclick="showAdEditHistory('${ad.id}')" class="block mt-1 text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium">${ad.editCount} edit${ad.editCount > 1 ? 's' : ''}</button>` : ''}
                     </td>
-                    <td class="py-3 px-2 text-xs text-slate-500">${new Date(ad.startDate).toLocaleDateString()}</td>
-                    <td class="py-3 px-2">
-                      <div class="flex space-x-1">
-                        <button onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700" title="Top-ups">
-                          <i data-lucide="trending-up" class="w-4 h-4"></i>
+                    <td class="py-3 px-2 text-xs text-slate-500" data-label="Date">${new Date(ad.startDate).toLocaleDateString()}</td>
+                    <td class="py-3 px-2" data-label="Actions">
+                      <div class="flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
+                        <button onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="Top-ups">
+                          <i data-lucide="trending-up" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.topUps && ad.topUps.length > 0 ? `<span class="text-xs">${ad.topUps.length}</span>` : ''}
                         </button>
-                        <button onclick="manageRefund('${ad.id}')" class="text-amber-600 hover:text-amber-700" title="Refund">
-                          <i data-lucide="arrow-left-circle" class="w-4 h-4"></i>
+                        <button onclick="manageRefund('${ad.id}')" class="text-amber-600 hover:text-amber-700 p-2 md:p-0" title="Refund">
+                          <i data-lucide="arrow-left-circle" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.refundType && ad.refundType !== 'None' ? `<span class="text-xs">!</span>` : ''}
                         </button>
-                        <button onclick="stopAd('${ad.id}')" class="text-orange-600 hover:text-orange-700" title="${ad.status === 'Stopped' ? 'Edit Stop Details' : 'Stop Ad'}">
-                          <i data-lucide="${ad.status === 'Stopped' ? 'edit' : 'square'}" class="w-4 h-4"></i>
+                        <button onclick="stopAd('${ad.id}')" class="text-orange-600 hover:text-orange-700 p-2 md:p-0" title="${ad.status === 'Stopped' ? 'Edit Stop Details' : 'Stop Ad'}">
+                          <i data-lucide="${ad.status === 'Stopped' ? 'edit' : 'square'}" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.status === 'Stopped' ? '<span class="text-xs">!</span>' : ''}
                         </button>
-                        <button onclick="editAd('${ad.id}')" class="text-indigo-600 hover:text-indigo-700" title="Edit"><i data-lucide="edit" class="w-4 h-4"></i></button>
-                        <button onclick="deleteAd('${ad.id}')" class="text-rose-600 hover:text-rose-700" title="Delete"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                        <button onclick="editAd('${ad.id}')" class="text-indigo-600 hover:text-indigo-700 p-2 md:p-0" title="Edit"><i data-lucide="edit" class="w-5 h-5 md:w-4 md:h-4"></i></button>
+                        <button onclick="deleteAd('${ad.id}')" class="text-rose-600 hover:text-rose-700 p-2 md:p-0" title="Delete"><i data-lucide="trash-2" class="w-5 h-5 md:w-4 md:h-4"></i></button>
                       </div>
                     </td>
                   </tr>
@@ -9634,46 +10075,55 @@ function renderDeliveryDashboard() {
   const needsDelivery = myDeliveries.filter(ad => ad.deliveryStatus === 'Needs Delivery');
   const inProgress = myDeliveries.filter(ad => ad.deliveryStatus === 'In Progress');
   const delivered = myDeliveries.filter(ad => ad.deliveryStatus === 'Delivered');
-  const totalCollected = delivered.reduce((sum, ad) => sum + _getCollectedCashLocal(ad), 0);
+  // Cash held by driver = delivered items that have NOT been handed over to the office yet
+  const heldByDriver = delivered.filter(d => !_isReceivedInOffice(d) && _getCollectedCashLocal(d) > 0);
+  const cashHeldByDriver = heldByDriver.reduce((sum, ad) => sum + _getCollectedCashLocal(ad), 0);
 
   let visibleDeliveries = myDeliveries;
   if (filterStatus === 'Needs Delivery') visibleDeliveries = myDeliveries.filter(d => d.deliveryStatus === 'Needs Delivery');
   if (filterStatus === 'In Progress') visibleDeliveries = myDeliveries.filter(d => d.deliveryStatus === 'In Progress');
   if (filterStatus === 'Delivered') visibleDeliveries = myDeliveries.filter(d => d.deliveryStatus === 'Delivered');
-  if (filterStatus === 'Collected') visibleDeliveries = myDeliveries.filter(d => _getCollectedCashLocal(d) > 0);
+  // "Held" filter shows items driver is holding (delivered but not handed to office)
+  if (filterStatus === 'Held') visibleDeliveries = heldByDriver;
   
   return `
-    <div class="space-y-6 animate-fade-in-up">
+    <div class="space-y-4 md:space-y-6 animate-fade-in-up px-2 md:px-0 max-w-full overflow-x-hidden">
       <!-- Header with Logout -->
-      <div class="flex justify-between items-center">
+      <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
         <div>
-          <h1 class="text-3xl font-bold text-slate-800 dark:text-white">Delivery Dashboard</h1>
-          <p class="text-sm text-slate-500 mt-1">Welcome, ${Security.escapeHtml(state.currentUser?.name || '')}!</p>
+          <h1 class="text-xl sm:text-2xl md:text-3xl font-bold text-slate-800 dark:text-white">Delivery Dashboard</h1>
+          <p class="text-xs sm:text-sm text-slate-500 mt-1">Welcome, ${Security.escapeHtml(state.currentUser?.name || '')}!</p>
         </div>
-        <button onclick="handleLogout()" class="btn-shine bg-rose-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
-          <i data-lucide="log-out" class="w-4 h-4"></i>
-          <span>Logout</span>
-        </button>
+        <div class="flex items-center gap-2 w-full sm:w-auto">
+          <button onclick="refreshDeliveryDashboard()" class="btn-shine bg-blue-600 text-white px-3 py-2 rounded-xl font-bold flex items-center justify-center space-x-1 flex-1 sm:flex-none text-sm" title="Refresh to see latest updates">
+            <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+            <span>Refresh</span>
+          </button>
+          <button onclick="handleLogout()" class="btn-shine bg-rose-600 text-white px-3 py-2 rounded-xl font-bold flex items-center justify-center space-x-1 flex-1 sm:flex-none text-sm">
+            <i data-lucide="log-out" class="w-4 h-4"></i>
+            <span>Logout</span>
+          </button>
+        </div>
       </div>
 
       <!-- Stats -->
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="grid grid-cols-2 gap-2 md:gap-4 md:grid-cols-4">
         ${renderStatCard('Needs Delivery', needsDelivery.length, 'clock', 'from-amber-500 to-orange-600', "setDeliveryDashboardFilter('Needs Delivery')", filterStatus === 'Needs Delivery')}
         ${renderStatCard('In Progress', inProgress.length, 'truck', 'from-blue-500 to-cyan-600', "setDeliveryDashboardFilter('In Progress')", filterStatus === 'In Progress')}
         ${renderStatCard('Delivered', delivered.length, 'check-circle', 'from-emerald-500 to-teal-600', "setDeliveryDashboardFilter('Delivered')", filterStatus === 'Delivered')}
-        ${renderStatCard('Collected', totalCollected.toFixed(0) + ' LYD', 'dollar-sign', 'from-purple-500 to-pink-600', "setDeliveryDashboardFilter('Collected')", filterStatus === 'Collected')}
+        ${renderStatCard('Held', `${heldByDriver.length} (${cashHeldByDriver.toFixed(0)} LYD)`, 'wallet', 'from-purple-500 to-pink-600', "setDeliveryDashboardFilter('Held')", filterStatus === 'Held')}
       </div>
 
       <!-- My Deliveries -->
-      <div class="glass-panel rounded-2xl p-6">
-        <div class="flex items-center justify-between mb-4">
-          <h2 class="text-xl font-bold">My Deliveries ${filterStatus !== 'all' ? `<span class="ml-2 text-sm font-bold text-indigo-600">(${Security.escapeHtml(filterStatus)})</span>` : ''}</h2>
+      <div class="glass-panel rounded-2xl p-3 md:p-6">
+        <div class="flex items-center justify-between mb-3 md:mb-4">
+          <h2 class="text-lg md:text-xl font-bold">My Deliveries ${filterStatus !== 'all' ? `<span class="ml-1 md:ml-2 text-xs md:text-sm font-bold text-indigo-600">(${Security.escapeHtml(filterStatus)})</span>` : ''}</h2>
           ${filterStatus !== 'all' ? `
             <button type="button" onclick="setDeliveryDashboardFilter('all')" class="text-xs font-bold text-slate-600 hover:text-slate-800">Show All</button>
           ` : ''}
         </div>
         ${visibleDeliveries.length === 0 ? '<p class="text-center text-slate-500 py-8">No deliveries for this filter</p>' : `
-          <div class="space-y-3">
+          <div class="space-y-3 w-full">
             ${visibleDeliveries.map(ad => {
               const customer = state.customers.find(c => c.id === ad.customerId);
               const phone = String(ad.phoneNumber || customer?.phones?.[0] || '').trim();
@@ -9681,20 +10131,20 @@ function renderDeliveryDashboard() {
               const displayFinalNo = ad.finalReceiptNo || ad.serialNumber || '';
               const displayTempNo = ad.tempReceiptNo || '';
               return `
-                <div class="glass-panel rounded-xl p-4">
-                  <div class="flex flex-col md:flex-row md:justify-between md:items-center gap-4">
-                    <div class="flex-1">
-                      <h3 class="font-bold text-lg">${Security.escapeHtml(customer?.name || 'Unknown')}</h3>
-                      <div class="flex items-center justify-between gap-2">
-                        <p class="text-sm text-slate-500">${Security.escapeHtml(phone || 'No phone')}</p>
+                <div class="glass-panel rounded-xl p-3 md:p-4 w-full box-border">
+                  <div class="flex flex-col gap-3 md:gap-4">
+                    <div class="w-full min-w-0">
+                      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 sm:gap-2">
+                        <h3 class="font-bold text-base md:text-lg truncate">${Security.escapeHtml(customer?.name || 'Unknown')}</h3>
                         ${phone ? `
-                          <div class="flex items-center gap-2">
-                            <a href="tel:${encodeURIComponent(phone)}" class="text-xs font-bold text-blue-600 hover:text-blue-700">Call</a>
-                            ${wa ? `<a href="${wa}" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-emerald-600 hover:text-emerald-700">WhatsApp</a>` : ''}
-                            <button type="button" onclick='copyTextToClipboard(${JSON.stringify(phone)}).then(ok => showNotification(ok ? "Copied" : "Copy Failed", ok ? "Phone number copied" : "Could not copy phone number", ok ? "success" : "error"))' class="text-xs font-bold text-slate-600 hover:text-slate-700">Copy</button>
+                          <div class="flex items-center gap-2 flex-shrink-0">
+                            <a href="tel:${encodeURIComponent(phone)}" class="text-xs font-bold text-blue-600 hover:text-blue-700 px-2 py-1 bg-blue-50 rounded-lg">Call</a>
+                            ${wa ? `<a href="${wa}" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-emerald-600 hover:text-emerald-700 px-2 py-1 bg-emerald-50 rounded-lg">WhatsApp</a>` : ''}
+                            <button type="button" onclick='copyTextToClipboard(${JSON.stringify(phone)}).then(ok => showNotification(ok ? "Copied" : "Copy Failed", ok ? "Phone number copied" : "Could not copy phone number", ok ? "success" : "error"))' class="text-xs font-bold text-slate-600 hover:text-slate-700 px-2 py-1 bg-slate-100 rounded-lg">Copy</button>
                           </div>
                         ` : ''}
                       </div>
+                      <p class="text-xs md:text-sm text-slate-500 mt-1">${Security.escapeHtml(phone || 'No phone')}</p>
                       ${ad.isReceipt && (displayTempNo || displayFinalNo) ? `
                         <div class="text-xs text-indigo-600 font-bold mt-1">
                           Receipt: ${displayTempNo && displayFinalNo ? `${displayTempNo} → ${displayFinalNo}` : (displayTempNo ? `${displayTempNo} (Temp)` : displayFinalNo)}
@@ -9710,47 +10160,53 @@ function renderDeliveryDashboard() {
                           Quoted fee: <span class="font-bold text-emerald-600">${Number(ad.quotedDeliveryFee || 0).toFixed(0)} LYD</span>
                         </div>
                       ` : ''}
-                      <div class="flex flex-wrap gap-2 mt-2">
-                        <span class="text-xs font-bold text-emerald-600">$${ad.amountUSD} (${ad.amountLocal} LYD)</span>
-                        <span class="payment-badge text-xs">${ad.paymentMethod}</span>
-                        <span class="delivery-${ad.deliveryStatus.toLowerCase().replace(' ', '')} px-2 py-1 rounded-full text-xs font-bold">${ad.deliveryStatus}</span>
+                      ${ad.isReceipt && ad.deliveryInstructions ? `
+                        <div class="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/30 rounded-lg p-2 mt-1 border border-amber-200 dark:border-amber-800">
+                          <span class="font-bold">📝 Instructions:</span> ${Security.escapeHtml(String(ad.deliveryInstructions || ''))}
+                        </div>
+                      ` : ''}
+                      <div class="flex flex-wrap items-center gap-1.5 md:gap-2 mt-2">
+                        <span class="text-xs font-bold text-emerald-600">$${Number(ad.amountUSD || 0).toFixed(2)} (${Number(ad.amountLocal || 0).toFixed(0)} LYD)</span>
+                        <span class="payment-badge text-[10px] md:text-xs">${Security.escapeHtml(ad.paymentMethod || '')}</span>
+                        <span class="delivery-${(ad.deliveryStatus || '').toLowerCase().replace(' ', '')} px-2 py-0.5 md:py-1 rounded-full text-[10px] md:text-xs font-bold">${Security.escapeHtml(ad.deliveryStatus || '')}</span>
+                        ${ad.editCount ? `<button onclick="showReceiptEditHistory('${ad.id}')" class="text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium flex items-center gap-1"><i data-lucide="history" class="w-3 h-3"></i>${ad.editCount}</button>` : ''}
                       </div>
                     </div>
-                    <div class="flex flex-col space-y-2">
+                    <div class="flex flex-row md:flex-col gap-2 w-full md:w-auto">
                       ${ad.deliveryStatus === 'Needs Delivery' ? `
-                        <button onclick="acceptDelivery('${ad.id}')" class="btn-shine bg-blue-600 text-white px-4 py-2 rounded-lg font-bold whitespace-nowrap">
-                          <i data-lucide="check" class="w-4 h-4 inline mr-1"></i>Accept
+                        <button onclick="acceptDelivery('${ad.id}')" class="btn-shine bg-blue-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
+                          <i data-lucide="check" class="w-4 h-4 mr-1"></i>Accept
                         </button>
-                        <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-4 py-2 rounded-lg font-bold whitespace-nowrap">
-                          <i data-lucide="x-circle" class="w-4 h-4 inline mr-1"></i>Cancel
+                        <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
+                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>Cancel
                         </button>
                       ` : ''}
                       ${ad.deliveryStatus === 'In Progress' && ad.isReceipt ? `
-                        <button onclick="openReceiptDeliveryCompletionModal('${ad.id}')" class="btn-shine bg-emerald-600 text-white px-4 py-2 rounded-lg font-bold whitespace-nowrap">
-                          <i data-lucide="check-circle" class="w-4 h-4 inline mr-1"></i>Mark Delivered
+                        <button onclick="openReceiptDeliveryCompletionModal('${ad.id}')" class="btn-shine bg-emerald-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
+                          <i data-lucide="check-circle" class="w-4 h-4 mr-1"></i>Delivered
                         </button>
-                        <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-4 py-2 rounded-lg font-bold whitespace-nowrap">
-                          <i data-lucide="x-circle" class="w-4 h-4 inline mr-1"></i>Cancel
+                        <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
+                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>Cancel
                         </button>
                       ` : ''}
                       ${ad.deliveryStatus === 'In Progress' && !ad.isReceipt && !ad.isPaid ? `
-                        <button onclick="markAsCollected('${ad.id}')" class="btn-shine bg-emerald-600 text-white px-4 py-2 rounded-lg font-bold whitespace-nowrap">
-                          <i data-lucide="dollar-sign" class="w-4 h-4 inline mr-1"></i>Collected
+                        <button onclick="markAsCollected('${ad.id}')" class="btn-shine bg-emerald-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
+                          <i data-lucide="dollar-sign" class="w-4 h-4 mr-1"></i>Collected
                         </button>
-                        <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-4 py-2 rounded-lg font-bold whitespace-nowrap">
-                          <i data-lucide="x-circle" class="w-4 h-4 inline mr-1"></i>Cancel
+                        <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
+                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>Cancel
                         </button>
                       ` : ''}
                       ${ad.deliveryStatus === 'In Progress' && !ad.isReceipt && ad.isPaid ? `
-                        <button onclick="markAsDelivered('${ad.id}')" class="btn-shine bg-emerald-600 text-white px-4 py-2 rounded-lg font-bold whitespace-nowrap">
-                          <i data-lucide="check-circle" class="w-4 h-4 inline mr-1"></i>Delivered
+                        <button onclick="markAsDelivered('${ad.id}')" class="btn-shine bg-emerald-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
+                          <i data-lucide="check-circle" class="w-4 h-4 mr-1"></i>Delivered
                         </button>
-                        <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-4 py-2 rounded-lg font-bold whitespace-nowrap">
-                          <i data-lucide="x-circle" class="w-4 h-4 inline mr-1"></i>Cancel
+                        <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
+                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>Cancel
                         </button>
                       ` : ''}
                       ${ad.deliveryStatus === 'Delivered' ? `
-                        <div class="text-emerald-600 font-bold text-sm flex items-center justify-center">
+                        <div class="text-emerald-600 font-bold text-sm flex items-center justify-center py-2">
                           <i data-lucide="check-circle" class="w-4 h-4 mr-1"></i>Complete
                         </div>
                       ` : ''}
@@ -9768,10 +10224,52 @@ function renderDeliveryDashboard() {
 
 function setDeliveryDashboardFilter(status) {
   const next = String(status || 'all');
-  const current = String(state.deliveryDashboardFilterStatus || 'all');
-  state.deliveryDashboardFilterStatus = (current === next) ? 'all' : next;
+  // Don't toggle back to 'all' on double-click - stay on selected filter
+  state.deliveryDashboardFilterStatus = next;
   render();
   if (window.lucide) lucide.createIcons();
+}
+
+// Manual refresh button for delivery dashboard - forces immediate sync from server
+async function refreshDeliveryDashboard() {
+  if (!isServerModeEnabled()) {
+    render();
+    showNotification('Refreshed', 'Dashboard refreshed', 'success');
+    return;
+  }
+
+  updateSyncIndicator('syncing');
+  showNotification('Syncing', 'Fetching latest data...', 'info');
+
+  try {
+    // Clear cache to force fresh data
+    _collectionCache.receipts = { data: null, timestamp: 0 };
+    _collectionCache.customers = { data: null, timestamp: 0 };
+
+    // Force immediate sync from server
+    const [receipts, customers] = await Promise.all([
+      apiLoadCollectionAll('receipts'),
+      apiLoadCollectionAll('customers')
+    ]);
+
+    if (Array.isArray(receipts)) state.receipts = receipts;
+    if (Array.isArray(customers)) state.customers = customers;
+
+    markCollectionDirty('receipts');
+    markCollectionDirty('customers');
+    saveState();
+
+    render();
+    if (window.lucide) lucide.createIcons();
+    updateSyncIndicator('synced');
+    showNotification('Refreshed', 'Dashboard updated with latest data', 'success');
+  } catch (e) {
+    console.error('Failed to refresh delivery dashboard:', e);
+    updateSyncIndicator('error');
+    showNotification('Refresh Failed', 'Could not fetch latest data. Please try again.', 'error');
+    // Still render with current data
+    render();
+  }
 }
 
 function _findAdForDeliveryModal(adId) {
@@ -14792,7 +15290,7 @@ function getPagesForCustomer(customerId) {
 
 function getReceiptsForAd(customerId, pageId) {
   if (!customerId) return [];
-  return getVisibleRecords(state.receipts).filter(r => {
+  return getVisibleRecords(state.receipts || []).filter(r => {
     if (!r || r._deleted) return false;
     if (r.customerId !== customerId) return false;
     if (pageId && r.pageId && r.pageId !== pageId) return false;
@@ -15337,18 +15835,19 @@ function renderAdMergedFundingList() {
     const receipt = receipts.find(r => r.id === alloc.receiptId);
     const optionsHtml = receipts.map(r => {
       const usage = getReceiptUsageStats(r);
-      const label = `#${r.serialNumber || r.finalReceiptNo || r.id.slice(0,6)} • $${(usage.remainingUSD || 0).toFixed(2)} avail`;
-      return `<option value="${r.id}" ${alloc.receiptId === r.id ? 'selected' : ''}>${label}</option>`;
+      const serial = r.serialNumber || r.finalReceiptNo || (r.id ? String(r.id).slice(0,6) : '???');
+      const label = `#${serial} • $${(usage.remainingUSD || 0).toFixed(2)} avail`;
+      return `<option value="${r.id || ''}" ${alloc.receiptId === r.id ? 'selected' : ''}>${Security.escapeHtml(label)}</option>`;
     }).join('');
     
     let receiptRemaining = 0;
     if (receipt) {
       const usage = getReceiptUsageStats(receipt);
-      receiptRemaining = usage.remainingUSD;
+      receiptRemaining = Number(usage?.remainingUSD) || 0;
     }
-    
+
     const plannedSpend = parseFloat(alloc.amountUSD) || 0;
-    
+
     return `
       <div class="p-2 bg-slate-50 rounded-lg space-y-2">
         <div class="flex items-center justify-between">
@@ -15986,21 +16485,29 @@ function refreshAdFundingRow(idx) {
 function renderAdFundingList() {
   const list = document.getElementById('ad-funding-list');
   if (!list) return;
-  
-  const customerId = document.getElementById('ad-customer-id')?.value || '';
-  const pageId = document.getElementById('ad-page')?.value || '';
-  const paymentStatus = document.getElementById('ad-payment-status')?.value || 'paid';
-  const allocations = state.tempAdFunding?.allocations || [];
-  const selectedReceiptIds = new Set(allocations.map(a => String(a.receiptId || '')).filter(Boolean));
 
-  // Only show receipts for this customer that still have remaining balance.
-  // When editing an existing ad, keep currently-selected receipts visible even if their remaining is now 0.
-  let receipts = getReceiptsForAd(customerId, pageId).filter(r => {
-    if (selectedReceiptIds.has(String(r.id))) return true;
-    const usage = getReceiptUsageStats(r);
-    const remaining = usage?.remainingUSD ?? 0;
-    return remaining > 0.0001;
-  });
+  try {
+    const customerId = document.getElementById('ad-customer-id')?.value || '';
+    const pageId = document.getElementById('ad-page')?.value || '';
+    const paymentStatus = document.getElementById('ad-payment-status')?.value || 'paid';
+    const allocations = state.tempAdFunding?.allocations || [];
+    const selectedReceiptIds = new Set(allocations.map(a => String(a.receiptId || '')).filter(Boolean));
+
+    // Only show receipts for this customer that still have remaining balance.
+    // When editing an existing ad, keep currently-selected receipts visible even if their remaining is now 0.
+    let receipts = [];
+    try {
+      receipts = getReceiptsForAd(customerId, pageId).filter(r => {
+        if (!r) return false;
+        if (selectedReceiptIds.has(String(r.id))) return true;
+        const usage = getReceiptUsageStats(r);
+        const remaining = usage?.remainingUSD ?? 0;
+        return remaining > 0.0001;
+      });
+    } catch (filterErr) {
+      console.error('Error filtering receipts for ad:', filterErr);
+      receipts = [];
+    }
 
   // Prefer latest receipts first (serialNumber desc if numeric, otherwise createdAt desc)
   receipts.sort((a, b) => {
@@ -16042,8 +16549,9 @@ function renderAdFundingList() {
   list.innerHTML = allocations.map((alloc, idx) => {
     const receipt = receipts.find(r => r.id === alloc.receiptId);
     const optionsHtml = receipts.map(r => {
-      const label = `#${r.serialNumber || r.id.slice(0,6)} • $${(r.amountUSD || 0).toFixed(2)}`;
-      return `<option value="${r.id}" ${alloc.receiptId === r.id ? 'selected' : ''}>${label}</option>`;
+      const serial = r.serialNumber || r.finalReceiptNo || (r.id ? String(r.id).slice(0,6) : '???');
+      const label = `#${serial} • $${(r.amountUSD || 0).toFixed(2)}`;
+      return `<option value="${r.id || ''}" ${alloc.receiptId === r.id ? 'selected' : ''}>${Security.escapeHtml(label)}</option>`;
     }).join('');
     
     const receiptRate = receipt?.exchangeRate || state.defaultExchangeRate || '-';
@@ -16052,9 +16560,9 @@ function renderAdFundingList() {
     let receiptRemaining = 0;
     if (receipt) {
       const usage = getReceiptUsageStats(receipt);
-      receiptRemaining = usage.remainingUSD;
+      receiptRemaining = Number(usage?.remainingUSD) || 0;
     }
-    
+
     // Calculate balance = Remaining - Planned Spend
     const plannedSpend = parseFloat(alloc.amountUSD) || 0;
     const balance = Math.max(receiptRemaining - plannedSpend, 0);
@@ -16088,9 +16596,13 @@ function renderAdFundingList() {
       </div>
     `;
   }).join('');
-  
+
   refreshAdFundingSummary();
   if (window.lucide) lucide.createIcons();
+  } catch (err) {
+    console.error('Error rendering ad funding list:', err);
+    list.innerHTML = `<div class="py-3 text-center text-xs text-rose-500">Error loading receipts. Please refresh.</div>`;
+  }
 }
 
 function refreshAdFundingSummary() {
@@ -18314,11 +18826,24 @@ async function handleModalSubmit() {
       if (isPaid) {
         // Sum allocations per receipt (prevents over-allocation if the same receipt is selected twice).
         const totalsByReceipt = new Map();
+        let totalAllocated = 0;
         for (const alloc of allocations) {
           const rid = String(alloc.receiptId || '');
           if (!rid) continue;
-          totalsByReceipt.set(rid, (totalsByReceipt.get(rid) || 0) + (parseFloat(alloc.amountUSD) || 0));
+          const allocAmount = parseFloat(alloc.amountUSD) || 0;
+          totalsByReceipt.set(rid, (totalsByReceipt.get(rid) || 0) + allocAmount);
+          totalAllocated += allocAmount;
         }
+
+        // Validate total allocations make sense (should be > 0)
+        if (totalAllocated <= 0) {
+          showNotification('Validation', 'Total allocation amount must be greater than zero.', 'error');
+          return;
+        }
+
+        // Set amountUSD from allocations total for paid ads (ensures consistency)
+        amountUSD = totalAllocated;
+
         for (const [receiptId, plannedTotal] of totalsByReceipt.entries()) {
           const receipt = state.receipts.find(r => String(r.id) === String(receiptId));
           if (!receipt) {
@@ -18327,7 +18852,19 @@ async function handleModalSubmit() {
           }
           // Calculate remaining balance (total - used - transferred)
           const usageStats = getReceiptUsageStats(receipt);
-          const remaining = usageStats.remainingUSD || 0;
+          let remaining = usageStats.remainingUSD || 0;
+
+          // If editing, add back what this ad already allocated from this receipt
+          if (isEdit && state.modalData?.id) {
+            const existingAd = state.ads.find(a => a.id === state.modalData.id);
+            if (existingAd?.receiptAllocations) {
+              const existingAlloc = existingAd.receiptAllocations
+                .filter(a => String(a.receiptId) === String(receiptId))
+                .reduce((sum, a) => sum + (parseFloat(a.amountUSD) || 0), 0);
+              remaining += existingAlloc;
+            }
+          }
+
           if (plannedTotal > remaining + 0.0001) {
             showNotification(
               'Validation',
@@ -18966,9 +19503,39 @@ function deleteCustomer(id) {
     showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف العملاء' : 'You do not have permission to delete customers', 'error');
     return;
   }
-  if (confirm('Delete this customer?')) {
+  const customer = state.customers.find(c => c.id === id);
+  const customerName = customer?.name || 'Unknown';
+  // Check for linked receipts/ads
+  const linkedReceipts = state.receipts.filter(r => r.customerId === id && !r._deleted);
+  const linkedAds = state.ads.filter(a => a.customerId === id && !a._deleted);
+  let warning = `Are you sure you want to delete customer "${customerName}"?`;
+  if (linkedReceipts.length > 0 || linkedAds.length > 0) {
+    warning += `\n\n⚠️ WARNING: This customer has ${linkedReceipts.length} receipt(s) and ${linkedAds.length} ad(s).`;
+    warning += `\n\nChoose an option:`;
+    warning += `\n• OK = Delete customer AND all their receipts/ads`;
+    warning += `\n• Cancel = Keep everything`;
+  }
+  if (confirm(warning)) {
+    // Cascade delete: also delete linked receipts and ads
+    linkedReceipts.forEach(receipt => {
+      receipt._deleted = true;
+      receipt._lastModified = getMonotonicTime();
+      markCollectionDirty('receipts');
+      if (isServerModeEnabled()) {
+        apiDeleteEntity('receipts', receipt.id).catch(() => {});
+      }
+    });
+    linkedAds.forEach(ad => {
+      ad._deleted = true;
+      ad._lastModified = getMonotonicTime();
+      markCollectionDirty('ads');
+      if (isServerModeEnabled()) {
+        apiDeleteEntity('ads', ad.id).catch(() => {});
+      }
+    });
     deleteRecord(state.customers, id);
-    showNotification('Deleted', 'Customer deleted', 'success');
+    const deletedCount = linkedReceipts.length + linkedAds.length;
+    showNotification('Deleted', `Customer deleted${deletedCount > 0 ? ` along with ${deletedCount} linked record(s)` : ''}`, 'success');
     render();
   }
 }
@@ -18993,9 +19560,55 @@ function deleteReceipt(id) {
     showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الوصولات' : 'You do not have permission to delete this receipt', 'error');
     return;
   }
-  if (confirm('Delete this receipt?')) {
+  const serialNo = receipt?.serialNumber || receipt?.tempReceiptNo || receipt?.finalReceiptNo || id.slice(0, 8);
+  const amountUSD = receipt?.amountUSD?.toFixed(2) || '0.00';
+  // Check for linked ads
+  const linkedAds = state.ads.filter(a =>
+    (a.receiptId === id || a.linkedDeliveryReceiptId === id || a.fundingReceiptId === id ||
+     (Array.isArray(a.receiptAllocations) && a.receiptAllocations.some(alloc => alloc.receiptId === id)) ||
+     (Array.isArray(a.dueAllocations) && a.dueAllocations.some(alloc => alloc.receiptId === id)))
+    && !a._deleted
+  );
+  let warning = `Are you sure you want to delete receipt #${serialNo} ($${amountUSD})?`;
+  if (linkedAds.length > 0) {
+    warning += `\n\n⚠️ WARNING: ${linkedAds.length} ad(s) are funded by this receipt. Their allocation references will be cleaned up.`;
+  }
+  if (confirm(warning)) {
+    // Clean up allocation references in linked ads
+    linkedAds.forEach(ad => {
+      let changed = false;
+      // Remove from receiptAllocations
+      if (Array.isArray(ad.receiptAllocations)) {
+        const before = ad.receiptAllocations.length;
+        ad.receiptAllocations = ad.receiptAllocations.filter(alloc => alloc.receiptId !== id);
+        if (ad.receiptAllocations.length !== before) changed = true;
+      }
+      // Remove from dueAllocations
+      if (Array.isArray(ad.dueAllocations)) {
+        const before = ad.dueAllocations.length;
+        ad.dueAllocations = ad.dueAllocations.filter(alloc => alloc.receiptId !== id);
+        if (ad.dueAllocations.length !== before) changed = true;
+      }
+      // Clear linked receipt references
+      if (ad.receiptId === id) { ad.receiptId = ''; changed = true; }
+      if (ad.linkedDeliveryReceiptId === id) { ad.linkedDeliveryReceiptId = ''; changed = true; }
+      if (ad.fundingReceiptId === id) { ad.fundingReceiptId = ''; changed = true; }
+      // Remove from receiptIds array
+      if (Array.isArray(ad.receiptIds)) {
+        const before = ad.receiptIds.length;
+        ad.receiptIds = ad.receiptIds.filter(rid => rid !== id);
+        if (ad.receiptIds.length !== before) changed = true;
+      }
+      if (changed) {
+        ad._lastModified = getMonotonicTime();
+        markCollectionDirty('ads');
+        if (isServerModeEnabled()) {
+          apiUpdateEntity('ads', ad.id, ad).catch(() => {});
+        }
+      }
+    });
     deleteRecord(state.receipts, id);
-    showNotification('Deleted', 'Receipt deleted', 'success');
+    showNotification('Deleted', `Receipt deleted${linkedAds.length > 0 ? ` (${linkedAds.length} ad allocation(s) cleaned up)` : ''}`, 'success');
     render();
   }
 }
@@ -19007,7 +19620,11 @@ function deleteAd(id) {
     showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الإعلانات' : 'You do not have permission to delete this ad', 'error');
     return;
   }
-  if (confirm('Delete this ad?')) {
+  const customer = state.customers.find(c => c.id === ad?.customerId);
+  const customerName = customer?.name || 'Unknown';
+  const amountUSD = ad?.amountUSD?.toFixed(2) || '0.00';
+  const warning = `Are you sure you want to delete this ad?\n\nCustomer: ${customerName}\nAmount: $${amountUSD}\n\n⚠️ This action cannot be undone!`;
+  if (confirm(warning)) {
     deleteRecord(state.ads, id);
     showNotification('Deleted', 'Ad deleted', 'success');
     render();

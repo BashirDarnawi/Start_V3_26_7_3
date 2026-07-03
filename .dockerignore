@@ -19,4 +19,16 @@ node_modules/
 
 deploy/
 
+# Not needed inside the server image (it only copies server/ + the 3 frontend files)
+android/
+ios/
+www/
+docs/
+scripts/
+.claude/
+.cursor/
+.pycache_tmp/
+*.log
+script.min.js
+
 

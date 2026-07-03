@@ -4,7 +4,9 @@
   "description": "Albayan platform — vanilla JS web app + FastAPI backend + Capacitor iOS/Android shells. See PLATFORM_FOUNDATION.md for platform rules.",
   "main": "script.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "sync:www": "node scripts/sync-www.js",
+    "sync:mobile": "node scripts/sync-www.js && npx cap copy",
+    "test": "echo \"Backend tests: run 'python -m pytest' (see START_HERE.md)\" && exit 0"
   },
   "keywords": [],
   "author": "",

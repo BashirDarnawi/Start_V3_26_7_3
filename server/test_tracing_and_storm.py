@@ -28,7 +28,9 @@ from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id  # 
 from server import rate_limiter  # noqa: E402
 
 
-client = TestClient(app)
+# Send an Origin header matching the test host so the CSRF same-origin check
+# (require_same_origin) accepts requests, like a real browser would.
+client = TestClient(app, headers={"Origin": "http://testserver"})
 
 TEST_ADMIN_EMAIL = os.getenv("TEST_ADMIN_EMAIL", "testadmin@albayan.test")
 TEST_ADMIN_PASSWORD = os.getenv("TEST_ADMIN_PASSWORD", "TestPassword123!Secure")

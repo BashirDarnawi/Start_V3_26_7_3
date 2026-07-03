@@ -1,29 +1,147 @@
-/* Anti-Blink: Smooth content transitions */
+/* ==========================================
+   ANTI-JUMP: Prevent page movement during renders
+   ========================================== */
+
+/* Prevent horizontal overflow on all devices */
+html, body {
+  overflow-x: hidden;
+  max-width: 100vw;
+  /* Prevent pull-to-refresh on mobile causing layout shifts */
+  overscroll-behavior-y: contain;
+  /* Disable smooth scrolling during JS scroll restoration */
+  scroll-behavior: auto !important;
+}
+
+/* Lock scroll position during render */
+html.is-rendering {
+  /* Prevent any scroll during render */
+  overflow-anchor: none;
+}
+
+/* Anti-Blink & Anti-Jump: Stable app container */
 #app {
   /* Prevent layout shift during render */
   min-height: 100vh;
+  overflow-x: hidden;
+  max-width: 100%;
+  /* Lock the container to prevent movement */
+  position: relative;
+  /* Isolate layout calculations */
+  contain: layout style;
+  /* Prevent content from pushing layout */
+  overflow-anchor: none;
 }
 
+/* During render, lock the app height to prevent jumps */
+#app.is-rendering {
+  /* Lock current height during update */
+  min-height: var(--app-height, 100vh);
+  /* Prevent any animations during render */
+  pointer-events: none;
+}
+
+/* DISABLE the fadeIn animation - it causes blinking */
 #app > * {
-  /* Smooth opacity transition for content changes */
-  animation: fadeIn 0.15s ease-out;
-}
-
-@keyframes fadeIn {
-  from { opacity: 0.7; }
-  to { opacity: 1; }
+  /* No animation - prevents flicker */
+  animation: none !important;
 }
 
 /* Prevent white flash during navigation */
 main, .main-content {
   background: inherit;
   min-height: 100vh;
+  /* Prevent layout shift */
+  contain: layout style;
+  /* Stable positioning */
+  position: relative;
+}
+
+/* Content area should maintain stable dimensions */
+.p-4.md\:p-8 {
+  /* Prevent content area from causing jumps */
+  contain: layout style;
+  /* Minimum height to prevent collapse */
+  min-height: calc(100vh - 80px);
 }
 
 /* Stabilize sidebar during navigation */
 nav, aside, .sidebar {
   /* Don't animate sidebar - keeps it stable */
   animation: none !important;
+  /* Prevent reflow */
+  contain: layout style paint;
+  /* Fixed positioning already prevents jumps, reinforce it */
+  will-change: transform;
+}
+
+/* Prevent all layout shifts during sync */
+.glass-panel, .rounded-2xl, .rounded-xl {
+  /* Contain layout to prevent shifts */
+  contain: layout style;
+  /* Prevent size changes from affecting parent */
+  box-sizing: border-box;
+}
+
+/* Grids should maintain stable layouts */
+.grid {
+  /* Prevent grid from causing reflows */
+  contain: layout;
+}
+
+/* Buttons and interactive elements shouldn't cause reflow */
+button, a, select, input {
+  /* Prevent dimension changes on state changes */
+  box-sizing: border-box;
+}
+
+/* Prevent images and icons from causing layout shifts */
+img, svg, [data-lucide] {
+  /* Reserve space for icons */
+  display: inline-block;
+  vertical-align: middle;
+}
+
+/* Lucide icons placeholder to prevent shift when they load */
+[data-lucide]:empty {
+  /* Reserve icon space before JS renders them */
+  min-width: 1em;
+  min-height: 1em;
+  display: inline-block;
+}
+
+/* Prevent scroll anchoring issues */
+.space-y-4 > *, .space-y-6 > *, .space-y-3 > * {
+  overflow-anchor: none;
+}
+
+/* Mobile: Extra anti-jump measures */
+@media (max-width: 768px) {
+  html, body {
+    /* Prevent overscroll effects */
+    overscroll-behavior: none;
+    /* Disable smooth scrolling on mobile */
+    scroll-behavior: auto !important;
+  }
+
+  #app {
+    /* Use dynamic viewport height */
+    min-height: 100dvh;
+  }
+
+  /* Prevent mobile keyboard from causing jumps */
+  .fixed.inset-0 {
+    /* Modal overlays should not affect scroll */
+    overscroll-behavior: contain;
+  }
+}
+
+/* Hide sync indicator animation to reduce repaints */
+#sync-status-indicator {
+  /* GPU accelerate to prevent main thread jank */
+  transform: translateZ(0);
+  will-change: opacity;
+  /* Fixed position prevents layout interference */
+  position: fixed;
 }
 
 /* Global Variables */
@@ -1209,6 +1327,239 @@ textarea:disabled {
 @keyframes shimmer {
   0% { background-position: 0% 50%; }
   100% { background-position: 200% 50%; }
+}
+
+/* ==========================================
+   MOBILE-RESPONSIVE TABLES & LAYOUTS
+   ========================================== */
+
+/* On mobile, make table rows display as cards */
+@media (max-width: 768px) {
+  /* Table becomes a card stack on mobile */
+  .glass-panel table {
+    display: block;
+    overflow-x: visible;
+  }
+
+  .glass-panel table thead {
+    display: none; /* Hide header on mobile */
+  }
+
+  .glass-panel table tbody {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .glass-panel table tbody tr {
+    display: flex;
+    flex-wrap: wrap;
+    padding: 1rem;
+    background: rgba(255, 255, 255, 0.5);
+    border: 1px solid rgba(var(--brand-blue-rgb), 0.1);
+    border-radius: 1rem;
+    gap: 0.5rem;
+    align-items: center;
+  }
+
+  .dark .glass-panel table tbody tr {
+    background: rgba(15, 23, 42, 0.5);
+    border-color: rgba(var(--brand-teal-rgb), 0.1);
+  }
+
+  .glass-panel table tbody tr td {
+    display: flex;
+    flex-direction: column;
+    padding: 0.25rem 0.5rem;
+    border: none;
+    min-width: 0;
+    flex-shrink: 0;
+  }
+
+  /* Make certain columns take full width on mobile */
+  .glass-panel table tbody tr td:first-child {
+    flex-basis: 100%;
+    font-size: 1.125rem;
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+    border-bottom: 1px solid rgba(var(--brand-blue-rgb), 0.1);
+    padding-bottom: 0.75rem;
+  }
+
+  /* Actions column stays at the end */
+  .glass-panel table tbody tr td:last-child {
+    flex-basis: 100%;
+    margin-top: 0.5rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid rgba(var(--brand-blue-rgb), 0.1);
+    justify-content: center;
+  }
+
+  .glass-panel table tbody tr td:last-child > div {
+    justify-content: center;
+    gap: 0.75rem;
+  }
+
+  /* Style action buttons for mobile */
+  .glass-panel table tbody tr td:last-child button {
+    padding: 0.5rem;
+    border-radius: 0.5rem;
+    background: rgba(var(--brand-blue-rgb), 0.1);
+  }
+
+  /* Add data labels before content on mobile (via pseudo-elements) */
+  .glass-panel table tbody tr td::before {
+    content: attr(data-label);
+    font-size: 0.625rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--brand-blue);
+    opacity: 0.7;
+    margin-bottom: 0.25rem;
+  }
+}
+
+/* Mobile-responsive header sections */
+@media (max-width: 640px) {
+  /* Stack header title and buttons vertically */
+  .flex.justify-between.items-center {
+    flex-direction: column;
+    align-items: flex-start !important;
+    gap: 1rem;
+  }
+
+  /* Full-width buttons on mobile */
+  .flex.justify-between.items-center .btn-shine,
+  .flex.justify-between.items-center button {
+    width: 100%;
+    justify-content: center;
+  }
+
+  /* Stack filter dropdowns */
+  .flex.flex-wrap.gap-2 {
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .flex.flex-wrap.gap-2 > select,
+  .flex.flex-wrap.gap-2 > button {
+    width: 100%;
+  }
+
+  /* Reduce heading sizes on mobile */
+  h1.text-3xl {
+    font-size: 1.5rem;
+  }
+
+  h2.text-2xl {
+    font-size: 1.25rem;
+  }
+
+  /* Smaller stat cards on mobile */
+  .stat-card {
+    padding: 0.75rem 1rem;
+  }
+
+  .stat-card .text-3xl,
+  .stat-card .text-2xl {
+    font-size: 1.25rem;
+  }
+}
+
+/* Ensure cards don't overflow on mobile */
+@media (max-width: 768px) {
+  .glass-panel,
+  .glass-panel-sm {
+    max-width: 100%;
+    overflow: hidden;
+  }
+
+  /* Prevent horizontal scroll from content */
+  .glass-panel > *,
+  .glass-panel-sm > * {
+    max-width: 100%;
+    overflow-wrap: break-word;
+    word-wrap: break-word;
+  }
+
+  /* Grid should be single column on mobile */
+  .grid.grid-cols-2,
+  .grid.grid-cols-3,
+  .grid.grid-cols-4 {
+    grid-template-columns: 1fr;
+  }
+
+  /* Exception: small stat grids can be 2 columns */
+  .grid.grid-cols-2.gap-3,
+  .grid.grid-cols-2.gap-4 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* Modal responsiveness */
+@media (max-width: 768px) {
+  /* Full-screen modals on mobile */
+  .fixed.inset-0 > .glass-panel,
+  .fixed.inset-0 > div > .glass-panel {
+    max-height: 95vh;
+    max-width: 95vw;
+    margin: 0.5rem;
+    border-radius: 1rem;
+  }
+
+  /* Modal content scrollable */
+  .fixed.inset-0 .overflow-y-auto {
+    max-height: calc(95vh - 120px);
+  }
+
+  /* Modal form inputs full width */
+  .fixed.inset-0 input,
+  .fixed.inset-0 select,
+  .fixed.inset-0 textarea {
+    width: 100%;
+    font-size: 16px; /* Prevent iOS zoom */
+  }
+}
+
+/* Delivery Dashboard Mobile Optimization */
+@media (max-width: 768px) {
+  /* Stat cards in a 2x2 grid on mobile */
+  .delivery-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.75rem;
+  }
+
+  .delivery-stats-grid > * {
+    padding: 0.75rem;
+  }
+
+  /* Delivery card actions */
+  .delivery-card-actions {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .delivery-card-actions button {
+    width: 100%;
+  }
+}
+
+/* Analytics View Mobile */
+@media (max-width: 768px) {
+  /* Analytics stat cards */
+  .analytics-stat-cards {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .analytics-stat-cards .glass-panel {
+    padding: 0.75rem;
+  }
+
+  .analytics-stat-cards .text-2xl {
+    font-size: 1.125rem;
+  }
 }
 
 /* ==========================================
