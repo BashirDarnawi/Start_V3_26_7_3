@@ -32,7 +32,9 @@ from server import rate_limiter  # noqa: E402
 # (require_same_origin) accepts requests, like a real browser would.
 client = TestClient(app, headers={"Origin": "http://testserver"})
 
-TEST_ADMIN_EMAIL = os.getenv("TEST_ADMIN_EMAIL", "testadmin@albayan.test")
+# Note: the domain must be a normally-formed one — the login endpoint validates
+# emails and rejects reserved TLDs like .test, so "@albayan.test" cannot log in.
+TEST_ADMIN_EMAIL = os.getenv("TEST_ADMIN_EMAIL", "testadmin@tests.albayanhub.com")
 TEST_ADMIN_PASSWORD = os.getenv("TEST_ADMIN_PASSWORD", "TestPassword123!Secure")
 
 

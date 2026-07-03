@@ -34,7 +34,9 @@ client = TestClient(app, headers={"Origin": "http://testserver"})
 
 # Test credentials - use environment variables with fallback for CI/local testing
 # In production CI, set these via secrets; locally, defaults are fine for isolated test DBs
-TEST_ADMIN_EMAIL = os.getenv("TEST_ADMIN_EMAIL", "testadmin@albayan.test")
+# Note: the domain must be a normally-formed one — the login endpoint validates
+# emails and rejects reserved TLDs like .test, so "@albayan.test" cannot log in.
+TEST_ADMIN_EMAIL = os.getenv("TEST_ADMIN_EMAIL", "testadmin@tests.albayanhub.com")
 TEST_ADMIN_PASSWORD = os.getenv("TEST_ADMIN_PASSWORD", "TestPassword123!Secure")
 
 
