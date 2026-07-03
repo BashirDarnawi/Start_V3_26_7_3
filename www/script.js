@@ -5574,34 +5574,16 @@ async function serverLiveSyncOnce() {
   // Delivery users: do a small "replace" sync of only assigned deliveries + linked customers.
   // This guarantees removals (unassigned items) disappear without needing manual refresh.
   if (roleLower === 'delivery') {
-    // #region agent log
-    const _syncStart = Date.now();
-    // #endregion
     const safeAll = async (collection) => {
-      // #region agent log
-      const _colStart = Date.now();
-      // #endregion
       try {
-        const result = await apiLoadCollectionAll(collection);
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/c65e43fd-ebac-4d34-a622-d21a008ad71c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'delivery-sync',hypothesisId:'H4',location:'script.js:deliverySync:ok',message:`Delivery sync ${collection} OK`,data:{collection,durationMs:Date.now()-_colStart,count:Array.isArray(result)?result.length:0},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
-        return result;
+        return await apiLoadCollectionAll(collection);
       } catch (e) {
         // Network errors during sync - don't break the app, just return null
         if (ALBAYAN_DEBUG_MODE) console.warn(`[safeAll] Failed to load ${collection}:`, e?.message || e);
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/c65e43fd-ebac-4d34-a622-d21a008ad71c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'delivery-sync',hypothesisId:'H1',location:'script.js:deliverySync:error',message:`Delivery sync ${collection} FAILED`,data:{collection,durationMs:Date.now()-_colStart,error:e?.message||'unknown',status:e?.status||null},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
         return null;
       }
     };
 
-    const prevCursor = computeServerCursorFromState();
-    // #region agent log
-    const _prevAdsLen = Array.isArray(state.ads) ? state.ads.length : 0;
-    const _prevReceiptsLen = Array.isArray(state.receipts) ? state.receipts.length : 0;
-    // #endregion
     const [ads, receipts, customers] = await Promise.all([
       safeAll('ads'),
       safeAll('receipts'),
@@ -5621,10 +5603,6 @@ async function serverLiveSyncOnce() {
         assignSequentialNumbers(false); // Use cache if available
       }, 100);
     }
-
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/c65e43fd-ebac-4d34-a622-d21a008ad71c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'delivery-sync',hypothesisId:'H5',location:'script.js:deliverySync:state',message:'Delivery sync state update',data:{durationMs:Date.now()-_syncStart,prevAds:_prevAdsLen,prevReceipts:_prevReceiptsLen,newAds:Array.isArray(ads)?ads.length:'null',newReceipts:Array.isArray(receipts)?receipts.length:'null',newCustomers:Array.isArray(customers)?customers.length:'null',changed},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
 
     const nextCursor = computeServerCursorFromState();
     _serverLiveSync.cursor = Math.max(_serverLiveSync.cursor || 0, nextCursor);
@@ -20494,32 +20472,21 @@ async function init() {
   // Initialize IndexedDB for persistent audit log storage
   await initIndexedDB();
 
-  // #region agent log
-  // Hypothesis H-ENV: User is reproducing on file:// which bypasses backend endpoints and makes telemetry misleading.
-  // Show a visible warning so the user switches to http://127.0.0.1:8001/ (or LAN IP) for accurate repro.
+  // Opening the app directly from a local file (file://) bypasses the backend,
+  // so server mode can never activate. Warn once so the user runs it via a server.
   try {
     const proto = String(window.location?.protocol || '');
     if (proto === 'file:' && !window.__albayanFileModeWarned) {
       window.__albayanFileModeWarned = true;
       try {
-        if (typeof window.__albayanDebugEmit === 'function') {
-          window.__albayanDebugEmit('H-ENV', 'script.js:init', 'file_protocol_detected', {
-            protocol: String(window.location?.protocol || '').slice(0, 16),
-            origin: String(window.location?.origin || '').slice(0, 120),
-            path: String(window.location?.pathname || '').slice(0, 160),
-          });
-        }
-      } catch (_) {}
-      try {
         showNotification(
           'Run via Server',
-          'You opened Albayan from a local file (file://). For correct app behavior + telemetry, open http://127.0.0.1:8001/ (same device) or http://172.20.10.3:8001/ (LAN).',
+          'You opened Albayan from a local file (file://). For full functionality, serve it over HTTP instead (e.g. the backend at http://127.0.0.1:8000/ or "npx serve").',
           'warning'
         );
       } catch (_) {}
     }
   } catch (_) {}
-  // #endregion
 
   // #region agent log
   // Hypothesis H1: Security.escapeHtml does not escape quotes, which can break attribute contexts (value="...")
