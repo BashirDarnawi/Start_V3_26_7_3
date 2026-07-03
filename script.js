@@ -8527,7 +8527,7 @@ function renderReceiptsView() {
       <div class="flex justify-between items-center">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('receipts')}</h1>
-          <p class="text-sm text-slate-500 mt-1">${filteredReceipts.length}${hasActiveFilters ? ` of ${allReceipts.length}` : ''} receipts</p>
+          <p id="receipts-count" class="text-sm text-slate-500 mt-1">${filteredReceipts.length}${hasActiveFilters ? ` of ${allReceipts.length}` : ''} receipts</p>
         </div>
         <button onclick="showReceiptModal()" class="btn-shine bg-purple-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
           <i data-lucide="receipt" class="w-4 h-4"></i>
@@ -8549,7 +8549,7 @@ function renderReceiptsView() {
               oninput="updateReceiptSearch(this.value)"
               class="w-full pl-12 pr-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all placeholder:text-slate-400"
             />
-            ${state.receiptSearch ? `<button onclick="clearReceiptSearch()" class="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full transition-colors"><i data-lucide="x" class="w-4 h-4 text-slate-400"></i></button>` : ''}
+            <span id="receipt-search-clear">${state.receiptSearch ? `<button onclick="clearReceiptSearch()" class="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full transition-colors"><i data-lucide="x" class="w-4 h-4 text-slate-400"></i></button>` : ''}</span>
           </div>
           
           <!-- Filter Dropdowns -->
@@ -8605,7 +8605,7 @@ function renderReceiptsView() {
         </div>
         
         <!-- Active Filters Display -->
-        ${hasActiveFilters ? `
+        <div id="receipt-active-filters">${hasActiveFilters ? `
           <div class="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
             <span class="text-xs font-medium text-slate-500">Active filters:</span>
             ${state.receiptSearch ? `<span class="px-2 py-1 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full text-xs font-medium flex items-center"><i data-lucide="search" class="w-3 h-3 mr-1"></i>"${Security.escapeHtml(state.receiptSearch)}"</span>` : ''}
@@ -8614,10 +8614,10 @@ function renderReceiptsView() {
             ${state.receiptDateFilter !== 'all' ? `<span class="px-2 py-1 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-full text-xs font-medium">${state.receiptDateFilter}</span>` : ''}
             ${state.receiptCollectedFilter !== 'all' ? `<span class="px-2 py-1 ${state.receiptCollectedFilter === 'collected' ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300' : 'bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300'} rounded-full text-xs font-medium">${state.receiptCollectedFilter}</span>` : ''}
           </div>
-        ` : ''}
+        ` : ''}</div>
       </div>
 
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div id="receipts-grid" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
         ${filteredReceipts.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${hasActiveFilters ? 'search-x' : 'receipt'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${hasActiveFilters ? 'No receipts match your filters' : 'No receipts yet'}</p>${hasActiveFilters ? '<button onclick="clearAllReceiptFilters()" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">Clear all filters</button>' : ''}</div>` : filteredReceipts.map((receipt, idx) => {
           const customer = state.customers.find(c => c.id === receipt.customerId);
           const displayFinalNo = receipt.finalReceiptNo || receipt.serialNumber || '';
@@ -8791,7 +8791,7 @@ function renderReceiptsView() {
                 </div>
               `}
 
-              ${receipt.receiptImage ? `<div class="mb-4"><img src="${receipt.receiptImage}" alt="Receipt" class="w-full h-32 object-cover rounded-lg border border-slate-200 dark:border-slate-700" /></div>` : ''}
+              ${receipt.receiptImage ? `<div class="mb-4"><img src="${Security.escapeHtml(receipt.receiptImage)}" alt="Receipt" class="w-full h-32 object-cover rounded-lg border border-slate-200 dark:border-slate-700" /></div>` : ''}
 
               <!-- Collected Toggle -->
               <div class="flex items-center justify-between py-2 px-3 mb-3 rounded-xl ${receipt.collected ? 'bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800' : 'bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800'}">
@@ -10980,7 +10980,7 @@ function showLogDetails(logId) {
         <div class="grid grid-cols-2 gap-4">
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
             <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">Log ID</div>
-            <div class="text-xs font-mono text-slate-700 dark:text-slate-300">${log.id}</div>
+            <div class="text-xs font-mono text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.id)}</div>
           </div>
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
             <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">Timestamp</div>
@@ -10995,29 +10995,29 @@ function showLogDetails(logId) {
           </div>
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
             <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">Action</div>
-            <div class="text-xs font-bold text-slate-700 dark:text-slate-300">${log.action}</div>
+            <div class="text-xs font-bold text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.action)}</div>
           </div>
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
             <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">Category</div>
-            <div class="text-xs text-slate-700 dark:text-slate-300 capitalize">${log.category || 'general'}</div>
+            <div class="text-xs text-slate-700 dark:text-slate-300 capitalize">${Security.escapeHtml(log.category || 'general')}</div>
           </div>
         </div>
         
         <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
           <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">Description</div>
-          <div class="text-sm text-slate-700 dark:text-slate-300">${log.description}</div>
+          <div class="text-sm text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.description)}</div>
         </div>
         
         ${log.resourceId ? `
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
             <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">Resource ID</div>
-            <div class="text-xs font-mono text-slate-700 dark:text-slate-300">${log.resourceId}</div>
+            <div class="text-xs font-mono text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.resourceId)}</div>
           </div>
         ` : ''}
         
         <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
           <div class="text-[10px] font-bold text-slate-400 uppercase mb-2">Metadata</div>
-          <pre class="text-xs text-slate-600 dark:text-slate-400 overflow-x-auto whitespace-pre-wrap bg-slate-100 dark:bg-slate-900 p-3 rounded-lg">${JSON.stringify(log.metadata || {}, null, 2)}</pre>
+          <pre class="text-xs text-slate-600 dark:text-slate-400 overflow-x-auto whitespace-pre-wrap bg-slate-100 dark:bg-slate-900 p-3 rounded-lg">${Security.escapeHtml(JSON.stringify(log.metadata || {}, null, 2))}</pre>
         </div>
       </div>
     </div>
@@ -12735,35 +12735,48 @@ function markAsDelivered(itemId) {
 // RECEIPT FILTER FUNCTIONS
 // ==========================================
 
+let _receiptSearchTimer = null;
+
 function updateReceiptSearch(value) {
   const v = String(value || '');
   const clean = Security.sanitizeInput(v, { maxLength: 200 });
-  // #region agent log
-  // Hypothesis H4: Receipt search is injected into templates as an attribute value; quotes can break HTML.
-  if (ALBAYAN_DEBUG_MODE && typeof window.__albayanDebugEmit === 'function') {
-  try {
-    const dbg = (window.__albayanDebugAudit = window.__albayanDebugAudit || {});
-    const hasQuote = v.includes('"');
-    const hasApos = v.includes("'");
-    const hasAngle = v.includes('<') || v.includes('>');
-    if (!dbg.receiptSearchLogged && (hasQuote || hasApos || hasAngle)) {
-      dbg.receiptSearchLogged = true;
-        window.__albayanDebugEmit('H4', 'script.js:updateReceiptSearch', 'receiptSearch contains special chars', {len:v.length,hasQuote,hasApos,hasAngle});
-    }
-  } catch (_) {}
-  }
-  // #endregion
   state.receiptSearch = clean;
-  render();
-  lucide.createIcons();
-  // Re-focus the search input after render
-  setTimeout(() => {
-    const input = document.getElementById('receipt-search-input');
-    if (input) {
-      input.focus();
-      input.setSelectionRange(input.value.length, input.value.length);
-    }
-  }, 10);
+  if (_receiptSearchTimer) clearTimeout(_receiptSearchTimer);
+  // Small debounce to keep typing smooth (same pattern as the customers view).
+  // Only the results below the search box are re-rendered, so the input keeps
+  // focus naturally — no full-page rebuild, no refocus hack.
+  _receiptSearchTimer = setTimeout(() => {
+    _receiptSearchTimer = null;
+    updateReceiptsViewFiltered();
+  }, 120);
+}
+
+function updateReceiptsViewFiltered() {
+  if (state.currentView !== 'receipts') return;
+  const grid = document.getElementById('receipts-grid');
+  const countEl = document.getElementById('receipts-count');
+  const chipsEl = document.getElementById('receipt-active-filters');
+  const clearEl = document.getElementById('receipt-search-clear');
+  if (!grid || !countEl) {
+    // View structure not on screen (e.g. mid-navigation): fall back to a full render.
+    render();
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  // Build the fresh view HTML off-screen, then swap in only the parts that
+  // change while searching (results grid, count, filter chips, clear button).
+  const tpl = document.createElement('template');
+  tpl.innerHTML = renderReceiptsView();
+  const src = tpl.content;
+  const newGrid = src.querySelector('#receipts-grid');
+  const newCount = src.querySelector('#receipts-count');
+  const newChips = src.querySelector('#receipt-active-filters');
+  const newClear = src.querySelector('#receipt-search-clear');
+  if (newGrid) grid.innerHTML = newGrid.innerHTML;
+  if (newCount) countEl.textContent = newCount.textContent;
+  if (chipsEl && newChips) chipsEl.innerHTML = newChips.innerHTML;
+  if (clearEl && newClear) clearEl.innerHTML = newClear.innerHTML;
+  if (window.lucide) lucide.createIcons();
 }
 
 function clearReceiptSearch() {
@@ -13561,7 +13574,7 @@ function filterReceiptPhones() {
   
   if (filtered.length > 0 && searchTerm) {
     dropdown.innerHTML = filtered.map(item => `
-      <div class="px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer phone-option rounded transition-colors" onclick='selectReceiptPhone(${JSON.stringify(item.phone)}, ${JSON.stringify(item.customer.id)})'>
+      <div class="px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer phone-option rounded transition-colors" data-phone="${Security.escapeHtml(item.phone)}" data-customer-id="${Security.escapeHtml(item.customer.id)}" onclick="selectReceiptPhone(this.dataset.phone, this.dataset.customerId)">
         <div class="text-sm font-medium">${Security.escapeHtml(item.phone)}</div>
         <div class="text-xs text-slate-500">${Security.escapeHtml(item.customer.name)} - ${Security.escapeHtml(item.customer.platform)}</div>
       </div>
@@ -16243,7 +16256,7 @@ function renderAdPhotoPreviews() {
   }
   container.innerHTML = photos.map((src, idx) => `
     <div class="relative group rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700">
-      <img src="${src}" class="w-full h-20 object-cover" />
+      <img src="${Security.escapeHtml(src)}" class="w-full h-20 object-cover" />
       <button type="button" onclick="removeAdPhoto(${idx})" class="absolute top-1 right-1 bg-white/80 dark:bg-slate-900/80 rounded-full p-1 shadow hover:bg-rose-100">
         <i data-lucide="x" class="w-3 h-3 text-rose-600"></i>
       </button>
@@ -16310,7 +16323,7 @@ function renderReceiptPhotoPreviews() {
   }
   container.innerHTML = photos.map((src, idx) => `
     <div class="relative group rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700">
-      <img src="${src}" class="w-full h-20 object-cover" />
+      <img src="${Security.escapeHtml(src)}" class="w-full h-20 object-cover" />
       <button type="button" onclick="removeReceiptPhoto(${idx})" class="absolute top-1 right-1 bg-white/80 dark:bg-slate-900/80 rounded-full p-1 shadow hover:bg-rose-100">
         <i data-lucide="x" class="w-3 h-3 text-rose-600"></i>
       </button>
@@ -17701,9 +17714,9 @@ function renderModal() {
                 />
                 <div id="receipt-phone-dropdown" class="absolute z-20 mt-1 w-80 glass-panel rounded-lg shadow-xl max-h-40 overflow-y-auto hidden">
                   ${phoneCustomerMap.map(item => `
-                    <div class="px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer phone-option" onclick="selectReceiptPhone('${item.phone}', '${item.customer.id}')">
-                      <div class="text-sm font-medium">${item.phone}</div>
-                      <div class="text-xs text-slate-500">${item.customer.name} - ${item.customer.platform}</div>
+                    <div class="px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer phone-option" data-phone="${Security.escapeHtml(item.phone)}" data-customer-id="${Security.escapeHtml(item.customer.id)}" onclick="selectReceiptPhone(this.dataset.phone, this.dataset.customerId)">
+                      <div class="text-sm font-medium">${Security.escapeHtml(item.phone)}</div>
+                      <div class="text-xs text-slate-500">${Security.escapeHtml(item.customer.name)} - ${Security.escapeHtml(item.customer.platform)}</div>
                     </div>
                   `).join('')}
                 </div>
