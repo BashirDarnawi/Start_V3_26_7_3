@@ -481,10 +481,14 @@ function showPermissionsModal(userId) {
         <div class="flex items-center space-x-3">
           <button onclick="exportUserPermissions('${userId}')" class="px-4 py-2 rounded-xl text-xs font-bold bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 flex items-center space-x-2 transition-colors">
             <i data-lucide="download" class="w-3 h-3"></i>
-            <span>Export</span>
+            <span>${state.language === 'ar' ? 'تصدير' : 'Export'}</span>
+          </button>
+          <button onclick="importUserPermissions('${userId}')" class="px-4 py-2 rounded-xl text-xs font-bold bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 flex items-center space-x-2 transition-colors">
+            <i data-lucide="upload" class="w-3 h-3"></i>
+            <span>${state.language === 'ar' ? 'استيراد' : 'Import'}</span>
           </button>
           <button onclick="this.closest('#app-modal').remove()" class="px-6 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-purple-600 to-indigo-600 text-white hover:opacity-90 transition-all">
-            Done
+            ${state.language === 'ar' ? 'تم' : 'Done'}
           </button>
         </div>
       </div>
