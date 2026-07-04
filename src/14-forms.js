@@ -1501,7 +1501,10 @@ async function saveReceiptFromModal() {
     }
     
     receipt.updatedAt = new Date().toISOString();
-    updateRecord(state.receipts, receipt.id, receipt);
+    // Pass the baseline the user actually edited (the modal snapshot) so a
+    // concurrent change (e.g. a driver completing the delivery) triggers a
+    // 409 conflict + reload instead of being silently overwritten.
+    updateRecord(state.receipts, receipt.id, receipt, oldReceipt?._lastModified);
     showNotification('Updated', 'Receipt updated successfully!', 'success');
     addLog('update', 'receipt', receipt.id, `Updated receipt${serialNumber ? ' #' + serialNumber : ''}`);
   } else {

@@ -518,6 +518,7 @@ async function apiLoadCollectionAll(collection) {
     const timeoutMs = getCollectionTimeout(collection);
     let pageCount = 0;
     const maxPages = 50; // Safety limit to prevent infinite loops
+    let partial = false;
 
     while (pageCount < maxPages) {
       pageCount++;
@@ -542,17 +543,22 @@ async function apiLoadCollectionAll(collection) {
         if (items.length < limit) break;
         offset += limit;
       } catch (pageError) {
-        // If we already have some data, return what we have instead of failing completely
-        if (all.length > 0) {
+        // Partial load: only accept it if it is not WORSE than what the app
+        // already has. Otherwise let the error propagate so the caller's
+        // keep-existing-data guard preserves the more complete local copy
+        // instead of wholesale-replacing it with a truncated list.
+        const existing = Array.isArray(state[collection]) ? state[collection].length : 0;
+        if (all.length > 0 && all.length >= existing) {
           console.warn(`[apiLoadCollectionAll] Partial load for ${collection}: got ${all.length} items before error`, pageError?.message);
+          partial = true;
           break;
         }
         throw pageError;
       }
     }
 
-    // Update cache
-    if (_collectionCache[collection]) {
+    // Update cache only for complete loads — never persist a truncated result.
+    if (!partial && _collectionCache[collection]) {
       _collectionCache[collection] = { data: all, timestamp: Date.now() };
     }
 

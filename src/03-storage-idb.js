@@ -204,6 +204,40 @@ function idbDelete(storeName, key) {
   });
 }
 
+/**
+ * Perform several puts and deletes in ONE IndexedDB transaction, atomically.
+ * Either every operation commits or none does — so an interrupted collection
+ * save (tab close / crash / quota) can never leave new chunks mixed with old
+ * ones under a stale meta record (which silently corrupts the collection).
+ * Enqueued on the same write queue to preserve serialization. Do NOT await
+ * anything between the put/delete calls — an intervening await would let the
+ * transaction auto-commit early and defeat atomicity.
+ *
+ * @param {Array<object>} puts - records to store (each has a `key`)
+ * @param {Array<string>} deleteKeys - keys to delete
+ * @returns {Promise<boolean>}
+ */
+function idbAtomicWrite(puts, deleteKeys) {
+  if (!db) return Promise.resolve(false);
+  return new Promise((resolve, reject) => {
+    const task = () => new Promise((innerResolve, innerReject) => {
+      try {
+        const tx = db.transaction([DATA_STORE_NAME], 'readwrite');
+        const store = tx.objectStore(DATA_STORE_NAME);
+        tx.oncomplete = () => innerResolve(true);
+        tx.onerror = () => innerReject(tx.error);
+        tx.onabort = () => innerReject(tx.error || new Error('IndexedDB transaction aborted'));
+        for (const v of (puts || [])) store.put(v);
+        for (const k of (deleteKeys || [])) store.delete(k);
+      } catch (e) {
+        innerReject(e);
+      }
+    });
+    idbTransactionQueue.push(() => task().then(resolve).catch(reject));
+    processIdbQueue();
+  });
+}
+
 function idbClear(storeName) {
   if (!db) return Promise.resolve(false);
   return new Promise((resolve, reject) => {
@@ -258,16 +292,15 @@ async function saveCollectionToIndexedDB(collectionName, data) {
         recordCount
       };
 
-      await idbPut(DATA_STORE_NAME, record);
-
-      // Clean up any old chunked layout
+      // Atomic: write the single record AND drop any old chunked layout in one
+      // transaction, so we can never end up with both present (which would make
+      // load prefer the stale chunked copy).
+      const deleteKeys = [];
       if (prevChunkCount > 0) {
-        for (let i = 0; i < prevChunkCount; i++) {
-          await idbDelete(DATA_STORE_NAME, getCollectionChunkKey(name, i));
-        }
-        await idbDelete(DATA_STORE_NAME, metaKey);
+        for (let i = 0; i < prevChunkCount; i++) deleteKeys.push(getCollectionChunkKey(name, i));
+        deleteKeys.push(metaKey);
       }
-
+      await idbAtomicWrite([record], deleteKeys);
       return true;
     }
 
@@ -276,9 +309,14 @@ async function saveCollectionToIndexedDB(collectionName, data) {
     const chunkCount = Math.ceil(recordCount / chunkSize);
     const updatedAt = Date.now();
 
+    // Build every chunk record + the meta record, then commit them together
+    // with the cleanup deletes in ONE atomic transaction. An interrupted save
+    // now rolls back entirely, leaving the previous consistent generation
+    // (chunks + meta) intact instead of a corrupt mix.
+    const puts = [];
     for (let i = 0; i < chunkCount; i++) {
       const chunk = data.slice(i * chunkSize, (i + 1) * chunkSize);
-      await idbPut(DATA_STORE_NAME, {
+      puts.push({
         key: getCollectionChunkKey(name, i),
         type: 'collection_chunk',
         collection: name,
@@ -287,8 +325,7 @@ async function saveCollectionToIndexedDB(collectionName, data) {
         data: chunk
       });
     }
-
-    await idbPut(DATA_STORE_NAME, {
+    puts.push({
       key: metaKey,
       type: 'collection_meta',
       collection: name,
@@ -299,15 +336,15 @@ async function saveCollectionToIndexedDB(collectionName, data) {
       updatedAt
     });
 
-    // Delete any leftover old chunks
+    const deleteKeys = [];
+    // Leftover old chunks beyond the new count
     if (prevChunkCount > chunkCount) {
-      for (let i = chunkCount; i < prevChunkCount; i++) {
-        await idbDelete(DATA_STORE_NAME, getCollectionChunkKey(name, i));
-      }
+      for (let i = chunkCount; i < prevChunkCount; i++) deleteKeys.push(getCollectionChunkKey(name, i));
     }
+    // Legacy single-record storage, if it exists
+    deleteKeys.push(name);
 
-    // Remove legacy single-record storage if it exists
-    await idbDelete(DATA_STORE_NAME, name).catch(() => {});
+    await idbAtomicWrite(puts, deleteKeys);
     return true;
   } catch (error) {
     console.error('Error saving collection to IndexedDB:', error);

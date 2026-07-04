@@ -68,6 +68,13 @@ async function flushDirtyCollections() {
   } finally {
     idbSync.flushing = false;
   }
+  // Collections marked dirty WHILE this flush was running hit the re-entrancy
+  // guard above and had their debounce swallowed — they would otherwise sit
+  // unpersisted until some unrelated later edit. Flush them now. Terminates
+  // because each pass clears the set.
+  if (idbSync.dirty.size > 0) {
+    await flushDirtyCollections();
+  }
 }
 
 function saveState() {

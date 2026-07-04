@@ -121,7 +121,7 @@ function addRecord(array, record) {
  *   - Uses optimistic locking (expectedLastModified timestamp)
  *   - Prevents lost updates in multi-user scenarios
  */
-function updateRecord(array, id, updates) {
+function updateRecord(array, id, updates, expectedLastModified) {
   const index = array.findIndex(item => item.id === id);
   if (index !== -1) {
     const old = { ...array[index] };
@@ -163,7 +163,12 @@ function updateRecord(array, id, updates) {
 
     // Server write-through (always-online multi-user mode)
     if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
-      const expected = old._lastModified || 0;
+      // Use the baseline the caller actually saw when supplied (e.g. the modal
+      // snapshot the user edited), so a change committed by someone else in
+      // between produces a 409 conflict instead of silently overwriting it.
+      const expected = (Number.isFinite(Number(expectedLastModified))
+        ? Number(expectedLastModified)
+        : (old._lastModified || 0));
       apiPatchEntity(collectionName, id, sanitizedUpdates, expected)
         .then((entity) => {
           if (entity?.data) {

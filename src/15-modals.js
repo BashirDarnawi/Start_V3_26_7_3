@@ -644,7 +644,9 @@ function renderModal() {
       const defaultRate1 = getDefaultRate1(PAYMENT_METHODS[0]);
       const existingPayments = receiptData.payments || [{ method: PAYMENT_METHODS[0], amount: 0, rate: defaultRate1, rate2: state.defaultExchangeRate, collectionType: 'office', deliveryPersonId: '' }];
       const receiptDeliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
-      state.tempReceiptPhotos = receiptData.photos || [];
+      // Copy (not alias) the live record's photos so add/remove in the modal
+      // does not mutate the saved receipt when the user cancels.
+      state.tempReceiptPhotos = (receiptData.photos || []).slice();
       
       if (receiptCustomers.length === 0) {
         modalContent = `
@@ -1756,9 +1758,14 @@ async function handleModalSubmit() {
       
       let exchangeRate = parseFloat(document.getElementById('ad-rate')?.value || state.defaultExchangeRate);
       const isPaid = paymentStatus === 'paid';
-      const isReceived = document.getElementById('ad-received')?.checked || false;
-      const spentUSD = parseFloat(document.getElementById('ad-spent')?.value) || undefined;
-      const extraTime = parseInt(document.getElementById('ad-extra-time')?.value) || undefined;
+      // These three inputs do NOT exist in the ad modal template. Reading them
+      // always yielded false/undefined, which on EDIT erased spentUSD /
+      // extraTimeMinutes and reset the office-handover flag. Preserve the
+      // existing record's values instead (create leaves modalData null, so a
+      // new ad still gets the correct defaults).
+      const isReceived = state.modalData?.isReceivedInOffice || false;
+      const spentUSD = state.modalData?.spentUSD;
+      const extraTime = state.modalData?.extraTimeMinutes;
       const startDate = document.getElementById('ad-start-date')?.value;
       const endDate = document.getElementById('ad-end-date')?.value;
       const days = parseInt(document.getElementById('ad-days')?.value) || undefined;
@@ -2429,6 +2436,9 @@ function closeModal() {
   // Clear temp funding states
   state.tempAdFunding = null;
   state.tempMergeFunding = null;
+  // Discard any pending (unsaved) photos so a cancelled upload cannot leak
+  // into the next ad/receipt created in this session.
+  state.tempAdPhotos = [];
   // Discard any pending (unsaved) top-up edits so they cannot leak into the
   // next ad's top-up session.
   tempTopUps = [];

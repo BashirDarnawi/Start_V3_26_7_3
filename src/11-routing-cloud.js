@@ -169,6 +169,14 @@ function restoreModalFromUrl() {
     if (state.activeModal) {
       state.activeModal = null;
       state.modalData = null;
+      // Discard pending unsaved modal state so it cannot leak into the next
+      // record (same cleanup closeModal does — the browser-back path bypasses
+      // closeModal and previously left these dangling).
+      state.tempAdFunding = null;
+      state.tempMergeFunding = null;
+      state.tempAdPhotos = [];
+      state.tempReceiptPhotos = [];
+      tempTopUps = [];
       document.querySelectorAll('#app-modal').forEach(el => el.remove());
     }
   }

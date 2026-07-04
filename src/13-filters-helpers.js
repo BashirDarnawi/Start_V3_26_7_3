@@ -1498,23 +1498,24 @@ function toggleReceiptCollected(receiptId) {
   
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
-  
-  const wasCollected = receipt.collected;
-  receipt.collected = !wasCollected;
-  
-  if (receipt.collected) {
-    receipt.collectedAt = new Date().toISOString();
-    receipt.collectedBy = state.currentUser?.id || 'admin';
-  } else {
-    receipt.collectedAt = null;
-    receipt.collectedBy = null;
-  }
-  
+
+  const nowCollected = !receipt.collected;
+  // Persist through the canonical helper so the change is sanitized, bumps
+  // _lastModified, marks the collection dirty for IndexedDB, and (in server
+  // mode) write-throughs to the server with conflict handling. A bare
+  // saveState() previously left this in memory only, so the collected flag
+  // silently reverted on reload/sync — a real double-collection risk.
+  updateRecord(state.receipts, receiptId, {
+    collected: nowCollected,
+    collectedAt: nowCollected ? new Date().toISOString() : null,
+    collectedBy: nowCollected ? (state.currentUser?.id || 'admin') : null
+  });
+
   // Log the action
   state.logs.push({
     id: generateId(),
     type: 'receipt_collection',
-    action: receipt.collected ? 'collected' : 'uncollected',
+    action: nowCollected ? 'collected' : 'uncollected',
     receiptId: receiptId,
     userId: state.currentUser?.id,
     timestamp: new Date().toISOString(),
@@ -1524,12 +1525,12 @@ function toggleReceiptCollected(receiptId) {
       amountLocal: receipt.amountLocal
     }
   });
-  
+
   saveState();
   showNotification(
-    receipt.collected ? 'Receipt Collected' : 'Collection Removed',
-    receipt.collected ? `Receipt #${receipt.serialNumber || receiptId.slice(0,8)} marked as collected` : `Receipt #${receipt.serialNumber || receiptId.slice(0,8)} marked as not collected`,
-    receipt.collected ? 'success' : 'info'
+    nowCollected ? 'Receipt Collected' : 'Collection Removed',
+    nowCollected ? `Receipt #${receipt.serialNumber || receiptId.slice(0,8)} marked as collected` : `Receipt #${receipt.serialNumber || receiptId.slice(0,8)} marked as not collected`,
+    nowCollected ? 'success' : 'info'
   );
   render();
   lucide.createIcons();

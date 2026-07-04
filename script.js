@@ -983,6 +983,40 @@ function idbDelete(storeName, key) {
   });
 }
 
+/**
+ * Perform several puts and deletes in ONE IndexedDB transaction, atomically.
+ * Either every operation commits or none does — so an interrupted collection
+ * save (tab close / crash / quota) can never leave new chunks mixed with old
+ * ones under a stale meta record (which silently corrupts the collection).
+ * Enqueued on the same write queue to preserve serialization. Do NOT await
+ * anything between the put/delete calls — an intervening await would let the
+ * transaction auto-commit early and defeat atomicity.
+ *
+ * @param {Array<object>} puts - records to store (each has a `key`)
+ * @param {Array<string>} deleteKeys - keys to delete
+ * @returns {Promise<boolean>}
+ */
+function idbAtomicWrite(puts, deleteKeys) {
+  if (!db) return Promise.resolve(false);
+  return new Promise((resolve, reject) => {
+    const task = () => new Promise((innerResolve, innerReject) => {
+      try {
+        const tx = db.transaction([DATA_STORE_NAME], 'readwrite');
+        const store = tx.objectStore(DATA_STORE_NAME);
+        tx.oncomplete = () => innerResolve(true);
+        tx.onerror = () => innerReject(tx.error);
+        tx.onabort = () => innerReject(tx.error || new Error('IndexedDB transaction aborted'));
+        for (const v of (puts || [])) store.put(v);
+        for (const k of (deleteKeys || [])) store.delete(k);
+      } catch (e) {
+        innerReject(e);
+      }
+    });
+    idbTransactionQueue.push(() => task().then(resolve).catch(reject));
+    processIdbQueue();
+  });
+}
+
 function idbClear(storeName) {
   if (!db) return Promise.resolve(false);
   return new Promise((resolve, reject) => {
@@ -1037,16 +1071,15 @@ async function saveCollectionToIndexedDB(collectionName, data) {
         recordCount
       };
 
-      await idbPut(DATA_STORE_NAME, record);
-
-      // Clean up any old chunked layout
+      // Atomic: write the single record AND drop any old chunked layout in one
+      // transaction, so we can never end up with both present (which would make
+      // load prefer the stale chunked copy).
+      const deleteKeys = [];
       if (prevChunkCount > 0) {
-        for (let i = 0; i < prevChunkCount; i++) {
-          await idbDelete(DATA_STORE_NAME, getCollectionChunkKey(name, i));
-        }
-        await idbDelete(DATA_STORE_NAME, metaKey);
+        for (let i = 0; i < prevChunkCount; i++) deleteKeys.push(getCollectionChunkKey(name, i));
+        deleteKeys.push(metaKey);
       }
-
+      await idbAtomicWrite([record], deleteKeys);
       return true;
     }
 
@@ -1055,9 +1088,14 @@ async function saveCollectionToIndexedDB(collectionName, data) {
     const chunkCount = Math.ceil(recordCount / chunkSize);
     const updatedAt = Date.now();
 
+    // Build every chunk record + the meta record, then commit them together
+    // with the cleanup deletes in ONE atomic transaction. An interrupted save
+    // now rolls back entirely, leaving the previous consistent generation
+    // (chunks + meta) intact instead of a corrupt mix.
+    const puts = [];
     for (let i = 0; i < chunkCount; i++) {
       const chunk = data.slice(i * chunkSize, (i + 1) * chunkSize);
-      await idbPut(DATA_STORE_NAME, {
+      puts.push({
         key: getCollectionChunkKey(name, i),
         type: 'collection_chunk',
         collection: name,
@@ -1066,8 +1104,7 @@ async function saveCollectionToIndexedDB(collectionName, data) {
         data: chunk
       });
     }
-
-    await idbPut(DATA_STORE_NAME, {
+    puts.push({
       key: metaKey,
       type: 'collection_meta',
       collection: name,
@@ -1078,15 +1115,15 @@ async function saveCollectionToIndexedDB(collectionName, data) {
       updatedAt
     });
 
-    // Delete any leftover old chunks
+    const deleteKeys = [];
+    // Leftover old chunks beyond the new count
     if (prevChunkCount > chunkCount) {
-      for (let i = chunkCount; i < prevChunkCount; i++) {
-        await idbDelete(DATA_STORE_NAME, getCollectionChunkKey(name, i));
-      }
+      for (let i = chunkCount; i < prevChunkCount; i++) deleteKeys.push(getCollectionChunkKey(name, i));
     }
+    // Legacy single-record storage, if it exists
+    deleteKeys.push(name);
 
-    // Remove legacy single-record storage if it exists
-    await idbDelete(DATA_STORE_NAME, name).catch(() => {});
+    await idbAtomicWrite(puts, deleteKeys);
     return true;
   } catch (error) {
     console.error('Error saving collection to IndexedDB:', error);
@@ -3033,6 +3070,13 @@ async function flushDirtyCollections() {
   } finally {
     idbSync.flushing = false;
   }
+  // Collections marked dirty WHILE this flush was running hit the re-entrancy
+  // guard above and had their debounce swallowed — they would otherwise sit
+  // unpersisted until some unrelated later edit. Flush them now. Terminates
+  // because each pass clears the set.
+  if (idbSync.dirty.size > 0) {
+    await flushDirtyCollections();
+  }
 }
 
 function saveState() {
@@ -4118,7 +4162,7 @@ function addRecord(array, record) {
  *   - Uses optimistic locking (expectedLastModified timestamp)
  *   - Prevents lost updates in multi-user scenarios
  */
-function updateRecord(array, id, updates) {
+function updateRecord(array, id, updates, expectedLastModified) {
   const index = array.findIndex(item => item.id === id);
   if (index !== -1) {
     const old = { ...array[index] };
@@ -4160,7 +4204,12 @@ function updateRecord(array, id, updates) {
 
     // Server write-through (always-online multi-user mode)
     if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
-      const expected = old._lastModified || 0;
+      // Use the baseline the caller actually saw when supplied (e.g. the modal
+      // snapshot the user edited), so a change committed by someone else in
+      // between produces a 409 conflict instead of silently overwriting it.
+      const expected = (Number.isFinite(Number(expectedLastModified))
+        ? Number(expectedLastModified)
+        : (old._lastModified || 0));
       apiPatchEntity(collectionName, id, sanitizedUpdates, expected)
         .then((entity) => {
           if (entity?.data) {
@@ -5271,6 +5320,7 @@ async function apiLoadCollectionAll(collection) {
     const timeoutMs = getCollectionTimeout(collection);
     let pageCount = 0;
     const maxPages = 50; // Safety limit to prevent infinite loops
+    let partial = false;
 
     while (pageCount < maxPages) {
       pageCount++;
@@ -5295,17 +5345,22 @@ async function apiLoadCollectionAll(collection) {
         if (items.length < limit) break;
         offset += limit;
       } catch (pageError) {
-        // If we already have some data, return what we have instead of failing completely
-        if (all.length > 0) {
+        // Partial load: only accept it if it is not WORSE than what the app
+        // already has. Otherwise let the error propagate so the caller's
+        // keep-existing-data guard preserves the more complete local copy
+        // instead of wholesale-replacing it with a truncated list.
+        const existing = Array.isArray(state[collection]) ? state[collection].length : 0;
+        if (all.length > 0 && all.length >= existing) {
           console.warn(`[apiLoadCollectionAll] Partial load for ${collection}: got ${all.length} items before error`, pageError?.message);
+          partial = true;
           break;
         }
         throw pageError;
       }
     }
 
-    // Update cache
-    if (_collectionCache[collection]) {
+    // Update cache only for complete loads — never persist a truncated result.
+    if (!partial && _collectionCache[collection]) {
       _collectionCache[collection] = { data: all, timestamp: Date.now() };
     }
 
@@ -5563,7 +5618,10 @@ const _serverLiveSync = {
   inFlight: false,
   cursor: 0,
   lastUsersSyncAt: 0,
-  startedForUserId: null
+  startedForUserId: null,
+  // Signature of the last delivery-role payload, so identical polls don't
+  // force a full re-render every 3s (which snapped dropdowns shut on phones).
+  lastDeliverySig: null
 };
 
 function _maxLastModifiedFromArray(arr) {
@@ -5659,10 +5717,19 @@ async function serverLiveSyncOnce() {
       safeAll('customers')
     ]);
 
-    let changed = false;
-    if (Array.isArray(ads)) { state.ads = ads; changed = true; }
-    if (Array.isArray(receipts)) { state.receipts = receipts; changed = true; }
-    if (Array.isArray(customers)) { state.customers = customers; changed = true; }
+    // Only treat the tick as "changed" when the fetched payload actually
+    // differs from the previous one. Comparing against state would always
+    // differ (migrateOldDataFormats mutates state records in place), so
+    // compare the raw fetched arrays via a signature.
+    let sig = null;
+    try { sig = JSON.stringify([ads, receipts, customers]); } catch (_) {}
+    const changed = (sig === null) || sig !== _serverLiveSync.lastDeliverySig;
+    if (changed) {
+      if (Array.isArray(ads)) state.ads = ads;
+      if (Array.isArray(receipts)) state.receipts = receipts;
+      if (Array.isArray(customers)) state.customers = customers;
+      if (sig !== null) _serverLiveSync.lastDeliverySig = sig;
+    }
     
     // Ensure data migration on live sync (only if data changed, and debounced)
     if (changed) {
@@ -5684,11 +5751,15 @@ async function serverLiveSyncOnce() {
   // Admin/Employee: delta sync by lastModified cursor (efficient for large datasets).
   const since = _serverLiveSync.cursor || computeServerCursorFromState() || 0;
 
+  let anyFetchFailed = false;
   const safeSince = async (collection) => {
     try {
       return await apiLoadCollectionSince(collection, since);
     } catch (e) {
       if (e?.status === 403) return [];
+      // A genuine fetch failure: do NOT let the cursor advance past updates we
+      // never received, or those records would be skipped forever.
+      anyFetchFailed = true;
       return [];
     }
   };
@@ -5724,7 +5795,13 @@ async function serverLiveSyncOnce() {
     _maxLastModifiedFromArray(pagesDelta),
     _maxLastModifiedFromArray(exhDelta)
   );
-  _serverLiveSync.cursor = Math.max(since, maxDelta);
+  // Freeze the cursor for this tick if any collection failed to load, so the
+  // next tick re-requests the same window (idempotent — applyServerDelta
+  // upserts by id) instead of permanently skipping the missed collection.
+  _serverLiveSync.cursor = anyFetchFailed ? since : Math.max(since, maxDelta);
+  if (anyFetchFailed && typeof updateSyncIndicator === 'function') {
+    try { updateSyncIndicator('error'); } catch (_) {}
+  }
   state.serverLastSyncAt = new Date().toISOString();
 
   // Refresh minimal users list occasionally (for assignment dropdowns)
@@ -6400,6 +6477,14 @@ function restoreModalFromUrl() {
     if (state.activeModal) {
       state.activeModal = null;
       state.modalData = null;
+      // Discard pending unsaved modal state so it cannot leak into the next
+      // record (same cleanup closeModal does — the browser-back path bypasses
+      // closeModal and previously left these dangling).
+      state.tempAdFunding = null;
+      state.tempMergeFunding = null;
+      state.tempAdPhotos = [];
+      state.tempReceiptPhotos = [];
+      tempTopUps = [];
       document.querySelectorAll('#app-modal').forEach(el => el.remove());
     }
   }
@@ -13069,23 +13154,24 @@ function toggleReceiptCollected(receiptId) {
   
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
-  
-  const wasCollected = receipt.collected;
-  receipt.collected = !wasCollected;
-  
-  if (receipt.collected) {
-    receipt.collectedAt = new Date().toISOString();
-    receipt.collectedBy = state.currentUser?.id || 'admin';
-  } else {
-    receipt.collectedAt = null;
-    receipt.collectedBy = null;
-  }
-  
+
+  const nowCollected = !receipt.collected;
+  // Persist through the canonical helper so the change is sanitized, bumps
+  // _lastModified, marks the collection dirty for IndexedDB, and (in server
+  // mode) write-throughs to the server with conflict handling. A bare
+  // saveState() previously left this in memory only, so the collected flag
+  // silently reverted on reload/sync — a real double-collection risk.
+  updateRecord(state.receipts, receiptId, {
+    collected: nowCollected,
+    collectedAt: nowCollected ? new Date().toISOString() : null,
+    collectedBy: nowCollected ? (state.currentUser?.id || 'admin') : null
+  });
+
   // Log the action
   state.logs.push({
     id: generateId(),
     type: 'receipt_collection',
-    action: receipt.collected ? 'collected' : 'uncollected',
+    action: nowCollected ? 'collected' : 'uncollected',
     receiptId: receiptId,
     userId: state.currentUser?.id,
     timestamp: new Date().toISOString(),
@@ -13095,12 +13181,12 @@ function toggleReceiptCollected(receiptId) {
       amountLocal: receipt.amountLocal
     }
   });
-  
+
   saveState();
   showNotification(
-    receipt.collected ? 'Receipt Collected' : 'Collection Removed',
-    receipt.collected ? `Receipt #${receipt.serialNumber || receiptId.slice(0,8)} marked as collected` : `Receipt #${receipt.serialNumber || receiptId.slice(0,8)} marked as not collected`,
-    receipt.collected ? 'success' : 'info'
+    nowCollected ? 'Receipt Collected' : 'Collection Removed',
+    nowCollected ? `Receipt #${receipt.serialNumber || receiptId.slice(0,8)} marked as collected` : `Receipt #${receipt.serialNumber || receiptId.slice(0,8)} marked as not collected`,
+    nowCollected ? 'success' : 'info'
   );
   render();
   lucide.createIcons();
@@ -15109,7 +15195,10 @@ async function saveReceiptFromModal() {
     }
     
     receipt.updatedAt = new Date().toISOString();
-    updateRecord(state.receipts, receipt.id, receipt);
+    // Pass the baseline the user actually edited (the modal snapshot) so a
+    // concurrent change (e.g. a driver completing the delivery) triggers a
+    // 409 conflict + reload instead of being silently overwritten.
+    updateRecord(state.receipts, receipt.id, receipt, oldReceipt?._lastModified);
     showNotification('Updated', 'Receipt updated successfully!', 'success');
     addLog('update', 'receipt', receipt.id, `Updated receipt${serialNumber ? ' #' + serialNumber : ''}`);
   } else {
@@ -17960,7 +18049,9 @@ function renderModal() {
       const defaultRate1 = getDefaultRate1(PAYMENT_METHODS[0]);
       const existingPayments = receiptData.payments || [{ method: PAYMENT_METHODS[0], amount: 0, rate: defaultRate1, rate2: state.defaultExchangeRate, collectionType: 'office', deliveryPersonId: '' }];
       const receiptDeliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
-      state.tempReceiptPhotos = receiptData.photos || [];
+      // Copy (not alias) the live record's photos so add/remove in the modal
+      // does not mutate the saved receipt when the user cancels.
+      state.tempReceiptPhotos = (receiptData.photos || []).slice();
       
       if (receiptCustomers.length === 0) {
         modalContent = `
@@ -19072,9 +19163,14 @@ async function handleModalSubmit() {
       
       let exchangeRate = parseFloat(document.getElementById('ad-rate')?.value || state.defaultExchangeRate);
       const isPaid = paymentStatus === 'paid';
-      const isReceived = document.getElementById('ad-received')?.checked || false;
-      const spentUSD = parseFloat(document.getElementById('ad-spent')?.value) || undefined;
-      const extraTime = parseInt(document.getElementById('ad-extra-time')?.value) || undefined;
+      // These three inputs do NOT exist in the ad modal template. Reading them
+      // always yielded false/undefined, which on EDIT erased spentUSD /
+      // extraTimeMinutes and reset the office-handover flag. Preserve the
+      // existing record's values instead (create leaves modalData null, so a
+      // new ad still gets the correct defaults).
+      const isReceived = state.modalData?.isReceivedInOffice || false;
+      const spentUSD = state.modalData?.spentUSD;
+      const extraTime = state.modalData?.extraTimeMinutes;
       const startDate = document.getElementById('ad-start-date')?.value;
       const endDate = document.getElementById('ad-end-date')?.value;
       const days = parseInt(document.getElementById('ad-days')?.value) || undefined;
@@ -19745,6 +19841,9 @@ function closeModal() {
   // Clear temp funding states
   state.tempAdFunding = null;
   state.tempMergeFunding = null;
+  // Discard any pending (unsaved) photos so a cancelled upload cannot leak
+  // into the next ad/receipt created in this session.
+  state.tempAdPhotos = [];
   // Discard any pending (unsaved) top-up edits so they cannot leak into the
   // next ad's top-up session.
   tempTopUps = [];

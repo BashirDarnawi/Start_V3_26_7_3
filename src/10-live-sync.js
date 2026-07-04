@@ -7,7 +7,10 @@ const _serverLiveSync = {
   inFlight: false,
   cursor: 0,
   lastUsersSyncAt: 0,
-  startedForUserId: null
+  startedForUserId: null,
+  // Signature of the last delivery-role payload, so identical polls don't
+  // force a full re-render every 3s (which snapped dropdowns shut on phones).
+  lastDeliverySig: null
 };
 
 function _maxLastModifiedFromArray(arr) {
@@ -103,10 +106,19 @@ async function serverLiveSyncOnce() {
       safeAll('customers')
     ]);
 
-    let changed = false;
-    if (Array.isArray(ads)) { state.ads = ads; changed = true; }
-    if (Array.isArray(receipts)) { state.receipts = receipts; changed = true; }
-    if (Array.isArray(customers)) { state.customers = customers; changed = true; }
+    // Only treat the tick as "changed" when the fetched payload actually
+    // differs from the previous one. Comparing against state would always
+    // differ (migrateOldDataFormats mutates state records in place), so
+    // compare the raw fetched arrays via a signature.
+    let sig = null;
+    try { sig = JSON.stringify([ads, receipts, customers]); } catch (_) {}
+    const changed = (sig === null) || sig !== _serverLiveSync.lastDeliverySig;
+    if (changed) {
+      if (Array.isArray(ads)) state.ads = ads;
+      if (Array.isArray(receipts)) state.receipts = receipts;
+      if (Array.isArray(customers)) state.customers = customers;
+      if (sig !== null) _serverLiveSync.lastDeliverySig = sig;
+    }
     
     // Ensure data migration on live sync (only if data changed, and debounced)
     if (changed) {
@@ -128,11 +140,15 @@ async function serverLiveSyncOnce() {
   // Admin/Employee: delta sync by lastModified cursor (efficient for large datasets).
   const since = _serverLiveSync.cursor || computeServerCursorFromState() || 0;
 
+  let anyFetchFailed = false;
   const safeSince = async (collection) => {
     try {
       return await apiLoadCollectionSince(collection, since);
     } catch (e) {
       if (e?.status === 403) return [];
+      // A genuine fetch failure: do NOT let the cursor advance past updates we
+      // never received, or those records would be skipped forever.
+      anyFetchFailed = true;
       return [];
     }
   };
@@ -168,7 +184,13 @@ async function serverLiveSyncOnce() {
     _maxLastModifiedFromArray(pagesDelta),
     _maxLastModifiedFromArray(exhDelta)
   );
-  _serverLiveSync.cursor = Math.max(since, maxDelta);
+  // Freeze the cursor for this tick if any collection failed to load, so the
+  // next tick re-requests the same window (idempotent — applyServerDelta
+  // upserts by id) instead of permanently skipping the missed collection.
+  _serverLiveSync.cursor = anyFetchFailed ? since : Math.max(since, maxDelta);
+  if (anyFetchFailed && typeof updateSyncIndicator === 'function') {
+    try { updateSyncIndicator('error'); } catch (_) {}
+  }
   state.serverLastSyncAt = new Date().toISOString();
 
   // Refresh minimal users list occasionally (for assignment dropdowns)
