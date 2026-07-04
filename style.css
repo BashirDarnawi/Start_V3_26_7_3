@@ -1619,8 +1619,13 @@ body.is-mobile select {
   font-size: 16px !important;
 }
 
-/* Fix for Capacitor iOS safe areas */
-body.platform-ios {
+/* Fix for Capacitor safe areas.
+   iOS: notch/home-indicator. Android: targetSdk 35+ forces edge-to-edge on
+   Android 15+, so without this padding content sits under the status and
+   navigation bars (env() works in the Android WebView because index.html
+   sets viewport-fit=cover). */
+body.platform-ios,
+body.platform-android {
   padding-top: env(safe-area-inset-top, 0);
   padding-bottom: env(safe-area-inset-bottom, 0);
   padding-left: env(safe-area-inset-left, 0);

@@ -1,0 +1,7 @@
+# Copy this file to android/key.properties and fill in your real values.
+# NEVER commit key.properties or the .jks keystore file (both are gitignored).
+# See android/RELEASE_SIGNING.md for the step-by-step guide.
+storeFile=../albayan-release.jks
+storePassword=CHANGE_ME
+keyAlias=albayan
+keyPassword=CHANGE_ME

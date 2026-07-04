@@ -19,6 +19,11 @@ android/.gradle/
 android/build/
 android/app/build/
 android/local.properties
+
+# Android release signing — NEVER commit these
+android/key.properties
+android/*.jks
+android/*.keystore
 ios/App/build/
 ios/App/DerivedData/
 

@@ -20,6 +20,7 @@
     "@capacitor/ios": "^8.0.0"
   },
   "devDependencies": {
+    "sharp": "^0.35.3",
     "tailwindcss": "^3.4.17"
   }
 }
