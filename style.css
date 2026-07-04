@@ -602,9 +602,32 @@ input[type="number"] {
   direction: rtl;
 }
 
-[dir="rtl"] .space-x-reverse > * + * {
-  margin-right: 0.75rem;
-  margin-left: 0;
+/* Sidebar: in RTL the fixed sidebar must sit on the physical RIGHT (content is
+   offset with md:mr-72), otherwise it overlaps the content on desktop. The
+   prebuilt tailwind.css doesn't ship the positive translate/border-l utilities,
+   so pin it here. The hidden state (-translate-x-full) must slide OUT to the
+   right, i.e. +100%. */
+[dir="rtl"] aside.fixed {
+  left: auto;
+  right: 0;
+  border-right-width: 0;
+  border-left-width: 1px;
+}
+/* Only flip the hidden-slide direction on mobile (where the drawer opens/closes).
+   On desktop the sidebar is always shown via md:translate-x-0, so we must NOT
+   override that or the sidebar would slide off the right edge. */
+@media (max-width: 767px) {
+  [dir="rtl"] aside.fixed.-translate-x-full {
+    --tw-translate-x: 100%;
+  }
+}
+
+/* space-x-* gaps: the app never adds the `space-x-reverse` class, so flip the
+   gap to the correct side in RTL for every space-x size actually used. Setting
+   the Tailwind variable makes the compiled space utility put the margin on the
+   start (right) side. */
+[dir="rtl"] :is(.space-x-1, .space-x-2, .space-x-3, .space-x-4) > :not([hidden]) ~ :not([hidden]) {
+  --tw-space-x-reverse: 1;
 }
 
 /* Notification Animations */

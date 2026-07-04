@@ -3072,10 +3072,18 @@ function updateAdFundingReceipt(idx, receiptId) {
 function sanitizeMoneyInput(input, maxDecimals = 2) {
   if (!input) return;
   let val = String(input.value || '');
-  
+
+  // Normalize non-ASCII numerals/separators BEFORE filtering, so an Arabic
+  // keyboard entry is not corrupted: previously "12,5" (comma decimal) became
+  // "125" (a 10x error) and Arabic-Indic digits were deleted entirely.
+  val = val
+    .replace(/[٠-٩]/g, d => String.fromCharCode(d.charCodeAt(0) - 0x0660 + 48)) // Arabic-Indic
+    .replace(/[۰-۹]/g, d => String.fromCharCode(d.charCodeAt(0) - 0x06F0 + 48)) // Extended (Persian)
+    .replace(/[,٫]/g, '.'); // comma / Arabic decimal separator -> dot
+
   // Preserve cursor position
   const cursorPos = input.selectionStart || 0;
-  
+
   // Remove everything except digits and first decimal point
   let clean = '';
   let hasDecimal = false;

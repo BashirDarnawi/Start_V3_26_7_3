@@ -9849,7 +9849,9 @@ function exportDeliveryReport() {
     csv += `"${customer?.name || 'Unknown'}","${r.phoneNumber || customer?.phones?.[0] || ''}",${debt},${collected},${remaining},"${r.deliveryStatus || ''}","${driver?.name || ''}",${received ? 'Yes' : 'No'},"${formatDateShort(r.createdAt || r.date)}"\n`;
   });
   
-  const blob = new Blob([csv], { type: 'text/csv' });
+  // Prepend a UTF-8 BOM so Excel reads Arabic customer/driver names correctly
+  // instead of garbling them (mojibake).
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -11269,8 +11271,11 @@ function exportAuditLogs(format) {
       const user = state.users.find(u => u.id === log.userId);
       const date = new Date(log.date);
       return [
-        date.toLocaleDateString(),
-        date.toLocaleTimeString(),
+        // Pin an unambiguous, sortable Gregorian format. On ar-SA devices the
+        // locale-less calls rendered Hijri Arabic-Indic dates, inconsistent
+        // with the stored Gregorian timestamps.
+        date.toLocaleDateString('en-CA'),                       // YYYY-MM-DD
+        date.toLocaleTimeString('en-GB', { hour12: false }),    // HH:MM:SS
         log.userName || user?.name || 'System',
         log.action,
         log.category || 'general',
@@ -11281,7 +11286,9 @@ function exportAuditLogs(format) {
     });
     
     const csv = [headers.join(','), ...rows].join('\n');
-    downloadFile(csv, `audit-logs-${new Date().toISOString().split('T')[0]}.csv`, 'text/csv');
+    // UTF-8 BOM so Excel reads Arabic text correctly (downloadFile is shared
+    // with JSON export, so add the BOM here rather than inside it).
+    downloadFile('﻿' + csv, `audit-logs-${new Date().toISOString().split('T')[0]}.csv`, 'text/csv;charset=utf-8');
   } else {
     const json = JSON.stringify(allLogs, null, 2);
     downloadFile(json, `audit-logs-${new Date().toISOString().split('T')[0]}.json`, 'application/json');
@@ -16766,10 +16773,18 @@ function updateAdFundingReceipt(idx, receiptId) {
 function sanitizeMoneyInput(input, maxDecimals = 2) {
   if (!input) return;
   let val = String(input.value || '');
-  
+
+  // Normalize non-ASCII numerals/separators BEFORE filtering, so an Arabic
+  // keyboard entry is not corrupted: previously "12,5" (comma decimal) became
+  // "125" (a 10x error) and Arabic-Indic digits were deleted entirely.
+  val = val
+    .replace(/[٠-٩]/g, d => String.fromCharCode(d.charCodeAt(0) - 0x0660 + 48)) // Arabic-Indic
+    .replace(/[۰-۹]/g, d => String.fromCharCode(d.charCodeAt(0) - 0x06F0 + 48)) // Extended (Persian)
+    .replace(/[,٫]/g, '.'); // comma / Arabic decimal separator -> dot
+
   // Preserve cursor position
   const cursorPos = input.selectionStart || 0;
-  
+
   // Remove everything except digits and first decimal point
   let clean = '';
   let hasDecimal = false;
@@ -19895,12 +19910,25 @@ function deleteCustomer(id) {
   // Check for linked receipts/ads
   const linkedReceipts = state.receipts.filter(r => r.customerId === id && !r._deleted);
   const linkedAds = state.ads.filter(a => a.customerId === id && !a._deleted);
-  let warning = `Are you sure you want to delete customer "${customerName}"?`;
+  // Show the cascade-delete warning in the user's language. Previously it was
+  // English-only, so an Arabic-only user could unknowingly delete every linked
+  // receipt and ad.
+  const isAr = state.language === 'ar';
+  let warning = isAr
+    ? `هل أنت متأكد من حذف العميل "${customerName}"؟`
+    : `Are you sure you want to delete customer "${customerName}"?`;
   if (linkedReceipts.length > 0 || linkedAds.length > 0) {
-    warning += `\n\n⚠️ WARNING: This customer has ${linkedReceipts.length} receipt(s) and ${linkedAds.length} ad(s).`;
-    warning += `\n\nChoose an option:`;
-    warning += `\n• OK = Delete customer AND all their receipts/ads`;
-    warning += `\n• Cancel = Keep everything`;
+    if (isAr) {
+      warning += `\n\n⚠️ تحذير: لدى هذا العميل ${linkedReceipts.length} وصل و ${linkedAds.length} إعلان.`;
+      warning += `\n\nاختر:`;
+      warning += `\n• موافق = حذف العميل وجميع وصولاته وإعلاناته`;
+      warning += `\n• إلغاء = الإبقاء على كل شيء`;
+    } else {
+      warning += `\n\n⚠️ WARNING: This customer has ${linkedReceipts.length} receipt(s) and ${linkedAds.length} ad(s).`;
+      warning += `\n\nChoose an option:`;
+      warning += `\n• OK = Delete customer AND all their receipts/ads`;
+      warning += `\n• Cancel = Keep everything`;
+    }
   }
   if (confirm(warning)) {
     // Cascade delete: also delete linked receipts and ads

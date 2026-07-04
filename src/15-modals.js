@@ -2490,12 +2490,25 @@ function deleteCustomer(id) {
   // Check for linked receipts/ads
   const linkedReceipts = state.receipts.filter(r => r.customerId === id && !r._deleted);
   const linkedAds = state.ads.filter(a => a.customerId === id && !a._deleted);
-  let warning = `Are you sure you want to delete customer "${customerName}"?`;
+  // Show the cascade-delete warning in the user's language. Previously it was
+  // English-only, so an Arabic-only user could unknowingly delete every linked
+  // receipt and ad.
+  const isAr = state.language === 'ar';
+  let warning = isAr
+    ? `هل أنت متأكد من حذف العميل "${customerName}"؟`
+    : `Are you sure you want to delete customer "${customerName}"?`;
   if (linkedReceipts.length > 0 || linkedAds.length > 0) {
-    warning += `\n\n⚠️ WARNING: This customer has ${linkedReceipts.length} receipt(s) and ${linkedAds.length} ad(s).`;
-    warning += `\n\nChoose an option:`;
-    warning += `\n• OK = Delete customer AND all their receipts/ads`;
-    warning += `\n• Cancel = Keep everything`;
+    if (isAr) {
+      warning += `\n\n⚠️ تحذير: لدى هذا العميل ${linkedReceipts.length} وصل و ${linkedAds.length} إعلان.`;
+      warning += `\n\nاختر:`;
+      warning += `\n• موافق = حذف العميل وجميع وصولاته وإعلاناته`;
+      warning += `\n• إلغاء = الإبقاء على كل شيء`;
+    } else {
+      warning += `\n\n⚠️ WARNING: This customer has ${linkedReceipts.length} receipt(s) and ${linkedAds.length} ad(s).`;
+      warning += `\n\nChoose an option:`;
+      warning += `\n• OK = Delete customer AND all their receipts/ads`;
+      warning += `\n• Cancel = Keep everything`;
+    }
   }
   if (confirm(warning)) {
     // Cascade delete: also delete linked receipts and ads

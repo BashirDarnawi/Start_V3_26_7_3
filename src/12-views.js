@@ -3002,7 +3002,9 @@ function exportDeliveryReport() {
     csv += `"${customer?.name || 'Unknown'}","${r.phoneNumber || customer?.phones?.[0] || ''}",${debt},${collected},${remaining},"${r.deliveryStatus || ''}","${driver?.name || ''}",${received ? 'Yes' : 'No'},"${formatDateShort(r.createdAt || r.date)}"\n`;
   });
   
-  const blob = new Blob([csv], { type: 'text/csv' });
+  // Prepend a UTF-8 BOM so Excel reads Arabic customer/driver names correctly
+  // instead of garbling them (mojibake).
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -4422,8 +4424,11 @@ function exportAuditLogs(format) {
       const user = state.users.find(u => u.id === log.userId);
       const date = new Date(log.date);
       return [
-        date.toLocaleDateString(),
-        date.toLocaleTimeString(),
+        // Pin an unambiguous, sortable Gregorian format. On ar-SA devices the
+        // locale-less calls rendered Hijri Arabic-Indic dates, inconsistent
+        // with the stored Gregorian timestamps.
+        date.toLocaleDateString('en-CA'),                       // YYYY-MM-DD
+        date.toLocaleTimeString('en-GB', { hour12: false }),    // HH:MM:SS
         log.userName || user?.name || 'System',
         log.action,
         log.category || 'general',
@@ -4434,7 +4439,9 @@ function exportAuditLogs(format) {
     });
     
     const csv = [headers.join(','), ...rows].join('\n');
-    downloadFile(csv, `audit-logs-${new Date().toISOString().split('T')[0]}.csv`, 'text/csv');
+    // UTF-8 BOM so Excel reads Arabic text correctly (downloadFile is shared
+    // with JSON export, so add the BOM here rather than inside it).
+    downloadFile('﻿' + csv, `audit-logs-${new Date().toISOString().split('T')[0]}.csv`, 'text/csv;charset=utf-8');
   } else {
     const json = JSON.stringify(allLogs, null, 2);
     downloadFile(json, `audit-logs-${new Date().toISOString().split('T')[0]}.json`, 'application/json');
