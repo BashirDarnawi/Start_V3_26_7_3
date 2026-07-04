@@ -100,6 +100,22 @@ def _insert_receipt(rid: str, data: dict) -> None:
         )
 
 
+def _insert_ad(aid: str, data: dict) -> None:
+    now = now_ms()
+    data = dict(data)
+    data.setdefault("id", aid)
+    with db_conn() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO entities (type, id, data_json, deleted, created_at, created_by, last_modified)
+                VALUES ('ads', :id, :data_json, false, :created_at, 'system', :last_modified)
+                """
+            ),
+            {"id": aid, "data_json": json_dumps(data), "created_at": now, "last_modified": now},
+        )
+
+
 def _login(email: str) -> str:
     resp = client.post("/api/auth/login", json={"email": email, "password": PASSWORD})
     assert resp.status_code == 200, f"login failed for {email}: {resp.status_code} {resp.text[:200]}"
@@ -206,3 +222,51 @@ class TestDeliverySettlementLockdown:
         assert not str(data.get("receiptImage") or "").startswith("data:image/png;base64,AAAA"), (
             "driver must not be able to swap the proof photo outside a Delivered confirmation"
         )
+
+
+def _driver_id() -> str:
+    with db_conn() as conn:
+        row = (
+            conn.execute(
+                text("SELECT id FROM users WHERE lower(email)=lower(:e) LIMIT 1"),
+                {"e": DRIVER_EMAIL},
+            )
+            .mappings()
+            .first()
+        )
+    return str(row["id"])
+
+
+class TestAdDeliveryTerminalStateLockdown:
+    def test_driver_cannot_reopen_a_delivered_ad(self):
+        did = _driver_id()
+        _insert_ad("hf2_ad_delivered", {"deliveryPersonId": did, "deliveryStatus": "Delivered", "amountUSD": 50})
+        token = _login(DRIVER_EMAIL)
+        # Attempt to move the ad OUT of the terminal 'Delivered' state.
+        resp = client.patch(
+            "/api/collections/ads/hf2_ad_delivered",
+            json={"data": {"deliveryStatus": "In Progress"}},
+            cookies={"albayan_session": token},
+        )
+        assert resp.status_code == 400, resp.text[:200]
+        # State must be unchanged on the server.
+        with db_conn() as conn:
+            row = (
+                conn.execute(text("SELECT data_json FROM entities WHERE type='ads' AND id='hf2_ad_delivered'"))
+                .mappings()
+                .first()
+            )
+        import json as _json
+        assert _json.loads(row["data_json"]).get("deliveryStatus") == "Delivered"
+
+    def test_driver_can_still_progress_an_ad_forward(self):
+        did = _driver_id()
+        _insert_ad("hf2_ad_progress", {"deliveryPersonId": did, "deliveryStatus": "In Progress", "amountUSD": 50})
+        token = _login(DRIVER_EMAIL)
+        # The normal forward flow (In Progress -> Delivered) must still work.
+        resp = client.patch(
+            "/api/collections/ads/hf2_ad_progress",
+            json={"data": {"deliveryStatus": "Delivered"}},
+            cookies={"albayan_session": token},
+        )
+        assert resp.status_code == 200, resp.text[:200]

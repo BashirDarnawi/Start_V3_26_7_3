@@ -2624,6 +2624,21 @@ def update_collection_item(
 
             desired = str(updates.get("deliveryStatus") or "").strip()
             now = now_ms()
+
+            # SECURITY: ad deliveries are intentionally proof-less (the driver
+            # legitimately sets isPaid/status via the collection flow, so those
+            # fields stay writable — unlike receipts). But a terminal delivery
+            # state must be final: a delivery-role user must NOT be able to move
+            # an ad OUT of 'Delivered' or 'Canceled' (the receipts branch already
+            # enforces this). This blocks re-opening a completed/cancelled ad
+            # delivery without touching any legitimate forward flow.
+            current_status = str(data.get("deliveryStatus") or "").strip()
+            if desired and desired != current_status and current_status in {"Delivered", "Canceled"}:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot change delivery status from '{current_status}' - this is a terminal state",
+                )
+
             if desired == "Canceled":
                 reason = sanitize_str(str(updates.get("deliveryCancelReason") or ""))[:500]
                 if not reason:
