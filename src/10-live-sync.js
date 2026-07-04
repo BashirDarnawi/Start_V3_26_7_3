@@ -467,7 +467,7 @@ async function handleLogin(email, password) {
           }
         } catch (_) {}
         // #endregion
-        showNotification('Login Failed', 'Invalid email or password', 'error');
+        showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', state.language === 'ar' ? 'البريد الإلكتروني أو كلمة المرور غير صحيحة' : 'Invalid email or password', 'error');
         return;
       }
 
@@ -547,7 +547,7 @@ async function handleLogin(email, password) {
         );
         return;
       }
-      showNotification('Login Failed', e?.message || 'Login failed', 'error');
+      showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', e?.message || (state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login failed'), 'error');
       return;
     }
   }
@@ -571,7 +571,7 @@ async function handleLogin(email, password) {
   // Check rate limiting
   const rateCheck = Security.checkRateLimit(sanitizedEmail, 5, 15 * 60 * 1000);
   if (!rateCheck.allowed) {
-    showNotification('Too Many Attempts', `Please wait ${rateCheck.waitMinutes} minutes before trying again`, 'error');
+    showNotification(state.language === 'ar' ? 'محاولات كثيرة جداً' : 'Too Many Attempts', state.language === 'ar' ? `الرجاء الانتظار ${rateCheck.waitMinutes} دقيقة قبل المحاولة مرة أخرى` : `Please wait ${rateCheck.waitMinutes} minutes before trying again`, 'error');
     addSecurityLog('rate_limit_exceeded', sanitizedEmail);
     return;
   }
@@ -602,7 +602,7 @@ async function handleLogin(email, password) {
   );
   
   if (!user) {
-    showNotification('Login Failed', 'Invalid email or password', 'error');
+    showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', state.language === 'ar' ? 'البريد الإلكتروني أو كلمة المرور غير صحيحة' : 'Invalid email or password', 'error');
     addSecurityLog('failed_login_unknown_user', sanitizedEmail);
     return;
   }
@@ -726,7 +726,7 @@ async function handleLogin(email, password) {
       }
     } catch (_) {}
     // #endregion
-    showNotification('Login Failed', 'Invalid email or password', 'error');
+    showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', state.language === 'ar' ? 'البريد الإلكتروني أو كلمة المرور غير صحيحة' : 'Invalid email or password', 'error');
     addSecurityLog('failed_login_wrong_password', sanitizedEmail);
   }
 }

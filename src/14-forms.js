@@ -1263,7 +1263,7 @@ async function _saveReceiptFromModalInner() {
     // concurrent change (e.g. a driver completing the delivery) triggers a
     // 409 conflict + reload instead of being silently overwritten.
     updateRecord(state.receipts, receipt.id, receipt, oldReceipt?._lastModified);
-    showNotification('Updated', 'Receipt updated successfully!', 'success');
+    showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث الوصل بنجاح!' : 'Receipt updated successfully!', 'success');
     addLog('update', 'receipt', receipt.id, `Updated receipt${serialNumber ? ' #' + serialNumber : ''}`);
   } else {
     // Create new
@@ -1280,7 +1280,7 @@ async function _saveReceiptFromModalInner() {
         state.receipts.unshift(saved);
         markCollectionDirty('receipts');
         saveState();
-        showNotification('Success', 'Receipt created successfully!', 'success');
+        showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
         addLog('create', 'receipt', saved.id, `Created receipt${saved.tempReceiptNo ? ' #' + saved.tempReceiptNo : (serialNumber ? ' #' + serialNumber : '')} for ${customerName}`);
       } catch (e) {
         const status = e?.status ? `HTTP ${e.status}` : '';
@@ -1290,7 +1290,7 @@ async function _saveReceiptFromModalInner() {
       }
     } else {
     addRecord(state.receipts, receipt);
-    showNotification('Success', 'Receipt created successfully!', 'success');
+    showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
     addLog('create', 'receipt', receipt.id, `Created receipt${serialNumber ? ' #' + serialNumber : ''} for ${customerName}`);
     }
   }

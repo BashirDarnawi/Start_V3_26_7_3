@@ -3315,11 +3315,20 @@ function removeDeliveryMission(itemId) {
 
   const ds = String(receipt.deliveryStatus || '').trim();
   if (ds === 'Delivered') {
-    showNotification('Not Allowed', 'Delivered missions cannot be removed. Use Office Handover (Undo) or manage the receipt from the Receipts screen.', 'warning');
+    showNotification(
+      state.language === 'ar' ? 'غير مسموح' : 'Not Allowed',
+      state.language === 'ar'
+        ? 'لا يمكن إزالة مهمة تم توصيلها. استخدم تسليم المكتب (تراجع) أو أدرها من شاشة الوصولات.'
+        : 'Delivered missions cannot be removed. Use Office Handover (Undo) or manage the receipt from the Receipts screen.',
+      'warning'
+    );
     return;
   }
 
-  if (!confirm('Remove this delivery mission?\n\nThis will unassign the driver and remove it from Delivery Operations.\nThe receipt will remain in Receipts.')) return;
+  const removeMsg = state.language === 'ar'
+    ? 'إزالة مهمة التوصيل هذه؟\n\nسيتم إلغاء تعيين السائق وإزالتها من عمليات التوصيل.\nسيبقى الوصل في شاشة الوصولات.'
+    : 'Remove this delivery mission?\n\nThis will unassign the driver and remove it from Delivery Operations.\nThe receipt will remain in Receipts.';
+  if (!confirm(removeMsg)) return;
 
   const nowIso = new Date().toISOString();
   const uid = state.currentUser?.id || '';

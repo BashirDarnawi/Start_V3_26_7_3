@@ -6169,7 +6169,7 @@ async function handleLogin(email, password) {
           }
         } catch (_) {}
         // #endregion
-        showNotification('Login Failed', 'Invalid email or password', 'error');
+        showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', state.language === 'ar' ? 'البريد الإلكتروني أو كلمة المرور غير صحيحة' : 'Invalid email or password', 'error');
         return;
       }
 
@@ -6249,7 +6249,7 @@ async function handleLogin(email, password) {
         );
         return;
       }
-      showNotification('Login Failed', e?.message || 'Login failed', 'error');
+      showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', e?.message || (state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login failed'), 'error');
       return;
     }
   }
@@ -6273,7 +6273,7 @@ async function handleLogin(email, password) {
   // Check rate limiting
   const rateCheck = Security.checkRateLimit(sanitizedEmail, 5, 15 * 60 * 1000);
   if (!rateCheck.allowed) {
-    showNotification('Too Many Attempts', `Please wait ${rateCheck.waitMinutes} minutes before trying again`, 'error');
+    showNotification(state.language === 'ar' ? 'محاولات كثيرة جداً' : 'Too Many Attempts', state.language === 'ar' ? `الرجاء الانتظار ${rateCheck.waitMinutes} دقيقة قبل المحاولة مرة أخرى` : `Please wait ${rateCheck.waitMinutes} minutes before trying again`, 'error');
     addSecurityLog('rate_limit_exceeded', sanitizedEmail);
     return;
   }
@@ -6304,7 +6304,7 @@ async function handleLogin(email, password) {
   );
   
   if (!user) {
-    showNotification('Login Failed', 'Invalid email or password', 'error');
+    showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', state.language === 'ar' ? 'البريد الإلكتروني أو كلمة المرور غير صحيحة' : 'Invalid email or password', 'error');
     addSecurityLog('failed_login_unknown_user', sanitizedEmail);
     return;
   }
@@ -6428,7 +6428,7 @@ async function handleLogin(email, password) {
       }
     } catch (_) {}
     // #endregion
-    showNotification('Login Failed', 'Invalid email or password', 'error');
+    showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', state.language === 'ar' ? 'البريد الإلكتروني أو كلمة المرور غير صحيحة' : 'Invalid email or password', 'error');
     addSecurityLog('failed_login_wrong_password', sanitizedEmail);
   }
 }
@@ -10341,11 +10341,20 @@ function removeDeliveryMission(itemId) {
 
   const ds = String(receipt.deliveryStatus || '').trim();
   if (ds === 'Delivered') {
-    showNotification('Not Allowed', 'Delivered missions cannot be removed. Use Office Handover (Undo) or manage the receipt from the Receipts screen.', 'warning');
+    showNotification(
+      state.language === 'ar' ? 'غير مسموح' : 'Not Allowed',
+      state.language === 'ar'
+        ? 'لا يمكن إزالة مهمة تم توصيلها. استخدم تسليم المكتب (تراجع) أو أدرها من شاشة الوصولات.'
+        : 'Delivered missions cannot be removed. Use Office Handover (Undo) or manage the receipt from the Receipts screen.',
+      'warning'
+    );
     return;
   }
 
-  if (!confirm('Remove this delivery mission?\n\nThis will unassign the driver and remove it from Delivery Operations.\nThe receipt will remain in Receipts.')) return;
+  const removeMsg = state.language === 'ar'
+    ? 'إزالة مهمة التوصيل هذه؟\n\nسيتم إلغاء تعيين السائق وإزالتها من عمليات التوصيل.\nسيبقى الوصل في شاشة الوصولات.'
+    : 'Remove this delivery mission?\n\nThis will unassign the driver and remove it from Delivery Operations.\nThe receipt will remain in Receipts.';
+  if (!confirm(removeMsg)) return;
 
   const nowIso = new Date().toISOString();
   const uid = state.currentUser?.id || '';
@@ -13099,26 +13108,32 @@ async function submitReceiptDeliveryCompletion(receiptId) {
   const notes = String(document.getElementById('delivery-driver-notes')?.value || '').trim();
   const imgData = String(document.getElementById('delivery-receipt-image-data')?.dataset?.imageData || '').trim();
 
+  // Drivers are the most likely Arabic-only users — keep every message bilingual.
+  const isArDrv = state.language === 'ar';
+  const drvValidationTitle = isArDrv ? 'خطأ في الإدخال' : 'Validation';
+
   // Allow S-prefixed auto-serial numbers (S1, S2, etc.) for LTT/Libyana/Madar
   const isAutoSerialFinal = isAutoSerialNumber(finalNo);
   if (!finalNo || (!isAutoSerialFinal && (!/^\d+$/.test(finalNo) || finalNo.startsWith('0')))) {
-    showNotification('Validation', 'Final receipt number is required (digits only, no leading 0, or S-prefix for LTT/Libyana/Madar).', 'error');
+    showNotification(drvValidationTitle, isArDrv
+      ? 'رقم الوصل النهائي مطلوب (أرقام فقط، بدون صفر في البداية، أو بادئة S لـ LTT/ليبيانا/المدار).'
+      : 'Final receipt number is required (digits only, no leading 0, or S-prefix for LTT/Libyana/Madar).', 'error');
     return;
   }
   if (_receiptFinalNoExists(finalNo, receipt.id)) {
-    showNotification('Validation', 'Final receipt number already exists.', 'error');
+    showNotification(drvValidationTitle, isArDrv ? 'رقم الوصل النهائي موجود بالفعل.' : 'Final receipt number already exists.', 'error');
     return;
   }
   if (!imgData) {
-    showNotification('Validation', 'Receipt photo is required.', 'error');
+    showNotification(drvValidationTitle, isArDrv ? 'صورة الوصل مطلوبة.' : 'Receipt photo is required.', 'error');
     return;
   }
   if (!Number.isFinite(collected) || collected < 0) {
-    showNotification('Validation', 'Amount collected is required.', 'error');
+    showNotification(drvValidationTitle, isArDrv ? 'المبلغ المُحصَّل مطلوب.' : 'Amount collected is required.', 'error');
     return;
   }
   if (!Number.isFinite(actualFee) || actualFee < 0) {
-    showNotification('Validation', 'Actual delivery fee is required.', 'error');
+    showNotification(drvValidationTitle, isArDrv ? 'قيمة التوصيل الفعلية مطلوبة.' : 'Actual delivery fee is required.', 'error');
     return;
   }
 
@@ -13179,7 +13194,7 @@ async function submitReceiptDeliveryCompletion(receiptId) {
       const res = await apiPatchEntity('receipts', receipt.id, updates, expected);
       const saved = res?.data ? Security.sanitizeObject(res.data) : null;
       if (!saved || !saved.id) {
-        showNotification('Server Error', 'Failed to save delivery: invalid server response', 'error');
+        showNotification(state.language === 'ar' ? 'خطأ في الخادم' : 'Server Error', state.language === 'ar' ? 'فشل حفظ التوصيل: استجابة غير صالحة من الخادم' : 'Failed to save delivery: invalid server response', 'error');
         if (btn) btn.disabled = false;
         return;
       }
@@ -13188,7 +13203,7 @@ async function submitReceiptDeliveryCompletion(receiptId) {
       markCollectionDirty('receipts');
       saveState();
       document.getElementById('delivery-complete-modal')?.remove();
-      showNotification('Delivered', 'Delivery completed and saved', 'success');
+      showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم إكمال التوصيل وحفظه' : 'Delivery completed and saved', 'success');
       render();
     } catch (e) {
       // Idempotency / retries: if we hit a conflict, load latest and succeed if already delivered.
@@ -13202,7 +13217,7 @@ async function submitReceiptDeliveryCompletion(receiptId) {
             markCollectionDirty('receipts');
             saveState();
             document.getElementById('delivery-complete-modal')?.remove();
-            showNotification('Delivered', 'Delivery completed and saved', 'success');
+            showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم إكمال التوصيل وحفظه' : 'Delivery completed and saved', 'success');
             render();
             return;
           }
@@ -13221,7 +13236,7 @@ async function submitReceiptDeliveryCompletion(receiptId) {
     // Local mode: optimistic update
     updateRecord(state.receipts, receipt.id, updates);
     document.getElementById('delivery-complete-modal')?.remove();
-    showNotification('Delivered', 'Delivery completed and saved', 'success');
+    showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم إكمال التوصيل وحفظه' : 'Delivery completed and saved', 'success');
     render();
   }
 }
@@ -15241,7 +15256,7 @@ async function _saveReceiptFromModalInner() {
     // concurrent change (e.g. a driver completing the delivery) triggers a
     // 409 conflict + reload instead of being silently overwritten.
     updateRecord(state.receipts, receipt.id, receipt, oldReceipt?._lastModified);
-    showNotification('Updated', 'Receipt updated successfully!', 'success');
+    showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث الوصل بنجاح!' : 'Receipt updated successfully!', 'success');
     addLog('update', 'receipt', receipt.id, `Updated receipt${serialNumber ? ' #' + serialNumber : ''}`);
   } else {
     // Create new
@@ -15258,7 +15273,7 @@ async function _saveReceiptFromModalInner() {
         state.receipts.unshift(saved);
         markCollectionDirty('receipts');
         saveState();
-        showNotification('Success', 'Receipt created successfully!', 'success');
+        showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
         addLog('create', 'receipt', saved.id, `Created receipt${saved.tempReceiptNo ? ' #' + saved.tempReceiptNo : (serialNumber ? ' #' + serialNumber : '')} for ${customerName}`);
       } catch (e) {
         const status = e?.status ? `HTTP ${e.status}` : '';
@@ -15268,7 +15283,7 @@ async function _saveReceiptFromModalInner() {
       }
     } else {
     addRecord(state.receipts, receipt);
-    showNotification('Success', 'Receipt created successfully!', 'success');
+    showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
     addLog('create', 'receipt', receipt.id, `Created receipt${serialNumber ? ' #' + serialNumber : ''} for ${customerName}`);
     }
   }
@@ -19566,7 +19581,7 @@ async function handleModalSubmit() {
         }
         
         updateRecord(state.ads, state.modalData.id, adUpdates);
-        showNotification('Updated', 'Ad updated successfully', 'success');
+        showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث الإعلان بنجاح' : 'Ad updated successfully', 'success');
         addLog('update', 'ad', state.modalData.id, `Updated ad with ${allocations.length} receipt link(s)`);
       } else {
         const ad = {
@@ -19578,7 +19593,7 @@ async function handleModalSubmit() {
           ...adUpdates
         };
         addRecord(state.ads, ad);
-        showNotification('Success', 'Ad created successfully', 'success');
+        showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الإعلان بنجاح' : 'Ad created successfully', 'success');
         addLog('create', 'ad', ad.id, `Created ad with ${allocations.length} receipt link(s)`);
         
         // Log receipt usage for each allocation
@@ -19910,7 +19925,7 @@ async function handleModalSubmit() {
       
       if (isEdit) {
         updateRecord(state.receipts, state.modalData.id, receiptUpdates);
-        showNotification('Updated', 'Receipt updated successfully!', 'success');
+        showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث الوصل بنجاح!' : 'Receipt updated successfully!', 'success');
       } else {
         const receipt = {
           id: generateId('receipt'),
@@ -19923,7 +19938,7 @@ async function handleModalSubmit() {
           ...receiptUpdates
         };
         addRecord(state.receipts, receipt);
-        showNotification('Success', 'Receipt created successfully!', 'success');
+        showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
       }
       break;
   }
@@ -20055,9 +20070,14 @@ function deleteReceipt(id) {
      (Array.isArray(a.dueAllocations) && a.dueAllocations.some(alloc => alloc.receiptId === id)))
     && !a._deleted
   );
-  let warning = `Are you sure you want to delete receipt #${serialNo} ($${amountUSD})?`;
+  const isArDel = state.language === 'ar';
+  let warning = isArDel
+    ? `هل أنت متأكد من حذف الوصل رقم ${serialNo} ($${amountUSD})؟`
+    : `Are you sure you want to delete receipt #${serialNo} ($${amountUSD})?`;
   if (linkedAds.length > 0) {
-    warning += `\n\n⚠️ WARNING: ${linkedAds.length} ad(s) are funded by this receipt. Their allocation references will be cleaned up.`;
+    warning += isArDel
+      ? `\n\n⚠️ تحذير: ${linkedAds.length} إعلان(ات) ممولة من هذا الوصل. سيتم تنظيف ارتباطات التمويل الخاصة بها.`
+      : `\n\n⚠️ WARNING: ${linkedAds.length} ad(s) are funded by this receipt. Their allocation references will be cleaned up.`;
   }
   if (confirm(warning)) {
     // Clean up allocation references in linked ads
@@ -20105,7 +20125,13 @@ function deleteReceipt(id) {
       }
     });
     deleteRecord(state.receipts, id);
-    showNotification('Deleted', `Receipt deleted${linkedAds.length > 0 ? ` (${linkedAds.length} ad allocation(s) cleaned up)` : ''}`, 'success');
+    showNotification(
+      isArDel ? 'تم الحذف' : 'Deleted',
+      isArDel
+        ? `تم حذف الوصل${linkedAds.length > 0 ? ` (تم تنظيف ${linkedAds.length} ارتباط تمويل)` : ''}`
+        : `Receipt deleted${linkedAds.length > 0 ? ` (${linkedAds.length} ad allocation(s) cleaned up)` : ''}`,
+      'success'
+    );
     render();
   }
 }
@@ -20120,7 +20146,9 @@ function deleteAd(id) {
   const customer = state.customers.find(c => c.id === ad?.customerId);
   const customerName = customer?.name || 'Unknown';
   const amountUSD = ad?.amountUSD?.toFixed(2) || '0.00';
-  const warning = `Are you sure you want to delete this ad?\n\nCustomer: ${customerName}\nAmount: $${amountUSD}\n\n⚠️ This action cannot be undone!`;
+  const warning = state.language === 'ar'
+    ? `هل أنت متأكد من حذف هذا الإعلان؟\n\nالعميل: ${customerName}\nالمبلغ: $${amountUSD}\n\n⚠️ لا يمكن التراجع عن هذا الإجراء!`
+    : `Are you sure you want to delete this ad?\n\nCustomer: ${customerName}\nAmount: $${amountUSD}\n\n⚠️ This action cannot be undone!`;
   if (confirm(warning)) {
     deleteRecord(state.ads, id);
     showNotification('Deleted', 'Ad deleted', 'success');
@@ -20505,7 +20533,7 @@ function deleteUser(id) {
     showNotification('Access Denied', state.language === 'ar' ? 'حذف المستخدمين للأدمن فقط' : 'Admin only', 'error');
     return;
   }
-  if (confirm('Delete this user?')) {
+  if (confirm(state.language === 'ar' ? 'هل تريد حذف هذا المستخدم؟' : 'Delete this user?')) {
     deleteRecord(state.users, id);
     render();
   }
@@ -20518,7 +20546,7 @@ function updateExchangeRate(value) {
   const rate = parseFloat(value);
   if (!Number.isFinite(rate) || rate <= 0) {
     showNotification(
-      'Validation',
+      state.language === 'ar' ? 'خطأ في الإدخال' : 'Validation',
       state.language === 'ar' ? 'أدخل سعر صرف صحيح أكبر من صفر' : 'Enter a valid exchange rate greater than zero',
       'error'
     );
@@ -20970,7 +20998,7 @@ async function clearAllData() {
     showNotification('Not Allowed', 'Clear-all is disabled in server mode. Use backend admin tools.', 'error');
     return;
   }
-  if (confirm('Clear all data? This cannot be undone!')) {
+  if (confirm(state.language === 'ar' ? 'مسح جميع البيانات؟ لا يمكن التراجع عن هذا الإجراء!' : 'Clear all data? This cannot be undone!')) {
     // Clear in-memory collections
     state.ads = [];
     state.receipts = [];

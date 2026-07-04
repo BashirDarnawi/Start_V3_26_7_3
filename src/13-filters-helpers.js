@@ -1183,26 +1183,32 @@ async function submitReceiptDeliveryCompletion(receiptId) {
   const notes = String(document.getElementById('delivery-driver-notes')?.value || '').trim();
   const imgData = String(document.getElementById('delivery-receipt-image-data')?.dataset?.imageData || '').trim();
 
+  // Drivers are the most likely Arabic-only users — keep every message bilingual.
+  const isArDrv = state.language === 'ar';
+  const drvValidationTitle = isArDrv ? 'خطأ في الإدخال' : 'Validation';
+
   // Allow S-prefixed auto-serial numbers (S1, S2, etc.) for LTT/Libyana/Madar
   const isAutoSerialFinal = isAutoSerialNumber(finalNo);
   if (!finalNo || (!isAutoSerialFinal && (!/^\d+$/.test(finalNo) || finalNo.startsWith('0')))) {
-    showNotification('Validation', 'Final receipt number is required (digits only, no leading 0, or S-prefix for LTT/Libyana/Madar).', 'error');
+    showNotification(drvValidationTitle, isArDrv
+      ? 'رقم الوصل النهائي مطلوب (أرقام فقط، بدون صفر في البداية، أو بادئة S لـ LTT/ليبيانا/المدار).'
+      : 'Final receipt number is required (digits only, no leading 0, or S-prefix for LTT/Libyana/Madar).', 'error');
     return;
   }
   if (_receiptFinalNoExists(finalNo, receipt.id)) {
-    showNotification('Validation', 'Final receipt number already exists.', 'error');
+    showNotification(drvValidationTitle, isArDrv ? 'رقم الوصل النهائي موجود بالفعل.' : 'Final receipt number already exists.', 'error');
     return;
   }
   if (!imgData) {
-    showNotification('Validation', 'Receipt photo is required.', 'error');
+    showNotification(drvValidationTitle, isArDrv ? 'صورة الوصل مطلوبة.' : 'Receipt photo is required.', 'error');
     return;
   }
   if (!Number.isFinite(collected) || collected < 0) {
-    showNotification('Validation', 'Amount collected is required.', 'error');
+    showNotification(drvValidationTitle, isArDrv ? 'المبلغ المُحصَّل مطلوب.' : 'Amount collected is required.', 'error');
     return;
   }
   if (!Number.isFinite(actualFee) || actualFee < 0) {
-    showNotification('Validation', 'Actual delivery fee is required.', 'error');
+    showNotification(drvValidationTitle, isArDrv ? 'قيمة التوصيل الفعلية مطلوبة.' : 'Actual delivery fee is required.', 'error');
     return;
   }
 
@@ -1263,7 +1269,7 @@ async function submitReceiptDeliveryCompletion(receiptId) {
       const res = await apiPatchEntity('receipts', receipt.id, updates, expected);
       const saved = res?.data ? Security.sanitizeObject(res.data) : null;
       if (!saved || !saved.id) {
-        showNotification('Server Error', 'Failed to save delivery: invalid server response', 'error');
+        showNotification(state.language === 'ar' ? 'خطأ في الخادم' : 'Server Error', state.language === 'ar' ? 'فشل حفظ التوصيل: استجابة غير صالحة من الخادم' : 'Failed to save delivery: invalid server response', 'error');
         if (btn) btn.disabled = false;
         return;
       }
@@ -1272,7 +1278,7 @@ async function submitReceiptDeliveryCompletion(receiptId) {
       markCollectionDirty('receipts');
       saveState();
       document.getElementById('delivery-complete-modal')?.remove();
-      showNotification('Delivered', 'Delivery completed and saved', 'success');
+      showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم إكمال التوصيل وحفظه' : 'Delivery completed and saved', 'success');
       render();
     } catch (e) {
       // Idempotency / retries: if we hit a conflict, load latest and succeed if already delivered.
@@ -1286,7 +1292,7 @@ async function submitReceiptDeliveryCompletion(receiptId) {
             markCollectionDirty('receipts');
             saveState();
             document.getElementById('delivery-complete-modal')?.remove();
-            showNotification('Delivered', 'Delivery completed and saved', 'success');
+            showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم إكمال التوصيل وحفظه' : 'Delivery completed and saved', 'success');
             render();
             return;
           }
@@ -1305,7 +1311,7 @@ async function submitReceiptDeliveryCompletion(receiptId) {
     // Local mode: optimistic update
     updateRecord(state.receipts, receipt.id, updates);
     document.getElementById('delivery-complete-modal')?.remove();
-    showNotification('Delivered', 'Delivery completed and saved', 'success');
+    showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم إكمال التوصيل وحفظه' : 'Delivery completed and saved', 'success');
     render();
   }
 }

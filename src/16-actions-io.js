@@ -374,7 +374,7 @@ function deleteUser(id) {
     showNotification('Access Denied', state.language === 'ar' ? 'حذف المستخدمين للأدمن فقط' : 'Admin only', 'error');
     return;
   }
-  if (confirm('Delete this user?')) {
+  if (confirm(state.language === 'ar' ? 'هل تريد حذف هذا المستخدم؟' : 'Delete this user?')) {
     deleteRecord(state.users, id);
     render();
   }
@@ -387,7 +387,7 @@ function updateExchangeRate(value) {
   const rate = parseFloat(value);
   if (!Number.isFinite(rate) || rate <= 0) {
     showNotification(
-      'Validation',
+      state.language === 'ar' ? 'خطأ في الإدخال' : 'Validation',
       state.language === 'ar' ? 'أدخل سعر صرف صحيح أكبر من صفر' : 'Enter a valid exchange rate greater than zero',
       'error'
     );
@@ -839,7 +839,7 @@ async function clearAllData() {
     showNotification('Not Allowed', 'Clear-all is disabled in server mode. Use backend admin tools.', 'error');
     return;
   }
-  if (confirm('Clear all data? This cannot be undone!')) {
+  if (confirm(state.language === 'ar' ? 'مسح جميع البيانات؟ لا يمكن التراجع عن هذا الإجراء!' : 'Clear all data? This cannot be undone!')) {
     // Clear in-memory collections
     state.ads = [];
     state.receipts = [];

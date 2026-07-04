@@ -2155,7 +2155,7 @@ async function handleModalSubmit() {
         }
         
         updateRecord(state.ads, state.modalData.id, adUpdates);
-        showNotification('Updated', 'Ad updated successfully', 'success');
+        showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث الإعلان بنجاح' : 'Ad updated successfully', 'success');
         addLog('update', 'ad', state.modalData.id, `Updated ad with ${allocations.length} receipt link(s)`);
       } else {
         const ad = {
@@ -2167,7 +2167,7 @@ async function handleModalSubmit() {
           ...adUpdates
         };
         addRecord(state.ads, ad);
-        showNotification('Success', 'Ad created successfully', 'success');
+        showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الإعلان بنجاح' : 'Ad created successfully', 'success');
         addLog('create', 'ad', ad.id, `Created ad with ${allocations.length} receipt link(s)`);
         
         // Log receipt usage for each allocation
@@ -2499,7 +2499,7 @@ async function handleModalSubmit() {
       
       if (isEdit) {
         updateRecord(state.receipts, state.modalData.id, receiptUpdates);
-        showNotification('Updated', 'Receipt updated successfully!', 'success');
+        showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث الوصل بنجاح!' : 'Receipt updated successfully!', 'success');
       } else {
         const receipt = {
           id: generateId('receipt'),
@@ -2512,7 +2512,7 @@ async function handleModalSubmit() {
           ...receiptUpdates
         };
         addRecord(state.receipts, receipt);
-        showNotification('Success', 'Receipt created successfully!', 'success');
+        showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
       }
       break;
   }
@@ -2644,9 +2644,14 @@ function deleteReceipt(id) {
      (Array.isArray(a.dueAllocations) && a.dueAllocations.some(alloc => alloc.receiptId === id)))
     && !a._deleted
   );
-  let warning = `Are you sure you want to delete receipt #${serialNo} ($${amountUSD})?`;
+  const isArDel = state.language === 'ar';
+  let warning = isArDel
+    ? `هل أنت متأكد من حذف الوصل رقم ${serialNo} ($${amountUSD})؟`
+    : `Are you sure you want to delete receipt #${serialNo} ($${amountUSD})?`;
   if (linkedAds.length > 0) {
-    warning += `\n\n⚠️ WARNING: ${linkedAds.length} ad(s) are funded by this receipt. Their allocation references will be cleaned up.`;
+    warning += isArDel
+      ? `\n\n⚠️ تحذير: ${linkedAds.length} إعلان(ات) ممولة من هذا الوصل. سيتم تنظيف ارتباطات التمويل الخاصة بها.`
+      : `\n\n⚠️ WARNING: ${linkedAds.length} ad(s) are funded by this receipt. Their allocation references will be cleaned up.`;
   }
   if (confirm(warning)) {
     // Clean up allocation references in linked ads
@@ -2694,7 +2699,13 @@ function deleteReceipt(id) {
       }
     });
     deleteRecord(state.receipts, id);
-    showNotification('Deleted', `Receipt deleted${linkedAds.length > 0 ? ` (${linkedAds.length} ad allocation(s) cleaned up)` : ''}`, 'success');
+    showNotification(
+      isArDel ? 'تم الحذف' : 'Deleted',
+      isArDel
+        ? `تم حذف الوصل${linkedAds.length > 0 ? ` (تم تنظيف ${linkedAds.length} ارتباط تمويل)` : ''}`
+        : `Receipt deleted${linkedAds.length > 0 ? ` (${linkedAds.length} ad allocation(s) cleaned up)` : ''}`,
+      'success'
+    );
     render();
   }
 }
@@ -2709,7 +2720,9 @@ function deleteAd(id) {
   const customer = state.customers.find(c => c.id === ad?.customerId);
   const customerName = customer?.name || 'Unknown';
   const amountUSD = ad?.amountUSD?.toFixed(2) || '0.00';
-  const warning = `Are you sure you want to delete this ad?\n\nCustomer: ${customerName}\nAmount: $${amountUSD}\n\n⚠️ This action cannot be undone!`;
+  const warning = state.language === 'ar'
+    ? `هل أنت متأكد من حذف هذا الإعلان؟\n\nالعميل: ${customerName}\nالمبلغ: $${amountUSD}\n\n⚠️ لا يمكن التراجع عن هذا الإجراء!`
+    : `Are you sure you want to delete this ad?\n\nCustomer: ${customerName}\nAmount: $${amountUSD}\n\n⚠️ This action cannot be undone!`;
   if (confirm(warning)) {
     deleteRecord(state.ads, id);
     showNotification('Deleted', 'Ad deleted', 'success');
