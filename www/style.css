@@ -664,6 +664,17 @@ input[type="number"] {
   animation: slideOut 0.3s ease-in;
 }
 
+/* Re-shown duplicate toast: draw the eye instead of stacking a copy */
+@keyframes notificationPulse {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.06); }
+  100% { transform: scale(1); }
+}
+
+.notification-pulse {
+  animation: notificationPulse 0.35s ease-in-out;
+}
+
 /* Table Styles */
 table {
   border-collapse: collapse;

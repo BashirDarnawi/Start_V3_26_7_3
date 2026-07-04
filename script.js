@@ -4004,7 +4004,28 @@ function showNotification(title, message, type = 'info') {
   // #endregion
 
   const container = document.getElementById('notification-container');
+  if (!container) return;
+
+  // De-duplicate: if an IDENTICAL toast is already on screen, pulse it and
+  // reset its 5s timer instead of stacking a copy. Repeated clicks on a
+  // blocked save were piling up the same error toast many times over.
+  const notifKey = `${type}|${title}|${message}`.slice(0, 400);
+  const existing = Array.from(container.children).find(el => el.dataset && el.dataset.notifKey === notifKey);
+  if (existing) {
+    if (existing._hideTimer) clearTimeout(existing._hideTimer);
+    existing.classList.remove('notification-enter', 'notification-exit', 'notification-pulse');
+    void existing.offsetWidth; // restart the CSS animation
+    existing.classList.add('notification-pulse');
+    existing._hideTimer = setTimeout(() => {
+      existing.classList.remove('notification-pulse');
+      existing.classList.add('notification-exit');
+      setTimeout(() => existing.remove(), 300);
+    }, 5000);
+    return;
+  }
+
   const notification = document.createElement('div');
+  notification.dataset.notifKey = notifKey;
   notification.className = `notification-enter glass-panel px-4 py-3 rounded-xl shadow-lg flex items-start space-x-3 mb-2 ${
     type === 'success' ? 'border-l-4 border-green-500' :
     type === 'error' ? 'border-l-4 border-red-500' :
@@ -4036,8 +4057,8 @@ function showNotification(title, message, type = 'info') {
   
   container.appendChild(notification);
   IconQueue.schedule(notification);
-  
-  setTimeout(() => {
+
+  notification._hideTimer = setTimeout(() => {
     notification.classList.remove('notification-enter');
     notification.classList.add('notification-exit');
     setTimeout(() => notification.remove(), 300);
