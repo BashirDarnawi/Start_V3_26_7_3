@@ -383,6 +383,40 @@ class TestConcurrencyControl:
         assert response.status_code == 409  # Conflict
 
 
+class TestSoftDeleteIntegrity:
+    """A PATCH landing after a delete (easy with the 3s polling sync) must
+    not resurrect the soft-deleted record."""
+
+    def test_patch_does_not_resurrect_deleted_record(self, admin_session):
+        cookies = {"albayan_session": admin_session}
+        r = client.post(
+            "/api/collections/customers",
+            json={"id": "test_no_resurrect", "data": {"name": "Ghost"}},
+            cookies=cookies,
+        )
+        assert r.status_code == 200
+
+        r = client.delete("/api/collections/customers/test_no_resurrect", cookies=cookies)
+        assert r.status_code == 200
+
+        # Simulates client B patching 2s after client A deleted
+        r = client.patch(
+            "/api/collections/customers/test_no_resurrect",
+            json={"data": {"name": "Ghost Updated"}},
+            cookies=cookies,
+        )
+        assert r.status_code == 200
+        assert r.json()["deleted"] is True  # still deleted — no resurrection
+
+        # And it must not reappear in the normal (non-deleted) listing
+        r = client.get("/api/collections/customers", cookies=cookies)
+        assert r.status_code == 200
+        payload = r.json()
+        items = payload["items"] if isinstance(payload, dict) else payload
+        ids = [item["id"] for item in items]
+        assert "test_no_resurrect" not in ids
+
+
 class TestMobileAppOrigins:
     """The packaged Capacitor apps call the API cross-origin.
     Their allowlisted origins must pass CSRF and get a cross-site cookie;

@@ -1024,27 +1024,40 @@ def upsert_entity(entity_type: str, entity_id: str, data: dict[str, Any], user_i
         if existing:
             created_at = int(existing["created_at"])
             created_by = existing["created_by"]
+            # DATA-INTEGRITY FIX: preserve the soft-delete flag on updates.
+            # The UPDATE used to force deleted=false, so a PATCH arriving just
+            # after a delete (easy with the 3s polling sync) silently
+            # resurrected the record. Restores go through the dedicated admin
+            # restore endpoint, and POST create refuses existing ids, so
+            # nothing legitimate relied on this resurrection.
             deleted = bool(existing["deleted"])
             # Protected fields
             clean["id"] = entity_id
             clean["_created"] = clean.get("_created") or created_at
             clean["createdBy"] = clean.get("createdBy") or created_by
 
-            conn.execute(
-                text(
-                    """
-                    UPDATE entities
-                    SET data_json = :data_json, last_modified = :last_modified, deleted = false
-                    WHERE type = :type AND id = :id
-                    """
-                ),
-                {
-                    "data_json": json_dumps(clean),
-                    "last_modified": now,
-                    "type": entity_type,
-                    "id": entity_id,
-                },
-            )
+            try:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE entities
+                        SET data_json = :data_json, last_modified = :last_modified, deleted = :deleted
+                        WHERE type = :type AND id = :id
+                        """
+                    ),
+                    {
+                        "data_json": json_dumps(clean),
+                        "last_modified": now,
+                        "deleted": deleted,
+                        "type": entity_type,
+                        "id": entity_id,
+                    },
+                )
+            except IntegrityError:
+                # Postgres partial unique indexes on receipt numbers
+                # (uq_receipts_* in add_jsonb_indexes.py) caught a duplicate
+                # that raced past the application-level check.
+                raise HTTPException(status_code=409, detail="Receipt number already exists")
         else:
             if not create_if_missing:
                 raise HTTPException(status_code=404, detail="Not found")
@@ -1072,11 +1085,12 @@ def upsert_entity(entity_type: str, entity_id: str, data: dict[str, Any], user_i
                         "last_modified": now,
                     },
                 )
-            except IntegrityError:
-                # Two clients raced to create the same id: the earlier existence
-                # check saw nothing, but another request inserted first. Surface
-                # the same 409 the non-racing duplicate path produces instead of
-                # a raw 500 primary-key violation.
+            except IntegrityError as e:
+                # Two possible causes, both races past application checks:
+                # - duplicate receipt number (unique indexes uq_receipts_*)
+                # - duplicate primary key (two clients created the same id)
+                if "uq_receipts" in str(e).lower():
+                    raise HTTPException(status_code=409, detail="Receipt number already exists")
                 raise HTTPException(status_code=409, detail="Record with this ID already exists")
 
     return {

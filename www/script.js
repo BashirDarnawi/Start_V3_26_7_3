@@ -3020,9 +3020,15 @@ function saveState() {
     toSave.logs = logsForStorage; // Only store recent logs in localStorage
     // Never persist full user object in localStorage (sessionStorage is the source of truth)
     delete toSave.currentUser;
-    // Persist large collections in IndexedDB only
-    for (const key of PERSISTED_COLLECTIONS) {
-      delete toSave[key];
+    // Persist large collections in IndexedDB only. CRITICAL: if IndexedDB is
+    // unavailable (db === null — e.g. some private-browsing modes and older
+    // WebViews), keep the collections inside this localStorage snapshot.
+    // Deleting them here with no IndexedDB would leave business data in
+    // memory only, and it would vanish on the next reload.
+    if (db) {
+      for (const key of PERSISTED_COLLECTIONS) {
+        delete toSave[key];
+      }
     }
     // Mark metadata for migration/debugging
     toSave._storageVersion = 2;
@@ -3234,7 +3240,9 @@ async function loadCollectionsFromStorage(legacyCollections = null) {
     await saveCollectionToIndexedDB('receipts', state.receipts);
   }
 
-  // Persist cleaned localStorage snapshot (drops large arrays)
+  // Persist the refreshed localStorage snapshot. With IndexedDB available
+  // this drops the large arrays from localStorage; without IndexedDB,
+  // saveState() now keeps them there so existing data is never wiped.
   saveState();
 }
 
@@ -12305,19 +12313,71 @@ function _receiptFinalNoExists(serial, excludeId) {
   );
 }
 
+// ==========================================
+// IMAGE COMPRESSION (shared by all photo uploads)
+// ==========================================
+// A phone camera photo is often 3-6MB; stored as a base64 data URL inside a
+// record it inflates every save, sync payload and export by that amount.
+// Downscaling to max 1280px JPEG (~80% quality) keeps receipts perfectly
+// readable while shrinking payloads 10-20x. PNG stays PNG (transparency),
+// and on ANY failure we fall back to the original uncompressed data URL so
+// a photo is never lost.
+const IMAGE_MAX_DIMENSION = 1280;
+const IMAGE_JPEG_QUALITY = 0.8;
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => resolve(String(e.target?.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('File read failed'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function compressImageToDataUrl(file) {
+  const originalDataUrl = await readFileAsDataUrl(file);
+  try {
+    if (!/^image\//i.test(String(file.type || ''))) return originalDataUrl;
+    const img = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error('Image decode failed'));
+      image.src = originalDataUrl;
+    });
+    const w = img.naturalWidth || img.width;
+    const h = img.naturalHeight || img.height;
+    if (!w || !h) return originalDataUrl;
+    const scale = Math.min(1, IMAGE_MAX_DIMENSION / Math.max(w, h));
+    const isPng = /image\/png/i.test(file.type);
+    // Small already and not worth re-encoding? Keep the original.
+    if (scale === 1 && originalDataUrl.length < 300 * 1024) return originalDataUrl;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return originalDataUrl;
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const out = isPng
+      ? canvas.toDataURL('image/png')
+      : canvas.toDataURL('image/jpeg', IMAGE_JPEG_QUALITY);
+    // Only use the compressed version if it is actually smaller.
+    return (out && out.length < originalDataUrl.length) ? out : originalDataUrl;
+  } catch (_) {
+    return originalDataUrl;
+  }
+}
+
 function handleDeliveryReceiptPhotoUpload(fileList) {
   const file = fileList && fileList.length ? fileList[0] : null;
   if (!file) return;
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    const dataUrl = String(e.target?.result || '');
+  compressImageToDataUrl(file).then((dataUrl) => {
+    if (!dataUrl) return;
     const hidden = document.getElementById('delivery-receipt-image-data');
     if (hidden) hidden.dataset.imageData = dataUrl;
     const img = document.getElementById('delivery-receipt-image-preview');
     if (img) img.src = dataUrl;
     updateReceiptDeliveryCompletionComputed();
-  };
-  reader.readAsDataURL(file);
+  }).catch(() => {});
 }
 
 function updateReceiptDeliveryCompletionComputed() {
@@ -14921,12 +14981,10 @@ async function saveReceiptFromModal() {
 // Image upload handler
 function handleReceiptImageUpload(input) {
   if (input.files && input.files[0]) {
-    const reader = new FileReader();
-    reader.onload = function(e) {
-      // Store base64 image temporarily
-      input.dataset.imageData = e.target.result;
-    };
-    reader.readAsDataURL(input.files[0]);
+    compressImageToDataUrl(input.files[0]).then((dataUrl) => {
+      // Store base64 image temporarily (compressed)
+      if (dataUrl) input.dataset.imageData = dataUrl;
+    }).catch(() => {});
   }
 }
 
@@ -16259,12 +16317,11 @@ function uploadAdPhotos(fileList) {
   if (!fileList || !fileList.length) return;
   state.tempAdPhotos = state.tempAdPhotos || [];
   Array.from(fileList).forEach(file => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      state.tempAdPhotos.push(e.target.result);
+    compressImageToDataUrl(file).then((dataUrl) => {
+      if (!dataUrl) return;
+      state.tempAdPhotos.push(dataUrl);
       renderAdPhotoPreviews();
-    };
-    reader.readAsDataURL(file);
+    }).catch(() => {});
   });
 }
 
@@ -16326,12 +16383,11 @@ function uploadReceiptPhotos(fileList) {
   if (!fileList || !fileList.length) return;
   state.tempReceiptPhotos = state.tempReceiptPhotos || [];
   Array.from(fileList).forEach(file => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      state.tempReceiptPhotos.push(e.target.result);
+    compressImageToDataUrl(file).then((dataUrl) => {
+      if (!dataUrl) return;
+      state.tempReceiptPhotos.push(dataUrl);
       renderReceiptPhotoPreviews();
-    };
-    reader.readAsDataURL(file);
+    }).catch(() => {});
   });
 }
 
@@ -20746,14 +20802,25 @@ async function init() {
         if (url.protocol !== 'https:') {
           throw new Error('Only HTTPS endpoints are allowed');
         }
-        
-        state.cloudConfig = { 
-          enabled: true, 
-          endpoint: Security.sanitizeInput(config.endpoint, { maxLength: 500 }), 
-          apiKey: config.apiKey 
+
+        // SECURITY: a crafted link could otherwise silently redirect all of
+        // this device's data to an attacker-controlled endpoint. Require an
+        // explicit, informed confirmation from the user before enabling.
+        const confirmMsg = state.language === 'ar'
+          ? 'رابط يطلب مزامنة بيانات هذا الجهاز مع خادم خارجي:\n\n' + url.host + '\n\nلا توافق إلا إذا كنت تثق بمصدر هذا الرابط. هل تريد المتابعة؟'
+          : 'This link asks to sync ALL data on this device with an external server:\n\n' + url.host + '\n\nOnly continue if you trust where this link came from. Enable sync?';
+        if (!window.confirm(confirmMsg)) {
+          addSecurityLog('cloud_connect_rejected', 'User declined sys_connect to ' + url.host);
+          throw new Error('User declined the connection request');
+        }
+
+        state.cloudConfig = {
+          enabled: true,
+          endpoint: Security.sanitizeInput(config.endpoint, { maxLength: 500 }),
+          apiKey: config.apiKey
         };
         showNotification('System Connected', 'Synchronizing data...', 'success');
-        
+
         // Remove param from URL
         const newUrl = window.location.protocol + "//" + window.location.host + window.location.pathname;
         window.history.pushState({path:newUrl},'',newUrl);
