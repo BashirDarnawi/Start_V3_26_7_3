@@ -367,6 +367,11 @@ BLOCKED_KEYS = {"__proto__", "prototype", "constructor"}
 
 # BEST PRACTICE: Maximum input length limits to prevent DoS
 MAX_INPUT_LENGTH = 10000  # Maximum length for text inputs
+# Data-URL image fields (receiptImage, photos[]) are base64 and legitimately
+# far larger than a text field. Cap them well above a real photo but under the
+# 10MB request-size middleware, so they are never silently truncated (which
+# would corrupt the image) while still bounding memory.
+MAX_DATA_URL_LENGTH = 8 * 1024 * 1024
 MAX_JSON_DEPTH = 20  # Maximum nesting depth for JSON
 
 # Financial validation constants
@@ -452,6 +457,10 @@ def sanitize_json(obj: Any, depth: int = 0, parent_key: str = "") -> Any:
     if obj is None:
         return None
     if isinstance(obj, str):
+        # Base64 image data URLs must not be truncated to 10k (that corrupts
+        # the image). They contain no HTML anyway. Give them a large cap.
+        if obj.startswith("data:image/"):
+            return sanitize_str(obj, MAX_DATA_URL_LENGTH)
         return sanitize_str(obj)
     if isinstance(obj, (int, float)):
         # Validate financial amounts and exchange rates
@@ -869,7 +878,10 @@ def list_entities(
         where.append("deleted = false")
     if updated_since is not None:
         where.append("last_modified > :updated_since")
-        params["updated_since"] = int(updated_since)
+        # Delta-sync grace window: a write can commit slightly after a poll read
+        # its cursor, so re-scan the last 15s each poll. applyServerDelta upserts
+        # by id, so re-delivered records are idempotent — no missed writes.
+        params["updated_since"] = max(0, int(updated_since) - 15000)
     if created_by is not None:
         where.append("created_by = :created_by")
         params["created_by"] = created_by
@@ -892,7 +904,12 @@ def list_entities(
             params[k] = cid
         where.append(f"id IN ({', '.join(ph)})")
 
-    sql = f"SELECT * FROM entities WHERE {' AND '.join(where)} ORDER BY last_modified DESC LIMIT :limit OFFSET :offset"
+    # ORDER BY: for full (non-delta) listing, order by an IMMUTABLE key so that
+    # an edit committed mid-load cannot move a row across the OFFSET window and
+    # cause a record to be skipped or duplicated. Delta queries keep
+    # last_modified ordering (they re-scan by cursor and upsert idempotently).
+    order_by = "last_modified DESC" if updated_since is not None else "created_at DESC, id DESC"
+    sql = f"SELECT * FROM entities WHERE {' AND '.join(where)} ORDER BY {order_by} LIMIT :limit OFFSET :offset"
     params["limit"] = limit
     params["offset"] = offset
 
@@ -2189,11 +2206,24 @@ def bootstrap(user: dict[str, Any] = Depends(current_user)):
     def can(module: str, action: str) -> bool:
         return user_has_permission(user, module, action)
 
-    ads = list_entities("ads", include_deleted=can("ads", "delete"))
-    receipts = list_entities("receipts", include_deleted=can("receipts", "delete"))
-    customers = list_entities("customers", include_deleted=can("customers", "delete"))
-    pages = list_entities("pages", include_deleted=can("pages", "delete"))
-    exh = list_entities("exchangeRateHistory", include_deleted=True)
+    def _fetch_all(collection: str, include_deleted: bool) -> list[dict[str, Any]]:
+        # list_entities caps a single call at 1000 rows; page through so
+        # bootstrap keeps its "returns all records" contract instead of
+        # silently truncating to the newest 500.
+        out: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            page = list_entities(collection, include_deleted=include_deleted, limit=1000, offset=offset)
+            out.extend(page)
+            if len(page) < 1000:
+                return out
+            offset += 1000
+
+    ads = _fetch_all("ads", include_deleted=can("ads", "delete"))
+    receipts = _fetch_all("receipts", include_deleted=can("receipts", "delete"))
+    customers = _fetch_all("customers", include_deleted=can("customers", "delete"))
+    pages = _fetch_all("pages", include_deleted=can("pages", "delete"))
+    exh = _fetch_all("exchangeRateHistory", include_deleted=True)
     logs = []  # audit logs are available via /api/audit
 
     return BootstrapResponse(
@@ -2551,6 +2581,24 @@ def update_collection_item(
             now = now_ms()
             current_status = str(data.get("deliveryStatus") or "").strip()
 
+            # SECURITY: payment/settlement and server-computed fields may ONLY
+            # be written by the server's Delivered-confirmation computation
+            # below. Otherwise a driver could PATCH e.g. status=Paid,
+            # amountUSD=999999 on a non-Delivered update and bypass every
+            # verification (finding: delivery-role settlement bypass). Strip
+            # them from any update that is not a Delivered transition.
+            SETTLEMENT_FIELDS = {
+                "status", "isPaid", "collectionDate",
+                "paymentResult", "overpaidAmount", "remainingDue",
+                "feeDifferenceStatus", "feeDiff",
+                "debtAmountLocal", "debtAmountUSD",
+                "amountLocal", "amountUSD", "deliveredAt",
+                "finalReceiptNo", "serialNumber",
+            }
+            if desired != "Delivered":
+                for _f in SETTLEMENT_FIELDS:
+                    updates.pop(_f, None)
+
             # Validate delivery status transitions
             VALID_TRANSITIONS = {
                 "": {"Needs Delivery", "In Progress", "Office"},  # Initial state
@@ -2655,12 +2703,24 @@ def update_collection_item(
                 updates["deliveredAt"] = updates.get("deliveredAt") or now
 
                 # Revenue: delivery fee is NOT business revenue. Only amountCollectedFromCustomer counts.
-                ex_rate = _as_float(data.get("exchangeRate")) or 1.0
-                if ex_rate <= 0:
-                    ex_rate = 1.0
                 updates["amountLocal"] = float(amt_collected)
-                # BUG FIX: Prevent division by zero (defense in depth, ex_rate already validated above)
-                updates["amountUSD"] = float(amt_collected) / float(ex_rate) if ex_rate > 0 else float(amt_collected)
+                # Convert collected LYD to USD. The receipt's exchangeRate can be
+                # missing or the clamped-invalid sentinel (0.001) when Rate 2 was
+                # left blank at creation; dividing by that fabricates enormous USD
+                # ad credit (500 LYD -> $500,000). So only trust a real rate; else
+                # derive it from the receipt's own debt baseline, and if there is
+                # no baseline either, fall back to the USD debt directly rather
+                # than storing raw LYD as USD.
+                ex_rate = _as_float(data.get("exchangeRate"))
+                trusted_rate = ex_rate if (ex_rate is not None and ex_rate > MIN_EXCHANGE_RATE) else None
+                if trusted_rate is None and debt_local and debt_usd and debt_local > 0 and debt_usd > 0:
+                    trusted_rate = float(debt_local) / float(debt_usd)
+                if trusted_rate and trusted_rate > 0:
+                    updates["amountUSD"] = float(amt_collected) / float(trusted_rate)
+                else:
+                    # No usable rate at all: use the USD debt baseline (0 if none),
+                    # never raw LYD misrepresented as USD.
+                    updates["amountUSD"] = float(debt_usd or 0.0)
 
                 # Payment status based on remaining due
                 if remaining_due <= 1e-9:
@@ -3122,37 +3182,41 @@ def create_user(body: CreateUserRequest, request: Request, admin: dict[str, Any]
     permissions_json = json_dumps(body.permissions or {})
     user_id = new_id("user")
 
-    with db_conn() as conn:
-        conn.execute(
-            text(
-                """
-                INSERT INTO users (
-                  id, name, email, role, permissions_json,
-                  password_hash, password_salt, password_algo, password_iterations,
-                  deleted, created_at, created_by, last_modified
-                )
-                VALUES (
-                  :id, :name, :email, :role, :permissions_json,
-                  :password_hash, :password_salt, :password_algo, :password_iterations,
-                  false, :created_at, :created_by, :last_modified
-                )
-                """
-            ),
-            {
-                "id": user_id,
-                "name": sanitize_str(body.name),
-                "email": str(body.email).lower(),
-                "role": sanitize_str(body.role),
-                "permissions_json": permissions_json,
-                "password_hash": pw.hash_hex,
-                "password_salt": pw.salt_hex,
-                "password_algo": pw.algo,
-                "password_iterations": pw.iterations,
-                "created_at": now,
-                "created_by": str(admin.get("id")),
-                "last_modified": now,
-            },
-        )
+    try:
+        with db_conn() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO users (
+                      id, name, email, role, permissions_json,
+                      password_hash, password_salt, password_algo, password_iterations,
+                      deleted, created_at, created_by, last_modified
+                    )
+                    VALUES (
+                      :id, :name, :email, :role, :permissions_json,
+                      :password_hash, :password_salt, :password_algo, :password_iterations,
+                      false, :created_at, :created_by, :last_modified
+                    )
+                    """
+                ),
+                {
+                    "id": user_id,
+                    "name": sanitize_str(body.name),
+                    "email": str(body.email).lower(),
+                    "role": sanitize_str(body.role),
+                    "permissions_json": permissions_json,
+                    "password_hash": pw.hash_hex,
+                    "password_salt": pw.salt_hex,
+                    "password_algo": pw.algo,
+                    "password_iterations": pw.iterations,
+                    "created_at": now,
+                    "created_by": str(admin.get("id")),
+                    "last_modified": now,
+                },
+            )
+    except IntegrityError:
+        # Duplicate email (unique constraint) — return a clear 409, not a 500.
+        raise HTTPException(status_code=409, detail="A user with this email already exists")
 
     audit(str(admin.get("id")), "create", "users", user_id, f"Created user {body.email}", {})
     created = _get_user_by_id(user_id)
@@ -3207,11 +3271,15 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
     if invalid_fields:
         raise HTTPException(status_code=400, detail=f"Invalid field(s): {', '.join(invalid_fields)}")
 
-    with db_conn() as conn:
-        # SECURITY: Only use whitelisted fields in SQL construction
-        set_clause = ", ".join([f"{k} = :{k}" for k in update_fields.keys() if k in ALLOWED_USER_UPDATE_FIELDS])
-        params = {**update_fields, "id": user_id}
-        conn.execute(text(f"UPDATE users SET {set_clause} WHERE id = :id"), params)
+    try:
+        with db_conn() as conn:
+            # SECURITY: Only use whitelisted fields in SQL construction
+            set_clause = ", ".join([f"{k} = :{k}" for k in update_fields.keys() if k in ALLOWED_USER_UPDATE_FIELDS])
+            params = {**update_fields, "id": user_id}
+            conn.execute(text(f"UPDATE users SET {set_clause} WHERE id = :id"), params)
+    except IntegrityError:
+        # Changing email to one already used by another user.
+        raise HTTPException(status_code=409, detail="A user with this email already exists")
 
     audit(str(admin.get("id")), "update", "users", user_id, f"Updated user {user_id}", {})
     # Use include-deleted fetch so "delete user" can return a response instead of 404

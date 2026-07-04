@@ -353,6 +353,91 @@ class TestSecurityValidation:
         assert response.status_code == 200
 
 
+class TestDeliverySettlementLockdown:
+    """A delivery driver must NOT be able to set payment/settlement fields
+    outside the server-verified Delivered confirmation flow."""
+
+    def _make_driver(self, admin_session):
+        cookies = {"albayan_session": admin_session}
+        email = "driver-lockdown@tests.albayanhub.com"
+        client.post("/api/users", json={
+            "name": "Driver Lock", "email": email, "role": "Delivery",
+            "password": "DriverPass123!", "permissions": {"deliveries": ["view", "update"]},
+        }, cookies=cookies)
+        # find the driver id
+        users = client.get("/api/users", cookies=cookies).json()
+        driver = next(u for u in users if u["email"] == email)
+        # log in as the driver
+        r = client.post("/api/auth/login", json={"email": email, "password": "DriverPass123!"})
+        assert r.status_code == 200, r.text
+        token = r.cookies.get("albayan_session")
+        try:
+            client.cookies.clear()
+        except Exception:
+            pass
+        return driver["id"], token
+
+    def test_driver_cannot_set_paid_outside_delivered(self, admin_session):
+        driver_id, driver_token = self._make_driver(admin_session)
+        # Admin creates a receipt assigned to the driver, In Progress, Not Paid
+        client.post("/api/collections/receipts", json={
+            "id": "test_lockdown_1",
+            "data": {
+                "deliveryPersonId": driver_id,
+                "deliveryStatus": "In Progress",
+                "status": "Not Paid", "isPaid": False,
+                "amountUSD": 20.0, "amountLocal": 100.0,
+            },
+        }, cookies={"albayan_session": admin_session})
+
+        # Driver tries to mark it Paid with a huge amount WITHOUT delivering
+        resp = client.patch("/api/collections/receipts/test_lockdown_1", json={
+            "data": {"driverNotes": "hi", "status": "Paid", "isPaid": True, "amountUSD": 999999},
+        }, cookies={"albayan_session": driver_token})
+        assert resp.status_code == 200
+
+        # Verify via admin read that settlement fields were NOT changed
+        got = client.get("/api/collections/receipts/test_lockdown_1",
+                         cookies={"albayan_session": admin_session}).json()["data"]
+        assert got["status"] == "Not Paid"
+        assert got["isPaid"] is False
+        assert got["amountUSD"] == 20.0
+        assert got.get("driverNotes") == "hi"  # the legitimate field did apply
+
+
+class TestImageNotTruncated:
+    """Base64 image data URLs must survive sanitize (not truncated to 10k)."""
+
+    def test_large_receipt_image_preserved(self, admin_session):
+        big_image = "data:image/jpeg;base64," + ("A" * 200000)
+        response = client.post(
+            "/api/collections/receipts",
+            json={"id": "test_big_image", "data": {"receiptImage": big_image, "amountLocal": 10}},
+            cookies={"albayan_session": admin_session},
+        )
+        assert response.status_code == 200
+        stored = response.json()["data"]["receiptImage"]
+        assert len(stored) == len(big_image)  # not truncated
+
+
+class TestDuplicateUserEmail:
+    """Creating a user with an existing email returns 409, not 500."""
+
+    def test_duplicate_email_returns_409(self, admin_session):
+        cookies = {"albayan_session": admin_session}
+        body = {
+            "name": "Dup One",
+            "email": "dup-user@tests.albayanhub.com",
+            "role": "Staff",
+            "password": "SomePassword123!",
+            "permissions": {},
+        }
+        r1 = client.post("/api/users", json=body, cookies=cookies)
+        assert r1.status_code == 200
+        r2 = client.post("/api/users", json=body, cookies=cookies)
+        assert r2.status_code == 409
+
+
 class TestConcurrencyControl:
     """Test optimistic locking and race condition prevention"""
     
