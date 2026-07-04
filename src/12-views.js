@@ -2239,7 +2239,7 @@ function renderReceiptsView() {
                     </button>
                     <button onclick="manageSplitPayments('${receipt.id}')" class="text-purple-600 hover:text-purple-700" title="${state.language === 'ar' ? 'تعديل الدفعات المقسّمة' : 'Manage split payments'}"><i data-lucide="credit-card" class="w-4 h-4"></i></button>
                     <button onclick="editReceipt('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="Edit"><i data-lucide="edit" class="w-4 h-4"></i></button>
-                    <button onclick="window.print()" class="text-slate-600 hover:text-slate-700" title="Print"><i data-lucide="printer" class="w-4 h-4"></i></button>
+                    <button onclick="printReceiptCard(this)" class="text-slate-600 hover:text-slate-700" title="Print"><i data-lucide="printer" class="w-4 h-4"></i></button>
                     <button onclick="deleteReceipt('${receipt.id}')" class="text-rose-600 hover:text-rose-700" title="Delete"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
                   </div>
                 </div>

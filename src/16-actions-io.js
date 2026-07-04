@@ -405,6 +405,29 @@ function updateExchangeRate(value) {
   showNotification('Updated', state.language === 'ar' ? 'تم تحديث سعر الصرف' : 'Exchange rate updated', 'success');
 }
 
+// Print ONE receipt card. window.print() alone printed the whole Receipts
+// page — every loaded card, other customers' amounts included — onto the
+// paper handed to a single customer. Mark the clicked card and let the
+// @media print rules in style.css hide everything else.
+function printReceiptCard(btn) {
+  const card = btn && btn.closest ? btn.closest('.glass-panel') : null;
+  if (!card) {
+    window.print();
+    return;
+  }
+  card.classList.add('print-target');
+  document.body.classList.add('print-single');
+  const cleanup = () => {
+    card.classList.remove('print-target');
+    document.body.classList.remove('print-single');
+    window.removeEventListener('afterprint', cleanup);
+  };
+  window.addEventListener('afterprint', cleanup);
+  window.print();
+  // Safety net for webviews that never fire afterprint
+  setTimeout(cleanup, 3000);
+}
+
 function exportData() {
   // Create secure export (no plaintext secrets)
   const exportState = JSON.parse(JSON.stringify(state));

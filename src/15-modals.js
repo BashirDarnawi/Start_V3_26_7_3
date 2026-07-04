@@ -1705,49 +1705,71 @@ async function handleModalSubmit() {
       showNotification('Success', 'Password changed successfully', 'success');
       break;
     }
-    case 'customer':
+    case 'customer': {
+      const isAr = state.language === 'ar';
+      // Whitespace-only input satisfies the HTML `required` attribute, so
+      // trim + check here — otherwise a blank-named customer gets saved.
+      const custName = document.getElementById('customer-name').value.trim();
+      if (!custName) {
+        showNotification(isAr ? 'خطأ في الإدخال' : 'Validation Error', isAr ? 'اسم العميل مطلوب' : 'Customer name is required', 'error');
+        return;
+      }
+
       // Collect all phone numbers
       const phoneInputs = document.querySelectorAll('.customer-phone');
       const phones = Array.from(phoneInputs).map(input => input.value.trim()).filter(p => p);
-      
+      // A whitespace-only phone passes `required` but is filtered out above —
+      // without this check the customer is saved with zero phone numbers.
+      if (phones.length === 0) {
+        showNotification(isAr ? 'خطأ في الإدخال' : 'Validation Error', isAr ? 'رقم هاتف واحد على الأقل مطلوب' : 'At least one phone number is required', 'error');
+        return;
+      }
+
       // Check for duplicate phone numbers with other customers
       const currentCustomerId = isEdit ? state.modalData.id : null;
       const duplicatePhone = checkDuplicatePhone(phones, currentCustomerId);
       if (duplicatePhone) {
-        showNotification('Duplicate Phone Number', `The phone number "${duplicatePhone.phone}" is already linked to customer "${duplicatePhone.customerName}". Please use a different phone number.`, 'error');
+        showNotification(
+          isAr ? 'رقم هاتف مكرر' : 'Duplicate Phone Number',
+          isAr
+            ? `رقم الهاتف "${duplicatePhone.phone}" مسجّل بالفعل للعميل "${duplicatePhone.customerName}". الرجاء استخدام رقم آخر.`
+            : `The phone number "${duplicatePhone.phone}" is already linked to customer "${duplicatePhone.customerName}". Please use a different phone number.`,
+          'error'
+        );
         return; // Stop here, don't close modal
       }
-      
+
       // Collect all profile links
       const linkInputs = document.querySelectorAll('.customer-link');
       const profileLinks = Array.from(linkInputs).map(input => input.value.trim()).filter(l => l);
-      
+
       // Get join date
       const joinDateValue = document.getElementById('customer-joindate').value;
       const joinDate = joinDateValue ? new Date(joinDateValue).toISOString() : new Date().toISOString();
-      
+
       if (isEdit) {
         updateRecord(state.customers, state.modalData.id, {
-          name: document.getElementById('customer-name').value,
+          name: custName,
           phones: phones,
           platform: document.getElementById('customer-platform').value,
           joinDate: joinDate,
           profileLinks: profileLinks
         });
-        showNotification('Updated', 'Customer updated successfully', 'success');
+        showNotification(isAr ? 'تم التحديث' : 'Updated', isAr ? 'تم تحديث العميل بنجاح' : 'Customer updated successfully', 'success');
       } else {
         const customer = {
           id: generateId('cust'),
-          name: document.getElementById('customer-name').value,
+          name: custName,
           phones: phones,
           platform: document.getElementById('customer-platform').value,
           joinDate: joinDate,
           profileLinks: profileLinks
         };
         addRecord(state.customers, customer);
-        showNotification('Success', 'Customer added successfully', 'success');
+        showNotification(isAr ? 'تمت الإضافة' : 'Success', isAr ? 'تمت إضافة العميل بنجاح' : 'Customer added successfully', 'success');
       }
       break;
+    }
     case 'ad':
       try {
       const paymentStatus = document.getElementById('ad-payment-status')?.value || 'paid';
@@ -2186,8 +2208,23 @@ async function handleModalSubmit() {
       const userName = Security.sanitizeInput(document.getElementById('user-name').value, { maxLength: 100 });
       const userEmail = Security.sanitizeInput(document.getElementById('user-email').value, { maxLength: 120 }).toLowerCase();
 
+      // sanitizeInput trims, but a whitespace-only name still satisfies the
+      // HTML `required` attribute — reject it or a blank user gets saved.
+      if (!userName) {
+        showNotification(
+          state.language === 'ar' ? 'خطأ في الإدخال' : 'Validation Error',
+          state.language === 'ar' ? 'الاسم مطلوب' : 'Name is required',
+          'error'
+        );
+        return;
+      }
+
       if (!Security.isValidEmail(userEmail)) {
-        showNotification('Validation Error', 'Please enter a valid email address', 'error');
+        showNotification(
+          state.language === 'ar' ? 'خطأ في الإدخال' : 'Validation Error',
+          state.language === 'ar' ? 'الرجاء إدخال بريد إلكتروني صحيح' : 'Please enter a valid email address',
+          'error'
+        );
         return;
       }
       
@@ -2347,40 +2384,58 @@ async function handleModalSubmit() {
         }
       }
       break;
-    case 'page':
+    case 'page': {
+      const isArPage = state.language === 'ar';
+      // Whitespace-only input satisfies `required` — trim + check both fields.
+      const pageName = document.getElementById('page-name').value.trim();
+      const pageCategory = document.getElementById('page-category').value.trim();
+      if (!pageName || !pageCategory) {
+        showNotification(
+          isArPage ? 'خطأ في الإدخال' : 'Validation Error',
+          isArPage ? 'اسم الصفحة والفئة مطلوبان' : 'Page name and category are required',
+          'error'
+        );
+        return;
+      }
+
       // Get selected customer IDs
       const selectedCustomers = Array.from(document.querySelectorAll('.page-customer-item'))
         .map(item => item.getAttribute('data-customer-id'));
-      
+
       // Validate at least one customer
       if (selectedCustomers.length === 0) {
-        showNotification('Validation Error', 'Please select at least one customer to link this page', 'error');
+        showNotification(
+          isArPage ? 'خطأ في الإدخال' : 'Validation Error',
+          isArPage ? 'الرجاء اختيار عميل واحد على الأقل لربط الصفحة' : 'Please select at least one customer to link this page',
+          'error'
+        );
         return;
       }
-      
+
       if (isEdit) {
         updateRecord(state.pages, state.modalData.id, {
-          name: document.getElementById('page-name').value,
-          category: document.getElementById('page-category').value,
+          name: pageName,
+          category: pageCategory,
           customerIds: selectedCustomers
         });
-        showNotification('Updated', 'Page updated successfully', 'success');
-        addLog('update', 'page', state.modalData.id, `Updated page: ${document.getElementById('page-name').value}`);
+        showNotification(isArPage ? 'تم التحديث' : 'Updated', isArPage ? 'تم تحديث الصفحة بنجاح' : 'Page updated successfully', 'success');
+        addLog('update', 'page', state.modalData.id, `Updated page: ${pageName}`);
       } else {
         const page = {
           id: generateId('page'),
-          name: document.getElementById('page-name').value,
-          category: document.getElementById('page-category').value,
+          name: pageName,
+          category: pageCategory,
           customerIds: selectedCustomers,
           createdAt: new Date().toISOString(),
           _lastModified: Date.now(),
           _deleted: false
         };
         addRecord(state.pages, page);
-        showNotification('Success', 'Page added successfully', 'success');
+        showNotification(isArPage ? 'تمت الإضافة' : 'Success', isArPage ? 'تمت إضافة الصفحة بنجاح' : 'Page added successfully', 'success');
         addLog('create', 'page', page.id, `Created page: ${page.name} linked to ${selectedCustomers.length} customer(s)`);
       }
       break;
+    }
     case 'receipt':
       const receiptAmountEl = document.getElementById('receipt-amount');
       const receiptRateEl = document.getElementById('receipt-rate');

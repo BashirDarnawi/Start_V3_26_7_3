@@ -1038,10 +1038,31 @@ table tbody tr:hover {
   table {
     page-break-inside: auto;
   }
-  
+
   tr {
     page-break-inside: avoid;
     page-break-after: auto;
+  }
+
+  /* Single-receipt print (printReceiptCard): show ONLY the targeted card.
+     Without this, the per-receipt Print button printed the whole receipts
+     grid — other customers' amounts included. visibility (not display) so
+     the re-shown subtree can override its hidden ancestors. */
+  body.print-single * {
+    visibility: hidden;
+  }
+  body.print-single .print-target,
+  body.print-single .print-target * {
+    visibility: visible;
+  }
+  body.print-single .print-target {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+  body.print-single {
+    zoom: 1; /* one card doesn't need the 0.8 shrink */
   }
 }
 
