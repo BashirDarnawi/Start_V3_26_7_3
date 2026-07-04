@@ -37,7 +37,12 @@ if (fs.existsSync(OUT)) {
   const current = fs.readFileSync(OUT, 'utf8');
   if (current !== out) {
     const outMtime = fs.statSync(OUT).mtimeMs;
-    const newestSrc = Math.max(...manifest.files.map(f => fs.statSync(path.join(SRC, f)).mtimeMs));
+    // Include manifest.json itself: a manifest-only change (reorder/add/
+    // remove) is a legitimate source change, not a hand-edit of script.js.
+    const newestSrc = Math.max(
+      fs.statSync(path.join(SRC, 'manifest.json')).mtimeMs,
+      ...manifest.files.map(f => fs.statSync(path.join(SRC, f)).mtimeMs)
+    );
     if (outMtime > newestSrc + 2000) {
       console.error(
         'REFUSING TO BUILD: script.js is newer than all src/ files but has different content.\n' +

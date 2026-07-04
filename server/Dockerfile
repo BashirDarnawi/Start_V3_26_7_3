@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir -r /app/server/requirements.txt
 
 # Copy application code
 COPY server /app/server
-COPY index.html script.js style.css privacy.html /app/
+COPY index.html script.js style.css privacy.html alembic.ini /app/
 COPY assets /app/assets
 
 # Production defaults (can be overridden via docker-compose or env vars)
