@@ -151,14 +151,13 @@ def db_conn() -> Connection:
         yield conn
 
 
-def init_db():
+def define_schema():
     """
-    Create tables if they don't exist (works for Postgres + SQLite).
-    For serious production migrations, add Alembic later.
+    Register all table definitions on METADATA (idempotent, no DB access).
+    Shared by init_db() and Alembic's migration environment
+    (server/migrations/env.py) so there is exactly one schema definition.
     """
-    engine = get_engine()
-
-    # Define schema once (safe if init_db is called multiple times)
+    # Define schema once (safe if called multiple times)
     if USERS not in METADATA.tables:
         Table(
             USERS,
@@ -250,6 +249,15 @@ def init_db():
         Index("password_resets_expires_at", pr.c.expires_at)
         Index("password_resets_token_hash", pr.c.token_hash)
 
+
+def init_db():
+    """
+    Create tables if they don't exist (works for Postgres + SQLite).
+    Schema CHANGES to an existing production database are managed with
+    Alembic migrations — see server/MIGRATIONS.md.
+    """
+    engine = get_engine()
+    define_schema()
     METADATA.create_all(engine)
 
 

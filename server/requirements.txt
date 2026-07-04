@@ -3,6 +3,7 @@ uvicorn[standard]==0.32.1
 rjsmin>=1.2.0
 email-validator==2.2.0
 sqlalchemy==2.0.36
+alembic==1.14.0
 psycopg[binary]==3.2.3
 pytest==7.4.3
 httpx==0.26.0

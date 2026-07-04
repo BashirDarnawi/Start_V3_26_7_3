@@ -20,3 +20,16 @@ Files:
 - `albayan.service` — systemd unit (reads env file, runs uvicorn)
 
 
+
+## Database migrations
+
+Schema changes are managed with Alembic (see `server/MIGRATIONS.md`).
+After deploying new code that changes the database schema, run once:
+
+```
+alembic upgrade head
+```
+
+(inside Docker: `docker compose exec albayan alembic upgrade head`).
+Back up the database first (`pg_dump`). The app intentionally does NOT
+auto-migrate at startup.
