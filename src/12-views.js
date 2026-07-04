@@ -1764,6 +1764,20 @@ function renderCustomersView() {
   `;
 }
 
+// PAGINATION ("Load more") for the receipts grid. Rendering every receipt
+// card at once makes the view slow past a few hundred receipts; we render
+// the first RECEIPTS_PAGE_SIZE and reveal more on demand. The limit resets
+// automatically whenever the search/filters/sort change (fingerprint check
+// inside renderReceiptsView), so filtering always starts from page one.
+const RECEIPTS_PAGE_SIZE = 50;
+let _receiptsShowLimit = RECEIPTS_PAGE_SIZE;
+let _receiptsFilterFingerprint = '';
+
+function loadMoreReceipts() {
+  _receiptsShowLimit += RECEIPTS_PAGE_SIZE;
+  updateReceiptsViewFiltered();
+}
+
 function renderReceiptsView() {
   const allReceipts = getVisibleRecords(state.receipts);
   // PERFORMANCE: one Map lookup per receipt instead of scanning the whole
@@ -1837,7 +1851,19 @@ function renderReceiptsView() {
   });
   
   const hasActiveFilters = state.receiptSearch || state.receiptStatusFilter !== 'all' || state.receiptPaymentFilter !== 'all' || state.receiptDateFilter !== 'all' || state.receiptCollectedFilter !== 'all';
-  
+
+  // Reset pagination whenever the filter/sort/search combination changes.
+  const filterFingerprint = JSON.stringify([
+    state.receiptSearch, state.receiptStatusFilter, state.receiptPaymentFilter,
+    state.receiptDateFilter, state.receiptCollectedFilter, state.receiptSortBy
+  ]);
+  if (filterFingerprint !== _receiptsFilterFingerprint) {
+    _receiptsFilterFingerprint = filterFingerprint;
+    _receiptsShowLimit = RECEIPTS_PAGE_SIZE;
+  }
+  const visibleReceipts = filteredReceipts.slice(0, _receiptsShowLimit);
+  const remainingReceipts = filteredReceipts.length - visibleReceipts.length;
+
   return `
     <div class="space-y-6 animate-fade-in-up">
       <div class="flex justify-between items-center">
@@ -1934,7 +1960,7 @@ function renderReceiptsView() {
       </div>
 
       <div id="receipts-grid" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        ${filteredReceipts.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${hasActiveFilters ? 'search-x' : 'receipt'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${hasActiveFilters ? 'No receipts match your filters' : 'No receipts yet'}</p>${hasActiveFilters ? '<button onclick="clearAllReceiptFilters()" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">Clear all filters</button>' : ''}</div>` : filteredReceipts.map((receipt, idx) => {
+        ${filteredReceipts.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${hasActiveFilters ? 'search-x' : 'receipt'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${hasActiveFilters ? 'No receipts match your filters' : 'No receipts yet'}</p>${hasActiveFilters ? '<button onclick="clearAllReceiptFilters()" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">Clear all filters</button>' : ''}</div>` : visibleReceipts.map((receipt, idx) => {
           const customer = customersById.get(receipt.customerId);
           const displayFinalNo = receipt.finalReceiptNo || receipt.serialNumber || '';
           const displayTempNo = receipt.tempReceiptNo || '';
@@ -2140,6 +2166,14 @@ function renderReceiptsView() {
             </div>
           `;
         }).join('')}
+        ${remainingReceipts > 0 ? `
+          <div class="col-span-full flex justify-center py-2">
+            <button onclick="loadMoreReceipts()" class="px-6 py-3 glass-panel rounded-xl text-sm font-bold text-purple-600 dark:text-purple-400 hover:scale-105 transition-transform flex items-center gap-2">
+              <i data-lucide="chevron-down" class="w-4 h-4"></i>
+              <span>${state.language === 'ar' ? `عرض المزيد (${remainingReceipts} متبقي)` : `Load more (${remainingReceipts} remaining)`}</span>
+            </button>
+          </div>
+        ` : ''}
       </div>
     </div>
   `;
