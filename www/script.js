@@ -13552,7 +13552,10 @@ function saveSplitPayments() {
     const method = item.querySelector('.split-method').value;
     const amount = parseFloat(item.querySelector('.split-amount').value) || 0;
     const rate = parseFloat(item.querySelector('.split-rate').value) || state.defaultExchangeRate;
-    const rate2 = parseFloat(item.querySelector('.split-rate2')?.value) || rate;
+    // 0/blank Rate 2 means "no USD ads credit" (matches saveReceiptFromModal),
+    // NOT "fall back to the LYD rate" — the old fallback fabricated ads credit
+    // out of a zero-rate receipt on a no-op Save.
+    const rate2 = parseFloat(item.querySelector('.split-rate2')?.value) || 0;
     const collectionType = item.querySelector('.split-collection').value;
     const deliveryPersonId = item.querySelector('.split-delivery-person')?.value || '';
 
@@ -13585,7 +13588,9 @@ function saveSplitPayments() {
     totalR1 += r1;
     totalR2 += r2;
   });
-  if (totalR2 % 1 !== 0) totalR2 = totalR2 + 0.01;
+  // Snap to 2 decimals first so binary float residue doesn't trip the rule.
+  totalR2 = Math.round(totalR2 * 100) / 100;
+  if (totalR2 % 1 !== 0) totalR2 = Math.round((totalR2 + 0.01) * 100) / 100;
   const avgRate = (totalR2 > 0 && totalR1 > 0) ? (totalR1 / totalR2) : state.defaultExchangeRate;
 
   updateRecord(state.receipts, receiptId, {
@@ -14709,8 +14714,11 @@ function updateReceiptTotals() {
   });
   
   // Add 0.01 to TOTAL ADS CREDIT (USD) only if it has decimals
+  // Snap to 2 decimals first so binary float residue (e.g. a sum landing on
+  // 100.00000000000001) doesn't trip the "has decimals" rule on a whole total.
+  totalR2 = Math.round(totalR2 * 100) / 100;
   if (totalR2 % 1 !== 0) {
-    totalR2 = totalR2 + 0.01;
+    totalR2 = Math.round((totalR2 + 0.01) * 100) / 100;
   }
   
   // Update total displays
@@ -14793,8 +14801,11 @@ function getPaymentTotalsFromDom() {
     totalR2 += r2;
   });
   // Add 0.01 to TOTAL ADS CREDIT (USD) only if it has decimals
+  // Snap to 2 decimals first so binary float residue (e.g. a sum landing on
+  // 100.00000000000001) doesn't trip the "has decimals" rule on a whole total.
+  totalR2 = Math.round(totalR2 * 100) / 100;
   if (totalR2 % 1 !== 0) {
-    totalR2 = totalR2 + 0.01;
+    totalR2 = Math.round((totalR2 + 0.01) * 100) / 100;
   }
   return { totalR1, totalR2 };
 }
@@ -14893,8 +14904,11 @@ async function saveReceiptFromModal() {
   });
   
   // Add 0.01 to TOTAL ADS CREDIT (USD) only if it has decimals
+  // Snap to 2 decimals first so binary float residue (e.g. a sum landing on
+  // 100.00000000000001) doesn't trip the "has decimals" rule on a whole total.
+  totalR2 = Math.round(totalR2 * 100) / 100;
   if (totalR2 % 1 !== 0) {
-    totalR2 = totalR2 + 0.01;
+    totalR2 = Math.round((totalR2 + 0.01) * 100) / 100;
   }
   
   const totalLYD = totalR1;
@@ -15996,7 +16010,24 @@ function onAdTempReceiptChange(receiptId) {
     
     // Calculate available credit in USD using the new tracking function
     const dueUsage = getDeliveryReceiptDueUsage(r);
-    const availableUSD = dueUsage.remainingDueUSD;
+    let availableUSD = dueUsage.remainingDueUSD;
+    // When EDITING an ad, add back this ad's own due usage so its existing
+    // allocation can be shown and preserved. Without this, editing an ad that
+    // used the receipt's full due credit computed available=$0, skipped the
+    // prefill, and on save wiped the allocation — silently resurrecting the
+    // spent credit and zeroing the ad's budget.
+    if (state.modalData?.id) {
+      const existingAd = state.ads.find(a => a.id === state.modalData.id);
+      if (existingAd) {
+        if (Array.isArray(existingAd.dueAllocations)) {
+          availableUSD += existingAd.dueAllocations
+            .filter(a => String(a.receiptId) === rid)
+            .reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0);
+        } else if (existingAd.dueAmountToUseUSD > 0 && String(existingAd.linkedDeliveryReceiptId) === rid) {
+          availableUSD += existingAd.dueAmountToUseUSD;
+        }
+      }
+    }
     const exchangeRate = dueUsage.exchangeRate || state.defaultExchangeRate || 1;
     
     const txt = `${r.tempReceiptNo}${r.finalReceiptNo || r.serialNumber ? ` → ${r.finalReceiptNo || r.serialNumber}` : ''}${place ? ` • ${place}` : ''} • Quoted fee ${fee.toFixed(0)} LYD`;
@@ -16036,15 +16067,17 @@ function onAdTempReceiptChange(receiptId) {
       if (mergeToggle) mergeToggle.classList.remove('hidden');
       // Initialize merge funding state
       initMergeFunding();
+      reflectMergeFundingUI();
     } else {
       // No credit available - all used up
       if (dueSection) dueSection.classList.add('hidden');
       if (mergeToggle) mergeToggle.classList.remove('hidden'); // Still allow merging paid receipts
       initMergeFunding();
+      reflectMergeFundingUI();
       // Update hint to show that credit is fully used
       if (hint) hint.textContent += ' • ⚠️ Credit fully used';
     }
-    
+
     updateAdDueSummary();
   }
 
@@ -16060,10 +16093,22 @@ function onAdTempReceiptChange(receiptId) {
   }
 }
 
-// Initialize merge funding state
+// Initialize merge funding state.
+// When EDITING an ad that already has merged paid funds, seed the working set
+// from the saved allocations so a plain edit preserves them. Without this,
+// tempMergeFunding started empty/disabled and saving wiped the merged funds
+// (shrinking the ad's amountUSD and resurrecting the paid receipt's balance).
 function initMergeFunding() {
   if (!state.tempMergeFunding) {
-    state.tempMergeFunding = { allocations: [], enabled: false };
+    const md = state.modalData;
+    if (md?.hasMergedPaidFunds && Array.isArray(md.mergedPaidAllocations) && md.mergedPaidAllocations.length) {
+      state.tempMergeFunding = {
+        enabled: true,
+        allocations: md.mergedPaidAllocations.map(a => ({ receiptId: a.receiptId, amountUSD: String(a.amountUSD) }))
+      };
+    } else {
+      state.tempMergeFunding = { allocations: [], enabled: false };
+    }
   }
 }
 
@@ -16112,6 +16157,21 @@ function updateAdDueSummary() {
   } else {
     summary.innerHTML = '<span class="text-amber-600">Enter amount to use from due receipt.</span>';
   }
+}
+
+// When merge funding is already enabled (e.g. seeded from an ad being edited),
+// make the UI match: reveal the section, set the toggle label, and render the
+// saved allocations so they can be seen and kept.
+function reflectMergeFundingUI() {
+  if (!state.tempMergeFunding?.enabled) return;
+  const mergedSection = document.getElementById('ad-merged-paid-funds');
+  const mergeIcon = document.getElementById('ad-merge-icon');
+  const mergeText = document.getElementById('ad-merge-text');
+  if (mergedSection) mergedSection.classList.remove('hidden');
+  if (mergeIcon) mergeIcon.setAttribute('data-lucide', 'minus-circle');
+  if (mergeText) mergeText.textContent = 'Remove Paid Receipt Funds';
+  renderAdMergedFundingList();
+  if (window.lucide) lucide.createIcons();
 }
 
 // Toggle merge with paid funds
@@ -18558,7 +18618,7 @@ function renderModal() {
                   </div>
                   <div>
                     <label class="block text-xs font-medium mb-1">USD Rate (Rate 2)</label>
-                    <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate2 || payment.rate || state.defaultExchangeRate}" oninput="sanitizeMoneyInput(this, 4)" />
+                    <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate2 !== undefined ? payment.rate2 : (payment.rate || state.defaultExchangeRate)}" oninput="sanitizeMoneyInput(this, 4)" />
                   </div>
                   <div>
                     <label class="block text-xs font-medium mb-1">Collection Type</label>
@@ -19383,7 +19443,18 @@ async function handleModalSubmit() {
             return;
           }
           const usageStats = getReceiptUsageStats(receipt);
-          const remaining = usageStats.remainingUSD || 0;
+          let remaining = usageStats.remainingUSD || 0;
+          // If editing, add back what this ad already merged from this receipt
+          // (mirrors the paid path) so re-saving the same amount is allowed.
+          if (isEdit && state.modalData?.id) {
+            const existingAd = state.ads.find(a => a.id === state.modalData.id);
+            const src = existingAd?.mergedPaidAllocations || existingAd?.receiptAllocations;
+            if (Array.isArray(src)) {
+              remaining += src
+                .filter(a => String(a.receiptId) === String(alloc.receiptId))
+                .reduce((sum, a) => sum + (parseFloat(a.amountUSD) || 0), 0);
+            }
+          }
           if (alloc.amountUSD > remaining + 0.0001) {
             showNotification(
               'Validation',
@@ -20202,6 +20273,22 @@ function confirmStopAd(id) {
   const previousRemainingUSD = adAmountUSD - previousSpentUSD;
   const newRemainingUSD = adAmountUSD - spentUSD;
   const remainingDifference = newRemainingUSD - previousRemainingUSD;
+
+  // BUG FIX (double-return): the unspent remainder must be apportioned ONCE
+  // across the ad's whole funding pool, not returned in full by each
+  // allocation block against its own smaller total. Compute the pool now
+  // (before any mutation). mergedPaidAllocations mirrors receiptAllocations
+  // for Not Paid + Driver ads, so it is NOT added to the denominator again.
+  const _sumAlloc = (arr) => Array.isArray(arr) ? arr.reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0) : 0;
+  const _poolPaid = _sumAlloc(ad.receiptAllocations);
+  const _poolDue = (Array.isArray(ad.dueAllocations) && ad.dueAllocations.length)
+    ? _sumAlloc(ad.dueAllocations)
+    : (parseFloat(ad.dueAmountToUseUSD) || 0);
+  const _poolTotal = _poolPaid + _poolDue;
+  // Single fraction every block uses: share of each allocation to return on a
+  // first stop, or to adjust on a re-stop edit.
+  const returnFraction = _poolTotal > 0 ? Math.min(Math.max(newRemainingUSD, 0) / _poolTotal, 1) : 0;
+  const adjustFraction = _poolTotal > 0 ? Math.abs(remainingDifference) / _poolTotal : 0;
   
   // Update ad status and spent amount
   ad.status = 'Stopped';
@@ -20217,9 +20304,9 @@ function confirmStopAd(id) {
     
     if (totalAllocated > 0) {
       if (isEditing && remainingDifference !== 0) {
-        // Editing: adjust allocations based on difference
-        const adjustmentRatio = Math.abs(remainingDifference) / totalAllocated;
-        
+        // Editing: adjust allocations by the ad's global funding-pool fraction
+        const adjustmentRatio = adjustFraction;
+
         ad.receiptAllocations.forEach(alloc => {
           const receipt = state.receipts.find(r => r.id === alloc.receiptId);
           if (receipt) {
@@ -20248,9 +20335,9 @@ function confirmStopAd(id) {
           }
         });
       } else if (!isEditing && newRemainingUSD > 0) {
-        // First time stopping: reduce allocations proportionally
-        const reductionRatio = Math.min(newRemainingUSD / totalAllocated, 1);
-        
+        // First time stopping: return each allocation's share of the remainder
+        const reductionRatio = returnFraction;
+
         ad.receiptAllocations.forEach(alloc => {
           const receipt = state.receipts.find(r => r.id === alloc.receiptId);
           if (receipt) {
@@ -20278,9 +20365,9 @@ function confirmStopAd(id) {
     
     if (totalDueAllocated > 0) {
       if (isEditing && remainingDifference !== 0) {
-        // Editing: adjust allocations based on difference
-        const adjustmentRatio = Math.abs(remainingDifference) / totalDueAllocated;
-        
+        // Editing: adjust allocations by the ad's global funding-pool fraction
+        const adjustmentRatio = adjustFraction;
+
         ad.dueAllocations.forEach(alloc => {
           const receipt = state.receipts.find(r => r.id === alloc.receiptId);
           if (receipt) {
@@ -20307,9 +20394,9 @@ function confirmStopAd(id) {
           }
         });
       } else if (!isEditing && newRemainingUSD > 0) {
-        // First time stopping: reduce allocations proportionally
-        const reductionRatio = Math.min(newRemainingUSD / totalDueAllocated, 1);
-        
+        // First time stopping: return each allocation's share of the remainder
+        const reductionRatio = returnFraction;
+
         ad.dueAllocations.forEach(alloc => {
           const receipt = state.receipts.find(r => r.id === alloc.receiptId);
           if (receipt) {
@@ -20333,8 +20420,9 @@ function confirmStopAd(id) {
     // Also update the legacy dueAmountToUseUSD field to match
     ad.dueAmountToUseUSD = ad.dueAllocations.reduce((sum, alloc) => sum + (parseFloat(alloc.amountUSD) || 0), 0);
   } else if (ad.dueAmountToUseUSD > 0 && !isEditing && newRemainingUSD > 0) {
-    // Legacy: Handle ads with dueAmountToUseUSD but no dueAllocations array
-    const reductionAmount = Math.min(newRemainingUSD, ad.dueAmountToUseUSD);
+    // Legacy: Handle ads with dueAmountToUseUSD but no dueAllocations array.
+    // Return only this pool's share of the remainder (global apportionment).
+    const reductionAmount = Math.min(ad.dueAmountToUseUSD * returnFraction, ad.dueAmountToUseUSD);
     ad.dueAmountToUseUSD = Math.max(ad.dueAmountToUseUSD - reductionAmount, 0);
     
     if (ad.linkedDeliveryReceiptId) {
@@ -20352,8 +20440,9 @@ function confirmStopAd(id) {
     
     if (totalMergedAllocated > 0) {
       if (isEditing && remainingDifference !== 0) {
-        const adjustmentRatio = Math.abs(remainingDifference) / totalMergedAllocated;
-        
+        // Merged mirrors the paid pool — use the same global fraction.
+        const adjustmentRatio = adjustFraction;
+
         ad.mergedPaidAllocations.forEach(alloc => {
           const receipt = state.receipts.find(r => r.id === alloc.receiptId);
           if (receipt) {
@@ -20374,8 +20463,9 @@ function confirmStopAd(id) {
           }
         });
       } else if (!isEditing && newRemainingUSD > 0) {
-        const reductionRatio = Math.min(newRemainingUSD / totalMergedAllocated, 1);
-        
+        // Merged mirrors the paid pool — use the same global fraction.
+        const reductionRatio = returnFraction;
+
         ad.mergedPaidAllocations.forEach(alloc => {
           const receipt = state.receipts.find(r => r.id === alloc.receiptId);
           if (receipt) {

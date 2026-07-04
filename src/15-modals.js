@@ -1138,7 +1138,7 @@ function renderModal() {
                   </div>
                   <div>
                     <label class="block text-xs font-medium mb-1">USD Rate (Rate 2)</label>
-                    <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate2 || payment.rate || state.defaultExchangeRate}" oninput="sanitizeMoneyInput(this, 4)" />
+                    <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate2 !== undefined ? payment.rate2 : (payment.rate || state.defaultExchangeRate)}" oninput="sanitizeMoneyInput(this, 4)" />
                   </div>
                   <div>
                     <label class="block text-xs font-medium mb-1">Collection Type</label>
@@ -1963,7 +1963,18 @@ async function handleModalSubmit() {
             return;
           }
           const usageStats = getReceiptUsageStats(receipt);
-          const remaining = usageStats.remainingUSD || 0;
+          let remaining = usageStats.remainingUSD || 0;
+          // If editing, add back what this ad already merged from this receipt
+          // (mirrors the paid path) so re-saving the same amount is allowed.
+          if (isEdit && state.modalData?.id) {
+            const existingAd = state.ads.find(a => a.id === state.modalData.id);
+            const src = existingAd?.mergedPaidAllocations || existingAd?.receiptAllocations;
+            if (Array.isArray(src)) {
+              remaining += src
+                .filter(a => String(a.receiptId) === String(alloc.receiptId))
+                .reduce((sum, a) => sum + (parseFloat(a.amountUSD) || 0), 0);
+            }
+          }
           if (alloc.amountUSD > remaining + 0.0001) {
             showNotification(
               'Validation',

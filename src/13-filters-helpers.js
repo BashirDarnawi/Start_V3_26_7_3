@@ -1889,7 +1889,10 @@ function saveSplitPayments() {
     const method = item.querySelector('.split-method').value;
     const amount = parseFloat(item.querySelector('.split-amount').value) || 0;
     const rate = parseFloat(item.querySelector('.split-rate').value) || state.defaultExchangeRate;
-    const rate2 = parseFloat(item.querySelector('.split-rate2')?.value) || rate;
+    // 0/blank Rate 2 means "no USD ads credit" (matches saveReceiptFromModal),
+    // NOT "fall back to the LYD rate" — the old fallback fabricated ads credit
+    // out of a zero-rate receipt on a no-op Save.
+    const rate2 = parseFloat(item.querySelector('.split-rate2')?.value) || 0;
     const collectionType = item.querySelector('.split-collection').value;
     const deliveryPersonId = item.querySelector('.split-delivery-person')?.value || '';
 
@@ -1922,7 +1925,9 @@ function saveSplitPayments() {
     totalR1 += r1;
     totalR2 += r2;
   });
-  if (totalR2 % 1 !== 0) totalR2 = totalR2 + 0.01;
+  // Snap to 2 decimals first so binary float residue doesn't trip the rule.
+  totalR2 = Math.round(totalR2 * 100) / 100;
+  if (totalR2 % 1 !== 0) totalR2 = Math.round((totalR2 + 0.01) * 100) / 100;
   const avgRate = (totalR2 > 0 && totalR1 > 0) ? (totalR1 / totalR2) : state.defaultExchangeRate;
 
   updateRecord(state.receipts, receiptId, {

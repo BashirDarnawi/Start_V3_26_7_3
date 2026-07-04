@@ -1008,8 +1008,11 @@ function updateReceiptTotals() {
   });
   
   // Add 0.01 to TOTAL ADS CREDIT (USD) only if it has decimals
+  // Snap to 2 decimals first so binary float residue (e.g. a sum landing on
+  // 100.00000000000001) doesn't trip the "has decimals" rule on a whole total.
+  totalR2 = Math.round(totalR2 * 100) / 100;
   if (totalR2 % 1 !== 0) {
-    totalR2 = totalR2 + 0.01;
+    totalR2 = Math.round((totalR2 + 0.01) * 100) / 100;
   }
   
   // Update total displays
@@ -1092,8 +1095,11 @@ function getPaymentTotalsFromDom() {
     totalR2 += r2;
   });
   // Add 0.01 to TOTAL ADS CREDIT (USD) only if it has decimals
+  // Snap to 2 decimals first so binary float residue (e.g. a sum landing on
+  // 100.00000000000001) doesn't trip the "has decimals" rule on a whole total.
+  totalR2 = Math.round(totalR2 * 100) / 100;
   if (totalR2 % 1 !== 0) {
-    totalR2 = totalR2 + 0.01;
+    totalR2 = Math.round((totalR2 + 0.01) * 100) / 100;
   }
   return { totalR1, totalR2 };
 }
@@ -1192,8 +1198,11 @@ async function saveReceiptFromModal() {
   });
   
   // Add 0.01 to TOTAL ADS CREDIT (USD) only if it has decimals
+  // Snap to 2 decimals first so binary float residue (e.g. a sum landing on
+  // 100.00000000000001) doesn't trip the "has decimals" rule on a whole total.
+  totalR2 = Math.round(totalR2 * 100) / 100;
   if (totalR2 % 1 !== 0) {
-    totalR2 = totalR2 + 0.01;
+    totalR2 = Math.round((totalR2 + 0.01) * 100) / 100;
   }
   
   const totalLYD = totalR1;
@@ -2295,7 +2304,24 @@ function onAdTempReceiptChange(receiptId) {
     
     // Calculate available credit in USD using the new tracking function
     const dueUsage = getDeliveryReceiptDueUsage(r);
-    const availableUSD = dueUsage.remainingDueUSD;
+    let availableUSD = dueUsage.remainingDueUSD;
+    // When EDITING an ad, add back this ad's own due usage so its existing
+    // allocation can be shown and preserved. Without this, editing an ad that
+    // used the receipt's full due credit computed available=$0, skipped the
+    // prefill, and on save wiped the allocation — silently resurrecting the
+    // spent credit and zeroing the ad's budget.
+    if (state.modalData?.id) {
+      const existingAd = state.ads.find(a => a.id === state.modalData.id);
+      if (existingAd) {
+        if (Array.isArray(existingAd.dueAllocations)) {
+          availableUSD += existingAd.dueAllocations
+            .filter(a => String(a.receiptId) === rid)
+            .reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0);
+        } else if (existingAd.dueAmountToUseUSD > 0 && String(existingAd.linkedDeliveryReceiptId) === rid) {
+          availableUSD += existingAd.dueAmountToUseUSD;
+        }
+      }
+    }
     const exchangeRate = dueUsage.exchangeRate || state.defaultExchangeRate || 1;
     
     const txt = `${r.tempReceiptNo}${r.finalReceiptNo || r.serialNumber ? ` → ${r.finalReceiptNo || r.serialNumber}` : ''}${place ? ` • ${place}` : ''} • Quoted fee ${fee.toFixed(0)} LYD`;
@@ -2335,15 +2361,17 @@ function onAdTempReceiptChange(receiptId) {
       if (mergeToggle) mergeToggle.classList.remove('hidden');
       // Initialize merge funding state
       initMergeFunding();
+      reflectMergeFundingUI();
     } else {
       // No credit available - all used up
       if (dueSection) dueSection.classList.add('hidden');
       if (mergeToggle) mergeToggle.classList.remove('hidden'); // Still allow merging paid receipts
       initMergeFunding();
+      reflectMergeFundingUI();
       // Update hint to show that credit is fully used
       if (hint) hint.textContent += ' • ⚠️ Credit fully used';
     }
-    
+
     updateAdDueSummary();
   }
 
@@ -2359,10 +2387,22 @@ function onAdTempReceiptChange(receiptId) {
   }
 }
 
-// Initialize merge funding state
+// Initialize merge funding state.
+// When EDITING an ad that already has merged paid funds, seed the working set
+// from the saved allocations so a plain edit preserves them. Without this,
+// tempMergeFunding started empty/disabled and saving wiped the merged funds
+// (shrinking the ad's amountUSD and resurrecting the paid receipt's balance).
 function initMergeFunding() {
   if (!state.tempMergeFunding) {
-    state.tempMergeFunding = { allocations: [], enabled: false };
+    const md = state.modalData;
+    if (md?.hasMergedPaidFunds && Array.isArray(md.mergedPaidAllocations) && md.mergedPaidAllocations.length) {
+      state.tempMergeFunding = {
+        enabled: true,
+        allocations: md.mergedPaidAllocations.map(a => ({ receiptId: a.receiptId, amountUSD: String(a.amountUSD) }))
+      };
+    } else {
+      state.tempMergeFunding = { allocations: [], enabled: false };
+    }
   }
 }
 
@@ -2411,6 +2451,21 @@ function updateAdDueSummary() {
   } else {
     summary.innerHTML = '<span class="text-amber-600">Enter amount to use from due receipt.</span>';
   }
+}
+
+// When merge funding is already enabled (e.g. seeded from an ad being edited),
+// make the UI match: reveal the section, set the toggle label, and render the
+// saved allocations so they can be seen and kept.
+function reflectMergeFundingUI() {
+  if (!state.tempMergeFunding?.enabled) return;
+  const mergedSection = document.getElementById('ad-merged-paid-funds');
+  const mergeIcon = document.getElementById('ad-merge-icon');
+  const mergeText = document.getElementById('ad-merge-text');
+  if (mergedSection) mergedSection.classList.remove('hidden');
+  if (mergeIcon) mergeIcon.setAttribute('data-lucide', 'minus-circle');
+  if (mergeText) mergeText.textContent = 'Remove Paid Receipt Funds';
+  renderAdMergedFundingList();
+  if (window.lucide) lucide.createIcons();
 }
 
 // Toggle merge with paid funds

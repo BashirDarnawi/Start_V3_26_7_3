@@ -153,6 +153,22 @@ function confirmStopAd(id) {
   const previousRemainingUSD = adAmountUSD - previousSpentUSD;
   const newRemainingUSD = adAmountUSD - spentUSD;
   const remainingDifference = newRemainingUSD - previousRemainingUSD;
+
+  // BUG FIX (double-return): the unspent remainder must be apportioned ONCE
+  // across the ad's whole funding pool, not returned in full by each
+  // allocation block against its own smaller total. Compute the pool now
+  // (before any mutation). mergedPaidAllocations mirrors receiptAllocations
+  // for Not Paid + Driver ads, so it is NOT added to the denominator again.
+  const _sumAlloc = (arr) => Array.isArray(arr) ? arr.reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0) : 0;
+  const _poolPaid = _sumAlloc(ad.receiptAllocations);
+  const _poolDue = (Array.isArray(ad.dueAllocations) && ad.dueAllocations.length)
+    ? _sumAlloc(ad.dueAllocations)
+    : (parseFloat(ad.dueAmountToUseUSD) || 0);
+  const _poolTotal = _poolPaid + _poolDue;
+  // Single fraction every block uses: share of each allocation to return on a
+  // first stop, or to adjust on a re-stop edit.
+  const returnFraction = _poolTotal > 0 ? Math.min(Math.max(newRemainingUSD, 0) / _poolTotal, 1) : 0;
+  const adjustFraction = _poolTotal > 0 ? Math.abs(remainingDifference) / _poolTotal : 0;
   
   // Update ad status and spent amount
   ad.status = 'Stopped';
@@ -168,9 +184,9 @@ function confirmStopAd(id) {
     
     if (totalAllocated > 0) {
       if (isEditing && remainingDifference !== 0) {
-        // Editing: adjust allocations based on difference
-        const adjustmentRatio = Math.abs(remainingDifference) / totalAllocated;
-        
+        // Editing: adjust allocations by the ad's global funding-pool fraction
+        const adjustmentRatio = adjustFraction;
+
         ad.receiptAllocations.forEach(alloc => {
           const receipt = state.receipts.find(r => r.id === alloc.receiptId);
           if (receipt) {
@@ -199,9 +215,9 @@ function confirmStopAd(id) {
           }
         });
       } else if (!isEditing && newRemainingUSD > 0) {
-        // First time stopping: reduce allocations proportionally
-        const reductionRatio = Math.min(newRemainingUSD / totalAllocated, 1);
-        
+        // First time stopping: return each allocation's share of the remainder
+        const reductionRatio = returnFraction;
+
         ad.receiptAllocations.forEach(alloc => {
           const receipt = state.receipts.find(r => r.id === alloc.receiptId);
           if (receipt) {
@@ -229,9 +245,9 @@ function confirmStopAd(id) {
     
     if (totalDueAllocated > 0) {
       if (isEditing && remainingDifference !== 0) {
-        // Editing: adjust allocations based on difference
-        const adjustmentRatio = Math.abs(remainingDifference) / totalDueAllocated;
-        
+        // Editing: adjust allocations by the ad's global funding-pool fraction
+        const adjustmentRatio = adjustFraction;
+
         ad.dueAllocations.forEach(alloc => {
           const receipt = state.receipts.find(r => r.id === alloc.receiptId);
           if (receipt) {
@@ -258,9 +274,9 @@ function confirmStopAd(id) {
           }
         });
       } else if (!isEditing && newRemainingUSD > 0) {
-        // First time stopping: reduce allocations proportionally
-        const reductionRatio = Math.min(newRemainingUSD / totalDueAllocated, 1);
-        
+        // First time stopping: return each allocation's share of the remainder
+        const reductionRatio = returnFraction;
+
         ad.dueAllocations.forEach(alloc => {
           const receipt = state.receipts.find(r => r.id === alloc.receiptId);
           if (receipt) {
@@ -284,8 +300,9 @@ function confirmStopAd(id) {
     // Also update the legacy dueAmountToUseUSD field to match
     ad.dueAmountToUseUSD = ad.dueAllocations.reduce((sum, alloc) => sum + (parseFloat(alloc.amountUSD) || 0), 0);
   } else if (ad.dueAmountToUseUSD > 0 && !isEditing && newRemainingUSD > 0) {
-    // Legacy: Handle ads with dueAmountToUseUSD but no dueAllocations array
-    const reductionAmount = Math.min(newRemainingUSD, ad.dueAmountToUseUSD);
+    // Legacy: Handle ads with dueAmountToUseUSD but no dueAllocations array.
+    // Return only this pool's share of the remainder (global apportionment).
+    const reductionAmount = Math.min(ad.dueAmountToUseUSD * returnFraction, ad.dueAmountToUseUSD);
     ad.dueAmountToUseUSD = Math.max(ad.dueAmountToUseUSD - reductionAmount, 0);
     
     if (ad.linkedDeliveryReceiptId) {
@@ -303,8 +320,9 @@ function confirmStopAd(id) {
     
     if (totalMergedAllocated > 0) {
       if (isEditing && remainingDifference !== 0) {
-        const adjustmentRatio = Math.abs(remainingDifference) / totalMergedAllocated;
-        
+        // Merged mirrors the paid pool — use the same global fraction.
+        const adjustmentRatio = adjustFraction;
+
         ad.mergedPaidAllocations.forEach(alloc => {
           const receipt = state.receipts.find(r => r.id === alloc.receiptId);
           if (receipt) {
@@ -325,8 +343,9 @@ function confirmStopAd(id) {
           }
         });
       } else if (!isEditing && newRemainingUSD > 0) {
-        const reductionRatio = Math.min(newRemainingUSD / totalMergedAllocated, 1);
-        
+        // Merged mirrors the paid pool — use the same global fraction.
+        const reductionRatio = returnFraction;
+
         ad.mergedPaidAllocations.forEach(alloc => {
           const receipt = state.receipts.find(r => r.id === alloc.receiptId);
           if (receipt) {
