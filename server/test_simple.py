@@ -46,6 +46,38 @@ def test_serve_style():
     assert "css" in response.headers["content-type"]
 
 
+def test_serve_bundled_assets():
+    """Should serve the locally bundled tailwind/fonts/lucide assets"""
+    for name, ctype in [
+        ("tailwind.css", "css"),
+        ("fonts.css", "css"),
+        ("lucide.min.js", "javascript"),
+    ]:
+        response = client.get(f"/assets/{name}")
+        assert response.status_code == 200, name
+        assert ctype in response.headers["content-type"], name
+
+
+def test_index_references_versioned_assets():
+    """serve_index should inject cache-busting ?v= into all asset URLs"""
+    html = client.get("/").text
+    assert 'src="script.js?v=' in html
+    assert 'href="style.css?v=' in html
+    assert 'href="assets/tailwind.css?v=' in html
+    assert 'href="assets/fonts.css?v=' in html
+    assert 'src="assets/lucide.min.js?v=' in html
+
+
+def test_assets_reject_traversal_and_unknown_types():
+    """Asset routes must not serve arbitrary files"""
+    # Encoded traversal (starlette decodes %2e%2e%2f into ../)
+    response = client.get("/assets/%2e%2e%2fserver%2fmain.py")
+    assert response.status_code in (400, 404)
+    # Unknown extension inside assets/ must 404 even if the file existed
+    response = client.get("/assets/whatever.py")
+    assert response.status_code == 404
+
+
 def test_login_requires_credentials():
     """Login should require email and password"""
     response = client.post("/api/auth/login", json={})

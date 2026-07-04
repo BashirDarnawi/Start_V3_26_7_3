@@ -287,6 +287,7 @@ INDEX_PATH = PROJECT_ROOT / "index.html"
 SCRIPT_PATH = PROJECT_ROOT / "script.js"
 SCRIPT_MIN_PATH = PROJECT_ROOT / "script.min.js"
 STYLE_PATH = PROJECT_ROOT / "style.css"
+ASSETS_DIR = PROJECT_ROOT / "assets"
 
 COOKIE_NAME = "albayan_session"
 SESSION_DURATION_MS = int(os.getenv("ALBAYAN_SESSION_MS", str(8 * 60 * 60 * 1000)))
@@ -1379,13 +1380,15 @@ async def security_headers(request: Request, call_next):
     resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
     # SECURITY FIX: Additional defense-in-depth headers
     resp.headers["X-Permitted-Cross-Domain-Policies"] = "none"
-    # Content Security Policy - allows inline scripts and required CDNs (Tailwind, Lucide, Google Fonts)
+    # Content Security Policy. All styling/icons/fonts are bundled locally under
+    # /assets (no CDNs, no 'unsafe-eval'). 'unsafe-inline' is still required by
+    # the app's inline onclick handlers.
     # Note: CSP is also set in index.html meta tag for first load before server responds
     resp.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://unpkg.com; "
-        "style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://fonts.googleapis.com; "
-        "font-src 'self' https://fonts.gstatic.com data:; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "font-src 'self' data:; "
         "img-src 'self' data: blob: https:; "
         "connect-src 'self' https:; "
         "frame-ancestors 'self'; "
@@ -1527,6 +1530,13 @@ def serve_index(request: Request):
         style_v = _asset_version(STYLE_PATH)
         html = html.replace('src="script.js"', f'src="script.js?v={script_v}"')
         html = html.replace('href="style.css"', f'href="style.css?v={style_v}"')
+        # Version the bundled assets the same way (fonts, tailwind, lucide).
+        for asset in ("fonts.css", "tailwind.css", "lucide.min.js"):
+            attr = "src" if asset.endswith(".js") else "href"
+            v = _asset_version(ASSETS_DIR / asset)
+            html = html.replace(
+                f'{attr}="assets/{asset}"', f'{attr}="assets/{asset}?v={v}"'
+            )
         return HTMLResponse(html, headers=_NO_STORE_HEADERS)
     except Exception:
         # Fail open: serve the file as-is (unversioned assets fall back to no-store).
@@ -1767,6 +1777,46 @@ def serve_style(request: Request):
     v = request.query_params.get("v")
     headers = _ASSET_CACHE_HEADERS if v and v == _asset_version(STYLE_PATH) else _NO_STORE_HEADERS
     return FileResponse(str(STYLE_PATH), media_type="text/css", headers=headers)
+
+
+_ASSET_MEDIA_TYPES = {
+    ".css": "text/css",
+    ".js": "application/javascript",
+    ".woff2": "font/woff2",
+}
+
+
+def _serve_asset_file(path: Path, request: Request, always_cache: bool = False):
+    """Serve one bundled asset with strict name validation done by the caller."""
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Not found")
+    media = _ASSET_MEDIA_TYPES.get(path.suffix.lower())
+    if media is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    v = request.query_params.get("v")
+    if always_cache or (v and v == _asset_version(path)):
+        headers = _ASSET_CACHE_HEADERS
+    else:
+        # Unversioned request: cache briefly so direct hits stay fresh-ish.
+        headers = {"Cache-Control": "public, max-age=3600"}
+    return FileResponse(str(path), media_type=media, headers=headers)
+
+
+@app.get("/assets/{filename}")
+def serve_asset(filename: str, request: Request):
+    # Only plain filenames — no separators, no traversal.
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=404, detail="Not found")
+    return _serve_asset_file(ASSETS_DIR / filename, request)
+
+
+@app.get("/assets/fonts/{filename}")
+def serve_asset_font(filename: str, request: Request):
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=404, detail="Not found")
+    # Font files have content-unique names (from Google's CDN), so they are
+    # safe to cache forever even without a version parameter.
+    return _serve_asset_file(ASSETS_DIR / "fonts" / filename, request, always_cache=True)
 
 
 @app.post("/api/auth/login", response_model=LoginResponse)

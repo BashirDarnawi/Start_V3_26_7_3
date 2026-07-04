@@ -17,74 +17,36 @@
     <meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin">
     <meta http-equiv="Permissions-Policy" content="geolocation=(), microphone=(), camera=()">
     
-    <!-- Content Security Policy - Production-ready -->
+    <!-- Content Security Policy - Production-ready.
+         All styling/icons/fonts are bundled locally (assets/), so no CDN hosts
+         and no 'unsafe-eval' are needed anymore. -->
     <meta http-equiv="Content-Security-Policy" content="
         default-src 'self';
-        script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://unpkg.com;
-        style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://fonts.googleapis.com;
-        font-src 'self' https://fonts.gstatic.com data:;
+        script-src 'self' 'unsafe-inline';
+        style-src 'self' 'unsafe-inline';
+        font-src 'self' data:;
         img-src 'self' data: blob: https:;
         connect-src 'self' https:;
         form-action 'self';
         base-uri 'self';
         frame-ancestors 'self';
     ">
-    
-    <!-- Tailwind CSS CDN -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-      tailwind.config = {
-        darkMode: 'class',
-        theme: {
-          extend: {
-            colors: {
-              slate: {
-                850: '#151e2e',
-                900: '#0f172a',
-                950: '#020617',
-              },
-            },
-            animation: {
-              'fade-in-up': 'fadeInUp 0.8s cubic-bezier(0.16, 1, 0.3, 1)',
-              'pulse-slow': 'pulse 6s cubic-bezier(0.4, 0, 0.6, 1) infinite',
-              'blob': 'blob 20s infinite alternate',
-              'shimmer': 'shimmer 2.5s linear infinite',
-              'shake': 'shake 0.3s ease-in-out',
-            },
-            keyframes: {
-              fadeInUp: {
-                '0%': { opacity: '0', transform: 'translateY(40px) scale(0.95)' },
-                '100%': { opacity: '1', transform: 'translateY(0) scale(1)' },
-              },
-              blob: {
-                '0%': { transform: 'translate(0px, 0px) scale(1)' },
-                '33%': { transform: 'translate(50px, -50px) scale(1.2)' },
-                '66%': { transform: 'translate(-40px, 20px) scale(0.8)' },
-                '100%': { transform: 'translate(0px, 0px) scale(1)' },
-              },
-              shimmer: {
-                '0%': { backgroundPosition: '-1000px 0' },
-                '100%': { backgroundPosition: '1000px 0' },
-              },
-              shake: {
-                '0%, 100%': { transform: 'translateX(0)' },
-                '25%': { transform: 'translateX(-5px)' },
-                '75%': { transform: 'translateX(5px)' },
-              }
-            }
-          }
-        }
-      }
-    </script>
-    
-    <!-- Google Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    
-    <!-- Lucide Icons CDN -->
-    <script src="https://unpkg.com/lucide@1.23.0/dist/umd/lucide.min.js"></script>
-    
+
+    <!-- Fonts (self-hosted Inter — see scripts/download-fonts.js) -->
+    <link rel="stylesheet" href="assets/fonts.css">
+
+    <!-- Lucide Icons (self-hosted, pinned 1.23.0) -->
+    <script src="assets/lucide.min.js"></script>
+
     <!-- Custom CSS -->
     <link rel="stylesheet" href="style.css">
+
+    <!-- Tailwind CSS (prebuilt — run `npm run build:css` after editing classes; see tailwind.config.js).
+         IMPORTANT: this link must stay AFTER style.css. The old Tailwind CDN
+         injected its generated styles at the end of <head>, so utility classes
+         historically override style.css rules of equal specificity; keeping
+         that order preserves the app's exact appearance. -->
+    <link rel="stylesheet" href="assets/tailwind.css">
 </head>
 <body class="bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100">
     
