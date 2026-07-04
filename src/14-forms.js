@@ -692,8 +692,14 @@ function updateReceiptTotals() {
   const paymentItems = document.querySelectorAll('.payment-split-item');
   
   let totalR1 = 0; // Total PAID (LYD) - sum of all R1 values
-  let totalR2 = 0; // Total ADS CREDIT (USD) - sum of all R2 values
-  
+  let totalR2 = 0; // Total ADS CREDIT (USD) - sum of all R2 values (rounded UP, = credit granted)
+  // Un-rounded USD total. The credit granted (totalR2) is rounded UP in the
+  // customer's favor, but comparing THAT against the market rate manufactures a
+  // fake "saving" even when the customer paid exactly at market rate (and can
+  // hide a real "paid extra"). The saved-vs-extra verdict and the effective
+  // average rate must be judged from this un-rounded basis.
+  let totalR2Raw = 0;
+
   paymentItems.forEach((item) => {
     const methodSelect = item.querySelector('.payment-method');
     const amountInput = item.querySelector('.payment-amount');
@@ -718,27 +724,29 @@ function updateReceiptTotals() {
     let r2 = 0;
     const usdBasedMethods = ['USDT', 'Bank Transfer (USD)', 'Cash (USD)'];
     
+    let r2Raw = 0;
     if (rate2 > 0) {
       if (usdBasedMethods.includes(paymentMethod)) {
         // USD-based methods: R2 = R1 / Rate 2
         // BUG FIX: Prevent division by zero
-        r2 = rate2 > 0 ? (r1 / rate2) : 0;
+        r2Raw = rate2 > 0 ? (r1 / rate2) : 0;
       } else {
         // Normal methods: R2 = Amount / Rate 2
         // BUG FIX: Prevent division by zero
-        r2 = rate2 > 0 ? (amount / rate2) : 0;
+        r2Raw = rate2 > 0 ? (amount / rate2) : 0;
       }
       // Apply ceiling rounding to individual R2 (always round up to 2 decimal places)
-      r2 = ceilingRound(r2);
+      r2 = ceilingRound(r2Raw);
     }
-    
+
     // Update displays
     if (r1Display) r1Display.textContent = r1.toFixed(2) + ' LYD';
     if (r2Display) r2Display.textContent = r2.toFixed(2) + ' USD';
-    
+
     // Add to totals
     totalR1 += r1;
     totalR2 += r2;
+    totalR2Raw += r2Raw;
   });
   
   // Add 0.01 to TOTAL ADS CREDIT (USD) only if it has decimals
@@ -759,8 +767,10 @@ function updateReceiptTotals() {
   if (totalLydEl) totalLydEl.textContent = totalR1.toFixed(2);
   if (totalUsdEl) totalUsdEl.textContent = '$' + totalR2.toFixed(2);
   
-  // Calculate average rate (Total LYD / Total USD)
-  const avgRate = totalR2 > 0 ? (totalR1 / totalR2) : 0;
+  // Calculate the effective average rate the customer transacted at. Use the
+  // UN-rounded USD basis so a payment made exactly at the market rate shows an
+  // avg rate equal to the market rate (the rounded credit would skew it).
+  const avgRate = totalR2Raw > 0 ? (totalR1 / totalR2Raw) : 0;
   if (avgRateEl) avgRateEl.textContent = avgRate.toFixed(4);
   
   // Calculate net paid (total - processing fee if any)
@@ -771,27 +781,29 @@ function updateReceiptTotals() {
   // Calculate savings or extra paid compared to market rate
   const marketRate = state.defaultExchangeRate;
   
-  if (savingsEl && totalR2 > 0) {
-    // What customer would have paid at market rate
-    const marketValue = totalR2 * marketRate;
-    // Difference: positive = customer saved, negative = customer paid extra
+  if (savingsEl && totalR2Raw > 0) {
+    // What the customer would have paid at market rate for the SAME credit,
+    // using the un-rounded USD so rounding can't fabricate a saving or mask an
+    // overpayment. Positive = customer saved, negative = customer paid extra.
+    const marketValue = totalR2Raw * marketRate;
     const difference = marketValue - totalR1;
     
+    const isArSav = state.language === 'ar';
     if (Math.abs(difference) < 0.01) {
       // No significant difference
       savingsEl.className = 'mt-2 p-2 rounded-lg text-center text-sm font-bold bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400';
-      savingsEl.innerHTML = `<i data-lucide="equal" class="w-4 h-4 inline mr-1"></i> Paid at market rate`;
+      savingsEl.innerHTML = `<i data-lucide="equal" class="w-4 h-4 inline mr-1"></i> ${isArSav ? 'دُفِع بسعر السوق' : 'Paid at market rate'}`;
       savingsEl.classList.remove('hidden');
     } else if (difference > 0) {
       // Customer saved money (paid less than market rate)
       savingsEl.className = 'mt-2 p-2 rounded-lg text-center text-sm font-bold bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400';
-      savingsEl.innerHTML = `<i data-lucide="trending-down" class="w-4 h-4 inline mr-1"></i> Customer Saved: <span class="text-emerald-600 font-bold">${Security.escapeHtml(difference.toFixed(2))} LYD</span>`;
+      savingsEl.innerHTML = `<i data-lucide="trending-down" class="w-4 h-4 inline mr-1"></i> ${isArSav ? 'وفّر العميل' : 'Customer Saved'}: <span class="text-emerald-600 font-bold">${Security.escapeHtml(difference.toFixed(2))} LYD</span>`;
       savingsEl.classList.remove('hidden');
     } else {
       // Customer paid extra (paid more than market rate)
       const extra = Math.abs(difference);
       savingsEl.className = 'mt-2 p-2 rounded-lg text-center text-sm font-bold bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-400';
-      savingsEl.innerHTML = `<i data-lucide="trending-up" class="w-4 h-4 inline mr-1"></i> Paid Extra: <span class="text-rose-600 font-bold">${Security.escapeHtml(extra.toFixed(2))} LYD</span>`;
+      savingsEl.innerHTML = `<i data-lucide="trending-up" class="w-4 h-4 inline mr-1"></i> ${isArSav ? 'دفع زيادة' : 'Paid Extra'}: <span class="text-rose-600 font-bold">${Security.escapeHtml(extra.toFixed(2))} LYD</span>`;
       savingsEl.classList.remove('hidden');
     }
     
