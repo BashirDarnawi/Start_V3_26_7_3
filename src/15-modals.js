@@ -1135,6 +1135,10 @@ function renderModal() {
                     <input type="text" inputmode="decimal" class="split-rate w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate || state.defaultExchangeRate}" oninput="sanitizeMoneyInput(this, 4)" />
                   </div>
                   <div>
+                    <label class="block text-xs font-medium mb-1">USD Rate (Rate 2)</label>
+                    <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate2 || payment.rate || state.defaultExchangeRate}" oninput="sanitizeMoneyInput(this, 4)" />
+                  </div>
+                  <div>
                     <label class="block text-xs font-medium mb-1">Collection Type</label>
                     <select class="split-collection w-full glass-input px-3 py-2 rounded-lg text-sm">
                       <option value="office" ${payment.collectionType === 'office' ? 'selected' : ''}>Office</option>
@@ -1178,8 +1182,13 @@ function renderModal() {
       break;
     case 'top-ups':
       const topUpAd = state.modalData;
-      const existingTopUps = topUpAd.topUps || [];
-      
+      // Render from the working copy (tempTopUps) so existing AND just-added
+      // top-ups both show and can be removed. The "New total" is computed live
+      // from the base amount + the working list.
+      const existingTopUps = tempTopUps;
+      const topUpBase = topUpAd.initialAmountUSD || topUpAd.amountUSD;
+      const topUpWorkingTotal = existingTopUps.reduce((sum, t) => sum + (t.amount || 0), 0);
+
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center">
           <i data-lucide="trending-up" class="w-6 h-6 mr-2 text-blue-600"></i>
@@ -1188,8 +1197,8 @@ function renderModal() {
         <div class="space-y-4">
           <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl">
             <div class="text-sm font-medium text-blue-700 dark:text-blue-300">Ad Details</div>
-            <div class="text-lg font-bold text-blue-600 mt-1">Original: $${topUpAd.initialAmountUSD || topUpAd.amountUSD} → Current: $${topUpAd.amountUSD}</div>
-            ${existingTopUps.length > 0 ? `<div class="text-xs text-slate-500 mt-1">Total top-ups: $${existingTopUps.reduce((sum, t) => sum + t.amount, 0).toFixed(2)}</div>` : ''}
+            <div class="text-lg font-bold text-blue-600 mt-1">Original: $${topUpBase} → New: $${(topUpBase + topUpWorkingTotal).toFixed(2)}</div>
+            ${existingTopUps.length > 0 ? `<div class="text-xs text-slate-500 mt-1">Total top-ups: $${topUpWorkingTotal.toFixed(2)}</div>` : ''}
           </div>
 
           <div id="topups-container" class="space-y-2">
@@ -2416,10 +2425,13 @@ async function handleModalSubmit() {
 function closeModal() {
   state.activeModal = null;
   state.modalData = null;
-  
+
   // Clear temp funding states
   state.tempAdFunding = null;
   state.tempMergeFunding = null;
+  // Discard any pending (unsaved) top-up edits so they cannot leak into the
+  // next ad's top-up session.
+  tempTopUps = [];
   
   // Clear URL params (modal, id)
   clearUrlParams(['modal', 'id']);

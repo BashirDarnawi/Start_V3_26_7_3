@@ -1425,8 +1425,14 @@ async function saveReceiptFromModal() {
     deliveryPlaceName: isTempDelivery ? deliveryPlaceName : (state.modalData?.deliveryPlaceName || deliveryPlaceName || ''),
     deliveryInstructions: isTempDelivery ? deliveryInstructions : (state.modalData?.deliveryInstructions || deliveryInstructions || ''),
     quotedDeliveryFee: isTempDelivery ? quotedDeliveryFee : (state.modalData?.quotedDeliveryFee ?? quotedDeliveryFee),
-    debtAmountLocal: (state.modalData?.debtAmountLocal ?? (isTempDelivery ? totalLYD : undefined)),
-    debtAmountUSD: (state.modalData?.debtAmountUSD ?? (isTempDelivery ? totalUSD : undefined)),
+    // Debt baseline (what the driver must collect on delivery). While the
+    // receipt is still a pre-delivery temp receipt, keep this in sync with the
+    // current totals so an admin's edit to the amount also corrects the amount
+    // to be collected. Once delivered (no longer a temp receipt) the stored
+    // baseline is preserved. Previously an edit updated amountLocal but left
+    // this stale, corrupting the driver's cash reconciliation.
+    debtAmountLocal: (isTempDelivery ? totalLYD : (state.modalData?.debtAmountLocal ?? undefined)),
+    debtAmountUSD: (isTempDelivery ? totalUSD : (state.modalData?.debtAmountUSD ?? undefined)),
     officeFee: 0,
     discount: 0,
     phoneNumber: document.getElementById('receipt-phone-search').value || '',

@@ -39,6 +39,35 @@ function unlockLayoutAfterRender(app) {
   app.style.removeProperty('--app-height');
 }
 
+// Capture the currently-focused text field (by id) and its caret, so a
+// full/partial re-render can put the cursor back where the user was typing.
+function _captureFocusState() {
+  const el = document.activeElement;
+  if (!el || !el.id) return null;
+  const tag = el.tagName;
+  if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') return null;
+  const state = { id: el.id };
+  try {
+    if (tag !== 'SELECT' && typeof el.selectionStart === 'number') {
+      state.start = el.selectionStart;
+      state.end = el.selectionEnd;
+    }
+  } catch (_) { /* some input types disallow selection access */ }
+  return state;
+}
+
+function _restoreFocusState(saved) {
+  if (!saved) return;
+  const el = document.getElementById(saved.id);
+  if (!el || el === document.activeElement) return;
+  try {
+    el.focus({ preventScroll: true });
+    if (typeof saved.start === 'number' && typeof el.setSelectionRange === 'function') {
+      el.setSelectionRange(saved.start, saved.end);
+    }
+  } catch (_) { /* ignore focus/caret restore failures */ }
+}
+
 function render() {
   // Prevent re-entrant rendering
   if (_renderInProgress) return;
@@ -90,6 +119,11 @@ function render() {
       // Enforce "secret ideas" gating for non-admin users
       enforceSecretFeaturesGate();
 
+      // Preserve keyboard focus + caret across the innerHTML swap. Without
+      // this, a background live-sync render() (every 3s) recreates the DOM and
+      // steals focus while the user is typing in e.g. the receipts search box.
+      const _focusBefore = _captureFocusState();
+
       // For main app, try to update only the content area if possible
       if (canPartialUpdate) {
         // Only update the view content, not the entire app
@@ -102,6 +136,8 @@ function render() {
       } else {
         app.innerHTML = renderMainApp();
       }
+
+      _restoreFocusState(_focusBefore);
 
       _lastRenderedView = currentView;
       _lastRenderedUserId = currentUserId;

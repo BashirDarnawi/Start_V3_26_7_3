@@ -196,10 +196,13 @@ function getCustomerSortValue(customer, sortType) {
       return stats.totalSpent;
     case 'leastSpend':
       return -stats.totalSpent;
+    // Non-qualifying customers sink to the bottom. Use a finite sentinel, not
+    // -Infinity: two -Infinity values subtract to NaN in the comparator, which
+    // makes the sort order undefined (and can throw in some engines).
     case 'biggestCredit':
-      return stats.balance > 0 ? stats.balance : -Infinity;
+      return stats.balance > 0 ? stats.balance : -Number.MAX_VALUE;
     case 'highestDebt':
-      return stats.balance < 0 ? -stats.balance : -Infinity;
+      return stats.balance < 0 ? -stats.balance : -Number.MAX_VALUE;
     default:
       return 0;
   }
@@ -1557,7 +1560,13 @@ function manageSplitPayments(receiptId) {
 function manageTopUps(adId) {
   const ad = state.ads.find(a => a.id === adId);
   if (!ad) return;
-  
+
+  // Seed the working list with a COPY of the ad's existing top-ups, so the
+  // modal shows them, the X button can delete them, and newly-added ones
+  // appear immediately. Starting empty (the old behavior) meant existing
+  // top-ups couldn't be removed and new ones were invisible until save.
+  tempTopUps = (ad.topUps || []).map(t => ({ ...t }));
+
   state.activeModal = 'top-ups';
   state.modalData = ad;
   renderModal();
@@ -1838,6 +1847,10 @@ function addSplitPayment() {
         <input type="text" inputmode="decimal" class="split-rate w-full glass-input px-3 py-2 rounded-lg text-sm" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" />
       </div>
       <div>
+        <label class="block text-xs font-medium mb-1">USD Rate (Rate 2)</label>
+        <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" />
+      </div>
+      <div>
         <label class="block text-xs font-medium mb-1">Collection Type</label>
         <select class="split-collection w-full glass-input px-3 py-2 rounded-lg text-sm">
           <option value="office">Office</option>
@@ -1870,26 +1883,53 @@ function saveSplitPayments() {
   const receiptId = state.modalData.id;
   const paymentItems = document.querySelectorAll('.split-payment-item');
   const payments = [];
-  
+
   paymentItems.forEach(item => {
     const method = item.querySelector('.split-method').value;
     const amount = parseFloat(item.querySelector('.split-amount').value) || 0;
     const rate = parseFloat(item.querySelector('.split-rate').value) || state.defaultExchangeRate;
+    const rate2 = parseFloat(item.querySelector('.split-rate2')?.value) || rate;
     const collectionType = item.querySelector('.split-collection').value;
     const deliveryPersonId = item.querySelector('.split-delivery-person')?.value || '';
-    
+
     if (amount > 0) {
       payments.push({
         method,
         amount,
         rate,
+        rate2,
         collectionType,
         deliveryPersonId
       });
     }
   });
-  
-  updateRecord(state.receipts, receiptId, { payments });
+
+  // Recompute the receipt totals from the edited payments using the SAME
+  // logic as saveReceipt (src/14-forms.js). Previously this saved only the
+  // payments array and left amountUSD/amountLocal/exchangeRate stale, so the
+  // receipt's money totals no longer matched its own payment lines.
+  const usdBasedMethods = ['USDT', 'Bank Transfer (USD)', 'Cash (USD)'];
+  let totalR1 = 0; // Total PAID (LYD)
+  let totalR2 = 0; // Total ADS CREDIT (USD)
+  payments.forEach(p => {
+    const r1 = p.amount * p.rate;
+    let r2 = 0;
+    if (p.rate2 > 0) {
+      r2 = usdBasedMethods.includes(p.method) ? (r1 / p.rate2) : (p.amount / p.rate2);
+      r2 = ceilingRound(r2);
+    }
+    totalR1 += r1;
+    totalR2 += r2;
+  });
+  if (totalR2 % 1 !== 0) totalR2 = totalR2 + 0.01;
+  const avgRate = (totalR2 > 0 && totalR1 > 0) ? (totalR1 / totalR2) : state.defaultExchangeRate;
+
+  updateRecord(state.receipts, receiptId, {
+    payments,
+    amountLocal: totalR1,
+    amountUSD: totalR2,
+    exchangeRate: avgRate
+  });
   showNotification('Saved', 'Split payments saved successfully', 'success');
   closeModal();
   render();
@@ -1933,18 +1973,23 @@ function removeTopUp(index) {
 function saveTopUps() {
   const adId = state.modalData.id;
   const ad = state.ads.find(a => a.id === adId);
-  
-  const allTopUps = [...(ad.topUps || []), ...tempTopUps];
-  const totalTopUps = tempTopUps.reduce((sum, t) => sum + t.amount, 0);
-  const newAmountUSD = (ad.initialAmountUSD || ad.amountUSD) + totalTopUps;
-  
+  if (!ad) return;
+
+  // tempTopUps is the COMPLETE working list (seeded from ad.topUps on open,
+  // plus/minus edits). initialAmountUSD is the amount BEFORE any top-up, so
+  // the new amount is the base plus EVERY top-up — not just newly-added ones.
+  const allTopUps = tempTopUps.map(t => ({ ...t }));
+  const baseAmountUSD = ad.initialAmountUSD || ad.amountUSD;
+  const totalTopUps = allTopUps.reduce((sum, t) => sum + t.amount, 0);
+  const newAmountUSD = baseAmountUSD + totalTopUps;
+
   updateRecord(state.ads, adId, {
     topUps: allTopUps,
-    initialAmountUSD: ad.initialAmountUSD || ad.amountUSD,
+    initialAmountUSD: baseAmountUSD,
     amountUSD: newAmountUSD,
     amountLocal: newAmountUSD * ad.exchangeRate
   });
-  
+
   tempTopUps = [];
   showNotification('Saved', `Top-ups saved. New amount: $${newAmountUSD.toFixed(2)}`, 'success');
   closeModal();

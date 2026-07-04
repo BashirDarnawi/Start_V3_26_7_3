@@ -6801,6 +6801,35 @@ function unlockLayoutAfterRender(app) {
   app.style.removeProperty('--app-height');
 }
 
+// Capture the currently-focused text field (by id) and its caret, so a
+// full/partial re-render can put the cursor back where the user was typing.
+function _captureFocusState() {
+  const el = document.activeElement;
+  if (!el || !el.id) return null;
+  const tag = el.tagName;
+  if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') return null;
+  const state = { id: el.id };
+  try {
+    if (tag !== 'SELECT' && typeof el.selectionStart === 'number') {
+      state.start = el.selectionStart;
+      state.end = el.selectionEnd;
+    }
+  } catch (_) { /* some input types disallow selection access */ }
+  return state;
+}
+
+function _restoreFocusState(saved) {
+  if (!saved) return;
+  const el = document.getElementById(saved.id);
+  if (!el || el === document.activeElement) return;
+  try {
+    el.focus({ preventScroll: true });
+    if (typeof saved.start === 'number' && typeof el.setSelectionRange === 'function') {
+      el.setSelectionRange(saved.start, saved.end);
+    }
+  } catch (_) { /* ignore focus/caret restore failures */ }
+}
+
 function render() {
   // Prevent re-entrant rendering
   if (_renderInProgress) return;
@@ -6852,6 +6881,11 @@ function render() {
       // Enforce "secret ideas" gating for non-admin users
       enforceSecretFeaturesGate();
 
+      // Preserve keyboard focus + caret across the innerHTML swap. Without
+      // this, a background live-sync render() (every 3s) recreates the DOM and
+      // steals focus while the user is typing in e.g. the receipts search box.
+      const _focusBefore = _captureFocusState();
+
       // For main app, try to update only the content area if possible
       if (canPartialUpdate) {
         // Only update the view content, not the entire app
@@ -6864,6 +6898,8 @@ function render() {
       } else {
         app.innerHTML = renderMainApp();
       }
+
+      _restoreFocusState(_focusBefore);
 
       _lastRenderedView = currentView;
       _lastRenderedUserId = currentUserId;
@@ -11731,10 +11767,13 @@ function getCustomerSortValue(customer, sortType) {
       return stats.totalSpent;
     case 'leastSpend':
       return -stats.totalSpent;
+    // Non-qualifying customers sink to the bottom. Use a finite sentinel, not
+    // -Infinity: two -Infinity values subtract to NaN in the comparator, which
+    // makes the sort order undefined (and can throw in some engines).
     case 'biggestCredit':
-      return stats.balance > 0 ? stats.balance : -Infinity;
+      return stats.balance > 0 ? stats.balance : -Number.MAX_VALUE;
     case 'highestDebt':
-      return stats.balance < 0 ? -stats.balance : -Infinity;
+      return stats.balance < 0 ? -stats.balance : -Number.MAX_VALUE;
     default:
       return 0;
   }
@@ -13092,7 +13131,13 @@ function manageSplitPayments(receiptId) {
 function manageTopUps(adId) {
   const ad = state.ads.find(a => a.id === adId);
   if (!ad) return;
-  
+
+  // Seed the working list with a COPY of the ad's existing top-ups, so the
+  // modal shows them, the X button can delete them, and newly-added ones
+  // appear immediately. Starting empty (the old behavior) meant existing
+  // top-ups couldn't be removed and new ones were invisible until save.
+  tempTopUps = (ad.topUps || []).map(t => ({ ...t }));
+
   state.activeModal = 'top-ups';
   state.modalData = ad;
   renderModal();
@@ -13373,6 +13418,10 @@ function addSplitPayment() {
         <input type="text" inputmode="decimal" class="split-rate w-full glass-input px-3 py-2 rounded-lg text-sm" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" />
       </div>
       <div>
+        <label class="block text-xs font-medium mb-1">USD Rate (Rate 2)</label>
+        <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" />
+      </div>
+      <div>
         <label class="block text-xs font-medium mb-1">Collection Type</label>
         <select class="split-collection w-full glass-input px-3 py-2 rounded-lg text-sm">
           <option value="office">Office</option>
@@ -13405,26 +13454,53 @@ function saveSplitPayments() {
   const receiptId = state.modalData.id;
   const paymentItems = document.querySelectorAll('.split-payment-item');
   const payments = [];
-  
+
   paymentItems.forEach(item => {
     const method = item.querySelector('.split-method').value;
     const amount = parseFloat(item.querySelector('.split-amount').value) || 0;
     const rate = parseFloat(item.querySelector('.split-rate').value) || state.defaultExchangeRate;
+    const rate2 = parseFloat(item.querySelector('.split-rate2')?.value) || rate;
     const collectionType = item.querySelector('.split-collection').value;
     const deliveryPersonId = item.querySelector('.split-delivery-person')?.value || '';
-    
+
     if (amount > 0) {
       payments.push({
         method,
         amount,
         rate,
+        rate2,
         collectionType,
         deliveryPersonId
       });
     }
   });
-  
-  updateRecord(state.receipts, receiptId, { payments });
+
+  // Recompute the receipt totals from the edited payments using the SAME
+  // logic as saveReceipt (src/14-forms.js). Previously this saved only the
+  // payments array and left amountUSD/amountLocal/exchangeRate stale, so the
+  // receipt's money totals no longer matched its own payment lines.
+  const usdBasedMethods = ['USDT', 'Bank Transfer (USD)', 'Cash (USD)'];
+  let totalR1 = 0; // Total PAID (LYD)
+  let totalR2 = 0; // Total ADS CREDIT (USD)
+  payments.forEach(p => {
+    const r1 = p.amount * p.rate;
+    let r2 = 0;
+    if (p.rate2 > 0) {
+      r2 = usdBasedMethods.includes(p.method) ? (r1 / p.rate2) : (p.amount / p.rate2);
+      r2 = ceilingRound(r2);
+    }
+    totalR1 += r1;
+    totalR2 += r2;
+  });
+  if (totalR2 % 1 !== 0) totalR2 = totalR2 + 0.01;
+  const avgRate = (totalR2 > 0 && totalR1 > 0) ? (totalR1 / totalR2) : state.defaultExchangeRate;
+
+  updateRecord(state.receipts, receiptId, {
+    payments,
+    amountLocal: totalR1,
+    amountUSD: totalR2,
+    exchangeRate: avgRate
+  });
   showNotification('Saved', 'Split payments saved successfully', 'success');
   closeModal();
   render();
@@ -13468,18 +13544,23 @@ function removeTopUp(index) {
 function saveTopUps() {
   const adId = state.modalData.id;
   const ad = state.ads.find(a => a.id === adId);
-  
-  const allTopUps = [...(ad.topUps || []), ...tempTopUps];
-  const totalTopUps = tempTopUps.reduce((sum, t) => sum + t.amount, 0);
-  const newAmountUSD = (ad.initialAmountUSD || ad.amountUSD) + totalTopUps;
-  
+  if (!ad) return;
+
+  // tempTopUps is the COMPLETE working list (seeded from ad.topUps on open,
+  // plus/minus edits). initialAmountUSD is the amount BEFORE any top-up, so
+  // the new amount is the base plus EVERY top-up — not just newly-added ones.
+  const allTopUps = tempTopUps.map(t => ({ ...t }));
+  const baseAmountUSD = ad.initialAmountUSD || ad.amountUSD;
+  const totalTopUps = allTopUps.reduce((sum, t) => sum + t.amount, 0);
+  const newAmountUSD = baseAmountUSD + totalTopUps;
+
   updateRecord(state.ads, adId, {
     topUps: allTopUps,
-    initialAmountUSD: ad.initialAmountUSD || ad.amountUSD,
+    initialAmountUSD: baseAmountUSD,
     amountUSD: newAmountUSD,
     amountLocal: newAmountUSD * ad.exchangeRate
   });
-  
+
   tempTopUps = [];
   showNotification('Saved', `Top-ups saved. New amount: $${newAmountUSD.toFixed(2)}`, 'success');
   closeModal();
@@ -14952,8 +15033,14 @@ async function saveReceiptFromModal() {
     deliveryPlaceName: isTempDelivery ? deliveryPlaceName : (state.modalData?.deliveryPlaceName || deliveryPlaceName || ''),
     deliveryInstructions: isTempDelivery ? deliveryInstructions : (state.modalData?.deliveryInstructions || deliveryInstructions || ''),
     quotedDeliveryFee: isTempDelivery ? quotedDeliveryFee : (state.modalData?.quotedDeliveryFee ?? quotedDeliveryFee),
-    debtAmountLocal: (state.modalData?.debtAmountLocal ?? (isTempDelivery ? totalLYD : undefined)),
-    debtAmountUSD: (state.modalData?.debtAmountUSD ?? (isTempDelivery ? totalUSD : undefined)),
+    // Debt baseline (what the driver must collect on delivery). While the
+    // receipt is still a pre-delivery temp receipt, keep this in sync with the
+    // current totals so an admin's edit to the amount also corrects the amount
+    // to be collected. Once delivered (no longer a temp receipt) the stored
+    // baseline is preserved. Previously an edit updated amountLocal but left
+    // this stale, corrupting the driver's cash reconciliation.
+    debtAmountLocal: (isTempDelivery ? totalLYD : (state.modalData?.debtAmountLocal ?? undefined)),
+    debtAmountUSD: (isTempDelivery ? totalUSD : (state.modalData?.debtAmountUSD ?? undefined)),
     officeFee: 0,
     discount: 0,
     phoneNumber: document.getElementById('receipt-phone-search').value || '',
@@ -18364,6 +18451,10 @@ function renderModal() {
                     <input type="text" inputmode="decimal" class="split-rate w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate || state.defaultExchangeRate}" oninput="sanitizeMoneyInput(this, 4)" />
                   </div>
                   <div>
+                    <label class="block text-xs font-medium mb-1">USD Rate (Rate 2)</label>
+                    <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate2 || payment.rate || state.defaultExchangeRate}" oninput="sanitizeMoneyInput(this, 4)" />
+                  </div>
+                  <div>
                     <label class="block text-xs font-medium mb-1">Collection Type</label>
                     <select class="split-collection w-full glass-input px-3 py-2 rounded-lg text-sm">
                       <option value="office" ${payment.collectionType === 'office' ? 'selected' : ''}>Office</option>
@@ -18407,8 +18498,13 @@ function renderModal() {
       break;
     case 'top-ups':
       const topUpAd = state.modalData;
-      const existingTopUps = topUpAd.topUps || [];
-      
+      // Render from the working copy (tempTopUps) so existing AND just-added
+      // top-ups both show and can be removed. The "New total" is computed live
+      // from the base amount + the working list.
+      const existingTopUps = tempTopUps;
+      const topUpBase = topUpAd.initialAmountUSD || topUpAd.amountUSD;
+      const topUpWorkingTotal = existingTopUps.reduce((sum, t) => sum + (t.amount || 0), 0);
+
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center">
           <i data-lucide="trending-up" class="w-6 h-6 mr-2 text-blue-600"></i>
@@ -18417,8 +18513,8 @@ function renderModal() {
         <div class="space-y-4">
           <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl">
             <div class="text-sm font-medium text-blue-700 dark:text-blue-300">Ad Details</div>
-            <div class="text-lg font-bold text-blue-600 mt-1">Original: $${topUpAd.initialAmountUSD || topUpAd.amountUSD} → Current: $${topUpAd.amountUSD}</div>
-            ${existingTopUps.length > 0 ? `<div class="text-xs text-slate-500 mt-1">Total top-ups: $${existingTopUps.reduce((sum, t) => sum + t.amount, 0).toFixed(2)}</div>` : ''}
+            <div class="text-lg font-bold text-blue-600 mt-1">Original: $${topUpBase} → New: $${(topUpBase + topUpWorkingTotal).toFixed(2)}</div>
+            ${existingTopUps.length > 0 ? `<div class="text-xs text-slate-500 mt-1">Total top-ups: $${topUpWorkingTotal.toFixed(2)}</div>` : ''}
           </div>
 
           <div id="topups-container" class="space-y-2">
@@ -19645,10 +19741,13 @@ async function handleModalSubmit() {
 function closeModal() {
   state.activeModal = null;
   state.modalData = null;
-  
+
   // Clear temp funding states
   state.tempAdFunding = null;
   state.tempMergeFunding = null;
+  // Discard any pending (unsaved) top-up edits so they cannot leak into the
+  // next ad's top-up session.
+  tempTopUps = [];
   
   // Clear URL params (modal, id)
   clearUrlParams(['modal', 'id']);
