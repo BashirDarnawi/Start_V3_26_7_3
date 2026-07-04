@@ -577,6 +577,20 @@ function getReceiptUsageStats(receipt) {
       return sum + explicitAllocations;
     }
 
+    // MONEY-MATH: fall back to spentUSD/amountUSD ONLY when the ad carries no
+    // allocation data at all (legacy records that predate allocations). If the
+    // ad HAS allocation entries — they just point at OTHER receipts — then a
+    // zero sum for THIS receipt means this receipt funded nothing; charging the
+    // full ad spend here would count the same dollars on two receipts at once
+    // (e.g. a delivery ad matched via linkedDeliveryReceiptId but funded
+    // entirely from a merged paid receipt).
+    const hasAllocationData =
+      (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length > 0) ||
+      (Array.isArray(ad.dueAllocations) && ad.dueAllocations.length > 0);
+    if (hasAllocationData) {
+      return sum;
+    }
+
     // Fall back to spentUSD or amountUSD only if no explicit allocations
     const spend = ad.spentUSD ?? ad.amountUSD ?? 0;
     return sum + spend;

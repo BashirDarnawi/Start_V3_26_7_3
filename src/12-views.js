@@ -1271,11 +1271,13 @@ function renderAnalyticsView() {
   const paidUSD = paidReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
   const pendingUSD = pendingReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
 
-  // Calculate actual balance: paid receipts - used funds
-  // This shows how much money from receipts is actually available
+  // Calculate actual balance: paid receipts - used funds - transferred funds.
+  // MONEY-MATH: transfers consume a receipt exactly like usage does (the
+  // per-receipt cards already subtract them), so the dashboard must subtract
+  // them too or every transferred dollar shows as still "available".
   const totalUsedFromReceipts = paidReceipts.reduce((sum, r) => {
     const stats = getReceiptUsageStats(r);
-    return sum + (stats.usedUSD || 0);
+    return sum + (stats.usedUSD || 0) + (stats.transferredUSD || 0);
   }, 0);
   const availableReceiptBalance = Math.max(paidUSD - totalUsedFromReceipts, 0);
   

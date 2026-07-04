@@ -1955,30 +1955,43 @@ async function handleModalSubmit() {
           .filter(a => a.receiptId && parseFloat(a.amountUSD) > 0)
           .map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) }));
         
-        // Validate merged allocations don't exceed receipt remaining
+        // Validate merged allocations don't exceed receipt remaining.
+        // MONEY-MATH: aggregate per receipt FIRST (mirrors the paid path above).
+        // Checking row-by-row let two rows that pick the SAME receipt each pass
+        // individually while their sum over-drew the receipt, and the edit
+        // add-back was applied once per duplicate row, widening the gap.
+        const mergedTotalsByReceipt = new Map();
         for (const alloc of mergedAllocations) {
-          const receipt = state.receipts.find(r => String(r.id) === String(alloc.receiptId));
-          if (!receipt) {
-            showNotification('Validation', 'One of the merged receipts is missing.', 'error');
+          const rid = String(alloc.receiptId || '');
+          if (!rid) continue;
+          mergedTotalsByReceipt.set(rid, (mergedTotalsByReceipt.get(rid) || 0) + (parseFloat(alloc.amountUSD) || 0));
+        }
+        for (const [rid, plannedTotal] of mergedTotalsByReceipt.entries()) {
+          const receipt = state.receipts.find(r => String(r.id) === rid);
+          // Soft-deleted receipts stay in state.receipts with _deleted=true —
+          // money can NOT be drawn from a deleted receipt.
+          if (!receipt || receipt._deleted) {
+            showNotification('Validation', 'One of the merged receipts is missing or was deleted.', 'error');
             return;
           }
           const usageStats = getReceiptUsageStats(receipt);
           let remaining = usageStats.remainingUSD || 0;
           // If editing, add back what this ad already merged from this receipt
-          // (mirrors the paid path) so re-saving the same amount is allowed.
+          // (mirrors the paid path) so re-saving the same amount is allowed —
+          // applied ONCE per receipt, not once per duplicate row.
           if (isEdit && state.modalData?.id) {
             const existingAd = state.ads.find(a => a.id === state.modalData.id);
             const src = existingAd?.mergedPaidAllocations || existingAd?.receiptAllocations;
             if (Array.isArray(src)) {
               remaining += src
-                .filter(a => String(a.receiptId) === String(alloc.receiptId))
+                .filter(a => String(a.receiptId) === rid)
                 .reduce((sum, a) => sum + (parseFloat(a.amountUSD) || 0), 0);
             }
           }
-          if (alloc.amountUSD > remaining + 0.0001) {
+          if (plannedTotal > remaining + 0.0001) {
             showNotification(
               'Validation',
-              `Merged spend ($${alloc.amountUSD.toFixed(2)}) exceeds available balance ($${remaining.toFixed(2)}) for receipt ${receipt.serialNumber || receipt.id}.`,
+              `Merged spend ($${plannedTotal.toFixed(2)}) exceeds available balance ($${remaining.toFixed(2)}) for receipt ${receipt.serialNumber || receipt.id}.`,
               'error'
             );
             return;
@@ -2594,6 +2607,17 @@ function deleteReceipt(id) {
         const before = ad.dueAllocations.length;
         ad.dueAllocations = ad.dueAllocations.filter(alloc => alloc.receiptId !== id);
         if (ad.dueAllocations.length !== before) changed = true;
+      }
+      // Remove from mergedPaidAllocations (the merged-funding mirror). Leaving
+      // it stale would let the next ad edit reseed the merge editor from it and
+      // re-write an allocation that draws money from the deleted receipt.
+      if (Array.isArray(ad.mergedPaidAllocations)) {
+        const before = ad.mergedPaidAllocations.length;
+        ad.mergedPaidAllocations = ad.mergedPaidAllocations.filter(alloc => alloc.receiptId !== id);
+        if (ad.mergedPaidAllocations.length !== before) {
+          changed = true;
+          ad.hasMergedPaidFunds = ad.mergedPaidAllocations.length > 0;
+        }
       }
       // Clear linked receipt references
       if (ad.receiptId === id) { ad.receiptId = ''; changed = true; }

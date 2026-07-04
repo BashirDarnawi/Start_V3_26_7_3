@@ -169,7 +169,113 @@ function confirmStopAd(id) {
   // first stop, or to adjust on a re-stop edit.
   const returnFraction = _poolTotal > 0 ? Math.min(Math.max(newRemainingUSD, 0) / _poolTotal, 1) : 0;
   const adjustFraction = _poolTotal > 0 ? Math.abs(remainingDifference) / _poolTotal : 0;
-  
+
+  // MONEY-MATH: snapshot the funding proportions the FIRST time the ad is
+  // stopped. Stopping with a low spend shrinks (possibly zeroes) the live
+  // allocations, so a later stop-EDIT cannot recover each receipt's original
+  // share from the live values alone (a fully-returned pool sums to 0 and
+  // blocks all redistribution). With this baseline, an edit recomputes each
+  // receipt's allocation as ORIGINAL share × (new spent / original pool) —
+  // mathematically identical to the old adjust-by-difference math in the
+  // normal case, but still correct after a zero/low-spend stop.
+  if (!isEditing && !ad.stopAllocationBaseline) {
+    const snap = (arr) => Array.isArray(arr)
+      ? arr.map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) || 0 }))
+      : [];
+    ad.stopAllocationBaseline = {
+      receipt: snap(ad.receiptAllocations),
+      due: snap(ad.dueAllocations),
+      merged: snap(ad.mergedPaidAllocations),
+      dueLegacy: (Array.isArray(ad.dueAllocations) && ad.dueAllocations.length) ? 0 : (parseFloat(ad.dueAmountToUseUSD) || 0),
+    };
+  }
+
+  // Plan the final amount of every allocation entry BEFORE mutating anything,
+  // so spend increases can be validated against receipt balances first.
+  const _baseline = isEditing ? (ad.stopAllocationBaseline || null) : null;
+  const _basePool = _baseline
+    ? (_sumAlloc(_baseline.receipt) + (_baseline.due.length ? _sumAlloc(_baseline.due) : (_baseline.dueLegacy || 0)))
+    : 0;
+  const _spentFraction = _basePool > 0 ? Math.min(spentUSD / _basePool, 1) : 0;
+
+  const _baseAmountFor = (baseEntries, receiptId) => (baseEntries || [])
+    .filter(b => String(b.receiptId) === String(receiptId))
+    .reduce((s, b) => s + (b.amountUSD || 0), 0);
+
+  const _planFor = (allocs, baseEntries) => {
+    if (!Array.isArray(allocs)) return [];
+    return allocs.map(alloc => {
+      const current = parseFloat(alloc.amountUSD) || 0;
+      let newAmount = current;
+      if (isEditing && remainingDifference !== 0) {
+        if (_baseline && _basePool > 0) {
+          newAmount = _baseAmountFor(baseEntries, alloc.receiptId) * _spentFraction;
+        } else {
+          // Legacy ads stopped before the baseline existed: keep the old
+          // adjust-by-difference behavior.
+          newAmount = remainingDifference > 0
+            ? Math.max(current - current * adjustFraction, 0)
+            : current + current * adjustFraction;
+        }
+      } else if (!isEditing && newRemainingUSD > 0) {
+        newAmount = Math.max(current - current * returnFraction, 0);
+      }
+      return { alloc, current, newAmount };
+    });
+  };
+
+  const _planReceipt = _planFor(ad.receiptAllocations, _baseline ? _baseline.receipt : []);
+  const _planDue = _planFor(ad.dueAllocations, _baseline ? _baseline.due : []);
+  const _planMerged = _planFor(ad.mergedPaidAllocations, _baseline ? _baseline.merged : []);
+
+  // MONEY-MATH: when a stop-edit INCREASES spend, the extra money is re-taken
+  // from the funding receipts — verify each receipt still has that much left
+  // (another ad may have legitimately used the returned funds in the meantime).
+  // Without this check two ads could spend more than a receipt ever contained.
+  // Merged entries mirror the paid pool, so validating _planReceipt covers them.
+  if (isEditing && remainingDifference < 0) {
+    const increaseByReceipt = new Map();
+    for (const p of _planReceipt) {
+      const inc = p.newAmount - p.current;
+      if (inc > 0.0001) {
+        const rid = String(p.alloc.receiptId || '');
+        increaseByReceipt.set(rid, (increaseByReceipt.get(rid) || 0) + inc);
+      }
+    }
+    for (const [rid, inc] of increaseByReceipt.entries()) {
+      const receipt = state.receipts.find(r => String(r.id) === rid && !r._deleted);
+      const remaining = receipt ? (getReceiptUsageStats(receipt).remainingUSD || 0) : 0;
+      if (inc > remaining + 0.01) {
+        showNotification(
+          'Validation',
+          `Cannot increase spent: receipt ${receipt ? (receipt.serialNumber || receipt.finalReceiptNo || rid) : rid} only has $${remaining.toFixed(2)} left (needs $${inc.toFixed(2)} more).`,
+          'error'
+        );
+        return;
+      }
+    }
+    const dueIncreaseByReceipt = new Map();
+    for (const p of _planDue) {
+      const inc = p.newAmount - p.current;
+      if (inc > 0.0001) {
+        const rid = String(p.alloc.receiptId || '');
+        dueIncreaseByReceipt.set(rid, (dueIncreaseByReceipt.get(rid) || 0) + inc);
+      }
+    }
+    for (const [rid, inc] of dueIncreaseByReceipt.entries()) {
+      const dueUsage = getDeliveryReceiptDueUsage(rid);
+      const remaining = dueUsage ? (dueUsage.remainingDueUSD || 0) : 0;
+      if (inc > remaining + 0.01) {
+        showNotification(
+          'Validation',
+          `Cannot increase spent: the delivery receipt's due credit only has $${remaining.toFixed(2)} left (needs $${inc.toFixed(2)} more).`,
+          'error'
+        );
+        return;
+      }
+    }
+  }
+
   // Update ad status and spent amount
   ad.status = 'Stopped';
   ad.spentUSD = spentUSD;
@@ -177,134 +283,47 @@ function confirmStopAd(id) {
     ad.stoppedAt = new Date().toISOString();
   }
   ad.lastUpdated = new Date().toISOString();
-  
-  // Handle receipt allocations - adjust based on remaining difference
-  if (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length > 0) {
-    const totalAllocated = ad.receiptAllocations.reduce((sum, alloc) => sum + (parseFloat(alloc.amountUSD) || 0), 0);
-    
-    if (totalAllocated > 0) {
-      if (isEditing && remainingDifference !== 0) {
-        // Editing: adjust allocations by the ad's global funding-pool fraction
-        const adjustmentRatio = adjustFraction;
 
-        ad.receiptAllocations.forEach(alloc => {
-          const receipt = state.receipts.find(r => r.id === alloc.receiptId);
-          if (receipt) {
-            const allocatedAmount = parseFloat(alloc.amountUSD) || 0;
-            const adjustmentAmount = allocatedAmount * adjustmentRatio;
-            
-            if (remainingDifference > 0) {
-              // More remaining now - reduce allocation (return more to receipt)
-              alloc.amountUSD = Math.max(allocatedAmount - adjustmentAmount, 0);
-              addAuditLog('receipt', receipt.id, 'usage', `Ad ${ad.id} updated - returned additional $${adjustmentAmount.toFixed(2)} to receipt balance`, {
-                adId: ad.id,
-                returnedAmount: adjustmentAmount,
-                spentAmount: spentUSD,
-                previousSpent: previousSpentUSD
-              });
-            } else {
-              // Less remaining now - increase allocation (use more from receipt)
-              alloc.amountUSD = allocatedAmount + adjustmentAmount;
-              addAuditLog('receipt', receipt.id, 'usage', `Ad ${ad.id} updated - used additional $${adjustmentAmount.toFixed(2)} from receipt balance`, {
-                adId: ad.id,
-                usedAmount: adjustmentAmount,
-                spentAmount: spentUSD,
-                previousSpent: previousSpentUSD
-              });
-            }
-          }
+  // Apply the planned allocation amounts (+ audit trail per receipt).
+  // MONEY-MATH: zero-amount entries are intentionally KEPT (not filtered out)
+  // so each receipt's identity survives a zero/low-spend stop and a later
+  // stop-edit can re-charge the same receipts in their original proportions.
+  const _applyPlan = (plan, poolLabel) => {
+    for (const p of plan) {
+      const receipt = state.receipts.find(r => r.id === p.alloc.receiptId);
+      if (!receipt) continue;
+      const delta = p.newAmount - p.current;
+      if (Math.abs(delta) < 0.0000001) continue;
+      p.alloc.amountUSD = Math.max(p.newAmount, 0);
+      if (isEditing) {
+        addAuditLog('receipt', receipt.id, 'usage', `Ad ${ad.id} updated - ${delta > 0 ? 'used additional' : 'returned additional'} $${Math.abs(delta).toFixed(2)} ${delta > 0 ? 'from' : 'to'} ${poolLabel}`, {
+          adId: ad.id,
+          ...(delta > 0 ? { usedAmount: Math.abs(delta) } : { returnedAmount: Math.abs(delta) }),
+          spentAmount: spentUSD,
+          previousSpent: previousSpentUSD
         });
-      } else if (!isEditing && newRemainingUSD > 0) {
-        // First time stopping: return each allocation's share of the remainder
-        const reductionRatio = returnFraction;
-
-        ad.receiptAllocations.forEach(alloc => {
-          const receipt = state.receipts.find(r => r.id === alloc.receiptId);
-          if (receipt) {
-            const allocatedAmount = parseFloat(alloc.amountUSD) || 0;
-            const reductionAmount = allocatedAmount * reductionRatio;
-            alloc.amountUSD = Math.max(allocatedAmount - reductionAmount, 0);
-            
-            addAuditLog('receipt', receipt.id, 'usage', `Ad ${ad.id} stopped - returned $${reductionAmount.toFixed(2)} to receipt balance`, {
-              adId: ad.id,
-              returnedAmount: reductionAmount,
-              spentAmount: spentUSD
-            });
-          }
+      } else {
+        addAuditLog('receipt', receipt.id, 'usage', `Ad ${ad.id} stopped - returned $${Math.abs(delta).toFixed(2)} to ${poolLabel}`, {
+          adId: ad.id,
+          returnedAmount: Math.abs(delta),
+          spentAmount: spentUSD
         });
       }
-      
-      // Remove zero allocations
-      ad.receiptAllocations = ad.receiptAllocations.filter(alloc => (parseFloat(alloc.amountUSD) || 0) > 0);
     }
-  }
-  
-  // Handle dueAllocations - for "Not Paid + Driver" mode ads
+  };
+  _applyPlan(_planReceipt, 'receipt balance');
+  _applyPlan(_planDue, 'delivery receipt due balance');
+  _applyPlan(_planMerged, 'merged receipt balance');
+
   if (Array.isArray(ad.dueAllocations) && ad.dueAllocations.length > 0) {
-    const totalDueAllocated = ad.dueAllocations.reduce((sum, alloc) => sum + (parseFloat(alloc.amountUSD) || 0), 0);
-    
-    if (totalDueAllocated > 0) {
-      if (isEditing && remainingDifference !== 0) {
-        // Editing: adjust allocations by the ad's global funding-pool fraction
-        const adjustmentRatio = adjustFraction;
-
-        ad.dueAllocations.forEach(alloc => {
-          const receipt = state.receipts.find(r => r.id === alloc.receiptId);
-          if (receipt) {
-            const allocatedAmount = parseFloat(alloc.amountUSD) || 0;
-            const adjustmentAmount = allocatedAmount * adjustmentRatio;
-            
-            if (remainingDifference > 0) {
-              alloc.amountUSD = Math.max(allocatedAmount - adjustmentAmount, 0);
-              addAuditLog('receipt', receipt.id, 'usage', `Ad ${ad.id} updated - returned additional $${adjustmentAmount.toFixed(2)} to delivery receipt due balance`, {
-                adId: ad.id,
-                returnedAmount: adjustmentAmount,
-                spentAmount: spentUSD,
-                previousSpent: previousSpentUSD
-              });
-            } else {
-              alloc.amountUSD = allocatedAmount + adjustmentAmount;
-              addAuditLog('receipt', receipt.id, 'usage', `Ad ${ad.id} updated - used additional $${adjustmentAmount.toFixed(2)} from delivery receipt due balance`, {
-                adId: ad.id,
-                usedAmount: adjustmentAmount,
-                spentAmount: spentUSD,
-                previousSpent: previousSpentUSD
-              });
-            }
-          }
-        });
-      } else if (!isEditing && newRemainingUSD > 0) {
-        // First time stopping: return each allocation's share of the remainder
-        const reductionRatio = returnFraction;
-
-        ad.dueAllocations.forEach(alloc => {
-          const receipt = state.receipts.find(r => r.id === alloc.receiptId);
-          if (receipt) {
-            const allocatedAmount = parseFloat(alloc.amountUSD) || 0;
-            const reductionAmount = allocatedAmount * reductionRatio;
-            alloc.amountUSD = Math.max(allocatedAmount - reductionAmount, 0);
-            
-            addAuditLog('receipt', receipt.id, 'usage', `Ad ${ad.id} stopped - returned $${reductionAmount.toFixed(2)} to delivery receipt due balance`, {
-              adId: ad.id,
-              returnedAmount: reductionAmount,
-              spentAmount: spentUSD
-            });
-          }
-        });
-      }
-      
-      // Remove zero allocations
-      ad.dueAllocations = ad.dueAllocations.filter(alloc => (parseFloat(alloc.amountUSD) || 0) > 0);
-    }
-    
-    // Also update the legacy dueAmountToUseUSD field to match
+    // Keep the legacy dueAmountToUseUSD field in sync with dueAllocations
     ad.dueAmountToUseUSD = ad.dueAllocations.reduce((sum, alloc) => sum + (parseFloat(alloc.amountUSD) || 0), 0);
   } else if (ad.dueAmountToUseUSD > 0 && !isEditing && newRemainingUSD > 0) {
     // Legacy: Handle ads with dueAmountToUseUSD but no dueAllocations array.
     // Return only this pool's share of the remainder (global apportionment).
     const reductionAmount = Math.min(ad.dueAmountToUseUSD * returnFraction, ad.dueAmountToUseUSD);
     ad.dueAmountToUseUSD = Math.max(ad.dueAmountToUseUSD - reductionAmount, 0);
-    
+
     if (ad.linkedDeliveryReceiptId) {
       addAuditLog('receipt', ad.linkedDeliveryReceiptId, 'usage', `Ad ${ad.id} stopped - returned $${reductionAmount.toFixed(2)} to delivery receipt due balance`, {
         adId: ad.id,
@@ -313,59 +332,7 @@ function confirmStopAd(id) {
       });
     }
   }
-  
-  // Handle mergedPaidAllocations - for "Not Paid + Driver" mode ads with merged paid receipts
-  if (Array.isArray(ad.mergedPaidAllocations) && ad.mergedPaidAllocations.length > 0) {
-    const totalMergedAllocated = ad.mergedPaidAllocations.reduce((sum, alloc) => sum + (parseFloat(alloc.amountUSD) || 0), 0);
-    
-    if (totalMergedAllocated > 0) {
-      if (isEditing && remainingDifference !== 0) {
-        // Merged mirrors the paid pool — use the same global fraction.
-        const adjustmentRatio = adjustFraction;
 
-        ad.mergedPaidAllocations.forEach(alloc => {
-          const receipt = state.receipts.find(r => r.id === alloc.receiptId);
-          if (receipt) {
-            const allocatedAmount = parseFloat(alloc.amountUSD) || 0;
-            const adjustmentAmount = allocatedAmount * adjustmentRatio;
-            
-            if (remainingDifference > 0) {
-              alloc.amountUSD = Math.max(allocatedAmount - adjustmentAmount, 0);
-              addAuditLog('receipt', receipt.id, 'usage', `Ad ${ad.id} updated - returned additional $${adjustmentAmount.toFixed(2)} to merged receipt balance`, {
-                adId: ad.id,
-                returnedAmount: adjustmentAmount,
-                spentAmount: spentUSD,
-                previousSpent: previousSpentUSD
-              });
-            } else {
-              alloc.amountUSD = allocatedAmount + adjustmentAmount;
-            }
-          }
-        });
-      } else if (!isEditing && newRemainingUSD > 0) {
-        // Merged mirrors the paid pool — use the same global fraction.
-        const reductionRatio = returnFraction;
-
-        ad.mergedPaidAllocations.forEach(alloc => {
-          const receipt = state.receipts.find(r => r.id === alloc.receiptId);
-          if (receipt) {
-            const allocatedAmount = parseFloat(alloc.amountUSD) || 0;
-            const reductionAmount = allocatedAmount * reductionRatio;
-            alloc.amountUSD = Math.max(allocatedAmount - reductionAmount, 0);
-            
-            addAuditLog('receipt', receipt.id, 'usage', `Ad ${ad.id} stopped - returned $${reductionAmount.toFixed(2)} to merged receipt balance`, {
-              adId: ad.id,
-              returnedAmount: reductionAmount,
-              spentAmount: spentUSD
-            });
-          }
-        });
-      }
-      
-      ad.mergedPaidAllocations = ad.mergedPaidAllocations.filter(alloc => (parseFloat(alloc.amountUSD) || 0) > 0);
-    }
-  }
-  
   // Update customer balance
   const customer = state.customers.find(c => c.id === ad.customerId);
   if (customer) {
