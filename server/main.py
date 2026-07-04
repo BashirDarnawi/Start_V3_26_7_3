@@ -560,8 +560,17 @@ def require_same_origin(request: Request):
     referer = request.headers.get("referer")
     host = request.headers.get("host")
 
-    # SECURITY FIX: Must have at least one of origin/referer
+    # SECURITY FIX: Must have at least one of origin/referer.
+    # Exception: the packaged mobile apps use Capacitor's native HTTP layer
+    # (CapacitorHttp — required because iOS WKWebView blocks cross-site
+    # cookies), and native requests carry no Origin/Referer at all. They DO
+    # always carry the app's custom X-Request-ID header. That header is a
+    # safe CSRF marker: HTML forms cannot set custom headers, and fetch()
+    # from a hostile website would need a CORS preflight that only
+    # allowlisted origins pass. (Standard custom-request-header defense.)
     if not origin and not referer:
+        if request.headers.get("x-request-id"):
+            return
         raise HTTPException(status_code=403, detail="Missing origin/referer header")
 
     # Packaged mobile apps and explicitly configured frontends are trusted:

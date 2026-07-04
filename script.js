@@ -3084,6 +3084,23 @@ function saveState() {
     
     // If quota exceeded, try with fewer logs
     if (error.name === 'QuotaExceededError' || error.message.includes('quota')) {
+      // CRITICAL: without IndexedDB, this localStorage snapshot is the ONLY
+      // persisted copy of the business data. Overwriting it with a reduced,
+      // collection-less snapshot would destroy that copy — so in no-IDB mode
+      // we keep the last good snapshot untouched and just warn the user.
+      if (!db) {
+        console.warn('Storage quota exceeded and IndexedDB is unavailable — keeping the previous snapshot to protect data.');
+        try {
+          showNotification(
+            state.language === 'ar' ? 'مساحة التخزين ممتلئة' : 'Storage Full',
+            state.language === 'ar'
+              ? 'لا يمكن حفظ آخر التغييرات — مساحة المتصفح ممتلئة. صدّر نسخة احتياطية من الإعدادات.'
+              : 'Latest changes could not be saved — browser storage is full. Please export a backup from Settings.',
+            'error'
+          );
+        } catch (_) {}
+        return;
+      }
       try {
         const reducedSave = Security.sanitizeObject({
           language: state.language,
@@ -3124,15 +3141,15 @@ function loadState() {
       // Sanitize loaded data to prevent XSS from corrupted storage
       const sanitizedData = Security.sanitizeObject(parsed);
 
-      // Extract legacy large collections (older versions stored everything in localStorage)
-      const legacyCollections = {
-        ads: Array.isArray(sanitizedData.ads) ? sanitizedData.ads : null,
-        receipts: Array.isArray(sanitizedData.receipts) ? sanitizedData.receipts : null,
-        customers: Array.isArray(sanitizedData.customers) ? sanitizedData.customers : null,
-        pages: Array.isArray(sanitizedData.pages) ? sanitizedData.pages : null,
-        users: Array.isArray(sanitizedData.users) ? sanitizedData.users : null,
-        exchangeRateHistory: Array.isArray(sanitizedData.exchangeRateHistory) ? sanitizedData.exchangeRateHistory : null
-      };
+      // Extract legacy large collections (older versions stored everything in
+      // localStorage, and no-IndexedDB mode still does). Built from
+      // PERSISTED_COLLECTIONS so every collection saveState() persists is
+      // round-tripped — a hard-coded list here once missed walletTransactions
+      // and serviceSubscriptions, wiping wallets on reload in no-IDB mode.
+      const legacyCollections = {};
+      for (const key of PERSISTED_COLLECTIONS) {
+        legacyCollections[key] = Array.isArray(sanitizedData[key]) ? sanitizedData[key] : null;
+      }
       // Do not merge large collections from localStorage into runtime state (they belong in IndexedDB)
       for (const key of PERSISTED_COLLECTIONS) delete sanitizedData[key];
       
@@ -12401,7 +12418,11 @@ function readFileAsDataUrl(file) {
 async function compressImageToDataUrl(file) {
   const originalDataUrl = await readFileAsDataUrl(file);
   try {
-    if (!/^image\//i.test(String(file.type || ''))) return originalDataUrl;
+    const type = String(file.type || '').toLowerCase();
+    if (!/^image\//.test(type)) return originalDataUrl;
+    // Animated GIFs cannot survive a canvas re-encode (only the first frame
+    // would remain) — always keep them untouched.
+    if (type === 'image/gif') return originalDataUrl;
     const img = await new Promise((resolve, reject) => {
       const image = new Image();
       image.onload = () => resolve(image);
@@ -12412,7 +12433,8 @@ async function compressImageToDataUrl(file) {
     const h = img.naturalHeight || img.height;
     if (!w || !h) return originalDataUrl;
     const scale = Math.min(1, IMAGE_MAX_DIMENSION / Math.max(w, h));
-    const isPng = /image\/png/i.test(file.type);
+    // PNG and WebP may carry transparency — re-encode as PNG to keep it.
+    const keepAlpha = /image\/(png|webp)/.test(type);
     // Small already and not worth re-encoding? Keep the original.
     if (scale === 1 && originalDataUrl.length < 300 * 1024) return originalDataUrl;
     const canvas = document.createElement('canvas');
@@ -12421,7 +12443,7 @@ async function compressImageToDataUrl(file) {
     const ctx = canvas.getContext('2d');
     if (!ctx) return originalDataUrl;
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    const out = isPng
+    const out = keepAlpha
       ? canvas.toDataURL('image/png')
       : canvas.toDataURL('image/jpeg', IMAGE_JPEG_QUALITY);
     // Only use the compressed version if it is actually smaller.

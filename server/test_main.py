@@ -460,6 +460,27 @@ class TestMobileAppOrigins:
         response, _ = self._login("https://evil.example.com")
         assert response.status_code == 403
 
+    def test_native_http_login_via_custom_header(self):
+        """Capacitor's native HTTP layer (iOS fix) sends no Origin/Referer,
+        but always sends the app's X-Request-ID header — that must pass."""
+        plain = TestClient(app)  # no default Origin header
+        response = plain.post(
+            "/api/auth/login",
+            json={"email": TEST_ADMIN_EMAIL, "password": TEST_ADMIN_PASSWORD},
+            headers={"X-Request-ID": "native-test-1"},
+        )
+        assert response.status_code == 200
+
+    def test_headerless_cross_site_request_still_rejected(self):
+        """A classic CSRF vector (form post: no Origin, no Referer, and no
+        custom headers possible) must still be blocked."""
+        plain = TestClient(app)
+        response = plain.post(
+            "/api/auth/login",
+            json={"email": TEST_ADMIN_EMAIL, "password": TEST_ADMIN_PASSWORD},
+        )
+        assert response.status_code == 403
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
