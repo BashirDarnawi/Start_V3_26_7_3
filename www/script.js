@@ -8594,13 +8594,13 @@ function renderReceiptsView() {
               <option value="amount-low" ${state.receiptSortBy === 'amount-low' ? 'selected' : ''}>💰 Lowest Amount</option>
             </select>
             
-            <!-- Clear Filters Button -->
-            ${hasActiveFilters ? `
+            <!-- Clear Filters Button (span uses display:contents so the button stays a direct flex item) -->
+            <span id="receipt-clear-filters" class="contents">${hasActiveFilters ? `
               <button onclick="clearAllReceiptFilters()" class="px-4 py-3 bg-rose-100 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400 border-2 border-rose-200 dark:border-rose-800 rounded-xl text-sm font-bold hover:bg-rose-200 dark:hover:bg-rose-900/50 transition-all flex items-center space-x-2">
                 <i data-lucide="x-circle" class="w-4 h-4"></i>
                 <span>Clear</span>
               </button>
-            ` : ''}
+            ` : ''}</span>
           </div>
         </div>
         
@@ -12757,6 +12757,7 @@ function updateReceiptsViewFiltered() {
   const countEl = document.getElementById('receipts-count');
   const chipsEl = document.getElementById('receipt-active-filters');
   const clearEl = document.getElementById('receipt-search-clear');
+  const clearFiltersEl = document.getElementById('receipt-clear-filters');
   if (!grid || !countEl) {
     // View structure not on screen (e.g. mid-navigation): fall back to a full render.
     render();
@@ -12772,10 +12773,12 @@ function updateReceiptsViewFiltered() {
   const newCount = src.querySelector('#receipts-count');
   const newChips = src.querySelector('#receipt-active-filters');
   const newClear = src.querySelector('#receipt-search-clear');
+  const newClearFilters = src.querySelector('#receipt-clear-filters');
   if (newGrid) grid.innerHTML = newGrid.innerHTML;
   if (newCount) countEl.textContent = newCount.textContent;
   if (chipsEl && newChips) chipsEl.innerHTML = newChips.innerHTML;
   if (clearEl && newClear) clearEl.innerHTML = newClear.innerHTML;
+  if (clearFiltersEl && newClearFilters) clearFiltersEl.innerHTML = newClearFilters.innerHTML;
   if (window.lucide) lucide.createIcons();
 }
 
