@@ -1906,7 +1906,13 @@ function addSplitPayment() {
 }
 
 function saveSplitPayments() {
-  const receiptId = state.modalData.id;
+  // Read the target from the frozen hidden field, not the mutable global, so a
+  // stray navigation can't redirect this save onto a different receipt.
+  const receiptId = (document.getElementById('split-payments-receipt-id')?.value || '').trim() || state.modalData?.id;
+  if (!receiptId || !state.receipts.some(r => r && !r._deleted && String(r.id) === String(receiptId))) {
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'تعذّر تحديد الوصل' : 'Could not identify the receipt', 'error');
+    return;
+  }
   const paymentItems = document.querySelectorAll('.split-payment-item');
   const payments = [];
 

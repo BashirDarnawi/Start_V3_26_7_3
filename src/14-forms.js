@@ -900,6 +900,17 @@ async function saveReceiptFromModal() {
 
 async function _saveReceiptFromModalInner() {
   try {
+  // Resolve the edit target from the FROZEN hidden field written when this form
+  // was rendered — NOT from the mutable global state.modalData, which a stray
+  // browser-back / refresh / URL-restore can silently repoint at a different
+  // receipt. Empty id, or an id no longer present, means "create new".
+  // (Bug: a new receipt was overwriting an old one because state.modalData had
+  // been repointed at the old receipt after the form opened.)
+  const _editingId = (document.getElementById('receipt-editing-id')?.value || '').trim();
+  const editTarget = _editingId
+    ? (state.receipts.find(r => r && !r._deleted && String(r.id) === _editingId) || null)
+    : null;
+
   const customerId = document.getElementById('receipt-customer-id').value;
   if (!customerId) {
     showNotification('Error', 'Please select a customer by phone', 'error');
@@ -1063,7 +1074,7 @@ async function _saveReceiptFromModalInner() {
     if (isTempDelivery) {
       const existingTemp = state.receipts.find(r =>
         !r._deleted &&
-        r.id !== (state.modalData ? state.modalData.id : null) &&
+        r.id !== (editTarget ? editTarget.id : null) &&
         (String(r.tempReceiptNo || '').trim() === serialNumber || String(r.serialNumber || '').trim() === serialNumber || String(r.finalReceiptNo || '').trim() === serialNumber)
       );
       if (existingTemp) {
@@ -1088,9 +1099,9 @@ async function _saveReceiptFromModalInner() {
     }
     
     // Check for duplicates (excluding current record if editing)
-    const existingReceipt = isTempDelivery ? null : state.receipts.find(receipt => 
-      receipt.serialNumber === serialNumber && 
-      receipt.id !== (state.modalData ? state.modalData.id : null) &&
+    const existingReceipt = isTempDelivery ? null : state.receipts.find(receipt =>
+      receipt.serialNumber === serialNumber &&
+      receipt.id !== (editTarget ? editTarget.id : null) &&
       !receipt._deleted
     );
     
@@ -1163,12 +1174,12 @@ async function _saveReceiptFromModalInner() {
   
   // Temp delivery receipts: send tempReceiptNo (D#) only; serialNumber stays empty until delivery completion.
   // Normal receipts: send serialNumber only.
-  const tempReceiptNo = isTempDelivery ? serialNumber : (state.modalData?.tempReceiptNo || '');
-  const serialFinal = isTempDelivery ? (state.modalData?.serialNumber || state.modalData?.finalReceiptNo || '') : serialNumber;
-  const finalReceiptNo = (state.modalData?.finalReceiptNo || '') || (serialFinal || '');
-  
+  const tempReceiptNo = isTempDelivery ? serialNumber : (editTarget?.tempReceiptNo || '');
+  const serialFinal = isTempDelivery ? (editTarget?.serialNumber || editTarget?.finalReceiptNo || '') : serialNumber;
+  const finalReceiptNo = (editTarget?.finalReceiptNo || '') || (serialFinal || '');
+
   const receipt = {
-    id: state.modalData ? state.modalData.id : generateId('receipt'),
+    id: editTarget ? editTarget.id : generateId('receipt'),
     recordType: 'receipt',
     customerId: customerId,
     pageId: '',
@@ -1185,24 +1196,24 @@ async function _saveReceiptFromModalInner() {
     isReceivedInOffice: receiptIsReceivedInOffice,
     startDate: new Date().toISOString(),
     endDate: new Date().toISOString(),
-    createdAt: state.modalData ? state.modalData.createdAt : new Date().toISOString(),
+    createdAt: editTarget ? editTarget.createdAt : new Date().toISOString(),
     // CRITICAL: temp delivery receipts must NOT send serialNumber=D# (server rejects non-digit serial).
     // Only send serialNumber for normal receipts; temp receipts use tempReceiptNo.
     serialNumber: isTempDelivery ? '' : serialFinal,
     finalReceiptNo: finalReceiptNo,
     tempReceiptNo: tempReceiptNo,
-    receiptType: tempReceiptNo ? 'DELIVERY_TEMP' : (state.modalData?.receiptType || ''),
-    deliveryPlaceName: isTempDelivery ? deliveryPlaceName : (state.modalData?.deliveryPlaceName || deliveryPlaceName || ''),
-    deliveryInstructions: isTempDelivery ? deliveryInstructions : (state.modalData?.deliveryInstructions || deliveryInstructions || ''),
-    quotedDeliveryFee: isTempDelivery ? quotedDeliveryFee : (state.modalData?.quotedDeliveryFee ?? quotedDeliveryFee),
+    receiptType: tempReceiptNo ? 'DELIVERY_TEMP' : (editTarget?.receiptType || ''),
+    deliveryPlaceName: isTempDelivery ? deliveryPlaceName : (editTarget?.deliveryPlaceName || deliveryPlaceName || ''),
+    deliveryInstructions: isTempDelivery ? deliveryInstructions : (editTarget?.deliveryInstructions || deliveryInstructions || ''),
+    quotedDeliveryFee: isTempDelivery ? quotedDeliveryFee : (editTarget?.quotedDeliveryFee ?? quotedDeliveryFee),
     // Debt baseline (what the driver must collect on delivery). While the
     // receipt is still a pre-delivery temp receipt, keep this in sync with the
     // current totals so an admin's edit to the amount also corrects the amount
     // to be collected. Once delivered (no longer a temp receipt) the stored
     // baseline is preserved. Previously an edit updated amountLocal but left
     // this stale, corrupting the driver's cash reconciliation.
-    debtAmountLocal: (isTempDelivery ? totalLYD : (state.modalData?.debtAmountLocal ?? undefined)),
-    debtAmountUSD: (isTempDelivery ? totalUSD : (state.modalData?.debtAmountUSD ?? undefined)),
+    debtAmountLocal: (isTempDelivery ? totalLYD : (editTarget?.debtAmountLocal ?? undefined)),
+    debtAmountUSD: (isTempDelivery ? totalUSD : (editTarget?.debtAmountUSD ?? undefined)),
     officeFee: 0,
     discount: 0,
     phoneNumber: document.getElementById('receipt-phone-search').value || '',
@@ -1215,9 +1226,9 @@ async function _saveReceiptFromModalInner() {
   const linkedCustomer = state.customers.find(c => c.id === customerId);
   const customerName = linkedCustomer ? linkedCustomer.name : 'customer';
   
-  if (state.modalData) {
+  if (editTarget) {
     // Update existing - Track changes for edit history
-    const oldReceipt = state.modalData;
+    const oldReceipt = editTarget;
     const changes = [];
     
     // Fields to track for changes
@@ -1310,7 +1321,12 @@ async function _saveReceiptFromModalInner() {
   // Reset modal state FIRST
   state.activeModal = null;
   state.modalData = null;
-  
+  // Clear the modal/id URL params too. Leaving them meant the just-saved (or a
+  // previously edited) receipt id lingered in the URL and could be restored
+  // into state.modalData by a later back/refresh — the exact stale-target the
+  // frozen editTarget id above defends the save against; clear it at the source.
+  try { clearUrlParams(['modal', 'id']); } catch (_) {}
+
   // Force remove ALL modal elements directly
   document.querySelectorAll('#app-modal').forEach(el => el.remove());
   document.querySelectorAll('[class*="fixed inset-0"]').forEach(el => {

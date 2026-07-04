@@ -668,6 +668,12 @@ function renderModal() {
         
         modalContent = `
           <div class="space-y-3 max-h-[75vh] overflow-y-auto custom-scrollbar pr-1">
+            <!-- The record this form edits, FROZEN at render time. Save reads
+                 THIS, not the mutable global state.modalData, so a stray
+                 browser-back/refresh that reloads a different receipt into
+                 state.modalData can never redirect this save onto the wrong
+                 record. Empty value = create a brand-new receipt. -->
+            <input type="hidden" id="receipt-editing-id" value="${Security.escapeHtml(String(receiptData.id || ''))}" />
             <!-- Phone Search Section -->
             <div class="grid grid-cols-2 gap-3 p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
               <div>
@@ -1112,6 +1118,9 @@ function renderModal() {
           Manage Split Payments
         </h2>
         <div class="space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar pr-2">
+          <!-- Target receipt id frozen at render time (same defense as the main
+               receipt form): saveSplitPayments reads THIS, not state.modalData. -->
+          <input type="hidden" id="split-payments-receipt-id" value="${Security.escapeHtml(String(splitReceipt.id || ''))}" />
           <div class="p-4 bg-indigo-50 dark:bg-indigo-900/20 rounded-xl">
             <div class="text-sm font-medium text-indigo-700 dark:text-indigo-300 mb-2">Receipt Total</div>
             <div class="text-2xl font-bold text-indigo-600">$${splitReceipt.amountUSD?.toFixed(2)} = ${splitReceipt.amountLocal?.toFixed(2)} LYD</div>
