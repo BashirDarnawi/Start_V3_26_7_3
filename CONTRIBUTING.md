@@ -9,6 +9,21 @@ This repository is not “just a single dashboard” anymore. It is a **platform
 
 If you are a developer **or an AI** making changes: read this first.
 
+## How to edit the frontend (IMPORTANT)
+
+`script.js` is a **GENERATED file** — never edit it directly. The real source
+code lives in `src/` (17 ordered files, see `src/README.md` for what's where).
+Workflow:
+
+```
+# 1. edit the right file in src/
+npm run build:js      # 2. rebuild script.js
+npm run sync:mobile   # 3. push to the iOS/Android app folders
+```
+
+If you add/change Tailwind classes built from data (like `bg-${color}-50`),
+also update the safelist in `tailwind.config.js` and run `npm run build:css`.
+
 ## Non‑negotiable rules (do not break)
 
 - **Stable IDs**: never change service `id`s (they become routing, mobile deep links, subscription keys).
@@ -29,7 +44,7 @@ If you are a developer **or an AI** making changes: read this first.
 
 ## Where the platform “truth” lives
 
-- **Services catalog**: `script.js` → `const SERVICES`, `const SMART_SYSTEMS_CHILDREN`
+- **Services catalog**: `src/05-state-services.js` → `const SERVICES`, `const SMART_SYSTEMS_CHILDREN`
 - **Subscriptions source of truth**: `state.serviceSubscriptions` + `SUBSCRIPTIONS.*`
 - **Wallet source of truth**: `state.walletTransactions` + `WALLET.*`
 - **Access checks**: `hasSubscription()` + `checkServiceAccess()`

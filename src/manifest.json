@@ -1,0 +1,21 @@
+{
+  "files": [
+    "01-platform.js",
+    "02-security.js",
+    "03-storage-idb.js",
+    "04-permissions.js",
+    "05-state-services.js",
+    "06-persistence.js",
+    "07-i18n-render-core.js",
+    "08-data-audit.js",
+    "09-api-auth.js",
+    "10-live-sync.js",
+    "11-routing-cloud.js",
+    "12-views.js",
+    "13-filters-helpers.js",
+    "14-forms.js",
+    "15-modals.js",
+    "16-actions-io.js",
+    "17-init.js"
+  ]
+}

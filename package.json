@@ -4,6 +4,7 @@
   "description": "Albayan platform — vanilla JS web app + FastAPI backend + Capacitor iOS/Android shells. See PLATFORM_FOUNDATION.md for platform rules.",
   "main": "script.js",
   "scripts": {
+    "build:js": "node scripts/build-js.js",
     "build:css": "tailwindcss -c tailwind.config.js -i tailwind-input.css -o assets/tailwind.css --minify",
     "sync:www": "node scripts/sync-www.js",
     "sync:mobile": "node scripts/sync-www.js && npx cap copy",
