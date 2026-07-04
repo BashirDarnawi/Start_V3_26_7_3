@@ -209,6 +209,29 @@ def _next_temp_delivery_receipt_no_inner(created_by: str | None, dialect: str, n
     with db_conn() as conn:
         # Lock the counter row (Postgres) to prevent races.
         if dialect == "postgresql":
+            # Seed the counter row first, idempotently. FOR UPDATE cannot lock a
+            # row that does not exist yet, so on a fresh DB two concurrent
+            # first-use requests would both fall through to INSERT and the second
+            # commit would raise an uncaught IntegrityError (500) on the (type,id)
+            # primary key. ON CONFLICT DO NOTHING guarantees the row exists so the
+            # FOR UPDATE below always has something to lock.
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO entities (type, id, data_json, deleted, created_at, created_by, last_modified)
+                    VALUES (:type, :id, :data_json, false, :created_at, :created_by, :last_modified)
+                    ON CONFLICT (type, id) DO NOTHING
+                    """
+                ),
+                {
+                    "type": counter_type,
+                    "id": counter_id,
+                    "data_json": json_dumps({"last": 0, "updatedAt": now}),
+                    "created_at": now,
+                    "created_by": created_by,
+                    "last_modified": now,
+                },
+            )
             row = (
                 conn.execute(
                     text(
@@ -293,8 +316,18 @@ PRIVACY_PATH = PROJECT_ROOT / "privacy.html"
 COOKIE_NAME = "albayan_session"
 SESSION_DURATION_MS = int(os.getenv("ALBAYAN_SESSION_MS", str(8 * 60 * 60 * 1000)))
 # SECURITY: Default to secure cookies in production (HTTPS only)
-# In development, can be set to False via environment variable
-COOKIE_SECURE = os.getenv("ALBAYAN_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes"} or not DEBUG_MODE
+# In development, can be set to False via environment variable.
+# Tri-state: if the env var is set, honor its boolean value (so testing over
+# plain HTTP on a LAN IP can turn Secure OFF); only when it is unset do we
+# default to "secure unless DEBUG". The old expression `<truthy> or not DEBUG`
+# could never be forced to False.
+_COOKIE_SECURE_ENV = os.getenv("ALBAYAN_COOKIE_SECURE", "").strip().lower()
+if _COOKIE_SECURE_ENV in {"1", "true", "yes"}:
+    COOKIE_SECURE = True
+elif _COOKIE_SECURE_ENV in {"0", "false", "no"}:
+    COOKIE_SECURE = False
+else:
+    COOKIE_SECURE = not DEBUG_MODE
 
 # If set, ALL requests must include the origin secret header (added by Cloudflare) or they'll be blocked.
 # This protects your ALB/origin from being accessed directly if someone finds the ALB DNS name.
@@ -317,10 +350,29 @@ _RESET_WINDOW_MS = int(os.getenv("ALBAYAN_RESET_WINDOW_MS", str(15 * 60 * 1000))
 _RESET_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_RESET_MAX_ATTEMPTS", "5"))
 
 
+def _client_ip(request: Request) -> str:
+    """Real client IP, preferring X-Forwarded-For when behind ALB/Cloudflare.
+
+    Without this, request.client.host is the load-balancer node IP in
+    production, so every user shares one rate-limit bucket: a single attacker
+    could lock out password resets platform-wide, or lock any victim's login by
+    spamming their email. The access-log middleware already trusts X-Forwarded-For
+    the same way, so this is consistent with the existing proxy assumption.
+    """
+    try:
+        xff = request.headers.get("x-forwarded-for")
+        if xff:
+            first = xff.split(",")[0].strip()
+            if first:
+                return first
+    except Exception:
+        pass
+    return request.client.host if request.client else "unknown"
+
+
 def _rate_key(request: Request, email: str) -> str:
     """Generate rate limit key from IP + email"""
-    ip = request.client.host if request.client else "unknown"
-    return f"{ip}|{email.lower()}"
+    return f"{_client_ip(request)}|{email.lower()}"
 
 
 def _rate_check(request: Request, email: str) -> tuple[bool, int]:
@@ -1364,10 +1416,10 @@ async def limit_request_size(request: Request, call_next):
     """Prevent DoS via large payloads (max 10 MB)"""
     if request.method in ["POST", "PUT", "PATCH"]:
         content_length = request.headers.get("content-length")
+        max_size = 10 * 1024 * 1024  # 10 MB
         if content_length:
             try:
                 size = int(content_length)
-                max_size = 10 * 1024 * 1024  # 10 MB
                 if size > max_size:
                     return JSONResponse(
                         {"detail": f"Request too large (max {max_size/1024/1024:.0f} MB)"},
@@ -1375,6 +1427,15 @@ async def limit_request_size(request: Request, call_next):
                     )
             except (ValueError, TypeError):
                 pass  # Invalid content-length, let request proceed (will fail later if truly invalid)
+        elif request.url.path.startswith("/api/"):
+            # No Content-Length on an API write means a chunked/streamed body,
+            # which bypasses the size check above and lets a client stream an
+            # unbounded body into memory. All legitimate app clients (browser
+            # fetch, CapacitorHttp) send Content-Length for JSON, so require it.
+            return JSONResponse(
+                {"detail": "Length Required: Content-Length header is required for this request"},
+                status_code=411,
+            )
     return await call_next(request)
 
 
@@ -2199,31 +2260,72 @@ def password_reset_confirm(body: PasswordResetConfirmRequest, request: Request):
     return {"ok": True}
 
 
+def _page_all(collection: str, **kwargs: Any) -> list[dict[str, Any]]:
+    # list_entities caps a single call at 1000 rows; page through so callers
+    # keep a "returns all records" contract instead of silently truncating.
+    out: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        page = list_entities(collection, limit=1000, offset=offset, **kwargs)
+        out.extend(page)
+        if len(page) < 1000:
+            return out
+        offset += 1000
+
+
+def _bootstrap_fetch_scoped(collection: str, user: dict[str, Any]) -> list[dict[str, Any]]:
+    """Fetch a collection for /api/bootstrap using the SAME visibility rules as
+    GET /api/collections/{collection}. Previously bootstrap returned the entire
+    table to any authenticated user, so a Delivery driver (or a viewOwn-only
+    user) received every ad/receipt/customer in the business. This mirrors
+    get_collection's delivery scoping and view/viewOwn permission checks.
+    """
+    role_lower = str(user.get("role") or "").lower()
+
+    # Delivery users: only records assigned to them (mirror get_collection).
+    if role_lower == "delivery" and collection in {"ads", "receipts", "customers"}:
+        uid = sanitize_str(str(user.get("id") or ""))[:80]
+        if not uid:
+            return []
+        if collection in {"ads", "receipts"}:
+            return _page_all(collection, include_deleted=False, assigned_to=uid)
+        # customers: only those referenced by the driver's assigned deliveries.
+        customer_ids: set[str] = set()
+        for c in ("ads", "receipts"):
+            for it in _page_all(c, include_deleted=False, assigned_to=uid):
+                cid = (it.get("data") or {}).get("customerId")
+                if cid:
+                    customer_ids.add(sanitize_str(str(cid))[:80])
+        if not customer_ids:
+            return []
+        return _page_all("customers", include_deleted=False, id_in=sorted(customer_ids))
+
+    module = _module_for_collection(collection)
+    action = _action_for_collection(collection, "view")
+    can_view_all = user_has_permission(user, module, action)
+    can_view_own = user_has_permission(user, module, action, record_creator_id=str(user.get("id") or ""))
+    if not can_view_all and not can_view_own:
+        return []
+
+    include_deleted = can_view_all and user_has_permission(
+        user, module, _action_for_collection(collection, "delete")
+    )
+    created_by_filter = None if can_view_all else str(user.get("id") or "")
+    return _page_all(collection, include_deleted=include_deleted, created_by=created_by_filter)
+
+
 @app.get("/api/bootstrap", response_model=BootstrapResponse)
 def bootstrap(user: dict[str, Any] = Depends(current_user)):
     # For huge datasets, prefer the paginated endpoints.
     # This endpoint returns all records and is best for small/medium deployments.
-    def can(module: str, action: str) -> bool:
-        return user_has_permission(user, module, action)
-
-    def _fetch_all(collection: str, include_deleted: bool) -> list[dict[str, Any]]:
-        # list_entities caps a single call at 1000 rows; page through so
-        # bootstrap keeps its "returns all records" contract instead of
-        # silently truncating to the newest 500.
-        out: list[dict[str, Any]] = []
-        offset = 0
-        while True:
-            page = list_entities(collection, include_deleted=include_deleted, limit=1000, offset=offset)
-            out.extend(page)
-            if len(page) < 1000:
-                return out
-            offset += 1000
-
-    ads = _fetch_all("ads", include_deleted=can("ads", "delete"))
-    receipts = _fetch_all("receipts", include_deleted=can("receipts", "delete"))
-    customers = _fetch_all("customers", include_deleted=can("customers", "delete"))
-    pages = _fetch_all("pages", include_deleted=can("pages", "delete"))
-    exh = _fetch_all("exchangeRateHistory", include_deleted=True)
+    ads = _bootstrap_fetch_scoped("ads", user)
+    receipts = _bootstrap_fetch_scoped("receipts", user)
+    customers = _bootstrap_fetch_scoped("customers", user)
+    pages = _bootstrap_fetch_scoped("pages", user)
+    # Exchange-rate history is non-sensitive reference data every client needs to
+    # render historical money conversions; keep it readable to all authenticated
+    # users (unchanged behavior).
+    exh = _page_all("exchangeRateHistory", include_deleted=True)
     logs = []  # audit logs are available via /api/audit
 
     return BootstrapResponse(
@@ -2425,7 +2527,6 @@ def create_collection_item(
         if is_temp_delivery and not delivery_person_id_in:
             raise HTTPException(status_code=400, detail="deliveryPersonId is required for delivery receipts")
 
-        serial_in = sanitize_str(str(data_in.get("finalReceiptNo") or data_in.get("serialNumber") or ""))[:80]
         temp_in = sanitize_str(str(data_in.get("tempReceiptNo") or ""))[:80]
 
         # Server-generated temp receipt number (preferred): if not provided, generate D{n} safely.
@@ -2445,11 +2546,24 @@ def create_collection_item(
             if _temp_receipt_no_exists(temp_in):
                 raise HTTPException(status_code=409, detail="tempReceiptNo already exists")
 
-        if serial_in:
+        # Validate finalReceiptNo AND serialNumber independently. Previously only
+        # the first non-empty of the two was checked, so a request that sent a
+        # valid finalReceiptNo alongside an invalid/duplicate serialNumber stored
+        # the bad serial without any format or uniqueness check. Read fresh from
+        # data_in so the temp-delivery block above (which may clear serialNumber)
+        # is respected.
+        _final_no = sanitize_str(str(data_in.get("finalReceiptNo") or ""))[:80]
+        _serial_no = sanitize_str(str(data_in.get("serialNumber") or ""))[:80]
+        _serials_to_check = [_final_no]
+        if _serial_no and _serial_no != _final_no:
+            _serials_to_check.append(_serial_no)
+        for _s in _serials_to_check:
+            if not _s:
+                continue
             # Allow S-prefixed auto-serial (S1, S2, S3) for LTT/Libyana/Madar, or regular digits
-            if not _is_valid_serial_number(serial_in):
+            if not _is_valid_serial_number(_s):
                 raise HTTPException(status_code=400, detail="Invalid serialNumber (must be digits or S-prefixed like S1, S2)")
-            if _receipt_serial_exists(serial_in):
+            if _receipt_serial_exists(_s):
                 raise HTTPException(status_code=409, detail="serialNumber already exists")
 
         # Persist server-generated/normalized fields
@@ -2594,6 +2708,18 @@ def update_collection_item(
                 "debtAmountLocal", "debtAmountUSD",
                 "amountLocal", "amountUSD", "deliveredAt",
                 "finalReceiptNo", "serialNumber",
+                # Proof + collected-amount inputs: these are the settlement
+                # EVIDENCE. They may only be written as part of the server's
+                # Delivered-confirmation computation below. Otherwise a driver
+                # could PATCH a receipt that is already Delivered (desired == "",
+                # so the transition check is skipped) with a smaller
+                # amountCollectedFromCustomer and a swapped proof photo, falsifying
+                # what they collected. Strip them from any non-Delivered update.
+                "amountCollectedFromCustomer",
+                "actualDeliveryFeeCollected",
+                "deliveryFeeCollected",
+                "receiptImage",
+                "photos",
             }
             if desired != "Delivered":
                 for _f in SETTLEMENT_FIELDS:
@@ -2772,7 +2898,6 @@ def update_collection_item(
     # Receipt number uniqueness enforcement (server-side, multi-user safe)
     if collection == "receipts":
         updates_in = sanitize_json(body.data or {}) or {}
-        serial_in = sanitize_str(str(updates_in.get("finalReceiptNo") or updates_in.get("serialNumber") or ""))[:80]
         temp_in = sanitize_str(str(updates_in.get("tempReceiptNo") or ""))[:80]
 
         if temp_in:
@@ -2781,11 +2906,19 @@ def update_collection_item(
             if _temp_receipt_no_exists(temp_in, exclude_id=entity_id):
                 raise HTTPException(status_code=409, detail="tempReceiptNo already exists")
 
-        if serial_in:
+        # Validate finalReceiptNo AND serialNumber independently (see create path).
+        _final_no = sanitize_str(str(updates_in.get("finalReceiptNo") or ""))[:80]
+        _serial_no = sanitize_str(str(updates_in.get("serialNumber") or ""))[:80]
+        _serials_to_check = [_final_no]
+        if _serial_no and _serial_no != _final_no:
+            _serials_to_check.append(_serial_no)
+        for _s in _serials_to_check:
+            if not _s:
+                continue
             # Allow S-prefixed auto-serial (S1, S2, S3) for LTT/Libyana/Madar, or regular digits
-            if not _is_valid_serial_number(serial_in):
+            if not _is_valid_serial_number(_s):
                 raise HTTPException(status_code=400, detail="Invalid serialNumber (must be digits or S-prefixed like S1, S2)")
-            if _receipt_serial_exists(serial_in, exclude_id=entity_id):
+            if _receipt_serial_exists(_s, exclude_id=entity_id):
                 raise HTTPException(status_code=409, detail="serialNumber already exists")
 
     # Enforce: Ads must NOT create deliveries in the Not Paid + Driver receipt-linked flow.
@@ -3097,18 +3230,40 @@ def check_stuck_deliveries(
     stuck_deliveries = []
     
     with db_conn() as conn:
-        # Get all receipts with deliveryStatus = 'In Progress'
-        rows = (
-            conn.execute(
-                text("""
-                    SELECT id, data_json, created_at, last_modified
-                    FROM entities
-                    WHERE type = 'receipts' AND deleted = false
-                """)
+        # Get receipts with deliveryStatus = 'In Progress'. Production receipts
+        # carry inline base64 photos (up to 8MB each), so loading EVERY receipt's
+        # data_json to filter in Python could materialize gigabytes and OOM-kill
+        # the small ECS task. On Postgres, filter deliveryStatus in SQL so only
+        # candidate rows load their data_json. Cap results as a backstop.
+        dialect = str(get_engine().dialect.name or "")
+        if dialect == "postgresql":
+            rows = (
+                conn.execute(
+                    text("""
+                        SELECT id, data_json, created_at, last_modified
+                        FROM entities
+                        WHERE type = 'receipts' AND deleted = false
+                          AND (data_json::jsonb ->> 'deliveryStatus') = 'In Progress'
+                        LIMIT 5000
+                    """)
+                )
+                .mappings()
+                .all()
             )
-            .mappings()
-            .all()
-        )
+        else:
+            # SQLite (dev): no JSON operator dependency; bounded scan.
+            rows = (
+                conn.execute(
+                    text("""
+                        SELECT id, data_json, created_at, last_modified
+                        FROM entities
+                        WHERE type = 'receipts' AND deleted = false
+                        LIMIT 5000
+                    """)
+                )
+                .mappings()
+                .all()
+            )
         
         for row in rows:
             data = json_loads(row.get("data_json") or "{}") or {}
