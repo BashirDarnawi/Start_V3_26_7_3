@@ -10,7 +10,13 @@ const _serverLiveSync = {
   startedForUserId: null,
   // Signature of the last delivery-role payload, so identical polls don't
   // force a full re-render every 3s (which snapped dropdowns shut on phones).
-  lastDeliverySig: null
+  lastDeliverySig: null,
+  // Highest _lastModified ever seen in an ACTUAL server response. The delta
+  // cursor is seeded/re-seeded from this, never from client-written _lastModified
+  // values — otherwise a device whose clock runs fast would seed the cursor
+  // minutes ahead of server time and silently skip everyone else's updates
+  // (the server's updated_since window only looks back 15s).
+  serverWatermark: 0
 };
 
 function _maxLastModifiedFromArray(arr) {
@@ -232,6 +238,9 @@ async function serverLiveSyncOnce() {
     _maxLastModifiedFromArray(pagesDelta),
     _maxLastModifiedFromArray(exhDelta)
   );
+  // Deltas come straight from the server, so maxDelta is a trustworthy server
+  // timestamp — record it as the watermark for future cursor seeds.
+  if (maxDelta > (_serverLiveSync.serverWatermark || 0)) _serverLiveSync.serverWatermark = maxDelta;
   // Freeze the cursor for this tick if any collection failed to load, so the
   // next tick re-requests the same window (idempotent — applyServerDelta
   // upserts by id) instead of permanently skipping the missed collection.
@@ -375,7 +384,11 @@ function startServerLiveSync() {
 
   stopServerLiveSync();
   _serverLiveSync.startedForUserId = uid;
-  _serverLiveSync.cursor = computeServerCursorFromState();
+  // Seed from the server watermark when we have one (authoritative, skew-free).
+  // Before the first server load this session it is 0, so fall back to the state
+  // estimate for a fast start; serverLoadAllData re-seeds authoritatively (and
+  // can only LOWER a clock-skewed estimate) the moment it completes.
+  _serverLiveSync.cursor = _serverLiveSync.serverWatermark || computeServerCursorFromState();
   _serverLiveSync.lastUsersSyncAt = 0;
 
   // Run one immediately, then poll.
@@ -731,11 +744,38 @@ function handleLogout() {
 
   // Destroy session
   SessionManager.destroySession();
-  
+
   // Clear all caches
   _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 };
   _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000 };
-  
+
+  // DATA ISOLATION (shared device): in SERVER mode the server is the source of
+  // truth, so wipe the previous user's business data from memory + caches so it
+  // can never be shown to — or kept by — the next user if their fresh fetch
+  // fails transiently. In LOCAL mode these collections are the ONLY copy of the
+  // data, so they must NOT be cleared.
+  if (isServerModeEnabled()) {
+    const _cols = (typeof PERSISTED_COLLECTIONS !== 'undefined' && Array.isArray(PERSISTED_COLLECTIONS))
+      ? PERSISTED_COLLECTIONS
+      : ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory'];
+    for (const name of _cols) state[name] = [];
+    try {
+      if (typeof _collectionCache === 'object' && _collectionCache) {
+        for (const k of Object.keys(_collectionCache)) _collectionCache[k] = { data: null, timestamp: 0 };
+      }
+    } catch (_) {}
+    try { if (typeof _pendingRequests !== 'undefined' && _pendingRequests && _pendingRequests.clear) _pendingRequests.clear(); } catch (_) {}
+    _serverLiveSync.serverWatermark = 0;
+    _serverLiveSync.cursor = 0;
+    // Also drop the cached copies in IndexedDB so a full page reload by a
+    // different user on this device doesn't surface them before re-auth.
+    if (db) {
+      for (const name of _cols) {
+        try { saveCollectionToIndexedDB(name, []).catch(() => {}); } catch (_) {}
+      }
+    }
+  }
+
   state.currentUser = null;
   state.currentView = 'analytics';
   saveState();

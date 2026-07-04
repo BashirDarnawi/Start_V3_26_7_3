@@ -1656,14 +1656,17 @@ function checkReceiptNumberDuplicate(input) {
     return;
   }
   
-  // Check for duplicates (excluding current record if editing)
-  const existingReceipt = state.ads.find(ad => 
-    ad.recordType === 'receipt' && 
-    ad.serialNumber === serialNumber && 
-    ad.id !== (state.modalData ? state.modalData.id : null) &&
-    !ad._deleted
+  // Check for duplicates (excluding current record if editing).
+  // Search state.receipts — receipts were migrated OUT of state.ads long ago
+  // (normalizeReceiptsFromAds strips recordType==='receipt' from ads on every
+  // load), so the old state.ads lookup never found anything and this live
+  // warning was a silent no-op. Mirrors the save-time check in saveReceipt.
+  const existingReceipt = state.receipts.find(receipt =>
+    receipt.serialNumber === serialNumber &&
+    receipt.id !== (state.modalData ? state.modalData.id : null) &&
+    !receipt._deleted
   );
-  
+
   if (existingReceipt) {
     const customer = state.customers.find(c => c.id === existingReceipt.customerId);
     const customerName = customer ? customer.name : 'Unknown';

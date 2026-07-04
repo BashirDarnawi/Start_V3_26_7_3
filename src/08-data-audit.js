@@ -10,6 +10,13 @@ function getMonotonicTime() {
   return Date.now();
 }
 
+// Per-record PATCH chains (server mode). Keyed by `${collection}:${id}` so a
+// rapid second edit to the same record waits for the first PATCH's echo (which
+// carries the server's authoritative _lastModified) and uses THAT as its
+// concurrency baseline — instead of the first edit's client timestamp, which
+// the server never stored and which always produced a false 409.
+const _patchChains = new Map();
+
 /**
  * Add a new record to a collection (receipts, ads, customers, etc.).
  * 
@@ -163,13 +170,29 @@ function updateRecord(array, id, updates, expectedLastModified) {
 
     // Server write-through (always-online multi-user mode)
     if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
-      // Use the baseline the caller actually saw when supplied (e.g. the modal
-      // snapshot the user edited), so a change committed by someone else in
-      // between produces a 409 conflict instead of silently overwriting it.
-      const expected = (Number.isFinite(Number(expectedLastModified))
+      const _patchChainKey = collectionName + ':' + id;
+      // If a PATCH for this record is already in flight, this edit is queued
+      // behind it and must use the FRESH echoed baseline, not the modal snapshot.
+      const _queuedBehind = _patchChains.has(_patchChainKey);
+      const _providedExpected = Number.isFinite(Number(expectedLastModified))
         ? Number(expectedLastModified)
-        : (old._lastModified || 0));
-      apiPatchEntity(collectionName, id, sanitizedUpdates, expected)
+        : null;
+      const sendPatch = () => {
+        // Use the baseline the caller actually saw when supplied (e.g. the modal
+        // snapshot the user edited), so a change committed by someone else in
+        // between produces a 409 conflict instead of silently overwriting it.
+        // For an edit queued behind an in-flight PATCH, read the record's CURRENT
+        // _lastModified (the prior PATCH's echo replaced it with the server value).
+        let expected;
+        if (_queuedBehind) {
+          const cur = array.find(x => x && x.id === id);
+          expected = (cur && Number.isFinite(Number(cur._lastModified)))
+            ? Number(cur._lastModified)
+            : (_providedExpected != null ? _providedExpected : (old._lastModified || 0));
+        } else {
+          expected = _providedExpected != null ? _providedExpected : (old._lastModified || 0);
+        }
+        return apiPatchEntity(collectionName, id, sanitizedUpdates, expected)
         .then((entity) => {
           if (entity?.data) {
             const idx = array.findIndex(x => x && x.id === id);
@@ -214,6 +237,16 @@ function updateRecord(array, id, updates, expectedLastModified) {
           }
           render();
         });
+      };
+      // Chain this PATCH after any in-flight PATCH for the same record (run
+      // regardless of whether the previous one resolved or rejected), and drop
+      // the chain entry once it settles so a later idle edit starts fresh.
+      const _prevPatch = _patchChains.get(_patchChainKey) || Promise.resolve();
+      const _thisPatch = _prevPatch.then(sendPatch, sendPatch);
+      _patchChains.set(_patchChainKey, _thisPatch);
+      _thisPatch.finally(() => {
+        if (_patchChains.get(_patchChainKey) === _thisPatch) _patchChains.delete(_patchChainKey);
+      });
     } else if (isServerModeEnabled() && collectionName === 'users') {
       // Map to server user update API (Admin only)
       const payload = {};

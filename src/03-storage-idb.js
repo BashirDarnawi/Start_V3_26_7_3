@@ -352,6 +352,15 @@ async function saveCollectionToIndexedDB(collectionName, data) {
   }
 }
 
+// DATA SAFETY: collections whose IndexedDB copy loaded INCOMPLETE (a chunk was
+// missing / the record count didn't match). Such a collection must never be
+// re-saved, or the truncated in-memory array would overwrite the intact-but-
+// unread chunks and permanently destroy the missing records.
+let _corruptedCollections = new Set();
+function isCollectionCorrupted(name) { return _corruptedCollections.has(String(name || '')); }
+function markCollectionCorrupted(name) { _corruptedCollections.add(String(name || '')); }
+function clearCollectionCorruption(name) { _corruptedCollections.delete(String(name || '')); }
+
 async function loadCollectionFromIndexedDB(collectionName) {
   if (!db) return null;
   const name = String(collectionName || '');
@@ -364,20 +373,41 @@ async function loadCollectionFromIndexedDB(collectionName) {
     // Chunked layout
     if (meta && meta.type === 'collection_meta' && Number.isFinite(meta.chunkCount)) {
       const chunks = [];
+      let missingChunk = false;
       for (let i = 0; i < meta.chunkCount; i++) {
         const chunk = await idbGet(DATA_STORE_NAME, getCollectionChunkKey(name, i));
         if (chunk && Array.isArray(chunk.data)) {
           chunks.push(...chunk.data);
         } else {
           console.warn(`Missing chunk for ${name} index ${i}`);
+          missingChunk = true;
         }
       }
 
+      let checksumMismatch = false;
       if (meta.checksum) {
         const currentChecksum = DataIntegrity.calculateChecksum(chunks);
         if (currentChecksum !== meta.checksum) {
           console.warn(`Data integrity warning for ${name}: checksum mismatch`);
+          checksumMismatch = true;
         }
+      }
+
+      // A missing chunk, or a loaded record-count that doesn't match what was
+      // saved, means the data we could read is INCOMPLETE. Returning it as if
+      // complete would let the caller adopt a truncated collection and re-save
+      // it, wiping the unread records. Flag corruption (blocks re-save) and
+      // throw so the loader can fall back / warn instead of silently truncating.
+      // A checksum mismatch with all chunks present AND a matching record count
+      // is treated as a soft warning only (avoids false positives from checksum
+      // nuances bricking otherwise-complete data).
+      const recordCountMismatch = Number.isFinite(meta.recordCount) && chunks.length !== meta.recordCount;
+      if (missingChunk || recordCountMismatch || (checksumMismatch && recordCountMismatch)) {
+        markCollectionCorrupted(name);
+        const err = new Error(`IndexedDB collection "${name}" is incomplete (${missingChunk ? 'missing chunk' : 'record count mismatch'})`);
+        err.code = 'IDB_COLLECTION_CORRUPT';
+        err.partialData = chunks;
+        throw err;
       }
 
       return chunks;
@@ -395,6 +425,8 @@ async function loadCollectionFromIndexedDB(collectionName) {
 
     return null;
   } catch (error) {
+    // Let the corruption signal reach the loader so it can fall back + warn.
+    if (error && error.code === 'IDB_COLLECTION_CORRUPT') throw error;
     console.error('Error loading collection from IndexedDB:', error);
     return null;
   }

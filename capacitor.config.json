@@ -7,7 +7,9 @@
   },
   "plugins": {
     "CapacitorHttp": {
-      "enabled": true
+      "enabled": true,
+      "connectTimeout": 15000,
+      "readTimeout": 30000
     },
     "CapacitorCookies": {
       "enabled": true

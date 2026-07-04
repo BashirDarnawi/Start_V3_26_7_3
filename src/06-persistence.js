@@ -41,6 +41,13 @@ function getCollectionNameFromArray(array) {
 function markCollectionDirty(collectionName) {
   if (!db) return;
   if (!collectionName || !PERSISTED_COLLECTIONS.includes(collectionName)) return;
+  // DATA SAFETY: never re-save a collection whose IndexedDB copy loaded
+  // incomplete — rewriting it would overwrite the intact (unread) chunks with
+  // the truncated in-memory array and destroy the missing records for good.
+  if (typeof isCollectionCorrupted === 'function' && isCollectionCorrupted(collectionName)) {
+    console.warn(`[albayan] Skipping IndexedDB re-save of "${collectionName}" — its stored copy is incomplete (protected from overwrite).`);
+    return;
+  }
   idbSync.dirty.add(collectionName);
 
   if (idbSync.timer) clearTimeout(idbSync.timer);
@@ -300,6 +307,25 @@ function normalizeReceiptsFromAds() {
   return true;
 }
 
+// Warn the user (once per collection) that a stored collection loaded incomplete
+// and is protected from being overwritten, so they can restore a backup.
+function _notifyCollectionCorruption(name) {
+  try {
+    if (!Array.isArray(state._corruptedCollections)) state._corruptedCollections = [];
+    if (!state._corruptedCollections.includes(name)) state._corruptedCollections.push(name);
+    console.error(`[albayan] IndexedDB copy of "${name}" is incomplete — protected from overwrite; restore a backup.`);
+    if (typeof showNotification === 'function') {
+      const ar = `تعذّر تحميل بعض بيانات (${name}) كاملة من هذا الجهاز، وتم منع الكتابة فوقها لحمايتها. الرجاء الاستعادة من نسخة احتياطية حديثة من الإعدادات.`;
+      const en = `Some saved "${name}" data could not be fully loaded from this device and has been protected from being overwritten. Please restore from a recent backup in Settings.`;
+      showNotification(
+        state.language === 'ar' ? 'تحذير سلامة البيانات' : 'Data Safety Warning',
+        state.language === 'ar' ? ar : en,
+        'error'
+      );
+    }
+  } catch (_) {}
+}
+
 async function loadCollectionsFromStorage(legacyCollections = null) {
   const legacy = legacyCollections || {};
 
@@ -307,7 +333,27 @@ async function loadCollectionsFromStorage(legacyCollections = null) {
     let loaded = null;
 
     if (db) {
-      loaded = await loadCollectionFromIndexedDB(name);
+      try {
+        loaded = await loadCollectionFromIndexedDB(name);
+      } catch (e) {
+        if (e && e.code === 'IDB_COLLECTION_CORRUPT') {
+          // The IndexedDB copy is incomplete. Prefer the legacy localStorage
+          // snapshot if present (it may be complete); otherwise keep the partial
+          // records we could read. Either way the collection stays flagged
+          // corrupted so it is NOT re-saved over the intact chunks, and we warn
+          // the user to restore a backup.
+          if (Array.isArray(legacy[name])) {
+            state[name] = legacy[name];
+          } else if (Array.isArray(e.partialData)) {
+            state[name] = e.partialData;
+          } else if (!Array.isArray(state[name])) {
+            state[name] = [];
+          }
+          _notifyCollectionCorruption(name);
+          continue;
+        }
+        throw e;
+      }
     }
 
     if (loaded !== null && loaded !== undefined) {
@@ -326,8 +372,9 @@ async function loadCollectionsFromStorage(legacyCollections = null) {
   // Backwards compatibility: receipts used to be stored in ads[]
   const normalized = normalizeReceiptsFromAds();
   if (normalized && db) {
-    await saveCollectionToIndexedDB('ads', state.ads);
-    await saveCollectionToIndexedDB('receipts', state.receipts);
+    // Never re-save a corrupted collection (would overwrite intact chunks).
+    if (!isCollectionCorrupted('ads')) await saveCollectionToIndexedDB('ads', state.ads);
+    if (!isCollectionCorrupted('receipts')) await saveCollectionToIndexedDB('receipts', state.receipts);
   }
 
   // Persist the refreshed localStorage snapshot. With IndexedDB available

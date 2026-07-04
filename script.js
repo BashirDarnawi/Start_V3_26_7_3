@@ -1131,6 +1131,15 @@ async function saveCollectionToIndexedDB(collectionName, data) {
   }
 }
 
+// DATA SAFETY: collections whose IndexedDB copy loaded INCOMPLETE (a chunk was
+// missing / the record count didn't match). Such a collection must never be
+// re-saved, or the truncated in-memory array would overwrite the intact-but-
+// unread chunks and permanently destroy the missing records.
+let _corruptedCollections = new Set();
+function isCollectionCorrupted(name) { return _corruptedCollections.has(String(name || '')); }
+function markCollectionCorrupted(name) { _corruptedCollections.add(String(name || '')); }
+function clearCollectionCorruption(name) { _corruptedCollections.delete(String(name || '')); }
+
 async function loadCollectionFromIndexedDB(collectionName) {
   if (!db) return null;
   const name = String(collectionName || '');
@@ -1143,20 +1152,41 @@ async function loadCollectionFromIndexedDB(collectionName) {
     // Chunked layout
     if (meta && meta.type === 'collection_meta' && Number.isFinite(meta.chunkCount)) {
       const chunks = [];
+      let missingChunk = false;
       for (let i = 0; i < meta.chunkCount; i++) {
         const chunk = await idbGet(DATA_STORE_NAME, getCollectionChunkKey(name, i));
         if (chunk && Array.isArray(chunk.data)) {
           chunks.push(...chunk.data);
         } else {
           console.warn(`Missing chunk for ${name} index ${i}`);
+          missingChunk = true;
         }
       }
 
+      let checksumMismatch = false;
       if (meta.checksum) {
         const currentChecksum = DataIntegrity.calculateChecksum(chunks);
         if (currentChecksum !== meta.checksum) {
           console.warn(`Data integrity warning for ${name}: checksum mismatch`);
+          checksumMismatch = true;
         }
+      }
+
+      // A missing chunk, or a loaded record-count that doesn't match what was
+      // saved, means the data we could read is INCOMPLETE. Returning it as if
+      // complete would let the caller adopt a truncated collection and re-save
+      // it, wiping the unread records. Flag corruption (blocks re-save) and
+      // throw so the loader can fall back / warn instead of silently truncating.
+      // A checksum mismatch with all chunks present AND a matching record count
+      // is treated as a soft warning only (avoids false positives from checksum
+      // nuances bricking otherwise-complete data).
+      const recordCountMismatch = Number.isFinite(meta.recordCount) && chunks.length !== meta.recordCount;
+      if (missingChunk || recordCountMismatch || (checksumMismatch && recordCountMismatch)) {
+        markCollectionCorrupted(name);
+        const err = new Error(`IndexedDB collection "${name}" is incomplete (${missingChunk ? 'missing chunk' : 'record count mismatch'})`);
+        err.code = 'IDB_COLLECTION_CORRUPT';
+        err.partialData = chunks;
+        throw err;
       }
 
       return chunks;
@@ -1174,6 +1204,8 @@ async function loadCollectionFromIndexedDB(collectionName) {
 
     return null;
   } catch (error) {
+    // Let the corruption signal reach the loader so it can fall back + warn.
+    if (error && error.code === 'IDB_COLLECTION_CORRUPT') throw error;
     console.error('Error loading collection from IndexedDB:', error);
     return null;
   }
@@ -3046,6 +3078,13 @@ function getCollectionNameFromArray(array) {
 function markCollectionDirty(collectionName) {
   if (!db) return;
   if (!collectionName || !PERSISTED_COLLECTIONS.includes(collectionName)) return;
+  // DATA SAFETY: never re-save a collection whose IndexedDB copy loaded
+  // incomplete — rewriting it would overwrite the intact (unread) chunks with
+  // the truncated in-memory array and destroy the missing records for good.
+  if (typeof isCollectionCorrupted === 'function' && isCollectionCorrupted(collectionName)) {
+    console.warn(`[albayan] Skipping IndexedDB re-save of "${collectionName}" — its stored copy is incomplete (protected from overwrite).`);
+    return;
+  }
   idbSync.dirty.add(collectionName);
 
   if (idbSync.timer) clearTimeout(idbSync.timer);
@@ -3305,6 +3344,25 @@ function normalizeReceiptsFromAds() {
   return true;
 }
 
+// Warn the user (once per collection) that a stored collection loaded incomplete
+// and is protected from being overwritten, so they can restore a backup.
+function _notifyCollectionCorruption(name) {
+  try {
+    if (!Array.isArray(state._corruptedCollections)) state._corruptedCollections = [];
+    if (!state._corruptedCollections.includes(name)) state._corruptedCollections.push(name);
+    console.error(`[albayan] IndexedDB copy of "${name}" is incomplete — protected from overwrite; restore a backup.`);
+    if (typeof showNotification === 'function') {
+      const ar = `تعذّر تحميل بعض بيانات (${name}) كاملة من هذا الجهاز، وتم منع الكتابة فوقها لحمايتها. الرجاء الاستعادة من نسخة احتياطية حديثة من الإعدادات.`;
+      const en = `Some saved "${name}" data could not be fully loaded from this device and has been protected from being overwritten. Please restore from a recent backup in Settings.`;
+      showNotification(
+        state.language === 'ar' ? 'تحذير سلامة البيانات' : 'Data Safety Warning',
+        state.language === 'ar' ? ar : en,
+        'error'
+      );
+    }
+  } catch (_) {}
+}
+
 async function loadCollectionsFromStorage(legacyCollections = null) {
   const legacy = legacyCollections || {};
 
@@ -3312,7 +3370,27 @@ async function loadCollectionsFromStorage(legacyCollections = null) {
     let loaded = null;
 
     if (db) {
-      loaded = await loadCollectionFromIndexedDB(name);
+      try {
+        loaded = await loadCollectionFromIndexedDB(name);
+      } catch (e) {
+        if (e && e.code === 'IDB_COLLECTION_CORRUPT') {
+          // The IndexedDB copy is incomplete. Prefer the legacy localStorage
+          // snapshot if present (it may be complete); otherwise keep the partial
+          // records we could read. Either way the collection stays flagged
+          // corrupted so it is NOT re-saved over the intact chunks, and we warn
+          // the user to restore a backup.
+          if (Array.isArray(legacy[name])) {
+            state[name] = legacy[name];
+          } else if (Array.isArray(e.partialData)) {
+            state[name] = e.partialData;
+          } else if (!Array.isArray(state[name])) {
+            state[name] = [];
+          }
+          _notifyCollectionCorruption(name);
+          continue;
+        }
+        throw e;
+      }
     }
 
     if (loaded !== null && loaded !== undefined) {
@@ -3331,8 +3409,9 @@ async function loadCollectionsFromStorage(legacyCollections = null) {
   // Backwards compatibility: receipts used to be stored in ads[]
   const normalized = normalizeReceiptsFromAds();
   if (normalized && db) {
-    await saveCollectionToIndexedDB('ads', state.ads);
-    await saveCollectionToIndexedDB('receipts', state.receipts);
+    // Never re-save a corrupted collection (would overwrite intact chunks).
+    if (!isCollectionCorrupted('ads')) await saveCollectionToIndexedDB('ads', state.ads);
+    if (!isCollectionCorrupted('receipts')) await saveCollectionToIndexedDB('receipts', state.receipts);
   }
 
   // Persist the refreshed localStorage snapshot. With IndexedDB available
@@ -4060,6 +4139,13 @@ function getMonotonicTime() {
   return Date.now();
 }
 
+// Per-record PATCH chains (server mode). Keyed by `${collection}:${id}` so a
+// rapid second edit to the same record waits for the first PATCH's echo (which
+// carries the server's authoritative _lastModified) and uses THAT as its
+// concurrency baseline — instead of the first edit's client timestamp, which
+// the server never stored and which always produced a false 409.
+const _patchChains = new Map();
+
 /**
  * Add a new record to a collection (receipts, ads, customers, etc.).
  * 
@@ -4213,13 +4299,29 @@ function updateRecord(array, id, updates, expectedLastModified) {
 
     // Server write-through (always-online multi-user mode)
     if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
-      // Use the baseline the caller actually saw when supplied (e.g. the modal
-      // snapshot the user edited), so a change committed by someone else in
-      // between produces a 409 conflict instead of silently overwriting it.
-      const expected = (Number.isFinite(Number(expectedLastModified))
+      const _patchChainKey = collectionName + ':' + id;
+      // If a PATCH for this record is already in flight, this edit is queued
+      // behind it and must use the FRESH echoed baseline, not the modal snapshot.
+      const _queuedBehind = _patchChains.has(_patchChainKey);
+      const _providedExpected = Number.isFinite(Number(expectedLastModified))
         ? Number(expectedLastModified)
-        : (old._lastModified || 0));
-      apiPatchEntity(collectionName, id, sanitizedUpdates, expected)
+        : null;
+      const sendPatch = () => {
+        // Use the baseline the caller actually saw when supplied (e.g. the modal
+        // snapshot the user edited), so a change committed by someone else in
+        // between produces a 409 conflict instead of silently overwriting it.
+        // For an edit queued behind an in-flight PATCH, read the record's CURRENT
+        // _lastModified (the prior PATCH's echo replaced it with the server value).
+        let expected;
+        if (_queuedBehind) {
+          const cur = array.find(x => x && x.id === id);
+          expected = (cur && Number.isFinite(Number(cur._lastModified)))
+            ? Number(cur._lastModified)
+            : (_providedExpected != null ? _providedExpected : (old._lastModified || 0));
+        } else {
+          expected = _providedExpected != null ? _providedExpected : (old._lastModified || 0);
+        }
+        return apiPatchEntity(collectionName, id, sanitizedUpdates, expected)
         .then((entity) => {
           if (entity?.data) {
             const idx = array.findIndex(x => x && x.id === id);
@@ -4264,6 +4366,16 @@ function updateRecord(array, id, updates, expectedLastModified) {
           }
           render();
         });
+      };
+      // Chain this PATCH after any in-flight PATCH for the same record (run
+      // regardless of whether the previous one resolved or rejected), and drop
+      // the chain entry once it settles so a later idle edit starts fresh.
+      const _prevPatch = _patchChains.get(_patchChainKey) || Promise.resolve();
+      const _thisPatch = _prevPatch.then(sendPatch, sendPatch);
+      _patchChains.set(_patchChainKey, _thisPatch);
+      _thisPatch.finally(() => {
+        if (_patchChains.get(_patchChainKey) === _thisPatch) _patchChains.delete(_patchChainKey);
+      });
     } else if (isServerModeEnabled() && collectionName === 'users') {
       // Map to server user update API (Admin only)
       const payload = {};
@@ -5579,6 +5691,24 @@ async function serverLoadAllData() {
 
   state.serverLastSyncAt = new Date().toISOString();
 
+  // Authoritatively (re)seed the live-sync cursor from server-issued timestamps.
+  // This is the ONLY skew-free source: the freshly-loaded arrays carry the
+  // server's last_modified, so re-seeding here corrects a cursor that
+  // startServerLiveSync may have estimated too high from a clock-skewed device.
+  try {
+    const _wm = Math.max(
+      _maxLastModifiedFromArray(results.ads && results.ads.data),
+      _maxLastModifiedFromArray(results.receipts && results.receipts.data),
+      _maxLastModifiedFromArray(results.customers && results.customers.data),
+      _maxLastModifiedFromArray(results.pages && results.pages.data),
+      _maxLastModifiedFromArray(results.exchangeRateHistory && results.exchangeRateHistory.data)
+    );
+    if (_wm > 0 && typeof _serverLiveSync === 'object' && _serverLiveSync) {
+      _serverLiveSync.serverWatermark = _wm;
+      _serverLiveSync.cursor = _wm;
+    }
+  } catch (_) {}
+
   // Cache server data locally (IndexedDB) for performance (optional)
   if (db) {
     markAllCollectionsDirty();
@@ -5644,7 +5774,13 @@ const _serverLiveSync = {
   startedForUserId: null,
   // Signature of the last delivery-role payload, so identical polls don't
   // force a full re-render every 3s (which snapped dropdowns shut on phones).
-  lastDeliverySig: null
+  lastDeliverySig: null,
+  // Highest _lastModified ever seen in an ACTUAL server response. The delta
+  // cursor is seeded/re-seeded from this, never from client-written _lastModified
+  // values — otherwise a device whose clock runs fast would seed the cursor
+  // minutes ahead of server time and silently skip everyone else's updates
+  // (the server's updated_since window only looks back 15s).
+  serverWatermark: 0
 };
 
 function _maxLastModifiedFromArray(arr) {
@@ -5866,6 +6002,9 @@ async function serverLiveSyncOnce() {
     _maxLastModifiedFromArray(pagesDelta),
     _maxLastModifiedFromArray(exhDelta)
   );
+  // Deltas come straight from the server, so maxDelta is a trustworthy server
+  // timestamp — record it as the watermark for future cursor seeds.
+  if (maxDelta > (_serverLiveSync.serverWatermark || 0)) _serverLiveSync.serverWatermark = maxDelta;
   // Freeze the cursor for this tick if any collection failed to load, so the
   // next tick re-requests the same window (idempotent — applyServerDelta
   // upserts by id) instead of permanently skipping the missed collection.
@@ -6009,7 +6148,11 @@ function startServerLiveSync() {
 
   stopServerLiveSync();
   _serverLiveSync.startedForUserId = uid;
-  _serverLiveSync.cursor = computeServerCursorFromState();
+  // Seed from the server watermark when we have one (authoritative, skew-free).
+  // Before the first server load this session it is 0, so fall back to the state
+  // estimate for a fast start; serverLoadAllData re-seeds authoritatively (and
+  // can only LOWER a clock-skewed estimate) the moment it completes.
+  _serverLiveSync.cursor = _serverLiveSync.serverWatermark || computeServerCursorFromState();
   _serverLiveSync.lastUsersSyncAt = 0;
 
   // Run one immediately, then poll.
@@ -6365,11 +6508,38 @@ function handleLogout() {
 
   // Destroy session
   SessionManager.destroySession();
-  
+
   // Clear all caches
   _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 };
   _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000 };
-  
+
+  // DATA ISOLATION (shared device): in SERVER mode the server is the source of
+  // truth, so wipe the previous user's business data from memory + caches so it
+  // can never be shown to — or kept by — the next user if their fresh fetch
+  // fails transiently. In LOCAL mode these collections are the ONLY copy of the
+  // data, so they must NOT be cleared.
+  if (isServerModeEnabled()) {
+    const _cols = (typeof PERSISTED_COLLECTIONS !== 'undefined' && Array.isArray(PERSISTED_COLLECTIONS))
+      ? PERSISTED_COLLECTIONS
+      : ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory'];
+    for (const name of _cols) state[name] = [];
+    try {
+      if (typeof _collectionCache === 'object' && _collectionCache) {
+        for (const k of Object.keys(_collectionCache)) _collectionCache[k] = { data: null, timestamp: 0 };
+      }
+    } catch (_) {}
+    try { if (typeof _pendingRequests !== 'undefined' && _pendingRequests && _pendingRequests.clear) _pendingRequests.clear(); } catch (_) {}
+    _serverLiveSync.serverWatermark = 0;
+    _serverLiveSync.cursor = 0;
+    // Also drop the cached copies in IndexedDB so a full page reload by a
+    // different user on this device doesn't surface them before re-auth.
+    if (db) {
+      for (const name of _cols) {
+        try { saveCollectionToIndexedDB(name, []).catch(() => {}); } catch (_) {}
+      }
+    }
+  }
+
   state.currentUser = null;
   state.currentView = 'analytics';
   saveState();
@@ -15540,14 +15710,17 @@ function checkReceiptNumberDuplicate(input) {
     return;
   }
   
-  // Check for duplicates (excluding current record if editing)
-  const existingReceipt = state.ads.find(ad => 
-    ad.recordType === 'receipt' && 
-    ad.serialNumber === serialNumber && 
-    ad.id !== (state.modalData ? state.modalData.id : null) &&
-    !ad._deleted
+  // Check for duplicates (excluding current record if editing).
+  // Search state.receipts — receipts were migrated OUT of state.ads long ago
+  // (normalizeReceiptsFromAds strips recordType==='receipt' from ads on every
+  // load), so the old state.ads lookup never found anything and this live
+  // warning was a silent no-op. Mirrors the save-time check in saveReceipt.
+  const existingReceipt = state.receipts.find(receipt =>
+    receipt.serialNumber === serialNumber &&
+    receipt.id !== (state.modalData ? state.modalData.id : null) &&
+    !receipt._deleted
   );
-  
+
   if (existingReceipt) {
     const customer = state.customers.find(c => c.id === existingReceipt.customerId);
     const customerName = customer ? customer.name : 'Unknown';

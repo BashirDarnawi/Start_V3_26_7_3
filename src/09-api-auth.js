@@ -754,6 +754,24 @@ async function serverLoadAllData() {
 
   state.serverLastSyncAt = new Date().toISOString();
 
+  // Authoritatively (re)seed the live-sync cursor from server-issued timestamps.
+  // This is the ONLY skew-free source: the freshly-loaded arrays carry the
+  // server's last_modified, so re-seeding here corrects a cursor that
+  // startServerLiveSync may have estimated too high from a clock-skewed device.
+  try {
+    const _wm = Math.max(
+      _maxLastModifiedFromArray(results.ads && results.ads.data),
+      _maxLastModifiedFromArray(results.receipts && results.receipts.data),
+      _maxLastModifiedFromArray(results.customers && results.customers.data),
+      _maxLastModifiedFromArray(results.pages && results.pages.data),
+      _maxLastModifiedFromArray(results.exchangeRateHistory && results.exchangeRateHistory.data)
+    );
+    if (_wm > 0 && typeof _serverLiveSync === 'object' && _serverLiveSync) {
+      _serverLiveSync.serverWatermark = _wm;
+      _serverLiveSync.cursor = _wm;
+    }
+  } catch (_) {}
+
   // Cache server data locally (IndexedDB) for performance (optional)
   if (db) {
     markAllCollectionsDirty();
