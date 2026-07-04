@@ -533,20 +533,42 @@ def user_row_to_public(row: dict[str, Any]) -> UserPublic:
     )
 
 
+def _is_trusted_app_origin(origin: str) -> bool:
+    """
+    True for origins that are explicitly allowlisted for cross-origin use:
+    the packaged Capacitor/Ionic mobile apps and any ALBAYAN_CORS_ORIGINS
+    entries. These are exact-string matches against the CORS allowlist (the
+    same list the CORS middleware enforces), so a hostile website's origin
+    can never pass.
+    """
+    try:
+        return bool(origin) and origin in CORS_ORIGINS
+    except NameError:
+        # CORS_ORIGINS not initialized yet (import order) — be strict.
+        return False
+
+
 def require_same_origin(request: Request):
     """
     Enhanced CSRF protection for cookie-based auth.
     Checks both Origin and Referer headers with proper fallback.
+    Explicitly allowlisted app origins (Capacitor/Ionic mobile shells,
+    ALBAYAN_CORS_ORIGINS) are accepted as trusted cross-origin callers.
     For production, also run behind HTTPS + reverse proxy.
     """
     origin = request.headers.get("origin")
     referer = request.headers.get("referer")
     host = request.headers.get("host")
-    
+
     # SECURITY FIX: Must have at least one of origin/referer
     if not origin and not referer:
         raise HTTPException(status_code=403, detail="Missing origin/referer header")
-    
+
+    # Packaged mobile apps and explicitly configured frontends are trusted:
+    # they legitimately call the API from a different origin.
+    if _is_trusted_app_origin(origin):
+        return
+
     # Check origin if present
     if origin and host:
         # Extract hostname from origin (handles ports)
@@ -1338,9 +1360,10 @@ CORS_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_ENV.split(",") if orig
 
 # Always add Capacitor/Ionic mobile app origins for iOS/Android app support
 MOBILE_APP_ORIGINS = [
-    "capacitor://localhost",
+    "capacitor://localhost",   # iOS WebView
     "ionic://localhost",
-    "http://localhost",  # Android WebView
+    "https://localhost",       # Android WebView (androidScheme: 'https' in capacitor.config.json)
+    "http://localhost",        # Android WebView (legacy androidScheme: 'http')
 ]
 for mobile_origin in MOBILE_APP_ORIGINS:
     if mobile_origin not in CORS_ORIGINS:
@@ -1865,12 +1888,19 @@ def login(payload: LoginRequest, request: Request):
     cookie_val = new_session_cookie_value(session_id, token)
 
     resp = JSONResponse(content=LoginResponse(user=user_row_to_public(user)).model_dump())
+    # The packaged mobile apps call the API cross-origin (their WebView origin
+    # is capacitor://localhost or https://localhost), and browsers/WebViews do
+    # not send SameSite=Lax cookies on cross-site requests. For logins coming
+    # from a trusted app origin, issue the cookie with SameSite=None (requires
+    # Secure). Web logins keep the stricter Lax cookie.
+    login_origin = request.headers.get("origin") or ""
+    is_mobile_app_login = login_origin in MOBILE_APP_ORIGINS
     resp.set_cookie(
         COOKIE_NAME,
         cookie_val,
         httponly=True,
-        secure=COOKIE_SECURE,
-        samesite="lax",
+        secure=True if is_mobile_app_login else COOKIE_SECURE,
+        samesite="none" if is_mobile_app_login else "lax",
         max_age=int(SESSION_DURATION_MS / 1000),
         path="/",
     )

@@ -383,6 +383,50 @@ class TestConcurrencyControl:
         assert response.status_code == 409  # Conflict
 
 
+class TestMobileAppOrigins:
+    """The packaged Capacitor apps call the API cross-origin.
+    Their allowlisted origins must pass CSRF and get a cross-site cookie;
+    anything else must stay blocked."""
+
+    def _login(self, origin):
+        try:
+            client.cookies.clear()
+        except Exception:
+            pass
+        response = client.post(
+            "/api/auth/login",
+            json={"email": TEST_ADMIN_EMAIL, "password": TEST_ADMIN_PASSWORD},
+            headers={"Origin": origin},
+        )
+        set_cookie = response.headers.get("set-cookie", "")
+        try:
+            client.cookies.clear()
+        except Exception:
+            pass
+        return response, set_cookie
+
+    def test_ios_capacitor_origin_login_allowed(self):
+        response, set_cookie = self._login("capacitor://localhost")
+        assert response.status_code == 200
+        # Cross-origin cookie must be SameSite=None; Secure or WebViews drop it
+        assert "samesite=none" in set_cookie.lower()
+        assert "secure" in set_cookie.lower()
+
+    def test_android_https_localhost_origin_login_allowed(self):
+        response, set_cookie = self._login("https://localhost")
+        assert response.status_code == 200
+        assert "samesite=none" in set_cookie.lower()
+
+    def test_web_login_keeps_lax_cookie(self):
+        response, set_cookie = self._login("http://testserver")
+        assert response.status_code == 200
+        assert "samesite=lax" in set_cookie.lower()
+
+    def test_untrusted_cross_origin_login_rejected(self):
+        response, _ = self._login("https://evil.example.com")
+        assert response.status_code == 403
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 

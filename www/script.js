@@ -4709,9 +4709,18 @@ function getEffectiveExchangeRate(ad) {
 // SERVER API (Always‑Online Multi‑User Mode)
 // ==========================================
 
+// Production server used by the packaged Capacitor (iOS/Android) apps.
+// The web app is unaffected: it always talks to the origin it was loaded from.
+// For testing a different server on a device, set the override once from the
+// WebView console/settings: localStorage.setItem('albayan_server_url', 'https://staging.example.com')
+const MOBILE_SERVER_URL = 'https://albayanhub.com';
+
 /** @type {AlbayanServerApiConfig} */
 const SERVER_API = {
-  enabledByDefault: window.location.protocol === 'http:' || window.location.protocol === 'https:',
+  // http/https covers the web + Android WebView (https://localhost); the
+  // Platform check additionally covers iOS, whose WebView origin is
+  // capacitor://localhost and would otherwise disable server mode entirely.
+  enabledByDefault: window.location.protocol === 'http:' || window.location.protocol === 'https:' || Platform.isCapacitor,
   requestTimeoutMs: 15000, // 15s for better reliability on slow connections
   // Live sync: automatically refresh changes from other users in server mode (no manual refresh).
   liveSyncEnabled: true,
@@ -4739,7 +4748,17 @@ function setServerModeOverride(mode) {
 
 function getServerBaseUrl() {
   const base = (state.serverBaseUrl || '').trim();
-  return base ? base.replace(/\/+$/, '') : '';
+  if (base) return base.replace(/\/+$/, '');
+  // Packaged mobile apps have no same-origin backend (their origin is the
+  // app bundle itself), so they must target a real server URL.
+  if (Platform.isCapacitor) {
+    try {
+      const override = (localStorage.getItem('albayan_server_url') || '').trim();
+      if (/^https:\/\/[^\s]+$/i.test(override)) return override.replace(/\/+$/, '');
+    } catch (_) { /* storage unavailable — fall through to default */ }
+    return MOBILE_SERVER_URL;
+  }
+  return '';
 }
 
 // ==========================================
