@@ -46,6 +46,15 @@ def test_serve_style():
     assert "css" in response.headers["content-type"]
 
 
+def test_serve_privacy_policy():
+    """The store-required privacy policy must be served at /privacy"""
+    response = client.get("/privacy")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "Privacy Policy" in response.text
+    assert "سياسة الخصوصية" in response.text  # Arabic section present
+
+
 def test_serve_bundled_assets():
     """Should serve the locally bundled tailwind/fonts/lucide assets"""
     for name, ctype in [

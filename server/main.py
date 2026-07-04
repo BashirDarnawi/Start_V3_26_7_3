@@ -288,6 +288,7 @@ SCRIPT_PATH = PROJECT_ROOT / "script.js"
 SCRIPT_MIN_PATH = PROJECT_ROOT / "script.min.js"
 STYLE_PATH = PROJECT_ROOT / "style.css"
 ASSETS_DIR = PROJECT_ROOT / "assets"
+PRIVACY_PATH = PROJECT_ROOT / "privacy.html"
 
 COOKIE_NAME = "albayan_session"
 SESSION_DURATION_MS = int(os.getenv("ALBAYAN_SESSION_MS", str(8 * 60 * 60 * 1000)))
@@ -1846,6 +1847,18 @@ def _serve_asset_file(path: Path, request: Request, always_cache: bool = False):
         # Unversioned request: cache briefly so direct hits stay fresh-ish.
         headers = {"Cache-Control": "public, max-age=3600"}
     return FileResponse(str(path), media_type=media, headers=headers)
+
+
+@app.get("/privacy")
+def serve_privacy():
+    """Public privacy policy — the URL app stores require for listings."""
+    if not PRIVACY_PATH.exists():
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(
+        str(PRIVACY_PATH),
+        media_type="text/html",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 @app.get("/assets/{filename}")
