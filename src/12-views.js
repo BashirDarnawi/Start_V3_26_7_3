@@ -1602,13 +1602,22 @@ function updateCustomersViewFiltered() {
   if (state.currentView !== 'customers') return;
   const grid = document.getElementById('customers-grid');
   const countEl = document.getElementById('customers-count');
-  if (!grid || !countEl) return;
-
-  const allCustomers = getVisibleRecords(state.customers);
-  const visibleCustomers = getFilteredCustomers();
-
-  countEl.textContent = `${visibleCustomers.length} of ${allCustomers.length} customers`;
-  grid.innerHTML = renderCustomersGrid(visibleCustomers);
+  if (!grid || !countEl) {
+    // View structure not on screen (e.g. mid-navigation): fall back to a full render.
+    render();
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  // Build the fresh view HTML off-screen, then swap in only the grid + count so
+  // the search input keeps its caret (same approach as updateReceiptsViewFiltered).
+  // renderCustomersView owns the pagination fingerprint/slice + Load-more button.
+  const tpl = document.createElement('template');
+  tpl.innerHTML = renderCustomersView();
+  const src = tpl.content;
+  const newGrid = src.querySelector('#customers-grid');
+  const newCount = src.querySelector('#customers-count');
+  if (newGrid) grid.innerHTML = newGrid.innerHTML;
+  if (newCount) countEl.textContent = newCount.textContent;
   if (window.lucide) lucide.createIcons();
 }
 
@@ -1721,10 +1730,35 @@ function renderCustomersGrid(customers) {
   }).join('');
 }
 
+// PAGINATION ("Load more") for the customers grid — mirrors the receipts grid.
+// Rendering every customer card at once (each card has two financial grids and
+// several icons) freezes the view past a few hundred customers; render the first
+// CUSTOMERS_PAGE_SIZE and reveal more on demand. The limit resets automatically
+// whenever the search/sort/financial-filter changes (fingerprint check below).
+const CUSTOMERS_PAGE_SIZE = 50;
+let _customersShowLimit = CUSTOMERS_PAGE_SIZE;
+let _customersFilterFingerprint = '';
+
+function loadMoreCustomers() {
+  _customersShowLimit += CUSTOMERS_PAGE_SIZE;
+  updateCustomersViewFiltered();
+}
+
 function renderCustomersView() {
-  const visibleCustomers = getFilteredCustomers();
+  const allFilteredCustomers = getFilteredCustomers();
   const allCustomers = getVisibleRecords(state.customers);
-  
+
+  // Reset pagination whenever the filter/sort/search combination changes.
+  const filterFingerprint = JSON.stringify([
+    state.customerSearch, state.customerSort, state.customerFinancialFilter
+  ]);
+  if (filterFingerprint !== _customersFilterFingerprint) {
+    _customersFilterFingerprint = filterFingerprint;
+    _customersShowLimit = CUSTOMERS_PAGE_SIZE;
+  }
+  const visibleCustomers = allFilteredCustomers.slice(0, _customersShowLimit);
+  const remainingCustomers = allFilteredCustomers.length - visibleCustomers.length;
+
   // Calculate overall stats
   let totalRevenue = 0;
   let totalDebts = 0;
@@ -1743,7 +1777,7 @@ function renderCustomersView() {
       <div class="flex justify-between items-center">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('customers')}</h1>
-          <p id="customers-count" class="text-sm text-slate-500 mt-1">${visibleCustomers.length} of ${allCustomers.length} customers</p>
+          <p id="customers-count" class="text-sm text-slate-500 mt-1">${allFilteredCustomers.length} of ${allCustomers.length} customers</p>
         </div>
         <button onclick="showCustomerModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
           <i data-lucide="user-plus" class="w-4 h-4"></i>
@@ -1795,6 +1829,14 @@ function renderCustomersView() {
 
       <div id="customers-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         ${renderCustomersGrid(visibleCustomers)}
+        ${remainingCustomers > 0 ? `
+          <div class="col-span-full flex justify-center py-2">
+            <button onclick="loadMoreCustomers()" class="px-6 py-3 glass-panel rounded-xl text-sm font-bold text-indigo-600 dark:text-indigo-400 hover:scale-105 transition-transform flex items-center gap-2">
+              <i data-lucide="chevron-down" class="w-4 h-4"></i>
+              <span>${state.language === 'ar' ? `عرض المزيد (${remainingCustomers} متبقي)` : `Load more (${remainingCustomers} remaining)`}</span>
+            </button>
+          </div>
+        ` : ''}
       </div>
     </div>
   `;
@@ -2318,15 +2360,57 @@ function renderPagesView() {
   `;
 }
 
+let _adSearchTimer = null;
+function onAdSearchInput(value) {
+  // Debounced ads search: keep the term in state and swap only the table, instead
+  // of the old oninput="render()" which rebuilt the ENTIRE app (and the whole ads
+  // table) synchronously on every keystroke.
+  state.adSearch = Security.sanitizeInput(String(value || ''), { maxLength: 200 });
+  if (_adSearchTimer) clearTimeout(_adSearchTimer);
+  _adSearchTimer = setTimeout(() => {
+    _adSearchTimer = null;
+    updateAdsViewFiltered();
+  }, 80);
+}
+
+function updateAdsViewFiltered() {
+  if (state.currentView !== 'ads') return;
+  const container = document.getElementById('ads-table-container');
+  const countEl = document.getElementById('ads-count');
+  if (!container) {
+    // View not on screen (e.g. mid-navigation): fall back to a full render.
+    render();
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  // Build the fresh view off-screen and swap only the table + count so the search
+  // input keeps its caret (same approach as updateReceiptsViewFiltered).
+  const tpl = document.createElement('template');
+  tpl.innerHTML = renderAdsView();
+  const src = tpl.content;
+  const newContainer = src.querySelector('#ads-table-container');
+  const newCount = src.querySelector('#ads-count');
+  if (newContainer) container.innerHTML = newContainer.innerHTML;
+  if (countEl && newCount) countEl.textContent = newCount.textContent;
+  if (window.lucide) lucide.createIcons();
+}
+
 function renderAdsView() {
-  const allAds = getFilteredAds();
-  
+  // PERFORMANCE: build id->record Maps ONCE so each table row does O(1) lookups
+  // instead of scanning state.customers / state.receipts / state.users per row
+  // (was O(ads × (customers+receipts+users)) on every keystroke). Same Map is
+  // passed into getFilteredAds so the search filter is O(1)-per-ad too.
+  const customersById = new Map(state.customers.map(c => [c.id, c]));
+  const receiptsById = new Map(state.receipts.map(r => [r.id, r]));
+  const usersById = new Map(state.users.map(u => [u.id, u]));
+  const allAds = getFilteredAds(customersById);
+
   return `
     <div class="space-y-6 animate-fade-in-up">
       <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('ads')}</h1>
-          <p class="text-sm text-slate-500 mt-1">${allAds.length} total ads</p>
+          <p id="ads-count" class="text-sm text-slate-500 mt-1">${allAds.length} total ads</p>
         </div>
         <div class="flex flex-wrap gap-2">
           <button onclick="showAdModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
@@ -2340,10 +2424,10 @@ function renderAdsView() {
       </div>
 
       <div class="glass-panel rounded-xl p-4">
-        <input type="text" id="ad-search" placeholder="Search ads..." class="w-full glass-input px-4 py-2 rounded-lg" oninput="render()" />
+        <input type="text" id="ad-search" placeholder="Search ads..." value="${Security.escapeHtml(state.adSearch || '')}" class="w-full glass-input px-4 py-2 rounded-lg" oninput="onAdSearchInput(this.value)" autocomplete="off" />
       </div>
 
-      <div class="glass-panel rounded-2xl p-6 overflow-x-auto">
+      <div id="ads-table-container" class="glass-panel rounded-2xl p-6 overflow-x-auto">
         ${allAds.length === 0 ? '<div class="text-center py-12"><i data-lucide="inbox" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">No ads yet</p></div>' : `
           <table class="w-full text-sm">
             <thead>
@@ -2363,12 +2447,12 @@ function renderAdsView() {
             </thead>
             <tbody>
               ${allAds.map((ad, idx) => {
-                const customer = state.customers.find(c => c.id === ad.customerId);
+                const customer = customersById.get(ad.customerId);
                 // For ads linked to delivery receipts, get delivery status from the receipt (source of truth)
-                const linkedReceipt = ad.linkedDeliveryReceiptId ? state.receipts.find(r => r.id === ad.linkedDeliveryReceiptId) : null;
+                const linkedReceipt = ad.linkedDeliveryReceiptId ? receiptsById.get(ad.linkedDeliveryReceiptId) : null;
                 const effectiveDeliveryStatus = linkedReceipt ? (linkedReceipt.deliveryStatus || 'Needs Delivery') : (ad.deliveryStatus || 'Office');
                 const effectiveDeliveryPersonId = linkedReceipt ? linkedReceipt.deliveryPersonId : ad.deliveryPersonId;
-                const deliveryPerson = effectiveDeliveryPersonId ? state.users.find(u => u.id === effectiveDeliveryPersonId) : null;
+                const deliveryPerson = effectiveDeliveryPersonId ? usersById.get(effectiveDeliveryPersonId) : null;
                 const isLinkedToDeliveryReceipt = !!linkedReceipt;
                 // Use consistent exchange rate calculation
                 const receiptExchangeRate = getEffectiveExchangeRate(ad);

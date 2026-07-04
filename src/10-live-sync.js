@@ -59,22 +59,62 @@ async function apiLoadCollectionSince(collection, sinceMs) {
   return all;
 }
 
+// Cheap change-detection fingerprint for a fetched collection. Only reads each
+// record's id and _lastModified (tiny), never the heavy base64 photo fields, so
+// it is orders of magnitude cheaper than JSON.stringify of the full payload.
+function _cheapSyncSig(arr) {
+  if (!Array.isArray(arr)) return 'n';
+  let h = 0;
+  let maxLM = 0;
+  for (const r of arr) {
+    const id = String((r && r.id) || '');
+    const lm = Number((r && r._lastModified) || 0) | 0;
+    if (lm > maxLM) maxLM = lm;
+    for (let i = 0; i < id.length; i++) h = ((h << 5) - h + id.charCodeAt(i)) | 0;
+    h = ((h << 5) - h + lm) | 0;
+  }
+  return arr.length + ':' + maxLM + ':' + (h >>> 0);
+}
+
 function applyServerDelta(collectionName, records) {
   if (!Array.isArray(records) || records.length === 0) return false;
   if (!Array.isArray(state[collectionName])) state[collectionName] = [];
   const arr = state[collectionName];
+
+  // PERFORMANCE: build id->index ONCE. The old code did arr.findIndex per
+  // incoming record (O(delta × collection)) plus an O(n) arr.unshift per new
+  // record, so a large catch-up delta (tab hidden overnight / cursor frozen on
+  // failures) froze the UI for hundreds of ms. This is O(delta + collection).
+  const byId = new Map();
+  for (let i = 0; i < arr.length; i++) {
+    const x = arr[i];
+    if (x && x.id != null) byId.set(x.id, i);
+  }
+
+  const newOnes = [];         // staged new records (in delta order)
+  const newById = new Map();  // id -> index in newOnes (dedup within this delta)
   let changed = false;
 
   for (const rec of records) {
     if (!rec || !rec.id) continue;
     const clean = Security.sanitizeObject(rec);
-    const idx = arr.findIndex(x => x && x.id === clean.id);
-    if (idx !== -1) {
-      arr[idx] = clean;
+    const idx = byId.get(clean.id);
+    if (idx !== undefined) {
+      arr[idx] = clean;                       // update existing in place
+    } else if (newById.has(clean.id)) {
+      newOnes[newById.get(clean.id)] = clean; // dup id within this delta -> keep last
     } else {
-      arr.unshift(clean);
+      newById.set(clean.id, newOnes.length);
+      newOnes.push(clean);
     }
     changed = true;
+  }
+
+  // Prepend new records once. Reverse to preserve the previous behavior where
+  // per-record unshift left the last delta record at the very front.
+  if (newOnes.length) {
+    newOnes.reverse();
+    arr.unshift(...newOnes);
   }
   return changed;
 }
@@ -110,8 +150,16 @@ async function serverLiveSyncOnce() {
     // differs from the previous one. Comparing against state would always
     // differ (migrateOldDataFormats mutates state records in place), so
     // compare the raw fetched arrays via a signature.
+    // PERFORMANCE: use a CHEAP fingerprint (count + max/rolling-hash of
+    // id+_lastModified) instead of JSON.stringify of the whole payload. The
+    // full payload carries receiptImage base64 (~50-200KB each), so stringifying
+    // it every 3s serialized tens of MB and stalled the main thread even when
+    // nothing changed. Additions/removals change the count+hash; any edit bumps
+    // _lastModified, so this detects every real change without touching photos.
     let sig = null;
-    try { sig = JSON.stringify([ads, receipts, customers]); } catch (_) {}
+    try {
+      sig = _cheapSyncSig(ads) + '|' + _cheapSyncSig(receipts) + '|' + _cheapSyncSig(customers);
+    } catch (_) {}
     const changed = (sig === null) || sig !== _serverLiveSync.lastDeliverySig;
     if (changed) {
       if (Array.isArray(ads)) state.ads = ads;

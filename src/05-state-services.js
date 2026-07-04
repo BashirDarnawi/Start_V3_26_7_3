@@ -596,6 +596,9 @@ const state = {
   customerSort: 'newest',
   customerFinancialFilter: 'all',
   
+  // Ad Filters
+  adSearch: '',
+
   // Receipt Filters
   receiptSearch: '',
   receiptStatusFilter: 'all',

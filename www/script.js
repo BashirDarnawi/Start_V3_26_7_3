@@ -2977,6 +2977,9 @@ const state = {
   customerSort: 'newest',
   customerFinancialFilter: 'all',
   
+  // Ad Filters
+  adSearch: '',
+
   // Receipt Filters
   receiptSearch: '',
   receiptStatusFilter: 'all',
@@ -3112,17 +3115,23 @@ function saveState() {
     
     // Sanitize before persistence (defense-in-depth)
     const sanitizedToSave = Security.sanitizeObject(toSave);
-    const dataString = JSON.stringify(sanitizedToSave);
-    
-    // Check if approaching localStorage limit (typically 5-10MB)
-    const sizeInMB = new Blob([dataString]).size / (1024 * 1024);
+    // PERFORMANCE: serialize ONCE and reuse for both the size check and the
+    // write. The old code stringified the whole snapshot twice and also built a
+    // throwaway Blob just to measure it — in no-IndexedDB mode that snapshot
+    // includes every collection with base64 photos, and saveState runs on hot
+    // paths (every permission toggle / record update), so that was 2× multi-MB
+    // serialization + a Blob allocation per call. dataString.length ≈ the byte
+    // size here (base64 photos + JSON keys are ASCII), so no Blob is needed.
+    let dataString = JSON.stringify(sanitizedToSave);
+    const sizeInMB = dataString.length / (1024 * 1024);
     if (sizeInMB > 4) {
       console.warn(`LocalStorage data size: ${sizeInMB.toFixed(2)}MB - approaching limit`);
-      // Further reduce logs if needed
+      // Further reduce logs and re-serialize only in this rare branch.
       sanitizedToSave.logs = state.logs.slice(0, 100);
+      dataString = JSON.stringify(sanitizedToSave);
     }
-    
-    localStorage.setItem('albayan_complete_state', JSON.stringify(sanitizedToSave));
+
+    localStorage.setItem('albayan_complete_state', dataString);
   } catch (error) {
     console.error('Error saving state:', error);
     
@@ -5670,22 +5679,62 @@ async function apiLoadCollectionSince(collection, sinceMs) {
   return all;
 }
 
+// Cheap change-detection fingerprint for a fetched collection. Only reads each
+// record's id and _lastModified (tiny), never the heavy base64 photo fields, so
+// it is orders of magnitude cheaper than JSON.stringify of the full payload.
+function _cheapSyncSig(arr) {
+  if (!Array.isArray(arr)) return 'n';
+  let h = 0;
+  let maxLM = 0;
+  for (const r of arr) {
+    const id = String((r && r.id) || '');
+    const lm = Number((r && r._lastModified) || 0) | 0;
+    if (lm > maxLM) maxLM = lm;
+    for (let i = 0; i < id.length; i++) h = ((h << 5) - h + id.charCodeAt(i)) | 0;
+    h = ((h << 5) - h + lm) | 0;
+  }
+  return arr.length + ':' + maxLM + ':' + (h >>> 0);
+}
+
 function applyServerDelta(collectionName, records) {
   if (!Array.isArray(records) || records.length === 0) return false;
   if (!Array.isArray(state[collectionName])) state[collectionName] = [];
   const arr = state[collectionName];
+
+  // PERFORMANCE: build id->index ONCE. The old code did arr.findIndex per
+  // incoming record (O(delta × collection)) plus an O(n) arr.unshift per new
+  // record, so a large catch-up delta (tab hidden overnight / cursor frozen on
+  // failures) froze the UI for hundreds of ms. This is O(delta + collection).
+  const byId = new Map();
+  for (let i = 0; i < arr.length; i++) {
+    const x = arr[i];
+    if (x && x.id != null) byId.set(x.id, i);
+  }
+
+  const newOnes = [];         // staged new records (in delta order)
+  const newById = new Map();  // id -> index in newOnes (dedup within this delta)
   let changed = false;
 
   for (const rec of records) {
     if (!rec || !rec.id) continue;
     const clean = Security.sanitizeObject(rec);
-    const idx = arr.findIndex(x => x && x.id === clean.id);
-    if (idx !== -1) {
-      arr[idx] = clean;
+    const idx = byId.get(clean.id);
+    if (idx !== undefined) {
+      arr[idx] = clean;                       // update existing in place
+    } else if (newById.has(clean.id)) {
+      newOnes[newById.get(clean.id)] = clean; // dup id within this delta -> keep last
     } else {
-      arr.unshift(clean);
+      newById.set(clean.id, newOnes.length);
+      newOnes.push(clean);
     }
     changed = true;
+  }
+
+  // Prepend new records once. Reverse to preserve the previous behavior where
+  // per-record unshift left the last delta record at the very front.
+  if (newOnes.length) {
+    newOnes.reverse();
+    arr.unshift(...newOnes);
   }
   return changed;
 }
@@ -5721,8 +5770,16 @@ async function serverLiveSyncOnce() {
     // differs from the previous one. Comparing against state would always
     // differ (migrateOldDataFormats mutates state records in place), so
     // compare the raw fetched arrays via a signature.
+    // PERFORMANCE: use a CHEAP fingerprint (count + max/rolling-hash of
+    // id+_lastModified) instead of JSON.stringify of the whole payload. The
+    // full payload carries receiptImage base64 (~50-200KB each), so stringifying
+    // it every 3s serialized tens of MB and stalled the main thread even when
+    // nothing changed. Additions/removals change the count+hash; any edit bumps
+    // _lastModified, so this detects every real change without touching photos.
     let sig = null;
-    try { sig = JSON.stringify([ads, receipts, customers]); } catch (_) {}
+    try {
+      sig = _cheapSyncSig(ads) + '|' + _cheapSyncSig(receipts) + '|' + _cheapSyncSig(customers);
+    } catch (_) {}
     const changed = (sig === null) || sig !== _serverLiveSync.lastDeliverySig;
     if (changed) {
       if (Array.isArray(ads)) state.ads = ads;
@@ -8449,13 +8506,22 @@ function updateCustomersViewFiltered() {
   if (state.currentView !== 'customers') return;
   const grid = document.getElementById('customers-grid');
   const countEl = document.getElementById('customers-count');
-  if (!grid || !countEl) return;
-
-  const allCustomers = getVisibleRecords(state.customers);
-  const visibleCustomers = getFilteredCustomers();
-
-  countEl.textContent = `${visibleCustomers.length} of ${allCustomers.length} customers`;
-  grid.innerHTML = renderCustomersGrid(visibleCustomers);
+  if (!grid || !countEl) {
+    // View structure not on screen (e.g. mid-navigation): fall back to a full render.
+    render();
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  // Build the fresh view HTML off-screen, then swap in only the grid + count so
+  // the search input keeps its caret (same approach as updateReceiptsViewFiltered).
+  // renderCustomersView owns the pagination fingerprint/slice + Load-more button.
+  const tpl = document.createElement('template');
+  tpl.innerHTML = renderCustomersView();
+  const src = tpl.content;
+  const newGrid = src.querySelector('#customers-grid');
+  const newCount = src.querySelector('#customers-count');
+  if (newGrid) grid.innerHTML = newGrid.innerHTML;
+  if (newCount) countEl.textContent = newCount.textContent;
   if (window.lucide) lucide.createIcons();
 }
 
@@ -8568,10 +8634,35 @@ function renderCustomersGrid(customers) {
   }).join('');
 }
 
+// PAGINATION ("Load more") for the customers grid — mirrors the receipts grid.
+// Rendering every customer card at once (each card has two financial grids and
+// several icons) freezes the view past a few hundred customers; render the first
+// CUSTOMERS_PAGE_SIZE and reveal more on demand. The limit resets automatically
+// whenever the search/sort/financial-filter changes (fingerprint check below).
+const CUSTOMERS_PAGE_SIZE = 50;
+let _customersShowLimit = CUSTOMERS_PAGE_SIZE;
+let _customersFilterFingerprint = '';
+
+function loadMoreCustomers() {
+  _customersShowLimit += CUSTOMERS_PAGE_SIZE;
+  updateCustomersViewFiltered();
+}
+
 function renderCustomersView() {
-  const visibleCustomers = getFilteredCustomers();
+  const allFilteredCustomers = getFilteredCustomers();
   const allCustomers = getVisibleRecords(state.customers);
-  
+
+  // Reset pagination whenever the filter/sort/search combination changes.
+  const filterFingerprint = JSON.stringify([
+    state.customerSearch, state.customerSort, state.customerFinancialFilter
+  ]);
+  if (filterFingerprint !== _customersFilterFingerprint) {
+    _customersFilterFingerprint = filterFingerprint;
+    _customersShowLimit = CUSTOMERS_PAGE_SIZE;
+  }
+  const visibleCustomers = allFilteredCustomers.slice(0, _customersShowLimit);
+  const remainingCustomers = allFilteredCustomers.length - visibleCustomers.length;
+
   // Calculate overall stats
   let totalRevenue = 0;
   let totalDebts = 0;
@@ -8590,7 +8681,7 @@ function renderCustomersView() {
       <div class="flex justify-between items-center">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('customers')}</h1>
-          <p id="customers-count" class="text-sm text-slate-500 mt-1">${visibleCustomers.length} of ${allCustomers.length} customers</p>
+          <p id="customers-count" class="text-sm text-slate-500 mt-1">${allFilteredCustomers.length} of ${allCustomers.length} customers</p>
         </div>
         <button onclick="showCustomerModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
           <i data-lucide="user-plus" class="w-4 h-4"></i>
@@ -8642,6 +8733,14 @@ function renderCustomersView() {
 
       <div id="customers-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         ${renderCustomersGrid(visibleCustomers)}
+        ${remainingCustomers > 0 ? `
+          <div class="col-span-full flex justify-center py-2">
+            <button onclick="loadMoreCustomers()" class="px-6 py-3 glass-panel rounded-xl text-sm font-bold text-indigo-600 dark:text-indigo-400 hover:scale-105 transition-transform flex items-center gap-2">
+              <i data-lucide="chevron-down" class="w-4 h-4"></i>
+              <span>${state.language === 'ar' ? `عرض المزيد (${remainingCustomers} متبقي)` : `Load more (${remainingCustomers} remaining)`}</span>
+            </button>
+          </div>
+        ` : ''}
       </div>
     </div>
   `;
@@ -9165,15 +9264,57 @@ function renderPagesView() {
   `;
 }
 
+let _adSearchTimer = null;
+function onAdSearchInput(value) {
+  // Debounced ads search: keep the term in state and swap only the table, instead
+  // of the old oninput="render()" which rebuilt the ENTIRE app (and the whole ads
+  // table) synchronously on every keystroke.
+  state.adSearch = Security.sanitizeInput(String(value || ''), { maxLength: 200 });
+  if (_adSearchTimer) clearTimeout(_adSearchTimer);
+  _adSearchTimer = setTimeout(() => {
+    _adSearchTimer = null;
+    updateAdsViewFiltered();
+  }, 80);
+}
+
+function updateAdsViewFiltered() {
+  if (state.currentView !== 'ads') return;
+  const container = document.getElementById('ads-table-container');
+  const countEl = document.getElementById('ads-count');
+  if (!container) {
+    // View not on screen (e.g. mid-navigation): fall back to a full render.
+    render();
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  // Build the fresh view off-screen and swap only the table + count so the search
+  // input keeps its caret (same approach as updateReceiptsViewFiltered).
+  const tpl = document.createElement('template');
+  tpl.innerHTML = renderAdsView();
+  const src = tpl.content;
+  const newContainer = src.querySelector('#ads-table-container');
+  const newCount = src.querySelector('#ads-count');
+  if (newContainer) container.innerHTML = newContainer.innerHTML;
+  if (countEl && newCount) countEl.textContent = newCount.textContent;
+  if (window.lucide) lucide.createIcons();
+}
+
 function renderAdsView() {
-  const allAds = getFilteredAds();
-  
+  // PERFORMANCE: build id->record Maps ONCE so each table row does O(1) lookups
+  // instead of scanning state.customers / state.receipts / state.users per row
+  // (was O(ads × (customers+receipts+users)) on every keystroke). Same Map is
+  // passed into getFilteredAds so the search filter is O(1)-per-ad too.
+  const customersById = new Map(state.customers.map(c => [c.id, c]));
+  const receiptsById = new Map(state.receipts.map(r => [r.id, r]));
+  const usersById = new Map(state.users.map(u => [u.id, u]));
+  const allAds = getFilteredAds(customersById);
+
   return `
     <div class="space-y-6 animate-fade-in-up">
       <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('ads')}</h1>
-          <p class="text-sm text-slate-500 mt-1">${allAds.length} total ads</p>
+          <p id="ads-count" class="text-sm text-slate-500 mt-1">${allAds.length} total ads</p>
         </div>
         <div class="flex flex-wrap gap-2">
           <button onclick="showAdModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
@@ -9187,10 +9328,10 @@ function renderAdsView() {
       </div>
 
       <div class="glass-panel rounded-xl p-4">
-        <input type="text" id="ad-search" placeholder="Search ads..." class="w-full glass-input px-4 py-2 rounded-lg" oninput="render()" />
+        <input type="text" id="ad-search" placeholder="Search ads..." value="${Security.escapeHtml(state.adSearch || '')}" class="w-full glass-input px-4 py-2 rounded-lg" oninput="onAdSearchInput(this.value)" autocomplete="off" />
       </div>
 
-      <div class="glass-panel rounded-2xl p-6 overflow-x-auto">
+      <div id="ads-table-container" class="glass-panel rounded-2xl p-6 overflow-x-auto">
         ${allAds.length === 0 ? '<div class="text-center py-12"><i data-lucide="inbox" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">No ads yet</p></div>' : `
           <table class="w-full text-sm">
             <thead>
@@ -9210,12 +9351,12 @@ function renderAdsView() {
             </thead>
             <tbody>
               ${allAds.map((ad, idx) => {
-                const customer = state.customers.find(c => c.id === ad.customerId);
+                const customer = customersById.get(ad.customerId);
                 // For ads linked to delivery receipts, get delivery status from the receipt (source of truth)
-                const linkedReceipt = ad.linkedDeliveryReceiptId ? state.receipts.find(r => r.id === ad.linkedDeliveryReceiptId) : null;
+                const linkedReceipt = ad.linkedDeliveryReceiptId ? receiptsById.get(ad.linkedDeliveryReceiptId) : null;
                 const effectiveDeliveryStatus = linkedReceipt ? (linkedReceipt.deliveryStatus || 'Needs Delivery') : (ad.deliveryStatus || 'Office');
                 const effectiveDeliveryPersonId = linkedReceipt ? linkedReceipt.deliveryPersonId : ad.deliveryPersonId;
-                const deliveryPerson = effectiveDeliveryPersonId ? state.users.find(u => u.id === effectiveDeliveryPersonId) : null;
+                const deliveryPerson = effectiveDeliveryPersonId ? usersById.get(effectiveDeliveryPersonId) : null;
                 const isLinkedToDeliveryReceipt = !!linkedReceipt;
                 // Use consistent exchange rate calculation
                 const receiptExchangeRate = getEffectiveExchangeRate(ad);
@@ -11671,22 +11812,29 @@ function filterAds() {
   render();
 }
 
-function getFilteredAds() {
+function getFilteredAds(customersById = null) {
   let filtered = getVisibleRecords(state.ads).filter(ad => ad.recordType !== 'receipt');
-  const searchTerm = document.getElementById('ad-search')?.value.toLowerCase() || '';
-  
+  // Read the search term from state (kept in sync by the debounced input handler).
+  // Fall back to the DOM only if state hasn't been set yet.
+  const searchTerm = String(
+    state.adSearch != null ? state.adSearch : (document.getElementById('ad-search')?.value || '')
+  ).toLowerCase().trim();
+
   if (searchTerm) {
+    // PERFORMANCE: one Map lookup per ad instead of scanning the whole customers
+    // array for every ad on every keystroke.
+    const custMap = customersById || new Map(state.customers.map(c => [c.id, c]));
     filtered = filtered.filter(ad => {
-      const customer = state.customers.find(c => c.id === ad.customerId);
+      const customer = custMap.get(ad.customerId);
       return (
-        customer?.name.toLowerCase().includes(searchTerm) ||
+        customer?.name?.toLowerCase().includes(searchTerm) ||
         ad.id.toLowerCase().includes(searchTerm) ||
         ad.phoneNumber?.toLowerCase().includes(searchTerm) ||
         ad.serialNumber?.toLowerCase().includes(searchTerm)
       );
     });
   }
-  
+
   return filtered;
 }
 
@@ -11841,9 +11989,13 @@ function getCustomerStats(customerId, statsIndex = null) {
   };
 }
 
-function getCustomerSortValue(customer, sortType) {
-  const stats = getCustomerStats(customer.id);
-  
+function getCustomerSortValue(customer, sortType, statsIndex = null) {
+  // Date sorts never touch stats — skip the expensive computation entirely.
+  if (sortType === 'newest') return new Date(customer.joinDate).getTime();
+  if (sortType === 'oldest') return -new Date(customer.joinDate).getTime();
+
+  const stats = getCustomerStats(customer.id, statsIndex);
+
   switch (sortType) {
     case 'newest':
       return new Date(customer.joinDate).getTime();
@@ -11883,23 +12035,33 @@ function getFilteredCustomers() {
     );
   }
   
+  // PERFORMANCE: build the by-customer stats index ONCE and reuse it for both
+  // the financial filter and the sort. Previously the sort comparator called
+  // getCustomerStats(customer.id) with no index for BOTH operands of EVERY
+  // comparison, and the no-index path rescans all ads+receipts+pages each time —
+  // ~O(customers log customers × records), freezing the UI for seconds at a few
+  // thousand records on every search keystroke / sort change / live-sync tick.
+  const needsStats = (
+    state.customerFinancialFilter === 'hasCredit' ||
+    state.customerFinancialFilter === 'hasDebt' ||
+    !(state.customerSort === 'newest' || state.customerSort === 'oldest')
+  );
+  const statsIndex = needsStats ? buildCustomerStatsIndex() : null;
+
   // Apply financial filter
-  if (state.customerFinancialFilter === 'hasCredit' || state.customerFinancialFilter === 'hasDebt') {
-    const statsIndex = buildCustomerStatsIndex();
-    if (state.customerFinancialFilter === 'hasCredit') {
-      filtered = filtered.filter(c => getCustomerStats(c.id, statsIndex).balance > 0);
-    } else {
-      filtered = filtered.filter(c => getCustomerStats(c.id, statsIndex).balance < 0);
-    }
+  if (state.customerFinancialFilter === 'hasCredit') {
+    filtered = filtered.filter(c => getCustomerStats(c.id, statsIndex).balance > 0);
+  } else if (state.customerFinancialFilter === 'hasDebt') {
+    filtered = filtered.filter(c => getCustomerStats(c.id, statsIndex).balance < 0);
   }
-  
-  // Apply sorting
-  filtered.sort((a, b) => {
-    const aValue = getCustomerSortValue(a, state.customerSort);
-    const bValue = getCustomerSortValue(b, state.customerSort);
-    return bValue - aValue; // Descending order
-  });
-  
+
+  // Apply sorting (decorate-sort-undecorate: compute each sort value once,
+  // reusing the shared statsIndex, instead of recomputing inside the comparator).
+  filtered = filtered
+    .map(c => ({ c, v: getCustomerSortValue(c, state.customerSort, statsIndex) }))
+    .sort((a, b) => b.v - a.v) // Descending order
+    .map(x => x.c);
+
   return filtered;
 }
 

@@ -110,17 +110,23 @@ function saveState() {
     
     // Sanitize before persistence (defense-in-depth)
     const sanitizedToSave = Security.sanitizeObject(toSave);
-    const dataString = JSON.stringify(sanitizedToSave);
-    
-    // Check if approaching localStorage limit (typically 5-10MB)
-    const sizeInMB = new Blob([dataString]).size / (1024 * 1024);
+    // PERFORMANCE: serialize ONCE and reuse for both the size check and the
+    // write. The old code stringified the whole snapshot twice and also built a
+    // throwaway Blob just to measure it — in no-IndexedDB mode that snapshot
+    // includes every collection with base64 photos, and saveState runs on hot
+    // paths (every permission toggle / record update), so that was 2× multi-MB
+    // serialization + a Blob allocation per call. dataString.length ≈ the byte
+    // size here (base64 photos + JSON keys are ASCII), so no Blob is needed.
+    let dataString = JSON.stringify(sanitizedToSave);
+    const sizeInMB = dataString.length / (1024 * 1024);
     if (sizeInMB > 4) {
       console.warn(`LocalStorage data size: ${sizeInMB.toFixed(2)}MB - approaching limit`);
-      // Further reduce logs if needed
+      // Further reduce logs and re-serialize only in this rare branch.
       sanitizedToSave.logs = state.logs.slice(0, 100);
+      dataString = JSON.stringify(sanitizedToSave);
     }
-    
-    localStorage.setItem('albayan_complete_state', JSON.stringify(sanitizedToSave));
+
+    localStorage.setItem('albayan_complete_state', dataString);
   } catch (error) {
     console.error('Error saving state:', error);
     

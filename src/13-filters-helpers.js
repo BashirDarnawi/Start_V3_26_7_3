@@ -8,22 +8,29 @@ function filterAds() {
   render();
 }
 
-function getFilteredAds() {
+function getFilteredAds(customersById = null) {
   let filtered = getVisibleRecords(state.ads).filter(ad => ad.recordType !== 'receipt');
-  const searchTerm = document.getElementById('ad-search')?.value.toLowerCase() || '';
-  
+  // Read the search term from state (kept in sync by the debounced input handler).
+  // Fall back to the DOM only if state hasn't been set yet.
+  const searchTerm = String(
+    state.adSearch != null ? state.adSearch : (document.getElementById('ad-search')?.value || '')
+  ).toLowerCase().trim();
+
   if (searchTerm) {
+    // PERFORMANCE: one Map lookup per ad instead of scanning the whole customers
+    // array for every ad on every keystroke.
+    const custMap = customersById || new Map(state.customers.map(c => [c.id, c]));
     filtered = filtered.filter(ad => {
-      const customer = state.customers.find(c => c.id === ad.customerId);
+      const customer = custMap.get(ad.customerId);
       return (
-        customer?.name.toLowerCase().includes(searchTerm) ||
+        customer?.name?.toLowerCase().includes(searchTerm) ||
         ad.id.toLowerCase().includes(searchTerm) ||
         ad.phoneNumber?.toLowerCase().includes(searchTerm) ||
         ad.serialNumber?.toLowerCase().includes(searchTerm)
       );
     });
   }
-  
+
   return filtered;
 }
 
@@ -178,9 +185,13 @@ function getCustomerStats(customerId, statsIndex = null) {
   };
 }
 
-function getCustomerSortValue(customer, sortType) {
-  const stats = getCustomerStats(customer.id);
-  
+function getCustomerSortValue(customer, sortType, statsIndex = null) {
+  // Date sorts never touch stats — skip the expensive computation entirely.
+  if (sortType === 'newest') return new Date(customer.joinDate).getTime();
+  if (sortType === 'oldest') return -new Date(customer.joinDate).getTime();
+
+  const stats = getCustomerStats(customer.id, statsIndex);
+
   switch (sortType) {
     case 'newest':
       return new Date(customer.joinDate).getTime();
@@ -220,23 +231,33 @@ function getFilteredCustomers() {
     );
   }
   
+  // PERFORMANCE: build the by-customer stats index ONCE and reuse it for both
+  // the financial filter and the sort. Previously the sort comparator called
+  // getCustomerStats(customer.id) with no index for BOTH operands of EVERY
+  // comparison, and the no-index path rescans all ads+receipts+pages each time —
+  // ~O(customers log customers × records), freezing the UI for seconds at a few
+  // thousand records on every search keystroke / sort change / live-sync tick.
+  const needsStats = (
+    state.customerFinancialFilter === 'hasCredit' ||
+    state.customerFinancialFilter === 'hasDebt' ||
+    !(state.customerSort === 'newest' || state.customerSort === 'oldest')
+  );
+  const statsIndex = needsStats ? buildCustomerStatsIndex() : null;
+
   // Apply financial filter
-  if (state.customerFinancialFilter === 'hasCredit' || state.customerFinancialFilter === 'hasDebt') {
-    const statsIndex = buildCustomerStatsIndex();
-    if (state.customerFinancialFilter === 'hasCredit') {
-      filtered = filtered.filter(c => getCustomerStats(c.id, statsIndex).balance > 0);
-    } else {
-      filtered = filtered.filter(c => getCustomerStats(c.id, statsIndex).balance < 0);
-    }
+  if (state.customerFinancialFilter === 'hasCredit') {
+    filtered = filtered.filter(c => getCustomerStats(c.id, statsIndex).balance > 0);
+  } else if (state.customerFinancialFilter === 'hasDebt') {
+    filtered = filtered.filter(c => getCustomerStats(c.id, statsIndex).balance < 0);
   }
-  
-  // Apply sorting
-  filtered.sort((a, b) => {
-    const aValue = getCustomerSortValue(a, state.customerSort);
-    const bValue = getCustomerSortValue(b, state.customerSort);
-    return bValue - aValue; // Descending order
-  });
-  
+
+  // Apply sorting (decorate-sort-undecorate: compute each sort value once,
+  // reusing the shared statsIndex, instead of recomputing inside the comparator).
+  filtered = filtered
+    .map(c => ({ c, v: getCustomerSortValue(c, state.customerSort, statsIndex) }))
+    .sort((a, b) => b.v - a.v) // Descending order
+    .map(x => x.c);
+
   return filtered;
 }
 
