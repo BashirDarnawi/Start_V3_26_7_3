@@ -10619,7 +10619,7 @@ function renderDeliveryDashboard() {
                           <div class="flex items-center gap-2 flex-shrink-0">
                             <a href="tel:${encodeURIComponent(phone)}" class="text-xs font-bold text-blue-600 hover:text-blue-700 px-2 py-1 bg-blue-50 rounded-lg">Call</a>
                             ${wa ? `<a href="${wa}" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-emerald-600 hover:text-emerald-700 px-2 py-1 bg-emerald-50 rounded-lg">WhatsApp</a>` : ''}
-                            <button type="button" onclick='copyTextToClipboard(${JSON.stringify(phone)}).then(ok => showNotification(ok ? "Copied" : "Copy Failed", ok ? "Phone number copied" : "Could not copy phone number", ok ? "success" : "error"))' class="text-xs font-bold text-slate-600 hover:text-slate-700 px-2 py-1 bg-slate-100 rounded-lg">Copy</button>
+                            <button type="button" data-phone="${Security.escapeHtml(phone)}" onclick='copyTextToClipboard(this.dataset.phone).then(ok => showNotification(ok ? "Copied" : "Copy Failed", ok ? "Phone number copied" : "Could not copy phone number", ok ? "success" : "error"))' class="text-xs font-bold text-slate-600 hover:text-slate-700 px-2 py-1 bg-slate-100 rounded-lg">Copy</button>
                           </div>
                         ` : ''}
                       </div>
@@ -11809,8 +11809,8 @@ function renderSettingsView() {
         <div class="space-y-4">
           <div class="flex flex-col md:flex-row md:items-center space-y-2 md:space-y-0 md:space-x-4">
             <label class="text-sm font-medium text-slate-700 dark:text-slate-300">Current Rate (USD to LYD):</label>
-            <input type="text" inputmode="decimal" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" onchange="updateExchangeRate(this.value)" class="glass-input px-4 py-2 rounded-xl w-32 font-bold text-emerald-600" />
-            <button onclick="updateExchangeRate(document.querySelector('input[type=number]').value)" class="btn-shine bg-emerald-600 text-white px-4 py-2 rounded-xl text-sm">Save Rate</button>
+            <input type="text" id="default-rate-input" inputmode="decimal" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" onchange="updateExchangeRate(this.value)" class="glass-input px-4 py-2 rounded-xl w-32 font-bold text-emerald-600" />
+            <button onclick="updateExchangeRate(document.getElementById('default-rate-input').value)" class="btn-shine bg-emerald-600 text-white px-4 py-2 rounded-xl text-sm">Save Rate</button>
           </div>
 
           ${history.length > 0 ? `
@@ -14849,7 +14849,22 @@ function getPaymentTotalsFromDom() {
  *   - Server errors: Show detailed message from server
  *   - Rollback not needed (optimistic update only after server confirms)
  */
+// Reentrancy guard: saving awaits a network call in server mode, and a second
+// click while the first is in flight created a SECOND receipt (the duplicate-
+// serial check passes for both because the first hasn't landed in state yet).
+let _savingReceiptInFlight = false;
+
 async function saveReceiptFromModal() {
+  if (_savingReceiptInFlight) return;
+  _savingReceiptInFlight = true;
+  try {
+    await _saveReceiptFromModalInner();
+  } finally {
+    _savingReceiptInFlight = false;
+  }
+}
+
+async function _saveReceiptFromModalInner() {
   try {
   const customerId = document.getElementById('receipt-customer-id').value;
   if (!customerId) {
@@ -19006,13 +19021,25 @@ function renderModal() {
   
   const form = document.getElementById('modal-form');
   if (form) {
+    // Reentrancy guard: user/customer/page creation awaits async work
+    // (apiCreateUser / password hashing) before the modal closes, so a
+    // double-click on Create ran handleModalSubmit twice and created
+    // duplicate records. Also disable the submit button for visible feedback.
+    let submitting = false;
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
+      if (submitting) return;
+      submitting = true;
+      const submitBtn = e.submitter || document.querySelector('button[type="submit"][form="modal-form"], #modal-form button[type="submit"]');
+      if (submitBtn) submitBtn.disabled = true;
       try {
         await handleModalSubmit();
       } catch (err) {
         console.error('Modal submit error:', err);
         showNotification('Error', 'Failed to save changes', 'error');
+      } finally {
+        submitting = false;
+        if (submitBtn) submitBtn.disabled = false;
       }
     });
   }
@@ -20430,7 +20457,20 @@ function deleteUser(id) {
 }
 
 function updateExchangeRate(value) {
-  state.defaultExchangeRate = parseFloat(value);
+  // MONEY-MATH: an empty/invalid field parseFloats to NaN; storing it poisons
+  // every later save (amountLocal = amountUSD * NaN) while showing a green
+  // success toast. Validate first, keep the previous rate on bad input.
+  const rate = parseFloat(value);
+  if (!Number.isFinite(rate) || rate <= 0) {
+    showNotification(
+      'Validation',
+      state.language === 'ar' ? 'أدخل سعر صرف صحيح أكبر من صفر' : 'Enter a valid exchange rate greater than zero',
+      'error'
+    );
+    render();
+    return;
+  }
+  state.defaultExchangeRate = rate;
   const record = {
     id: generateId('rate'),
     rate: state.defaultExchangeRate,
@@ -20438,7 +20478,7 @@ function updateExchangeRate(value) {
     userId: state.currentUser?.id || 'system'
   };
   addRecord(state.exchangeRateHistory, record);
-  showNotification('Updated', 'Exchange rate updated', 'success');
+  showNotification('Updated', state.language === 'ar' ? 'تم تحديث سعر الصرف' : 'Exchange rate updated', 'success');
 }
 
 function exportData() {

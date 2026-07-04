@@ -381,7 +381,20 @@ function deleteUser(id) {
 }
 
 function updateExchangeRate(value) {
-  state.defaultExchangeRate = parseFloat(value);
+  // MONEY-MATH: an empty/invalid field parseFloats to NaN; storing it poisons
+  // every later save (amountLocal = amountUSD * NaN) while showing a green
+  // success toast. Validate first, keep the previous rate on bad input.
+  const rate = parseFloat(value);
+  if (!Number.isFinite(rate) || rate <= 0) {
+    showNotification(
+      'Validation',
+      state.language === 'ar' ? 'أدخل سعر صرف صحيح أكبر من صفر' : 'Enter a valid exchange rate greater than zero',
+      'error'
+    );
+    render();
+    return;
+  }
+  state.defaultExchangeRate = rate;
   const record = {
     id: generateId('rate'),
     rate: state.defaultExchangeRate,
@@ -389,7 +402,7 @@ function updateExchangeRate(value) {
     userId: state.currentUser?.id || 'system'
   };
   addRecord(state.exchangeRateHistory, record);
-  showNotification('Updated', 'Exchange rate updated', 'success');
+  showNotification('Updated', state.language === 'ar' ? 'تم تحديث سعر الصرف' : 'Exchange rate updated', 'success');
 }
 
 function exportData() {

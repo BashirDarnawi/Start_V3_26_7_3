@@ -1610,13 +1610,25 @@ function renderModal() {
   
   const form = document.getElementById('modal-form');
   if (form) {
+    // Reentrancy guard: user/customer/page creation awaits async work
+    // (apiCreateUser / password hashing) before the modal closes, so a
+    // double-click on Create ran handleModalSubmit twice and created
+    // duplicate records. Also disable the submit button for visible feedback.
+    let submitting = false;
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
+      if (submitting) return;
+      submitting = true;
+      const submitBtn = e.submitter || document.querySelector('button[type="submit"][form="modal-form"], #modal-form button[type="submit"]');
+      if (submitBtn) submitBtn.disabled = true;
       try {
         await handleModalSubmit();
       } catch (err) {
         console.error('Modal submit error:', err);
         showNotification('Error', 'Failed to save changes', 'error');
+      } finally {
+        submitting = false;
+        if (submitBtn) submitBtn.disabled = false;
       }
     });
   }

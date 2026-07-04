@@ -871,7 +871,22 @@ function getPaymentTotalsFromDom() {
  *   - Server errors: Show detailed message from server
  *   - Rollback not needed (optimistic update only after server confirms)
  */
+// Reentrancy guard: saving awaits a network call in server mode, and a second
+// click while the first is in flight created a SECOND receipt (the duplicate-
+// serial check passes for both because the first hasn't landed in state yet).
+let _savingReceiptInFlight = false;
+
 async function saveReceiptFromModal() {
+  if (_savingReceiptInFlight) return;
+  _savingReceiptInFlight = true;
+  try {
+    await _saveReceiptFromModalInner();
+  } finally {
+    _savingReceiptInFlight = false;
+  }
+}
+
+async function _saveReceiptFromModalInner() {
   try {
   const customerId = document.getElementById('receipt-customer-id').value;
   if (!customerId) {

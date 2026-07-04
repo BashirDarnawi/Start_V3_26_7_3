@@ -26,8 +26,12 @@ html.is-rendering {
   max-width: 100%;
   /* Lock the container to prevent movement */
   position: relative;
-  /* Isolate layout calculations */
-  contain: layout style;
+  /* Isolate style recalculation. NOTE: must NOT include `layout` — layout
+     containment makes #app the containing block for position:fixed
+     descendants, so the sidebar (fixed inset-y-0) and the mobile-menu
+     backdrop anchored to the DOCUMENT instead of the viewport and scrolled
+     away with long lists. */
+  contain: style;
   /* Prevent content from pushing layout */
   overflow-anchor: none;
 }
@@ -325,9 +329,11 @@ body.is-scrolling .btn-shine:hover {
    Dramatically speeds up rendering of long lists
    ========================================== */
 
-/* Containment for main content area - isolates repaints */
+/* Containment for main content area - isolates style recalcs only.
+   (`layout` containment would re-anchor the fixed sidebar to #app — see the
+   #app rule near the top of this file.) */
 #app {
-  contain: layout style;
+  contain: style;
 }
 
 /* Virtual scrolling hint for list items - browser can skip rendering off-screen items */
@@ -342,6 +348,14 @@ body.is-scrolling .btn-shine:hover {
 .space-y-3 > .glass-panel {
   content-visibility: auto;
   contain-intrinsic-size: auto 180px;
+}
+
+/* Modal panels must NOT get content-visibility containment: it clips
+   anything painted outside the panel box (like the customer-search dropdown
+   in the Page modal) exactly like overflow:hidden. */
+#app-modal .glass-panel {
+  content-visibility: visible;
+  contain: none;
 }
 
 /* Sidebar isolation - don't repaint when main content changes */

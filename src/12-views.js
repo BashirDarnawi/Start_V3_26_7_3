@@ -3593,7 +3593,7 @@ function renderDeliveryDashboard() {
                           <div class="flex items-center gap-2 flex-shrink-0">
                             <a href="tel:${encodeURIComponent(phone)}" class="text-xs font-bold text-blue-600 hover:text-blue-700 px-2 py-1 bg-blue-50 rounded-lg">Call</a>
                             ${wa ? `<a href="${wa}" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-emerald-600 hover:text-emerald-700 px-2 py-1 bg-emerald-50 rounded-lg">WhatsApp</a>` : ''}
-                            <button type="button" onclick='copyTextToClipboard(${JSON.stringify(phone)}).then(ok => showNotification(ok ? "Copied" : "Copy Failed", ok ? "Phone number copied" : "Could not copy phone number", ok ? "success" : "error"))' class="text-xs font-bold text-slate-600 hover:text-slate-700 px-2 py-1 bg-slate-100 rounded-lg">Copy</button>
+                            <button type="button" data-phone="${Security.escapeHtml(phone)}" onclick='copyTextToClipboard(this.dataset.phone).then(ok => showNotification(ok ? "Copied" : "Copy Failed", ok ? "Phone number copied" : "Could not copy phone number", ok ? "success" : "error"))' class="text-xs font-bold text-slate-600 hover:text-slate-700 px-2 py-1 bg-slate-100 rounded-lg">Copy</button>
                           </div>
                         ` : ''}
                       </div>
@@ -4783,8 +4783,8 @@ function renderSettingsView() {
         <div class="space-y-4">
           <div class="flex flex-col md:flex-row md:items-center space-y-2 md:space-y-0 md:space-x-4">
             <label class="text-sm font-medium text-slate-700 dark:text-slate-300">Current Rate (USD to LYD):</label>
-            <input type="text" inputmode="decimal" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" onchange="updateExchangeRate(this.value)" class="glass-input px-4 py-2 rounded-xl w-32 font-bold text-emerald-600" />
-            <button onclick="updateExchangeRate(document.querySelector('input[type=number]').value)" class="btn-shine bg-emerald-600 text-white px-4 py-2 rounded-xl text-sm">Save Rate</button>
+            <input type="text" id="default-rate-input" inputmode="decimal" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" onchange="updateExchangeRate(this.value)" class="glass-input px-4 py-2 rounded-xl w-32 font-bold text-emerald-600" />
+            <button onclick="updateExchangeRate(document.getElementById('default-rate-input').value)" class="btn-shine bg-emerald-600 text-white px-4 py-2 rounded-xl text-sm">Save Rate</button>
           </div>
 
           ${history.length > 0 ? `
