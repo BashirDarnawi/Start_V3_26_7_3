@@ -297,24 +297,6 @@ function currentUserHasPermission(module, action) {
   return hasPermission(state.currentUser?.id, module, action);
 }
 
-// Get all permissions for a user
-function getUserPermissions(userId) {
-  const user = state.users.find(u => u.id === userId);
-  if (!user) return {};
-  
-  if (isAdminRole(user.role)) {
-    // Admin gets all permissions
-    return Object.fromEntries(
-      Object.entries(PERMISSION_MODULES).map(([module, config]) => [
-        module,
-        Object.keys(config.permissions)
-      ])
-    );
-  }
-  
-  return user.permissions || {};
-}
-
 // Get permission summary for display
 function getPermissionSummary(permissions) {
   let total = 0;
@@ -329,14 +311,6 @@ function getPermissionSummary(permissions) {
   });
   
   return { total, granted, percentage: Math.round((granted / total) * 100) };
-}
-
-// Helper to render permission-controlled buttons
-function renderPermissionButton(module, action, buttonHtml, fallbackHtml = '') {
-  if (currentUserHasPermission(module, action)) {
-    return buttonHtml;
-  }
-  return fallbackHtml;
 }
 
 // Check if user can perform action on specific record (own vs all)
@@ -354,11 +328,6 @@ function canActOnRecord(module, action, recordCreatorId) {
   }
   
   return false;
-}
-
-// Get a permission-denied tooltip
-function getPermissionDeniedTooltip(action) {
-  return `You don't have permission to ${action}. Contact your administrator.`;
 }
 
 // ==========================================

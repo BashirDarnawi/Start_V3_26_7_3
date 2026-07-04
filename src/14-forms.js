@@ -502,53 +502,6 @@ document.addEventListener('click', (e) => {
   }
 });
 
-function setPaymentCollection(button, type) {
-  const paymentItem = button.closest('.payment-split-item');
-  const collectionInput = paymentItem.querySelector('.collection-type');
-  collectionInput.value = type;
-  
-  // Update button styles
-  const buttons = paymentItem.querySelectorAll('.collection-btn');
-  buttons.forEach(btn => {
-    const btnType = btn.getAttribute('onclick').match(/'(\w+)'/)[1];
-    if (btnType === type) {
-      btn.className = 'collection-btn px-3 py-2 rounded-lg text-xs font-bold uppercase tracking-wide transition-all bg-white border-2 border-indigo-600 text-indigo-700 shadow-sm';
-    } else {
-      btn.className = 'collection-btn px-3 py-2 rounded-lg text-xs font-bold uppercase tracking-wide transition-all bg-slate-100 dark:bg-slate-700 text-slate-500 border-2 border-transparent';
-    }
-  });
-  
-  // Show/hide delivery person selector
-  let deliverySelect = paymentItem.querySelector('.delivery-person');
-  
-  if (type === 'delivery') {
-    // If delivery selected and no dropdown exists, create it
-    if (!deliverySelect) {
-  const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
-      if (deliveryUsers.length > 0) {
-        const selectHtml = `
-          <select class="delivery-person w-full glass-input px-3 py-2 rounded-lg text-sm mt-2 border border-slate-200 dark:border-slate-700">
-            <option value="">Select delivery person...</option>
-            ${deliveryUsers.map(u => `<option value="${u.id}">${Security.escapeHtml(u.name || '')}</option>`).join('')}
-          </select>
-        `;
-        const collectionDiv = paymentItem.querySelector('.collection-type').closest('div');
-        collectionDiv.insertAdjacentHTML('beforeend', selectHtml);
-      }
-    } else {
-      deliverySelect.style.display = 'block';
-    }
-  } else {
-    // Hide delivery person selector if not delivery
-    if (deliverySelect) {
-      deliverySelect.style.display = 'none';
-    }
-  }
-}
-
-// REMOVED DUPLICATE addReceiptPaymentSplit - correct version is defined earlier at line ~2738
-// This duplicate was causing layout issues by not restructuring the totals section
-
 // Get default Rate 1 based on payment method
 function getDefaultRate1(paymentMethod) {
   const zeroRateMethods = ['Bank Transfer', 'Bank Transfer (LYD)', 'Bank Transfer (USD)', 'Sadad', 'USDT', 'Cash (USD)', 'LTT'];
@@ -560,12 +513,6 @@ function getDefaultRate1(paymentMethod) {
   if (paymentMethod === 'Madar') return 0.75;
   
   return state.defaultExchangeRate; // Default for others
-}
-
-// Check if Rate 2 should be zero for this payment method
-function shouldRate2BeZero(paymentMethod) {
-  const zeroRate2Methods = ['USDT', 'Bank Transfer (USD)', 'Cash (USD)'];
-  return zeroRate2Methods.includes(paymentMethod);
 }
 
 // Payment methods that get auto-serial numbers (S-prefix: S1, S2, S3...)
@@ -1373,16 +1320,6 @@ async function saveReceiptFromModal() {
       render();
       lucide.createIcons();
     }, 50);
-  }
-}
-
-// Image upload handler
-function handleReceiptImageUpload(input) {
-  if (input.files && input.files[0]) {
-    compressImageToDataUrl(input.files[0]).then((dataUrl) => {
-      // Store base64 image temporarily (compressed)
-      if (dataUrl) input.dataset.imageData = dataUrl;
-    }).catch(() => {});
   }
 }
 
@@ -2487,13 +2424,6 @@ document.addEventListener('click', function(e) {
   }
 });
 
-function toggleAdDriver() {
-  const deliverySelect = document.getElementById('ad-delivery');
-  const driverContainer = document.getElementById('ad-driver-container');
-  if (!deliverySelect || !driverContainer) return;
-  driverContainer.classList.toggle('hidden', !deliverySelect.value);
-}
-
 // Add ad link input dynamically
 function addAdLinkInput(value = '') {
   const list = document.getElementById('ad-links-list');
@@ -3329,82 +3259,6 @@ function selectLostOption(value) {
   if (window.lucide) lucide.createIcons();
 }
 
-function addInlineSplit(data = null) {
-  const container = document.getElementById('inline-splits-container');
-  const index = container.children.length;
-  
-  const div = document.createElement('div');
-  div.className = 'split-card bg-white border border-slate-200 rounded-xl p-4 relative shadow-sm transition-all hover:shadow-md';
-  
-  const method = data?.method || 'Cash (LYD)';
-  const amount = data?.amount || '';
-  const rate1 = data?.rate || 1;
-  const rate2 = data?.rate2 !== undefined ? data.rate2 : state.defaultExchangeRate;
-  const collection = data?.collectionType || 'office';
-  
-  div.innerHTML = `
-    <div class="flex justify-between items-center mb-3">
-      <div class="flex items-center space-x-2">
-        <i data-lucide="credit-card" class="w-4 h-4 text-slate-400"></i>
-        <span class="text-xs font-bold text-slate-500 uppercase tracking-wider">PAYMENT #${index + 1}</span>
-      </div>
-      <button type="button" onclick="this.closest('.split-card').remove(); updateReceiptTotals();" class="text-slate-300 hover:text-rose-500 transition-colors">
-        <i data-lucide="x" class="w-4 h-4"></i>
-      </button>
-    </div>
-
-    <div class="grid grid-cols-12 gap-4 mb-4">
-      <div class="col-span-5">
-        <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Payment Method</label>
-        <select class="split-method w-full bg-slate-50 border-none text-sm font-medium rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-500/20" onchange="updateReceiptTotals()">
-          ${PAYMENT_METHODS.map(m => `<option value="${m}" ${method === m ? 'selected' : ''}>${m}</option>`).join('')}
-        </select>
-      </div>
-      <div class="col-span-4">
-        <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Amount</label>
-        <input type="text" inputmode="decimal" class="split-amount w-full bg-slate-50 border-none text-lg font-bold text-slate-800 rounded-lg px-3 py-1 focus:ring-2 focus:ring-indigo-500/20" oninput="sanitizeMoneyInput(this)" 
-          value="${amount}" placeholder="0" oninput="updateReceiptTotals()" />
-      </div>
-      <div class="col-span-3 space-y-2">
-        <div class="flex items-center">
-          <label class="text-[10px] font-bold text-slate-400 w-12">RATE 1:</label>
-          <input type="text" inputmode="decimal" class="split-rate1 w-full bg-slate-50 border-none text-xs font-mono rounded px-2 py-1 text-right" oninput="sanitizeMoneyInput(this, 4)" 
-            value="${rate1}" oninput="updateReceiptTotals()" />
-        </div>
-        <div class="flex items-center">
-          <label class="text-[10px] font-bold text-slate-400 w-12">RATE 2:</label>
-          <input type="text" inputmode="decimal" class="split-rate2 w-full bg-slate-50 border-none text-xs font-mono rounded px-2 py-1 text-right" oninput="sanitizeMoneyInput(this, 4)" 
-            value="${rate2}" oninput="updateReceiptTotals()" />
-        </div>
-      </div>
-    </div>
-
-    <div class="flex justify-between items-end border-t border-slate-100 pt-3">
-      <div class="space-y-1">
-        <div class="text-[10px] text-slate-400 font-mono">R1: <span class="split-r1-display font-bold text-slate-600">0.00 LYD</span></div>
-        <div class="text-[10px] text-slate-400 font-mono">R2: <span class="split-r2-display font-bold text-slate-600">0.00 USD</span></div>
-      </div>
-      
-      <div>
-        <div class="flex bg-slate-100 p-0.5 rounded-lg">
-          <button type="button" onclick="toggleCollection(this, 'office')" 
-            class="px-3 py-1 text-[10px] font-bold rounded-md transition-all ${collection === 'office' ? 'bg-white shadow text-indigo-600' : 'text-slate-400 hover:text-slate-600'}">
-            In Shop
-          </button>
-          <button type="button" onclick="toggleCollection(this, 'delivery')" 
-            class="px-3 py-1 text-[10px] font-bold rounded-md transition-all ${collection === 'delivery' ? 'bg-white shadow text-indigo-600' : 'text-slate-400 hover:text-slate-600'}">
-            Delivery
-          </button>
-          <input type="hidden" class="split-collection" value="${collection}">
-        </div>
-      </div>
-    </div>
-  `;
-  
-  container.appendChild(div);
-  lucide.createIcons();
-  updateReceiptTotals();
-}
 
 function toggleCollection(btn, type) {
   const wrapper = btn.parentElement;

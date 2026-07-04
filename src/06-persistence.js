@@ -693,12 +693,6 @@ function assignSequentialNumbers(force = false) {
   _seqNoCache.lastUpdate = now;
 }
 
-// Get display number for a record
-function getRecordDisplayNumber(record) {
-  if (!record) return '';
-  return record._seqNo ? `#${record._seqNo}` : '';
-}
-
 async function ensureUsersHavePasswordHashes() {
   if (!Array.isArray(state.users)) return;
 

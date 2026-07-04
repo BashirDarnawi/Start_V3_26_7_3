@@ -500,18 +500,6 @@ async function cleanOldBackups() {
   }
 }
 
-async function getStorageEstimate() {
-  if ('storage' in navigator && 'estimate' in navigator.storage) {
-    const estimate = await navigator.storage.estimate();
-    return {
-      usage: estimate.usage || 0,
-      quota: estimate.quota || 0,
-      usagePercentage: estimate.quota ? ((estimate.usage / estimate.quota) * 100).toFixed(2) : 0
-    };
-  }
-  return { usage: 0, quota: 0, usagePercentage: 0 };
-}
-
 async function saveLogToIndexedDB(log) {
   if (!db) return false;
   

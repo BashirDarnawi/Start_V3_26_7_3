@@ -206,25 +206,6 @@ function setupScrollPerformanceMode() {
   window.addEventListener('scroll', onScroll, { passive: true });
 }
 
-// ==========================================
-// PERFORMANCE: Scoped Lucide Icon Creation
-// ==========================================
-// Instead of scanning entire DOM, only scan a specific container
-function scopedCreateIcons(container) {
-  if (!window.lucide) return;
-  try {
-    if (container && container instanceof Element) {
-      // Scope to container only - much faster than full DOM scan
-      lucide.createIcons({ nodes: container.querySelectorAll('[data-lucide]') });
-    } else {
-      // Fallback to full scan (use sparingly)
-      lucide.createIcons();
-    }
-  } catch (e) {
-    // Ignore lucide errors
-  }
-}
-
 // Debounced icon refresh (batches multiple calls)
 const IconQueue = {
   pending: new Set(),

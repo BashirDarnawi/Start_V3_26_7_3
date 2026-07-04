@@ -2492,17 +2492,6 @@ function closeModal() {
   }, 50);
 }
 
-// Helper to open modal with URL tracking
-function openModalWithUrl(modalType, id = null, data = {}) {
-  state.activeModal = modalType;
-  state.modalData = { ...data, id };
-  
-  // Update URL
-  updateUrlParams({ modal: modalType, id: id || null });
-  
-  renderModal();
-}
-
 function deleteCustomer(id) {
   // Permission check
   if (!currentUserHasPermission('customers', 'delete')) {

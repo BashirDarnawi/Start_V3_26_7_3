@@ -4689,19 +4689,6 @@ async function cleanupAuditLogs() {
   }
 }
 
-// Get storage statistics
-function getStorageStats() {
-  const localStorageUsed = new Blob([localStorage.getItem('albayan_complete_state') || '']).size;
-  const totalLogs = state.logs.length;
-  
-  return {
-    localStorageUsedMB: (localStorageUsed / (1024 * 1024)).toFixed(2),
-    totalLogs,
-    logsInLocalStorage: Math.min(totalLogs, MAX_LOGS_IN_LOCALSTORAGE),
-    hasIndexedDB: !!db
-  };
-}
-
 function renderSettingsView() {
   const history = state.exchangeRateHistory || [];
   

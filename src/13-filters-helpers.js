@@ -2,12 +2,6 @@
 // SEARCH & FILTER FUNCTIONS
 // ==========================================
 
-function filterAds() {
-  // Search is handled by re-rendering with filtered data
-  // This is called by oninput on search fields
-  render();
-}
-
 function getFilteredAds(customersById = null) {
   let filtered = getVisibleRecords(state.ads).filter(ad => ad.recordType !== 'receipt');
   // Read the search term from state (kept in sync by the debounced input handler).

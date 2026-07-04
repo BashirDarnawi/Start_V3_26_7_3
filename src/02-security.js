@@ -599,19 +599,4 @@ function strictParseNumber(value, options = {}) {
   return defaultValue;
 }
 
-/**
- * Parse a value to an integer with strict validation.
- * 
- * @param {any} value - Value to parse  
- * @param {object} options - Optional configuration
- * @param {number} options.min - Minimum allowed value
- * @param {number} options.max - Maximum allowed value
- * @param {number} options.defaultValue - Value to return if parsing fails (default: NaN)
- * @returns {number} Parsed integer or defaultValue if invalid
- */
-function strictParseInt(value, options = {}) {
-  const num = strictParseNumber(value, options);
-  if (!Number.isFinite(num)) return options.defaultValue ?? NaN;
-  return Math.trunc(num);
-}
 
