@@ -1701,3 +1701,10 @@ body {
   min-height: -webkit-fill-available;
 }
 
+
+/* Battery saver: pause the infinite aurora/blob animations while the app is
+   hidden (class toggled by a visibilitychange listener in script.js). */
+body.app-hidden #aurora-bg *,
+body.app-hidden .animate-blob {
+  animation-play-state: paused !important;
+}

@@ -136,6 +136,31 @@ if (document.readyState === 'loading') {
 }
 
 // ==========================================
+// ROLE HELPERS
+// ==========================================
+// The server compares roles case-insensitively (server/main.py lowercases),
+// but the client used to do exact-case checks like role === 'Admin'. A role
+// stored as 'admin' would then pass ALL server permission checks while
+// failing the client's UI checks — half-privileged, inconsistent behavior.
+// These helpers make the client tolerant of case the same way the server is.
+function isAdminRole(role) {
+  return String(role || '').trim().toLowerCase() === 'admin';
+}
+
+function isDeliveryRole(role) {
+  return String(role || '').trim().toLowerCase() === 'delivery';
+}
+
+// BATTERY SAVER: pause the infinite aurora background animations while the
+// app/tab is hidden (style.css: body.app-hidden rules). Purely a GPU/battery
+// win — the user never sees the page while it is hidden.
+document.addEventListener('visibilitychange', () => {
+  try {
+    document.body.classList.toggle('app-hidden', document.visibilityState === 'hidden');
+  } catch (_) {}
+});
+
+// ==========================================
 // SECURITY MODULE - XSS Protection, Sanitization, Hashing
 // ==========================================
 
@@ -1585,7 +1610,7 @@ function getUserPermissions(userId) {
   const user = state.users.find(u => u.id === userId);
   if (!user) return {};
   
-  if (user.role === 'Admin') {
+  if (isAdminRole(user.role)) {
     // Admin gets all permissions
     return Object.fromEntries(
       Object.entries(PERMISSION_MODULES).map(([module, config]) => [
@@ -1625,7 +1650,7 @@ function renderPermissionButton(module, action, buttonHtml, fallbackHtml = '') {
 // Check if user can perform action on specific record (own vs all)
 function canActOnRecord(module, action, recordCreatorId) {
   // Admin always can
-  if (state.currentUser?.role === 'Admin') return true;
+  if (isAdminRole(state.currentUser?.role)) return true;
   
   // Check full permission first
   if (currentUserHasPermission(module, action)) return true;
@@ -1650,7 +1675,7 @@ function getPermissionDeniedTooltip(action) {
 
 function hasSubscription(serviceId) {
   if (!state.currentUser) return false;
-  if (state.currentUser.role === 'Admin') return true; // Admin gets all
+  if (isAdminRole(state.currentUser.role)) return true; // Admin gets all
   const uid = String(state.currentUser.id || '');
   if (uid && SUBSCRIPTIONS.isActive(uid, serviceId)) return true;
   const subs = state.currentUser.subscriptions || [];
@@ -1815,7 +1840,7 @@ async function generateAndShowRecoveryKey() {
     showNotification('Not Available', 'Recovery keys are for local mode only. Use email reset on the server.', 'info');
     return;
   }
-  if (!state.currentUser || state.currentUser.role !== 'Admin') {
+  if (!state.currentUser || !isAdminRole(state.currentUser.role)) {
     showNotification('Access Denied', 'Only Admin can generate a recovery key.', 'error');
     return;
   }
@@ -2271,7 +2296,7 @@ async function passkeySignIn() {
     state.currentUser = user;
     if (!Array.isArray(state.currentUser.subscriptions)) {
       state.currentUser.subscriptions = [];
-      if (state.currentUser.role === 'Admin') {
+      if (isAdminRole(state.currentUser.role)) {
         state.currentUser.subscriptions = Object.keys(SERVICES);
       }
     }
@@ -2626,7 +2651,7 @@ const WALLET = {
     // Bank-grade rule: in real deployments, "minting" money must come ONLY from external funding rails
     // (bank/processor settlement). Manual credit should be disabled in server mode.
     if (isServerModeEnabled()) throw new Error('Manual top-ups are disabled in server mode');
-    if (state.currentUser.role !== 'Admin') throw new Error('Only Admin can top-up wallets');
+    if (!isAdminRole(state.currentUser.role)) throw new Error('Only Admin can top-up wallets');
     const currency = walletNormalizeCurrency(meta.currency || WALLET.currency);
     const amountMinor = Number.isFinite(Number(meta.amountMinor)) ? Math.trunc(Number(meta.amountMinor)) : walletToMinor(amount, currency);
     if (!Number.isFinite(amountMinor) || amountMinor <= 0) throw new Error('Invalid amount');
@@ -2671,7 +2696,7 @@ const WALLET = {
     const toId = String(toUserId || '');
     if (!fromId || !toId) throw new Error('Missing users');
     if (fromId === toId) throw new Error('Cannot transfer to self');
-    const isAdmin = state.currentUser.role === 'Admin';
+    const isAdmin = isAdminRole(state.currentUser.role);
     if (!isAdmin && String(state.currentUser.id) !== fromId) throw new Error('Forbidden');
     if (!isAdmin && fromId === 'system') throw new Error('Forbidden');
     if (toId !== 'system') {
@@ -2714,7 +2739,7 @@ const WALLET = {
   // Create a compensating transaction (Admin-only) instead of editing history
   reverse: (transactionId, meta = {}) => {
     if (!state.currentUser?.id) throw new Error('Not logged in');
-    if (state.currentUser.role !== 'Admin') throw new Error('Admin only');
+    if (!isAdminRole(state.currentUser.role)) throw new Error('Admin only');
     const id = String(transactionId || '').trim();
     if (!id) throw new Error('Missing transaction id');
     const txs = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
@@ -2764,7 +2789,7 @@ const SUBSCRIPTIONS = {
     const uid = String(userId || '');
     const sid = String(serviceId || '');
     if (!uid || !sid) throw new Error('Missing subscription data');
-    const isAdmin = state.currentUser.role === 'Admin';
+    const isAdmin = isAdminRole(state.currentUser.role);
     if (!isAdmin && String(state.currentUser.id) !== uid) throw new Error('Forbidden');
     if (SUBSCRIPTIONS.isActive(uid, sid)) throw new Error('Already subscribed');
 
@@ -2827,7 +2852,7 @@ const SUBSCRIPTIONS = {
     const uid = String(userId || '');
     const sid = String(serviceId || '');
     if (!uid || !sid) throw new Error('Missing subscription data');
-    const isAdmin = state.currentUser.role === 'Admin';
+    const isAdmin = isAdminRole(state.currentUser.role);
     if (!isAdmin && String(state.currentUser.id) !== uid) throw new Error('Forbidden');
 
     const now = Date.now();
@@ -4094,7 +4119,7 @@ function updateRecord(array, id, updates) {
     }
     // Users: only Admin can change access-control fields (role/permissions/subscriptions).
     // Non-admin users may update their own profile fields (e.g., name/password/passkeys), but not privilege fields.
-    if (collectionName === 'users' && state.currentUser && state.currentUser.role !== 'Admin') {
+    if (collectionName === 'users' && state.currentUser && !isAdminRole(state.currentUser.role)) {
       const isSelf = String(state.currentUser.id || '') === String(id || '');
       if (!isSelf) {
         showNotification('Access Denied', state.language === 'ar' ? 'لا يمكنك تعديل مستخدمين آخرين' : 'You cannot edit other users', 'error');
@@ -4427,7 +4452,7 @@ function userCanAccessView(user, view) {
 
 function getAlbayanManagerLandingViewForUser(user) {
   const role = String(user?.role || '');
-  if (role === 'Delivery') return 'delivery-dashboard';
+  if (isDeliveryRole(role)) return 'delivery-dashboard';
   // Pick the first view they are allowed to open
   for (const view of ALBAYAN_MANAGER_VIEW_ORDER) {
     if (userCanAccessView(user, view)) return view;
@@ -5825,6 +5850,10 @@ function startServerLiveSync() {
   // Run one immediately, then poll.
   serverLiveSyncTick().catch(() => {});
   _serverLiveSync.timer = setInterval(() => {
+    // BATTERY/SERVER SAVER: skip polls while the tab/app is hidden. The
+    // visibilitychange handler below fires an immediate catch-up sync the
+    // moment the app becomes visible again, so no update is ever missed.
+    if (document.visibilityState === 'hidden') return;
     serverLiveSyncTick().catch(() => {});
   }, SERVER_API.liveSyncIntervalMs || 3000);
 
@@ -5912,7 +5941,7 @@ async function handleLogin(email, password) {
       // Ensure user has subscriptions array
       if (!Array.isArray(state.currentUser.subscriptions)) {
         state.currentUser.subscriptions = [];
-        if (state.currentUser.role === 'Admin') {
+        if (isAdminRole(state.currentUser.role)) {
           state.currentUser.subscriptions = Object.keys(SERVICES);
         }
       }
@@ -6113,7 +6142,7 @@ async function handleLogin(email, password) {
     if (!Array.isArray(state.currentUser.subscriptions)) {
       state.currentUser.subscriptions = [];
       // Give Admin all services by default
-      if (state.currentUser.role === 'Admin') {
+      if (isAdminRole(state.currentUser.role)) {
         state.currentUser.subscriptions = Object.keys(SERVICES);
       }
     }
@@ -7173,17 +7202,17 @@ function renderSidebar() {
   ];
 
   // Delivery users have a special dashboard view (not permission-gated).
-  if (state.currentUser?.role === 'Delivery') {
+  if (isDeliveryRole(state.currentUser?.role)) {
     allNavItems.unshift({ id: 'delivery-dashboard', icon: 'layout-dashboard', label: 'dashboard' });
   }
   
   // Filter nav items based on permissions (Admin sees all, others based on their permissions)
   const navItems = allNavItems.filter(item => {
     // Admin sees everything
-    if (state.currentUser?.role === 'Admin') return true;
+    if (isAdminRole(state.currentUser?.role)) return true;
     
     // Delivery role - show delivery dashboard + deliveries
-    if (state.currentUser?.role === 'Delivery') {
+    if (isDeliveryRole(state.currentUser?.role)) {
       return item.id === 'delivery-dashboard' || item.id === 'deliveries';
     }
     
@@ -7618,7 +7647,7 @@ function walletTransferFromUi() {
 function walletTopUpFromUi() {
   try {
     if (!state.currentUser?.id) return;
-    if (state.currentUser.role !== 'Admin') {
+    if (!isAdminRole(state.currentUser.role)) {
       showNotification('Not Allowed', state.language === 'ar' ? 'للأدمن فقط' : 'Admin only', 'error');
       return;
     }
@@ -7676,7 +7705,7 @@ function cancelSubscriptionFromUi(serviceId) {
 function renderWalletView() {
   const isRTL = state.language === 'ar';
   const uid = String(state.currentUser?.id || '');
-  const isAdmin = state.currentUser?.role === 'Admin';
+  const isAdmin = isAdminRole(state.currentUser?.role);
 
   const balances = [];
   if (uid) {
@@ -8298,8 +8327,9 @@ function renderCustomersGrid(customers) {
   }
 
   const totalCustomers = customers.length;
+  const statsIndex = buildCustomerStatsIndex();
   return customers.map((c, idx) => {
-          const stats = getCustomerStats(c.id);
+          const stats = getCustomerStats(c.id, statsIndex);
           const lastAdText = stats.lastAdDate 
             ? new Date(stats.lastAdDate).toLocaleDateString()
             : 'Never';
@@ -8407,9 +8437,10 @@ function renderCustomersView() {
   // Calculate overall stats
   let totalRevenue = 0;
   let totalDebts = 0;
-  
+
+  const statsIndex = buildCustomerStatsIndex();
   allCustomers.forEach(c => {
-    const stats = getCustomerStats(c.id);
+    const stats = getCustomerStats(c.id, statsIndex);
     totalRevenue += stats.totalPaid;
     if (stats.balance < 0) {
       totalDebts += Math.abs(stats.balance);
@@ -8480,10 +8511,13 @@ function renderCustomersView() {
 
 function renderReceiptsView() {
   const allReceipts = getVisibleRecords(state.receipts);
-  
+  // PERFORMANCE: one Map lookup per receipt instead of scanning the whole
+  // customers array for every receipt (same strict-equality semantics).
+  const customersById = new Map(state.customers.map(c => [c.id, c]));
+
   // Apply filters
   let filteredReceipts = allReceipts.filter(receipt => {
-    const customer = state.customers.find(c => c.id === receipt.customerId);
+    const customer = customersById.get(receipt.customerId);
     const customerName = customer?.name?.toLowerCase() || '';
     const finalNo = (receipt.finalReceiptNo || receipt.serialNumber || '').toLowerCase();
     const tempNo = (receipt.tempReceiptNo || '').toLowerCase();
@@ -8646,7 +8680,7 @@ function renderReceiptsView() {
 
       <div id="receipts-grid" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
         ${filteredReceipts.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${hasActiveFilters ? 'search-x' : 'receipt'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${hasActiveFilters ? 'No receipts match your filters' : 'No receipts yet'}</p>${hasActiveFilters ? '<button onclick="clearAllReceiptFilters()" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">Clear all filters</button>' : ''}</div>` : filteredReceipts.map((receipt, idx) => {
-          const customer = state.customers.find(c => c.id === receipt.customerId);
+          const customer = customersById.get(receipt.customerId);
           const displayFinalNo = receipt.finalReceiptNo || receipt.serialNumber || '';
           const displayTempNo = receipt.tempReceiptNo || '';
           // Display number: total - index (so first item = highest number, matching newest-first sort)
@@ -8660,7 +8694,7 @@ function renderReceiptsView() {
           const usage = getReceiptUsageStats(receipt);
           const hasTransfers = (receipt.transfers && receipt.transfers.length > 0);
           const lastTransfer = hasTransfers ? receipt.transfers[receipt.transfers.length - 1] : null;
-          const lastTransferName = lastTransfer ? (state.customers.find(c => c.id === lastTransfer.toCustomerId)?.name || 'Unknown') : '';
+          const lastTransferName = lastTransfer ? (customersById.get(lastTransfer.toCustomerId)?.name || 'Unknown') : '';
           const lastTransferNameSafe = Security.escapeHtml(String(lastTransferName || ''));
           // Defensive: ensure exchange rate is always positive and reasonable
           const rawFxRate = (receipt.exchangeRate || state.defaultExchangeRate || 1);
@@ -9091,7 +9125,7 @@ function renderAdsView() {
 function renderDeliveriesView() {
   // Deliveries are tracked ONLY on receipts (ads are not a delivery source of truth).
   const allReceipts = getVisibleRecords(state.receipts);
-  const deliveryUsers = getVisibleRecords(state.users).filter(u => u.role === 'Delivery');
+  const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
 
   const deliveryReceipts = allReceipts
     .filter(r => {
@@ -9630,7 +9664,7 @@ function exportDeliveryReport() {
     const npc = String(sd.notPaidCollection || '').trim();
     return String(r?.status || '').trim() === 'Not Paid' && npc === 'delivery';
   }).map(r => ({ ...r, isReceipt: true }));
-  const deliveryUsers = getVisibleRecords(state.users).filter(u => u.role === 'Delivery');
+  const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
   
   let csv = 'Customer,Phone,Debt LYD,Collected LYD,Remaining Due,Status,Driver,Office Received,Date\n';
   deliveryAds.forEach(r => {
@@ -9912,7 +9946,7 @@ function showDeliveryDetails(itemId) {
   if (!ad) return;
   
   const customer = state.customers.find(c => c.id === ad.customerId);
-  const deliveryUsers = getVisibleRecords(state.users).filter(u => u.role === 'Delivery');
+  const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
   const deliveryPerson = ad.deliveryPersonId ? deliveryUsers.find(u => u.id === ad.deliveryPersonId) : null;
   const receivedInOffice = _isReceivedInOffice(ad);
   const roleLower = String(state.currentUser?.role || '').toLowerCase();
@@ -10471,13 +10505,13 @@ function renderUsersView() {
                   <div class="flex-1">
                     <h3 class="font-bold text-lg text-slate-800 dark:text-white">${Security.escapeHtml(u.name || '')}</h3>
                     <div class="flex items-center space-x-2 mt-1">
-                      <span class="text-xs px-2 py-1 ${u.role === 'Admin' ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300' : u.role === 'Delivery' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'} rounded-full font-medium">${u.role}</span>
+                      <span class="text-xs px-2 py-1 ${isAdminRole(u.role) ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300' : isDeliveryRole(u.role) ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'} rounded-full font-medium">${u.role}</span>
                       ${u.id === state.currentUser?.id ? '<span class="text-xs text-indigo-600 font-medium">(You)</span>' : ''}
                     </div>
                   </div>
                 </div>
                 <div class="flex space-x-1">
-                  ${isAdmin && u.id !== state.currentUser?.id && u.role !== 'Admin' ? `
+                  ${isAdmin && u.id !== state.currentUser?.id && !isAdminRole(u.role) ? `
                     <button onclick="showPermissionsModal('${u.id}')" class="text-purple-600 hover:text-purple-700 p-1" title="Manage Permissions">
                       <i data-lucide="shield" class="w-4 h-4"></i>
                     </button>
@@ -10501,7 +10535,7 @@ function renderUsersView() {
                   <span class="truncate">${Security.escapeHtml(u.email || '')}</span>
                 </div>
 
-                ${u.role === 'Delivery' && u.stats ? `
+                ${isDeliveryRole(u.role) && u.stats ? `
                   <div class="mt-3 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg space-y-1">
                     <div class="text-xs font-bold text-blue-700 dark:text-blue-300 uppercase mb-2">Delivery Stats</div>
                     <div class="flex justify-between text-xs"><span>Total Assigned:</span><span class="font-bold">${u.stats.totalAds || 0}</span></div>
@@ -10526,7 +10560,7 @@ function renderUsersView() {
                 ` : ''}
                 
                 <!-- Permission Summary -->
-                ${u.role !== 'Admin' ? (() => {
+                ${!isAdminRole(u.role) ? (() => {
                   const permSummary = getPermissionSummary(u.permissions || {});
                   return `
                     <div class="mt-3 p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg">
@@ -11520,10 +11554,43 @@ function checkDuplicatePhone(phones, excludeCustomerId = null) {
 // CUSTOMER STATS CALCULATION FUNCTIONS
 // ==========================================
 
-function getCustomerStats(customerId) {
-  const customerAds = getVisibleRecords(state.ads).filter(ad => ad.customerId === customerId && ad.recordType === 'ad');
-  const customerReceipts = getVisibleRecords(state.receipts).filter(r => r.customerId === customerId);
-  const linkedPages = getVisibleRecords(state.pages).filter(p => p.customerIds?.includes(customerId));
+// PERFORMANCE: one-pass grouping of ads/receipts/pages by customer id.
+// Build this ONCE before a loop over many customers and pass it to
+// getCustomerStats — turns O(customers × records) view rendering into
+// O(customers + records). Results are identical to the per-call filters.
+function buildCustomerStatsIndex() {
+  const adsByCustomer = new Map();
+  for (const ad of getVisibleRecords(state.ads)) {
+    if (ad.recordType !== 'ad') continue;
+    const list = adsByCustomer.get(ad.customerId);
+    if (list) list.push(ad); else adsByCustomer.set(ad.customerId, [ad]);
+  }
+  const receiptsByCustomer = new Map();
+  for (const r of getVisibleRecords(state.receipts)) {
+    const list = receiptsByCustomer.get(r.customerId);
+    if (list) list.push(r); else receiptsByCustomer.set(r.customerId, [r]);
+  }
+  const pagesByCustomer = new Map();
+  for (const p of getVisibleRecords(state.pages)) {
+    if (!Array.isArray(p.customerIds)) continue;
+    for (const cid of p.customerIds) {
+      const list = pagesByCustomer.get(cid);
+      if (list) list.push(p); else pagesByCustomer.set(cid, [p]);
+    }
+  }
+  return { adsByCustomer, receiptsByCustomer, pagesByCustomer };
+}
+
+function getCustomerStats(customerId, statsIndex = null) {
+  const customerAds = statsIndex
+    ? (statsIndex.adsByCustomer.get(customerId) || [])
+    : getVisibleRecords(state.ads).filter(ad => ad.customerId === customerId && ad.recordType === 'ad');
+  const customerReceipts = statsIndex
+    ? (statsIndex.receiptsByCustomer.get(customerId) || [])
+    : getVisibleRecords(state.receipts).filter(r => r.customerId === customerId);
+  const linkedPages = statsIndex
+    ? (statsIndex.pagesByCustomer.get(customerId) || [])
+    : getVisibleRecords(state.pages).filter(p => p.customerIds?.includes(customerId));
   
   // Calculate total paid from receipts (in LYD and USD)
   // IMPORTANT: Unpaid receipts (status "Not Paid") should NOT be counted as revenue.
@@ -11635,16 +11702,13 @@ function getFilteredCustomers() {
   }
   
   // Apply financial filter
-  if (state.customerFinancialFilter === 'hasCredit') {
-    filtered = filtered.filter(c => {
-      const stats = getCustomerStats(c.id);
-      return stats.balance > 0;
-    });
-  } else if (state.customerFinancialFilter === 'hasDebt') {
-    filtered = filtered.filter(c => {
-      const stats = getCustomerStats(c.id);
-      return stats.balance < 0;
-    });
+  if (state.customerFinancialFilter === 'hasCredit' || state.customerFinancialFilter === 'hasDebt') {
+    const statsIndex = buildCustomerStatsIndex();
+    if (state.customerFinancialFilter === 'hasCredit') {
+      filtered = filtered.filter(c => getCustomerStats(c.id, statsIndex).balance > 0);
+    } else {
+      filtered = filtered.filter(c => getCustomerStats(c.id, statsIndex).balance < 0);
+    }
   }
   
   // Apply sorting
@@ -11739,7 +11803,7 @@ function showPermissionsModal(userId) {
   }
   
   // Admins shouldn't have their permissions edited (they have all by default)
-  if (user.role === 'Admin') {
+  if (isAdminRole(user.role)) {
     showNotification('Info', 'Administrators have full access by default', 'info');
     return;
   }
@@ -12228,7 +12292,7 @@ function markAsCollected(itemId) {
     });
   }
   // Update delivery stats if delivery user
-  if (state.currentUser?.role === 'Delivery' && state.currentUser.stats) {
+  if (isDeliveryRole(state.currentUser?.role) && state.currentUser.stats) {
     state.currentUser.stats.collected = (state.currentUser.stats.collected || 0) + 1;
     updateRecord(state.users, state.currentUser.id, { stats: state.currentUser.stats });
   }
@@ -12250,7 +12314,7 @@ function acceptDelivery(itemId) {
     updateRecord(state.ads, itemId, updateData);
   }
   // Update delivery stats
-  if (state.currentUser?.role === 'Delivery' && state.currentUser.stats) {
+  if (isDeliveryRole(state.currentUser?.role) && state.currentUser.stats) {
     state.currentUser.stats.accepted = (state.currentUser.stats.accepted || 0) + 1;
     state.currentUser.stats.totalAds = (state.currentUser.stats.totalAds || 0) + 1;
     updateRecord(state.users, state.currentUser.id, { stats: state.currentUser.stats });
@@ -13232,7 +13296,7 @@ function saveReceiptTransfer() {
 
 function addSplitPayment() {
   const container = document.getElementById('split-payments-container');
-  const deliveryUsers = getVisibleRecords(state.users).filter(u => u.role === 'Delivery');
+  const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
   
   const div = document.createElement('div');
   div.className = 'split-payment-item p-4 rounded-lg';
@@ -13919,7 +13983,7 @@ function addReceiptPaymentSplit() {
   
   // Re-render the financial section
   const financialSection = document.getElementById('receipt-financial-section');
-  const deliveryUsers = getVisibleRecords(state.users).filter(u => u.role === 'Delivery');
+  const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
   
   if (financialSection) {
     financialSection.innerHTML = renderReceiptFinancials(currentPayments, currentPayments, deliveryUsers);
@@ -13944,7 +14008,7 @@ function removeReceiptPaymentSplit(btn) {
       const currentPayments = getReceiptPaymentData(); // Get remaining data
       
       const financialSection = document.getElementById('receipt-financial-section');
-      const deliveryUsers = getVisibleRecords(state.users).filter(u => u.role === 'Delivery');
+      const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
       
       if (financialSection) {
         financialSection.innerHTML = renderReceiptFinancials(currentPayments, currentPayments, deliveryUsers);
@@ -13997,7 +14061,7 @@ function filterPageCustomers() {
   
   if (filtered.length > 0 && searchTerm) {
     dropdown.innerHTML = filtered.map(c => `
-      <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" onclick="selectPageCustomer('${c.id}', '${state.currentUser?.role === 'Admin'}')">
+      <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" onclick="selectPageCustomer('${c.id}', '${isAdminRole(state.currentUser?.role)}')">
         <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
         <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || 'No phone')}</div>
       </div>
@@ -14014,7 +14078,7 @@ function showPageCustomerDropdown() {
   
   if (customers.length > 0) {
     dropdown.innerHTML = customers.map(c => `
-      <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" onclick="selectPageCustomer('${c.id}', '${state.currentUser?.role === 'Admin'}')">
+      <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" onclick="selectPageCustomer('${c.id}', '${isAdminRole(state.currentUser?.role)}')">
         <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
         <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || 'No phone')}</div>
       </div>
@@ -14144,7 +14208,7 @@ function setPaymentCollection(button, type) {
   if (type === 'delivery') {
     // If delivery selected and no dropdown exists, create it
     if (!deliverySelect) {
-  const deliveryUsers = getVisibleRecords(state.users).filter(u => u.role === 'Delivery');
+  const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
       if (deliveryUsers.length > 0) {
         const selectHtml = `
           <select class="delivery-person w-full glass-input px-3 py-2 rounded-lg text-sm mt-2 border border-slate-200 dark:border-slate-700">
@@ -17207,7 +17271,7 @@ function renderModal() {
     case 'ad':
       const visibleCustomers = getVisibleRecords(state.customers);
       const visiblePages = getVisibleRecords(state.pages);
-      const deliveryUsers = getVisibleRecords(state.users).filter(u => u.role === 'Delivery');
+      const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
       const adData = state.modalData || {};
       state.tempAdPhotos = adData.adPhotos || adData.photos || state.tempAdPhotos || [];
       const durationDaysDefault = (adData.days !== undefined ? adData.days : (adData.startDate && adData.endDate ? Math.max(0, Math.round((new Date(adData.endDate) - new Date(adData.startDate)) / (1000 * 60 * 60 * 24))) : ''));
@@ -17525,7 +17589,7 @@ function renderModal() {
       const userData = state.modalData || {};
       const isAdminEditor = isCurrentUserAdmin();
       const isSelfEdit = isEdit && String(userData.id || '') === String(state.currentUser?.id || '');
-      const userPermSummary = isEdit && userData.role !== 'Admin' ? getPermissionSummary(userData.permissions || {}) : null;
+      const userPermSummary = isEdit && !isAdminRole(userData.role) ? getPermissionSummary(userData.permissions || {}) : null;
       modalContent = `
         <div class="flex items-center justify-between mb-6">
           <div class="flex items-center space-x-3">
@@ -17575,24 +17639,24 @@ function renderModal() {
           <!-- Role Info -->
           <div id="role-info" class="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
             <div class="flex items-center space-x-3">
-              <div id="role-icon" class="w-10 h-10 rounded-xl flex items-center justify-center ${userData.role === 'Admin' ? 'bg-amber-100 dark:bg-amber-900/30' : userData.role === 'Delivery' ? 'bg-cyan-100 dark:bg-cyan-900/30' : 'bg-emerald-100 dark:bg-emerald-900/30'}">
-                <i data-lucide="${userData.role === 'Admin' ? 'crown' : userData.role === 'Delivery' ? 'truck' : 'user-check'}" class="w-5 h-5 ${userData.role === 'Admin' ? 'text-amber-600' : userData.role === 'Delivery' ? 'text-cyan-600' : 'text-emerald-600'}"></i>
+              <div id="role-icon" class="w-10 h-10 rounded-xl flex items-center justify-center ${isAdminRole(userData.role) ? 'bg-amber-100 dark:bg-amber-900/30' : isDeliveryRole(userData.role) ? 'bg-cyan-100 dark:bg-cyan-900/30' : 'bg-emerald-100 dark:bg-emerald-900/30'}">
+                <i data-lucide="${isAdminRole(userData.role) ? 'crown' : isDeliveryRole(userData.role) ? 'truck' : 'user-check'}" class="w-5 h-5 ${isAdminRole(userData.role) ? 'text-amber-600' : isDeliveryRole(userData.role) ? 'text-cyan-600' : 'text-emerald-600'}"></i>
               </div>
               <div class="flex-1">
                 <div id="role-title" class="font-bold text-sm text-slate-700 dark:text-slate-300">
-                  ${userData.role === 'Admin' ? 'Full Administrator' : userData.role === 'Delivery' ? 'Delivery Driver' : 'Employee'}
+                  ${isAdminRole(userData.role) ? 'Full Administrator' : isDeliveryRole(userData.role) ? 'Delivery Driver' : 'Employee'}
                 </div>
                 <div id="role-desc" class="text-xs text-slate-500">
-                  ${userData.role === 'Admin' ? 'Complete access to all features. No restrictions.' : userData.role === 'Delivery' ? 'Access to delivery operations only.' : 'Standard employee access. Customize permissions after creation.'}
+                  ${isAdminRole(userData.role) ? 'Complete access to all features. No restrictions.' : isDeliveryRole(userData.role) ? 'Access to delivery operations only.' : 'Standard employee access. Customize permissions after creation.'}
                 </div>
               </div>
-              ${userData.role === 'Admin' ? `
+              ${isAdminRole(userData.role) ? `
                 <span class="px-2 py-1 rounded-lg bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 text-xs font-bold">ALL ACCESS</span>
               ` : ''}
             </div>
           </div>
           
-          ${isEdit && userData.role !== 'Admin' && userPermSummary ? `
+          ${isEdit && !isAdminRole(userData.role) && userPermSummary ? `
             <!-- Current Permissions Summary -->
             <div class="p-4 rounded-xl bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800">
               <div class="flex items-center justify-between mb-3">
@@ -17646,7 +17710,7 @@ function renderModal() {
       const pageData = state.modalData || {};
       const pageCustomers = getVisibleRecords(state.customers);
       const existingCustomerIds = pageData.customerIds || [];
-      const isAdminPage = state.currentUser?.role === 'Admin';
+      const isAdminPage = isAdminRole(state.currentUser?.role);
       
       if (pageCustomers.length === 0) {
         modalContent = `
@@ -17752,7 +17816,7 @@ function renderModal() {
       const isAdminReceipt = isCurrentUserAdmin();
       const defaultRate1 = getDefaultRate1(PAYMENT_METHODS[0]);
       const existingPayments = receiptData.payments || [{ method: PAYMENT_METHODS[0], amount: 0, rate: defaultRate1, rate2: state.defaultExchangeRate, collectionType: 'office', deliveryPersonId: '' }];
-      const receiptDeliveryUsers = getVisibleRecords(state.users).filter(u => u.role === 'Delivery');
+      const receiptDeliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
       state.tempReceiptPhotos = receiptData.photos || [];
       
       if (receiptCustomers.length === 0) {
@@ -17878,7 +17942,7 @@ function renderModal() {
                   </label>
                   <select id="paid-delivery-person" class="w-full glass-input px-3 py-2 rounded-lg text-sm border border-emerald-200 dark:border-emerald-700 focus:ring-2 focus:ring-emerald-500/20">
                     <option value="">Select delivery person...</option>
-                    ${getVisibleRecords(state.users).filter(u => u.role === 'Delivery').map(u =>
+                    ${getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role)).map(u =>
                       `<option value="${u.id}" ${receiptData.deliveryPersonId === u.id ? 'selected' : ''}>${Security.escapeHtml(u.name || '')}</option>`
                     ).join('')}
                   </select>
@@ -17947,7 +18011,7 @@ function renderModal() {
                     </label>
                     <select id="notpaid-delivery-person" class="w-full glass-input px-3 py-2 rounded-lg text-sm border border-emerald-200 dark:border-emerald-700 focus:ring-2 focus:ring-emerald-500/20">
                       <option value="">Select delivery person...</option>
-                      ${getVisibleRecords(state.users).filter(u => u.role === 'Delivery').map(u => 
+                      ${getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role)).map(u => 
                         `<option value="${u.id}" ${receiptData.deliveryPersonId === u.id ? 'selected' : ''}>${Security.escapeHtml(u.name || '')}</option>`
                       ).join('')}
                     </select>
@@ -18211,7 +18275,7 @@ function renderModal() {
     case 'split-payments':
       const splitReceipt = state.modalData;
       const splitExistingPayments = splitReceipt.payments || [];
-      const splitDeliveryUsers = getVisibleRecords(state.users).filter(u => u.role === 'Delivery');
+      const splitDeliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
       
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center">
@@ -19286,9 +19350,9 @@ async function handleModalSubmit() {
           // Role-based permissions defaults
           const oldRole = state.modalData.role;
           if (oldRole !== userRole) {
-            if (userRole === 'Admin') {
+            if (isAdminRole(userRole)) {
               payload.permissions = {};
-            } else if (oldRole === 'Admin') {
+            } else if (isAdminRole(oldRole)) {
               payload.permissions = getDefaultPermissions(userRole);
             }
           }
@@ -19323,7 +19387,7 @@ async function handleModalSubmit() {
             saveState();
             showNotification('Success', 'User added successfully', 'success');
 
-            if (userRole !== 'Admin') {
+            if (!isAdminRole(userRole)) {
               setTimeout(() => showPermissionsModal(created.id), 500);
             }
           } else {
@@ -19361,9 +19425,9 @@ async function handleModalSubmit() {
         if (isAdminEditor) {
         const oldRole = state.modalData.role;
         if (oldRole !== userRole) {
-          if (userRole === 'Admin') {
+          if (isAdminRole(userRole)) {
             updates.permissions = {};
-          } else if (oldRole === 'Admin') {
+          } else if (isAdminRole(oldRole)) {
             updates.permissions = getDefaultPermissions(userRole);
             }
           }
@@ -19397,7 +19461,7 @@ async function handleModalSubmit() {
         showNotification('Success', 'User added successfully', 'success');
         
         // Show permission modal for non-admin users
-        if (userRole !== 'Admin') {
+        if (!isAdminRole(userRole)) {
           setTimeout(() => {
             showPermissionsModal(user.id);
           }, 500);
