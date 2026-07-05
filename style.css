@@ -189,6 +189,34 @@ body {
   position: relative;
 }
 
+/* Base page background tinted to match the aurora's average lavender wash.
+   During fast scrolling on slow GPUs the browser briefly shows the base
+   background before the heavy aurora layer repaints — with the default
+   near-white slate-50 that read as a jarring purple->white flash. A matching
+   tint makes those flashes invisible (and gives perf-lite mode, which hides
+   the aurora entirely, the same soft brand tint instead of stark white).
+
+   Scoped to LIGHT mode only (html:not(.dark)) so it never fights the app's
+   dark theme — in dark mode the body keeps its existing bg-slate-950 and the
+   html base is set to the same near-black. The :not(.dark) body rule needs
+   !important to beat the bg-slate-50 utility class on <body>. */
+html:not(.dark) {
+  background-color: #f1eefa;
+}
+html:not(.dark) body {
+  background-color: #f1eefa !important;
+}
+html.dark {
+  background-color: #020617;
+}
+
+/* Pin the aurora into its own compositor layer so scrolling never has to
+   re-rasterize the blur(110px) blob stack. */
+#aurora-bg {
+  transform: translateZ(0);
+  backface-visibility: hidden;
+}
+
 body::before {
   content: '';
   position: fixed;
