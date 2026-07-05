@@ -336,27 +336,13 @@ body.is-scrolling .btn-shine:hover {
   contain: style;
 }
 
-/* Virtual scrolling hint for list items - browser can skip rendering off-screen items */
-.glass-panel {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 200px; /* Estimated height for off-screen panels */
-}
-
-/* Cards in grid layouts */
-.grid > .glass-panel,
-.space-y-4 > .glass-panel,
-.space-y-3 > .glass-panel {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 180px;
-}
-
-/* Modal panels must NOT get content-visibility containment: it clips
-   anything painted outside the panel box (like the customer-search dropdown
-   in the Page modal) exactly like overflow:hidden. */
-#app-modal .glass-panel {
-  content-visibility: visible;
-  contain: none;
-}
+/* NOTE: .glass-panel previously used content-visibility:auto as a "skip
+   off-screen cards" speed trick for huge unpaginated lists. It caused visible
+   pop-in/blinking while scrolling (cards render in late, the 200px height
+   estimate was ~half a real card so the scroll position jumped, worsened by
+   overflow-anchor:none) and clipped dropdowns inside modals. The lists are
+   paginated now (Load more, 50 per page), so the trick's benefit is gone —
+   removed entirely. */
 
 /* Sidebar isolation - don't repaint when main content changes */
 aside, nav {
