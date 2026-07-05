@@ -160,3 +160,58 @@ document.addEventListener('visibilitychange', () => {
   } catch (_) {}
 });
 
+// ==========================================
+// PERFORMANCE MODE (for weak/old devices)
+// ==========================================
+// The default look leans hard on the GPU: a viewport-sized aurora layer under
+// filter:blur(110px) animating forever, a full-screen backdrop-blur overlay,
+// and backdrop-filter blur(14px) on every glass panel. On an old laptop or a
+// cheap phone that turns every scroll and repaint into a slideshow.
+// body.perf-lite (style.css) keeps ALL features and the same layout but turns
+// those decorations off. Preference is per-device (localStorage), with
+// auto-detection for weak hardware when the user hasn't chosen.
+
+function isWeakDevice() {
+  try {
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return true;
+    const mem = navigator.deviceMemory;         // Chrome/WebView only, capped at 8
+    const cores = navigator.hardwareConcurrency;
+    if (typeof mem === 'number' && mem <= 4) return true;
+    if (typeof cores === 'number' && cores <= 2) return true;
+  } catch (_) {}
+  return false;
+}
+
+function isPerformanceModeOn() {
+  let pref = null;
+  try { pref = localStorage.getItem('albayan_perf_mode'); } catch (_) {}
+  return pref === 'lite' || (pref !== 'full' && isWeakDevice());
+}
+
+function applyPerformanceMode() {
+  const lite = isPerformanceModeOn();
+  try {
+    if (document.body) document.body.classList.toggle('perf-lite', lite);
+  } catch (_) {}
+  return lite;
+}
+
+function togglePerformanceMode(on) {
+  try { localStorage.setItem('albayan_perf_mode', on ? 'lite' : 'full'); } catch (_) {}
+  applyPerformanceMode();
+  if (typeof showNotification === 'function' && typeof state !== 'undefined') {
+    const isAr = state.language === 'ar';
+    showNotification(
+      isAr ? 'وضع الأداء' : 'Performance Mode',
+      on
+        ? (isAr ? 'تم تفعيل وضع الأداء — التطبيق أخف وأسرع.' : 'Performance mode ON — lighter and faster.')
+        : (isAr ? 'تم إيقاف وضع الأداء — عادت التأثيرات المرئية.' : 'Performance mode OFF — visual effects restored.'),
+      'success'
+    );
+  }
+}
+
+// Apply immediately at load (script.js is at the end of <body>, so body
+// exists) — before the first render, so there is no styled->lite flash.
+applyPerformanceMode();
+

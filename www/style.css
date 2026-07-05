@@ -1768,3 +1768,63 @@ body.app-hidden #aurora-bg *,
 body.app-hidden .animate-blob {
   animation-play-state: paused !important;
 }
+
+/* ==========================================
+   PERFORMANCE MODE (body.perf-lite)
+   For weak/old devices. Same features, same layout — only the expensive
+   GPU decorations are turned off. Toggled in Settings; auto-enabled on weak
+   hardware (see applyPerformanceMode in script.js).
+   ========================================== */
+
+/* 1. The heaviest item by far: the viewport-sized aurora layer (three blobs
+   animating forever under filter:blur(110px)) and its full-screen
+   backdrop-blur overlay. Hide the whole layer; the body's flat
+   bg-slate-50/dark:bg-slate-950 remains. Also drop the noise texture. */
+body.perf-lite #aurora-bg,
+body.perf-lite .bg-noise {
+  display: none !important;
+}
+
+/* 2. Kill backdrop blur everywhere (every glass panel/input pays it on each
+   repaint, plus modal overlays via backdrop-blur-* utility classes). */
+body.perf-lite .glass-panel,
+body.perf-lite .glass-input,
+body.perf-lite [class*="backdrop-blur"] {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* 3. Panels become near-opaque flat cards (they normally rely on the blur to
+   stay readable over the aurora) with a cheap small shadow. */
+body.perf-lite .glass-panel {
+  background: rgba(255, 255, 255, 0.97) !important;
+  box-shadow: 0 1px 4px rgba(2, 6, 23, 0.10) !important;
+}
+.dark body.perf-lite .glass-panel {
+  background: rgba(15, 23, 42, 0.97) !important;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45) !important;
+}
+
+/* 4. No transitions (hover lifts, color fades) — every one forces extra
+   frames. Animations are NOT blanket-disabled (the loading spinner must keep
+   spinning); the decorative ones are switched off individually below. */
+body.perf-lite *,
+body.perf-lite *::before,
+body.perf-lite *::after {
+  transition: none !important;
+}
+body.perf-lite .animate-blob,
+body.perf-lite .animate-fade-in,
+body.perf-lite .animate-fade-in-up,
+body.perf-lite .animate-slide-up,
+body.perf-lite .sync-pulse {
+  animation: none !important;
+}
+body.perf-lite .btn-shine::after {
+  display: none !important; /* the moving shine sweep */
+}
+body.perf-lite .btn-shine:hover,
+body.perf-lite .glass-panel:hover {
+  transform: none !important;
+  box-shadow: inherit;
+}

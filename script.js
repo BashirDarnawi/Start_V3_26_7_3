@@ -161,6 +161,61 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ==========================================
+// PERFORMANCE MODE (for weak/old devices)
+// ==========================================
+// The default look leans hard on the GPU: a viewport-sized aurora layer under
+// filter:blur(110px) animating forever, a full-screen backdrop-blur overlay,
+// and backdrop-filter blur(14px) on every glass panel. On an old laptop or a
+// cheap phone that turns every scroll and repaint into a slideshow.
+// body.perf-lite (style.css) keeps ALL features and the same layout but turns
+// those decorations off. Preference is per-device (localStorage), with
+// auto-detection for weak hardware when the user hasn't chosen.
+
+function isWeakDevice() {
+  try {
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return true;
+    const mem = navigator.deviceMemory;         // Chrome/WebView only, capped at 8
+    const cores = navigator.hardwareConcurrency;
+    if (typeof mem === 'number' && mem <= 4) return true;
+    if (typeof cores === 'number' && cores <= 2) return true;
+  } catch (_) {}
+  return false;
+}
+
+function isPerformanceModeOn() {
+  let pref = null;
+  try { pref = localStorage.getItem('albayan_perf_mode'); } catch (_) {}
+  return pref === 'lite' || (pref !== 'full' && isWeakDevice());
+}
+
+function applyPerformanceMode() {
+  const lite = isPerformanceModeOn();
+  try {
+    if (document.body) document.body.classList.toggle('perf-lite', lite);
+  } catch (_) {}
+  return lite;
+}
+
+function togglePerformanceMode(on) {
+  try { localStorage.setItem('albayan_perf_mode', on ? 'lite' : 'full'); } catch (_) {}
+  applyPerformanceMode();
+  if (typeof showNotification === 'function' && typeof state !== 'undefined') {
+    const isAr = state.language === 'ar';
+    showNotification(
+      isAr ? 'وضع الأداء' : 'Performance Mode',
+      on
+        ? (isAr ? 'تم تفعيل وضع الأداء — التطبيق أخف وأسرع.' : 'Performance mode ON — lighter and faster.')
+        : (isAr ? 'تم إيقاف وضع الأداء — عادت التأثيرات المرئية.' : 'Performance mode OFF — visual effects restored.'),
+      'success'
+    );
+  }
+}
+
+// Apply immediately at load (script.js is at the end of <body>, so body
+// exists) — before the first render, so there is no styled->lite flash.
+applyPerformanceMode();
+
+// ==========================================
 // SECURITY MODULE - XSS Protection, Sanitization, Hashing
 // ==========================================
 
@@ -11807,6 +11862,27 @@ function renderSettingsView() {
                 : 'No recovery key created yet.')}
           </div>
         ` : ''}
+      </div>
+
+      <!-- Performance mode (for slow devices) -->
+      <div class="glass-panel rounded-2xl p-6">
+        <h2 class="text-xl font-bold mb-4 flex items-center">
+          <i data-lucide="zap" class="w-5 h-5 mr-2 text-amber-500"></i>
+          ${state.language === 'ar' ? 'الأداء' : 'Performance'}
+        </h2>
+        <label class="flex items-center justify-between gap-4 cursor-pointer">
+          <div>
+            <div class="font-medium text-slate-800 dark:text-slate-100">
+              ${state.language === 'ar' ? 'وضع الأداء (للأجهزة البطيئة)' : 'Performance mode (for slow devices)'}
+            </div>
+            <div class="text-xs text-slate-500 mt-1">
+              ${state.language === 'ar'
+                ? 'يوقف تأثيرات الزجاج والخلفية المتحركة لجعل التطبيق أخف وأسرع. جميع الميزات تبقى كما هي. يُفعَّل تلقائياً على الأجهزة الضعيفة.'
+                : 'Turns off the glass-blur effects and animated background so the app runs lighter and faster. All features stay the same. Enabled automatically on weak devices.'}
+            </div>
+          </div>
+          <input type="checkbox" ${isPerformanceModeOn() ? 'checked' : ''} onchange="togglePerformanceMode(this.checked)" class="w-5 h-5 accent-indigo-600 flex-shrink-0" />
+        </label>
       </div>
 
       <!-- Exchange Rate -->

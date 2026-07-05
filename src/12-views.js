@@ -4783,6 +4783,27 @@ function renderSettingsView() {
         ` : ''}
       </div>
 
+      <!-- Performance mode (for slow devices) -->
+      <div class="glass-panel rounded-2xl p-6">
+        <h2 class="text-xl font-bold mb-4 flex items-center">
+          <i data-lucide="zap" class="w-5 h-5 mr-2 text-amber-500"></i>
+          ${state.language === 'ar' ? 'الأداء' : 'Performance'}
+        </h2>
+        <label class="flex items-center justify-between gap-4 cursor-pointer">
+          <div>
+            <div class="font-medium text-slate-800 dark:text-slate-100">
+              ${state.language === 'ar' ? 'وضع الأداء (للأجهزة البطيئة)' : 'Performance mode (for slow devices)'}
+            </div>
+            <div class="text-xs text-slate-500 mt-1">
+              ${state.language === 'ar'
+                ? 'يوقف تأثيرات الزجاج والخلفية المتحركة لجعل التطبيق أخف وأسرع. جميع الميزات تبقى كما هي. يُفعَّل تلقائياً على الأجهزة الضعيفة.'
+                : 'Turns off the glass-blur effects and animated background so the app runs lighter and faster. All features stay the same. Enabled automatically on weak devices.'}
+            </div>
+          </div>
+          <input type="checkbox" ${isPerformanceModeOn() ? 'checked' : ''} onchange="togglePerformanceMode(this.checked)" class="w-5 h-5 accent-indigo-600 flex-shrink-0" />
+        </label>
+      </div>
+
       <!-- Exchange Rate -->
       <div class="glass-panel rounded-2xl p-6">
         <h2 class="text-xl font-bold mb-4 flex items-center">
