@@ -2464,7 +2464,7 @@ const SERVICES = {
     subscription: { price: 0, durationDays: 30 },
     openView: 'smart-systems',
     hasChildren: true,
-    children: ['albayan_manager', 'crm', 'store_system']
+    children: ['albayan_manager', 'crm', 'store_system', 'clothes_system']
   },
   albayan_cards: {
     id: 'albayan_cards',
@@ -2574,6 +2574,20 @@ const SMART_SYSTEMS_CHILDREN = {
     comingSoon: true,
     requiresSubscription: true,
     requiredSubscriptions: ['smart_systems']
+  },
+  clothes_system: {
+    id: 'clothes_system',
+    order: 4,
+    name: 'Clothes System',
+    nameAr: 'نظام الملابس',
+    icon: 'shirt',
+    color: 'from-rose-500 to-pink-500',
+    description: 'Warehouse, shipments & orders',
+    descriptionAr: 'المستودع والشحنات والطلبات',
+    comingSoon: false,
+    requiresSubscription: true,
+    requiredSubscriptions: ['smart_systems'],
+    openView: 'clothes-system'
   }
 };
 
@@ -2974,6 +2988,11 @@ const state = {
   logs: [],
   walletTransactions: [], // ledger entries (huge-data safe via IndexedDB)
   serviceSubscriptions: [], // structured subscriptions (huge-data safe via IndexedDB)
+
+  // Clothes System (Smart Systems child #4)
+  clothesProducts: [], // items for sale: variants (color/size) with stock counts
+  clothesShipments: [], // incoming goods from abroad (Ordered → Received)
+  clothesOrders: [], // outgoing customer orders (delivery + payment tracking)
   
   // Settings
   defaultExchangeRate: 0,
@@ -3042,7 +3061,11 @@ const PERSISTED_COLLECTIONS = [
   'exchangeRateHistory',
   // Platform foundation (future‑proof)
   'walletTransactions',
-  'serviceSubscriptions'
+  'serviceSubscriptions',
+  // Clothes System
+  'clothesProducts',
+  'clothesShipments',
+  'clothesOrders'
 ];
 
 // Debounced IndexedDB sync (avoid writing huge arrays on every keystroke)
@@ -3062,6 +3085,9 @@ function getCollectionNameFromArray(array) {
   if (array === state.exchangeRateHistory) return 'exchangeRateHistory';
   if (array === state.walletTransactions) return 'walletTransactions';
   if (array === state.serviceSubscriptions) return 'serviceSubscriptions';
+  if (array === state.clothesProducts) return 'clothesProducts';
+  if (array === state.clothesShipments) return 'clothesShipments';
+  if (array === state.clothesOrders) return 'clothesOrders';
   return null;
 }
 
@@ -3253,6 +3279,9 @@ function loadState() {
       if (!Array.isArray(state.exchangeRateHistory)) state.exchangeRateHistory = [];
       if (!Array.isArray(state.walletTransactions)) state.walletTransactions = [];
       if (!Array.isArray(state.serviceSubscriptions)) state.serviceSubscriptions = [];
+      if (!Array.isArray(state.clothesProducts)) state.clothesProducts = [];
+      if (!Array.isArray(state.clothesShipments)) state.clothesShipments = [];
+      if (!Array.isArray(state.clothesOrders)) state.clothesOrders = [];
       
       // Validate language (must be 'en' or 'ar')
       if (state.language !== 'en' && state.language !== 'ar') {
@@ -4562,7 +4591,7 @@ function isCurrentUserAdmin() {
 }
 
 // "Secret ideas" gating (UI only). Non-admin users are kept inside Albayan Manager for now.
-const PLATFORM_ADMIN_ONLY_VIEWS = new Set(['services-hub', 'smart-systems', 'service-placeholder', 'wallet']);
+const PLATFORM_ADMIN_ONLY_VIEWS = new Set(['services-hub', 'smart-systems', 'service-placeholder', 'wallet', 'clothes-system']);
 
 // View -> permission module mapping (used for landing + access checks)
 const VIEW_PERMISSION_MODULES = {
@@ -5534,6 +5563,9 @@ async function serverLoadAllData() {
     pages: Array.isArray(state.pages) ? state.pages.length : 0,
     exchangeRateHistory: Array.isArray(state.exchangeRateHistory) ? state.exchangeRateHistory.length : 0,
     users: Array.isArray(state.users) ? state.users.length : 0,
+    clothesProducts: Array.isArray(state.clothesProducts) ? state.clothesProducts.length : 0,
+    clothesShipments: Array.isArray(state.clothesShipments) ? state.clothesShipments.length : 0,
+    clothesOrders: Array.isArray(state.clothesOrders) ? state.clothesOrders.length : 0,
   };
   // #region agent log
   const _loadStartTime = Date.now();
@@ -5584,7 +5616,7 @@ async function serverLoadAllData() {
   // Load collections in parallel for faster initial load
   // Use higher concurrency for initial load, but still limit to avoid overwhelming server
   const results = {};
-  const collections = ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory'];
+  const collections = ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory', 'clothesProducts', 'clothesShipments', 'clothesOrders'];
   const CONCURRENCY = SERVER_API.initialLoadConcurrency || 3;
 
   // Show loading progress
@@ -5666,7 +5698,10 @@ async function serverLoadAllData() {
       _maxLastModifiedFromArray(results.receipts && results.receipts.data),
       _maxLastModifiedFromArray(results.customers && results.customers.data),
       _maxLastModifiedFromArray(results.pages && results.pages.data),
-      _maxLastModifiedFromArray(results.exchangeRateHistory && results.exchangeRateHistory.data)
+      _maxLastModifiedFromArray(results.exchangeRateHistory && results.exchangeRateHistory.data),
+      _maxLastModifiedFromArray(results.clothesProducts && results.clothesProducts.data),
+      _maxLastModifiedFromArray(results.clothesShipments && results.clothesShipments.data),
+      _maxLastModifiedFromArray(results.clothesOrders && results.clothesOrders.data)
     );
     if (_wm > 0 && typeof _serverLiveSync === 'object' && _serverLiveSync) {
       _serverLiveSync.serverWatermark = _wm;
@@ -5764,7 +5799,10 @@ function computeServerCursorFromState() {
     _maxLastModifiedFromArray(state.receipts),
     _maxLastModifiedFromArray(state.customers),
     _maxLastModifiedFromArray(state.pages),
-    _maxLastModifiedFromArray(state.exchangeRateHistory)
+    _maxLastModifiedFromArray(state.exchangeRateHistory),
+    _maxLastModifiedFromArray(state.clothesProducts),
+    _maxLastModifiedFromArray(state.clothesShipments),
+    _maxLastModifiedFromArray(state.clothesOrders)
   );
 }
 
@@ -5936,12 +5974,15 @@ async function serverLiveSyncOnce() {
     }
   };
 
-  const [adsDelta, receiptsDelta, customersDelta, pagesDelta, exhDelta] = await Promise.all([
+  const [adsDelta, receiptsDelta, customersDelta, pagesDelta, exhDelta, clothesProductsDelta, clothesShipmentsDelta, clothesOrdersDelta] = await Promise.all([
     safeSince('ads'),
     safeSince('receipts'),
     safeSince('customers'),
     safeSince('pages'),
-    safeSince('exchangeRateHistory')
+    safeSince('exchangeRateHistory'),
+    safeSince('clothesProducts'),
+    safeSince('clothesShipments'),
+    safeSince('clothesOrders')
   ]);
 
   let changed = false;
@@ -5950,6 +5991,9 @@ async function serverLiveSyncOnce() {
   changed = applyServerDelta('customers', customersDelta) || changed;
   changed = applyServerDelta('pages', pagesDelta) || changed;
   changed = applyServerDelta('exchangeRateHistory', exhDelta) || changed;
+  changed = applyServerDelta('clothesProducts', clothesProductsDelta) || changed;
+  changed = applyServerDelta('clothesShipments', clothesShipmentsDelta) || changed;
+  changed = applyServerDelta('clothesOrders', clothesOrdersDelta) || changed;
   
   // Ensure data migration on live sync (only if data changed, debounced to not block render)
   if (changed) {
@@ -5965,7 +6009,10 @@ async function serverLiveSyncOnce() {
     _maxLastModifiedFromArray(receiptsDelta),
     _maxLastModifiedFromArray(customersDelta),
     _maxLastModifiedFromArray(pagesDelta),
-    _maxLastModifiedFromArray(exhDelta)
+    _maxLastModifiedFromArray(exhDelta),
+    _maxLastModifiedFromArray(clothesProductsDelta),
+    _maxLastModifiedFromArray(clothesShipmentsDelta),
+    _maxLastModifiedFromArray(clothesOrdersDelta)
   );
   // Deltas come straight from the server, so maxDelta is a trustworthy server
   // timestamp — record it as the watermark for future cursor seeds.
@@ -6531,6 +6578,7 @@ const VIEW_TO_PATH = {
   'no-access': '/no-access',
   // Platform views (admin only)
   'smart-systems': '/smart-systems',
+  'clothes-system': '/clothes-system',
   'wallet': '/wallet',
   'account': '/account'
 };
@@ -7498,7 +7546,7 @@ function attachLoginHandlers() {
 
 function renderMainApp() {
   const dir = getDir();
-  const showSidebar = !['services-hub', 'smart-systems', 'service-placeholder', 'wallet'].includes(state.currentView);
+  const showSidebar = !['services-hub', 'smart-systems', 'service-placeholder', 'wallet', 'clothes-system'].includes(state.currentView);
   
   return `
     <div class="flex min-h-screen" dir="${dir}">
@@ -7658,6 +7706,7 @@ function renderView() {
   switch (state.currentView) {
     case 'services-hub': return renderServicesHub();
     case 'smart-systems': return renderSmartSystems();
+    case 'clothes-system': return renderClothesSystemView();
     case 'service-placeholder': return renderServicePlaceholder();
     case 'wallet': return renderWalletView();
     case 'analytics': return renderAnalyticsView();
@@ -9220,36 +9269,15 @@ function renderReceiptsView() {
                     </div>
                     <div>
                       <div class="text-slate-500 text-xs mb-1 flex items-center space-x-1">
-                        <i data-lucide="dollar-sign" class="w-3 h-3"></i><span>Usage</span>
-                      </div>
-                      <div class="font-bold text-emerald-600">$${usage.usedUSD.toFixed(2)} used</div>
-                      <div class="text-xs text-slate-500">Left: $${usage.remainingUSD.toFixed(2)} (${remainingLYD.toFixed(2)} LYD)</div>
-                    </div>
-                    <div>
-                      <div class="text-slate-500 text-xs mb-1 flex items-center space-x-1">
                         <i data-lucide="gauge" class="w-3 h-3"></i><span>Status</span>
                       </div>
                       <span class="status-badge status-${usage.usageStatus.toLowerCase().replace(' ', '-')}">${usage.usageStatus}</span>
                     </div>
-                    <div>
+                    <div class="col-span-2">
                       <div class="text-slate-500 text-xs mb-1 flex items-center space-x-1">
                         <i data-lucide="clock" class="w-3 h-3"></i><span>Last Used</span>
                       </div>
                       <div class="text-xs text-slate-600 dark:text-slate-400">${formatDateShort(usage.lastUsedAt)}</div>
-                    </div>
-                    <div>
-                      <div class="text-slate-500 text-xs mb-1 flex items-center space-x-1">
-                        <i data-lucide="check-circle" class="w-3 h-3"></i><span>Used?</span>
-                      </div>
-                      <div class="text-xs font-medium ${usage.usedUSD > 0 ? 'text-emerald-600' : 'text-amber-600'}">
-                        ${usage.usedUSD === 0 ? 'Not used yet' : (usage.remainingUSD === 0 ? 'Fully used' : 'Partially used')}
-                      </div>
-                    </div>
-                    <div>
-                      <div class="text-slate-500 text-xs mb-1 flex items-center space-x-1">
-                        <i data-lucide="calendar" class="w-3 h-3"></i><span>Total Allocated</span>
-                      </div>
-                      <div class="font-bold text-slate-700 dark:text-slate-300">$${usage.totalUSD.toFixed(2)}</div>
                     </div>
                     <div class="col-span-2 flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/40">
                       <div class="text-xs text-slate-600 dark:text-slate-300 flex items-center space-x-2">
@@ -9268,20 +9296,44 @@ function renderReceiptsView() {
 
               ${receipt.receiptImage ? `<div class="mb-4"><img src="${Security.escapeHtml(receipt.receiptImage)}" alt="Receipt" class="w-full h-32 object-cover rounded-lg border border-slate-200 dark:border-slate-700" /></div>` : ''}
 
-              <!-- Collected Toggle -->
-              <div class="flex items-center justify-between py-2 px-3 mb-3 rounded-xl ${receipt.collected ? 'bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800' : 'bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800'}">
-                <div class="flex items-center space-x-2">
-                  <i data-lucide="${receipt.collected ? 'check-circle-2' : 'circle'}" class="w-4 h-4 ${receipt.collected ? 'text-emerald-600' : 'text-amber-600'}"></i>
-                  <span class="text-sm font-medium ${receipt.collected ? 'text-emerald-700 dark:text-emerald-300' : 'text-amber-700 dark:text-amber-300'}">
-                    ${receipt.collected ? 'Collected' : 'Not Collected'}
-                  </span>
-                  ${receipt.collectedAt ? `<span class="text-[10px] text-slate-500">${new Date(receipt.collectedAt).toLocaleDateString()}</span>` : ''}
-                  ${receipt.collectedBy ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">${Security.escapeHtml(state.users.find(u => u.id === receipt.collectedBy)?.name || 'Admin')}</span>` : ''}
+              <!-- Collection (with amount) -->
+              ${(() => {
+                const targetLYD = Number(receipt.amountLocal) || 0;
+                // Amount actually collected. Older receipts have no
+                // collectedAmount: treat a collected-but-amountless receipt as
+                // fully collected so nothing looks "unpaid" after the upgrade.
+                const collectedLYD = receipt.collected
+                  ? (receipt.collectedAmount != null ? Number(receipt.collectedAmount) || 0 : targetLYD)
+                  : 0;
+                const leftLYD = Math.max(targetLYD - collectedLYD, 0);
+                const fully = receipt.collected && leftLYD <= 0.01;
+                const isAr = state.language === 'ar';
+                return `
+              <div class="py-2 px-3 mb-3 rounded-xl ${!receipt.collected ? 'bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800' : fully ? 'bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800' : 'bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800'}">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center space-x-2 min-w-0">
+                    <i data-lucide="${receipt.collected ? (fully ? 'check-circle-2' : 'circle-dot') : 'circle'}" class="w-4 h-4 flex-shrink-0 ${!receipt.collected ? 'text-amber-600' : fully ? 'text-emerald-600' : 'text-orange-600'}"></i>
+                    <span class="text-sm font-medium ${!receipt.collected ? 'text-amber-700 dark:text-amber-300' : fully ? 'text-emerald-700 dark:text-emerald-300' : 'text-orange-700 dark:text-orange-300'}">
+                      ${!receipt.collected ? (isAr ? 'لم يُحصَّل' : 'Not Collected') : fully ? (isAr ? 'تم التحصيل' : 'Collected') : (isAr ? 'تحصيل جزئي' : 'Partially Collected')}
+                    </span>
+                    ${receipt.collectedAt ? `<span class="text-[10px] text-slate-500">${new Date(receipt.collectedAt).toLocaleDateString()}</span>` : ''}
+                    ${receipt.collectedBy ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">${Security.escapeHtml(state.users.find(u => u.id === receipt.collectedBy)?.name || 'Admin')}</span>` : ''}
+                  </div>
+                  <div class="flex items-center gap-2 flex-shrink-0">
+                    ${receipt.collected ? `<button onclick="uncollectReceipt('${receipt.id}')" class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-300 transition-all" title="${isAr ? 'إلغاء التحصيل' : 'Undo collection'}">${isAr ? 'إلغاء' : 'Undo'}</button>` : ''}
+                    <button onclick="openCollectReceiptModal('${receipt.id}')" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all bg-emerald-100 hover:bg-emerald-200 text-emerald-700 dark:bg-emerald-900/40 dark:hover:bg-emerald-900/60 dark:text-emerald-300">
+                      ${!receipt.collected ? (isAr ? 'تسجيل التحصيل' : 'Mark Collected') : (isAr ? 'تعديل المبلغ' : 'Edit Amount')}
+                    </button>
+                  </div>
                 </div>
-                <button onclick="toggleReceiptCollected('${receipt.id}')" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${receipt.collected ? 'bg-amber-100 hover:bg-amber-200 text-amber-700 dark:bg-amber-900/40 dark:hover:bg-amber-900/60 dark:text-amber-300' : 'bg-emerald-100 hover:bg-emerald-200 text-emerald-700 dark:bg-emerald-900/40 dark:hover:bg-emerald-900/60 dark:text-emerald-300'}">
-                  ${receipt.collected ? 'Mark Not Collected' : 'Mark Collected'}
-                </button>
-              </div>
+                ${receipt.collected ? `
+                  <div class="flex flex-wrap gap-x-4 gap-y-0.5 mt-1.5 text-xs">
+                    <span class="text-slate-600 dark:text-slate-300">${isAr ? 'المُحصَّل' : 'Collected'}: <span class="font-bold text-emerald-600">${collectedLYD.toFixed(2)} LYD</span></span>
+                    ${leftLYD > 0.01 ? `<span class="text-slate-600 dark:text-slate-300">${isAr ? 'المتبقي للتحصيل' : 'Left to collect'}: <span class="font-bold text-orange-600">${leftLYD.toFixed(2)} LYD</span></span>` : ''}
+                  </div>
+                ` : ''}
+              </div>`;
+              })()}
 
               <div class="flex flex-col space-y-2 pt-3 border-t border-slate-200 dark:border-slate-700">
                 <div class="flex justify-between items-center">
@@ -13484,51 +13536,136 @@ function clearAllReceiptFilters() {
 }
 
 // Toggle receipt collected status
-function toggleReceiptCollected(receiptId) {
-  // Permission check
+function _canMarkCollected() {
   if (!currentUserHasPermission('receipts', 'markCollected')) {
     showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل حالة التحصيل' : 'You do not have permission to mark receipts as collected', 'error');
-    return;
+    return false;
   }
-  
-  const receipt = state.receipts.find(r => r.id === receiptId);
-  if (!receipt) return;
+  return true;
+}
 
-  const nowCollected = !receipt.collected;
-  // Persist through the canonical helper so the change is sanitized, bumps
-  // _lastModified, marks the collection dirty for IndexedDB, and (in server
-  // mode) write-throughs to the server with conflict handling. A bare
-  // saveState() previously left this in memory only, so the collected flag
-  // silently reverted on reload/sync — a real double-collection risk.
-  updateRecord(state.receipts, receiptId, {
-    collected: nowCollected,
-    collectedAt: nowCollected ? new Date().toISOString() : null,
-    collectedBy: nowCollected ? (state.currentUser?.id || 'admin') : null
-  });
-
-  // Log the action
+function _logReceiptCollection(receipt, action, collectedAmount) {
   state.logs.push({
     id: generateId(),
     type: 'receipt_collection',
-    action: nowCollected ? 'collected' : 'uncollected',
-    receiptId: receiptId,
+    action,
+    receiptId: receipt.id,
     userId: state.currentUser?.id,
     timestamp: new Date().toISOString(),
-    details: {
-      receiptSerial: receipt.serialNumber,
-      amountUSD: receipt.amountUSD,
-      amountLocal: receipt.amountLocal
-    }
+    details: { receiptSerial: receipt.serialNumber, amountUSD: receipt.amountUSD, amountLocal: receipt.amountLocal, collectedAmount }
   });
+}
 
+// Open a small modal to record HOW MUCH was collected for a receipt (user
+// request). Supports partial collection; the card then shows collected + the
+// amount still left to collect. Self-contained (stop-ad-modal style) so it
+// doesn't touch renderModal/state.modalData.
+function openCollectReceiptModal(receiptId) {
+  if (!_canMarkCollected()) return;
+  const receipt = state.receipts.find(r => r.id === receiptId);
+  if (!receipt) return;
+  const isAr = state.language === 'ar';
+  const targetLYD = Number(receipt.amountLocal) || 0;
+  // Prefill with the amount already collected, or the full receipt total.
+  const prefill = receipt.collectedAmount != null ? (Number(receipt.collectedAmount) || 0) : targetLYD;
+  const serialTxt = receipt.serialNumber || receipt.tempReceiptNo || receipt.finalReceiptNo || receiptId.slice(0, 8);
+
+  document.getElementById('collect-receipt-modal')?.remove();
+  const html = `
+    <div id="collect-receipt-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onclick="if(event.target===this) this.remove()">
+      <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-sm w-full" onclick="event.stopPropagation()">
+        <div class="p-5 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
+          <h2 class="text-lg font-bold text-slate-800 dark:text-white flex items-center">
+            <i data-lucide="hand-coins" class="w-5 h-5 mr-2 text-emerald-600"></i>
+            ${isAr ? 'تسجيل التحصيل' : 'Record Collection'}
+          </h2>
+          <button onclick="document.getElementById('collect-receipt-modal').remove()" class="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg"><i data-lucide="x" class="w-5 h-5"></i></button>
+        </div>
+        <div class="p-5 space-y-4">
+          <div class="text-sm text-slate-600 dark:text-slate-400">
+            ${isAr ? 'الوصل' : 'Receipt'} #${Security.escapeHtml(String(serialTxt))} — ${isAr ? 'الإجمالي' : 'Total'}: <span class="font-bold text-slate-800 dark:text-white">${targetLYD.toFixed(2)} LYD</span>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">${isAr ? 'المبلغ المُحصَّل (LYD)' : 'Amount Collected (LYD)'}</label>
+            <input type="text" inputmode="decimal" id="collect-amount" value="${prefill}" oninput="sanitizeMoneyInput(this); _updateCollectLeft(${targetLYD})" class="w-full glass-input px-4 py-2 rounded-xl text-lg font-bold focus:ring-2 focus:ring-emerald-500" placeholder="0.00" />
+            <div class="flex gap-2 mt-2">
+              <button type="button" onclick="document.getElementById('collect-amount').value='${targetLYD}'; _updateCollectLeft(${targetLYD})" class="text-xs px-2 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 font-medium">${isAr ? 'المبلغ كامل' : 'Full amount'}</button>
+            </div>
+          </div>
+          <div class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-3 flex justify-between text-sm">
+            <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المتبقي للتحصيل' : 'Left to collect'}:</span>
+            <span class="font-bold text-orange-600" id="collect-left">${Math.max(targetLYD - prefill, 0).toFixed(2)} LYD</span>
+          </div>
+          <div class="flex space-x-3 pt-1">
+            <button onclick="document.getElementById('collect-receipt-modal').remove()" class="flex-1 px-4 py-2.5 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl font-bold">${isAr ? 'إلغاء' : 'Cancel'}</button>
+            <button onclick="confirmCollectReceipt('${receiptId}')" class="flex-1 px-4 py-2.5 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-700">${isAr ? 'حفظ' : 'Save'}</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', html);
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => { const el = document.getElementById('collect-amount'); if (el) { el.focus(); el.select(); } }, 100);
+}
+
+function _updateCollectLeft(targetLYD) {
+  const amt = parseFloat(document.getElementById('collect-amount')?.value) || 0;
+  const leftEl = document.getElementById('collect-left');
+  if (leftEl) leftEl.textContent = Math.max((Number(targetLYD) || 0) - amt, 0).toFixed(2) + ' LYD';
+}
+
+function confirmCollectReceipt(receiptId) {
+  if (!_canMarkCollected()) return;
+  const receipt = state.receipts.find(r => r.id === receiptId);
+  if (!receipt) return;
+  const targetLYD = Number(receipt.amountLocal) || 0;
+  let amount = parseFloat(document.getElementById('collect-amount')?.value);
+  if (!Number.isFinite(amount) || amount < 0) {
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'أدخل مبلغاً صحيحاً' : 'Enter a valid amount', 'error');
+    return;
+  }
+  amount = Math.round(amount * 100) / 100;
+  // Persist through updateRecord so it syncs to IndexedDB/server (a bare
+  // saveState used to leave the collected flag memory-only -> reverted on sync).
+  updateRecord(state.receipts, receiptId, {
+    collected: true,
+    collectedAmount: amount,
+    collectedAt: new Date().toISOString(),
+    collectedBy: state.currentUser?.id || 'admin'
+  });
+  _logReceiptCollection(receipt, 'collected', amount);
   saveState();
+  document.getElementById('collect-receipt-modal')?.remove();
+  const leftLYD = Math.max(targetLYD - amount, 0);
+  const isAr = state.language === 'ar';
   showNotification(
-    nowCollected ? 'Receipt Collected' : 'Collection Removed',
-    nowCollected ? `Receipt #${receipt.serialNumber || receiptId.slice(0,8)} marked as collected` : `Receipt #${receipt.serialNumber || receiptId.slice(0,8)} marked as not collected`,
-    nowCollected ? 'success' : 'info'
+    isAr ? 'تم التحصيل' : 'Collected',
+    (isAr ? `تم تسجيل ${amount.toFixed(2)} LYD` : `Recorded ${amount.toFixed(2)} LYD`) + (leftLYD > 0.01 ? (isAr ? ` — المتبقي ${leftLYD.toFixed(2)} LYD` : ` — ${leftLYD.toFixed(2)} LYD left`) : ''),
+    'success'
   );
   render();
-  lucide.createIcons();
+  if (window.lucide) lucide.createIcons();
+}
+
+function uncollectReceipt(receiptId) {
+  if (!_canMarkCollected()) return;
+  const receipt = state.receipts.find(r => r.id === receiptId);
+  if (!receipt) return;
+  updateRecord(state.receipts, receiptId, { collected: false, collectedAmount: null, collectedAt: null, collectedBy: null });
+  _logReceiptCollection(receipt, 'uncollected', 0);
+  saveState();
+  showNotification(state.language === 'ar' ? 'تم الإلغاء' : 'Collection Removed', state.language === 'ar' ? 'تم إلغاء التحصيل' : 'Receipt marked as not collected', 'info');
+  render();
+  if (window.lucide) lucide.createIcons();
+}
+
+// Back-compat shim: old callers of the boolean toggle now route to the new
+// amount-based flow (open the modal to collect, or undo).
+function toggleReceiptCollected(receiptId) {
+  const receipt = state.receipts.find(r => r.id === receiptId);
+  if (!receipt) return;
+  if (receipt.collected) uncollectReceipt(receiptId);
+  else openCollectReceiptModal(receiptId);
 }
 
 function showReceiptModal() {
@@ -19164,8 +19301,12 @@ function renderModal() {
         </div>
       `;
       break;
+
+    case 'clothes-product':
+      modalContent = renderClothesProductModal();
+      break;
   }
-  
+
   const modal = document.createElement('div');
   modal.id = 'app-modal';
   modal.className = 'fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4';
@@ -19177,6 +19318,8 @@ function renderModal() {
     modalSize = 'max-w-xl'; // Wider modal for new Ad design with sections
   } else if (state.activeModal === 'receipt') {
     modalSize = 'max-w-lg'; // Compact size for receipts
+  } else if (state.activeModal === 'clothes-product') {
+    modalSize = 'max-w-xl'; // Room for the color/size/qty rows
   }
   // Make Ad/Receipt modals scroll on the whole panel (header + content) to avoid "nothing shows" confusion.
   const modalScrollable = (state.activeModal === 'receipt' || state.activeModal === 'ad')
@@ -19227,6 +19370,11 @@ function renderModal() {
         updateAdUnpaidTotals();
       }
     }, 100);
+  } else if (state.activeModal === 'clothes-product') {
+    setTimeout(() => {
+      refreshClothesVariantRows();
+      refreshClothesPhotoPreview();
+    }, 50);
   }
   
   const form = document.getElementById('modal-form');
@@ -19259,6 +19407,11 @@ async function handleModalSubmit() {
   const isEdit = state.modalData !== null;
   
   switch (state.activeModal) {
+    case 'clothes-product': {
+      const saved = await saveClothesProductFromModal();
+      if (!saved) return; // keep modal open on validation errors
+      break;
+    }
     case 'change-password': {
       if (!state.currentUser?.id) {
         showNotification('Error', 'Not logged in', 'error');
@@ -20182,6 +20335,9 @@ function closeModal() {
   // Discard any pending (unsaved) top-up edits so they cannot leak into the
   // next ad's top-up session.
   tempTopUps = [];
+  // Discard any pending (unsaved) clothes-product edits
+  _clothesTempVariants = [];
+  _clothesTempPhoto = null;
   
   // Clear URL params (modal, id)
   clearUrlParams(['modal', 'id']);
@@ -20380,6 +20536,679 @@ function deleteAd(id) {
 }
 
 // Stop Ad - Enter spent amount and return remaining to receipts/customer
+// ==========================================
+// CLOTHES SYSTEM (نظام الملابس)
+// Smart Systems child #4 — warehouse stock, incoming shipments
+// from abroad, and customer orders (buy in USD, sell in LYD).
+// Admin-only for now (registered in PLATFORM_ADMIN_ONLY_VIEWS).
+// Collections: state.clothesProducts / clothesShipments / clothesOrders.
+// ==========================================
+
+// Active tab: 'dashboard' | 'products' | 'shipments' | 'orders'
+let _clothesActiveTab = 'dashboard';
+
+const CLOTHES_TABS = [
+  { id: 'dashboard', icon: 'layout-dashboard', label: 'Dashboard', labelAr: 'نظرة عامة' },
+  { id: 'products', icon: 'shirt', label: 'Products', labelAr: 'البضاعة' },
+  { id: 'shipments', icon: 'plane', label: 'Shipments', labelAr: 'الشحنات القادمة' },
+  { id: 'orders', icon: 'shopping-bag', label: 'Orders', labelAr: 'طلبات الزبائن' }
+];
+
+// A variant's stock is "low" at or below this count (and "out" at 0)
+const CLOTHES_LOW_STOCK_THRESHOLD = 2;
+const CLOTHES_PRODUCTS_PAGE_SIZE = 30;
+
+function setClothesTab(tabId) {
+  if (!CLOTHES_TABS.some(tab => tab.id === tabId)) return;
+  _clothesActiveTab = tabId;
+  render();
+}
+
+// ------------------------------------------
+// Shared helpers
+// ------------------------------------------
+
+function clothesIsAr() {
+  return state.language === 'ar';
+}
+
+function clothesFmtUSD(n) {
+  const v = Math.round((Number(n) || 0) * 100) / 100;
+  return `$${v.toFixed(2)}`;
+}
+
+function clothesFmtLYD(n) {
+  const v = Math.round((Number(n) || 0) * 100) / 100;
+  return `${v.toFixed(2)} LYD`;
+}
+
+function clothesParseMoney(raw) {
+  // Inputs already run through sanitizeMoneyInput (ASCII digits, one dot),
+  // this is the final defensive parse at save time.
+  const v = parseFloat(String(raw == null ? '' : raw).trim());
+  if (!Number.isFinite(v) || v < 0) return 0;
+  return Math.round(v * 100) / 100;
+}
+
+function getClothesProductTotalQty(product) {
+  const variants = Array.isArray(product?.variants) ? product.variants : [];
+  return variants.reduce((sum, v) => sum + (Math.max(0, Math.floor(Number(v?.qty) || 0))), 0);
+}
+
+function getVisibleClothesProducts() {
+  return getVisibleRecords(state.clothesProducts);
+}
+
+// ------------------------------------------
+// Tab bar + view shell
+// ------------------------------------------
+
+function renderClothesTabBar() {
+  const isAr = clothesIsAr();
+  return `
+    <div class="flex flex-wrap gap-2 mb-8">
+      ${CLOTHES_TABS.map(tab => {
+        const active = _clothesActiveTab === tab.id;
+        return `
+          <button
+            type="button"
+            onclick="setClothesTab('${tab.id}')"
+            class="flex items-center gap-2 px-4 py-2.5 rounded-xl font-medium transition-all ${active
+              ? 'bg-gradient-to-r from-rose-500 to-pink-500 text-white shadow-lg'
+              : 'glass-panel text-slate-600 dark:text-slate-300 hover:text-rose-600 dark:hover:text-rose-400'}"
+          >
+            <i data-lucide="${tab.icon}" class="w-4 h-4"></i>
+            <span>${isAr ? tab.labelAr : tab.label}</span>
+          </button>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+// Shared placeholder for tabs not built yet (removed stage by stage)
+function renderClothesComingSoonPanel(icon, title, titleAr, desc, descAr) {
+  const isAr = clothesIsAr();
+  return `
+    <div class="glass-panel rounded-2xl p-12 text-center">
+      <div class="w-20 h-20 mx-auto rounded-3xl bg-gradient-to-br from-rose-500 to-pink-500 flex items-center justify-center mb-6 shadow-2xl">
+        <i data-lucide="${icon}" class="w-10 h-10 text-white"></i>
+      </div>
+      <h3 class="text-2xl font-bold text-slate-800 dark:text-white mb-2">${isAr ? titleAr : title}</h3>
+      <p class="text-slate-500 dark:text-slate-400 max-w-xl mx-auto mb-6">${isAr ? descAr : desc}</p>
+      <span class="inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-bold uppercase bg-gradient-to-r from-amber-400 to-orange-500 text-white shadow-lg">
+        <i data-lucide="hammer" class="w-3.5 h-3.5"></i>
+        ${isAr ? 'يتم البناء الآن — المرحلة القادمة' : 'Under construction — next stage'}
+      </span>
+    </div>
+  `;
+}
+
+function renderClothesDashboardTab() {
+  return renderClothesComingSoonPanel(
+    'layout-dashboard',
+    'Dashboard', 'نظرة عامة',
+    'One screen with the full picture: value of stock in the warehouse, goods still on the way, orders out for delivery, money collected and money customers still owe.',
+    'شاشة واحدة بالصورة الكاملة: قيمة البضاعة في المستودع، البضاعة التي في الطريق، الطلبات الخارجة للتوصيل، المال المحصَّل والمال المتبقي عند الزبائن.'
+  );
+}
+
+function renderClothesShipmentsTab() {
+  return renderClothesComingSoonPanel(
+    'plane',
+    'Incoming Shipments', 'الشحنات القادمة',
+    'Goods you buy from abroad: supplier, contents, costs, and a status you move forward — Ordered, Shipped, Arrived, Received. Receiving a shipment adds it to your stock automatically.',
+    'البضاعة التي تشتريها من الخارج: المورد، المحتويات، التكاليف، وحالة تتقدم خطوة بخطوة — مطلوبة، مشحونة، وصلت، استُلمت. استلام الشحنة يضيفها للمخزون تلقائياً.'
+  );
+}
+
+function renderClothesOrdersTab() {
+  return renderClothesComingSoonPanel(
+    'shopping-bag',
+    'Customer Orders', 'طلبات الزبائن',
+    'What you send to customers: the pieces, delivery status (New, On the way, Delivered, Returned, Canceled) and payment status (Paid, Partially paid, Not paid).',
+    'ما ترسله للزبائن: القطع، حالة التوصيل (جديد، في الطريق، تم التسليم، مرتجع، ملغى) وحالة الدفع (مدفوع، مدفوع جزئياً، غير مدفوع).'
+  );
+}
+
+function renderClothesSystemView() {
+  const isAr = clothesIsAr();
+
+  let tabContent;
+  switch (_clothesActiveTab) {
+    case 'products': tabContent = renderClothesProductsTab(); break;
+    case 'shipments': tabContent = renderClothesShipmentsTab(); break;
+    case 'orders': tabContent = renderClothesOrdersTab(); break;
+    default: tabContent = renderClothesDashboardTab();
+  }
+
+  return `
+    <div class="max-w-6xl mx-auto">
+      <!-- Back Button -->
+      <button onclick="navigateTo('smart-systems')" class="mb-6 flex items-center gap-2 text-rose-600 hover:text-rose-700 font-medium">
+        <i data-lucide="${isAr ? 'arrow-right' : 'arrow-left'}" class="w-5 h-5"></i>
+        <span>${isAr ? 'العودة للأنظمة الذكية' : 'Back to Smart Systems'}</span>
+      </button>
+
+      <!-- Header -->
+      <div class="mb-8">
+        <div class="flex items-center gap-4 mb-4">
+          <div class="w-16 h-16 rounded-2xl bg-gradient-to-br from-rose-500 to-pink-500 flex items-center justify-center shadow-2xl">
+            <i data-lucide="shirt" class="w-8 h-8 text-white"></i>
+          </div>
+          <div>
+            <h1 class="text-3xl font-bold text-slate-800 dark:text-white">
+              ${isAr ? 'نظام الملابس' : 'Clothes System'}
+            </h1>
+            <p class="text-slate-500 dark:text-slate-400">
+              ${isAr ? 'المستودع والشحنات وطلبات الزبائن' : 'Warehouse, shipments & customer orders'}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      ${renderClothesTabBar()}
+
+      ${tabContent}
+    </div>
+  `;
+}
+
+// ------------------------------------------
+// PRODUCTS TAB — list, search, stock adjust
+// ------------------------------------------
+
+let _clothesProductSearch = '';
+let _clothesProductsShowLimit = CLOTHES_PRODUCTS_PAGE_SIZE;
+let _clothesProductsFilterFingerprint = '';
+
+function loadMoreClothesProducts() {
+  _clothesProductsShowLimit += CLOTHES_PRODUCTS_PAGE_SIZE;
+  updateClothesProductsFiltered();
+}
+
+function onClothesProductSearchInput(el) {
+  const value = Security.sanitizeInput(String(el?.value || ''), { maxLength: 200 });
+  _clothesProductSearch = value;
+  if (window._clothesProductSearchTimer) clearTimeout(window._clothesProductSearchTimer);
+  window._clothesProductSearchTimer = setTimeout(() => updateClothesProductsFiltered(), 80);
+}
+
+function getFilteredClothesProducts() {
+  const q = _clothesProductSearch.trim().toLowerCase();
+  let items = getVisibleClothesProducts();
+  if (q) {
+    items = items.filter(p => {
+      const name = String(p.name || '').toLowerCase();
+      const category = String(p.category || '').toLowerCase();
+      if (name.includes(q) || category.includes(q)) return true;
+      const variants = Array.isArray(p.variants) ? p.variants : [];
+      return variants.some(v =>
+        String(v?.color || '').toLowerCase().includes(q) ||
+        String(v?.size || '').toLowerCase().includes(q)
+      );
+    });
+  }
+  return items;
+}
+
+// Targeted swap (caret-preserving): re-renders only the stats + grid regions,
+// same pattern as updateCustomersViewFiltered.
+function updateClothesProductsFiltered() {
+  const container = document.querySelector('main');
+  if (!container || state.currentView !== 'clothes-system' || _clothesActiveTab !== 'products') {
+    render();
+    return;
+  }
+  const template = document.createElement('template');
+  template.innerHTML = renderClothesProductsTab();
+  const newStats = template.content.querySelector('#clothes-products-stats');
+  const newGrid = template.content.querySelector('#clothes-products-grid');
+  const curStats = document.getElementById('clothes-products-stats');
+  const curGrid = document.getElementById('clothes-products-grid');
+  if (newStats && curStats) curStats.innerHTML = newStats.innerHTML;
+  if (newGrid && curGrid) curGrid.innerHTML = newGrid.innerHTML;
+  if (typeof IconQueue !== 'undefined') IconQueue.schedule(container);
+  else lucide.createIcons();
+}
+
+function renderClothesProductsTab() {
+  const isAr = clothesIsAr();
+  const all = getVisibleClothesProducts();
+  const filtered = getFilteredClothesProducts();
+
+  // Reset pagination when the filter changes
+  const fingerprint = JSON.stringify([_clothesProductSearch]);
+  if (fingerprint !== _clothesProductsFilterFingerprint) {
+    _clothesProductsFilterFingerprint = fingerprint;
+    _clothesProductsShowLimit = CLOTHES_PRODUCTS_PAGE_SIZE;
+  }
+  const shown = filtered.slice(0, _clothesProductsShowLimit);
+  const remaining = Math.max(0, filtered.length - shown.length);
+
+  // Stats
+  let totalPieces = 0;
+  let stockValueUSD = 0;
+  let lowVariants = 0;
+  for (const p of all) {
+    const variants = Array.isArray(p.variants) ? p.variants : [];
+    for (const v of variants) {
+      const qty = Math.max(0, Math.floor(Number(v?.qty) || 0));
+      totalPieces += qty;
+      stockValueUSD += qty * (Number(p.costUSD) || 0);
+      if (qty <= CLOTHES_LOW_STOCK_THRESHOLD) lowVariants++;
+    }
+  }
+  stockValueUSD = Math.round(stockValueUSD * 100) / 100;
+
+  const statCard = (icon, label, value, gradient) => `
+    <div class="glass-panel rounded-2xl p-4 flex items-center gap-3">
+      <div class="w-11 h-11 rounded-xl bg-gradient-to-br ${gradient} flex items-center justify-center shadow-lg shrink-0">
+        <i data-lucide="${icon}" class="w-5 h-5 text-white"></i>
+      </div>
+      <div class="min-w-0">
+        <div class="text-xs text-slate-500 dark:text-slate-400">${label}</div>
+        <div class="text-lg font-bold text-slate-800 dark:text-white truncate">${value}</div>
+      </div>
+    </div>
+  `;
+
+  return `
+    <div>
+      <div id="clothes-products-stats" class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        ${statCard('shirt', isAr ? 'المنتجات' : 'Products', String(all.length), 'from-rose-500 to-pink-500')}
+        ${statCard('boxes', isAr ? 'القطع في المخزون' : 'Pieces in stock', String(totalPieces), 'from-blue-500 to-cyan-500')}
+        ${statCard('banknote', isAr ? 'قيمة المخزون (تكلفة)' : 'Stock value (cost)', clothesFmtUSD(stockValueUSD), 'from-emerald-500 to-green-500')}
+        ${statCard('alert-triangle', isAr ? 'مقاسات شارفت على النفاد' : 'Low-stock variants', String(lowVariants), 'from-amber-400 to-orange-500')}
+      </div>
+
+      <div class="flex flex-col sm:flex-row gap-3 mb-6">
+        <div class="relative flex-1">
+          <i data-lucide="search" class="w-4 h-4 absolute top-1/2 -translate-y-1/2 ${isAr ? 'right-4' : 'left-4'} text-slate-400"></i>
+          <input
+            type="text"
+            id="clothes-product-search"
+            value="${Security.escapeHtml(_clothesProductSearch)}"
+            oninput="onClothesProductSearchInput(this)"
+            placeholder="${isAr ? 'ابحث بالاسم أو الفئة أو اللون أو المقاس...' : 'Search by name, category, color or size...'}"
+            class="w-full glass-input ${isAr ? 'pr-11 pl-4' : 'pl-11 pr-4'} py-2.5 rounded-xl"
+          />
+        </div>
+        <button onclick="showClothesProductModal()" class="btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-5 py-2.5 rounded-xl font-bold shadow-lg hover:shadow-xl flex items-center justify-center gap-2">
+          <i data-lucide="plus" class="w-4 h-4"></i>
+          ${isAr ? 'إضافة منتج' : 'Add Product'}
+        </button>
+      </div>
+
+      <div id="clothes-products-grid">
+        ${shown.length === 0 ? `
+          <div class="glass-panel rounded-2xl p-12 text-center">
+            <div class="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-rose-500 to-pink-500 flex items-center justify-center mb-4 shadow-xl opacity-80">
+              <i data-lucide="shirt" class="w-8 h-8 text-white"></i>
+            </div>
+            <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-1">
+              ${all.length === 0
+                ? (isAr ? 'لا توجد منتجات بعد' : 'No products yet')
+                : (isAr ? 'لا توجد نتائج للبحث' : 'No results for this search')}
+            </h3>
+            <p class="text-sm text-slate-500 dark:text-slate-400">
+              ${all.length === 0
+                ? (isAr ? 'أضف أول منتج لبدء تتبع المخزون.' : 'Add your first product to start tracking stock.')
+                : (isAr ? 'جرّب كلمة بحث أخرى.' : 'Try a different search term.')}
+            </p>
+          </div>
+        ` : `
+          <div class="text-sm text-slate-500 dark:text-slate-400 mb-3" id="clothes-products-count">
+            ${isAr ? `عرض ${shown.length} من ${filtered.length} منتج` : `Showing ${shown.length} of ${filtered.length} products`}
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            ${shown.map(p => renderClothesProductCard(p)).join('')}
+          </div>
+          ${remaining > 0 ? `
+            <div class="text-center mt-6">
+              <button onclick="loadMoreClothesProducts()" class="glass-panel px-6 py-2.5 rounded-xl font-medium text-slate-600 dark:text-slate-300 hover:text-rose-600">
+                ${isAr ? `عرض المزيد (${remaining} متبقي)` : `Load more (${remaining} remaining)`}
+              </button>
+            </div>
+          ` : ''}
+        `}
+      </div>
+    </div>
+  `;
+}
+
+function renderClothesProductCard(p) {
+  const isAr = clothesIsAr();
+  const variants = Array.isArray(p.variants) ? p.variants : [];
+  const totalQty = getClothesProductTotalQty(p);
+
+  const qtyBadgeClass = totalQty === 0
+    ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
+    : (variants.some(v => (Math.floor(Number(v?.qty) || 0)) <= CLOTHES_LOW_STOCK_THRESHOLD)
+      ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
+      : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300');
+
+  const variantChips = variants.map((v, idx) => {
+    const qty = Math.max(0, Math.floor(Number(v?.qty) || 0));
+    const label = [v?.color, v?.size].map(s => String(s || '').trim()).filter(Boolean).join(' · ') || (isAr ? 'بدون تحديد' : 'unspecified');
+    const chipClass = qty === 0
+      ? 'border-red-300 dark:border-red-700 text-red-600 dark:text-red-400'
+      : (qty <= CLOTHES_LOW_STOCK_THRESHOLD
+        ? 'border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400'
+        : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300');
+    return `
+      <span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium border ${chipClass}">
+        <span>${Security.escapeHtml(label)}</span>
+        <button type="button" onclick="adjustClothesVariantQty('${p.id}', ${idx}, -1)" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-rose-200 dark:hover:bg-rose-800 flex items-center justify-center leading-none" title="-1">−</button>
+        <span class="font-bold">${qty}</span>
+        <button type="button" onclick="adjustClothesVariantQty('${p.id}', ${idx}, 1)" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-emerald-200 dark:hover:bg-emerald-800 flex items-center justify-center leading-none" title="+1">+</button>
+      </span>
+    `;
+  }).join('');
+
+  return `
+    <div class="glass-panel rounded-2xl p-5">
+      <div class="flex items-start gap-4">
+        <div class="w-16 h-16 rounded-xl overflow-hidden bg-gradient-to-br from-rose-100 to-pink-100 dark:from-rose-900/30 dark:to-pink-900/30 flex items-center justify-center shrink-0">
+          ${p.photo
+            ? `<img src="${Security.escapeHtml(p.photo)}" alt="" class="w-full h-full object-cover" />`
+            : `<i data-lucide="shirt" class="w-7 h-7 text-rose-400"></i>`}
+        </div>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-start justify-between gap-2">
+            <div class="min-w-0">
+              <h4 class="font-bold text-slate-800 dark:text-white truncate">${Security.escapeHtml(p.name || '')}</h4>
+              ${p.category ? `<span class="inline-block mt-0.5 px-2 py-0.5 rounded-full text-xs font-medium bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300">${Security.escapeHtml(p.category)}</span>` : ''}
+            </div>
+            <span class="px-2.5 py-1 rounded-full text-xs font-bold whitespace-nowrap ${qtyBadgeClass}">
+              ${totalQty} ${isAr ? 'قطعة' : 'pcs'}
+            </span>
+          </div>
+          <div class="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-sm">
+            <span class="text-slate-500 dark:text-slate-400">${isAr ? 'التكلفة:' : 'Cost:'} <span class="font-bold text-slate-700 dark:text-slate-200">${clothesFmtUSD(p.costUSD)}</span></span>
+            <span class="text-slate-500 dark:text-slate-400">${isAr ? 'البيع:' : 'Sell:'} <span class="font-bold text-emerald-600 dark:text-emerald-400">${clothesFmtLYD(p.priceLYD)}</span></span>
+          </div>
+        </div>
+      </div>
+
+      ${variants.length ? `<div class="flex flex-wrap gap-1.5 mt-4">${variantChips}</div>` : `
+        <div class="mt-4 text-xs text-slate-400 dark:text-slate-500">${isAr ? 'لا توجد ألوان/مقاسات بعد — عدّل المنتج لإضافتها.' : 'No colors/sizes yet — edit the product to add them.'}</div>
+      `}
+
+      ${p.note ? `<p class="mt-3 text-xs text-slate-500 dark:text-slate-400 line-clamp-2">${Security.escapeHtml(p.note)}</p>` : ''}
+
+      <div class="flex gap-2 mt-4 pt-3 border-t border-slate-200 dark:border-slate-700">
+        <button onclick="editClothesProduct('${p.id}')" class="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800">
+          <i data-lucide="pencil" class="w-3.5 h-3.5"></i>${isAr ? 'تعديل' : 'Edit'}
+        </button>
+        <button onclick="deleteClothesProduct('${p.id}')" class="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20">
+          <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>${isAr ? 'حذف' : 'Delete'}
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function adjustClothesVariantQty(productId, variantIndex, delta) {
+  if (!isCurrentUserAdmin()) return;
+  const product = getVisibleClothesProducts().find(p => p.id === productId);
+  if (!product) return;
+  const variants = (Array.isArray(product.variants) ? product.variants : []).map(v => ({ ...v }));
+  const v = variants[variantIndex];
+  if (!v) return;
+  v.qty = Math.max(0, Math.floor(Number(v.qty) || 0) + (Number(delta) || 0));
+  updateRecord(state.clothesProducts, productId, { variants });
+  updateClothesProductsFiltered();
+}
+
+function deleteClothesProduct(id) {
+  if (!isCurrentUserAdmin()) return;
+  const isAr = clothesIsAr();
+  const product = getVisibleClothesProducts().find(p => p.id === id);
+  if (!product) return;
+  const name = product.name || (isAr ? 'منتج' : 'product');
+  const ok = confirm(isAr
+    ? `هل تريد حذف المنتج "${name}"؟\nسيبقى في الشحنات والطلبات القديمة كسجل فقط.`
+    : `Delete product "${name}"?\nOld shipments and orders will keep it for history only.`);
+  if (!ok) return;
+  deleteRecord(state.clothesProducts, id);
+  showNotification(
+    isAr ? 'تم الحذف' : 'Deleted',
+    isAr ? 'تم حذف المنتج.' : 'Product deleted.',
+    'success'
+  );
+  updateClothesProductsFiltered();
+}
+
+// ------------------------------------------
+// PRODUCT MODAL (add / edit)
+// ------------------------------------------
+
+// Temp modal state (seeded on open, cleared in closeModal)
+let _clothesTempVariants = [];
+let _clothesTempPhoto = null;
+
+function showClothesProductModal() {
+  if (!isCurrentUserAdmin()) return;
+  state.activeModal = 'clothes-product';
+  state.modalData = null;
+  _clothesTempVariants = [{ color: '', size: '', qty: 0 }];
+  _clothesTempPhoto = null;
+  renderModal();
+}
+
+function editClothesProduct(id) {
+  if (!isCurrentUserAdmin()) return;
+  const product = getVisibleClothesProducts().find(p => p.id === id);
+  if (!product) return;
+  state.activeModal = 'clothes-product';
+  state.modalData = product;
+  const variants = Array.isArray(product.variants) ? product.variants : [];
+  _clothesTempVariants = variants.length
+    ? variants.map(v => ({ color: String(v?.color || ''), size: String(v?.size || ''), qty: Math.max(0, Math.floor(Number(v?.qty) || 0)) }))
+    : [{ color: '', size: '', qty: 0 }];
+  _clothesTempPhoto = product.photo || null;
+  renderModal();
+}
+
+function renderClothesProductModal() {
+  const isAr = clothesIsAr();
+  const data = state.modalData || {};
+  const isEdit = state.modalData !== null;
+  const categories = [...new Set(getVisibleClothesProducts().map(p => String(p.category || '').trim()).filter(Boolean))];
+
+  return `
+    <h2 class="text-2xl font-bold mb-4 flex items-center gap-2">
+      <i data-lucide="shirt" class="w-6 h-6 text-rose-500"></i>
+      ${isEdit ? (isAr ? 'تعديل منتج' : 'Edit Product') : (isAr ? 'إضافة منتج' : 'Add Product')}
+    </h2>
+    <form id="modal-form" class="space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar ${isAr ? 'pl-2' : 'pr-2'}">
+      <!-- Frozen edit target: never trust state.modalData at save time (it can be
+           repointed by URL restore) — same defense as #receipt-editing-id. -->
+      <input type="hidden" id="clothes-product-editing-id" value="${Security.escapeHtml(String(isEdit ? (data.id || '') : ''))}" />
+
+      <div>
+        <label class="block text-sm font-medium mb-2">${isAr ? 'اسم المنتج *' : 'Product name *'}</label>
+        <input type="text" id="clothes-product-name" value="${Security.escapeHtml(data.name || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isAr ? 'مثال: قميص قطن رجالي' : 'e.g. Men cotton shirt'}" />
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium mb-2">${isAr ? 'الفئة' : 'Category'}</label>
+        <input type="text" id="clothes-product-category" list="clothes-categories-list" value="${Security.escapeHtml(data.category || '')}" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isAr ? 'مثال: قمصان، بناطيل، فساتين...' : 'e.g. Shirts, Pants, Dresses...'}" />
+        <datalist id="clothes-categories-list">
+          ${categories.map(c => `<option value="${Security.escapeHtml(c)}"></option>`).join('')}
+        </datalist>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium mb-2">${isAr ? 'سعر التكلفة (دولار) *' : 'Cost price (USD) *'}</label>
+          <input type="text" inputmode="decimal" id="clothes-product-cost" value="${Security.escapeHtml(String(data.costUSD ?? ''))}" oninput="sanitizeMoneyInput(this)" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="0.00" />
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-2">${isAr ? 'سعر البيع (دينار) *' : 'Selling price (LYD) *'}</label>
+          <input type="text" inputmode="decimal" id="clothes-product-price" value="${Security.escapeHtml(String(data.priceLYD ?? ''))}" oninput="sanitizeMoneyInput(this)" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="0.00" />
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium mb-2">${isAr ? 'الألوان والمقاسات والكمية' : 'Colors, sizes & quantity'}</label>
+        <div id="clothes-variant-rows" class="space-y-2"></div>
+        <button type="button" onclick="addClothesVariantRow()" class="mt-2 flex items-center gap-1.5 text-sm font-medium text-rose-600 hover:text-rose-700">
+          <i data-lucide="plus" class="w-4 h-4"></i>${isAr ? 'إضافة لون/مقاس' : 'Add color/size'}
+        </button>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium mb-2">${isAr ? 'صورة (اختياري)' : 'Photo (optional)'}</label>
+        <div id="clothes-photo-preview-wrap"></div>
+        <input type="file" id="clothes-product-photo-input" accept="image/*" class="hidden" onchange="onClothesProductPhotoSelected(this)" />
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium mb-2">${isAr ? 'ملاحظة' : 'Note'}</label>
+        <textarea id="clothes-product-note" rows="2" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isAr ? 'اختياري' : 'Optional'}">${Security.escapeHtml(data.note || '')}</textarea>
+      </div>
+
+      <div class="flex gap-3 pt-2">
+        <button type="submit" class="flex-1 btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-6 py-3 rounded-xl font-bold shadow-lg">
+          ${isEdit ? (isAr ? 'حفظ التعديلات' : 'Save Changes') : (isAr ? 'إضافة المنتج' : 'Add Product')}
+        </button>
+        <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600">
+          ${isAr ? 'إلغاء' : 'Cancel'}
+        </button>
+      </div>
+    </form>
+  `;
+}
+
+// Variant rows: inputs write straight into _clothesTempVariants (no re-render
+// while typing, so the caret is preserved); add/remove re-render the rows only.
+function refreshClothesVariantRows() {
+  const isAr = clothesIsAr();
+  const wrap = document.getElementById('clothes-variant-rows');
+  if (!wrap) return;
+  wrap.innerHTML = _clothesTempVariants.map((v, idx) => `
+    <div class="flex items-center gap-2">
+      <input type="text" value="${Security.escapeHtml(String(v.color || ''))}" oninput="onClothesVariantField(${idx}, 'color', this.value)" placeholder="${isAr ? 'اللون' : 'Color'}" class="flex-1 min-w-0 glass-input px-3 py-2 rounded-xl text-sm" />
+      <input type="text" value="${Security.escapeHtml(String(v.size || ''))}" oninput="onClothesVariantField(${idx}, 'size', this.value)" placeholder="${isAr ? 'المقاس' : 'Size'}" class="w-20 glass-input px-3 py-2 rounded-xl text-sm" />
+      <input type="number" min="0" step="1" value="${Math.max(0, Math.floor(Number(v.qty) || 0))}" oninput="onClothesVariantField(${idx}, 'qty', this.value)" placeholder="0" class="w-20 glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'الكمية' : 'Quantity'}" />
+      <button type="button" onclick="removeClothesVariantRow(${idx})" class="w-8 h-8 rounded-lg flex items-center justify-center text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 shrink-0" title="${isAr ? 'إزالة' : 'Remove'}">
+        <i data-lucide="x" class="w-4 h-4"></i>
+      </button>
+    </div>
+  `).join('');
+  if (typeof IconQueue !== 'undefined') IconQueue.schedule(wrap);
+}
+
+function onClothesVariantField(idx, field, value) {
+  const v = _clothesTempVariants[idx];
+  if (!v) return;
+  if (field === 'qty') {
+    v.qty = Math.max(0, Math.floor(Number(value) || 0));
+  } else if (field === 'color' || field === 'size') {
+    v[field] = Security.sanitizeInput(String(value || ''), { maxLength: 60 });
+  }
+}
+
+function addClothesVariantRow() {
+  _clothesTempVariants.push({ color: '', size: '', qty: 0 });
+  refreshClothesVariantRows();
+}
+
+function removeClothesVariantRow(idx) {
+  _clothesTempVariants.splice(idx, 1);
+  if (_clothesTempVariants.length === 0) _clothesTempVariants.push({ color: '', size: '', qty: 0 });
+  refreshClothesVariantRows();
+}
+
+function refreshClothesPhotoPreview() {
+  const isAr = clothesIsAr();
+  const wrap = document.getElementById('clothes-photo-preview-wrap');
+  if (!wrap) return;
+  if (_clothesTempPhoto) {
+    wrap.innerHTML = `
+      <div class="flex items-center gap-3">
+        <img src="${Security.escapeHtml(_clothesTempPhoto)}" alt="" class="w-16 h-16 rounded-xl object-cover border border-slate-200 dark:border-slate-700" />
+        <button type="button" onclick="removeClothesProductPhoto()" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20">
+          <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>${isAr ? 'إزالة الصورة' : 'Remove photo'}
+        </button>
+      </div>
+    `;
+  } else {
+    wrap.innerHTML = `
+      <button type="button" onclick="document.getElementById('clothes-product-photo-input').click()" class="flex items-center gap-2 px-4 py-2 rounded-xl border-2 border-dashed border-slate-300 dark:border-slate-600 text-sm font-medium text-slate-500 dark:text-slate-400 hover:border-rose-400 hover:text-rose-500">
+        <i data-lucide="image-plus" class="w-4 h-4"></i>${isAr ? 'اختر صورة' : 'Choose photo'}
+      </button>
+    `;
+  }
+  if (typeof IconQueue !== 'undefined') IconQueue.schedule(wrap);
+}
+
+function onClothesProductPhotoSelected(input) {
+  const file = input?.files && input.files[0];
+  if (!file) return;
+  compressImageToDataUrl(file).then((dataUrl) => {
+    _clothesTempPhoto = dataUrl;
+    refreshClothesPhotoPreview();
+  }).catch(() => {
+    showNotification('Error', clothesIsAr() ? 'تعذر قراءة الصورة' : 'Could not read the image', 'error');
+  });
+  // Allow re-selecting the same file later
+  input.value = '';
+}
+
+function removeClothesProductPhoto() {
+  _clothesTempPhoto = null;
+  refreshClothesPhotoPreview();
+}
+
+// Called by handleModalSubmit for state.activeModal === 'clothes-product'.
+// Returns true when saved (modal may close), false to keep the modal open.
+async function saveClothesProductFromModal() {
+  if (!isCurrentUserAdmin()) return false;
+  const isAr = clothesIsAr();
+
+  const name = Security.sanitizeInput(String(document.getElementById('clothes-product-name')?.value || ''), { maxLength: 120 }).trim();
+  if (!name) {
+    showNotification(isAr ? 'تنبيه' : 'Validation', isAr ? 'اسم المنتج مطلوب' : 'Product name is required', 'error');
+    return false;
+  }
+  const category = Security.sanitizeInput(String(document.getElementById('clothes-product-category')?.value || ''), { maxLength: 60 }).trim();
+  const note = Security.sanitizeInput(String(document.getElementById('clothes-product-note')?.value || ''), { maxLength: 500 }).trim();
+  const costUSD = clothesParseMoney(document.getElementById('clothes-product-cost')?.value);
+  const priceLYD = clothesParseMoney(document.getElementById('clothes-product-price')?.value);
+
+  // Normalize variants: trim, drop fully-empty rows, merge duplicate color+size
+  const merged = new Map();
+  for (const v of _clothesTempVariants) {
+    const color = String(v?.color || '').trim();
+    const size = String(v?.size || '').trim();
+    const qty = Math.max(0, Math.floor(Number(v?.qty) || 0));
+    if (!color && !size && qty === 0) continue;
+    const key = `${color.toLowerCase()}|${size.toLowerCase()}`;
+    if (merged.has(key)) {
+      merged.get(key).qty += qty;
+    } else {
+      merged.set(key, { color, size, qty });
+    }
+  }
+  const variants = Array.from(merged.values());
+
+  const editingId = String(document.getElementById('clothes-product-editing-id')?.value || '').trim();
+  const editTarget = editingId ? getVisibleClothesProducts().find(p => p.id === editingId) : null;
+
+  const payload = { name, category, note, photo: _clothesTempPhoto, costUSD, priceLYD, variants };
+
+  if (editTarget) {
+    updateRecord(state.clothesProducts, editTarget.id, payload);
+    showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? 'تم تحديث المنتج بنجاح.' : 'Product updated successfully.', 'success');
+  } else {
+    addRecord(state.clothesProducts, { ...payload, createdAt: new Date().toISOString() });
+    showNotification(isAr ? 'تمت الإضافة' : 'Added', isAr ? 'تمت إضافة المنتج بنجاح.' : 'Product added successfully.', 'success');
+  }
+  return true;
+}
 function stopAd(id) {
   // Permission check
   if (!canActOnRecord('ads', 'stopAd', state.ads.find(a => a.id === id)?.creatorId)) {
@@ -20851,7 +21680,10 @@ function exportData() {
     exchangeRateHistory: { visible: countVisible(exportState.exchangeRateHistory), deleted: countDeleted(exportState.exchangeRateHistory) },
     logs: { visible: countVisible(exportState.logs), deleted: countDeleted(exportState.logs) },
     walletTransactions: { visible: countVisible(exportState.walletTransactions), deleted: countDeleted(exportState.walletTransactions) },
-    serviceSubscriptions: { visible: countVisible(exportState.serviceSubscriptions), deleted: countDeleted(exportState.serviceSubscriptions) }
+    serviceSubscriptions: { visible: countVisible(exportState.serviceSubscriptions), deleted: countDeleted(exportState.serviceSubscriptions) },
+    clothesProducts: { visible: countVisible(exportState.clothesProducts), deleted: countDeleted(exportState.clothesProducts) },
+    clothesShipments: { visible: countVisible(exportState.clothesShipments), deleted: countDeleted(exportState.clothesShipments) },
+    clothesOrders: { visible: countVisible(exportState.clothesOrders), deleted: countDeleted(exportState.clothesOrders) }
   };
 
   exportState.ads = filterVisible(exportState.ads);
@@ -20863,6 +21695,9 @@ function exportData() {
   exportState.logs = filterVisible(exportState.logs);
   exportState.walletTransactions = filterVisible(exportState.walletTransactions);
   exportState.serviceSubscriptions = filterVisible(exportState.serviceSubscriptions);
+  exportState.clothesProducts = filterVisible(exportState.clothesProducts);
+  exportState.clothesShipments = filterVisible(exportState.clothesShipments);
+  exportState.clothesOrders = filterVisible(exportState.clothesOrders);
   
   // Add export metadata
   const checksum = DataIntegrity.calculateChecksum(exportState);
@@ -21088,6 +21923,11 @@ function importData() {
       await applyCollectionReplace('ads', sanitizedImport.ads);
       await applyCollectionReplace('receipts', sanitizedImport.receipts);
       await applyCollectionReplace('exchangeRateHistory', sanitizedImport.exchangeRateHistory);
+      // Clothes System collections: only replace when present in the backup
+      // (older backups predate these collections — leave server data untouched).
+      if (Array.isArray(sanitizedImport.clothesProducts)) await applyCollectionReplace('clothesProducts', sanitizedImport.clothesProducts);
+      if (Array.isArray(sanitizedImport.clothesShipments)) await applyCollectionReplace('clothesShipments', sanitizedImport.clothesShipments);
+      if (Array.isArray(sanitizedImport.clothesOrders)) await applyCollectionReplace('clothesOrders', sanitizedImport.clothesOrders);
 
       // Reload fresh server state
       await serverLoadAllData();
@@ -21183,6 +22023,9 @@ function importData() {
         state.logs = Array.isArray(sanitizedImport.logs) ? sanitizedImport.logs : [];
         state.walletTransactions = Array.isArray(sanitizedImport.walletTransactions) ? sanitizedImport.walletTransactions : [];
         state.serviceSubscriptions = Array.isArray(sanitizedImport.serviceSubscriptions) ? sanitizedImport.serviceSubscriptions : [];
+        state.clothesProducts = Array.isArray(sanitizedImport.clothesProducts) ? sanitizedImport.clothesProducts : [];
+        state.clothesShipments = Array.isArray(sanitizedImport.clothesShipments) ? sanitizedImport.clothesShipments : [];
+        state.clothesOrders = Array.isArray(sanitizedImport.clothesOrders) ? sanitizedImport.clothesOrders : [];
 
         if (sanitizedImport.defaultExchangeRate !== undefined) {
           const rate = parseFloat(sanitizedImport.defaultExchangeRate);

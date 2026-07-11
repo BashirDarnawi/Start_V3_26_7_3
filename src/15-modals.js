@@ -1577,8 +1577,12 @@ function renderModal() {
         </div>
       `;
       break;
+
+    case 'clothes-product':
+      modalContent = renderClothesProductModal();
+      break;
   }
-  
+
   const modal = document.createElement('div');
   modal.id = 'app-modal';
   modal.className = 'fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4';
@@ -1590,6 +1594,8 @@ function renderModal() {
     modalSize = 'max-w-xl'; // Wider modal for new Ad design with sections
   } else if (state.activeModal === 'receipt') {
     modalSize = 'max-w-lg'; // Compact size for receipts
+  } else if (state.activeModal === 'clothes-product') {
+    modalSize = 'max-w-xl'; // Room for the color/size/qty rows
   }
   // Make Ad/Receipt modals scroll on the whole panel (header + content) to avoid "nothing shows" confusion.
   const modalScrollable = (state.activeModal === 'receipt' || state.activeModal === 'ad')
@@ -1640,6 +1646,11 @@ function renderModal() {
         updateAdUnpaidTotals();
       }
     }, 100);
+  } else if (state.activeModal === 'clothes-product') {
+    setTimeout(() => {
+      refreshClothesVariantRows();
+      refreshClothesPhotoPreview();
+    }, 50);
   }
   
   const form = document.getElementById('modal-form');
@@ -1672,6 +1683,11 @@ async function handleModalSubmit() {
   const isEdit = state.modalData !== null;
   
   switch (state.activeModal) {
+    case 'clothes-product': {
+      const saved = await saveClothesProductFromModal();
+      if (!saved) return; // keep modal open on validation errors
+      break;
+    }
     case 'change-password': {
       if (!state.currentUser?.id) {
         showNotification('Error', 'Not logged in', 'error');
@@ -2595,6 +2611,9 @@ function closeModal() {
   // Discard any pending (unsaved) top-up edits so they cannot leak into the
   // next ad's top-up session.
   tempTopUps = [];
+  // Discard any pending (unsaved) clothes-product edits
+  _clothesTempVariants = [];
+  _clothesTempPhoto = null;
   
   // Clear URL params (modal, id)
   clearUrlParams(['modal', 'id']);

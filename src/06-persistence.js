@@ -15,7 +15,11 @@ const PERSISTED_COLLECTIONS = [
   'exchangeRateHistory',
   // Platform foundation (future‑proof)
   'walletTransactions',
-  'serviceSubscriptions'
+  'serviceSubscriptions',
+  // Clothes System
+  'clothesProducts',
+  'clothesShipments',
+  'clothesOrders'
 ];
 
 // Debounced IndexedDB sync (avoid writing huge arrays on every keystroke)
@@ -35,6 +39,9 @@ function getCollectionNameFromArray(array) {
   if (array === state.exchangeRateHistory) return 'exchangeRateHistory';
   if (array === state.walletTransactions) return 'walletTransactions';
   if (array === state.serviceSubscriptions) return 'serviceSubscriptions';
+  if (array === state.clothesProducts) return 'clothesProducts';
+  if (array === state.clothesShipments) return 'clothesShipments';
+  if (array === state.clothesOrders) return 'clothesOrders';
   return null;
 }
 
@@ -226,6 +233,9 @@ function loadState() {
       if (!Array.isArray(state.exchangeRateHistory)) state.exchangeRateHistory = [];
       if (!Array.isArray(state.walletTransactions)) state.walletTransactions = [];
       if (!Array.isArray(state.serviceSubscriptions)) state.serviceSubscriptions = [];
+      if (!Array.isArray(state.clothesProducts)) state.clothesProducts = [];
+      if (!Array.isArray(state.clothesShipments)) state.clothesShipments = [];
+      if (!Array.isArray(state.clothesOrders)) state.clothesOrders = [];
       
       // Validate language (must be 'en' or 'ar')
       if (state.language !== 'en' && state.language !== 'ar') {

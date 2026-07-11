@@ -445,7 +445,7 @@ function attachLoginHandlers() {
 
 function renderMainApp() {
   const dir = getDir();
-  const showSidebar = !['services-hub', 'smart-systems', 'service-placeholder', 'wallet'].includes(state.currentView);
+  const showSidebar = !['services-hub', 'smart-systems', 'service-placeholder', 'wallet', 'clothes-system'].includes(state.currentView);
   
   return `
     <div class="flex min-h-screen" dir="${dir}">
@@ -605,6 +605,7 @@ function renderView() {
   switch (state.currentView) {
     case 'services-hub': return renderServicesHub();
     case 'smart-systems': return renderSmartSystems();
+    case 'clothes-system': return renderClothesSystemView();
     case 'service-placeholder': return renderServicePlaceholder();
     case 'wallet': return renderWalletView();
     case 'analytics': return renderAnalyticsView();
@@ -2167,36 +2168,15 @@ function renderReceiptsView() {
                     </div>
                     <div>
                       <div class="text-slate-500 text-xs mb-1 flex items-center space-x-1">
-                        <i data-lucide="dollar-sign" class="w-3 h-3"></i><span>Usage</span>
-                      </div>
-                      <div class="font-bold text-emerald-600">$${usage.usedUSD.toFixed(2)} used</div>
-                      <div class="text-xs text-slate-500">Left: $${usage.remainingUSD.toFixed(2)} (${remainingLYD.toFixed(2)} LYD)</div>
-                    </div>
-                    <div>
-                      <div class="text-slate-500 text-xs mb-1 flex items-center space-x-1">
                         <i data-lucide="gauge" class="w-3 h-3"></i><span>Status</span>
                       </div>
                       <span class="status-badge status-${usage.usageStatus.toLowerCase().replace(' ', '-')}">${usage.usageStatus}</span>
                     </div>
-                    <div>
+                    <div class="col-span-2">
                       <div class="text-slate-500 text-xs mb-1 flex items-center space-x-1">
                         <i data-lucide="clock" class="w-3 h-3"></i><span>Last Used</span>
                       </div>
                       <div class="text-xs text-slate-600 dark:text-slate-400">${formatDateShort(usage.lastUsedAt)}</div>
-                    </div>
-                    <div>
-                      <div class="text-slate-500 text-xs mb-1 flex items-center space-x-1">
-                        <i data-lucide="check-circle" class="w-3 h-3"></i><span>Used?</span>
-                      </div>
-                      <div class="text-xs font-medium ${usage.usedUSD > 0 ? 'text-emerald-600' : 'text-amber-600'}">
-                        ${usage.usedUSD === 0 ? 'Not used yet' : (usage.remainingUSD === 0 ? 'Fully used' : 'Partially used')}
-                      </div>
-                    </div>
-                    <div>
-                      <div class="text-slate-500 text-xs mb-1 flex items-center space-x-1">
-                        <i data-lucide="calendar" class="w-3 h-3"></i><span>Total Allocated</span>
-                      </div>
-                      <div class="font-bold text-slate-700 dark:text-slate-300">$${usage.totalUSD.toFixed(2)}</div>
                     </div>
                     <div class="col-span-2 flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/40">
                       <div class="text-xs text-slate-600 dark:text-slate-300 flex items-center space-x-2">
@@ -2215,20 +2195,44 @@ function renderReceiptsView() {
 
               ${receipt.receiptImage ? `<div class="mb-4"><img src="${Security.escapeHtml(receipt.receiptImage)}" alt="Receipt" class="w-full h-32 object-cover rounded-lg border border-slate-200 dark:border-slate-700" /></div>` : ''}
 
-              <!-- Collected Toggle -->
-              <div class="flex items-center justify-between py-2 px-3 mb-3 rounded-xl ${receipt.collected ? 'bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800' : 'bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800'}">
-                <div class="flex items-center space-x-2">
-                  <i data-lucide="${receipt.collected ? 'check-circle-2' : 'circle'}" class="w-4 h-4 ${receipt.collected ? 'text-emerald-600' : 'text-amber-600'}"></i>
-                  <span class="text-sm font-medium ${receipt.collected ? 'text-emerald-700 dark:text-emerald-300' : 'text-amber-700 dark:text-amber-300'}">
-                    ${receipt.collected ? 'Collected' : 'Not Collected'}
-                  </span>
-                  ${receipt.collectedAt ? `<span class="text-[10px] text-slate-500">${new Date(receipt.collectedAt).toLocaleDateString()}</span>` : ''}
-                  ${receipt.collectedBy ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">${Security.escapeHtml(state.users.find(u => u.id === receipt.collectedBy)?.name || 'Admin')}</span>` : ''}
+              <!-- Collection (with amount) -->
+              ${(() => {
+                const targetLYD = Number(receipt.amountLocal) || 0;
+                // Amount actually collected. Older receipts have no
+                // collectedAmount: treat a collected-but-amountless receipt as
+                // fully collected so nothing looks "unpaid" after the upgrade.
+                const collectedLYD = receipt.collected
+                  ? (receipt.collectedAmount != null ? Number(receipt.collectedAmount) || 0 : targetLYD)
+                  : 0;
+                const leftLYD = Math.max(targetLYD - collectedLYD, 0);
+                const fully = receipt.collected && leftLYD <= 0.01;
+                const isAr = state.language === 'ar';
+                return `
+              <div class="py-2 px-3 mb-3 rounded-xl ${!receipt.collected ? 'bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800' : fully ? 'bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800' : 'bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800'}">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center space-x-2 min-w-0">
+                    <i data-lucide="${receipt.collected ? (fully ? 'check-circle-2' : 'circle-dot') : 'circle'}" class="w-4 h-4 flex-shrink-0 ${!receipt.collected ? 'text-amber-600' : fully ? 'text-emerald-600' : 'text-orange-600'}"></i>
+                    <span class="text-sm font-medium ${!receipt.collected ? 'text-amber-700 dark:text-amber-300' : fully ? 'text-emerald-700 dark:text-emerald-300' : 'text-orange-700 dark:text-orange-300'}">
+                      ${!receipt.collected ? (isAr ? 'لم يُحصَّل' : 'Not Collected') : fully ? (isAr ? 'تم التحصيل' : 'Collected') : (isAr ? 'تحصيل جزئي' : 'Partially Collected')}
+                    </span>
+                    ${receipt.collectedAt ? `<span class="text-[10px] text-slate-500">${new Date(receipt.collectedAt).toLocaleDateString()}</span>` : ''}
+                    ${receipt.collectedBy ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">${Security.escapeHtml(state.users.find(u => u.id === receipt.collectedBy)?.name || 'Admin')}</span>` : ''}
+                  </div>
+                  <div class="flex items-center gap-2 flex-shrink-0">
+                    ${receipt.collected ? `<button onclick="uncollectReceipt('${receipt.id}')" class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-300 transition-all" title="${isAr ? 'إلغاء التحصيل' : 'Undo collection'}">${isAr ? 'إلغاء' : 'Undo'}</button>` : ''}
+                    <button onclick="openCollectReceiptModal('${receipt.id}')" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all bg-emerald-100 hover:bg-emerald-200 text-emerald-700 dark:bg-emerald-900/40 dark:hover:bg-emerald-900/60 dark:text-emerald-300">
+                      ${!receipt.collected ? (isAr ? 'تسجيل التحصيل' : 'Mark Collected') : (isAr ? 'تعديل المبلغ' : 'Edit Amount')}
+                    </button>
+                  </div>
                 </div>
-                <button onclick="toggleReceiptCollected('${receipt.id}')" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${receipt.collected ? 'bg-amber-100 hover:bg-amber-200 text-amber-700 dark:bg-amber-900/40 dark:hover:bg-amber-900/60 dark:text-amber-300' : 'bg-emerald-100 hover:bg-emerald-200 text-emerald-700 dark:bg-emerald-900/40 dark:hover:bg-emerald-900/60 dark:text-emerald-300'}">
-                  ${receipt.collected ? 'Mark Not Collected' : 'Mark Collected'}
-                </button>
-              </div>
+                ${receipt.collected ? `
+                  <div class="flex flex-wrap gap-x-4 gap-y-0.5 mt-1.5 text-xs">
+                    <span class="text-slate-600 dark:text-slate-300">${isAr ? 'المُحصَّل' : 'Collected'}: <span class="font-bold text-emerald-600">${collectedLYD.toFixed(2)} LYD</span></span>
+                    ${leftLYD > 0.01 ? `<span class="text-slate-600 dark:text-slate-300">${isAr ? 'المتبقي للتحصيل' : 'Left to collect'}: <span class="font-bold text-orange-600">${leftLYD.toFixed(2)} LYD</span></span>` : ''}
+                  </div>
+                ` : ''}
+              </div>`;
+              })()}
 
               <div class="flex flex-col space-y-2 pt-3 border-t border-slate-200 dark:border-slate-700">
                 <div class="flex justify-between items-center">

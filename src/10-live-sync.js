@@ -35,7 +35,10 @@ function computeServerCursorFromState() {
     _maxLastModifiedFromArray(state.receipts),
     _maxLastModifiedFromArray(state.customers),
     _maxLastModifiedFromArray(state.pages),
-    _maxLastModifiedFromArray(state.exchangeRateHistory)
+    _maxLastModifiedFromArray(state.exchangeRateHistory),
+    _maxLastModifiedFromArray(state.clothesProducts),
+    _maxLastModifiedFromArray(state.clothesShipments),
+    _maxLastModifiedFromArray(state.clothesOrders)
   );
 }
 
@@ -207,12 +210,15 @@ async function serverLiveSyncOnce() {
     }
   };
 
-  const [adsDelta, receiptsDelta, customersDelta, pagesDelta, exhDelta] = await Promise.all([
+  const [adsDelta, receiptsDelta, customersDelta, pagesDelta, exhDelta, clothesProductsDelta, clothesShipmentsDelta, clothesOrdersDelta] = await Promise.all([
     safeSince('ads'),
     safeSince('receipts'),
     safeSince('customers'),
     safeSince('pages'),
-    safeSince('exchangeRateHistory')
+    safeSince('exchangeRateHistory'),
+    safeSince('clothesProducts'),
+    safeSince('clothesShipments'),
+    safeSince('clothesOrders')
   ]);
 
   let changed = false;
@@ -221,6 +227,9 @@ async function serverLiveSyncOnce() {
   changed = applyServerDelta('customers', customersDelta) || changed;
   changed = applyServerDelta('pages', pagesDelta) || changed;
   changed = applyServerDelta('exchangeRateHistory', exhDelta) || changed;
+  changed = applyServerDelta('clothesProducts', clothesProductsDelta) || changed;
+  changed = applyServerDelta('clothesShipments', clothesShipmentsDelta) || changed;
+  changed = applyServerDelta('clothesOrders', clothesOrdersDelta) || changed;
   
   // Ensure data migration on live sync (only if data changed, debounced to not block render)
   if (changed) {
@@ -236,7 +245,10 @@ async function serverLiveSyncOnce() {
     _maxLastModifiedFromArray(receiptsDelta),
     _maxLastModifiedFromArray(customersDelta),
     _maxLastModifiedFromArray(pagesDelta),
-    _maxLastModifiedFromArray(exhDelta)
+    _maxLastModifiedFromArray(exhDelta),
+    _maxLastModifiedFromArray(clothesProductsDelta),
+    _maxLastModifiedFromArray(clothesShipmentsDelta),
+    _maxLastModifiedFromArray(clothesOrdersDelta)
   );
   // Deltas come straight from the server, so maxDelta is a trustworthy server
   // timestamp — record it as the watermark for future cursor seeds.

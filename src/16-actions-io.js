@@ -469,7 +469,10 @@ function exportData() {
     exchangeRateHistory: { visible: countVisible(exportState.exchangeRateHistory), deleted: countDeleted(exportState.exchangeRateHistory) },
     logs: { visible: countVisible(exportState.logs), deleted: countDeleted(exportState.logs) },
     walletTransactions: { visible: countVisible(exportState.walletTransactions), deleted: countDeleted(exportState.walletTransactions) },
-    serviceSubscriptions: { visible: countVisible(exportState.serviceSubscriptions), deleted: countDeleted(exportState.serviceSubscriptions) }
+    serviceSubscriptions: { visible: countVisible(exportState.serviceSubscriptions), deleted: countDeleted(exportState.serviceSubscriptions) },
+    clothesProducts: { visible: countVisible(exportState.clothesProducts), deleted: countDeleted(exportState.clothesProducts) },
+    clothesShipments: { visible: countVisible(exportState.clothesShipments), deleted: countDeleted(exportState.clothesShipments) },
+    clothesOrders: { visible: countVisible(exportState.clothesOrders), deleted: countDeleted(exportState.clothesOrders) }
   };
 
   exportState.ads = filterVisible(exportState.ads);
@@ -481,6 +484,9 @@ function exportData() {
   exportState.logs = filterVisible(exportState.logs);
   exportState.walletTransactions = filterVisible(exportState.walletTransactions);
   exportState.serviceSubscriptions = filterVisible(exportState.serviceSubscriptions);
+  exportState.clothesProducts = filterVisible(exportState.clothesProducts);
+  exportState.clothesShipments = filterVisible(exportState.clothesShipments);
+  exportState.clothesOrders = filterVisible(exportState.clothesOrders);
   
   // Add export metadata
   const checksum = DataIntegrity.calculateChecksum(exportState);
@@ -706,6 +712,11 @@ function importData() {
       await applyCollectionReplace('ads', sanitizedImport.ads);
       await applyCollectionReplace('receipts', sanitizedImport.receipts);
       await applyCollectionReplace('exchangeRateHistory', sanitizedImport.exchangeRateHistory);
+      // Clothes System collections: only replace when present in the backup
+      // (older backups predate these collections — leave server data untouched).
+      if (Array.isArray(sanitizedImport.clothesProducts)) await applyCollectionReplace('clothesProducts', sanitizedImport.clothesProducts);
+      if (Array.isArray(sanitizedImport.clothesShipments)) await applyCollectionReplace('clothesShipments', sanitizedImport.clothesShipments);
+      if (Array.isArray(sanitizedImport.clothesOrders)) await applyCollectionReplace('clothesOrders', sanitizedImport.clothesOrders);
 
       // Reload fresh server state
       await serverLoadAllData();
@@ -801,6 +812,9 @@ function importData() {
         state.logs = Array.isArray(sanitizedImport.logs) ? sanitizedImport.logs : [];
         state.walletTransactions = Array.isArray(sanitizedImport.walletTransactions) ? sanitizedImport.walletTransactions : [];
         state.serviceSubscriptions = Array.isArray(sanitizedImport.serviceSubscriptions) ? sanitizedImport.serviceSubscriptions : [];
+        state.clothesProducts = Array.isArray(sanitizedImport.clothesProducts) ? sanitizedImport.clothesProducts : [];
+        state.clothesShipments = Array.isArray(sanitizedImport.clothesShipments) ? sanitizedImport.clothesShipments : [];
+        state.clothesOrders = Array.isArray(sanitizedImport.clothesOrders) ? sanitizedImport.clothesOrders : [];
 
         if (sanitizedImport.defaultExchangeRate !== undefined) {
           const rate = parseFloat(sanitizedImport.defaultExchangeRate);

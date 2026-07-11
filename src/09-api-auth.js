@@ -632,6 +632,9 @@ async function serverLoadAllData() {
     pages: Array.isArray(state.pages) ? state.pages.length : 0,
     exchangeRateHistory: Array.isArray(state.exchangeRateHistory) ? state.exchangeRateHistory.length : 0,
     users: Array.isArray(state.users) ? state.users.length : 0,
+    clothesProducts: Array.isArray(state.clothesProducts) ? state.clothesProducts.length : 0,
+    clothesShipments: Array.isArray(state.clothesShipments) ? state.clothesShipments.length : 0,
+    clothesOrders: Array.isArray(state.clothesOrders) ? state.clothesOrders.length : 0,
   };
   // #region agent log
   const _loadStartTime = Date.now();
@@ -682,7 +685,7 @@ async function serverLoadAllData() {
   // Load collections in parallel for faster initial load
   // Use higher concurrency for initial load, but still limit to avoid overwhelming server
   const results = {};
-  const collections = ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory'];
+  const collections = ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory', 'clothesProducts', 'clothesShipments', 'clothesOrders'];
   const CONCURRENCY = SERVER_API.initialLoadConcurrency || 3;
 
   // Show loading progress
@@ -764,7 +767,10 @@ async function serverLoadAllData() {
       _maxLastModifiedFromArray(results.receipts && results.receipts.data),
       _maxLastModifiedFromArray(results.customers && results.customers.data),
       _maxLastModifiedFromArray(results.pages && results.pages.data),
-      _maxLastModifiedFromArray(results.exchangeRateHistory && results.exchangeRateHistory.data)
+      _maxLastModifiedFromArray(results.exchangeRateHistory && results.exchangeRateHistory.data),
+      _maxLastModifiedFromArray(results.clothesProducts && results.clothesProducts.data),
+      _maxLastModifiedFromArray(results.clothesShipments && results.clothesShipments.data),
+      _maxLastModifiedFromArray(results.clothesOrders && results.clothesOrders.data)
     );
     if (_wm > 0 && typeof _serverLiveSync === 'object' && _serverLiveSync) {
       _serverLiveSync.serverWatermark = _wm;

@@ -61,7 +61,7 @@ const SERVICES = {
     subscription: { price: 0, durationDays: 30 },
     openView: 'smart-systems',
     hasChildren: true,
-    children: ['albayan_manager', 'crm', 'store_system']
+    children: ['albayan_manager', 'crm', 'store_system', 'clothes_system']
   },
   albayan_cards: {
     id: 'albayan_cards',
@@ -171,6 +171,20 @@ const SMART_SYSTEMS_CHILDREN = {
     comingSoon: true,
     requiresSubscription: true,
     requiredSubscriptions: ['smart_systems']
+  },
+  clothes_system: {
+    id: 'clothes_system',
+    order: 4,
+    name: 'Clothes System',
+    nameAr: 'نظام الملابس',
+    icon: 'shirt',
+    color: 'from-rose-500 to-pink-500',
+    description: 'Warehouse, shipments & orders',
+    descriptionAr: 'المستودع والشحنات والطلبات',
+    comingSoon: false,
+    requiresSubscription: true,
+    requiredSubscriptions: ['smart_systems'],
+    openView: 'clothes-system'
   }
 };
 
@@ -571,6 +585,11 @@ const state = {
   logs: [],
   walletTransactions: [], // ledger entries (huge-data safe via IndexedDB)
   serviceSubscriptions: [], // structured subscriptions (huge-data safe via IndexedDB)
+
+  // Clothes System (Smart Systems child #4)
+  clothesProducts: [], // items for sale: variants (color/size) with stock counts
+  clothesShipments: [], // incoming goods from abroad (Ordered → Received)
+  clothesOrders: [], // outgoing customer orders (delivery + payment tracking)
   
   // Settings
   defaultExchangeRate: 0,

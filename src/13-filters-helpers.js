@@ -1537,51 +1537,136 @@ function clearAllReceiptFilters() {
 }
 
 // Toggle receipt collected status
-function toggleReceiptCollected(receiptId) {
-  // Permission check
+function _canMarkCollected() {
   if (!currentUserHasPermission('receipts', 'markCollected')) {
     showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل حالة التحصيل' : 'You do not have permission to mark receipts as collected', 'error');
-    return;
+    return false;
   }
-  
-  const receipt = state.receipts.find(r => r.id === receiptId);
-  if (!receipt) return;
+  return true;
+}
 
-  const nowCollected = !receipt.collected;
-  // Persist through the canonical helper so the change is sanitized, bumps
-  // _lastModified, marks the collection dirty for IndexedDB, and (in server
-  // mode) write-throughs to the server with conflict handling. A bare
-  // saveState() previously left this in memory only, so the collected flag
-  // silently reverted on reload/sync — a real double-collection risk.
-  updateRecord(state.receipts, receiptId, {
-    collected: nowCollected,
-    collectedAt: nowCollected ? new Date().toISOString() : null,
-    collectedBy: nowCollected ? (state.currentUser?.id || 'admin') : null
-  });
-
-  // Log the action
+function _logReceiptCollection(receipt, action, collectedAmount) {
   state.logs.push({
     id: generateId(),
     type: 'receipt_collection',
-    action: nowCollected ? 'collected' : 'uncollected',
-    receiptId: receiptId,
+    action,
+    receiptId: receipt.id,
     userId: state.currentUser?.id,
     timestamp: new Date().toISOString(),
-    details: {
-      receiptSerial: receipt.serialNumber,
-      amountUSD: receipt.amountUSD,
-      amountLocal: receipt.amountLocal
-    }
+    details: { receiptSerial: receipt.serialNumber, amountUSD: receipt.amountUSD, amountLocal: receipt.amountLocal, collectedAmount }
   });
+}
 
+// Open a small modal to record HOW MUCH was collected for a receipt (user
+// request). Supports partial collection; the card then shows collected + the
+// amount still left to collect. Self-contained (stop-ad-modal style) so it
+// doesn't touch renderModal/state.modalData.
+function openCollectReceiptModal(receiptId) {
+  if (!_canMarkCollected()) return;
+  const receipt = state.receipts.find(r => r.id === receiptId);
+  if (!receipt) return;
+  const isAr = state.language === 'ar';
+  const targetLYD = Number(receipt.amountLocal) || 0;
+  // Prefill with the amount already collected, or the full receipt total.
+  const prefill = receipt.collectedAmount != null ? (Number(receipt.collectedAmount) || 0) : targetLYD;
+  const serialTxt = receipt.serialNumber || receipt.tempReceiptNo || receipt.finalReceiptNo || receiptId.slice(0, 8);
+
+  document.getElementById('collect-receipt-modal')?.remove();
+  const html = `
+    <div id="collect-receipt-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onclick="if(event.target===this) this.remove()">
+      <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-sm w-full" onclick="event.stopPropagation()">
+        <div class="p-5 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
+          <h2 class="text-lg font-bold text-slate-800 dark:text-white flex items-center">
+            <i data-lucide="hand-coins" class="w-5 h-5 mr-2 text-emerald-600"></i>
+            ${isAr ? 'تسجيل التحصيل' : 'Record Collection'}
+          </h2>
+          <button onclick="document.getElementById('collect-receipt-modal').remove()" class="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg"><i data-lucide="x" class="w-5 h-5"></i></button>
+        </div>
+        <div class="p-5 space-y-4">
+          <div class="text-sm text-slate-600 dark:text-slate-400">
+            ${isAr ? 'الوصل' : 'Receipt'} #${Security.escapeHtml(String(serialTxt))} — ${isAr ? 'الإجمالي' : 'Total'}: <span class="font-bold text-slate-800 dark:text-white">${targetLYD.toFixed(2)} LYD</span>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">${isAr ? 'المبلغ المُحصَّل (LYD)' : 'Amount Collected (LYD)'}</label>
+            <input type="text" inputmode="decimal" id="collect-amount" value="${prefill}" oninput="sanitizeMoneyInput(this); _updateCollectLeft(${targetLYD})" class="w-full glass-input px-4 py-2 rounded-xl text-lg font-bold focus:ring-2 focus:ring-emerald-500" placeholder="0.00" />
+            <div class="flex gap-2 mt-2">
+              <button type="button" onclick="document.getElementById('collect-amount').value='${targetLYD}'; _updateCollectLeft(${targetLYD})" class="text-xs px-2 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 font-medium">${isAr ? 'المبلغ كامل' : 'Full amount'}</button>
+            </div>
+          </div>
+          <div class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-3 flex justify-between text-sm">
+            <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المتبقي للتحصيل' : 'Left to collect'}:</span>
+            <span class="font-bold text-orange-600" id="collect-left">${Math.max(targetLYD - prefill, 0).toFixed(2)} LYD</span>
+          </div>
+          <div class="flex space-x-3 pt-1">
+            <button onclick="document.getElementById('collect-receipt-modal').remove()" class="flex-1 px-4 py-2.5 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl font-bold">${isAr ? 'إلغاء' : 'Cancel'}</button>
+            <button onclick="confirmCollectReceipt('${receiptId}')" class="flex-1 px-4 py-2.5 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-700">${isAr ? 'حفظ' : 'Save'}</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', html);
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => { const el = document.getElementById('collect-amount'); if (el) { el.focus(); el.select(); } }, 100);
+}
+
+function _updateCollectLeft(targetLYD) {
+  const amt = parseFloat(document.getElementById('collect-amount')?.value) || 0;
+  const leftEl = document.getElementById('collect-left');
+  if (leftEl) leftEl.textContent = Math.max((Number(targetLYD) || 0) - amt, 0).toFixed(2) + ' LYD';
+}
+
+function confirmCollectReceipt(receiptId) {
+  if (!_canMarkCollected()) return;
+  const receipt = state.receipts.find(r => r.id === receiptId);
+  if (!receipt) return;
+  const targetLYD = Number(receipt.amountLocal) || 0;
+  let amount = parseFloat(document.getElementById('collect-amount')?.value);
+  if (!Number.isFinite(amount) || amount < 0) {
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'أدخل مبلغاً صحيحاً' : 'Enter a valid amount', 'error');
+    return;
+  }
+  amount = Math.round(amount * 100) / 100;
+  // Persist through updateRecord so it syncs to IndexedDB/server (a bare
+  // saveState used to leave the collected flag memory-only -> reverted on sync).
+  updateRecord(state.receipts, receiptId, {
+    collected: true,
+    collectedAmount: amount,
+    collectedAt: new Date().toISOString(),
+    collectedBy: state.currentUser?.id || 'admin'
+  });
+  _logReceiptCollection(receipt, 'collected', amount);
   saveState();
+  document.getElementById('collect-receipt-modal')?.remove();
+  const leftLYD = Math.max(targetLYD - amount, 0);
+  const isAr = state.language === 'ar';
   showNotification(
-    nowCollected ? 'Receipt Collected' : 'Collection Removed',
-    nowCollected ? `Receipt #${receipt.serialNumber || receiptId.slice(0,8)} marked as collected` : `Receipt #${receipt.serialNumber || receiptId.slice(0,8)} marked as not collected`,
-    nowCollected ? 'success' : 'info'
+    isAr ? 'تم التحصيل' : 'Collected',
+    (isAr ? `تم تسجيل ${amount.toFixed(2)} LYD` : `Recorded ${amount.toFixed(2)} LYD`) + (leftLYD > 0.01 ? (isAr ? ` — المتبقي ${leftLYD.toFixed(2)} LYD` : ` — ${leftLYD.toFixed(2)} LYD left`) : ''),
+    'success'
   );
   render();
-  lucide.createIcons();
+  if (window.lucide) lucide.createIcons();
+}
+
+function uncollectReceipt(receiptId) {
+  if (!_canMarkCollected()) return;
+  const receipt = state.receipts.find(r => r.id === receiptId);
+  if (!receipt) return;
+  updateRecord(state.receipts, receiptId, { collected: false, collectedAmount: null, collectedAt: null, collectedBy: null });
+  _logReceiptCollection(receipt, 'uncollected', 0);
+  saveState();
+  showNotification(state.language === 'ar' ? 'تم الإلغاء' : 'Collection Removed', state.language === 'ar' ? 'تم إلغاء التحصيل' : 'Receipt marked as not collected', 'info');
+  render();
+  if (window.lucide) lucide.createIcons();
+}
+
+// Back-compat shim: old callers of the boolean toggle now route to the new
+// amount-based flow (open the modal to collect, or undo).
+function toggleReceiptCollected(receiptId) {
+  const receipt = state.receipts.find(r => r.id === receiptId);
+  if (!receipt) return;
+  if (receipt.collected) uncollectReceipt(receiptId);
+  else openCollectReceiptModal(receiptId);
 }
 
 function showReceiptModal() {

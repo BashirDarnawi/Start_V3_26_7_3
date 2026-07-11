@@ -17,6 +17,7 @@ const VIEW_TO_PATH = {
   'no-access': '/no-access',
   // Platform views (admin only)
   'smart-systems': '/smart-systems',
+  'clothes-system': '/clothes-system',
   'wallet': '/wallet',
   'account': '/account'
 };
