@@ -2776,13 +2776,11 @@ function updateAdUnpaidTotals() {
 }
 
 // Update ad status directly from list view
-function updateAdStatusFromList(adId, status) {
-  const ad = state.ads.find(a => a.id === adId);
-  if (!ad) return;
-  updateRecord(state.ads, adId, { status: status });
-  addLog('status_change', 'ad', adId, `Changed status to: ${status}`);
-  render();
-}
+// NOTE: updateAdStatusFromList was removed (user request): the ads-table
+// status dropdown is now a read-only badge. It also let "Stopped" be set
+// directly, bypassing confirmStopAd's money flow (unspent funds were never
+// returned to the funding receipts) — status changes go through the Actions
+// buttons, which run the correct flows.
 
 function updateAdDeliveryStatus(adId, deliveryStatus) {
   // Permission check

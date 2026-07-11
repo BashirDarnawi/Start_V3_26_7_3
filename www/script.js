@@ -9536,9 +9536,18 @@ function renderAdsView() {
                     <td class="py-3 px-2" data-label="Local">${ad.amountLocal?.toFixed(2)} LYD</td>
                     <td class="py-3 px-2" data-label="Payment"><span class="payment-badge text-xs">${ad.paymentMethod}</span></td>
                     <td class="py-3 px-2" data-label="Status">
-                      <select class="glass-input px-2 py-1 rounded-lg text-xs w-full md:w-auto" onchange="updateAdStatusFromList('${ad.id}', this.value)">
-                        ${AD_STATUSES.map(s => `<option value="${s}" ${ad.status === s ? 'selected' : ''}>${s}</option>`).join('')}
-                      </select>
+                      <!-- Read-only badge (user request): status changes only via the
+                           Actions buttons. The old inline dropdown also let "Stopped"
+                           be set WITHOUT the stop-ad money flow, skipping the return
+                           of unspent funds to receipts. -->
+                      <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-bold ${({
+                        'Pending': 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
+                        'Paused': 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-300',
+                        'Completed': 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300',
+                        'Canceled': 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
+                        'Lost': 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
+                        'Stopped': 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
+                      })[ad.status] || 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300'}">${Security.escapeHtml(ad.status || 'Active')}</span>
                       ${ad.isPaid ? '<div class="text-xs text-emerald-600 mt-1">✓ Paid</div>' : ''}
                       ${ad.status === 'Stopped' && ad.spentUSD !== undefined ? `
                         <div class="text-xs mt-1 space-y-0.5">
@@ -16702,13 +16711,11 @@ function updateAdUnpaidTotals() {
 }
 
 // Update ad status directly from list view
-function updateAdStatusFromList(adId, status) {
-  const ad = state.ads.find(a => a.id === adId);
-  if (!ad) return;
-  updateRecord(state.ads, adId, { status: status });
-  addLog('status_change', 'ad', adId, `Changed status to: ${status}`);
-  render();
-}
+// NOTE: updateAdStatusFromList was removed (user request): the ads-table
+// status dropdown is now a read-only badge. It also let "Stopped" be set
+// directly, bypassing confirmStopAd's money flow (unspent funds were never
+// returned to the funding receipts) — status changes go through the Actions
+// buttons, which run the correct flows.
 
 function updateAdDeliveryStatus(adId, deliveryStatus) {
   // Permission check
