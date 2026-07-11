@@ -1581,6 +1581,10 @@ function renderModal() {
     case 'clothes-product':
       modalContent = renderClothesProductModal();
       break;
+
+    case 'clothes-shipment':
+      modalContent = renderClothesShipmentModal();
+      break;
   }
 
   const modal = document.createElement('div');
@@ -1596,6 +1600,8 @@ function renderModal() {
     modalSize = 'max-w-lg'; // Compact size for receipts
   } else if (state.activeModal === 'clothes-product') {
     modalSize = 'max-w-xl'; // Room for the color/size/qty rows
+  } else if (state.activeModal === 'clothes-shipment') {
+    modalSize = 'max-w-2xl'; // Room for the shipment line rows
   }
   // Make Ad/Receipt modals scroll on the whole panel (header + content) to avoid "nothing shows" confusion.
   const modalScrollable = (state.activeModal === 'receipt' || state.activeModal === 'ad')
@@ -1651,6 +1657,10 @@ function renderModal() {
       refreshClothesVariantRows();
       refreshClothesPhotoPreview();
     }, 50);
+  } else if (state.activeModal === 'clothes-shipment') {
+    setTimeout(() => {
+      refreshClothesShipLines();
+    }, 50);
   }
   
   const form = document.getElementById('modal-form');
@@ -1685,6 +1695,11 @@ async function handleModalSubmit() {
   switch (state.activeModal) {
     case 'clothes-product': {
       const saved = await saveClothesProductFromModal();
+      if (!saved) return; // keep modal open on validation errors
+      break;
+    }
+    case 'clothes-shipment': {
+      const saved = await saveClothesShipmentFromModal();
       if (!saved) return; // keep modal open on validation errors
       break;
     }
@@ -2611,9 +2626,10 @@ function closeModal() {
   // Discard any pending (unsaved) top-up edits so they cannot leak into the
   // next ad's top-up session.
   tempTopUps = [];
-  // Discard any pending (unsaved) clothes-product edits
+  // Discard any pending (unsaved) clothes-product/shipment edits
   _clothesTempVariants = [];
   _clothesTempPhoto = null;
+  _clothesTempShipLines = [];
   
   // Clear URL params (modal, id)
   clearUrlParams(['modal', 'id']);

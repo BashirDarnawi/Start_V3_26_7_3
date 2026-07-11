@@ -1561,87 +1561,205 @@ function _logReceiptCollection(receipt, action, collectedAmount) {
 // request). Supports partial collection; the card then shows collected + the
 // amount still left to collect. Self-contained (stop-ad-modal style) so it
 // doesn't touch renderModal/state.modalData.
+// ---- Receipt collection (2-step): ask "same as receipt?" -> Yes records it
+// as-is; No opens a payment-methods editor like the ad/receipt forms. ----
+let _tempCollectPayments = [];   // [{ method, amount }] working list for the "No" editor
+let _collectReceiptId = '';
+let _collectTargetLYD = 0;
+
+// The receipt's own payment breakdown in LYD (used for the "Yes = same" path
+// and to seed the "No" editor). Each split's LYD value is amount × rate1.
+function _receiptCollectionBreakdown(receipt) {
+  const target = Number(receipt.amountLocal) || 0;
+  if (Array.isArray(receipt.payments) && receipt.payments.length) {
+    return receipt.payments
+      .map(p => ({ method: p.method || 'Cash (LYD)', amount: Math.round((Number(p.amount) || 0) * (Number(p.rate) || 1) * 100) / 100 }))
+      .filter(p => p.amount > 0);
+  }
+  return [{ method: receipt.paymentMethod || 'Cash (LYD)', amount: target }];
+}
+
 function openCollectReceiptModal(receiptId) {
   if (!_canMarkCollected()) return;
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
   const isAr = state.language === 'ar';
   const targetLYD = Number(receipt.amountLocal) || 0;
-  // Prefill with the amount already collected, or the full receipt total.
-  const prefill = receipt.collectedAmount != null ? (Number(receipt.collectedAmount) || 0) : targetLYD;
   const serialTxt = receipt.serialNumber || receipt.tempReceiptNo || receipt.finalReceiptNo || receiptId.slice(0, 8);
+  _collectReceiptId = receiptId;
+  _collectTargetLYD = targetLYD;
+  _tempCollectPayments = [];
 
   document.getElementById('collect-receipt-modal')?.remove();
   const html = `
     <div id="collect-receipt-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onclick="if(event.target===this) this.remove()">
-      <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-sm w-full" onclick="event.stopPropagation()">
-        <div class="p-5 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
+      <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full max-h-[90vh] overflow-y-auto" onclick="event.stopPropagation()">
+        <div class="p-5 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between sticky top-0 bg-white dark:bg-slate-800 z-10">
           <h2 class="text-lg font-bold text-slate-800 dark:text-white flex items-center">
             <i data-lucide="hand-coins" class="w-5 h-5 mr-2 text-emerald-600"></i>
             ${isAr ? 'تسجيل التحصيل' : 'Record Collection'}
           </h2>
           <button onclick="document.getElementById('collect-receipt-modal').remove()" class="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg"><i data-lucide="x" class="w-5 h-5"></i></button>
         </div>
-        <div class="p-5 space-y-4">
-          <div class="text-sm text-slate-600 dark:text-slate-400">
-            ${isAr ? 'الوصل' : 'Receipt'} #${Security.escapeHtml(String(serialTxt))} — ${isAr ? 'الإجمالي' : 'Total'}: <span class="font-bold text-slate-800 dark:text-white">${targetLYD.toFixed(2)} LYD</span>
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">${isAr ? 'المبلغ المُحصَّل (LYD)' : 'Amount Collected (LYD)'}</label>
-            <input type="text" inputmode="decimal" id="collect-amount" value="${prefill}" oninput="sanitizeMoneyInput(this); _updateCollectLeft(${targetLYD})" class="w-full glass-input px-4 py-2 rounded-xl text-lg font-bold focus:ring-2 focus:ring-emerald-500" placeholder="0.00" />
-            <div class="flex gap-2 mt-2">
-              <button type="button" onclick="document.getElementById('collect-amount').value='${targetLYD}'; _updateCollectLeft(${targetLYD})" class="text-xs px-2 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 font-medium">${isAr ? 'المبلغ كامل' : 'Full amount'}</button>
-            </div>
-          </div>
-          <div class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-3 flex justify-between text-sm">
-            <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المتبقي للتحصيل' : 'Left to collect'}:</span>
-            <span class="font-bold text-orange-600" id="collect-left">${Math.max(targetLYD - prefill, 0).toFixed(2)} LYD</span>
-          </div>
-          <div class="flex space-x-3 pt-1">
-            <button onclick="document.getElementById('collect-receipt-modal').remove()" class="flex-1 px-4 py-2.5 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl font-bold">${isAr ? 'إلغاء' : 'Cancel'}</button>
-            <button onclick="confirmCollectReceipt('${receiptId}')" class="flex-1 px-4 py-2.5 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-700">${isAr ? 'حفظ' : 'Save'}</button>
-          </div>
+        <div id="collect-modal-body" class="p-5">
+          ${_collectAskView(receiptId, receipt, isAr, targetLYD, serialTxt)}
         </div>
       </div>
     </div>`;
   document.body.insertAdjacentHTML('beforeend', html);
   if (window.lucide) lucide.createIcons();
-  setTimeout(() => { const el = document.getElementById('collect-amount'); if (el) { el.focus(); el.select(); } }, 100);
 }
 
-function _updateCollectLeft(targetLYD) {
-  const amt = parseFloat(document.getElementById('collect-amount')?.value) || 0;
-  const leftEl = document.getElementById('collect-left');
-  if (leftEl) leftEl.textContent = Math.max((Number(targetLYD) || 0) - amt, 0).toFixed(2) + ' LYD';
+// Step 1: ask whether the money came in exactly as the receipt states.
+function _collectAskView(receiptId, receipt, isAr, targetLYD, serialTxt) {
+  const breakdown = _receiptCollectionBreakdown(receipt);
+  return `
+    <div class="text-sm text-slate-600 dark:text-slate-400 mb-1">
+      ${isAr ? 'الوصل' : 'Receipt'} #${Security.escapeHtml(String(serialTxt))} — ${isAr ? 'الإجمالي' : 'Total'}: <span class="font-bold text-slate-800 dark:text-white">${targetLYD.toFixed(2)} LYD</span>
+    </div>
+    <div class="text-xs text-slate-500 mb-4">
+      ${isAr ? 'حسب الوصل' : 'As on the receipt'}: ${breakdown.map(p => `${Security.escapeHtml(p.method)} ${p.amount.toFixed(2)} LYD`).join(' • ')}
+    </div>
+    <p class="text-sm font-medium text-slate-700 dark:text-slate-300 mb-3">
+      ${isAr ? 'هل تم التحصيل بنفس بيانات الوصل الأصلية؟' : 'Did you collect exactly as shown on the receipt?'}
+    </p>
+    <div class="grid grid-cols-2 gap-3">
+      <button onclick="collectReceiptSame('${receiptId}')" class="px-4 py-3 rounded-xl font-bold bg-emerald-600 text-white hover:bg-emerald-700 flex items-center justify-center gap-2">
+        <i data-lucide="check" class="w-4 h-4"></i>${isAr ? 'نعم، كما الوصل' : 'Yes, same'}
+      </button>
+      <button onclick="collectReceiptCustom('${receiptId}')" class="px-4 py-3 rounded-xl font-bold bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-600 flex items-center justify-center gap-2">
+        <i data-lucide="sliders-horizontal" class="w-4 h-4"></i>${isAr ? 'لا، طرق أخرى' : 'No, different'}
+      </button>
+    </div>`;
 }
 
-function confirmCollectReceipt(receiptId) {
-  if (!_canMarkCollected()) return;
+// "Yes" — record the collection using the receipt's own breakdown, full amount.
+function collectReceiptSame(receiptId) {
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
-  const targetLYD = Number(receipt.amountLocal) || 0;
-  let amount = parseFloat(document.getElementById('collect-amount')?.value);
-  if (!Number.isFinite(amount) || amount < 0) {
-    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'أدخل مبلغاً صحيحاً' : 'Enter a valid amount', 'error');
+  const breakdown = _receiptCollectionBreakdown(receipt);
+  _saveReceiptCollection(receipt, breakdown, Number(receipt.amountLocal) || 0, true);
+}
+
+// "No" — switch the modal to the payment-methods editor (like the ad form).
+function collectReceiptCustom(receiptId) {
+  const receipt = state.receipts.find(r => r.id === receiptId);
+  if (!receipt) return;
+  // Seed from the receipt's own breakdown so the user just edits amounts/methods.
+  _tempCollectPayments = _receiptCollectionBreakdown(receipt).map(p => ({ method: p.method, amount: String(p.amount) }));
+  if (_tempCollectPayments.length === 0) _tempCollectPayments = [{ method: PAYMENT_METHODS[0], amount: '' }];
+  const body = document.getElementById('collect-modal-body');
+  if (body) body.innerHTML = _collectEditorView(receiptId, receipt);
+  if (window.lucide) lucide.createIcons();
+}
+
+function _collectEditorView(receiptId, receipt) {
+  const isAr = state.language === 'ar';
+  const target = _collectTargetLYD;
+  const rows = _tempCollectPayments.map((p, idx) => `
+    <div class="grid grid-cols-12 gap-2 items-end">
+      <div class="col-span-7">
+        ${idx === 0 ? `<label class="block text-[10px] text-slate-400 mb-1">${isAr ? 'الطريقة' : 'Method'}</label>` : ''}
+        <select onchange="updateCollectPaymentRow(${idx}, 'method', this.value)" class="w-full glass-input px-2 py-1.5 rounded-lg text-sm">
+          ${PAYMENT_METHODS.map(m => `<option value="${m}" ${p.method === m ? 'selected' : ''}>${m}</option>`).join('')}
+        </select>
+      </div>
+      <div class="col-span-4">
+        ${idx === 0 ? `<label class="block text-[10px] text-slate-400 mb-1">${isAr ? 'المبلغ (LYD)' : 'Amount (LYD)'}</label>` : ''}
+        <input type="text" inputmode="decimal" value="${Security.escapeHtml(String(p.amount || ''))}" oninput="sanitizeMoneyInput(this); updateCollectPaymentRow(${idx}, 'amount', this.value)" onfocus="this.select()" class="w-full glass-input px-2 py-1.5 rounded-lg text-sm" placeholder="0.00" />
+      </div>
+      <div class="col-span-1 flex justify-center pb-1">
+        ${_tempCollectPayments.length > 1 ? `<button type="button" onclick="removeCollectPaymentRow(${idx})" class="text-rose-500 hover:text-rose-600"><i data-lucide="x" class="w-4 h-4"></i></button>` : ''}
+      </div>
+    </div>`).join('');
+  const total = _tempCollectPayments.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
+  const left = Math.max(target - total, 0);
+  return `
+    <div class="text-sm text-slate-600 dark:text-slate-400 mb-3">
+      ${isAr ? 'الإجمالي المطلوب' : 'Total due'}: <span class="font-bold text-slate-800 dark:text-white">${target.toFixed(2)} LYD</span>
+    </div>
+    <div class="space-y-2" id="collect-rows">${rows}</div>
+    <button type="button" onclick="addCollectPaymentRow()" class="mt-2 text-xs font-bold text-emerald-600 hover:text-emerald-700 flex items-center gap-1">
+      <i data-lucide="plus-circle" class="w-4 h-4"></i>${isAr ? 'إضافة طريقة' : 'Add method'}
+    </button>
+    <div class="mt-3 bg-slate-50 dark:bg-slate-900/50 rounded-xl p-3 space-y-1 text-sm">
+      <div class="flex justify-between"><span class="text-slate-600 dark:text-slate-400">${isAr ? 'إجمالي المُحصَّل' : 'Total collected'}:</span><span class="font-bold text-emerald-600" id="collect-total">${total.toFixed(2)} LYD</span></div>
+      <div class="flex justify-between"><span class="text-slate-600 dark:text-slate-400">${isAr ? 'المتبقي للتحصيل' : 'Left to collect'}:</span><span class="font-bold text-orange-600" id="collect-left">${left.toFixed(2)} LYD</span></div>
+    </div>
+    <div class="flex space-x-3 pt-4">
+      <button onclick="collectReceiptCustomBack('${receiptId}')" class="flex-1 px-4 py-2.5 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl font-bold">${isAr ? 'رجوع' : 'Back'}</button>
+      <button onclick="confirmCollectReceipt('${receiptId}')" class="flex-1 px-4 py-2.5 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-700">${isAr ? 'حفظ' : 'Save'}</button>
+    </div>`;
+}
+
+function _rerenderCollectEditor() {
+  const receipt = state.receipts.find(r => r.id === _collectReceiptId);
+  const body = document.getElementById('collect-modal-body');
+  if (receipt && body) { body.innerHTML = _collectEditorView(_collectReceiptId, receipt); if (window.lucide) lucide.createIcons(); }
+}
+
+function _refreshCollectTotals() {
+  const total = _tempCollectPayments.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
+  const totalEl = document.getElementById('collect-total');
+  const leftEl = document.getElementById('collect-left');
+  if (totalEl) totalEl.textContent = total.toFixed(2) + ' LYD';
+  if (leftEl) leftEl.textContent = Math.max(_collectTargetLYD - total, 0).toFixed(2) + ' LYD';
+}
+
+// Row edits: amount just refreshes the totals (no re-render, keeps typing focus);
+// method changes state silently; add/remove re-render the whole editor.
+function updateCollectPaymentRow(idx, field, value) {
+  if (!_tempCollectPayments[idx]) return;
+  _tempCollectPayments[idx][field] = value;
+  if (field === 'amount') _refreshCollectTotals();
+}
+function addCollectPaymentRow() { _tempCollectPayments.push({ method: PAYMENT_METHODS[0], amount: '' }); _rerenderCollectEditor(); }
+function removeCollectPaymentRow(idx) { _tempCollectPayments.splice(idx, 1); _rerenderCollectEditor(); }
+function collectReceiptCustomBack(receiptId) {
+  const receipt = state.receipts.find(r => r.id === receiptId);
+  const body = document.getElementById('collect-modal-body');
+  if (receipt && body) {
+    const serialTxt = receipt.serialNumber || receipt.tempReceiptNo || receipt.finalReceiptNo || receiptId.slice(0, 8);
+    body.innerHTML = _collectAskView(receiptId, receipt, state.language === 'ar', Number(receipt.amountLocal) || 0, serialTxt);
+    if (window.lucide) lucide.createIcons();
+  }
+}
+
+// "No" path save: validate + persist the custom breakdown.
+function confirmCollectReceipt(receiptId) {
+  const receipt = state.receipts.find(r => r.id === receiptId);
+  if (!receipt) return;
+  const payments = _tempCollectPayments
+    .map(p => ({ method: p.method, amount: Math.round((parseFloat(p.amount) || 0) * 100) / 100 }))
+    .filter(p => p.amount > 0);
+  if (payments.length === 0) {
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'أدخل مبلغاً واحداً على الأقل' : 'Enter at least one amount', 'error');
     return;
   }
-  amount = Math.round(amount * 100) / 100;
-  // Persist through updateRecord so it syncs to IndexedDB/server (a bare
-  // saveState used to leave the collected flag memory-only -> reverted on sync).
-  updateRecord(state.receipts, receiptId, {
+  const total = Math.round(payments.reduce((s, p) => s + p.amount, 0) * 100) / 100;
+  _saveReceiptCollection(receipt, payments, total, false);
+}
+
+// Shared save for both the "Yes" and "No" paths.
+function _saveReceiptCollection(receipt, payments, totalLYD, matchesReceipt) {
+  if (!_canMarkCollected()) return;
+  const targetLYD = Number(receipt.amountLocal) || 0;
+  updateRecord(state.receipts, receipt.id, {
     collected: true,
-    collectedAmount: amount,
+    collectedAmount: totalLYD,
+    collectedPayments: payments,
+    collectedMatchesReceipt: !!matchesReceipt,
     collectedAt: new Date().toISOString(),
     collectedBy: state.currentUser?.id || 'admin'
   });
-  _logReceiptCollection(receipt, 'collected', amount);
+  _logReceiptCollection(receipt, 'collected', totalLYD);
   saveState();
   document.getElementById('collect-receipt-modal')?.remove();
-  const leftLYD = Math.max(targetLYD - amount, 0);
+  const leftLYD = Math.max(targetLYD - totalLYD, 0);
   const isAr = state.language === 'ar';
   showNotification(
     isAr ? 'تم التحصيل' : 'Collected',
-    (isAr ? `تم تسجيل ${amount.toFixed(2)} LYD` : `Recorded ${amount.toFixed(2)} LYD`) + (leftLYD > 0.01 ? (isAr ? ` — المتبقي ${leftLYD.toFixed(2)} LYD` : ` — ${leftLYD.toFixed(2)} LYD left`) : ''),
+    (isAr ? `تم تسجيل ${totalLYD.toFixed(2)} LYD` : `Recorded ${totalLYD.toFixed(2)} LYD`) + (leftLYD > 0.01 ? (isAr ? ` — المتبقي ${leftLYD.toFixed(2)} LYD` : ` — ${leftLYD.toFixed(2)} LYD left`) : ''),
     'success'
   );
   render();

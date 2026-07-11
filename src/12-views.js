@@ -2230,6 +2230,11 @@ function renderReceiptsView() {
                     <span class="text-slate-600 dark:text-slate-300">${isAr ? 'المُحصَّل' : 'Collected'}: <span class="font-bold text-emerald-600">${collectedLYD.toFixed(2)} LYD</span></span>
                     ${leftLYD > 0.01 ? `<span class="text-slate-600 dark:text-slate-300">${isAr ? 'المتبقي للتحصيل' : 'Left to collect'}: <span class="font-bold text-orange-600">${leftLYD.toFixed(2)} LYD</span></span>` : ''}
                   </div>
+                  ${Array.isArray(receipt.collectedPayments) && receipt.collectedPayments.length && !receipt.collectedMatchesReceipt ? `
+                    <div class="flex flex-wrap gap-1 mt-1">
+                      ${receipt.collectedPayments.map(p => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">${Security.escapeHtml(p.method)}: ${(Number(p.amount) || 0).toFixed(0)} LYD</span>`).join('')}
+                    </div>
+                  ` : ''}
                 ` : ''}
               </div>`;
               })()}

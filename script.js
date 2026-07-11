@@ -9331,6 +9331,11 @@ function renderReceiptsView() {
                     <span class="text-slate-600 dark:text-slate-300">${isAr ? 'المُحصَّل' : 'Collected'}: <span class="font-bold text-emerald-600">${collectedLYD.toFixed(2)} LYD</span></span>
                     ${leftLYD > 0.01 ? `<span class="text-slate-600 dark:text-slate-300">${isAr ? 'المتبقي للتحصيل' : 'Left to collect'}: <span class="font-bold text-orange-600">${leftLYD.toFixed(2)} LYD</span></span>` : ''}
                   </div>
+                  ${Array.isArray(receipt.collectedPayments) && receipt.collectedPayments.length && !receipt.collectedMatchesReceipt ? `
+                    <div class="flex flex-wrap gap-1 mt-1">
+                      ${receipt.collectedPayments.map(p => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">${Security.escapeHtml(p.method)}: ${(Number(p.amount) || 0).toFixed(0)} LYD</span>`).join('')}
+                    </div>
+                  ` : ''}
                 ` : ''}
               </div>`;
               })()}
@@ -13560,87 +13565,205 @@ function _logReceiptCollection(receipt, action, collectedAmount) {
 // request). Supports partial collection; the card then shows collected + the
 // amount still left to collect. Self-contained (stop-ad-modal style) so it
 // doesn't touch renderModal/state.modalData.
+// ---- Receipt collection (2-step): ask "same as receipt?" -> Yes records it
+// as-is; No opens a payment-methods editor like the ad/receipt forms. ----
+let _tempCollectPayments = [];   // [{ method, amount }] working list for the "No" editor
+let _collectReceiptId = '';
+let _collectTargetLYD = 0;
+
+// The receipt's own payment breakdown in LYD (used for the "Yes = same" path
+// and to seed the "No" editor). Each split's LYD value is amount × rate1.
+function _receiptCollectionBreakdown(receipt) {
+  const target = Number(receipt.amountLocal) || 0;
+  if (Array.isArray(receipt.payments) && receipt.payments.length) {
+    return receipt.payments
+      .map(p => ({ method: p.method || 'Cash (LYD)', amount: Math.round((Number(p.amount) || 0) * (Number(p.rate) || 1) * 100) / 100 }))
+      .filter(p => p.amount > 0);
+  }
+  return [{ method: receipt.paymentMethod || 'Cash (LYD)', amount: target }];
+}
+
 function openCollectReceiptModal(receiptId) {
   if (!_canMarkCollected()) return;
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
   const isAr = state.language === 'ar';
   const targetLYD = Number(receipt.amountLocal) || 0;
-  // Prefill with the amount already collected, or the full receipt total.
-  const prefill = receipt.collectedAmount != null ? (Number(receipt.collectedAmount) || 0) : targetLYD;
   const serialTxt = receipt.serialNumber || receipt.tempReceiptNo || receipt.finalReceiptNo || receiptId.slice(0, 8);
+  _collectReceiptId = receiptId;
+  _collectTargetLYD = targetLYD;
+  _tempCollectPayments = [];
 
   document.getElementById('collect-receipt-modal')?.remove();
   const html = `
     <div id="collect-receipt-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onclick="if(event.target===this) this.remove()">
-      <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-sm w-full" onclick="event.stopPropagation()">
-        <div class="p-5 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
+      <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full max-h-[90vh] overflow-y-auto" onclick="event.stopPropagation()">
+        <div class="p-5 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between sticky top-0 bg-white dark:bg-slate-800 z-10">
           <h2 class="text-lg font-bold text-slate-800 dark:text-white flex items-center">
             <i data-lucide="hand-coins" class="w-5 h-5 mr-2 text-emerald-600"></i>
             ${isAr ? 'تسجيل التحصيل' : 'Record Collection'}
           </h2>
           <button onclick="document.getElementById('collect-receipt-modal').remove()" class="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg"><i data-lucide="x" class="w-5 h-5"></i></button>
         </div>
-        <div class="p-5 space-y-4">
-          <div class="text-sm text-slate-600 dark:text-slate-400">
-            ${isAr ? 'الوصل' : 'Receipt'} #${Security.escapeHtml(String(serialTxt))} — ${isAr ? 'الإجمالي' : 'Total'}: <span class="font-bold text-slate-800 dark:text-white">${targetLYD.toFixed(2)} LYD</span>
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">${isAr ? 'المبلغ المُحصَّل (LYD)' : 'Amount Collected (LYD)'}</label>
-            <input type="text" inputmode="decimal" id="collect-amount" value="${prefill}" oninput="sanitizeMoneyInput(this); _updateCollectLeft(${targetLYD})" class="w-full glass-input px-4 py-2 rounded-xl text-lg font-bold focus:ring-2 focus:ring-emerald-500" placeholder="0.00" />
-            <div class="flex gap-2 mt-2">
-              <button type="button" onclick="document.getElementById('collect-amount').value='${targetLYD}'; _updateCollectLeft(${targetLYD})" class="text-xs px-2 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 font-medium">${isAr ? 'المبلغ كامل' : 'Full amount'}</button>
-            </div>
-          </div>
-          <div class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-3 flex justify-between text-sm">
-            <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المتبقي للتحصيل' : 'Left to collect'}:</span>
-            <span class="font-bold text-orange-600" id="collect-left">${Math.max(targetLYD - prefill, 0).toFixed(2)} LYD</span>
-          </div>
-          <div class="flex space-x-3 pt-1">
-            <button onclick="document.getElementById('collect-receipt-modal').remove()" class="flex-1 px-4 py-2.5 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl font-bold">${isAr ? 'إلغاء' : 'Cancel'}</button>
-            <button onclick="confirmCollectReceipt('${receiptId}')" class="flex-1 px-4 py-2.5 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-700">${isAr ? 'حفظ' : 'Save'}</button>
-          </div>
+        <div id="collect-modal-body" class="p-5">
+          ${_collectAskView(receiptId, receipt, isAr, targetLYD, serialTxt)}
         </div>
       </div>
     </div>`;
   document.body.insertAdjacentHTML('beforeend', html);
   if (window.lucide) lucide.createIcons();
-  setTimeout(() => { const el = document.getElementById('collect-amount'); if (el) { el.focus(); el.select(); } }, 100);
 }
 
-function _updateCollectLeft(targetLYD) {
-  const amt = parseFloat(document.getElementById('collect-amount')?.value) || 0;
-  const leftEl = document.getElementById('collect-left');
-  if (leftEl) leftEl.textContent = Math.max((Number(targetLYD) || 0) - amt, 0).toFixed(2) + ' LYD';
+// Step 1: ask whether the money came in exactly as the receipt states.
+function _collectAskView(receiptId, receipt, isAr, targetLYD, serialTxt) {
+  const breakdown = _receiptCollectionBreakdown(receipt);
+  return `
+    <div class="text-sm text-slate-600 dark:text-slate-400 mb-1">
+      ${isAr ? 'الوصل' : 'Receipt'} #${Security.escapeHtml(String(serialTxt))} — ${isAr ? 'الإجمالي' : 'Total'}: <span class="font-bold text-slate-800 dark:text-white">${targetLYD.toFixed(2)} LYD</span>
+    </div>
+    <div class="text-xs text-slate-500 mb-4">
+      ${isAr ? 'حسب الوصل' : 'As on the receipt'}: ${breakdown.map(p => `${Security.escapeHtml(p.method)} ${p.amount.toFixed(2)} LYD`).join(' • ')}
+    </div>
+    <p class="text-sm font-medium text-slate-700 dark:text-slate-300 mb-3">
+      ${isAr ? 'هل تم التحصيل بنفس بيانات الوصل الأصلية؟' : 'Did you collect exactly as shown on the receipt?'}
+    </p>
+    <div class="grid grid-cols-2 gap-3">
+      <button onclick="collectReceiptSame('${receiptId}')" class="px-4 py-3 rounded-xl font-bold bg-emerald-600 text-white hover:bg-emerald-700 flex items-center justify-center gap-2">
+        <i data-lucide="check" class="w-4 h-4"></i>${isAr ? 'نعم، كما الوصل' : 'Yes, same'}
+      </button>
+      <button onclick="collectReceiptCustom('${receiptId}')" class="px-4 py-3 rounded-xl font-bold bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-600 flex items-center justify-center gap-2">
+        <i data-lucide="sliders-horizontal" class="w-4 h-4"></i>${isAr ? 'لا، طرق أخرى' : 'No, different'}
+      </button>
+    </div>`;
 }
 
-function confirmCollectReceipt(receiptId) {
-  if (!_canMarkCollected()) return;
+// "Yes" — record the collection using the receipt's own breakdown, full amount.
+function collectReceiptSame(receiptId) {
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
-  const targetLYD = Number(receipt.amountLocal) || 0;
-  let amount = parseFloat(document.getElementById('collect-amount')?.value);
-  if (!Number.isFinite(amount) || amount < 0) {
-    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'أدخل مبلغاً صحيحاً' : 'Enter a valid amount', 'error');
+  const breakdown = _receiptCollectionBreakdown(receipt);
+  _saveReceiptCollection(receipt, breakdown, Number(receipt.amountLocal) || 0, true);
+}
+
+// "No" — switch the modal to the payment-methods editor (like the ad form).
+function collectReceiptCustom(receiptId) {
+  const receipt = state.receipts.find(r => r.id === receiptId);
+  if (!receipt) return;
+  // Seed from the receipt's own breakdown so the user just edits amounts/methods.
+  _tempCollectPayments = _receiptCollectionBreakdown(receipt).map(p => ({ method: p.method, amount: String(p.amount) }));
+  if (_tempCollectPayments.length === 0) _tempCollectPayments = [{ method: PAYMENT_METHODS[0], amount: '' }];
+  const body = document.getElementById('collect-modal-body');
+  if (body) body.innerHTML = _collectEditorView(receiptId, receipt);
+  if (window.lucide) lucide.createIcons();
+}
+
+function _collectEditorView(receiptId, receipt) {
+  const isAr = state.language === 'ar';
+  const target = _collectTargetLYD;
+  const rows = _tempCollectPayments.map((p, idx) => `
+    <div class="grid grid-cols-12 gap-2 items-end">
+      <div class="col-span-7">
+        ${idx === 0 ? `<label class="block text-[10px] text-slate-400 mb-1">${isAr ? 'الطريقة' : 'Method'}</label>` : ''}
+        <select onchange="updateCollectPaymentRow(${idx}, 'method', this.value)" class="w-full glass-input px-2 py-1.5 rounded-lg text-sm">
+          ${PAYMENT_METHODS.map(m => `<option value="${m}" ${p.method === m ? 'selected' : ''}>${m}</option>`).join('')}
+        </select>
+      </div>
+      <div class="col-span-4">
+        ${idx === 0 ? `<label class="block text-[10px] text-slate-400 mb-1">${isAr ? 'المبلغ (LYD)' : 'Amount (LYD)'}</label>` : ''}
+        <input type="text" inputmode="decimal" value="${Security.escapeHtml(String(p.amount || ''))}" oninput="sanitizeMoneyInput(this); updateCollectPaymentRow(${idx}, 'amount', this.value)" onfocus="this.select()" class="w-full glass-input px-2 py-1.5 rounded-lg text-sm" placeholder="0.00" />
+      </div>
+      <div class="col-span-1 flex justify-center pb-1">
+        ${_tempCollectPayments.length > 1 ? `<button type="button" onclick="removeCollectPaymentRow(${idx})" class="text-rose-500 hover:text-rose-600"><i data-lucide="x" class="w-4 h-4"></i></button>` : ''}
+      </div>
+    </div>`).join('');
+  const total = _tempCollectPayments.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
+  const left = Math.max(target - total, 0);
+  return `
+    <div class="text-sm text-slate-600 dark:text-slate-400 mb-3">
+      ${isAr ? 'الإجمالي المطلوب' : 'Total due'}: <span class="font-bold text-slate-800 dark:text-white">${target.toFixed(2)} LYD</span>
+    </div>
+    <div class="space-y-2" id="collect-rows">${rows}</div>
+    <button type="button" onclick="addCollectPaymentRow()" class="mt-2 text-xs font-bold text-emerald-600 hover:text-emerald-700 flex items-center gap-1">
+      <i data-lucide="plus-circle" class="w-4 h-4"></i>${isAr ? 'إضافة طريقة' : 'Add method'}
+    </button>
+    <div class="mt-3 bg-slate-50 dark:bg-slate-900/50 rounded-xl p-3 space-y-1 text-sm">
+      <div class="flex justify-between"><span class="text-slate-600 dark:text-slate-400">${isAr ? 'إجمالي المُحصَّل' : 'Total collected'}:</span><span class="font-bold text-emerald-600" id="collect-total">${total.toFixed(2)} LYD</span></div>
+      <div class="flex justify-between"><span class="text-slate-600 dark:text-slate-400">${isAr ? 'المتبقي للتحصيل' : 'Left to collect'}:</span><span class="font-bold text-orange-600" id="collect-left">${left.toFixed(2)} LYD</span></div>
+    </div>
+    <div class="flex space-x-3 pt-4">
+      <button onclick="collectReceiptCustomBack('${receiptId}')" class="flex-1 px-4 py-2.5 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl font-bold">${isAr ? 'رجوع' : 'Back'}</button>
+      <button onclick="confirmCollectReceipt('${receiptId}')" class="flex-1 px-4 py-2.5 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-700">${isAr ? 'حفظ' : 'Save'}</button>
+    </div>`;
+}
+
+function _rerenderCollectEditor() {
+  const receipt = state.receipts.find(r => r.id === _collectReceiptId);
+  const body = document.getElementById('collect-modal-body');
+  if (receipt && body) { body.innerHTML = _collectEditorView(_collectReceiptId, receipt); if (window.lucide) lucide.createIcons(); }
+}
+
+function _refreshCollectTotals() {
+  const total = _tempCollectPayments.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
+  const totalEl = document.getElementById('collect-total');
+  const leftEl = document.getElementById('collect-left');
+  if (totalEl) totalEl.textContent = total.toFixed(2) + ' LYD';
+  if (leftEl) leftEl.textContent = Math.max(_collectTargetLYD - total, 0).toFixed(2) + ' LYD';
+}
+
+// Row edits: amount just refreshes the totals (no re-render, keeps typing focus);
+// method changes state silently; add/remove re-render the whole editor.
+function updateCollectPaymentRow(idx, field, value) {
+  if (!_tempCollectPayments[idx]) return;
+  _tempCollectPayments[idx][field] = value;
+  if (field === 'amount') _refreshCollectTotals();
+}
+function addCollectPaymentRow() { _tempCollectPayments.push({ method: PAYMENT_METHODS[0], amount: '' }); _rerenderCollectEditor(); }
+function removeCollectPaymentRow(idx) { _tempCollectPayments.splice(idx, 1); _rerenderCollectEditor(); }
+function collectReceiptCustomBack(receiptId) {
+  const receipt = state.receipts.find(r => r.id === receiptId);
+  const body = document.getElementById('collect-modal-body');
+  if (receipt && body) {
+    const serialTxt = receipt.serialNumber || receipt.tempReceiptNo || receipt.finalReceiptNo || receiptId.slice(0, 8);
+    body.innerHTML = _collectAskView(receiptId, receipt, state.language === 'ar', Number(receipt.amountLocal) || 0, serialTxt);
+    if (window.lucide) lucide.createIcons();
+  }
+}
+
+// "No" path save: validate + persist the custom breakdown.
+function confirmCollectReceipt(receiptId) {
+  const receipt = state.receipts.find(r => r.id === receiptId);
+  if (!receipt) return;
+  const payments = _tempCollectPayments
+    .map(p => ({ method: p.method, amount: Math.round((parseFloat(p.amount) || 0) * 100) / 100 }))
+    .filter(p => p.amount > 0);
+  if (payments.length === 0) {
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'أدخل مبلغاً واحداً على الأقل' : 'Enter at least one amount', 'error');
     return;
   }
-  amount = Math.round(amount * 100) / 100;
-  // Persist through updateRecord so it syncs to IndexedDB/server (a bare
-  // saveState used to leave the collected flag memory-only -> reverted on sync).
-  updateRecord(state.receipts, receiptId, {
+  const total = Math.round(payments.reduce((s, p) => s + p.amount, 0) * 100) / 100;
+  _saveReceiptCollection(receipt, payments, total, false);
+}
+
+// Shared save for both the "Yes" and "No" paths.
+function _saveReceiptCollection(receipt, payments, totalLYD, matchesReceipt) {
+  if (!_canMarkCollected()) return;
+  const targetLYD = Number(receipt.amountLocal) || 0;
+  updateRecord(state.receipts, receipt.id, {
     collected: true,
-    collectedAmount: amount,
+    collectedAmount: totalLYD,
+    collectedPayments: payments,
+    collectedMatchesReceipt: !!matchesReceipt,
     collectedAt: new Date().toISOString(),
     collectedBy: state.currentUser?.id || 'admin'
   });
-  _logReceiptCollection(receipt, 'collected', amount);
+  _logReceiptCollection(receipt, 'collected', totalLYD);
   saveState();
   document.getElementById('collect-receipt-modal')?.remove();
-  const leftLYD = Math.max(targetLYD - amount, 0);
+  const leftLYD = Math.max(targetLYD - totalLYD, 0);
   const isAr = state.language === 'ar';
   showNotification(
     isAr ? 'تم التحصيل' : 'Collected',
-    (isAr ? `تم تسجيل ${amount.toFixed(2)} LYD` : `Recorded ${amount.toFixed(2)} LYD`) + (leftLYD > 0.01 ? (isAr ? ` — المتبقي ${leftLYD.toFixed(2)} LYD` : ` — ${leftLYD.toFixed(2)} LYD left`) : ''),
+    (isAr ? `تم تسجيل ${totalLYD.toFixed(2)} LYD` : `Recorded ${totalLYD.toFixed(2)} LYD`) + (leftLYD > 0.01 ? (isAr ? ` — المتبقي ${leftLYD.toFixed(2)} LYD` : ` — ${leftLYD.toFixed(2)} LYD left`) : ''),
     'success'
   );
   render();
@@ -19305,6 +19428,10 @@ function renderModal() {
     case 'clothes-product':
       modalContent = renderClothesProductModal();
       break;
+
+    case 'clothes-shipment':
+      modalContent = renderClothesShipmentModal();
+      break;
   }
 
   const modal = document.createElement('div');
@@ -19320,6 +19447,8 @@ function renderModal() {
     modalSize = 'max-w-lg'; // Compact size for receipts
   } else if (state.activeModal === 'clothes-product') {
     modalSize = 'max-w-xl'; // Room for the color/size/qty rows
+  } else if (state.activeModal === 'clothes-shipment') {
+    modalSize = 'max-w-2xl'; // Room for the shipment line rows
   }
   // Make Ad/Receipt modals scroll on the whole panel (header + content) to avoid "nothing shows" confusion.
   const modalScrollable = (state.activeModal === 'receipt' || state.activeModal === 'ad')
@@ -19375,6 +19504,10 @@ function renderModal() {
       refreshClothesVariantRows();
       refreshClothesPhotoPreview();
     }, 50);
+  } else if (state.activeModal === 'clothes-shipment') {
+    setTimeout(() => {
+      refreshClothesShipLines();
+    }, 50);
   }
   
   const form = document.getElementById('modal-form');
@@ -19409,6 +19542,11 @@ async function handleModalSubmit() {
   switch (state.activeModal) {
     case 'clothes-product': {
       const saved = await saveClothesProductFromModal();
+      if (!saved) return; // keep modal open on validation errors
+      break;
+    }
+    case 'clothes-shipment': {
+      const saved = await saveClothesShipmentFromModal();
       if (!saved) return; // keep modal open on validation errors
       break;
     }
@@ -20335,9 +20473,10 @@ function closeModal() {
   // Discard any pending (unsaved) top-up edits so they cannot leak into the
   // next ad's top-up session.
   tempTopUps = [];
-  // Discard any pending (unsaved) clothes-product edits
+  // Discard any pending (unsaved) clothes-product/shipment edits
   _clothesTempVariants = [];
   _clothesTempPhoto = null;
+  _clothesTempShipLines = [];
   
   // Clear URL params (modal, id)
   clearUrlParams(['modal', 'id']);
@@ -20653,14 +20792,7 @@ function renderClothesDashboardTab() {
   );
 }
 
-function renderClothesShipmentsTab() {
-  return renderClothesComingSoonPanel(
-    'plane',
-    'Incoming Shipments', 'الشحنات القادمة',
-    'Goods you buy from abroad: supplier, contents, costs, and a status you move forward — Ordered, Shipped, Arrived, Received. Receiving a shipment adds it to your stock automatically.',
-    'البضاعة التي تشتريها من الخارج: المورد، المحتويات، التكاليف، وحالة تتقدم خطوة بخطوة — مطلوبة، مشحونة، وصلت، استُلمت. استلام الشحنة يضيفها للمخزون تلقائياً.'
-  );
-}
+// (Shipments tab implemented in the SHIPMENTS section below)
 
 function renderClothesOrdersTab() {
   return renderClothesComingSoonPanel(
@@ -21206,6 +21338,596 @@ async function saveClothesProductFromModal() {
   } else {
     addRecord(state.clothesProducts, { ...payload, createdAt: new Date().toISOString() });
     showNotification(isAr ? 'تمت الإضافة' : 'Added', isAr ? 'تمت إضافة المنتج بنجاح.' : 'Product added successfully.', 'success');
+  }
+  return true;
+}
+
+// ------------------------------------------
+// SHIPMENTS TAB — incoming goods from abroad
+// ------------------------------------------
+// Rules that keep stock honest:
+// - Stock is added ONLY when a shipment's status becomes 'Received'
+//   (stockApplied flag makes this happen exactly once).
+// - Moving a Received shipment back to an earlier status removes the same
+//   quantities again (mistake correction, fully reversible).
+// - A Received shipment cannot be edited or deleted — move its status back
+//   first. This prevents silent stock drift.
+
+const CLOTHES_SHIPMENT_STATUSES = [
+  { id: 'Ordered', label: 'Ordered', labelAr: 'مطلوبة', badge: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300' },
+  { id: 'Shipped', label: 'Shipped', labelAr: 'مشحونة', badge: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' },
+  { id: 'Arrived', label: 'Arrived', labelAr: 'وصلت', badge: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' },
+  { id: 'Received', label: 'Received', labelAr: 'استُلمت', badge: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' }
+];
+const CLOTHES_SHIPMENTS_PAGE_SIZE = 30;
+
+let _clothesShipmentSearch = '';
+let _clothesShipmentStatusFilter = 'all';
+let _clothesShipmentsShowLimit = CLOTHES_SHIPMENTS_PAGE_SIZE;
+let _clothesShipmentsFilterFingerprint = '';
+
+function getVisibleClothesShipments() {
+  return getVisibleRecords(state.clothesShipments);
+}
+
+function clothesShipmentStatusMeta(statusId) {
+  return CLOTHES_SHIPMENT_STATUSES.find(s => s.id === statusId) || CLOTHES_SHIPMENT_STATUSES[0];
+}
+
+// Product name lookup that still works for deleted products (history display)
+function clothesProductNameById(productId) {
+  const p = (state.clothesProducts || []).find(x => x.id === productId);
+  return p ? String(p.name || '') : (clothesIsAr() ? '(منتج محذوف)' : '(deleted product)');
+}
+
+function getClothesShipmentTotals(s) {
+  const lines = Array.isArray(s?.lines) ? s.lines : [];
+  let pieces = 0;
+  let goodsUSD = 0;
+  for (const line of lines) {
+    const qty = Math.max(0, Math.floor(Number(line?.qty) || 0));
+    pieces += qty;
+    goodsUSD += qty * (Number(line?.unitCostUSD) || 0);
+  }
+  goodsUSD = Math.round(goodsUSD * 100) / 100;
+  const shippingUSD = Math.round((Number(s?.shippingCostUSD) || 0) * 100) / 100;
+  const totalUSD = Math.round((goodsUSD + shippingUSD) * 100) / 100;
+  return { pieces, goodsUSD, shippingUSD, totalUSD };
+}
+
+// Add (sign=+1) or remove (sign=-1) a shipment's quantities in product stock.
+// One updateRecord per product so every change syncs like any other edit.
+function applyClothesShipmentStockDelta(shipment, sign) {
+  const lines = Array.isArray(shipment?.lines) ? shipment.lines : [];
+  const byProduct = new Map();
+  for (const line of lines) {
+    const pid = String(line?.productId || '');
+    if (!pid) continue;
+    if (!byProduct.has(pid)) byProduct.set(pid, []);
+    byProduct.get(pid).push(line);
+  }
+  for (const [pid, productLines] of byProduct) {
+    const product = getVisibleClothesProducts().find(p => p.id === pid);
+    if (!product) continue; // product deleted — nothing to update
+    const variants = (Array.isArray(product.variants) ? product.variants : []).map(v => ({ ...v }));
+    for (const line of productLines) {
+      const qty = Math.max(0, Math.floor(Number(line?.qty) || 0));
+      if (qty === 0) continue;
+      const color = String(line?.color || '').trim();
+      const size = String(line?.size || '').trim();
+      const match = variants.find(v =>
+        String(v?.color || '').trim().toLowerCase() === color.toLowerCase() &&
+        String(v?.size || '').trim().toLowerCase() === size.toLowerCase()
+      );
+      if (match) {
+        match.qty = Math.max(0, Math.floor(Number(match.qty) || 0) + sign * qty);
+      } else if (sign > 0) {
+        variants.push({ color, size, qty });
+      }
+    }
+    updateRecord(state.clothesProducts, pid, { variants });
+  }
+}
+
+function setClothesShipmentStatus(shipmentId, newStatus) {
+  if (!isCurrentUserAdmin()) return;
+  const isAr = clothesIsAr();
+  if (!CLOTHES_SHIPMENT_STATUSES.some(s => s.id === newStatus)) return;
+  const shipment = getVisibleClothesShipments().find(s => s.id === shipmentId);
+  if (!shipment || shipment.status === newStatus) return;
+
+  const updates = { status: newStatus };
+  if (newStatus === 'Received' && !shipment.stockApplied) {
+    const ok = confirm(isAr
+      ? 'تأكيد استلام الشحنة؟ سيتم إضافة الكميات إلى المخزون.'
+      : 'Confirm receiving this shipment? Quantities will be ADDED to stock.');
+    if (!ok) { updateClothesShipmentsFiltered(); return; }
+    applyClothesShipmentStockDelta(shipment, 1);
+    updates.stockApplied = true;
+    updates.receivedAt = new Date().toISOString();
+  } else if (shipment.status === 'Received' && newStatus !== 'Received' && shipment.stockApplied) {
+    const ok = confirm(isAr
+      ? 'إرجاع الشحنة إلى حالة سابقة؟ سيتم خصم كمياتها من المخزون مرة أخرى.'
+      : 'Move this shipment back? Its quantities will be REMOVED from stock again.');
+    if (!ok) { updateClothesShipmentsFiltered(); return; }
+    applyClothesShipmentStockDelta(shipment, -1);
+    updates.stockApplied = false;
+    updates.receivedAt = null;
+  }
+
+  updateRecord(state.clothesShipments, shipmentId, updates);
+  const meta = clothesShipmentStatusMeta(newStatus);
+  showNotification(
+    isAr ? 'تم التحديث' : 'Updated',
+    isAr ? `حالة الشحنة الآن: ${meta.labelAr}` : `Shipment status is now: ${meta.label}`,
+    'success'
+  );
+  updateClothesShipmentsFiltered();
+}
+
+function deleteClothesShipment(id) {
+  if (!isCurrentUserAdmin()) return;
+  const isAr = clothesIsAr();
+  const shipment = getVisibleClothesShipments().find(s => s.id === id);
+  if (!shipment) return;
+  if (shipment.status === 'Received') {
+    showNotification(
+      isAr ? 'غير ممكن' : 'Not allowed',
+      isAr ? 'لا يمكن حذف شحنة مستلمة — أرجع حالتها أولاً حتى يُخصم مخزونها.' : 'Cannot delete a Received shipment — move its status back first so its stock is removed.',
+      'error'
+    );
+    return;
+  }
+  const ok = confirm(isAr ? 'هل تريد حذف هذه الشحنة؟' : 'Delete this shipment?');
+  if (!ok) return;
+  deleteRecord(state.clothesShipments, id);
+  showNotification(isAr ? 'تم الحذف' : 'Deleted', isAr ? 'تم حذف الشحنة.' : 'Shipment deleted.', 'success');
+  updateClothesShipmentsFiltered();
+}
+
+function loadMoreClothesShipments() {
+  _clothesShipmentsShowLimit += CLOTHES_SHIPMENTS_PAGE_SIZE;
+  updateClothesShipmentsFiltered();
+}
+
+function onClothesShipmentSearchInput(el) {
+  _clothesShipmentSearch = Security.sanitizeInput(String(el?.value || ''), { maxLength: 200 });
+  if (window._clothesShipmentSearchTimer) clearTimeout(window._clothesShipmentSearchTimer);
+  window._clothesShipmentSearchTimer = setTimeout(() => updateClothesShipmentsFiltered(), 80);
+}
+
+function setClothesShipmentStatusFilter(value) {
+  _clothesShipmentStatusFilter = String(value || 'all');
+  updateClothesShipmentsFiltered();
+}
+
+function getFilteredClothesShipments() {
+  const q = _clothesShipmentSearch.trim().toLowerCase();
+  let items = getVisibleClothesShipments();
+  if (_clothesShipmentStatusFilter !== 'all') {
+    items = items.filter(s => s.status === _clothesShipmentStatusFilter);
+  }
+  if (q) {
+    items = items.filter(s => {
+      if (String(s.ref || '').toLowerCase().includes(q)) return true;
+      if (String(s.supplier || '').toLowerCase().includes(q)) return true;
+      const lines = Array.isArray(s.lines) ? s.lines : [];
+      return lines.some(line => clothesProductNameById(line.productId).toLowerCase().includes(q));
+    });
+  }
+  return items;
+}
+
+function updateClothesShipmentsFiltered() {
+  const container = document.querySelector('main');
+  if (!container || state.currentView !== 'clothes-system' || _clothesActiveTab !== 'shipments') {
+    render();
+    return;
+  }
+  const template = document.createElement('template');
+  template.innerHTML = renderClothesShipmentsTab();
+  const newStats = template.content.querySelector('#clothes-shipments-stats');
+  const newGrid = template.content.querySelector('#clothes-shipments-grid');
+  const curStats = document.getElementById('clothes-shipments-stats');
+  const curGrid = document.getElementById('clothes-shipments-grid');
+  if (newStats && curStats) curStats.innerHTML = newStats.innerHTML;
+  if (newGrid && curGrid) curGrid.innerHTML = newGrid.innerHTML;
+  if (typeof IconQueue !== 'undefined') IconQueue.schedule(container);
+  else lucide.createIcons();
+}
+
+function renderClothesShipmentsTab() {
+  const isAr = clothesIsAr();
+  const all = getVisibleClothesShipments();
+  const filtered = getFilteredClothesShipments();
+
+  const fingerprint = JSON.stringify([_clothesShipmentSearch, _clothesShipmentStatusFilter]);
+  if (fingerprint !== _clothesShipmentsFilterFingerprint) {
+    _clothesShipmentsFilterFingerprint = fingerprint;
+    _clothesShipmentsShowLimit = CLOTHES_SHIPMENTS_PAGE_SIZE;
+  }
+  const shown = filtered.slice(0, _clothesShipmentsShowLimit);
+  const remaining = Math.max(0, filtered.length - shown.length);
+
+  // Stats: money still on the way vs already received
+  let inTransitCount = 0, inTransitUSD = 0, receivedCount = 0, receivedUSD = 0;
+  for (const s of all) {
+    const t = getClothesShipmentTotals(s);
+    if (s.status === 'Received') { receivedCount++; receivedUSD += t.totalUSD; }
+    else { inTransitCount++; inTransitUSD += t.totalUSD; }
+  }
+  inTransitUSD = Math.round(inTransitUSD * 100) / 100;
+  receivedUSD = Math.round(receivedUSD * 100) / 100;
+
+  const statCard = (icon, label, value, gradient) => `
+    <div class="glass-panel rounded-2xl p-4 flex items-center gap-3">
+      <div class="w-11 h-11 rounded-xl bg-gradient-to-br ${gradient} flex items-center justify-center shadow-lg shrink-0">
+        <i data-lucide="${icon}" class="w-5 h-5 text-white"></i>
+      </div>
+      <div class="min-w-0">
+        <div class="text-xs text-slate-500 dark:text-slate-400">${label}</div>
+        <div class="text-lg font-bold text-slate-800 dark:text-white truncate">${value}</div>
+      </div>
+    </div>
+  `;
+
+  return `
+    <div>
+      <div id="clothes-shipments-stats" class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        ${statCard('plane', isAr ? 'في الطريق' : 'On the way', String(inTransitCount), 'from-blue-500 to-cyan-500')}
+        ${statCard('banknote', isAr ? 'قيمة ما في الطريق' : 'Value on the way', clothesFmtUSD(inTransitUSD), 'from-amber-400 to-orange-500')}
+        ${statCard('package-check', isAr ? 'شحنات مستلمة' : 'Received shipments', String(receivedCount), 'from-emerald-500 to-green-500')}
+        ${statCard('boxes', isAr ? 'قيمة المستلم' : 'Received value', clothesFmtUSD(receivedUSD), 'from-rose-500 to-pink-500')}
+      </div>
+
+      <div class="flex flex-col sm:flex-row gap-3 mb-6">
+        <div class="relative flex-1">
+          <i data-lucide="search" class="w-4 h-4 absolute top-1/2 -translate-y-1/2 ${isAr ? 'right-4' : 'left-4'} text-slate-400"></i>
+          <input
+            type="text"
+            id="clothes-shipment-search"
+            value="${Security.escapeHtml(_clothesShipmentSearch)}"
+            oninput="onClothesShipmentSearchInput(this)"
+            placeholder="${isAr ? 'ابحث بالمرجع أو المورد أو المنتج...' : 'Search by reference, supplier or product...'}"
+            class="w-full glass-input ${isAr ? 'pr-11 pl-4' : 'pl-11 pr-4'} py-2.5 rounded-xl"
+          />
+        </div>
+        <select onchange="setClothesShipmentStatusFilter(this.value)" class="glass-input px-4 py-2.5 rounded-xl">
+          <option value="all" ${_clothesShipmentStatusFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All statuses'}</option>
+          ${CLOTHES_SHIPMENT_STATUSES.map(s => `<option value="${s.id}" ${_clothesShipmentStatusFilter === s.id ? 'selected' : ''}>${isAr ? s.labelAr : s.label}</option>`).join('')}
+        </select>
+        <button onclick="showClothesShipmentModal()" class="btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-5 py-2.5 rounded-xl font-bold shadow-lg hover:shadow-xl flex items-center justify-center gap-2">
+          <i data-lucide="plus" class="w-4 h-4"></i>
+          ${isAr ? 'إضافة شحنة' : 'Add Shipment'}
+        </button>
+      </div>
+
+      <div id="clothes-shipments-grid">
+        ${shown.length === 0 ? `
+          <div class="glass-panel rounded-2xl p-12 text-center">
+            <div class="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-rose-500 to-pink-500 flex items-center justify-center mb-4 shadow-xl opacity-80">
+              <i data-lucide="plane" class="w-8 h-8 text-white"></i>
+            </div>
+            <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-1">
+              ${all.length === 0 ? (isAr ? 'لا توجد شحنات بعد' : 'No shipments yet') : (isAr ? 'لا توجد نتائج' : 'No results')}
+            </h3>
+            <p class="text-sm text-slate-500 dark:text-slate-400">
+              ${all.length === 0
+                ? (isAr ? 'أضف شحنة عندما تشتري بضاعة من الخارج.' : 'Add a shipment when you buy goods from abroad.')
+                : (isAr ? 'جرّب بحثاً أو فلتراً آخر.' : 'Try a different search or filter.')}
+            </p>
+          </div>
+        ` : `
+          <div class="text-sm text-slate-500 dark:text-slate-400 mb-3">
+            ${isAr ? `عرض ${shown.length} من ${filtered.length} شحنة` : `Showing ${shown.length} of ${filtered.length} shipments`}
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            ${shown.map(s => renderClothesShipmentCard(s)).join('')}
+          </div>
+          ${remaining > 0 ? `
+            <div class="text-center mt-6">
+              <button onclick="loadMoreClothesShipments()" class="glass-panel px-6 py-2.5 rounded-xl font-medium text-slate-600 dark:text-slate-300 hover:text-rose-600">
+                ${isAr ? `عرض المزيد (${remaining} متبقي)` : `Load more (${remaining} remaining)`}
+              </button>
+            </div>
+          ` : ''}
+        `}
+      </div>
+    </div>
+  `;
+}
+
+function renderClothesShipmentCard(s) {
+  const isAr = clothesIsAr();
+  const meta = clothesShipmentStatusMeta(s.status);
+  const totals = getClothesShipmentTotals(s);
+  const lines = Array.isArray(s.lines) ? s.lines : [];
+  const isReceived = s.status === 'Received';
+
+  const lineSummary = lines.slice(0, 3).map(line => {
+    const bits = [clothesProductNameById(line.productId)];
+    const variant = [line.color, line.size].map(x => String(x || '').trim()).filter(Boolean).join('/');
+    if (variant) bits.push(variant);
+    return `${Security.escapeHtml(bits.join(' '))} ×${Math.max(0, Math.floor(Number(line.qty) || 0))}`;
+  }).join(isAr ? '، ' : ', ') + (lines.length > 3 ? (isAr ? ` +${lines.length - 3} أخرى` : ` +${lines.length - 3} more`) : '');
+
+  return `
+    <div class="glass-panel rounded-2xl p-5">
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0">
+          <h4 class="font-bold text-slate-800 dark:text-white truncate">
+            ${Security.escapeHtml(s.ref || (isAr ? 'شحنة' : 'Shipment'))}
+          </h4>
+          ${s.supplier ? `<p class="text-sm text-slate-500 dark:text-slate-400 truncate">${Security.escapeHtml(s.supplier)}</p>` : ''}
+        </div>
+        <span class="px-2.5 py-1 rounded-full text-xs font-bold whitespace-nowrap ${meta.badge}">
+          ${isAr ? meta.labelAr : meta.label}
+        </span>
+      </div>
+
+      <div class="mt-3 space-y-1.5 text-sm">
+        <div class="flex justify-between gap-2">
+          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'تاريخ الطلب' : 'Ordered'}</span>
+          <span class="font-medium text-slate-700 dark:text-slate-200">${Security.escapeHtml(s.orderedAt || '—')}</span>
+        </div>
+        <div class="flex justify-between gap-2">
+          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'القطع' : 'Pieces'}</span>
+          <span class="font-medium text-slate-700 dark:text-slate-200">${totals.pieces}</span>
+        </div>
+        <div class="flex justify-between gap-2">
+          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'البضاعة + الشحن' : 'Goods + shipping'}</span>
+          <span class="font-medium text-slate-700 dark:text-slate-200">${clothesFmtUSD(totals.goodsUSD)} + ${clothesFmtUSD(totals.shippingUSD)}</span>
+        </div>
+        <div class="flex justify-between gap-2">
+          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'الإجمالي' : 'Total'}</span>
+          <span class="font-bold text-rose-600 dark:text-rose-400">${clothesFmtUSD(totals.totalUSD)}</span>
+        </div>
+        ${s.receivedAt ? `
+        <div class="flex justify-between gap-2">
+          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'تاريخ الاستلام' : 'Received at'}</span>
+          <span class="font-medium text-emerald-600 dark:text-emerald-400">${Security.escapeHtml(String(s.receivedAt).split('T')[0])}</span>
+        </div>` : ''}
+      </div>
+
+      ${lines.length ? `<p class="mt-3 text-xs text-slate-500 dark:text-slate-400">${lineSummary}</p>` : ''}
+      ${s.note ? `<p class="mt-2 text-xs text-slate-400 dark:text-slate-500 line-clamp-2">${Security.escapeHtml(s.note)}</p>` : ''}
+
+      <div class="flex items-center gap-2 mt-4 pt-3 border-t border-slate-200 dark:border-slate-700">
+        <select onchange="setClothesShipmentStatus('${s.id}', this.value)" class="glass-input px-2 py-1.5 rounded-lg text-sm flex-1" title="${isAr ? 'تغيير الحالة' : 'Change status'}">
+          ${CLOTHES_SHIPMENT_STATUSES.map(st => `<option value="${st.id}" ${s.status === st.id ? 'selected' : ''}>${isAr ? st.labelAr : st.label}</option>`).join('')}
+        </select>
+        ${isReceived ? `
+          <span class="text-xs text-slate-400 dark:text-slate-500 px-2" title="${isAr ? 'أرجع الحالة أولاً للتعديل أو الحذف' : 'Move status back to edit or delete'}">
+            <i data-lucide="lock" class="w-4 h-4"></i>
+          </span>
+        ` : `
+          <button onclick="editClothesShipment('${s.id}')" class="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800" title="${isAr ? 'تعديل' : 'Edit'}">
+            <i data-lucide="pencil" class="w-4 h-4"></i>
+          </button>
+          <button onclick="deleteClothesShipment('${s.id}')" class="p-2 rounded-lg text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20" title="${isAr ? 'حذف' : 'Delete'}">
+            <i data-lucide="trash-2" class="w-4 h-4"></i>
+          </button>
+        `}
+      </div>
+    </div>
+  `;
+}
+
+// ------------------------------------------
+// SHIPMENT MODAL (add / edit)
+// ------------------------------------------
+
+let _clothesTempShipLines = [];
+
+function showClothesShipmentModal() {
+  if (!isCurrentUserAdmin()) return;
+  state.activeModal = 'clothes-shipment';
+  state.modalData = null;
+  _clothesTempShipLines = [{ productId: '', color: '', size: '', qty: 0, unitCostUSD: '' }];
+  renderModal();
+}
+
+function editClothesShipment(id) {
+  if (!isCurrentUserAdmin()) return;
+  const shipment = getVisibleClothesShipments().find(s => s.id === id);
+  if (!shipment) return;
+  if (shipment.status === 'Received') {
+    showNotification(
+      clothesIsAr() ? 'غير ممكن' : 'Not allowed',
+      clothesIsAr() ? 'لا يمكن تعديل شحنة مستلمة — أرجع حالتها أولاً.' : 'Cannot edit a Received shipment — move its status back first.',
+      'error'
+    );
+    return;
+  }
+  state.activeModal = 'clothes-shipment';
+  state.modalData = shipment;
+  const lines = Array.isArray(shipment.lines) ? shipment.lines : [];
+  _clothesTempShipLines = lines.length
+    ? lines.map(l => ({
+        productId: String(l?.productId || ''),
+        color: String(l?.color || ''),
+        size: String(l?.size || ''),
+        qty: Math.max(0, Math.floor(Number(l?.qty) || 0)),
+        unitCostUSD: String(l?.unitCostUSD ?? '')
+      }))
+    : [{ productId: '', color: '', size: '', qty: 0, unitCostUSD: '' }];
+  renderModal();
+}
+
+function renderClothesShipmentModal() {
+  const isAr = clothesIsAr();
+  const data = state.modalData || {};
+  const isEdit = state.modalData !== null;
+
+  return `
+    <h2 class="text-2xl font-bold mb-4 flex items-center gap-2">
+      <i data-lucide="plane" class="w-6 h-6 text-rose-500"></i>
+      ${isEdit ? (isAr ? 'تعديل شحنة' : 'Edit Shipment') : (isAr ? 'إضافة شحنة' : 'Add Shipment')}
+    </h2>
+    <form id="modal-form" class="space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar ${isAr ? 'pl-2' : 'pr-2'}">
+      <input type="hidden" id="clothes-shipment-editing-id" value="${Security.escapeHtml(String(isEdit ? (data.id || '') : ''))}" />
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium mb-2">${isAr ? 'مرجع الشحنة' : 'Reference'}</label>
+          <input type="text" id="clothes-shipment-ref" value="${Security.escapeHtml(data.ref || '')}" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isAr ? 'مثال: شحنة تركيا يوليو' : 'e.g. Turkey July batch'}" />
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-2">${isAr ? 'المورد / البلد' : 'Supplier / country'}</label>
+          <input type="text" id="clothes-shipment-supplier" value="${Security.escapeHtml(data.supplier || '')}" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isAr ? 'مثال: مورد إسطنبول' : 'e.g. Istanbul supplier'}" />
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium mb-2">${isAr ? 'تاريخ الطلب' : 'Order date'}</label>
+          <input type="date" id="clothes-shipment-date" value="${Security.escapeHtml(data.orderedAt || getTodayDateString())}" class="w-full glass-input px-4 py-2 rounded-xl" />
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-2">${isAr ? 'تكلفة الشحن (دولار)' : 'Shipping cost (USD)'}</label>
+          <input type="text" inputmode="decimal" id="clothes-shipment-shipping" value="${Security.escapeHtml(String(data.shippingCostUSD ?? ''))}" oninput="sanitizeMoneyInput(this)" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="0.00" />
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium mb-2">${isAr ? 'محتويات الشحنة *' : 'Shipment contents *'}</label>
+        <div id="clothes-ship-lines" class="space-y-2"></div>
+        <button type="button" onclick="addClothesShipLine()" class="mt-2 flex items-center gap-1.5 text-sm font-medium text-rose-600 hover:text-rose-700">
+          <i data-lucide="plus" class="w-4 h-4"></i>${isAr ? 'إضافة صنف' : 'Add item'}
+        </button>
+        <p class="mt-1 text-xs text-slate-400 dark:text-slate-500">
+          ${isAr ? 'أضف المنتج أولاً في تبويب البضاعة إن لم يكن موجوداً.' : 'If a product is missing, add it first in the Products tab.'}
+        </p>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium mb-2">${isAr ? 'ملاحظة' : 'Note'}</label>
+        <textarea id="clothes-shipment-note" rows="2" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isAr ? 'اختياري' : 'Optional'}">${Security.escapeHtml(data.note || '')}</textarea>
+      </div>
+
+      <div class="flex gap-3 pt-2">
+        <button type="submit" class="flex-1 btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-6 py-3 rounded-xl font-bold shadow-lg">
+          ${isEdit ? (isAr ? 'حفظ التعديلات' : 'Save Changes') : (isAr ? 'إضافة الشحنة' : 'Add Shipment')}
+        </button>
+        <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600">
+          ${isAr ? 'إلغاء' : 'Cancel'}
+        </button>
+      </div>
+    </form>
+  `;
+}
+
+function refreshClothesShipLines() {
+  const isAr = clothesIsAr();
+  const wrap = document.getElementById('clothes-ship-lines');
+  if (!wrap) return;
+  const products = getVisibleClothesProducts();
+  wrap.innerHTML = _clothesTempShipLines.map((line, idx) => `
+    <div class="flex flex-wrap items-center gap-2">
+      <select oninput="onClothesShipLineField(${idx}, 'productId', this.value)" class="flex-1 min-w-[140px] glass-input px-3 py-2 rounded-xl text-sm">
+        <option value="">${isAr ? '— اختر المنتج —' : '— choose product —'}</option>
+        ${products.map(p => `<option value="${p.id}" ${line.productId === p.id ? 'selected' : ''}>${Security.escapeHtml(p.name || '')}</option>`).join('')}
+      </select>
+      <input type="text" value="${Security.escapeHtml(String(line.color || ''))}" oninput="onClothesShipLineField(${idx}, 'color', this.value)" placeholder="${isAr ? 'اللون' : 'Color'}" class="w-24 glass-input px-3 py-2 rounded-xl text-sm" />
+      <input type="text" value="${Security.escapeHtml(String(line.size || ''))}" oninput="onClothesShipLineField(${idx}, 'size', this.value)" placeholder="${isAr ? 'المقاس' : 'Size'}" class="w-20 glass-input px-3 py-2 rounded-xl text-sm" />
+      <input type="number" min="0" step="1" value="${Math.max(0, Math.floor(Number(line.qty) || 0))}" oninput="onClothesShipLineField(${idx}, 'qty', this.value)" placeholder="${isAr ? 'كمية' : 'Qty'}" class="w-20 glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'الكمية' : 'Quantity'}" />
+      <input type="text" inputmode="decimal" value="${Security.escapeHtml(String(line.unitCostUSD ?? ''))}" oninput="sanitizeMoneyInput(this); onClothesShipLineField(${idx}, 'unitCostUSD', this.value)" placeholder="$/1" class="w-20 glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'تكلفة القطعة بالدولار' : 'Unit cost USD'}" />
+      <button type="button" onclick="removeClothesShipLine(${idx})" class="w-8 h-8 rounded-lg flex items-center justify-center text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 shrink-0" title="${isAr ? 'إزالة' : 'Remove'}">
+        <i data-lucide="x" class="w-4 h-4"></i>
+      </button>
+    </div>
+  `).join('');
+  if (typeof IconQueue !== 'undefined') IconQueue.schedule(wrap);
+}
+
+function onClothesShipLineField(idx, field, value) {
+  const line = _clothesTempShipLines[idx];
+  if (!line) return;
+  if (field === 'qty') {
+    line.qty = Math.max(0, Math.floor(Number(value) || 0));
+  } else if (field === 'unitCostUSD') {
+    line.unitCostUSD = String(value || '');
+  } else if (field === 'productId') {
+    line.productId = String(value || '');
+    // Convenience: prefill unit cost from the product's cost price when empty
+    if (!String(line.unitCostUSD || '').trim()) {
+      const p = getVisibleClothesProducts().find(x => x.id === line.productId);
+      if (p && Number(p.costUSD) > 0) {
+        line.unitCostUSD = String(p.costUSD);
+        refreshClothesShipLines();
+      }
+    }
+  } else if (field === 'color' || field === 'size') {
+    line[field] = Security.sanitizeInput(String(value || ''), { maxLength: 60 });
+  }
+}
+
+function addClothesShipLine() {
+  _clothesTempShipLines.push({ productId: '', color: '', size: '', qty: 0, unitCostUSD: '' });
+  refreshClothesShipLines();
+}
+
+function removeClothesShipLine(idx) {
+  _clothesTempShipLines.splice(idx, 1);
+  if (_clothesTempShipLines.length === 0) _clothesTempShipLines.push({ productId: '', color: '', size: '', qty: 0, unitCostUSD: '' });
+  refreshClothesShipLines();
+}
+
+// Called by handleModalSubmit for state.activeModal === 'clothes-shipment'.
+async function saveClothesShipmentFromModal() {
+  if (!isCurrentUserAdmin()) return false;
+  const isAr = clothesIsAr();
+
+  const ref = Security.sanitizeInput(String(document.getElementById('clothes-shipment-ref')?.value || ''), { maxLength: 120 }).trim();
+  const supplier = Security.sanitizeInput(String(document.getElementById('clothes-shipment-supplier')?.value || ''), { maxLength: 120 }).trim();
+  const orderedAt = String(document.getElementById('clothes-shipment-date')?.value || '').trim();
+  const shippingCostUSD = clothesParseMoney(document.getElementById('clothes-shipment-shipping')?.value);
+  const note = Security.sanitizeInput(String(document.getElementById('clothes-shipment-note')?.value || ''), { maxLength: 500 }).trim();
+
+  // Valid lines: a chosen product and a positive quantity
+  const lines = [];
+  for (const l of _clothesTempShipLines) {
+    const productId = String(l?.productId || '').trim();
+    const qty = Math.max(0, Math.floor(Number(l?.qty) || 0));
+    if (!productId || qty === 0) continue;
+    lines.push({
+      productId,
+      color: String(l?.color || '').trim(),
+      size: String(l?.size || '').trim(),
+      qty,
+      unitCostUSD: clothesParseMoney(l?.unitCostUSD)
+    });
+  }
+  if (lines.length === 0) {
+    showNotification(
+      isAr ? 'تنبيه' : 'Validation',
+      isAr ? 'أضف صنفاً واحداً على الأقل (منتج + كمية).' : 'Add at least one item (product + quantity).',
+      'error'
+    );
+    return false;
+  }
+
+  const editingId = String(document.getElementById('clothes-shipment-editing-id')?.value || '').trim();
+  const editTarget = editingId ? getVisibleClothesShipments().find(s => s.id === editingId) : null;
+  if (editTarget && editTarget.status === 'Received') {
+    showNotification(isAr ? 'غير ممكن' : 'Not allowed', isAr ? 'لا يمكن تعديل شحنة مستلمة.' : 'Cannot edit a Received shipment.', 'error');
+    return false;
+  }
+
+  const payload = { ref, supplier, orderedAt, shippingCostUSD, note, lines };
+
+  if (editTarget) {
+    updateRecord(state.clothesShipments, editTarget.id, payload);
+    showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? 'تم تحديث الشحنة.' : 'Shipment updated.', 'success');
+  } else {
+    addRecord(state.clothesShipments, {
+      ...payload,
+      status: 'Ordered',
+      stockApplied: false,
+      receivedAt: null,
+      createdAt: new Date().toISOString()
+    });
+    showNotification(isAr ? 'تمت الإضافة' : 'Added', isAr ? 'تمت إضافة الشحنة.' : 'Shipment added.', 'success');
   }
   return true;
 }
