@@ -2782,19 +2782,12 @@ function updateAdUnpaidTotals() {
 // returned to the funding receipts) — status changes go through the Actions
 // buttons, which run the correct flows.
 
-function updateAdDeliveryStatus(adId, deliveryStatus) {
-  // Permission check
-  if (!currentUserHasPermission('deliveries', 'assign') && !currentUserHasPermission('ads', 'edit')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتغيير حالة التوصيل' : 'You do not have permission to change delivery status', 'error');
-    return;
-  }
-  const ad = state.ads.find(a => a.id === adId);
-  if (!ad) return;
-  updateRecord(state.ads, adId, { deliveryStatus: deliveryStatus });
-  addLog('delivery_status_change', 'ad', adId, `Changed delivery status to: ${deliveryStatus}`);
-  showNotification('Updated', `Delivery status changed to ${deliveryStatus}`, 'success');
-  render();
-}
+// NOTE: updateAdDeliveryStatus was removed (user request, same as the status
+// dropdown): the ads-table Delivery column is now a read-only badge. Like the
+// status dropdown, it wrote deliveryStatus directly with no transition
+// validation (e.g. could jump straight to Delivered, or reopen a terminal
+// state). Delivery changes go through the Deliveries page / delivery
+// dashboard flows, which run the proper checks.
 
 // Receipt photos helpers
 function uploadReceiptPhotos(fileList) {

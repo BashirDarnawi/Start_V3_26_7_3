@@ -9557,16 +9557,13 @@ function renderAdsView() {
                       ` : ''}
                     </td>
                     <td class="py-3 px-2" data-label="Delivery">
-                      ${isLinkedToDeliveryReceipt ? `
-                        <div class="px-2 py-1 rounded-lg text-xs delivery-${effectiveDeliveryStatus.toLowerCase().replace(' ', '')} bg-slate-100 dark:bg-slate-700">
-                          ${effectiveDeliveryStatus}
-                          <div class="text-[10px] text-slate-400 mt-0.5">via Receipt</div>
-                        </div>
-                      ` : `
-                        <select class="glass-input px-2 py-1 rounded-lg text-xs w-full md:w-auto delivery-${effectiveDeliveryStatus.toLowerCase().replace(' ', '')}" onchange="updateAdDeliveryStatus('${ad.id}', this.value)">
-                          ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${effectiveDeliveryStatus === s ? 'selected' : ''}>${s}</option>`).join('')}
-                        </select>
-                      `}
+                      <!-- Read-only (user request, same as Status): delivery
+                           changes happen via the Deliveries page / delivery
+                           dashboard flows, not inline in this table. -->
+                      <div class="inline-block px-2 py-1 rounded-lg text-xs delivery-${effectiveDeliveryStatus.toLowerCase().replace(' ', '')} bg-slate-100 dark:bg-slate-700">
+                        ${effectiveDeliveryStatus}
+                        ${isLinkedToDeliveryReceipt ? '<div class="text-[10px] text-slate-400 mt-0.5">via Receipt</div>' : ''}
+                      </div>
                       ${deliveryPerson ? `<div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(deliveryPerson.name || '')}</div>` : ''}
                     </td>
                     <td class="py-3 px-2" data-label="Serial">
@@ -16717,19 +16714,12 @@ function updateAdUnpaidTotals() {
 // returned to the funding receipts) — status changes go through the Actions
 // buttons, which run the correct flows.
 
-function updateAdDeliveryStatus(adId, deliveryStatus) {
-  // Permission check
-  if (!currentUserHasPermission('deliveries', 'assign') && !currentUserHasPermission('ads', 'edit')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتغيير حالة التوصيل' : 'You do not have permission to change delivery status', 'error');
-    return;
-  }
-  const ad = state.ads.find(a => a.id === adId);
-  if (!ad) return;
-  updateRecord(state.ads, adId, { deliveryStatus: deliveryStatus });
-  addLog('delivery_status_change', 'ad', adId, `Changed delivery status to: ${deliveryStatus}`);
-  showNotification('Updated', `Delivery status changed to ${deliveryStatus}`, 'success');
-  render();
-}
+// NOTE: updateAdDeliveryStatus was removed (user request, same as the status
+// dropdown): the ads-table Delivery column is now a read-only badge. Like the
+// status dropdown, it wrote deliveryStatus directly with no transition
+// validation (e.g. could jump straight to Delivered, or reopen a terminal
+// state). Delivery changes go through the Deliveries page / delivery
+// dashboard flows, which run the proper checks.
 
 // Receipt photos helpers
 function uploadReceiptPhotos(fileList) {

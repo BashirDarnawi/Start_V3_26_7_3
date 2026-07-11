@@ -2497,16 +2497,13 @@ function renderAdsView() {
                       ` : ''}
                     </td>
                     <td class="py-3 px-2" data-label="Delivery">
-                      ${isLinkedToDeliveryReceipt ? `
-                        <div class="px-2 py-1 rounded-lg text-xs delivery-${effectiveDeliveryStatus.toLowerCase().replace(' ', '')} bg-slate-100 dark:bg-slate-700">
-                          ${effectiveDeliveryStatus}
-                          <div class="text-[10px] text-slate-400 mt-0.5">via Receipt</div>
-                        </div>
-                      ` : `
-                        <select class="glass-input px-2 py-1 rounded-lg text-xs w-full md:w-auto delivery-${effectiveDeliveryStatus.toLowerCase().replace(' ', '')}" onchange="updateAdDeliveryStatus('${ad.id}', this.value)">
-                          ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${effectiveDeliveryStatus === s ? 'selected' : ''}>${s}</option>`).join('')}
-                        </select>
-                      `}
+                      <!-- Read-only (user request, same as Status): delivery
+                           changes happen via the Deliveries page / delivery
+                           dashboard flows, not inline in this table. -->
+                      <div class="inline-block px-2 py-1 rounded-lg text-xs delivery-${effectiveDeliveryStatus.toLowerCase().replace(' ', '')} bg-slate-100 dark:bg-slate-700">
+                        ${effectiveDeliveryStatus}
+                        ${isLinkedToDeliveryReceipt ? '<div class="text-[10px] text-slate-400 mt-0.5">via Receipt</div>' : ''}
+                      </div>
                       ${deliveryPerson ? `<div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(deliveryPerson.name || '')}</div>` : ''}
                     </td>
                     <td class="py-3 px-2" data-label="Serial">
