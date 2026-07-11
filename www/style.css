@@ -50,20 +50,23 @@ html.is-rendering {
   animation: none !important;
 }
 
-/* Prevent white flash during navigation */
+/* Prevent white flash during navigation.
+   NOTE: `contain: layout` was removed from main/content/panels/grids below.
+   Layout containment silently turns an element into its own stacking context
+   and into the containing block for absolutely-positioned descendants — it
+   TRAPPED dropdowns' z-index inside their section, so e.g. the receipt
+   phone-search suggestions rendered UNDER the receipt-number field and status
+   buttons that come later in the form. The min-height/position rules below do
+   the actual anti-jump work and are kept. */
 main, .main-content {
   background: inherit;
   min-height: 100vh;
-  /* Prevent layout shift */
-  contain: layout style;
   /* Stable positioning */
   position: relative;
 }
 
 /* Content area should maintain stable dimensions */
 .p-4.md\:p-8 {
-  /* Prevent content area from causing jumps */
-  contain: layout style;
   /* Minimum height to prevent collapse */
   min-height: calc(100vh - 80px);
 }
@@ -80,16 +83,8 @@ nav, aside, .sidebar {
 
 /* Prevent all layout shifts during sync */
 .glass-panel, .rounded-2xl, .rounded-xl {
-  /* Contain layout to prevent shifts */
-  contain: layout style;
   /* Prevent size changes from affecting parent */
   box-sizing: border-box;
-}
-
-/* Grids should maintain stable layouts */
-.grid {
-  /* Prevent grid from causing reflows */
-  contain: layout;
 }
 
 /* Buttons and interactive elements shouldn't cause reflow */
@@ -372,10 +367,8 @@ body.is-scrolling .btn-shine:hover {
    paginated now (Load more, 50 per page), so the trick's benefit is gone —
    removed entirely. */
 
-/* Sidebar isolation - don't repaint when main content changes */
-aside, nav {
-  contain: layout style paint;
-}
+/* (duplicate aside/nav containment removed — the rule near the top of this
+   file already isolates the sidebar) */
 
 /* Modal backdrop - isolate from main page repaints */
 .fixed.inset-0 {
@@ -1555,7 +1548,14 @@ textarea:disabled {
   .glass-panel,
   .glass-panel-sm {
     max-width: 100%;
-    overflow: hidden;
+    /* Clip only the HORIZONTAL axis. Plain `overflow: hidden` clipped BOTH
+       axes, so on narrow screens (and in the iOS/Android apps, which are always
+       phone-width) modal panels clipped their own dropdowns — the receipt
+       phone-search / page customer-search suggestions were cut off at the panel
+       edge. `overflow-x: clip` leaves overflow-y visible so dropdowns can
+       extend past the panel, while the body's overflow-x:hidden still prevents
+       any page-level horizontal scroll. */
+    overflow-x: clip;
   }
 
   /* Prevent horizontal scroll from content */
