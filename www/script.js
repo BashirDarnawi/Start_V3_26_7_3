@@ -9640,7 +9640,26 @@ function renderAdsView() {
                       ${serialDisplay ? `<span class="font-mono text-xs">${Security.escapeHtml(serialDisplay)}</span>` : '-'}
                       ${ad.editCount ? `<button onclick="showAdEditHistory('${ad.id}')" class="block mt-1 text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium">${ad.editCount} edit${ad.editCount > 1 ? 's' : ''}</button>` : ''}
                     </td>
-                    <td class="py-3 px-2 text-xs text-slate-500" data-label="Date">${new Date(ad.startDate).toLocaleDateString()}</td>
+                    <td class="py-3 px-2 text-xs" data-label="Date">
+                      <div class="text-slate-500">${(() => { const d = new Date(ad.startDate); return isNaN(d) ? '-' : d.toLocaleDateString(); })()}</div>
+                      ${(() => {
+                        // End date (+extra time) and, when topped up, the date
+                        // of the latest top-up — visible without opening the ad.
+                        const e = new Date(ad.endDate);
+                        const endLine = !isNaN(e) && ad.endDate
+                          ? `<div class="text-slate-700 dark:text-slate-300 font-medium">End: ${e.toLocaleDateString()}${(parseFloat(ad.extraTimeMinutes) || 0) > 0 ? ` <span class="text-amber-600">+${ad.extraTimeMinutes}m</span>` : ''}</div>`
+                          : '';
+                        const ups = Array.isArray(ad.topUps) ? ad.topUps : [];
+                        let upLine = '';
+                        if (ups.length) {
+                          const lastDate = ups.map(t => t && t.date).filter(Boolean).sort().slice(-1)[0];
+                          const ld = lastDate ? new Date(lastDate) : null;
+                          const when = ld && !isNaN(ld) ? `: ${ld.toLocaleDateString()}` : '';
+                          upLine = `<div class="text-emerald-600 dark:text-emerald-400 font-medium" title="${ups.length} top-up(s), total $${ups.reduce((s, t) => s + (parseFloat(t && t.amount) || 0), 0).toFixed(2)}">&#8593; Topped up${when}</div>`;
+                        }
+                        return endLine + upLine;
+                      })()}
+                    </td>
                     <td class="py-3 px-2" data-label="Actions">
                       <div class="flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
                         <button onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="Top-ups">
