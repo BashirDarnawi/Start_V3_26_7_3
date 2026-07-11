@@ -19922,6 +19922,34 @@ async function handleModalSubmit() {
         return;
       }
 
+      // Duplicate-name guard (user request): a page whose name matches an
+      // existing page (case-insensitive, ignoring the page being edited) is
+      // BLOCKED for non-admins; an Admin gets an explicit approve-anyway
+      // confirmation. Prevents accidental duplicates like two "albayan" pages.
+      const editingPageId = isEdit ? String(state.modalData?.id || '') : '';
+      const duplicatePage = (state.pages || []).find(p =>
+        p && !p._deleted &&
+        String(p.id) !== editingPageId &&
+        String(p.name || '').trim().toLowerCase() === pageName.toLowerCase()
+      );
+      if (duplicatePage) {
+        if (isCurrentUserAdmin()) {
+          const approveMsg = isArPage
+            ? `توجد صفحة أخرى بنفس الاسم "${pageName}".\n\nهل توافق (كأدمن) على استخدام نفس الاسم لصفحة أخرى؟`
+            : `Another page named "${pageName}" already exists.\n\nDo you (as Admin) approve using the same name for another page?`;
+          if (!confirm(approveMsg)) return;
+        } else {
+          showNotification(
+            isArPage ? 'اسم مكرر' : 'Duplicate Name',
+            isArPage
+              ? `توجد صفحة بنفس الاسم "${pageName}" بالفعل. استخدام نفس الاسم يتطلب موافقة الأدمن.`
+              : `A page named "${pageName}" already exists. Using the same name requires Admin approval.`,
+            'error'
+          );
+          return;
+        }
+      }
+
       // Get selected customer IDs
       const selectedCustomers = Array.from(document.querySelectorAll('.page-customer-item'))
         .map(item => item.getAttribute('data-customer-id'));
