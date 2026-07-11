@@ -168,24 +168,17 @@ document.addEventListener('visibilitychange', () => {
 // and backdrop-filter blur(14px) on every glass panel. On an old laptop or a
 // cheap phone that turns every scroll and repaint into a slideshow.
 // body.perf-lite (style.css) keeps ALL features and the same layout but turns
-// those decorations off. Preference is per-device (localStorage), with
-// auto-detection for weak hardware when the user hasn't chosen.
-
-function isWeakDevice() {
-  try {
-    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return true;
-    const mem = navigator.deviceMemory;         // Chrome/WebView only, capped at 8
-    const cores = navigator.hardwareConcurrency;
-    if (typeof mem === 'number' && mem <= 4) return true;
-    if (typeof cores === 'number' && cores <= 2) return true;
-  } catch (_) {}
-  return false;
-}
+// those decorations off. Preference is per-device (localStorage); lite is the
+// DEFAULT — only an explicit 'full' choice in Settings enables the effects.
 
 function isPerformanceModeOn() {
   let pref = null;
   try { pref = localStorage.getItem('albayan_perf_mode'); } catch (_) {}
-  return pref === 'lite' || (pref !== 'full' && isWeakDevice());
+  // Performance mode is the DEFAULT (user request): every device starts in
+  // lite mode; only an explicit 'full' choice in Settings restores the heavy
+  // glass/aurora effects. (Previously lite was only auto-enabled on weak
+  // hardware via a deviceMemory/cores heuristic.)
+  return pref !== 'full';
 }
 
 function applyPerformanceMode() {
@@ -11785,8 +11778,8 @@ function renderSettingsView() {
             </div>
             <div class="text-xs text-slate-500 mt-1">
               ${state.language === 'ar'
-                ? 'يوقف تأثيرات الزجاج والخلفية المتحركة لجعل التطبيق أخف وأسرع. جميع الميزات تبقى كما هي. يُفعَّل تلقائياً على الأجهزة الضعيفة.'
-                : 'Turns off the glass-blur effects and animated background so the app runs lighter and faster. All features stay the same. Enabled automatically on weak devices.'}
+                ? 'يوقف تأثيرات الزجاج والخلفية المتحركة لجعل التطبيق أخف وأسرع. جميع الميزات تبقى كما هي. مفعّل افتراضياً — أطفئه لاستعادة التأثيرات المرئية الكاملة.'
+                : 'Turns off the glass-blur effects and animated background so the app runs lighter and faster. All features stay the same. On by default — turn it off to bring back the full visual effects.'}
             </div>
           </div>
           <input type="checkbox" ${isPerformanceModeOn() ? 'checked' : ''} onchange="togglePerformanceMode(this.checked)" class="w-5 h-5 accent-indigo-600 flex-shrink-0" />

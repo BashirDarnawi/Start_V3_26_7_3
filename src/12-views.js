@@ -4725,8 +4725,8 @@ function renderSettingsView() {
             </div>
             <div class="text-xs text-slate-500 mt-1">
               ${state.language === 'ar'
-                ? 'يوقف تأثيرات الزجاج والخلفية المتحركة لجعل التطبيق أخف وأسرع. جميع الميزات تبقى كما هي. يُفعَّل تلقائياً على الأجهزة الضعيفة.'
-                : 'Turns off the glass-blur effects and animated background so the app runs lighter and faster. All features stay the same. Enabled automatically on weak devices.'}
+                ? 'يوقف تأثيرات الزجاج والخلفية المتحركة لجعل التطبيق أخف وأسرع. جميع الميزات تبقى كما هي. مفعّل افتراضياً — أطفئه لاستعادة التأثيرات المرئية الكاملة.'
+                : 'Turns off the glass-blur effects and animated background so the app runs lighter and faster. All features stay the same. On by default — turn it off to bring back the full visual effects.'}
             </div>
           </div>
           <input type="checkbox" ${isPerformanceModeOn() ? 'checked' : ''} onchange="togglePerformanceMode(this.checked)" class="w-5 h-5 accent-indigo-600 flex-shrink-0" />
