@@ -1789,6 +1789,27 @@ function initAdFunding(adData = {}) {
   };
 }
 
+// When EDITING an ad, getReceiptUsageStats counts the ad's own saved
+// allocation as "used" on its receipts. Every edit-form display must add that
+// share back, otherwise the form double-counts the ad against itself — e.g. a
+// $50 ad on a $200 receipt showed Balance $100 instead of $150, as if a brand
+// new ad were being created next to the old one. (The save-time validation
+// already does this add-back; this is the display-side counterpart.)
+// kind: 'receipt' (paid funding rows) | 'merged' (merged paid-funds rows).
+function getEditingAdExistingAllocationUSD(receiptId, kind = 'receipt') {
+  if (!state.modalData?.id) return 0;
+  const existingAd = state.ads.find(a => a.id === state.modalData.id);
+  if (!existingAd) return 0;
+  const src = kind === 'merged'
+    ? (existingAd.mergedPaidAllocations || existingAd.receiptAllocations)
+    : existingAd.receiptAllocations;
+  if (!Array.isArray(src)) return 0;
+  const rid = String(receiptId || '');
+  const total = src.filter(a => a && String(a.receiptId) === rid)
+    .reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0);
+  return Math.round(total * 100) / 100;
+}
+
 function handleAdCustomerChange(customerId, preserveFunding = false) {
   // Reset page and funding when customer changes
   const pageSelect = document.getElementById('ad-page');
@@ -2354,15 +2375,17 @@ function renderAdMergedFundingList() {
     );
     const optionsHtml = receipts.filter(r => !usedElsewhere.has(r.id)).map(r => {
       const usage = getReceiptUsageStats(r);
+      const avail = Math.round(((usage.remainingUSD || 0) + getEditingAdExistingAllocationUSD(r.id, 'merged')) * 100) / 100;
       const serial = r.serialNumber || r.finalReceiptNo || (r.id ? String(r.id).slice(0,6) : '???');
-      const label = `#${serial} • $${(usage.remainingUSD || 0).toFixed(2)} avail`;
+      const label = `#${serial} • $${avail.toFixed(2)} avail`;
       return `<option value="${r.id || ''}" ${alloc.receiptId === r.id ? 'selected' : ''}>${Security.escapeHtml(label)}</option>`;
     }).join('');
-    
+
     let receiptRemaining = 0;
     if (receipt) {
       const usage = getReceiptUsageStats(receipt);
       receiptRemaining = Number(usage?.remainingUSD) || 0;
+      receiptRemaining = Math.round((receiptRemaining + getEditingAdExistingAllocationUSD(receipt.id, 'merged')) * 100) / 100;
     }
 
     const plannedSpend = parseFloat(alloc.amountUSD) || 0;
@@ -2982,7 +3005,7 @@ function refreshAdFundingRow(idx) {
   if (!remainingEl && !balanceEl && !rateEl) return;
 
   const usage = getReceiptUsageStats(receipt);
-  const receiptRemaining = usage?.remainingUSD ?? 0;
+  const receiptRemaining = Math.round(((usage?.remainingUSD ?? 0) + getEditingAdExistingAllocationUSD(receipt.id)) * 100) / 100;
   const plannedSpend = parseFloat(allocation.amountUSD) || 0;
   const balance = Math.max(receiptRemaining - plannedSpend, 0);
   const receiptRate = receipt?.exchangeRate || state.defaultExchangeRate || '-';
@@ -3071,12 +3094,14 @@ function renderAdFundingList() {
     }).join('');
     
     const receiptRate = receipt?.exchangeRate || state.defaultExchangeRate || '-';
-    
-    // Calculate remaining balance BEFORE any planned spend (full receipt remaining)
+
+    // Calculate remaining balance BEFORE any planned spend (full receipt
+    // remaining + this ad's own saved share when editing).
     let receiptRemaining = 0;
     if (receipt) {
       const usage = getReceiptUsageStats(receipt);
       receiptRemaining = Number(usage?.remainingUSD) || 0;
+      receiptRemaining = Math.round((receiptRemaining + getEditingAdExistingAllocationUSD(receipt.id)) * 100) / 100;
     }
 
     // Calculate balance = Remaining - Planned Spend
@@ -3132,20 +3157,22 @@ function refreshAdFundingSummary() {
     return;
   }
   
-  // Calculate total balance (sum of all balances: Remaining - Planned Spend per allocation)
+  // Calculate total balance (sum of all balances: Remaining - Planned Spend
+  // per allocation, with this ad's own saved share added back when editing)
   let totalBalance = 0;
   allocations.forEach(a => {
     if (a.receiptId) {
       const receipt = state.receipts.find(r => r.id === a.receiptId);
       if (receipt) {
         const usage = getReceiptUsageStats(receipt);
-        const receiptRemaining = usage.remainingUSD;
+        const receiptRemaining = (usage.remainingUSD || 0) + getEditingAdExistingAllocationUSD(receipt.id);
         const plannedSpend = parseFloat(a.amountUSD) || 0;
         const balance = Math.max(receiptRemaining - plannedSpend, 0);
         totalBalance += balance;
       }
     }
   });
+  totalBalance = Math.round(totalBalance * 100) / 100;
   
   summary.innerHTML = `
     <div class="flex items-center justify-between py-1.5">
