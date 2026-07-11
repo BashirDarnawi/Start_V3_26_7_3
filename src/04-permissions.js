@@ -162,6 +162,64 @@ const PERMISSION_MODULES = {
       backup: { label: 'Backup Logs', description: 'Backup audit logs' },
       clear: { label: 'Clear Logs', description: 'Clear audit logs' }
     }
+  },
+  // Clothes System (module keys MUST equal the collection names — the server
+  // maps collection → permission module by name)
+  clothesProducts: {
+    name: 'Clothes — Products',
+    icon: 'shirt',
+    color: 'rose',
+    description: 'Clothes System: products & stock',
+    permissions: {
+      view: { label: 'View All Products', description: 'View every user\'s products (platform staff)' },
+      viewOwn: { label: 'View Own Products', description: 'View only self-created products (subscriber)' },
+      add: { label: 'Add Products', description: 'Create new products' },
+      edit: { label: 'Edit All Products', description: 'Edit any product' },
+      editOwn: { label: 'Edit Own Products', description: 'Edit only self-created products' },
+      delete: { label: 'Delete All Products', description: 'Delete any product' },
+      deleteOwn: { label: 'Delete Own Products', description: 'Delete only self-created products' }
+    }
+  },
+  clothesShipments: {
+    name: 'Clothes — Shipments',
+    icon: 'plane',
+    color: 'rose',
+    description: 'Clothes System: incoming shipments',
+    permissions: {
+      view: { label: 'View All Shipments', description: 'View every user\'s shipments (platform staff)' },
+      viewOwn: { label: 'View Own Shipments', description: 'View only self-created shipments (subscriber)' },
+      add: { label: 'Add Shipments', description: 'Create new shipments' },
+      edit: { label: 'Edit All Shipments', description: 'Edit any shipment' },
+      editOwn: { label: 'Edit Own Shipments', description: 'Edit only self-created shipments' },
+      delete: { label: 'Delete All Shipments', description: 'Delete any shipment' },
+      deleteOwn: { label: 'Delete Own Shipments', description: 'Delete only self-created shipments' }
+    }
+  },
+  clothesOrders: {
+    name: 'Clothes — Orders',
+    icon: 'shopping-bag',
+    color: 'rose',
+    description: 'Clothes System: customer orders',
+    permissions: {
+      view: { label: 'View All Orders', description: 'View every user\'s orders (platform staff)' },
+      viewOwn: { label: 'View Own Orders', description: 'View only self-created orders (subscriber)' },
+      add: { label: 'Add Orders', description: 'Create new orders' },
+      edit: { label: 'Edit All Orders', description: 'Edit any order' },
+      editOwn: { label: 'Edit Own Orders', description: 'Edit only self-created orders' },
+      delete: { label: 'Delete All Orders', description: 'Delete any order' },
+      deleteOwn: { label: 'Delete Own Orders', description: 'Delete only self-created orders' }
+    }
+  },
+  clothesSettings: {
+    name: 'Clothes — Settings',
+    icon: 'settings',
+    color: 'rose',
+    description: 'Clothes System: personal settings (exchange rate)',
+    permissions: {
+      viewOwn: { label: 'View Own Settings', description: 'View own clothes settings' },
+      add: { label: 'Create Settings', description: 'Create own settings record' },
+      editOwn: { label: 'Edit Own Settings', description: 'Edit own clothes settings' }
+    }
   }
 };
 
@@ -246,6 +304,18 @@ const PERMISSION_TEMPLATES = {
       pages: ['view'],
       deliveries: ['view'],
       auditLogs: ['viewOwn']
+    }
+  },
+  clothesSubscriber: {
+    name: 'Clothes Subscriber',
+    description: 'Runs their own clothes business — sees only their own data',
+    icon: 'shirt',
+    color: 'rose',
+    permissions: {
+      clothesProducts: ['viewOwn', 'add', 'editOwn', 'deleteOwn'],
+      clothesShipments: ['viewOwn', 'add', 'editOwn', 'deleteOwn'],
+      clothesOrders: ['viewOwn', 'add', 'editOwn', 'deleteOwn'],
+      clothesSettings: ['viewOwn', 'add', 'editOwn']
     }
   }
 };
@@ -344,7 +414,8 @@ function hasSubscription(serviceId) {
 }
 
 function getServiceSubscriptionOffer(serviceId) {
-  const svc = SERVICES[serviceId];
+  // Child systems (e.g. clothes_system) can carry their own offer too
+  const svc = SERVICES[serviceId] || SMART_SYSTEMS_CHILDREN[serviceId];
   const offer = svc && typeof svc === 'object' ? svc.subscription : null;
   const currency = walletNormalizeCurrency(offer?.currency || WALLET.currency);
   const priceMinor = Number.isFinite(Number(offer?.priceMinor))

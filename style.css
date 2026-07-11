@@ -1042,6 +1042,26 @@ table tbody tr:hover {
   body.print-single {
     zoom: 1; /* one card doesn't need the 0.8 shrink */
   }
+  /* Clothes order slip: parked off-screen while on screen, brought into the
+     page only for print (printClothesOrderSlip). Declared after the generic
+     .print-target rules so its left/top win. */
+  body.print-single .clothes-print-slip {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+}
+
+/* Clothes order slip lives in the DOM only during printing; keep it invisible
+   and out of the layout on screen. */
+.clothes-print-slip {
+  position: fixed;
+  left: -10000px;
+  top: 0;
+  width: 190mm;
+  background: #ffffff;
+  color: #0f172a;
 }
 
 /* Cloud Sync Indicator */

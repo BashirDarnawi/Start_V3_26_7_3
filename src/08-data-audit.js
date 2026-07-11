@@ -468,7 +468,7 @@ function isCurrentUserAdmin() {
 }
 
 // "Secret ideas" gating (UI only). Non-admin users are kept inside Albayan Manager for now.
-const PLATFORM_ADMIN_ONLY_VIEWS = new Set(['services-hub', 'smart-systems', 'service-placeholder', 'wallet', 'clothes-system']);
+const PLATFORM_ADMIN_ONLY_VIEWS = new Set(['services-hub', 'smart-systems', 'service-placeholder', 'wallet']);
 
 // View -> permission module mapping (used for landing + access checks)
 const VIEW_PERMISSION_MODULES = {
@@ -481,7 +481,10 @@ const VIEW_PERMISSION_MODULES = {
   reconciliation: 'analytics',
   users: 'users',
   audit: 'auditLogs',
-  settings: 'settings'
+  settings: 'settings',
+  // Clothes System is open to non-admins holding clothesProducts view/viewOwn
+  // (subscription checked inside renderClothesSystemView)
+  'clothes-system': 'clothesProducts'
 };
 
 const ALBAYAN_MANAGER_VIEW_ORDER = [
@@ -494,7 +497,8 @@ const ALBAYAN_MANAGER_VIEW_ORDER = [
   'reconciliation',
   'audit',
   'settings',
-  'users'
+  'users',
+  'clothes-system'
 ];
 
 function userCanAccessView(user, view) {

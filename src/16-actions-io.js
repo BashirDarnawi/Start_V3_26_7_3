@@ -472,7 +472,8 @@ function exportData() {
     serviceSubscriptions: { visible: countVisible(exportState.serviceSubscriptions), deleted: countDeleted(exportState.serviceSubscriptions) },
     clothesProducts: { visible: countVisible(exportState.clothesProducts), deleted: countDeleted(exportState.clothesProducts) },
     clothesShipments: { visible: countVisible(exportState.clothesShipments), deleted: countDeleted(exportState.clothesShipments) },
-    clothesOrders: { visible: countVisible(exportState.clothesOrders), deleted: countDeleted(exportState.clothesOrders) }
+    clothesOrders: { visible: countVisible(exportState.clothesOrders), deleted: countDeleted(exportState.clothesOrders) },
+    clothesSettings: { visible: countVisible(exportState.clothesSettings), deleted: countDeleted(exportState.clothesSettings) }
   };
 
   exportState.ads = filterVisible(exportState.ads);
@@ -487,6 +488,7 @@ function exportData() {
   exportState.clothesProducts = filterVisible(exportState.clothesProducts);
   exportState.clothesShipments = filterVisible(exportState.clothesShipments);
   exportState.clothesOrders = filterVisible(exportState.clothesOrders);
+  exportState.clothesSettings = filterVisible(exportState.clothesSettings);
   
   // Add export metadata
   const checksum = DataIntegrity.calculateChecksum(exportState);
@@ -717,6 +719,7 @@ function importData() {
       if (Array.isArray(sanitizedImport.clothesProducts)) await applyCollectionReplace('clothesProducts', sanitizedImport.clothesProducts);
       if (Array.isArray(sanitizedImport.clothesShipments)) await applyCollectionReplace('clothesShipments', sanitizedImport.clothesShipments);
       if (Array.isArray(sanitizedImport.clothesOrders)) await applyCollectionReplace('clothesOrders', sanitizedImport.clothesOrders);
+      if (Array.isArray(sanitizedImport.clothesSettings)) await applyCollectionReplace('clothesSettings', sanitizedImport.clothesSettings);
 
       // Reload fresh server state
       await serverLoadAllData();
@@ -815,6 +818,7 @@ function importData() {
         state.clothesProducts = Array.isArray(sanitizedImport.clothesProducts) ? sanitizedImport.clothesProducts : [];
         state.clothesShipments = Array.isArray(sanitizedImport.clothesShipments) ? sanitizedImport.clothesShipments : [];
         state.clothesOrders = Array.isArray(sanitizedImport.clothesOrders) ? sanitizedImport.clothesOrders : [];
+        state.clothesSettings = Array.isArray(sanitizedImport.clothesSettings) ? sanitizedImport.clothesSettings : [];
 
         if (sanitizedImport.defaultExchangeRate !== undefined) {
           const rate = parseFloat(sanitizedImport.defaultExchangeRate);

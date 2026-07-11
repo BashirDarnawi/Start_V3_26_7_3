@@ -1250,6 +1250,7 @@ function handleSmartSystemClick(systemId) {
 }
 
 function renderAnalyticsView() {
+  const isAr = state.language === 'ar';
   const ads = getVisibleRecords(state.ads).filter(ad => ad.recordType !== 'receipt');
   const receipts = getVisibleRecords(state.receipts);
   const users = getVisibleRecords(state.users);
@@ -1328,8 +1329,8 @@ function renderAnalyticsView() {
 
   // Recent activity (ads + receipts)
   const recentItems = [
-    ...ads.map(ad => ({ type: 'Ad', name: state.customers.find(c => c.id === ad.customerId)?.name || 'Unknown', value: ad.amountUSD || 0, status: ad.status || 'Pending', at: ad.createdAt })),
-    ...receipts.map(r => ({ type: 'Receipt', name: state.customers.find(c => c.id === r.customerId)?.name || 'Unknown', value: r.amountUSD || 0, status: r.status || 'Paid', at: r.createdAt }))
+    ...ads.map(ad => ({ type: isAr ? 'إعلان' : 'Ad', name: state.customers.find(c => c.id === ad.customerId)?.name || (isAr ? 'غير معروف' : 'Unknown'), value: ad.amountUSD || 0, status: ad.status || 'Pending', at: ad.createdAt })),
+    ...receipts.map(r => ({ type: isAr ? 'وصل' : 'Receipt', name: state.customers.find(c => c.id === r.customerId)?.name || (isAr ? 'غير معروف' : 'Unknown'), value: r.amountUSD || 0, status: r.status || 'Paid', at: r.createdAt }))
   ].sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0)).slice(0, 6);
 
   const renderProgress = (label, value, target, color) => {
@@ -1350,11 +1351,11 @@ function renderAnalyticsView() {
       <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
           <h1 class="text-3xl font-bold text-slate-900 dark:text-white">${t('analytics')}</h1>
-          <p class="text-sm text-slate-500">Advanced tracking across revenue, receipts, delivery, and activity</p>
+          <p class="text-sm text-slate-500">${isAr ? 'تتبّع متقدّم للإيرادات والوصولات والتوصيل والنشاط' : 'Advanced tracking across revenue, receipts, delivery, and activity'}</p>
         </div>
         <div class="flex items-center gap-3">
-          <div class="px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-semibold text-slate-600 dark:text-slate-200">Last 7 days: ${adsLast7} ads • ${receiptsLast7} receipts</div>
-          <div class="px-3 py-2 rounded-xl bg-emerald-50 dark:bg-emerald-900/30 text-xs font-semibold text-emerald-700 dark:text-emerald-300">Users: ${users.length}</div>
+          <div class="px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-semibold text-slate-600 dark:text-slate-200">${isAr ? `آخر 7 أيام: ${adsLast7} إعلان • ${receiptsLast7} وصل` : `Last 7 days: ${adsLast7} ads • ${receiptsLast7} receipts`}</div>
+          <div class="px-3 py-2 rounded-xl bg-emerald-50 dark:bg-emerald-900/30 text-xs font-semibold text-emerald-700 dark:text-emerald-300">${isAr ? 'المستخدمون' : 'Users'}: ${users.length}</div>
         </div>
       </div>
 
@@ -1365,24 +1366,24 @@ function renderAnalyticsView() {
           <div class="absolute inset-0 bg-gradient-to-br from-emerald-500 to-teal-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
           <div class="flex items-start justify-between relative">
             <div>
-              <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">Ad Revenue (Paid)</p>
+              <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">${isAr ? 'إيراد الإعلانات (مدفوع)' : 'Ad Revenue (Paid)'}</p>
               <p class="text-2xl font-bold text-slate-800 dark:text-white">$${paidAdRevenue.toFixed(2)}</p>
-              <p class="text-xs text-slate-500 mt-1">Pending: $${unpaidAdRevenue.toFixed(2)}</p>
+              <p class="text-xs text-slate-500 mt-1">${isAr ? 'قيد الانتظار' : 'Pending'}: $${unpaidAdRevenue.toFixed(2)}</p>
             </div>
             <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg">
               <i data-lucide="dollar-sign" class="w-6 h-6 text-white"></i>
             </div>
           </div>
         </div>
-        ${renderStatCard('Receipts Volume', '$' + totalReceiptsUSD.toFixed(2), 'file-text', 'from-indigo-500 to-purple-600')}
+        ${renderStatCard(isAr ? 'حجم الوصولات' : 'Receipts Volume', '$' + totalReceiptsUSD.toFixed(2), 'file-text', 'from-indigo-500 to-purple-600')}
         <!-- Show available balance (paid receipts - used) -->
         <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform">
           <div class="absolute inset-0 bg-gradient-to-br from-blue-500 to-cyan-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
           <div class="flex items-start justify-between relative">
             <div>
-              <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">Available Balance</p>
+              <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">${isAr ? 'الرصيد المتاح' : 'Available Balance'}</p>
               <p class="text-2xl font-bold text-slate-800 dark:text-white">$${availableReceiptBalance.toFixed(2)}</p>
-              <p class="text-xs text-slate-500 mt-1">Used: $${totalUsedFromReceipts.toFixed(2)} / Paid: $${paidUSD.toFixed(2)}</p>
+              <p class="text-xs text-slate-500 mt-1">${isAr ? 'مستخدم' : 'Used'}: $${totalUsedFromReceipts.toFixed(2)} / ${isAr ? 'مدفوع' : 'Paid'}: $${paidUSD.toFixed(2)}</p>
             </div>
             <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center shadow-lg">
               <i data-lucide="piggy-bank" class="w-6 h-6 text-white"></i>
@@ -1395,7 +1396,7 @@ function renderAnalyticsView() {
           <div class="absolute inset-0 bg-gradient-to-br from-amber-500 to-orange-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
           <div class="flex items-start justify-between relative">
             <div>
-              <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">Collection Status</p>
+              <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">${isAr ? 'حالة التحصيل' : 'Collection Status'}</p>
               <div class="flex items-baseline space-x-2">
                 <p class="text-2xl font-bold text-slate-800 dark:text-white">${collectedReceipts.length}/${receipts.length}</p>
                 <span class="text-sm font-medium ${collectionRate >= 80 ? 'text-emerald-600' : collectionRate >= 50 ? 'text-amber-600' : 'text-rose-600'}">${collectionRate}%</span>
@@ -1420,54 +1421,54 @@ function renderAnalyticsView() {
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div class="glass-panel rounded-2xl p-5 space-y-4">
           <div class="flex items-center justify-between">
-            <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">Revenue & Collections</h2>
-            <span class="text-xs px-3 py-1 rounded-full bg-emerald-50 text-emerald-700 dark:bg-emerald-900/40">Cashflow</span>
+            <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">${isAr ? 'الإيرادات والتحصيلات' : 'Revenue & Collections'}</h2>
+            <span class="text-xs px-3 py-1 rounded-full bg-emerald-50 text-emerald-700 dark:bg-emerald-900/40">${isAr ? 'التدفّق النقدي' : 'Cashflow'}</span>
           </div>
-          ${renderProgress('Collected (Receipts)', paidUSD, Math.max(paidUSD + pendingUSD, 1), 'bg-emerald-500')}
-          ${renderProgress('Pending (Receipts)', pendingUSD, Math.max(paidUSD + pendingUSD, 1), 'bg-amber-500')}
-          ${renderProgress('Ad Revenue (all time)', totalAdRevenue, Math.max(totalAdRevenue, 1), 'bg-indigo-500')}
+          ${renderProgress(isAr ? 'المُحصَّل (وصولات)' : 'Collected (Receipts)', paidUSD, Math.max(paidUSD + pendingUSD, 1), 'bg-emerald-500')}
+          ${renderProgress(isAr ? 'المعلّق (وصولات)' : 'Pending (Receipts)', pendingUSD, Math.max(paidUSD + pendingUSD, 1), 'bg-amber-500')}
+          ${renderProgress(isAr ? 'إيراد الإعلانات (الكل)' : 'Ad Revenue (all time)', totalAdRevenue, Math.max(totalAdRevenue, 1), 'bg-indigo-500')}
         </div>
 
         <div class="glass-panel rounded-2xl p-5 space-y-4">
           <div class="flex items-center justify-between">
-            <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">Receipts & Transfers</h2>
-            <span class="text-xs px-3 py-1 rounded-full bg-indigo-50 text-indigo-700 dark:bg-indigo-900/40">Usage</span>
+            <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">${isAr ? 'الوصولات والتحويلات' : 'Receipts & Transfers'}</h2>
+            <span class="text-xs px-3 py-1 rounded-full bg-indigo-50 text-indigo-700 dark:bg-indigo-900/40">${isAr ? 'الاستخدام' : 'Usage'}</span>
           </div>
           <div class="grid grid-cols-2 gap-3 text-sm">
             <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
-              <p class="text-slate-500 text-xs">Receipts</p>
+              <p class="text-slate-500 text-xs">${isAr ? 'الوصولات' : 'Receipts'}</p>
               <p class="text-xl font-bold text-slate-800 dark:text-white">${receipts.length}</p>
-              <p class="text-[11px] text-slate-500">${receiptsLast7} created in last 7 days</p>
+              <p class="text-[11px] text-slate-500">${isAr ? `${receiptsLast7} في آخر 7 أيام` : `${receiptsLast7} created in last 7 days`}</p>
             </div>
             <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
-              <p class="text-slate-500 text-xs">Transfers</p>
+              <p class="text-slate-500 text-xs">${isAr ? 'التحويلات' : 'Transfers'}</p>
               <p class="text-xl font-bold text-slate-800 dark:text-white">${receipts.filter(r => r.transfers?.length).length}</p>
-              <p class="text-[11px] text-slate-500">With balance moves</p>
+              <p class="text-[11px] text-slate-500">${isAr ? 'بحركات رصيد' : 'With balance moves'}</p>
             </div>
           </div>
-          ${renderProgress('Remaining (vs receipts)', Math.max(totalReceiptsUSD - paidUSD, 0), Math.max(totalReceiptsUSD, 1), 'bg-sky-500')}
+          ${renderProgress(isAr ? 'المتبقّي (مقابل الوصولات)' : 'Remaining (vs receipts)', Math.max(totalReceiptsUSD - paidUSD, 0), Math.max(totalReceiptsUSD, 1), 'bg-sky-500')}
         </div>
 
         <div class="glass-panel rounded-2xl p-5 space-y-4">
           <div class="flex items-center justify-between">
-            <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">Delivery Tracking</h2>
-            <span class="text-xs px-3 py-1 rounded-full bg-amber-50 text-amber-700 dark:bg-amber-900/40">Drivers</span>
+            <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">${isAr ? 'متابعة التوصيل' : 'Delivery Tracking'}</h2>
+            <span class="text-xs px-3 py-1 rounded-full bg-amber-50 text-amber-700 dark:bg-amber-900/40">${isAr ? 'السائقون' : 'Drivers'}</span>
           </div>
           <div class="grid grid-cols-3 gap-3 text-sm">
             <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg text-center">
-              <p class="text-slate-500 text-xs">Active</p>
+              <p class="text-slate-500 text-xs">${isAr ? 'نشط' : 'Active'}</p>
               <p class="text-xl font-bold text-slate-800 dark:text-white">${activeDeliveries}</p>
             </div>
             <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg text-center">
-              <p class="text-slate-500 text-xs">Completed</p>
+              <p class="text-slate-500 text-xs">${isAr ? 'مكتمل' : 'Completed'}</p>
               <p class="text-xl font-bold text-slate-800 dark:text-white">${completedDeliveries}</p>
             </div>
             <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg text-center">
-              <p class="text-slate-500 text-xs">Total</p>
+              <p class="text-slate-500 text-xs">${isAr ? 'الإجمالي' : 'Total'}</p>
               <p class="text-xl font-bold text-slate-800 dark:text-white">${deliveryAds.length}</p>
             </div>
           </div>
-          ${renderProgress('Delivery completion', completedDeliveries, Math.max(deliveryAds.length, 1), 'bg-emerald-500')}
+          ${renderProgress(isAr ? 'اكتمال التوصيل' : 'Delivery completion', completedDeliveries, Math.max(deliveryAds.length, 1), 'bg-emerald-500')}
         </div>
       </div>
 
@@ -1475,10 +1476,10 @@ function renderAnalyticsView() {
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div class="glass-panel rounded-2xl p-5">
           <div class="flex items-center justify-between mb-3">
-            <h3 class="font-bold text-slate-800 dark:text-white">Top Customers (Spend)</h3>
+            <h3 class="font-bold text-slate-800 dark:text-white">${isAr ? 'أفضل العملاء (إنفاق)' : 'Top Customers (Spend)'}</h3>
             <i data-lucide="users" class="w-4 h-4 text-slate-400"></i>
           </div>
-          ${topCustomers.length === 0 ? '<p class="text-sm text-slate-500">No data</p>' : `
+          ${topCustomers.length === 0 ? `<p class="text-sm text-slate-500">${isAr ? 'لا توجد بيانات' : 'No data'}</p>` : `
             <div class="space-y-2">
               ${topCustomers.map(c => `
                 <div class="flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/50">
@@ -1486,7 +1487,7 @@ function renderAnalyticsView() {
                     <p class="font-medium">${Security.escapeHtml(c.name || '')}</p>
                     <p class="text-[11px] text-slate-500">${c.spend.toFixed(2)} USD</p>
                   </div>
-                  <span class="text-xs px-2 py-1 rounded-full bg-indigo-50 text-indigo-700 dark:bg-indigo-900/40">Top</span>
+                  <span class="text-xs px-2 py-1 rounded-full bg-indigo-50 text-indigo-700 dark:bg-indigo-900/40">${isAr ? 'الأعلى' : 'Top'}</span>
                 </div>
               `).join('')}
             </div>
@@ -1495,18 +1496,18 @@ function renderAnalyticsView() {
 
         <div class="glass-panel rounded-2xl p-5">
           <div class="flex items-center justify-between mb-3">
-            <h3 class="font-bold text-slate-800 dark:text-white">Top Pages (Ads)</h3>
+            <h3 class="font-bold text-slate-800 dark:text-white">${isAr ? 'أفضل الصفحات (إعلانات)' : 'Top Pages (Ads)'}</h3>
             <i data-lucide="layout-dashboard" class="w-4 h-4 text-slate-400"></i>
           </div>
-          ${topPages.length === 0 ? '<p class="text-sm text-slate-500">No data</p>' : `
+          ${topPages.length === 0 ? `<p class="text-sm text-slate-500">${isAr ? 'لا توجد بيانات' : 'No data'}</p>` : `
             <div class="space-y-2">
               ${topPages.map(p => `
                 <div class="flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/50">
                   <div>
                     <p class="font-medium">${Security.escapeHtml(p.name || '')}</p>
-                    <p class="text-[11px] text-slate-500">${p.count} ads</p>
+                    <p class="text-[11px] text-slate-500">${isAr ? `${p.count} إعلان` : `${p.count} ads`}</p>
                   </div>
-                  <span class="text-xs px-2 py-1 rounded-full bg-sky-50 text-sky-700 dark:bg-sky-900/40">Active</span>
+                  <span class="text-xs px-2 py-1 rounded-full bg-sky-50 text-sky-700 dark:bg-sky-900/40">${isAr ? 'نشطة' : 'Active'}</span>
                 </div>
               `).join('')}
             </div>
@@ -1515,10 +1516,10 @@ function renderAnalyticsView() {
 
         <div class="glass-panel rounded-2xl p-5">
           <div class="flex items-center justify-between mb-3">
-            <h3 class="font-bold text-slate-800 dark:text-white">Recent Activity</h3>
+            <h3 class="font-bold text-slate-800 dark:text-white">${isAr ? 'النشاط الأخير' : 'Recent Activity'}</h3>
             <i data-lucide="activity" class="w-4 h-4 text-slate-400"></i>
           </div>
-          ${recentItems.length === 0 ? '<p class="text-sm text-slate-500">No activity yet</p>' : `
+          ${recentItems.length === 0 ? `<p class="text-sm text-slate-500">${isAr ? 'لا يوجد نشاط بعد' : 'No activity yet'}</p>` : `
             <div class="space-y-2">
               ${recentItems.map(item => `
                 <div class="flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/50">
@@ -3917,6 +3918,11 @@ function renderUsersView() {
                   </div>
                 </div>
                 <div class="flex space-x-1">
+                  ${isAdmin ? `
+                    <button onclick="showWalletTopupModal('${u.id}')" class="text-emerald-600 hover:text-emerald-700 p-1" title="${state.language === 'ar' ? 'شحن المحفظة' : 'Top up wallet'}">
+                      <i data-lucide="banknote" class="w-4 h-4"></i>
+                    </button>
+                  ` : ''}
                   ${isAdmin && u.id !== state.currentUser?.id && !isAdminRole(u.role) ? `
                     <button onclick="showPermissionsModal('${u.id}')" class="text-purple-600 hover:text-purple-700 p-1" title="Manage Permissions">
                       <i data-lucide="shield" class="w-4 h-4"></i>

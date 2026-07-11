@@ -38,7 +38,8 @@ function computeServerCursorFromState() {
     _maxLastModifiedFromArray(state.exchangeRateHistory),
     _maxLastModifiedFromArray(state.clothesProducts),
     _maxLastModifiedFromArray(state.clothesShipments),
-    _maxLastModifiedFromArray(state.clothesOrders)
+    _maxLastModifiedFromArray(state.clothesOrders),
+    _maxLastModifiedFromArray(state.clothesSettings)
   );
 }
 
@@ -210,7 +211,7 @@ async function serverLiveSyncOnce() {
     }
   };
 
-  const [adsDelta, receiptsDelta, customersDelta, pagesDelta, exhDelta, clothesProductsDelta, clothesShipmentsDelta, clothesOrdersDelta] = await Promise.all([
+  const [adsDelta, receiptsDelta, customersDelta, pagesDelta, exhDelta, clothesProductsDelta, clothesShipmentsDelta, clothesOrdersDelta, clothesSettingsDelta] = await Promise.all([
     safeSince('ads'),
     safeSince('receipts'),
     safeSince('customers'),
@@ -218,7 +219,8 @@ async function serverLiveSyncOnce() {
     safeSince('exchangeRateHistory'),
     safeSince('clothesProducts'),
     safeSince('clothesShipments'),
-    safeSince('clothesOrders')
+    safeSince('clothesOrders'),
+    safeSince('clothesSettings')
   ]);
 
   let changed = false;
@@ -230,6 +232,7 @@ async function serverLiveSyncOnce() {
   changed = applyServerDelta('clothesProducts', clothesProductsDelta) || changed;
   changed = applyServerDelta('clothesShipments', clothesShipmentsDelta) || changed;
   changed = applyServerDelta('clothesOrders', clothesOrdersDelta) || changed;
+  changed = applyServerDelta('clothesSettings', clothesSettingsDelta) || changed;
   
   // Ensure data migration on live sync (only if data changed, debounced to not block render)
   if (changed) {
@@ -248,7 +251,8 @@ async function serverLiveSyncOnce() {
     _maxLastModifiedFromArray(exhDelta),
     _maxLastModifiedFromArray(clothesProductsDelta),
     _maxLastModifiedFromArray(clothesShipmentsDelta),
-    _maxLastModifiedFromArray(clothesOrdersDelta)
+    _maxLastModifiedFromArray(clothesOrdersDelta),
+    _maxLastModifiedFromArray(clothesSettingsDelta)
   );
   // Deltas come straight from the server, so maxDelta is a trustworthy server
   // timestamp — record it as the watermark for future cursor seeds.

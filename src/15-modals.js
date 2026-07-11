@@ -1585,6 +1585,48 @@ function renderModal() {
     case 'clothes-shipment':
       modalContent = renderClothesShipmentModal();
       break;
+
+    case 'clothes-order':
+      modalContent = renderClothesOrderModal();
+      break;
+
+    case 'wallet-topup': {
+      const isArW = state.language === 'ar';
+      const topupUser = state.users.find(u => u.id === state.modalData?.userId);
+      const balanceLabel = topupUser ? walletFormatMinor(WALLET.getBalanceMinor(topupUser.id), WALLET.currency) : '';
+      modalContent = `
+        <h2 class="text-2xl font-bold mb-4 flex items-center gap-2">
+          <i data-lucide="banknote" class="w-6 h-6 text-emerald-600"></i>
+          ${isArW ? 'شحن محفظة' : 'Top Up Wallet'}
+        </h2>
+        <form id="modal-form" class="space-y-4">
+          <div class="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-900/20">
+            <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(topupUser?.name || '')}</div>
+            <div class="text-sm text-slate-500 dark:text-slate-400">${isArW ? 'الرصيد الحالي:' : 'Current balance:'} <span class="font-bold">${balanceLabel}</span></div>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${isArW ? 'المبلغ (دينار) *' : 'Amount (LYD) *'}</label>
+            <input type="text" inputmode="decimal" id="topup-amount" oninput="sanitizeMoneyInput(this)" required class="w-full glass-input px-4 py-2 rounded-xl" placeholder="0.00" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${isArW ? 'ملاحظة (مثال: دفع نقدي)' : 'Note (e.g. cash payment)'}</label>
+            <input type="text" id="topup-memo" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isArW ? 'اختياري' : 'Optional'}" />
+          </div>
+          <p class="text-xs text-slate-400 dark:text-slate-500">
+            ${isArW ? 'سجّل هنا المال الذي استلمته من العميل خارج التطبيق (نقداً أو تحويلاً).' : 'Record money you received from this client outside the app (cash or transfer).'}
+          </p>
+          <div class="flex gap-3 pt-2">
+            <button type="submit" class="flex-1 btn-shine bg-gradient-to-r from-emerald-500 to-teal-500 text-white px-6 py-3 rounded-xl font-bold shadow-lg">
+              ${isArW ? 'إضافة الرصيد' : 'Add Credit'}
+            </button>
+            <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600">
+              ${isArW ? 'إلغاء' : 'Cancel'}
+            </button>
+          </div>
+        </form>
+      `;
+      break;
+    }
   }
 
   const modal = document.createElement('div');
@@ -1602,6 +1644,8 @@ function renderModal() {
     modalSize = 'max-w-xl'; // Room for the color/size/qty rows
   } else if (state.activeModal === 'clothes-shipment') {
     modalSize = 'max-w-2xl'; // Room for the shipment line rows
+  } else if (state.activeModal === 'clothes-order') {
+    modalSize = 'max-w-2xl'; // Room for the order line rows
   }
   // Make Ad/Receipt modals scroll on the whole panel (header + content) to avoid "nothing shows" confusion.
   const modalScrollable = (state.activeModal === 'receipt' || state.activeModal === 'ad')
@@ -1661,6 +1705,10 @@ function renderModal() {
     setTimeout(() => {
       refreshClothesShipLines();
     }, 50);
+  } else if (state.activeModal === 'clothes-order') {
+    setTimeout(() => {
+      refreshClothesOrderLines();
+    }, 50);
   }
   
   const form = document.getElementById('modal-form');
@@ -1701,6 +1749,37 @@ async function handleModalSubmit() {
     case 'clothes-shipment': {
       const saved = await saveClothesShipmentFromModal();
       if (!saved) return; // keep modal open on validation errors
+      break;
+    }
+    case 'clothes-order': {
+      const saved = await saveClothesOrderFromModal();
+      if (!saved) return; // keep modal open on validation errors
+      break;
+    }
+    case 'wallet-topup': {
+      const isArW = state.language === 'ar';
+      const targetUserId = String(state.modalData?.userId || '');
+      const amountRaw = document.getElementById('topup-amount')?.value;
+      const amount = parseFloat(String(amountRaw || '').trim());
+      if (!Number.isFinite(amount) || amount <= 0) {
+        showNotification(isArW ? 'تنبيه' : 'Validation', isArW ? 'أدخل مبلغاً أكبر من صفر.' : 'Enter an amount greater than zero.', 'error');
+        return;
+      }
+      const memo = Security.sanitizeInput(String(document.getElementById('topup-memo')?.value || ''), { maxLength: 180 }).trim();
+      try {
+        const tx = WALLET.credit(targetUserId, amount, {
+          memo: memo || (isArW ? 'شحن محفظة' : 'Wallet top-up'),
+          idempotencyKey: String(state.modalData?.idempotencyKey || '') || Security.generateSecureId('topup')
+        });
+        showNotification(
+          isArW ? 'تم الشحن' : 'Credited',
+          isArW ? `تمت إضافة ${walletFormatMinor(tx.amountMinor, tx.currency)} إلى المحفظة.` : `${walletFormatMinor(tx.amountMinor, tx.currency)} added to the wallet.`,
+          'success'
+        );
+      } catch (e) {
+        showNotification(isArW ? 'خطأ' : 'Error', e?.message || 'Top-up failed', 'error');
+        return;
+      }
       break;
     }
     case 'change-password': {
@@ -2613,6 +2692,17 @@ async function handleModalSubmit() {
   render();
 }
 
+function showWalletTopupModal(userId) {
+  if (!isCurrentUserAdmin()) return;
+  const target = state.users.find(u => u.id === userId && !u._deleted);
+  if (!target) return;
+  state.activeModal = 'wallet-topup';
+  // Idempotency key fixed at open time: even a double submit of this same
+  // form can only ever create ONE credit transaction.
+  state.modalData = { userId: String(userId), idempotencyKey: Security.generateSecureId('topup') };
+  renderModal();
+}
+
 function closeModal() {
   state.activeModal = null;
   state.modalData = null;
@@ -2630,6 +2720,7 @@ function closeModal() {
   _clothesTempVariants = [];
   _clothesTempPhoto = null;
   _clothesTempShipLines = [];
+  _clothesTempOrderLines = [];
   
   // Clear URL params (modal, id)
   clearUrlParams(['modal', 'id']);

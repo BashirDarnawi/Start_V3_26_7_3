@@ -183,7 +183,9 @@ const SMART_SYSTEMS_CHILDREN = {
     descriptionAr: 'المستودع والشحنات والطلبات',
     comingSoon: false,
     requiresSubscription: true,
-    requiredSubscriptions: ['smart_systems'],
+    // Sold as its OWN subscription product (not bundled with smart_systems)
+    requiredSubscriptions: ['clothes_system'],
+    subscription: { price: 0, durationDays: 30 },
     openView: 'clothes-system'
   }
 };
@@ -318,9 +320,12 @@ const WALLET = {
   // Add credit (admin/top-up)
   credit: (toUserId, amount, meta = {}) => {
     if (!state.currentUser?.id) throw new Error('Not logged in');
-    // Bank-grade rule: in real deployments, "minting" money must come ONLY from external funding rails
-    // (bank/processor settlement). Manual credit should be disabled in server mode.
-    if (isServerModeEnabled()) throw new Error('Manual top-ups are disabled in server mode');
+    // Manual credit = the platform owner records money received OUTSIDE the
+    // app (cash / bank transfer from a client). Admin-only on the client, and
+    // the server additionally rejects walletTransactions writes from anyone
+    // who is not Admin (no role template grants that module). If a real
+    // payment processor is ever added, its settlements must come from the
+    // backend, not this function.
     if (!isAdminRole(state.currentUser.role)) throw new Error('Only Admin can top-up wallets');
     const currency = walletNormalizeCurrency(meta.currency || WALLET.currency);
     const amountMinor = Number.isFinite(Number(meta.amountMinor)) ? Math.trunc(Number(meta.amountMinor)) : walletToMinor(amount, currency);
@@ -590,6 +595,7 @@ const state = {
   clothesProducts: [], // items for sale: variants (color/size) with stock counts
   clothesShipments: [], // incoming goods from abroad (Ordered → Received)
   clothesOrders: [], // outgoing customer orders (delivery + payment tracking)
+  clothesSettings: [], // one record per user: their own exchange rate etc.
   
   // Settings
   defaultExchangeRate: 0,

@@ -19,7 +19,8 @@ const PERSISTED_COLLECTIONS = [
   // Clothes System
   'clothesProducts',
   'clothesShipments',
-  'clothesOrders'
+  'clothesOrders',
+  'clothesSettings'
 ];
 
 // Debounced IndexedDB sync (avoid writing huge arrays on every keystroke)
@@ -42,6 +43,7 @@ function getCollectionNameFromArray(array) {
   if (array === state.clothesProducts) return 'clothesProducts';
   if (array === state.clothesShipments) return 'clothesShipments';
   if (array === state.clothesOrders) return 'clothesOrders';
+  if (array === state.clothesSettings) return 'clothesSettings';
   return null;
 }
 
@@ -236,6 +238,7 @@ function loadState() {
       if (!Array.isArray(state.clothesProducts)) state.clothesProducts = [];
       if (!Array.isArray(state.clothesShipments)) state.clothesShipments = [];
       if (!Array.isArray(state.clothesOrders)) state.clothesOrders = [];
+      if (!Array.isArray(state.clothesSettings)) state.clothesSettings = [];
       
       // Validate language (must be 'en' or 'ar')
       if (state.language !== 'en' && state.language !== 'ar') {

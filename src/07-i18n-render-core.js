@@ -32,6 +32,7 @@ const translations = {
     deliveries: 'Deliveries',
     auditLogs: 'Audit Logs',
     settings: 'Settings',
+    clothesSystem: 'Clothes System',
     jobReconciliation: 'Reconciliation',
     totalRevenue: 'Total Revenue',
     totalAds: 'Total Ads',
@@ -97,6 +98,7 @@ const translations = {
     deliveries: 'التوصيل',
     auditLogs: 'سجل التدقيق',
     settings: 'الإعدادات',
+    clothesSystem: 'نظام الملابس',
     jobReconciliation: 'التسوية',
     totalRevenue: 'إجمالي الإيرادات',
     totalAds: 'إجمالي الإعلانات',
@@ -178,7 +180,16 @@ function toggleLanguage() {
   state.language = state.language === 'en' ? 'ar' : 'en';
   document.documentElement.setAttribute('dir', getDir());
   saveState();
+  // Force a FULL re-render, not the partial (same-view) content swap: the
+  // <main> wrapper's sidebar-offset margin is direction-dependent
+  // (md:ml-72 in LTR vs md:mr-72 in RTL) and the sidebar itself flips side.
+  // A partial update left <main> with the old-direction margin while the
+  // sidebar had already moved via [dir] CSS, so the content overlapped the
+  // sidebar until the next full render.
+  _lastRenderedView = null;
+  _lastRenderedUserId = null;
   render();
+  if (window.lucide) lucide.createIcons();
 }
 
 // NOTE: the old "scroll performance mode" (setupScrollPerformanceMode toggling

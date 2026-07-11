@@ -1560,6 +1560,64 @@ const PERMISSION_MODULES = {
       backup: { label: 'Backup Logs', description: 'Backup audit logs' },
       clear: { label: 'Clear Logs', description: 'Clear audit logs' }
     }
+  },
+  // Clothes System (module keys MUST equal the collection names — the server
+  // maps collection → permission module by name)
+  clothesProducts: {
+    name: 'Clothes — Products',
+    icon: 'shirt',
+    color: 'rose',
+    description: 'Clothes System: products & stock',
+    permissions: {
+      view: { label: 'View All Products', description: 'View every user\'s products (platform staff)' },
+      viewOwn: { label: 'View Own Products', description: 'View only self-created products (subscriber)' },
+      add: { label: 'Add Products', description: 'Create new products' },
+      edit: { label: 'Edit All Products', description: 'Edit any product' },
+      editOwn: { label: 'Edit Own Products', description: 'Edit only self-created products' },
+      delete: { label: 'Delete All Products', description: 'Delete any product' },
+      deleteOwn: { label: 'Delete Own Products', description: 'Delete only self-created products' }
+    }
+  },
+  clothesShipments: {
+    name: 'Clothes — Shipments',
+    icon: 'plane',
+    color: 'rose',
+    description: 'Clothes System: incoming shipments',
+    permissions: {
+      view: { label: 'View All Shipments', description: 'View every user\'s shipments (platform staff)' },
+      viewOwn: { label: 'View Own Shipments', description: 'View only self-created shipments (subscriber)' },
+      add: { label: 'Add Shipments', description: 'Create new shipments' },
+      edit: { label: 'Edit All Shipments', description: 'Edit any shipment' },
+      editOwn: { label: 'Edit Own Shipments', description: 'Edit only self-created shipments' },
+      delete: { label: 'Delete All Shipments', description: 'Delete any shipment' },
+      deleteOwn: { label: 'Delete Own Shipments', description: 'Delete only self-created shipments' }
+    }
+  },
+  clothesOrders: {
+    name: 'Clothes — Orders',
+    icon: 'shopping-bag',
+    color: 'rose',
+    description: 'Clothes System: customer orders',
+    permissions: {
+      view: { label: 'View All Orders', description: 'View every user\'s orders (platform staff)' },
+      viewOwn: { label: 'View Own Orders', description: 'View only self-created orders (subscriber)' },
+      add: { label: 'Add Orders', description: 'Create new orders' },
+      edit: { label: 'Edit All Orders', description: 'Edit any order' },
+      editOwn: { label: 'Edit Own Orders', description: 'Edit only self-created orders' },
+      delete: { label: 'Delete All Orders', description: 'Delete any order' },
+      deleteOwn: { label: 'Delete Own Orders', description: 'Delete only self-created orders' }
+    }
+  },
+  clothesSettings: {
+    name: 'Clothes — Settings',
+    icon: 'settings',
+    color: 'rose',
+    description: 'Clothes System: personal settings (exchange rate)',
+    permissions: {
+      viewOwn: { label: 'View Own Settings', description: 'View own clothes settings' },
+      add: { label: 'Create Settings', description: 'Create own settings record' },
+      editOwn: { label: 'Edit Own Settings', description: 'Edit own clothes settings' }
+    }
   }
 };
 
@@ -1644,6 +1702,18 @@ const PERMISSION_TEMPLATES = {
       pages: ['view'],
       deliveries: ['view'],
       auditLogs: ['viewOwn']
+    }
+  },
+  clothesSubscriber: {
+    name: 'Clothes Subscriber',
+    description: 'Runs their own clothes business — sees only their own data',
+    icon: 'shirt',
+    color: 'rose',
+    permissions: {
+      clothesProducts: ['viewOwn', 'add', 'editOwn', 'deleteOwn'],
+      clothesShipments: ['viewOwn', 'add', 'editOwn', 'deleteOwn'],
+      clothesOrders: ['viewOwn', 'add', 'editOwn', 'deleteOwn'],
+      clothesSettings: ['viewOwn', 'add', 'editOwn']
     }
   }
 };
@@ -1742,7 +1812,8 @@ function hasSubscription(serviceId) {
 }
 
 function getServiceSubscriptionOffer(serviceId) {
-  const svc = SERVICES[serviceId];
+  // Child systems (e.g. clothes_system) can carry their own offer too
+  const svc = SERVICES[serviceId] || SMART_SYSTEMS_CHILDREN[serviceId];
   const offer = svc && typeof svc === 'object' ? svc.subscription : null;
   const currency = walletNormalizeCurrency(offer?.currency || WALLET.currency);
   const priceMinor = Number.isFinite(Number(offer?.priceMinor))
@@ -2586,7 +2657,9 @@ const SMART_SYSTEMS_CHILDREN = {
     descriptionAr: 'المستودع والشحنات والطلبات',
     comingSoon: false,
     requiresSubscription: true,
-    requiredSubscriptions: ['smart_systems'],
+    // Sold as its OWN subscription product (not bundled with smart_systems)
+    requiredSubscriptions: ['clothes_system'],
+    subscription: { price: 0, durationDays: 30 },
     openView: 'clothes-system'
   }
 };
@@ -2721,9 +2794,12 @@ const WALLET = {
   // Add credit (admin/top-up)
   credit: (toUserId, amount, meta = {}) => {
     if (!state.currentUser?.id) throw new Error('Not logged in');
-    // Bank-grade rule: in real deployments, "minting" money must come ONLY from external funding rails
-    // (bank/processor settlement). Manual credit should be disabled in server mode.
-    if (isServerModeEnabled()) throw new Error('Manual top-ups are disabled in server mode');
+    // Manual credit = the platform owner records money received OUTSIDE the
+    // app (cash / bank transfer from a client). Admin-only on the client, and
+    // the server additionally rejects walletTransactions writes from anyone
+    // who is not Admin (no role template grants that module). If a real
+    // payment processor is ever added, its settlements must come from the
+    // backend, not this function.
     if (!isAdminRole(state.currentUser.role)) throw new Error('Only Admin can top-up wallets');
     const currency = walletNormalizeCurrency(meta.currency || WALLET.currency);
     const amountMinor = Number.isFinite(Number(meta.amountMinor)) ? Math.trunc(Number(meta.amountMinor)) : walletToMinor(amount, currency);
@@ -2993,6 +3069,7 @@ const state = {
   clothesProducts: [], // items for sale: variants (color/size) with stock counts
   clothesShipments: [], // incoming goods from abroad (Ordered → Received)
   clothesOrders: [], // outgoing customer orders (delivery + payment tracking)
+  clothesSettings: [], // one record per user: their own exchange rate etc.
   
   // Settings
   defaultExchangeRate: 0,
@@ -3065,7 +3142,8 @@ const PERSISTED_COLLECTIONS = [
   // Clothes System
   'clothesProducts',
   'clothesShipments',
-  'clothesOrders'
+  'clothesOrders',
+  'clothesSettings'
 ];
 
 // Debounced IndexedDB sync (avoid writing huge arrays on every keystroke)
@@ -3088,6 +3166,7 @@ function getCollectionNameFromArray(array) {
   if (array === state.clothesProducts) return 'clothesProducts';
   if (array === state.clothesShipments) return 'clothesShipments';
   if (array === state.clothesOrders) return 'clothesOrders';
+  if (array === state.clothesSettings) return 'clothesSettings';
   return null;
 }
 
@@ -3282,6 +3361,7 @@ function loadState() {
       if (!Array.isArray(state.clothesProducts)) state.clothesProducts = [];
       if (!Array.isArray(state.clothesShipments)) state.clothesShipments = [];
       if (!Array.isArray(state.clothesOrders)) state.clothesOrders = [];
+      if (!Array.isArray(state.clothesSettings)) state.clothesSettings = [];
       
       // Validate language (must be 'en' or 'ar')
       if (state.language !== 'en' && state.language !== 'ar') {
@@ -3820,6 +3900,7 @@ const translations = {
     deliveries: 'Deliveries',
     auditLogs: 'Audit Logs',
     settings: 'Settings',
+    clothesSystem: 'Clothes System',
     jobReconciliation: 'Reconciliation',
     totalRevenue: 'Total Revenue',
     totalAds: 'Total Ads',
@@ -3885,6 +3966,7 @@ const translations = {
     deliveries: 'التوصيل',
     auditLogs: 'سجل التدقيق',
     settings: 'الإعدادات',
+    clothesSystem: 'نظام الملابس',
     jobReconciliation: 'التسوية',
     totalRevenue: 'إجمالي الإيرادات',
     totalAds: 'إجمالي الإعلانات',
@@ -3966,7 +4048,16 @@ function toggleLanguage() {
   state.language = state.language === 'en' ? 'ar' : 'en';
   document.documentElement.setAttribute('dir', getDir());
   saveState();
+  // Force a FULL re-render, not the partial (same-view) content swap: the
+  // <main> wrapper's sidebar-offset margin is direction-dependent
+  // (md:ml-72 in LTR vs md:mr-72 in RTL) and the sidebar itself flips side.
+  // A partial update left <main> with the old-direction margin while the
+  // sidebar had already moved via [dir] CSS, so the content overlapped the
+  // sidebar until the next full render.
+  _lastRenderedView = null;
+  _lastRenderedUserId = null;
   render();
+  if (window.lucide) lucide.createIcons();
 }
 
 // NOTE: the old "scroll performance mode" (setupScrollPerformanceMode toggling
@@ -4591,7 +4682,7 @@ function isCurrentUserAdmin() {
 }
 
 // "Secret ideas" gating (UI only). Non-admin users are kept inside Albayan Manager for now.
-const PLATFORM_ADMIN_ONLY_VIEWS = new Set(['services-hub', 'smart-systems', 'service-placeholder', 'wallet', 'clothes-system']);
+const PLATFORM_ADMIN_ONLY_VIEWS = new Set(['services-hub', 'smart-systems', 'service-placeholder', 'wallet']);
 
 // View -> permission module mapping (used for landing + access checks)
 const VIEW_PERMISSION_MODULES = {
@@ -4604,7 +4695,10 @@ const VIEW_PERMISSION_MODULES = {
   reconciliation: 'analytics',
   users: 'users',
   audit: 'auditLogs',
-  settings: 'settings'
+  settings: 'settings',
+  // Clothes System is open to non-admins holding clothesProducts view/viewOwn
+  // (subscription checked inside renderClothesSystemView)
+  'clothes-system': 'clothesProducts'
 };
 
 const ALBAYAN_MANAGER_VIEW_ORDER = [
@@ -4617,7 +4711,8 @@ const ALBAYAN_MANAGER_VIEW_ORDER = [
   'reconciliation',
   'audit',
   'settings',
-  'users'
+  'users',
+  'clothes-system'
 ];
 
 function userCanAccessView(user, view) {
@@ -5566,6 +5661,7 @@ async function serverLoadAllData() {
     clothesProducts: Array.isArray(state.clothesProducts) ? state.clothesProducts.length : 0,
     clothesShipments: Array.isArray(state.clothesShipments) ? state.clothesShipments.length : 0,
     clothesOrders: Array.isArray(state.clothesOrders) ? state.clothesOrders.length : 0,
+    clothesSettings: Array.isArray(state.clothesSettings) ? state.clothesSettings.length : 0,
   };
   // #region agent log
   const _loadStartTime = Date.now();
@@ -5616,7 +5712,7 @@ async function serverLoadAllData() {
   // Load collections in parallel for faster initial load
   // Use higher concurrency for initial load, but still limit to avoid overwhelming server
   const results = {};
-  const collections = ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory', 'clothesProducts', 'clothesShipments', 'clothesOrders'];
+  const collections = ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory', 'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings'];
   const CONCURRENCY = SERVER_API.initialLoadConcurrency || 3;
 
   // Show loading progress
@@ -5701,7 +5797,8 @@ async function serverLoadAllData() {
       _maxLastModifiedFromArray(results.exchangeRateHistory && results.exchangeRateHistory.data),
       _maxLastModifiedFromArray(results.clothesProducts && results.clothesProducts.data),
       _maxLastModifiedFromArray(results.clothesShipments && results.clothesShipments.data),
-      _maxLastModifiedFromArray(results.clothesOrders && results.clothesOrders.data)
+      _maxLastModifiedFromArray(results.clothesOrders && results.clothesOrders.data),
+      _maxLastModifiedFromArray(results.clothesSettings && results.clothesSettings.data)
     );
     if (_wm > 0 && typeof _serverLiveSync === 'object' && _serverLiveSync) {
       _serverLiveSync.serverWatermark = _wm;
@@ -5802,7 +5899,8 @@ function computeServerCursorFromState() {
     _maxLastModifiedFromArray(state.exchangeRateHistory),
     _maxLastModifiedFromArray(state.clothesProducts),
     _maxLastModifiedFromArray(state.clothesShipments),
-    _maxLastModifiedFromArray(state.clothesOrders)
+    _maxLastModifiedFromArray(state.clothesOrders),
+    _maxLastModifiedFromArray(state.clothesSettings)
   );
 }
 
@@ -5974,7 +6072,7 @@ async function serverLiveSyncOnce() {
     }
   };
 
-  const [adsDelta, receiptsDelta, customersDelta, pagesDelta, exhDelta, clothesProductsDelta, clothesShipmentsDelta, clothesOrdersDelta] = await Promise.all([
+  const [adsDelta, receiptsDelta, customersDelta, pagesDelta, exhDelta, clothesProductsDelta, clothesShipmentsDelta, clothesOrdersDelta, clothesSettingsDelta] = await Promise.all([
     safeSince('ads'),
     safeSince('receipts'),
     safeSince('customers'),
@@ -5982,7 +6080,8 @@ async function serverLiveSyncOnce() {
     safeSince('exchangeRateHistory'),
     safeSince('clothesProducts'),
     safeSince('clothesShipments'),
-    safeSince('clothesOrders')
+    safeSince('clothesOrders'),
+    safeSince('clothesSettings')
   ]);
 
   let changed = false;
@@ -5994,6 +6093,7 @@ async function serverLiveSyncOnce() {
   changed = applyServerDelta('clothesProducts', clothesProductsDelta) || changed;
   changed = applyServerDelta('clothesShipments', clothesShipmentsDelta) || changed;
   changed = applyServerDelta('clothesOrders', clothesOrdersDelta) || changed;
+  changed = applyServerDelta('clothesSettings', clothesSettingsDelta) || changed;
   
   // Ensure data migration on live sync (only if data changed, debounced to not block render)
   if (changed) {
@@ -6012,7 +6112,8 @@ async function serverLiveSyncOnce() {
     _maxLastModifiedFromArray(exhDelta),
     _maxLastModifiedFromArray(clothesProductsDelta),
     _maxLastModifiedFromArray(clothesShipmentsDelta),
-    _maxLastModifiedFromArray(clothesOrdersDelta)
+    _maxLastModifiedFromArray(clothesOrdersDelta),
+    _maxLastModifiedFromArray(clothesSettingsDelta)
   );
   // Deltas come straight from the server, so maxDelta is a trustworthy server
   // timestamp — record it as the watermark for future cursor seeds.
@@ -8351,6 +8452,7 @@ function handleSmartSystemClick(systemId) {
 }
 
 function renderAnalyticsView() {
+  const isAr = state.language === 'ar';
   const ads = getVisibleRecords(state.ads).filter(ad => ad.recordType !== 'receipt');
   const receipts = getVisibleRecords(state.receipts);
   const users = getVisibleRecords(state.users);
@@ -8429,8 +8531,8 @@ function renderAnalyticsView() {
 
   // Recent activity (ads + receipts)
   const recentItems = [
-    ...ads.map(ad => ({ type: 'Ad', name: state.customers.find(c => c.id === ad.customerId)?.name || 'Unknown', value: ad.amountUSD || 0, status: ad.status || 'Pending', at: ad.createdAt })),
-    ...receipts.map(r => ({ type: 'Receipt', name: state.customers.find(c => c.id === r.customerId)?.name || 'Unknown', value: r.amountUSD || 0, status: r.status || 'Paid', at: r.createdAt }))
+    ...ads.map(ad => ({ type: isAr ? 'إعلان' : 'Ad', name: state.customers.find(c => c.id === ad.customerId)?.name || (isAr ? 'غير معروف' : 'Unknown'), value: ad.amountUSD || 0, status: ad.status || 'Pending', at: ad.createdAt })),
+    ...receipts.map(r => ({ type: isAr ? 'وصل' : 'Receipt', name: state.customers.find(c => c.id === r.customerId)?.name || (isAr ? 'غير معروف' : 'Unknown'), value: r.amountUSD || 0, status: r.status || 'Paid', at: r.createdAt }))
   ].sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0)).slice(0, 6);
 
   const renderProgress = (label, value, target, color) => {
@@ -8451,11 +8553,11 @@ function renderAnalyticsView() {
       <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
           <h1 class="text-3xl font-bold text-slate-900 dark:text-white">${t('analytics')}</h1>
-          <p class="text-sm text-slate-500">Advanced tracking across revenue, receipts, delivery, and activity</p>
+          <p class="text-sm text-slate-500">${isAr ? 'تتبّع متقدّم للإيرادات والوصولات والتوصيل والنشاط' : 'Advanced tracking across revenue, receipts, delivery, and activity'}</p>
         </div>
         <div class="flex items-center gap-3">
-          <div class="px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-semibold text-slate-600 dark:text-slate-200">Last 7 days: ${adsLast7} ads • ${receiptsLast7} receipts</div>
-          <div class="px-3 py-2 rounded-xl bg-emerald-50 dark:bg-emerald-900/30 text-xs font-semibold text-emerald-700 dark:text-emerald-300">Users: ${users.length}</div>
+          <div class="px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-semibold text-slate-600 dark:text-slate-200">${isAr ? `آخر 7 أيام: ${adsLast7} إعلان • ${receiptsLast7} وصل` : `Last 7 days: ${adsLast7} ads • ${receiptsLast7} receipts`}</div>
+          <div class="px-3 py-2 rounded-xl bg-emerald-50 dark:bg-emerald-900/30 text-xs font-semibold text-emerald-700 dark:text-emerald-300">${isAr ? 'المستخدمون' : 'Users'}: ${users.length}</div>
         </div>
       </div>
 
@@ -8466,24 +8568,24 @@ function renderAnalyticsView() {
           <div class="absolute inset-0 bg-gradient-to-br from-emerald-500 to-teal-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
           <div class="flex items-start justify-between relative">
             <div>
-              <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">Ad Revenue (Paid)</p>
+              <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">${isAr ? 'إيراد الإعلانات (مدفوع)' : 'Ad Revenue (Paid)'}</p>
               <p class="text-2xl font-bold text-slate-800 dark:text-white">$${paidAdRevenue.toFixed(2)}</p>
-              <p class="text-xs text-slate-500 mt-1">Pending: $${unpaidAdRevenue.toFixed(2)}</p>
+              <p class="text-xs text-slate-500 mt-1">${isAr ? 'قيد الانتظار' : 'Pending'}: $${unpaidAdRevenue.toFixed(2)}</p>
             </div>
             <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg">
               <i data-lucide="dollar-sign" class="w-6 h-6 text-white"></i>
             </div>
           </div>
         </div>
-        ${renderStatCard('Receipts Volume', '$' + totalReceiptsUSD.toFixed(2), 'file-text', 'from-indigo-500 to-purple-600')}
+        ${renderStatCard(isAr ? 'حجم الوصولات' : 'Receipts Volume', '$' + totalReceiptsUSD.toFixed(2), 'file-text', 'from-indigo-500 to-purple-600')}
         <!-- Show available balance (paid receipts - used) -->
         <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform">
           <div class="absolute inset-0 bg-gradient-to-br from-blue-500 to-cyan-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
           <div class="flex items-start justify-between relative">
             <div>
-              <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">Available Balance</p>
+              <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">${isAr ? 'الرصيد المتاح' : 'Available Balance'}</p>
               <p class="text-2xl font-bold text-slate-800 dark:text-white">$${availableReceiptBalance.toFixed(2)}</p>
-              <p class="text-xs text-slate-500 mt-1">Used: $${totalUsedFromReceipts.toFixed(2)} / Paid: $${paidUSD.toFixed(2)}</p>
+              <p class="text-xs text-slate-500 mt-1">${isAr ? 'مستخدم' : 'Used'}: $${totalUsedFromReceipts.toFixed(2)} / ${isAr ? 'مدفوع' : 'Paid'}: $${paidUSD.toFixed(2)}</p>
             </div>
             <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center shadow-lg">
               <i data-lucide="piggy-bank" class="w-6 h-6 text-white"></i>
@@ -8496,7 +8598,7 @@ function renderAnalyticsView() {
           <div class="absolute inset-0 bg-gradient-to-br from-amber-500 to-orange-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
           <div class="flex items-start justify-between relative">
             <div>
-              <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">Collection Status</p>
+              <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">${isAr ? 'حالة التحصيل' : 'Collection Status'}</p>
               <div class="flex items-baseline space-x-2">
                 <p class="text-2xl font-bold text-slate-800 dark:text-white">${collectedReceipts.length}/${receipts.length}</p>
                 <span class="text-sm font-medium ${collectionRate >= 80 ? 'text-emerald-600' : collectionRate >= 50 ? 'text-amber-600' : 'text-rose-600'}">${collectionRate}%</span>
@@ -8521,54 +8623,54 @@ function renderAnalyticsView() {
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div class="glass-panel rounded-2xl p-5 space-y-4">
           <div class="flex items-center justify-between">
-            <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">Revenue & Collections</h2>
-            <span class="text-xs px-3 py-1 rounded-full bg-emerald-50 text-emerald-700 dark:bg-emerald-900/40">Cashflow</span>
+            <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">${isAr ? 'الإيرادات والتحصيلات' : 'Revenue & Collections'}</h2>
+            <span class="text-xs px-3 py-1 rounded-full bg-emerald-50 text-emerald-700 dark:bg-emerald-900/40">${isAr ? 'التدفّق النقدي' : 'Cashflow'}</span>
           </div>
-          ${renderProgress('Collected (Receipts)', paidUSD, Math.max(paidUSD + pendingUSD, 1), 'bg-emerald-500')}
-          ${renderProgress('Pending (Receipts)', pendingUSD, Math.max(paidUSD + pendingUSD, 1), 'bg-amber-500')}
-          ${renderProgress('Ad Revenue (all time)', totalAdRevenue, Math.max(totalAdRevenue, 1), 'bg-indigo-500')}
+          ${renderProgress(isAr ? 'المُحصَّل (وصولات)' : 'Collected (Receipts)', paidUSD, Math.max(paidUSD + pendingUSD, 1), 'bg-emerald-500')}
+          ${renderProgress(isAr ? 'المعلّق (وصولات)' : 'Pending (Receipts)', pendingUSD, Math.max(paidUSD + pendingUSD, 1), 'bg-amber-500')}
+          ${renderProgress(isAr ? 'إيراد الإعلانات (الكل)' : 'Ad Revenue (all time)', totalAdRevenue, Math.max(totalAdRevenue, 1), 'bg-indigo-500')}
         </div>
 
         <div class="glass-panel rounded-2xl p-5 space-y-4">
           <div class="flex items-center justify-between">
-            <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">Receipts & Transfers</h2>
-            <span class="text-xs px-3 py-1 rounded-full bg-indigo-50 text-indigo-700 dark:bg-indigo-900/40">Usage</span>
+            <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">${isAr ? 'الوصولات والتحويلات' : 'Receipts & Transfers'}</h2>
+            <span class="text-xs px-3 py-1 rounded-full bg-indigo-50 text-indigo-700 dark:bg-indigo-900/40">${isAr ? 'الاستخدام' : 'Usage'}</span>
           </div>
           <div class="grid grid-cols-2 gap-3 text-sm">
             <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
-              <p class="text-slate-500 text-xs">Receipts</p>
+              <p class="text-slate-500 text-xs">${isAr ? 'الوصولات' : 'Receipts'}</p>
               <p class="text-xl font-bold text-slate-800 dark:text-white">${receipts.length}</p>
-              <p class="text-[11px] text-slate-500">${receiptsLast7} created in last 7 days</p>
+              <p class="text-[11px] text-slate-500">${isAr ? `${receiptsLast7} في آخر 7 أيام` : `${receiptsLast7} created in last 7 days`}</p>
             </div>
             <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
-              <p class="text-slate-500 text-xs">Transfers</p>
+              <p class="text-slate-500 text-xs">${isAr ? 'التحويلات' : 'Transfers'}</p>
               <p class="text-xl font-bold text-slate-800 dark:text-white">${receipts.filter(r => r.transfers?.length).length}</p>
-              <p class="text-[11px] text-slate-500">With balance moves</p>
+              <p class="text-[11px] text-slate-500">${isAr ? 'بحركات رصيد' : 'With balance moves'}</p>
             </div>
           </div>
-          ${renderProgress('Remaining (vs receipts)', Math.max(totalReceiptsUSD - paidUSD, 0), Math.max(totalReceiptsUSD, 1), 'bg-sky-500')}
+          ${renderProgress(isAr ? 'المتبقّي (مقابل الوصولات)' : 'Remaining (vs receipts)', Math.max(totalReceiptsUSD - paidUSD, 0), Math.max(totalReceiptsUSD, 1), 'bg-sky-500')}
         </div>
 
         <div class="glass-panel rounded-2xl p-5 space-y-4">
           <div class="flex items-center justify-between">
-            <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">Delivery Tracking</h2>
-            <span class="text-xs px-3 py-1 rounded-full bg-amber-50 text-amber-700 dark:bg-amber-900/40">Drivers</span>
+            <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">${isAr ? 'متابعة التوصيل' : 'Delivery Tracking'}</h2>
+            <span class="text-xs px-3 py-1 rounded-full bg-amber-50 text-amber-700 dark:bg-amber-900/40">${isAr ? 'السائقون' : 'Drivers'}</span>
           </div>
           <div class="grid grid-cols-3 gap-3 text-sm">
             <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg text-center">
-              <p class="text-slate-500 text-xs">Active</p>
+              <p class="text-slate-500 text-xs">${isAr ? 'نشط' : 'Active'}</p>
               <p class="text-xl font-bold text-slate-800 dark:text-white">${activeDeliveries}</p>
             </div>
             <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg text-center">
-              <p class="text-slate-500 text-xs">Completed</p>
+              <p class="text-slate-500 text-xs">${isAr ? 'مكتمل' : 'Completed'}</p>
               <p class="text-xl font-bold text-slate-800 dark:text-white">${completedDeliveries}</p>
             </div>
             <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg text-center">
-              <p class="text-slate-500 text-xs">Total</p>
+              <p class="text-slate-500 text-xs">${isAr ? 'الإجمالي' : 'Total'}</p>
               <p class="text-xl font-bold text-slate-800 dark:text-white">${deliveryAds.length}</p>
             </div>
           </div>
-          ${renderProgress('Delivery completion', completedDeliveries, Math.max(deliveryAds.length, 1), 'bg-emerald-500')}
+          ${renderProgress(isAr ? 'اكتمال التوصيل' : 'Delivery completion', completedDeliveries, Math.max(deliveryAds.length, 1), 'bg-emerald-500')}
         </div>
       </div>
 
@@ -8576,10 +8678,10 @@ function renderAnalyticsView() {
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div class="glass-panel rounded-2xl p-5">
           <div class="flex items-center justify-between mb-3">
-            <h3 class="font-bold text-slate-800 dark:text-white">Top Customers (Spend)</h3>
+            <h3 class="font-bold text-slate-800 dark:text-white">${isAr ? 'أفضل العملاء (إنفاق)' : 'Top Customers (Spend)'}</h3>
             <i data-lucide="users" class="w-4 h-4 text-slate-400"></i>
           </div>
-          ${topCustomers.length === 0 ? '<p class="text-sm text-slate-500">No data</p>' : `
+          ${topCustomers.length === 0 ? `<p class="text-sm text-slate-500">${isAr ? 'لا توجد بيانات' : 'No data'}</p>` : `
             <div class="space-y-2">
               ${topCustomers.map(c => `
                 <div class="flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/50">
@@ -8587,7 +8689,7 @@ function renderAnalyticsView() {
                     <p class="font-medium">${Security.escapeHtml(c.name || '')}</p>
                     <p class="text-[11px] text-slate-500">${c.spend.toFixed(2)} USD</p>
                   </div>
-                  <span class="text-xs px-2 py-1 rounded-full bg-indigo-50 text-indigo-700 dark:bg-indigo-900/40">Top</span>
+                  <span class="text-xs px-2 py-1 rounded-full bg-indigo-50 text-indigo-700 dark:bg-indigo-900/40">${isAr ? 'الأعلى' : 'Top'}</span>
                 </div>
               `).join('')}
             </div>
@@ -8596,18 +8698,18 @@ function renderAnalyticsView() {
 
         <div class="glass-panel rounded-2xl p-5">
           <div class="flex items-center justify-between mb-3">
-            <h3 class="font-bold text-slate-800 dark:text-white">Top Pages (Ads)</h3>
+            <h3 class="font-bold text-slate-800 dark:text-white">${isAr ? 'أفضل الصفحات (إعلانات)' : 'Top Pages (Ads)'}</h3>
             <i data-lucide="layout-dashboard" class="w-4 h-4 text-slate-400"></i>
           </div>
-          ${topPages.length === 0 ? '<p class="text-sm text-slate-500">No data</p>' : `
+          ${topPages.length === 0 ? `<p class="text-sm text-slate-500">${isAr ? 'لا توجد بيانات' : 'No data'}</p>` : `
             <div class="space-y-2">
               ${topPages.map(p => `
                 <div class="flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/50">
                   <div>
                     <p class="font-medium">${Security.escapeHtml(p.name || '')}</p>
-                    <p class="text-[11px] text-slate-500">${p.count} ads</p>
+                    <p class="text-[11px] text-slate-500">${isAr ? `${p.count} إعلان` : `${p.count} ads`}</p>
                   </div>
-                  <span class="text-xs px-2 py-1 rounded-full bg-sky-50 text-sky-700 dark:bg-sky-900/40">Active</span>
+                  <span class="text-xs px-2 py-1 rounded-full bg-sky-50 text-sky-700 dark:bg-sky-900/40">${isAr ? 'نشطة' : 'Active'}</span>
                 </div>
               `).join('')}
             </div>
@@ -8616,10 +8718,10 @@ function renderAnalyticsView() {
 
         <div class="glass-panel rounded-2xl p-5">
           <div class="flex items-center justify-between mb-3">
-            <h3 class="font-bold text-slate-800 dark:text-white">Recent Activity</h3>
+            <h3 class="font-bold text-slate-800 dark:text-white">${isAr ? 'النشاط الأخير' : 'Recent Activity'}</h3>
             <i data-lucide="activity" class="w-4 h-4 text-slate-400"></i>
           </div>
-          ${recentItems.length === 0 ? '<p class="text-sm text-slate-500">No activity yet</p>' : `
+          ${recentItems.length === 0 ? `<p class="text-sm text-slate-500">${isAr ? 'لا يوجد نشاط بعد' : 'No activity yet'}</p>` : `
             <div class="space-y-2">
               ${recentItems.map(item => `
                 <div class="flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/50">
@@ -11018,6 +11120,11 @@ function renderUsersView() {
                   </div>
                 </div>
                 <div class="flex space-x-1">
+                  ${isAdmin ? `
+                    <button onclick="showWalletTopupModal('${u.id}')" class="text-emerald-600 hover:text-emerald-700 p-1" title="${state.language === 'ar' ? 'شحن المحفظة' : 'Top up wallet'}">
+                      <i data-lucide="banknote" class="w-4 h-4"></i>
+                    </button>
+                  ` : ''}
                   ${isAdmin && u.id !== state.currentUser?.id && !isAdminRole(u.role) ? `
                     <button onclick="showPermissionsModal('${u.id}')" class="text-purple-600 hover:text-purple-700 p-1" title="Manage Permissions">
                       <i data-lucide="shield" class="w-4 h-4"></i>
@@ -19432,6 +19539,48 @@ function renderModal() {
     case 'clothes-shipment':
       modalContent = renderClothesShipmentModal();
       break;
+
+    case 'clothes-order':
+      modalContent = renderClothesOrderModal();
+      break;
+
+    case 'wallet-topup': {
+      const isArW = state.language === 'ar';
+      const topupUser = state.users.find(u => u.id === state.modalData?.userId);
+      const balanceLabel = topupUser ? walletFormatMinor(WALLET.getBalanceMinor(topupUser.id), WALLET.currency) : '';
+      modalContent = `
+        <h2 class="text-2xl font-bold mb-4 flex items-center gap-2">
+          <i data-lucide="banknote" class="w-6 h-6 text-emerald-600"></i>
+          ${isArW ? 'شحن محفظة' : 'Top Up Wallet'}
+        </h2>
+        <form id="modal-form" class="space-y-4">
+          <div class="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-900/20">
+            <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(topupUser?.name || '')}</div>
+            <div class="text-sm text-slate-500 dark:text-slate-400">${isArW ? 'الرصيد الحالي:' : 'Current balance:'} <span class="font-bold">${balanceLabel}</span></div>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${isArW ? 'المبلغ (دينار) *' : 'Amount (LYD) *'}</label>
+            <input type="text" inputmode="decimal" id="topup-amount" oninput="sanitizeMoneyInput(this)" required class="w-full glass-input px-4 py-2 rounded-xl" placeholder="0.00" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${isArW ? 'ملاحظة (مثال: دفع نقدي)' : 'Note (e.g. cash payment)'}</label>
+            <input type="text" id="topup-memo" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isArW ? 'اختياري' : 'Optional'}" />
+          </div>
+          <p class="text-xs text-slate-400 dark:text-slate-500">
+            ${isArW ? 'سجّل هنا المال الذي استلمته من العميل خارج التطبيق (نقداً أو تحويلاً).' : 'Record money you received from this client outside the app (cash or transfer).'}
+          </p>
+          <div class="flex gap-3 pt-2">
+            <button type="submit" class="flex-1 btn-shine bg-gradient-to-r from-emerald-500 to-teal-500 text-white px-6 py-3 rounded-xl font-bold shadow-lg">
+              ${isArW ? 'إضافة الرصيد' : 'Add Credit'}
+            </button>
+            <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600">
+              ${isArW ? 'إلغاء' : 'Cancel'}
+            </button>
+          </div>
+        </form>
+      `;
+      break;
+    }
   }
 
   const modal = document.createElement('div');
@@ -19449,6 +19598,8 @@ function renderModal() {
     modalSize = 'max-w-xl'; // Room for the color/size/qty rows
   } else if (state.activeModal === 'clothes-shipment') {
     modalSize = 'max-w-2xl'; // Room for the shipment line rows
+  } else if (state.activeModal === 'clothes-order') {
+    modalSize = 'max-w-2xl'; // Room for the order line rows
   }
   // Make Ad/Receipt modals scroll on the whole panel (header + content) to avoid "nothing shows" confusion.
   const modalScrollable = (state.activeModal === 'receipt' || state.activeModal === 'ad')
@@ -19508,6 +19659,10 @@ function renderModal() {
     setTimeout(() => {
       refreshClothesShipLines();
     }, 50);
+  } else if (state.activeModal === 'clothes-order') {
+    setTimeout(() => {
+      refreshClothesOrderLines();
+    }, 50);
   }
   
   const form = document.getElementById('modal-form');
@@ -19548,6 +19703,37 @@ async function handleModalSubmit() {
     case 'clothes-shipment': {
       const saved = await saveClothesShipmentFromModal();
       if (!saved) return; // keep modal open on validation errors
+      break;
+    }
+    case 'clothes-order': {
+      const saved = await saveClothesOrderFromModal();
+      if (!saved) return; // keep modal open on validation errors
+      break;
+    }
+    case 'wallet-topup': {
+      const isArW = state.language === 'ar';
+      const targetUserId = String(state.modalData?.userId || '');
+      const amountRaw = document.getElementById('topup-amount')?.value;
+      const amount = parseFloat(String(amountRaw || '').trim());
+      if (!Number.isFinite(amount) || amount <= 0) {
+        showNotification(isArW ? 'تنبيه' : 'Validation', isArW ? 'أدخل مبلغاً أكبر من صفر.' : 'Enter an amount greater than zero.', 'error');
+        return;
+      }
+      const memo = Security.sanitizeInput(String(document.getElementById('topup-memo')?.value || ''), { maxLength: 180 }).trim();
+      try {
+        const tx = WALLET.credit(targetUserId, amount, {
+          memo: memo || (isArW ? 'شحن محفظة' : 'Wallet top-up'),
+          idempotencyKey: String(state.modalData?.idempotencyKey || '') || Security.generateSecureId('topup')
+        });
+        showNotification(
+          isArW ? 'تم الشحن' : 'Credited',
+          isArW ? `تمت إضافة ${walletFormatMinor(tx.amountMinor, tx.currency)} إلى المحفظة.` : `${walletFormatMinor(tx.amountMinor, tx.currency)} added to the wallet.`,
+          'success'
+        );
+      } catch (e) {
+        showNotification(isArW ? 'خطأ' : 'Error', e?.message || 'Top-up failed', 'error');
+        return;
+      }
       break;
     }
     case 'change-password': {
@@ -20460,6 +20646,17 @@ async function handleModalSubmit() {
   render();
 }
 
+function showWalletTopupModal(userId) {
+  if (!isCurrentUserAdmin()) return;
+  const target = state.users.find(u => u.id === userId && !u._deleted);
+  if (!target) return;
+  state.activeModal = 'wallet-topup';
+  // Idempotency key fixed at open time: even a double submit of this same
+  // form can only ever create ONE credit transaction.
+  state.modalData = { userId: String(userId), idempotencyKey: Security.generateSecureId('topup') };
+  renderModal();
+}
+
 function closeModal() {
   state.activeModal = null;
   state.modalData = null;
@@ -20477,6 +20674,7 @@ function closeModal() {
   _clothesTempVariants = [];
   _clothesTempPhoto = null;
   _clothesTempShipLines = [];
+  _clothesTempOrderLines = [];
   
   // Clear URL params (modal, id)
   clearUrlParams(['modal', 'id']);
@@ -20734,8 +20932,60 @@ function getClothesProductTotalQty(product) {
   return variants.reduce((sum, v) => sum + (Math.max(0, Math.floor(Number(v?.qty) || 0))), 0);
 }
 
+// Who may use the Clothes System: admins always; anyone else needs an active
+// clothes_system subscription (the server additionally enforces per-record
+// ownership through viewOwn/editOwn/deleteOwn permissions).
+function clothesCanUse() {
+  if (isCurrentUserAdmin()) return true;
+  return hasSubscription('clothes_system');
+}
+
+// Multi-tenant isolation: subscribers see ONLY their own records.
+// Admin (platform owner) sees everything.
+function _clothesScopeToOwner(records) {
+  const visible = getVisibleRecords(records);
+  if (isCurrentUserAdmin()) return visible;
+  const uid = state.currentUser?.id;
+  return visible.filter(r => r && r.createdBy === uid);
+}
+
 function getVisibleClothesProducts() {
-  return getVisibleRecords(state.clothesProducts);
+  return _clothesScopeToOwner(state.clothesProducts);
+}
+
+// Personal settings: ONE record per user, strictly own for everyone
+// (including admin — the platform owner's rate must not pick up a client's).
+function getClothesSettingsRecord() {
+  const uid = state.currentUser?.id;
+  if (!uid) return null;
+  return getVisibleRecords(state.clothesSettings).find(r => r && r.createdBy === uid) || null;
+}
+
+// The USD→LYD rate used for THIS user's profit math. Falls back to the app's
+// global rate for admins; subscribers must set their own (0 = unset → the UI
+// hides profit instead of showing wrong numbers).
+function getClothesExchangeRate() {
+  const own = Number(getClothesSettingsRecord()?.rateLYDperUSD) || 0;
+  if (own > 0) return own;
+  return isCurrentUserAdmin() ? (Number(state.defaultExchangeRate) || 0) : 0;
+}
+
+function saveClothesExchangeRate() {
+  if (!clothesCanUse()) return;
+  const isAr = clothesIsAr();
+  const value = clothesParseMoney(document.getElementById('clothes-rate-input')?.value);
+  if (!(value > 0)) {
+    showNotification(isAr ? 'تنبيه' : 'Validation', isAr ? 'أدخل سعر صرف أكبر من صفر (كم دينار يساوي الدولار).' : 'Enter a rate greater than zero (how many LYD one USD is worth).', 'error');
+    return;
+  }
+  const existing = getClothesSettingsRecord();
+  if (existing) {
+    updateRecord(state.clothesSettings, existing.id, { rateLYDperUSD: value });
+  } else {
+    addRecord(state.clothesSettings, { rateLYDperUSD: value, createdAt: new Date().toISOString() });
+  }
+  showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? `سعر الصرف الآن: ${value}` : `Exchange rate is now: ${value}`, 'success');
+  render();
 }
 
 // ------------------------------------------
@@ -20784,27 +21034,291 @@ function renderClothesComingSoonPanel(icon, title, titleAr, desc, descAr) {
 }
 
 function renderClothesDashboardTab() {
-  return renderClothesComingSoonPanel(
-    'layout-dashboard',
-    'Dashboard', 'نظرة عامة',
-    'One screen with the full picture: value of stock in the warehouse, goods still on the way, orders out for delivery, money collected and money customers still owe.',
-    'شاشة واحدة بالصورة الكاملة: قيمة البضاعة في المستودع، البضاعة التي في الطريق، الطلبات الخارجة للتوصيل، المال المحصَّل والمال المتبقي عند الزبائن.'
-  );
+  const isAr = clothesIsAr();
+  const products = getVisibleClothesProducts();
+  const shipments = getVisibleClothesShipments();
+  const orders = getVisibleClothesOrders();
+
+  // Warehouse: pieces + cost value + low-stock list
+  let totalPieces = 0;
+  let stockValueUSD = 0;
+  const lowStock = [];
+  for (const p of products) {
+    const variants = Array.isArray(p.variants) ? p.variants : [];
+    for (const v of variants) {
+      const qty = Math.max(0, Math.floor(Number(v?.qty) || 0));
+      totalPieces += qty;
+      stockValueUSD += qty * (Number(p.costUSD) || 0);
+      if (qty <= CLOTHES_LOW_STOCK_THRESHOLD) {
+        lowStock.push({ name: p.name, color: v?.color, size: v?.size, qty });
+      }
+    }
+  }
+  stockValueUSD = Math.round(stockValueUSD * 100) / 100;
+
+  // Shipments: money still on the way vs already brought in
+  let inTransitUSD = 0, receivedUSD = 0;
+  for (const s of shipments) {
+    const t = getClothesShipmentTotals(s);
+    if (s.status === 'Received') receivedUSD += t.totalUSD;
+    else inTransitUSD += t.totalUSD;
+  }
+  inTransitUSD = Math.round(inTransitUSD * 100) / 100;
+  receivedUSD = Math.round(receivedUSD * 100) / 100;
+
+  // Orders: deliveries in motion + the money picture
+  let outCount = 0, outValueLYD = 0, collectedLYD = 0, owedLYD = 0;
+  for (const o of orders) {
+    const t = getClothesOrderTotals(o);
+    if (o.status === 'On the way') { outCount++; outValueLYD += t.totalLYD; }
+    if (o.status !== 'Canceled' && o.status !== 'Returned') {
+      collectedLYD += t.paidLYD;
+      owedLYD += t.remainingLYD;
+    }
+  }
+  outValueLYD = Math.round(outValueLYD * 100) / 100;
+  collectedLYD = Math.round(collectedLYD * 100) / 100;
+  owedLYD = Math.round(owedLYD * 100) / 100;
+
+  // Profit (needs the exchange rate; hidden gracefully when unset)
+  const rate = getClothesExchangeRate();
+  let profitAllLYD = 0, profitMonthLYD = 0, deliveredThisMonth = 0;
+  const now = new Date();
+  const monthKey = `${now.getFullYear()}-${now.getMonth()}`;
+  if (rate > 0) {
+    for (const o of orders) {
+      if (o.status !== 'Delivered') continue;
+      const p = getClothesOrderProfitLYD(o);
+      if (p === null) continue;
+      profitAllLYD += p;
+      const d = o.deliveredAt ? new Date(o.deliveredAt) : null;
+      if (d && `${d.getFullYear()}-${d.getMonth()}` === monthKey) {
+        profitMonthLYD += p;
+        deliveredThisMonth++;
+      }
+    }
+    profitAllLYD = Math.round(profitAllLYD * 100) / 100;
+    profitMonthLYD = Math.round(profitMonthLYD * 100) / 100;
+  }
+
+  const bigCard = (icon, label, value, sub, gradient) => `
+    <div class="glass-panel rounded-2xl p-5">
+      <div class="flex items-center gap-3">
+        <div class="w-12 h-12 rounded-xl bg-gradient-to-br ${gradient} flex items-center justify-center shadow-lg shrink-0">
+          <i data-lucide="${icon}" class="w-6 h-6 text-white"></i>
+        </div>
+        <div class="min-w-0">
+          <div class="text-xs text-slate-500 dark:text-slate-400">${label}</div>
+          <div class="text-xl font-bold text-slate-800 dark:text-white truncate">${value}</div>
+          ${sub ? `<div class="text-xs text-slate-400 dark:text-slate-500 truncate">${sub}</div>` : ''}
+        </div>
+      </div>
+    </div>
+  `;
+
+  const lowStockList = lowStock.slice(0, 10).map(item => {
+    const variant = [item.color, item.size].map(x => String(x || '').trim()).filter(Boolean).join(' · ');
+    const chip = item.qty === 0
+      ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
+      : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300';
+    return `
+      <div class="flex items-center justify-between gap-3 py-2 border-b border-slate-100 dark:border-slate-800 last:border-0">
+        <div class="min-w-0">
+          <span class="font-medium text-slate-700 dark:text-slate-200">${Security.escapeHtml(String(item.name || ''))}</span>
+          ${variant ? `<span class="text-slate-400 dark:text-slate-500 text-sm"> — ${Security.escapeHtml(variant)}</span>` : ''}
+        </div>
+        <span class="px-2.5 py-0.5 rounded-full text-xs font-bold whitespace-nowrap ${chip}">
+          ${item.qty === 0 ? (isAr ? 'نفد' : 'Out') : item.qty}
+        </span>
+      </div>
+    `;
+  }).join('');
+
+  // First-time guide: shown until the system has any real data
+  const isEmpty = products.length === 0 && shipments.length === 0 && orders.length === 0;
+  const guideStep = (n, icon, title, desc, onclick, btnLabel) => `
+    <div class="flex-1 glass-panel rounded-2xl p-5 text-center">
+      <div class="w-10 h-10 mx-auto rounded-full bg-gradient-to-br from-rose-500 to-pink-500 text-white font-bold flex items-center justify-center mb-3 shadow-lg">${n}</div>
+      <i data-lucide="${icon}" class="w-6 h-6 mx-auto text-rose-400 mb-2"></i>
+      <h4 class="font-bold text-slate-800 dark:text-white mb-1">${title}</h4>
+      <p class="text-xs text-slate-500 dark:text-slate-400 mb-3">${desc}</p>
+      <button onclick="${onclick}" class="text-sm font-bold text-rose-600 hover:text-rose-700">${btnLabel} ←</button>
+    </div>
+  `;
+  const firstRunGuide = !isEmpty ? '' : `
+    <div class="glass-panel rounded-2xl p-6 mb-6">
+      <h3 class="text-xl font-bold text-slate-800 dark:text-white mb-1 text-center">${isAr ? '👋 أهلاً بك! ثلاث خطوات وتبدأ' : '👋 Welcome! Three steps to get going'}</h3>
+      <p class="text-sm text-slate-500 dark:text-slate-400 mb-5 text-center">${isAr ? 'هكذا يعمل النظام — من الشراء إلى البيع' : 'This is how the system works — from buying to selling'}</p>
+      <div class="flex flex-col md:flex-row gap-4" dir="${isAr ? 'rtl' : 'ltr'}">
+        ${guideStep(1, 'shirt', isAr ? 'أضف بضاعتك' : 'Add your products', isAr ? 'كل قطعة: الصورة والسعر والألوان والمقاسات.' : 'Each item: photo, prices, colors and sizes.', "setClothesTab('products'); showClothesProductModal();", isAr ? 'أضف منتجاً' : 'Add a product')}
+        ${guideStep(2, 'plane', isAr ? 'سجّل شحناتك' : 'Record your shipments', isAr ? 'عند الاستلام تُضاف الكميات للمخزون تلقائياً.' : 'Receiving adds the quantities to stock automatically.', "setClothesTab('shipments'); showClothesShipmentModal();", isAr ? 'أضف شحنة' : 'Add a shipment')}
+        ${guideStep(3, 'shopping-bag', isAr ? 'بِع لزبائنك' : 'Sell to your customers', isAr ? 'الطلب يخصم من المخزون ويتابع التوصيل والدفع.' : 'An order deducts stock and tracks delivery and payment.', "setClothesTab('orders'); showClothesOrderModal();", isAr ? 'أنشئ طلباً' : 'Create an order')}
+      </div>
+    </div>
+  `;
+
+  return `
+    <div>
+      ${firstRunGuide}
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
+        ${bigCard('warehouse', isAr ? 'قيمة المخزون (تكلفة)' : 'Stock value (cost)', clothesFmtUSD(stockValueUSD), isAr ? `${totalPieces} قطعة في المستودع` : `${totalPieces} pieces in the warehouse`, 'from-rose-500 to-pink-500')}
+        ${bigCard('plane', isAr ? 'بضاعة في الطريق' : 'Goods on the way', clothesFmtUSD(inTransitUSD), isAr ? 'شحنات لم تُستلم بعد' : 'Shipments not yet received', 'from-blue-500 to-cyan-500')}
+        ${bigCard('banknote', isAr ? 'إجمالي ما استوردته' : 'Total imported', clothesFmtUSD(receivedUSD), isAr ? 'الشحنات المستلمة (بضاعة + شحن)' : 'Received shipments (goods + shipping)', 'from-violet-500 to-fuchsia-500')}
+        ${bigCard('truck', isAr ? 'طلبات في الطريق للزبائن' : 'Orders out for delivery', String(outCount), clothesFmtLYD(outValueLYD), 'from-amber-400 to-orange-500')}
+        ${bigCard('circle-check', isAr ? 'المال المحصَّل' : 'Money collected', clothesFmtLYD(collectedLYD), isAr ? 'من الطلبات الفعّالة' : 'From active orders', 'from-emerald-500 to-green-500')}
+        ${bigCard('alert-triangle', isAr ? 'متبقٍ عند الزبائن' : 'Still owed by customers', clothesFmtLYD(owedLYD), isAr ? 'مبالغ غير محصّلة' : 'Uncollected amounts', 'from-red-500 to-rose-500')}
+        ${rate > 0
+          ? bigCard('trending-up', isAr ? 'الربح التقديري (المُسلّم)' : 'Est. profit (delivered)', clothesFmtLYD(profitAllLYD), isAr ? `سعر الصرف: ${rate}` : `Exchange rate: ${rate}`, 'from-emerald-600 to-teal-500')
+          : bigCard('trending-up', isAr ? 'الربح التقديري' : 'Est. profit', '—', isAr ? 'حدّد سعر صرفك في الأسفل أولاً' : 'Set your exchange rate below first', 'from-slate-400 to-slate-500')}
+        ${rate > 0
+          ? bigCard('calendar', isAr ? 'هذا الشهر' : 'This month', clothesFmtLYD(profitMonthLYD), isAr ? `${deliveredThisMonth} طلب مُسلّم` : `${deliveredThisMonth} delivered orders`, 'from-indigo-500 to-purple-500')
+          : ''}
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div class="glass-panel rounded-2xl p-5">
+          <h3 class="font-bold text-slate-800 dark:text-white mb-3 flex items-center gap-2">
+            <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-500"></i>
+            ${isAr ? 'مقاسات شارفت على النفاد' : 'Running low'}
+          </h3>
+          ${lowStock.length
+            ? lowStockList + (lowStock.length > 10 ? `<p class="mt-2 text-xs text-slate-400">${isAr ? `+${lowStock.length - 10} أخرى` : `+${lowStock.length - 10} more`}</p>` : '')
+            : `<p class="text-sm text-slate-400 dark:text-slate-500">${isAr ? 'كل المقاسات متوفرة بكمية كافية 🎉' : 'Everything is well stocked 🎉'}</p>`}
+        </div>
+
+        <div class="glass-panel rounded-2xl p-5">
+          <h3 class="font-bold text-slate-800 dark:text-white mb-3 flex items-center gap-2">
+            <i data-lucide="zap" class="w-4 h-4 text-rose-500"></i>
+            ${isAr ? 'إجراءات سريعة' : 'Quick actions'}
+          </h3>
+          <div class="space-y-2">
+            <button onclick="setClothesTab('products'); showClothesProductModal();" class="w-full flex items-center gap-2 px-4 py-2.5 rounded-xl glass-input hover:border-rose-400 font-medium text-slate-700 dark:text-slate-200">
+              <i data-lucide="shirt" class="w-4 h-4 text-rose-500"></i>${isAr ? 'إضافة منتج' : 'Add a product'}
+            </button>
+            <button onclick="setClothesTab('shipments'); showClothesShipmentModal();" class="w-full flex items-center gap-2 px-4 py-2.5 rounded-xl glass-input hover:border-rose-400 font-medium text-slate-700 dark:text-slate-200">
+              <i data-lucide="plane" class="w-4 h-4 text-blue-500"></i>${isAr ? 'إضافة شحنة' : 'Add a shipment'}
+            </button>
+            <button onclick="setClothesTab('orders'); showClothesOrderModal();" class="w-full flex items-center gap-2 px-4 py-2.5 rounded-xl glass-input hover:border-rose-400 font-medium text-slate-700 dark:text-slate-200">
+              <i data-lucide="shopping-bag" class="w-4 h-4 text-emerald-500"></i>${isAr ? 'طلب جديد لزبون' : 'New customer order'}
+            </button>
+          </div>
+
+          <h3 class="font-bold text-slate-800 dark:text-white mt-5 mb-2 flex items-center gap-2">
+            <i data-lucide="banknote" class="w-4 h-4 text-emerald-500"></i>
+            ${isAr ? 'سعر الصرف الخاص بك' : 'Your exchange rate'}
+          </h3>
+          <p class="text-xs text-slate-500 dark:text-slate-400 mb-2">
+            ${isAr ? 'كم ديناراً يساوي الدولار الواحد — يُستخدم لحساب أرباحك أنت فقط.' : 'How many LYD one USD is worth — used only for YOUR profit numbers.'}
+          </p>
+          <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:0.5rem;align-items:center;">
+            <input type="text" inputmode="decimal" id="clothes-rate-input" value="${rate > 0 ? rate : ''}" oninput="sanitizeMoneyInput(this)" placeholder="${isAr ? 'مثال: 5.2' : 'e.g. 5.2'}" style="width:100%;min-width:0;" class="glass-input px-3 py-2 rounded-xl text-sm" />
+            <button onclick="saveClothesExchangeRate()" class="btn-shine bg-gradient-to-r from-emerald-500 to-teal-500 text-white px-4 py-2 rounded-xl text-sm font-bold shadow">
+              ${isAr ? 'حفظ' : 'Save'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ------------------------------------------
+// CSV EXPORTS (Excel-friendly: UTF-8 BOM + en-CA dates, like exportAuditLogs)
+// ------------------------------------------
+
+function _clothesCsvCell(v) {
+  return `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+}
+
+function _clothesDownloadCsv(rows, filenameBase) {
+  const csv = rows.map(r => r.map(_clothesCsvCell).join(',')).join('\n');
+  downloadFile('﻿' + csv, `${filenameBase}-${getTodayDateString()}.csv`, 'text/csv;charset=utf-8');
+  showNotification(clothesIsAr() ? 'تم التصدير' : 'Exported', clothesIsAr() ? 'تم تنزيل ملف CSV.' : 'CSV file downloaded.', 'success');
+}
+
+function exportClothesProductsCSV() {
+  const isAr = clothesIsAr();
+  const rows = [[
+    isAr ? 'المنتج' : 'Product', isAr ? 'الفئة' : 'Category', isAr ? 'اللون' : 'Color', isAr ? 'المقاس' : 'Size',
+    isAr ? 'الكمية' : 'Qty', isAr ? 'التكلفة $' : 'Cost USD', isAr ? 'سعر البيع د.ل' : 'Price LYD'
+  ]];
+  for (const p of getFilteredClothesProducts()) {
+    const variants = Array.isArray(p.variants) && p.variants.length ? p.variants : [{ color: '', size: '', qty: 0 }];
+    for (const v of variants) {
+      rows.push([p.name || '', p.category || '', v.color || '', v.size || '', Math.max(0, Math.floor(Number(v.qty) || 0)), Number(p.costUSD) || 0, Number(p.priceLYD) || 0]);
+    }
+  }
+  _clothesDownloadCsv(rows, 'clothes-products');
+}
+
+function exportClothesShipmentsCSV() {
+  const isAr = clothesIsAr();
+  const rows = [[
+    isAr ? 'المرجع' : 'Reference', isAr ? 'المورد' : 'Supplier', isAr ? 'الحالة' : 'Status',
+    isAr ? 'تاريخ الطلب' : 'Ordered', isAr ? 'تاريخ الاستلام' : 'Received',
+    isAr ? 'القطع' : 'Pieces', isAr ? 'البضاعة $' : 'Goods USD', isAr ? 'الشحن $' : 'Shipping USD', isAr ? 'الإجمالي $' : 'Total USD',
+    isAr ? 'ملاحظة' : 'Note'
+  ]];
+  for (const s of getFilteredClothesShipments()) {
+    const t = getClothesShipmentTotals(s);
+    const meta = clothesShipmentStatusMeta(s.status);
+    rows.push([
+      s.ref || '', s.supplier || '', isAr ? meta.labelAr : meta.label,
+      s.orderedAt || '', s.receivedAt ? String(s.receivedAt).split('T')[0] : '',
+      t.pieces, t.goodsUSD, t.shippingUSD, t.totalUSD, s.note || ''
+    ]);
+  }
+  _clothesDownloadCsv(rows, 'clothes-shipments');
+}
+
+function exportClothesOrdersCSV() {
+  const isAr = clothesIsAr();
+  const rows = [[
+    isAr ? 'الزبون' : 'Customer', isAr ? 'الهاتف' : 'Phone', isAr ? 'الحالة' : 'Status', isAr ? 'الدفع' : 'Payment',
+    isAr ? 'القطع' : 'Pieces', isAr ? 'البضاعة د.ل' : 'Goods LYD', isAr ? 'التوصيل د.ل' : 'Delivery LYD',
+    isAr ? 'الإجمالي د.ل' : 'Total LYD', isAr ? 'المدفوع د.ل' : 'Paid LYD', isAr ? 'المتبقي د.ل' : 'Remaining LYD',
+    isAr ? 'طريقة الدفع' : 'Method', isAr ? 'تاريخ الإنشاء' : 'Created', isAr ? 'تاريخ التسليم' : 'Delivered',
+    isAr ? 'ملاحظة' : 'Note'
+  ]];
+  for (const o of getFilteredClothesOrders()) {
+    const t = getClothesOrderTotals(o);
+    const meta = clothesOrderStatusMeta(o.status);
+    const payMeta = clothesPaymentStatusMeta(o.paymentStatus);
+    rows.push([
+      o.customerName || '', o.customerPhone || '', isAr ? meta.labelAr : meta.label, isAr ? payMeta.labelAr : payMeta.label,
+      t.pieces, t.goodsLYD, t.feeLYD, t.totalLYD, t.paidLYD, t.remainingLYD,
+      o.paymentMethod || '', o.createdAt ? String(o.createdAt).split('T')[0] : '', o.deliveredAt ? String(o.deliveredAt).split('T')[0] : '',
+      o.note || ''
+    ]);
+  }
+  _clothesDownloadCsv(rows, 'clothes-orders');
 }
 
 // (Shipments tab implemented in the SHIPMENTS section below)
 
-function renderClothesOrdersTab() {
-  return renderClothesComingSoonPanel(
-    'shopping-bag',
-    'Customer Orders', 'طلبات الزبائن',
-    'What you send to customers: the pieces, delivery status (New, On the way, Delivered, Returned, Canceled) and payment status (Paid, Partially paid, Not paid).',
-    'ما ترسله للزبائن: القطع، حالة التوصيل (جديد، في الطريق، تم التسليم، مرتجع، ملغى) وحالة الدفع (مدفوع، مدفوع جزئياً، غير مدفوع).'
-  );
-}
+// (Orders tab implemented in the ORDERS section below)
 
 function renderClothesSystemView() {
   const isAr = clothesIsAr();
+  const isAdmin = isCurrentUserAdmin();
+
+  // Subscription gate for non-admins (view access alone is not enough)
+  if (!isAdmin && !hasSubscription('clothes_system')) {
+    return `
+      <div class="max-w-2xl mx-auto">
+        <div class="glass-panel rounded-2xl p-12 text-center">
+          <div class="w-20 h-20 mx-auto rounded-3xl bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center mb-6 shadow-2xl">
+            <i data-lucide="lock" class="w-10 h-10 text-white"></i>
+          </div>
+          <h3 class="text-2xl font-bold text-slate-800 dark:text-white mb-2">${isAr ? 'الاشتراك مطلوب' : 'Subscription required'}</h3>
+          <p class="text-slate-500 dark:text-slate-400 mb-6">${isAr ? 'نظام الملابس خدمة باشتراك. اشترك لتبدأ إدارة مخزونك وطلباتك.' : 'The Clothes System is a subscription service. Subscribe to start managing your stock and orders.'}</p>
+          <button onclick="showSubscriptionModal('clothes_system', 'clothes_system')" class="btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-8 py-3 rounded-xl font-bold shadow-lg">
+            ${isAr ? 'اشترك الآن' : 'Subscribe now'}
+          </button>
+        </div>
+      </div>
+    `;
+  }
 
   let tabContent;
   switch (_clothesActiveTab) {
@@ -20814,13 +21328,21 @@ function renderClothesSystemView() {
     default: tabContent = renderClothesDashboardTab();
   }
 
+  // Back target: admins return to the Smart Systems hub; employees with other
+  // permissions return to their first allowed manager page; pure subscribers
+  // (this is their whole world) get no back button.
+  const backView = isAdmin ? 'smart-systems' : getAlbayanManagerLandingViewForUser(state.currentUser);
+  const showBack = isAdmin || (backView && backView !== 'clothes-system' && backView !== 'no-access');
+  const backLabel = isAdmin ? (isAr ? 'العودة للأنظمة الذكية' : 'Back to Smart Systems') : (isAr ? 'العودة' : 'Back');
+
   return `
     <div class="max-w-6xl mx-auto">
+      ${showBack ? `
       <!-- Back Button -->
-      <button onclick="navigateTo('smart-systems')" class="mb-6 flex items-center gap-2 text-rose-600 hover:text-rose-700 font-medium">
+      <button onclick="navigateTo('${backView}')" class="mb-6 flex items-center gap-2 text-rose-600 hover:text-rose-700 font-medium">
         <i data-lucide="${isAr ? 'arrow-right' : 'arrow-left'}" class="w-5 h-5"></i>
-        <span>${isAr ? 'العودة للأنظمة الذكية' : 'Back to Smart Systems'}</span>
-      </button>
+        <span>${backLabel}</span>
+      </button>` : ''}
 
       <!-- Header -->
       <div class="mb-8">
@@ -20966,6 +21488,9 @@ function renderClothesProductsTab() {
             class="w-full glass-input ${isAr ? 'pr-11 pl-4' : 'pl-11 pr-4'} py-2.5 rounded-xl"
           />
         </div>
+        <button onclick="exportClothesProductsCSV()" class="glass-panel px-3 py-2.5 rounded-xl text-slate-600 dark:text-slate-300 hover:text-rose-600 flex items-center justify-center" title="${isAr ? 'تصدير CSV (إكسل)' : 'Export CSV (Excel)'}">
+          <i data-lucide="download" class="w-4 h-4"></i>
+        </button>
         <button onclick="showClothesProductModal()" class="btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-5 py-2.5 rounded-xl font-bold shadow-lg hover:shadow-xl flex items-center justify-center gap-2">
           <i data-lucide="plus" class="w-4 h-4"></i>
           ${isAr ? 'إضافة منتج' : 'Add Product'}
@@ -21082,7 +21607,7 @@ function renderClothesProductCard(p) {
 }
 
 function adjustClothesVariantQty(productId, variantIndex, delta) {
-  if (!isCurrentUserAdmin()) return;
+  if (!clothesCanUse()) return;
   const product = getVisibleClothesProducts().find(p => p.id === productId);
   if (!product) return;
   const variants = (Array.isArray(product.variants) ? product.variants : []).map(v => ({ ...v }));
@@ -21094,7 +21619,7 @@ function adjustClothesVariantQty(productId, variantIndex, delta) {
 }
 
 function deleteClothesProduct(id) {
-  if (!isCurrentUserAdmin()) return;
+  if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   const product = getVisibleClothesProducts().find(p => p.id === id);
   if (!product) return;
@@ -21121,7 +21646,7 @@ let _clothesTempVariants = [];
 let _clothesTempPhoto = null;
 
 function showClothesProductModal() {
-  if (!isCurrentUserAdmin()) return;
+  if (!clothesCanUse()) return;
   state.activeModal = 'clothes-product';
   state.modalData = null;
   _clothesTempVariants = [{ color: '', size: '', qty: 0 }];
@@ -21130,7 +21655,7 @@ function showClothesProductModal() {
 }
 
 function editClothesProduct(id) {
-  if (!isCurrentUserAdmin()) return;
+  if (!clothesCanUse()) return;
   const product = getVisibleClothesProducts().find(p => p.id === id);
   if (!product) return;
   state.activeModal = 'clothes-product';
@@ -21220,12 +21745,16 @@ function refreshClothesVariantRows() {
   const isAr = clothesIsAr();
   const wrap = document.getElementById('clothes-variant-rows');
   if (!wrap) return;
+  // Inline grid template: width utility classes proved unreliable inside the
+  // modal in narrow webviews, so the column sizes are pinned inline.
+  const rowStyle = 'display:grid;grid-template-columns:minmax(0,1fr) 5.5rem 4.5rem 2rem;gap:0.5rem;align-items:center;';
+  const cellStyle = 'width:100%;min-width:0;';
   wrap.innerHTML = _clothesTempVariants.map((v, idx) => `
-    <div class="flex items-center gap-2">
-      <input type="text" value="${Security.escapeHtml(String(v.color || ''))}" oninput="onClothesVariantField(${idx}, 'color', this.value)" placeholder="${isAr ? 'اللون' : 'Color'}" class="flex-1 min-w-0 glass-input px-3 py-2 rounded-xl text-sm" />
-      <input type="text" value="${Security.escapeHtml(String(v.size || ''))}" oninput="onClothesVariantField(${idx}, 'size', this.value)" placeholder="${isAr ? 'المقاس' : 'Size'}" class="w-20 glass-input px-3 py-2 rounded-xl text-sm" />
-      <input type="number" min="0" step="1" value="${Math.max(0, Math.floor(Number(v.qty) || 0))}" oninput="onClothesVariantField(${idx}, 'qty', this.value)" placeholder="0" class="w-20 glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'الكمية' : 'Quantity'}" />
-      <button type="button" onclick="removeClothesVariantRow(${idx})" class="w-8 h-8 rounded-lg flex items-center justify-center text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 shrink-0" title="${isAr ? 'إزالة' : 'Remove'}">
+    <div style="${rowStyle}">
+      <input type="text" value="${Security.escapeHtml(String(v.color || ''))}" oninput="onClothesVariantField(${idx}, 'color', this.value)" placeholder="${isAr ? 'اللون' : 'Color'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
+      <input type="text" value="${Security.escapeHtml(String(v.size || ''))}" oninput="onClothesVariantField(${idx}, 'size', this.value)" placeholder="${isAr ? 'المقاس' : 'Size'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
+      <input type="number" min="0" step="1" value="${Math.max(0, Math.floor(Number(v.qty) || 0))}" oninput="onClothesVariantField(${idx}, 'qty', this.value)" placeholder="0" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'الكمية' : 'Quantity'}" />
+      <button type="button" onclick="removeClothesVariantRow(${idx})" class="w-8 h-8 rounded-lg flex items-center justify-center text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20" title="${isAr ? 'إزالة' : 'Remove'}">
         <i data-lucide="x" class="w-4 h-4"></i>
       </button>
     </div>
@@ -21298,7 +21827,7 @@ function removeClothesProductPhoto() {
 // Called by handleModalSubmit for state.activeModal === 'clothes-product'.
 // Returns true when saved (modal may close), false to keep the modal open.
 async function saveClothesProductFromModal() {
-  if (!isCurrentUserAdmin()) return false;
+  if (!clothesCanUse()) return false;
   const isAr = clothesIsAr();
 
   const name = Security.sanitizeInput(String(document.getElementById('clothes-product-name')?.value || ''), { maxLength: 120 }).trim();
@@ -21367,7 +21896,7 @@ let _clothesShipmentsShowLimit = CLOTHES_SHIPMENTS_PAGE_SIZE;
 let _clothesShipmentsFilterFingerprint = '';
 
 function getVisibleClothesShipments() {
-  return getVisibleRecords(state.clothesShipments);
+  return _clothesScopeToOwner(state.clothesShipments);
 }
 
 function clothesShipmentStatusMeta(statusId) {
@@ -21430,7 +21959,7 @@ function applyClothesShipmentStockDelta(shipment, sign) {
 }
 
 function setClothesShipmentStatus(shipmentId, newStatus) {
-  if (!isCurrentUserAdmin()) return;
+  if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   if (!CLOTHES_SHIPMENT_STATUSES.some(s => s.id === newStatus)) return;
   const shipment = getVisibleClothesShipments().find(s => s.id === shipmentId);
@@ -21466,7 +21995,7 @@ function setClothesShipmentStatus(shipmentId, newStatus) {
 }
 
 function deleteClothesShipment(id) {
-  if (!isCurrentUserAdmin()) return;
+  if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   const shipment = getVisibleClothesShipments().find(s => s.id === id);
   if (!shipment) return;
@@ -21596,6 +22125,9 @@ function renderClothesShipmentsTab() {
           <option value="all" ${_clothesShipmentStatusFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All statuses'}</option>
           ${CLOTHES_SHIPMENT_STATUSES.map(s => `<option value="${s.id}" ${_clothesShipmentStatusFilter === s.id ? 'selected' : ''}>${isAr ? s.labelAr : s.label}</option>`).join('')}
         </select>
+        <button onclick="exportClothesShipmentsCSV()" class="glass-panel px-3 py-2.5 rounded-xl text-slate-600 dark:text-slate-300 hover:text-rose-600 flex items-center justify-center" title="${isAr ? 'تصدير CSV (إكسل)' : 'Export CSV (Excel)'}">
+          <i data-lucide="download" class="w-4 h-4"></i>
+        </button>
         <button onclick="showClothesShipmentModal()" class="btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-5 py-2.5 rounded-xl font-bold shadow-lg hover:shadow-xl flex items-center justify-center gap-2">
           <i data-lucide="plus" class="w-4 h-4"></i>
           ${isAr ? 'إضافة شحنة' : 'Add Shipment'}
@@ -21717,10 +22249,31 @@ function renderClothesShipmentCard(s) {
 // SHIPMENT MODAL (add / edit)
 // ------------------------------------------
 
+// Variant helpers shared by shipment + order line editors.
+// "Pick, don't type": color/size come from a dropdown fed by the chosen
+// product, so a typo can never send stock to the wrong place.
+function clothesVariantOptionLabel(v, withStock) {
+  const isAr = clothesIsAr();
+  const label = [v?.color, v?.size].map(x => String(x || '').trim()).filter(Boolean).join(' · ') || (isAr ? 'بدون تحديد' : 'unspecified');
+  if (!withStock) return label;
+  const qty = Math.max(0, Math.floor(Number(v?.qty) || 0));
+  return `${label} (${qty} ${isAr ? 'متبقي' : 'left'})`;
+}
+
+function findClothesVariantIndex(product, color, size) {
+  const variants = Array.isArray(product?.variants) ? product.variants : [];
+  const c = String(color || '').trim().toLowerCase();
+  const s = String(size || '').trim().toLowerCase();
+  return variants.findIndex(v =>
+    String(v?.color || '').trim().toLowerCase() === c &&
+    String(v?.size || '').trim().toLowerCase() === s
+  );
+}
+
 let _clothesTempShipLines = [];
 
 function showClothesShipmentModal() {
-  if (!isCurrentUserAdmin()) return;
+  if (!clothesCanUse()) return;
   state.activeModal = 'clothes-shipment';
   state.modalData = null;
   _clothesTempShipLines = [{ productId: '', color: '', size: '', qty: 0, unitCostUSD: '' }];
@@ -21728,7 +22281,7 @@ function showClothesShipmentModal() {
 }
 
 function editClothesShipment(id) {
-  if (!isCurrentUserAdmin()) return;
+  if (!clothesCanUse()) return;
   const shipment = getVisibleClothesShipments().find(s => s.id === id);
   if (!shipment) return;
   if (shipment.status === 'Received') {
@@ -21822,22 +22375,72 @@ function refreshClothesShipLines() {
   const wrap = document.getElementById('clothes-ship-lines');
   if (!wrap) return;
   const products = getVisibleClothesProducts();
-  wrap.innerHTML = _clothesTempShipLines.map((line, idx) => `
-    <div class="flex flex-wrap items-center gap-2">
-      <select oninput="onClothesShipLineField(${idx}, 'productId', this.value)" class="flex-1 min-w-[140px] glass-input px-3 py-2 rounded-xl text-sm">
+  // Inline grid template: width utility classes proved unreliable inside the
+  // modal in narrow webviews (see refreshClothesVariantRows), so the column
+  // sizes are pinned inline. Two rows per line so it stays usable on phones:
+  // row 1 = product + remove, row 2 = variant picker / qty / unit cost
+  // (+ a color/size text row only when "new color/size" is chosen).
+  const rowStyle = 'display:grid;grid-template-columns:minmax(0,1fr) 2rem;gap:0.5rem;align-items:center;';
+  const subStyle = 'grid-column:1 / -1;display:grid;grid-template-columns:minmax(0,1fr) 4rem 5rem;gap:0.5rem;align-items:center;';
+  const newStyle = 'grid-column:1 / -1;display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;align-items:center;';
+  const cellStyle = 'width:100%;min-width:0;';
+  wrap.innerHTML = _clothesTempShipLines.map((line, idx) => {
+    const product = products.find(p => p.id === line.productId);
+    const variants = Array.isArray(product?.variants) ? product.variants : [];
+    const matchIdx = product ? findClothesVariantIndex(product, line.color, line.size) : -1;
+    // "new" mode stays sticky while the user is typing a brand-new color/size
+    const isNew = line._newVariant === true || (matchIdx === -1 && !!(String(line.color || '').trim() || String(line.size || '').trim()));
+    const selectVal = (matchIdx >= 0 && !line._newVariant) ? `v:${matchIdx}` : (isNew ? 'new' : '');
+    return `
+    <div style="${rowStyle}" class="pb-2 border-b border-slate-100 dark:border-slate-800">
+      <select oninput="onClothesShipLineField(${idx}, 'productId', this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm">
         <option value="">${isAr ? '— اختر المنتج —' : '— choose product —'}</option>
         ${products.map(p => `<option value="${p.id}" ${line.productId === p.id ? 'selected' : ''}>${Security.escapeHtml(p.name || '')}</option>`).join('')}
       </select>
-      <input type="text" value="${Security.escapeHtml(String(line.color || ''))}" oninput="onClothesShipLineField(${idx}, 'color', this.value)" placeholder="${isAr ? 'اللون' : 'Color'}" class="w-24 glass-input px-3 py-2 rounded-xl text-sm" />
-      <input type="text" value="${Security.escapeHtml(String(line.size || ''))}" oninput="onClothesShipLineField(${idx}, 'size', this.value)" placeholder="${isAr ? 'المقاس' : 'Size'}" class="w-20 glass-input px-3 py-2 rounded-xl text-sm" />
-      <input type="number" min="0" step="1" value="${Math.max(0, Math.floor(Number(line.qty) || 0))}" oninput="onClothesShipLineField(${idx}, 'qty', this.value)" placeholder="${isAr ? 'كمية' : 'Qty'}" class="w-20 glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'الكمية' : 'Quantity'}" />
-      <input type="text" inputmode="decimal" value="${Security.escapeHtml(String(line.unitCostUSD ?? ''))}" oninput="sanitizeMoneyInput(this); onClothesShipLineField(${idx}, 'unitCostUSD', this.value)" placeholder="$/1" class="w-20 glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'تكلفة القطعة بالدولار' : 'Unit cost USD'}" />
-      <button type="button" onclick="removeClothesShipLine(${idx})" class="w-8 h-8 rounded-lg flex items-center justify-center text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 shrink-0" title="${isAr ? 'إزالة' : 'Remove'}">
+      <button type="button" onclick="removeClothesShipLine(${idx})" class="w-8 h-8 rounded-lg flex items-center justify-center text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20" title="${isAr ? 'إزالة' : 'Remove'}">
         <i data-lucide="x" class="w-4 h-4"></i>
       </button>
+      <div style="${subStyle}">
+        <select oninput="onClothesShipLineVariantPick(${idx}, this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" ${product ? '' : 'disabled'} title="${isAr ? 'اللون والمقاس' : 'Color & size'}">
+          <option value="" ${selectVal === '' ? 'selected' : ''}>${product ? (isAr ? '— اللون والمقاس —' : '— color & size —') : (isAr ? 'اختر المنتج أولاً' : 'choose product first')}</option>
+          ${variants.map((v, vi) => `<option value="v:${vi}" ${selectVal === `v:${vi}` ? 'selected' : ''}>${Security.escapeHtml(clothesVariantOptionLabel(v, false))}</option>`).join('')}
+          ${product ? `<option value="new" ${selectVal === 'new' ? 'selected' : ''}>${isAr ? '+ لون/مقاس جديد' : '+ new color/size'}</option>` : ''}
+        </select>
+        <input type="number" min="0" step="1" value="${Math.max(0, Math.floor(Number(line.qty) || 0))}" oninput="onClothesShipLineField(${idx}, 'qty', this.value)" placeholder="${isAr ? 'كمية' : 'Qty'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'الكمية' : 'Quantity'}" />
+        <input type="text" inputmode="decimal" value="${Security.escapeHtml(String(line.unitCostUSD ?? ''))}" oninput="sanitizeMoneyInput(this); onClothesShipLineField(${idx}, 'unitCostUSD', this.value)" placeholder="$/1" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'تكلفة القطعة بالدولار' : 'Unit cost USD'}" />
+      </div>
+      ${isNew ? `
+      <div style="${newStyle}">
+        <input type="text" value="${Security.escapeHtml(String(line.color || ''))}" oninput="onClothesShipLineField(${idx}, 'color', this.value)" placeholder="${isAr ? 'اللون الجديد' : 'New color'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
+        <input type="text" value="${Security.escapeHtml(String(line.size || ''))}" oninput="onClothesShipLineField(${idx}, 'size', this.value)" placeholder="${isAr ? 'المقاس الجديد' : 'New size'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
+      </div>` : ''}
     </div>
-  `).join('');
+  `;
+  }).join('');
   if (typeof IconQueue !== 'undefined') IconQueue.schedule(wrap);
+}
+
+function onClothesShipLineVariantPick(idx, value) {
+  const line = _clothesTempShipLines[idx];
+  if (!line) return;
+  const product = getVisibleClothesProducts().find(p => p.id === line.productId);
+  if (String(value).startsWith('v:')) {
+    const v = (product?.variants || [])[Number(String(value).slice(2))];
+    if (v) {
+      line.color = String(v.color || '');
+      line.size = String(v.size || '');
+      line._newVariant = false;
+    }
+  } else if (value === 'new') {
+    line.color = '';
+    line.size = '';
+    line._newVariant = true;
+  } else {
+    line.color = '';
+    line.size = '';
+    line._newVariant = false;
+  }
+  refreshClothesShipLines();
 }
 
 function onClothesShipLineField(idx, field, value) {
@@ -21849,14 +22452,16 @@ function onClothesShipLineField(idx, field, value) {
     line.unitCostUSD = String(value || '');
   } else if (field === 'productId') {
     line.productId = String(value || '');
+    // New product = new variant list: reset the picked color/size
+    line.color = '';
+    line.size = '';
+    line._newVariant = false;
     // Convenience: prefill unit cost from the product's cost price when empty
     if (!String(line.unitCostUSD || '').trim()) {
       const p = getVisibleClothesProducts().find(x => x.id === line.productId);
-      if (p && Number(p.costUSD) > 0) {
-        line.unitCostUSD = String(p.costUSD);
-        refreshClothesShipLines();
-      }
+      if (p && Number(p.costUSD) > 0) line.unitCostUSD = String(p.costUSD);
     }
+    refreshClothesShipLines();
   } else if (field === 'color' || field === 'size') {
     line[field] = Security.sanitizeInput(String(value || ''), { maxLength: 60 });
   }
@@ -21875,7 +22480,7 @@ function removeClothesShipLine(idx) {
 
 // Called by handleModalSubmit for state.activeModal === 'clothes-shipment'.
 async function saveClothesShipmentFromModal() {
-  if (!isCurrentUserAdmin()) return false;
+  if (!clothesCanUse()) return false;
   const isAr = clothesIsAr();
 
   const ref = Security.sanitizeInput(String(document.getElementById('clothes-shipment-ref')?.value || ''), { maxLength: 120 }).trim();
@@ -21928,6 +22533,914 @@ async function saveClothesShipmentFromModal() {
       createdAt: new Date().toISOString()
     });
     showNotification(isAr ? 'تمت الإضافة' : 'Added', isAr ? 'تمت إضافة الشحنة.' : 'Shipment added.', 'success');
+  }
+  return true;
+}
+
+// ------------------------------------------
+// ORDERS TAB — outgoing customer orders
+// ------------------------------------------
+// Rules that keep stock honest (mirror of shipments, in reverse):
+// - Creating an order takes its pieces OUT of stock immediately
+//   (stockDeducted flag makes this happen exactly once).
+// - 'Returned' / 'Canceled' puts the pieces BACK; moving the order back to an
+//   active status takes them out again (fully reversible).
+// - Editing an order's lines restores the old pieces first, then deducts the
+//   new ones — stock never drifts.
+// - Returned/Canceled orders cannot be edited (re-activate first).
+
+const CLOTHES_ORDER_STATUSES = [
+  { id: 'New', label: 'New', labelAr: 'جديد', active: true, badge: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300' },
+  { id: 'On the way', label: 'On the way', labelAr: 'في الطريق', active: true, badge: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' },
+  { id: 'Delivered', label: 'Delivered', labelAr: 'تم التسليم', active: true, badge: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' },
+  { id: 'Returned', label: 'Returned', labelAr: 'مرتجع', active: false, badge: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' },
+  { id: 'Canceled', label: 'Canceled', labelAr: 'ملغى', active: false, badge: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' }
+];
+
+const CLOTHES_PAYMENT_STATUSES = [
+  { id: 'Not Paid', label: 'Not Paid', labelAr: 'غير مدفوع', badge: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' },
+  { id: 'Partially Paid', label: 'Partially Paid', labelAr: 'مدفوع جزئياً', badge: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' },
+  { id: 'Paid', label: 'Paid', labelAr: 'مدفوع', badge: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' }
+];
+
+const CLOTHES_ORDERS_PAGE_SIZE = 30;
+
+let _clothesOrderSearch = '';
+let _clothesOrderStatusFilter = 'all';
+let _clothesOrderPaymentFilter = 'all';
+let _clothesOrdersShowLimit = CLOTHES_ORDERS_PAGE_SIZE;
+let _clothesOrdersFilterFingerprint = '';
+
+function getVisibleClothesOrders() {
+  return _clothesScopeToOwner(state.clothesOrders);
+}
+
+function clothesOrderStatusMeta(statusId) {
+  return CLOTHES_ORDER_STATUSES.find(s => s.id === statusId) || CLOTHES_ORDER_STATUSES[0];
+}
+
+function clothesPaymentStatusMeta(statusId) {
+  return CLOTHES_PAYMENT_STATUSES.find(s => s.id === statusId) || CLOTHES_PAYMENT_STATUSES[0];
+}
+
+function clothesOrderIsActiveStatus(statusId) {
+  return clothesOrderStatusMeta(statusId).active === true;
+}
+
+function getClothesOrderTotals(o) {
+  const lines = Array.isArray(o?.lines) ? o.lines : [];
+  let pieces = 0;
+  let goodsLYD = 0;
+  for (const line of lines) {
+    const qty = Math.max(0, Math.floor(Number(line?.qty) || 0));
+    pieces += qty;
+    goodsLYD += qty * (Number(line?.priceLYD) || 0);
+  }
+  goodsLYD = Math.round(goodsLYD * 100) / 100;
+  const feeLYD = Math.round((Number(o?.deliveryFeeLYD) || 0) * 100) / 100;
+  const totalLYD = Math.round((goodsLYD + feeLYD) * 100) / 100;
+  const paidLYD = Math.round((Number(o?.amountPaidLYD) || 0) * 100) / 100;
+  const remainingLYD = Math.max(0, Math.round((totalLYD - paidLYD) * 100) / 100);
+  return { pieces, goodsLYD, feeLYD, totalLYD, paidLYD, remainingLYD };
+}
+
+// Estimated profit of an order in LYD: goods revenue minus goods cost
+// (cost is the USD snapshot taken at sale time, converted with the app's
+// exchange rate). Delivery fee excluded — it usually covers the courier.
+// Returns null when no exchange rate is set (never show wrong numbers).
+function getClothesOrderProfitLYD(order) {
+  const rate = getClothesExchangeRate();
+  if (rate <= 0) return null;
+  const lines = Array.isArray(order?.lines) ? order.lines : [];
+  let profit = 0;
+  for (const line of lines) {
+    const qty = Math.max(0, Math.floor(Number(line?.qty) || 0));
+    const price = Number(line?.priceLYD) || 0;
+    const costUSD = Number(line?.costUSDAtSale) || 0;
+    profit += qty * (price - costUSD * rate);
+  }
+  return Math.round(profit * 100) / 100;
+}
+
+// Add (sign=+1, restore) or remove (sign=-1, sell) an order's pieces in stock.
+function applyClothesOrderStockDelta(order, sign) {
+  const lines = Array.isArray(order?.lines) ? order.lines : [];
+  const byProduct = new Map();
+  for (const line of lines) {
+    const pid = String(line?.productId || '');
+    if (!pid) continue;
+    if (!byProduct.has(pid)) byProduct.set(pid, []);
+    byProduct.get(pid).push(line);
+  }
+  for (const [pid, productLines] of byProduct) {
+    const product = getVisibleClothesProducts().find(p => p.id === pid);
+    if (!product) continue; // product deleted — nothing to update
+    const variants = (Array.isArray(product.variants) ? product.variants : []).map(v => ({ ...v }));
+    for (const line of productLines) {
+      const qty = Math.max(0, Math.floor(Number(line?.qty) || 0));
+      if (qty === 0) continue;
+      const color = String(line?.color || '').trim();
+      const size = String(line?.size || '').trim();
+      const match = variants.find(v =>
+        String(v?.color || '').trim().toLowerCase() === color.toLowerCase() &&
+        String(v?.size || '').trim().toLowerCase() === size.toLowerCase()
+      );
+      if (match) {
+        match.qty = Math.max(0, Math.floor(Number(match.qty) || 0) + sign * qty);
+      } else if (sign > 0) {
+        variants.push({ color, size, qty });
+      }
+    }
+    updateRecord(state.clothesProducts, pid, { variants });
+  }
+}
+
+function setClothesOrderStatus(orderId, newStatus) {
+  if (!clothesCanUse()) return;
+  const isAr = clothesIsAr();
+  if (!CLOTHES_ORDER_STATUSES.some(s => s.id === newStatus)) return;
+  const order = getVisibleClothesOrders().find(o => o.id === orderId);
+  if (!order || order.status === newStatus) return;
+
+  const wasActive = clothesOrderIsActiveStatus(order.status);
+  const willBeActive = clothesOrderIsActiveStatus(newStatus);
+  const updates = { status: newStatus };
+
+  if (wasActive && !willBeActive && order.stockDeducted) {
+    const ok = confirm(isAr
+      ? 'سيتم إرجاع قطع هذا الطلب إلى المخزون. متابعة؟'
+      : 'This order\'s pieces will be RETURNED to stock. Continue?');
+    if (!ok) { updateClothesOrdersFiltered(); return; }
+    applyClothesOrderStockDelta(order, 1);
+    updates.stockDeducted = false;
+  } else if (!wasActive && willBeActive && !order.stockDeducted) {
+    const ok = confirm(isAr
+      ? 'سيتم خصم قطع هذا الطلب من المخزون مرة أخرى. متابعة؟'
+      : 'This order\'s pieces will be TAKEN from stock again. Continue?');
+    if (!ok) { updateClothesOrdersFiltered(); return; }
+    applyClothesOrderStockDelta(order, -1);
+    updates.stockDeducted = true;
+  }
+
+  if (newStatus === 'Delivered' && !order.deliveredAt) {
+    updates.deliveredAt = new Date().toISOString();
+  }
+
+  updateRecord(state.clothesOrders, orderId, updates);
+  const meta = clothesOrderStatusMeta(newStatus);
+  showNotification(
+    isAr ? 'تم التحديث' : 'Updated',
+    isAr ? `حالة الطلب الآن: ${meta.labelAr}` : `Order status is now: ${meta.label}`,
+    'success'
+  );
+  updateClothesOrdersFiltered();
+}
+
+function setClothesOrderPayment(orderId, newPaymentStatus) {
+  if (!clothesCanUse()) return;
+  const isAr = clothesIsAr();
+  if (!CLOTHES_PAYMENT_STATUSES.some(s => s.id === newPaymentStatus)) return;
+  const order = getVisibleClothesOrders().find(o => o.id === orderId);
+  if (!order || order.paymentStatus === newPaymentStatus) return;
+
+  const totals = getClothesOrderTotals(order);
+  const updates = { paymentStatus: newPaymentStatus };
+  if (newPaymentStatus === 'Paid') {
+    updates.amountPaidLYD = totals.totalLYD; // fully paid
+    updates.paidAt = order.paidAt || new Date().toISOString();
+  } else if (newPaymentStatus === 'Not Paid') {
+    updates.amountPaidLYD = 0;
+  }
+  // 'Partially Paid' keeps the recorded amount — edit it in the order form.
+
+  updateRecord(state.clothesOrders, orderId, updates);
+  const meta = clothesPaymentStatusMeta(newPaymentStatus);
+  showNotification(
+    isAr ? 'تم التحديث' : 'Updated',
+    isAr ? `حالة الدفع الآن: ${meta.labelAr}` : `Payment status is now: ${meta.label}`,
+    'success'
+  );
+  updateClothesOrdersFiltered();
+}
+
+function deleteClothesOrder(id) {
+  if (!clothesCanUse()) return;
+  const isAr = clothesIsAr();
+  const order = getVisibleClothesOrders().find(o => o.id === id);
+  if (!order) return;
+  const willRestore = order.stockDeducted === true;
+  const ok = confirm(isAr
+    ? (willRestore ? 'هل تريد حذف هذا الطلب؟ ستعود قطعه إلى المخزون.' : 'هل تريد حذف هذا الطلب؟')
+    : (willRestore ? 'Delete this order? Its pieces will return to stock.' : 'Delete this order?'));
+  if (!ok) return;
+  if (willRestore) {
+    applyClothesOrderStockDelta(order, 1);
+    updateRecord(state.clothesOrders, id, { stockDeducted: false });
+  }
+  deleteRecord(state.clothesOrders, id);
+  showNotification(isAr ? 'تم الحذف' : 'Deleted', isAr ? 'تم حذف الطلب.' : 'Order deleted.', 'success');
+  updateClothesOrdersFiltered();
+}
+
+function loadMoreClothesOrders() {
+  _clothesOrdersShowLimit += CLOTHES_ORDERS_PAGE_SIZE;
+  updateClothesOrdersFiltered();
+}
+
+function onClothesOrderSearchInput(el) {
+  _clothesOrderSearch = Security.sanitizeInput(String(el?.value || ''), { maxLength: 200 });
+  if (window._clothesOrderSearchTimer) clearTimeout(window._clothesOrderSearchTimer);
+  window._clothesOrderSearchTimer = setTimeout(() => updateClothesOrdersFiltered(), 80);
+}
+
+function setClothesOrderStatusFilter(value) {
+  _clothesOrderStatusFilter = String(value || 'all');
+  updateClothesOrdersFiltered();
+}
+
+function setClothesOrderPaymentFilter(value) {
+  _clothesOrderPaymentFilter = String(value || 'all');
+  updateClothesOrdersFiltered();
+}
+
+function getFilteredClothesOrders() {
+  const q = _clothesOrderSearch.trim().toLowerCase();
+  let items = getVisibleClothesOrders();
+  if (_clothesOrderStatusFilter !== 'all') {
+    items = items.filter(o => o.status === _clothesOrderStatusFilter);
+  }
+  if (_clothesOrderPaymentFilter !== 'all') {
+    items = items.filter(o => o.paymentStatus === _clothesOrderPaymentFilter);
+  }
+  if (q) {
+    items = items.filter(o => {
+      if (String(o.customerName || '').toLowerCase().includes(q)) return true;
+      if (String(o.customerPhone || '').toLowerCase().includes(q)) return true;
+      const lines = Array.isArray(o.lines) ? o.lines : [];
+      return lines.some(line => clothesProductNameById(line.productId).toLowerCase().includes(q));
+    });
+  }
+  return items;
+}
+
+function updateClothesOrdersFiltered() {
+  const container = document.querySelector('main');
+  if (!container || state.currentView !== 'clothes-system' || _clothesActiveTab !== 'orders') {
+    render();
+    return;
+  }
+  const template = document.createElement('template');
+  template.innerHTML = renderClothesOrdersTab();
+  const newStats = template.content.querySelector('#clothes-orders-stats');
+  const newGrid = template.content.querySelector('#clothes-orders-grid');
+  const curStats = document.getElementById('clothes-orders-stats');
+  const curGrid = document.getElementById('clothes-orders-grid');
+  if (newStats && curStats) curStats.innerHTML = newStats.innerHTML;
+  if (newGrid && curGrid) curGrid.innerHTML = newGrid.innerHTML;
+  if (typeof IconQueue !== 'undefined') IconQueue.schedule(container);
+  else lucide.createIcons();
+}
+
+function renderClothesOrdersTab() {
+  const isAr = clothesIsAr();
+  const all = getVisibleClothesOrders();
+  const filtered = getFilteredClothesOrders();
+
+  const fingerprint = JSON.stringify([_clothesOrderSearch, _clothesOrderStatusFilter, _clothesOrderPaymentFilter]);
+  if (fingerprint !== _clothesOrdersFilterFingerprint) {
+    _clothesOrdersFilterFingerprint = fingerprint;
+    _clothesOrdersShowLimit = CLOTHES_ORDERS_PAGE_SIZE;
+  }
+  const shown = filtered.slice(0, _clothesOrdersShowLimit);
+  const remaining = Math.max(0, filtered.length - shown.length);
+
+  // Stats: where the orders and the money stand
+  let onTheWay = 0, deliveredCount = 0, collectedLYD = 0, owedLYD = 0;
+  for (const o of all) {
+    const t = getClothesOrderTotals(o);
+    if (o.status === 'On the way') onTheWay++;
+    if (o.status === 'Delivered') deliveredCount++;
+    if (o.status !== 'Canceled' && o.status !== 'Returned') {
+      collectedLYD += t.paidLYD;
+      owedLYD += t.remainingLYD;
+    }
+  }
+  collectedLYD = Math.round(collectedLYD * 100) / 100;
+  owedLYD = Math.round(owedLYD * 100) / 100;
+
+  const statCard = (icon, label, value, gradient) => `
+    <div class="glass-panel rounded-2xl p-4 flex items-center gap-3">
+      <div class="w-11 h-11 rounded-xl bg-gradient-to-br ${gradient} flex items-center justify-center shadow-lg shrink-0">
+        <i data-lucide="${icon}" class="w-5 h-5 text-white"></i>
+      </div>
+      <div class="min-w-0">
+        <div class="text-xs text-slate-500 dark:text-slate-400">${label}</div>
+        <div class="text-lg font-bold text-slate-800 dark:text-white truncate">${value}</div>
+      </div>
+    </div>
+  `;
+
+  return `
+    <div>
+      <div id="clothes-orders-stats" class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        ${statCard('truck', isAr ? 'في الطريق للزبون' : 'On the way', String(onTheWay), 'from-blue-500 to-cyan-500')}
+        ${statCard('package-check', isAr ? 'طلبات مُسلّمة' : 'Delivered', String(deliveredCount), 'from-emerald-500 to-green-500')}
+        ${statCard('banknote', isAr ? 'المال المحصَّل' : 'Money collected', clothesFmtLYD(collectedLYD), 'from-rose-500 to-pink-500')}
+        ${statCard('alert-triangle', isAr ? 'متبقٍ عند الزبائن' : 'Still owed', clothesFmtLYD(owedLYD), 'from-amber-400 to-orange-500')}
+      </div>
+
+      <div class="flex flex-col sm:flex-row gap-3 mb-6">
+        <div class="relative flex-1">
+          <i data-lucide="search" class="w-4 h-4 absolute top-1/2 -translate-y-1/2 ${isAr ? 'right-4' : 'left-4'} text-slate-400"></i>
+          <input
+            type="text"
+            id="clothes-order-search"
+            value="${Security.escapeHtml(_clothesOrderSearch)}"
+            oninput="onClothesOrderSearchInput(this)"
+            placeholder="${isAr ? 'ابحث باسم الزبون أو الهاتف أو المنتج...' : 'Search by customer, phone or product...'}"
+            class="w-full glass-input ${isAr ? 'pr-11 pl-4' : 'pl-11 pr-4'} py-2.5 rounded-xl"
+          />
+        </div>
+        <select onchange="setClothesOrderStatusFilter(this.value)" class="glass-input px-4 py-2.5 rounded-xl">
+          <option value="all" ${_clothesOrderStatusFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All statuses'}</option>
+          ${CLOTHES_ORDER_STATUSES.map(s => `<option value="${s.id}" ${_clothesOrderStatusFilter === s.id ? 'selected' : ''}>${isAr ? s.labelAr : s.label}</option>`).join('')}
+        </select>
+        <select onchange="setClothesOrderPaymentFilter(this.value)" class="glass-input px-4 py-2.5 rounded-xl">
+          <option value="all" ${_clothesOrderPaymentFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل حالات الدفع' : 'All payments'}</option>
+          ${CLOTHES_PAYMENT_STATUSES.map(s => `<option value="${s.id}" ${_clothesOrderPaymentFilter === s.id ? 'selected' : ''}>${isAr ? s.labelAr : s.label}</option>`).join('')}
+        </select>
+        <button onclick="exportClothesOrdersCSV()" class="glass-panel px-3 py-2.5 rounded-xl text-slate-600 dark:text-slate-300 hover:text-rose-600 flex items-center justify-center" title="${isAr ? 'تصدير CSV (إكسل)' : 'Export CSV (Excel)'}">
+          <i data-lucide="download" class="w-4 h-4"></i>
+        </button>
+        <button onclick="showClothesOrderModal()" class="btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-5 py-2.5 rounded-xl font-bold shadow-lg hover:shadow-xl flex items-center justify-center gap-2">
+          <i data-lucide="plus" class="w-4 h-4"></i>
+          ${isAr ? 'طلب جديد' : 'New Order'}
+        </button>
+      </div>
+
+      <div id="clothes-orders-grid">
+        ${shown.length === 0 ? `
+          <div class="glass-panel rounded-2xl p-12 text-center">
+            <div class="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-rose-500 to-pink-500 flex items-center justify-center mb-4 shadow-xl opacity-80">
+              <i data-lucide="shopping-bag" class="w-8 h-8 text-white"></i>
+            </div>
+            <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-1">
+              ${all.length === 0 ? (isAr ? 'لا توجد طلبات بعد' : 'No orders yet') : (isAr ? 'لا توجد نتائج' : 'No results')}
+            </h3>
+            <p class="text-sm text-slate-500 dark:text-slate-400">
+              ${all.length === 0
+                ? (isAr ? 'أنشئ طلباً عندما يشتري منك زبون.' : 'Create an order when a customer buys from you.')
+                : (isAr ? 'جرّب بحثاً أو فلتراً آخر.' : 'Try a different search or filter.')}
+            </p>
+          </div>
+        ` : `
+          <div class="text-sm text-slate-500 dark:text-slate-400 mb-3">
+            ${isAr ? `عرض ${shown.length} من ${filtered.length} طلب` : `Showing ${shown.length} of ${filtered.length} orders`}
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            ${shown.map(o => renderClothesOrderCard(o)).join('')}
+          </div>
+          ${remaining > 0 ? `
+            <div class="text-center mt-6">
+              <button onclick="loadMoreClothesOrders()" class="glass-panel px-6 py-2.5 rounded-xl font-medium text-slate-600 dark:text-slate-300 hover:text-rose-600">
+                ${isAr ? `عرض المزيد (${remaining} متبقي)` : `Load more (${remaining} remaining)`}
+              </button>
+            </div>
+          ` : ''}
+        `}
+      </div>
+    </div>
+  `;
+}
+
+function renderClothesOrderCard(o) {
+  const isAr = clothesIsAr();
+  const meta = clothesOrderStatusMeta(o.status);
+  const payMeta = clothesPaymentStatusMeta(o.paymentStatus);
+  const totals = getClothesOrderTotals(o);
+  const lines = Array.isArray(o.lines) ? o.lines : [];
+  const editable = clothesOrderIsActiveStatus(o.status);
+
+  const lineSummary = lines.slice(0, 3).map(line => {
+    const bits = [clothesProductNameById(line.productId)];
+    const variant = [line.color, line.size].map(x => String(x || '').trim()).filter(Boolean).join('/');
+    if (variant) bits.push(variant);
+    return `${Security.escapeHtml(bits.join(' '))} ×${Math.max(0, Math.floor(Number(line.qty) || 0))}`;
+  }).join(isAr ? '، ' : ', ') + (lines.length > 3 ? (isAr ? ` +${lines.length - 3} أخرى` : ` +${lines.length - 3} more`) : '');
+
+  return `
+    <div class="glass-panel rounded-2xl p-5">
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0">
+          <h4 class="font-bold text-slate-800 dark:text-white truncate">
+            ${o.orderNo ? `<span class="text-rose-500">#${String(Math.floor(Number(o.orderNo))).padStart(4, '0')}</span> ` : ''}${Security.escapeHtml(o.customerName || '')}
+          </h4>
+          ${o.customerPhone ? `<p class="text-sm text-slate-500 dark:text-slate-400 truncate" dir="ltr">${Security.escapeHtml(o.customerPhone)}</p>` : ''}
+        </div>
+        <div class="flex flex-col items-end gap-1">
+          <span class="px-2.5 py-1 rounded-full text-xs font-bold whitespace-nowrap ${meta.badge}">${isAr ? meta.labelAr : meta.label}</span>
+          <span class="px-2.5 py-1 rounded-full text-xs font-bold whitespace-nowrap ${payMeta.badge}">${isAr ? payMeta.labelAr : payMeta.label}</span>
+        </div>
+      </div>
+
+      <div class="mt-3 space-y-1.5 text-sm">
+        <div class="flex justify-between gap-2">
+          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'القطع' : 'Pieces'}</span>
+          <span class="font-medium text-slate-700 dark:text-slate-200">${totals.pieces}</span>
+        </div>
+        <div class="flex justify-between gap-2">
+          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'البضاعة + التوصيل' : 'Goods + delivery'}</span>
+          <span class="font-medium text-slate-700 dark:text-slate-200">${clothesFmtLYD(totals.goodsLYD)} + ${clothesFmtLYD(totals.feeLYD)}</span>
+        </div>
+        <div class="flex justify-between gap-2">
+          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'الإجمالي' : 'Total'}</span>
+          <span class="font-bold text-rose-600 dark:text-rose-400">${clothesFmtLYD(totals.totalLYD)}</span>
+        </div>
+        <div class="flex justify-between gap-2">
+          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'المدفوع / المتبقي' : 'Paid / remaining'}</span>
+          <span class="font-medium">
+            <span class="text-emerald-600 dark:text-emerald-400">${clothesFmtLYD(totals.paidLYD)}</span>
+            <span class="text-slate-400"> / </span>
+            <span class="${totals.remainingLYD > 0 ? 'text-red-600 dark:text-red-400 font-bold' : 'text-slate-500'}">${clothesFmtLYD(totals.remainingLYD)}</span>
+          </span>
+        </div>
+        ${(() => {
+          const profit = getClothesOrderProfitLYD(o);
+          if (profit === null) return '';
+          return `
+        <div class="flex justify-between gap-2">
+          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'الربح التقديري' : 'Est. profit'}</span>
+          <span class="font-bold ${profit >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}">${clothesFmtLYD(profit)}</span>
+        </div>`;
+        })()}
+        ${o.deliveredAt ? `
+        <div class="flex justify-between gap-2">
+          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'تاريخ التسليم' : 'Delivered at'}</span>
+          <span class="font-medium text-emerald-600 dark:text-emerald-400">${Security.escapeHtml(String(o.deliveredAt).split('T')[0])}</span>
+        </div>` : ''}
+      </div>
+
+      ${lines.length ? `<p class="mt-3 text-xs text-slate-500 dark:text-slate-400">${lineSummary}</p>` : ''}
+      ${o.note ? `<p class="mt-2 text-xs text-slate-400 dark:text-slate-500 line-clamp-2">${Security.escapeHtml(o.note)}</p>` : ''}
+
+      <div class="flex items-center gap-2 mt-4 pt-3 border-t border-slate-200 dark:border-slate-700">
+        <select onchange="setClothesOrderStatus('${o.id}', this.value)" class="glass-input px-2 py-1.5 rounded-lg text-sm flex-1" title="${isAr ? 'حالة التوصيل' : 'Delivery status'}">
+          ${CLOTHES_ORDER_STATUSES.map(st => `<option value="${st.id}" ${o.status === st.id ? 'selected' : ''}>${isAr ? st.labelAr : st.label}</option>`).join('')}
+        </select>
+        <select onchange="setClothesOrderPayment('${o.id}', this.value)" class="glass-input px-2 py-1.5 rounded-lg text-sm flex-1" title="${isAr ? 'حالة الدفع' : 'Payment status'}">
+          ${CLOTHES_PAYMENT_STATUSES.map(st => `<option value="${st.id}" ${o.paymentStatus === st.id ? 'selected' : ''}>${isAr ? st.labelAr : st.label}</option>`).join('')}
+        </select>
+        <button onclick="printClothesOrderSlip('${o.id}')" class="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800" title="${isAr ? 'طباعة إيصال' : 'Print slip'}">
+          <i data-lucide="printer" class="w-4 h-4"></i>
+        </button>
+        ${editable ? `
+          <button onclick="editClothesOrder('${o.id}')" class="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800" title="${isAr ? 'تعديل' : 'Edit'}">
+            <i data-lucide="pencil" class="w-4 h-4"></i>
+          </button>
+        ` : ''}
+        <button onclick="deleteClothesOrder('${o.id}')" class="p-2 rounded-lg text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20" title="${isAr ? 'حذف' : 'Delete'}">
+          <i data-lucide="trash-2" class="w-4 h-4"></i>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+// ------------------------------------------
+// ORDER MODAL (add / edit)
+// ------------------------------------------
+
+let _clothesTempOrderLines = [];
+
+function showClothesOrderModal() {
+  if (!clothesCanUse()) return;
+  state.activeModal = 'clothes-order';
+  state.modalData = null;
+  _clothesTempOrderLines = [{ productId: '', color: '', size: '', qty: 1, priceLYD: '' }];
+  renderModal();
+}
+
+function editClothesOrder(id) {
+  if (!clothesCanUse()) return;
+  const order = getVisibleClothesOrders().find(o => o.id === id);
+  if (!order) return;
+  if (!clothesOrderIsActiveStatus(order.status)) {
+    showNotification(
+      clothesIsAr() ? 'غير ممكن' : 'Not allowed',
+      clothesIsAr() ? 'لا يمكن تعديل طلب مرتجع أو ملغى — أعد تفعيله أولاً.' : 'Cannot edit a Returned/Canceled order — re-activate it first.',
+      'error'
+    );
+    return;
+  }
+  state.activeModal = 'clothes-order';
+  state.modalData = order;
+  const lines = Array.isArray(order.lines) ? order.lines : [];
+  _clothesTempOrderLines = lines.length
+    ? lines.map(l => ({
+        productId: String(l?.productId || ''),
+        color: String(l?.color || ''),
+        size: String(l?.size || ''),
+        qty: Math.max(0, Math.floor(Number(l?.qty) || 0)),
+        priceLYD: String(l?.priceLYD ?? '')
+      }))
+    : [{ productId: '', color: '', size: '', qty: 1, priceLYD: '' }];
+  renderModal();
+}
+
+function renderClothesOrderModal() {
+  const isAr = clothesIsAr();
+  const data = state.modalData || {};
+  const isEdit = state.modalData !== null;
+  const payStatus = data.paymentStatus || 'Not Paid';
+
+  return `
+    <h2 class="text-2xl font-bold mb-4 flex items-center gap-2">
+      <i data-lucide="shopping-bag" class="w-6 h-6 text-rose-500"></i>
+      ${isEdit ? (isAr ? 'تعديل طلب' : 'Edit Order') : (isAr ? 'طلب جديد' : 'New Order')}
+    </h2>
+    <form id="modal-form" class="space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar ${isAr ? 'pl-2' : 'pr-2'}">
+      <input type="hidden" id="clothes-order-editing-id" value="${Security.escapeHtml(String(isEdit ? (data.id || '') : ''))}" />
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium mb-2">${isAr ? 'اسم الزبون *' : 'Customer name *'}</label>
+          <input type="text" id="clothes-order-customer" value="${Security.escapeHtml(data.customerName || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isAr ? 'الاسم' : 'Name'}" />
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-2">${isAr ? 'الهاتف' : 'Phone'}</label>
+          <input type="text" id="clothes-order-phone" value="${Security.escapeHtml(data.customerPhone || '')}" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="09..." dir="ltr" />
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium mb-2">${isAr ? 'القطع المطلوبة *' : 'Order items *'}</label>
+        <div id="clothes-order-lines" class="space-y-2"></div>
+        <button type="button" onclick="addClothesOrderLine()" class="mt-2 flex items-center gap-1.5 text-sm font-medium text-rose-600 hover:text-rose-700">
+          <i data-lucide="plus" class="w-4 h-4"></i>${isAr ? 'إضافة قطعة' : 'Add item'}
+        </button>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium mb-2">${isAr ? 'رسوم التوصيل (دينار)' : 'Delivery fee (LYD)'}</label>
+          <input type="text" inputmode="decimal" id="clothes-order-fee" value="${Security.escapeHtml(String(data.deliveryFeeLYD ?? ''))}" oninput="sanitizeMoneyInput(this); updateClothesOrderModalTotal()" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="0.00" />
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-2">${isAr ? 'الإجمالي' : 'Total'}</label>
+          <div id="clothes-order-modal-total" class="w-full px-4 py-2 rounded-xl bg-rose-50 dark:bg-rose-900/20 font-bold text-rose-600 dark:text-rose-400">0.00 LYD</div>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium mb-2">${isAr ? 'حالة الدفع' : 'Payment status'}</label>
+          <select id="clothes-order-paystatus" class="w-full glass-input px-4 py-2 rounded-xl">
+            ${CLOTHES_PAYMENT_STATUSES.map(s => `<option value="${s.id}" ${payStatus === s.id ? 'selected' : ''}>${isAr ? s.labelAr : s.label}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-2">${isAr ? 'المبلغ المدفوع (دينار)' : 'Amount paid (LYD)'}</label>
+          <input type="text" inputmode="decimal" id="clothes-order-paid" value="${Security.escapeHtml(String(data.amountPaidLYD ?? ''))}" oninput="sanitizeMoneyInput(this)" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="0.00" />
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium mb-2">${isAr ? 'طريقة الدفع' : 'Payment method'}</label>
+          <input type="text" id="clothes-order-method" list="clothes-pay-methods" value="${Security.escapeHtml(data.paymentMethod || '')}" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isAr ? 'نقداً، تحويل...' : 'Cash, transfer...'}" />
+          <datalist id="clothes-pay-methods">
+            <option value="${isAr ? 'نقداً' : 'Cash'}"></option>
+            <option value="${isAr ? 'تحويل بنكي' : 'Bank transfer'}"></option>
+            <option value="${isAr ? 'بطاقة' : 'Card'}"></option>
+          </datalist>
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-2">${isAr ? 'ملاحظة' : 'Note'}</label>
+          <input type="text" id="clothes-order-note" value="${Security.escapeHtml(data.note || '')}" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isAr ? 'اختياري' : 'Optional'}" />
+        </div>
+      </div>
+
+      <div class="flex gap-3 pt-2">
+        <button type="submit" class="flex-1 btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-6 py-3 rounded-xl font-bold shadow-lg">
+          ${isEdit ? (isAr ? 'حفظ التعديلات' : 'Save Changes') : (isAr ? 'إنشاء الطلب' : 'Create Order')}
+        </button>
+        <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600">
+          ${isAr ? 'إلغاء' : 'Cancel'}
+        </button>
+      </div>
+    </form>
+  `;
+}
+
+function refreshClothesOrderLines() {
+  const isAr = clothesIsAr();
+  const wrap = document.getElementById('clothes-order-lines');
+  if (!wrap) return;
+  const products = getVisibleClothesProducts();
+  // Same inline-grid pattern as the shipment modal (width utility classes are
+  // unreliable inside modals in narrow webviews).
+  const rowStyle = 'display:grid;grid-template-columns:minmax(0,1fr) 2rem;gap:0.5rem;align-items:center;';
+  const subStyle = 'grid-column:1 / -1;display:grid;grid-template-columns:minmax(0,1fr) 4rem 4rem 5rem;gap:0.5rem;align-items:center;';
+  const cellStyle = 'width:100%;min-width:0;';
+  wrap.innerHTML = _clothesTempOrderLines.map((line, idx) => {
+    const product = products.find(p => p.id === line.productId);
+    const variants = Array.isArray(product?.variants) ? product.variants : [];
+    const matchIdx = product ? findClothesVariantIndex(product, line.color, line.size) : -1;
+    return `
+    <div style="${rowStyle}" class="pb-2 border-b border-slate-100 dark:border-slate-800">
+      <select oninput="onClothesOrderLineField(${idx}, 'productId', this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm">
+        <option value="">${isAr ? '— اختر المنتج —' : '— choose product —'}</option>
+        ${products.map(p => `<option value="${p.id}" ${line.productId === p.id ? 'selected' : ''}>${Security.escapeHtml(p.name || '')}</option>`).join('')}
+      </select>
+      <button type="button" onclick="removeClothesOrderLine(${idx})" class="w-8 h-8 rounded-lg flex items-center justify-center text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20" title="${isAr ? 'إزالة' : 'Remove'}">
+        <i data-lucide="x" class="w-4 h-4"></i>
+      </button>
+      <div style="${subStyle}">
+        <select oninput="onClothesOrderLineVariantPick(${idx}, this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" ${product && variants.length ? '' : 'disabled'} title="${isAr ? 'اللون والمقاس' : 'Color & size'}">
+          <option value="" ${matchIdx < 0 ? 'selected' : ''}>${!product
+            ? (isAr ? 'اختر المنتج أولاً' : 'choose product first')
+            : (variants.length ? (isAr ? '— اللون والمقاس —' : '— color & size —') : (isAr ? 'لا مخزون لهذا المنتج' : 'no stock for this product'))}</option>
+          ${variants.map((v, vi) => `<option value="v:${vi}" ${matchIdx === vi ? 'selected' : ''}>${Security.escapeHtml(clothesVariantOptionLabel(v, true))}</option>`).join('')}
+        </select>
+        <input type="number" min="0" step="1" value="${Math.max(0, Math.floor(Number(line.qty) || 0))}" oninput="onClothesOrderLineField(${idx}, 'qty', this.value)" placeholder="${isAr ? 'كمية' : 'Qty'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'الكمية' : 'Quantity'}" />
+        <input type="text" inputmode="decimal" value="${Security.escapeHtml(String(line.priceLYD ?? ''))}" oninput="sanitizeMoneyInput(this); onClothesOrderLineField(${idx}, 'priceLYD', this.value)" placeholder="${isAr ? 'سعر/1' : 'LYD/1'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'سعر القطعة بالدينار' : 'Unit price LYD'}" />
+      </div>
+    </div>
+  `;
+  }).join('');
+  if (typeof IconQueue !== 'undefined') IconQueue.schedule(wrap);
+  updateClothesOrderModalTotal();
+}
+
+function onClothesOrderLineVariantPick(idx, value) {
+  const line = _clothesTempOrderLines[idx];
+  if (!line) return;
+  const product = getVisibleClothesProducts().find(p => p.id === line.productId);
+  if (String(value).startsWith('v:')) {
+    const v = (product?.variants || [])[Number(String(value).slice(2))];
+    if (v) {
+      line.color = String(v.color || '');
+      line.size = String(v.size || '');
+    }
+  } else {
+    line.color = '';
+    line.size = '';
+  }
+  refreshClothesOrderLines();
+}
+
+function onClothesOrderLineField(idx, field, value) {
+  const line = _clothesTempOrderLines[idx];
+  if (!line) return;
+  if (field === 'qty') {
+    line.qty = Math.max(0, Math.floor(Number(value) || 0));
+  } else if (field === 'priceLYD') {
+    line.priceLYD = String(value || '');
+  } else if (field === 'productId') {
+    line.productId = String(value || '');
+    // New product = new variant list: reset the picked color/size
+    line.color = '';
+    line.size = '';
+    // Convenience: prefill unit price from the product's selling price when empty
+    if (!String(line.priceLYD || '').trim()) {
+      const p = getVisibleClothesProducts().find(x => x.id === line.productId);
+      if (p && Number(p.priceLYD) > 0) line.priceLYD = String(p.priceLYD);
+    }
+    refreshClothesOrderLines();
+    return;
+  }
+  updateClothesOrderModalTotal();
+}
+
+function addClothesOrderLine() {
+  _clothesTempOrderLines.push({ productId: '', color: '', size: '', qty: 1, priceLYD: '' });
+  refreshClothesOrderLines();
+}
+
+function removeClothesOrderLine(idx) {
+  _clothesTempOrderLines.splice(idx, 1);
+  if (_clothesTempOrderLines.length === 0) _clothesTempOrderLines.push({ productId: '', color: '', size: '', qty: 1, priceLYD: '' });
+  refreshClothesOrderLines();
+}
+
+function updateClothesOrderModalTotal() {
+  const el = document.getElementById('clothes-order-modal-total');
+  if (!el) return;
+  let goods = 0;
+  for (const line of _clothesTempOrderLines) {
+    goods += Math.max(0, Math.floor(Number(line.qty) || 0)) * (clothesParseMoney(line.priceLYD) || 0);
+  }
+  const fee = clothesParseMoney(document.getElementById('clothes-order-fee')?.value);
+  el.textContent = clothesFmtLYD(Math.round((goods + fee) * 100) / 100);
+}
+
+// Printable bilingual order slip (uses the app's print-single/.print-target
+// mechanism — see printReceiptCard for the original pattern).
+function printClothesOrderSlip(orderId) {
+  const order = getVisibleClothesOrders().find(o => o.id === orderId);
+  if (!order) return;
+  const isAr = clothesIsAr();
+  const totals = getClothesOrderTotals(order);
+  const lines = Array.isArray(order.lines) ? order.lines : [];
+  const payMeta = clothesPaymentStatusMeta(order.paymentStatus);
+  const orderNoLabel = order.orderNo ? `#${String(Math.floor(Number(order.orderNo))).padStart(4, '0')}` : '';
+  const dateLabel = String(order.createdAt || '').split('T')[0] || '';
+
+  const rowsHtml = lines.map((line, i) => {
+    const variant = [line.color, line.size].map(x => String(x || '').trim()).filter(Boolean).join(' · ');
+    const qty = Math.max(0, Math.floor(Number(line.qty) || 0));
+    const price = Number(line.priceLYD) || 0;
+    return `
+      <tr>
+        <td style="border:1px solid #cbd5e1;padding:6px 8px;text-align:center;">${i + 1}</td>
+        <td style="border:1px solid #cbd5e1;padding:6px 8px;">${Security.escapeHtml(clothesProductNameById(line.productId))}${variant ? ` — ${Security.escapeHtml(variant)}` : ''}</td>
+        <td style="border:1px solid #cbd5e1;padding:6px 8px;text-align:center;">${qty}</td>
+        <td style="border:1px solid #cbd5e1;padding:6px 8px;text-align:center;">${price.toFixed(2)}</td>
+        <td style="border:1px solid #cbd5e1;padding:6px 8px;text-align:center;">${(qty * price).toFixed(2)}</td>
+      </tr>`;
+  }).join('');
+
+  const moneyRow = (label, value, bold) => `
+    <div style="display:flex;justify-content:space-between;padding:3px 0;${bold ? 'font-weight:bold;font-size:15px;border-top:1px solid #cbd5e1;margin-top:4px;padding-top:6px;' : ''}">
+      <span>${label}</span><span>${value}</span>
+    </div>`;
+
+  document.querySelectorAll('.clothes-print-slip').forEach(el => el.remove());
+  const slip = document.createElement('div');
+  slip.className = 'clothes-print-slip print-target';
+  slip.dir = isAr ? 'rtl' : 'ltr';
+  slip.innerHTML = `
+    <div style="padding:18px;font-family:inherit;font-size:13px;">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;border-bottom:2px solid #0f172a;padding-bottom:8px;margin-bottom:10px;">
+        <div style="font-size:20px;font-weight:bold;">${isAr ? 'إيصال طلب' : 'Order Slip'} ${orderNoLabel}</div>
+        <div>${Security.escapeHtml(dateLabel)}</div>
+      </div>
+      <div style="margin-bottom:10px;">
+        <div><strong>${isAr ? 'الزبون:' : 'Customer:'}</strong> ${Security.escapeHtml(order.customerName || '')}</div>
+        ${order.customerPhone ? `<div><strong>${isAr ? 'الهاتف:' : 'Phone:'}</strong> <span dir="ltr">${Security.escapeHtml(order.customerPhone)}</span></div>` : ''}
+      </div>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:10px;">
+        <thead>
+          <tr style="background:#f1f5f9;">
+            <th style="border:1px solid #cbd5e1;padding:6px 8px;">#</th>
+            <th style="border:1px solid #cbd5e1;padding:6px 8px;text-align:${isAr ? 'right' : 'left'};">${isAr ? 'الصنف' : 'Item'}</th>
+            <th style="border:1px solid #cbd5e1;padding:6px 8px;">${isAr ? 'الكمية' : 'Qty'}</th>
+            <th style="border:1px solid #cbd5e1;padding:6px 8px;">${isAr ? 'السعر' : 'Price'}</th>
+            <th style="border:1px solid #cbd5e1;padding:6px 8px;">${isAr ? 'المجموع' : 'Total'}</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+      <div style="max-width:280px;margin-${isAr ? 'right' : 'left'}:auto;">
+        ${moneyRow(isAr ? 'البضاعة' : 'Goods', clothesFmtLYD(totals.goodsLYD), false)}
+        ${moneyRow(isAr ? 'التوصيل' : 'Delivery', clothesFmtLYD(totals.feeLYD), false)}
+        ${moneyRow(isAr ? 'الإجمالي' : 'TOTAL', clothesFmtLYD(totals.totalLYD), true)}
+        ${moneyRow(isAr ? 'المدفوع' : 'Paid', clothesFmtLYD(totals.paidLYD), false)}
+        ${moneyRow(isAr ? 'المتبقي' : 'Remaining', clothesFmtLYD(totals.remainingLYD), false)}
+        ${moneyRow(isAr ? 'حالة الدفع' : 'Payment', `${isAr ? payMeta.labelAr : payMeta.label}${order.paymentMethod ? ` (${Security.escapeHtml(order.paymentMethod)})` : ''}`, false)}
+      </div>
+      <div style="text-align:center;margin-top:16px;color:#64748b;">${isAr ? 'شكراً لتسوقكم معنا' : 'Thank you for your business'}</div>
+    </div>
+  `;
+  document.body.appendChild(slip);
+  document.body.classList.add('print-single');
+  const cleanup = () => {
+    document.body.classList.remove('print-single');
+    slip.remove();
+    window.removeEventListener('afterprint', cleanup);
+  };
+  window.addEventListener('afterprint', cleanup);
+  // Safety net for webviews that never fire afterprint (printReceiptCard pattern)
+  setTimeout(cleanup, 3000);
+  window.print();
+}
+
+// Checks stock for the requested lines; returns a human list of shortages.
+function getClothesOrderStockShortages(lines) {
+  const shortages = [];
+  for (const line of lines) {
+    const product = getVisibleClothesProducts().find(p => p.id === line.productId);
+    if (!product) continue;
+    const variants = Array.isArray(product.variants) ? product.variants : [];
+    const match = variants.find(v =>
+      String(v?.color || '').trim().toLowerCase() === String(line.color || '').trim().toLowerCase() &&
+      String(v?.size || '').trim().toLowerCase() === String(line.size || '').trim().toLowerCase()
+    );
+    const available = match ? Math.max(0, Math.floor(Number(match.qty) || 0)) : 0;
+    if (line.qty > available) {
+      const variant = [line.color, line.size].filter(Boolean).join('/');
+      shortages.push(`${product.name}${variant ? ' ' + variant : ''}: ${available} ${clothesIsAr() ? 'متوفر' : 'available'}, ${line.qty} ${clothesIsAr() ? 'مطلوب' : 'requested'}`);
+    }
+  }
+  return shortages;
+}
+
+// Called by handleModalSubmit for state.activeModal === 'clothes-order'.
+async function saveClothesOrderFromModal() {
+  if (!clothesCanUse()) return false;
+  const isAr = clothesIsAr();
+
+  const customerName = Security.sanitizeInput(String(document.getElementById('clothes-order-customer')?.value || ''), { maxLength: 120 }).trim();
+  if (!customerName) {
+    showNotification(isAr ? 'تنبيه' : 'Validation', isAr ? 'اسم الزبون مطلوب' : 'Customer name is required', 'error');
+    return false;
+  }
+  const customerPhone = Security.sanitizeInput(String(document.getElementById('clothes-order-phone')?.value || ''), { maxLength: 40 }).trim();
+  const deliveryFeeLYD = clothesParseMoney(document.getElementById('clothes-order-fee')?.value);
+  const paymentStatus = String(document.getElementById('clothes-order-paystatus')?.value || 'Not Paid');
+  let amountPaidLYD = clothesParseMoney(document.getElementById('clothes-order-paid')?.value);
+  const paymentMethod = Security.sanitizeInput(String(document.getElementById('clothes-order-method')?.value || ''), { maxLength: 60 }).trim();
+  const note = Security.sanitizeInput(String(document.getElementById('clothes-order-note')?.value || ''), { maxLength: 500 }).trim();
+
+  const lines = [];
+  for (const l of _clothesTempOrderLines) {
+    const productId = String(l?.productId || '').trim();
+    const qty = Math.max(0, Math.floor(Number(l?.qty) || 0));
+    if (!productId || qty === 0) continue;
+    const product = getVisibleClothesProducts().find(p => p.id === productId);
+    lines.push({
+      productId,
+      color: String(l?.color || '').trim(),
+      size: String(l?.size || '').trim(),
+      qty,
+      priceLYD: clothesParseMoney(l?.priceLYD),
+      // Cost snapshot: profit stays correct even if the product's cost price
+      // changes later. Re-snapshotted on every save of this order.
+      costUSDAtSale: Math.round(((Number(product?.costUSD) || 0)) * 100) / 100
+    });
+  }
+  if (lines.length === 0) {
+    showNotification(isAr ? 'تنبيه' : 'Validation', isAr ? 'أضف قطعة واحدة على الأقل (منتج + كمية).' : 'Add at least one item (product + quantity).', 'error');
+    return false;
+  }
+
+  // A product that has colors/sizes must have one picked (dropdown), so the
+  // deduction can never land on a variant that does not exist.
+  for (const line of lines) {
+    const product = getVisibleClothesProducts().find(p => p.id === line.productId);
+    const variants = Array.isArray(product?.variants) ? product.variants : [];
+    if (variants.length && findClothesVariantIndex(product, line.color, line.size) === -1) {
+      showNotification(
+        isAr ? 'تنبيه' : 'Validation',
+        isAr ? `اختر اللون والمقاس للمنتج "${product.name}".` : `Choose a color & size for "${product.name}".`,
+        'error'
+      );
+      return false;
+    }
+  }
+
+  const editingId = String(document.getElementById('clothes-order-editing-id')?.value || '').trim();
+  const editTarget = editingId ? getVisibleClothesOrders().find(o => o.id === editingId) : null;
+  if (editTarget && !clothesOrderIsActiveStatus(editTarget.status)) {
+    showNotification(isAr ? 'غير ممكن' : 'Not allowed', isAr ? 'لا يمكن تعديل طلب مرتجع أو ملغى.' : 'Cannot edit a Returned/Canceled order.', 'error');
+    return false;
+  }
+
+  // For stock checking on edit: the old pieces come back first, so check
+  // against stock as it would be AFTER restoring them.
+  if (editTarget && editTarget.stockDeducted) {
+    applyClothesOrderStockDelta(editTarget, 1); // restore old pieces
+  }
+  const shortages = getClothesOrderStockShortages(lines);
+  if (shortages.length) {
+    const ok = confirm((isAr
+      ? 'تنبيه: المخزون غير كافٍ للقطع التالية:\n\n'
+      : 'Warning: not enough stock for these items:\n\n') + shortages.join('\n') + (isAr
+      ? '\n\nهل تريد المتابعة رغم ذلك؟ (سيصبح المخزون صفراً)'
+      : '\n\nContinue anyway? (stock will floor at zero)'));
+    if (!ok) {
+      // Put the old pieces back the way they were and abort
+      if (editTarget && editTarget.stockDeducted) applyClothesOrderStockDelta(editTarget, -1);
+      return false;
+    }
+  }
+
+  const totalsProbe = { lines, deliveryFeeLYD };
+  const total = getClothesOrderTotals(totalsProbe).totalLYD;
+  if (paymentStatus === 'Paid') amountPaidLYD = total;
+  if (paymentStatus === 'Not Paid') amountPaidLYD = 0;
+
+  const payload = { customerName, customerPhone, note, lines, deliveryFeeLYD, paymentStatus, amountPaidLYD, paymentMethod };
+
+  if (editTarget) {
+    applyClothesOrderStockDelta({ lines }, -1); // deduct the new pieces
+    updateRecord(state.clothesOrders, editTarget.id, { ...payload, stockDeducted: true });
+    showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? 'تم تحديث الطلب.' : 'Order updated.', 'success');
+  } else {
+    applyClothesOrderStockDelta({ lines }, -1); // pieces leave the warehouse
+    // Sequential order number; max over ALL records (deleted included) so a
+    // number is never reused after a delete.
+    const nextNo = 1 + (state.clothesOrders || []).reduce((m, x) => Math.max(m, Math.floor(Number(x?.orderNo) || 0)), 0);
+    addRecord(state.clothesOrders, {
+      ...payload,
+      orderNo: nextNo,
+      status: 'New',
+      stockDeducted: true,
+      deliveredAt: null,
+      paidAt: paymentStatus === 'Paid' ? new Date().toISOString() : null,
+      createdAt: new Date().toISOString()
+    });
+    showNotification(isAr ? 'تم الإنشاء' : 'Created', isAr ? 'تم إنشاء الطلب وخصم القطع من المخزون.' : 'Order created and pieces taken from stock.', 'success');
   }
   return true;
 }
@@ -22405,7 +23918,8 @@ function exportData() {
     serviceSubscriptions: { visible: countVisible(exportState.serviceSubscriptions), deleted: countDeleted(exportState.serviceSubscriptions) },
     clothesProducts: { visible: countVisible(exportState.clothesProducts), deleted: countDeleted(exportState.clothesProducts) },
     clothesShipments: { visible: countVisible(exportState.clothesShipments), deleted: countDeleted(exportState.clothesShipments) },
-    clothesOrders: { visible: countVisible(exportState.clothesOrders), deleted: countDeleted(exportState.clothesOrders) }
+    clothesOrders: { visible: countVisible(exportState.clothesOrders), deleted: countDeleted(exportState.clothesOrders) },
+    clothesSettings: { visible: countVisible(exportState.clothesSettings), deleted: countDeleted(exportState.clothesSettings) }
   };
 
   exportState.ads = filterVisible(exportState.ads);
@@ -22420,6 +23934,7 @@ function exportData() {
   exportState.clothesProducts = filterVisible(exportState.clothesProducts);
   exportState.clothesShipments = filterVisible(exportState.clothesShipments);
   exportState.clothesOrders = filterVisible(exportState.clothesOrders);
+  exportState.clothesSettings = filterVisible(exportState.clothesSettings);
   
   // Add export metadata
   const checksum = DataIntegrity.calculateChecksum(exportState);
@@ -22650,6 +24165,7 @@ function importData() {
       if (Array.isArray(sanitizedImport.clothesProducts)) await applyCollectionReplace('clothesProducts', sanitizedImport.clothesProducts);
       if (Array.isArray(sanitizedImport.clothesShipments)) await applyCollectionReplace('clothesShipments', sanitizedImport.clothesShipments);
       if (Array.isArray(sanitizedImport.clothesOrders)) await applyCollectionReplace('clothesOrders', sanitizedImport.clothesOrders);
+      if (Array.isArray(sanitizedImport.clothesSettings)) await applyCollectionReplace('clothesSettings', sanitizedImport.clothesSettings);
 
       // Reload fresh server state
       await serverLoadAllData();
@@ -22748,6 +24264,7 @@ function importData() {
         state.clothesProducts = Array.isArray(sanitizedImport.clothesProducts) ? sanitizedImport.clothesProducts : [];
         state.clothesShipments = Array.isArray(sanitizedImport.clothesShipments) ? sanitizedImport.clothesShipments : [];
         state.clothesOrders = Array.isArray(sanitizedImport.clothesOrders) ? sanitizedImport.clothesOrders : [];
+        state.clothesSettings = Array.isArray(sanitizedImport.clothesSettings) ? sanitizedImport.clothesSettings : [];
 
         if (sanitizedImport.defaultExchangeRate !== undefined) {
           const rate = parseFloat(sanitizedImport.defaultExchangeRate);
