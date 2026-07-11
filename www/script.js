@@ -13945,29 +13945,41 @@ function saveSplitPayments() {
 // Top-ups management functions
 let tempTopUps = [];
 
-function addNewTopUp() {
+// Read whatever the user typed in the Add New Top-up form. Returns a top-up
+// entry ({date, amount, extendDays, note}) or null when the form is empty.
+// Shared by the "Add Top-up" button AND saveTopUps — previously an amount that
+// was typed but not explicitly "Add"ed was SILENTLY DROPPED on Save, which
+// made the whole feature look broken.
+function _readTopUpForm() {
   const amountEl = document.getElementById('topup-amount');
-  const dateEl = document.getElementById('topup-date');
-  const noteEl = document.getElementById('topup-note');
-  if (!amountEl || !dateEl) {
+  if (!amountEl) return null;
+  const amount = parseFloat(amountEl.value) || 0;
+  const extendDays = parseInt(document.getElementById('topup-extend-days')?.value, 10) || 0;
+  if (amount <= 0 && extendDays <= 0) return null;
+  const date = document.getElementById('topup-date')?.value;
+  return {
+    date: date ? new Date(date).toISOString() : new Date().toISOString(),
+    amount: amount > 0 ? amount : 0,
+    extendDays: extendDays > 0 ? extendDays : 0,
+    note: document.getElementById('topup-note')?.value || 'Top-up'
+  };
+}
+
+function addNewTopUp() {
+  const entry = _readTopUpForm();
+  if (entry === null && !document.getElementById('topup-amount')) {
     showNotification('Error', 'Top-up form elements not found', 'error');
     return;
   }
-  const amount = parseFloat(amountEl.value);
-  const date = dateEl.value;
-  const note = noteEl?.value || '';
-  
-  if (!amount || amount <= 0) {
-    showNotification('Error', 'Please enter a valid amount', 'error');
+  if (!entry) {
+    showNotification(
+      state.language === 'ar' ? 'خطأ في الإدخال' : 'Validation',
+      state.language === 'ar' ? 'أدخل مبلغاً أو عدد أيام تمديد' : 'Enter an amount or extension days',
+      'error'
+    );
     return;
   }
-  
-  tempTopUps.push({
-    date: date ? new Date(date).toISOString() : new Date().toISOString(),
-    amount,
-    note: note || 'Top-up'
-  });
-  
+  tempTopUps.push(entry);
   // Re-render modal to show new top-up
   renderModal();
 }
@@ -13982,23 +13994,47 @@ function saveTopUps() {
   const ad = state.ads.find(a => a.id === adId);
   if (!ad) return;
 
+  // Forgiving save: anything still typed in the form counts as a top-up too
+  // (the user should not need to click "Add Top-up" before "Save Top-ups").
+  const pending = _readTopUpForm();
+  if (pending) tempTopUps.push(pending);
+
   // tempTopUps is the COMPLETE working list (seeded from ad.topUps on open,
-  // plus/minus edits). initialAmountUSD is the amount BEFORE any top-up, so
-  // the new amount is the base plus EVERY top-up — not just newly-added ones.
+  // plus/minus edits). initialAmountUSD / initialEndDate are the values BEFORE
+  // any top-up, so the new totals are base + EVERY top-up — removing a top-up
+  // later correctly shrinks both the amount and the end date again.
   const allTopUps = tempTopUps.map(t => ({ ...t }));
   const baseAmountUSD = ad.initialAmountUSD || ad.amountUSD;
-  const totalTopUps = allTopUps.reduce((sum, t) => sum + t.amount, 0);
-  const newAmountUSD = baseAmountUSD + totalTopUps;
+  const totalTopUps = allTopUps.reduce((sum, t) => sum + (parseFloat(t.amount) || 0), 0);
+  const newAmountUSD = Math.round((baseAmountUSD + totalTopUps) * 100) / 100;
 
-  updateRecord(state.ads, adId, {
+  const updates = {
     topUps: allTopUps,
     initialAmountUSD: baseAmountUSD,
     amountUSD: newAmountUSD,
-    amountLocal: newAmountUSD * ad.exchangeRate
-  });
+    amountLocal: Math.round(newAmountUSD * ad.exchangeRate * 100) / 100
+  };
+
+  // End-date extension (user request): top-ups can extend the ad's run.
+  const baseEnd = ad.initialEndDate || ad.endDate || '';
+  const totalExtendDays = allTopUps.reduce((sum, t) => sum + (parseInt(t.extendDays, 10) || 0), 0);
+  let newEndDisplay = '';
+  if (baseEnd && !isNaN(new Date(baseEnd).getTime())) {
+    updates.initialEndDate = baseEnd;
+    updates.endDate = new Date(new Date(baseEnd).getTime() + totalExtendDays * 86400000).toISOString();
+    if (totalExtendDays > 0) newEndDisplay = new Date(updates.endDate).toLocaleDateString();
+  }
+
+  updateRecord(state.ads, adId, updates);
 
   tempTopUps = [];
-  showNotification('Saved', `Top-ups saved. New amount: $${newAmountUSD.toFixed(2)}`, 'success');
+  const isArTU = state.language === 'ar';
+  showNotification(
+    isArTU ? 'تم الحفظ' : 'Saved',
+    (isArTU ? `تم حفظ التعبئة. المبلغ الجديد: $${newAmountUSD.toFixed(2)}` : `Top-ups saved. New amount: $${newAmountUSD.toFixed(2)}`)
+      + (newEndDisplay ? (isArTU ? ` — ينتهي: ${newEndDisplay}` : ` — ends: ${newEndDisplay}`) : ''),
+    'success'
+  );
   closeModal();
   render();
 }
@@ -18750,6 +18786,12 @@ function renderModal() {
       const existingTopUps = tempTopUps;
       const topUpBase = topUpAd.initialAmountUSD || topUpAd.amountUSD;
       const topUpWorkingTotal = existingTopUps.reduce((sum, t) => sum + (t.amount || 0), 0);
+      // End-date preview: base end (before any top-up) + every extension day
+      // in the working list — live, so the user sees the new end before saving.
+      const topUpBaseEnd = topUpAd.initialEndDate || topUpAd.endDate || '';
+      const topUpWorkingDays = existingTopUps.reduce((sum, t) => sum + (parseInt(t.extendDays, 10) || 0), 0);
+      const topUpBaseEndOk = topUpBaseEnd && !isNaN(new Date(topUpBaseEnd).getTime());
+      const topUpNewEnd = topUpBaseEndOk ? new Date(new Date(topUpBaseEnd).getTime() + topUpWorkingDays * 86400000) : null;
 
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center">
@@ -18760,6 +18802,7 @@ function renderModal() {
           <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl">
             <div class="text-sm font-medium text-blue-700 dark:text-blue-300">Ad Details</div>
             <div class="text-lg font-bold text-blue-600 mt-1">Original: $${topUpBase} → New: $${(topUpBase + topUpWorkingTotal).toFixed(2)}</div>
+            ${topUpBaseEndOk ? `<div class="text-sm font-medium text-blue-700 dark:text-blue-300 mt-1">End: ${new Date(topUpBaseEnd).toLocaleDateString()}${topUpWorkingDays > 0 ? ` → <span class="font-bold">${topUpNewEnd.toLocaleDateString()}</span> (+${topUpWorkingDays} day${topUpWorkingDays > 1 ? 's' : ''})` : ''}</div>` : ''}
             ${existingTopUps.length > 0 ? `<div class="text-xs text-slate-500 mt-1">Total top-ups: $${topUpWorkingTotal.toFixed(2)}</div>` : ''}
           </div>
 
@@ -18767,7 +18810,7 @@ function renderModal() {
             ${existingTopUps.map((topup, idx) => `
               <div class="p-3 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-between">
                 <div>
-                  <div class="font-medium">$${topup.amount}</div>
+                  <div class="font-medium">$${topup.amount}${(parseInt(topup.extendDays, 10) || 0) > 0 ? ` <span class="text-xs font-bold text-emerald-600">+${topup.extendDays} day${topup.extendDays > 1 ? 's' : ''}</span>` : ''}</div>
                   <div class="text-xs text-slate-500">${new Date(topup.date).toLocaleDateString()} - ${Security.escapeHtml(topup.note || '')}</div>
                 </div>
                 <button type="button" onclick="removeTopUp(${idx})" class="text-rose-500 hover:text-rose-700">
@@ -18779,7 +18822,7 @@ function renderModal() {
 
           <div class="p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl space-y-3">
             <h4 class="text-sm font-medium">Add New Top-up</h4>
-            <div class="grid grid-cols-2 gap-3">
+            <div class="grid grid-cols-3 gap-3">
               <div>
                 <label class="block text-xs mb-1">Amount (USD)</label>
                 <input type="text" inputmode="decimal" id="topup-amount" class="w-full glass-input px-3 py-2 rounded-lg" placeholder="0.00" oninput="sanitizeMoneyInput(this)" />
@@ -18787,6 +18830,10 @@ function renderModal() {
               <div>
                 <label class="block text-xs mb-1">Date</label>
                 <input type="date" id="topup-date" value="${getTodayDateString()}" class="w-full glass-input px-3 py-2 rounded-lg" />
+              </div>
+              <div>
+                <label class="block text-xs mb-1">Extend (days)</label>
+                <input type="number" min="0" step="1" id="topup-extend-days" class="w-full glass-input px-3 py-2 rounded-lg" placeholder="0" />
               </div>
             </div>
             <div>
