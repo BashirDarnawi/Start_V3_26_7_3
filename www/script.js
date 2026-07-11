@@ -16280,7 +16280,12 @@ function renderAdMergedFundingList() {
   
   list.innerHTML = allocations.map((alloc, idx) => {
     const receipt = receipts.find(r => r.id === alloc.receiptId);
-    const optionsHtml = receipts.map(r => {
+    // Same rule as the paid funding rows: a receipt already chosen in ANOTHER
+    // row is not offered again (each receipt can be merged only once).
+    const usedElsewhere = new Set(
+      allocations.filter((a, i) => i !== idx && a && a.receiptId).map(a => a.receiptId)
+    );
+    const optionsHtml = receipts.filter(r => !usedElsewhere.has(r.id)).map(r => {
       const usage = getReceiptUsageStats(r);
       const serial = r.serialNumber || r.finalReceiptNo || (r.id ? String(r.id).slice(0,6) : '???');
       const label = `#${serial} • $${(usage.remainingUSD || 0).toFixed(2)} avail`;
@@ -16449,7 +16454,8 @@ function setAdPaymentStatus(status) {
   const unpaidFinancial = document.getElementById('ad-unpaid-financial');
   
   if (!paidBtn || !notPaidBtn || !wontPayBtn || !hiddenInput) {
-    console.error('Payment status buttons not found');
+    // Expected while the New Ad wizard hasn't rendered the payment section yet
+    // (it appears only after a customer is selected) — not an error.
     return;
   }
   
@@ -16985,7 +16991,13 @@ function renderAdFundingList() {
   
   list.innerHTML = allocations.map((alloc, idx) => {
     const receipt = receipts.find(r => r.id === alloc.receiptId);
-    const optionsHtml = receipts.map(r => {
+    // A receipt already chosen in ANOTHER allocation row must not be offered
+    // again here (user request) — each receipt can fund the ad only once.
+    // The row's OWN current selection stays listed so it renders as selected.
+    const usedElsewhere = new Set(
+      allocations.filter((a, i) => i !== idx && a && a.receiptId).map(a => a.receiptId)
+    );
+    const optionsHtml = receipts.filter(r => !usedElsewhere.has(r.id)).map(r => {
       const serial = r.serialNumber || r.finalReceiptNo || (r.id ? String(r.id).slice(0,6) : '???');
       const label = `#${serial} • $${(r.amountUSD || 0).toFixed(2)}`;
       return `<option value="${r.id || ''}" ${alloc.receiptId === r.id ? 'selected' : ''}>${Security.escapeHtml(label)}</option>`;
