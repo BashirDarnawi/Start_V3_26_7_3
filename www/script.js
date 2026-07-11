@@ -9521,6 +9521,23 @@ function renderAdsView() {
                 const receiptExchangeRate = getEffectiveExchangeRate(ad);
                 // Display number: total - index (so first item = highest number)
                 const adDisplayNum = allAds.length - idx;
+                // Serial: ads rarely carry their own serial number — fall back
+                // to the linked receipt number(s): the delivery receipt
+                // (D#/final no) or the funding receipts' serials.
+                const _rcptNo = (rc) => rc ? String(rc.serialNumber || rc.finalReceiptNo || rc.tempReceiptNo || '').trim() : '';
+                let serialDisplay = String(ad.serialNumber || '').trim();
+                if (!serialDisplay) {
+                  const rcptIds = [];
+                  if (ad.linkedDeliveryReceiptId) rcptIds.push(ad.linkedDeliveryReceiptId);
+                  if (ad.receiptId) rcptIds.push(ad.receiptId);
+                  if (ad.fundingReceiptId) rcptIds.push(ad.fundingReceiptId);
+                  if (Array.isArray(ad.receiptIds)) rcptIds.push(...ad.receiptIds);
+                  if (Array.isArray(ad.receiptAllocations)) rcptIds.push(...ad.receiptAllocations.map(a => a && a.receiptId));
+                  const serialNos = [...new Set(
+                    [...new Set(rcptIds.filter(Boolean))].map(id => _rcptNo(receiptsById.get(id))).filter(Boolean)
+                  )];
+                  serialDisplay = serialNos.slice(0, 3).join(', ') + (serialNos.length > 3 ? ` +${serialNos.length - 3}` : '');
+                }
                 return `
                   <tr class="border-b border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50">
                     <td class="py-3 px-2" data-label="#">
@@ -9567,7 +9584,7 @@ function renderAdsView() {
                       ${deliveryPerson ? `<div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(deliveryPerson.name || '')}</div>` : ''}
                     </td>
                     <td class="py-3 px-2" data-label="Serial">
-                      ${ad.serialNumber ? `<span class="font-mono text-xs">${ad.serialNumber}</span>` : '-'}
+                      ${serialDisplay ? `<span class="font-mono text-xs">${Security.escapeHtml(serialDisplay)}</span>` : '-'}
                       ${ad.editCount ? `<button onclick="showAdEditHistory('${ad.id}')" class="block mt-1 text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium">${ad.editCount} edit${ad.editCount > 1 ? 's' : ''}</button>` : ''}
                     </td>
                     <td class="py-3 px-2 text-xs text-slate-500" data-label="Date">${new Date(ad.startDate).toLocaleDateString()}</td>
