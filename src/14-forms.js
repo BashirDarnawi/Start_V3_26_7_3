@@ -1773,8 +1773,19 @@ function getReceiptRemainingUSD(receipt) {
 }
 
 function initAdFunding(adData = {}) {
+  // COPY each allocation (not alias — editing the form must not mutate the
+  // saved ad until Save) and snap the amount to 2 decimals for display:
+  // stored values can carry float residue from proportional stop-ad math
+  // (e.g. 50.000000000000001), which otherwise shows raw in the input.
   state.tempAdFunding = {
-    allocations: Array.isArray(adData.receiptAllocations) ? [...adData.receiptAllocations] : []
+    allocations: Array.isArray(adData.receiptAllocations)
+      ? adData.receiptAllocations.map(a => ({
+          ...a,
+          amountUSD: (a && a.amountUSD !== '' && a.amountUSD !== null && isFinite(parseFloat(a.amountUSD)))
+            ? Math.round(parseFloat(a.amountUSD) * 100) / 100
+            : (a ? a.amountUSD : '')
+        }))
+      : []
   };
 }
 
@@ -2168,7 +2179,12 @@ function initMergeFunding() {
     if (md?.hasMergedPaidFunds && Array.isArray(md.mergedPaidAllocations) && md.mergedPaidAllocations.length) {
       state.tempMergeFunding = {
         enabled: true,
-        allocations: md.mergedPaidAllocations.map(a => ({ receiptId: a.receiptId, amountUSD: String(a.amountUSD) }))
+        // Snap to 2 decimals for display — stored values can carry float
+        // residue from proportional stop-ad math (same as initAdFunding).
+        allocations: md.mergedPaidAllocations.map(a => ({
+          receiptId: a.receiptId,
+          amountUSD: isFinite(parseFloat(a.amountUSD)) ? String(Math.round(parseFloat(a.amountUSD) * 100) / 100) : String(a.amountUSD)
+        }))
       };
     } else {
       state.tempMergeFunding = { allocations: [], enabled: false };

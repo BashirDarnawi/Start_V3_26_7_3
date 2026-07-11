@@ -294,7 +294,10 @@ function confirmStopAd(id) {
       if (!receipt) continue;
       const delta = p.newAmount - p.current;
       if (Math.abs(delta) < 0.0000001) continue;
-      p.alloc.amountUSD = Math.max(p.newAmount, 0);
+      // Snap to 2 decimals: proportional math leaves binary float residue
+      // (50 * 0.5454... -> 50.000000000000001) that would otherwise be stored
+      // and shown raw in the edit form's amount inputs.
+      p.alloc.amountUSD = Math.round(Math.max(p.newAmount, 0) * 100) / 100;
       if (isEditing) {
         addAuditLog('receipt', receipt.id, 'usage', `Ad ${ad.id} updated - ${delta > 0 ? 'used additional' : 'returned additional'} $${Math.abs(delta).toFixed(2)} ${delta > 0 ? 'from' : 'to'} ${poolLabel}`, {
           adId: ad.id,
@@ -317,12 +320,12 @@ function confirmStopAd(id) {
 
   if (Array.isArray(ad.dueAllocations) && ad.dueAllocations.length > 0) {
     // Keep the legacy dueAmountToUseUSD field in sync with dueAllocations
-    ad.dueAmountToUseUSD = ad.dueAllocations.reduce((sum, alloc) => sum + (parseFloat(alloc.amountUSD) || 0), 0);
+    ad.dueAmountToUseUSD = Math.round(ad.dueAllocations.reduce((sum, alloc) => sum + (parseFloat(alloc.amountUSD) || 0), 0) * 100) / 100;
   } else if (ad.dueAmountToUseUSD > 0 && !isEditing && newRemainingUSD > 0) {
     // Legacy: Handle ads with dueAmountToUseUSD but no dueAllocations array.
     // Return only this pool's share of the remainder (global apportionment).
     const reductionAmount = Math.min(ad.dueAmountToUseUSD * returnFraction, ad.dueAmountToUseUSD);
-    ad.dueAmountToUseUSD = Math.max(ad.dueAmountToUseUSD - reductionAmount, 0);
+    ad.dueAmountToUseUSD = Math.round(Math.max(ad.dueAmountToUseUSD - reductionAmount, 0) * 100) / 100;
 
     if (ad.linkedDeliveryReceiptId) {
       addAuditLog('receipt', ad.linkedDeliveryReceiptId, 'usage', `Ad ${ad.id} stopped - returned $${reductionAmount.toFixed(2)} to delivery receipt due balance`, {
@@ -337,16 +340,16 @@ function confirmStopAd(id) {
   const customer = state.customers.find(c => c.id === ad.customerId);
   if (customer) {
     if (isEditing && remainingDifference !== 0) {
-      // Adjust customer balance by the difference
+      // Adjust customer balance by the difference (snapped to 2 decimals)
       if (customer.balance !== undefined) {
-        customer.balance = (customer.balance || 0) + remainingDifference;
+        customer.balance = Math.round(((customer.balance || 0) + remainingDifference) * 100) / 100;
         updateRecord(state.customers, customer.id, customer);
       }
       addLog('update', 'customer', customer.id, `Ad stop updated - ${remainingDifference > 0 ? 'returned' : 'used'} $${Math.abs(remainingDifference).toFixed(2)} ${remainingDifference > 0 ? 'to' : 'from'} customer balance`);
     } else if (!isEditing && newRemainingUSD > 0) {
-      // First time stopping: add remaining to customer balance
+      // First time stopping: add remaining to customer balance (snapped to 2dp)
       if (customer.balance !== undefined) {
-        customer.balance = (customer.balance || 0) + newRemainingUSD;
+        customer.balance = Math.round(((customer.balance || 0) + newRemainingUSD) * 100) / 100;
         updateRecord(state.customers, customer.id, customer);
       }
       addLog('update', 'customer', customer.id, `Ad stopped - returned $${newRemainingUSD.toFixed(2)} to customer balance`);
