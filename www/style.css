@@ -2,12 +2,14 @@
    ANTI-JUMP: Prevent page movement during renders
    ========================================== */
 
-/* Prevent horizontal overflow on all devices */
+/* Prevent horizontal overflow on all devices.
+   NOTE: overscroll-behavior-y was REMOVED here — it only existed to stop
+   mobile pull-to-refresh (the mobile @media block below already sets
+   overscroll-behavior: none), but on desktop it can interfere with touchpad
+   two-finger scroll gestures in Chrome on Windows. */
 html, body {
   overflow-x: hidden;
   max-width: 100vw;
-  /* Prevent pull-to-refresh on mobile causing layout shifts */
-  overscroll-behavior-y: contain;
   /* Disable smooth scrolling during JS scroll restoration */
   scroll-behavior: auto !important;
 }
@@ -22,7 +24,14 @@ html.is-rendering {
 #app {
   /* Prevent layout shift during render */
   min-height: 100vh;
-  overflow-x: hidden;
+  /* MUST be `clip`, not `hidden`: per the CSS spec, `overflow-x: hidden`
+     silently computes overflow-y to `auto`, turning #app into an invisible
+     SCROLL CONTAINER wrapping the whole app. Chrome latches touchpad scroll
+     gestures onto the nearest scroll container under the cursor — it latched
+     onto #app (which has nothing to scroll, it grows with its content), so
+     two-finger touchpad scrolling died instead of scrolling the page.
+     `clip` never creates a scroll container. */
+  overflow-x: clip;
   max-width: 100%;
   /* Lock the container to prevent movement */
   position: relative;
