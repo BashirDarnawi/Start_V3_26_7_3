@@ -212,7 +212,6 @@ async function init() {
   }
   
   // Theme and direction already applied at start
-  setupScrollPerformanceMode();
   setupUrlRouting();
   
   // URL Routing: If user is logged in, check URL for initial view

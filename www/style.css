@@ -300,52 +300,14 @@ body::before {
   transform: translateY(-2px);
 }
 
-/* ==========================================
-   Scroll performance mode (prevents jank + "disappearing" while scrolling)
-   We temporarily reduce heavy effects (blur/shadows/hover transforms).
-   Enabled by JS toggling `body.is-scrolling`.
-   ========================================== */
-body.is-scrolling #aurora-bg {
-  opacity: 0 !important;
-  filter: none !important;
-}
-
-body.is-scrolling .bg-noise {
-  opacity: 0 !important;
-}
-
-body.is-scrolling::before {
-  opacity: 0.35 !important;
-}
-
-body.is-scrolling #aurora-bg * {
-  animation-play-state: paused !important;
-}
-
-/* Disable Tailwind backdrop blur utilities while scrolling (big performance win) */
-body.is-scrolling [class*="backdrop-blur"] {
-  backdrop-filter: none !important;
-  -webkit-backdrop-filter: none !important;
-}
-
-body.is-scrolling .glass-panel,
-body.is-scrolling .glass-panel-sm {
-  backdrop-filter: none !important;
-  -webkit-backdrop-filter: none !important;
-  box-shadow: none !important;
-  transition: none !important;
-}
-
-body.is-scrolling .glass-panel:hover,
-body.is-scrolling .glass-panel-sm:hover,
-body.is-scrolling .btn-shine:hover,
-body.is-scrolling .card-hover-lift:hover {
-  transform: none !important;
-}
-
-body.is-scrolling .btn-shine:hover {
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.10) !important;
-}
+/* NOTE: the old "scroll performance mode" (body.is-scrolling rules toggled by
+   a scroll listener) was REMOVED. It hid the aurora and swapped every panel's
+   blur/shadow the instant scrolling started and flipped them back 250ms after
+   it stopped — a full-page style recalculation both ways, ON EVERY SCROLL.
+   On weak machines that self-inflicted jank swallowed touchpad scrolling
+   entirely and caused the visible purple->white background flashing. Weak
+   devices are now served properly by Performance mode (body.perf-lite), which
+   turns the heavy effects off permanently instead of toggling them mid-scroll. */
 
 /* ==========================================
    PERFORMANCE: Content Visibility & Containment

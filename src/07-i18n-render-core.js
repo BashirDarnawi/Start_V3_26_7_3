@@ -181,30 +181,12 @@ function toggleLanguage() {
   render();
 }
 
-// ==========================================
-// PERFORMANCE: Smooth Scrolling Mode + Optimized Rendering
-// ==========================================
-let _scrollPerfInit = false;
-let _scrollRafId = null;
-function setupScrollPerformanceMode() {
-  if (_scrollPerfInit) return;
-  _scrollPerfInit = true;
-  let timer = null;
-  const onScroll = () => {
-    if (!document.body) return;
-    // Use RAF for smoother class toggling
-    if (_scrollRafId) cancelAnimationFrame(_scrollRafId);
-    _scrollRafId = requestAnimationFrame(() => {
-    document.body.classList.add('is-scrolling');
-    });
-    if (timer) clearTimeout(timer);
-    // Longer debounce (250ms) prevents rapid on/off toggling during momentum scroll
-    timer = setTimeout(() => {
-      document.body.classList.remove('is-scrolling');
-    }, 250);
-  };
-  window.addEventListener('scroll', onScroll, { passive: true });
-}
+// NOTE: the old "scroll performance mode" (setupScrollPerformanceMode toggling
+// body.is-scrolling on every scroll) was REMOVED together with its CSS. Hiding
+// the aurora and re-styling every panel at scroll start/stop forced full-page
+// style recalculations mid-scroll — on weak machines that swallowed touchpad
+// scrolling and flashed the background. Performance mode (body.perf-lite)
+// handles weak devices properly by turning effects off permanently.
 
 // Debounced icon refresh (batches multiple calls)
 const IconQueue = {
@@ -249,11 +231,8 @@ const RenderQueue = {
     const delay = Math.max(0, RenderQueue.minIntervalMs - elapsed);
     RenderQueue.timer = setTimeout(() => {
       RenderQueue.timer = null;
-      // Skip render while scrolling (causes jank)
-      if (document.body?.classList?.contains('is-scrolling')) {
-        RenderQueue.schedule(reason);
-        return;
-      }
+      // (the old is-scrolling defer was removed together with the scroll
+      // performance mode — the class is never set anymore)
       // Skip render if another render is in progress
       if (_renderInProgress) {
         RenderQueue.schedule(reason);
