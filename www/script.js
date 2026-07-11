@@ -18145,7 +18145,21 @@ function renderModal() {
           </div>
           <div>
               <label class="block text-sm font-medium mb-2">Category *</label>
-            <input type="text" id="page-category" value="${Security.escapeHtml(pageData.category || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" />
+            <input type="text" id="page-category" list="page-category-suggestions" autocomplete="off" value="${Security.escapeHtml(pageData.category || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" />
+            <!-- Suggest previously-used categories while typing (user request):
+                 picking an existing one avoids near-duplicate categories like
+                 "cars" / "car". Deduped case-insensitively, first spelling wins. -->
+            <datalist id="page-category-suggestions">
+              ${(() => {
+                const seen = new Map();
+                getVisibleRecords(state.pages || []).forEach(p => {
+                  const c = String(p.category || '').trim();
+                  if (c && !seen.has(c.toLowerCase())) seen.set(c.toLowerCase(), c);
+                });
+                return [...seen.values()].sort((a, b) => a.localeCompare(b))
+                  .map(c => `<option value="${Security.escapeHtml(c)}"></option>`).join('');
+              })()}
+            </datalist>
           </div>
             
             <!-- Customer Linking Section -->
