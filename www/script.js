@@ -9675,163 +9675,88 @@ function renderDeliveriesView() {
   const activeDeliveries = deliveryReceipts.filter(d => d.deliveryStatus === 'In Progress' || d.deliveryStatus === 'Needs Delivery');
 
   return `
-    <div class="space-y-6 animate-fade-in-up">
+    <div class="space-y-4 animate-fade-in-up">
       <!-- Header -->
-      <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+      <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
         <div>
-          <h1 class="text-3xl font-bold bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 bg-clip-text text-transparent flex items-center space-x-3">
-            <span class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg">
-              <i data-lucide="truck" class="w-5 h-5 text-white"></i>
-            </span>
-            <span>Delivery Operations</span>
-          </h1>
-          <p class="text-sm text-slate-500 mt-1">${deliveryReceipts.length} deliveries • Tracking receipts only</p>
+          <h1 class="text-2xl font-bold text-slate-800 dark:text-white">Delivery Operations</h1>
+          <p class="text-sm text-slate-500 mt-0.5">${deliveryReceipts.length} deliveries • Tracking receipts only</p>
         </div>
         <div class="flex items-center space-x-2">
-          <button onclick="refreshDeliveries()" class="glass-panel px-4 py-2 rounded-xl text-sm font-medium flex items-center space-x-2 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all">
+          <button onclick="refreshDeliveries()" class="glass-panel px-3 py-2 rounded-xl text-sm font-medium flex items-center space-x-2 hover:bg-slate-100 dark:hover:bg-slate-800">
             <i data-lucide="refresh-cw" class="w-4 h-4"></i>
             <span>Refresh</span>
           </button>
-          <button onclick="checkStuckDeliveries()" class="glass-panel px-4 py-2 rounded-xl text-sm font-medium flex items-center space-x-2 hover:bg-amber-50 dark:hover:bg-amber-900/20 border-2 border-amber-200 dark:border-amber-800 transition-all" title="Find deliveries stuck in progress for more than 3 days">
+          <button onclick="checkStuckDeliveries()" class="glass-panel px-3 py-2 rounded-xl text-sm font-medium flex items-center space-x-2 hover:bg-amber-50 dark:hover:bg-amber-900/20" title="Find deliveries stuck in progress for more than 3 days">
             <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-600"></i>
             <span class="text-amber-700 dark:text-amber-400">Check Stuck</span>
           </button>
-          <button onclick="exportDeliveryReport()" class="btn-shine bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-4 py-2 rounded-xl text-sm font-bold flex items-center space-x-2">
+          <button onclick="exportDeliveryReport()" class="btn-shine bg-indigo-600 text-white px-3 py-2 rounded-xl text-sm font-bold flex items-center space-x-2">
             <i data-lucide="download" class="w-4 h-4"></i>
             <span>Export</span>
           </button>
         </div>
       </div>
 
-      <!-- Primary Stats Row -->
-      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div class="relative overflow-hidden rounded-2xl p-5 bg-gradient-to-br from-amber-400 via-orange-500 to-red-500 text-white shadow-xl shadow-orange-500/20">
-          <div class="absolute top-0 right-0 w-24 h-24 bg-white/10 rounded-full -translate-y-8 translate-x-8"></div>
-          <div class="relative">
-            <div class="flex items-center justify-between mb-2">
-              <span class="text-xs font-medium text-white/80 uppercase tracking-wider">Pending Delivery</span>
-              <span class="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center">
-                <i data-lucide="package" class="w-4 h-4"></i>
-              </span>
-            </div>
-            <div class="text-3xl font-black">${stats.pendingDelivery}</div>
-            <div class="text-xs text-white/70 mt-1">Receipts not yet delivered</div>
+      <!-- Stats (compact): 4 money/count tiles + pipeline strip in one panel -->
+      <div class="glass-panel rounded-2xl p-4">
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <div class="p-3 rounded-xl bg-amber-50 dark:bg-amber-900/15 border-l-4 border-amber-500">
+            <div class="text-[11px] font-bold text-amber-700 dark:text-amber-400 uppercase tracking-wide">Pending Delivery</div>
+            <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.pendingDelivery}</div>
+            <div class="text-[11px] text-slate-500">Receipts not yet delivered</div>
+          </div>
+          <div class="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-900/15 border-l-4 border-emerald-500">
+            <div class="text-[11px] font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wide">Uncollected Value</div>
+            <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.uncollectedLYD.toLocaleString()} <span class="text-sm">LYD</span></div>
+            <div class="text-[11px] text-slate-500">To be collected from customers</div>
+          </div>
+          <div class="p-3 rounded-xl bg-purple-50 dark:bg-purple-900/15 border-l-4 border-purple-500">
+            <div class="text-[11px] font-bold text-purple-700 dark:text-purple-400 uppercase tracking-wide">Held by Drivers</div>
+            <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.heldByDrivers}</div>
+            <div class="text-[11px] text-slate-500">Delivered but not in office</div>
+          </div>
+          <div class="p-3 rounded-xl bg-blue-50 dark:bg-blue-900/15 border-l-4 border-blue-500">
+            <div class="text-[11px] font-bold text-blue-700 dark:text-blue-400 uppercase tracking-wide">Driver Cash Value</div>
+            <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.driverCashLYD.toLocaleString()} <span class="text-sm">LYD</span></div>
+            <div class="text-[11px] text-slate-500">To be collected from drivers</div>
           </div>
         </div>
-
-        <div class="relative overflow-hidden rounded-2xl p-5 bg-gradient-to-br from-emerald-400 via-teal-500 to-cyan-500 text-white shadow-xl shadow-emerald-500/20">
-          <div class="absolute top-0 right-0 w-24 h-24 bg-white/10 rounded-full -translate-y-8 translate-x-8"></div>
-          <div class="relative">
-            <div class="flex items-center justify-between mb-2">
-              <span class="text-xs font-medium text-white/80 uppercase tracking-wider">Uncollected Value</span>
-              <span class="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center">
-                <i data-lucide="wallet" class="w-4 h-4"></i>
-              </span>
-            </div>
-            <div class="text-3xl font-black">${stats.uncollectedLYD.toLocaleString()}<span class="text-lg ml-1">LYD</span></div>
-            <div class="text-xs text-white/70 mt-1">To be collected from customers</div>
-          </div>
-        </div>
-
-        <div class="relative overflow-hidden rounded-2xl p-5 bg-gradient-to-br from-violet-400 via-purple-500 to-fuchsia-500 text-white shadow-xl shadow-purple-500/20">
-          <div class="absolute top-0 right-0 w-24 h-24 bg-white/10 rounded-full -translate-y-8 translate-x-8"></div>
-          <div class="relative">
-            <div class="flex items-center justify-between mb-2">
-              <span class="text-xs font-medium text-white/80 uppercase tracking-wider">Held by Drivers</span>
-              <span class="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center">
-                <i data-lucide="hand-coins" class="w-4 h-4"></i>
-              </span>
-            </div>
-            <div class="text-3xl font-black">${stats.heldByDrivers}</div>
-            <div class="text-xs text-white/70 mt-1">Delivered but not in office</div>
-          </div>
-        </div>
-
-        <div class="relative overflow-hidden rounded-2xl p-5 bg-gradient-to-br from-blue-400 via-indigo-500 to-purple-500 text-white shadow-xl shadow-indigo-500/20">
-          <div class="absolute top-0 right-0 w-24 h-24 bg-white/10 rounded-full -translate-y-8 translate-x-8"></div>
-          <div class="relative">
-            <div class="flex items-center justify-between mb-2">
-              <span class="text-xs font-medium text-white/80 uppercase tracking-wider">Driver Cash Value</span>
-              <span class="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center">
-                <i data-lucide="banknote" class="w-4 h-4"></i>
-              </span>
-            </div>
-            <div class="text-3xl font-black">${stats.driverCashLYD.toLocaleString()}<span class="text-lg ml-1">LYD</span></div>
-            <div class="text-xs text-white/70 mt-1">To be collected from drivers</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Status Pipeline -->
-      <div class="glass-panel rounded-2xl p-5">
-        <div class="flex items-center space-x-2 mb-4">
-          <span class="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
-            <i data-lucide="git-branch" class="w-4 h-4 text-white"></i>
-          </span>
-          <h2 class="text-lg font-bold text-slate-800 dark:text-white">Delivery Pipeline</h2>
-        </div>
-        <div class="flex items-center justify-between">
-          ${renderPipelineStage('Pending Assignment', stats.pendingAssignment, 'clock', 'slate', 0)}
-          <div class="flex-1 h-1 mx-2 bg-gradient-to-r from-slate-300 to-amber-300 dark:from-slate-700 dark:to-amber-700 rounded"></div>
-          ${renderPipelineStage('In Progress', stats.inProgress, 'truck', 'blue', 1)}
-          <div class="flex-1 h-1 mx-2 bg-gradient-to-r from-blue-300 to-emerald-300 dark:from-blue-700 dark:to-emerald-700 rounded"></div>
-          ${renderPipelineStage('Completed', stats.completed, 'check-circle', 'emerald', 2)}
-          <div class="flex-1 h-1 mx-2 bg-gradient-to-r from-emerald-300 to-rose-300 dark:from-emerald-700 dark:to-rose-700 rounded"></div>
-          ${renderPipelineStage('Canceled', stats.canceled, 'x-circle', 'rose', 3)}
+        <!-- Pipeline as a slim strip (same numbers, no icon towers) -->
+        <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700 flex flex-wrap items-center gap-x-5 gap-y-1 text-sm">
+          <span class="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Pipeline</span>
+          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-slate-400"></span>Pending Assignment <b>${stats.pendingAssignment}</b></span>
+          <span class="text-slate-300">→</span>
+          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-blue-500"></span>In Progress <b>${stats.inProgress}</b></span>
+          <span class="text-slate-300">→</span>
+          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>Completed <b>${stats.completed}</b></span>
+          <span class="text-slate-300">→</span>
+          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>Canceled <b>${stats.canceled}</b></span>
         </div>
       </div>
 
       <!-- Driver Performance & Delivery Log Grid -->
       <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        <!-- Driver Performance -->
-        <div class="glass-panel rounded-2xl p-5">
-          <div class="flex items-center justify-between mb-4">
-            <div class="flex items-center space-x-2">
-              <span class="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center">
-                <i data-lucide="users" class="w-4 h-4 text-white"></i>
-              </span>
-              <h2 class="text-lg font-bold text-slate-800 dark:text-white">Driver Performance</h2>
-            </div>
-          </div>
-          <div class="space-y-3 max-h-80 overflow-y-auto">
+        <!-- Driver Performance (compact rows, same numbers) -->
+        <div class="glass-panel rounded-2xl p-4">
+          <h2 class="text-base font-bold text-slate-800 dark:text-white mb-3">Driver Performance</h2>
+          <div class="space-y-2 max-h-80 overflow-y-auto">
             ${driverPerformance.length === 0 ? `
-              <div class="text-center py-8 text-slate-500">
-                <i data-lucide="user-x" class="w-12 h-12 mx-auto mb-2 opacity-50"></i>
-                <p>No delivery drivers found</p>
-              </div>
+              <div class="text-center py-6 text-slate-500 text-sm">No delivery drivers found</div>
             ` : driverPerformance.map((driver, idx) => `
-              <div class="relative p-4 rounded-xl border-2 ${idx === 0 ? 'border-amber-200 bg-gradient-to-r from-amber-50 to-orange-50 dark:from-amber-900/20 dark:to-orange-900/20 dark:border-amber-800' : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50'} transition-all hover:shadow-md">
-                ${idx === 0 ? '<div class="absolute -top-2 -right-2 w-8 h-8 rounded-full bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center shadow-lg"><i data-lucide="crown" class="w-4 h-4 text-white"></i></div>' : ''}
-                <div class="flex items-center space-x-3 mb-3">
-                  <div class="w-10 h-10 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white font-bold shadow-md">
-                    ${driver.name?.charAt(0) || '?'}
+              <div class="p-3 rounded-xl border ${idx === 0 && driver.totalAssigned > 0 ? 'border-amber-300 bg-amber-50/60 dark:bg-amber-900/15 dark:border-amber-700' : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50'}">
+                <div class="flex items-center justify-between gap-2">
+                  <div class="font-bold text-sm text-slate-800 dark:text-white truncate">
+                    ${idx === 0 && driver.totalAssigned > 0 ? '⭐ ' : ''}${Security.escapeHtml(driver.name || '')}
+                    <span class="font-normal text-xs text-slate-500">• ${driver.totalAssigned} assigned</span>
                   </div>
-                  <div class="flex-1 min-w-0">
-                    <h4 class="font-bold text-sm text-slate-800 dark:text-white truncate">${Security.escapeHtml(driver.name || '')}</h4>
-                    <p class="text-xs text-slate-500">${driver.totalAssigned} assigned</p>
-                  </div>
-                  <div class="text-right">
-                    <div class="text-lg font-black ${driver.successRate >= 80 ? 'text-emerald-600' : driver.successRate >= 50 ? 'text-amber-600' : 'text-slate-500'}">${driver.successRate}%</div>
-                    <div class="text-[10px] text-slate-500">Success</div>
-                  </div>
+                  <div class="text-sm font-black ${driver.successRate >= 80 ? 'text-emerald-600' : driver.successRate >= 50 ? 'text-amber-600' : 'text-slate-500'}">${driver.successRate}%</div>
                 </div>
-                <div class="grid grid-cols-4 gap-2 text-center">
-                  <div class="p-2 rounded-lg bg-white dark:bg-slate-900/50">
-                    <div class="text-sm font-bold text-slate-700 dark:text-slate-300">${driver.pending}</div>
-                    <div class="text-[9px] text-slate-500 uppercase">Pending</div>
-                  </div>
-                  <div class="p-2 rounded-lg bg-white dark:bg-slate-900/50">
-                    <div class="text-sm font-bold text-blue-600">${driver.inProgress}</div>
-                    <div class="text-[9px] text-slate-500 uppercase">Active</div>
-                  </div>
-                  <div class="p-2 rounded-lg bg-white dark:bg-slate-900/50">
-                    <div class="text-sm font-bold text-emerald-600">${driver.completed}</div>
-                    <div class="text-[9px] text-slate-500 uppercase">Done</div>
-                  </div>
-                  <div class="p-2 rounded-lg bg-white dark:bg-slate-900/50">
-                    <div class="text-sm font-bold text-purple-600">${driver.heldCash.toLocaleString()}</div>
-                    <div class="text-[9px] text-slate-500 uppercase">Held LYD</div>
-                  </div>
+                <div class="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-slate-600 dark:text-slate-300">
+                  <span>Pending <b>${driver.pending}</b></span>
+                  <span class="text-blue-600 dark:text-blue-400">Active <b>${driver.inProgress}</b></span>
+                  <span class="text-emerald-600 dark:text-emerald-400">Done <b>${driver.completed}</b></span>
+                  <span class="text-purple-600 dark:text-purple-400">Held <b>${driver.heldCash.toLocaleString()}</b> LYD</span>
                 </div>
               </div>
             `).join('')}
@@ -9839,14 +9764,9 @@ function renderDeliveriesView() {
         </div>
 
         <!-- Delivery Log -->
-        <div class="xl:col-span-2 glass-panel rounded-2xl p-5">
-          <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-4">
-            <div class="flex items-center space-x-2">
-              <span class="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center">
-                <i data-lucide="clipboard-list" class="w-4 h-4 text-white"></i>
-              </span>
-              <h2 class="text-lg font-bold text-slate-800 dark:text-white">Delivery Log</h2>
-            </div>
+        <div class="xl:col-span-2 glass-panel rounded-2xl p-4">
+          <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 mb-3">
+            <h2 class="text-base font-bold text-slate-800 dark:text-white">Delivery Log</h2>
             <div class="flex flex-wrap items-center gap-2 w-full md:w-auto">
               <div class="relative flex-1 md:flex-none">
                 <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"></i>
@@ -9991,25 +9911,15 @@ function renderDeliveriesView() {
         </div>
       </div>
 
-      <!-- Active Deliveries Grid -->
-      <div class="glass-panel rounded-2xl p-5">
-        <div class="flex items-center justify-between mb-4">
-          <div class="flex items-center space-x-2">
-            <span class="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center">
-              <i data-lucide="zap" class="w-4 h-4 text-white"></i>
-            </span>
-            <h2 class="text-lg font-bold text-slate-800 dark:text-white">Active Deliveries</h2>
-            <span class="px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
-              ${activeDeliveries.length}
-            </span>
-          </div>
-        </div>
-        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+      <!-- Active Deliveries (compact cards, same actions) -->
+      <div class="glass-panel rounded-2xl p-4">
+        <h2 class="text-base font-bold text-slate-800 dark:text-white mb-3">
+          Active Deliveries
+          <span class="ml-1 px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">${activeDeliveries.length}</span>
+        </h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
           ${activeDeliveries.length === 0 ? `
-            <div class="col-span-full py-12 text-center">
-              <div class="w-20 h-20 mx-auto mb-4 rounded-full bg-gradient-to-br from-emerald-100 to-teal-100 dark:from-emerald-900/20 dark:to-teal-900/20 flex items-center justify-center">
-                <i data-lucide="check-circle" class="w-10 h-10 text-emerald-500"></i>
-              </div>
+            <div class="col-span-full py-8 text-center">
               <p class="text-slate-500 font-medium">All caught up!</p>
               <p class="text-sm text-slate-400">No pending deliveries at the moment</p>
             </div>
@@ -10017,66 +9927,46 @@ function renderDeliveriesView() {
             const customer = state.customers.find(c => c.id === ad.customerId);
             const deliveryPerson = ad.deliveryPersonId ? deliveryUsers.find(u => u.id === ad.deliveryPersonId) : null;
             const isUrgent = ad.deliveryStatus === 'Needs Delivery' && !ad.deliveryPersonId;
-          
-          return `
-              <div class="relative overflow-hidden rounded-xl border-2 ${isUrgent ? 'border-rose-300 dark:border-rose-700 bg-gradient-to-br from-rose-50 to-orange-50 dark:from-rose-900/20 dark:to-orange-900/20' : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/50'} p-4 transition-all hover:shadow-lg">
-                ${isUrgent ? '<div class="absolute top-0 right-0 px-2 py-1 bg-rose-500 text-white text-[10px] font-bold uppercase rounded-bl-lg">Urgent</div>' : ''}
-                
-                <div class="flex items-start justify-between mb-3">
-                  <div class="flex items-center space-x-3">
-                    <div class="w-11 h-11 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white font-bold shadow-lg">
-                      ${customer?.name?.charAt(0) || '?'}
-                </div>
-                    <div>
-                      <h3 class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || 'Unknown')}</h3>
-                      <p class="text-xs text-slate-500 flex items-center space-x-1">
-                        <i data-lucide="phone" class="w-3 h-3"></i>
-                        <span>${Security.escapeHtml(ad.phoneNumber || customer?.phones?.[0] || 'No phone')}</span>
-                      </p>
-                    </div>
-                  </div>
-                  <span class="px-2 py-1 rounded-lg text-xs font-bold ${ad.deliveryStatus === 'In Progress' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'}">
-                    ${ad.deliveryStatus}
-                  </span>
-              </div>
 
-                <div class="grid grid-cols-2 gap-3 mb-3 text-sm">
-                  <div class="p-2 rounded-lg bg-slate-50 dark:bg-slate-900/50">
-                    <div class="text-[10px] text-slate-500 uppercase">Amount</div>
-                    <div class="font-bold text-emerald-600">${(ad.amountLocal || 0).toLocaleString()} LYD</div>
+          return `
+              <div class="rounded-xl border ${isUrgent ? 'border-rose-300 dark:border-rose-700' : 'border-slate-200 dark:border-slate-700'} bg-white dark:bg-slate-800/50 p-3">
+                <div class="flex items-start justify-between gap-2 mb-2">
+                  <div class="min-w-0">
+                    <h3 class="font-bold text-sm text-slate-800 dark:text-white truncate">${Security.escapeHtml(customer?.name || 'Unknown')}</h3>
+                    <p class="text-xs text-slate-500 truncate">${Security.escapeHtml(ad.phoneNumber || customer?.phones?.[0] || 'No phone')}</p>
                   </div>
-                  <div class="p-2 rounded-lg bg-slate-50 dark:bg-slate-900/50">
-                    <div class="text-[10px] text-slate-500 uppercase">USD Value</div>
-                    <div class="font-bold text-slate-700 dark:text-slate-300">$${(ad.amountUSD || 0).toFixed(2)}</div>
+                  <div class="flex flex-col items-end gap-1 flex-shrink-0">
+                    <span class="px-2 py-0.5 rounded-lg text-[11px] font-bold ${ad.deliveryStatus === 'In Progress' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'}">${ad.deliveryStatus}</span>
+                    ${isUrgent ? '<span class="px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase bg-rose-500 text-white">Urgent</span>' : ''}
                   </div>
-              </div>
+                </div>
+
+                <div class="text-sm mb-2">
+                  <span class="font-bold text-emerald-600">${(ad.amountLocal || 0).toLocaleString()} LYD</span>
+                  <span class="text-xs text-slate-500 ml-2">$${(ad.amountUSD || 0).toFixed(2)}</span>
+                </div>
 
                 ${deliveryPerson ? `
-                  <div class="mb-3 p-2 rounded-lg bg-indigo-50 dark:bg-indigo-900/20 flex items-center space-x-2">
-                    <div class="w-6 h-6 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white text-xs font-bold">
-                      ${deliveryPerson.name?.charAt(0)}
-                    </div>
-                    <span class="text-xs font-medium text-indigo-700 dark:text-indigo-300">${Security.escapeHtml(deliveryPerson.name || '')}</span>
-                  </div>
+                  <div class="mb-2 text-xs font-medium text-indigo-700 dark:text-indigo-300">Driver: ${Security.escapeHtml(deliveryPerson.name || '')}</div>
                 ` : (canAssign ? `
-                  <select onchange="assignDelivery('${ad.id}', this.value)" class="w-full glass-input px-3 py-2 rounded-lg text-sm mb-3">
-                    <option value="">⚡ Assign driver...</option>
+                  <select onchange="assignDelivery('${ad.id}', this.value)" class="w-full glass-input px-3 py-2 rounded-lg text-sm mb-2">
+                    <option value="">Assign driver...</option>
                     ${deliveryUsers.map(u => `<option value="${u.id}">${Security.escapeHtml(u.name || '')}</option>`).join('')}
                   </select>
-                ` : `<div class="mb-3 text-xs text-slate-400">Unassigned</div>`)}
+                ` : `<div class="mb-2 text-xs text-slate-400">Unassigned</div>`)}
 
                 <div class="flex space-x-2">
                   ${String(ad.deliveryStatus || '') !== 'Delivered' && String(ad.deliveryStatus || '') !== 'Canceled' ? `
-                    <button onclick="openDeliveryCancelModal('${ad.id}')" class="flex-1 btn-shine bg-rose-600 text-white px-3 py-2 rounded-lg text-sm font-bold flex items-center justify-center space-x-1">
+                    <button onclick="openDeliveryCancelModal('${ad.id}')" class="flex-1 bg-rose-600 text-white px-3 py-1.5 rounded-lg text-sm font-bold flex items-center justify-center space-x-1">
                       <i data-lucide="x-circle" class="w-4 h-4"></i>
                       <span>Cancel</span>
                     </button>
                   ` : ''}
-                  <button onclick="showDeliveryDetails('${ad.id}')" class="btn-shine bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 px-3 py-2 rounded-lg text-sm">
+                  <button onclick="showDeliveryDetails('${ad.id}')" class="bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 px-3 py-1.5 rounded-lg text-sm" title="View Details">
                     <i data-lucide="more-horizontal" class="w-4 h-4"></i>
                   </button>
                   ${canAssign && String(ad.deliveryStatus || '') !== 'Delivered' ? `
-                    <button onclick="removeDeliveryMission('${ad.id}')" class="btn-shine bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 px-3 py-2 rounded-lg text-sm" title="Delete Mission">
+                    <button onclick="removeDeliveryMission('${ad.id}')" class="bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 px-3 py-1.5 rounded-lg text-sm" title="Delete Mission">
                       <i data-lucide="trash-2" class="w-4 h-4"></i>
                     </button>
                   ` : ''}
@@ -10090,26 +9980,8 @@ function renderDeliveriesView() {
   `;
 }
 
-// Helper function to render pipeline stages
-function renderPipelineStage(label, count, icon, color, index) {
-  const colors = {
-    slate: 'from-slate-400 to-gray-500',
-    amber: 'from-amber-400 to-orange-500',
-    blue: 'from-blue-400 to-indigo-500',
-    emerald: 'from-emerald-400 to-teal-500',
-    rose: 'from-rose-400 to-red-500'
-  };
-  
-  return `
-    <div class="flex flex-col items-center">
-      <div class="w-14 h-14 rounded-2xl bg-gradient-to-br ${colors[color]} flex items-center justify-center shadow-lg mb-2 animate-pulse-slow" style="animation-delay: ${index * 200}ms">
-        <i data-lucide="${icon}" class="w-6 h-6 text-white"></i>
-      </div>
-      <div class="text-2xl font-black text-slate-800 dark:text-white">${count}</div>
-      <div class="text-[10px] text-slate-500 text-center uppercase tracking-wide">${label}</div>
-    </div>
-  `;
-}
+// (renderPipelineStage helper removed — the pipeline is now a slim inline
+// strip inside the stats panel of renderDeliveriesView, same four numbers)
 
 // Filter deliveries
 function filterDeliveries(type, value) {
