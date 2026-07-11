@@ -4,6 +4,26 @@
 
 function getFilteredAds(customersById = null) {
   let filtered = getVisibleRecords(state.ads).filter(ad => ad.recordType !== 'receipt');
+
+  // Dropdown filters (status / payment / page) — state.adFilters is kept in
+  // sync by updateAdFilter(); 'all' or unset means no filtering.
+  const f = state.adFilters || {};
+  if (f.status && f.status !== 'all') {
+    filtered = filtered.filter(ad => String(ad.status || '') === f.status);
+  }
+  if (f.payment && f.payment !== 'all') {
+    filtered = filtered.filter(ad => {
+      const ps = String(ad.paymentStatus || '').toLowerCase();
+      const isPaid = ad.isPaid === true || ps === 'paid';
+      if (f.payment === 'paid') return isPaid;
+      if (f.payment === 'wont_pay') return ps === 'wont_pay';
+      return !isPaid && ps !== 'wont_pay'; // not_paid
+    });
+  }
+  if (f.page && f.page !== 'all') {
+    filtered = filtered.filter(ad => String(ad.pageId || '') === String(f.page));
+  }
+
   // Read the search term from state (kept in sync by the debounced input handler).
   // Fall back to the DOM only if state hasn't been set yet.
   const searchTerm = String(
@@ -14,13 +34,16 @@ function getFilteredAds(customersById = null) {
     // PERFORMANCE: one Map lookup per ad instead of scanning the whole customers
     // array for every ad on every keystroke.
     const custMap = customersById || new Map(state.customers.map(c => [c.id, c]));
+    const pageMap = new Map((state.pages || []).map(p => [p.id, p]));
     filtered = filtered.filter(ad => {
       const customer = custMap.get(ad.customerId);
+      const page = ad.pageId ? pageMap.get(ad.pageId) : null;
       return (
         customer?.name?.toLowerCase().includes(searchTerm) ||
         ad.id.toLowerCase().includes(searchTerm) ||
         ad.phoneNumber?.toLowerCase().includes(searchTerm) ||
-        ad.serialNumber?.toLowerCase().includes(searchTerm)
+        ad.serialNumber?.toLowerCase().includes(searchTerm) ||
+        page?.name?.toLowerCase().includes(searchTerm)
       );
     });
   }

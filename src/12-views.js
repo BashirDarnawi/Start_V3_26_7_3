@@ -2364,6 +2364,14 @@ function renderPagesView() {
 }
 
 let _adSearchTimer = null;
+function updateAdFilter(type, value) {
+  if (!state.adFilters) state.adFilters = {};
+  state.adFilters[type] = value;
+  // Same targeted swap as the search box — only the table + count re-render,
+  // so the filter dropdowns and search input keep their values and focus.
+  updateAdsViewFiltered();
+}
+
 function onAdSearchInput(value) {
   // Debounced ads search: keep the term in state and swap only the table, instead
   // of the old oninput="render()" which rebuilt the ENTIRE app (and the whole ads
@@ -2406,7 +2414,10 @@ function renderAdsView() {
   const customersById = new Map(state.customers.map(c => [c.id, c]));
   const receiptsById = new Map(state.receipts.map(r => [r.id, r]));
   const usersById = new Map(state.users.map(u => [u.id, u]));
+  const pagesById = new Map((state.pages || []).map(p => [p.id, p]));
   const allAds = getFilteredAds(customersById);
+  const adF = state.adFilters || {};
+  const visiblePages = getVisibleRecords(state.pages || []);
 
   return `
     <div class="space-y-6 animate-fade-in-up">
@@ -2427,7 +2438,23 @@ function renderAdsView() {
       </div>
 
       <div class="glass-panel rounded-xl p-4">
-        <input type="text" id="ad-search" placeholder="Search ads..." value="${Security.escapeHtml(state.adSearch || '')}" class="w-full glass-input px-4 py-2 rounded-lg" oninput="onAdSearchInput(this.value)" autocomplete="off" />
+        <div class="flex flex-col md:flex-row gap-2">
+          <input type="text" id="ad-search" placeholder="Search by customer, phone, serial or page..." value="${Security.escapeHtml(state.adSearch || '')}" class="flex-1 glass-input px-4 py-2 rounded-lg" oninput="onAdSearchInput(this.value)" autocomplete="off" />
+          <select onchange="updateAdFilter('status', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
+            <option value="all" ${(adF.status || 'all') === 'all' ? 'selected' : ''}>All Status</option>
+            ${AD_STATUSES.map(s => `<option value="${s}" ${adF.status === s ? 'selected' : ''}>${s}</option>`).join('')}
+          </select>
+          <select onchange="updateAdFilter('payment', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
+            <option value="all" ${(adF.payment || 'all') === 'all' ? 'selected' : ''}>All Payments</option>
+            <option value="paid" ${adF.payment === 'paid' ? 'selected' : ''}>Paid</option>
+            <option value="not_paid" ${adF.payment === 'not_paid' ? 'selected' : ''}>Not Paid</option>
+            <option value="wont_pay" ${adF.payment === 'wont_pay' ? 'selected' : ''}>Won't Pay</option>
+          </select>
+          <select onchange="updateAdFilter('page', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm max-w-[180px]">
+            <option value="all" ${(adF.page || 'all') === 'all' ? 'selected' : ''}>All Pages</option>
+            ${visiblePages.map(p => `<option value="${Security.escapeHtml(p.id)}" ${adF.page === p.id ? 'selected' : ''}>${Security.escapeHtml(p.name || '')}</option>`).join('')}
+          </select>
+        </div>
       </div>
 
       <div id="ads-table-container" class="glass-panel rounded-2xl p-6 overflow-x-auto">
@@ -2437,6 +2464,7 @@ function renderAdsView() {
               <tr class="border-b-2 border-indigo-200 dark:border-indigo-800">
                 <th class="text-left py-3 px-2 w-12">#</th>
                 <th class="text-left py-3 px-2">Customer</th>
+                <th class="text-left py-3 px-2">Page</th>
                 <th class="text-left py-3 px-2">Amount</th>
                 <th class="text-left py-3 px-2">Rate</th>
                 <th class="text-left py-3 px-2">Local</th>
@@ -2487,6 +2515,12 @@ function renderAdsView() {
                     <td class="py-3 px-2 hidden md:table-cell">
                       <div class="font-medium">${Security.escapeHtml(customer?.name || 'Unknown')}</div>
                       ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
+                    </td>
+                    <td class="py-3 px-2" data-label="Page">
+                      ${ad.pageId && pagesById.get(ad.pageId) ? `
+                        <div class="text-sm font-medium text-indigo-700 dark:text-indigo-300">${Security.escapeHtml(pagesById.get(ad.pageId).name || '')}</div>
+                        ${pagesById.get(ad.pageId).category ? `<div class="text-xs text-slate-500">${Security.escapeHtml(pagesById.get(ad.pageId).category)}</div>` : ''}
+                      ` : '<span class="text-xs text-slate-400">-</span>'}
                     </td>
                     <td class="py-3 px-2 font-bold text-emerald-600" data-label="Amount">$${ad.amountUSD?.toFixed(2) || '0.00'}</td>
                     <td class="py-3 px-2" data-label="Rate">${receiptExchangeRate?.toFixed(2) || ad.exchangeRate?.toFixed(2) || '0.00'}</td>
