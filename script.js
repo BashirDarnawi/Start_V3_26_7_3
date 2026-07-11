@@ -9542,23 +9542,42 @@ function renderAdsView() {
                 const receiptExchangeRate = getEffectiveExchangeRate(ad);
                 // Display number: total - index (so first item = highest number)
                 const adDisplayNum = allAds.length - idx;
+                // All receipts linked to this ad (delivery + funding), deduped —
+                // used for the Serial fallback AND the Payment method display.
+                const adReceiptIds = [...new Set([
+                  ad.linkedDeliveryReceiptId, ad.receiptId, ad.fundingReceiptId,
+                  ...(Array.isArray(ad.receiptIds) ? ad.receiptIds : []),
+                  ...(Array.isArray(ad.receiptAllocations) ? ad.receiptAllocations.map(a => a && a.receiptId) : [])
+                ].filter(Boolean))];
                 // Serial: ads rarely carry their own serial number — fall back
                 // to the linked receipt number(s): the delivery receipt
                 // (D#/final no) or the funding receipts' serials.
                 const _rcptNo = (rc) => rc ? String(rc.serialNumber || rc.finalReceiptNo || rc.tempReceiptNo || '').trim() : '';
                 let serialDisplay = String(ad.serialNumber || '').trim();
                 if (!serialDisplay) {
-                  const rcptIds = [];
-                  if (ad.linkedDeliveryReceiptId) rcptIds.push(ad.linkedDeliveryReceiptId);
-                  if (ad.receiptId) rcptIds.push(ad.receiptId);
-                  if (ad.fundingReceiptId) rcptIds.push(ad.fundingReceiptId);
-                  if (Array.isArray(ad.receiptIds)) rcptIds.push(...ad.receiptIds);
-                  if (Array.isArray(ad.receiptAllocations)) rcptIds.push(...ad.receiptAllocations.map(a => a && a.receiptId));
                   const serialNos = [...new Set(
-                    [...new Set(rcptIds.filter(Boolean))].map(id => _rcptNo(receiptsById.get(id))).filter(Boolean)
+                    adReceiptIds.map(id => _rcptNo(receiptsById.get(id))).filter(Boolean)
                   )];
                   serialDisplay = serialNos.slice(0, 3).join(', ') + (serialNos.length > 3 ? ` +${serialNos.length - 3}` : '');
                 }
+                // Payment method(s): the ad's own method when set (Not Paid
+                // collection), plus the REAL methods from the linked receipts'
+                // payment splits — a paid ad stores '' as its own method, so
+                // the column used to render an empty badge. 'Split Payment' is
+                // a container label, not a method: drop it once real ones exist.
+                const _methods = new Set();
+                if (ad.paymentMethod) _methods.add(String(ad.paymentMethod));
+                adReceiptIds.forEach(id => {
+                  const rc = receiptsById.get(id);
+                  if (!rc) return;
+                  if (Array.isArray(rc.payments) && rc.payments.length) {
+                    rc.payments.forEach(p => { if (p && p.method) _methods.add(String(p.method)); });
+                  } else if (rc.paymentMethod) {
+                    _methods.add(String(rc.paymentMethod));
+                  }
+                });
+                if (_methods.size > 1) _methods.delete('Split Payment');
+                const paymentMethods = [..._methods];
                 return `
                   <tr class="border-b border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50">
                     <td class="py-3 px-2" data-label="#">
@@ -9578,7 +9597,14 @@ function renderAdsView() {
                     <td class="py-3 px-2 font-bold text-emerald-600" data-label="Amount">$${ad.amountUSD?.toFixed(2) || '0.00'}</td>
                     <td class="py-3 px-2" data-label="Rate">${receiptExchangeRate?.toFixed(2) || ad.exchangeRate?.toFixed(2) || '0.00'}</td>
                     <td class="py-3 px-2" data-label="Local">${ad.amountLocal?.toFixed(2)} LYD</td>
-                    <td class="py-3 px-2" data-label="Payment"><span class="payment-badge text-xs">${ad.paymentMethod}</span></td>
+                    <td class="py-3 px-2" data-label="Payment">
+                      ${paymentMethods.length ? `
+                        <div class="flex flex-wrap gap-1">
+                          ${paymentMethods.slice(0, 3).map(m => `<span class="payment-badge text-xs">${Security.escapeHtml(m)}</span>`).join('')}
+                          ${paymentMethods.length > 3 ? `<span class="text-xs text-slate-500" title="${Security.escapeHtml(paymentMethods.slice(3).join(', '))}">+${paymentMethods.length - 3}</span>` : ''}
+                        </div>
+                      ` : '<span class="text-xs text-slate-400">-</span>'}
+                    </td>
                     <td class="py-3 px-2" data-label="Status">
                       <!-- Read-only badge (user request): status changes only via the
                            Actions buttons. The old inline dropdown also let "Stopped"
