@@ -23,7 +23,9 @@ from .rbac import user_has_permission
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from .schemas import (
+    AdminBulkImportRequest,
     AdminRestoreEntityRequest,
+    BatchDeleteRequest,
     BootstrapResponse,
     ChangePasswordRequest,
     CreateUserRequest,
@@ -2974,7 +2976,13 @@ def admin_restore_collection_item(
     - POST always sets created_by to the current user => breaks ownership on fresh restores.
 
     This endpoint lets the backup/restore flow write the record exactly, including:
-    createdAt/createdBy/lastModified and deleted flag.
+    createdAt/createdBy and deleted flag.
+
+    SYNC FIX: lastModified is now ALWAYS stamped with the restore time (the
+    body's value is accepted but ignored). Restoring with the backup's old
+    last_modified put the row BELOW every online device's delta-sync cursor,
+    so other devices received the import's deletions but never the restored
+    data until a full reload.
     """
     require_same_origin(request)
 
@@ -2983,10 +2991,11 @@ def admin_restore_collection_item(
     if not entity_type or not ent_id:
         raise HTTPException(status_code=400, detail="Invalid entity type/id")
 
-    # Desired metadata (optional, but recommended for perfect restores)
+    # Desired metadata (optional, but recommended for perfect restores).
+    # body.lastModified is accepted for backward compatibility but ignored —
+    # the restore time is stamped instead (see docstring).
     deleted = bool(body.deleted) if body.deleted is not None else False
     created_at_in = body.createdAt
-    last_modified_in = body.lastModified
 
     created_by_in = None
     if body.createdBy is not None:
@@ -3005,7 +3014,6 @@ def admin_restore_collection_item(
             return None
 
     created_at_in_i = _as_int(created_at_in)
-    last_modified_in_i = _as_int(last_modified_in)
 
     with db_conn() as conn:
         existing = (
@@ -3022,7 +3030,9 @@ def admin_restore_collection_item(
         # Fallback to existing metadata when not provided
         created_at = created_at_in_i if created_at_in_i is not None else (int(existing["created_at"]) if existing else None)
         created_by = created_by_in if body.createdBy is not None else (existing.get("created_by") if existing else None)
-        last_modified = last_modified_in_i if last_modified_in_i is not None else (int(existing["last_modified"]) if existing else now_ms())
+        # Stamp restore time so delta-sync clients receive the restored row
+        # (see docstring). The backup's lastModified is deliberately ignored.
+        last_modified = now_ms()
 
         # For a *new* record, createdAt is required to keep deterministic backups
         if created_at is None:
@@ -3097,6 +3107,232 @@ def admin_restore_collection_item(
         lastModified=int(last_modified),
         data=data,
     )
+
+
+@app.post("/api/admin/import")
+def admin_bulk_import(
+    body: AdminBulkImportRequest,
+    request: Request,
+    admin: dict[str, Any] = Depends(require_admin),
+):
+    """
+    Transactional whole-backup import (admin only).
+
+    Replaces every listed collection in ONE database transaction:
+    - active backup records are upserted exactly (createdAt/createdBy kept)
+    - records absent from the backup, or marked _deleted in it, are
+      soft-deleted ("prune")
+    - every touched row is stamped last_modified = import time so online
+      delta-sync clients receive the restored data (not only the deletions)
+
+    A failure anywhere raises and rolls back EVERYTHING — the server can
+    never be left half backup / half current data, which the old
+    one-request-per-record flow allowed on a mid-import error.
+    """
+    require_same_origin(request)
+
+    raw_collections = body.collections or {}
+    if not raw_collections:
+        raise HTTPException(status_code=400, detail="No collections to import")
+    if len(raw_collections) > 20:
+        raise HTTPException(status_code=400, detail="Too many collections")
+
+    def _as_int(v: Any) -> Optional[int]:
+        if v is None:
+            return None
+        try:
+            return int(v)
+        except Exception:
+            return None
+
+    now = now_ms()
+
+    # Validate + sanitize everything BEFORE touching the database, so bad
+    # input fails fast without opening a transaction at all.
+    prepared: list[tuple[str, set[str], list[tuple[str, dict[str, Any], Optional[int], Optional[str]]]]] = []
+    for raw_name, raw_records in raw_collections.items():
+        name = sanitize_str(str(raw_name))[:40]
+        if not name:
+            raise HTTPException(status_code=400, detail="Invalid collection name")
+        if name == "users":
+            raise HTTPException(status_code=400, detail="Users are not imported through this endpoint")
+        records = raw_records or []
+        if len(records) > 50000:
+            raise HTTPException(status_code=400, detail=f"Too many records in '{name}'")
+        seen_ids: set[str] = set()
+        active: list[tuple[str, dict[str, Any], Optional[int], Optional[str]]] = []
+        for rec in records:
+            if not isinstance(rec, dict):
+                raise HTTPException(status_code=400, detail=f"'{name}' contains a non-object record")
+            rid = sanitize_str(str(rec.get("id") or ""))[:80]
+            if not rid:
+                raise HTTPException(status_code=400, detail=f"'{name}' contains a record without an id")
+            if rid in seen_ids:
+                raise HTTPException(status_code=400, detail=f"'{name}' contains duplicate id '{rid}'")
+            seen_ids.add(rid)
+            if rec.get("_deleted"):
+                # Stays (or becomes) deleted via the prune step below.
+                continue
+            data = sanitize_json(rec) or {}
+            data["id"] = rid
+            created_at = _as_int(data.get("_created"))
+            created_by = sanitize_str(str(data.get("createdBy") or ""))[:80] or None
+            active.append((rid, data, created_at, created_by))
+        prepared.append((name, seen_ids, active))
+
+    summary: dict[str, dict[str, int]] = {}
+    with db_conn() as conn:
+        # createdBy FK safety: the entities.created_by column references
+        # users.id, so it may only hold ids that actually exist (deleted
+        # users included — history stays attributed). Unknown creators get a
+        # NULL column while data.createdBy keeps the backup's value.
+        user_rows = conn.execute(text("SELECT id FROM users")).mappings().all()
+        existing_user_ids = {str(r["id"]) for r in user_rows}
+
+        for (name, _seen_ids, active) in prepared:
+            existing_rows = conn.execute(
+                text("SELECT id, deleted, created_at FROM entities WHERE type = :type"),
+                {"type": name},
+            ).mappings().all()
+            existing_meta = {str(r["id"]): r for r in existing_rows}
+            active_ids = {rid for (rid, _d, _c, _cb) in active}
+
+            pruned = 0
+            for eid, meta in existing_meta.items():
+                if bool(meta["deleted"]):
+                    continue
+                if eid not in active_ids:
+                    conn.execute(
+                        text("UPDATE entities SET deleted = true, last_modified = :ts WHERE type = :type AND id = :id"),
+                        {"ts": now, "type": name, "id": eid},
+                    )
+                    pruned += 1
+
+            restored = 0
+            for (rid, data, created_at_in, created_by_in) in active:
+                existing = existing_meta.get(rid)
+                created_at = created_at_in if created_at_in is not None else (int(existing["created_at"]) if existing else now)
+                col_created_by = created_by_in if (created_by_in and created_by_in in existing_user_ids) else None
+                data["_created"] = int(created_at)
+                data["_lastModified"] = int(now)
+                data["_deleted"] = False
+                payload = {
+                    "type": name,
+                    "id": rid,
+                    "data_json": json_dumps(data),
+                    "deleted": False,
+                    "created_at": int(created_at),
+                    "created_by": col_created_by,
+                    "last_modified": int(now),
+                }
+                if existing:
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE entities
+                            SET data_json = :data_json,
+                                deleted = :deleted,
+                                created_at = :created_at,
+                                created_by = :created_by,
+                                last_modified = :last_modified
+                            WHERE type = :type AND id = :id
+                            """
+                        ),
+                        payload,
+                    )
+                else:
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO entities (type, id, data_json, deleted, created_at, created_by, last_modified)
+                            VALUES (:type, :id, :data_json, :deleted, :created_at, :created_by, :last_modified)
+                            """
+                        ),
+                        payload,
+                    )
+                restored += 1
+
+            summary[name] = {"restored": restored, "pruned": pruned}
+
+    # Audit AFTER the committed transaction (audit() opens its own connection).
+    audit(
+        str(admin.get("id")),
+        "import",
+        "backup",
+        "bulk",
+        "Transactional server import: " + ", ".join(f"{k}={v['restored']}+{v['pruned']}del" for k, v in summary.items()),
+        summary,
+    )
+    return {"ok": True, "lastModified": now, "collections": summary}
+
+
+@app.post("/api/batch/delete")
+def batch_delete_entities(
+    body: BatchDeleteRequest,
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+):
+    """
+    Soft-delete several entities in ONE transaction (all-or-nothing).
+
+    Cascade deletes (a customer with their receipts, ads and linked transfer
+    receipts) previously fired one DELETE per record with no retry — on a
+    flaky connection some succeeded and some silently failed, leaving the
+    cascade half-applied and the failed records resurrecting on other
+    devices. This endpoint applies the whole set atomically.
+
+    Permissions mirror the single DELETE endpoint, checked per item BEFORE
+    any write. Items already gone from the server are skipped (idempotent),
+    matching how a re-run of the same cascade should behave.
+    """
+    require_same_origin(request)
+
+    normalized: list[tuple[str, str]] = []
+    for item in body.items:
+        col = sanitize_str(item.collection)[:40]
+        eid = sanitize_str(item.id)[:80]
+        if not col or not eid:
+            raise HTTPException(status_code=400, detail="Invalid collection/id in batch")
+        if col == "users":
+            raise HTTPException(status_code=400, detail="Users cannot be deleted through this endpoint")
+        module = _module_for_collection(col)
+        delete_action = _action_for_collection(col, "delete")
+        if not user_has_permission(user, module, delete_action):
+            existing = get_entity(col, eid)
+            if not existing:
+                # Missing records are skipped later; nothing to authorize.
+                normalized.append((col, eid))
+                continue
+            creator = existing.get("createdBy") or (existing.get("data") or {}).get("createdBy") or (existing.get("data") or {}).get("creatorId")
+            if not user_has_permission(user, module, delete_action, record_creator_id=str(creator or "")):
+                raise HTTPException(status_code=403, detail=f"Forbidden: {col}/{eid}")
+        normalized.append((col, eid))
+
+    now = now_ms()
+    deleted = 0
+    skipped = 0
+    with db_conn() as conn:
+        for (col, eid) in normalized:
+            exists = (
+                conn.execute(
+                    text("SELECT id FROM entities WHERE type = :type AND id = :id LIMIT 1"),
+                    {"type": col, "id": eid},
+                )
+                .mappings()
+                .first()
+            )
+            if not exists:
+                skipped += 1
+                continue
+            conn.execute(
+                text("UPDATE entities SET deleted = true, last_modified = :ts WHERE type = :type AND id = :id"),
+                {"ts": now, "type": col, "id": eid},
+            )
+            deleted += 1
+
+    for (col, eid) in normalized:
+        audit(str(user.get("id")), "delete", col, eid, f"Deleted {col} {eid} (atomic batch)", {})
+    return {"ok": True, "deleted": deleted, "skipped": skipped}
 
 
 @app.delete("/api/collections/{collection}/{entity_id}")

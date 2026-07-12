@@ -625,7 +625,27 @@ async function apiAdminRestoreEntity(collection, id, record) {
 }
 
 async function apiDeleteEntity(collection, id) {
-  return await apiJson(`/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`, { method: 'DELETE', body: {} }, { timeoutMs: 20000 });
+  // Retry like create/patch do — a single 20s hiccup used to silently drop a
+  // deletion, letting the record resurrect from the server later.
+  return await withRetry(() =>
+    apiJson(`/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`, { method: 'DELETE', body: {} }, { timeoutMs: 20000 })
+  , 2, 500);
+}
+
+// Soft-delete several records in ONE all-or-nothing server transaction.
+// Used by cascade deletes (customer + receipts + ads + linked transfer
+// receipts) so a flaky connection can never leave a cascade half-applied.
+async function apiBatchDeleteEntities(items) {
+  return await withRetry(() =>
+    apiJson('/api/batch/delete', { method: 'POST', body: { items } }, { timeoutMs: 30000 })
+  , 2, 500);
+}
+
+// Transactional whole-backup import: the server replaces every listed
+// collection inside one database transaction — a failure anywhere rolls back
+// everything, so the server can never be left half backup / half current.
+async function apiAdminBulkImport(collections) {
+  return await apiJson('/api/admin/import', { method: 'POST', body: { collections } }, { timeoutMs: 120000 });
 }
 
 async function serverLoadAllData() {

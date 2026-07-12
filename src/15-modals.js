@@ -2914,7 +2914,7 @@ function undoTransferIntoReceipt(receipt) {
 // other customers keep spendable money that no longer exists anywhere.
 // Handles onward (chained) transfers; `seen` guards against cycles. Returns
 // how many paired receipts were deleted.
-function cascadeDeleteOutgoingTransfers(receipt, seen) {
+function cascadeDeleteOutgoingTransfers(receipt, seen, deleteOpts) {
   seen = seen || new Set();
   if (!receipt || seen.has(String(receipt.id))) return 0;
   seen.add(String(receipt.id));
@@ -2922,9 +2922,9 @@ function cascadeDeleteOutgoingTransfers(receipt, seen) {
   (Array.isArray(receipt.transfers) ? receipt.transfers : []).forEach(t => {
     const target = state.receipts.find(r => r && !r._deleted && String(r.id) === String(t?.toReceiptId || ''));
     if (!target) return;
-    count += cascadeDeleteOutgoingTransfers(target, seen);
+    count += cascadeDeleteOutgoingTransfers(target, seen, deleteOpts);
     cleanupAdFundingLinks(target.id);
-    deleteRecord(state.receipts, target.id);
+    deleteRecord(state.receipts, target.id, deleteOpts);
     count += 1;
   });
   return count;
@@ -2968,8 +2968,12 @@ function deleteCustomer(id) {
     // deleteRecord (instead of a bare _deleted flag with a fire-and-forget
     // server call) gives every cascaded record the standard server push with
     // rollback, error notification and audit log.
+    // Every soft-delete of the cascade is collected and pushed to the server
+    // as ONE all-or-nothing batch — a flaky connection can no longer leave
+    // the customer half-deleted with some records resurrecting later.
+    const batchDeleteOps = { collectServerOps: [] };
     linkedAds.forEach(ad => {
-      deleteRecord(state.ads, ad.id);
+      deleteRecord(state.ads, ad.id, batchDeleteOps);
     });
     linkedReceipts.forEach(receipt => {
       // Same link cleanup deleteReceipt does. Without it, ads of OTHER
@@ -2979,8 +2983,8 @@ function deleteCustomer(id) {
       // Undo BEFORE cleanup: the undo reads spent amounts from allocations.
       undoTransferIntoReceipt(receipt);
       cleanupAdFundingLinks(receipt.id);
-      cascadeDeleteOutgoingTransfers(receipt);
-      deleteRecord(state.receipts, receipt.id);
+      cascadeDeleteOutgoingTransfers(receipt, undefined, batchDeleteOps);
+      deleteRecord(state.receipts, receipt.id, batchDeleteOps);
     });
     // Unlink the customer from pages: page.customerIds kept the ghost id, so
     // the Pages view still showed the deleted customer as owner and every
@@ -2990,7 +2994,8 @@ function deleteCustomer(id) {
         updateRecord(state.pages, page.id, { customerIds: page.customerIds.filter(cid => cid !== id) });
       }
     });
-    deleteRecord(state.customers, id);
+    deleteRecord(state.customers, id, batchDeleteOps);
+    flushBatchDeletes(batchDeleteOps.collectServerOps);
     const deletedCount = linkedReceipts.length + linkedAds.length;
     showNotification(
       isAr ? 'تم الحذف' : 'Deleted',
@@ -3078,10 +3083,14 @@ function deleteReceipt(id) {
     // also used by deleteCustomer so both delete paths behave the same).
     // Order matters: the transfer undo reads how much of this receipt was
     // SPENT from its allocations, so it must run before cleanup strips them.
+    // All soft-deletes are collected and pushed to the server as ONE
+    // all-or-nothing batch (receipt + its chained transfer receipts).
+    const batchDeleteOps = { collectServerOps: [] };
     const returnedTo = undoTransferIntoReceipt(receipt);
     cleanupAdFundingLinks(id);
-    const cascadeCount = cascadeDeleteOutgoingTransfers(receipt);
-    deleteRecord(state.receipts, id);
+    const cascadeCount = cascadeDeleteOutgoingTransfers(receipt, undefined, batchDeleteOps);
+    deleteRecord(state.receipts, id, batchDeleteOps);
+    flushBatchDeletes(batchDeleteOps.collectServerOps);
     let detail = isArDel ? 'تم حذف الوصل' : 'Receipt deleted';
     if (linkedAds.length > 0) detail += isArDel ? ` (تم تنظيف ${linkedAds.length} ارتباط تمويل)` : ` (${linkedAds.length} ad allocation(s) cleaned up)`;
     if (returnedTo) detail += isArDel ? ` — عاد $${amountUSD} إلى الوصل رقم ${returnedTo.serialNumber || returnedTo.id.slice(0, 8)}` : ` — $${amountUSD} returned to receipt #${returnedTo.serialNumber || returnedTo.id.slice(0, 8)}`;

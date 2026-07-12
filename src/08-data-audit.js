@@ -278,7 +278,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
   }
 }
 
-function deleteRecord(array, id) {
+function deleteRecord(array, id, opts) {
   const index = array.findIndex(item => item.id === id);
   if (index !== -1) {
     const collectionName = getCollectionNameFromArray(array);
@@ -297,6 +297,16 @@ function deleteRecord(array, id) {
     saveState();
     addAuditLog('Delete', id, `Deleted ${getRecordType(array[index])}`);
     RenderQueue.schedule('deleteRecord');
+
+    // Cascade deletes collect their server pushes instead of firing them one
+    // by one, so the whole cascade can be sent as ONE all-or-nothing batch
+    // (see flushBatchDeletes). Local state above is already updated.
+    if (opts && Array.isArray(opts.collectServerOps)) {
+      if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
+        opts.collectServerOps.push({ collection: collectionName, id, old, array });
+      }
+      return;
+    }
 
     // Server write-through (always-online multi-user mode)
     if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
@@ -342,6 +352,46 @@ function deleteRecord(array, id) {
         });
     }
   }
+}
+
+// Push a cascade's collected soft-deletes to the server as ONE all-or-nothing
+// transaction (POST /api/batch/delete). Either every record is deleted on the
+// server or none is — a flaky connection can no longer leave a customer
+// cascade half-applied with some records resurrecting on other devices.
+// On failure the local soft-deletes are rolled back so local and server agree.
+function flushBatchDeletes(ops) {
+  if (!Array.isArray(ops) || ops.length === 0) return;
+  if (!isServerModeEnabled()) return;
+  apiBatchDeleteEntities(ops.map(o => ({ collection: o.collection, id: o.id })))
+    .then(() => {
+      render();
+    })
+    .catch((e) => {
+      if (e?.status === 404 || e?.status === 405) {
+        // Older server without the batch endpoint — push one by one with
+        // retry (the pre-batch behavior).
+        ops.forEach(o => {
+          apiDeleteEntity(o.collection, o.id).catch(() => {});
+        });
+        return;
+      }
+      // The server refused the whole batch: roll back every local soft-delete
+      // so nothing is half-deleted anywhere.
+      ops.forEach(o => {
+        const idx = o.array.findIndex(x => x && x.id === o.id);
+        if (idx !== -1) o.array[idx] = o.old;
+        markCollectionDirty(o.collection);
+      });
+      saveState();
+      showNotification(
+        state.language === 'ar' ? 'خطأ في الخادم' : 'Server Error',
+        state.language === 'ar'
+          ? `فشل الحذف على الخادم (${e?.message || 'خطأ'}) — تم التراجع عن الحذف بالكامل.`
+          : `Server delete failed (${e?.message || 'Error'}) — the whole delete was rolled back.`,
+        'error'
+      );
+      render();
+    });
 }
 
 function getVisibleRecords(array) {

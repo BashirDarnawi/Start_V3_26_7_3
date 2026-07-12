@@ -4563,7 +4563,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
   }
 }
 
-function deleteRecord(array, id) {
+function deleteRecord(array, id, opts) {
   const index = array.findIndex(item => item.id === id);
   if (index !== -1) {
     const collectionName = getCollectionNameFromArray(array);
@@ -4582,6 +4582,16 @@ function deleteRecord(array, id) {
     saveState();
     addAuditLog('Delete', id, `Deleted ${getRecordType(array[index])}`);
     RenderQueue.schedule('deleteRecord');
+
+    // Cascade deletes collect their server pushes instead of firing them one
+    // by one, so the whole cascade can be sent as ONE all-or-nothing batch
+    // (see flushBatchDeletes). Local state above is already updated.
+    if (opts && Array.isArray(opts.collectServerOps)) {
+      if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
+        opts.collectServerOps.push({ collection: collectionName, id, old, array });
+      }
+      return;
+    }
 
     // Server write-through (always-online multi-user mode)
     if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
@@ -4627,6 +4637,46 @@ function deleteRecord(array, id) {
         });
     }
   }
+}
+
+// Push a cascade's collected soft-deletes to the server as ONE all-or-nothing
+// transaction (POST /api/batch/delete). Either every record is deleted on the
+// server or none is — a flaky connection can no longer leave a customer
+// cascade half-applied with some records resurrecting on other devices.
+// On failure the local soft-deletes are rolled back so local and server agree.
+function flushBatchDeletes(ops) {
+  if (!Array.isArray(ops) || ops.length === 0) return;
+  if (!isServerModeEnabled()) return;
+  apiBatchDeleteEntities(ops.map(o => ({ collection: o.collection, id: o.id })))
+    .then(() => {
+      render();
+    })
+    .catch((e) => {
+      if (e?.status === 404 || e?.status === 405) {
+        // Older server without the batch endpoint — push one by one with
+        // retry (the pre-batch behavior).
+        ops.forEach(o => {
+          apiDeleteEntity(o.collection, o.id).catch(() => {});
+        });
+        return;
+      }
+      // The server refused the whole batch: roll back every local soft-delete
+      // so nothing is half-deleted anywhere.
+      ops.forEach(o => {
+        const idx = o.array.findIndex(x => x && x.id === o.id);
+        if (idx !== -1) o.array[idx] = o.old;
+        markCollectionDirty(o.collection);
+      });
+      saveState();
+      showNotification(
+        state.language === 'ar' ? 'خطأ في الخادم' : 'Server Error',
+        state.language === 'ar'
+          ? `فشل الحذف على الخادم (${e?.message || 'خطأ'}) — تم التراجع عن الحذف بالكامل.`
+          : `Server delete failed (${e?.message || 'Error'}) — the whole delete was rolled back.`,
+        'error'
+      );
+      render();
+    });
 }
 
 function getVisibleRecords(array) {
@@ -5739,7 +5789,27 @@ async function apiAdminRestoreEntity(collection, id, record) {
 }
 
 async function apiDeleteEntity(collection, id) {
-  return await apiJson(`/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`, { method: 'DELETE', body: {} }, { timeoutMs: 20000 });
+  // Retry like create/patch do — a single 20s hiccup used to silently drop a
+  // deletion, letting the record resurrect from the server later.
+  return await withRetry(() =>
+    apiJson(`/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`, { method: 'DELETE', body: {} }, { timeoutMs: 20000 })
+  , 2, 500);
+}
+
+// Soft-delete several records in ONE all-or-nothing server transaction.
+// Used by cascade deletes (customer + receipts + ads + linked transfer
+// receipts) so a flaky connection can never leave a cascade half-applied.
+async function apiBatchDeleteEntities(items) {
+  return await withRetry(() =>
+    apiJson('/api/batch/delete', { method: 'POST', body: { items } }, { timeoutMs: 30000 })
+  , 2, 500);
+}
+
+// Transactional whole-backup import: the server replaces every listed
+// collection inside one database transaction — a failure anywhere rolls back
+// everything, so the server can never be left half backup / half current.
+async function apiAdminBulkImport(collections) {
+  return await apiJson('/api/admin/import', { method: 'POST', body: { collections } }, { timeoutMs: 120000 });
 }
 
 async function serverLoadAllData() {
@@ -21395,7 +21465,7 @@ function undoTransferIntoReceipt(receipt) {
 // other customers keep spendable money that no longer exists anywhere.
 // Handles onward (chained) transfers; `seen` guards against cycles. Returns
 // how many paired receipts were deleted.
-function cascadeDeleteOutgoingTransfers(receipt, seen) {
+function cascadeDeleteOutgoingTransfers(receipt, seen, deleteOpts) {
   seen = seen || new Set();
   if (!receipt || seen.has(String(receipt.id))) return 0;
   seen.add(String(receipt.id));
@@ -21403,9 +21473,9 @@ function cascadeDeleteOutgoingTransfers(receipt, seen) {
   (Array.isArray(receipt.transfers) ? receipt.transfers : []).forEach(t => {
     const target = state.receipts.find(r => r && !r._deleted && String(r.id) === String(t?.toReceiptId || ''));
     if (!target) return;
-    count += cascadeDeleteOutgoingTransfers(target, seen);
+    count += cascadeDeleteOutgoingTransfers(target, seen, deleteOpts);
     cleanupAdFundingLinks(target.id);
-    deleteRecord(state.receipts, target.id);
+    deleteRecord(state.receipts, target.id, deleteOpts);
     count += 1;
   });
   return count;
@@ -21449,8 +21519,12 @@ function deleteCustomer(id) {
     // deleteRecord (instead of a bare _deleted flag with a fire-and-forget
     // server call) gives every cascaded record the standard server push with
     // rollback, error notification and audit log.
+    // Every soft-delete of the cascade is collected and pushed to the server
+    // as ONE all-or-nothing batch — a flaky connection can no longer leave
+    // the customer half-deleted with some records resurrecting later.
+    const batchDeleteOps = { collectServerOps: [] };
     linkedAds.forEach(ad => {
-      deleteRecord(state.ads, ad.id);
+      deleteRecord(state.ads, ad.id, batchDeleteOps);
     });
     linkedReceipts.forEach(receipt => {
       // Same link cleanup deleteReceipt does. Without it, ads of OTHER
@@ -21460,8 +21534,8 @@ function deleteCustomer(id) {
       // Undo BEFORE cleanup: the undo reads spent amounts from allocations.
       undoTransferIntoReceipt(receipt);
       cleanupAdFundingLinks(receipt.id);
-      cascadeDeleteOutgoingTransfers(receipt);
-      deleteRecord(state.receipts, receipt.id);
+      cascadeDeleteOutgoingTransfers(receipt, undefined, batchDeleteOps);
+      deleteRecord(state.receipts, receipt.id, batchDeleteOps);
     });
     // Unlink the customer from pages: page.customerIds kept the ghost id, so
     // the Pages view still showed the deleted customer as owner and every
@@ -21471,7 +21545,8 @@ function deleteCustomer(id) {
         updateRecord(state.pages, page.id, { customerIds: page.customerIds.filter(cid => cid !== id) });
       }
     });
-    deleteRecord(state.customers, id);
+    deleteRecord(state.customers, id, batchDeleteOps);
+    flushBatchDeletes(batchDeleteOps.collectServerOps);
     const deletedCount = linkedReceipts.length + linkedAds.length;
     showNotification(
       isAr ? 'تم الحذف' : 'Deleted',
@@ -21559,10 +21634,14 @@ function deleteReceipt(id) {
     // also used by deleteCustomer so both delete paths behave the same).
     // Order matters: the transfer undo reads how much of this receipt was
     // SPENT from its allocations, so it must run before cleanup strips them.
+    // All soft-deletes are collected and pushed to the server as ONE
+    // all-or-nothing batch (receipt + its chained transfer receipts).
+    const batchDeleteOps = { collectServerOps: [] };
     const returnedTo = undoTransferIntoReceipt(receipt);
     cleanupAdFundingLinks(id);
-    const cascadeCount = cascadeDeleteOutgoingTransfers(receipt);
-    deleteRecord(state.receipts, id);
+    const cascadeCount = cascadeDeleteOutgoingTransfers(receipt, undefined, batchDeleteOps);
+    deleteRecord(state.receipts, id, batchDeleteOps);
+    flushBatchDeletes(batchDeleteOps.collectServerOps);
     let detail = isArDel ? 'تم حذف الوصل' : 'Receipt deleted';
     if (linkedAds.length > 0) detail += isArDel ? ` (تم تنظيف ${linkedAds.length} ارتباط تمويل)` : ` (${linkedAds.length} ad allocation(s) cleaned up)`;
     if (returnedTo) detail += isArDel ? ` — عاد $${amountUSD} إلى الوصل رقم ${returnedTo.serialNumber || returnedTo.id.slice(0, 8)}` : ` — $${amountUSD} returned to receipt #${returnedTo.serialNumber || returnedTo.id.slice(0, 8)}`;
@@ -24917,9 +24996,11 @@ function importData() {
       return JSON.stringify(normalize(value));
     };
 
-    const applyCollectionReplace = async (collection, records) => {
+    // Strict backup shape checks shared by the transactional and the legacy
+    // import paths (backup must contain explicit unique IDs — we do NOT
+    // generate IDs; that would break relationships).
+    const prepareBackupList = (collection, records) => {
       const list = Array.isArray(records) ? records.filter(r => r && typeof r === 'object') : [];
-      // Strict: backup must contain explicit IDs (we do NOT generate IDs; that would break relationships)
       const idsAll = new Set();
       for (const r of list) {
         const id = String(r?.id || '').trim();
@@ -24936,6 +25017,59 @@ function importData() {
       const deletedIds = new Set(list.filter(r => !!r._deleted).map(r => String(r.id || '')).filter(Boolean));
       const activeList = list.filter(r => !r._deleted);
       const activeIds = new Set(activeList.map(r => String(r.id || '')).filter(Boolean));
+      return { list, idsAll, deletedIds, activeList, activeIds };
+    };
+
+    // The server stamps _lastModified with the RESTORE time on purpose (so
+    // online devices' delta sync picks the restored rows up) — that volatile
+    // field must not fail the byte-for-byte verification below.
+    const stripVolatileMeta = (r) => {
+      const copy = { ...r };
+      delete copy._lastModified;
+      return copy;
+    };
+
+    // Verify a collection on the server against the backup: visible id sets
+    // must match exactly AND every record's content must match byte-for-byte
+    // (minus the volatile _lastModified stamp).
+    const verifyCollectionMatchesBackup = async (collection, activeList, activeIds) => {
+      const after = await apiLoadCollectionAll(collection).catch(() => []);
+      const serverVisible = (Array.isArray(after) ? after : []).filter(r => r && r.id && !r._deleted);
+      const serverVisibleIds = new Set(serverVisible.map(r => String(r.id)));
+      const extraVisible = [];
+      for (const id of serverVisibleIds) {
+        if (!activeIds.has(id)) extraVisible.push(id);
+      }
+      const missingVisible = [];
+      for (const id of activeIds) {
+        if (!serverVisibleIds.has(id)) missingVisible.push(id);
+      }
+      if (extraVisible.length || missingVisible.length) {
+        const extraTxt = extraVisible.length ? `Extra on server: ${extraVisible.slice(0, 10).join(', ')}${extraVisible.length > 10 ? '…' : ''}` : '';
+        const missTxt = missingVisible.length ? `Missing on server: ${missingVisible.slice(0, 10).join(', ')}${missingVisible.length > 10 ? '…' : ''}` : '';
+        throw new Error(`Import verification failed for "${collection}". ${[extraTxt, missTxt].filter(Boolean).join(' | ')}`);
+      }
+
+      const backupById = new Map(activeList.map(r => [String(r.id), r]));
+      const serverById = new Map(serverVisible.map(r => [String(r.id), r]));
+      const mismatched = [];
+      for (const id of activeIds) {
+        const b = backupById.get(id);
+        const s = serverById.get(id);
+        if (!b || !s) continue;
+        const bStr = stableStringify(stripVolatileMeta(Security.sanitizeObject(b)));
+        const sStr = stableStringify(stripVolatileMeta(Security.sanitizeObject(s)));
+        if (bStr !== sStr) mismatched.push(id);
+      }
+      if (mismatched.length) {
+        throw new Error(
+          `Import verification failed for "${collection}": ${mismatched.length} record(s) differ from the backup (example: ${mismatched.slice(0, 5).join(', ')}${mismatched.length > 5 ? '…' : ''}).`
+        );
+      }
+    };
+
+    const applyCollectionReplace = async (collection, records) => {
+      const { idsAll, deletedIds, activeList, activeIds } = prepareBackupList(collection, records);
 
       // Delete any existing records that should NOT be visible after restore:
       // - records not present in backup at all
@@ -24972,57 +25106,63 @@ function importData() {
         }
       });
 
-      // Verify: server visible set must match backup visible set (prevents "ghost records" coming back)
-      const after = await apiLoadCollectionAll(collection).catch(() => []);
-      const serverVisible = (Array.isArray(after) ? after : []).filter(r => r && r.id && !r._deleted);
-      const serverVisibleIds = new Set(serverVisible.map(r => String(r.id)));
-      const extraVisible = [];
-      for (const id of serverVisibleIds) {
-        if (!activeIds.has(id)) extraVisible.push(id);
-      }
-      const missingVisible = [];
-      for (const id of activeIds) {
-        if (!serverVisibleIds.has(id)) missingVisible.push(id);
-      }
-      if (extraVisible.length || missingVisible.length) {
-        const extraTxt = extraVisible.length ? `Extra on server: ${extraVisible.slice(0, 10).join(', ')}${extraVisible.length > 10 ? '…' : ''}` : '';
-        const missTxt = missingVisible.length ? `Missing on server: ${missingVisible.slice(0, 10).join(', ')}${missingVisible.length > 10 ? '…' : ''}` : '';
-        throw new Error(`Import verification failed for "${collection}". ${[extraTxt, missTxt].filter(Boolean).join(' | ')}`);
-      }
-
-      // Deep verification: record content must match exactly by id (strongest safety check)
-      const backupById = new Map(activeList.map(r => [String(r.id), r]));
-      const serverById = new Map(serverVisible.map(r => [String(r.id), r]));
-      const mismatched = [];
-      for (const id of activeIds) {
-        const b = backupById.get(id);
-        const s = serverById.get(id);
-        if (!b || !s) continue;
-        const bStr = stableStringify(Security.sanitizeObject(b));
-        const sStr = stableStringify(Security.sanitizeObject(s));
-        if (bStr !== sStr) mismatched.push(id);
-      }
-      if (mismatched.length) {
-        throw new Error(
-          `Import verification failed for "${collection}": ${mismatched.length} record(s) differ from the backup (example: ${mismatched.slice(0, 5).join(', ')}${mismatched.length > 5 ? '…' : ''}).`
-        );
-      }
+      // Verify: visible id sets + deep content match (shared with bulk path)
+      await verifyCollectionMatchesBackup(collection, activeList, activeIds);
     };
 
     try {
       showNotification(isAr ? 'استيراد' : 'Import', isAr ? 'جارٍ بدء الاستيراد إلى الخادم...' : 'Starting server import...', 'info');
-      // Replace core collections only (server is source of truth)
-      await applyCollectionReplace('customers', sanitizedImport.customers);
-      await applyCollectionReplace('pages', sanitizedImport.pages);
-      await applyCollectionReplace('ads', sanitizedImport.ads);
-      await applyCollectionReplace('receipts', sanitizedImport.receipts);
-      await applyCollectionReplace('exchangeRateHistory', sanitizedImport.exchangeRateHistory);
-      // Clothes System collections: only replace when present in the backup
-      // (older backups predate these collections — leave server data untouched).
-      if (Array.isArray(sanitizedImport.clothesProducts)) await applyCollectionReplace('clothesProducts', sanitizedImport.clothesProducts);
-      if (Array.isArray(sanitizedImport.clothesShipments)) await applyCollectionReplace('clothesShipments', sanitizedImport.clothesShipments);
-      if (Array.isArray(sanitizedImport.clothesOrders)) await applyCollectionReplace('clothesOrders', sanitizedImport.clothesOrders);
-      if (Array.isArray(sanitizedImport.clothesSettings)) await applyCollectionReplace('clothesSettings', sanitizedImport.clothesSettings);
+      // Core collections always; Clothes System collections only when present
+      // in the backup (older backups predate them — leave server data alone).
+      const collectionsMap = {
+        customers: sanitizedImport.customers || [],
+        pages: sanitizedImport.pages || [],
+        ads: sanitizedImport.ads || [],
+        receipts: sanitizedImport.receipts || [],
+        exchangeRateHistory: sanitizedImport.exchangeRateHistory || []
+      };
+      if (Array.isArray(sanitizedImport.clothesProducts)) collectionsMap.clothesProducts = sanitizedImport.clothesProducts;
+      if (Array.isArray(sanitizedImport.clothesShipments)) collectionsMap.clothesShipments = sanitizedImport.clothesShipments;
+      if (Array.isArray(sanitizedImport.clothesOrders)) collectionsMap.clothesOrders = sanitizedImport.clothesOrders;
+      if (Array.isArray(sanitizedImport.clothesSettings)) collectionsMap.clothesSettings = sanitizedImport.clothesSettings;
+
+      // Validate the backup's shape up-front for BOTH paths (throws on
+      // missing/duplicate ids before anything is sent to the server).
+      const preparedByCollection = new Map();
+      for (const [name, records] of Object.entries(collectionsMap)) {
+        preparedByCollection.set(name, prepareBackupList(name, records));
+      }
+
+      // Preferred path: ONE transactional request — the server replaces the
+      // whole backup atomically, so a mid-import failure can never leave it
+      // half backup / half current data.
+      let bulkImported = false;
+      try {
+        await apiAdminBulkImport(collectionsMap);
+        bulkImported = true;
+      } catch (e) {
+        // Older servers don't have the transactional endpoint yet (404/405):
+        // fall back to the legacy one-request-per-record flow below.
+        // Anything else is a real failure — the transaction rolled back and
+        // the server is untouched.
+        if (e?.status !== 404 && e?.status !== 405) throw e;
+        showNotification(
+          isAr ? 'استيراد' : 'Import',
+          isAr ? 'الخادم لا يدعم الاستيراد الذري بعد — جارٍ الاستيراد سجلاً بسجل...' : 'Server does not support atomic import yet — importing record by record...',
+          'warning'
+        );
+      }
+
+      if (bulkImported) {
+        // Same verification as the legacy path: id sets + deep content.
+        for (const [name, prepared] of preparedByCollection.entries()) {
+          await verifyCollectionMatchesBackup(name, prepared.activeList, prepared.activeIds);
+        }
+      } else {
+        for (const [name, records] of Object.entries(collectionsMap)) {
+          await applyCollectionReplace(name, records);
+        }
+      }
 
       // Reload fresh server state
       await serverLoadAllData();

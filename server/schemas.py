@@ -60,6 +60,35 @@ class EntityUpdateRequest(BaseModel):
     expectedLastModified: Optional[int] = None
 
 
+class AdminBulkImportRequest(BaseModel):
+    """
+    Transactional whole-backup import (admin only).
+
+    Every listed collection is REPLACED in one database transaction:
+    - records marked _deleted (or absent from the backup) are soft-deleted
+    - all other records are upserted with their backup content
+    A failure anywhere rolls back everything — the server can never be left
+    half backup / half current data (which the old per-record flow allowed).
+    """
+
+    collections: dict[str, list[dict[str, Any]]]
+
+
+class BatchDeleteItem(BaseModel):
+    collection: str = Field(min_length=1, max_length=40)
+    id: str = Field(min_length=1, max_length=80)
+
+
+class BatchDeleteRequest(BaseModel):
+    """
+    Soft-delete several entities in ONE transaction (all-or-nothing).
+    Used by cascade deletes (customer + receipts + ads + linked transfer
+    receipts) so a flaky connection cannot leave a cascade half-applied.
+    """
+
+    items: list[BatchDeleteItem] = Field(min_length=1, max_length=500)
+
+
 class AdminRestoreEntityRequest(BaseModel):
     """
     Admin-only restore/replace of an entity with optional metadata.

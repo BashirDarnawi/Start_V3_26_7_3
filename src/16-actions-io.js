@@ -683,9 +683,11 @@ function importData() {
       return JSON.stringify(normalize(value));
     };
 
-    const applyCollectionReplace = async (collection, records) => {
+    // Strict backup shape checks shared by the transactional and the legacy
+    // import paths (backup must contain explicit unique IDs — we do NOT
+    // generate IDs; that would break relationships).
+    const prepareBackupList = (collection, records) => {
       const list = Array.isArray(records) ? records.filter(r => r && typeof r === 'object') : [];
-      // Strict: backup must contain explicit IDs (we do NOT generate IDs; that would break relationships)
       const idsAll = new Set();
       for (const r of list) {
         const id = String(r?.id || '').trim();
@@ -702,6 +704,59 @@ function importData() {
       const deletedIds = new Set(list.filter(r => !!r._deleted).map(r => String(r.id || '')).filter(Boolean));
       const activeList = list.filter(r => !r._deleted);
       const activeIds = new Set(activeList.map(r => String(r.id || '')).filter(Boolean));
+      return { list, idsAll, deletedIds, activeList, activeIds };
+    };
+
+    // The server stamps _lastModified with the RESTORE time on purpose (so
+    // online devices' delta sync picks the restored rows up) — that volatile
+    // field must not fail the byte-for-byte verification below.
+    const stripVolatileMeta = (r) => {
+      const copy = { ...r };
+      delete copy._lastModified;
+      return copy;
+    };
+
+    // Verify a collection on the server against the backup: visible id sets
+    // must match exactly AND every record's content must match byte-for-byte
+    // (minus the volatile _lastModified stamp).
+    const verifyCollectionMatchesBackup = async (collection, activeList, activeIds) => {
+      const after = await apiLoadCollectionAll(collection).catch(() => []);
+      const serverVisible = (Array.isArray(after) ? after : []).filter(r => r && r.id && !r._deleted);
+      const serverVisibleIds = new Set(serverVisible.map(r => String(r.id)));
+      const extraVisible = [];
+      for (const id of serverVisibleIds) {
+        if (!activeIds.has(id)) extraVisible.push(id);
+      }
+      const missingVisible = [];
+      for (const id of activeIds) {
+        if (!serverVisibleIds.has(id)) missingVisible.push(id);
+      }
+      if (extraVisible.length || missingVisible.length) {
+        const extraTxt = extraVisible.length ? `Extra on server: ${extraVisible.slice(0, 10).join(', ')}${extraVisible.length > 10 ? '…' : ''}` : '';
+        const missTxt = missingVisible.length ? `Missing on server: ${missingVisible.slice(0, 10).join(', ')}${missingVisible.length > 10 ? '…' : ''}` : '';
+        throw new Error(`Import verification failed for "${collection}". ${[extraTxt, missTxt].filter(Boolean).join(' | ')}`);
+      }
+
+      const backupById = new Map(activeList.map(r => [String(r.id), r]));
+      const serverById = new Map(serverVisible.map(r => [String(r.id), r]));
+      const mismatched = [];
+      for (const id of activeIds) {
+        const b = backupById.get(id);
+        const s = serverById.get(id);
+        if (!b || !s) continue;
+        const bStr = stableStringify(stripVolatileMeta(Security.sanitizeObject(b)));
+        const sStr = stableStringify(stripVolatileMeta(Security.sanitizeObject(s)));
+        if (bStr !== sStr) mismatched.push(id);
+      }
+      if (mismatched.length) {
+        throw new Error(
+          `Import verification failed for "${collection}": ${mismatched.length} record(s) differ from the backup (example: ${mismatched.slice(0, 5).join(', ')}${mismatched.length > 5 ? '…' : ''}).`
+        );
+      }
+    };
+
+    const applyCollectionReplace = async (collection, records) => {
+      const { idsAll, deletedIds, activeList, activeIds } = prepareBackupList(collection, records);
 
       // Delete any existing records that should NOT be visible after restore:
       // - records not present in backup at all
@@ -738,57 +793,63 @@ function importData() {
         }
       });
 
-      // Verify: server visible set must match backup visible set (prevents "ghost records" coming back)
-      const after = await apiLoadCollectionAll(collection).catch(() => []);
-      const serverVisible = (Array.isArray(after) ? after : []).filter(r => r && r.id && !r._deleted);
-      const serverVisibleIds = new Set(serverVisible.map(r => String(r.id)));
-      const extraVisible = [];
-      for (const id of serverVisibleIds) {
-        if (!activeIds.has(id)) extraVisible.push(id);
-      }
-      const missingVisible = [];
-      for (const id of activeIds) {
-        if (!serverVisibleIds.has(id)) missingVisible.push(id);
-      }
-      if (extraVisible.length || missingVisible.length) {
-        const extraTxt = extraVisible.length ? `Extra on server: ${extraVisible.slice(0, 10).join(', ')}${extraVisible.length > 10 ? '…' : ''}` : '';
-        const missTxt = missingVisible.length ? `Missing on server: ${missingVisible.slice(0, 10).join(', ')}${missingVisible.length > 10 ? '…' : ''}` : '';
-        throw new Error(`Import verification failed for "${collection}". ${[extraTxt, missTxt].filter(Boolean).join(' | ')}`);
-      }
-
-      // Deep verification: record content must match exactly by id (strongest safety check)
-      const backupById = new Map(activeList.map(r => [String(r.id), r]));
-      const serverById = new Map(serverVisible.map(r => [String(r.id), r]));
-      const mismatched = [];
-      for (const id of activeIds) {
-        const b = backupById.get(id);
-        const s = serverById.get(id);
-        if (!b || !s) continue;
-        const bStr = stableStringify(Security.sanitizeObject(b));
-        const sStr = stableStringify(Security.sanitizeObject(s));
-        if (bStr !== sStr) mismatched.push(id);
-      }
-      if (mismatched.length) {
-        throw new Error(
-          `Import verification failed for "${collection}": ${mismatched.length} record(s) differ from the backup (example: ${mismatched.slice(0, 5).join(', ')}${mismatched.length > 5 ? '…' : ''}).`
-        );
-      }
+      // Verify: visible id sets + deep content match (shared with bulk path)
+      await verifyCollectionMatchesBackup(collection, activeList, activeIds);
     };
 
     try {
       showNotification(isAr ? 'استيراد' : 'Import', isAr ? 'جارٍ بدء الاستيراد إلى الخادم...' : 'Starting server import...', 'info');
-      // Replace core collections only (server is source of truth)
-      await applyCollectionReplace('customers', sanitizedImport.customers);
-      await applyCollectionReplace('pages', sanitizedImport.pages);
-      await applyCollectionReplace('ads', sanitizedImport.ads);
-      await applyCollectionReplace('receipts', sanitizedImport.receipts);
-      await applyCollectionReplace('exchangeRateHistory', sanitizedImport.exchangeRateHistory);
-      // Clothes System collections: only replace when present in the backup
-      // (older backups predate these collections — leave server data untouched).
-      if (Array.isArray(sanitizedImport.clothesProducts)) await applyCollectionReplace('clothesProducts', sanitizedImport.clothesProducts);
-      if (Array.isArray(sanitizedImport.clothesShipments)) await applyCollectionReplace('clothesShipments', sanitizedImport.clothesShipments);
-      if (Array.isArray(sanitizedImport.clothesOrders)) await applyCollectionReplace('clothesOrders', sanitizedImport.clothesOrders);
-      if (Array.isArray(sanitizedImport.clothesSettings)) await applyCollectionReplace('clothesSettings', sanitizedImport.clothesSettings);
+      // Core collections always; Clothes System collections only when present
+      // in the backup (older backups predate them — leave server data alone).
+      const collectionsMap = {
+        customers: sanitizedImport.customers || [],
+        pages: sanitizedImport.pages || [],
+        ads: sanitizedImport.ads || [],
+        receipts: sanitizedImport.receipts || [],
+        exchangeRateHistory: sanitizedImport.exchangeRateHistory || []
+      };
+      if (Array.isArray(sanitizedImport.clothesProducts)) collectionsMap.clothesProducts = sanitizedImport.clothesProducts;
+      if (Array.isArray(sanitizedImport.clothesShipments)) collectionsMap.clothesShipments = sanitizedImport.clothesShipments;
+      if (Array.isArray(sanitizedImport.clothesOrders)) collectionsMap.clothesOrders = sanitizedImport.clothesOrders;
+      if (Array.isArray(sanitizedImport.clothesSettings)) collectionsMap.clothesSettings = sanitizedImport.clothesSettings;
+
+      // Validate the backup's shape up-front for BOTH paths (throws on
+      // missing/duplicate ids before anything is sent to the server).
+      const preparedByCollection = new Map();
+      for (const [name, records] of Object.entries(collectionsMap)) {
+        preparedByCollection.set(name, prepareBackupList(name, records));
+      }
+
+      // Preferred path: ONE transactional request — the server replaces the
+      // whole backup atomically, so a mid-import failure can never leave it
+      // half backup / half current data.
+      let bulkImported = false;
+      try {
+        await apiAdminBulkImport(collectionsMap);
+        bulkImported = true;
+      } catch (e) {
+        // Older servers don't have the transactional endpoint yet (404/405):
+        // fall back to the legacy one-request-per-record flow below.
+        // Anything else is a real failure — the transaction rolled back and
+        // the server is untouched.
+        if (e?.status !== 404 && e?.status !== 405) throw e;
+        showNotification(
+          isAr ? 'استيراد' : 'Import',
+          isAr ? 'الخادم لا يدعم الاستيراد الذري بعد — جارٍ الاستيراد سجلاً بسجل...' : 'Server does not support atomic import yet — importing record by record...',
+          'warning'
+        );
+      }
+
+      if (bulkImported) {
+        // Same verification as the legacy path: id sets + deep content.
+        for (const [name, prepared] of preparedByCollection.entries()) {
+          await verifyCollectionMatchesBackup(name, prepared.activeList, prepared.activeIds);
+        }
+      } else {
+        for (const [name, records] of Object.entries(collectionsMap)) {
+          await applyCollectionReplace(name, records);
+        }
+      }
 
       // Reload fresh server state
       await serverLoadAllData();
