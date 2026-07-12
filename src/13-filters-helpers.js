@@ -1457,9 +1457,19 @@ function submitReceiptDeliveryCancel(receiptId) {
     deliveryCancelledBy: state.currentUser?.id || '',
     deliveryHistory: nextHistory
   });
+  // The canceled delivery's debt will never be collected — release any ad
+  // funding that was drawn from its due credit.
+  const releasedAds = releaseCanceledDeliveryDueFunding(receipt.id);
   document.getElementById('delivery-cancel-modal')?.remove();
   document.getElementById('delivery-complete-modal')?.remove();
-  showNotification(state.language === 'ar' ? 'تم الإلغاء' : 'Canceled', state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled', 'success');
+  showNotification(
+    state.language === 'ar' ? 'تم الإلغاء' : 'Canceled',
+    (state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled')
+      + (releasedAds > 0
+        ? (state.language === 'ar' ? ` — تم تحرير تمويل ${releasedAds} إعلان(ات) كان مأخوذاً من دين هذا التوصيل` : ` — funding of ${releasedAds} ad(s) drawn from this delivery's debt was released`)
+        : ''),
+    releasedAds > 0 ? 'warning' : 'success'
+  );
   render();
 }
 

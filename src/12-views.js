@@ -3873,6 +3873,18 @@ function submitDeliveryCancel(itemType, itemId) {
       deliveryCancelledBy: uid,
       deliveryHistory: nextHistory
     });
+    // The canceled delivery's debt will never be collected — release any ad
+    // funding that was drawn from its due credit.
+    const releasedAds = releaseCanceledDeliveryDueFunding(receipt.id);
+    if (releasedAds > 0) {
+      showNotification(
+        state.language === 'ar' ? 'تنبيه' : 'Notice',
+        state.language === 'ar'
+          ? `تم تحرير تمويل ${releasedAds} إعلان(ات) كان مأخوذاً من دين هذا التوصيل الملغى`
+          : `Funding of ${releasedAds} ad(s) drawn from this canceled delivery's debt was released`,
+        'warning'
+      );
+    }
   } else {
     const ad = _findAdForDeliveryModal(id);
     if (!ad) return;

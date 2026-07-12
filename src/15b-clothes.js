@@ -749,9 +749,30 @@ function deleteClothesProduct(id) {
   const product = getVisibleClothesProducts().find(p => p.id === id);
   if (!product) return;
   const name = product.name || (isAr ? 'منتج' : 'product');
-  const ok = confirm(isAr
+  // Live records that still plan to MOVE this product's stock: a shipment on
+  // the way whose pieces would arrive, and active orders whose pieces would
+  // return to stock on cancel. After deletion those movements are silently
+  // skipped — the user must know before confirming.
+  const pendingShipments = (state.clothesShipments || []).filter(s => s && !s._deleted
+    && String(s.status || '') !== 'Received'
+    && Array.isArray(s.lines) && s.lines.some(l => String(l?.productId || '') === String(id))).length;
+  const activeOrders = (state.clothesOrders || []).filter(o => o && !o._deleted
+    && clothesOrderIsActiveStatus(o.status)
+    && Array.isArray(o.lines) && o.lines.some(l => String(l?.productId || '') === String(id))).length;
+  let msg = isAr
     ? `هل تريد حذف المنتج "${name}"؟\nسيبقى في الشحنات والطلبات القديمة كسجل فقط.`
-    : `Delete product "${name}"?\nOld shipments and orders will keep it for history only.`);
+    : `Delete product "${name}"?\nOld shipments and orders will keep it for history only.`;
+  if (pendingShipments > 0) {
+    msg += isAr
+      ? `\n\n⚠️ ${pendingShipments} شحنة لم تصل بعد تحتوي هذا المنتج — قطعها لن تُضاف إلى المخزون عند الاستلام.`
+      : `\n\n⚠️ ${pendingShipments} shipment(s) still on the way contain this product — their pieces will NOT be added to stock on arrival.`;
+  }
+  if (activeOrders > 0) {
+    msg += isAr
+      ? `\n\n⚠️ ${activeOrders} طلب نشط يحتوي هذا المنتج — إلغاؤه أو إرجاعه لن يعيد القطع إلى المخزون.`
+      : `\n\n⚠️ ${activeOrders} active order(s) contain this product — canceling or returning them will NOT put the pieces back in stock.`;
+  }
+  const ok = confirm(msg);
   if (!ok) return;
   deleteRecord(state.clothesProducts, id);
   showNotification(
@@ -1770,13 +1791,35 @@ function applyClothesOrderStockDelta(order, sign) {
         String(v?.color || '').trim().toLowerCase() === color.toLowerCase() &&
         String(v?.size || '').trim().toLowerCase() === size.toLowerCase()
       );
-      if (match) {
-        match.qty = Math.max(0, Math.floor(Number(match.qty) || 0) + sign * qty);
-      } else if (sign > 0) {
-        variants.push({ color, size, qty });
+      if (sign < 0) {
+        // Selling: the warehouse can only give what it actually has, so
+        // remember the amount REALLY removed. Restoring later puts back only
+        // that amount — an oversold order (stock floored at zero) can no
+        // longer invent phantom pieces when it is canceled or deleted.
+        const available = match ? Math.max(0, Math.floor(Number(match.qty) || 0)) : 0;
+        const taken = Math.min(qty, available);
+        if (match) match.qty = available - taken;
+        line.deductedQty = taken;
+      } else {
+        // Restoring: put back what was really removed. Orders saved before
+        // deductedQty existed restore the full quantity (old behavior).
+        const back = Number.isFinite(Number(line?.deductedQty))
+          ? Math.max(0, Math.floor(Number(line.deductedQty)))
+          : qty;
+        if (back === 0) continue;
+        if (match) {
+          match.qty = Math.max(0, Math.floor(Number(match.qty) || 0) + back);
+        } else {
+          variants.push({ color, size, qty: back });
+        }
       }
     }
     updateRecord(state.clothesProducts, pid, { variants });
+  }
+  // Persist the per-line deducted amounts when the order already lives in
+  // state (new orders save their lines right after this call anyway).
+  if (order && order.id && (state.clothesOrders || []).some(o => o && o.id === order.id)) {
+    updateRecord(state.clothesOrders, order.id, { lines });
   }
 }
 
@@ -2166,7 +2209,11 @@ function editClothesOrder(id) {
         color: String(l?.color || ''),
         size: String(l?.size || ''),
         qty: Math.max(0, Math.floor(Number(l?.qty) || 0)),
-        priceLYD: String(l?.priceLYD ?? '')
+        priceLYD: String(l?.priceLYD ?? ''),
+        // Carry the historical cost snapshot: if this line's product was
+        // deleted meanwhile, saving the edit must NOT wipe the cost to 0
+        // (which would inflate the order's profit numbers).
+        costUSDAtSale: Number(l?.costUSDAtSale) || 0
       }))
     : [{ productId: '', color: '', size: '', qty: 1, priceLYD: '' }];
   renderModal();
@@ -2482,16 +2529,23 @@ async function saveClothesOrderFromModal() {
     const productId = String(l?.productId || '').trim();
     const qty = Math.max(0, Math.floor(Number(l?.qty) || 0));
     if (!productId || qty === 0) continue;
-    const product = getVisibleClothesProducts().find(p => p.id === productId);
+    const product = getVisibleClothesProducts().find(p => p.id === productId)
+      // Deleted products keep their historical cost for the snapshot.
+      || (state.clothesProducts || []).find(p => p && p.id === productId);
+    // Cost snapshot: profit stays correct even if the product's cost price
+    // changes later. Re-snapshotted on every save of this order — but when
+    // the product no longer exists at all, KEEP the line's previous snapshot
+    // instead of writing 0 (a 0 cost silently inflated profit numbers).
+    const prevSnap = Number(l?.costUSDAtSale);
     lines.push({
       productId,
       color: String(l?.color || '').trim(),
       size: String(l?.size || '').trim(),
       qty,
       priceLYD: clothesParseMoney(l?.priceLYD),
-      // Cost snapshot: profit stays correct even if the product's cost price
-      // changes later. Re-snapshotted on every save of this order.
-      costUSDAtSale: Math.round(((Number(product?.costUSD) || 0)) * 100) / 100
+      costUSDAtSale: product
+        ? Math.round(((Number(product.costUSD) || 0)) * 100) / 100
+        : (Number.isFinite(prevSnap) ? prevSnap : 0)
     });
   }
   if (lines.length === 0) {

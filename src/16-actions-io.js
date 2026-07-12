@@ -392,7 +392,56 @@ function deleteUser(id) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'حذف المستخدمين للأدمن فقط' : 'Admin only', 'error');
     return;
   }
-  if (confirm(state.language === 'ar' ? 'هل تريد حذف هذا المستخدم؟' : 'Delete this user?')) {
+  const isArDU = state.language === 'ar';
+
+  // Wallet money is an immutable ledger — deleting a user with a balance
+  // strands that money with no UI path to ever recover it. Transfer it first.
+  if (typeof WALLET !== 'undefined' && Array.isArray(WALLET_SUPPORTED_CURRENCIES)) {
+    const balances = WALLET_SUPPORTED_CURRENCIES
+      .map(c => ({ c, v: WALLET.getBalance(id, c) }))
+      .filter(b => Math.abs(b.v) > 0.001);
+    if (balances.length > 0) {
+      const list = balances.map(b => `${b.v} ${b.c}`).join(', ');
+      showNotification(
+        isArDU ? 'غير ممكن' : 'Not possible',
+        isArDU
+          ? `لدى هذا المستخدم رصيد في المحفظة (${list}). حوِّل الرصيد إلى مستخدم آخر أولاً ثم احذفه.`
+          : `This user still has a wallet balance (${list}). Transfer the balance to another user first, then delete.`,
+        'error'
+      );
+      return;
+    }
+  }
+
+  // Delivery work in flight: active missions go back to the assignment pool;
+  // collected cash not yet handed to the office must be pointed out before
+  // the driver disappears from the per-driver lists.
+  const activeMissions = state.receipts.filter(r => r && !r._deleted
+    && String(r.deliveryPersonId || '') === String(id)
+    && !['', 'Delivered', 'Canceled', 'Office'].includes(String(r.deliveryStatus || '')));
+  const heldCash = state.receipts.filter(r => r && !r._deleted
+    && String(r.deliveryPersonId || '') === String(id)
+    && String(r.deliveryStatus || '') === 'Delivered'
+    && r.isReceivedInOffice !== true);
+
+  let warning = isArDU ? 'هل تريد حذف هذا المستخدم؟' : 'Delete this user?';
+  if (activeMissions.length > 0) {
+    warning += isArDU
+      ? `\n\n⚠️ لديه ${activeMissions.length} مهمة توصيل نشطة — ستعود إلى قائمة الإسناد بدون سائق.`
+      : `\n\n⚠️ This user has ${activeMissions.length} active delivery mission(s) — they will return to the assignment pool with no driver.`;
+  }
+  if (heldCash.length > 0) {
+    warning += isArDU
+      ? `\n\n💰 لديه ${heldCash.length} توصيلة مُسلَّمة لم يُسلَّم نقدها للمكتب بعد — سوِّ النقد قبل الحذف أو وثِّقه.`
+      : `\n\n💰 This user has ${heldCash.length} delivered order(s) whose cash was not handed to the office yet — settle or document that cash before deleting.`;
+  }
+
+  if (confirm(warning)) {
+    // Return in-flight missions to the pool so they don't stay assigned to a
+    // ghost driver. Delivered history keeps the id for the audit trail.
+    activeMissions.forEach(r => {
+      updateRecord(state.receipts, r.id, { deliveryPersonId: '' });
+    });
     deleteRecord(state.users, id);
     render();
   }

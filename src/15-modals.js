@@ -2842,6 +2842,35 @@ function cleanupAdFundingLinks(receiptId) {
   return linkedAds.length;
 }
 
+// When a delivery is CANCELED its debt will never be collected, so ads funded
+// from that due credit must stop counting it — otherwise uncollectible money
+// keeps backing ad budgets forever. The ads themselves stay (no feature
+// removed); only their due-funding rows pointing at this receipt are
+// released. Returns how many ads were touched.
+function releaseCanceledDeliveryDueFunding(receiptId) {
+  const rid = String(receiptId || '');
+  let touched = 0;
+  state.ads.filter(a => a && !a._deleted && a.recordType !== 'receipt' && (
+    (Array.isArray(a.dueAllocations) && a.dueAllocations.some(al => String(al?.receiptId || '') === rid)) ||
+    (String(a.linkedDeliveryReceiptId || '') === rid && (parseFloat(a.dueAmountToUseUSD) || 0) > 0)
+  )).forEach(ad => {
+    const updates = {};
+    if (Array.isArray(ad.dueAllocations)) {
+      const kept = ad.dueAllocations.filter(al => String(al?.receiptId || '') !== rid);
+      if (kept.length !== ad.dueAllocations.length) updates.dueAllocations = kept;
+    }
+    // Legacy single-field shape predating dueAllocations.
+    if (String(ad.linkedDeliveryReceiptId || '') === rid && (parseFloat(ad.dueAmountToUseUSD) || 0) > 0) {
+      updates.dueAmountToUseUSD = 0;
+    }
+    if (Object.keys(updates).length) {
+      updateRecord(state.ads, ad.id, updates);
+      touched += 1;
+    }
+  });
+  return touched;
+}
+
 // If `receipt` is a transferred-in receipt, give the money BACK to the source
 // receipt by removing the paired transfers[] entry (the deduction). Without
 // this, deleting a transferred-in receipt made the money vanish: the target
