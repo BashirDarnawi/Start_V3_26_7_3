@@ -10516,22 +10516,10 @@ async function checkStuckDeliveries() {
   }
   
   try {
-    const res = await fetch(`/api/deliveries/check-stuck`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Session': getSessionToken()
-      },
-      body: JSON.stringify({ hours_threshold: hours })
-    });
-    
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: 'Check failed' }));
-      showNotification(isAr ? 'خطأ' : 'Error', err.detail || (isAr ? 'فشل الفحص' : 'Check failed'), 'error');
-      return;
-    }
-
-    const result = await res.json();
+    // apiJson sends the session cookie and handles timeouts/errors. The old
+    // raw fetch here called getSessionToken(), a function that never existed,
+    // so this feature crashed before the request was even sent.
+    const result = await apiJson('/api/deliveries/check-stuck', { method: 'POST', body: { hours_threshold: hours } }, { timeoutMs: 30000 });
 
     if (result.stuck_count === 0) {
       showNotification(isAr ? 'كل شيء جيد!' : 'All Good!', isAr ? `لا توجد توصيلات عالقة لأكثر من ${hours} ساعة` : `No deliveries stuck for more than ${hours} hours`, 'success');
@@ -12091,22 +12079,10 @@ async function cleanupAuditLogs() {
   }
   
   try {
-    const res = await fetch('/api/audit/cleanup', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Session': getSessionToken()
-      },
-      body: JSON.stringify({ days_to_keep: days })
-    });
-    
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: 'Cleanup failed' }));
-      showNotification(isAr ? 'خطأ' : 'Error', err.detail || (isAr ? 'فشل التنظيف' : 'Cleanup failed'), 'error');
-      return;
-    }
-
-    const result = await res.json();
+    // apiJson sends the session cookie and handles timeouts/errors. The old
+    // raw fetch here called getSessionToken(), a function that never existed,
+    // so audit cleanup crashed before the request was even sent.
+    const result = await apiJson('/api/audit/cleanup', { method: 'POST', body: { days_to_keep: days } }, { timeoutMs: 30000 });
     showNotification(
       isAr ? 'اكتمل التنظيف' : 'Cleanup Complete',
       isAr ? `تم حذف ${result.deleted_count} سجل تدقيق قديم` : `Deleted ${result.deleted_count} old audit logs`,
