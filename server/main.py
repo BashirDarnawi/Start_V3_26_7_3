@@ -2059,6 +2059,18 @@ def login(payload: LoginRequest, request: Request):
     return resp
 
 
+@app.get("/api/auth/needs-setup")
+def needs_setup(request: Request):
+    """Public: does this server still need its first admin?
+
+    Lets the login page show a 'create first admin' option up-front instead
+    of only after a failed login. Reveals no more than the login 503 already
+    does (whether the server is initialized) — never any user data."""
+    with db_conn() as conn:
+        n = conn.execute(text("SELECT COUNT(*) FROM users WHERE deleted = false")).scalar()
+    return {"needsSetup": int(n or 0) == 0}
+
+
 @app.post("/api/auth/setup-admin", response_model=LoginResponse)
 def setup_admin(payload: SetupAdminRequest, request: Request):
     """Create the FIRST admin from the browser and log them in.

@@ -226,6 +226,12 @@ function renderFirstRunSetup() {
   `;
 }
 
+// Open the server first-run setup screen from the login page.
+function startServerSetup() {
+  state.needsServerSetup = true;
+  render();
+}
+
 // Leave the server first-run setup screen and go back to the normal login.
 function cancelServerSetup() {
   state.needsServerSetup = false;
@@ -269,6 +275,7 @@ function attachFirstRunHandlers() {
           const user = await apiSetupAdmin(name, email, password);
           if (!user) throw new Error('setup failed');
           state.needsServerSetup = false;
+          state.serverHasNoUsers = false;
           state.currentUser = user;
           if (!Array.isArray(state.currentUser.subscriptions)) {
             state.currentUser.subscriptions = isAdminRole(state.currentUser.role) ? Object.keys(SERVICES) : [];
@@ -354,6 +361,19 @@ function renderLogin() {
             <h1 class="text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">${t('appName')}</h1>
             <p class="text-slate-500 mt-2">${t('signInTitle')}</p>
           </div>
+
+          ${(isServerModeEnabled() && state.serverHasNoUsers) ? `
+          <button type="button" onclick="startServerSetup()" class="w-full mb-5 text-left rounded-2xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-900/20 p-4 hover:shadow-md transition-all">
+            <div class="flex items-center gap-3">
+              <i data-lucide="user-plus" class="w-5 h-5 text-indigo-600 flex-shrink-0"></i>
+              <div>
+                <div class="font-bold text-indigo-700 dark:text-indigo-300 text-sm">${isRTL ? 'أول مرة؟ أنشئ حساب المدير' : 'First time? Create the admin account'}</div>
+                <div class="text-xs text-slate-500 dark:text-slate-400">${isRTL ? 'هذا الخادم جديد ولا يحتوي على أي حساب بعد.' : 'This server is fresh and has no account yet.'}</div>
+              </div>
+              <i data-lucide="${isRTL ? 'chevron-left' : 'chevron-right'}" class="w-4 h-4 text-indigo-400 ml-auto flex-shrink-0"></i>
+            </div>
+          </button>
+          ` : ''}
 
           <form id="login-form" class="space-y-4">
             <div>

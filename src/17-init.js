@@ -151,6 +151,12 @@ async function init() {
     } else {
       state.currentUser = null;
       stopServerLiveSync();
+      // Fresh server with no admin yet? Surface the first-run setup option on
+      // the login page directly, so the operator doesn't have to fail a login
+      // first to discover it.
+      const fresh = await apiNeedsSetup();
+      state.serverHasNoUsers = fresh;
+      state.needsServerSetup = fresh;
     }
   } else {
     // Offline/local mode (single-device)

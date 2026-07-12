@@ -570,6 +570,7 @@ async function handleLogin(email, password) {
       const _msg = String(e?.message || '');
       if (e?.status === 503 && /not initialized|no users/i.test(_msg)) {
         state.needsServerSetup = true;
+        state.serverHasNoUsers = true;
         showNotification(
           state.language === 'ar' ? 'إعداد أول مرة' : 'First-time setup',
           state.language === 'ar' ? 'لا يوجد حساب بعد. أنشئ حساب المدير الأول للبدء.' : 'No account yet. Create the first admin to get started.',

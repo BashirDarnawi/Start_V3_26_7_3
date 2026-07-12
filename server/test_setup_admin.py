@@ -61,6 +61,11 @@ class TestSetupAdmin:
     def test_starts_with_zero_users(self):
         assert _user_count() == 0
 
+    def test_needs_setup_true_when_empty(self):
+        r = client.get("/api/auth/needs-setup")
+        assert r.status_code == 200
+        assert r.json()["needsSetup"] is True
+
     def test_creates_first_admin_and_logs_in(self):
         r = client.post(
             "/api/auth/setup-admin",
@@ -103,3 +108,8 @@ class TestSetupAdmin:
             json={"name": "X", "email": "x@tests.albayanhub.com", "password": "short"},
         )
         assert r.status_code == 422
+
+    def test_needs_setup_false_after_admin_exists(self):
+        r = client.get("/api/auth/needs-setup")
+        assert r.status_code == 200
+        assert r.json()["needsSetup"] is False

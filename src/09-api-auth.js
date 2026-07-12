@@ -319,6 +319,17 @@ async function apiLogin(email, password) {
   }
 }
 
+// Does the server still need its first admin? Used so the login page can offer
+// setup up-front instead of only after a failed login. Never throws.
+async function apiNeedsSetup() {
+  try {
+    const res = await apiJson('/api/auth/needs-setup', { method: 'GET' }, { timeoutMs: 8000 });
+    return !!res?.needsSetup;
+  } catch {
+    return false;
+  }
+}
+
 // First-run bootstrap: create the very first admin straight from the browser
 // (replaces the shell `python -m server.create_admin` step). The server only
 // honors this while zero users exist, then logs the new admin in.
