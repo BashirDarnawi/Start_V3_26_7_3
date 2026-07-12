@@ -106,7 +106,10 @@ function render() {
                              isLoggedIn;
 
     if (!state.currentUser) {
-      if (!isServerModeEnabled() && (!Array.isArray(state.users) || state.users.length === 0)) {
+      const localFirstRun = !isServerModeEnabled() && (!Array.isArray(state.users) || state.users.length === 0);
+      // Server mode: only after a login attempt reveals the server has no users
+      // yet (state.needsServerSetup) do we offer first-run admin creation.
+      if (localFirstRun || (isServerModeEnabled() && state.needsServerSetup)) {
         app.innerHTML = renderFirstRunSetup();
         attachFirstRunHandlers();
       } else {
@@ -171,8 +174,9 @@ function render() {
 
 function renderFirstRunSetup() {
   const isAr = state.language === 'ar';
-  const modeNote = isServerModeEnabled()
-    ? (isAr ? 'تم اكتشاف وضع السيرفر. يرجى تسجيل الدخول بحساب السيرفر الخاص بك.' : 'Server mode detected. Please login with your server account.')
+  const serverSetup = isServerModeEnabled() && state.needsServerSetup;
+  const modeNote = serverSetup
+    ? (isAr ? 'الخادم جديد ولا يحتوي على أي حساب بعد. أنشئ حساب المدير الأول للبدء.' : 'This server is fresh and has no account yet. Create the first admin to begin.')
     : (isAr ? 'الإعداد لأول مرة (تجربة محلية). أنشئ حساب مدير للبدء.' : 'First time setup (local testing). Create an Admin account to start.');
 
   return `
@@ -187,7 +191,9 @@ function renderFirstRunSetup() {
         <div class="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 mb-6">
           <div class="text-xs text-slate-600 dark:text-slate-300">
             <div class="font-bold mb-1">${isAr ? 'لماذا هذا الإعداد؟' : 'Why this setup?'}</div>
-            <div>${isAr ? 'للتجربة المحلية تحتاج إلى مستخدم مدير واحد. أما للنشر على الإنترنت، فيجب إنشاء المستخدمين على السيرفر.' : 'For local testing you need one admin user. For internet deployment, users must be created on the server.'}</div>
+            <div>${serverSetup
+              ? (isAr ? 'هذا الحساب الأول (مدير) يُنشأ مرة واحدة فقط على الخادم. بعد إنشائه تختفي هذه الشاشة نهائياً.' : 'This first admin account is created once on the server. After that, this screen disappears for good.')
+              : (isAr ? 'للتجربة المحلية تحتاج إلى مستخدم مدير واحد. أما للنشر على الإنترنت، فيجب إنشاء المستخدمين على السيرفر.' : 'For local testing you need one admin user. For internet deployment, users must be created on the server.')}</div>
           </div>
         </div>
 
@@ -209,14 +215,21 @@ function renderFirstRunSetup() {
             <input type="password" id="first-password-confirm" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'أعد كتابة كلمة المرور' : 'Repeat password'}" minlength="8" />
           </div>
           <button type="submit" class="w-full btn-shine alb-btn-primary text-white font-bold py-3 rounded-xl transition-all">
-            ${isAr ? 'إنشاء مدير (محلي)' : 'Create Admin (Local)'}
+            ${serverSetup ? (isAr ? 'إنشاء حساب المدير' : 'Create Admin') : (isAr ? 'إنشاء مدير (محلي)' : 'Create Admin (Local)')}
           </button>
         </form>
 
-        <button onclick="toggleLanguage()" class="mt-4 text-xs text-slate-400 alb-hover-brand mx-auto block">${state.language === 'en' ? 'العربية' : 'English'}</button>
+        ${serverSetup ? `<button onclick="cancelServerSetup()" class="mt-4 text-xs text-slate-500 alb-hover-brand mx-auto block">${isAr ? '← العودة لتسجيل الدخول' : '← Back to login'}</button>` : ''}
+        <button onclick="toggleLanguage()" class="mt-3 text-xs text-slate-400 alb-hover-brand mx-auto block">${state.language === 'en' ? 'العربية' : 'English'}</button>
       </div>
     </div>
   `;
+}
+
+// Leave the server first-run setup screen and go back to the normal login.
+function cancelServerSetup() {
+  state.needsServerSetup = false;
+  render();
 }
 
 function attachFirstRunHandlers() {
@@ -226,12 +239,6 @@ function attachFirstRunHandlers() {
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     try {
-      if (isServerModeEnabled()) {
-        showNotification(state.language === 'ar' ? 'وضع السيرفر' : 'Server Mode', state.language === 'ar' ? 'وضع السيرفر مفعّل. يرجى تسجيل الدخول بحساب السيرفر الخاص بك.' : 'Server mode is enabled. Please login with your server account.', 'error');
-        render();
-        return;
-      }
-
       const name = Security.sanitizeInput(document.getElementById('first-name').value, { maxLength: 100 });
       const email = Security.sanitizeInput(document.getElementById('first-email').value, { maxLength: 120 }).toLowerCase();
       const password = document.getElementById('first-password').value;
@@ -252,6 +259,38 @@ function attachFirstRunHandlers() {
       }
       if (password !== confirm) {
         showNotification(_vErr, state.language === 'ar' ? 'كلمتا المرور غير متطابقتين' : 'Passwords do not match', 'error');
+        return;
+      }
+
+      // Server mode first-run: create the first admin ON THE SERVER (one-time,
+      // then the server rejects further setup calls) and log straight in.
+      if (isServerModeEnabled() && state.needsServerSetup) {
+        try {
+          const user = await apiSetupAdmin(name, email, password);
+          if (!user) throw new Error('setup failed');
+          state.needsServerSetup = false;
+          state.currentUser = user;
+          if (!Array.isArray(state.currentUser.subscriptions)) {
+            state.currentUser.subscriptions = isAdminRole(state.currentUser.role) ? Object.keys(SERVICES) : [];
+          }
+          state.currentView = getPostLoginLandingViewForUser(user);
+          saveState();
+          showNotification(state.language === 'ar' ? 'تم إنشاء المدير' : 'Admin Created', state.language === 'ar' ? 'تم إنشاء حساب المدير وتسجيل الدخول.' : 'Admin account created and logged in.', 'success');
+          render();
+          try { await serverLoadAllData(); } catch (_) {}
+          startServerLiveSync();
+          render();
+        } catch (err) {
+          const already = err?.status === 409;
+          showNotification(
+            state.language === 'ar' ? 'خطأ' : 'Error',
+            already
+              ? (state.language === 'ar' ? 'الخادم مُهيّأ مسبقاً. سجّل الدخول بحسابك.' : 'Server already initialized. Please log in.')
+              : (err?.message || (state.language === 'ar' ? 'فشل إنشاء حساب المدير' : 'Failed to create admin')),
+            'error'
+          );
+          if (already) { state.needsServerSetup = false; render(); }
+        }
         return;
       }
 

@@ -564,6 +564,20 @@ async function handleLogin(email, password) {
         }
       } catch (_) {}
       // #endregion
+      // Fresh server with no users yet — show the first-run setup screen so the
+      // owner can create the first admin from the browser (no shell needed).
+      // The server returns 503 with a "not initialized" hint in that case.
+      const _msg = String(e?.message || '');
+      if (e?.status === 503 && /not initialized|no users/i.test(_msg)) {
+        state.needsServerSetup = true;
+        showNotification(
+          state.language === 'ar' ? 'إعداد أول مرة' : 'First-time setup',
+          state.language === 'ar' ? 'لا يوجد حساب بعد. أنشئ حساب المدير الأول للبدء.' : 'No account yet. Create the first admin to get started.',
+          'info'
+        );
+        render();
+        return;
+      }
       if (e?.status === 401) {
         showNotification(
           state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed',

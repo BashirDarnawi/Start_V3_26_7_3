@@ -36,6 +36,7 @@ from .schemas import (
     LoginResponse,
     PasswordResetConfirmRequest,
     PasswordResetRequest,
+    SetupAdminRequest,
     UpdateUserRequest,
     UserPublic,
 )
@@ -2055,6 +2056,87 @@ def login(payload: LoginRequest, request: Request):
     reset_rate_limit(f"login:{_rate_key(request, str(payload.email))}")
     
     audit(user["id"], "login", "auth", user["id"], f"User {user['email']} logged in", {})
+    return resp
+
+
+@app.post("/api/auth/setup-admin", response_model=LoginResponse)
+def setup_admin(payload: SetupAdminRequest, request: Request):
+    """Create the FIRST admin from the browser and log them in.
+
+    Guarded so it is a one-time bootstrap only: if any non-deleted user
+    already exists, it returns 409 and does nothing. This lets a fresh
+    server be initialized without shell access, replacing the
+    `python -m server.create_admin` step, while never becoming a way to
+    add admins after the first one.
+    """
+    require_same_origin(request)
+
+    email = str(payload.email).strip().lower()
+    name = (payload.name or "").strip() or "Admin"
+    password = payload.password or ""
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    now = now_ms()
+    pw = hash_password(password, iterations=PBKDF2_ITERATIONS_DEFAULT)
+    user_id = new_id("user")
+
+    with db_conn() as conn:
+        existing = conn.execute(
+            text("SELECT COUNT(*) FROM users WHERE deleted = false")
+        ).scalar()
+        if int(existing or 0) > 0:
+            # Already initialized — this endpoint only bootstraps a fresh server.
+            raise HTTPException(status_code=409, detail="Server already initialized. Use normal login.")
+        conn.execute(
+            text(
+                """
+                INSERT INTO users (
+                  id, name, email, role, permissions_json,
+                  password_hash, password_salt, password_algo, password_iterations,
+                  deleted, created_at, created_by, last_modified
+                )
+                VALUES (
+                  :id, :name, :email, 'Admin', :permissions_json,
+                  :password_hash, :password_salt, :password_algo, :password_iterations,
+                  false, :created_at, :created_by, :last_modified
+                )
+                """
+            ),
+            {
+                "id": user_id,
+                "name": name,
+                "email": email,
+                "permissions_json": json_dumps({}),  # Admin gets all permissions server-side
+                "password_hash": pw.hash_hex,
+                "password_salt": pw.salt_hex,
+                "password_algo": pw.algo,
+                "password_iterations": pw.iterations,
+                "created_at": now,
+                "created_by": user_id,
+                "last_modified": now,
+            },
+        )
+
+    user = _get_user_by_email(email)
+    if not user:
+        raise HTTPException(status_code=500, detail="Admin creation failed")
+
+    session_id, token = _create_session(user["id"], request)
+    cookie_val = new_session_cookie_value(session_id, token)
+    resp = JSONResponse(content=LoginResponse(user=user_row_to_public(user)).model_dump())
+    login_origin = request.headers.get("origin") or ""
+    is_mobile_app_login = login_origin in MOBILE_APP_ORIGINS
+    resp.set_cookie(
+        COOKIE_NAME,
+        cookie_val,
+        httponly=True,
+        secure=True if is_mobile_app_login else COOKIE_SECURE,
+        samesite="none" if is_mobile_app_login else "lax",
+        max_age=int(SESSION_DURATION_MS / 1000),
+        path="/",
+    )
+    audit(user["id"], "setup_admin", "auth", user["id"], f"First admin {email} created via setup", {})
     return resp
 
 

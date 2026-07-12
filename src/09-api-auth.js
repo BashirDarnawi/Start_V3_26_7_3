@@ -319,6 +319,14 @@ async function apiLogin(email, password) {
   }
 }
 
+// First-run bootstrap: create the very first admin straight from the browser
+// (replaces the shell `python -m server.create_admin` step). The server only
+// honors this while zero users exist, then logs the new admin in.
+async function apiSetupAdmin(name, email, password) {
+  const res = await apiJson('/api/auth/setup-admin', { method: 'POST', body: { name, email, password } }, { timeoutMs: 15000 });
+  return res?.user || null;
+}
+
 async function apiLogout() {
   try {
     await apiJson('/api/auth/logout', { method: 'POST', body: {} }, { timeoutMs: 12000 });

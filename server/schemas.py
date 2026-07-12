@@ -41,6 +41,17 @@ class CreateUserRequest(BaseModel):
     permissions: Optional[dict[str, list[str]]] = None
 
 
+class SetupAdminRequest(BaseModel):
+    """First-run creation of the very first Admin, straight from the browser.
+
+    The endpoint is a no-op once ANY user exists, so it cannot be used to
+    add admins after setup — it exists only to bootstrap a fresh server
+    without needing shell/SSH access."""
+    name: str = Field(min_length=1, max_length=100)
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=256)
+
+
 class UpdateUserRequest(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
     email: Optional[EmailStr] = None
