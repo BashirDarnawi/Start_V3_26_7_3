@@ -320,12 +320,12 @@ function updateSyncIndicator(status) {
   switch (status) {
     case 'syncing':
       indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300';
-      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-blue-500 rounded-full animate-pulse mr-2"></span>Syncing...';
+      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-blue-500 rounded-full animate-pulse mr-2"></span>' + (state.language === 'ar' ? 'جارٍ المزامنة...' : 'Syncing...');
       indicator.style.opacity = '1';
       break;
     case 'synced':
       indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300';
-      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-emerald-500 rounded-full mr-2"></span>Synced';
+      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-emerald-500 rounded-full mr-2"></span>' + (state.language === 'ar' ? 'تمت المزامنة' : 'Synced');
       // Fade out after 2 seconds
       setTimeout(() => {
         if (indicator) indicator.style.opacity = '0';
@@ -333,7 +333,7 @@ function updateSyncIndicator(status) {
       break;
     case 'error':
       indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-rose-100 text-rose-700 dark:bg-rose-900/50 dark:text-rose-300 cursor-pointer';
-      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-rose-500 rounded-full mr-2"></span>Sync failed - Tap to retry';
+      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-rose-500 rounded-full mr-2"></span>' + (state.language === 'ar' ? 'فشلت المزامنة - اضغط لإعادة المحاولة' : 'Sync failed - Tap to retry');
       indicator.style.opacity = '1';
       indicator.onclick = () => manualSyncData();
       break;
@@ -343,12 +343,12 @@ function updateSyncIndicator(status) {
 // Manual sync function for users
 async function manualSyncData() {
   if (!isServerModeEnabled()) {
-    showNotification('Offline Mode', 'Not connected to server', 'info');
+    showNotification(state.language === 'ar' ? 'وضع عدم الاتصال' : 'Offline Mode', state.language === 'ar' ? 'غير متصل بالسيرفر' : 'Not connected to server', 'info');
     return;
   }
 
   updateSyncIndicator('syncing');
-  showNotification('Syncing', 'Refreshing data from server...', 'info');
+  showNotification(state.language === 'ar' ? 'جارٍ المزامنة' : 'Syncing', state.language === 'ar' ? 'جارٍ تحديث البيانات من السيرفر...' : 'Refreshing data from server...', 'info');
 
   try {
     // Clear cache to force fresh data
@@ -359,12 +359,12 @@ async function manualSyncData() {
 
     await serverLoadAllData();
     updateSyncIndicator('synced');
-    showNotification('Synced', 'Data refreshed successfully', 'success');
+    showNotification(state.language === 'ar' ? 'تمت المزامنة' : 'Synced', state.language === 'ar' ? 'تم تحديث البيانات بنجاح' : 'Data refreshed successfully', 'success');
     forceFullRender();
   } catch (e) {
     console.error('[manualSyncData] Failed:', e);
     updateSyncIndicator('error');
-    showNotification('Sync Failed', 'Could not refresh data. Check your connection.', 'error');
+    showNotification(state.language === 'ar' ? 'فشلت المزامنة' : 'Sync Failed', state.language === 'ar' ? 'تعذر تحديث البيانات. تحقق من اتصالك.' : 'Could not refresh data. Check your connection.', 'error');
   }
 }
 
@@ -434,7 +434,7 @@ function startServerLiveSync() {
     _serverLiveSync.onlineHandler = () => {
       if (state.currentUser) {
         console.log('[LiveSync] Network online - triggering immediate sync');
-        showNotification('Back Online', 'Reconnected to server, syncing...', 'info');
+        showNotification(state.language === 'ar' ? 'عاد الاتصال' : 'Back Online', state.language === 'ar' ? 'تمت إعادة الاتصال بالسيرفر، جارٍ المزامنة...' : 'Reconnected to server, syncing...', 'info');
         serverLiveSyncTick().catch(() => {});
       }
     };
@@ -509,7 +509,7 @@ async function handleLogin(email, password) {
       state.currentView = getPostLoginLandingViewForUser(user);
       saveState();
 
-      showNotification('Welcome!', `Logged in as ${Security.escapeHtml(user.name)}. Loading data...`, 'success');
+      showNotification(state.language === 'ar' ? 'مرحباً!' : 'Welcome!', state.language === 'ar' ? `تم تسجيل الدخول باسم ${Security.escapeHtml(user.name)}. جارٍ تحميل البيانات...` : `Logged in as ${Security.escapeHtml(user.name)}. Loading data...`, 'success');
       render(); // immediately leave the login screen
 
       // Show loading indicator
@@ -519,19 +519,19 @@ async function handleLogin(email, password) {
       loadingOverlay.innerHTML = `
         <div class="text-center">
           <div class="w-12 h-12 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mx-auto mb-4"></div>
-          <p id="loading-progress" class="text-slate-600 dark:text-slate-300 font-medium">Loading data...</p>
-          <p class="text-xs text-slate-400 mt-2">Please wait while we sync your data</p>
+          <p id="loading-progress" class="text-slate-600 dark:text-slate-300 font-medium">${state.language === 'ar' ? 'جارٍ تحميل البيانات...' : 'Loading data...'}</p>
+          <p class="text-xs text-slate-400 mt-2">${state.language === 'ar' ? 'الرجاء الانتظار بينما تتم مزامنة بياناتك' : 'Please wait while we sync your data'}</p>
         </div>
       `;
       document.body.appendChild(loadingOverlay);
 
       try {
         await serverLoadAllData();
-        showNotification('Data Loaded', 'All data synchronized successfully', 'success');
+        showNotification(state.language === 'ar' ? 'تم تحميل البيانات' : 'Data Loaded', state.language === 'ar' ? 'تمت مزامنة جميع البيانات بنجاح' : 'All data synchronized successfully', 'success');
       } catch (e) {
         // serverLoadAllData should be tolerant, but keep a belt-and-suspenders guard.
         console.warn('Server data load failed after login:', e);
-        showNotification('Server Warning', 'Logged in, but some data failed to load. Try Refresh.', 'warning');
+        showNotification(state.language === 'ar' ? 'تحذير السيرفر' : 'Server Warning', state.language === 'ar' ? 'تم تسجيل الدخول، لكن فشل تحميل بعض البيانات. جرّب التحديث.' : 'Logged in, but some data failed to load. Try Refresh.', 'warning');
       } finally {
         // Remove loading overlay
         document.getElementById('data-loading-overlay')?.remove();
@@ -555,7 +555,7 @@ async function handleLogin(email, password) {
       // #endregion
       if (e?.status === 401) {
         showNotification(
-          'Login Failed',
+          state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed',
           state.language === 'ar'
             ? 'بيانات الدخول غير صحيحة (حساب السيرفر). إذا كنت تريد حساب المتصفح المحلي، اضغط "استخدام المحلي".'
             : 'Invalid email or password (server account). If you meant your local browser account, click “Use Local”.',
@@ -574,13 +574,13 @@ async function handleLogin(email, password) {
   
   // Validate email format
   if (!Security.isValidEmail(sanitizedEmail)) {
-    showNotification('Invalid Email', 'Please enter a valid email address', 'error');
+    showNotification(state.language === 'ar' ? 'بريد إلكتروني غير صحيح' : 'Invalid Email', state.language === 'ar' ? 'الرجاء إدخال بريد إلكتروني صحيح' : 'Please enter a valid email address', 'error');
     addSecurityLog('invalid_email_format', sanitizedEmail);
     return;
   }
 
   if (!Array.isArray(state.users) || state.users.length === 0) {
-    showNotification('No Local Users', 'This deployment uses server login. Please run the backend and login there.', 'error');
+    showNotification(state.language === 'ar' ? 'لا يوجد مستخدمون محليون' : 'No Local Users', state.language === 'ar' ? 'هذا النشر يستخدم تسجيل الدخول عبر السيرفر. الرجاء تشغيل الخادم وتسجيل الدخول هناك.' : 'This deployment uses server login. Please run the backend and login there.', 'error');
     return;
   }
   
@@ -627,7 +627,7 @@ async function handleLogin(email, password) {
   // In that case, require password reset instead of silently failing.
   if (!user.passwordHash && !user.password) {
     showNotification(
-      'Login Failed',
+      state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed',
       state.language === 'ar'
         ? 'لا توجد بيانات كلمة مرور لهذا الحساب (ربما من نسخة احتياطية قديمة). استخدم "نسيت كلمة المرور؟" أو أنشئ مفتاح استعادة من الإعدادات.'
         : 'This account has no password data (likely from an old backup). Use “Forgot password?” or generate a Recovery Key in Settings.',
@@ -724,7 +724,7 @@ async function handleLogin(email, password) {
 
     saveState();
     addAuditLog('Login', user.id, `User ${Security.escapeHtml(user.name)} logged in`);
-    showNotification('Welcome!', `Logged in as ${Security.escapeHtml(user.name)}`, 'success');
+    showNotification(state.language === 'ar' ? 'مرحباً!' : 'Welcome!', state.language === 'ar' ? `تم تسجيل الدخول باسم ${Security.escapeHtml(user.name)}` : `Logged in as ${Security.escapeHtml(user.name)}`, 'success');
     render();
   } else {
     // #region agent log
@@ -795,7 +795,7 @@ function handleLogout() {
   state.currentUser = null;
   state.currentView = 'analytics';
   saveState();
-  showNotification('Logged Out', 'See you soon!', 'info');
+  showNotification(state.language === 'ar' ? 'تم تسجيل الخروج' : 'Logged Out', state.language === 'ar' ? 'إلى اللقاء قريباً!' : 'See you soon!', 'info');
   render();
 }
 

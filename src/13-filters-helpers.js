@@ -286,7 +286,7 @@ function editAd(id) {
   // Permission check for editing ads
   const ad = state.ads.find(a => a.id === id);
   if (!canActOnRecord('ads', 'edit', ad?.creatorId)) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الإعلانات' : 'You do not have permission to edit this ad', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الإعلانات' : 'You do not have permission to edit this ad', 'error');
     return;
   }
   state.activeModal = 'ad';
@@ -299,7 +299,7 @@ function editReceipt(id) {
   // Permission check for editing receipts
   const receipt = state.receipts.find(r => r.id === id);
   if (!canActOnRecord('receipts', 'edit', receipt?.createdBy)) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
     return;
   }
   state.activeModal = 'receipt';
@@ -312,7 +312,7 @@ function editCustomer(id) {
   // Permission check for editing customers
   const customer = state.customers.find(c => c.id === id);
   if (!canActOnRecord('customers', 'edit', customer?.createdBy)) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل العملاء' : 'You do not have permission to edit this customer', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل العملاء' : 'You do not have permission to edit this customer', 'error');
     return;
   }
   state.activeModal = 'customer';
@@ -324,7 +324,7 @@ function editCustomer(id) {
 function editPage(id) {
   // Permission check for editing pages
   if (!currentUserHasPermission('pages', 'edit')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الصفحات' : 'You do not have permission to edit pages', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الصفحات' : 'You do not have permission to edit pages', 'error');
     return;
   }
   state.activeModal = 'page';
@@ -335,7 +335,7 @@ function editPage(id) {
 
 function editUser(id) {
   if (!isCurrentUserAdmin() && String(id) !== String(state.currentUser?.id || '')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يمكنك تعديل مستخدمين آخرين' : 'You cannot edit other users', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يمكنك تعديل مستخدمين آخرين' : 'You cannot edit other users', 'error');
     return;
   }
   state.activeModal = 'user';
@@ -350,18 +350,18 @@ function editUser(id) {
 
 function showPermissionsModal(userId) {
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Permissions Manager is Admin only', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Permissions Manager is Admin only', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
   if (!user) {
-    showNotification('Error', 'User not found', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'المستخدم غير موجود' : 'User not found', 'error');
     return;
   }
-  
+
   // Admins shouldn't have their permissions edited (they have all by default)
   if (isAdminRole(user.role)) {
-    showNotification('Info', 'Administrators have full access by default', 'info');
+    showNotification(state.language === 'ar' ? 'معلومة' : 'Info', state.language === 'ar' ? 'المدراء لديهم صلاحية كاملة افتراضياً' : 'Administrators have full access by default', 'info');
     return;
   }
   
@@ -394,7 +394,7 @@ function showPermissionsModal(userId) {
               <span class="text-2xl font-bold">${user.name.charAt(0)}</span>
             </div>
             <div>
-              <h2 class="text-2xl font-bold">Permissions Manager</h2>
+              <h2 class="text-2xl font-bold">${state.language === 'ar' ? 'إدارة الصلاحيات' : 'Permissions Manager'}</h2>
               <div class="flex items-center space-x-2 mt-1">
                 <span class="text-white/80">${Security.escapeHtml(user.name || '')}</span>
                 <span class="px-2 py-0.5 rounded-full bg-white/20 text-xs font-medium">${Security.escapeHtml(user.role || '')}</span>
@@ -421,11 +421,11 @@ function showPermissionsModal(userId) {
           <div class="flex items-center justify-between mb-3">
             <h3 class="text-sm font-bold text-slate-700 dark:text-slate-300 uppercase flex items-center space-x-2">
               <i data-lucide="zap" class="w-4 h-4 text-amber-500"></i>
-              <span>Quick Templates</span>
+              <span>${state.language === 'ar' ? 'قوالب سريعة' : 'Quick Templates'}</span>
             </h3>
             <button onclick="clearAllPermissions('${userId}')" class="text-xs text-rose-600 hover:text-rose-700 font-medium flex items-center space-x-1">
               <i data-lucide="trash-2" class="w-3 h-3"></i>
-              <span>Clear All</span>
+              <span>${state.language === 'ar' ? 'مسح الكل' : 'Clear All'}</span>
             </button>
           </div>
           <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
@@ -463,7 +463,7 @@ function showPermissionsModal(userId) {
                   <div class="flex items-center space-x-3">
                     <span id="perm-module-count-${moduleKey}" class="text-xs font-bold ${moduleGranted > 0 ? 'text-emerald-600' : 'text-slate-400'}">${moduleGranted}/${modulePermCount}</span>
                     <button id="perm-module-toggle-${moduleKey}" data-color="${moduleConfig.color}" onclick="toggleModulePermissions('${userId}', '${moduleKey}', ${!allSelected})" class="px-3 py-1.5 rounded-lg text-xs font-bold ${allSelected ? 'bg-slate-200 dark:bg-slate-700 text-slate-600' : 'bg-' + moduleConfig.color + '-600 text-white'} hover:opacity-80 transition-all">
-                      ${allSelected ? 'Deselect All' : 'Select All'}
+                      ${allSelected ? (state.language === 'ar' ? 'إلغاء تحديد الكل' : 'Deselect All') : (state.language === 'ar' ? 'تحديد الكل' : 'Select All')}
                     </button>
                   </div>
                 </div>
@@ -499,7 +499,7 @@ function showPermissionsModal(userId) {
       <div class="p-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 flex items-center justify-between">
         <div class="text-xs text-slate-500">
           <i data-lucide="info" class="w-3 h-3 inline mr-1"></i>
-          Changes are saved automatically
+          ${state.language === 'ar' ? 'يتم حفظ التغييرات تلقائياً' : 'Changes are saved automatically'}
         </div>
         <div class="flex items-center space-x-3">
           <button onclick="exportUserPermissions('${userId}')" class="px-4 py-2 rounded-xl text-xs font-bold bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 flex items-center space-x-2 transition-colors">
@@ -553,7 +553,7 @@ function refreshPermissionsModalUi(userId, moduleKey = null) {
     const btn = modal.querySelector(`#perm-module-toggle-${mk}`);
     if (btn) {
       btn.setAttribute('onclick', `toggleModulePermissions('${String(userId)}', '${String(mk)}', ${!allSelected})`);
-      btn.textContent = allSelected ? 'Deselect All' : 'Select All';
+      btn.textContent = allSelected ? (state.language === 'ar' ? 'إلغاء تحديد الكل' : 'Deselect All') : (state.language === 'ar' ? 'تحديد الكل' : 'Select All');
       const base = 'px-3 py-1.5 rounded-lg text-xs font-bold hover:opacity-80 transition-all';
       const color = String(btn.dataset.color || cfg.color || 'indigo');
       btn.className = `${base} ${allSelected ? 'bg-slate-200 dark:bg-slate-700 text-slate-600' : `bg-${color}-600 text-white`}`;
@@ -569,7 +569,7 @@ function refreshPermissionsModalUi(userId, moduleKey = null) {
 
 function togglePermission(userId, moduleKey, permKey, enabled) {
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -605,7 +605,7 @@ function togglePermission(userId, moduleKey, permKey, enabled) {
 
 function toggleModulePermissions(userId, moduleKey, enableAll) {
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -646,7 +646,7 @@ function toggleModulePermissions(userId, moduleKey, enableAll) {
 
 function applyPermissionTemplate(userId, templateKey) {
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -667,7 +667,7 @@ function applyPermissionTemplate(userId, templateKey) {
     template: templateKey
   });
   
-  showNotification('Template Applied', `${template.name} permissions applied to ${user.name}`, 'success');
+  showNotification(state.language === 'ar' ? 'تم تطبيق القالب' : 'Template Applied', state.language === 'ar' ? `تم تطبيق صلاحيات "${template.name}" على ${user.name}` : `${template.name} permissions applied to ${user.name}`, 'success');
   // Update UI in-place (no blinking)
   const modal = document.getElementById('app-modal');
   if (modal?.dataset?.modalType === 'permissions' && String(modal.dataset.userId || '') === String(userId || '')) {
@@ -683,13 +683,13 @@ function applyPermissionTemplate(userId, templateKey) {
 
 function clearAllPermissions(userId) {
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
   if (!user) return;
   
-  if (!confirm(`Clear all permissions for ${user.name}? They will lose access to most features.`)) return;
+  if (!confirm(state.language === 'ar' ? `مسح جميع صلاحيات ${user.name}؟ سيفقد الوصول إلى معظم الميزات.` : `Clear all permissions for ${user.name}? They will lose access to most features.`)) return;
   
   user.permissions = {};
   user._lastModified = getMonotonicTime();
@@ -703,7 +703,7 @@ function clearAllPermissions(userId) {
     action: 'clear_all'
   });
   
-  showNotification('Cleared', `All permissions cleared for ${user.name}`, 'success');
+  showNotification(state.language === 'ar' ? 'تم المسح' : 'Cleared', state.language === 'ar' ? `تم مسح جميع صلاحيات ${user.name}` : `All permissions cleared for ${user.name}`, 'success');
   const modal = document.getElementById('app-modal');
   if (modal?.dataset?.modalType === 'permissions' && String(modal.dataset.userId || '') === String(userId || '')) {
     modal.querySelectorAll('input[type="checkbox"][data-module][data-perm]').forEach((el) => { el.checked = false; });
@@ -713,7 +713,7 @@ function clearAllPermissions(userId) {
 
 function exportUserPermissions(userId) {
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -730,12 +730,12 @@ function exportUserPermissions(userId) {
   const json = JSON.stringify(exportData, null, 2);
   downloadFile(json, `permissions-${user.name.toLowerCase().replace(/\s+/g, '-')}-${new Date().toISOString().split('T')[0]}.json`, 'application/json');
   
-  showNotification('Exported', `Permissions exported for ${user.name}`, 'success');
+  showNotification(state.language === 'ar' ? 'تم التصدير' : 'Exported', state.language === 'ar' ? `تم تصدير صلاحيات ${user.name}` : `Permissions exported for ${user.name}`, 'success');
 }
 
 function importUserPermissions(userId) {
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
     return;
   }
   const input = document.createElement('input');
@@ -766,7 +766,7 @@ function importUserPermissions(userId) {
             action: 'import'
           });
           
-          showNotification('Imported', `Permissions imported for ${user.name}`, 'success');
+          showNotification(state.language === 'ar' ? 'تم الاستيراد' : 'Imported', state.language === 'ar' ? `تم استيراد صلاحيات ${user.name}` : `Permissions imported for ${user.name}`, 'success');
           const modal = document.getElementById('app-modal');
           if (modal?.dataset?.modalType === 'permissions' && String(modal.dataset.userId || '') === String(userId || '')) {
             modal.querySelectorAll('input[type="checkbox"][data-module][data-perm]').forEach((el) => {
@@ -779,7 +779,7 @@ function importUserPermissions(userId) {
           refreshPermissionsModalUi(userId);
         }
       } catch (error) {
-        showNotification('Error', 'Invalid permissions file', 'error');
+        showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'ملف صلاحيات غير صالح' : 'Invalid permissions file', 'error');
       }
     };
     reader.readAsText(file);
@@ -797,7 +797,7 @@ function assignDelivery(itemId, userId) {
   } else {
     updateRecord(state.ads, itemId, { deliveryPersonId: userId });
   }
-  showNotification('Assigned', 'Delivery person assigned', 'success');
+  showNotification(state.language === 'ar' ? 'تم التعيين' : 'Assigned', state.language === 'ar' ? 'تم تعيين مندوب التوصيل' : 'Delivery person assigned', 'success');
   render();
 }
 
@@ -815,7 +815,7 @@ function updateDeliveryStatus(itemId, status) {
     return;
   }
   if (s === 'Delivered' && String(state.currentUser?.role || '').toLowerCase() !== 'delivery') {
-    showNotification('Not Allowed', 'Only the assigned delivery driver can mark a delivery as Delivered.', 'warning');
+    showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'فقط سائق التوصيل المعيَّن يمكنه تحديد التوصيل كـ"تم التوصيل".' : 'Only the assigned delivery driver can mark a delivery as Delivered.', 'warning');
     return;
   }
   // Check if it's a receipt or an ad
@@ -825,7 +825,7 @@ function updateDeliveryStatus(itemId, status) {
   } else {
     updateRecord(state.ads, itemId, { deliveryStatus: s });
   }
-  showNotification('Updated', `Status changed to ${s}`, 'success');
+  showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? `تم تغيير الحالة إلى ${trStatus(s)}` : `Status changed to ${s}`, 'success');
   render();
 }
 
@@ -835,7 +835,7 @@ function markAsCollected(itemId) {
   if (isReceipt) {
     // Temp delivery receipts require strict completion (final receipt # + photo + amounts).
     if (isTempDeliveryReceiptNo(isReceipt.tempReceiptNo)) {
-      showNotification('Not Allowed', 'Use "Mark Delivered" to complete this delivery with receipt photo + final number.', 'warning');
+      showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'استخدم "تم التوصيل" لإكمال هذا التوصيل مع صورة الوصل والرقم النهائي.' : 'Use "Mark Delivered" to complete this delivery with receipt photo + final number.', 'warning');
       openReceiptDeliveryCompletionModal(itemId);
       return;
     }
@@ -857,7 +857,7 @@ function markAsCollected(itemId) {
     state.currentUser.stats.collected = (state.currentUser.stats.collected || 0) + 1;
     updateRecord(state.users, state.currentUser.id, { stats: state.currentUser.stats });
   }
-  showNotification('Collected', 'Payment marked as collected', 'success');
+  showNotification(state.language === 'ar' ? 'تم التحصيل' : 'Collected', state.language === 'ar' ? 'تم تسجيل الدفعة كمُحصَّلة' : 'Payment marked as collected', 'success');
   render();
 }
 
@@ -880,7 +880,7 @@ function acceptDelivery(itemId) {
     state.currentUser.stats.totalAds = (state.currentUser.stats.totalAds || 0) + 1;
     updateRecord(state.users, state.currentUser.id, { stats: state.currentUser.stats });
   }
-  showNotification('Accepted', 'Delivery accepted', 'success');
+  showNotification(state.language === 'ar' ? 'تم القبول' : 'Accepted', state.language === 'ar' ? 'تم قبول التوصيل' : 'Delivery accepted', 'success');
   render();
 }
 
@@ -1031,20 +1031,21 @@ function updateReceiptDeliveryCompletionComputed() {
   const feeCmp = compareFees(quoted, actualFee);
   const debtCmp = compareDebt(debt, collected);
 
+  const isArC = state.language === 'ar';
   const feeEl = document.getElementById('delivery-fee-compare');
   const debtEl = document.getElementById('delivery-debt-compare');
   if (feeEl) {
     const diff = feeCmp.feeDiff;
     feeEl.textContent = feeCmp.feeDifferenceStatus === 'SAME'
-      ? 'Fee: SAME'
+      ? (isArC ? 'قيمة التوصيل: مطابقة' : 'Fee: SAME')
       : (feeCmp.feeDifferenceStatus === 'LOWER'
-        ? `Fee: LOWER (${Math.abs(diff).toFixed(0)} LYD)`
-        : `Fee: HIGHER (${diff.toFixed(0)} LYD)`);
+        ? (isArC ? `قيمة التوصيل: أقل (${Math.abs(diff).toFixed(0)} LYD)` : `Fee: LOWER (${Math.abs(diff).toFixed(0)} LYD)`)
+        : (isArC ? `قيمة التوصيل: أعلى (${diff.toFixed(0)} LYD)` : `Fee: HIGHER (${diff.toFixed(0)} LYD)`));
   }
   if (debtEl) {
-    if (debtCmp.paymentResult === 'PAID_EXACT') debtEl.textContent = 'Payment: PAID EXACT';
-    if (debtCmp.paymentResult === 'OVERPAID') debtEl.textContent = `Payment: OVERPAID (+${debtCmp.overpaidAmount.toFixed(0)} LYD)`;
-    if (debtCmp.paymentResult === 'UNDERPAID') debtEl.textContent = `Payment: UNDERPAID (${debtCmp.remainingDue.toFixed(0)} LYD remaining)`;
+    if (debtCmp.paymentResult === 'PAID_EXACT') debtEl.textContent = isArC ? 'الدفع: مطابق تماماً' : 'Payment: PAID EXACT';
+    if (debtCmp.paymentResult === 'OVERPAID') debtEl.textContent = isArC ? `الدفع: زائد (+${debtCmp.overpaidAmount.toFixed(0)} LYD)` : `Payment: OVERPAID (+${debtCmp.overpaidAmount.toFixed(0)} LYD)`;
+    if (debtCmp.paymentResult === 'UNDERPAID') debtEl.textContent = isArC ? `الدفع: ناقص (المتبقي ${debtCmp.remainingDue.toFixed(0)} LYD)` : `Payment: UNDERPAID (${debtCmp.remainingDue.toFixed(0)} LYD remaining)`;
   }
 
   // Validate (allow S-prefixed auto-serials for LTT/Libyana/Madar)
@@ -1053,13 +1054,13 @@ function updateReceiptDeliveryCompletionComputed() {
   let ok = true;
   if (!finalNo) {
     ok = false;
-    if (errEl) errEl.textContent = 'Final receipt number is required.';
+    if (errEl) errEl.textContent = isArC ? 'رقم الوصل النهائي مطلوب.' : 'Final receipt number is required.';
   } else if (!isAutoSerialValidation && (!/^\d+$/.test(finalNo) || finalNo.startsWith('0'))) {
     ok = false;
-    if (errEl) errEl.textContent = 'Final receipt number must be digits (no leading 0) or S-prefixed (S1, S2).';
+    if (errEl) errEl.textContent = isArC ? 'رقم الوصل النهائي يجب أن يكون أرقاماً (بدون صفر في البداية) أو ببادئة S (S1, S2).' : 'Final receipt number must be digits (no leading 0) or S-prefixed (S1, S2).';
   } else if (_receiptFinalNoExists(finalNo, receipt.id)) {
     ok = false;
-    if (errEl) errEl.textContent = 'Final receipt number already exists.';
+    if (errEl) errEl.textContent = isArC ? 'رقم الوصل النهائي موجود بالفعل.' : 'Final receipt number already exists.';
   } else {
     if (errEl) errEl.textContent = '';
   }
@@ -1076,17 +1077,18 @@ function updateReceiptDeliveryCompletionComputed() {
 }
 
 function openReceiptDeliveryCompletionModal(receiptId) {
+  const isArD = state.language === 'ar';
   const receipt = _findReceiptForDeliveryModal(receiptId);
   if (!receipt) {
-    showNotification('Error', 'Receipt not found', 'error');
+    showNotification(isArD ? 'خطأ' : 'Error', isArD ? 'الوصل غير موجود' : 'Receipt not found', 'error');
     return;
   }
   if (String(state.currentUser?.role || '').toLowerCase() !== 'delivery') {
-    showNotification('Access Denied', 'Delivery users only', 'error');
+    showNotification(isArD ? 'تم رفض الوصول' : 'Access Denied', isArD ? 'لمستخدمي التوصيل فقط' : 'Delivery users only', 'error');
     return;
   }
   if (String(receipt.deliveryPersonId || '') !== String(state.currentUser?.id || '')) {
-    showNotification('Access Denied', 'This receipt is not assigned to you', 'error');
+    showNotification(isArD ? 'تم رفض الوصول' : 'Access Denied', isArD ? 'هذا الوصل غير معيَّن لك' : 'This receipt is not assigned to you', 'error');
     return;
   }
 
@@ -1115,8 +1117,8 @@ function openReceiptDeliveryCompletionModal(receiptId) {
             <i data-lucide="check-circle" class="w-5 h-5 text-white"></i>
           </span>
           <div>
-            <div class="text-lg font-bold text-slate-800 dark:text-white">Mark Delivered</div>
-            <div class="text-xs text-slate-500">${Security.escapeHtml(customer?.name || 'Unknown')}</div>
+            <div class="text-lg font-bold text-slate-800 dark:text-white">${isArD ? 'تم التوصيل' : 'Mark Delivered'}</div>
+            <div class="text-xs text-slate-500">${Security.escapeHtml(customer?.name || (isArD ? 'غير معروف' : 'Unknown'))}</div>
           </div>
         </div>
         <button onclick="this.closest('#delivery-complete-modal').remove()" class="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
@@ -1126,46 +1128,46 @@ function openReceiptDeliveryCompletionModal(receiptId) {
 
       <div class="space-y-3">
         <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
-          <div class="text-xs text-slate-500 mb-1">Receipt</div>
+          <div class="text-xs text-slate-500 mb-1">${isArD ? 'الوصل' : 'Receipt'}</div>
           <div class="font-bold text-indigo-600">${Security.escapeHtml(tempNo || 'D?')}${finalNo ? ` → ${Security.escapeHtml(finalNo)}` : ''}</div>
           ${place ? `<div class="text-xs text-slate-600 dark:text-slate-300 mt-1"><span class="font-bold">📍</span> ${Security.escapeHtml(place)}</div>` : ''}
-          <div class="text-xs text-slate-500 mt-1">Debt due: <span class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(0)} LYD</span> • Quoted fee: <span class="font-bold text-emerald-600">${quoted.toFixed(0)} LYD</span></div>
-          ${phone ? `<div class="text-xs text-slate-500 mt-1">Phone: <span class="font-bold text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone)}</span></div>` : ''}
+          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(0)} LYD</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span class="font-bold text-emerald-600">${quoted.toFixed(0)} LYD</span></div>
+          ${phone ? `<div class="text-xs text-slate-500 mt-1">${isArD ? 'الهاتف' : 'Phone'}: <span class="font-bold text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone)}</span></div>` : ''}
         </div>
 
         <div>
-          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">Final receipt number *</label>
-          <input id="delivery-final-receipt-no" type="text" inputmode="numeric" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="e.g., 45873" value="${Security.escapeHtml(finalNo)}" oninput="this.value=this.value.replace(/[^0-9]/g,''); updateReceiptDeliveryCompletionComputed()" />
+          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'رقم الوصل النهائي *' : 'Final receipt number *'}</label>
+          <input id="delivery-final-receipt-no" type="text" inputmode="numeric" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isArD ? 'مثال: 45873' : 'e.g., 45873'}" value="${Security.escapeHtml(finalNo)}" oninput="this.value=this.value.replace(/[^0-9]/g,''); updateReceiptDeliveryCompletionComputed()" />
           <div id="delivery-final-receipt-error" class="mt-1 text-[11px] text-rose-600"></div>
         </div>
 
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">Amount collected (LYD) *</label>
+            <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'المبلغ المُحصَّل (LYD) *' : 'Amount collected (LYD) *'}</label>
             <input id="delivery-collected-amount" type="text" inputmode="decimal" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="0.00" value="${Security.escapeHtml(String(receipt.amountCollectedFromCustomer ?? ''))}" oninput="sanitizeMoneyInput(this); updateReceiptDeliveryCompletionComputed()" />
           </div>
           <div>
-            <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">Actual delivery fee collected (LYD) *</label>
+            <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'قيمة التوصيل الفعلية المُحصَّلة (LYD) *' : 'Actual delivery fee collected (LYD) *'}</label>
             <input id="delivery-actual-fee" type="text" inputmode="decimal" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="0.00" value="${Security.escapeHtml(String(receipt.actualDeliveryFeeCollected ?? receipt.deliveryFeeCollected ?? ''))}" oninput="sanitizeMoneyInput(this); updateReceiptDeliveryCompletionComputed()" />
           </div>
         </div>
 
         <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
           <div class="flex items-center justify-between mb-2">
-            <div class="text-xs font-bold text-slate-600 dark:text-slate-400">Receipt photo *</div>
+            <div class="text-xs font-bold text-slate-600 dark:text-slate-400">${isArD ? 'صورة الوصل *' : 'Receipt photo *'}</div>
             <label class="text-xs font-bold text-indigo-600 hover:text-indigo-700 cursor-pointer">
-              Upload
+              ${isArD ? 'رفع صورة' : 'Upload'}
               <input type="file" accept="image/*" class="hidden" onchange="handleDeliveryReceiptPhotoUpload(this.files)" />
             </label>
           </div>
           <input type="hidden" id="delivery-receipt-image-data" data-image-data="${Security.escapeHtml(String(receipt.receiptImage || receipt.photos?.[0] || ''))}" />
           <img id="delivery-receipt-image-preview" src="${Security.escapeHtml(String(receipt.receiptImage || receipt.photos?.[0] || ''))}" class="${(receipt.receiptImage || receipt.photos?.[0]) ? '' : 'hidden'} w-full h-36 object-cover rounded-lg border border-slate-200 dark:border-slate-700" />
-          ${(receipt.receiptImage || receipt.photos?.[0]) ? '' : '<div class="text-xs text-slate-400">No photo yet.</div>'}
+          ${(receipt.receiptImage || receipt.photos?.[0]) ? '' : `<div class="text-xs text-slate-400">${isArD ? 'لا توجد صورة بعد.' : 'No photo yet.'}</div>`}
         </div>
 
         <div>
-          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">Driver notes (optional)</label>
-          <textarea id="delivery-driver-notes" rows="2" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="Notes..." oninput="updateReceiptDeliveryCompletionComputed()">${Security.escapeHtml(String(receipt.driverNotes || ''))}</textarea>
+          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'ملاحظات السائق (اختياري)' : 'Driver notes (optional)'}</label>
+          <textarea id="delivery-driver-notes" rows="2" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isArD ? 'ملاحظات...' : 'Notes...'}" oninput="updateReceiptDeliveryCompletionComputed()">${Security.escapeHtml(String(receipt.driverNotes || ''))}</textarea>
         </div>
 
         <div class="grid grid-cols-2 gap-3 text-xs">
@@ -1175,10 +1177,10 @@ function openReceiptDeliveryCompletionModal(receiptId) {
 
         <div class="flex space-x-2 pt-2 border-t border-slate-200 dark:border-slate-700">
           <button type="button" onclick="openReceiptDeliveryCancelModal('${receipt.id}')" class="flex-1 btn-shine bg-rose-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold">
-            <i data-lucide="x-circle" class="w-4 h-4 inline mr-1"></i>Cancel Delivery
+            <i data-lucide="x-circle" class="w-4 h-4 inline mr-1"></i>${isArD ? 'إلغاء التوصيل' : 'Cancel Delivery'}
           </button>
           <button type="button" id="delivery-complete-submit" onclick="submitReceiptDeliveryCompletion('${receipt.id}')" class="flex-1 btn-shine bg-emerald-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold disabled:opacity-50 disabled:cursor-not-allowed">
-            <i data-lucide="check" class="w-4 h-4 inline mr-1"></i>Mark Delivered
+            <i data-lucide="check" class="w-4 h-4 inline mr-1"></i>${isArD ? 'تم التوصيل' : 'Mark Delivered'}
           </button>
         </div>
       </div>
@@ -1196,7 +1198,7 @@ function openReceiptDeliveryCompletionModal(receiptId) {
 async function submitReceiptDeliveryCompletion(receiptId) {
   const receipt = _findReceiptForDeliveryModal(receiptId);
   if (!receipt) {
-    showNotification('Error', 'Receipt not found', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'الوصل غير موجود' : 'Receipt not found', 'error');
     return;
   }
 
@@ -1326,7 +1328,7 @@ async function submitReceiptDeliveryCompletion(receiptId) {
       }
       const status = e?.status ? `HTTP ${e.status}` : '';
       const detail = (e?.payload && typeof e.payload === 'object' && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
-      showNotification('Server Error', `Failed to save delivery: ${status ? status + ' - ' : ''}${detail}`, 'error');
+      showNotification(state.language === 'ar' ? 'خطأ في الخادم' : 'Server Error', (state.language === 'ar' ? 'فشل حفظ التوصيل: ' : 'Failed to save delivery: ') + `${status ? status + ' - ' : ''}${detail}`, 'error');
       if (btn) btn.disabled = false;
       return;
     }
@@ -1340,21 +1342,22 @@ async function submitReceiptDeliveryCompletion(receiptId) {
 }
 
 function openReceiptDeliveryCancelModal(receiptId) {
+  const isArX = state.language === 'ar';
   const receipt = _findReceiptForDeliveryModal(receiptId);
   if (!receipt) {
-    showNotification('Error', 'Receipt not found', 'error');
+    showNotification(isArX ? 'خطأ' : 'Error', isArX ? 'الوصل غير موجود' : 'Receipt not found', 'error');
     return;
   }
   if (String(state.currentUser?.role || '').toLowerCase() !== 'delivery') {
-    showNotification('Access Denied', 'Delivery users only', 'error');
+    showNotification(isArX ? 'تم رفض الوصول' : 'Access Denied', isArX ? 'لمستخدمي التوصيل فقط' : 'Delivery users only', 'error');
     return;
   }
   if (String(receipt.deliveryPersonId || '') !== String(state.currentUser?.id || '')) {
-    showNotification('Access Denied', 'This receipt is not assigned to you', 'error');
+    showNotification(isArX ? 'تم رفض الوصول' : 'Access Denied', isArX ? 'هذا الوصل غير معيَّن لك' : 'This receipt is not assigned to you', 'error');
     return;
   }
   if (String(receipt.deliveryStatus || '') === 'Delivered') {
-    showNotification('Not Allowed', 'Already delivered.', 'warning');
+    showNotification(isArX ? 'غير مسموح' : 'Not Allowed', isArX ? 'تم التوصيل بالفعل.' : 'Already delivered.', 'warning');
     return;
   }
 
@@ -1371,8 +1374,8 @@ function openReceiptDeliveryCancelModal(receiptId) {
             <i data-lucide="x-circle" class="w-5 h-5 text-white"></i>
           </span>
           <div>
-            <div class="text-lg font-bold text-slate-800 dark:text-white">Cancel Delivery</div>
-            <div class="text-xs text-slate-500">Receipt ${Security.escapeHtml(String(receipt.tempReceiptNo || receipt.serialNumber || receipt.id))}</div>
+            <div class="text-lg font-bold text-slate-800 dark:text-white">${isArX ? 'إلغاء التوصيل' : 'Cancel Delivery'}</div>
+            <div class="text-xs text-slate-500">${isArX ? 'الوصل' : 'Receipt'} ${Security.escapeHtml(String(receipt.tempReceiptNo || receipt.serialNumber || receipt.id))}</div>
           </div>
         </div>
         <button onclick="this.closest('#delivery-cancel-modal').remove()" class="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
@@ -1382,13 +1385,13 @@ function openReceiptDeliveryCancelModal(receiptId) {
 
       <div class="space-y-3">
         <div>
-          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">Reason *</label>
-          <textarea id="delivery-cancel-reason" rows="3" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="Why are you cancelling?"></textarea>
+          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArX ? 'السبب *' : 'Reason *'}</label>
+          <textarea id="delivery-cancel-reason" rows="3" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isArX ? 'لماذا تقوم بالإلغاء؟' : 'Why are you cancelling?'}"></textarea>
         </div>
         <div class="flex space-x-2 pt-2 border-t border-slate-200 dark:border-slate-700">
-          <button type="button" onclick="this.closest('#delivery-cancel-modal').remove()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-slate-300">Close</button>
+          <button type="button" onclick="this.closest('#delivery-cancel-modal').remove()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-slate-300">${isArX ? 'إغلاق' : 'Close'}</button>
           <button type="button" onclick="submitReceiptDeliveryCancel('${receipt.id}')" class="flex-1 btn-shine bg-rose-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold">
-            Confirm Cancel
+            ${isArX ? 'تأكيد الإلغاء' : 'Confirm Cancel'}
           </button>
         </div>
       </div>
@@ -1403,7 +1406,7 @@ function submitReceiptDeliveryCancel(receiptId) {
   if (!receipt) return;
   const reason = String(document.getElementById('delivery-cancel-reason')?.value || '').trim();
   if (!reason) {
-    showNotification('Validation', 'Cancel reason is required.', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ في الإدخال' : 'Validation', state.language === 'ar' ? 'سبب الإلغاء مطلوب.' : 'Cancel reason is required.', 'error');
     return;
   }
   const nextHistory = Array.isArray(receipt.deliveryHistory) ? [...receipt.deliveryHistory] : [];
@@ -1422,7 +1425,7 @@ function submitReceiptDeliveryCancel(receiptId) {
   });
   document.getElementById('delivery-cancel-modal')?.remove();
   document.getElementById('delivery-complete-modal')?.remove();
-  showNotification('Canceled', 'Delivery canceled', 'success');
+  showNotification(state.language === 'ar' ? 'تم الإلغاء' : 'Canceled', state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled', 'success');
   render();
 }
 
@@ -1442,7 +1445,7 @@ function markAsDelivered(itemId) {
       deliveryStatus: 'Delivered'
     });
   }
-  showNotification('Delivered', 'Marked as delivered', 'success');
+  showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم التحديد كمُوصَّل' : 'Marked as delivered', 'success');
   render();
 }
 
@@ -1539,7 +1542,7 @@ function clearAllReceiptFilters() {
 // Toggle receipt collected status
 function _canMarkCollected() {
   if (!currentUserHasPermission('receipts', 'markCollected')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل حالة التحصيل' : 'You do not have permission to mark receipts as collected', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل حالة التحصيل' : 'You do not have permission to mark receipts as collected', 'error');
     return false;
   }
   return true;
@@ -1618,7 +1621,7 @@ function _collectAskView(receiptId, receipt, isAr, targetLYD, serialTxt) {
       ${isAr ? 'الوصل' : 'Receipt'} #${Security.escapeHtml(String(serialTxt))} — ${isAr ? 'الإجمالي' : 'Total'}: <span class="font-bold text-slate-800 dark:text-white">${targetLYD.toFixed(2)} LYD</span>
     </div>
     <div class="text-xs text-slate-500 mb-4">
-      ${isAr ? 'حسب الوصل' : 'As on the receipt'}: ${breakdown.map(p => `${Security.escapeHtml(p.method)} ${p.amount.toFixed(2)} LYD`).join(' • ')}
+      ${isAr ? 'حسب الوصل' : 'As on the receipt'}: ${breakdown.map(p => `${Security.escapeHtml(trMethod(p.method))} ${p.amount.toFixed(2)} LYD`).join(' • ')}
     </div>
     <p class="text-sm font-medium text-slate-700 dark:text-slate-300 mb-3">
       ${isAr ? 'هل تم التحصيل بنفس بيانات الوصل الأصلية؟' : 'Did you collect exactly as shown on the receipt?'}
@@ -1661,7 +1664,7 @@ function _collectEditorView(receiptId, receipt) {
       <div class="col-span-7">
         ${idx === 0 ? `<label class="block text-[10px] text-slate-400 mb-1">${isAr ? 'الطريقة' : 'Method'}</label>` : ''}
         <select onchange="updateCollectPaymentRow(${idx}, 'method', this.value)" class="w-full glass-input px-2 py-1.5 rounded-lg text-sm">
-          ${PAYMENT_METHODS.map(m => `<option value="${m}" ${p.method === m ? 'selected' : ''}>${m}</option>`).join('')}
+          ${PAYMENT_METHODS.map(m => `<option value="${m}" ${p.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
         </select>
       </div>
       <div class="col-span-4">
@@ -1790,7 +1793,7 @@ function toggleReceiptCollected(receiptId) {
 function showReceiptModal() {
   // Permission check for creating receipts
   if (!currentUserHasPermission('receipts', 'add')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإنشاء وصولات' : 'You do not have permission to create receipts', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإنشاء وصولات' : 'You do not have permission to create receipts', 'error');
     return;
   }
   state.activeModal = 'receipt';
@@ -1837,7 +1840,7 @@ function manageRefund(adId) {
 function showReceiptTransferModal(receiptId) {
   // Permission check
   if (!currentUserHasPermission('receipts', 'transfer')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتحويل الرصيد' : 'You do not have permission to transfer receipt balance', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتحويل الرصيد' : 'You do not have permission to transfer receipt balance', 'error');
     return;
   }
   state.activeModal = 'receipt-transfer';
@@ -1850,16 +1853,19 @@ function showReceiptTransferHistory(receiptId) {
   const receipt = state.receipts.find(r => r.id === receiptId);
   const transfers = receipt?.transfers || [];
   if (!receipt) return;
+  const isArT = state.language === 'ar';
   if (transfers.length === 0) {
-    showNotification('Transfers', 'No transfers recorded for this receipt.', 'info');
+    showNotification(isArT ? 'التحويلات' : 'Transfers', isArT ? 'لا توجد تحويلات مسجلة لهذا الوصل.' : 'No transfers recorded for this receipt.', 'info');
     return;
   }
   const lines = transfers.map(t => {
     const targetCustomer = state.customers.find(c => c.id === t.toCustomerId);
-    const name = targetCustomer ? targetCustomer.name : 'Unknown';
-    return `${new Date(t.date).toLocaleString()}: $${(t.amountUSD || 0).toFixed(2)} to ${name}`;
+    const name = targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown');
+    return isArT
+      ? `${new Date(t.date).toLocaleString()}: $${(t.amountUSD || 0).toFixed(2)} إلى ${name}`
+      : `${new Date(t.date).toLocaleString()}: $${(t.amountUSD || 0).toFixed(2)} to ${name}`;
   }).join('\n');
-  showNotification('Transfer history', lines, 'info');
+  showNotification(isArT ? 'سجل التحويلات' : 'Transfer history', lines, 'info');
 }
 
 // Show receipt edit history modal
@@ -1867,9 +1873,10 @@ function showReceiptEditHistory(receiptId) {
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
   
+  const isArH = state.language === 'ar';
   const editHistory = receipt.editHistory || [];
   if (editHistory.length === 0) {
-    showNotification('Edit History', 'No edit history recorded for this receipt.', 'info');
+    showNotification(isArH ? 'سجل التعديلات' : 'Edit History', isArH ? 'لا يوجد سجل تعديلات لهذا الوصل.' : 'No edit history recorded for this receipt.', 'info');
     return;
   }
   
@@ -1883,10 +1890,10 @@ function showReceiptEditHistory(receiptId) {
             <div>
               <h2 class="text-xl font-bold text-slate-800 dark:text-white flex items-center">
                 <i data-lucide="history" class="w-5 h-5 mr-2 text-amber-500"></i>
-                Edit History
+                ${isArH ? 'سجل التعديلات' : 'Edit History'}
               </h2>
               <p class="text-sm text-slate-500 mt-1">
-                Receipt ${receipt.serialNumber ? '#' + receipt.serialNumber : ''} for ${Security.escapeHtml(customer?.name || 'Unknown')}
+                ${isArH ? 'وصل' : 'Receipt'} ${receipt.serialNumber ? '#' + receipt.serialNumber : ''} ${isArH ? 'للعميل' : 'for'} ${Security.escapeHtml(customer?.name || (isArH ? 'غير معروف' : 'Unknown'))}
               </p>
             </div>
             <button onclick="document.getElementById('edit-history-modal').remove()" class="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors">
@@ -1900,8 +1907,8 @@ function showReceiptEditHistory(receiptId) {
             <div class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-4 border border-slate-200 dark:border-slate-700">
               <div class="flex items-center justify-between mb-3">
                 <div class="flex items-center space-x-2">
-                  <span class="text-xs font-bold text-white bg-amber-500 px-2 py-1 rounded-full">Edit #${editHistory.length - idx}</span>
-                  <span class="text-xs text-slate-500">${edit.editedBy || 'Unknown'}</span>
+                  <span class="text-xs font-bold text-white bg-amber-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
+                  <span class="text-xs text-slate-500">${edit.editedBy || (isArH ? 'غير معروف' : 'Unknown')}</span>
                 </div>
                 <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString()}</span>
               </div>
@@ -1926,8 +1933,8 @@ function showReceiptEditHistory(receiptId) {
         
         <div class="p-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50">
           <p class="text-xs text-slate-500 text-center">
-            Total: ${editHistory.length} edit${editHistory.length > 1 ? 's' : ''} • 
-            Created: ${new Date(receipt.createdAt).toLocaleString()}
+            ${isArH ? `الإجمالي: ${editHistory.length} ${editHistory.length > 1 ? 'تعديلات' : 'تعديل'}` : `Total: ${editHistory.length} edit${editHistory.length > 1 ? 's' : ''}`} •
+            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${new Date(receipt.createdAt).toLocaleString()}
           </p>
         </div>
       </div>
@@ -1949,9 +1956,10 @@ function showAdEditHistory(adId) {
   const ad = state.ads.find(a => a.id === adId);
   if (!ad) return;
   
+  const isArH = state.language === 'ar';
   const editHistory = ad.editHistory || [];
   if (editHistory.length === 0) {
-    showNotification('Edit History', 'No edit history recorded for this ad.', 'info');
+    showNotification(isArH ? 'سجل التعديلات' : 'Edit History', isArH ? 'لا يوجد سجل تعديلات لهذا الإعلان.' : 'No edit history recorded for this ad.', 'info');
     return;
   }
   
@@ -1966,10 +1974,10 @@ function showAdEditHistory(adId) {
             <div>
               <h2 class="text-xl font-bold text-slate-800 dark:text-white flex items-center">
                 <i data-lucide="history" class="w-5 h-5 mr-2 text-purple-500"></i>
-                Edit History
+                ${isArH ? 'سجل التعديلات' : 'Edit History'}
               </h2>
               <p class="text-sm text-slate-500 mt-1">
-                Ad for ${Security.escapeHtml(customer?.name || 'Unknown')} • ${Security.escapeHtml(page?.name || 'Unknown Page')}
+                ${isArH ? 'إعلان للعميل' : 'Ad for'} ${Security.escapeHtml(customer?.name || (isArH ? 'غير معروف' : 'Unknown'))} • ${Security.escapeHtml(page?.name || (isArH ? 'صفحة غير معروفة' : 'Unknown Page'))}
               </p>
             </div>
             <button onclick="document.getElementById('edit-history-modal').remove()" class="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors">
@@ -1983,8 +1991,8 @@ function showAdEditHistory(adId) {
             <div class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-4 border border-slate-200 dark:border-slate-700">
               <div class="flex items-center justify-between mb-3">
                 <div class="flex items-center space-x-2">
-                  <span class="text-xs font-bold text-white bg-purple-500 px-2 py-1 rounded-full">Edit #${editHistory.length - idx}</span>
-                  <span class="text-xs text-slate-500">${edit.editedBy || 'Unknown'}</span>
+                  <span class="text-xs font-bold text-white bg-purple-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
+                  <span class="text-xs text-slate-500">${edit.editedBy || (isArH ? 'غير معروف' : 'Unknown')}</span>
                 </div>
                 <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString()}</span>
               </div>
@@ -2009,8 +2017,8 @@ function showAdEditHistory(adId) {
         
         <div class="p-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50">
           <p class="text-xs text-slate-500 text-center">
-            Total: ${editHistory.length} edit${editHistory.length > 1 ? 's' : ''} • 
-            Created: ${new Date(ad.createdAt).toLocaleString()}
+            ${isArH ? `الإجمالي: ${editHistory.length} ${editHistory.length > 1 ? 'تعديلات' : 'تعديل'}` : `Total: ${editHistory.length} edit${editHistory.length > 1 ? 's' : ''}`} •
+            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${new Date(ad.createdAt).toLocaleString()}
           </p>
         </div>
       </div>
@@ -2037,25 +2045,26 @@ function saveReceiptTransfer() {
   const amountUSDElement = document.getElementById('transfer-amount-usd');
   const noteElement = document.getElementById('transfer-note');
   if (!targetCustomerEl || !amountUSDElement) {
-    showNotification('Error', 'Transfer form elements not found', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'لم يتم العثور على عناصر نموذج التحويل' : 'Transfer form elements not found', 'error');
     return;
   }
   const targetCustomerId = targetCustomerEl.value;
   const amountUSD = parseFloat(amountUSDElement.value) || 0;
   const note = noteElement?.value || '';
 
+  const isArTr = state.language === 'ar';
   if (!targetCustomerId) {
-    showNotification('Validation', 'Please choose a customer to transfer to.', 'error');
+    showNotification(isArTr ? 'خطأ في الإدخال' : 'Validation', isArTr ? 'الرجاء اختيار عميل للتحويل إليه.' : 'Please choose a customer to transfer to.', 'error');
     return;
   }
   if (amountUSD <= 0) {
-    showNotification('Validation', 'Transfer amount must be greater than zero.', 'error');
+    showNotification(isArTr ? 'خطأ في الإدخال' : 'Validation', isArTr ? 'يجب أن يكون مبلغ التحويل أكبر من صفر.' : 'Transfer amount must be greater than zero.', 'error');
     return;
   }
 
   const usage = getReceiptUsageStats(receipt);
   if (amountUSD > usage.remainingUSD) {
-    showNotification('Validation', 'Amount exceeds available balance.', 'error');
+    showNotification(isArTr ? 'خطأ في الإدخال' : 'Validation', isArTr ? 'المبلغ يتجاوز الرصيد المتاح.' : 'Amount exceeds available balance.', 'error');
     return;
   }
 
@@ -2071,7 +2080,7 @@ function saveReceiptTransfer() {
   const updatedTransfers = [...(receipt.transfers || []), transfer];
   updateRecord(state.receipts, receipt.id, { transfers: updatedTransfers });
   addLog('transfer', 'receipt', receipt.id, `Transferred $${amountUSD.toFixed(2)} to customer`, { toCustomerId: targetCustomerId });
-  showNotification('Transferred', 'Receipt balance transferred successfully', 'success');
+  showNotification(state.language === 'ar' ? 'تم التحويل' : 'Transferred', state.language === 'ar' ? 'تم تحويل رصيد الوصل بنجاح' : 'Receipt balance transferred successfully', 'success');
   closeModal();
   render();
 }
@@ -2079,42 +2088,43 @@ function saveReceiptTransfer() {
 function addSplitPayment() {
   const container = document.getElementById('split-payments-container');
   const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
-  
+  const isArSp = state.language === 'ar';
+
   const div = document.createElement('div');
   div.className = 'split-payment-item p-4 rounded-lg';
   div.innerHTML = `
     <div class="grid grid-cols-2 gap-3">
       <div>
-        <label class="block text-xs font-medium mb-1">Payment Method</label>
+        <label class="block text-xs font-medium mb-1">${isArSp ? 'طريقة الدفع' : 'Payment Method'}</label>
         <select class="split-method w-full glass-input px-3 py-2 rounded-lg text-sm">
-          ${PAYMENT_METHODS.map(m => `<option value="${m}">${m}</option>`).join('')}
+          ${PAYMENT_METHODS.map(m => `<option value="${m}">${trMethod(m)}</option>`).join('')}
         </select>
       </div>
       <div>
-        <label class="block text-xs font-medium mb-1">Amount (LYD)</label>
+        <label class="block text-xs font-medium mb-1">${isArSp ? 'المبلغ (LYD)' : 'Amount (LYD)'}</label>
         <input type="text" inputmode="decimal" class="split-amount w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="0.00" oninput="sanitizeMoneyInput(this)" />
       </div>
       <div>
-        <label class="block text-xs font-medium mb-1">Exchange Rate</label>
+        <label class="block text-xs font-medium mb-1">${isArSp ? 'سعر الصرف' : 'Exchange Rate'}</label>
         <input type="text" inputmode="decimal" class="split-rate w-full glass-input px-3 py-2 rounded-lg text-sm" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" />
       </div>
       <div>
-        <label class="block text-xs font-medium mb-1">USD Rate (Rate 2)</label>
+        <label class="block text-xs font-medium mb-1">${isArSp ? 'سعر الدولار (سعر 2)' : 'USD Rate (Rate 2)'}</label>
         <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" />
       </div>
       <div>
-        <label class="block text-xs font-medium mb-1">Collection Type</label>
+        <label class="block text-xs font-medium mb-1">${isArSp ? 'نوع التحصيل' : 'Collection Type'}</label>
         <select class="split-collection w-full glass-input px-3 py-2 rounded-lg text-sm">
-          <option value="office">Office</option>
-          <option value="delivery">Delivery</option>
-          <option value="bank">Bank</option>
+          <option value="office">${trStatus('office')}</option>
+          <option value="delivery">${trStatus('delivery')}</option>
+          <option value="bank">${trStatus('bank')}</option>
         </select>
       </div>
       ${deliveryUsers.length > 0 ? `
         <div class="col-span-2">
-          <label class="block text-xs font-medium mb-1">Delivery Person (if delivery)</label>
+          <label class="block text-xs font-medium mb-1">${isArSp ? 'مندوب التوصيل (إذا كان توصيل)' : 'Delivery Person (if delivery)'}</label>
           <select class="split-delivery-person w-full glass-input px-3 py-2 rounded-lg text-sm">
-            <option value="">None</option>
+            <option value="">${trStatus('None')}</option>
             ${deliveryUsers.map(u => `<option value="${u.id}">${Security.escapeHtml(u.name || '')}</option>`).join('')}
           </select>
         </div>
@@ -2122,7 +2132,7 @@ function addSplitPayment() {
       <div class="col-span-2 flex justify-end">
         <button type="button" onclick="this.closest('.split-payment-item').remove(); lucide.createIcons()" class="text-rose-600 hover:text-rose-700 text-sm font-medium flex items-center space-x-1">
           <i data-lucide="trash-2" class="w-4 h-4"></i>
-          <span>Remove</span>
+          <span>${isArSp ? 'إزالة' : 'Remove'}</span>
         </button>
       </div>
     </div>
@@ -2193,7 +2203,7 @@ function saveSplitPayments() {
     amountUSD: totalR2,
     exchangeRate: avgRate
   });
-  showNotification('Saved', 'Split payments saved successfully', 'success');
+  showNotification(state.language === 'ar' ? 'تم الحفظ' : 'Saved', state.language === 'ar' ? 'تم حفظ الدفعات المقسمة بنجاح' : 'Split payments saved successfully', 'success');
   closeModal();
   render();
 }
@@ -2224,7 +2234,7 @@ function _readTopUpForm() {
 function addNewTopUp() {
   const entry = _readTopUpForm();
   if (entry === null && !document.getElementById('topup-amount')) {
-    showNotification('Error', 'Top-up form elements not found', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'لم يتم العثور على عناصر نموذج التعبئة' : 'Top-up form elements not found', 'error');
     return;
   }
   if (!entry) {
@@ -2329,7 +2339,7 @@ function saveRefund() {
   };
   
   updateRecord(state.ads, adId, updates);
-  showNotification('Saved', `Refund ${refundType} applied`, refundType !== 'None' ? 'warning' : 'success');
+  showNotification(state.language === 'ar' ? 'تم الحفظ' : 'Saved', state.language === 'ar' ? `تم تطبيق الاسترجاع (${trStatus(refundType)})` : `Refund ${refundType} applied`, refundType !== 'None' ? 'warning' : 'success');
   closeModal();
   render();
 }

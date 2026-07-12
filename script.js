@@ -1967,11 +1967,11 @@ function showRecoveryKeyModal(plainKey) {
 
 async function generateAndShowRecoveryKey() {
   if (isServerModeEnabled()) {
-    showNotification('Not Available', 'Recovery keys are for local mode only. Use email reset on the server.', 'info');
+    showNotification(state.language === 'ar' ? 'غير متاح' : 'Not Available', state.language === 'ar' ? 'مفاتيح الاستعادة للوضع المحلي فقط. استخدم إعادة التعيين عبر البريد الإلكتروني على السيرفر.' : 'Recovery keys are for local mode only. Use email reset on the server.', 'info');
     return;
   }
   if (!state.currentUser || !isAdminRole(state.currentUser.role)) {
-    showNotification('Access Denied', 'Only Admin can generate a recovery key.', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'فقط المسؤول يمكنه إنشاء مفتاح استعادة.' : 'Only Admin can generate a recovery key.', 'error');
     return;
   }
   const key = generateRecoveryKeyPlain();
@@ -2004,15 +2004,15 @@ async function passwordResetRequestServer() {
     const emailInput = document.getElementById('pwreset-email');
     const email = Security.sanitizeInput(String(emailInput?.value || '').toLowerCase().trim(), { maxLength: 120 });
     if (!Security.isValidEmail(email)) {
-      showNotification('Validation', 'Please enter a valid email address', 'error');
+      showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'الرجاء إدخال بريد إلكتروني صحيح' : 'Please enter a valid email address', 'error');
       return;
     }
     const res = await apiPasswordResetRequest(email);
     state.modalData = { step: 'confirm', email, token: String(res?.resetCode || '') };
     renderModal();
-    showNotification('Reset Code Sent', 'If this account exists, you will receive a reset code.', 'success');
+    showNotification(state.language === 'ar' ? 'تم إرسال رمز إعادة التعيين' : 'Reset Code Sent', state.language === 'ar' ? 'إذا كان هذا الحساب موجوداً، ستستلم رمز إعادة تعيين.' : 'If this account exists, you will receive a reset code.', 'success');
   } catch (e) {
-    showNotification('Error', e.message || 'Failed to request reset', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e.message || (state.language === 'ar' ? 'فشل طلب إعادة التعيين' : 'Failed to request reset'), 'error');
   }
 }
 
@@ -2023,31 +2023,31 @@ async function passwordResetConfirmServer() {
     const confirm = String(document.getElementById('pwreset-confirm')?.value || '');
 
     if (!token) {
-      showNotification('Validation', 'Reset code is required', 'error');
+      showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'رمز إعادة التعيين مطلوب' : 'Reset code is required', 'error');
       return;
     }
     if (!newPassword || newPassword.length < 8) {
-      showNotification('Validation', 'Password must be at least 8 characters', 'error');
+      showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'يجب أن تكون كلمة المرور 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
       return;
     }
     if (newPassword !== confirm) {
-      showNotification('Validation', 'Passwords do not match', 'error');
+      showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'كلمتا المرور غير متطابقتين' : 'Passwords do not match', 'error');
       return;
     }
 
     await apiPasswordResetConfirm(token, newPassword);
     closeModal();
-    showNotification('Success', 'Password reset successfully. Please sign in.', 'success');
+    showNotification(state.language === 'ar' ? 'نجاح' : 'Success', state.language === 'ar' ? 'تمت إعادة تعيين كلمة المرور بنجاح. الرجاء تسجيل الدخول.' : 'Password reset successfully. Please sign in.', 'success');
     render();
   } catch (e) {
-    showNotification('Reset Failed', e.message || 'Invalid or expired reset code', 'error');
+    showNotification(state.language === 'ar' ? 'فشلت إعادة التعيين' : 'Reset Failed', e.message || (state.language === 'ar' ? 'رمز إعادة التعيين غير صحيح أو منتهي الصلاحية' : 'Invalid or expired reset code'), 'error');
   }
 }
 
 async function passwordResetConfirmLocal() {
   try {
     if (isServerModeEnabled()) {
-      showNotification('Server Mode', 'Use server password reset.', 'info');
+      showNotification(state.language === 'ar' ? 'وضع السيرفر' : 'Server Mode', state.language === 'ar' ? 'استخدم إعادة تعيين كلمة المرور عبر السيرفر.' : 'Use server password reset.', 'info');
       return;
     }
     const email = Security.sanitizeInput(String(document.getElementById('pwreset-email')?.value || '').toLowerCase().trim(), { maxLength: 120 });
@@ -2056,11 +2056,11 @@ async function passwordResetConfirmLocal() {
     const confirm = String(document.getElementById('pwreset-confirm')?.value || '');
 
     if (!Security.isValidEmail(email)) {
-      showNotification('Validation', 'Please enter a valid email address', 'error');
+      showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'الرجاء إدخال بريد إلكتروني صحيح' : 'Please enter a valid email address', 'error');
       return;
     }
     if (!state.localRecovery?.hash || !state.localRecovery?.salt) {
-      showNotification('Recovery Not Set', 'No recovery key is configured. Ask Admin to create one in Settings → Security.', 'error');
+      showNotification(state.language === 'ar' ? 'مفتاح الاستعادة غير مُعدّ' : 'Recovery Not Set', state.language === 'ar' ? 'لا يوجد مفتاح استعادة مُعدّ. اطلب من المسؤول إنشاء واحد من الإعدادات ← الأمان.' : 'No recovery key is configured. Ask Admin to create one in Settings → Security.', 'error');
       return;
     }
     const ok = await Security.verifyPassword(
@@ -2071,22 +2071,22 @@ async function passwordResetConfirmLocal() {
       state.localRecovery.iterations || 310000
     );
     if (!ok) {
-      showNotification('Invalid Recovery Key', 'The recovery key is incorrect.', 'error');
+      showNotification(state.language === 'ar' ? 'مفتاح استعادة غير صحيح' : 'Invalid Recovery Key', state.language === 'ar' ? 'مفتاح الاستعادة غير صحيح.' : 'The recovery key is incorrect.', 'error');
       addSecurityLog('password_reset_bad_recovery_key', email);
       return;
     }
     if (!newPassword || newPassword.length < 8) {
-      showNotification('Validation', 'Password must be at least 8 characters', 'error');
+      showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'يجب أن تكون كلمة المرور 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
       return;
     }
     if (newPassword !== confirm) {
-      showNotification('Validation', 'Passwords do not match', 'error');
+      showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'كلمتا المرور غير متطابقتين' : 'Passwords do not match', 'error');
       return;
     }
 
     const user = state.users.find(u => u && !u._deleted && String(u.email || '').toLowerCase() === email);
     if (!user) {
-      showNotification('Not Found', 'No user found with this email (local).', 'error');
+      showNotification(state.language === 'ar' ? 'غير موجود' : 'Not Found', state.language === 'ar' ? 'لا يوجد مستخدم بهذا البريد الإلكتروني (محلي).' : 'No user found with this email (local).', 'error');
       return;
     }
 
@@ -2103,11 +2103,11 @@ async function passwordResetConfirmLocal() {
     flushDirtyCollections().catch(() => {});
 
     closeModal();
-    showNotification('Success', 'Password reset successfully. Please sign in.', 'success');
+    showNotification(state.language === 'ar' ? 'نجاح' : 'Success', state.language === 'ar' ? 'تمت إعادة تعيين كلمة المرور بنجاح. الرجاء تسجيل الدخول.' : 'Password reset successfully. Please sign in.', 'success');
     render();
   } catch (e) {
     console.error('Local password reset error:', e);
-    showNotification('Error', e.message || 'Failed to reset password', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e.message || (state.language === 'ar' ? 'فشلت إعادة تعيين كلمة المرور' : 'Failed to reset password'), 'error');
   }
 }
 
@@ -2241,17 +2241,17 @@ function _listAllStoredPasskeys() {
 async function passkeyRegisterCurrentUser() {
   try {
     if (!_isPasskeySupported()) {
-      showNotification('Not Supported', 'Passkeys require HTTPS or localhost.', 'error');
+      showNotification(state.language === 'ar' ? 'غير مدعوم' : 'Not Supported', state.language === 'ar' ? 'مفاتيح المرور تتطلب HTTPS أو localhost.' : 'Passkeys require HTTPS or localhost.', 'error');
       return;
     }
     if (!state.currentUser?.id) {
-      showNotification('Not Logged In', 'Please login first to add a passkey.', 'error');
+      showNotification(state.language === 'ar' ? 'غير مسجل الدخول' : 'Not Logged In', state.language === 'ar' ? 'الرجاء تسجيل الدخول أولاً لإضافة مفتاح مرور.' : 'Please login first to add a passkey.', 'error');
       return;
     }
 
     const rpId = _getRpId();
     if (!rpId) {
-      showNotification('Not Supported', 'Passkeys require a web origin (HTTPS/localhost).', 'error');
+      showNotification(state.language === 'ar' ? 'غير مدعوم' : 'Not Supported', state.language === 'ar' ? 'مفاتيح المرور تتطلب أصل ويب (HTTPS/localhost).' : 'Passkeys require a web origin (HTTPS/localhost).', 'error');
       return;
     }
 
@@ -2335,34 +2335,34 @@ async function passkeyRegisterCurrentUser() {
       updateRecord(state.users, user.id, { passkeys: user.passkeys });
     }
 
-    showNotification('Success', 'Passkey added successfully', 'success');
+    showNotification(state.language === 'ar' ? 'نجاح' : 'Success', state.language === 'ar' ? 'تمت إضافة مفتاح المرور بنجاح' : 'Passkey added successfully', 'success');
     render(); // refresh settings UI
   } catch (e) {
     console.error('Passkey register error:', e);
-    showNotification('Error', e.message || 'Failed to add passkey', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e.message || (state.language === 'ar' ? 'فشلت إضافة مفتاح المرور' : 'Failed to add passkey'), 'error');
   }
 }
 
 async function passkeySignIn() {
   try {
     if (isServerModeEnabled()) {
-      showNotification('Not Available', 'Passkey sign-in requires server WebAuthn endpoints (next step).', 'info');
+      showNotification(state.language === 'ar' ? 'غير متاح' : 'Not Available', state.language === 'ar' ? 'تسجيل الدخول بمفتاح المرور يتطلب دعم WebAuthn على السيرفر (قريباً).' : 'Passkey sign-in requires server WebAuthn endpoints (next step).', 'info');
       return;
     }
     if (!_isPasskeySupported()) {
-      showNotification('Not Supported', 'Passkeys require HTTPS or localhost.', 'error');
+      showNotification(state.language === 'ar' ? 'غير مدعوم' : 'Not Supported', state.language === 'ar' ? 'مفاتيح المرور تتطلب HTTPS أو localhost.' : 'Passkeys require HTTPS or localhost.', 'error');
       return;
     }
 
     const rpId = _getRpId();
     if (!rpId) {
-      showNotification('Not Supported', 'Passkeys require a web origin (HTTPS/localhost).', 'error');
+      showNotification(state.language === 'ar' ? 'غير مدعوم' : 'Not Supported', state.language === 'ar' ? 'مفاتيح المرور تتطلب أصل ويب (HTTPS/localhost).' : 'Passkeys require a web origin (HTTPS/localhost).', 'error');
       return;
     }
 
     const stored = _listAllStoredPasskeys();
     if (stored.length === 0) {
-      showNotification('No Passkeys', 'No passkeys found. Login with password then add one in Settings → Security.', 'info');
+      showNotification(state.language === 'ar' ? 'لا توجد مفاتيح مرور' : 'No Passkeys', state.language === 'ar' ? 'لا توجد مفاتيح مرور. سجّل الدخول بكلمة المرور ثم أضف واحداً من الإعدادات ← الأمان.' : 'No passkeys found. Login with password then add one in Settings → Security.', 'info');
       return;
     }
 
@@ -2432,18 +2432,18 @@ async function passkeySignIn() {
     }
     state.currentView = getPostLoginLandingViewForUser(user);
     saveState();
-    showNotification('Welcome!', `Logged in as ${Security.escapeHtml(user.name || user.email || user.id)}`, 'success');
+    showNotification(state.language === 'ar' ? 'مرحباً!' : 'Welcome!', state.language === 'ar' ? `تم تسجيل الدخول باسم ${Security.escapeHtml(user.name || user.email || user.id)}` : `Logged in as ${Security.escapeHtml(user.name || user.email || user.id)}`, 'success');
     render();
   } catch (e) {
     console.error('Passkey sign-in error:', e);
-    showNotification('Passkey Login Failed', e.message || 'Failed to sign in with passkey', 'error');
+    showNotification(state.language === 'ar' ? 'فشل الدخول بمفتاح المرور' : 'Passkey Login Failed', e.message || (state.language === 'ar' ? 'فشل تسجيل الدخول بمفتاح المرور' : 'Failed to sign in with passkey'), 'error');
   }
 }
 
 function removePasskey(credentialId) {
   try {
     if (!state.currentUser?.id) {
-      showNotification('Error', 'Not logged in', 'error');
+      showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'غير مسجل الدخول' : 'Not logged in', 'error');
       return;
     }
     const id = String(credentialId || '').trim();
@@ -2453,11 +2453,11 @@ function removePasskey(credentialId) {
     const keys = Array.isArray(user.passkeys) ? user.passkeys : [];
     const next = keys.filter(k => k && k.id !== id);
     updateRecord(state.users, user.id, { passkeys: next });
-    showNotification('Removed', 'Passkey removed', 'success');
+    showNotification(state.language === 'ar' ? 'تم الحذف' : 'Removed', state.language === 'ar' ? 'تم حذف مفتاح المرور' : 'Passkey removed', 'success');
     render();
   } catch (e) {
     console.error('removePasskey error:', e);
-    showNotification('Error', e.message || 'Failed to remove passkey', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e.message || (state.language === 'ar' ? 'فشل حذف مفتاح المرور' : 'Failed to remove passkey'), 'error');
   }
 }
 
@@ -4015,6 +4015,76 @@ function t(key) {
   return lang[key] || key;
 }
 
+// Arabic display names for DYNAMIC status/enum values stored in records.
+// IMPORTANT: this is DISPLAY ONLY — never store the translated value, and CSS
+// class derivation (e.g. status-${s.toLowerCase()}) must keep using the RAW
+// English value. Unmapped values (and English mode) pass through unchanged.
+const STATUS_TRANSLATIONS_AR = {
+  // Payment / receipt status
+  'Paid': 'مدفوع',
+  'Not Paid': 'غير مدفوع',
+  'Unpaid': 'غير مدفوع',
+  'Pending': 'قيد الانتظار',
+  "Won't Pay": 'لن يدفع',
+  // Ad lifecycle
+  'Active': 'نشط',
+  'Paused': 'متوقف مؤقتاً',
+  'Completed': 'مكتمل',
+  'Canceled': 'ملغي',
+  'Cancelled': 'ملغي',
+  'Lost': 'ضائع',
+  'Stopped': 'موقوف',
+  'posted': 'منشور',
+  // Delivery pipeline
+  'Needs Delivery': 'بحاجة توصيل',
+  'In Progress': 'قيد التوصيل',
+  'Delivered': 'تم التوصيل',
+  'Office': 'المكتب',
+  // Receipt usage
+  'Unused': 'غير مستخدم',
+  'Partially Used': 'مستخدم جزئياً',
+  'Fully Used': 'مستخدم بالكامل',
+  'Unknown': 'غير معروف',
+  // Delivered payment results
+  'PAID_EXACT': 'مدفوع بالضبط',
+  'OVERPAID': 'دفع زائد',
+  'UNDERPAID': 'دفع ناقص',
+  // Collection types
+  'office': 'المكتب',
+  'delivery': 'توصيل',
+  'bank': 'مصرف',
+  // Refund
+  'None': 'بدون',
+  'Full': 'كامل',
+  'Partial': 'جزئي',
+};
+
+// Translate a stored status/enum value for display (Arabic mode only).
+function trStatus(value) {
+  if (state.language !== 'ar') return value == null ? '' : String(value);
+  const s = String(value == null ? '' : value).trim();
+  return STATUS_TRANSLATIONS_AR[s] || s;
+}
+
+// Payment channel names: Libyana/Madar/LTT/Sadad/USDT are proper names and
+// stay as-is; only the generic words are localized.
+const METHOD_TRANSLATIONS_AR = {
+  'Cash (LYD)': 'نقدي (LYD)',
+  'Cash (USD)': 'نقدي (USD)',
+  'Bank Transfer': 'حوالة مصرفية',
+  'Bank Transfer (LYD)': 'حوالة مصرفية (LYD)',
+  'Bank Transfer (USD)': 'حوالة مصرفية (USD)',
+  'Transfer Office': 'مكتب صرافة',
+  'Split Payment': 'دفعات مقسّمة',
+};
+
+// Translate a payment-method LABEL for display (values stay raw English).
+function trMethod(value) {
+  if (state.language !== 'ar') return value == null ? '' : String(value);
+  const s = String(value == null ? '' : value).trim();
+  return METHOD_TRANSLATIONS_AR[s] || s;
+}
+
 function getDir() {
   return state.language === 'ar' ? 'rtl' : 'ltr';
 }
@@ -4933,11 +5003,12 @@ function getDeliveryReceiptDueUsage(receipt) {
 }
 
 function formatDateShort(date) {
-  if (!date) return 'Never';
+  const never = state.language === 'ar' ? 'أبداً' : 'Never';
+  if (!date) return never;
   try {
     return new Date(date).toLocaleString();
   } catch (e) {
-    return 'Never';
+    return never;
   }
 }
 
@@ -5325,7 +5396,7 @@ async function apiLogin(email, password) {
   const cooldownCheck = isRateLimited('login');
   if (cooldownCheck.limited) {
     const minutes = Math.ceil(cooldownCheck.retryAfter / 60);
-    const err = new Error(`Too many login attempts. Please wait ${minutes} minute(s) before trying again.`);
+    const err = new Error(state.language === 'ar' ? `محاولات دخول كثيرة جداً. الرجاء الانتظار ${minutes} دقيقة قبل المحاولة مرة أخرى.` : `Too many login attempts. Please wait ${minutes} minute(s) before trying again.`);
     err.status = 429;
     err.retryAfter = cooldownCheck.retryAfter;
     throw err;
@@ -5339,7 +5410,7 @@ async function apiLogin(email, password) {
     // If rate limited, show a user-friendly message
     if (e?.status === 429) {
       const minutes = Math.ceil((e.retryAfter || 60) / 60);
-      showNotification('Too Many Attempts', `Please wait ${minutes} minute(s) before trying again.`, 'error');
+      showNotification(state.language === 'ar' ? 'محاولات كثيرة جداً' : 'Too Many Attempts', state.language === 'ar' ? `الرجاء الانتظار ${minutes} دقيقة قبل المحاولة مرة أخرى.` : `Please wait ${minutes} minute(s) before trying again.`, 'error');
     }
     throw e;
   }
@@ -5440,7 +5511,7 @@ function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
       }
     } catch (e) {
       if (!quiet) {
-        showNotification('Server Error', `Failed to save user changes: ${e?.message || 'Error'}`, 'error');
+        showNotification(state.language === 'ar' ? 'خطأ في السيرفر' : 'Server Error', state.language === 'ar' ? `فشل حفظ تغييرات المستخدم: ${e?.message || 'خطأ'}` : `Failed to save user changes: ${e?.message || 'Error'}`, 'error');
       }
     }
   }, _serverUserUpdate.debounceMs);
@@ -5722,7 +5793,7 @@ async function serverLoadAllData() {
     const pct = Math.round((loadedCount / collections.length) * 100);
     // Update any loading indicator if present
     const progressEl = document.getElementById('loading-progress');
-    if (progressEl) progressEl.textContent = `Loading data... ${pct}%`;
+    if (progressEl) progressEl.textContent = state.language === 'ar' ? `جارٍ تحميل البيانات... ${pct}%` : `Loading data... ${pct}%`;
   };
 
   for (let i = 0; i < collections.length; i += CONCURRENCY) {
@@ -5818,8 +5889,10 @@ async function serverLoadAllData() {
     // Admins can still see this warning for troubleshooting.
     if (isCurrentUserAdmin()) {
       showNotification(
-        'Limited Access',
-        `Your account cannot access: ${forbidden.join(', ')}. Ask an Admin to grant permissions.`,
+        state.language === 'ar' ? 'وصول محدود' : 'Limited Access',
+        state.language === 'ar'
+          ? `حسابك لا يمكنه الوصول إلى: ${forbidden.join(', ')}. اطلب من المسؤول منح الصلاحيات.`
+          : `Your account cannot access: ${forbidden.join(', ')}. Ask an Admin to grant permissions.`,
         'warning'
       );
     }
@@ -5840,8 +5913,10 @@ async function serverLoadAllData() {
     });
     if (names.length) {
     showNotification(
-      'Server Warning',
-      `Some data failed to load: ${names.join(', ')}. You can try Refresh.`,
+      state.language === 'ar' ? 'تحذير السيرفر' : 'Server Warning',
+      state.language === 'ar'
+        ? `فشل تحميل بعض البيانات: ${names.join(', ')}. يمكنك تجربة التحديث.`
+        : `Some data failed to load: ${names.join(', ')}. You can try Refresh.`,
       'warning'
     );
   }
@@ -6181,12 +6256,12 @@ function updateSyncIndicator(status) {
   switch (status) {
     case 'syncing':
       indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300';
-      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-blue-500 rounded-full animate-pulse mr-2"></span>Syncing...';
+      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-blue-500 rounded-full animate-pulse mr-2"></span>' + (state.language === 'ar' ? 'جارٍ المزامنة...' : 'Syncing...');
       indicator.style.opacity = '1';
       break;
     case 'synced':
       indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300';
-      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-emerald-500 rounded-full mr-2"></span>Synced';
+      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-emerald-500 rounded-full mr-2"></span>' + (state.language === 'ar' ? 'تمت المزامنة' : 'Synced');
       // Fade out after 2 seconds
       setTimeout(() => {
         if (indicator) indicator.style.opacity = '0';
@@ -6194,7 +6269,7 @@ function updateSyncIndicator(status) {
       break;
     case 'error':
       indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-rose-100 text-rose-700 dark:bg-rose-900/50 dark:text-rose-300 cursor-pointer';
-      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-rose-500 rounded-full mr-2"></span>Sync failed - Tap to retry';
+      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-rose-500 rounded-full mr-2"></span>' + (state.language === 'ar' ? 'فشلت المزامنة - اضغط لإعادة المحاولة' : 'Sync failed - Tap to retry');
       indicator.style.opacity = '1';
       indicator.onclick = () => manualSyncData();
       break;
@@ -6204,12 +6279,12 @@ function updateSyncIndicator(status) {
 // Manual sync function for users
 async function manualSyncData() {
   if (!isServerModeEnabled()) {
-    showNotification('Offline Mode', 'Not connected to server', 'info');
+    showNotification(state.language === 'ar' ? 'وضع عدم الاتصال' : 'Offline Mode', state.language === 'ar' ? 'غير متصل بالسيرفر' : 'Not connected to server', 'info');
     return;
   }
 
   updateSyncIndicator('syncing');
-  showNotification('Syncing', 'Refreshing data from server...', 'info');
+  showNotification(state.language === 'ar' ? 'جارٍ المزامنة' : 'Syncing', state.language === 'ar' ? 'جارٍ تحديث البيانات من السيرفر...' : 'Refreshing data from server...', 'info');
 
   try {
     // Clear cache to force fresh data
@@ -6220,12 +6295,12 @@ async function manualSyncData() {
 
     await serverLoadAllData();
     updateSyncIndicator('synced');
-    showNotification('Synced', 'Data refreshed successfully', 'success');
+    showNotification(state.language === 'ar' ? 'تمت المزامنة' : 'Synced', state.language === 'ar' ? 'تم تحديث البيانات بنجاح' : 'Data refreshed successfully', 'success');
     forceFullRender();
   } catch (e) {
     console.error('[manualSyncData] Failed:', e);
     updateSyncIndicator('error');
-    showNotification('Sync Failed', 'Could not refresh data. Check your connection.', 'error');
+    showNotification(state.language === 'ar' ? 'فشلت المزامنة' : 'Sync Failed', state.language === 'ar' ? 'تعذر تحديث البيانات. تحقق من اتصالك.' : 'Could not refresh data. Check your connection.', 'error');
   }
 }
 
@@ -6295,7 +6370,7 @@ function startServerLiveSync() {
     _serverLiveSync.onlineHandler = () => {
       if (state.currentUser) {
         console.log('[LiveSync] Network online - triggering immediate sync');
-        showNotification('Back Online', 'Reconnected to server, syncing...', 'info');
+        showNotification(state.language === 'ar' ? 'عاد الاتصال' : 'Back Online', state.language === 'ar' ? 'تمت إعادة الاتصال بالسيرفر، جارٍ المزامنة...' : 'Reconnected to server, syncing...', 'info');
         serverLiveSyncTick().catch(() => {});
       }
     };
@@ -6370,7 +6445,7 @@ async function handleLogin(email, password) {
       state.currentView = getPostLoginLandingViewForUser(user);
       saveState();
 
-      showNotification('Welcome!', `Logged in as ${Security.escapeHtml(user.name)}. Loading data...`, 'success');
+      showNotification(state.language === 'ar' ? 'مرحباً!' : 'Welcome!', state.language === 'ar' ? `تم تسجيل الدخول باسم ${Security.escapeHtml(user.name)}. جارٍ تحميل البيانات...` : `Logged in as ${Security.escapeHtml(user.name)}. Loading data...`, 'success');
       render(); // immediately leave the login screen
 
       // Show loading indicator
@@ -6380,19 +6455,19 @@ async function handleLogin(email, password) {
       loadingOverlay.innerHTML = `
         <div class="text-center">
           <div class="w-12 h-12 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mx-auto mb-4"></div>
-          <p id="loading-progress" class="text-slate-600 dark:text-slate-300 font-medium">Loading data...</p>
-          <p class="text-xs text-slate-400 mt-2">Please wait while we sync your data</p>
+          <p id="loading-progress" class="text-slate-600 dark:text-slate-300 font-medium">${state.language === 'ar' ? 'جارٍ تحميل البيانات...' : 'Loading data...'}</p>
+          <p class="text-xs text-slate-400 mt-2">${state.language === 'ar' ? 'الرجاء الانتظار بينما تتم مزامنة بياناتك' : 'Please wait while we sync your data'}</p>
         </div>
       `;
       document.body.appendChild(loadingOverlay);
 
       try {
         await serverLoadAllData();
-        showNotification('Data Loaded', 'All data synchronized successfully', 'success');
+        showNotification(state.language === 'ar' ? 'تم تحميل البيانات' : 'Data Loaded', state.language === 'ar' ? 'تمت مزامنة جميع البيانات بنجاح' : 'All data synchronized successfully', 'success');
       } catch (e) {
         // serverLoadAllData should be tolerant, but keep a belt-and-suspenders guard.
         console.warn('Server data load failed after login:', e);
-        showNotification('Server Warning', 'Logged in, but some data failed to load. Try Refresh.', 'warning');
+        showNotification(state.language === 'ar' ? 'تحذير السيرفر' : 'Server Warning', state.language === 'ar' ? 'تم تسجيل الدخول، لكن فشل تحميل بعض البيانات. جرّب التحديث.' : 'Logged in, but some data failed to load. Try Refresh.', 'warning');
       } finally {
         // Remove loading overlay
         document.getElementById('data-loading-overlay')?.remove();
@@ -6416,7 +6491,7 @@ async function handleLogin(email, password) {
       // #endregion
       if (e?.status === 401) {
         showNotification(
-          'Login Failed',
+          state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed',
           state.language === 'ar'
             ? 'بيانات الدخول غير صحيحة (حساب السيرفر). إذا كنت تريد حساب المتصفح المحلي، اضغط "استخدام المحلي".'
             : 'Invalid email or password (server account). If you meant your local browser account, click “Use Local”.',
@@ -6435,13 +6510,13 @@ async function handleLogin(email, password) {
   
   // Validate email format
   if (!Security.isValidEmail(sanitizedEmail)) {
-    showNotification('Invalid Email', 'Please enter a valid email address', 'error');
+    showNotification(state.language === 'ar' ? 'بريد إلكتروني غير صحيح' : 'Invalid Email', state.language === 'ar' ? 'الرجاء إدخال بريد إلكتروني صحيح' : 'Please enter a valid email address', 'error');
     addSecurityLog('invalid_email_format', sanitizedEmail);
     return;
   }
 
   if (!Array.isArray(state.users) || state.users.length === 0) {
-    showNotification('No Local Users', 'This deployment uses server login. Please run the backend and login there.', 'error');
+    showNotification(state.language === 'ar' ? 'لا يوجد مستخدمون محليون' : 'No Local Users', state.language === 'ar' ? 'هذا النشر يستخدم تسجيل الدخول عبر السيرفر. الرجاء تشغيل الخادم وتسجيل الدخول هناك.' : 'This deployment uses server login. Please run the backend and login there.', 'error');
     return;
   }
   
@@ -6488,7 +6563,7 @@ async function handleLogin(email, password) {
   // In that case, require password reset instead of silently failing.
   if (!user.passwordHash && !user.password) {
     showNotification(
-      'Login Failed',
+      state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed',
       state.language === 'ar'
         ? 'لا توجد بيانات كلمة مرور لهذا الحساب (ربما من نسخة احتياطية قديمة). استخدم "نسيت كلمة المرور؟" أو أنشئ مفتاح استعادة من الإعدادات.'
         : 'This account has no password data (likely from an old backup). Use “Forgot password?” or generate a Recovery Key in Settings.',
@@ -6585,7 +6660,7 @@ async function handleLogin(email, password) {
 
     saveState();
     addAuditLog('Login', user.id, `User ${Security.escapeHtml(user.name)} logged in`);
-    showNotification('Welcome!', `Logged in as ${Security.escapeHtml(user.name)}`, 'success');
+    showNotification(state.language === 'ar' ? 'مرحباً!' : 'Welcome!', state.language === 'ar' ? `تم تسجيل الدخول باسم ${Security.escapeHtml(user.name)}` : `Logged in as ${Security.escapeHtml(user.name)}`, 'success');
     render();
   } else {
     // #region agent log
@@ -6656,7 +6731,7 @@ function handleLogout() {
   state.currentUser = null;
   state.currentView = 'analytics';
   saveState();
-  showNotification('Logged Out', 'See you soon!', 'info');
+  showNotification(state.language === 'ar' ? 'تم تسجيل الخروج' : 'Logged Out', state.language === 'ar' ? 'إلى اللقاء قريباً!' : 'See you soon!', 'info');
   render();
 }
 
@@ -6852,7 +6927,7 @@ function navigateToInternal(view, pushHistory = true) {
   
   // Secret ideas gating: only Admin can access the platform hub pages
   if (!isCurrentUserAdmin() && PLATFORM_ADMIN_ONLY_VIEWS.has(String(view || ''))) {
-    showNotification('Restricted', state.language === 'ar' ? 'هذه الميزات مخفية حالياً' : 'These features are hidden for now', 'info');
+    showNotification(state.language === 'ar' ? 'غير متاح' : 'Restricted', state.language === 'ar' ? 'هذه الميزات مخفية حالياً' : 'These features are hidden for now', 'info');
     state.currentView = getAlbayanManagerLandingViewForUser(state.currentUser);
     state.isMobileMenuOpen = false;
     if (pushHistory) updateUrlForView(state.currentView);
@@ -6865,7 +6940,7 @@ function navigateToInternal(view, pushHistory = true) {
   if (!isCurrentUserAdmin() && !userCanAccessView(state.currentUser, view)) {
     // Special views that don't need permissions
     if (view !== 'delivery-dashboard' && view !== 'no-access') {
-      showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية' : `You don't have permission to access this page`, 'error');
+      showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية' : `You don't have permission to access this page`, 'error');
       return;
     }
   }
@@ -6917,22 +6992,23 @@ function renderCommandPalette() {
   
   if (!state.commandPaletteOpen) return;
   
+  const isAr = state.language === 'ar';
   const commands = [
-    { id: 'analytics', label: 'Analytics', icon: 'layout-dashboard', action: () => navigateTo('analytics') },
-    { id: 'customers', label: 'Customers', icon: 'smile', action: () => navigateTo('customers') },
-    { id: 'receipts', label: 'Receipts', icon: 'receipt', action: () => navigateTo('receipts') },
-    { id: 'pages', label: 'Pages', icon: 'file-text', action: () => navigateTo('pages') },
-    { id: 'ads', label: 'Ads', icon: 'megaphone', action: () => navigateTo('ads') },
-    { id: 'deliveries', label: 'Deliveries', icon: 'truck', action: () => navigateTo('deliveries') },
-    { id: 'users', label: 'Users', icon: 'users', action: () => navigateTo('users') },
-    { id: 'settings', label: 'Settings', icon: 'settings', action: () => navigateTo('settings') },
-    { id: 'add-customer', label: 'Add Customer', icon: 'user-plus', action: () => { toggleCommandPalette(); showCustomerModal(); } },
-    { id: 'add-ad', label: 'Add Ad', icon: 'plus-circle', action: () => { toggleCommandPalette(); showAdModal(); } },
-    { id: 'add-receipt', label: 'Add Receipt', icon: 'receipt', action: () => { toggleCommandPalette(); showReceiptModal(); } },
-    { id: 'export', label: 'Export Data', icon: 'download', action: () => { toggleCommandPalette(); exportData(); } },
-    { id: 'dark-mode', label: 'Toggle Dark Mode', icon: 'moon', action: () => { toggleCommandPalette(); toggleTheme(); } },
-    { id: 'language', label: 'Toggle Language', icon: 'globe', action: () => { toggleCommandPalette(); toggleLanguage(); } },
-    { id: 'logout', label: 'Logout', icon: 'log-out', action: () => { toggleCommandPalette(); handleLogout(); } },
+    { id: 'analytics', label: isAr ? 'التحليلات' : 'Analytics', icon: 'layout-dashboard', action: () => navigateTo('analytics') },
+    { id: 'customers', label: isAr ? 'العملاء' : 'Customers', icon: 'smile', action: () => navigateTo('customers') },
+    { id: 'receipts', label: isAr ? 'الوصولات' : 'Receipts', icon: 'receipt', action: () => navigateTo('receipts') },
+    { id: 'pages', label: isAr ? 'الصفحات' : 'Pages', icon: 'file-text', action: () => navigateTo('pages') },
+    { id: 'ads', label: isAr ? 'الإعلانات' : 'Ads', icon: 'megaphone', action: () => navigateTo('ads') },
+    { id: 'deliveries', label: isAr ? 'التوصيلات' : 'Deliveries', icon: 'truck', action: () => navigateTo('deliveries') },
+    { id: 'users', label: isAr ? 'المستخدمون' : 'Users', icon: 'users', action: () => navigateTo('users') },
+    { id: 'settings', label: isAr ? 'الإعدادات' : 'Settings', icon: 'settings', action: () => navigateTo('settings') },
+    { id: 'add-customer', label: isAr ? 'إضافة عميل' : 'Add Customer', icon: 'user-plus', action: () => { toggleCommandPalette(); showCustomerModal(); } },
+    { id: 'add-ad', label: isAr ? 'إضافة إعلان' : 'Add Ad', icon: 'plus-circle', action: () => { toggleCommandPalette(); showAdModal(); } },
+    { id: 'add-receipt', label: isAr ? 'إضافة وصل' : 'Add Receipt', icon: 'receipt', action: () => { toggleCommandPalette(); showReceiptModal(); } },
+    { id: 'export', label: isAr ? 'تصدير البيانات' : 'Export Data', icon: 'download', action: () => { toggleCommandPalette(); exportData(); } },
+    { id: 'dark-mode', label: isAr ? 'تبديل الوضع الداكن' : 'Toggle Dark Mode', icon: 'moon', action: () => { toggleCommandPalette(); toggleTheme(); } },
+    { id: 'language', label: isAr ? 'تبديل اللغة' : 'Toggle Language', icon: 'globe', action: () => { toggleCommandPalette(); toggleLanguage(); } },
+    { id: 'logout', label: isAr ? 'تسجيل الخروج' : 'Logout', icon: 'log-out', action: () => { toggleCommandPalette(); handleLogout(); } },
   ];
   
   const modal = document.createElement('div');
@@ -6946,7 +7022,7 @@ function renderCommandPalette() {
         <input 
           type="text" 
           id="command-search" 
-          placeholder="Type a command or search..."
+          placeholder="${isAr ? 'اكتب أمراً أو ابحث...' : 'Type a command or search...'}"
           class="flex-1 bg-transparent outline-none text-slate-800 dark:text-white"
           oninput="filterCommands(this.value)"
         />
@@ -7104,13 +7180,13 @@ async function pushToCloud() {
     state.lastCloudSync = new Date().toISOString();
     saveState();
     renderSyncStatus();
-    showNotification('Synced', 'Data pushed to cloud', 'success');
+    showNotification(state.language === 'ar' ? 'تمت المزامنة' : 'Synced', state.language === 'ar' ? 'تم رفع البيانات إلى السحابة' : 'Data pushed to cloud', 'success');
     
   } catch (error) {
     console.error('Cloud push error:', error);
     state.cloudSyncStatus = 'error';
     renderSyncStatus();
-    showNotification('Sync Error', error.message, 'error');
+    showNotification(state.language === 'ar' ? 'خطأ في المزامنة' : 'Sync Error', error.message, 'error');
   }
 }
 
@@ -7192,7 +7268,7 @@ function renderSyncStatus() {
         ${statusIcons[state.cloudSyncStatus]}
       </div>
       <span class="text-xs font-medium text-slate-700 dark:text-slate-300">
-        ${state.cloudSyncStatus === 'syncing' ? 'Syncing...' : state.cloudSyncStatus === 'success' ? 'Synced' : state.cloudSyncStatus === 'error' ? 'Error' : 'Ready'}
+        ${state.cloudSyncStatus === 'syncing' ? (state.language === 'ar' ? 'جارٍ المزامنة...' : 'Syncing...') : state.cloudSyncStatus === 'success' ? (state.language === 'ar' ? 'تمت المزامنة' : 'Synced') : state.cloudSyncStatus === 'error' ? (state.language === 'ar' ? 'خطأ' : 'Error') : (state.language === 'ar' ? 'جاهز' : 'Ready')}
       </span>
     </div>
   `;
@@ -7372,9 +7448,10 @@ function render() {
 }
 
 function renderFirstRunSetup() {
+  const isAr = state.language === 'ar';
   const modeNote = isServerModeEnabled()
-    ? 'Server mode detected. Please login with your server account.'
-    : 'First time setup (local testing). Create an Admin account to start.';
+    ? (isAr ? 'تم اكتشاف وضع السيرفر. يرجى تسجيل الدخول بحساب السيرفر الخاص بك.' : 'Server mode detected. Please login with your server account.')
+    : (isAr ? 'الإعداد لأول مرة (تجربة محلية). أنشئ حساب مدير للبدء.' : 'First time setup (local testing). Create an Admin account to start.');
 
   return `
     <div class="min-h-screen flex items-center justify-center p-4">
@@ -7387,15 +7464,15 @@ function renderFirstRunSetup() {
 
         <div class="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 mb-6">
           <div class="text-xs text-slate-600 dark:text-slate-300">
-            <div class="font-bold mb-1">Why this setup?</div>
-            <div>For local testing you need one admin user. For internet deployment, users must be created on the server.</div>
+            <div class="font-bold mb-1">${isAr ? 'لماذا هذا الإعداد؟' : 'Why this setup?'}</div>
+            <div>${isAr ? 'للتجربة المحلية تحتاج إلى مستخدم مدير واحد. أما للنشر على الإنترنت، فيجب إنشاء المستخدمين على السيرفر.' : 'For local testing you need one admin user. For internet deployment, users must be created on the server.'}</div>
           </div>
         </div>
 
         <form id="first-run-form" class="space-y-4">
           <div>
-            <label class="block text-sm font-medium mb-2">Admin Name</label>
-            <input type="text" id="first-name" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="Your name" maxlength="100" />
+            <label class="block text-sm font-medium mb-2">${isAr ? 'اسم المدير' : 'Admin Name'}</label>
+            <input type="text" id="first-name" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'اسمك' : 'Your name'}" maxlength="100" />
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('email')}</label>
@@ -7403,14 +7480,14 @@ function renderFirstRunSetup() {
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('password')}</label>
-            <input type="password" id="first-password" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="Min. 8 characters" minlength="8" />
+            <input type="password" id="first-password" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? '8 أحرف على الأقل' : 'Min. 8 characters'}" minlength="8" />
           </div>
           <div>
-            <label class="block text-sm font-medium mb-2">Confirm Password</label>
-            <input type="password" id="first-password-confirm" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="Repeat password" minlength="8" />
+            <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
+            <input type="password" id="first-password-confirm" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'أعد كتابة كلمة المرور' : 'Repeat password'}" minlength="8" />
           </div>
           <button type="submit" class="w-full btn-shine alb-btn-primary text-white font-bold py-3 rounded-xl transition-all">
-            Create Admin (Local)
+            ${isAr ? 'إنشاء مدير (محلي)' : 'Create Admin (Local)'}
           </button>
         </form>
 
@@ -7428,7 +7505,7 @@ function attachFirstRunHandlers() {
     e.preventDefault();
     try {
       if (isServerModeEnabled()) {
-        showNotification('Server Mode', 'Server mode is enabled. Please login with your server account.', 'error');
+        showNotification(state.language === 'ar' ? 'وضع السيرفر' : 'Server Mode', state.language === 'ar' ? 'وضع السيرفر مفعّل. يرجى تسجيل الدخول بحساب السيرفر الخاص بك.' : 'Server mode is enabled. Please login with your server account.', 'error');
         render();
         return;
       }
@@ -7438,20 +7515,21 @@ function attachFirstRunHandlers() {
       const password = document.getElementById('first-password').value;
       const confirm = document.getElementById('first-password-confirm').value;
 
+      const _vErr = state.language === 'ar' ? 'خطأ في التحقق' : 'Validation Error';
       if (!name) {
-        showNotification('Validation Error', 'Name is required', 'error');
+        showNotification(_vErr, state.language === 'ar' ? 'الاسم مطلوب' : 'Name is required', 'error');
         return;
       }
       if (!Security.isValidEmail(email)) {
-        showNotification('Validation Error', 'Please enter a valid email', 'error');
+        showNotification(_vErr, state.language === 'ar' ? 'يرجى إدخال بريد إلكتروني صالح' : 'Please enter a valid email', 'error');
         return;
       }
       if (!password || String(password).length < 8) {
-        showNotification('Validation Error', 'Password must be at least 8 characters', 'error');
+        showNotification(_vErr, state.language === 'ar' ? 'يجب أن تكون كلمة المرور 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
         return;
       }
       if (password !== confirm) {
-        showNotification('Validation Error', 'Passwords do not match', 'error');
+        showNotification(_vErr, state.language === 'ar' ? 'كلمتا المرور غير متطابقتين' : 'Passwords do not match', 'error');
         return;
       }
 
@@ -7481,7 +7559,7 @@ function attachFirstRunHandlers() {
       state.currentView = getPostLoginLandingViewForUser(admin);
       saveState();
 
-      showNotification('Success', 'Admin account created (local)', 'success');
+      showNotification(state.language === 'ar' ? 'نجاح' : 'Success', state.language === 'ar' ? 'تم إنشاء حساب المدير (محلي)' : 'Admin account created (local)', 'success');
       render();
 
       // Generate a Recovery Key on first run (recommended for safe password resets in local mode)
@@ -7492,7 +7570,7 @@ function attachFirstRunHandlers() {
       }
     } catch (err) {
       console.error('First run setup error:', err);
-      showNotification('Error', 'Failed to create admin', 'error');
+      showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'فشل إنشاء حساب المدير' : 'Failed to create admin', 'error');
     }
   });
 }
@@ -7728,8 +7806,8 @@ function renderSidebar() {
         <div class="flex-1 flex items-center justify-center p-6">
           <div class="text-center">
             <i data-lucide="lock" class="w-12 h-12 mx-auto text-slate-300 mb-3"></i>
-            <p class="text-sm text-slate-500">No access granted</p>
-            <p class="text-xs text-slate-400 mt-1">Contact admin for permissions</p>
+            <p class="text-sm text-slate-500">${state.language === 'ar' ? 'لا توجد صلاحية' : 'No access granted'}</p>
+            <p class="text-xs text-slate-400 mt-1">${state.language === 'ar' ? 'تواصل مع المدير للحصول على الصلاحيات' : 'Contact admin for permissions'}</p>
           </div>
         </div>
         <div class="p-4 border-t border-white/10">
@@ -7779,7 +7857,7 @@ function renderSidebar() {
             <div class="font-bold text-sm text-slate-800 dark:text-white truncate">${Security.escapeHtml(state.currentUser?.name || 'User')}</div>
             <div class="text-xs text-slate-500 truncate">${Security.escapeHtml(state.currentUser?.role || 'Employee')}</div>
           </div>
-          <button onclick="editUser('${state.currentUser?.id}')" class="p-2 rounded-lg hover:bg-white/50 dark:hover:bg-slate-700/50 transition-colors" title="Edit Your Profile">
+          <button onclick="editUser('${state.currentUser?.id}')" class="p-2 rounded-lg hover:bg-white/50 dark:hover:bg-slate-700/50 transition-colors" title="${state.language === 'ar' ? 'تعديل ملفك الشخصي' : 'Edit Your Profile'}">
             <i data-lucide="settings" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
           </button>
         </div>
@@ -7822,7 +7900,7 @@ function renderView() {
     case 'settings': return renderSettingsView();
     case 'delivery-dashboard': return renderDeliveryDashboard();
     case 'no-access': return renderNoAccessView();
-    default: return `<div class="text-center py-12"><h2 class="text-2xl font-bold mb-4">${t('welcome')}</h2><p class="text-slate-500">Select a view from the sidebar</p></div>`;
+    default: return `<div class="text-center py-12"><h2 class="text-2xl font-bold mb-4">${t('welcome')}</h2><p class="text-slate-500">${state.language === 'ar' ? 'اختر صفحة من القائمة الجانبية' : 'Select a view from the sidebar'}</p></div>`;
   }
 }
 
@@ -8050,7 +8128,7 @@ function renderServicePlaceholder() {
   const isRTL = state.language === 'ar';
   
   if (!service) {
-    return `<div class="text-center py-12"><p class="text-slate-500">Service not found</p></div>`;
+    return `<div class="text-center py-12"><p class="text-slate-500">${isRTL ? 'الخدمة غير موجودة' : 'Service not found'}</p></div>`;
   }
   
   const serviceName = isRTL ? service.nameAr : service.name;
@@ -8110,7 +8188,7 @@ function walletTransferFromUi() {
 
     const toUser = findUserByEmailOrId(toValue);
     if (!toUser?.id) {
-      showNotification('Validation', state.language === 'ar' ? 'المستلم غير موجود' : 'Recipient not found', 'error');
+      showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'المستلم غير موجود' : 'Recipient not found', 'error');
       return;
     }
 
@@ -8119,7 +8197,7 @@ function walletTransferFromUi() {
     if (!Number.isFinite(amountMinor) || amountMinor <= 0) throw new Error('Invalid amount');
     const fingerprint = `${state.currentUser.id}|${toUser.id}|${currency}|${amountMinor}|${String(memoValue || '').trim()}`;
     if (WalletUiGuard.hit(fingerprint)) {
-      showNotification('Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
+      showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
       return;
     }
     WALLET.transfer(state.currentUser.id, toUser.id, 0, { memo: memoValue, currency, amountMinor, idempotencyKey: `p2p:${Security.generateSecureId('idem')}` });
@@ -8131,10 +8209,10 @@ function walletTransferFromUi() {
     if (amtEl) amtEl.value = '';
     if (memoEl) memoEl.value = '';
 
-    showNotification('Success', state.language === 'ar' ? 'تم التحويل بنجاح' : 'Transfer completed', 'success');
+    showNotification(state.language === 'ar' ? 'نجاح' : 'Success', state.language === 'ar' ? 'تم التحويل بنجاح' : 'Transfer completed', 'success');
     render();
   } catch (e) {
-    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e?.message || 'Transfer failed', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e?.message || (state.language === 'ar' ? 'فشل التحويل' : 'Transfer failed'), 'error');
   }
 }
 
@@ -8142,7 +8220,7 @@ function walletTopUpFromUi() {
   try {
     if (!state.currentUser?.id) return;
     if (!isAdminRole(state.currentUser.role)) {
-      showNotification('Not Allowed', state.language === 'ar' ? 'للأدمن فقط' : 'Admin only', 'error');
+      showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'للأدمن فقط' : 'Admin only', 'error');
       return;
     }
     const toValue = document.getElementById('wallet-topup-to')?.value || '';
@@ -8152,7 +8230,7 @@ function walletTopUpFromUi() {
 
     const toUser = findUserByEmailOrId(toValue);
     if (!toUser?.id) {
-      showNotification('Validation', state.language === 'ar' ? 'المستلم غير موجود' : 'Recipient not found', 'error');
+      showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'المستلم غير موجود' : 'Recipient not found', 'error');
       return;
     }
 
@@ -8161,7 +8239,7 @@ function walletTopUpFromUi() {
     if (!Number.isFinite(amountMinor) || amountMinor <= 0) throw new Error('Invalid amount');
     const fingerprint = `${toUser.id}|${currency}|${amountMinor}|${String(memoValue || '').trim()}`;
     if (WalletUiGuard.hit(fingerprint)) {
-      showNotification('Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
+      showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
       return;
     }
     WALLET.credit(toUser.id, 0, { memo: memoValue || 'Top-up', currency, amountMinor, idempotencyKey: `topup:${Security.generateSecureId('idem')}` });
@@ -8173,10 +8251,10 @@ function walletTopUpFromUi() {
     if (amtEl) amtEl.value = '';
     if (memoEl) memoEl.value = '';
 
-    showNotification('Success', state.language === 'ar' ? 'تم الشحن' : 'Top-up completed', 'success');
+    showNotification(state.language === 'ar' ? 'نجاح' : 'Success', state.language === 'ar' ? 'تم الشحن' : 'Top-up completed', 'success');
     render();
   } catch (e) {
-    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e?.message || 'Top-up failed', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e?.message || (state.language === 'ar' ? 'فشل الشحن' : 'Top-up failed'), 'error');
   }
 }
 
@@ -8189,10 +8267,10 @@ function cancelSubscriptionFromUi(serviceId) {
     const ok = confirm(isRTL ? 'هل تريد إلغاء الاشتراك؟' : 'Cancel this subscription?');
     if (!ok) return;
     SUBSCRIPTIONS.cancel(state.currentUser.id, sid);
-    showNotification('Success', isRTL ? 'تم إلغاء الاشتراك' : 'Subscription canceled', 'success');
+    showNotification(isRTL ? 'نجاح' : 'Success', isRTL ? 'تم إلغاء الاشتراك' : 'Subscription canceled', 'success');
     render();
   } catch (e) {
-    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e?.message || 'Failed to cancel subscription', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e?.message || (state.language === 'ar' ? 'فشل إلغاء الاشتراك' : 'Failed to cancel subscription'), 'error');
   }
 }
 
@@ -8343,7 +8421,7 @@ function renderWalletView() {
           </div>
         ` : `
           <div class="glass-panel p-6 rounded-2xl">
-            <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-4">${t('topUp')} (Admin)</h3>
+            <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-4">${t('topUp')} (${isRTL ? 'أدمن' : 'Admin'})</h3>
             <div class="space-y-4">
               <div>
                 <label class="block text-sm font-medium mb-2">${t('recipient')}</label>
@@ -8508,7 +8586,7 @@ function renderAnalyticsView() {
   const topCustomers = Object.entries(spendByCustomer)
     .map(([customerId, spend]) => ({
       customerId,
-      name: state.customers.find(c => c.id === customerId)?.name || 'Unknown',
+      name: state.customers.find(c => c.id === customerId)?.name || (isAr ? 'غير معروف' : 'Unknown'),
       spend
     }))
     .sort((a, b) => b.spend - a.spend)
@@ -8523,7 +8601,7 @@ function renderAnalyticsView() {
   const topPages = Object.entries(adsByPage)
     .map(([pageId, count]) => ({
       pageId,
-      name: state.pages.find(p => p.id === pageId)?.name || 'Unknown',
+      name: state.pages.find(p => p.id === pageId)?.name || (isAr ? 'غير معروف' : 'Unknown'),
       count
     }))
     .sort((a, b) => b.count - a.count)
@@ -8727,7 +8805,7 @@ function renderAnalyticsView() {
                 <div class="flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/50">
                   <div>
                     <p class="font-medium">${Security.escapeHtml(item.type || '')}: ${Security.escapeHtml(item.name || '')}</p>
-                    <p class="text-[11px] text-slate-500">$${item.value.toFixed(2)} • ${Security.escapeHtml(item.status || '')}</p>
+                    <p class="text-[11px] text-slate-500">$${item.value.toFixed(2)} • ${Security.escapeHtml(trStatus(item.status || ''))}</p>
                   </div>
                   <span class="text-[10px] text-slate-400">${item.at ? new Date(item.at).toLocaleDateString() : ''}</span>
                 </div>
@@ -8828,18 +8906,19 @@ function updateCustomersViewFiltered() {
 }
 
 function renderCustomersGrid(customers) {
+  const isAr = state.language === 'ar';
   if (!Array.isArray(customers) || customers.length === 0) {
-    return '<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="users" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">No customers found</p></div>';
+    return `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="users" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${isAr ? 'لا يوجد عملاء' : 'No customers found'}</p></div>`;
   }
 
   const totalCustomers = customers.length;
   const statsIndex = buildCustomerStatsIndex();
   return customers.map((c, idx) => {
           const stats = getCustomerStats(c.id, statsIndex);
-          const lastAdText = stats.lastAdDate 
+          const lastAdText = stats.lastAdDate
             ? new Date(stats.lastAdDate).toLocaleDateString()
-            : 'Never';
-          
+            : (isAr ? 'أبداً' : 'Never');
+
     const phones = Array.isArray(c.phones) ? c.phones : [];
     const profileLinks = Array.isArray(c.profileLinks) ? c.profileLinks : [];
           // Display number: total - index (so first item = highest number, matching newest-first sort)
@@ -8855,14 +8934,14 @@ function renderCustomersGrid(customers) {
                   </div>
                   <div class="flex items-center space-x-2 mt-1">
                     <span class="text-xs px-2 py-1 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 rounded-full">${Security.escapeHtml(c.platform || '')}</span>
-                    ${stats.linkedPagesCount > 0 ? `<span class="text-xs px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-full">${stats.linkedPagesCount} pages</span>` : ''}
+                    ${stats.linkedPagesCount > 0 ? `<span class="text-xs px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-full">${stats.linkedPagesCount} ${isAr ? 'صفحة' : 'pages'}</span>` : ''}
                   </div>
                 </div>
                 <div class="flex space-x-1">
-                  <button onclick="editCustomer('${c.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="Edit">
+                  <button onclick="editCustomer('${c.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${t('edit')}">
                     <i data-lucide="edit" class="w-4 h-4"></i>
                   </button>
-                  <button onclick="deleteCustomer('${c.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="Delete">
+                  <button onclick="deleteCustomer('${c.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="${t('delete')}">
                     <i data-lucide="trash-2" class="w-4 h-4"></i>
                   </button>
                 </div>
@@ -8872,7 +8951,7 @@ function renderCustomersGrid(customers) {
                 <div class="flex items-start space-x-2">
                   <i data-lucide="phone" class="w-4 h-4 text-slate-400 mt-0.5"></i>
                   <div class="flex-1">
-              ${phones.length > 0 ? phones.map(phone => `<div class="text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone || '')}</div>`).join('') : '<span class="text-slate-400">No phone</span>'}
+              ${phones.length > 0 ? phones.map(phone => `<div class="text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone || '')}</div>`).join('') : `<span class="text-slate-400">${isAr ? 'لا يوجد هاتف' : 'No phone'}</span>`}
                   </div>
                 </div>
 
@@ -8888,43 +8967,43 @@ function renderCustomersGrid(customers) {
                 <!-- Last Ad -->
                 <div class="flex items-center space-x-2 text-xs">
                   <i data-lucide="clock" class="w-3 h-3 text-slate-400"></i>
-                  <span class="text-slate-600 dark:text-slate-400">Last ad: ${lastAdText}</span>
+                  <span class="text-slate-600 dark:text-slate-400">${isAr ? 'آخر إعلان' : 'Last ad'}: ${lastAdText}</span>
                 </div>
 
                 <!-- Financial Summary -->
                 <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
                   <!-- LYD Section - TOTAL PAID -->
                   <div class="mb-2">
-                    <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">Total Paid (LYD)</div>
+                    <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">${isAr ? 'إجمالي المدفوع (LYD)' : 'Total Paid (LYD)'}</div>
                     <div class="grid grid-cols-3 gap-1 text-xs">
                       <div class="text-center p-1.5 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
-                        <div class="text-[10px] text-slate-400">Spent</div>
+                        <div class="text-[10px] text-slate-400">${isAr ? 'المصروف' : 'Spent'}</div>
                         <div class="font-bold text-slate-700 dark:text-slate-300">${stats.totalSpentLYD.toFixed(0)}</div>
                       </div>
                       <div class="text-center p-1.5 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg">
-                        <div class="text-[10px] text-emerald-600">Paid</div>
+                        <div class="text-[10px] text-emerald-600">${isAr ? 'المدفوع' : 'Paid'}</div>
                         <div class="font-bold text-emerald-600">${stats.totalPaidLYD.toFixed(0)}</div>
                       </div>
                       <div class="text-center p-1.5 ${stats.balanceLYD >= 0 ? 'bg-blue-50 dark:bg-blue-900/20' : 'bg-rose-50 dark:bg-rose-900/20'} rounded-lg">
-                        <div class="text-[10px] ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">Balance</div>
+                        <div class="text-[10px] ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${isAr ? 'الرصيد' : 'Balance'}</div>
                         <div class="font-bold ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceLYD >= 0 ? '+' : ''}${stats.balanceLYD.toFixed(0)}</div>
                       </div>
                     </div>
                   </div>
                   <!-- USD Section - TOTAL ADS CREDIT -->
                   <div>
-                    <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">Ads Credit (USD)</div>
+                    <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">${isAr ? 'رصيد الإعلانات (USD)' : 'Ads Credit (USD)'}</div>
                     <div class="grid grid-cols-3 gap-1 text-xs">
                       <div class="text-center p-1.5 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
-                        <div class="text-[10px] text-slate-400">Spent</div>
+                        <div class="text-[10px] text-slate-400">${isAr ? 'المصروف' : 'Spent'}</div>
                         <div class="font-bold text-slate-700 dark:text-slate-300">$${stats.totalSpentUSD.toFixed(2)}</div>
                       </div>
                       <div class="text-center p-1.5 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg">
-                        <div class="text-[10px] text-emerald-600">Paid</div>
+                        <div class="text-[10px] text-emerald-600">${isAr ? 'المدفوع' : 'Paid'}</div>
                         <div class="font-bold text-emerald-600">$${stats.totalPaidUSD.toFixed(2)}</div>
                       </div>
                       <div class="text-center p-1.5 ${stats.balanceUSD >= 0 ? 'bg-blue-50 dark:bg-blue-900/20' : 'bg-rose-50 dark:bg-rose-900/20'} rounded-lg">
-                        <div class="text-[10px] ${stats.balanceUSD >= 0 ? 'text-blue-600' : 'text-rose-600'}">Balance</div>
+                        <div class="text-[10px] ${stats.balanceUSD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${isAr ? 'الرصيد' : 'Balance'}</div>
                         <div class="font-bold ${stats.balanceUSD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceUSD >= 0 ? '+' : ''}$${stats.balanceUSD.toFixed(2)}</div>
                       </div>
                     </div>
@@ -8951,6 +9030,7 @@ function loadMoreCustomers() {
 }
 
 function renderCustomersView() {
+  const isAr = state.language === 'ar';
   const allFilteredCustomers = getFilteredCustomers();
   const allCustomers = getVisibleRecords(state.customers);
 
@@ -8983,7 +9063,7 @@ function renderCustomersView() {
       <div class="flex justify-between items-center">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('customers')}</h1>
-          <p id="customers-count" class="text-sm text-slate-500 mt-1">${allFilteredCustomers.length} of ${allCustomers.length} customers</p>
+          <p id="customers-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allFilteredCustomers.length} من ${allCustomers.length} عميل` : `${allFilteredCustomers.length} of ${allCustomers.length} customers`}</p>
         </div>
         <button onclick="showCustomerModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
           <i data-lucide="user-plus" class="w-4 h-4"></i>
@@ -8993,29 +9073,29 @@ function renderCustomersView() {
 
       <!-- Stats Cards -->
       <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-        ${renderStatCard('Total Customers', allCustomers.length, 'users', 'from-indigo-500 to-purple-600')}
-        ${renderStatCard('Lifetime Revenue (Receipts)', totalRevenue.toFixed(0) + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}
-        ${renderStatCard('Outstanding Debts', totalDebts.toFixed(0) + ' LYD', 'alert-circle', 'from-rose-500 to-pink-600')}
+        ${renderStatCard(isAr ? 'إجمالي العملاء' : 'Total Customers', allCustomers.length, 'users', 'from-indigo-500 to-purple-600')}
+        ${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', totalRevenue.toFixed(0) + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}
+        ${renderStatCard(isAr ? 'الديون المستحقة' : 'Outstanding Debts', totalDebts.toFixed(0) + ' LYD', 'alert-circle', 'from-rose-500 to-pink-600')}
       </div>
 
       <!-- Search and Filters -->
       <div class="glass-panel rounded-xl p-4">
         <div class="flex flex-col md:flex-row gap-4">
-          <input type="text" id="customer-search" placeholder="Search customers..." value="${Security.escapeHtml(state.customerSearch || '')}" class="flex-1 glass-input px-4 py-2 rounded-lg" oninput="onCustomerSearchInput(this.value)" autocomplete="off" />
+          <input type="text" id="customer-search" placeholder="${isAr ? 'بحث عن عملاء...' : 'Search customers...'}" value="${Security.escapeHtml(state.customerSearch || '')}" class="flex-1 glass-input px-4 py-2 rounded-lg" oninput="onCustomerSearchInput(this.value)" autocomplete="off" />
           
           <div class="flex gap-2">
             <!-- Sort Dropdown -->
             <div class="relative">
               <select id="customer-sort" onchange="state.customerSort = this.value; render();" class="glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
-                <option value="newest" ${state.customerSort === 'newest' ? 'selected' : ''}>Newest First</option>
-                <option value="oldest" ${state.customerSort === 'oldest' ? 'selected' : ''}>Oldest First</option>
-                <option value="lastActive" ${state.customerSort === 'lastActive' ? 'selected' : ''}>Last Active (Recently)</option>
-                <option value="highestPaid" ${state.customerSort === 'highestPaid' ? 'selected' : ''}>Highest Paid (Revenue)</option>
-                <option value="lowestPaid" ${state.customerSort === 'lowestPaid' ? 'selected' : ''}>Lowest Paid</option>
-                <option value="mostSpend" ${state.customerSort === 'mostSpend' ? 'selected' : ''}>Most Spend (Ads)</option>
-                <option value="leastSpend" ${state.customerSort === 'leastSpend' ? 'selected' : ''}>Least Spend</option>
-                <option value="biggestCredit" ${state.customerSort === 'biggestCredit' ? 'selected' : ''}>Biggest Credit Balance</option>
-                <option value="highestDebt" ${state.customerSort === 'highestDebt' ? 'selected' : ''}>Highest Debt</option>
+                <option value="newest" ${state.customerSort === 'newest' ? 'selected' : ''}>${isAr ? 'الأحدث أولاً' : 'Newest First'}</option>
+                <option value="oldest" ${state.customerSort === 'oldest' ? 'selected' : ''}>${isAr ? 'الأقدم أولاً' : 'Oldest First'}</option>
+                <option value="lastActive" ${state.customerSort === 'lastActive' ? 'selected' : ''}>${isAr ? 'آخر نشاط (حديثاً)' : 'Last Active (Recently)'}</option>
+                <option value="highestPaid" ${state.customerSort === 'highestPaid' ? 'selected' : ''}>${isAr ? 'الأعلى دفعاً (إيراد)' : 'Highest Paid (Revenue)'}</option>
+                <option value="lowestPaid" ${state.customerSort === 'lowestPaid' ? 'selected' : ''}>${isAr ? 'الأقل دفعاً' : 'Lowest Paid'}</option>
+                <option value="mostSpend" ${state.customerSort === 'mostSpend' ? 'selected' : ''}>${isAr ? 'الأكثر إنفاقاً (إعلانات)' : 'Most Spend (Ads)'}</option>
+                <option value="leastSpend" ${state.customerSort === 'leastSpend' ? 'selected' : ''}>${isAr ? 'الأقل إنفاقاً' : 'Least Spend'}</option>
+                <option value="biggestCredit" ${state.customerSort === 'biggestCredit' ? 'selected' : ''}>${isAr ? 'أكبر رصيد دائن' : 'Biggest Credit Balance'}</option>
+                <option value="highestDebt" ${state.customerSort === 'highestDebt' ? 'selected' : ''}>${isAr ? 'أعلى دين' : 'Highest Debt'}</option>
               </select>
               <i data-lucide="arrow-up-down" class="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400"></i>
             </div>
@@ -9023,9 +9103,9 @@ function renderCustomersView() {
             <!-- Financial Filter -->
             <div class="relative">
               <select id="customer-financial-filter" onchange="state.customerFinancialFilter = this.value; render();" class="glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
-                <option value="all" ${state.customerFinancialFilter === 'all' ? 'selected' : ''}>All Financials</option>
-                <option value="hasCredit" ${state.customerFinancialFilter === 'hasCredit' ? 'selected' : ''}>Has Credit</option>
-                <option value="hasDebt" ${state.customerFinancialFilter === 'hasDebt' ? 'selected' : ''}>Has Debt</option>
+                <option value="all" ${state.customerFinancialFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات المالية' : 'All Financials'}</option>
+                <option value="hasCredit" ${state.customerFinancialFilter === 'hasCredit' ? 'selected' : ''}>${isAr ? 'لديه رصيد دائن' : 'Has Credit'}</option>
+                <option value="hasDebt" ${state.customerFinancialFilter === 'hasDebt' ? 'selected' : ''}>${isAr ? 'عليه دين' : 'Has Debt'}</option>
               </select>
               <i data-lucide="filter" class="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400"></i>
             </div>
@@ -9063,6 +9143,7 @@ function loadMoreReceipts() {
 }
 
 function renderReceiptsView() {
+  const isArV = state.language === 'ar';
   const allReceipts = getVisibleRecords(state.receipts);
   // PERFORMANCE: one Map lookup per receipt instead of scanning the whole
   // customers array for every receipt (same strict-equality semantics).
@@ -9153,11 +9234,11 @@ function renderReceiptsView() {
       <div class="flex justify-between items-center">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('receipts')}</h1>
-          <p id="receipts-count" class="text-sm text-slate-500 mt-1">${filteredReceipts.length}${hasActiveFilters ? ` of ${allReceipts.length}` : ''} receipts</p>
+          <p id="receipts-count" class="text-sm text-slate-500 mt-1">${filteredReceipts.length}${hasActiveFilters ? (isArV ? ` من ${allReceipts.length}` : ` of ${allReceipts.length}`) : ''} ${isArV ? 'وصل' : 'receipts'}</p>
         </div>
         <button onclick="showReceiptModal()" class="btn-shine bg-purple-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
           <i data-lucide="receipt" class="w-4 h-4"></i>
-          <span>New Receipt</span>
+          <span>${isArV ? 'وصل جديد' : 'New Receipt'}</span>
         </button>
       </div>
 
@@ -9170,7 +9251,7 @@ function renderReceiptsView() {
             <input 
               type="text" 
               id="receipt-search-input"
-              placeholder="Search by customer, serial #, or phone..." 
+              placeholder="${isArV ? 'بحث بالعميل أو الرقم التسلسلي أو الهاتف...' : 'Search by customer, serial #, or phone...'}"
               value="${Security.escapeHtml(state.receiptSearch || '')}"
               oninput="updateReceiptSearch(this.value)"
               class="w-full pl-12 pr-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all placeholder:text-slate-400"
@@ -9182,49 +9263,49 @@ function renderReceiptsView() {
           <div class="flex flex-wrap gap-2">
             <!-- Status Filter -->
             <select onchange="updateReceiptFilter('status', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptStatusFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
-              <option value="all" ${state.receiptStatusFilter === 'all' ? 'selected' : ''}>All Status</option>
-              <option value="paid" ${state.receiptStatusFilter === 'paid' ? 'selected' : ''}>✓ Paid</option>
-              <option value="pending" ${state.receiptStatusFilter === 'pending' ? 'selected' : ''}>⏳ Pending</option>
-              <option value="cancelled" ${state.receiptStatusFilter === 'cancelled' ? 'selected' : ''}>✕ Cancelled</option>
+              <option value="all" ${state.receiptStatusFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل الحالات' : 'All Status'}</option>
+              <option value="paid" ${state.receiptStatusFilter === 'paid' ? 'selected' : ''}>✓ ${isArV ? 'مدفوع' : 'Paid'}</option>
+              <option value="pending" ${state.receiptStatusFilter === 'pending' ? 'selected' : ''}>⏳ ${isArV ? 'قيد الانتظار' : 'Pending'}</option>
+              <option value="cancelled" ${state.receiptStatusFilter === 'cancelled' ? 'selected' : ''}>✕ ${isArV ? 'ملغي' : 'Cancelled'}</option>
             </select>
             
             <!-- Payment Method Filter -->
             <select onchange="updateReceiptFilter('payment', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptPaymentFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
-              <option value="all" ${state.receiptPaymentFilter === 'all' ? 'selected' : ''}>All Payments</option>
-              <option value="cash" ${state.receiptPaymentFilter === 'cash' ? 'selected' : ''}>💵 Cash</option>
+              <option value="all" ${state.receiptPaymentFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل طرق الدفع' : 'All Payments'}</option>
+              <option value="cash" ${state.receiptPaymentFilter === 'cash' ? 'selected' : ''}>💵 ${isArV ? 'نقدي' : 'Cash'}</option>
               <option value="usdt" ${state.receiptPaymentFilter === 'usdt' ? 'selected' : ''}>💎 USDT</option>
-              <option value="bank" ${state.receiptPaymentFilter === 'bank' ? 'selected' : ''}>🏦 Bank Transfer</option>
-              <option value="split" ${state.receiptPaymentFilter === 'split' ? 'selected' : ''}>📊 Split Payment</option>
+              <option value="bank" ${state.receiptPaymentFilter === 'bank' ? 'selected' : ''}>🏦 ${isArV ? 'حوالة مصرفية' : 'Bank Transfer'}</option>
+              <option value="split" ${state.receiptPaymentFilter === 'split' ? 'selected' : ''}>📊 ${isArV ? 'دفعات مقسّمة' : 'Split Payment'}</option>
             </select>
             
             <!-- Date Filter -->
             <select onchange="updateReceiptFilter('date', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptDateFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
-              <option value="all" ${state.receiptDateFilter === 'all' ? 'selected' : ''}>All Time</option>
-              <option value="today" ${state.receiptDateFilter === 'today' ? 'selected' : ''}>📅 Today</option>
-              <option value="week" ${state.receiptDateFilter === 'week' ? 'selected' : ''}>📆 This Week</option>
-              <option value="month" ${state.receiptDateFilter === 'month' ? 'selected' : ''}>🗓️ This Month</option>
+              <option value="all" ${state.receiptDateFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل الأوقات' : 'All Time'}</option>
+              <option value="today" ${state.receiptDateFilter === 'today' ? 'selected' : ''}>📅 ${isArV ? 'اليوم' : 'Today'}</option>
+              <option value="week" ${state.receiptDateFilter === 'week' ? 'selected' : ''}>📆 ${isArV ? 'هذا الأسبوع' : 'This Week'}</option>
+              <option value="month" ${state.receiptDateFilter === 'month' ? 'selected' : ''}>🗓️ ${isArV ? 'هذا الشهر' : 'This Month'}</option>
             </select>
             
             <!-- Collected Filter -->
             <select onchange="updateReceiptFilter('collected', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptCollectedFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
-              <option value="all" ${state.receiptCollectedFilter === 'all' ? 'selected' : ''}>All Collection</option>
-              <option value="collected" ${state.receiptCollectedFilter === 'collected' ? 'selected' : ''}>✓ Collected</option>
-              <option value="not-collected" ${state.receiptCollectedFilter === 'not-collected' ? 'selected' : ''}>○ Not Collected</option>
+              <option value="all" ${state.receiptCollectedFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل حالات التحصيل' : 'All Collection'}</option>
+              <option value="collected" ${state.receiptCollectedFilter === 'collected' ? 'selected' : ''}>✓ ${isArV ? 'مُحصَّل' : 'Collected'}</option>
+              <option value="not-collected" ${state.receiptCollectedFilter === 'not-collected' ? 'selected' : ''}>○ ${isArV ? 'غير مُحصَّل' : 'Not Collected'}</option>
             </select>
             
             <!-- Sort By -->
             <select onchange="updateReceiptFilter('sort', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer">
-              <option value="newest" ${state.receiptSortBy === 'newest' ? 'selected' : ''}>🕐 Newest First</option>
-              <option value="oldest" ${state.receiptSortBy === 'oldest' ? 'selected' : ''}>🕐 Oldest First</option>
-              <option value="amount-high" ${state.receiptSortBy === 'amount-high' ? 'selected' : ''}>💰 Highest Amount</option>
-              <option value="amount-low" ${state.receiptSortBy === 'amount-low' ? 'selected' : ''}>💰 Lowest Amount</option>
+              <option value="newest" ${state.receiptSortBy === 'newest' ? 'selected' : ''}>🕐 ${isArV ? 'الأحدث أولاً' : 'Newest First'}</option>
+              <option value="oldest" ${state.receiptSortBy === 'oldest' ? 'selected' : ''}>🕐 ${isArV ? 'الأقدم أولاً' : 'Oldest First'}</option>
+              <option value="amount-high" ${state.receiptSortBy === 'amount-high' ? 'selected' : ''}>💰 ${isArV ? 'الأعلى مبلغاً' : 'Highest Amount'}</option>
+              <option value="amount-low" ${state.receiptSortBy === 'amount-low' ? 'selected' : ''}>💰 ${isArV ? 'الأقل مبلغاً' : 'Lowest Amount'}</option>
             </select>
             
             <!-- Clear Filters Button (span uses display:contents so the button stays a direct flex item) -->
             <span id="receipt-clear-filters" class="contents">${hasActiveFilters ? `
               <button onclick="clearAllReceiptFilters()" class="px-4 py-3 bg-rose-100 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400 border-2 border-rose-200 dark:border-rose-800 rounded-xl text-sm font-bold hover:bg-rose-200 dark:hover:bg-rose-900/50 transition-all flex items-center space-x-2">
                 <i data-lucide="x-circle" class="w-4 h-4"></i>
-                <span>Clear</span>
+                <span>${isArV ? 'مسح' : 'Clear'}</span>
               </button>
             ` : ''}</span>
           </div>
@@ -9233,18 +9314,18 @@ function renderReceiptsView() {
         <!-- Active Filters Display -->
         <div id="receipt-active-filters">${hasActiveFilters ? `
           <div class="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
-            <span class="text-xs font-medium text-slate-500">Active filters:</span>
+            <span class="text-xs font-medium text-slate-500">${isArV ? 'الفلاتر النشطة:' : 'Active filters:'}</span>
             ${state.receiptSearch ? `<span class="px-2 py-1 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full text-xs font-medium flex items-center"><i data-lucide="search" class="w-3 h-3 mr-1"></i>"${Security.escapeHtml(state.receiptSearch)}"</span>` : ''}
-            ${state.receiptStatusFilter !== 'all' ? `<span class="px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-full text-xs font-medium">${state.receiptStatusFilter}</span>` : ''}
-            ${state.receiptPaymentFilter !== 'all' ? `<span class="px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded-full text-xs font-medium">${state.receiptPaymentFilter}</span>` : ''}
-            ${state.receiptDateFilter !== 'all' ? `<span class="px-2 py-1 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-full text-xs font-medium">${state.receiptDateFilter}</span>` : ''}
-            ${state.receiptCollectedFilter !== 'all' ? `<span class="px-2 py-1 ${state.receiptCollectedFilter === 'collected' ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300' : 'bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300'} rounded-full text-xs font-medium">${state.receiptCollectedFilter}</span>` : ''}
+            ${state.receiptStatusFilter !== 'all' ? `<span class="px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-full text-xs font-medium">${isArV ? ({ paid: 'مدفوع', pending: 'قيد الانتظار', cancelled: 'ملغي' })[state.receiptStatusFilter] || state.receiptStatusFilter : state.receiptStatusFilter}</span>` : ''}
+            ${state.receiptPaymentFilter !== 'all' ? `<span class="px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded-full text-xs font-medium">${isArV ? ({ cash: 'نقدي', usdt: 'USDT', bank: 'حوالة مصرفية', split: 'دفعات مقسّمة' })[state.receiptPaymentFilter] || state.receiptPaymentFilter : state.receiptPaymentFilter}</span>` : ''}
+            ${state.receiptDateFilter !== 'all' ? `<span class="px-2 py-1 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-full text-xs font-medium">${isArV ? ({ today: 'اليوم', week: 'هذا الأسبوع', month: 'هذا الشهر' })[state.receiptDateFilter] || state.receiptDateFilter : state.receiptDateFilter}</span>` : ''}
+            ${state.receiptCollectedFilter !== 'all' ? `<span class="px-2 py-1 ${state.receiptCollectedFilter === 'collected' ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300' : 'bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300'} rounded-full text-xs font-medium">${isArV ? (state.receiptCollectedFilter === 'collected' ? 'مُحصَّل' : 'غير مُحصَّل') : state.receiptCollectedFilter}</span>` : ''}
           </div>
         ` : ''}</div>
       </div>
 
       <div id="receipts-grid" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        ${filteredReceipts.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${hasActiveFilters ? 'search-x' : 'receipt'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${hasActiveFilters ? 'No receipts match your filters' : 'No receipts yet'}</p>${hasActiveFilters ? '<button onclick="clearAllReceiptFilters()" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">Clear all filters</button>' : ''}</div>` : visibleReceipts.map((receipt, idx) => {
+        ${filteredReceipts.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${hasActiveFilters ? 'search-x' : 'receipt'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${hasActiveFilters ? (isArV ? 'لا توجد وصولات مطابقة للفلاتر' : 'No receipts match your filters') : (isArV ? 'لا توجد وصولات بعد' : 'No receipts yet')}</p>${hasActiveFilters ? `<button onclick="clearAllReceiptFilters()" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">${isArV ? 'مسح كل الفلاتر' : 'Clear all filters'}</button>` : ''}</div>` : visibleReceipts.map((receipt, idx) => {
           const customer = customersById.get(receipt.customerId);
           const displayFinalNo = receipt.finalReceiptNo || receipt.serialNumber || '';
           const displayTempNo = receipt.tempReceiptNo || '';
@@ -9259,7 +9340,7 @@ function renderReceiptsView() {
           const usage = getReceiptUsageStats(receipt);
           const hasTransfers = (receipt.transfers && receipt.transfers.length > 0);
           const lastTransfer = hasTransfers ? receipt.transfers[receipt.transfers.length - 1] : null;
-          const lastTransferName = lastTransfer ? (customersById.get(lastTransfer.toCustomerId)?.name || 'Unknown') : '';
+          const lastTransferName = lastTransfer ? (customersById.get(lastTransfer.toCustomerId)?.name || (isArV ? 'غير معروف' : 'Unknown')) : '';
           const lastTransferNameSafe = Security.escapeHtml(String(lastTransferName || ''));
           // Defensive: ensure exchange rate is always positive and reasonable
           const rawFxRate = (receipt.exchangeRate || state.defaultExchangeRate || 1);
@@ -9269,9 +9350,9 @@ function renderReceiptsView() {
 
           const creatorId = receipt.createdBy || receipt.creatorId || '';
           const creatorNameRaw = creatorId
-            ? (state.users.find(u => String(u.id) === String(creatorId))?.name || (creatorId === 'system' ? 'System' : 'Unknown'))
-            : 'Unknown';
-          const creatorName = Security.escapeHtml(String(creatorNameRaw || 'Unknown'));
+            ? (state.users.find(u => String(u.id) === String(creatorId))?.name || (creatorId === 'system' ? (isArV ? 'النظام' : 'System') : (isArV ? 'غير معروف' : 'Unknown')))
+            : (isArV ? 'غير معروف' : 'Unknown');
+          const creatorName = Security.escapeHtml(String(creatorNameRaw || (isArV ? 'غير معروف' : 'Unknown')));
           
           return `
             <div class="glass-panel rounded-2xl p-6 hover:scale-[1.01] transition-transform">
@@ -9279,60 +9360,60 @@ function renderReceiptsView() {
                 <div>
                   <div class="flex items-center gap-2">
                     <span class="px-2 py-0.5 rounded-md bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400 text-xs font-bold">#${receiptDisplayNum}</span>
-                  <h3 class="text-lg font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || 'Unknown')}</h3>
+                  <h3 class="text-lg font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || (isArV ? 'غير معروف' : 'Unknown'))}</h3>
                   </div>
                   ${(displayTempNo || displayFinalNo) ? `
                     <p class="text-sm text-indigo-600 font-medium">
-                      Serial: ${displayTempNo && displayFinalNo ? `${displayTempNo} → ${displayFinalNo}` : (displayTempNo ? `${displayTempNo} (Temp)` : displayFinalNo)}
+                      ${isArV ? 'الرقم التسلسلي' : 'Serial'}: ${displayTempNo && displayFinalNo ? `${displayTempNo} → ${displayFinalNo}` : (displayTempNo ? `${displayTempNo} ${isArV ? '(مؤقت)' : '(Temp)'}` : displayFinalNo)}
                     </p>
                   ` : ''}
                   <p class="text-xs text-slate-400 mt-1">${new Date(receipt.createdAt || receipt.startDate).toLocaleString()}</p>
                   <div class="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1 text-[10px] text-slate-500">
-                    <span class="inline-flex items-center gap-1" title="Created by">
+                    <span class="inline-flex items-center gap-1" title="${isArV ? 'تم الإنشاء بواسطة' : 'Created by'}">
                       <i data-lucide="user" class="w-3 h-3"></i>
                       <span>${state.language === 'ar' ? 'تم الإنشاء بواسطة' : 'Created by'}: <span class="font-medium text-slate-700 dark:text-slate-300">${creatorName}</span></span>
                     </span>
-                    <span class="inline-flex items-center gap-1" title="Ads credit usage from this receipt">
+                    <span class="inline-flex items-center gap-1" title="${isArV ? 'استخدام رصيد الإعلانات من هذا الوصل' : 'Ads credit usage from this receipt'}">
                       <i data-lucide="trending-down" class="w-3 h-3"></i>
                       <span>${state.language === 'ar' ? 'رصيد الإعلانات' : 'Ads credit'}: <span class="font-semibold text-emerald-600">$${usage.usedUSD.toFixed(2)}</span> ${state.language === 'ar' ? 'مصروف' : 'spent'} • <span class="font-semibold text-blue-600">$${usage.remainingUSD.toFixed(2)}</span> ${state.language === 'ar' ? 'متبقي' : 'left'} <span class="text-slate-400">(${remainingLYD.toFixed(2)} LYD)</span></span>
                     </span>
                   </div>
                   ${receipt.updatedAt ? `
                     <div class="flex items-center mt-0.5 space-x-2">
-                      <p class="text-[10px] text-amber-500 flex items-center"><i data-lucide="edit-3" class="w-2.5 h-2.5 mr-1"></i>Edited: ${new Date(receipt.updatedAt).toLocaleString()}</p>
-                      ${receipt.editCount ? `<button onclick="showReceiptEditHistory('${receipt.id}')" class="text-[10px] px-1.5 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-full hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors font-medium">${receipt.editCount} edit${receipt.editCount > 1 ? 's' : ''}</button>` : ''}
+                      <p class="text-[10px] text-amber-500 flex items-center"><i data-lucide="edit-3" class="w-2.5 h-2.5 mr-1"></i>${isArV ? 'عُدِّل' : 'Edited'}: ${new Date(receipt.updatedAt).toLocaleString()}</p>
+                      ${receipt.editCount ? `<button onclick="showReceiptEditHistory('${receipt.id}')" class="text-[10px] px-1.5 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-full hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors font-medium">${isArV ? `${receipt.editCount} تعديل` : `${receipt.editCount} edit${receipt.editCount > 1 ? 's' : ''}`}</button>` : ''}
                     </div>
                   ` : ''}
                 </div>
                 <div class="text-right">
                   <div class="text-2xl font-bold text-emerald-600">$${receipt.amountUSD?.toFixed(2)}</div>
                   <div class="text-sm text-slate-500">${receipt.amountLocal?.toFixed(2)} LYD</div>
-                  ${receipt.isPaid ? '<div class="text-xs text-emerald-600 mt-1">✓ Paid</div>' : '<div class="text-xs text-amber-600 mt-1">⏳ Unpaid</div>'}
+                  ${receipt.isPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isArV ? 'مدفوع' : 'Paid'}</div>` : `<div class="text-xs text-amber-600 mt-1">⏳ ${isArV ? 'غير مدفوع' : 'Unpaid'}</div>`}
                   ${receipt.paymentResult ? `
                     <div class="text-[10px] mt-1 ${receipt.paymentResult === 'UNDERPAID' ? 'text-rose-600' : receipt.paymentResult === 'OVERPAID' ? 'text-blue-600' : 'text-emerald-600'} font-bold">
-                      ${receipt.paymentResult === 'PAID_EXACT' ? 'Paid exact' : receipt.paymentResult === 'OVERPAID' ? `Overpaid +${Number(receipt.overpaidAmount || 0).toFixed(0)} LYD` : `Remaining ${Number(receipt.remainingDue || 0).toFixed(0)} LYD`}
+                      ${receipt.paymentResult === 'PAID_EXACT' ? (isArV ? 'مدفوع بالضبط' : 'Paid exact') : receipt.paymentResult === 'OVERPAID' ? `${isArV ? 'دفع زائد' : 'Overpaid'} +${Number(receipt.overpaidAmount || 0).toFixed(0)} LYD` : `${isArV ? 'المتبقي' : 'Remaining'} ${Number(receipt.remainingDue || 0).toFixed(0)} LYD`}
                     </div>
                   ` : ''}
                   ${receipt.feeDifferenceStatus ? `
                     <div class="text-[10px] ${receipt.feeDifferenceStatus === 'SAME' ? 'text-slate-500' : receipt.feeDifferenceStatus === 'LOWER' ? 'text-amber-600' : 'text-purple-600'} font-bold">
-                      Fee ${receipt.feeDifferenceStatus.toLowerCase()}
+                      ${isArV ? `العمولة ${({ SAME: 'مطابقة', LOWER: 'أقل', HIGHER: 'أعلى' })[receipt.feeDifferenceStatus] || receipt.feeDifferenceStatus}` : `Fee ${receipt.feeDifferenceStatus.toLowerCase()}`}
                     </div>
                   ` : ''}
-                  ${hasTransfers ? `<div class="text-xs text-blue-600 mt-1 flex items-center justify-end space-x-1" title="Transferred${lastTransferNameSafe ? ' to ' + lastTransferNameSafe : ''}"><i data-lucide="swap" class="w-3 h-3"></i><span>Transferred</span></div>` : ''}
+                  ${hasTransfers ? `<div class="text-xs text-blue-600 mt-1 flex items-center justify-end space-x-1" title="${isArV ? 'تم التحويل' : 'Transferred'}${lastTransferNameSafe ? (isArV ? ' إلى ' : ' to ') + lastTransferNameSafe : ''}"><i data-lucide="swap" class="w-3 h-3"></i><span>${isArV ? 'تم التحويل' : 'Transferred'}</span></div>` : ''}
                 </div>
               </div>
 
               <div class="space-y-2 mb-4 text-sm border-t border-b border-slate-200 dark:border-slate-700 py-3">
-                <div class="flex justify-between"><span class="text-slate-500">Exchange Rate:</span><span class="font-medium">${receipt.exchangeRate?.toFixed(2)}</span></div>
-                ${receipt.officeFee ? `<div class="flex justify-between"><span class="text-slate-500">Office Fee:</span><span class="font-medium text-amber-600">+${receipt.officeFee?.toFixed(2)} LYD</span></div>` : ''}
-                ${receipt.discount ? `<div class="flex justify-between"><span class="text-slate-500">Discount:</span><span class="font-medium text-emerald-600">-${receipt.discount?.toFixed(2)} LYD</span></div>` : ''}
+                <div class="flex justify-between"><span class="text-slate-500">${isArV ? 'سعر الصرف' : 'Exchange Rate'}:</span><span class="font-medium">${receipt.exchangeRate?.toFixed(2)}</span></div>
+                ${receipt.officeFee ? `<div class="flex justify-between"><span class="text-slate-500">${isArV ? 'عمولة المكتب' : 'Office Fee'}:</span><span class="font-medium text-amber-600">+${receipt.officeFee?.toFixed(2)} LYD</span></div>` : ''}
+                ${receipt.discount ? `<div class="flex justify-between"><span class="text-slate-500">${isArV ? 'الخصم' : 'Discount'}:</span><span class="font-medium text-emerald-600">-${receipt.discount?.toFixed(2)} LYD</span></div>` : ''}
               </div>
 
               ${hasMultiplePayments ? `
                 <div class="mb-4">
                   <h4 class="text-xs font-bold text-slate-500 uppercase mb-2 flex items-center">
                     <i data-lucide="credit-card" class="w-3 h-3 mr-1"></i>
-                    Split Payments (${payments.length})
+                    ${isArV ? `الدفعات المقسّمة (${payments.length})` : `Split Payments (${payments.length})`}
                   </h4>
                   <div class="space-y-2">
                     ${payments.map((payment, idx) => {
@@ -9341,9 +9422,9 @@ function renderReceiptsView() {
                       return `
                       <div class="split-payment-item flex justify-between items-center">
                         <div>
-                          <span class="font-medium text-sm">${payment.method}</span>
-                          ${payment.collectionType ? `<span class="text-xs text-slate-500 ml-2 px-2 py-0.5 bg-slate-100 dark:bg-slate-800 rounded">${payment.collectionType}</span>` : ''}
-                          ${payment.deliveryPersonId ? `<div class="text-xs text-slate-500">${Security.escapeHtml(state.users.find(u => u.id === payment.deliveryPersonId)?.name || 'Unknown')}</div>` : ''}
+                          <span class="font-medium text-sm">${trMethod(payment.method)}</span>
+                          ${payment.collectionType ? `<span class="text-xs text-slate-500 ml-2 px-2 py-0.5 bg-slate-100 dark:bg-slate-800 rounded">${trStatus(payment.collectionType)}</span>` : ''}
+                          ${payment.deliveryPersonId ? `<div class="text-xs text-slate-500">${Security.escapeHtml(state.users.find(u => u.id === payment.deliveryPersonId)?.name || (isArV ? 'غير معروف' : 'Unknown'))}</div>` : ''}
                         </div>
                         <div class="text-right">
                           <div class="font-bold text-indigo-600">${r1.toFixed(2)} LYD</div>
@@ -9353,43 +9434,43 @@ function renderReceiptsView() {
                     `}).join('')}
                   </div>
                   <div class="mt-2 pt-2 border-t border-slate-200 dark:border-slate-700 flex justify-between font-bold text-emerald-600">
-                    <span>Total Paid:</span><span>${totalPaid.toFixed(2)} LYD</span>
+                    <span>${isArV ? 'إجمالي المدفوع' : 'Total Paid'}:</span><span>${totalPaid.toFixed(2)} LYD</span>
                   </div>
                 </div>
               ` : `
                 <div class="mb-4">
                   <h4 class="text-xs font-bold text-slate-500 uppercase mb-2 flex items-center">
                     <i data-lucide="activity" class="w-3 h-3 mr-1"></i>
-                    Usage & Balance
+                    ${isArV ? 'الاستخدام والرصيد' : 'Usage & Balance'}
                   </h4>
                   <div class="grid grid-cols-2 gap-3 text-sm">
                     <div>
                       <div class="text-slate-500 text-xs mb-1 flex items-center space-x-1">
-                        <i data-lucide="link-2" class="w-3 h-3"></i><span>Linked Ads</span>
+                        <i data-lucide="link-2" class="w-3 h-3"></i><span>${isArV ? 'الإعلانات المرتبطة' : 'Linked Ads'}</span>
                       </div>
                       <div class="font-bold text-slate-700 dark:text-slate-300">${usage.fundedAds.length}</div>
                     </div>
                     <div>
                       <div class="text-slate-500 text-xs mb-1 flex items-center space-x-1">
-                        <i data-lucide="gauge" class="w-3 h-3"></i><span>Status</span>
+                        <i data-lucide="gauge" class="w-3 h-3"></i><span>${t('status')}</span>
                       </div>
-                      <span class="status-badge status-${usage.usageStatus.toLowerCase().replace(' ', '-')}">${usage.usageStatus}</span>
+                      <span class="status-badge status-${usage.usageStatus.toLowerCase().replace(' ', '-')}">${trStatus(usage.usageStatus)}</span>
                     </div>
                     <div class="col-span-2">
                       <div class="text-slate-500 text-xs mb-1 flex items-center space-x-1">
-                        <i data-lucide="clock" class="w-3 h-3"></i><span>Last Used</span>
+                        <i data-lucide="clock" class="w-3 h-3"></i><span>${isArV ? 'آخر استخدام' : 'Last Used'}</span>
                       </div>
                       <div class="text-xs text-slate-600 dark:text-slate-400">${formatDateShort(usage.lastUsedAt)}</div>
                     </div>
                     <div class="col-span-2 flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/40">
                       <div class="text-xs text-slate-600 dark:text-slate-300 flex items-center space-x-2">
                         <i data-lucide="swap" class="w-3 h-3"></i>
-                        <span>Transferred: $${usage.transferredUSD.toFixed(2)}</span>
-                        ${hasTransfers && lastTransferName ? `<span class="text-[10px] px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-100">Last: ${lastTransferName}</span>` : ''}
+                        <span>${isArV ? 'المُحوَّل' : 'Transferred'}: $${usage.transferredUSD.toFixed(2)}</span>
+                        ${hasTransfers && lastTransferName ? `<span class="text-[10px] px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-100">${isArV ? 'الأخير' : 'Last'}: ${lastTransferName}</span>` : ''}
                       </div>
                       <div class="flex items-center space-x-3">
-                        ${hasTransfers ? `<button class="text-xs text-blue-600 hover:text-blue-700" title="View transfer history" onclick="showReceiptTransferHistory('${receipt.id}')">History</button>` : ''}
-                        <button class="text-xs text-blue-600 hover:text-blue-700" title="Transfer balance" onclick="showReceiptTransferModal('${receipt.id}')">Transfer</button>
+                        ${hasTransfers ? `<button class="text-xs text-blue-600 hover:text-blue-700" title="${isArV ? 'عرض سجل التحويلات' : 'View transfer history'}" onclick="showReceiptTransferHistory('${receipt.id}')">${isArV ? 'السجل' : 'History'}</button>` : ''}
+                        <button class="text-xs text-blue-600 hover:text-blue-700" title="${isArV ? 'تحويل الرصيد' : 'Transfer balance'}" onclick="showReceiptTransferModal('${receipt.id}')">${isArV ? 'تحويل' : 'Transfer'}</button>
                       </div>
                     </div>
                   </div>
@@ -9419,7 +9500,7 @@ function renderReceiptsView() {
                       ${!receipt.collected ? (isAr ? 'لم يُحصَّل' : 'Not Collected') : fully ? (isAr ? 'تم التحصيل' : 'Collected') : (isAr ? 'تحصيل جزئي' : 'Partially Collected')}
                     </span>
                     ${receipt.collectedAt ? `<span class="text-[10px] text-slate-500">${new Date(receipt.collectedAt).toLocaleDateString()}</span>` : ''}
-                    ${receipt.collectedBy ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">${Security.escapeHtml(state.users.find(u => u.id === receipt.collectedBy)?.name || 'Admin')}</span>` : ''}
+                    ${receipt.collectedBy ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">${Security.escapeHtml(state.users.find(u => u.id === receipt.collectedBy)?.name || (isArV ? 'مدير' : 'Admin'))}</span>` : ''}
                   </div>
                   <div class="flex items-center gap-2 flex-shrink-0">
                     ${receipt.collected ? `<button onclick="uncollectReceipt('${receipt.id}')" class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-300 transition-all" title="${isAr ? 'إلغاء التحصيل' : 'Undo collection'}">${isAr ? 'إلغاء' : 'Undo'}</button>` : ''}
@@ -9435,7 +9516,7 @@ function renderReceiptsView() {
                   </div>
                   ${Array.isArray(receipt.collectedPayments) && receipt.collectedPayments.length && !receipt.collectedMatchesReceipt ? `
                     <div class="flex flex-wrap gap-1 mt-1">
-                      ${receipt.collectedPayments.map(p => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">${Security.escapeHtml(p.method)}: ${(Number(p.amount) || 0).toFixed(0)} LYD</span>`).join('')}
+                      ${receipt.collectedPayments.map(p => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">${Security.escapeHtml(trMethod(p.method))}: ${(Number(p.amount) || 0).toFixed(0)} LYD</span>`).join('')}
                     </div>
                   ` : ''}
                 ` : ''}
@@ -9444,15 +9525,15 @@ function renderReceiptsView() {
 
               <div class="flex flex-col space-y-2 pt-3 border-t border-slate-200 dark:border-slate-700">
                 <div class="flex justify-between items-center">
-                  <span class="status-badge status-${(receipt.status || '').toLowerCase()}">${receipt.status || 'Unknown'}</span>
+                  <span class="status-badge status-${(receipt.status || '').toLowerCase()}">${trStatus(receipt.status || 'Unknown')}</span>
                   <div class="flex space-x-2">
-                    <button onclick="showReceiptTransferModal('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="Transfer balance">
+                    <button onclick="showReceiptTransferModal('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="${isArV ? 'تحويل الرصيد' : 'Transfer balance'}">
                       <i data-lucide="swap" class="w-4 h-4"></i>
                     </button>
                     <button onclick="manageSplitPayments('${receipt.id}')" class="text-purple-600 hover:text-purple-700" title="${state.language === 'ar' ? 'تعديل الدفعات المقسّمة' : 'Manage split payments'}"><i data-lucide="credit-card" class="w-4 h-4"></i></button>
-                    <button onclick="editReceipt('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="Edit"><i data-lucide="edit" class="w-4 h-4"></i></button>
-                    <button onclick="printReceiptCard(this)" class="text-slate-600 hover:text-slate-700" title="Print"><i data-lucide="printer" class="w-4 h-4"></i></button>
-                    <button onclick="deleteReceipt('${receipt.id}')" class="text-rose-600 hover:text-rose-700" title="Delete"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                    <button onclick="editReceipt('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="${t('edit')}"><i data-lucide="edit" class="w-4 h-4"></i></button>
+                    <button onclick="printReceiptCard(this)" class="text-slate-600 hover:text-slate-700" title="${t('print')}"><i data-lucide="printer" class="w-4 h-4"></i></button>
+                    <button onclick="deleteReceipt('${receipt.id}')" class="text-rose-600 hover:text-rose-700" title="${t('delete')}"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
                   </div>
                 </div>
               </div>
@@ -9473,6 +9554,7 @@ function renderReceiptsView() {
 }
 
 function renderPagesView() {
+  const isAr = state.language === 'ar';
   const visiblePages = getVisibleRecords(state.pages);
   
   return `
@@ -9480,7 +9562,7 @@ function renderPagesView() {
       <div class="flex justify-between items-center">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('pages')}</h1>
-          <p class="text-sm text-slate-500 mt-1">${visiblePages.length} Facebook pages</p>
+          <p class="text-sm text-slate-500 mt-1">${isAr ? `${visiblePages.length} صفحة فيسبوك` : `${visiblePages.length} Facebook pages`}</p>
         </div>
         <button onclick="showPageModal()" class="btn-shine bg-blue-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
           <i data-lucide="file-plus" class="w-4 h-4"></i>
@@ -9489,7 +9571,7 @@ function renderPagesView() {
       </div>
 
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        ${visiblePages.length === 0 ? '<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="file-text" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">No pages yet</p></div>' : visiblePages.map((p, idx) => {
+        ${visiblePages.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="file-text" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${isAr ? 'لا توجد صفحات بعد' : 'No pages yet'}</p></div>` : visiblePages.map((p, idx) => {
           const linkedCustomers = p.customerIds ? p.customerIds.map(cid => state.customers.find(c => c.id === cid)).filter(Boolean) : [];
           const pageAds = getVisibleRecords(state.ads).filter(ad => ad.pageId === p.id && ad.recordType === 'ad');
           
@@ -9498,9 +9580,9 @@ function renderPagesView() {
           const lastAdDate = pageAds.length > 0 
             ? Math.max(...pageAds.map(ad => new Date(ad.date || ad.createdAt).getTime()))
             : null;
-          const lastAdText = lastAdDate 
+          const lastAdText = lastAdDate
             ? new Date(lastAdDate).toLocaleDateString()
-            : 'Never';
+            : (isAr ? 'أبداً' : 'Never');
           // Display number: total - index (so first item = highest number)
           const pageDisplayNum = visiblePages.length - idx;
           
@@ -9518,10 +9600,10 @@ function renderPagesView() {
                   <p class="text-sm text-slate-500 mt-1">${Security.escapeHtml(p.category || '')}</p>
                 </div>
                 <div class="flex space-x-1">
-                  <button onclick="editPage('${p.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="Edit">
+                  <button onclick="editPage('${p.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${t('edit')}">
                     <i data-lucide="edit" class="w-4 h-4"></i>
                   </button>
-                  <button onclick="deletePage('${p.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="Delete">
+                  <button onclick="deletePage('${p.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="${t('delete')}">
                     <i data-lucide="trash-2" class="w-4 h-4"></i>
                   </button>
                 </div>
@@ -9532,7 +9614,7 @@ function renderPagesView() {
                   <div>
                   <div class="text-xs font-medium text-slate-500 mb-1.5 flex items-center">
                     <i data-lucide="user" class="w-3 h-3 mr-1"></i>
-                    Owner${linkedCustomers.length > 1 ? 's' : ''}
+                    ${isAr ? (linkedCustomers.length > 1 ? 'المالكون' : 'المالك') : `Owner${linkedCustomers.length > 1 ? 's' : ''}`}
                     </div>
                   ${linkedCustomers.length > 0 ? `
                     <div class="space-y-1">
@@ -9542,26 +9624,26 @@ function renderPagesView() {
                           <span>${Security.escapeHtml(c.name || '')}</span>
                         </div>
                       `).join('')}
-                      ${linkedCustomers.length > 2 ? `<div class="text-xs text-slate-500 ml-3.5">+${linkedCustomers.length - 2} more</div>` : ''}
+                      ${linkedCustomers.length > 2 ? `<div class="text-xs text-slate-500 ml-3.5">+${linkedCustomers.length - 2} ${isAr ? 'آخرون' : 'more'}</div>` : ''}
                     </div>
-                  ` : '<div class="text-sm text-slate-400 ml-4">No owner</div>'}
+                  ` : `<div class="text-sm text-slate-400 ml-4">${isAr ? 'لا يوجد مالك' : 'No owner'}</div>`}
                   </div>
 
                 <!-- Last Ad Time -->
                   <div class="flex items-center space-x-2 text-xs">
                   <i data-lucide="clock" class="w-3 h-3 text-slate-400"></i>
-                  <span class="text-slate-600 dark:text-slate-400">Last ad: ${lastAdText}</span>
+                  <span class="text-slate-600 dark:text-slate-400">${isAr ? 'آخر إعلان' : 'Last ad'}: ${lastAdText}</span>
                   </div>
 
                 <!-- Stats -->
                 <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
                   <div class="grid grid-cols-2 gap-3 text-xs">
                     <div>
-                      <div class="text-slate-500 mb-1">Total Ads</div>
+                      <div class="text-slate-500 mb-1">${t('totalAds')}</div>
                       <div class="font-bold text-slate-700 dark:text-slate-300">${pageAds.length}</div>
                     </div>
                     <div>
-                      <div class="text-slate-500 mb-1">Total Spend</div>
+                      <div class="text-slate-500 mb-1">${isAr ? 'إجمالي الإنفاق' : 'Total Spend'}</div>
                       <div class="font-bold text-emerald-600 dark:text-emerald-400">${totalSpent.toFixed(0)} LYD</div>
                     </div>
                   </div>
@@ -9630,13 +9712,14 @@ function renderAdsView() {
   const allAds = getFilteredAds(customersById);
   const adF = state.adFilters || {};
   const visiblePages = getVisibleRecords(state.pages || []);
+  const isAr = state.language === 'ar';
 
   return `
     <div class="space-y-6 animate-fade-in-up">
       <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('ads')}</h1>
-          <p id="ads-count" class="text-sm text-slate-500 mt-1">${allAds.length} total ads</p>
+          <p id="ads-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allAds.length} إجمالي الإعلانات` : `${allAds.length} total ads`}</p>
         </div>
         <div class="flex flex-wrap gap-2">
           <button onclick="showAdModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
@@ -9651,41 +9734,41 @@ function renderAdsView() {
 
       <div class="glass-panel rounded-xl p-4">
         <div class="flex flex-col md:flex-row gap-2">
-          <input type="text" id="ad-search" placeholder="Search by customer, phone, serial or page..." value="${Security.escapeHtml(state.adSearch || '')}" class="flex-1 glass-input px-4 py-2 rounded-lg" oninput="onAdSearchInput(this.value)" autocomplete="off" />
+          <input type="text" id="ad-search" placeholder="${isAr ? 'بحث بالعميل أو الهاتف أو الرقم التسلسلي أو الصفحة...' : 'Search by customer, phone, serial or page...'}" value="${Security.escapeHtml(state.adSearch || '')}" class="flex-1 glass-input px-4 py-2 rounded-lg" oninput="onAdSearchInput(this.value)" autocomplete="off" />
           <select onchange="updateAdFilter('status', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
-            <option value="all" ${(adF.status || 'all') === 'all' ? 'selected' : ''}>All Status</option>
-            ${AD_STATUSES.map(s => `<option value="${s}" ${adF.status === s ? 'selected' : ''}>${s}</option>`).join('')}
+            <option value="all" ${(adF.status || 'all') === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All Status'}</option>
+            ${AD_STATUSES.map(s => `<option value="${s}" ${adF.status === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
           </select>
           <select onchange="updateAdFilter('payment', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
-            <option value="all" ${(adF.payment || 'all') === 'all' ? 'selected' : ''}>All Payments</option>
-            <option value="paid" ${adF.payment === 'paid' ? 'selected' : ''}>Paid</option>
-            <option value="not_paid" ${adF.payment === 'not_paid' ? 'selected' : ''}>Not Paid</option>
-            <option value="wont_pay" ${adF.payment === 'wont_pay' ? 'selected' : ''}>Won't Pay</option>
+            <option value="all" ${(adF.payment || 'all') === 'all' ? 'selected' : ''}>${isAr ? 'كل طرق الدفع' : 'All Payments'}</option>
+            <option value="paid" ${adF.payment === 'paid' ? 'selected' : ''}>${isAr ? 'مدفوع' : 'Paid'}</option>
+            <option value="not_paid" ${adF.payment === 'not_paid' ? 'selected' : ''}>${isAr ? 'غير مدفوع' : 'Not Paid'}</option>
+            <option value="wont_pay" ${adF.payment === 'wont_pay' ? 'selected' : ''}>${isAr ? 'لن يدفع' : "Won't Pay"}</option>
           </select>
           <select onchange="updateAdFilter('page', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm max-w-[180px]">
-            <option value="all" ${(adF.page || 'all') === 'all' ? 'selected' : ''}>All Pages</option>
+            <option value="all" ${(adF.page || 'all') === 'all' ? 'selected' : ''}>${isAr ? 'كل الصفحات' : 'All Pages'}</option>
             ${visiblePages.map(p => `<option value="${Security.escapeHtml(p.id)}" ${adF.page === p.id ? 'selected' : ''}>${Security.escapeHtml(p.name || '')}</option>`).join('')}
           </select>
         </div>
       </div>
 
       <div id="ads-table-container" class="glass-panel rounded-2xl p-6 overflow-x-auto">
-        ${allAds.length === 0 ? '<div class="text-center py-12"><i data-lucide="inbox" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">No ads yet</p></div>' : `
+        ${allAds.length === 0 ? `<div class="text-center py-12"><i data-lucide="inbox" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${isAr ? 'لا توجد إعلانات بعد' : 'No ads yet'}</p></div>` : `
           <table class="w-full text-sm">
             <thead>
               <tr class="border-b-2 border-indigo-200 dark:border-indigo-800">
                 <th class="text-left py-3 px-2 w-12">#</th>
-                <th class="text-left py-3 px-2">Customer</th>
-                <th class="text-left py-3 px-2">Page</th>
-                <th class="text-left py-3 px-2">Amount</th>
-                <th class="text-left py-3 px-2">Rate</th>
-                <th class="text-left py-3 px-2">Local</th>
-                <th class="text-left py-3 px-2">Payment</th>
-                <th class="text-left py-3 px-2">Status</th>
-                <th class="text-left py-3 px-2">Delivery</th>
-                <th class="text-left py-3 px-2">Serial</th>
-                <th class="text-left py-3 px-2">Date</th>
-                <th class="text-left py-3 px-2">Actions</th>
+                <th class="text-left py-3 px-2">${isAr ? 'العميل' : 'Customer'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'الصفحة' : 'Page'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'المبلغ' : 'Amount'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'السعر' : 'Rate'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'بالعملة المحلية' : 'Local'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'الدفع' : 'Payment'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'الحالة' : 'Status'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'التوصيل' : 'Delivery'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'الرقم التسلسلي' : 'Serial'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'التاريخ' : 'Date'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'إجراءات' : 'Actions'}</th>
               </tr>
             </thead>
             <tbody>
@@ -9740,11 +9823,11 @@ function renderAdsView() {
                 return `
                   <tr class="border-b border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50">
                     <td class="py-3 px-2" data-label="#">
-                      <div class="font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || 'Unknown')}</div>
+                      <div class="font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</div>
                       ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
                     </td>
                     <td class="py-3 px-2 hidden md:table-cell">
-                      <div class="font-medium">${Security.escapeHtml(customer?.name || 'Unknown')}</div>
+                      <div class="font-medium">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</div>
                       ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
                     </td>
                     <td class="py-3 px-2" data-label="Page">
@@ -9759,8 +9842,8 @@ function renderAdsView() {
                     <td class="py-3 px-2" data-label="Payment">
                       ${paymentMethods.length ? `
                         <div class="flex flex-wrap gap-1">
-                          ${paymentMethods.slice(0, 3).map(m => `<span class="payment-badge text-xs">${Security.escapeHtml(m)}</span>`).join('')}
-                          ${paymentMethods.length > 3 ? `<span class="text-xs text-slate-500" title="${Security.escapeHtml(paymentMethods.slice(3).join(', '))}">+${paymentMethods.length - 3}</span>` : ''}
+                          ${paymentMethods.slice(0, 3).map(m => `<span class="payment-badge text-xs">${Security.escapeHtml(trMethod(m))}</span>`).join('')}
+                          ${paymentMethods.length > 3 ? `<span class="text-xs text-slate-500" title="${Security.escapeHtml(paymentMethods.slice(3).map(m => trMethod(m)).join(', '))}">+${paymentMethods.length - 3}</span>` : ''}
                         </div>
                       ` : '<span class="text-xs text-slate-400">-</span>'}
                     </td>
@@ -9776,12 +9859,12 @@ function renderAdsView() {
                         'Canceled': 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
                         'Lost': 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
                         'Stopped': 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
-                      })[ad.status] || 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300'}">${Security.escapeHtml(ad.status || 'Active')}</span>
-                      ${ad.isPaid ? '<div class="text-xs text-emerald-600 mt-1">✓ Paid</div>' : ''}
+                      })[ad.status] || 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300'}">${Security.escapeHtml(trStatus(ad.status || 'Active'))}</span>
+                      ${ad.isPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isAr ? 'مدفوع' : 'Paid'}</div>` : ''}
                       ${ad.status === 'Stopped' && ad.spentUSD !== undefined ? `
                         <div class="text-xs mt-1 space-y-0.5">
-                          <div class="text-orange-600">Spent: $${ad.spentUSD.toFixed(2)}</div>
-                          <div class="text-emerald-600">Remaining: $${((ad.amountUSD || 0) - ad.spentUSD).toFixed(2)}</div>
+                          <div class="text-orange-600">${isAr ? 'المصروف' : 'Spent'}: $${ad.spentUSD.toFixed(2)}</div>
+                          <div class="text-emerald-600">${isAr ? 'المتبقي' : 'Remaining'}: $${((ad.amountUSD || 0) - ad.spentUSD).toFixed(2)}</div>
                         </div>
                       ` : ''}
                     </td>
@@ -9790,14 +9873,14 @@ function renderAdsView() {
                            changes happen via the Deliveries page / delivery
                            dashboard flows, not inline in this table. -->
                       <div class="inline-block px-2 py-1 rounded-lg text-xs delivery-${effectiveDeliveryStatus.toLowerCase().replace(' ', '')} bg-slate-100 dark:bg-slate-700">
-                        ${effectiveDeliveryStatus}
-                        ${isLinkedToDeliveryReceipt ? '<div class="text-[10px] text-slate-400 mt-0.5">via Receipt</div>' : ''}
+                        ${trStatus(effectiveDeliveryStatus)}
+                        ${isLinkedToDeliveryReceipt ? `<div class="text-[10px] text-slate-400 mt-0.5">${isAr ? 'عبر وصل' : 'via Receipt'}</div>` : ''}
                       </div>
                       ${deliveryPerson ? `<div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(deliveryPerson.name || '')}</div>` : ''}
                     </td>
                     <td class="py-3 px-2" data-label="Serial">
                       ${serialDisplay ? `<span class="font-mono text-xs">${Security.escapeHtml(serialDisplay)}</span>` : '-'}
-                      ${ad.editCount ? `<button onclick="showAdEditHistory('${ad.id}')" class="block mt-1 text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium">${ad.editCount} edit${ad.editCount > 1 ? 's' : ''}</button>` : ''}
+                      ${ad.editCount ? `<button onclick="showAdEditHistory('${ad.id}')" class="block mt-1 text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium">${isAr ? `${ad.editCount} تعديل` : `${ad.editCount} edit${ad.editCount > 1 ? 's' : ''}`}</button>` : ''}
                     </td>
                     <td class="py-3 px-2 text-xs" data-label="Date">
                       <div class="text-slate-500">${(() => { const d = new Date(ad.startDate); return isNaN(d) ? '-' : d.toLocaleDateString(); })()}</div>
@@ -9806,7 +9889,7 @@ function renderAdsView() {
                         // of the latest top-up — visible without opening the ad.
                         const e = new Date(ad.endDate);
                         const endLine = !isNaN(e) && ad.endDate
-                          ? `<div class="text-slate-700 dark:text-slate-300 font-medium">End: ${e.toLocaleDateString()}${(parseFloat(ad.extraTimeMinutes) || 0) > 0 ? ` <span class="text-amber-600">+${ad.extraTimeMinutes}m</span>` : ''}</div>`
+                          ? `<div class="text-slate-700 dark:text-slate-300 font-medium">${isAr ? 'الانتهاء' : 'End'}: ${e.toLocaleDateString()}${(parseFloat(ad.extraTimeMinutes) || 0) > 0 ? ` <span class="text-amber-600">+${ad.extraTimeMinutes}${isAr ? 'د' : 'm'}</span>` : ''}</div>`
                           : '';
                         const ups = Array.isArray(ad.topUps) ? ad.topUps : [];
                         let upLine = '';
@@ -9814,27 +9897,27 @@ function renderAdsView() {
                           const lastDate = ups.map(t => t && t.date).filter(Boolean).sort().slice(-1)[0];
                           const ld = lastDate ? new Date(lastDate) : null;
                           const when = ld && !isNaN(ld) ? `: ${ld.toLocaleDateString()}` : '';
-                          upLine = `<div class="text-emerald-600 dark:text-emerald-400 font-medium" title="${ups.length} top-up(s), total $${ups.reduce((s, t) => s + (parseFloat(t && t.amount) || 0), 0).toFixed(2)}">&#8593; Topped up${when}</div>`;
+                          upLine = `<div class="text-emerald-600 dark:text-emerald-400 font-medium" title="${isAr ? `${ups.length} عملية شحن، الإجمالي $` : `${ups.length} top-up(s), total $`}${ups.reduce((s, t) => s + (parseFloat(t && t.amount) || 0), 0).toFixed(2)}">&#8593; ${isAr ? 'تم الشحن' : 'Topped up'}${when}</div>`;
                         }
                         return endLine + upLine;
                       })()}
                     </td>
                     <td class="py-3 px-2" data-label="Actions">
                       <div class="flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
-                        <button onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="Top-ups">
+                        <button onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="${isAr ? 'عمليات الشحن' : 'Top-ups'}">
                           <i data-lucide="trending-up" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.topUps && ad.topUps.length > 0 ? `<span class="text-xs">${ad.topUps.length}</span>` : ''}
                         </button>
-                        <button onclick="manageRefund('${ad.id}')" class="text-amber-600 hover:text-amber-700 p-2 md:p-0" title="Refund">
+                        <button onclick="manageRefund('${ad.id}')" class="text-amber-600 hover:text-amber-700 p-2 md:p-0" title="${isAr ? 'استرجاع' : 'Refund'}">
                           <i data-lucide="arrow-left-circle" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.refundType && ad.refundType !== 'None' ? `<span class="text-xs">!</span>` : ''}
                         </button>
-                        <button onclick="stopAd('${ad.id}')" class="text-orange-600 hover:text-orange-700 p-2 md:p-0" title="${ad.status === 'Stopped' ? 'Edit Stop Details' : 'Stop Ad'}">
+                        <button onclick="stopAd('${ad.id}')" class="text-orange-600 hover:text-orange-700 p-2 md:p-0" title="${ad.status === 'Stopped' ? (isAr ? 'تعديل تفاصيل الإيقاف' : 'Edit Stop Details') : (isAr ? 'إيقاف الإعلان' : 'Stop Ad')}">
                           <i data-lucide="${ad.status === 'Stopped' ? 'edit' : 'square'}" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.status === 'Stopped' ? '<span class="text-xs">!</span>' : ''}
                         </button>
-                        <button onclick="editAd('${ad.id}')" class="text-indigo-600 hover:text-indigo-700 p-2 md:p-0" title="Edit"><i data-lucide="edit" class="w-5 h-5 md:w-4 md:h-4"></i></button>
-                        <button onclick="deleteAd('${ad.id}')" class="text-rose-600 hover:text-rose-700 p-2 md:p-0" title="Delete"><i data-lucide="trash-2" class="w-5 h-5 md:w-4 md:h-4"></i></button>
+                        <button onclick="editAd('${ad.id}')" class="text-indigo-600 hover:text-indigo-700 p-2 md:p-0" title="${t('edit')}"><i data-lucide="edit" class="w-5 h-5 md:w-4 md:h-4"></i></button>
+                        <button onclick="deleteAd('${ad.id}')" class="text-rose-600 hover:text-rose-700 p-2 md:p-0" title="${t('delete')}"><i data-lucide="trash-2" class="w-5 h-5 md:w-4 md:h-4"></i></button>
                       </div>
                     </td>
                   </tr>
@@ -9849,6 +9932,7 @@ function renderAdsView() {
 }
 
 function renderDeliveriesView() {
+  const isAr = state.language === 'ar';
   // Deliveries are tracked ONLY on receipts (ads are not a delivery source of truth).
   const allReceipts = getVisibleRecords(state.receipts);
   const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
@@ -9933,21 +10017,21 @@ function renderDeliveriesView() {
       <!-- Header -->
       <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
         <div>
-          <h1 class="text-2xl font-bold text-slate-800 dark:text-white">Delivery Operations</h1>
-          <p class="text-sm text-slate-500 mt-0.5">${deliveryReceipts.length} deliveries • Tracking receipts only</p>
+          <h1 class="text-2xl font-bold text-slate-800 dark:text-white">${isAr ? 'عمليات التوصيل' : 'Delivery Operations'}</h1>
+          <p class="text-sm text-slate-500 mt-0.5">${isAr ? `${deliveryReceipts.length} توصيلة • تتبع الوصولات فقط` : `${deliveryReceipts.length} deliveries • Tracking receipts only`}</p>
         </div>
         <div class="flex items-center space-x-2">
           <button onclick="refreshDeliveries()" class="glass-panel px-3 py-2 rounded-xl text-sm font-medium flex items-center space-x-2 hover:bg-slate-100 dark:hover:bg-slate-800">
             <i data-lucide="refresh-cw" class="w-4 h-4"></i>
-            <span>Refresh</span>
+            <span>${isAr ? 'تحديث' : 'Refresh'}</span>
           </button>
-          <button onclick="checkStuckDeliveries()" class="glass-panel px-3 py-2 rounded-xl text-sm font-medium flex items-center space-x-2 hover:bg-amber-50 dark:hover:bg-amber-900/20" title="Find deliveries stuck in progress for more than 3 days">
+          <button onclick="checkStuckDeliveries()" class="glass-panel px-3 py-2 rounded-xl text-sm font-medium flex items-center space-x-2 hover:bg-amber-50 dark:hover:bg-amber-900/20" title="${isAr ? 'البحث عن توصيلات عالقة قيد التنفيذ لأكثر من 3 أيام' : 'Find deliveries stuck in progress for more than 3 days'}">
             <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-600"></i>
-            <span class="text-amber-700 dark:text-amber-400">Check Stuck</span>
+            <span class="text-amber-700 dark:text-amber-400">${isAr ? 'فحص العالقة' : 'Check Stuck'}</span>
           </button>
           <button onclick="exportDeliveryReport()" class="btn-shine bg-indigo-600 text-white px-3 py-2 rounded-xl text-sm font-bold flex items-center space-x-2">
             <i data-lucide="download" class="w-4 h-4"></i>
-            <span>Export</span>
+            <span>${t('export')}</span>
           </button>
         </div>
       </div>
@@ -9956,36 +10040,36 @@ function renderDeliveriesView() {
       <div class="glass-panel rounded-2xl p-4">
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <div class="p-3 rounded-xl bg-amber-50 dark:bg-amber-900/15 border-l-4 border-amber-500">
-            <div class="text-[11px] font-bold text-amber-700 dark:text-amber-400 uppercase tracking-wide">Pending Delivery</div>
+            <div class="text-[11px] font-bold text-amber-700 dark:text-amber-400 uppercase tracking-wide">${isAr ? 'بانتظار التوصيل' : 'Pending Delivery'}</div>
             <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.pendingDelivery}</div>
-            <div class="text-[11px] text-slate-500">Receipts not yet delivered</div>
+            <div class="text-[11px] text-slate-500">${isAr ? 'وصولات لم تُوصَّل بعد' : 'Receipts not yet delivered'}</div>
           </div>
           <div class="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-900/15 border-l-4 border-emerald-500">
-            <div class="text-[11px] font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wide">Uncollected Value</div>
+            <div class="text-[11px] font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wide">${isAr ? 'قيمة غير مُحصَّلة' : 'Uncollected Value'}</div>
             <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.uncollectedLYD.toLocaleString()} <span class="text-sm">LYD</span></div>
-            <div class="text-[11px] text-slate-500">To be collected from customers</div>
+            <div class="text-[11px] text-slate-500">${isAr ? 'للتحصيل من العملاء' : 'To be collected from customers'}</div>
           </div>
           <div class="p-3 rounded-xl bg-purple-50 dark:bg-purple-900/15 border-l-4 border-purple-500">
-            <div class="text-[11px] font-bold text-purple-700 dark:text-purple-400 uppercase tracking-wide">Held by Drivers</div>
+            <div class="text-[11px] font-bold text-purple-700 dark:text-purple-400 uppercase tracking-wide">${isAr ? 'بحوزة السائقين' : 'Held by Drivers'}</div>
             <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.heldByDrivers}</div>
-            <div class="text-[11px] text-slate-500">Delivered but not in office</div>
+            <div class="text-[11px] text-slate-500">${isAr ? 'تم توصيلها لكن ليست في المكتب' : 'Delivered but not in office'}</div>
           </div>
           <div class="p-3 rounded-xl bg-blue-50 dark:bg-blue-900/15 border-l-4 border-blue-500">
-            <div class="text-[11px] font-bold text-blue-700 dark:text-blue-400 uppercase tracking-wide">Driver Cash Value</div>
+            <div class="text-[11px] font-bold text-blue-700 dark:text-blue-400 uppercase tracking-wide">${isAr ? 'قيمة نقد السائقين' : 'Driver Cash Value'}</div>
             <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.driverCashLYD.toLocaleString()} <span class="text-sm">LYD</span></div>
-            <div class="text-[11px] text-slate-500">To be collected from drivers</div>
+            <div class="text-[11px] text-slate-500">${isAr ? 'للتحصيل من السائقين' : 'To be collected from drivers'}</div>
           </div>
         </div>
         <!-- Pipeline as a slim strip (same numbers, no icon towers) -->
         <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700 flex flex-wrap items-center gap-x-5 gap-y-1 text-sm">
-          <span class="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Pipeline</span>
-          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-slate-400"></span>Pending Assignment <b>${stats.pendingAssignment}</b></span>
+          <span class="text-[11px] font-bold text-slate-400 uppercase tracking-wide">${isAr ? 'خط السير' : 'Pipeline'}</span>
+          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-slate-400"></span>${isAr ? 'بانتظار التعيين' : 'Pending Assignment'} <b>${stats.pendingAssignment}</b></span>
           <span class="text-slate-300">→</span>
-          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-blue-500"></span>In Progress <b>${stats.inProgress}</b></span>
+          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-blue-500"></span>${isAr ? 'قيد التوصيل' : 'In Progress'} <b>${stats.inProgress}</b></span>
           <span class="text-slate-300">→</span>
-          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>Completed <b>${stats.completed}</b></span>
+          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>${isAr ? 'مكتمل' : 'Completed'} <b>${stats.completed}</b></span>
           <span class="text-slate-300">→</span>
-          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>Canceled <b>${stats.canceled}</b></span>
+          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>${isAr ? 'ملغي' : 'Canceled'} <b>${stats.canceled}</b></span>
         </div>
       </div>
 
@@ -9993,24 +10077,24 @@ function renderDeliveriesView() {
       <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
         <!-- Driver Performance (compact rows, same numbers) -->
         <div class="glass-panel rounded-2xl p-4">
-          <h2 class="text-base font-bold text-slate-800 dark:text-white mb-3">Driver Performance</h2>
+          <h2 class="text-base font-bold text-slate-800 dark:text-white mb-3">${isAr ? 'أداء السائقين' : 'Driver Performance'}</h2>
           <div class="space-y-2 max-h-80 overflow-y-auto">
             ${driverPerformance.length === 0 ? `
-              <div class="text-center py-6 text-slate-500 text-sm">No delivery drivers found</div>
+              <div class="text-center py-6 text-slate-500 text-sm">${isAr ? 'لا يوجد سائقو توصيل' : 'No delivery drivers found'}</div>
             ` : driverPerformance.map((driver, idx) => `
               <div class="p-3 rounded-xl border ${idx === 0 && driver.totalAssigned > 0 ? 'border-amber-300 bg-amber-50/60 dark:bg-amber-900/15 dark:border-amber-700' : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50'}">
                 <div class="flex items-center justify-between gap-2">
                   <div class="font-bold text-sm text-slate-800 dark:text-white truncate">
                     ${idx === 0 && driver.totalAssigned > 0 ? '⭐ ' : ''}${Security.escapeHtml(driver.name || '')}
-                    <span class="font-normal text-xs text-slate-500">• ${driver.totalAssigned} assigned</span>
+                    <span class="font-normal text-xs text-slate-500">• ${driver.totalAssigned} ${isAr ? 'مُعيَّنة' : 'assigned'}</span>
                   </div>
                   <div class="text-sm font-black ${driver.successRate >= 80 ? 'text-emerald-600' : driver.successRate >= 50 ? 'text-amber-600' : 'text-slate-500'}">${driver.successRate}%</div>
                 </div>
                 <div class="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-slate-600 dark:text-slate-300">
-                  <span>Pending <b>${driver.pending}</b></span>
-                  <span class="text-blue-600 dark:text-blue-400">Active <b>${driver.inProgress}</b></span>
-                  <span class="text-emerald-600 dark:text-emerald-400">Done <b>${driver.completed}</b></span>
-                  <span class="text-purple-600 dark:text-purple-400">Held <b>${driver.heldCash.toLocaleString()}</b> LYD</span>
+                  <span>${isAr ? 'معلّقة' : 'Pending'} <b>${driver.pending}</b></span>
+                  <span class="text-blue-600 dark:text-blue-400">${isAr ? 'نشطة' : 'Active'} <b>${driver.inProgress}</b></span>
+                  <span class="text-emerald-600 dark:text-emerald-400">${isAr ? 'منجزة' : 'Done'} <b>${driver.completed}</b></span>
+                  <span class="text-purple-600 dark:text-purple-400">${isAr ? 'بحوزته' : 'Held'} <b>${driver.heldCash.toLocaleString()}</b> LYD</span>
                 </div>
               </div>
             `).join('')}
@@ -10020,18 +10104,18 @@ function renderDeliveriesView() {
         <!-- Delivery Log -->
         <div class="xl:col-span-2 glass-panel rounded-2xl p-4">
           <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 mb-3">
-            <h2 class="text-base font-bold text-slate-800 dark:text-white">Delivery Log</h2>
+            <h2 class="text-base font-bold text-slate-800 dark:text-white">${isAr ? 'سجل التوصيل' : 'Delivery Log'}</h2>
             <div class="flex flex-wrap items-center gap-2 w-full md:w-auto">
               <div class="relative flex-1 md:flex-none">
                 <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"></i>
-                <input type="text" placeholder="Search..." value="${Security.escapeHtml(searchTerm)}" oninput="filterDeliveries('search', this.value)" class="glass-input w-full md:w-40 pl-9 pr-3 py-2 rounded-lg text-sm">
+                <input type="text" placeholder="${isAr ? 'بحث...' : 'Search...'}" value="${Security.escapeHtml(searchTerm)}" oninput="filterDeliveries('search', this.value)" class="glass-input w-full md:w-40 pl-9 pr-3 py-2 rounded-lg text-sm">
               </div>
               <select onchange="filterDeliveries('status', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
-                <option value="all" ${filterStatus === 'all' ? 'selected' : ''}>All Status</option>
-                ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${filterStatus === s ? 'selected' : ''}>${s}</option>`).join('')}
+                <option value="all" ${filterStatus === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All Status'}</option>
+                ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${filterStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
               </select>
               <select onchange="filterDeliveries('driver', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
-                <option value="all" ${filterDriver === 'all' ? 'selected' : ''}>All Drivers</option>
+                <option value="all" ${filterDriver === 'all' ? 'selected' : ''}>${isAr ? 'كل السائقين' : 'All Drivers'}</option>
                 ${deliveryUsers.map(u => `<option value="${u.id}" ${filterDriver === u.id ? 'selected' : ''}>${Security.escapeHtml(u.name || '')}</option>`).join('')}
               </select>
             </div>
@@ -10042,13 +10126,13 @@ function renderDeliveriesView() {
             <table class="w-full text-sm">
               <thead>
                 <tr class="bg-slate-50 dark:bg-slate-800/50">
-                  <th class="text-left px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">Customer</th>
-                  <th class="text-left px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">Delivery Person</th>
-                  <th class="text-right px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">Amount</th>
-                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">Status</th>
-                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">Office Handover</th>
-                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">Date</th>
-                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">Actions</th>
+                  <th class="text-left px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'العميل' : 'Customer'}</th>
+                  <th class="text-left px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'السائق' : 'Delivery Person'}</th>
+                  <th class="text-right px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'المبلغ' : 'Amount'}</th>
+                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'الحالة' : 'Status'}</th>
+                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'التسليم للمكتب' : 'Office Handover'}</th>
+                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'التاريخ' : 'Date'}</th>
+                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'إجراءات' : 'Actions'}</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
@@ -10056,7 +10140,7 @@ function renderDeliveriesView() {
                   <tr>
                     <td colspan="7" class="px-4 py-12 text-center">
                       <i data-lucide="inbox" class="w-12 h-12 mx-auto text-slate-300 mb-3"></i>
-                      <p class="text-slate-500">No deliveries found</p>
+                      <p class="text-slate-500">${isAr ? 'لا توجد توصيلات' : 'No deliveries found'}</p>
                     </td>
                   </tr>
                 ` : filteredDeliveries.slice(0, 20).map(ad => {
@@ -10082,9 +10166,9 @@ function renderDeliveriesView() {
                             ${isReceipt ? '<i data-lucide="receipt" class="w-4 h-4"></i>' : (customer?.name?.charAt(0) || '?')}
                           </div>
                           <div>
-                            <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || 'Unknown')}</div>
-                            <div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber || customer?.phones?.[0] || 'No phone')}</div>
-                            <span class="text-[10px] px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 font-medium">Receipt</span>
+                            <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</div>
+                            <div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber || customer?.phones?.[0] || (isAr ? 'لا يوجد هاتف' : 'No phone'))}</div>
+                            <span class="text-[10px] px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 font-medium">${isAr ? 'وصل' : 'Receipt'}</span>
                           </div>
                         </div>
                       </td>
@@ -10098,21 +10182,21 @@ function renderDeliveriesView() {
                           </div>
                         ` : (canAssign ? `
                           <select onchange="assignDelivery('${ad.id}', this.value)" class="glass-input px-2 py-1 rounded-lg text-xs">
-                            <option value="">Assign...</option>
+                            <option value="">${isAr ? 'تعيين...' : 'Assign...'}</option>
                             ${deliveryUsers.map(u => `<option value="${u.id}">${Security.escapeHtml(u.name || '')}</option>`).join('')}
                           </select>
-                        ` : `<span class="text-xs text-slate-400">Unassigned</span>`)}
+                        ` : `<span class="text-xs text-slate-400">${isAr ? 'غير مُعيَّن' : 'Unassigned'}</span>`)}
                       </td>
                       <td class="px-4 py-3 text-right">
                         <div class="font-bold text-emerald-600">${debtLocal.toLocaleString()} LYD</div>
                         <div class="text-xs text-slate-500">$${debtUSD.toFixed(2)}</div>
                         ${String(ad.deliveryStatus || '') === 'Delivered' ? `
-                          <div class="text-[10px] text-slate-500 mt-1">Collected: <span class="font-bold text-slate-700 dark:text-slate-300">${collectedCash.toLocaleString()} LYD</span></div>
+                          <div class="text-[10px] text-slate-500 mt-1">${isAr ? 'المُحصَّل' : 'Collected'}: <span class="font-bold text-slate-700 dark:text-slate-300">${collectedCash.toLocaleString()} LYD</span></div>
                         ` : ''}
                       </td>
                       <td class="px-4 py-3 text-center">
                         <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-bold ${statusColors[ad.deliveryStatus] || 'bg-slate-100 text-slate-700'}">
-                          ${ad.deliveryStatus}
+                          ${trStatus(ad.deliveryStatus)}
                         </span>
                       </td>
                       <td class="px-4 py-3 text-center">
@@ -10121,16 +10205,16 @@ function renderDeliveriesView() {
                         ` : receivedInOffice ? `
                           <div class="inline-flex flex-col items-center gap-1">
                             <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">
-                              <i data-lucide="check" class="w-3 h-3 mr-1"></i>Received
+                              <i data-lucide="check" class="w-3 h-3 mr-1"></i>${isAr ? 'تم الاستلام' : 'Received'}
                             </span>
-                            ${canOffice ? `<button onclick="undoOfficeHandover('${ad.id}')" class="text-[10px] font-bold text-rose-600 hover:text-rose-700">Undo</button>` : ''}
+                            ${canOffice ? `<button onclick="undoOfficeHandover('${ad.id}')" class="text-[10px] font-bold text-rose-600 hover:text-rose-700">${isAr ? 'تراجع' : 'Undo'}</button>` : ''}
                           </div>
                         ` : `
                           ${canOffice ? `
                             <button onclick="markOfficeHandover('${ad.id}')" class="inline-flex items-center px-2 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-700 hover:bg-amber-200 dark:bg-amber-900/30 dark:text-amber-300 transition-colors">
-                              <i data-lucide="hand" class="w-3 h-3 mr-1"></i>Receive
+                              <i data-lucide="hand" class="w-3 h-3 mr-1"></i>${isAr ? 'استلام' : 'Receive'}
                             </button>
-                          ` : `<span class="text-xs text-slate-500">Pending</span>`}
+                          ` : `<span class="text-xs text-slate-500">${isAr ? 'قيد الانتظار' : 'Pending'}</span>`}
                         `}
                       </td>
                       <td class="px-4 py-3 text-center">
@@ -10139,13 +10223,13 @@ function renderDeliveriesView() {
                       <td class="px-4 py-3">
                         <div class="flex items-center justify-center space-x-1">
                           <select onchange="updateDeliveryStatus('${ad.id}', this.value)" class="glass-input px-2 py-1 rounded-lg text-xs w-24">
-                            ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${s}</option>`).join('')}
+                            ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
                           </select>
-                          <button onclick="showDeliveryDetails('${ad.id}')" class="p-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-300 transition-colors" title="View Details">
+                          <button onclick="showDeliveryDetails('${ad.id}')" class="p-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-300 transition-colors" title="${isAr ? 'عرض التفاصيل' : 'View Details'}">
                             <i data-lucide="eye" class="w-4 h-4"></i>
                           </button>
                           ${canAssign && String(ad.deliveryStatus || '') !== 'Delivered' ? `
-                            <button onclick="removeDeliveryMission('${ad.id}')" class="p-1.5 rounded-lg bg-rose-100 text-rose-700 hover:bg-rose-200 dark:bg-rose-900/30 dark:text-rose-300 transition-colors" title="Delete Mission">
+                            <button onclick="removeDeliveryMission('${ad.id}')" class="p-1.5 rounded-lg bg-rose-100 text-rose-700 hover:bg-rose-200 dark:bg-rose-900/30 dark:text-rose-300 transition-colors" title="${isAr ? 'حذف المهمة' : 'Delete Mission'}">
                               <i data-lucide="trash-2" class="w-4 h-4"></i>
                             </button>
                           ` : ''}
@@ -10159,7 +10243,7 @@ function renderDeliveriesView() {
           </div>
           ${filteredDeliveries.length > 20 ? `
             <div class="mt-3 text-center text-sm text-slate-500">
-              Showing 20 of ${filteredDeliveries.length} deliveries
+              ${isAr ? `عرض 20 من ${filteredDeliveries.length} توصيلة` : `Showing 20 of ${filteredDeliveries.length} deliveries`}
             </div>
           ` : ''}
         </div>
@@ -10168,14 +10252,14 @@ function renderDeliveriesView() {
       <!-- Active Deliveries (compact cards, same actions) -->
       <div class="glass-panel rounded-2xl p-4">
         <h2 class="text-base font-bold text-slate-800 dark:text-white mb-3">
-          Active Deliveries
+          ${isAr ? 'التوصيلات النشطة' : 'Active Deliveries'}
           <span class="ml-1 px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">${activeDeliveries.length}</span>
         </h2>
         <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
           ${activeDeliveries.length === 0 ? `
             <div class="col-span-full py-8 text-center">
-              <p class="text-slate-500 font-medium">All caught up!</p>
-              <p class="text-sm text-slate-400">No pending deliveries at the moment</p>
+              <p class="text-slate-500 font-medium">${isAr ? 'كل شيء منجز!' : 'All caught up!'}</p>
+              <p class="text-sm text-slate-400">${isAr ? 'لا توجد توصيلات معلّقة حالياً' : 'No pending deliveries at the moment'}</p>
             </div>
           ` : activeDeliveries.map(ad => {
             const customer = state.customers.find(c => c.id === ad.customerId);
@@ -10186,12 +10270,12 @@ function renderDeliveriesView() {
               <div class="rounded-xl border ${isUrgent ? 'border-rose-300 dark:border-rose-700' : 'border-slate-200 dark:border-slate-700'} bg-white dark:bg-slate-800/50 p-3">
                 <div class="flex items-start justify-between gap-2 mb-2">
                   <div class="min-w-0">
-                    <h3 class="font-bold text-sm text-slate-800 dark:text-white truncate">${Security.escapeHtml(customer?.name || 'Unknown')}</h3>
-                    <p class="text-xs text-slate-500 truncate">${Security.escapeHtml(ad.phoneNumber || customer?.phones?.[0] || 'No phone')}</p>
+                    <h3 class="font-bold text-sm text-slate-800 dark:text-white truncate">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</h3>
+                    <p class="text-xs text-slate-500 truncate">${Security.escapeHtml(ad.phoneNumber || customer?.phones?.[0] || (isAr ? 'لا يوجد هاتف' : 'No phone'))}</p>
                   </div>
                   <div class="flex flex-col items-end gap-1 flex-shrink-0">
-                    <span class="px-2 py-0.5 rounded-lg text-[11px] font-bold ${ad.deliveryStatus === 'In Progress' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'}">${ad.deliveryStatus}</span>
-                    ${isUrgent ? '<span class="px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase bg-rose-500 text-white">Urgent</span>' : ''}
+                    <span class="px-2 py-0.5 rounded-lg text-[11px] font-bold ${ad.deliveryStatus === 'In Progress' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'}">${trStatus(ad.deliveryStatus)}</span>
+                    ${isUrgent ? `<span class="px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase bg-rose-500 text-white">${isAr ? 'عاجل' : 'Urgent'}</span>` : ''}
                   </div>
                 </div>
 
@@ -10201,26 +10285,26 @@ function renderDeliveriesView() {
                 </div>
 
                 ${deliveryPerson ? `
-                  <div class="mb-2 text-xs font-medium text-indigo-700 dark:text-indigo-300">Driver: ${Security.escapeHtml(deliveryPerson.name || '')}</div>
+                  <div class="mb-2 text-xs font-medium text-indigo-700 dark:text-indigo-300">${isAr ? 'السائق' : 'Driver'}: ${Security.escapeHtml(deliveryPerson.name || '')}</div>
                 ` : (canAssign ? `
                   <select onchange="assignDelivery('${ad.id}', this.value)" class="w-full glass-input px-3 py-2 rounded-lg text-sm mb-2">
-                    <option value="">Assign driver...</option>
+                    <option value="">${isAr ? 'تعيين سائق...' : 'Assign driver...'}</option>
                     ${deliveryUsers.map(u => `<option value="${u.id}">${Security.escapeHtml(u.name || '')}</option>`).join('')}
                   </select>
-                ` : `<div class="mb-2 text-xs text-slate-400">Unassigned</div>`)}
+                ` : `<div class="mb-2 text-xs text-slate-400">${isAr ? 'غير مُعيَّن' : 'Unassigned'}</div>`)}
 
                 <div class="flex space-x-2">
                   ${String(ad.deliveryStatus || '') !== 'Delivered' && String(ad.deliveryStatus || '') !== 'Canceled' ? `
                     <button onclick="openDeliveryCancelModal('${ad.id}')" class="flex-1 bg-rose-600 text-white px-3 py-1.5 rounded-lg text-sm font-bold flex items-center justify-center space-x-1">
                       <i data-lucide="x-circle" class="w-4 h-4"></i>
-                      <span>Cancel</span>
+                      <span>${t('cancel')}</span>
                     </button>
                   ` : ''}
-                  <button onclick="showDeliveryDetails('${ad.id}')" class="bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 px-3 py-1.5 rounded-lg text-sm" title="View Details">
+                  <button onclick="showDeliveryDetails('${ad.id}')" class="bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 px-3 py-1.5 rounded-lg text-sm" title="${isAr ? 'عرض التفاصيل' : 'View Details'}">
                     <i data-lucide="more-horizontal" class="w-4 h-4"></i>
                   </button>
                   ${canAssign && String(ad.deliveryStatus || '') !== 'Delivered' ? `
-                    <button onclick="removeDeliveryMission('${ad.id}')" class="bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 px-3 py-1.5 rounded-lg text-sm" title="Delete Mission">
+                    <button onclick="removeDeliveryMission('${ad.id}')" class="bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 px-3 py-1.5 rounded-lg text-sm" title="${isAr ? 'حذف المهمة' : 'Delete Mission'}">
                       <i data-lucide="trash-2" class="w-4 h-4"></i>
                     </button>
                   ` : ''}
@@ -10247,7 +10331,7 @@ function filterDeliveries(type, value) {
 
 // Refresh deliveries
 function refreshDeliveries() {
-  showNotification('Refreshing', 'Delivery data updated', 'success');
+  showNotification(state.language === 'ar' ? 'جارٍ التحديث' : 'Refreshing', state.language === 'ar' ? 'تم تحديث بيانات التوصيل' : 'Delivery data updated', 'success');
   render();
   lucide.createIcons();
 }
@@ -10284,22 +10368,23 @@ function exportDeliveryReport() {
   a.download = `delivery-report-${getTodayDateString()}.csv`;
   a.click();
   URL.revokeObjectURL(url);
-  showNotification('Export Complete', 'Delivery report downloaded', 'success');
+  showNotification(state.language === 'ar' ? 'اكتمل التصدير' : 'Export Complete', state.language === 'ar' ? 'تم تنزيل تقرير التوصيل' : 'Delivery report downloaded', 'success');
 }
 
 // Check for stuck deliveries (In Progress for more than X hours)
 async function checkStuckDeliveries() {
+  const isAr = state.language === 'ar';
   if (!isCurrentUserAdmin() && !currentUserHasPermission('deliveries', 'assign')) {
-    showNotification('Access Denied', 'Admin or delivery manager only', 'error');
+    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'للأدمن أو مسؤول التوصيل فقط' : 'Admin or delivery manager only', 'error');
     return;
   }
-  
-  const hoursInput = prompt('Find deliveries stuck for more than how many hours? (default: 72 = 3 days)', '72');
+
+  const hoursInput = prompt(isAr ? 'البحث عن توصيلات عالقة لأكثر من كم ساعة؟ (الافتراضي: 72 = 3 أيام)' : 'Find deliveries stuck for more than how many hours? (default: 72 = 3 days)', '72');
   if (!hoursInput) return;
-  
+
   const hours = parseInt(hoursInput);
   if (isNaN(hours) || hours < 1) {
-    showNotification('Validation Error', 'Minimum 1 hour required', 'error');
+    showNotification(isAr ? 'خطأ في التحقق' : 'Validation Error', isAr ? 'الحد الأدنى ساعة واحدة' : 'Minimum 1 hour required', 'error');
     return;
   }
   
@@ -10315,14 +10400,14 @@ async function checkStuckDeliveries() {
     
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'Check failed' }));
-      showNotification('Error', err.detail || 'Check failed', 'error');
+      showNotification(isAr ? 'خطأ' : 'Error', err.detail || (isAr ? 'فشل الفحص' : 'Check failed'), 'error');
       return;
     }
-    
+
     const result = await res.json();
-    
+
     if (result.stuck_count === 0) {
-      showNotification('All Good!', `No deliveries stuck for more than ${hours} hours`, 'success');
+      showNotification(isAr ? 'كل شيء جيد!' : 'All Good!', isAr ? `لا توجد توصيلات عالقة لأكثر من ${hours} ساعة` : `No deliveries stuck for more than ${hours} hours`, 'success');
       return;
     }
     
@@ -10339,17 +10424,17 @@ async function checkStuckDeliveries() {
         <div class="p-3 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700">
           <div class="flex justify-between items-start mb-2">
             <div>
-              <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || 'Unknown')}</div>
-              <div class="text-xs text-slate-500">Receipt: ${Security.escapeHtml(d.tempReceiptNo || d.finalReceiptNo || d.id)}</div>
+              <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</div>
+              <div class="text-xs text-slate-500">${isAr ? 'الوصل' : 'Receipt'}: ${Security.escapeHtml(d.tempReceiptNo || d.finalReceiptNo || d.id)}</div>
             </div>
             <div class="text-right">
-              <div class="text-sm font-bold text-amber-700">${d.hoursStuck}h stuck</div>
-              <div class="text-xs text-slate-500">${Security.escapeHtml(driver?.name || 'Unassigned')}</div>
+              <div class="text-sm font-bold text-amber-700">${isAr ? `عالقة منذ ${d.hoursStuck} ساعة` : `${d.hoursStuck}h stuck`}</div>
+              <div class="text-xs text-slate-500">${Security.escapeHtml(driver?.name || (isAr ? 'غير مُعيَّن' : 'Unassigned'))}</div>
             </div>
           </div>
           <div class="flex justify-between text-xs">
-            <span class="text-slate-600 dark:text-slate-400">Amount: ${(d.amountLocal || 0).toLocaleString()} LYD</span>
-            <button onclick="navigateTo('deliveries'); this.closest('#app-modal').remove();" class="text-indigo-600 hover:text-indigo-700 font-bold">View →</button>
+            <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ' : 'Amount'}: ${(d.amountLocal || 0).toLocaleString()} LYD</span>
+            <button onclick="navigateTo('deliveries'); this.closest('#app-modal').remove();" class="text-indigo-600 hover:text-indigo-700 font-bold">${isAr ? 'عرض ←' : 'View →'}</button>
           </div>
         </div>
       `;
@@ -10363,8 +10448,8 @@ async function checkStuckDeliveries() {
               <i data-lucide="alert-triangle" class="w-5 h-5 text-white"></i>
             </span>
             <div>
-              <div class="text-lg font-bold text-slate-800 dark:text-white">⚠️ Stuck Deliveries</div>
-              <div class="text-xs text-slate-500">${result.stuck_count} found (> ${hours} hours)</div>
+              <div class="text-lg font-bold text-slate-800 dark:text-white">⚠️ ${isAr ? 'توصيلات عالقة' : 'Stuck Deliveries'}</div>
+              <div class="text-xs text-slate-500">${isAr ? `تم العثور على ${result.stuck_count} (أكثر من ${hours} ساعة)` : `${result.stuck_count} found (> ${hours} hours)`}</div>
             </div>
           </div>
           <button onclick="this.closest('#app-modal').remove()" class="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
@@ -10378,15 +10463,15 @@ async function checkStuckDeliveries() {
         
         <div class="mt-4 pt-4 border-t border-slate-200 dark:border-slate-700 text-center text-xs text-slate-500">
           <i data-lucide="info" class="w-3 h-3 inline mr-1"></i>
-          Consider following up with drivers or canceling stuck deliveries
+          ${isAr ? 'يُنصح بمتابعة السائقين أو إلغاء التوصيلات العالقة' : 'Consider following up with drivers or canceling stuck deliveries'}
         </div>
       </div>
     `;
-    
+
     document.body.appendChild(modal);
     IconQueue.schedule(modal);
   } catch (error) {
-    showNotification('Error', 'Check failed: ' + error.message, 'error');
+    showNotification(isAr ? 'خطأ' : 'Error', (isAr ? 'فشل الفحص: ' : 'Check failed: ') + error.message, 'error');
   }
 }
 
@@ -10425,18 +10510,19 @@ function setOfficeHandover(itemId, received) {
   const id = String(itemId || '');
   if (!id) return;
 
+  const isAr = state.language === 'ar';
   const roleLower = String(state.currentUser?.role || '').toLowerCase();
   if (!roleLower) {
-    showNotification('Access Denied', 'Please login', 'error');
+    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'يرجى تسجيل الدخول' : 'Please login', 'error');
     return;
   }
   // Office handover is an office/admin action (not a driver action).
   if (roleLower === 'delivery') {
-    showNotification('Not Allowed', 'Office handover can only be done by office/admin.', 'warning');
+    showNotification(isAr ? 'غير مسموح' : 'Not Allowed', isAr ? 'التسليم للمكتب يتم فقط بواسطة المكتب/الأدمن.' : 'Office handover can only be done by office/admin.', 'warning');
     return;
   }
   if (!currentUserHasPermission('deliveries', 'markCollected') && !isCurrentUserAdmin()) {
-    showNotification('Access Denied', 'You do not have permission to mark office handover', 'error');
+    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'ليس لديك صلاحية تسجيل التسليم للمكتب' : 'You do not have permission to mark office handover', 'error');
     return;
   }
 
@@ -10460,7 +10546,7 @@ function setOfficeHandover(itemId, received) {
   else updateRecord(state.ads, id, updates);
 
   addAuditLog('update', id, next ? 'Office handover marked as received' : 'Office handover undone', { isReceipt: !!receipt });
-  showNotification('Success', next ? 'Cash received at office' : 'Office handover undone', 'success');
+  showNotification(isAr ? 'نجاح' : 'Success', next ? (isAr ? 'تم استلام النقد في المكتب' : 'Cash received at office') : (isAr ? 'تم التراجع عن التسليم للمكتب' : 'Office handover undone'), 'success');
   render();
   if (window.lucide) lucide.createIcons();
 }
@@ -10479,23 +10565,24 @@ function removeDeliveryMission(itemId) {
   const id = String(itemId || '');
   if (!id) return;
 
+  const isAr = state.language === 'ar';
   const roleLower = String(state.currentUser?.role || '').toLowerCase();
   if (!roleLower) {
-    showNotification('Access Denied', 'Please login', 'error');
+    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'يرجى تسجيل الدخول' : 'Please login', 'error');
     return;
   }
   if (roleLower === 'delivery') {
-    showNotification('Not Allowed', 'Drivers cannot delete delivery missions.', 'warning');
+    showNotification(isAr ? 'غير مسموح' : 'Not Allowed', isAr ? 'لا يمكن للسائقين حذف مهام التوصيل.' : 'Drivers cannot delete delivery missions.', 'warning');
     return;
   }
   if (!currentUserHasPermission('deliveries', 'assign') && !isCurrentUserAdmin()) {
-    showNotification('Access Denied', 'You do not have permission to remove delivery missions', 'error');
+    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'ليس لديك صلاحية إزالة مهام التوصيل' : 'You do not have permission to remove delivery missions', 'error');
     return;
   }
 
   const receipt = state.receipts.find(r => r && !r._deleted && String(r.id) === id);
   if (!receipt) {
-    showNotification('Error', 'Delivery receipt not found', 'error');
+    showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'وصل التوصيل غير موجود' : 'Delivery receipt not found', 'error');
     return;
   }
 
@@ -10542,13 +10629,14 @@ function removeDeliveryMission(itemId) {
     statusDetail: nextStatusDetail
   });
 
-  showNotification('Removed', 'Delivery mission removed', 'success');
+  showNotification(state.language === 'ar' ? 'تمت الإزالة' : 'Removed', state.language === 'ar' ? 'تمت إزالة مهمة التوصيل' : 'Delivery mission removed', 'success');
   render();
   if (window.lucide) lucide.createIcons();
 }
 
 // Show delivery details modal
 function showDeliveryDetails(itemId) {
+  const isAr = state.language === 'ar';
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
   const ad = isReceipt || state.ads.find(a => a.id === itemId);
@@ -10574,7 +10662,7 @@ function showDeliveryDetails(itemId) {
           <span class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
             <i data-lucide="truck" class="w-5 h-5 text-white"></i>
           </span>
-          <span>Delivery Details</span>
+          <span>${isAr ? 'تفاصيل التوصيل' : 'Delivery Details'}</span>
         </h2>
         <button onclick="this.closest('#app-modal').remove()" class="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
           <i data-lucide="x" class="w-4 h-4 text-slate-600 dark:text-slate-300"></i>
@@ -10589,10 +10677,10 @@ function showDeliveryDetails(itemId) {
               ${customer?.name?.charAt(0) || '?'}
             </div>
             <div>
-              <h3 class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || 'Unknown')}</h3>
+              <h3 class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</h3>
               <p class="text-sm text-slate-500 flex items-center space-x-1">
                 <i data-lucide="phone" class="w-3 h-3"></i>
-                <span>${Security.escapeHtml(ad.phoneNumber || customer?.phones?.[0] || 'No phone')}</span>
+                <span>${Security.escapeHtml(ad.phoneNumber || customer?.phones?.[0] || (isAr ? 'لا يوجد هاتف' : 'No phone'))}</span>
               </p>
             </div>
           </div>
@@ -10601,11 +10689,11 @@ function showDeliveryDetails(itemId) {
         <!-- Amount Details -->
         <div class="grid grid-cols-2 gap-3">
           <div class="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-100 dark:border-emerald-800">
-            <div class="text-xs text-emerald-600 dark:text-emerald-400 font-medium mb-1">Amount (LYD)</div>
+            <div class="text-xs text-emerald-600 dark:text-emerald-400 font-medium mb-1">${isAr ? 'المبلغ (LYD)' : 'Amount (LYD)'}</div>
             <div class="text-2xl font-black text-emerald-700 dark:text-emerald-300">${(ad.amountLocal || 0).toLocaleString()}</div>
           </div>
           <div class="p-4 rounded-xl bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800">
-            <div class="text-xs text-blue-600 dark:text-blue-400 font-medium mb-1">Amount (USD)</div>
+            <div class="text-xs text-blue-600 dark:text-blue-400 font-medium mb-1">${isAr ? 'المبلغ (USD)' : 'Amount (USD)'}</div>
             <div class="text-2xl font-black text-blue-700 dark:text-blue-300">$${(ad.amountUSD || 0).toFixed(2)}</div>
           </div>
         </div>
@@ -10613,15 +10701,15 @@ function showDeliveryDetails(itemId) {
         <!-- Status & Driver -->
         <div class="grid grid-cols-2 gap-3">
           <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
-            <div class="text-xs text-slate-500 font-medium mb-2">Status</div>
+            <div class="text-xs text-slate-500 font-medium mb-2">${t('status')}</div>
             <select onchange="updateDeliveryStatus('${ad.id}', this.value); this.closest('#app-modal').remove();" class="w-full glass-input px-3 py-2 rounded-lg text-sm font-medium">
-              ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${s}</option>`).join('')}
+              ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
             </select>
           </div>
           <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
-            <div class="text-xs text-slate-500 font-medium mb-2">Driver</div>
+            <div class="text-xs text-slate-500 font-medium mb-2">${isAr ? 'السائق' : 'Driver'}</div>
             <select onchange="assignDelivery('${ad.id}', this.value); this.closest('#app-modal').remove();" class="w-full glass-input px-3 py-2 rounded-lg text-sm font-medium">
-              <option value="">Unassigned</option>
+              <option value="">${isAr ? 'غير مُعيَّن' : 'Unassigned'}</option>
               ${deliveryUsers.map(u => `<option value="${u.id}" ${ad.deliveryPersonId === u.id ? 'selected' : ''}>${Security.escapeHtml(u.name || '')}</option>`).join('')}
             </select>
           </div>
@@ -10629,26 +10717,26 @@ function showDeliveryDetails(itemId) {
         
         <!-- Tracking Info -->
         <div class="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
-          <div class="text-xs text-slate-500 font-medium mb-3">Tracking Information</div>
+          <div class="text-xs text-slate-500 font-medium mb-3">${isAr ? 'معلومات التتبع' : 'Tracking Information'}</div>
           <div class="space-y-2 text-sm">
             <div class="flex justify-between">
-              <span class="text-slate-500">Payment Method:</span>
-              <span class="font-medium">${ad.paymentMethod || 'N/A'}</span>
+              <span class="text-slate-500">${isAr ? 'طريقة الدفع' : 'Payment Method'}:</span>
+              <span class="font-medium">${ad.paymentMethod ? trMethod(ad.paymentMethod) : (isAr ? 'غير متوفر' : 'N/A')}</span>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-500">Wasil Card:</span>
-              <span class="font-mono">${ad.deliveryCardNumber || 'N/A'}</span>
+              <span class="text-slate-500">${isAr ? 'بطاقة واصل' : 'Wasil Card'}:</span>
+              <span class="font-mono">${ad.deliveryCardNumber || (isAr ? 'غير متوفر' : 'N/A')}</span>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-500">Collected:</span>
-              <span class="${ad.isPaid ? 'text-emerald-600 font-bold' : 'text-amber-600'}">${ad.isPaid ? 'Yes' : 'No'}</span>
+              <span class="text-slate-500">${isAr ? 'مُحصَّل' : 'Collected'}:</span>
+              <span class="${ad.isPaid ? 'text-emerald-600 font-bold' : 'text-amber-600'}">${ad.isPaid ? (isAr ? 'نعم' : 'Yes') : (isAr ? 'لا' : 'No')}</span>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-500">Office Handover:</span>
-              <span class="${receivedInOffice ? 'text-emerald-600 font-bold' : 'text-amber-600'}">${receivedInOffice ? 'Yes' : 'No'}</span>
+              <span class="text-slate-500">${isAr ? 'التسليم للمكتب' : 'Office Handover'}:</span>
+              <span class="${receivedInOffice ? 'text-emerald-600 font-bold' : 'text-amber-600'}">${receivedInOffice ? (isAr ? 'نعم' : 'Yes') : (isAr ? 'لا' : 'No')}</span>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-500">Created:</span>
+              <span class="text-slate-500">${isAr ? 'تاريخ الإنشاء' : 'Created'}:</span>
               <span>${formatDateShort(ad.createdAt || ad.date)}</span>
             </div>
           </div>
@@ -10659,34 +10747,34 @@ function showDeliveryDetails(itemId) {
           ${!ad.isPaid ? `
             <button onclick="markAsCollected('${ad.id}'); this.closest('#app-modal').remove();" class="flex-1 btn-shine bg-gradient-to-r from-emerald-500 to-teal-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2">
               <i data-lucide="dollar-sign" class="w-5 h-5"></i>
-              <span>Mark Collected</span>
+              <span>${isAr ? 'تسجيل التحصيل' : 'Mark Collected'}</span>
             </button>
           ` : !receivedInOffice ? `
             ${canOffice ? `
               <button onclick="markOfficeHandover('${ad.id}'); this.closest('#app-modal').remove();" class="flex-1 btn-shine bg-gradient-to-r from-purple-500 to-indigo-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2">
                 <i data-lucide="hand" class="w-5 h-5"></i>
-                <span>Office Handover</span>
+                <span>${isAr ? 'تسليم للمكتب' : 'Office Handover'}</span>
               </button>
             ` : `
               <div class="flex-1 px-4 py-3 rounded-xl bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 font-bold flex items-center justify-center space-x-2">
                 <i data-lucide="clock" class="w-5 h-5"></i>
-                <span>Pending Office</span>
+                <span>${isAr ? 'بانتظار المكتب' : 'Pending Office'}</span>
               </div>
             `}
           ` : `
             <div class="flex-1 px-4 py-3 rounded-xl bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 font-bold flex items-center justify-center space-x-2">
               <i data-lucide="check-circle" class="w-5 h-5"></i>
-              <span>Received</span>
+              <span>${isAr ? 'تم الاستلام' : 'Received'}</span>
             </div>
           `}
           <button onclick="${editHandler}('${ad.id}'); this.closest('#app-modal').remove();" class="btn-shine bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2">
             <i data-lucide="edit" class="w-5 h-5"></i>
-            <span>Edit</span>
+            <span>${t('edit')}</span>
           </button>
           ${canOffice && receivedInOffice ? `
             <button onclick="undoOfficeHandover('${ad.id}'); this.closest('#app-modal').remove();" class="btn-shine bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2">
               <i data-lucide="rotate-ccw" class="w-5 h-5"></i>
-              <span>Undo</span>
+              <span>${isAr ? 'تراجع' : 'Undo'}</span>
             </button>
           ` : ''}
         </div>
@@ -10699,6 +10787,7 @@ function showDeliveryDetails(itemId) {
 }
 
 function renderDeliveryDashboard() {
+  const isAr = state.language === 'ar';
   const filterStatus = String(state.deliveryDashboardFilterStatus || 'all');
   const uid = String(state.currentUser?.id || '');
   const receiptDeliveries = getVisibleRecords(state.receipts)
@@ -10739,38 +10828,38 @@ function renderDeliveryDashboard() {
       <!-- Header with Logout -->
       <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
         <div>
-          <h1 class="text-xl sm:text-2xl md:text-3xl font-bold text-slate-800 dark:text-white">Delivery Dashboard</h1>
-          <p class="text-xs sm:text-sm text-slate-500 mt-1">Welcome, ${Security.escapeHtml(state.currentUser?.name || '')}!</p>
+          <h1 class="text-xl sm:text-2xl md:text-3xl font-bold text-slate-800 dark:text-white">${isAr ? 'لوحة التوصيل' : 'Delivery Dashboard'}</h1>
+          <p class="text-xs sm:text-sm text-slate-500 mt-1">${isAr ? `مرحباً، ${Security.escapeHtml(state.currentUser?.name || '')}!` : `Welcome, ${Security.escapeHtml(state.currentUser?.name || '')}!`}</p>
         </div>
         <div class="flex items-center gap-2 w-full sm:w-auto">
-          <button onclick="refreshDeliveryDashboard()" class="btn-shine bg-blue-600 text-white px-3 py-2 rounded-xl font-bold flex items-center justify-center space-x-1 flex-1 sm:flex-none text-sm" title="Refresh to see latest updates">
+          <button onclick="refreshDeliveryDashboard()" class="btn-shine bg-blue-600 text-white px-3 py-2 rounded-xl font-bold flex items-center justify-center space-x-1 flex-1 sm:flex-none text-sm" title="${isAr ? 'حدِّث لرؤية آخر التحديثات' : 'Refresh to see latest updates'}">
             <i data-lucide="refresh-cw" class="w-4 h-4"></i>
-            <span>Refresh</span>
+            <span>${isAr ? 'تحديث' : 'Refresh'}</span>
           </button>
           <button onclick="handleLogout()" class="btn-shine bg-rose-600 text-white px-3 py-2 rounded-xl font-bold flex items-center justify-center space-x-1 flex-1 sm:flex-none text-sm">
             <i data-lucide="log-out" class="w-4 h-4"></i>
-            <span>Logout</span>
+            <span>${t('logout')}</span>
           </button>
         </div>
       </div>
 
       <!-- Stats -->
       <div class="grid grid-cols-2 gap-2 md:gap-4 md:grid-cols-4">
-        ${renderStatCard('Needs Delivery', needsDelivery.length, 'clock', 'from-amber-500 to-orange-600', "setDeliveryDashboardFilter('Needs Delivery')", filterStatus === 'Needs Delivery')}
-        ${renderStatCard('In Progress', inProgress.length, 'truck', 'from-blue-500 to-cyan-600', "setDeliveryDashboardFilter('In Progress')", filterStatus === 'In Progress')}
-        ${renderStatCard('Delivered', delivered.length, 'check-circle', 'from-emerald-500 to-teal-600', "setDeliveryDashboardFilter('Delivered')", filterStatus === 'Delivered')}
-        ${renderStatCard('Held', `${heldByDriver.length} (${cashHeldByDriver.toFixed(0)} LYD)`, 'wallet', 'from-purple-500 to-pink-600', "setDeliveryDashboardFilter('Held')", filterStatus === 'Held')}
+        ${renderStatCard(trStatus('Needs Delivery'), needsDelivery.length, 'clock', 'from-amber-500 to-orange-600', "setDeliveryDashboardFilter('Needs Delivery')", filterStatus === 'Needs Delivery')}
+        ${renderStatCard(trStatus('In Progress'), inProgress.length, 'truck', 'from-blue-500 to-cyan-600', "setDeliveryDashboardFilter('In Progress')", filterStatus === 'In Progress')}
+        ${renderStatCard(trStatus('Delivered'), delivered.length, 'check-circle', 'from-emerald-500 to-teal-600', "setDeliveryDashboardFilter('Delivered')", filterStatus === 'Delivered')}
+        ${renderStatCard(isAr ? 'بحوزة السائق' : 'Held', `${heldByDriver.length} (${cashHeldByDriver.toFixed(0)} LYD)`, 'wallet', 'from-purple-500 to-pink-600', "setDeliveryDashboardFilter('Held')", filterStatus === 'Held')}
       </div>
 
       <!-- My Deliveries -->
       <div class="glass-panel rounded-2xl p-3 md:p-6">
         <div class="flex items-center justify-between mb-3 md:mb-4">
-          <h2 class="text-lg md:text-xl font-bold">My Deliveries ${filterStatus !== 'all' ? `<span class="ml-1 md:ml-2 text-xs md:text-sm font-bold text-indigo-600">(${Security.escapeHtml(filterStatus)})</span>` : ''}</h2>
+          <h2 class="text-lg md:text-xl font-bold">${isAr ? 'توصيلاتي' : 'My Deliveries'} ${filterStatus !== 'all' ? `<span class="ml-1 md:ml-2 text-xs md:text-sm font-bold text-indigo-600">(${Security.escapeHtml(filterStatus === 'Held' ? (isAr ? 'بحوزة السائق' : 'Held') : trStatus(filterStatus))})</span>` : ''}</h2>
           ${filterStatus !== 'all' ? `
-            <button type="button" onclick="setDeliveryDashboardFilter('all')" class="text-xs font-bold text-slate-600 hover:text-slate-800">Show All</button>
+            <button type="button" onclick="setDeliveryDashboardFilter('all')" class="text-xs font-bold text-slate-600 hover:text-slate-800">${isAr ? 'عرض الكل' : 'Show All'}</button>
           ` : ''}
         </div>
-        ${visibleDeliveries.length === 0 ? '<p class="text-center text-slate-500 py-8">No deliveries for this filter</p>' : `
+        ${visibleDeliveries.length === 0 ? `<p class="text-center text-slate-500 py-8">${isAr ? 'لا توجد توصيلات لهذا الفلتر' : 'No deliveries for this filter'}</p>` : `
           <div class="space-y-3 w-full">
             ${visibleDeliveries.map(ad => {
               const customer = state.customers.find(c => c.id === ad.customerId);
@@ -10783,19 +10872,19 @@ function renderDeliveryDashboard() {
                   <div class="flex flex-col gap-3 md:gap-4">
                     <div class="w-full min-w-0">
                       <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 sm:gap-2">
-                        <h3 class="font-bold text-base md:text-lg truncate">${Security.escapeHtml(customer?.name || 'Unknown')}</h3>
+                        <h3 class="font-bold text-base md:text-lg truncate">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</h3>
                         ${phone ? `
                           <div class="flex items-center gap-2 flex-shrink-0">
-                            <a href="tel:${encodeURIComponent(phone)}" class="text-xs font-bold text-blue-600 hover:text-blue-700 px-2 py-1 bg-blue-50 rounded-lg">Call</a>
+                            <a href="tel:${encodeURIComponent(phone)}" class="text-xs font-bold text-blue-600 hover:text-blue-700 px-2 py-1 bg-blue-50 rounded-lg">${isAr ? 'اتصال' : 'Call'}</a>
                             ${wa ? `<a href="${wa}" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-emerald-600 hover:text-emerald-700 px-2 py-1 bg-emerald-50 rounded-lg">WhatsApp</a>` : ''}
-                            <button type="button" data-phone="${Security.escapeHtml(phone)}" onclick='copyTextToClipboard(this.dataset.phone).then(ok => showNotification(ok ? "Copied" : "Copy Failed", ok ? "Phone number copied" : "Could not copy phone number", ok ? "success" : "error"))' class="text-xs font-bold text-slate-600 hover:text-slate-700 px-2 py-1 bg-slate-100 rounded-lg">Copy</button>
+                            <button type="button" data-phone="${Security.escapeHtml(phone)}" onclick='copyTextToClipboard(this.dataset.phone).then(ok => showNotification(ok ? ${JSON.stringify(isAr ? 'تم النسخ' : 'Copied')} : ${JSON.stringify(isAr ? 'فشل النسخ' : 'Copy Failed')}, ok ? ${JSON.stringify(isAr ? 'تم نسخ رقم الهاتف' : 'Phone number copied')} : ${JSON.stringify(isAr ? 'تعذّر نسخ رقم الهاتف' : 'Could not copy phone number')}, ok ? "success" : "error"))' class="text-xs font-bold text-slate-600 hover:text-slate-700 px-2 py-1 bg-slate-100 rounded-lg">${isAr ? 'نسخ' : 'Copy'}</button>
                           </div>
                         ` : ''}
                       </div>
-                      <p class="text-xs md:text-sm text-slate-500 mt-1">${Security.escapeHtml(phone || 'No phone')}</p>
+                      <p class="text-xs md:text-sm text-slate-500 mt-1">${Security.escapeHtml(phone || (isAr ? 'لا يوجد هاتف' : 'No phone'))}</p>
                       ${ad.isReceipt && (displayTempNo || displayFinalNo) ? `
                         <div class="text-xs text-indigo-600 font-bold mt-1">
-                          Receipt: ${displayTempNo && displayFinalNo ? `${displayTempNo} → ${displayFinalNo}` : (displayTempNo ? `${displayTempNo} (Temp)` : displayFinalNo)}
+                          ${isAr ? 'الوصل' : 'Receipt'}: ${displayTempNo && displayFinalNo ? `${displayTempNo} → ${displayFinalNo}` : (displayTempNo ? `${displayTempNo} ${isAr ? '(مؤقت)' : '(Temp)'}` : displayFinalNo)}
                         </div>
                       ` : ''}
                       ${ad.isReceipt && ad.deliveryPlaceName ? `
@@ -10805,57 +10894,57 @@ function renderDeliveryDashboard() {
                       ` : ''}
                       ${ad.isReceipt && (ad.quotedDeliveryFee !== undefined && ad.quotedDeliveryFee !== null) ? `
                         <div class="text-[11px] text-slate-500 mt-0.5">
-                          Quoted fee: <span class="font-bold text-emerald-600">${Number(ad.quotedDeliveryFee || 0).toFixed(0)} LYD</span>
+                          ${isAr ? 'الرسوم المتفق عليها' : 'Quoted fee'}: <span class="font-bold text-emerald-600">${Number(ad.quotedDeliveryFee || 0).toFixed(0)} LYD</span>
                         </div>
                       ` : ''}
                       ${ad.isReceipt && ad.deliveryInstructions ? `
                         <div class="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/30 rounded-lg p-2 mt-1 border border-amber-200 dark:border-amber-800">
-                          <span class="font-bold">📝 Instructions:</span> ${Security.escapeHtml(String(ad.deliveryInstructions || ''))}
+                          <span class="font-bold">📝 ${isAr ? 'تعليمات' : 'Instructions'}:</span> ${Security.escapeHtml(String(ad.deliveryInstructions || ''))}
                         </div>
                       ` : ''}
                       <div class="flex flex-wrap items-center gap-1.5 md:gap-2 mt-2">
                         <span class="text-xs font-bold text-emerald-600">$${Number(ad.amountUSD || 0).toFixed(2)} (${Number(ad.amountLocal || 0).toFixed(0)} LYD)</span>
-                        <span class="payment-badge text-[10px] md:text-xs">${Security.escapeHtml(ad.paymentMethod || '')}</span>
-                        <span class="delivery-${(ad.deliveryStatus || '').toLowerCase().replace(' ', '')} px-2 py-0.5 md:py-1 rounded-full text-[10px] md:text-xs font-bold">${Security.escapeHtml(ad.deliveryStatus || '')}</span>
+                        <span class="payment-badge text-[10px] md:text-xs">${Security.escapeHtml(trMethod(ad.paymentMethod || ''))}</span>
+                        <span class="delivery-${(ad.deliveryStatus || '').toLowerCase().replace(' ', '')} px-2 py-0.5 md:py-1 rounded-full text-[10px] md:text-xs font-bold">${Security.escapeHtml(trStatus(ad.deliveryStatus || ''))}</span>
                         ${ad.editCount ? `<button onclick="showReceiptEditHistory('${ad.id}')" class="text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium flex items-center gap-1"><i data-lucide="history" class="w-3 h-3"></i>${ad.editCount}</button>` : ''}
                       </div>
                     </div>
                     <div class="flex flex-row md:flex-col gap-2 w-full md:w-auto">
                       ${ad.deliveryStatus === 'Needs Delivery' ? `
                         <button onclick="acceptDelivery('${ad.id}')" class="btn-shine bg-blue-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="check" class="w-4 h-4 mr-1"></i>Accept
+                          <i data-lucide="check" class="w-4 h-4 mr-1"></i>${isAr ? 'قبول' : 'Accept'}
                         </button>
                         <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>Cancel
+                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>${t('cancel')}
                         </button>
                       ` : ''}
                       ${ad.deliveryStatus === 'In Progress' && ad.isReceipt ? `
                         <button onclick="openReceiptDeliveryCompletionModal('${ad.id}')" class="btn-shine bg-emerald-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="check-circle" class="w-4 h-4 mr-1"></i>Delivered
+                          <i data-lucide="check-circle" class="w-4 h-4 mr-1"></i>${isAr ? 'تم التوصيل' : 'Delivered'}
                         </button>
                         <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>Cancel
+                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>${t('cancel')}
                         </button>
                       ` : ''}
                       ${ad.deliveryStatus === 'In Progress' && !ad.isReceipt && !ad.isPaid ? `
                         <button onclick="markAsCollected('${ad.id}')" class="btn-shine bg-emerald-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="dollar-sign" class="w-4 h-4 mr-1"></i>Collected
+                          <i data-lucide="dollar-sign" class="w-4 h-4 mr-1"></i>${isAr ? 'تم التحصيل' : 'Collected'}
                         </button>
                         <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>Cancel
+                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>${t('cancel')}
                         </button>
                       ` : ''}
                       ${ad.deliveryStatus === 'In Progress' && !ad.isReceipt && ad.isPaid ? `
                         <button onclick="markAsDelivered('${ad.id}')" class="btn-shine bg-emerald-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="check-circle" class="w-4 h-4 mr-1"></i>Delivered
+                          <i data-lucide="check-circle" class="w-4 h-4 mr-1"></i>${isAr ? 'تم التوصيل' : 'Delivered'}
                         </button>
                         <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>Cancel
+                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>${t('cancel')}
                         </button>
                       ` : ''}
                       ${ad.deliveryStatus === 'Delivered' ? `
                         <div class="text-emerald-600 font-bold text-sm flex items-center justify-center py-2">
-                          <i data-lucide="check-circle" class="w-4 h-4 mr-1"></i>Complete
+                          <i data-lucide="check-circle" class="w-4 h-4 mr-1"></i>${isAr ? 'مكتمل' : 'Complete'}
                         </div>
                       ` : ''}
                     </div>
@@ -10882,12 +10971,12 @@ function setDeliveryDashboardFilter(status) {
 async function refreshDeliveryDashboard() {
   if (!isServerModeEnabled()) {
     render();
-    showNotification('Refreshed', 'Dashboard refreshed', 'success');
+    showNotification(state.language === 'ar' ? 'تم التحديث' : 'Refreshed', state.language === 'ar' ? 'تم تحديث اللوحة' : 'Dashboard refreshed', 'success');
     return;
   }
 
   updateSyncIndicator('syncing');
-  showNotification('Syncing', 'Fetching latest data...', 'info');
+  showNotification(state.language === 'ar' ? 'جارٍ المزامنة' : 'Syncing', state.language === 'ar' ? 'جارٍ جلب أحدث البيانات...' : 'Fetching latest data...', 'info');
 
   try {
     // Clear cache to force fresh data
@@ -10910,11 +10999,11 @@ async function refreshDeliveryDashboard() {
     render();
     if (window.lucide) lucide.createIcons();
     updateSyncIndicator('synced');
-    showNotification('Refreshed', 'Dashboard updated with latest data', 'success');
+    showNotification(state.language === 'ar' ? 'تم التحديث' : 'Refreshed', state.language === 'ar' ? 'تم تحديث اللوحة بأحدث البيانات' : 'Dashboard updated with latest data', 'success');
   } catch (e) {
     console.error('Failed to refresh delivery dashboard:', e);
     updateSyncIndicator('error');
-    showNotification('Refresh Failed', 'Could not fetch latest data. Please try again.', 'error');
+    showNotification(state.language === 'ar' ? 'فشل التحديث' : 'Refresh Failed', state.language === 'ar' ? 'تعذّر جلب أحدث البيانات. يرجى المحاولة مجدداً.' : 'Could not fetch latest data. Please try again.', 'error');
     // Still render with current data
     render();
   }
@@ -10927,6 +11016,7 @@ function _findAdForDeliveryModal(adId) {
 }
 
 function openDeliveryCancelModal(itemId) {
+  const isAr = state.language === 'ar';
   const rid = String(itemId || '');
   const receipt = _findReceiptForDeliveryModal(rid);
   const ad = receipt ? null : _findAdForDeliveryModal(rid);
@@ -10934,23 +11024,23 @@ function openDeliveryCancelModal(itemId) {
   const itemType = receipt ? 'receipt' : 'ad';
 
   if (!item) {
-    showNotification('Error', 'Delivery not found', 'error');
+    showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'التوصيلة غير موجودة' : 'Delivery not found', 'error');
     return;
   }
 
   const roleLower = String(state.currentUser?.role || '').toLowerCase();
   if (roleLower === 'delivery') {
     if (String(item.deliveryPersonId || '') !== String(state.currentUser?.id || '')) {
-      showNotification('Access Denied', 'This delivery is not assigned to you', 'error');
+      showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'هذه التوصيلة غير مُعيَّنة لك' : 'This delivery is not assigned to you', 'error');
       return;
     }
   } else if (!roleLower) {
-    showNotification('Access Denied', 'Please login', 'error');
+    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'يرجى تسجيل الدخول' : 'Please login', 'error');
     return;
   }
 
   if (String(item.deliveryStatus || '') === 'Delivered') {
-    showNotification('Not Allowed', 'Already delivered.', 'warning');
+    showNotification(isAr ? 'غير مسموح' : 'Not Allowed', isAr ? 'تم التوصيل بالفعل.' : 'Already delivered.', 'warning');
     return;
   }
 
@@ -10974,10 +11064,10 @@ function openDeliveryCancelModal(itemId) {
             <i data-lucide="x-circle" class="w-5 h-5 text-white"></i>
           </span>
           <div>
-            <div class="text-lg font-bold text-slate-800 dark:text-white">Cancel Delivery</div>
+            <div class="text-lg font-bold text-slate-800 dark:text-white">${isAr ? 'إلغاء التوصيل' : 'Cancel Delivery'}</div>
             <div class="text-xs text-slate-500">
-              ${Security.escapeHtml(customer?.name || 'Unknown')}
-              ${ref ? ` • ${itemType === 'receipt' ? 'Receipt' : 'Delivery'} ${Security.escapeHtml(ref)}` : ''}
+              ${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}
+              ${ref ? ` • ${itemType === 'receipt' ? (isAr ? 'وصل' : 'Receipt') : (isAr ? 'توصيل' : 'Delivery')} ${Security.escapeHtml(ref)}` : ''}
               ${phone ? ` • ${Security.escapeHtml(phone)}` : ''}
             </div>
           </div>
@@ -10989,13 +11079,13 @@ function openDeliveryCancelModal(itemId) {
 
       <div class="space-y-3">
         <div>
-          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">Reason *</label>
-          <textarea id="delivery-cancel-reason" rows="3" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="Why are you cancelling?"></textarea>
+          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isAr ? 'السبب *' : 'Reason *'}</label>
+          <textarea id="delivery-cancel-reason" rows="3" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isAr ? 'لماذا تقوم بالإلغاء؟' : 'Why are you cancelling?'}"></textarea>
         </div>
         <div class="flex space-x-2 pt-2 border-t border-slate-200 dark:border-slate-700">
-          <button type="button" onclick="this.closest('#delivery-cancel-modal').remove()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-slate-300">Close</button>
+          <button type="button" onclick="this.closest('#delivery-cancel-modal').remove()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-slate-300">${isAr ? 'إغلاق' : 'Close'}</button>
           <button type="button" onclick='submitDeliveryCancel(${JSON.stringify(itemType)}, ${JSON.stringify(String(item.id || ""))})' class="flex-1 btn-shine bg-rose-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold">
-            Confirm Cancel
+            ${isAr ? 'تأكيد الإلغاء' : 'Confirm Cancel'}
           </button>
         </div>
       </div>
@@ -11011,7 +11101,7 @@ function submitDeliveryCancel(itemType, itemId) {
   const id = String(itemId || '');
   const reason = String(document.getElementById('delivery-cancel-reason')?.value || '').trim();
   if (!reason) {
-    showNotification('Validation', 'Cancel reason is required.', 'error');
+    showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'سبب الإلغاء مطلوب.' : 'Cancel reason is required.', 'error');
     return;
   }
 
@@ -11046,17 +11136,18 @@ function submitDeliveryCancel(itemType, itemId) {
 
   document.getElementById('delivery-cancel-modal')?.remove();
   document.getElementById('delivery-complete-modal')?.remove();
-  showNotification('Canceled', 'Delivery canceled', 'success');
+  showNotification(state.language === 'ar' ? 'أُلغيت' : 'Canceled', state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled', 'success');
   render();
 }
 
 function renderReconciliationView() {
+  const isAr = state.language === 'ar';
   const visibleAds = getVisibleRecords(state.ads).filter(ad => ad.spentUSD);
   return `
     <div class="space-y-6">
       <h1 class="text-3xl font-bold">${t('jobReconciliation')}</h1>
       <div class="glass-panel rounded-2xl p-6">
-        ${visibleAds.length === 0 ? '<p class="text-center text-slate-500 py-8">No reconciliation data</p>' : `
+        ${visibleAds.length === 0 ? `<p class="text-center text-slate-500 py-8">${isAr ? 'لا توجد بيانات تسوية' : 'No reconciliation data'}</p>` : `
           <div class="space-y-3">
             ${visibleAds.map(ad => {
               const customer = state.customers.find(c => c.id === ad.customerId);
@@ -11065,8 +11156,8 @@ function renderReconciliationView() {
               return `<div class="${reconClass} p-4 rounded-lg">
                 <div class="flex justify-between items-center">
                   <div>
-                    <span class="font-medium">${Security.escapeHtml(customer?.name || 'Unknown')}</span>
-                    <p class="text-sm">Collected: $${ad.amountUSD} | Spent: $${ad.spentUSD} | Diff: $${diff.toFixed(2)}</p>
+                    <span class="font-medium">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</span>
+                    <p class="text-sm">${isAr ? 'المُحصَّل' : 'Collected'}: $${ad.amountUSD} | ${isAr ? 'المصروف' : 'Spent'}: $${ad.spentUSD} | ${isAr ? 'الفرق' : 'Diff'}: $${diff.toFixed(2)}</p>
                   </div>
                 </div>
               </div>`;
@@ -11079,6 +11170,7 @@ function renderReconciliationView() {
 }
 
 function renderUsersView() {
+  const isAr = state.language === 'ar';
   const visibleUsers = getVisibleRecords(state.users);
   const isAdmin = isCurrentUserAdmin();
   
@@ -11087,7 +11179,7 @@ function renderUsersView() {
       <div class="flex justify-between items-center">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('users')}</h1>
-          <p class="text-sm text-slate-500 mt-1">${visibleUsers.length} system users</p>
+          <p class="text-sm text-slate-500 mt-1">${isAr ? `${visibleUsers.length} مستخدم في النظام` : `${visibleUsers.length} system users`}</p>
         </div>
         ${isAdmin ? `
         <button onclick="showUserModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
@@ -11114,8 +11206,8 @@ function renderUsersView() {
                   <div class="flex-1">
                     <h3 class="font-bold text-lg text-slate-800 dark:text-white">${Security.escapeHtml(u.name || '')}</h3>
                     <div class="flex items-center space-x-2 mt-1">
-                      <span class="text-xs px-2 py-1 ${isAdminRole(u.role) ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300' : isDeliveryRole(u.role) ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'} rounded-full font-medium">${u.role}</span>
-                      ${u.id === state.currentUser?.id ? '<span class="text-xs text-indigo-600 font-medium">(You)</span>' : ''}
+                      <span class="text-xs px-2 py-1 ${isAdminRole(u.role) ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300' : isDeliveryRole(u.role) ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'} rounded-full font-medium">${isAr ? (({ 'Admin': 'مدير', 'Employee': 'موظف', 'Delivery': 'سائق توصيل' })[u.role] || u.role) : u.role}</span>
+                      ${u.id === state.currentUser?.id ? `<span class="text-xs text-indigo-600 font-medium">${isAr ? '(أنت)' : '(You)'}</span>` : ''}
                     </div>
                   </div>
                 </div>
@@ -11126,17 +11218,17 @@ function renderUsersView() {
                     </button>
                   ` : ''}
                   ${isAdmin && u.id !== state.currentUser?.id && !isAdminRole(u.role) ? `
-                    <button onclick="showPermissionsModal('${u.id}')" class="text-purple-600 hover:text-purple-700 p-1" title="Manage Permissions">
+                    <button onclick="showPermissionsModal('${u.id}')" class="text-purple-600 hover:text-purple-700 p-1" title="${isAr ? 'إدارة الصلاحيات' : 'Manage Permissions'}">
                       <i data-lucide="shield" class="w-4 h-4"></i>
                     </button>
                   ` : ''}
                   ${isAdmin || u.id === state.currentUser?.id ? `
-                  <button onclick="editUser('${u.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${u.id === state.currentUser?.id ? 'Edit Your Profile' : 'Edit'}">
+                  <button onclick="editUser('${u.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${u.id === state.currentUser?.id ? (isAr ? 'تعديل ملفك الشخصي' : 'Edit Your Profile') : t('edit')}">
                     <i data-lucide="edit" class="w-4 h-4"></i>
                   </button>
                   ` : ''}
                   ${isAdmin && u.id !== state.currentUser?.id ? `
-                    <button onclick="deleteUser('${u.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="Delete">
+                    <button onclick="deleteUser('${u.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="${t('delete')}">
                       <i data-lucide="trash-2" class="w-4 h-4"></i>
                     </button>
                   ` : ''}
@@ -11151,25 +11243,25 @@ function renderUsersView() {
 
                 ${isDeliveryRole(u.role) && u.stats ? `
                   <div class="mt-3 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg space-y-1">
-                    <div class="text-xs font-bold text-blue-700 dark:text-blue-300 uppercase mb-2">Delivery Stats</div>
-                    <div class="flex justify-between text-xs"><span>Total Assigned:</span><span class="font-bold">${u.stats.totalAds || 0}</span></div>
-                    <div class="flex justify-between text-xs"><span>Accepted:</span><span class="font-bold text-blue-600">${u.stats.accepted || 0}</span></div>
-                    <div class="flex justify-between text-xs"><span>Collected:</span><span class="font-bold text-emerald-600">${u.stats.collected || 0}</span></div>
-                    <div class="flex justify-between text-xs"><span>Fees Earned:</span><span class="font-bold text-purple-600">${deliveryFeesLYD.toFixed(0)} LYD</span></div>
+                    <div class="text-xs font-bold text-blue-700 dark:text-blue-300 uppercase mb-2">${isAr ? 'إحصائيات التوصيل' : 'Delivery Stats'}</div>
+                    <div class="flex justify-between text-xs"><span>${isAr ? 'إجمالي المُعيَّن:' : 'Total Assigned:'}</span><span class="font-bold">${u.stats.totalAds || 0}</span></div>
+                    <div class="flex justify-between text-xs"><span>${isAr ? 'المقبول:' : 'Accepted:'}</span><span class="font-bold text-blue-600">${u.stats.accepted || 0}</span></div>
+                    <div class="flex justify-between text-xs"><span>${isAr ? 'المُحصَّل:' : 'Collected:'}</span><span class="font-bold text-emerald-600">${u.stats.collected || 0}</span></div>
+                    <div class="flex justify-between text-xs"><span>${isAr ? 'الرسوم المكتسبة:' : 'Fees Earned:'}</span><span class="font-bold text-purple-600">${deliveryFeesLYD.toFixed(0)} LYD</span></div>
                   </div>
                 ` : ''}
 
                 ${userAds.length > 0 ? `
                   <div class="flex items-center space-x-2 text-xs text-slate-500 mt-2">
                     <i data-lucide="megaphone" class="w-3 h-3"></i>
-                    <span>Created ${userAds.length} ads</span>
+                    <span>${isAr ? `أنشأ ${userAds.length} إعلان` : `Created ${userAds.length} ads`}</span>
                   </div>
                 ` : ''}
 
                 ${deliveredAds.length > 0 ? `
                   <div class="flex items-center space-x-2 text-xs text-emerald-600 mt-2">
                     <i data-lucide="truck" class="w-3 h-3"></i>
-                    <span>Delivered ${deliveredAds.length} ads</span>
+                    <span>${isAr ? `وصَّل ${deliveredAds.length} إعلان` : `Delivered ${deliveredAds.length} ads`}</span>
                   </div>
                 ` : ''}
                 
@@ -11181,7 +11273,7 @@ function renderUsersView() {
                       <div class="flex items-center justify-between mb-2">
                         <div class="flex items-center space-x-1">
                           <i data-lucide="shield" class="w-3 h-3 text-purple-600"></i>
-                          <span class="text-[10px] font-bold text-purple-700 dark:text-purple-300 uppercase">Permissions</span>
+                          <span class="text-[10px] font-bold text-purple-700 dark:text-purple-300 uppercase">${isAr ? 'الصلاحيات' : 'Permissions'}</span>
                         </div>
                         <span class="text-xs font-bold ${permSummary.percentage > 50 ? 'text-emerald-600' : 'text-purple-600'}">${permSummary.granted}/${permSummary.total}</span>
                       </div>
@@ -11191,7 +11283,7 @@ function renderUsersView() {
                       ${isAdmin ? `
                       <button onclick="showPermissionsModal('${u.id}')" class="mt-2 w-full text-xs text-purple-600 hover:text-purple-700 font-medium flex items-center justify-center space-x-1">
                         <i data-lucide="settings" class="w-3 h-3"></i>
-                        <span>Manage Access</span>
+                        <span>${isAr ? 'إدارة الوصول' : 'Manage Access'}</span>
                       </button>
                       ` : `
                         <div class="mt-2 text-[11px] text-slate-500 text-center">
@@ -11204,7 +11296,7 @@ function renderUsersView() {
                   <div class="mt-3 p-3 bg-amber-50 dark:bg-amber-900/20 rounded-lg text-center">
                     <div class="flex items-center justify-center space-x-1 text-amber-700 dark:text-amber-300">
                       <i data-lucide="crown" class="w-4 h-4"></i>
-                      <span class="text-xs font-bold">Full Admin Access</span>
+                      <span class="text-xs font-bold">${isAr ? 'صلاحيات مدير كاملة' : 'Full Admin Access'}</span>
                     </div>
                   </div>
                 `}
@@ -11218,6 +11310,7 @@ function renderUsersView() {
 }
 
 function renderAuditView() {
+  const isAr = state.language === 'ar';
   const allLogs = getVisibleRecords(state.logs);
   
   // Apply filters
@@ -11307,20 +11400,20 @@ function renderAuditView() {
             </span>
             <span>${t('auditLogs')}</span>
           </h1>
-          <p class="text-sm text-slate-500 mt-1">${totalLogs.toLocaleString()} total entries ${hasActiveFilters ? `(filtered from ${allLogs.length.toLocaleString()})` : ''}</p>
+          <p class="text-sm text-slate-500 mt-1">${isAr ? `${totalLogs.toLocaleString()} إجمالي السجلات` : `${totalLogs.toLocaleString()} total entries`} ${hasActiveFilters ? (isAr ? `(مصفّاة من ${allLogs.length.toLocaleString()})` : `(filtered from ${allLogs.length.toLocaleString()})`) : ''}</p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
-          <button onclick="backupAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 border-2 border-emerald-200 dark:border-emerald-800 transition-all" title="Create full backup of all logs">
+          <button onclick="backupAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 border-2 border-emerald-200 dark:border-emerald-800 transition-all" title="${isAr ? 'إنشاء نسخة احتياطية كاملة من كل السجلات' : 'Create full backup of all logs'}">
             <i data-lucide="archive" class="w-4 h-4 text-emerald-600"></i>
-            <span class="text-emerald-700 dark:text-emerald-400">Backup</span>
+            <span class="text-emerald-700 dark:text-emerald-400">${isAr ? 'نسخ احتياطي' : 'Backup'}</span>
           </button>
-          <button onclick="restoreAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-blue-50 dark:hover:bg-blue-900/20 border-2 border-blue-200 dark:border-blue-800 transition-all" title="Restore logs from backup file">
+          <button onclick="restoreAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-blue-50 dark:hover:bg-blue-900/20 border-2 border-blue-200 dark:border-blue-800 transition-all" title="${isAr ? 'استرجاع السجلات من ملف نسخة احتياطية' : 'Restore logs from backup file'}">
             <i data-lucide="upload" class="w-4 h-4 text-blue-600"></i>
-            <span class="text-blue-700 dark:text-blue-400">Restore</span>
+            <span class="text-blue-700 dark:text-blue-400">${isAr ? 'استرجاع' : 'Restore'}</span>
           </button>
-          <button onclick="cleanupAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-rose-50 dark:hover:bg-rose-900/20 border-2 border-rose-200 dark:border-rose-800 transition-all" title="Delete old audit logs (keeps last 1 year)">
+          <button onclick="cleanupAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-rose-50 dark:hover:bg-rose-900/20 border-2 border-rose-200 dark:border-rose-800 transition-all" title="${isAr ? 'حذف سجلات التدقيق القديمة (يحتفظ بآخر سنة)' : 'Delete old audit logs (keeps last 1 year)'}">
             <i data-lucide="trash-2" class="w-4 h-4 text-rose-600"></i>
-            <span class="text-rose-700 dark:text-rose-400">Cleanup</span>
+            <span class="text-rose-700 dark:text-rose-400">${isAr ? 'تنظيف' : 'Cleanup'}</span>
           </button>
           <div class="w-px h-6 bg-slate-300 dark:bg-slate-600"></div>
           <button onclick="exportAuditLogs('csv')" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all">
@@ -11341,18 +11434,18 @@ function renderAuditView() {
             <i data-lucide="database" class="w-4 h-4 text-indigo-600 dark:text-indigo-300"></i>
           </div>
           <div>
-            <div class="text-xs font-bold text-indigo-700 dark:text-indigo-300">Persistent Storage Enabled</div>
-            <div class="text-[10px] text-indigo-600/70 dark:text-indigo-400/70">${db ? 'IndexedDB Active - Logs stored permanently' : 'LocalStorage Only - Consider backing up'}</div>
+            <div class="text-xs font-bold text-indigo-700 dark:text-indigo-300">${isAr ? 'التخزين الدائم مفعّل' : 'Persistent Storage Enabled'}</div>
+            <div class="text-[10px] text-indigo-600/70 dark:text-indigo-400/70">${db ? (isAr ? 'IndexedDB نشط - السجلات محفوظة بشكل دائم' : 'IndexedDB Active - Logs stored permanently') : (isAr ? 'LocalStorage فقط - يُنصح بالنسخ الاحتياطي' : 'LocalStorage Only - Consider backing up')}</div>
           </div>
         </div>
         <div class="flex items-center space-x-4 text-xs">
           <div class="text-center">
             <div class="font-bold text-indigo-700 dark:text-indigo-300">${allLogs.length.toLocaleString()}</div>
-            <div class="text-[10px] text-indigo-600/70 dark:text-indigo-400/70">Total Logs</div>
+            <div class="text-[10px] text-indigo-600/70 dark:text-indigo-400/70">${isAr ? 'إجمالي السجلات' : 'Total Logs'}</div>
           </div>
           <div class="text-center">
             <div class="font-bold text-indigo-700 dark:text-indigo-300">${db ? '∞' : Math.min(allLogs.length, MAX_LOGS_IN_LOCALSTORAGE || 500)}</div>
-            <div class="text-[10px] text-indigo-600/70 dark:text-indigo-400/70">In Storage</div>
+            <div class="text-[10px] text-indigo-600/70 dark:text-indigo-400/70">${isAr ? 'في التخزين' : 'In Storage'}</div>
           </div>
           <div class="w-2 h-2 rounded-full ${db ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}"></div>
         </div>
@@ -11365,28 +11458,28 @@ function renderAuditView() {
             <i data-lucide="activity" class="w-5 h-5 text-blue-600"></i>
           </div>
           <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.length.toLocaleString()}</div>
-          <div class="text-xs text-slate-500">Total Logs</div>
+          <div class="text-xs text-slate-500">${isAr ? 'إجمالي السجلات' : 'Total Logs'}</div>
         </div>
         <div class="glass-panel rounded-xl p-4 text-center">
           <div class="w-10 h-10 mx-auto mb-2 rounded-lg bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center">
             <i data-lucide="plus-circle" class="w-5 h-5 text-emerald-600"></i>
           </div>
           <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'create').length.toLocaleString()}</div>
-          <div class="text-xs text-slate-500">Creates</div>
+          <div class="text-xs text-slate-500">${isAr ? 'إنشاء' : 'Creates'}</div>
         </div>
         <div class="glass-panel rounded-xl p-4 text-center">
           <div class="w-10 h-10 mx-auto mb-2 rounded-lg bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center">
             <i data-lucide="edit-3" class="w-5 h-5 text-amber-600"></i>
           </div>
           <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'update').length.toLocaleString()}</div>
-          <div class="text-xs text-slate-500">Updates</div>
+          <div class="text-xs text-slate-500">${isAr ? 'تعديلات' : 'Updates'}</div>
         </div>
         <div class="glass-panel rounded-xl p-4 text-center">
           <div class="w-10 h-10 mx-auto mb-2 rounded-lg bg-rose-100 dark:bg-rose-900/30 flex items-center justify-center">
             <i data-lucide="trash-2" class="w-5 h-5 text-rose-600"></i>
           </div>
           <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'delete' || l.action === 'Delete').length.toLocaleString()}</div>
-          <div class="text-xs text-slate-500">Deletes</div>
+          <div class="text-xs text-slate-500">${isAr ? 'حذف' : 'Deletes'}</div>
         </div>
       </div>
 
@@ -11398,7 +11491,7 @@ function renderAuditView() {
             <i data-lucide="search" class="w-5 h-5 absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"></i>
             <input 
               type="text" 
-              placeholder="Search logs by description, user, action..." 
+              placeholder="${isAr ? 'ابحث في السجلات بالوصف أو المستخدم أو الإجراء...' : 'Search logs by description, user, action...'}"
               value="${Security.escapeHtml(state.auditSearch || '')}"
               oninput="updateAuditFilter('search', this.value)"
               class="w-full pl-12 pr-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all"
@@ -11409,42 +11502,42 @@ function renderAuditView() {
           <!-- Filter Dropdowns -->
           <div class="flex flex-wrap gap-2">
             <select onchange="updateAuditFilter('action', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditActionFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
-              <option value="all">All Actions</option>
+              <option value="all">${isAr ? 'كل الإجراءات' : 'All Actions'}</option>
               ${uniqueActions.map(a => `<option value="${Security.escapeHtml(a)}" ${state.auditActionFilter === a ? 'selected' : ''}>${Security.escapeHtml(a)}</option>`).join('')}
             </select>
-            
+
             <select onchange="updateAuditFilter('category', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditCategoryFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
-              <option value="all">All Categories</option>
-              <option value="auth" ${state.auditCategoryFilter === 'auth' ? 'selected' : ''}>🔐 Auth</option>
-              <option value="data" ${state.auditCategoryFilter === 'data' ? 'selected' : ''}>💾 Data</option>
-              <option value="financial" ${state.auditCategoryFilter === 'financial' ? 'selected' : ''}>💰 Financial</option>
-              <option value="general" ${state.auditCategoryFilter === 'general' ? 'selected' : ''}>📄 General</option>
+              <option value="all">${isAr ? 'كل الفئات' : 'All Categories'}</option>
+              <option value="auth" ${state.auditCategoryFilter === 'auth' ? 'selected' : ''}>🔐 ${isAr ? 'مصادقة' : 'Auth'}</option>
+              <option value="data" ${state.auditCategoryFilter === 'data' ? 'selected' : ''}>💾 ${isAr ? 'بيانات' : 'Data'}</option>
+              <option value="financial" ${state.auditCategoryFilter === 'financial' ? 'selected' : ''}>💰 ${isAr ? 'مالي' : 'Financial'}</option>
+              <option value="general" ${state.auditCategoryFilter === 'general' ? 'selected' : ''}>📄 ${isAr ? 'عام' : 'General'}</option>
             </select>
-            
+
             <select onchange="updateAuditFilter('severity', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditSeverityFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
-              <option value="all">All Severity</option>
-              <option value="info" ${state.auditSeverityFilter === 'info' ? 'selected' : ''}>ℹ️ Info</option>
-              <option value="warning" ${state.auditSeverityFilter === 'warning' ? 'selected' : ''}>⚠️ Warning</option>
-              <option value="error" ${state.auditSeverityFilter === 'error' ? 'selected' : ''}>❌ Error</option>
-              <option value="critical" ${state.auditSeverityFilter === 'critical' ? 'selected' : ''}>🚨 Critical</option>
+              <option value="all">${isAr ? 'كل درجات الخطورة' : 'All Severity'}</option>
+              <option value="info" ${state.auditSeverityFilter === 'info' ? 'selected' : ''}>ℹ️ ${isAr ? 'معلومة' : 'Info'}</option>
+              <option value="warning" ${state.auditSeverityFilter === 'warning' ? 'selected' : ''}>⚠️ ${isAr ? 'تحذير' : 'Warning'}</option>
+              <option value="error" ${state.auditSeverityFilter === 'error' ? 'selected' : ''}>❌ ${isAr ? 'خطأ' : 'Error'}</option>
+              <option value="critical" ${state.auditSeverityFilter === 'critical' ? 'selected' : ''}>🚨 ${isAr ? 'حرج' : 'Critical'}</option>
             </select>
-            
+
             <select onchange="updateAuditFilter('user', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditUserFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
-              <option value="all">All Users</option>
+              <option value="all">${isAr ? 'كل المستخدمين' : 'All Users'}</option>
               ${uniqueUsers.map(userId => {
                 const user = state.users.find(u => u.id === userId);
                 return `<option value="${Security.escapeHtml(userId)}" ${state.auditUserFilter === userId ? 'selected' : ''}>${Security.escapeHtml(user?.name || userId)}</option>`;
               }).join('')}
             </select>
             
-            <input type="date" value="${Security.escapeHtml(state.auditDateFrom || '')}" onchange="updateAuditFilter('dateFrom', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditDateFrom ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}" title="From Date" />
+            <input type="date" value="${Security.escapeHtml(state.auditDateFrom || '')}" onchange="updateAuditFilter('dateFrom', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditDateFrom ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}" title="${isAr ? 'من تاريخ' : 'From Date'}" />
             
-            <input type="date" value="${Security.escapeHtml(state.auditDateTo || '')}" onchange="updateAuditFilter('dateTo', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditDateTo ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}" title="To Date" />
+            <input type="date" value="${Security.escapeHtml(state.auditDateTo || '')}" onchange="updateAuditFilter('dateTo', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditDateTo ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}" title="${isAr ? 'إلى تاريخ' : 'To Date'}" />
             
             ${hasActiveFilters ? `
               <button onclick="clearAuditFilters()" class="px-3 py-2 bg-rose-100 dark:bg-rose-900/30 text-rose-600 border-2 border-rose-200 dark:border-rose-800 rounded-xl text-xs font-bold hover:bg-rose-200 transition-all flex items-center space-x-1">
                 <i data-lucide="x-circle" class="w-3 h-3"></i>
-                <span>Clear</span>
+                <span>${isAr ? 'مسح' : 'Clear'}</span>
               </button>
             ` : ''}
           </div>
@@ -11456,21 +11549,21 @@ function renderAuditView() {
         ${paginatedLogs.length === 0 ? `
           <div class="p-12 text-center">
             <i data-lucide="${hasActiveFilters ? 'search-x' : 'file-clock'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i>
-            <p class="text-slate-500 font-medium">${hasActiveFilters ? 'No logs match your filters' : 'No activity logs yet'}</p>
-            ${hasActiveFilters ? '<button onclick="clearAuditFilters()" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">Clear all filters</button>' : ''}
+            <p class="text-slate-500 font-medium">${hasActiveFilters ? (isAr ? 'لا توجد سجلات مطابقة للفلاتر' : 'No logs match your filters') : (isAr ? 'لا توجد سجلات نشاط بعد' : 'No activity logs yet')}</p>
+            ${hasActiveFilters ? `<button onclick="clearAuditFilters()" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">${isAr ? 'مسح كل الفلاتر' : 'Clear all filters'}</button>` : ''}
           </div>
         ` : `
           <div class="overflow-x-auto">
             <table class="w-full text-sm">
               <thead class="bg-slate-50 dark:bg-slate-800/50">
                 <tr>
-                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">Timestamp</th>
-                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">User</th>
-                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">Action</th>
-                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">Category</th>
-                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">Description</th>
-                  <th class="text-center px-4 py-3 text-xs font-bold text-slate-500 uppercase">Severity</th>
-                  <th class="text-center px-4 py-3 text-xs font-bold text-slate-500 uppercase">Details</th>
+                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'الوقت' : 'Timestamp'}</th>
+                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'المستخدم' : 'User'}</th>
+                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'الإجراء' : 'Action'}</th>
+                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'الفئة' : 'Category'}</th>
+                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'الوصف' : 'Description'}</th>
+                  <th class="text-center px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'الخطورة' : 'Severity'}</th>
+                  <th class="text-center px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'التفاصيل' : 'Details'}</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
@@ -11489,7 +11582,7 @@ function renderAuditView() {
                           <div class="w-7 h-7 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white text-xs font-bold">
                             ${(log.userName || user?.name || 'S').charAt(0).toUpperCase()}
                           </div>
-                          <span class="text-xs font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.userName || user?.name || 'System')}</span>
+                          <span class="text-xs font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.userName || user?.name || (isAr ? 'النظام' : 'System'))}</span>
                         </div>
                       </td>
                       <td class="px-4 py-3">
@@ -11509,11 +11602,11 @@ function renderAuditView() {
                       </td>
                       <td class="px-4 py-3 text-center">
                         <span class="inline-flex px-2 py-1 rounded-full text-[10px] font-bold uppercase ${severityColors[severity] || severityColors['info']}">
-                          ${severity}
+                          ${isAr ? (({ info: 'معلومة', warning: 'تحذير', error: 'خطأ', critical: 'حرج' })[severity] || severity) : severity}
                         </span>
                       </td>
                       <td class="px-4 py-3 text-center">
-                        <button onclick="showLogDetails('${log.id}')" class="p-1.5 rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors" title="View Details">
+                        <button onclick="showLogDetails('${log.id}')" class="p-1.5 rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors" title="${isAr ? 'عرض التفاصيل' : 'View Details'}">
                           <i data-lucide="eye" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
                         </button>
                       </td>
@@ -11527,16 +11620,16 @@ function renderAuditView() {
           <!-- Pagination -->
           <div class="px-4 py-3 border-t border-slate-200 dark:border-slate-700 flex flex-col md:flex-row items-center justify-between gap-3">
             <div class="flex items-center space-x-2 text-xs text-slate-500">
-              <span>Show</span>
+              <span>${isAr ? 'عرض' : 'Show'}</span>
               <select onchange="updateAuditPageSize(this.value)" class="px-2 py-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs">
                 <option value="25" ${state.auditPageSize === 25 ? 'selected' : ''}>25</option>
                 <option value="50" ${state.auditPageSize === 50 ? 'selected' : ''}>50</option>
                 <option value="100" ${state.auditPageSize === 100 ? 'selected' : ''}>100</option>
                 <option value="250" ${state.auditPageSize === 250 ? 'selected' : ''}>250</option>
               </select>
-              <span>entries</span>
+              <span>${isAr ? 'سجل' : 'entries'}</span>
               <span class="text-slate-400">|</span>
-              <span>Showing ${startIndex + 1}-${Math.min(startIndex + state.auditPageSize, totalLogs)} of ${totalLogs}</span>
+              <span>${isAr ? `عرض ${startIndex + 1}-${Math.min(startIndex + state.auditPageSize, totalLogs)} من ${totalLogs}` : `Showing ${startIndex + 1}-${Math.min(startIndex + state.auditPageSize, totalLogs)} of ${totalLogs}`}</span>
             </div>
             
             <div class="flex items-center space-x-1">
@@ -11548,7 +11641,7 @@ function renderAuditView() {
               </button>
               
               <span class="px-3 py-1.5 text-xs font-bold text-slate-700 dark:text-slate-300">
-                Page ${currentPage} of ${totalPages || 1}
+                ${isAr ? `صفحة ${currentPage} من ${totalPages || 1}` : `Page ${currentPage} of ${totalPages || 1}`}
               </span>
               
               <button onclick="updateAuditPage(${currentPage + 1})" ${currentPage >= totalPages ? 'disabled' : ''} class="px-3 py-1.5 rounded-lg text-xs font-medium ${currentPage >= totalPages ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700'}">
@@ -11628,6 +11721,7 @@ function updateAuditPageSize(size) {
 }
 
 function showLogDetails(logId) {
+  const isAr = state.language === 'ar';
   const log = state.logs.find(l => l.id === logId);
   if (!log) return;
   
@@ -11644,7 +11738,7 @@ function showLogDetails(logId) {
           <span class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
             <i data-lucide="file-text" class="w-5 h-5 text-white"></i>
           </span>
-          <span>Log Details</span>
+          <span>${isAr ? 'تفاصيل السجل' : 'Log Details'}</span>
         </h2>
         <button onclick="this.closest('#app-modal').remove()" class="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
           <i data-lucide="x" class="w-4 h-4 text-slate-600 dark:text-slate-300"></i>
@@ -11654,44 +11748,44 @@ function showLogDetails(logId) {
       <div class="space-y-4">
         <div class="grid grid-cols-2 gap-4">
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">Log ID</div>
+            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'معرّف السجل' : 'Log ID'}</div>
             <div class="text-xs font-mono text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.id)}</div>
           </div>
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">Timestamp</div>
+            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'الوقت' : 'Timestamp'}</div>
             <div class="text-xs text-slate-700 dark:text-slate-300">${new Date(log.date).toLocaleString()}</div>
           </div>
         </div>
-        
+
         <div class="grid grid-cols-3 gap-4">
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">User</div>
-            <div class="text-xs text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.userName || user?.name || 'System')}</div>
+            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'المستخدم' : 'User'}</div>
+            <div class="text-xs text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.userName || user?.name || (isAr ? 'النظام' : 'System'))}</div>
           </div>
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">Action</div>
+            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'الإجراء' : 'Action'}</div>
             <div class="text-xs font-bold text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.action)}</div>
           </div>
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">Category</div>
+            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'الفئة' : 'Category'}</div>
             <div class="text-xs text-slate-700 dark:text-slate-300 capitalize">${Security.escapeHtml(log.category || 'general')}</div>
           </div>
         </div>
-        
+
         <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
-          <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">Description</div>
+          <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'الوصف' : 'Description'}</div>
           <div class="text-sm text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.description)}</div>
         </div>
-        
+
         ${log.resourceId ? `
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">Resource ID</div>
+            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'معرّف المورد' : 'Resource ID'}</div>
             <div class="text-xs font-mono text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.resourceId)}</div>
           </div>
         ` : ''}
-        
+
         <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
-          <div class="text-[10px] font-bold text-slate-400 uppercase mb-2">Metadata</div>
+          <div class="text-[10px] font-bold text-slate-400 uppercase mb-2">${isAr ? 'بيانات إضافية' : 'Metadata'}</div>
           <pre class="text-xs text-slate-600 dark:text-slate-400 overflow-x-auto whitespace-pre-wrap bg-slate-100 dark:bg-slate-900 p-3 rounded-lg">${Security.escapeHtml(JSON.stringify(log.metadata || {}, null, 2))}</pre>
         </div>
       </div>
@@ -11734,7 +11828,7 @@ function exportAuditLogs(format) {
     downloadFile(json, `audit-logs-${new Date().toISOString().split('T')[0]}.json`, 'application/json');
   }
   
-  showNotification('Export Complete', `Audit logs exported as ${format.toUpperCase()}`, 'success');
+  showNotification(state.language === 'ar' ? 'اكتمل التصدير' : 'Export Complete', state.language === 'ar' ? `تم تصدير سجلات التدقيق بصيغة ${format.toUpperCase()}` : `Audit logs exported as ${format.toUpperCase()}`, 'success');
 }
 
 function downloadFile(content, filename, mimeType) {
@@ -11767,7 +11861,7 @@ async function backupAuditLogs() {
   // Add backup log entry
   addAuditLog('backup', 'system', `Backed up ${allLogs.length} audit logs`, { backupSize: json.length });
   
-  showNotification('Backup Complete', `${allLogs.length} logs backed up successfully`, 'success');
+  showNotification(state.language === 'ar' ? 'اكتمل النسخ الاحتياطي' : 'Backup Complete', state.language === 'ar' ? `تم نسخ ${allLogs.length} سجل احتياطياً بنجاح` : `${allLogs.length} logs backed up successfully`, 'success');
 }
 
 // Restore audit logs from backup file
@@ -11786,7 +11880,7 @@ function restoreAuditLogs() {
         const backup = JSON.parse(event.target.result);
         
         if (!backup.logs || !Array.isArray(backup.logs)) {
-          showNotification('Error', 'Invalid backup file format', 'error');
+          showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'صيغة ملف النسخة الاحتياطية غير صالحة' : 'Invalid backup file format', 'error');
           return;
         }
         
@@ -11821,12 +11915,12 @@ function restoreAuditLogs() {
           totalInBackup: backup.totalLogs
         });
         
-        showNotification('Restore Complete', `Imported ${imported} new logs (${backup.totalLogs - imported} duplicates skipped)`, 'success');
+        showNotification(state.language === 'ar' ? 'اكتمل الاسترجاع' : 'Restore Complete', state.language === 'ar' ? `تم استيراد ${imported} سجل جديد (تم تخطي ${backup.totalLogs - imported} مكرر)` : `Imported ${imported} new logs (${backup.totalLogs - imported} duplicates skipped)`, 'success');
         render();
         lucide.createIcons();
       } catch (error) {
         console.error('Restore error:', error);
-        showNotification('Error', 'Failed to restore backup: ' + error.message, 'error');
+        showNotification(state.language === 'ar' ? 'خطأ' : 'Error', (state.language === 'ar' ? 'فشل استرجاع النسخة الاحتياطية: ' : 'Failed to restore backup: ') + error.message, 'error');
       }
     };
     
@@ -11838,21 +11932,22 @@ function restoreAuditLogs() {
 
 // Cleanup old audit logs
 async function cleanupAuditLogs() {
+  const isAr = state.language === 'ar';
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', 'Admin only', 'error');
+    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'للأدمن فقط' : 'Admin only', 'error');
     return;
   }
-  
-  const daysToKeep = prompt('Delete audit logs older than how many days? (default: 365)', '365');
+
+  const daysToKeep = prompt(isAr ? 'حذف سجلات التدقيق الأقدم من كم يوم؟ (الافتراضي: 365)' : 'Delete audit logs older than how many days? (default: 365)', '365');
   if (!daysToKeep) return;
-  
+
   const days = parseInt(daysToKeep);
   if (isNaN(days) || days < 30) {
-    showNotification('Validation Error', 'Minimum 30 days required', 'error');
+    showNotification(isAr ? 'خطأ في التحقق' : 'Validation Error', isAr ? 'الحد الأدنى 30 يوماً' : 'Minimum 30 days required', 'error');
     return;
   }
-  
-  if (!confirm(`⚠️ Delete all audit logs older than ${days} days?\n\nThis action cannot be undone.\nConsider backing up first.`)) {
+
+  if (!confirm(isAr ? `⚠️ حذف كل سجلات التدقيق الأقدم من ${days} يوماً؟\n\nلا يمكن التراجع عن هذا الإجراء.\nيُنصح بعمل نسخة احتياطية أولاً.` : `⚠️ Delete all audit logs older than ${days} days?\n\nThis action cannot be undone.\nConsider backing up first.`)) {
     return;
   }
   
@@ -11868,14 +11963,14 @@ async function cleanupAuditLogs() {
     
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'Cleanup failed' }));
-      showNotification('Error', err.detail || 'Cleanup failed', 'error');
+      showNotification(isAr ? 'خطأ' : 'Error', err.detail || (isAr ? 'فشل التنظيف' : 'Cleanup failed'), 'error');
       return;
     }
-    
+
     const result = await res.json();
     showNotification(
-      'Cleanup Complete',
-      `Deleted ${result.deleted_count} old audit logs`,
+      isAr ? 'اكتمل التنظيف' : 'Cleanup Complete',
+      isAr ? `تم حذف ${result.deleted_count} سجل تدقيق قديم` : `Deleted ${result.deleted_count} old audit logs`,
       'success'
     );
     
@@ -11886,11 +11981,12 @@ async function cleanupAuditLogs() {
       lucide.createIcons();
     }
   } catch (error) {
-    showNotification('Error', 'Cleanup failed: ' + error.message, 'error');
+    showNotification(isAr ? 'خطأ' : 'Error', (isAr ? 'فشل التنظيف: ' : 'Cleanup failed: ') + error.message, 'error');
   }
 }
 
 function renderSettingsView() {
+  const isAr = state.language === 'ar';
   const history = state.exchangeRateHistory || [];
   
   return `
@@ -11999,25 +12095,25 @@ function renderSettingsView() {
       <div class="glass-panel rounded-2xl p-6">
         <h2 class="text-xl font-bold mb-4 flex items-center">
           <i data-lucide="dollar-sign" class="w-5 h-5 mr-2 text-emerald-600"></i>
-          Exchange Rate Management
+          ${isAr ? 'إدارة سعر الصرف' : 'Exchange Rate Management'}
         </h2>
         <div class="space-y-4">
           <div class="flex flex-col md:flex-row md:items-center space-y-2 md:space-y-0 md:space-x-4">
-            <label class="text-sm font-medium text-slate-700 dark:text-slate-300">Current Rate (USD to LYD):</label>
+            <label class="text-sm font-medium text-slate-700 dark:text-slate-300">${isAr ? 'السعر الحالي (USD إلى LYD):' : 'Current Rate (USD to LYD):'}</label>
             <input type="text" id="default-rate-input" inputmode="decimal" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" onchange="updateExchangeRate(this.value)" class="glass-input px-4 py-2 rounded-xl w-32 font-bold text-emerald-600" />
-            <button onclick="updateExchangeRate(document.getElementById('default-rate-input').value)" class="btn-shine bg-emerald-600 text-white px-4 py-2 rounded-xl text-sm">Save Rate</button>
+            <button onclick="updateExchangeRate(document.getElementById('default-rate-input').value)" class="btn-shine bg-emerald-600 text-white px-4 py-2 rounded-xl text-sm">${isAr ? 'حفظ السعر' : 'Save Rate'}</button>
           </div>
 
           ${history.length > 0 ? `
             <div class="mt-6">
-              <h3 class="text-sm font-bold text-slate-500 uppercase mb-3">Rate History (Last 10)</h3>
+              <h3 class="text-sm font-bold text-slate-500 uppercase mb-3">${isAr ? 'سجل الأسعار (آخر 10)' : 'Rate History (Last 10)'}</h3>
               <div class="overflow-x-auto">
                 <table class="w-full text-sm">
                   <thead>
                     <tr class="border-b border-slate-200 dark:border-slate-700">
-                      <th class="text-left py-2">Date</th>
-                      <th class="text-left py-2">Rate</th>
-                      <th class="text-left py-2">Changed By</th>
+                      <th class="text-left py-2">${isAr ? 'التاريخ' : 'Date'}</th>
+                      <th class="text-left py-2">${isAr ? 'السعر' : 'Rate'}</th>
+                      <th class="text-left py-2">${isAr ? 'غُيِّر بواسطة' : 'Changed By'}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -12027,7 +12123,7 @@ function renderSettingsView() {
                         <tr class="border-b border-slate-100 dark:border-slate-800">
                           <td class="py-2 text-xs text-slate-500">${new Date(h.date).toLocaleString()}</td>
                           <td class="py-2 font-mono font-bold text-emerald-600">${h.rate.toFixed(2)}</td>
-                          <td class="py-2 text-slate-600 dark:text-slate-400">${Security.escapeHtml(user?.name || 'System')}</td>
+                          <td class="py-2 text-slate-600 dark:text-slate-400">${Security.escapeHtml(user?.name || (isAr ? 'النظام' : 'System'))}</td>
                         </tr>
                       `;
                     }).join('')}
@@ -12043,26 +12139,26 @@ function renderSettingsView() {
       <div class="glass-panel rounded-2xl p-6">
         <h2 class="text-xl font-bold mb-4 flex items-center">
           <i data-lucide="database" class="w-5 h-5 mr-2 text-blue-600"></i>
-          Data Management
+          ${isAr ? 'إدارة البيانات' : 'Data Management'}
         </h2>
         <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
           <button onclick="exportData()" class="btn-shine bg-blue-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-blue-700">
             <i data-lucide="download" class="w-5 h-5"></i>
-            <span>Export Backup</span>
+            <span>${isAr ? 'تصدير نسخة احتياطية' : 'Export Backup'}</span>
           </button>
           <button onclick="importData()" class="btn-shine bg-green-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-green-700">
             <i data-lucide="upload" class="w-5 h-5"></i>
-            <span>Import Backup</span>
+            <span>${isAr ? 'استيراد نسخة احتياطية' : 'Import Backup'}</span>
           </button>
           <button onclick="clearAllData()" class="btn-shine bg-rose-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-rose-700">
             <i data-lucide="trash-2" class="w-5 h-5"></i>
-            <span>Clear All Data</span>
+            <span>${isAr ? 'مسح كل البيانات' : 'Clear All Data'}</span>
           </button>
         </div>
         <div class="mt-4 p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl">
           <p class="text-sm text-slate-600 dark:text-slate-400">
             <i data-lucide="info" class="w-4 h-4 inline mr-1"></i>
-            Your data is stored locally in your browser. Export regularly to create backups.
+            ${isAr ? 'بياناتك مخزنة محلياً في متصفحك. صدِّر بانتظام لإنشاء نسخ احتياطية.' : 'Your data is stored locally in your browser. Export regularly to create backups.'}
           </p>
         </div>
       </div>
@@ -12072,22 +12168,22 @@ function renderSettingsView() {
         <div class="glass-panel rounded-2xl p-6">
           <h2 class="text-xl font-bold mb-4 flex items-center">
             <i data-lucide="cloud" class="w-5 h-5 mr-2 text-indigo-600"></i>
-            Cloud Sync
+            ${isAr ? 'المزامنة السحابية' : 'Cloud Sync'}
           </h2>
           <div class="space-y-4">
             <div class="flex items-center space-x-3 p-4 bg-emerald-50 dark:bg-emerald-900/20 rounded-xl">
               <i data-lucide="check-circle" class="w-5 h-5 text-emerald-600"></i>
               <div class="flex-1">
-                <p class="font-medium text-emerald-700 dark:text-emerald-300">Cloud Sync Enabled</p>
-                <p class="text-xs text-emerald-600 dark:text-emerald-400 mt-1">Last sync: ${state.lastCloudSync ? new Date(state.lastCloudSync).toLocaleString() : 'Never'}</p>
+                <p class="font-medium text-emerald-700 dark:text-emerald-300">${isAr ? 'المزامنة السحابية مفعّلة' : 'Cloud Sync Enabled'}</p>
+                <p class="text-xs text-emerald-600 dark:text-emerald-400 mt-1">${isAr ? 'آخر مزامنة' : 'Last sync'}: ${state.lastCloudSync ? new Date(state.lastCloudSync).toLocaleString() : (isAr ? 'أبداً' : 'Never')}</p>
               </div>
             </div>
             <div class="flex space-x-3">
               <button onclick="pushToCloud()" class="flex-1 btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold">
-                <i data-lucide="upload-cloud" class="w-4 h-4 inline mr-2"></i>Push Now
+                <i data-lucide="upload-cloud" class="w-4 h-4 inline mr-2"></i>${isAr ? 'رفع الآن' : 'Push Now'}
               </button>
               <button onclick="pullFromCloud()" class="flex-1 btn-shine bg-blue-600 text-white px-4 py-2 rounded-xl font-bold">
-                <i data-lucide="download-cloud" class="w-4 h-4 inline mr-2"></i>Pull Now
+                <i data-lucide="download-cloud" class="w-4 h-4 inline mr-2"></i>${isAr ? 'تنزيل الآن' : 'Pull Now'}
               </button>
             </div>
           </div>
@@ -12096,13 +12192,13 @@ function renderSettingsView() {
 
       <!-- App Info -->
       <div class="glass-panel rounded-2xl p-6">
-        <h2 class="text-xl font-bold mb-4">Application Info</h2>
+        <h2 class="text-xl font-bold mb-4">${isAr ? 'معلومات التطبيق' : 'Application Info'}</h2>
         <div class="space-y-2 text-sm">
-          <div class="flex justify-between"><span class="text-slate-500">Version:</span><span class="font-mono">3.5.0 Vanilla</span></div>
-          <div class="flex justify-between"><span class="text-slate-500">Total Ads:</span><span class="font-bold">${getVisibleRecords(state.ads).length}</span></div>
-          <div class="flex justify-between"><span class="text-slate-500">Total Customers:</span><span class="font-bold">${getVisibleRecords(state.customers).length}</span></div>
-          <div class="flex justify-between"><span class="text-slate-500">Total Users:</span><span class="font-bold">${getVisibleRecords(state.users).length}</span></div>
-          <div class="flex justify-between"><span class="text-slate-500">Audit Logs:</span><span class="font-bold">${getVisibleRecords(state.logs).length}</span></div>
+          <div class="flex justify-between"><span class="text-slate-500">${isAr ? 'الإصدار:' : 'Version:'}</span><span class="font-mono">3.5.0 Vanilla</span></div>
+          <div class="flex justify-between"><span class="text-slate-500">${isAr ? 'إجمالي الإعلانات:' : 'Total Ads:'}</span><span class="font-bold">${getVisibleRecords(state.ads).length}</span></div>
+          <div class="flex justify-between"><span class="text-slate-500">${isAr ? 'إجمالي العملاء:' : 'Total Customers:'}</span><span class="font-bold">${getVisibleRecords(state.customers).length}</span></div>
+          <div class="flex justify-between"><span class="text-slate-500">${isAr ? 'إجمالي المستخدمين:' : 'Total Users:'}</span><span class="font-bold">${getVisibleRecords(state.users).length}</span></div>
+          <div class="flex justify-between"><span class="text-slate-500">${isAr ? 'سجلات التدقيق:' : 'Audit Logs:'}</span><span class="font-bold">${getVisibleRecords(state.logs).length}</span></div>
         </div>
       </div>
     </div>
@@ -12397,7 +12493,7 @@ function editAd(id) {
   // Permission check for editing ads
   const ad = state.ads.find(a => a.id === id);
   if (!canActOnRecord('ads', 'edit', ad?.creatorId)) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الإعلانات' : 'You do not have permission to edit this ad', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الإعلانات' : 'You do not have permission to edit this ad', 'error');
     return;
   }
   state.activeModal = 'ad';
@@ -12410,7 +12506,7 @@ function editReceipt(id) {
   // Permission check for editing receipts
   const receipt = state.receipts.find(r => r.id === id);
   if (!canActOnRecord('receipts', 'edit', receipt?.createdBy)) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
     return;
   }
   state.activeModal = 'receipt';
@@ -12423,7 +12519,7 @@ function editCustomer(id) {
   // Permission check for editing customers
   const customer = state.customers.find(c => c.id === id);
   if (!canActOnRecord('customers', 'edit', customer?.createdBy)) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل العملاء' : 'You do not have permission to edit this customer', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل العملاء' : 'You do not have permission to edit this customer', 'error');
     return;
   }
   state.activeModal = 'customer';
@@ -12435,7 +12531,7 @@ function editCustomer(id) {
 function editPage(id) {
   // Permission check for editing pages
   if (!currentUserHasPermission('pages', 'edit')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الصفحات' : 'You do not have permission to edit pages', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الصفحات' : 'You do not have permission to edit pages', 'error');
     return;
   }
   state.activeModal = 'page';
@@ -12446,7 +12542,7 @@ function editPage(id) {
 
 function editUser(id) {
   if (!isCurrentUserAdmin() && String(id) !== String(state.currentUser?.id || '')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يمكنك تعديل مستخدمين آخرين' : 'You cannot edit other users', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يمكنك تعديل مستخدمين آخرين' : 'You cannot edit other users', 'error');
     return;
   }
   state.activeModal = 'user';
@@ -12461,18 +12557,18 @@ function editUser(id) {
 
 function showPermissionsModal(userId) {
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Permissions Manager is Admin only', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Permissions Manager is Admin only', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
   if (!user) {
-    showNotification('Error', 'User not found', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'المستخدم غير موجود' : 'User not found', 'error');
     return;
   }
-  
+
   // Admins shouldn't have their permissions edited (they have all by default)
   if (isAdminRole(user.role)) {
-    showNotification('Info', 'Administrators have full access by default', 'info');
+    showNotification(state.language === 'ar' ? 'معلومة' : 'Info', state.language === 'ar' ? 'المدراء لديهم صلاحية كاملة افتراضياً' : 'Administrators have full access by default', 'info');
     return;
   }
   
@@ -12505,7 +12601,7 @@ function showPermissionsModal(userId) {
               <span class="text-2xl font-bold">${user.name.charAt(0)}</span>
             </div>
             <div>
-              <h2 class="text-2xl font-bold">Permissions Manager</h2>
+              <h2 class="text-2xl font-bold">${state.language === 'ar' ? 'إدارة الصلاحيات' : 'Permissions Manager'}</h2>
               <div class="flex items-center space-x-2 mt-1">
                 <span class="text-white/80">${Security.escapeHtml(user.name || '')}</span>
                 <span class="px-2 py-0.5 rounded-full bg-white/20 text-xs font-medium">${Security.escapeHtml(user.role || '')}</span>
@@ -12532,11 +12628,11 @@ function showPermissionsModal(userId) {
           <div class="flex items-center justify-between mb-3">
             <h3 class="text-sm font-bold text-slate-700 dark:text-slate-300 uppercase flex items-center space-x-2">
               <i data-lucide="zap" class="w-4 h-4 text-amber-500"></i>
-              <span>Quick Templates</span>
+              <span>${state.language === 'ar' ? 'قوالب سريعة' : 'Quick Templates'}</span>
             </h3>
             <button onclick="clearAllPermissions('${userId}')" class="text-xs text-rose-600 hover:text-rose-700 font-medium flex items-center space-x-1">
               <i data-lucide="trash-2" class="w-3 h-3"></i>
-              <span>Clear All</span>
+              <span>${state.language === 'ar' ? 'مسح الكل' : 'Clear All'}</span>
             </button>
           </div>
           <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
@@ -12574,7 +12670,7 @@ function showPermissionsModal(userId) {
                   <div class="flex items-center space-x-3">
                     <span id="perm-module-count-${moduleKey}" class="text-xs font-bold ${moduleGranted > 0 ? 'text-emerald-600' : 'text-slate-400'}">${moduleGranted}/${modulePermCount}</span>
                     <button id="perm-module-toggle-${moduleKey}" data-color="${moduleConfig.color}" onclick="toggleModulePermissions('${userId}', '${moduleKey}', ${!allSelected})" class="px-3 py-1.5 rounded-lg text-xs font-bold ${allSelected ? 'bg-slate-200 dark:bg-slate-700 text-slate-600' : 'bg-' + moduleConfig.color + '-600 text-white'} hover:opacity-80 transition-all">
-                      ${allSelected ? 'Deselect All' : 'Select All'}
+                      ${allSelected ? (state.language === 'ar' ? 'إلغاء تحديد الكل' : 'Deselect All') : (state.language === 'ar' ? 'تحديد الكل' : 'Select All')}
                     </button>
                   </div>
                 </div>
@@ -12610,7 +12706,7 @@ function showPermissionsModal(userId) {
       <div class="p-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 flex items-center justify-between">
         <div class="text-xs text-slate-500">
           <i data-lucide="info" class="w-3 h-3 inline mr-1"></i>
-          Changes are saved automatically
+          ${state.language === 'ar' ? 'يتم حفظ التغييرات تلقائياً' : 'Changes are saved automatically'}
         </div>
         <div class="flex items-center space-x-3">
           <button onclick="exportUserPermissions('${userId}')" class="px-4 py-2 rounded-xl text-xs font-bold bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 flex items-center space-x-2 transition-colors">
@@ -12664,7 +12760,7 @@ function refreshPermissionsModalUi(userId, moduleKey = null) {
     const btn = modal.querySelector(`#perm-module-toggle-${mk}`);
     if (btn) {
       btn.setAttribute('onclick', `toggleModulePermissions('${String(userId)}', '${String(mk)}', ${!allSelected})`);
-      btn.textContent = allSelected ? 'Deselect All' : 'Select All';
+      btn.textContent = allSelected ? (state.language === 'ar' ? 'إلغاء تحديد الكل' : 'Deselect All') : (state.language === 'ar' ? 'تحديد الكل' : 'Select All');
       const base = 'px-3 py-1.5 rounded-lg text-xs font-bold hover:opacity-80 transition-all';
       const color = String(btn.dataset.color || cfg.color || 'indigo');
       btn.className = `${base} ${allSelected ? 'bg-slate-200 dark:bg-slate-700 text-slate-600' : `bg-${color}-600 text-white`}`;
@@ -12680,7 +12776,7 @@ function refreshPermissionsModalUi(userId, moduleKey = null) {
 
 function togglePermission(userId, moduleKey, permKey, enabled) {
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -12716,7 +12812,7 @@ function togglePermission(userId, moduleKey, permKey, enabled) {
 
 function toggleModulePermissions(userId, moduleKey, enableAll) {
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -12757,7 +12853,7 @@ function toggleModulePermissions(userId, moduleKey, enableAll) {
 
 function applyPermissionTemplate(userId, templateKey) {
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -12778,7 +12874,7 @@ function applyPermissionTemplate(userId, templateKey) {
     template: templateKey
   });
   
-  showNotification('Template Applied', `${template.name} permissions applied to ${user.name}`, 'success');
+  showNotification(state.language === 'ar' ? 'تم تطبيق القالب' : 'Template Applied', state.language === 'ar' ? `تم تطبيق صلاحيات "${template.name}" على ${user.name}` : `${template.name} permissions applied to ${user.name}`, 'success');
   // Update UI in-place (no blinking)
   const modal = document.getElementById('app-modal');
   if (modal?.dataset?.modalType === 'permissions' && String(modal.dataset.userId || '') === String(userId || '')) {
@@ -12794,13 +12890,13 @@ function applyPermissionTemplate(userId, templateKey) {
 
 function clearAllPermissions(userId) {
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
   if (!user) return;
   
-  if (!confirm(`Clear all permissions for ${user.name}? They will lose access to most features.`)) return;
+  if (!confirm(state.language === 'ar' ? `مسح جميع صلاحيات ${user.name}؟ سيفقد الوصول إلى معظم الميزات.` : `Clear all permissions for ${user.name}? They will lose access to most features.`)) return;
   
   user.permissions = {};
   user._lastModified = getMonotonicTime();
@@ -12814,7 +12910,7 @@ function clearAllPermissions(userId) {
     action: 'clear_all'
   });
   
-  showNotification('Cleared', `All permissions cleared for ${user.name}`, 'success');
+  showNotification(state.language === 'ar' ? 'تم المسح' : 'Cleared', state.language === 'ar' ? `تم مسح جميع صلاحيات ${user.name}` : `All permissions cleared for ${user.name}`, 'success');
   const modal = document.getElementById('app-modal');
   if (modal?.dataset?.modalType === 'permissions' && String(modal.dataset.userId || '') === String(userId || '')) {
     modal.querySelectorAll('input[type="checkbox"][data-module][data-perm]').forEach((el) => { el.checked = false; });
@@ -12824,7 +12920,7 @@ function clearAllPermissions(userId) {
 
 function exportUserPermissions(userId) {
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -12841,12 +12937,12 @@ function exportUserPermissions(userId) {
   const json = JSON.stringify(exportData, null, 2);
   downloadFile(json, `permissions-${user.name.toLowerCase().replace(/\s+/g, '-')}-${new Date().toISOString().split('T')[0]}.json`, 'application/json');
   
-  showNotification('Exported', `Permissions exported for ${user.name}`, 'success');
+  showNotification(state.language === 'ar' ? 'تم التصدير' : 'Exported', state.language === 'ar' ? `تم تصدير صلاحيات ${user.name}` : `Permissions exported for ${user.name}`, 'success');
 }
 
 function importUserPermissions(userId) {
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
     return;
   }
   const input = document.createElement('input');
@@ -12877,7 +12973,7 @@ function importUserPermissions(userId) {
             action: 'import'
           });
           
-          showNotification('Imported', `Permissions imported for ${user.name}`, 'success');
+          showNotification(state.language === 'ar' ? 'تم الاستيراد' : 'Imported', state.language === 'ar' ? `تم استيراد صلاحيات ${user.name}` : `Permissions imported for ${user.name}`, 'success');
           const modal = document.getElementById('app-modal');
           if (modal?.dataset?.modalType === 'permissions' && String(modal.dataset.userId || '') === String(userId || '')) {
             modal.querySelectorAll('input[type="checkbox"][data-module][data-perm]').forEach((el) => {
@@ -12890,7 +12986,7 @@ function importUserPermissions(userId) {
           refreshPermissionsModalUi(userId);
         }
       } catch (error) {
-        showNotification('Error', 'Invalid permissions file', 'error');
+        showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'ملف صلاحيات غير صالح' : 'Invalid permissions file', 'error');
       }
     };
     reader.readAsText(file);
@@ -12908,7 +13004,7 @@ function assignDelivery(itemId, userId) {
   } else {
     updateRecord(state.ads, itemId, { deliveryPersonId: userId });
   }
-  showNotification('Assigned', 'Delivery person assigned', 'success');
+  showNotification(state.language === 'ar' ? 'تم التعيين' : 'Assigned', state.language === 'ar' ? 'تم تعيين مندوب التوصيل' : 'Delivery person assigned', 'success');
   render();
 }
 
@@ -12926,7 +13022,7 @@ function updateDeliveryStatus(itemId, status) {
     return;
   }
   if (s === 'Delivered' && String(state.currentUser?.role || '').toLowerCase() !== 'delivery') {
-    showNotification('Not Allowed', 'Only the assigned delivery driver can mark a delivery as Delivered.', 'warning');
+    showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'فقط سائق التوصيل المعيَّن يمكنه تحديد التوصيل كـ"تم التوصيل".' : 'Only the assigned delivery driver can mark a delivery as Delivered.', 'warning');
     return;
   }
   // Check if it's a receipt or an ad
@@ -12936,7 +13032,7 @@ function updateDeliveryStatus(itemId, status) {
   } else {
     updateRecord(state.ads, itemId, { deliveryStatus: s });
   }
-  showNotification('Updated', `Status changed to ${s}`, 'success');
+  showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? `تم تغيير الحالة إلى ${trStatus(s)}` : `Status changed to ${s}`, 'success');
   render();
 }
 
@@ -12946,7 +13042,7 @@ function markAsCollected(itemId) {
   if (isReceipt) {
     // Temp delivery receipts require strict completion (final receipt # + photo + amounts).
     if (isTempDeliveryReceiptNo(isReceipt.tempReceiptNo)) {
-      showNotification('Not Allowed', 'Use "Mark Delivered" to complete this delivery with receipt photo + final number.', 'warning');
+      showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'استخدم "تم التوصيل" لإكمال هذا التوصيل مع صورة الوصل والرقم النهائي.' : 'Use "Mark Delivered" to complete this delivery with receipt photo + final number.', 'warning');
       openReceiptDeliveryCompletionModal(itemId);
       return;
     }
@@ -12968,7 +13064,7 @@ function markAsCollected(itemId) {
     state.currentUser.stats.collected = (state.currentUser.stats.collected || 0) + 1;
     updateRecord(state.users, state.currentUser.id, { stats: state.currentUser.stats });
   }
-  showNotification('Collected', 'Payment marked as collected', 'success');
+  showNotification(state.language === 'ar' ? 'تم التحصيل' : 'Collected', state.language === 'ar' ? 'تم تسجيل الدفعة كمُحصَّلة' : 'Payment marked as collected', 'success');
   render();
 }
 
@@ -12991,7 +13087,7 @@ function acceptDelivery(itemId) {
     state.currentUser.stats.totalAds = (state.currentUser.stats.totalAds || 0) + 1;
     updateRecord(state.users, state.currentUser.id, { stats: state.currentUser.stats });
   }
-  showNotification('Accepted', 'Delivery accepted', 'success');
+  showNotification(state.language === 'ar' ? 'تم القبول' : 'Accepted', state.language === 'ar' ? 'تم قبول التوصيل' : 'Delivery accepted', 'success');
   render();
 }
 
@@ -13142,20 +13238,21 @@ function updateReceiptDeliveryCompletionComputed() {
   const feeCmp = compareFees(quoted, actualFee);
   const debtCmp = compareDebt(debt, collected);
 
+  const isArC = state.language === 'ar';
   const feeEl = document.getElementById('delivery-fee-compare');
   const debtEl = document.getElementById('delivery-debt-compare');
   if (feeEl) {
     const diff = feeCmp.feeDiff;
     feeEl.textContent = feeCmp.feeDifferenceStatus === 'SAME'
-      ? 'Fee: SAME'
+      ? (isArC ? 'قيمة التوصيل: مطابقة' : 'Fee: SAME')
       : (feeCmp.feeDifferenceStatus === 'LOWER'
-        ? `Fee: LOWER (${Math.abs(diff).toFixed(0)} LYD)`
-        : `Fee: HIGHER (${diff.toFixed(0)} LYD)`);
+        ? (isArC ? `قيمة التوصيل: أقل (${Math.abs(diff).toFixed(0)} LYD)` : `Fee: LOWER (${Math.abs(diff).toFixed(0)} LYD)`)
+        : (isArC ? `قيمة التوصيل: أعلى (${diff.toFixed(0)} LYD)` : `Fee: HIGHER (${diff.toFixed(0)} LYD)`));
   }
   if (debtEl) {
-    if (debtCmp.paymentResult === 'PAID_EXACT') debtEl.textContent = 'Payment: PAID EXACT';
-    if (debtCmp.paymentResult === 'OVERPAID') debtEl.textContent = `Payment: OVERPAID (+${debtCmp.overpaidAmount.toFixed(0)} LYD)`;
-    if (debtCmp.paymentResult === 'UNDERPAID') debtEl.textContent = `Payment: UNDERPAID (${debtCmp.remainingDue.toFixed(0)} LYD remaining)`;
+    if (debtCmp.paymentResult === 'PAID_EXACT') debtEl.textContent = isArC ? 'الدفع: مطابق تماماً' : 'Payment: PAID EXACT';
+    if (debtCmp.paymentResult === 'OVERPAID') debtEl.textContent = isArC ? `الدفع: زائد (+${debtCmp.overpaidAmount.toFixed(0)} LYD)` : `Payment: OVERPAID (+${debtCmp.overpaidAmount.toFixed(0)} LYD)`;
+    if (debtCmp.paymentResult === 'UNDERPAID') debtEl.textContent = isArC ? `الدفع: ناقص (المتبقي ${debtCmp.remainingDue.toFixed(0)} LYD)` : `Payment: UNDERPAID (${debtCmp.remainingDue.toFixed(0)} LYD remaining)`;
   }
 
   // Validate (allow S-prefixed auto-serials for LTT/Libyana/Madar)
@@ -13164,13 +13261,13 @@ function updateReceiptDeliveryCompletionComputed() {
   let ok = true;
   if (!finalNo) {
     ok = false;
-    if (errEl) errEl.textContent = 'Final receipt number is required.';
+    if (errEl) errEl.textContent = isArC ? 'رقم الوصل النهائي مطلوب.' : 'Final receipt number is required.';
   } else if (!isAutoSerialValidation && (!/^\d+$/.test(finalNo) || finalNo.startsWith('0'))) {
     ok = false;
-    if (errEl) errEl.textContent = 'Final receipt number must be digits (no leading 0) or S-prefixed (S1, S2).';
+    if (errEl) errEl.textContent = isArC ? 'رقم الوصل النهائي يجب أن يكون أرقاماً (بدون صفر في البداية) أو ببادئة S (S1, S2).' : 'Final receipt number must be digits (no leading 0) or S-prefixed (S1, S2).';
   } else if (_receiptFinalNoExists(finalNo, receipt.id)) {
     ok = false;
-    if (errEl) errEl.textContent = 'Final receipt number already exists.';
+    if (errEl) errEl.textContent = isArC ? 'رقم الوصل النهائي موجود بالفعل.' : 'Final receipt number already exists.';
   } else {
     if (errEl) errEl.textContent = '';
   }
@@ -13187,17 +13284,18 @@ function updateReceiptDeliveryCompletionComputed() {
 }
 
 function openReceiptDeliveryCompletionModal(receiptId) {
+  const isArD = state.language === 'ar';
   const receipt = _findReceiptForDeliveryModal(receiptId);
   if (!receipt) {
-    showNotification('Error', 'Receipt not found', 'error');
+    showNotification(isArD ? 'خطأ' : 'Error', isArD ? 'الوصل غير موجود' : 'Receipt not found', 'error');
     return;
   }
   if (String(state.currentUser?.role || '').toLowerCase() !== 'delivery') {
-    showNotification('Access Denied', 'Delivery users only', 'error');
+    showNotification(isArD ? 'تم رفض الوصول' : 'Access Denied', isArD ? 'لمستخدمي التوصيل فقط' : 'Delivery users only', 'error');
     return;
   }
   if (String(receipt.deliveryPersonId || '') !== String(state.currentUser?.id || '')) {
-    showNotification('Access Denied', 'This receipt is not assigned to you', 'error');
+    showNotification(isArD ? 'تم رفض الوصول' : 'Access Denied', isArD ? 'هذا الوصل غير معيَّن لك' : 'This receipt is not assigned to you', 'error');
     return;
   }
 
@@ -13226,8 +13324,8 @@ function openReceiptDeliveryCompletionModal(receiptId) {
             <i data-lucide="check-circle" class="w-5 h-5 text-white"></i>
           </span>
           <div>
-            <div class="text-lg font-bold text-slate-800 dark:text-white">Mark Delivered</div>
-            <div class="text-xs text-slate-500">${Security.escapeHtml(customer?.name || 'Unknown')}</div>
+            <div class="text-lg font-bold text-slate-800 dark:text-white">${isArD ? 'تم التوصيل' : 'Mark Delivered'}</div>
+            <div class="text-xs text-slate-500">${Security.escapeHtml(customer?.name || (isArD ? 'غير معروف' : 'Unknown'))}</div>
           </div>
         </div>
         <button onclick="this.closest('#delivery-complete-modal').remove()" class="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
@@ -13237,46 +13335,46 @@ function openReceiptDeliveryCompletionModal(receiptId) {
 
       <div class="space-y-3">
         <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
-          <div class="text-xs text-slate-500 mb-1">Receipt</div>
+          <div class="text-xs text-slate-500 mb-1">${isArD ? 'الوصل' : 'Receipt'}</div>
           <div class="font-bold text-indigo-600">${Security.escapeHtml(tempNo || 'D?')}${finalNo ? ` → ${Security.escapeHtml(finalNo)}` : ''}</div>
           ${place ? `<div class="text-xs text-slate-600 dark:text-slate-300 mt-1"><span class="font-bold">📍</span> ${Security.escapeHtml(place)}</div>` : ''}
-          <div class="text-xs text-slate-500 mt-1">Debt due: <span class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(0)} LYD</span> • Quoted fee: <span class="font-bold text-emerald-600">${quoted.toFixed(0)} LYD</span></div>
-          ${phone ? `<div class="text-xs text-slate-500 mt-1">Phone: <span class="font-bold text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone)}</span></div>` : ''}
+          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(0)} LYD</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span class="font-bold text-emerald-600">${quoted.toFixed(0)} LYD</span></div>
+          ${phone ? `<div class="text-xs text-slate-500 mt-1">${isArD ? 'الهاتف' : 'Phone'}: <span class="font-bold text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone)}</span></div>` : ''}
         </div>
 
         <div>
-          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">Final receipt number *</label>
-          <input id="delivery-final-receipt-no" type="text" inputmode="numeric" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="e.g., 45873" value="${Security.escapeHtml(finalNo)}" oninput="this.value=this.value.replace(/[^0-9]/g,''); updateReceiptDeliveryCompletionComputed()" />
+          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'رقم الوصل النهائي *' : 'Final receipt number *'}</label>
+          <input id="delivery-final-receipt-no" type="text" inputmode="numeric" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isArD ? 'مثال: 45873' : 'e.g., 45873'}" value="${Security.escapeHtml(finalNo)}" oninput="this.value=this.value.replace(/[^0-9]/g,''); updateReceiptDeliveryCompletionComputed()" />
           <div id="delivery-final-receipt-error" class="mt-1 text-[11px] text-rose-600"></div>
         </div>
 
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">Amount collected (LYD) *</label>
+            <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'المبلغ المُحصَّل (LYD) *' : 'Amount collected (LYD) *'}</label>
             <input id="delivery-collected-amount" type="text" inputmode="decimal" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="0.00" value="${Security.escapeHtml(String(receipt.amountCollectedFromCustomer ?? ''))}" oninput="sanitizeMoneyInput(this); updateReceiptDeliveryCompletionComputed()" />
           </div>
           <div>
-            <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">Actual delivery fee collected (LYD) *</label>
+            <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'قيمة التوصيل الفعلية المُحصَّلة (LYD) *' : 'Actual delivery fee collected (LYD) *'}</label>
             <input id="delivery-actual-fee" type="text" inputmode="decimal" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="0.00" value="${Security.escapeHtml(String(receipt.actualDeliveryFeeCollected ?? receipt.deliveryFeeCollected ?? ''))}" oninput="sanitizeMoneyInput(this); updateReceiptDeliveryCompletionComputed()" />
           </div>
         </div>
 
         <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
           <div class="flex items-center justify-between mb-2">
-            <div class="text-xs font-bold text-slate-600 dark:text-slate-400">Receipt photo *</div>
+            <div class="text-xs font-bold text-slate-600 dark:text-slate-400">${isArD ? 'صورة الوصل *' : 'Receipt photo *'}</div>
             <label class="text-xs font-bold text-indigo-600 hover:text-indigo-700 cursor-pointer">
-              Upload
+              ${isArD ? 'رفع صورة' : 'Upload'}
               <input type="file" accept="image/*" class="hidden" onchange="handleDeliveryReceiptPhotoUpload(this.files)" />
             </label>
           </div>
           <input type="hidden" id="delivery-receipt-image-data" data-image-data="${Security.escapeHtml(String(receipt.receiptImage || receipt.photos?.[0] || ''))}" />
           <img id="delivery-receipt-image-preview" src="${Security.escapeHtml(String(receipt.receiptImage || receipt.photos?.[0] || ''))}" class="${(receipt.receiptImage || receipt.photos?.[0]) ? '' : 'hidden'} w-full h-36 object-cover rounded-lg border border-slate-200 dark:border-slate-700" />
-          ${(receipt.receiptImage || receipt.photos?.[0]) ? '' : '<div class="text-xs text-slate-400">No photo yet.</div>'}
+          ${(receipt.receiptImage || receipt.photos?.[0]) ? '' : `<div class="text-xs text-slate-400">${isArD ? 'لا توجد صورة بعد.' : 'No photo yet.'}</div>`}
         </div>
 
         <div>
-          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">Driver notes (optional)</label>
-          <textarea id="delivery-driver-notes" rows="2" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="Notes..." oninput="updateReceiptDeliveryCompletionComputed()">${Security.escapeHtml(String(receipt.driverNotes || ''))}</textarea>
+          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'ملاحظات السائق (اختياري)' : 'Driver notes (optional)'}</label>
+          <textarea id="delivery-driver-notes" rows="2" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isArD ? 'ملاحظات...' : 'Notes...'}" oninput="updateReceiptDeliveryCompletionComputed()">${Security.escapeHtml(String(receipt.driverNotes || ''))}</textarea>
         </div>
 
         <div class="grid grid-cols-2 gap-3 text-xs">
@@ -13286,10 +13384,10 @@ function openReceiptDeliveryCompletionModal(receiptId) {
 
         <div class="flex space-x-2 pt-2 border-t border-slate-200 dark:border-slate-700">
           <button type="button" onclick="openReceiptDeliveryCancelModal('${receipt.id}')" class="flex-1 btn-shine bg-rose-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold">
-            <i data-lucide="x-circle" class="w-4 h-4 inline mr-1"></i>Cancel Delivery
+            <i data-lucide="x-circle" class="w-4 h-4 inline mr-1"></i>${isArD ? 'إلغاء التوصيل' : 'Cancel Delivery'}
           </button>
           <button type="button" id="delivery-complete-submit" onclick="submitReceiptDeliveryCompletion('${receipt.id}')" class="flex-1 btn-shine bg-emerald-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold disabled:opacity-50 disabled:cursor-not-allowed">
-            <i data-lucide="check" class="w-4 h-4 inline mr-1"></i>Mark Delivered
+            <i data-lucide="check" class="w-4 h-4 inline mr-1"></i>${isArD ? 'تم التوصيل' : 'Mark Delivered'}
           </button>
         </div>
       </div>
@@ -13307,7 +13405,7 @@ function openReceiptDeliveryCompletionModal(receiptId) {
 async function submitReceiptDeliveryCompletion(receiptId) {
   const receipt = _findReceiptForDeliveryModal(receiptId);
   if (!receipt) {
-    showNotification('Error', 'Receipt not found', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'الوصل غير موجود' : 'Receipt not found', 'error');
     return;
   }
 
@@ -13437,7 +13535,7 @@ async function submitReceiptDeliveryCompletion(receiptId) {
       }
       const status = e?.status ? `HTTP ${e.status}` : '';
       const detail = (e?.payload && typeof e.payload === 'object' && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
-      showNotification('Server Error', `Failed to save delivery: ${status ? status + ' - ' : ''}${detail}`, 'error');
+      showNotification(state.language === 'ar' ? 'خطأ في الخادم' : 'Server Error', (state.language === 'ar' ? 'فشل حفظ التوصيل: ' : 'Failed to save delivery: ') + `${status ? status + ' - ' : ''}${detail}`, 'error');
       if (btn) btn.disabled = false;
       return;
     }
@@ -13451,21 +13549,22 @@ async function submitReceiptDeliveryCompletion(receiptId) {
 }
 
 function openReceiptDeliveryCancelModal(receiptId) {
+  const isArX = state.language === 'ar';
   const receipt = _findReceiptForDeliveryModal(receiptId);
   if (!receipt) {
-    showNotification('Error', 'Receipt not found', 'error');
+    showNotification(isArX ? 'خطأ' : 'Error', isArX ? 'الوصل غير موجود' : 'Receipt not found', 'error');
     return;
   }
   if (String(state.currentUser?.role || '').toLowerCase() !== 'delivery') {
-    showNotification('Access Denied', 'Delivery users only', 'error');
+    showNotification(isArX ? 'تم رفض الوصول' : 'Access Denied', isArX ? 'لمستخدمي التوصيل فقط' : 'Delivery users only', 'error');
     return;
   }
   if (String(receipt.deliveryPersonId || '') !== String(state.currentUser?.id || '')) {
-    showNotification('Access Denied', 'This receipt is not assigned to you', 'error');
+    showNotification(isArX ? 'تم رفض الوصول' : 'Access Denied', isArX ? 'هذا الوصل غير معيَّن لك' : 'This receipt is not assigned to you', 'error');
     return;
   }
   if (String(receipt.deliveryStatus || '') === 'Delivered') {
-    showNotification('Not Allowed', 'Already delivered.', 'warning');
+    showNotification(isArX ? 'غير مسموح' : 'Not Allowed', isArX ? 'تم التوصيل بالفعل.' : 'Already delivered.', 'warning');
     return;
   }
 
@@ -13482,8 +13581,8 @@ function openReceiptDeliveryCancelModal(receiptId) {
             <i data-lucide="x-circle" class="w-5 h-5 text-white"></i>
           </span>
           <div>
-            <div class="text-lg font-bold text-slate-800 dark:text-white">Cancel Delivery</div>
-            <div class="text-xs text-slate-500">Receipt ${Security.escapeHtml(String(receipt.tempReceiptNo || receipt.serialNumber || receipt.id))}</div>
+            <div class="text-lg font-bold text-slate-800 dark:text-white">${isArX ? 'إلغاء التوصيل' : 'Cancel Delivery'}</div>
+            <div class="text-xs text-slate-500">${isArX ? 'الوصل' : 'Receipt'} ${Security.escapeHtml(String(receipt.tempReceiptNo || receipt.serialNumber || receipt.id))}</div>
           </div>
         </div>
         <button onclick="this.closest('#delivery-cancel-modal').remove()" class="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
@@ -13493,13 +13592,13 @@ function openReceiptDeliveryCancelModal(receiptId) {
 
       <div class="space-y-3">
         <div>
-          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">Reason *</label>
-          <textarea id="delivery-cancel-reason" rows="3" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="Why are you cancelling?"></textarea>
+          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArX ? 'السبب *' : 'Reason *'}</label>
+          <textarea id="delivery-cancel-reason" rows="3" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isArX ? 'لماذا تقوم بالإلغاء؟' : 'Why are you cancelling?'}"></textarea>
         </div>
         <div class="flex space-x-2 pt-2 border-t border-slate-200 dark:border-slate-700">
-          <button type="button" onclick="this.closest('#delivery-cancel-modal').remove()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-slate-300">Close</button>
+          <button type="button" onclick="this.closest('#delivery-cancel-modal').remove()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-slate-300">${isArX ? 'إغلاق' : 'Close'}</button>
           <button type="button" onclick="submitReceiptDeliveryCancel('${receipt.id}')" class="flex-1 btn-shine bg-rose-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold">
-            Confirm Cancel
+            ${isArX ? 'تأكيد الإلغاء' : 'Confirm Cancel'}
           </button>
         </div>
       </div>
@@ -13514,7 +13613,7 @@ function submitReceiptDeliveryCancel(receiptId) {
   if (!receipt) return;
   const reason = String(document.getElementById('delivery-cancel-reason')?.value || '').trim();
   if (!reason) {
-    showNotification('Validation', 'Cancel reason is required.', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ في الإدخال' : 'Validation', state.language === 'ar' ? 'سبب الإلغاء مطلوب.' : 'Cancel reason is required.', 'error');
     return;
   }
   const nextHistory = Array.isArray(receipt.deliveryHistory) ? [...receipt.deliveryHistory] : [];
@@ -13533,7 +13632,7 @@ function submitReceiptDeliveryCancel(receiptId) {
   });
   document.getElementById('delivery-cancel-modal')?.remove();
   document.getElementById('delivery-complete-modal')?.remove();
-  showNotification('Canceled', 'Delivery canceled', 'success');
+  showNotification(state.language === 'ar' ? 'تم الإلغاء' : 'Canceled', state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled', 'success');
   render();
 }
 
@@ -13553,7 +13652,7 @@ function markAsDelivered(itemId) {
       deliveryStatus: 'Delivered'
     });
   }
-  showNotification('Delivered', 'Marked as delivered', 'success');
+  showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم التحديد كمُوصَّل' : 'Marked as delivered', 'success');
   render();
 }
 
@@ -13650,7 +13749,7 @@ function clearAllReceiptFilters() {
 // Toggle receipt collected status
 function _canMarkCollected() {
   if (!currentUserHasPermission('receipts', 'markCollected')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل حالة التحصيل' : 'You do not have permission to mark receipts as collected', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل حالة التحصيل' : 'You do not have permission to mark receipts as collected', 'error');
     return false;
   }
   return true;
@@ -13729,7 +13828,7 @@ function _collectAskView(receiptId, receipt, isAr, targetLYD, serialTxt) {
       ${isAr ? 'الوصل' : 'Receipt'} #${Security.escapeHtml(String(serialTxt))} — ${isAr ? 'الإجمالي' : 'Total'}: <span class="font-bold text-slate-800 dark:text-white">${targetLYD.toFixed(2)} LYD</span>
     </div>
     <div class="text-xs text-slate-500 mb-4">
-      ${isAr ? 'حسب الوصل' : 'As on the receipt'}: ${breakdown.map(p => `${Security.escapeHtml(p.method)} ${p.amount.toFixed(2)} LYD`).join(' • ')}
+      ${isAr ? 'حسب الوصل' : 'As on the receipt'}: ${breakdown.map(p => `${Security.escapeHtml(trMethod(p.method))} ${p.amount.toFixed(2)} LYD`).join(' • ')}
     </div>
     <p class="text-sm font-medium text-slate-700 dark:text-slate-300 mb-3">
       ${isAr ? 'هل تم التحصيل بنفس بيانات الوصل الأصلية؟' : 'Did you collect exactly as shown on the receipt?'}
@@ -13772,7 +13871,7 @@ function _collectEditorView(receiptId, receipt) {
       <div class="col-span-7">
         ${idx === 0 ? `<label class="block text-[10px] text-slate-400 mb-1">${isAr ? 'الطريقة' : 'Method'}</label>` : ''}
         <select onchange="updateCollectPaymentRow(${idx}, 'method', this.value)" class="w-full glass-input px-2 py-1.5 rounded-lg text-sm">
-          ${PAYMENT_METHODS.map(m => `<option value="${m}" ${p.method === m ? 'selected' : ''}>${m}</option>`).join('')}
+          ${PAYMENT_METHODS.map(m => `<option value="${m}" ${p.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
         </select>
       </div>
       <div class="col-span-4">
@@ -13901,7 +14000,7 @@ function toggleReceiptCollected(receiptId) {
 function showReceiptModal() {
   // Permission check for creating receipts
   if (!currentUserHasPermission('receipts', 'add')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإنشاء وصولات' : 'You do not have permission to create receipts', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإنشاء وصولات' : 'You do not have permission to create receipts', 'error');
     return;
   }
   state.activeModal = 'receipt';
@@ -13948,7 +14047,7 @@ function manageRefund(adId) {
 function showReceiptTransferModal(receiptId) {
   // Permission check
   if (!currentUserHasPermission('receipts', 'transfer')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتحويل الرصيد' : 'You do not have permission to transfer receipt balance', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتحويل الرصيد' : 'You do not have permission to transfer receipt balance', 'error');
     return;
   }
   state.activeModal = 'receipt-transfer';
@@ -13961,16 +14060,19 @@ function showReceiptTransferHistory(receiptId) {
   const receipt = state.receipts.find(r => r.id === receiptId);
   const transfers = receipt?.transfers || [];
   if (!receipt) return;
+  const isArT = state.language === 'ar';
   if (transfers.length === 0) {
-    showNotification('Transfers', 'No transfers recorded for this receipt.', 'info');
+    showNotification(isArT ? 'التحويلات' : 'Transfers', isArT ? 'لا توجد تحويلات مسجلة لهذا الوصل.' : 'No transfers recorded for this receipt.', 'info');
     return;
   }
   const lines = transfers.map(t => {
     const targetCustomer = state.customers.find(c => c.id === t.toCustomerId);
-    const name = targetCustomer ? targetCustomer.name : 'Unknown';
-    return `${new Date(t.date).toLocaleString()}: $${(t.amountUSD || 0).toFixed(2)} to ${name}`;
+    const name = targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown');
+    return isArT
+      ? `${new Date(t.date).toLocaleString()}: $${(t.amountUSD || 0).toFixed(2)} إلى ${name}`
+      : `${new Date(t.date).toLocaleString()}: $${(t.amountUSD || 0).toFixed(2)} to ${name}`;
   }).join('\n');
-  showNotification('Transfer history', lines, 'info');
+  showNotification(isArT ? 'سجل التحويلات' : 'Transfer history', lines, 'info');
 }
 
 // Show receipt edit history modal
@@ -13978,9 +14080,10 @@ function showReceiptEditHistory(receiptId) {
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
   
+  const isArH = state.language === 'ar';
   const editHistory = receipt.editHistory || [];
   if (editHistory.length === 0) {
-    showNotification('Edit History', 'No edit history recorded for this receipt.', 'info');
+    showNotification(isArH ? 'سجل التعديلات' : 'Edit History', isArH ? 'لا يوجد سجل تعديلات لهذا الوصل.' : 'No edit history recorded for this receipt.', 'info');
     return;
   }
   
@@ -13994,10 +14097,10 @@ function showReceiptEditHistory(receiptId) {
             <div>
               <h2 class="text-xl font-bold text-slate-800 dark:text-white flex items-center">
                 <i data-lucide="history" class="w-5 h-5 mr-2 text-amber-500"></i>
-                Edit History
+                ${isArH ? 'سجل التعديلات' : 'Edit History'}
               </h2>
               <p class="text-sm text-slate-500 mt-1">
-                Receipt ${receipt.serialNumber ? '#' + receipt.serialNumber : ''} for ${Security.escapeHtml(customer?.name || 'Unknown')}
+                ${isArH ? 'وصل' : 'Receipt'} ${receipt.serialNumber ? '#' + receipt.serialNumber : ''} ${isArH ? 'للعميل' : 'for'} ${Security.escapeHtml(customer?.name || (isArH ? 'غير معروف' : 'Unknown'))}
               </p>
             </div>
             <button onclick="document.getElementById('edit-history-modal').remove()" class="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors">
@@ -14011,8 +14114,8 @@ function showReceiptEditHistory(receiptId) {
             <div class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-4 border border-slate-200 dark:border-slate-700">
               <div class="flex items-center justify-between mb-3">
                 <div class="flex items-center space-x-2">
-                  <span class="text-xs font-bold text-white bg-amber-500 px-2 py-1 rounded-full">Edit #${editHistory.length - idx}</span>
-                  <span class="text-xs text-slate-500">${edit.editedBy || 'Unknown'}</span>
+                  <span class="text-xs font-bold text-white bg-amber-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
+                  <span class="text-xs text-slate-500">${edit.editedBy || (isArH ? 'غير معروف' : 'Unknown')}</span>
                 </div>
                 <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString()}</span>
               </div>
@@ -14037,8 +14140,8 @@ function showReceiptEditHistory(receiptId) {
         
         <div class="p-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50">
           <p class="text-xs text-slate-500 text-center">
-            Total: ${editHistory.length} edit${editHistory.length > 1 ? 's' : ''} • 
-            Created: ${new Date(receipt.createdAt).toLocaleString()}
+            ${isArH ? `الإجمالي: ${editHistory.length} ${editHistory.length > 1 ? 'تعديلات' : 'تعديل'}` : `Total: ${editHistory.length} edit${editHistory.length > 1 ? 's' : ''}`} •
+            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${new Date(receipt.createdAt).toLocaleString()}
           </p>
         </div>
       </div>
@@ -14060,9 +14163,10 @@ function showAdEditHistory(adId) {
   const ad = state.ads.find(a => a.id === adId);
   if (!ad) return;
   
+  const isArH = state.language === 'ar';
   const editHistory = ad.editHistory || [];
   if (editHistory.length === 0) {
-    showNotification('Edit History', 'No edit history recorded for this ad.', 'info');
+    showNotification(isArH ? 'سجل التعديلات' : 'Edit History', isArH ? 'لا يوجد سجل تعديلات لهذا الإعلان.' : 'No edit history recorded for this ad.', 'info');
     return;
   }
   
@@ -14077,10 +14181,10 @@ function showAdEditHistory(adId) {
             <div>
               <h2 class="text-xl font-bold text-slate-800 dark:text-white flex items-center">
                 <i data-lucide="history" class="w-5 h-5 mr-2 text-purple-500"></i>
-                Edit History
+                ${isArH ? 'سجل التعديلات' : 'Edit History'}
               </h2>
               <p class="text-sm text-slate-500 mt-1">
-                Ad for ${Security.escapeHtml(customer?.name || 'Unknown')} • ${Security.escapeHtml(page?.name || 'Unknown Page')}
+                ${isArH ? 'إعلان للعميل' : 'Ad for'} ${Security.escapeHtml(customer?.name || (isArH ? 'غير معروف' : 'Unknown'))} • ${Security.escapeHtml(page?.name || (isArH ? 'صفحة غير معروفة' : 'Unknown Page'))}
               </p>
             </div>
             <button onclick="document.getElementById('edit-history-modal').remove()" class="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors">
@@ -14094,8 +14198,8 @@ function showAdEditHistory(adId) {
             <div class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-4 border border-slate-200 dark:border-slate-700">
               <div class="flex items-center justify-between mb-3">
                 <div class="flex items-center space-x-2">
-                  <span class="text-xs font-bold text-white bg-purple-500 px-2 py-1 rounded-full">Edit #${editHistory.length - idx}</span>
-                  <span class="text-xs text-slate-500">${edit.editedBy || 'Unknown'}</span>
+                  <span class="text-xs font-bold text-white bg-purple-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
+                  <span class="text-xs text-slate-500">${edit.editedBy || (isArH ? 'غير معروف' : 'Unknown')}</span>
                 </div>
                 <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString()}</span>
               </div>
@@ -14120,8 +14224,8 @@ function showAdEditHistory(adId) {
         
         <div class="p-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50">
           <p class="text-xs text-slate-500 text-center">
-            Total: ${editHistory.length} edit${editHistory.length > 1 ? 's' : ''} • 
-            Created: ${new Date(ad.createdAt).toLocaleString()}
+            ${isArH ? `الإجمالي: ${editHistory.length} ${editHistory.length > 1 ? 'تعديلات' : 'تعديل'}` : `Total: ${editHistory.length} edit${editHistory.length > 1 ? 's' : ''}`} •
+            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${new Date(ad.createdAt).toLocaleString()}
           </p>
         </div>
       </div>
@@ -14148,25 +14252,26 @@ function saveReceiptTransfer() {
   const amountUSDElement = document.getElementById('transfer-amount-usd');
   const noteElement = document.getElementById('transfer-note');
   if (!targetCustomerEl || !amountUSDElement) {
-    showNotification('Error', 'Transfer form elements not found', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'لم يتم العثور على عناصر نموذج التحويل' : 'Transfer form elements not found', 'error');
     return;
   }
   const targetCustomerId = targetCustomerEl.value;
   const amountUSD = parseFloat(amountUSDElement.value) || 0;
   const note = noteElement?.value || '';
 
+  const isArTr = state.language === 'ar';
   if (!targetCustomerId) {
-    showNotification('Validation', 'Please choose a customer to transfer to.', 'error');
+    showNotification(isArTr ? 'خطأ في الإدخال' : 'Validation', isArTr ? 'الرجاء اختيار عميل للتحويل إليه.' : 'Please choose a customer to transfer to.', 'error');
     return;
   }
   if (amountUSD <= 0) {
-    showNotification('Validation', 'Transfer amount must be greater than zero.', 'error');
+    showNotification(isArTr ? 'خطأ في الإدخال' : 'Validation', isArTr ? 'يجب أن يكون مبلغ التحويل أكبر من صفر.' : 'Transfer amount must be greater than zero.', 'error');
     return;
   }
 
   const usage = getReceiptUsageStats(receipt);
   if (amountUSD > usage.remainingUSD) {
-    showNotification('Validation', 'Amount exceeds available balance.', 'error');
+    showNotification(isArTr ? 'خطأ في الإدخال' : 'Validation', isArTr ? 'المبلغ يتجاوز الرصيد المتاح.' : 'Amount exceeds available balance.', 'error');
     return;
   }
 
@@ -14182,7 +14287,7 @@ function saveReceiptTransfer() {
   const updatedTransfers = [...(receipt.transfers || []), transfer];
   updateRecord(state.receipts, receipt.id, { transfers: updatedTransfers });
   addLog('transfer', 'receipt', receipt.id, `Transferred $${amountUSD.toFixed(2)} to customer`, { toCustomerId: targetCustomerId });
-  showNotification('Transferred', 'Receipt balance transferred successfully', 'success');
+  showNotification(state.language === 'ar' ? 'تم التحويل' : 'Transferred', state.language === 'ar' ? 'تم تحويل رصيد الوصل بنجاح' : 'Receipt balance transferred successfully', 'success');
   closeModal();
   render();
 }
@@ -14190,42 +14295,43 @@ function saveReceiptTransfer() {
 function addSplitPayment() {
   const container = document.getElementById('split-payments-container');
   const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
-  
+  const isArSp = state.language === 'ar';
+
   const div = document.createElement('div');
   div.className = 'split-payment-item p-4 rounded-lg';
   div.innerHTML = `
     <div class="grid grid-cols-2 gap-3">
       <div>
-        <label class="block text-xs font-medium mb-1">Payment Method</label>
+        <label class="block text-xs font-medium mb-1">${isArSp ? 'طريقة الدفع' : 'Payment Method'}</label>
         <select class="split-method w-full glass-input px-3 py-2 rounded-lg text-sm">
-          ${PAYMENT_METHODS.map(m => `<option value="${m}">${m}</option>`).join('')}
+          ${PAYMENT_METHODS.map(m => `<option value="${m}">${trMethod(m)}</option>`).join('')}
         </select>
       </div>
       <div>
-        <label class="block text-xs font-medium mb-1">Amount (LYD)</label>
+        <label class="block text-xs font-medium mb-1">${isArSp ? 'المبلغ (LYD)' : 'Amount (LYD)'}</label>
         <input type="text" inputmode="decimal" class="split-amount w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="0.00" oninput="sanitizeMoneyInput(this)" />
       </div>
       <div>
-        <label class="block text-xs font-medium mb-1">Exchange Rate</label>
+        <label class="block text-xs font-medium mb-1">${isArSp ? 'سعر الصرف' : 'Exchange Rate'}</label>
         <input type="text" inputmode="decimal" class="split-rate w-full glass-input px-3 py-2 rounded-lg text-sm" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" />
       </div>
       <div>
-        <label class="block text-xs font-medium mb-1">USD Rate (Rate 2)</label>
+        <label class="block text-xs font-medium mb-1">${isArSp ? 'سعر الدولار (سعر 2)' : 'USD Rate (Rate 2)'}</label>
         <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" />
       </div>
       <div>
-        <label class="block text-xs font-medium mb-1">Collection Type</label>
+        <label class="block text-xs font-medium mb-1">${isArSp ? 'نوع التحصيل' : 'Collection Type'}</label>
         <select class="split-collection w-full glass-input px-3 py-2 rounded-lg text-sm">
-          <option value="office">Office</option>
-          <option value="delivery">Delivery</option>
-          <option value="bank">Bank</option>
+          <option value="office">${trStatus('office')}</option>
+          <option value="delivery">${trStatus('delivery')}</option>
+          <option value="bank">${trStatus('bank')}</option>
         </select>
       </div>
       ${deliveryUsers.length > 0 ? `
         <div class="col-span-2">
-          <label class="block text-xs font-medium mb-1">Delivery Person (if delivery)</label>
+          <label class="block text-xs font-medium mb-1">${isArSp ? 'مندوب التوصيل (إذا كان توصيل)' : 'Delivery Person (if delivery)'}</label>
           <select class="split-delivery-person w-full glass-input px-3 py-2 rounded-lg text-sm">
-            <option value="">None</option>
+            <option value="">${trStatus('None')}</option>
             ${deliveryUsers.map(u => `<option value="${u.id}">${Security.escapeHtml(u.name || '')}</option>`).join('')}
           </select>
         </div>
@@ -14233,7 +14339,7 @@ function addSplitPayment() {
       <div class="col-span-2 flex justify-end">
         <button type="button" onclick="this.closest('.split-payment-item').remove(); lucide.createIcons()" class="text-rose-600 hover:text-rose-700 text-sm font-medium flex items-center space-x-1">
           <i data-lucide="trash-2" class="w-4 h-4"></i>
-          <span>Remove</span>
+          <span>${isArSp ? 'إزالة' : 'Remove'}</span>
         </button>
       </div>
     </div>
@@ -14304,7 +14410,7 @@ function saveSplitPayments() {
     amountUSD: totalR2,
     exchangeRate: avgRate
   });
-  showNotification('Saved', 'Split payments saved successfully', 'success');
+  showNotification(state.language === 'ar' ? 'تم الحفظ' : 'Saved', state.language === 'ar' ? 'تم حفظ الدفعات المقسمة بنجاح' : 'Split payments saved successfully', 'success');
   closeModal();
   render();
 }
@@ -14335,7 +14441,7 @@ function _readTopUpForm() {
 function addNewTopUp() {
   const entry = _readTopUpForm();
   if (entry === null && !document.getElementById('topup-amount')) {
-    showNotification('Error', 'Top-up form elements not found', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'لم يتم العثور على عناصر نموذج التعبئة' : 'Top-up form elements not found', 'error');
     return;
   }
   if (!entry) {
@@ -14440,7 +14546,7 @@ function saveRefund() {
   };
   
   updateRecord(state.ads, adId, updates);
-  showNotification('Saved', `Refund ${refundType} applied`, refundType !== 'None' ? 'warning' : 'success');
+  showNotification(state.language === 'ar' ? 'تم الحفظ' : 'Saved', state.language === 'ar' ? `تم تطبيق الاسترجاع (${trStatus(refundType)})` : `Refund ${refundType} applied`, refundType !== 'None' ? 'warning' : 'success');
   closeModal();
   render();
 }
@@ -14503,9 +14609,10 @@ function showReceiptPhoneDropdown() {
 // ==========================================
 
 function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUsers) {
+  const isArF = state.language === 'ar';
   // BUG FIX: Check if array exists and has elements before accessing
   if (!Array.isArray(existingPayments) || existingPayments.length === 0) {
-    return '<div class="text-xs text-slate-400 p-4">No payments configured</div>';
+    return `<div class="text-xs text-slate-400 p-4">${isArF ? 'لا توجد دفعات معدة' : 'No payments configured'}</div>`;
   }
   
   const isSplit = existingPayments.length > 1;
@@ -14519,20 +14626,20 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
           <!-- Header -->
           <div class="flex items-center space-x-2 mb-4 pb-3 border-b border-slate-100 dark:border-slate-700">
             <i data-lucide="credit-card" class="w-4 h-4 text-slate-500"></i>
-            <span class="text-xs font-bold text-slate-500 uppercase">PAYMENT #1</span>
+            <span class="text-xs font-bold text-slate-500 uppercase">${isArF ? 'الدفعة رقم 1' : 'PAYMENT #1'}</span>
           </div>
 
           <div class="space-y-4">
             <!-- Payment Method & Amount Row -->
             <div class="grid grid-cols-2 gap-4">
               <div>
-                <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1.5">Payment Method</label>
+                <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1.5">${isArF ? 'طريقة الدفع' : 'Payment Method'}</label>
                 <select class="payment-method w-full glass-input px-3 py-2 rounded-lg text-sm font-medium border border-slate-200 dark:border-slate-600 focus:ring-2 focus:ring-indigo-500/20" onchange="onPaymentMethodChange(this)">
-                  ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${m}</option>`).join('')}
+                  ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
                 </select>
               </div>
               <div>
-                <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1.5">Amount</label>
+                <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1.5">${isArF ? 'المبلغ' : 'Amount'}</label>
                 <input type="text" inputmode="decimal" class="payment-amount w-full glass-input px-3 py-2 rounded-lg text-sm font-bold border border-slate-200 dark:border-slate-600 focus:ring-2 focus:ring-indigo-500/20" value="${payment.amount || 0}" placeholder="0" oninput="sanitizeMoneyInput(this); updateReceiptTotals()" />
               </div>
             </div>
@@ -14540,7 +14647,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             <!-- Rates Row -->
             <div class="grid grid-cols-2 gap-4">
               <div class="bg-slate-50 dark:bg-slate-900/50 p-3 rounded-lg border border-slate-200 dark:border-slate-700">
-                <label class="text-[10px] font-bold text-slate-500 uppercase mb-1.5 block">RATE 1</label>
+                <label class="text-[10px] font-bold text-slate-500 uppercase mb-1.5 block">${isArF ? 'السعر 1' : 'RATE 1'}</label>
                 <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${payment.rate || state.defaultExchangeRate}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
                 <div class="text-center pt-2 border-t border-slate-200 dark:border-slate-700">
                   <div class="text-[10px] font-bold text-slate-400 mb-0.5">R1:</div>
@@ -14548,7 +14655,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
                 </div>
               </div>
               <div class="bg-slate-50 dark:bg-slate-900/50 p-3 rounded-lg border border-slate-200 dark:border-slate-700">
-                <label class="text-[10px] font-bold text-slate-500 uppercase mb-1.5 block">RATE 2</label>
+                <label class="text-[10px] font-bold text-slate-500 uppercase mb-1.5 block">${isArF ? 'السعر 2' : 'RATE 2'}</label>
                 <input type="text" inputmode="decimal" class="payment-rate2 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${payment.rate2 !== undefined ? payment.rate2 : state.defaultExchangeRate}" placeholder="0" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
                 <div class="text-center pt-2 border-t border-slate-200 dark:border-slate-700">
                   <div class="text-[10px] font-bold text-slate-400 mb-0.5">R2:</div>
@@ -14563,17 +14670,17 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             <!-- Integrated Totals -->
             <div class="mt-4 pt-4 border-t border-slate-100 dark:border-slate-700 grid grid-cols-2 gap-4">
               <div>
-                <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">TOTAL PAID (LYD)</div>
+                <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي المدفوع (LYD)' : 'TOTAL PAID (LYD)'}</div>
                 <div class="p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg border border-slate-200 dark:border-slate-700">
                   <div id="receipt-total-lyd" class="text-xl font-bold text-slate-800 dark:text-white">0.00</div>
                   <div class="text-[10px] font-bold text-slate-400 mt-1">LYD</div>
                 </div>
               </div>
               <div>
-                <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">TOTAL ADS CREDIT (USD)</div>
+                <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي رصيد الإعلانات (USD)' : 'TOTAL ADS CREDIT (USD)'}</div>
                 <div class="p-3 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg border border-emerald-100 dark:border-emerald-900/30">
                   <div id="receipt-total-usd" class="text-xl font-bold text-emerald-600">$0.00</div>
-                  <div class="text-[10px] text-emerald-600/70 mt-1 leading-tight">Sum of all converted payments (Excluding Amount 2)</div>
+                  <div class="text-[10px] text-emerald-600/70 mt-1 leading-tight">${isArF ? 'مجموع كل الدفعات المحوّلة (باستثناء المبلغ 2)' : 'Sum of all converted payments (Excluding Amount 2)'}</div>
                 </div>
               </div>
             </div>
@@ -14581,12 +14688,12 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             <!-- Footer Stats -->
             <div class="flex justify-between items-center pt-2 text-[10px] text-slate-400">
               <div>
-                <div class="font-bold">Net Paid (After Fees):</div>
+                <div class="font-bold">${isArF ? 'صافي المدفوع (بعد الرسوم):' : 'Net Paid (After Fees):'}</div>
                 <div id="receipt-net-paid" class="text-indigo-600 font-bold text-xs">0.00 LYD</div>
               </div>
               <div class="text-right">
-                <div>Market Rate: <span id="receipt-market-rate" class="text-slate-600 dark:text-slate-300 font-bold">${state.defaultExchangeRate.toFixed(2)}</span></div>
-                <div>Actual Avg Rate: <span id="receipt-avg-rate" class="text-emerald-600 font-bold">0.0000</span></div>
+                <div>${isArF ? 'سعر السوق' : 'Market Rate'}: <span id="receipt-market-rate" class="text-slate-600 dark:text-slate-300 font-bold">${state.defaultExchangeRate.toFixed(2)}</span></div>
+                <div>${isArF ? 'متوسط السعر الفعلي' : 'Actual Avg Rate'}: <span id="receipt-avg-rate" class="text-emerald-600 font-bold">0.0000</span></div>
               </div>
             </div>
             
@@ -14606,7 +14713,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
         <div class="flex items-center justify-between mb-3">
           <div class="flex items-center space-x-2">
             <i data-lucide="credit-card" class="w-4 h-4 text-slate-400"></i>
-            <span class="text-xs font-bold text-slate-500 uppercase">PAYMENT #${idx + 1}</span>
+            <span class="text-xs font-bold text-slate-500 uppercase">${isArF ? `الدفعة رقم ${idx + 1}` : `PAYMENT #${idx + 1}`}</span>
           </div>
           <button type="button" onclick="removeReceiptPaymentSplit(this)" class="text-rose-500 hover:text-rose-700 transition-colors">
             <i data-lucide="trash-2" class="w-4 h-4"></i>
@@ -14616,20 +14723,20 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
         <div class="space-y-3">
           <div class="grid grid-cols-2 gap-3">
             <div>
-              <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Payment Method</label>
+              <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">${isArF ? 'طريقة الدفع' : 'Payment Method'}</label>
               <select class="payment-method w-full glass-input px-3 py-2 rounded-lg text-sm font-medium border border-slate-200 dark:border-slate-600" onchange="onPaymentMethodChange(this)">
-                ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${m}</option>`).join('')}
+                ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
               </select>
             </div>
             <div>
-              <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Amount</label>
+              <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">${isArF ? 'المبلغ' : 'Amount'}</label>
               <input type="text" inputmode="decimal" class="payment-amount w-full glass-input px-3 py-2 rounded-lg text-sm font-bold border border-slate-200 dark:border-slate-600" value="${payment.amount || 0}" placeholder="0" oninput="sanitizeMoneyInput(this); updateReceiptTotals()" />
             </div>
           </div>
 
           <div class="grid grid-cols-2 gap-3">
             <div class="bg-slate-50 dark:bg-slate-900/50 p-2 rounded-lg border border-slate-200 dark:border-slate-700">
-              <label class="text-[10px] font-bold text-slate-500 uppercase mb-1 block">RATE 1</label>
+              <label class="text-[10px] font-bold text-slate-500 uppercase mb-1 block">${isArF ? 'السعر 1' : 'RATE 1'}</label>
               <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${payment.rate || state.defaultExchangeRate}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
               <div class="text-center pt-1 border-t border-slate-200 dark:border-slate-700">
                 <span class="text-[9px] font-bold text-slate-400">R1: </span>
@@ -14637,7 +14744,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
               </div>
             </div>
             <div class="bg-slate-50 dark:bg-slate-900/50 p-2 rounded-lg border border-slate-200 dark:border-slate-700">
-              <label class="text-[10px] font-bold text-slate-500 uppercase mb-1 block">RATE 2</label>
+              <label class="text-[10px] font-bold text-slate-500 uppercase mb-1 block">${isArF ? 'السعر 2' : 'RATE 2'}</label>
               <input type="text" inputmode="decimal" class="payment-rate2 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${payment.rate2 !== undefined ? payment.rate2 : state.defaultExchangeRate}" placeholder="0" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
               <div class="text-center pt-1 border-t border-slate-200 dark:border-slate-700">
                 <span class="text-[9px] font-bold text-slate-400">R2: </span>
@@ -14662,17 +14769,17 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
       <div id="receipt-totals-section" class="mt-4 pt-4 border-t-2 border-slate-200 dark:border-slate-700">
         <div class="grid grid-cols-2 gap-4">
           <div>
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">TOTAL PAID (LYD)</div>
+            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي المدفوع (LYD)' : 'TOTAL PAID (LYD)'}</div>
             <div class="p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg border border-slate-200 dark:border-slate-700">
               <div id="receipt-total-lyd" class="text-xl font-bold text-slate-800 dark:text-white">0.00</div>
               <div class="text-[10px] font-bold text-slate-400 mt-1">LYD</div>
             </div>
           </div>
           <div>
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">TOTAL ADS CREDIT (USD)</div>
+            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي رصيد الإعلانات (USD)' : 'TOTAL ADS CREDIT (USD)'}</div>
             <div class="p-3 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg border border-emerald-100 dark:border-emerald-900/30">
               <div id="receipt-total-usd" class="text-xl font-bold text-emerald-600">$0.00</div>
-              <div class="text-[10px] text-emerald-600/70 mt-1">Sum of all R2 values</div>
+              <div class="text-[10px] text-emerald-600/70 mt-1">${isArF ? 'مجموع كل قيم R2' : 'Sum of all R2 values'}</div>
             </div>
           </div>
         </div>
@@ -14680,15 +14787,15 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
         <div class="mt-3 px-4 py-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg border border-slate-200 dark:border-slate-700">
           <div class="flex justify-between items-center text-xs">
             <div>
-              <span class="text-slate-500 font-bold">Net Paid:</span> 
+              <span class="text-slate-500 font-bold">${isArF ? 'صافي المدفوع:' : 'Net Paid:'}</span>
               <span id="receipt-net-paid" class="text-indigo-600 font-bold ml-1">0.00 LYD</span>
             </div>
             <div>
-              <span class="text-slate-500 font-bold">Market Rate:</span> 
+              <span class="text-slate-500 font-bold">${isArF ? 'سعر السوق:' : 'Market Rate:'}</span>
               <span id="receipt-market-rate" class="text-slate-600 font-bold ml-1">${state.defaultExchangeRate.toFixed(2)}</span>
             </div>
             <div>
-              <span class="text-slate-500 font-bold">Avg Rate:</span> 
+              <span class="text-slate-500 font-bold">${isArF ? 'متوسط السعر:' : 'Avg Rate:'}</span>
               <span id="receipt-avg-rate" class="text-emerald-600 font-bold ml-1">0.0000</span>
             </div>
           </div>
@@ -14731,7 +14838,7 @@ function addReceiptPaymentSplit() {
   const currentPayments = getReceiptPaymentData();
   // BUG FIX: Check if PAYMENT_METHODS array exists and has elements
   if (!Array.isArray(PAYMENT_METHODS) || PAYMENT_METHODS.length === 0) {
-    showNotification('Error', 'Payment methods not configured', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'طرق الدفع غير معدة' : 'Payment methods not configured', 'error');
     return;
   }
   const defaultRate1 = getDefaultRate1(PAYMENT_METHODS[0]);
@@ -14826,7 +14933,7 @@ function filterPageCustomers() {
     dropdown.innerHTML = filtered.map(c => `
       <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" onclick="selectPageCustomer('${c.id}', '${isAdminRole(state.currentUser?.role)}')">
         <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
-        <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || 'No phone')}</div>
+        <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (state.language === 'ar' ? 'لا يوجد هاتف' : 'No phone'))}</div>
       </div>
     `).join('');
     dropdown.classList.remove('hidden');
@@ -14843,7 +14950,7 @@ function showPageCustomerDropdown() {
     dropdown.innerHTML = customers.map(c => `
       <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" onclick="selectPageCustomer('${c.id}', '${isAdminRole(state.currentUser?.role)}')">
         <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
-        <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || 'No phone')}</div>
+        <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (state.language === 'ar' ? 'لا يوجد هاتف' : 'No phone'))}</div>
       </div>
     `).join('');
     dropdown.classList.remove('hidden');
@@ -14862,7 +14969,7 @@ function selectPageCustomer(customerId, isAdmin) {
   // Check if already selected
   const existing = container.querySelector(`[data-customer-id="${customerId}"]`);
   if (existing) {
-    showNotification('Already Selected', 'This customer is already linked to this page', 'info');
+    showNotification(state.language === 'ar' ? 'محدد مسبقاً' : 'Already Selected', state.language === 'ar' ? 'هذا العميل مرتبط بهذه الصفحة بالفعل' : 'This customer is already linked to this page', 'info');
     dropdown.classList.add('hidden');
     return;
   }
@@ -14870,7 +14977,7 @@ function selectPageCustomer(customerId, isAdmin) {
   // Check if non-admin trying to add multiple
   const currentCount = container.querySelectorAll('.page-customer-item').length;
   if (isAdmin === 'false' && currentCount >= 1) {
-    showNotification('Limit Reached', 'You can only link one customer. Remove the existing customer first.', 'error');
+    showNotification(state.language === 'ar' ? 'تم بلوغ الحد' : 'Limit Reached', state.language === 'ar' ? 'يمكنك ربط عميل واحد فقط. احذف العميل الحالي أولاً.' : 'You can only link one customer. Remove the existing customer first.', 'error');
     dropdown.classList.add('hidden');
     return;
   }
@@ -15043,15 +15150,15 @@ function onPaymentMethodChange(selectElement) {
         // Make field read-only and style it
         serialInput.readOnly = true;
         serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-        serialInput.title = `Auto-generated for ${paymentMethod}`;
+        serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${paymentMethod}` : `Auto-generated for ${paymentMethod}`;
         // Show notification about auto-generated serial
-        showNotification('Auto Serial', `Receipt number auto-set to ${nextSerial} for ${paymentMethod}`, 'info');
+        showNotification(state.language === 'ar' ? 'رقم تلقائي' : 'Auto Serial', state.language === 'ar' ? `تم تعيين رقم الوصل تلقائياً إلى ${nextSerial} لـ ${paymentMethod}` : `Receipt number auto-set to ${nextSerial} for ${paymentMethod}`, 'info');
       }
     } else if (serialInput) {
       // If already has value and is auto-serial method, keep it locked
       serialInput.readOnly = true;
       serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-      serialInput.title = `Auto-generated for ${paymentMethod}`;
+      serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${paymentMethod}` : `Auto-generated for ${paymentMethod}`;
     }
   }
   
@@ -15096,7 +15203,7 @@ function updateAutoSerialForReceipt() {
       // Make field read-only
       serialInput.readOnly = true;
       serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-      serialInput.title = `Auto-generated for ${autoSerialMethod}`;
+      serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${autoSerialMethod}` : `Auto-generated for ${autoSerialMethod}`;
     }
   }
   
@@ -15126,7 +15233,7 @@ function updateSerialLockState() {
     // Lock the serial field
     serialInput.readOnly = true;
     serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-    serialInput.title = `Auto-generated for ${autoSerialMethod}`;
+    serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${autoSerialMethod}` : `Auto-generated for ${autoSerialMethod}`;
   } else {
     // Unlock the serial field if no auto-serial methods are present
     serialInput.readOnly = false;
@@ -15346,6 +15453,7 @@ async function saveReceiptFromModal() {
 }
 
 async function _saveReceiptFromModalInner() {
+  const isArV = state.language === 'ar';
   try {
   // Resolve the edit target from the FROZEN hidden field written when this form
   // was rendered — NOT from the mutable global state.modalData, which a stray
@@ -15360,7 +15468,7 @@ async function _saveReceiptFromModalInner() {
 
   const customerId = document.getElementById('receipt-customer-id').value;
   if (!customerId) {
-    showNotification('Error', 'Please select a customer by phone', 'error');
+    showNotification(isArV ? 'خطأ' : 'Error', isArV ? 'الرجاء اختيار عميل عن طريق رقم الهاتف' : 'Please select a customer by phone', 'error');
     return;
   }
   
@@ -15448,7 +15556,7 @@ async function _saveReceiptFromModalInner() {
   // Enforce Not Paid rules
   if (status === 'Not Paid') {
     if (!statusDetail.notPaidCollection) {
-      showNotification('Validation', 'Select how the customer will pay (shop or delivery).', 'error');
+      showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'اختر كيف سيدفع العميل (المحل أو التوصيل).' : 'Select how the customer will pay (shop or delivery).', 'error');
       return;
     }
     if (!isCurrentUserAdmin()) {
@@ -15461,7 +15569,7 @@ async function _saveReceiptFromModalInner() {
   // Enforce Cancel rules
   if (status === 'Canceled') {
     if (!statusDetail.refundAction) {
-      showNotification('Validation', 'Select a cancellation outcome.', 'error');
+      showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'اختر نتيجة الإلغاء.' : 'Select a cancellation outcome.', 'error');
       return;
     }
     if (statusDetail.refundAction === 'full' || statusDetail.refundAction === 'partial') {
@@ -15475,7 +15583,7 @@ async function _saveReceiptFromModalInner() {
   
   // Lost rules
   if (status === 'Lost' && !statusDetail.lostResolution) {
-    showNotification('Validation', 'Select lost resolution (empty or paid).', 'error');
+    showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'اختر نتيجة الفقدان (فارغ أو مدفوع).' : 'Select lost resolution (empty or paid).', 'error');
     return;
   }
   
@@ -15488,11 +15596,11 @@ async function _saveReceiptFromModalInner() {
   if (isTempDelivery) {
     // In server mode, the backend generates tempReceiptNo safely, so it's OK to be empty before save.
     if (!serialNumber && !isServerModeEnabled()) {
-      showNotification('Validation', 'Temporary delivery receipt number is missing. Please re-select Delivery or reopen the receipt form.', 'error');
+      showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'رقم وصل التوصيل المؤقت مفقود. الرجاء إعادة اختيار التوصيل أو إعادة فتح نموذج الوصل.' : 'Temporary delivery receipt number is missing. Please re-select Delivery or reopen the receipt form.', 'error');
       return;
     }
     if (serialNumber && !isTempDeliveryReceiptNo(serialNumber)) {
-      showNotification('Validation', 'Temporary receipt number must look like D12, D13, ...', 'error');
+      showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'رقم الوصل المؤقت يجب أن يكون بالشكل D12، D13، ...' : 'Temporary receipt number must look like D12, D13, ...', 'error');
       return;
     }
   }
@@ -15510,7 +15618,7 @@ async function _saveReceiptFromModalInner() {
       serialInputEl.focus();
     }
     if (window.lucide) lucide.createIcons();
-    showNotification('Validation', state.language === 'ar'
+    showNotification(isArV ? 'تحقق' : 'Validation', state.language === 'ar'
       ? 'لا يمكن حفظ الوصل بدون رقم عندما تكون الحالة (مدفوع/ملغي/ضائع).'
       : 'You cannot save without a receipt number when status is Paid/Canceled/Lost.', 'error');
     return;
@@ -15525,7 +15633,7 @@ async function _saveReceiptFromModalInner() {
         (String(r.tempReceiptNo || '').trim() === serialNumber || String(r.serialNumber || '').trim() === serialNumber || String(r.finalReceiptNo || '').trim() === serialNumber)
       );
       if (existingTemp) {
-        showNotification('Duplicate Temp Receipt', `Temporary receipt number "${serialNumber}" already exists. Please reopen the receipt form to generate a new one.`, 'error');
+        showNotification(isArV ? 'وصل مؤقت مكرر' : 'Duplicate Temp Receipt', isArV ? `رقم الوصل المؤقت "${serialNumber}" موجود بالفعل. الرجاء إعادة فتح نموذج الوصل لتوليد رقم جديد.` : `Temporary receipt number "${serialNumber}" already exists. Please reopen the receipt form to generate a new one.`, 'error');
         return;
       }
     }
@@ -15535,13 +15643,13 @@ async function _saveReceiptFromModalInner() {
     // - Auto-serial receipts (LTT/Libyana/Madar): S-prefix + digits (S1, S2, S3, etc.)
     const isAutoSerial = isAutoSerialNumber(serialNumber);
     if (!isTempDelivery && !isAutoSerial && !/^\d+$/.test(serialNumber)) {
-      showNotification('Invalid Receipt Number', 'Receipt number must contain only digits (0-9) or be S-prefixed (S1, S2) for LTT/Libyana/Madar', 'error');
+      showNotification(isArV ? 'رقم وصل غير صالح' : 'Invalid Receipt Number', isArV ? 'رقم الوصل يجب أن يحتوي على أرقام فقط (0-9) أو يبدأ بحرف S (مثل S1، S2) لطرق LTT/Libyana/Madar' : 'Receipt number must contain only digits (0-9) or be S-prefixed (S1, S2) for LTT/Libyana/Madar', 'error');
       return;
     }
     
     // Check if it starts with zero (only for non-auto-serial receipts)
     if (!isTempDelivery && !isAutoSerial && serialNumber.startsWith('0')) {
-      showNotification('Invalid Receipt Number', 'Receipt number cannot start with zero', 'error');
+      showNotification(isArV ? 'رقم وصل غير صالح' : 'Invalid Receipt Number', isArV ? 'رقم الوصل لا يمكن أن يبدأ بصفر' : 'Receipt number cannot start with zero', 'error');
       return;
     }
     
@@ -15554,7 +15662,7 @@ async function _saveReceiptFromModalInner() {
     
     if (existingReceipt) {
       const customer = state.customers.find(c => c.id === existingReceipt.customerId);
-      const customerName = customer ? customer.name : 'Unknown';
+      const customerName = customer ? customer.name : (state.language === 'ar' ? 'غير معروف' : 'Unknown');
       
       // Show detailed duplicate warning
       showDuplicateReceiptWarning(serialNumber, customerName, existingReceipt.customerId);
@@ -15606,15 +15714,15 @@ async function _saveReceiptFromModalInner() {
   const deliveryInstructions = String(document.getElementById('receipt-delivery-instructions')?.value || '').trim();
   if (isTempDelivery) {
     if (!receiptDeliveryPersonId) {
-      showNotification('Validation', 'Please assign a delivery person.', 'error');
+      showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'الرجاء تعيين سائق توصيل.' : 'Please assign a delivery person.', 'error');
       return;
     }
     if (!deliveryPlaceName) {
-      showNotification('Validation', 'Delivery place name is required.', 'error');
+      showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'اسم مكان التوصيل مطلوب.' : 'Delivery place name is required.', 'error');
       return;
     }
     if (!(quotedDeliveryFee >= 0) || !Number.isFinite(quotedDeliveryFee)) {
-      showNotification('Validation', 'Quoted delivery fee is required.', 'error');
+      showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'رسوم التوصيل المتفق عليها مطلوبة.' : 'Quoted delivery fee is required.', 'error');
       return;
     }
   }
@@ -15743,7 +15851,7 @@ async function _saveReceiptFromModalInner() {
         const created = await apiCreateEntity('receipts', receipt);
         const saved = created?.data ? Security.sanitizeObject(created.data) : null;
         if (!saved || !saved.id) {
-          showNotification('Server Error', 'Failed to create receipt: invalid server response', 'error');
+          showNotification(isArV ? 'خطأ في الخادم' : 'Server Error', isArV ? 'فشل إنشاء الوصل: استجابة غير صالحة من الخادم' : 'Failed to create receipt: invalid server response', 'error');
           return;
         }
         // Insert into local state
@@ -15755,7 +15863,7 @@ async function _saveReceiptFromModalInner() {
       } catch (e) {
         const status = e?.status ? `HTTP ${e.status}` : '';
         const detail = (e?.payload && typeof e.payload === 'object' && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
-        showNotification('Server Error', `Failed to create receipt: ${status ? status + ' - ' : ''}${detail}`, 'error');
+        showNotification(isArV ? 'خطأ في الخادم' : 'Server Error', `${isArV ? 'فشل إنشاء الوصل' : 'Failed to create receipt'}: ${status ? status + ' - ' : ''}${detail}`, 'error');
         return; // keep modal open so user can retry
       }
     } else {
@@ -15800,7 +15908,7 @@ async function _saveReceiptFromModalInner() {
   
   } catch (error) {
     console.error('Error saving receipt:', error);
-    showNotification('Error', 'Failed to save receipt: ' + error.message, 'error');
+    showNotification(isArV ? 'خطأ' : 'Error', (isArV ? 'فشل حفظ الوصل: ' : 'Failed to save receipt: ') + error.message, 'error');
     
     // Still try to close the modal even if there was an error
     state.activeModal = null;
@@ -15838,7 +15946,7 @@ function validateReceiptNumberInput(input) {
     setTimeout(() => input.classList.remove('animate-shake'), 300);
     
     if (errorDiv) {
-      errorDiv.innerHTML = '<i data-lucide="alert-circle" class="w-3 h-3 inline mr-1"></i>Receipt number cannot start with zero';
+      errorDiv.innerHTML = '<i data-lucide="alert-circle" class="w-3 h-3 inline mr-1"></i>' + (state.language === 'ar' ? 'رقم الوصل لا يمكن أن يبدأ بصفر' : 'Receipt number cannot start with zero');
       errorDiv.classList.remove('hidden');
       input.classList.add('border-rose-500', 'focus:ring-rose-500/20');
       if (window.lucide) lucide.createIcons();
@@ -15890,10 +15998,10 @@ function checkReceiptNumberDuplicate(input) {
       errorDiv.innerHTML = `
         <div class="flex items-center space-x-2">
           <i data-lucide="alert-circle" class="w-3 h-3"></i>
-          <span>Already exists! Linked to: <strong>${customerName}</strong></span>
-          <button type="button" onclick="goToCustomerFromWarning('${existingReceipt.customerId}')" 
+          <span>${state.language === 'ar' ? 'موجود بالفعل! مرتبط بـ:' : 'Already exists! Linked to:'} <strong>${customerName}</strong></span>
+          <button type="button" onclick="goToCustomerFromWarning('${existingReceipt.customerId}')"
             class="ml-1 text-indigo-600 hover:text-indigo-700 underline font-bold">
-            View Customer →
+            ${state.language === 'ar' ? 'عرض العميل ←' : 'View Customer →'}
           </button>
         </div>
       `;
@@ -15909,6 +16017,7 @@ function checkReceiptNumberDuplicate(input) {
 
 // Duplicate receipt warning
 function showDuplicateReceiptWarning(receiptNumber, customerName, customerId) {
+  const isArDup = state.language === 'ar';
   const warningModal = document.createElement('div');
   warningModal.className = 'fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm';
   warningModal.id = 'duplicate-receipt-warning';
@@ -15920,9 +16029,9 @@ function showDuplicateReceiptWarning(receiptNumber, customerName, customerId) {
           <i data-lucide="alert-triangle" class="w-6 h-6 text-rose-600"></i>
         </div>
         <div>
-          <h3 class="text-xl font-bold text-slate-800 dark:text-white mb-2">Receipt Number Already Exists</h3>
+          <h3 class="text-xl font-bold text-slate-800 dark:text-white mb-2">${isArDup ? 'رقم الوصل موجود بالفعل' : 'Receipt Number Already Exists'}</h3>
           <p class="text-sm text-slate-600 dark:text-slate-400">
-            Receipt number <span class="font-mono font-bold text-rose-600">#${receiptNumber}</span> is already saved.
+            ${isArDup ? 'رقم الوصل' : 'Receipt number'} <span class="font-mono font-bold text-rose-600">#${receiptNumber}</span> ${isArDup ? 'محفوظ بالفعل.' : 'is already saved.'}
           </p>
         </div>
       </div>
@@ -15930,18 +16039,18 @@ function showDuplicateReceiptWarning(receiptNumber, customerName, customerId) {
       <div class="p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl mb-4">
         <div class="flex items-center space-x-2 mb-2">
           <i data-lucide="user" class="w-4 h-4 text-slate-500"></i>
-          <span class="text-xs font-medium text-slate-500 uppercase">Linked to Customer</span>
+          <span class="text-xs font-medium text-slate-500 uppercase">${isArDup ? 'مرتبط بالعميل' : 'Linked to Customer'}</span>
         </div>
         <p class="text-lg font-bold text-slate-800 dark:text-white">${customerName}</p>
       </div>
       
       <div class="flex space-x-3">
         <button onclick="closeDuplicateWarning()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors">
-          Close
+          ${isArDup ? 'إغلاق' : 'Close'}
         </button>
         <button onclick="goToCustomerFromWarning('${customerId}')" class="flex-1 btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
           <i data-lucide="arrow-right" class="w-4 h-4"></i>
-          <span>View Customer</span>
+          <span>${isArDup ? 'عرض العميل' : 'View Customer'}</span>
         </button>
       </div>
     </div>
@@ -16048,6 +16157,7 @@ function updateReceiptStatusUI(status) {
   const deliveryInfo = document.getElementById('receipt-delivery-info');
 
   const currentStatus = status || document.getElementById('receipt-status')?.value || 'Paid';
+  const isArS = state.language === 'ar';
   const isAdmin = isCurrentUserAdmin();
   const isTempDelivery = currentStatus === 'Not Paid' && notPaidCollection === 'delivery';
 
@@ -16075,20 +16185,20 @@ function updateReceiptStatusUI(status) {
         if (!isTempDeliveryReceiptNo(existing)) {
           serialInput.value = '';
         }
-        serialInput.placeholder = 'Temporary number (server-generated)';
+        serialInput.placeholder = isArS ? 'رقم مؤقت (يولّده الخادم)' : 'Temporary number (server-generated)';
         if (tempHint) {
           tempHint.classList.remove('hidden');
           tempHint.textContent = isTempDeliveryReceiptNo(existing)
-            ? `Temporary number: ${existing} (Pending Delivery)`
-            : 'Temporary number will be assigned when saved (Pending Delivery)';
+            ? (isArS ? `الرقم المؤقت: ${existing} (بانتظار التوصيل)` : `Temporary number: ${existing} (Pending Delivery)`)
+            : (isArS ? 'سيتم تعيين الرقم المؤقت عند الحفظ (بانتظار التوصيل)' : 'Temporary number will be assigned when saved (Pending Delivery)');
         }
       } else {
         // Local mode fallback: generate a best-effort D{n}.
-        serialInput.placeholder = 'Temporary number (auto)';
+        serialInput.placeholder = isArS ? 'رقم مؤقت (تلقائي)' : 'Temporary number (auto)';
         const tempNo = ensureTempDeliveryReceiptNoInReceiptForm();
         if (tempHint) {
           tempHint.classList.remove('hidden');
-          tempHint.textContent = `Temporary number: ${tempNo} (Pending Delivery)`;
+          tempHint.textContent = isArS ? `الرقم المؤقت: ${tempNo} (بانتظار التوصيل)` : `Temporary number: ${tempNo} (Pending Delivery)`;
         }
       }
       const overrideLabel = adminOverride?.closest('label');
@@ -16098,7 +16208,9 @@ function updateReceiptStatusUI(status) {
       const allow = isAdmin && adminOverride?.checked;
       serialInput.disabled = !allow;
       serialInput.readOnly = false;
-      serialInput.placeholder = allow ? 'Admin entering receipt number' : 'Locked until paid';
+      serialInput.placeholder = allow
+        ? (isArS ? 'الأدمن يدخل رقم الوصل' : 'Admin entering receipt number')
+        : (isArS ? 'مقفل حتى الدفع' : 'Locked until paid');
       if (!allow) serialInput.value = '';
       if (tempHint) tempHint.classList.add('hidden');
       const overrideLabel = adminOverride?.closest('label');
@@ -16107,7 +16219,7 @@ function updateReceiptStatusUI(status) {
     } else {
       serialInput.disabled = false;
       serialInput.readOnly = false;
-      serialInput.placeholder = 'e.g., 12345';
+      serialInput.placeholder = isArS ? 'مثال: 12345' : 'e.g., 12345';
       if (tempHint) tempHint.classList.add('hidden');
       const overrideLabel = adminOverride?.closest('label');
       if (overrideLabel) overrideLabel.classList.toggle('hidden', !isAdmin);
@@ -16262,7 +16374,7 @@ function handleAdCustomerChange(customerId, preserveFunding = false) {
   const pageSelect = document.getElementById('ad-page');
   if (pageSelect) {
     const pages = getPagesForCustomer(customerId);
-    pageSelect.innerHTML = `<option value="">Select page</option>${pages.map(p => `<option value="${Security.escapeHtml(p.id)}">${Security.escapeHtml(p.name)}</option>`).join('')}`;
+    pageSelect.innerHTML = `<option value="">${state.language === 'ar' ? 'اختر صفحة' : 'Select page'}</option>${pages.map(p => `<option value="${Security.escapeHtml(p.id)}">${Security.escapeHtml(p.name)}</option>`).join('')}`;
     if (preserveFunding && state.modalData?.pageId && pages.some(p => p.id === state.modalData.pageId)) {
       pageSelect.value = state.modalData.pageId;
     } else {
@@ -16289,6 +16401,7 @@ function handleAdPageChange(preserveFunding = false) {
 
 // Select a page in the Add Ad modal (Page-first workflow)
 function selectAdPage(pageId, preserveFunding = false) {
+  const isArP = state.language === 'ar';
   const pageInput = document.getElementById('ad-page');
   const pageSearch = document.getElementById('ad-page-search');
   const customerSection = document.getElementById('ad-customer-section');
@@ -16351,18 +16464,18 @@ function selectAdPage(pageId, preserveFunding = false) {
       customerDisplay.innerHTML = `
         <div class="p-3 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 text-center">
           <i data-lucide="alert-triangle" class="w-5 h-5 mx-auto mb-1 text-amber-500"></i>
-          <p class="text-xs text-amber-700 dark:text-amber-300">No customers linked.</p>
-          <button type="button" onclick="closeModal(); navigateTo('pages')" class="mt-1 text-xs text-amber-600 hover:text-amber-700 font-medium">Link →</button>
+          <p class="text-xs text-amber-700 dark:text-amber-300">${isArP ? 'لا يوجد عملاء مرتبطون.' : 'No customers linked.'}</p>
+          <button type="button" onclick="closeModal(); navigateTo('pages')" class="mt-1 text-xs text-amber-600 hover:text-amber-700 font-medium">${isArP ? 'ربط ←' : 'Link →'}</button>
         </div>
       `;
     }
     if (customerIdInput) customerIdInput.value = '';
-    if (customerHint) customerHint.textContent = '(no customers)';
+    if (customerHint) customerHint.textContent = isArP ? '(لا يوجد عملاء)' : '(no customers)';
   } else if (linkedCustomers.length === 1) {
     // Single customer - auto-select
     const customer = linkedCustomers[0];
     if (customerIdInput) customerIdInput.value = customer.id;
-    if (customerHint) customerHint.textContent = '(auto-selected)';
+    if (customerHint) customerHint.textContent = isArP ? '(محدد تلقائياً)' : '(auto-selected)';
     if (customerDisplay) {
       customerDisplay.innerHTML = `
         <div class="flex items-center space-x-3 p-2.5 rounded-lg bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
@@ -16371,7 +16484,7 @@ function selectAdPage(pageId, preserveFunding = false) {
           </div>
           <div class="flex-1 min-w-0">
             <div class="font-medium text-sm text-slate-700 dark:text-slate-200 truncate">${Security.escapeHtml(customer.name || '')}</div>
-            <div class="text-[10px] text-slate-400">${Security.escapeHtml(customer.platform || '')} • ${Security.escapeHtml(customer.phones?.[0] || 'No phone')}</div>
+            <div class="text-[10px] text-slate-400">${Security.escapeHtml(customer.platform || '')} • ${Security.escapeHtml(customer.phones?.[0] || (state.language === 'ar' ? 'لا يوجد هاتف' : 'No phone'))}</div>
           </div>
           <span class="text-[10px] text-indigo-600 dark:text-indigo-400">✓</span>
         </div>
@@ -16379,13 +16492,13 @@ function selectAdPage(pageId, preserveFunding = false) {
     }
   } else {
     // Multiple customers - show selection cards
-    if (customerHint) customerHint.textContent = '(select one)';
+    if (customerHint) customerHint.textContent = isArP ? '(اختر واحداً)' : '(select one)';
     const currentCustomerId = customerIdInput?.value || '';
     if (customerDisplay) {
       customerDisplay.innerHTML = `
         <div class="relative mb-2">
           <i data-lucide="search" class="w-3 h-3 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"></i>
-          <input type="text" placeholder="Search..." class="w-full glass-input pl-8 pr-3 py-1.5 rounded-lg text-xs" oninput="filterAdCustomers(this.value)" />
+          <input type="text" placeholder="${isArP ? 'بحث...' : 'Search...'}" class="w-full glass-input pl-8 pr-3 py-1.5 rounded-lg text-xs" oninput="filterAdCustomers(this.value)" />
         </div>
         <div id="ad-customer-cards" class="grid grid-cols-2 gap-2 max-h-28 overflow-y-auto">
           ${linkedCustomers.map(c => {
@@ -16468,6 +16581,7 @@ function getPendingTempDeliveryReceiptsForCustomer(customerId) {
 }
 
 function refreshAdTempReceiptOptions() {
+  const isArT = state.language === 'ar';
   const paymentStatus = document.getElementById('ad-payment-status')?.value || '';
   const collectionMethod = document.getElementById('ad-collection-method')?.value || '';
   const customerId = document.getElementById('ad-customer-id')?.value || '';
@@ -16482,7 +16596,7 @@ function refreshAdTempReceiptOptions() {
   if (!shouldShow) {
     hidden.value = '';
     if (hint) hint.textContent = '';
-    select.innerHTML = '<option value="">Select pending receipt...</option>';
+    select.innerHTML = `<option value="">${isArT ? 'اختر وصلاً معلقاً...' : 'Select pending receipt...'}</option>`;
     return;
   }
 
@@ -16490,13 +16604,13 @@ function refreshAdTempReceiptOptions() {
   const current = String(hidden.value || '').trim() || String(state.modalData?.receiptId || '').trim();
 
   select.innerHTML = [
-    '<option value="">Select pending receipt...</option>',
+    `<option value="">${isArT ? 'اختر وصلاً معلقاً...' : 'Select pending receipt...'}</option>`,
     ...receipts.map(r => {
       // Calculate available credit in USD
       const dueUsage = getDeliveryReceiptDueUsage(r);
       const availableUSD = dueUsage.remainingDueUSD;
       const place = String(r.deliveryPlaceName || '').trim();
-      const label = `${r.tempReceiptNo}${place ? ' • ' + place : ''} • $${availableUSD.toFixed(2)} available`;
+      const label = `${r.tempReceiptNo}${place ? ' • ' + place : ''} • $${availableUSD.toFixed(2)} ${isArT ? 'متاح' : 'available'}`;
       const selected = String(r.id) === current ? 'selected' : '';
       return `<option value="${r.id}" ${selected}>${Security.escapeHtml(label)}</option>`;
     })
@@ -16512,6 +16626,7 @@ function refreshAdTempReceiptOptions() {
 }
 
 function onAdTempReceiptChange(receiptId) {
+  const isArC = state.language === 'ar';
   const hidden = document.getElementById('ad-linked-receipt-id');
   const hint = document.getElementById('ad-temp-receipt-hint');
   const driverSelect = document.getElementById('ad-delivery-person');
@@ -16534,7 +16649,7 @@ function onAdTempReceiptChange(receiptId) {
 
   const r = state.receipts.find(x => x && !x._deleted && String(x.id) === rid);
   if (!r) {
-    if (hint) hint.textContent = 'Selected receipt not found. Try Refresh.';
+    if (hint) hint.textContent = isArC ? 'الوصل المحدد غير موجود. جرّب التحديث.' : 'Selected receipt not found. Try Refresh.';
     if (driverSelect) driverSelect.disabled = false;
     if (dueSection) dueSection.classList.add('hidden');
     if (mergeToggle) mergeToggle.classList.add('hidden');
@@ -16543,7 +16658,7 @@ function onAdTempReceiptChange(receiptId) {
 
   const customerId = document.getElementById('ad-customer-id')?.value || '';
   if (customerId && String(r.customerId || '') !== String(customerId)) {
-    if (hint) hint.textContent = 'Receipt customer mismatch. Please select the correct customer.';
+    if (hint) hint.textContent = isArC ? 'عميل الوصل غير مطابق. الرجاء اختيار العميل الصحيح.' : 'Receipt customer mismatch. Please select the correct customer.';
     if (dueSection) dueSection.classList.add('hidden');
     if (mergeToggle) mergeToggle.classList.add('hidden');
   } else {
@@ -16573,13 +16688,13 @@ function onAdTempReceiptChange(receiptId) {
     }
     const exchangeRate = dueUsage.exchangeRate || state.defaultExchangeRate || 1;
     
-    const txt = `${r.tempReceiptNo}${r.finalReceiptNo || r.serialNumber ? ` → ${r.finalReceiptNo || r.serialNumber}` : ''}${place ? ` • ${place}` : ''} • Quoted fee ${fee.toFixed(0)} LYD`;
+    const txt = `${r.tempReceiptNo}${r.finalReceiptNo || r.serialNumber ? ` → ${r.finalReceiptNo || r.serialNumber}` : ''}${place ? ` • ${place}` : ''} • ${isArC ? 'الرسوم المتفق عليها' : 'Quoted fee'} ${fee.toFixed(0)} LYD`;
     if (hint) hint.textContent = txt;
     
     // Show due amount section if there's available credit
     if (availableUSD > 0.01) {
       if (dueSection) dueSection.classList.remove('hidden');
-      if (dueAvailable) dueAvailable.textContent = `Available: $${availableUSD.toFixed(2)} (${(availableUSD * exchangeRate).toFixed(0)} LYD)`;
+      if (dueAvailable) dueAvailable.textContent = `${isArC ? 'المتاح' : 'Available'}: $${availableUSD.toFixed(2)} (${(availableUSD * exchangeRate).toFixed(0)} LYD)`;
       if (dueInput) {
         // Store the max due amount in USD for validation
         dueInput.dataset.maxDue = availableUSD.toString();
@@ -16618,7 +16733,7 @@ function onAdTempReceiptChange(receiptId) {
       initMergeFunding();
       reflectMergeFundingUI();
       // Update hint to show that credit is fully used
-      if (hint) hint.textContent += ' • ⚠️ Credit fully used';
+      if (hint) hint.textContent += isArC ? ' • ⚠️ الرصيد مستخدم بالكامل' : ' • ⚠️ Credit fully used';
     }
 
     updateAdDueSummary();
@@ -16700,10 +16815,13 @@ function updateAdDueSummary() {
   const usingLYD = usingUSD * exchangeRate;
   const remainingLYD = remainingUSD * exchangeRate;
   
+  const isArD = state.language === 'ar';
   if (usingUSD > 0) {
-    summary.innerHTML = `Using <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> (${usingLYD.toFixed(0)} LYD) from due. ${remainingUSD > 0 ? `<span class="text-slate-400">$${remainingUSD.toFixed(2)} (${remainingLYD.toFixed(0)} LYD) will remain.</span>` : '<span class="text-emerald-600">Full credit will be used.</span>'}`;
+    summary.innerHTML = isArD
+      ? `سيتم استخدام <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> (${usingLYD.toFixed(0)} LYD) من المستحق. ${remainingUSD > 0 ? `<span class="text-slate-400">سيتبقى $${remainingUSD.toFixed(2)} (${remainingLYD.toFixed(0)} LYD).</span>` : '<span class="text-emerald-600">سيتم استخدام الرصيد بالكامل.</span>'}`
+      : `Using <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> (${usingLYD.toFixed(0)} LYD) from due. ${remainingUSD > 0 ? `<span class="text-slate-400">$${remainingUSD.toFixed(2)} (${remainingLYD.toFixed(0)} LYD) will remain.</span>` : '<span class="text-emerald-600">Full credit will be used.</span>'}`;
   } else {
-    summary.innerHTML = '<span class="text-amber-600">Enter amount to use from due receipt.</span>';
+    summary.innerHTML = `<span class="text-amber-600">${isArD ? 'أدخل المبلغ المراد استخدامه من الوصل المستحق.' : 'Enter amount to use from due receipt.'}</span>`;
   }
 }
 
@@ -16717,7 +16835,7 @@ function reflectMergeFundingUI() {
   const mergeText = document.getElementById('ad-merge-text');
   if (mergedSection) mergedSection.classList.remove('hidden');
   if (mergeIcon) mergeIcon.setAttribute('data-lucide', 'minus-circle');
-  if (mergeText) mergeText.textContent = 'Remove Paid Receipt Funds';
+  if (mergeText) mergeText.textContent = state.language === 'ar' ? 'إزالة أموال الوصولات المدفوعة' : 'Remove Paid Receipt Funds';
   renderAdMergedFundingList();
   if (window.lucide) lucide.createIcons();
 }
@@ -16734,12 +16852,12 @@ function toggleMergePaidFunds() {
   if (state.tempMergeFunding.enabled) {
     if (mergedSection) mergedSection.classList.remove('hidden');
     if (mergeIcon) mergeIcon.setAttribute('data-lucide', 'minus-circle');
-    if (mergeText) mergeText.textContent = 'Remove Paid Receipt Funds';
+    if (mergeText) mergeText.textContent = state.language === 'ar' ? 'إزالة أموال الوصولات المدفوعة' : 'Remove Paid Receipt Funds';
     renderAdMergedFundingList();
   } else {
     if (mergedSection) mergedSection.classList.add('hidden');
     if (mergeIcon) mergeIcon.setAttribute('data-lucide', 'plus-circle');
-    if (mergeText) mergeText.textContent = 'Add Paid Receipt Funds';
+    if (mergeText) mergeText.textContent = state.language === 'ar' ? 'إضافة أموال وصولات مدفوعة' : 'Add Paid Receipt Funds';
     // Clear allocations when disabled
     state.tempMergeFunding.allocations = [];
   }
@@ -16799,16 +16917,17 @@ function getPaidReceiptsForMerge(customerId) {
 
 // Render the merged funding list (for Not Paid + Driver + Merge)
 function renderAdMergedFundingList() {
+  const isArM = state.language === 'ar';
   const list = document.getElementById('ad-merged-funding-list');
   if (!list) return;
-  
+
   initMergeFunding();
   const allocations = state.tempMergeFunding.allocations || [];
   const customerId = document.getElementById('ad-customer-id')?.value || '';
   const receipts = getPaidReceiptsForMerge(customerId);
   
   if (allocations.length === 0) {
-    list.innerHTML = `<div class="py-2 text-center text-xs text-slate-400">Click "+ Add Receipt" to use paid funds</div>`;
+    list.innerHTML = `<div class="py-2 text-center text-xs text-slate-400">${isArM ? 'اضغط "+ إضافة وصل" لاستخدام الأموال المدفوعة' : 'Click "+ Add Receipt" to use paid funds'}</div>`;
     refreshAdMergedFundingSummary();
     return;
   }
@@ -16824,7 +16943,7 @@ function renderAdMergedFundingList() {
       const usage = getReceiptUsageStats(r);
       const avail = Math.round(((usage.remainingUSD || 0) + getEditingAdExistingAllocationUSD(r.id, 'merged')) * 100) / 100;
       const serial = r.serialNumber || r.finalReceiptNo || (r.id ? String(r.id).slice(0,6) : '???');
-      const label = `#${serial} • $${avail.toFixed(2)} avail`;
+      const label = `#${serial} • $${avail.toFixed(2)} ${isArM ? 'متاح' : 'avail'}`;
       return `<option value="${r.id || ''}" ${alloc.receiptId === r.id ? 'selected' : ''}>${Security.escapeHtml(label)}</option>`;
     }).join('');
 
@@ -16840,25 +16959,25 @@ function renderAdMergedFundingList() {
     return `
       <div class="p-2 bg-slate-50 rounded-lg space-y-2">
         <div class="flex items-center justify-between">
-          <span class="text-xs text-slate-500">Paid Receipt #${idx + 1}</span>
-          <button type="button" onclick="removeAdMergeFundingAllocation(${idx})" class="text-xs text-rose-500 hover:text-rose-600">Remove</button>
+          <span class="text-xs text-slate-500">${isArM ? `وصل مدفوع رقم ${idx + 1}` : `Paid Receipt #${idx + 1}`}</span>
+          <button type="button" onclick="removeAdMergeFundingAllocation(${idx})" class="text-xs text-rose-500 hover:text-rose-600">${isArM ? 'إزالة' : 'Remove'}</button>
         </div>
         <div class="grid grid-cols-2 gap-2">
           <div>
-            <label class="block text-[10px] text-slate-400 mb-1">Receipt</label>
+            <label class="block text-[10px] text-slate-400 mb-1">${isArM ? 'الوصل' : 'Receipt'}</label>
             <select class="w-full border border-slate-200 px-2 py-1.5 rounded-lg text-sm" onchange="updateAdMergeFundingReceipt(${idx}, this.value)">
-              <option value="">Select...</option>
+              <option value="">${isArM ? 'اختر...' : 'Select...'}</option>
               ${optionsHtml}
             </select>
           </div>
           <div>
-            <label class="block text-[10px] text-slate-400 mb-1">Use Amount (USD)</label>
+            <label class="block text-[10px] text-slate-400 mb-1">${isArM ? 'المبلغ المستخدم (USD)' : 'Use Amount (USD)'}</label>
             <input type="text" inputmode="decimal" class="w-full border border-slate-200 px-2 py-1.5 rounded-lg text-sm" value="${alloc.amountUSD || ''}" oninput="sanitizeMoneyInput(this); updateAdMergeFundingAmount(${idx}, this.value)" onfocus="this.select()" />
           </div>
         </div>
         ${receipt ? `
           <div class="text-[10px] text-slate-400">
-            Available: <span class="text-emerald-600 font-medium">$${receiptRemaining.toFixed(2)}</span>
+            ${isArM ? 'المتاح' : 'Available'}: <span class="text-emerald-600 font-medium">$${receiptRemaining.toFixed(2)}</span>
           </div>
         ` : ''}
       </div>
@@ -16884,7 +17003,7 @@ function refreshAdMergedFundingSummary() {
   
   const totalUSD = allocations.reduce((sum, a) => sum + (parseFloat(a.amountUSD) || 0), 0);
   summary.innerHTML = `<div class="flex items-center justify-between py-1">
-    <span class="text-xs text-blue-600">Total from Paid Receipts</span>
+    <span class="text-xs text-blue-600">${state.language === 'ar' ? 'الإجمالي من الوصولات المدفوعة' : 'Total from Paid Receipts'}</span>
     <span class="text-sm font-semibold text-blue-700">$${totalUSD.toFixed(2)}</span>
   </div>`;
 }
@@ -16892,7 +17011,7 @@ function refreshAdMergedFundingSummary() {
 function openTempDeliveryReceiptFromAd() {
   const customerId = document.getElementById('ad-customer-id')?.value || '';
   if (!customerId) {
-    showNotification('Validation', 'Select a customer first.', 'error');
+    showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'اختر عميلاً أولاً.' : 'Select a customer first.', 'error');
     return;
   }
   const customer = state.customers.find(c => c && !c._deleted && String(c.id) === String(customerId));
@@ -17242,7 +17361,7 @@ function renderAdPhotoPreviews() {
   if (!container) return;
   const photos = state.tempAdPhotos || [];
   if (!photos.length) {
-    container.innerHTML = `<div class="text-xs text-slate-400 col-span-4">No photos yet. Click "Add Photo" to upload.</div>`;
+    container.innerHTML = `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. اضغط "إضافة صورة" للرفع.' : 'No photos yet. Click "Add Photo" to upload.'}</div>`;
     return;
   }
   container.innerHTML = photos.map((src, idx) => `
@@ -17299,7 +17418,7 @@ function renderReceiptPhotoPreviews() {
   if (!container) return;
   const photos = state.tempReceiptPhotos || [];
   if (!photos.length) {
-    container.innerHTML = `<div class="text-xs text-slate-400 col-span-4">No photos yet. Click "Add Photo" to upload.</div>`;
+    container.innerHTML = `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. اضغط "إضافة صورة" للرفع.' : 'No photos yet. Click "Add Photo" to upload.'}</div>`;
     return;
   }
   container.innerHTML = photos.map((src, idx) => `
@@ -17331,7 +17450,7 @@ function updateAdLocalAmount() {
   const rate = parseFloat(rateInput.value) || 1;
   const localAmount = amount * rate;
   
-  displayEl.innerHTML = `Local: <span class="font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(localAmount.toLocaleString())} LYD</span>`;
+  displayEl.innerHTML = `${state.language === 'ar' ? 'بالعملة المحلية' : 'Local'}: <span class="font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(localAmount.toLocaleString())} LYD</span>`;
 }
 
 function addAdFundingAllocation() {
@@ -17463,6 +17582,7 @@ function refreshAdFundingRow(idx) {
 }
 
 function renderAdFundingList() {
+  const isArL = state.language === 'ar';
   const list = document.getElementById('ad-funding-list');
   if (!list) return;
 
@@ -17501,13 +17621,13 @@ function renderAdFundingList() {
   
   if (!customerId) {
     // In the Ad modal, customer selection depends on picking a Page first.
-    list.innerHTML = `<div class="py-3 text-center text-xs text-slate-400">Select a page & customer first</div>`;
+    list.innerHTML = `<div class="py-3 text-center text-xs text-slate-400">${isArL ? 'اختر صفحة وعميلاً أولاً' : 'Select a page & customer first'}</div>`;
     refreshAdFundingSummary();
     return;
   }
   
   if (receipts.length === 0) {
-    list.innerHTML = `<div class="py-3 text-center text-xs text-slate-400">No receipts with remaining balance</div>`;
+    list.innerHTML = `<div class="py-3 text-center text-xs text-slate-400">${isArL ? 'لا توجد وصولات برصيد متبقٍ' : 'No receipts with remaining balance'}</div>`;
     refreshAdFundingSummary();
     return;
   }
@@ -17521,7 +17641,7 @@ function renderAdFundingList() {
       renderAdFundingList();
       return;
     }
-    list.innerHTML = `<div class="py-3 text-center text-xs text-slate-400">Click "+ Add" to link a receipt</div>`;
+    list.innerHTML = `<div class="py-3 text-center text-xs text-slate-400">${isArL ? 'اضغط "+ إضافة" لربط وصل' : 'Click "+ Add" to link a receipt'}</div>`;
     refreshAdFundingSummary();
     return;
   }
@@ -17558,27 +17678,27 @@ function renderAdFundingList() {
     return `
       <div class="space-y-2">
         <div class="flex items-center justify-between">
-          <span class="text-xs text-slate-500 flex items-center gap-1"><i data-lucide="receipt" class="w-3 h-3"></i>Receipt Allocation #${idx + 1}</span>
-          <button type="button" onclick="removeAdFundingAllocation(${idx})" class="text-xs text-rose-500 hover:text-rose-600">Remove</button>
+          <span class="text-xs text-slate-500 flex items-center gap-1"><i data-lucide="receipt" class="w-3 h-3"></i>${isArL ? `تخصيص الوصل رقم ${idx + 1}` : `Receipt Allocation #${idx + 1}`}</span>
+          <button type="button" onclick="removeAdFundingAllocation(${idx})" class="text-xs text-rose-500 hover:text-rose-600">${isArL ? 'إزالة' : 'Remove'}</button>
         </div>
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <label class="block text-[10px] text-slate-400 mb-1">Receipt</label>
+            <label class="block text-[10px] text-slate-400 mb-1">${isArL ? 'الوصل' : 'Receipt'}</label>
             <select class="w-full glass-input px-2 py-1.5 rounded-lg text-sm" onchange="updateAdFundingReceipt(${idx}, this.value)">
-              <option value="">Select...</option>
+              <option value="">${isArL ? 'اختر...' : 'Select...'}</option>
               ${optionsHtml}
             </select>
           </div>
           <div>
-            <label class="block text-[10px] text-slate-400 mb-1">Planned Spend (USD)</label>
+            <label class="block text-[10px] text-slate-400 mb-1">${isArL ? 'الإنفاق المخطط (USD)' : 'Planned Spend (USD)'}</label>
             <input type="text" inputmode="decimal" class="w-full glass-input px-2 py-1.5 rounded-lg text-sm" value="${alloc.amountUSD || ''}" oninput="sanitizeMoneyInput(this); updateAdFundingAmount(${idx}, this.value)" onfocus="this.select()" />
           </div>
         </div>
         ${receipt ? `
           <div class="text-[10px] text-slate-400 space-y-0.5">
-            <div>Remaining: <span id="ad-funding-remaining-${idx}" class="text-emerald-600 dark:text-emerald-400 font-medium">$${receiptRemaining.toFixed(2)}</span></div>
-            <div>Balance: <span id="ad-funding-balance-${idx}" class="text-blue-600 dark:text-blue-400 font-medium">$${balance.toFixed(2)}</span></div>
-            <div>Rate: <span id="ad-funding-rate-${idx}" class="text-slate-600 dark:text-slate-300">${receiptRate}</span></div>
+            <div>${isArL ? 'المتبقي' : 'Remaining'}: <span id="ad-funding-remaining-${idx}" class="text-emerald-600 dark:text-emerald-400 font-medium">$${receiptRemaining.toFixed(2)}</span></div>
+            <div>${isArL ? 'الرصيد' : 'Balance'}: <span id="ad-funding-balance-${idx}" class="text-blue-600 dark:text-blue-400 font-medium">$${balance.toFixed(2)}</span></div>
+            <div>${isArL ? 'السعر' : 'Rate'}: <span id="ad-funding-rate-${idx}" class="text-slate-600 dark:text-slate-300">${receiptRate}</span></div>
           </div>
         ` : ''}
       </div>
@@ -17589,7 +17709,7 @@ function renderAdFundingList() {
   if (window.lucide) lucide.createIcons();
   } catch (err) {
     console.error('Error rendering ad funding list:', err);
-    list.innerHTML = `<div class="py-3 text-center text-xs text-rose-500">Error loading receipts. Please refresh.</div>`;
+    list.innerHTML = `<div class="py-3 text-center text-xs text-rose-500">${isArL ? 'خطأ في تحميل الوصولات. الرجاء التحديث.' : 'Error loading receipts. Please refresh.'}</div>`;
   }
 }
 
@@ -17623,7 +17743,7 @@ function refreshAdFundingSummary() {
   
   summary.innerHTML = `
     <div class="flex items-center justify-between py-1.5">
-      <span class="text-xs text-slate-500">Total Balance</span>
+      <span class="text-xs text-slate-500">${state.language === 'ar' ? 'إجمالي الرصيد' : 'Total Balance'}</span>
       <span class="text-sm font-semibold ${totalBalance > 0 ? 'text-emerald-600' : 'text-slate-500'}">$${totalBalance.toFixed(2)}</span>
     </div>
   `;
@@ -17817,7 +17937,7 @@ function addPhoneField() {
   const div = document.createElement('div');
   div.className = 'flex items-center space-x-2 phone-field-group';
   div.innerHTML = `
-    <input type="tel" class="customer-phone flex-1 glass-input px-4 py-2 rounded-xl" placeholder="Phone number" />
+    <input type="tel" class="customer-phone flex-1 glass-input px-4 py-2 rounded-xl" placeholder="${state.language === 'ar' ? 'رقم الهاتف' : 'Phone number'}" />
     <button type="button" onclick="this.parentElement.remove(); lucide.createIcons()" class="text-rose-600 hover:text-rose-700">
       <i data-lucide="trash-2" class="w-4 h-4"></i>
     </button>
@@ -17848,7 +17968,7 @@ function addProfileLinkField() {
 function showCustomerModal() {
   // Permission check for creating customers
   if (!currentUserHasPermission('customers', 'add')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإضافة عملاء' : 'You do not have permission to add customers', 'error');
+    showNotification(state.language === 'ar' ? 'رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإضافة عملاء' : 'You do not have permission to add customers', 'error');
     return;
   }
   state.activeModal = 'customer';
@@ -17860,7 +17980,7 @@ function showCustomerModal() {
 function showPageModal() {
   // Permission check for creating pages
   if (!currentUserHasPermission('pages', 'add')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإضافة صفحات' : 'You do not have permission to add pages', 'error');
+    showNotification(state.language === 'ar' ? 'رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإضافة صفحات' : 'You do not have permission to add pages', 'error');
     return;
   }
   state.activeModal = 'page';
@@ -17872,11 +17992,11 @@ function showPageModal() {
 function showAdModal() {
   // Permission check for creating ads
   if (!currentUserHasPermission('ads', 'add')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإنشاء إعلانات' : 'You do not have permission to create ads', 'error');
+    showNotification(state.language === 'ar' ? 'رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإنشاء إعلانات' : 'You do not have permission to create ads', 'error');
     return;
   }
   if (getVisibleRecords(state.customers).length === 0) {
-    showNotification('No Customers', 'Please add a customer first', 'warning');
+    showNotification(state.language === 'ar' ? 'لا يوجد عملاء' : 'No Customers', state.language === 'ar' ? 'الرجاء إضافة عميل أولاً' : 'Please add a customer first', 'warning');
     return;
   }
   state.activeModal = 'ad';
@@ -17887,7 +18007,7 @@ function showAdModal() {
 
 function showUserModal() {
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', state.language === 'ar' ? 'هذه الميزة للأدمن فقط' : 'Admin only', 'error');
+    showNotification(state.language === 'ar' ? 'رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'هذه الميزة للأدمن فقط' : 'Admin only', 'error');
     return;
   }
   state.activeModal = 'user';
@@ -17905,27 +18025,28 @@ function updateUserRoleInfo(role) {
   
   if (!roleIcon || !roleTitle || !roleDesc) return;
   
+  const isArR = state.language === 'ar';
   const roleConfig = {
     'Admin': {
       icon: 'crown',
-      title: 'Full Administrator',
-      desc: 'Complete access to all features. No restrictions.',
+      title: isArR ? 'مدير كامل الصلاحيات' : 'Full Administrator',
+      desc: isArR ? 'وصول كامل لجميع الميزات. بدون قيود.' : 'Complete access to all features. No restrictions.',
       bgColor: 'bg-amber-100 dark:bg-amber-900/30',
       iconColor: 'text-amber-600',
-      badge: '<span class="px-2 py-1 rounded-lg bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 text-xs font-bold">ALL ACCESS</span>'
+      badge: `<span class="px-2 py-1 rounded-lg bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 text-xs font-bold">${isArR ? 'وصول كامل' : 'ALL ACCESS'}</span>`
     },
     'Delivery': {
       icon: 'truck',
-      title: 'Delivery Driver',
-      desc: 'Access to delivery operations only.',
+      title: isArR ? 'سائق توصيل' : 'Delivery Driver',
+      desc: isArR ? 'وصول لعمليات التوصيل فقط.' : 'Access to delivery operations only.',
       bgColor: 'bg-cyan-100 dark:bg-cyan-900/30',
       iconColor: 'text-cyan-600',
       badge: ''
     },
     'Employee': {
       icon: 'user-check',
-      title: 'Employee',
-      desc: 'Standard employee access. Customize permissions after creation.',
+      title: isArR ? 'موظف' : 'Employee',
+      desc: isArR ? 'وصول موظف قياسي. يمكن تخصيص الصلاحيات بعد الإنشاء.' : 'Standard employee access. Customize permissions after creation.',
       bgColor: 'bg-emerald-100 dark:bg-emerald-900/30',
       iconColor: 'text-emerald-600',
       badge: ''
@@ -17968,18 +18089,18 @@ function renderModal() {
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center">
           <i data-lucide="user" class="w-6 h-6 mr-2 text-indigo-600"></i>
-          ${isEdit ? 'Edit' : 'Add'} Customer
+          ${state.language === 'ar' ? (isEdit ? 'تعديل عميل' : 'إضافة عميل') : `${isEdit ? 'Edit' : 'Add'} Customer`}
         </h2>
         <form id="modal-form" class="space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar pr-2">
           <!-- Name -->
           <div>
-            <label class="block text-sm font-medium mb-2">Name *</label>
-            <input type="text" id="customer-name" value="${Security.escapeHtml(custData.name || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" placeholder="Customer name" />
+            <label class="block text-sm font-medium mb-2">${state.language === 'ar' ? 'الاسم *' : 'Name *'}</label>
+            <input type="text" id="customer-name" value="${Security.escapeHtml(custData.name || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${state.language === 'ar' ? 'اسم العميل' : 'Customer name'}" />
           </div>
 
           <!-- Platform -->
           <div>
-            <label class="block text-sm font-medium mb-2">Platform *</label>
+            <label class="block text-sm font-medium mb-2">${state.language === 'ar' ? 'المنصة *' : 'Platform *'}</label>
             <select id="customer-platform" class="w-full glass-input px-4 py-2 rounded-xl">
               ${PLATFORMS.map(p => `<option value="${p}" ${custData.platform === p ? 'selected' : ''}>${p}</option>`).join('')}
             </select>
@@ -17987,23 +18108,23 @@ function renderModal() {
 
           <!-- Join Date -->
           <div>
-            <label class="block text-sm font-medium mb-2">Join Date</label>
+            <label class="block text-sm font-medium mb-2">${state.language === 'ar' ? 'تاريخ الانضمام' : 'Join Date'}</label>
             <input type="date" id="customer-joindate" value="${Security.escapeHtml(custData.joinDate ? custData.joinDate.split('T')[0] : getTodayDateString())}" class="w-full glass-input px-4 py-2 rounded-xl" />
           </div>
 
           <!-- Phone Numbers -->
           <div>
             <div class="flex justify-between items-center mb-2">
-              <label class="block text-sm font-medium">Phone Numbers *</label>
+              <label class="block text-sm font-medium">${state.language === 'ar' ? 'أرقام الهاتف *' : 'Phone Numbers *'}</label>
               <button type="button" onclick="addPhoneField()" class="text-indigo-600 hover:text-indigo-700 text-sm font-medium flex items-center space-x-1">
                 <i data-lucide="plus-circle" class="w-4 h-4"></i>
-                <span>Add Phone</span>
+                <span>${state.language === 'ar' ? 'إضافة هاتف' : 'Add Phone'}</span>
               </button>
             </div>
             <div id="phone-fields-container" class="space-y-2">
               ${phones.map((phone, index) => `
                 <div class="flex items-center space-x-2 phone-field-group">
-                  <input type="tel" class="customer-phone flex-1 glass-input px-4 py-2 rounded-xl" value="${Security.escapeHtml(phone || '')}" placeholder="Phone number" ${index === 0 ? 'required' : ''} />
+                  <input type="tel" class="customer-phone flex-1 glass-input px-4 py-2 rounded-xl" value="${Security.escapeHtml(phone || '')}" placeholder="${state.language === 'ar' ? 'رقم الهاتف' : 'Phone number'}" ${index === 0 ? 'required' : ''} />
                   ${index > 0 ? `
                     <button type="button" onclick="this.parentElement.remove(); lucide.createIcons()" class="text-rose-600 hover:text-rose-700">
                       <i data-lucide="trash-2" class="w-4 h-4"></i>
@@ -18017,10 +18138,10 @@ function renderModal() {
           <!-- Profile Links -->
           <div>
             <div class="flex justify-between items-center mb-2">
-              <label class="block text-sm font-medium">Profile Links</label>
+              <label class="block text-sm font-medium">${state.language === 'ar' ? 'روابط الملف الشخصي' : 'Profile Links'}</label>
               <button type="button" onclick="addProfileLinkField()" class="text-indigo-600 hover:text-indigo-700 text-sm font-medium flex items-center space-x-1">
                 <i data-lucide="plus-circle" class="w-4 h-4"></i>
-                <span>Add Link</span>
+                <span>${state.language === 'ar' ? 'إضافة رابط' : 'Add Link'}</span>
               </button>
             </div>
             <div id="profile-links-container" class="space-y-2">
@@ -18034,7 +18155,7 @@ function renderModal() {
               `).join('') : `
                 <div class="text-center py-4 text-sm text-slate-400">
                   <i data-lucide="link" class="w-8 h-8 mx-auto mb-2 opacity-50"></i>
-                  <p>No profile links yet. Click "Add Link" to add one.</p>
+                  <p>${state.language === 'ar' ? 'لا توجد روابط بعد. اضغط "إضافة رابط" لإضافة واحد.' : 'No profile links yet. Click "Add Link" to add one.'}</p>
                 </div>
               `}
             </div>
@@ -18042,9 +18163,9 @@ function renderModal() {
 
           <div class="flex space-x-3 pt-4 border-t border-slate-200 dark:border-slate-700">
             <button type="submit" class="flex-1 btn-shine bg-indigo-600 text-white px-4 py-3 rounded-xl font-bold hover:bg-indigo-700">
-              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>${isEdit ? 'Save Changes' : 'Create Customer'}
+              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>${state.language === 'ar' ? (isEdit ? 'حفظ التغييرات' : 'إنشاء عميل') : (isEdit ? 'Save Changes' : 'Create Customer')}
             </button>
-            <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold hover:bg-slate-300">Cancel</button>
+            <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold hover:bg-slate-300">${state.language === 'ar' ? 'إلغاء' : 'Cancel'}</button>
           </div>
         </form>
       `;
@@ -18058,17 +18179,18 @@ function renderModal() {
       const durationDaysDefault = (adData.days !== undefined ? adData.days : (adData.startDate && adData.endDate ? Math.max(0, Math.round((new Date(adData.endDate) - new Date(adData.startDate)) / (1000 * 60 * 60 * 24))) : ''));
       const isAdminUser = isCurrentUserAdmin();
       const adCreator = isEdit && adData.creatorId ? state.users.find(u => u.id === adData.creatorId) : state.currentUser;
-      
+      const isArAd = state.language === 'ar';
+
       if (visiblePages.length === 0) {
         modalContent = `
           <div class="text-center py-8">
             <div class="w-20 h-20 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center shadow-xl">
               <i data-lucide="file-text" class="w-10 h-10 text-white"></i>
             </div>
-            <h2 class="text-xl font-bold text-slate-800 dark:text-white mb-2">No Pages Found</h2>
-            <p class="text-slate-500 mb-4">Please add a Facebook Page first before creating an ad.</p>
+            <h2 class="text-xl font-bold text-slate-800 dark:text-white mb-2">${isArAd ? 'لا توجد صفحات' : 'No Pages Found'}</h2>
+            <p class="text-slate-500 mb-4">${isArAd ? 'الرجاء إضافة صفحة فيسبوك أولاً قبل إنشاء إعلان.' : 'Please add a Facebook Page first before creating an ad.'}</p>
             <button onclick="closeModal(); navigateTo('pages')" class="btn-shine bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-6 py-3 rounded-xl font-bold">
-              <i data-lucide="plus" class="w-4 h-4 inline mr-2"></i>Add Page
+              <i data-lucide="plus" class="w-4 h-4 inline mr-2"></i>${isArAd ? 'إضافة صفحة' : 'Add Page'}
             </button>
           </div>
         `;
@@ -18085,8 +18207,8 @@ function renderModal() {
                 <i data-lucide="megaphone" class="w-5 h-5 text-white"></i>
               </span>
               <div>
-                <h2 class="text-lg font-bold text-slate-800 dark:text-white">${isEdit ? 'Edit' : 'New'} Ad</h2>
-                <p class="text-slate-400 text-xs">Fill all sections below</p>
+                <h2 class="text-lg font-bold text-slate-800 dark:text-white">${isArAd ? (isEdit ? 'تعديل إعلان' : 'إعلان جديد') : `${isEdit ? 'Edit' : 'New'} Ad`}</h2>
+                <p class="text-slate-400 text-xs">${isArAd ? 'املأ جميع الأقسام أدناه' : 'Fill all sections below'}</p>
               </div>
             </div>
             <button type="button" onclick="closeModal()" class="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-rose-100 hover:text-rose-600 transition-colors">
@@ -18101,7 +18223,7 @@ function renderModal() {
             <div class="bg-gradient-to-r from-slate-50 to-slate-100 dark:from-slate-800/50 dark:to-slate-800/30 rounded-xl p-4 space-y-3 border border-slate-200 dark:border-slate-700">
               <div class="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
                 <span class="w-5 h-5 rounded-full bg-indigo-600 text-white flex items-center justify-center text-[10px]">1</span>
-                Basic Info
+                ${isArAd ? 'معلومات أساسية' : 'Basic Info'}
               </div>
               
               <!-- Creator -->
@@ -18110,19 +18232,19 @@ function renderModal() {
                   <div class="w-7 h-7 rounded-full bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center text-indigo-600 font-bold text-xs">
                     ${adCreator?.name?.charAt(0) || 'U'}
                   </div>
-                  <span class="text-sm text-slate-600 dark:text-slate-300">${Security.escapeHtml(adCreator?.name || 'Unknown')}</span>
+                  <span class="text-sm text-slate-600 dark:text-slate-300">${Security.escapeHtml(adCreator?.name || (isArAd ? 'غير معروف' : 'Unknown'))}</span>
                 </div>
                 <span class="px-2 py-0.5 rounded-full text-[9px] font-bold ${isAdminUser ? 'bg-amber-100 text-amber-600' : 'bg-slate-200 text-slate-500'}">
-                  ${isAdminUser ? 'ADMIN' : 'USER'}
+                  ${isAdminUser ? (isArAd ? 'أدمن' : 'ADMIN') : (isArAd ? 'مستخدم' : 'USER')}
                 </span>
               </div>
               <input type="hidden" id="ad-creator-id" value="${adCreator?.id || state.currentUser?.id || ''}" />
               
               <!-- Page Selection -->
               <div>
-                <label class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">Page *</label>
+                <label class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">${isArAd ? 'الصفحة *' : 'Page *'}</label>
                 <div class="relative">
-                  <input type="text" id="ad-page-search" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-3 py-2 rounded-lg text-sm" placeholder="Search pages..." oninput="filterAdPages()" onfocus="showAdPageDropdown()" value="${Security.escapeHtml((state.pages.find(p => p.id === adData.pageId)?.name) || '')}" autocomplete="off" />
+                  <input type="text" id="ad-page-search" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-3 py-2 rounded-lg text-sm" placeholder="${isArAd ? 'ابحث في الصفحات...' : 'Search pages...'}" oninput="filterAdPages()" onfocus="showAdPageDropdown()" value="${Security.escapeHtml((state.pages.find(p => p.id === adData.pageId)?.name) || '')}" autocomplete="off" />
                   <div id="ad-page-dropdown" class="absolute z-20 mt-1 w-full bg-white dark:bg-slate-800 rounded-lg shadow-xl max-h-48 overflow-y-auto hidden border border-slate-200 dark:border-slate-600">
                     ${visiblePages.map(p => `
                       <div class="page-option px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer text-sm" data-name="${Security.escapeHtml((p.name || '').toLowerCase())}" onclick="selectAdPage('${p.id}')">
@@ -18136,7 +18258,7 @@ function renderModal() {
               
               <!-- Customer -->
               <div id="ad-customer-section" class="${adData.pageId ? '' : 'hidden'}">
-                <label class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">Customer <span class="text-slate-400" id="ad-customer-hint">(auto-selected)</span></label>
+                <label class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">${isArAd ? 'العميل' : 'Customer'} <span class="text-slate-400" id="ad-customer-hint">${isArAd ? '(يُختار تلقائياً)' : '(auto-selected)'}</span></label>
                 <div id="ad-customer-display" class="bg-white dark:bg-slate-900 rounded-lg p-2"></div>
                 <input type="hidden" id="ad-customer-id" value="${adData.customerId || ''}" required />
               </div>
@@ -18146,23 +18268,23 @@ function renderModal() {
             <div class="bg-gradient-to-r from-emerald-50 to-teal-50 dark:from-emerald-900/20 dark:to-teal-900/20 rounded-xl p-4 space-y-3 border border-emerald-200 dark:border-emerald-800">
               <div class="text-xs font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wider flex items-center gap-2">
                 <span class="w-5 h-5 rounded-full bg-emerald-600 text-white flex items-center justify-center text-[10px]">2</span>
-                Payment Status
+                ${isArAd ? 'حالة الدفع' : 'Payment Status'}
               </div>
               <div class="grid grid-cols-3 gap-2">
                 <button type="button" onclick="setAdPaymentStatus('paid')" id="ad-pay-status-paid"
                   class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'border-emerald-500 bg-emerald-100 dark:bg-emerald-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
                   <i data-lucide="check-circle" class="w-5 h-5 ${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'text-emerald-600' : 'text-slate-400'}"></i>
-                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'text-emerald-700' : 'text-slate-500'}">Paid</span>
+                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'text-emerald-700' : 'text-slate-500'}">${trStatus('Paid')}</span>
                 </button>
                 <button type="button" onclick="setAdPaymentStatus('not_paid')" id="ad-pay-status-not-paid"
                   class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adData.paymentStatus === 'not_paid' ? 'border-amber-500 bg-amber-100 dark:bg-amber-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
                   <i data-lucide="clock" class="w-5 h-5 ${adData.paymentStatus === 'not_paid' ? 'text-amber-600' : 'text-slate-400'}"></i>
-                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'not_paid' ? 'text-amber-700' : 'text-slate-500'}">Not Paid</span>
+                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'not_paid' ? 'text-amber-700' : 'text-slate-500'}">${isArAd ? 'غير مدفوع' : 'Not Paid'}</span>
                 </button>
                 <button type="button" onclick="setAdPaymentStatus('wont_pay')" id="ad-pay-status-wont"
                   class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adData.paymentStatus === 'wont_pay' ? 'border-rose-500 bg-rose-100 dark:bg-rose-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
                   <i data-lucide="x-octagon" class="w-5 h-5 ${adData.paymentStatus === 'wont_pay' ? 'text-rose-600' : 'text-slate-400'}"></i>
-                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'wont_pay' ? 'text-rose-700' : 'text-slate-500'}">Won't Pay</span>
+                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'wont_pay' ? 'text-rose-700' : 'text-slate-500'}">${isArAd ? 'لن يدفع' : "Won't Pay"}</span>
                 </button>
               </div>
               <input type="hidden" id="ad-payment-status" value="${adData.paymentStatus || 'paid'}" />
@@ -18171,26 +18293,26 @@ function renderModal() {
             <!-- NOT PAID OPTIONS -->
             <div id="ad-not-paid-options" class="${adData.paymentStatus === 'not_paid' ? '' : 'hidden'}">
               <div class="p-4 rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 space-y-3">
-                <label class="block text-xs font-bold text-amber-700">How will payment be collected?</label>
+                <label class="block text-xs font-bold text-amber-700">${isArAd ? 'كيف سيتم تحصيل الدفع؟' : 'How will payment be collected?'}</label>
                 <div class="grid grid-cols-2 gap-2">
                   <button type="button" onclick="setAdCollectionMethod('in_shop')" id="ad-collect-shop"
                     class="p-3 rounded-lg border-2 flex flex-col items-center ${adData.collectionMethod === 'in_shop' ? 'border-blue-500 bg-blue-50' : 'border-slate-200 bg-white'}">
                     <i data-lucide="store" class="w-5 h-5 ${adData.collectionMethod === 'in_shop' ? 'text-blue-600' : 'text-slate-400'}"></i>
-                    <span class="text-xs font-medium mt-1">In Shop</span>
+                    <span class="text-xs font-medium mt-1">${isArAd ? 'في المحل' : 'In Shop'}</span>
                   </button>
                   <button type="button" onclick="setAdCollectionMethod('driver')" id="ad-collect-driver"
                     class="p-3 rounded-lg border-2 flex flex-col items-center ${adData.collectionMethod === 'driver' ? 'border-violet-500 bg-violet-50' : 'border-slate-200 bg-white'}">
                     <i data-lucide="truck" class="w-5 h-5 ${adData.collectionMethod === 'driver' ? 'text-violet-600' : 'text-slate-400'}"></i>
-                    <span class="text-xs font-medium mt-1">Driver</span>
+                    <span class="text-xs font-medium mt-1">${isArAd ? 'سائق' : 'Driver'}</span>
                   </button>
                 </div>
                 <input type="hidden" id="ad-collection-method" value="${adData.collectionMethod || ''}" />
                 <div id="ad-collection-details" class="${adData.collectionMethod ? '' : 'hidden'} pt-2 border-t border-amber-200">
                   <div id="ad-driver-select" class="hidden"></div>
                   <div id="ad-temp-receipt-link" class="hidden mt-2 p-3 bg-white rounded-lg border border-violet-200 space-y-3">
-                    <label class="block text-xs font-bold text-violet-700">Link Delivery Receipt (D#)</label>
+                    <label class="block text-xs font-bold text-violet-700">${isArAd ? 'ربط وصل توصيل (D#)' : 'Link Delivery Receipt (D#)'}</label>
                     <select id="ad-temp-receipt-id" class="w-full border border-slate-200 px-3 py-2 rounded-lg text-sm" onchange="onAdTempReceiptChange(this.value)">
-                      <option value="">Select pending receipt...</option>
+                      <option value="">${isArAd ? 'اختر وصلاً معلقاً...' : 'Select pending receipt...'}</option>
                     </select>
                     <div id="ad-temp-receipt-hint" class="text-xs text-slate-500"></div>
                     <input type="hidden" id="ad-linked-receipt-id" value="${adData.receiptId || ''}" />
@@ -18198,18 +18320,18 @@ function renderModal() {
                     <!-- Due Amount Usage Section -->
                     <div id="ad-due-amount-section" class="hidden p-3 bg-violet-50 rounded-lg border border-violet-200 space-y-2">
                       <div class="flex items-center justify-between">
-                        <span class="text-xs font-semibold text-violet-700">Use Credit from Due Receipt</span>
-                        <span id="ad-due-available" class="text-xs text-violet-600 font-medium">Available: $0.00</span>
+                        <span class="text-xs font-semibold text-violet-700">${isArAd ? 'استخدام رصيد من الوصل المستحق' : 'Use Credit from Due Receipt'}</span>
+                        <span id="ad-due-available" class="text-xs text-violet-600 font-medium">${isArAd ? 'المتاح: $0.00' : 'Available: $0.00'}</span>
                   </div>
                       <div class="grid grid-cols-2 gap-2">
                         <div>
-                          <label class="block text-[10px] text-slate-500 mb-1">Planned Spend (USD)</label>
+                          <label class="block text-[10px] text-slate-500 mb-1">${isArAd ? 'الصرف المخطط (USD)' : 'Planned Spend (USD)'}</label>
                           <input type="text" id="ad-due-amount-to-use" inputmode="decimal" class="w-full border border-violet-300 px-3 py-2 rounded-lg text-sm bg-white" placeholder="0.00" oninput="sanitizeMoneyInput(this); onAdDueAmountChange()" onfocus="this.select()" />
                 </div>
                         <div>
-                          <label class="block text-[10px] text-slate-500 mb-1">Use All</label>
+                          <label class="block text-[10px] text-slate-500 mb-1">${isArAd ? 'استخدام الكل' : 'Use All'}</label>
                           <button type="button" onclick="useAllDueAmount()" class="w-full bg-violet-600 text-white px-3 py-2 rounded-lg text-sm font-medium hover:bg-violet-700">
-                            Use Full Credit
+                            ${isArAd ? 'استخدام كامل الرصيد' : 'Use Full Credit'}
                           </button>
                         </div>
                       </div>
@@ -18220,20 +18342,20 @@ function renderModal() {
                     <div id="ad-merge-funds-toggle" class="hidden">
                       <button type="button" onclick="toggleMergePaidFunds()" class="flex items-center gap-2 text-xs text-blue-600 hover:text-blue-700 font-medium">
                         <i data-lucide="plus-circle" class="w-4 h-4" id="ad-merge-icon"></i>
-                        <span id="ad-merge-text">Add Paid Receipt Funds</span>
+                        <span id="ad-merge-text">${isArAd ? 'إضافة أموال من وصل مدفوع' : 'Add Paid Receipt Funds'}</span>
                       </button>
                     </div>
                     
                     <!-- Merged Paid Funds Section (hidden by default) -->
                     <div id="ad-merged-paid-funds" class="hidden mt-2 p-3 bg-blue-50 rounded-lg border border-blue-200 space-y-2">
                       <div class="flex items-center justify-between">
-                        <span class="text-xs font-bold text-blue-700">Also Use Paid Receipt Funds</span>
+                        <span class="text-xs font-bold text-blue-700">${isArAd ? 'استخدام أموال وصل مدفوع أيضاً' : 'Also Use Paid Receipt Funds'}</span>
                         <button type="button" onclick="addAdFundingAllocationForMerge()" class="text-xs bg-blue-600 text-white px-2 py-1 rounded-lg font-medium hover:bg-blue-700">
-                          + Add Receipt
+                          ${isArAd ? '+ إضافة وصل' : '+ Add Receipt'}
                         </button>
                       </div>
                       <div id="ad-merged-funding-list" class="space-y-2 bg-white rounded-lg p-2 min-h-[40px]">
-                        <div class="text-xs text-slate-400 text-center py-1">Click "+ Add Receipt" to use paid funds</div>
+                        <div class="text-xs text-slate-400 text-center py-1">${isArAd ? 'اضغط "+ إضافة وصل" لاستخدام الأموال المدفوعة' : 'Click "+ Add Receipt" to use paid funds'}</div>
                       </div>
                       <div id="ad-merged-funding-summary" class="text-xs text-blue-600 font-medium"></div>
                     </div>
@@ -18246,8 +18368,8 @@ function renderModal() {
             <div id="ad-unpaid-financial" class="${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'hidden' : (adData.paymentStatus === 'not_paid' && adData.collectionMethod === 'driver' ? 'hidden' : '')}">
               <div class="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 space-y-2">
                 <div class="flex justify-between items-center">
-                  <span class="text-xs font-bold text-slate-600">Financial Details</span>
-                  <button type="button" onclick="addReceiptPaymentSplit()" class="text-xs text-emerald-600 font-medium">+ Add Split</button>
+                  <span class="text-xs font-bold text-slate-600">${isArAd ? 'التفاصيل المالية' : 'Financial Details'}</span>
+                  <button type="button" onclick="addReceiptPaymentSplit()" class="text-xs text-emerald-600 font-medium">${isArAd ? '+ إضافة تقسيم' : '+ Add Split'}</button>
                 </div>
                 <div id="receipt-financial-section">
                   ${renderReceiptFinancials(
@@ -18278,14 +18400,14 @@ function renderModal() {
               <div class="flex items-center justify-between">
                 <div class="text-xs font-bold text-blue-700 dark:text-blue-400 uppercase tracking-wider flex items-center gap-2">
                   <span class="w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center text-[10px]">3</span>
-                  Receipt Funding
+                  ${isArAd ? 'تمويل من الوصولات' : 'Receipt Funding'}
                 </div>
                 <button type="button" onclick="addAdFundingAllocation()" class="text-xs bg-blue-600 text-white px-2 py-1 rounded-lg font-medium hover:bg-blue-700">
-                  + Add Receipt
+                  ${isArAd ? '+ إضافة وصل' : '+ Add Receipt'}
                 </button>
               </div>
               <div id="ad-funding-list" class="space-y-2 bg-white dark:bg-slate-900 rounded-lg p-2 min-h-[60px]">
-                <div class="text-xs text-slate-400 text-center py-2">Select a page & customer first</div>
+                <div class="text-xs text-slate-400 text-center py-2">${isArAd ? 'اختر صفحة وعميلاً أولاً' : 'Select a page & customer first'}</div>
               </div>
               <div id="ad-funding-summary" class="text-xs text-blue-600 font-medium"></div>
             </div>
@@ -18294,19 +18416,19 @@ function renderModal() {
             <div class="bg-gradient-to-r from-purple-50 to-pink-50 dark:from-purple-900/20 dark:to-pink-900/20 rounded-xl p-4 space-y-3 border border-purple-200 dark:border-purple-800">
               <div class="text-xs font-bold text-purple-700 dark:text-purple-400 uppercase tracking-wider flex items-center gap-2">
                 <span class="w-5 h-5 rounded-full bg-purple-600 text-white flex items-center justify-center text-[10px]">4</span>
-                Ad Duration
+                ${isArAd ? 'مدة الإعلان' : 'Ad Duration'}
               </div>
               <div class="grid grid-cols-3 gap-2">
                 <div>
-                  <label class="block text-xs text-slate-500 mb-1">Start</label>
+                  <label class="block text-xs text-slate-500 mb-1">${isArAd ? 'البداية' : 'Start'}</label>
                   <input type="date" id="ad-start-date" value="${Security.escapeHtml(adData.startDate ? adData.startDate.split('T')[0] : getTodayDateString())}" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-2 py-2 rounded-lg text-sm" onchange="updateAdDays()" />
                 </div>
                 <div>
-                  <label class="block text-xs text-slate-500 mb-1">End</label>
+                  <label class="block text-xs text-slate-500 mb-1">${isArAd ? 'النهاية' : 'End'}</label>
                   <input type="date" id="ad-end-date" value="${Security.escapeHtml(adData.endDate ? adData.endDate.split('T')[0] : getTodayDateString())}" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-2 py-2 rounded-lg text-sm" onchange="updateAdDays()" />
                 </div>
                 <div>
-                  <label class="block text-xs text-slate-500 mb-1">Days</label>
+                  <label class="block text-xs text-slate-500 mb-1">${isArAd ? 'الأيام' : 'Days'}</label>
                   <input type="number" id="ad-days" min="0" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-2 py-2 rounded-lg text-sm" value="${Security.escapeHtml(String(durationDaysDefault || ''))}" oninput="updateAdEndDateFromDays()" />
                 </div>
               </div>
@@ -18317,15 +18439,15 @@ function renderModal() {
               <div class="flex items-center justify-between">
                 <div class="text-xs font-bold text-orange-700 dark:text-orange-400 uppercase tracking-wider flex items-center gap-2">
                   <span class="w-5 h-5 rounded-full bg-orange-600 text-white flex items-center justify-center text-[10px]">5</span>
-                  Photos
+                  ${isArAd ? 'الصور' : 'Photos'}
                 </div>
                 <label class="text-xs bg-orange-600 text-white px-2 py-1 rounded-lg font-medium cursor-pointer hover:bg-orange-700">
-                  + Upload
+                  ${isArAd ? '+ رفع' : '+ Upload'}
                   <input type="file" accept="image/*" multiple class="hidden" onchange="uploadAdPhotos(this.files)" />
                 </label>
               </div>
               <div id="ad-photo-previews" class="grid grid-cols-4 gap-2 min-h-[40px] bg-white dark:bg-slate-900 rounded-lg p-2">
-                <div class="text-xs text-slate-400 col-span-4 text-center py-2">No photos yet</div>
+                <div class="text-xs text-slate-400 col-span-4 text-center py-2">${isArAd ? 'لا توجد صور بعد' : 'No photos yet'}</div>
               </div>
             </div>
 
@@ -18334,10 +18456,10 @@ function renderModal() {
               <div class="flex items-center justify-between">
                 <div class="text-xs font-bold text-cyan-700 dark:text-cyan-400 uppercase tracking-wider flex items-center gap-2">
                   <span class="w-5 h-5 rounded-full bg-cyan-600 text-white flex items-center justify-center text-[10px]">6</span>
-                  Ad Links
+                  ${isArAd ? 'روابط الإعلان' : 'Ad Links'}
                 </div>
                 <button type="button" onclick="addAdLinkInput('')" class="text-xs bg-cyan-600 text-white px-2 py-1 rounded-lg font-medium hover:bg-cyan-700">
-                  + Add Link
+                  ${isArAd ? '+ إضافة رابط' : '+ Add Link'}
                 </button>
               </div>
               <div id="ad-links-list" class="space-y-2">
@@ -18357,10 +18479,10 @@ function renderModal() {
           <!-- FIXED FOOTER -->
           <div class="flex-shrink-0 pt-4 border-t border-slate-200 dark:border-slate-700 flex gap-3">
             <button type="submit" form="modal-form" class="flex-1 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white px-4 py-3 rounded-xl font-bold text-sm shadow-lg">
-              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>${isEdit ? 'Save Changes' : 'Create Ad'}
+              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>${isArAd ? (isEdit ? 'حفظ التغييرات' : 'إنشاء إعلان') : (isEdit ? 'Save Changes' : 'Create Ad')}
             </button>
             <button type="button" onclick="closeModal()" class="px-6 py-3 rounded-xl font-medium text-sm bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-200">
-              Cancel
+              ${isArAd ? 'إلغاء' : 'Cancel'}
             </button>
           </div>
         </div>
@@ -18371,6 +18493,7 @@ function renderModal() {
       const isAdminEditor = isCurrentUserAdmin();
       const isSelfEdit = isEdit && String(userData.id || '') === String(state.currentUser?.id || '');
       const userPermSummary = isEdit && !isAdminRole(userData.role) ? getPermissionSummary(userData.permissions || {}) : null;
+      const isArU = state.language === 'ar';
       modalContent = `
         <div class="flex items-center justify-between mb-6">
           <div class="flex items-center space-x-3">
@@ -18378,8 +18501,8 @@ function renderModal() {
               ${userData.name ? userData.name.charAt(0) : '<i data-lucide="user-plus" class="w-6 h-6"></i>'}
             </div>
             <div>
-              <h2 class="text-xl font-bold text-slate-800 dark:text-white">${isEdit ? (isSelfEdit ? 'Edit Profile' : 'Edit User') : 'Add New User'}</h2>
-              <p class="text-xs text-slate-500">${isEdit ? (isSelfEdit ? 'Update your profile details' : 'Update user details and access') : 'Create account with permissions'}</p>
+              <h2 class="text-xl font-bold text-slate-800 dark:text-white">${isArU ? (isEdit ? (isSelfEdit ? 'تعديل الملف الشخصي' : 'تعديل مستخدم') : 'إضافة مستخدم جديد') : (isEdit ? (isSelfEdit ? 'Edit Profile' : 'Edit User') : 'Add New User')}</h2>
+              <p class="text-xs text-slate-500">${isArU ? (isEdit ? (isSelfEdit ? 'حدّث بيانات ملفك الشخصي' : 'حدّث بيانات المستخدم وصلاحياته') : 'إنشاء حساب مع صلاحيات') : (isEdit ? (isSelfEdit ? 'Update your profile details' : 'Update user details and access') : 'Create account with permissions')}</p>
             </div>
           </div>
           <button type="button" onclick="closeModal()" class="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
@@ -18390,24 +18513,24 @@ function renderModal() {
         <form id="modal-form" class="space-y-5">
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">Full Name *</label>
+              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? 'الاسم الكامل *' : 'Full Name *'}</label>
               <input type="text" id="user-name" value="${Security.escapeHtml(userData.name || '')}" required class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="John Doe" />
             </div>
             <div>
-              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">Email Address *</label>
+              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? 'البريد الإلكتروني *' : 'Email Address *'}</label>
               <input type="email" id="user-email" value="${Security.escapeHtml(userData.email || '')}" required class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="john@company.com" />
             </div>
           </div>
           
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">Password ${isEdit ? '(leave blank to keep)' : '*'}</label>
-              <input type="password" id="user-password" ${!isEdit ? 'required' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : 'Min. 8 characters'}" />
+              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? `كلمة المرور ${isEdit ? '(اتركها فارغة للإبقاء عليها)' : '*'}` : `Password ${isEdit ? '(leave blank to keep)' : '*'}`}</label>
+              <input type="password" id="user-password" ${!isEdit ? 'required' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : (isArU ? '8 أحرف على الأقل' : 'Min. 8 characters')}" />
             </div>
             <div>
-              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">Role *</label>
+              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? 'الدور *' : 'Role *'}</label>
               <select id="user-role" onchange="updateUserRoleInfo(this.value)" class="w-full glass-input px-4 py-2.5 rounded-xl" ${isAdminEditor ? '' : 'disabled'}>
-                ${USER_ROLES.map(r => `<option value="${r}" ${userData.role === r ? 'selected' : ''}>${r}</option>`).join('')}
+                ${USER_ROLES.map(r => `<option value="${r}" ${userData.role === r ? 'selected' : ''}>${isArU ? ({ 'Admin': 'أدمن', 'Employee': 'موظف', 'Delivery': 'توصيل' }[r] || r) : r}</option>`).join('')}
               </select>
               ${!isAdminEditor ? `
                 <div class="mt-1 text-[11px] text-slate-400">
@@ -18425,14 +18548,14 @@ function renderModal() {
               </div>
               <div class="flex-1">
                 <div id="role-title" class="font-bold text-sm text-slate-700 dark:text-slate-300">
-                  ${isAdminRole(userData.role) ? 'Full Administrator' : isDeliveryRole(userData.role) ? 'Delivery Driver' : 'Employee'}
+                  ${isAdminRole(userData.role) ? (isArU ? 'أدمن كامل الصلاحيات' : 'Full Administrator') : isDeliveryRole(userData.role) ? (isArU ? 'سائق توصيل' : 'Delivery Driver') : (isArU ? 'موظف' : 'Employee')}
                 </div>
                 <div id="role-desc" class="text-xs text-slate-500">
-                  ${isAdminRole(userData.role) ? 'Complete access to all features. No restrictions.' : isDeliveryRole(userData.role) ? 'Access to delivery operations only.' : 'Standard employee access. Customize permissions after creation.'}
+                  ${isAdminRole(userData.role) ? (isArU ? 'وصول كامل لجميع الميزات. بلا قيود.' : 'Complete access to all features. No restrictions.') : isDeliveryRole(userData.role) ? (isArU ? 'وصول لعمليات التوصيل فقط.' : 'Access to delivery operations only.') : (isArU ? 'وصول موظف قياسي. يمكن تخصيص الصلاحيات بعد الإنشاء.' : 'Standard employee access. Customize permissions after creation.')}
                 </div>
               </div>
               ${isAdminRole(userData.role) ? `
-                <span class="px-2 py-1 rounded-lg bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 text-xs font-bold">ALL ACCESS</span>
+                <span class="px-2 py-1 rounded-lg bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 text-xs font-bold">${isArU ? 'وصول كامل' : 'ALL ACCESS'}</span>
               ` : ''}
             </div>
           </div>
@@ -18443,9 +18566,9 @@ function renderModal() {
               <div class="flex items-center justify-between mb-3">
                 <div class="flex items-center space-x-2">
                   <i data-lucide="shield" class="w-4 h-4 text-purple-600"></i>
-                  <span class="text-sm font-bold text-purple-700 dark:text-purple-300">Current Permissions</span>
+                  <span class="text-sm font-bold text-purple-700 dark:text-purple-300">${isArU ? 'الصلاحيات الحالية' : 'Current Permissions'}</span>
                 </div>
-                <span class="text-xs font-bold text-purple-600">${userPermSummary.granted}/${userPermSummary.total} granted</span>
+                <span class="text-xs font-bold text-purple-600">${userPermSummary.granted}/${userPermSummary.total} ${isArU ? 'ممنوحة' : 'granted'}</span>
               </div>
               <div class="w-full h-2 bg-purple-200 dark:bg-purple-800 rounded-full overflow-hidden mb-3">
                 <div class="h-full bg-gradient-to-r from-purple-500 to-indigo-500 rounded-full" style="width: ${userPermSummary.percentage}%"></div>
@@ -18453,7 +18576,7 @@ function renderModal() {
               ${isAdminEditor ? `
               <button type="button" onclick="closeModal(); setTimeout(() => showPermissionsModal('${userData.id}'), 200)" class="w-full py-2 rounded-lg text-xs font-bold text-purple-600 hover:bg-purple-100 dark:hover:bg-purple-800/30 transition-colors flex items-center justify-center space-x-2">
                 <i data-lucide="settings" class="w-3 h-3"></i>
-                <span>Manage Detailed Permissions</span>
+                <span>${isArU ? 'إدارة الصلاحيات التفصيلية' : 'Manage Detailed Permissions'}</span>
               </button>
               ` : `
                 <div class="text-[11px] text-slate-500 text-center">
@@ -18467,10 +18590,9 @@ function renderModal() {
               <div class="flex items-start space-x-3">
                 <i data-lucide="info" class="w-5 h-5 text-blue-600 mt-0.5"></i>
                 <div>
-                  <div class="text-sm font-bold text-blue-700 dark:text-blue-300">Permissions Setup</div>
+                  <div class="text-sm font-bold text-blue-700 dark:text-blue-300">${isArU ? 'إعداد الصلاحيات' : 'Permissions Setup'}</div>
                   <p class="text-xs text-blue-600 dark:text-blue-400 mt-1">
-                    After creating this user, you'll be able to configure their detailed permissions. 
-                    Default permissions will be assigned based on their role.
+                    ${isArU ? 'بعد إنشاء هذا المستخدم، يمكنك ضبط صلاحياته التفصيلية. سيتم تعيين صلاحيات افتراضية حسب دوره.' : `After creating this user, you'll be able to configure their detailed permissions. Default permissions will be assigned based on their role.`}
                   </p>
                 </div>
               </div>
@@ -18480,9 +18602,9 @@ function renderModal() {
           <div class="flex space-x-3 pt-2">
             <button type="submit" class="flex-1 btn-shine bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2">
               <i data-lucide="${isEdit ? 'save' : 'user-plus'}" class="w-4 h-4"></i>
-              <span>${isEdit ? 'Save Changes' : 'Create User'}</span>
+              <span>${isArU ? (isEdit ? 'حفظ التغييرات' : 'إنشاء مستخدم') : (isEdit ? 'Save Changes' : 'Create User')}</span>
             </button>
-            <button type="button" onclick="closeModal()" class="px-6 py-3 bg-slate-200 dark:bg-slate-700 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors">Cancel</button>
+            <button type="button" onclick="closeModal()" class="px-6 py-3 bg-slate-200 dark:bg-slate-700 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors">${isArU ? 'إلغاء' : 'Cancel'}</button>
           </div>
         </form>
       `;
@@ -18492,26 +18614,27 @@ function renderModal() {
       const pageCustomers = getVisibleRecords(state.customers);
       const existingCustomerIds = pageData.customerIds || [];
       const isAdminPage = isAdminRole(state.currentUser?.role);
-      
+      const isArP = state.language === 'ar';
+
       if (pageCustomers.length === 0) {
         modalContent = `
-          <h2 class="text-2xl font-bold mb-4">Add Page</h2>
+          <h2 class="text-2xl font-bold mb-4">${isArP ? 'إضافة صفحة' : 'Add Page'}</h2>
           <div class="text-center py-8">
             <i data-lucide="alert-circle" class="w-12 h-12 mx-auto text-amber-500 mb-4"></i>
-            <p class="text-slate-600 dark:text-slate-400 mb-4">No customers found. Please add a customer first.</p>
-            <button onclick="closeModal(); navigateTo('customers')" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold">Go to Customers</button>
+            <p class="text-slate-600 dark:text-slate-400 mb-4">${isArP ? 'لا يوجد عملاء. الرجاء إضافة عميل أولاً.' : 'No customers found. Please add a customer first.'}</p>
+            <button onclick="closeModal(); navigateTo('customers')" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold">${isArP ? 'الذهاب إلى العملاء' : 'Go to Customers'}</button>
           </div>
         `;
       } else {
       modalContent = `
-        <h2 class="text-2xl font-bold mb-4">${isEdit ? 'Edit' : 'Add'} Page</h2>
+        <h2 class="text-2xl font-bold mb-4">${isArP ? (isEdit ? 'تعديل صفحة' : 'إضافة صفحة') : `${isEdit ? 'Edit' : 'Add'} Page`}</h2>
         <form id="modal-form" class="space-y-4">
           <div>
-              <label class="block text-sm font-medium mb-2">Page Name *</label>
+              <label class="block text-sm font-medium mb-2">${isArP ? 'اسم الصفحة *' : 'Page Name *'}</label>
             <input type="text" id="page-name" value="${Security.escapeHtml(pageData.name || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" />
           </div>
           <div>
-              <label class="block text-sm font-medium mb-2">Category *</label>
+              <label class="block text-sm font-medium mb-2">${isArP ? 'الفئة *' : 'Category *'}</label>
             <input type="text" id="page-category" list="page-category-suggestions" autocomplete="off" value="${Security.escapeHtml(pageData.category || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" />
             <!-- Suggest previously-used categories while typing (user request):
                  picking an existing one avoids near-duplicate categories like
@@ -18533,14 +18656,14 @@ function renderModal() {
             <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl border border-blue-200 dark:border-blue-800">
               <div class="flex items-center space-x-2 mb-3">
                 <i data-lucide="users" class="w-4 h-4 text-blue-600"></i>
-                <label class="text-sm font-bold text-blue-900 dark:text-blue-100">Link to Customer(s) *</label>
+                <label class="text-sm font-bold text-blue-900 dark:text-blue-100">${isArP ? 'ربط بعميل (أو عملاء) *' : 'Link to Customer(s) *'}</label>
               </div>
               
               ${!isAdminPage ? `
                 <div class="mb-3 p-2 bg-amber-100 dark:bg-amber-900/20 rounded-lg">
                   <p class="text-xs text-amber-800 dark:text-amber-200">
                     <i data-lucide="info" class="w-3 h-3 inline mr-1"></i>
-                    You can only link a page to one customer
+                    ${isArP ? 'يمكنك ربط الصفحة بعميل واحد فقط' : 'You can only link a page to one customer'}
                   </p>
                 </div>
               ` : ''}
@@ -18549,7 +18672,7 @@ function renderModal() {
                 <input 
                   type="text" 
                   id="page-customer-search" 
-                  placeholder="Search for customer..."
+                  placeholder="${isArP ? 'ابحث عن عميل...' : 'Search for customer...'}"
                   class="w-full glass-input px-4 py-2 rounded-xl"
                   oninput="filterPageCustomers()"
                   onfocus="showPageCustomerDropdown()"
@@ -18558,7 +18681,7 @@ function renderModal() {
                   ${pageCustomers.map(c => `
                     <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" onclick="selectPageCustomer('${c.id}', '${isAdminPage}')">
                       <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
-                      <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || 'No phone')}</div>
+                      <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (isArP ? 'لا يوجد هاتف' : 'No phone'))}</div>
                     </div>
                   `).join('')}
                 </div>
@@ -18580,7 +18703,7 @@ function renderModal() {
                   ` : '';
                 }).join('')}
                 <div id="page-no-customers" class="${existingCustomerIds.length > 0 ? 'hidden' : ''} text-sm text-slate-400 text-center py-4 border-2 border-dashed border-slate-200 dark:border-slate-700 rounded-lg">
-                  No customers selected yet. Please search and select at least one customer above.
+                  ${isArP ? 'لم يتم اختيار عملاء بعد. الرجاء البحث واختيار عميل واحد على الأقل أعلاه.' : 'No customers selected yet. Please search and select at least one customer above.'}
                 </div>
               </div>
               
@@ -18589,8 +18712,8 @@ function renderModal() {
                   <div class="flex items-start space-x-2">
                     <i data-lucide="alert-triangle" class="w-4 h-4 text-rose-600 mt-0.5"></i>
                     <div>
-                      <p class="text-xs font-bold text-rose-900 dark:text-rose-100">Warning: Multiple Customers</p>
-                      <p class="text-xs text-rose-700 dark:text-rose-300 mt-1">This page is linked to multiple customers. This is uncommon and may cause confusion. Are you sure this is what you want?</p>
+                      <p class="text-xs font-bold text-rose-900 dark:text-rose-100">${isArP ? 'تحذير: عدة عملاء' : 'Warning: Multiple Customers'}</p>
+                      <p class="text-xs text-rose-700 dark:text-rose-300 mt-1">${isArP ? 'هذه الصفحة مرتبطة بعدة عملاء. هذا غير شائع وقد يسبب التباساً. هل أنت متأكد أن هذا ما تريده؟' : 'This page is linked to multiple customers. This is uncommon and may cause confusion. Are you sure this is what you want?'}</p>
                     </div>
                   </div>
                 </div>
@@ -18598,8 +18721,8 @@ function renderModal() {
             </div>
             
           <div class="flex space-x-3">
-            <button type="submit" class="flex-1 btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold">${isEdit ? 'Save Changes' : 'Create Page'}</button>
-            <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2 rounded-xl font-bold">Cancel</button>
+            <button type="submit" class="flex-1 btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold">${isArP ? (isEdit ? 'حفظ التغييرات' : 'إنشاء صفحة') : (isEdit ? 'Save Changes' : 'Create Page')}</button>
+            <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2 rounded-xl font-bold">${isArP ? 'إلغاء' : 'Cancel'}</button>
           </div>
         </form>
       `;
@@ -18612,17 +18735,18 @@ function renderModal() {
       const defaultRate1 = getDefaultRate1(PAYMENT_METHODS[0]);
       const existingPayments = receiptData.payments || [{ method: PAYMENT_METHODS[0], amount: 0, rate: defaultRate1, rate2: state.defaultExchangeRate, collectionType: 'office', deliveryPersonId: '' }];
       const receiptDeliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
+      const isArR = state.language === 'ar';
       // Copy (not alias) the live record's photos so add/remove in the modal
       // does not mutate the saved receipt when the user cancels.
       state.tempReceiptPhotos = (receiptData.photos || []).slice();
       
       if (receiptCustomers.length === 0) {
         modalContent = `
-          <h2 class="text-2xl font-bold mb-4">Add Receipt</h2>
+          <h2 class="text-2xl font-bold mb-4">${isArR ? 'إضافة وصل' : 'Add Receipt'}</h2>
           <div class="text-center py-8">
             <i data-lucide="alert-circle" class="w-12 h-12 mx-auto text-amber-500 mb-4"></i>
-            <p class="text-slate-600 dark:text-slate-400 mb-4">No customers found. Please add a customer first.</p>
-            <button onclick="closeModal(); navigateTo('customers')" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold">Go to Customers</button>
+            <p class="text-slate-600 dark:text-slate-400 mb-4">${isArR ? 'لا يوجد عملاء. الرجاء إضافة عميل أولاً.' : 'No customers found. Please add a customer first.'}</p>
+            <button onclick="closeModal(); navigateTo('customers')" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold">${isArR ? 'الذهاب إلى العملاء' : 'Go to Customers'}</button>
           </div>
         `;
       } else {
@@ -18647,12 +18771,12 @@ function renderModal() {
               <div>
                 <label class="block text-xs font-medium text-slate-500 mb-2 flex items-center">
                   <i data-lucide="phone" class="w-3 h-3 mr-1"></i>
-                  Search phone...
+                  ${isArR ? 'بحث برقم الهاتف...' : 'Search phone...'}
                 </label>
-                <input 
-                  type="text" 
-                  id="receipt-phone-search" 
-                  placeholder="Type phone number..."
+                <input
+                  type="text"
+                  id="receipt-phone-search"
+                  placeholder="${isArR ? 'اكتب رقم الهاتف...' : 'Type phone number...'}"
                   class="w-full glass-input px-3 py-2 rounded-lg text-sm"
                   oninput="filterReceiptPhones()"
                   onfocus="showReceiptPhoneDropdown()"
@@ -18667,18 +18791,18 @@ function renderModal() {
                 </div>
               </div>
               <div>
-                <label class="block text-xs font-medium text-slate-500 mb-2">Select phone first...</label>
-                <input type="text" id="receipt-customer-name" readonly class="w-full glass-input px-3 py-2 rounded-lg text-sm bg-slate-100 dark:bg-slate-800" placeholder="Customer will appear here" />
+                <label class="block text-xs font-medium text-slate-500 mb-2">${isArR ? 'اختر الهاتف أولاً...' : 'Select phone first...'}</label>
+                <input type="text" id="receipt-customer-name" readonly class="w-full glass-input px-3 py-2 rounded-lg text-sm bg-slate-100 dark:bg-slate-800" placeholder="${isArR ? 'سيظهر العميل هنا' : 'Customer will appear here'}" />
                 <input type="hidden" id="receipt-customer-id" value="${receiptData.customerId || ''}" />
               </div>
             </div>
 
             <!-- Receipt Number -->
             <div class="px-1">
-              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1.5">Receipt Number</label>
+              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1.5">${isArR ? 'رقم الوصل' : 'Receipt Number'}</label>
               <input type="text" id="receipt-serial" value="${receiptData.serialNumber || receiptData.finalReceiptNo || receiptData.tempReceiptNo || ''}" 
                 class="w-full glass-input px-3 py-2 rounded-lg text-sm" 
-                placeholder="e.g., 12345" 
+                placeholder="${isArR ? 'مثال: 12345' : 'e.g., 12345'}"
                 oninput="validateReceiptNumberInput(this)"
                 onblur="checkReceiptNumberDuplicate(this)" />
               <div id="receipt-serial-error" class="hidden mt-1 text-xs text-rose-500 font-medium"></div>
@@ -18687,12 +18811,12 @@ function renderModal() {
 
             <!-- Status Tabs -->
             <div class="px-1">
-              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1.5">Status</label>
+              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1.5">${isArR ? 'الحالة' : 'Status'}</label>
               <div class="grid grid-cols-4 gap-1.5" id="receipt-status-tabs">
-                <button type="button" onclick="setReceiptStatus(this, 'Paid')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${!receiptData.status || receiptData.status === 'Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Paid">Paid</button>
-                <button type="button" onclick="setReceiptStatus(this, 'Not Paid')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Not Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Not Paid">Not Paid</button>
-                <button type="button" onclick="setReceiptStatus(this, 'Canceled')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Canceled' ? 'bg-rose-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Canceled">Canceled</button>
-                <button type="button" onclick="setReceiptStatus(this, 'Lost')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Lost' ? 'bg-slate-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Lost">Lost</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Paid')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${!receiptData.status || receiptData.status === 'Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Paid">${trStatus('Paid')}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Not Paid')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Not Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Not Paid">${isArR ? 'غير مدفوع' : 'Not Paid'}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Canceled')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Canceled' ? 'bg-rose-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Canceled">${isArR ? 'ملغي' : 'Canceled'}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Lost')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Lost' ? 'bg-slate-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Lost">${isArR ? 'مفقود' : 'Lost'}</button>
               </div>
               <input type="hidden" id="receipt-status" value="${receiptData.status || 'Paid'}" />
 
@@ -18704,8 +18828,8 @@ function renderModal() {
                       <i data-lucide="check-circle-2" class="w-5 h-5 text-white"></i>
                     </span>
                     <div>
-                      <div class="text-sm font-bold text-blue-900 dark:text-blue-100">Payment Collected</div>
-                      <div class="text-xs text-blue-600/80 dark:text-blue-300/80">Choose how the payment was collected</div>
+                      <div class="text-sm font-bold text-blue-900 dark:text-blue-100">${isArR ? 'تم تحصيل الدفع' : 'Payment Collected'}</div>
+                      <div class="text-xs text-blue-600/80 dark:text-blue-300/80">${isArR ? 'اختر كيف تم تحصيل الدفع' : 'Choose how the payment was collected'}</div>
                     </div>
                   </div>
                 </div>
@@ -18719,8 +18843,8 @@ function renderModal() {
                         <i data-lucide="store" class="w-6 h-6 ${(!receiptData.statusDetail?.paidCollection || receiptData.statusDetail?.paidCollection === 'office') ? 'text-white' : 'text-blue-600 dark:text-blue-400'}"></i>
                       </span>
                       <div>
-                        <div class="font-bold text-sm ${(!receiptData.statusDetail?.paidCollection || receiptData.statusDetail?.paidCollection === 'office') ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">In Office</div>
-                        <div class="text-[10px] ${(!receiptData.statusDetail?.paidCollection || receiptData.statusDetail?.paidCollection === 'office') ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">Paid in shop/office</div>
+                        <div class="font-bold text-sm ${(!receiptData.statusDetail?.paidCollection || receiptData.statusDetail?.paidCollection === 'office') ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${isArR ? 'في المكتب' : 'In Office'}</div>
+                        <div class="text-[10px] ${(!receiptData.statusDetail?.paidCollection || receiptData.statusDetail?.paidCollection === 'office') ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">${isArR ? 'تم الدفع في المحل/المكتب' : 'Paid in shop/office'}</div>
                       </div>
                     </div>
                   </button>
@@ -18731,8 +18855,8 @@ function renderModal() {
                         <i data-lucide="truck" class="w-6 h-6 ${receiptData.statusDetail?.paidCollection === 'delivery' ? 'text-white' : 'text-emerald-600 dark:text-emerald-400'}"></i>
                       </span>
                       <div>
-                        <div class="font-bold text-sm ${receiptData.statusDetail?.paidCollection === 'delivery' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">By Delivery</div>
-                        <div class="text-[10px] ${receiptData.statusDetail?.paidCollection === 'delivery' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">Driver collected payment</div>
+                        <div class="font-bold text-sm ${receiptData.statusDetail?.paidCollection === 'delivery' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${isArR ? 'عبر التوصيل' : 'By Delivery'}</div>
+                        <div class="text-[10px] ${receiptData.statusDetail?.paidCollection === 'delivery' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">${isArR ? 'السائق حصّل الدفع' : 'Driver collected payment'}</div>
                       </div>
                     </div>
                   </button>
@@ -18741,10 +18865,10 @@ function renderModal() {
                 <div id="paid-delivery-person-section" class="${receiptData.statusDetail?.paidCollection === 'delivery' ? '' : 'hidden'} mt-3 p-3 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-700">
                   <label class="block text-xs font-bold text-emerald-700 dark:text-emerald-300 mb-2 flex items-center space-x-2">
                     <i data-lucide="user-check" class="w-4 h-4"></i>
-                    <span>Delivery Person (optional)</span>
+                    <span>${isArR ? 'موظف التوصيل (اختياري)' : 'Delivery Person (optional)'}</span>
                   </label>
                   <select id="paid-delivery-person" class="w-full glass-input px-3 py-2 rounded-lg text-sm border border-emerald-200 dark:border-emerald-700 focus:ring-2 focus:ring-emerald-500/20">
-                    <option value="">Select delivery person...</option>
+                    <option value="">${isArR ? 'اختر موظف التوصيل...' : 'Select delivery person...'}</option>
                     ${getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role)).map(u =>
                       `<option value="${u.id}" ${receiptData.deliveryPersonId === u.id ? 'selected' : ''}>${Security.escapeHtml(u.name || '')}</option>`
                     ).join('')}
@@ -18760,17 +18884,17 @@ function renderModal() {
                       <i data-lucide="clock" class="w-5 h-5 text-white"></i>
                     </span>
                     <div>
-                      <div class="text-sm font-bold text-amber-900 dark:text-amber-100">Payment Pending</div>
+                      <div class="text-sm font-bold text-amber-900 dark:text-amber-100">${isArR ? 'الدفع معلّق' : 'Payment Pending'}</div>
                       <div class="text-xs text-amber-600/80 dark:text-amber-300/80 flex items-center space-x-1">
                         <i data-lucide="lock" class="w-3 h-3"></i>
-                        <span>Receipt # locked until paid</span>
+                        <span>${isArR ? 'رقم الوصل مقفل حتى يتم الدفع' : 'Receipt # locked until paid'}</span>
               </div>
                 </div>
                   </div>
                   ${isAdminReceipt ? `
                     <label class="flex items-center space-x-2 px-3 py-2 rounded-xl bg-white/60 dark:bg-slate-800/60 border border-amber-200 dark:border-amber-700 cursor-pointer hover:bg-white dark:hover:bg-slate-800 transition-all">
                       <input type="checkbox" id="status-not-paid-admin-override" class="w-4 h-4 rounded border-amber-400 text-amber-600 focus:ring-amber-500" onchange="updateReceiptStatusUI('Not Paid')" ${receiptData.statusDetail?.allowSerialOverride ? 'checked' : ''}/>
-                      <span class="text-xs font-bold text-amber-800 dark:text-amber-200">Admin Override</span>
+                      <span class="text-xs font-bold text-amber-800 dark:text-amber-200">${isArR ? 'تجاوز الأدمن' : 'Admin Override'}</span>
                     </label>
                   ` : ''}
                       </div>
@@ -18778,7 +18902,7 @@ function renderModal() {
                 <div class="pt-3 border-t border-amber-200/60 dark:border-amber-700/40">
                   <div class="text-xs font-bold text-amber-800 dark:text-amber-200 mb-3 flex items-center space-x-2">
                     <i data-lucide="map-pin" class="w-3 h-3"></i>
-                    <span>How will customer pay?</span>
+                    <span>${isArR ? 'كيف سيدفع العميل؟' : 'How will customer pay?'}</span>
                   </div>
                   <input type="hidden" id="notpaid-collection-value" value="${receiptData.statusDetail?.notPaidCollection || 'office'}" />
                         <div class="grid grid-cols-2 gap-3">
@@ -18788,8 +18912,8 @@ function renderModal() {
                           <i data-lucide="store" class="w-6 h-6 ${!receiptData.statusDetail?.notPaidCollection || receiptData.statusDetail?.notPaidCollection === 'office' ? 'text-white' : 'text-blue-600 dark:text-blue-400'}"></i>
                         </span>
                           <div>
-                          <div class="font-bold text-sm ${!receiptData.statusDetail?.notPaidCollection || receiptData.statusDetail?.notPaidCollection === 'office' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">In Shop</div>
-                          <div class="text-[10px] ${!receiptData.statusDetail?.notPaidCollection || receiptData.statusDetail?.notPaidCollection === 'office' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">Customer visits office</div>
+                          <div class="font-bold text-sm ${!receiptData.statusDetail?.notPaidCollection || receiptData.statusDetail?.notPaidCollection === 'office' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${isArR ? 'في المحل' : 'In Shop'}</div>
+                          <div class="text-[10px] ${!receiptData.statusDetail?.notPaidCollection || receiptData.statusDetail?.notPaidCollection === 'office' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">${isArR ? 'العميل يزور المكتب' : 'Customer visits office'}</div>
                           </div>
                       </div>
                     </button>
@@ -18799,8 +18923,8 @@ function renderModal() {
                           <i data-lucide="truck" class="w-6 h-6 ${receiptData.statusDetail?.notPaidCollection === 'delivery' ? 'text-white' : 'text-emerald-600 dark:text-emerald-400'}"></i>
                         </span>
                           <div>
-                          <div class="font-bold text-sm ${receiptData.statusDetail?.notPaidCollection === 'delivery' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">Delivery</div>
-                          <div class="text-[10px] ${receiptData.statusDetail?.notPaidCollection === 'delivery' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">Driver collects payment</div>
+                          <div class="font-bold text-sm ${receiptData.statusDetail?.notPaidCollection === 'delivery' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${isArR ? 'توصيل' : 'Delivery'}</div>
+                          <div class="text-[10px] ${receiptData.statusDetail?.notPaidCollection === 'delivery' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">${isArR ? 'السائق يحصّل الدفع' : 'Driver collects payment'}</div>
                         </div>
                       </div>
                     </button>
@@ -18810,10 +18934,10 @@ function renderModal() {
                   <div id="notpaid-delivery-person-section" class="${receiptData.statusDetail?.notPaidCollection === 'delivery' ? '' : 'hidden'} mt-3 p-3 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-700">
                     <label class="block text-xs font-bold text-emerald-700 dark:text-emerald-300 mb-2 flex items-center space-x-2">
                       <i data-lucide="user-check" class="w-4 h-4"></i>
-                      <span>Assign Delivery Person</span>
+                      <span>${isArR ? 'تعيين موظف التوصيل' : 'Assign Delivery Person'}</span>
                     </label>
                     <select id="notpaid-delivery-person" class="w-full glass-input px-3 py-2 rounded-lg text-sm border border-emerald-200 dark:border-emerald-700 focus:ring-2 focus:ring-emerald-500/20">
-                      <option value="">Select delivery person...</option>
+                      <option value="">${isArR ? 'اختر موظف التوصيل...' : 'Select delivery person...'}</option>
                       ${getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role)).map(u => 
                         `<option value="${u.id}" ${receiptData.deliveryPersonId === u.id ? 'selected' : ''}>${Security.escapeHtml(u.name || '')}</option>`
                       ).join('')}
@@ -18824,19 +18948,19 @@ function renderModal() {
                   <div id="receipt-delivery-info" class="hidden mt-3 p-3 rounded-xl bg-white/70 dark:bg-slate-800/60 border border-emerald-200 dark:border-emerald-800 space-y-3">
                     <div class="text-xs font-bold text-emerald-700 dark:text-emerald-300 flex items-center space-x-2">
                       <i data-lucide="map-pin" class="w-4 h-4"></i>
-                      <span>Delivery Info (Required)</span>
+                      <span>${isArR ? 'معلومات التوصيل (مطلوبة)' : 'Delivery Info (Required)'}</span>
                     </div>
                     <div>
-                      <label class="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1">Place name *</label>
-                      <input type="text" id="receipt-delivery-place" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="Neighborhood / address / destination" value="${Security.escapeHtml(receiptData.deliveryPlaceName || '')}" maxlength="200" />
+                      <label class="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1">${isArR ? 'اسم المكان *' : 'Place name *'}</label>
+                      <input type="text" id="receipt-delivery-place" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isArR ? 'الحي / العنوان / الوجهة' : 'Neighborhood / address / destination'}" value="${Security.escapeHtml(receiptData.deliveryPlaceName || '')}" maxlength="200" />
                     </div>
                     <div>
-                      <label class="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1">Quoted delivery fee (LYD) *</label>
+                      <label class="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1">${isArR ? 'سعر التوصيل المتفق عليه (دينار) *' : 'Quoted delivery fee (LYD) *'}</label>
                       <input type="text" inputmode="decimal" id="receipt-quoted-delivery-fee" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="0.00" value="${(receiptData.quotedDeliveryFee ?? '')}" oninput="sanitizeMoneyInput(this)" />
                     </div>
                     <div>
-                      <label class="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1">Instructions (optional)</label>
-                      <textarea id="receipt-delivery-instructions" rows="2" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="Landmarks, notes...">${Security.escapeHtml(receiptData.deliveryInstructions || '')}</textarea>
+                      <label class="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1">${isArR ? 'تعليمات (اختياري)' : 'Instructions (optional)'}</label>
+                      <textarea id="receipt-delivery-instructions" rows="2" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isArR ? 'معالم، ملاحظات...' : 'Landmarks, notes...'}">${Security.escapeHtml(receiptData.deliveryInstructions || '')}</textarea>
                     </div>
                   </div>
                           </div>
@@ -18849,8 +18973,8 @@ function renderModal() {
                     <i data-lucide="rotate-ccw" class="w-5 h-5 text-white"></i>
                   </span>
                           <div>
-                    <div class="text-sm font-bold text-rose-900 dark:text-rose-100">What happened?</div>
-                    <div class="text-xs text-rose-600/80 dark:text-rose-300/80">Choose the cancellation outcome</div>
+                    <div class="text-sm font-bold text-rose-900 dark:text-rose-100">${isArR ? 'ماذا حدث؟' : 'What happened?'}</div>
+                    <div class="text-xs text-rose-600/80 dark:text-rose-300/80">${isArR ? 'اختر نتيجة الإلغاء' : 'Choose the cancellation outcome'}</div>
                           </div>
                           </div>
                 <input type="hidden" id="status-cancel-refund-action" value="${receiptData.statusDetail?.refundAction || ''}" />
@@ -18861,8 +18985,8 @@ function renderModal() {
                         <i data-lucide="banknote" class="w-4 h-4 ${receiptData.statusDetail?.refundAction === 'full' ? 'text-white' : 'text-emerald-600 dark:text-emerald-400'}"></i>
                       </span>
                           <div>
-                        <div class="font-bold text-sm ${receiptData.statusDetail?.refundAction === 'full' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">Full Refund</div>
-                        <div class="text-[10px] ${receiptData.statusDetail?.refundAction === 'full' ? 'text-white/80' : 'text-slate-500'}">Return all money</div>
+                        <div class="font-bold text-sm ${receiptData.statusDetail?.refundAction === 'full' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${isArR ? 'استرجاع كامل' : 'Full Refund'}</div>
+                        <div class="text-[10px] ${receiptData.statusDetail?.refundAction === 'full' ? 'text-white/80' : 'text-slate-500'}">${isArR ? 'إرجاع كل المال' : 'Return all money'}</div>
                           </div>
                           </div>
                   </button>
@@ -18872,8 +18996,8 @@ function renderModal() {
                         <i data-lucide="pie-chart" class="w-4 h-4 ${receiptData.statusDetail?.refundAction === 'partial' ? 'text-white' : 'text-amber-600 dark:text-amber-400'}"></i>
                       </span>
                       <div>
-                        <div class="font-bold text-sm ${receiptData.statusDetail?.refundAction === 'partial' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">Partial Refund</div>
-                        <div class="text-[10px] ${receiptData.statusDetail?.refundAction === 'partial' ? 'text-white/80' : 'text-slate-500'}">Return some money</div>
+                        <div class="font-bold text-sm ${receiptData.statusDetail?.refundAction === 'partial' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${isArR ? 'استرجاع جزئي' : 'Partial Refund'}</div>
+                        <div class="text-[10px] ${receiptData.statusDetail?.refundAction === 'partial' ? 'text-white/80' : 'text-slate-500'}">${isArR ? 'إرجاع جزء من المال' : 'Return some money'}</div>
                         </div>
                     </div>
                   </button>
@@ -18883,8 +19007,8 @@ function renderModal() {
                         <i data-lucide="heart-handshake" class="w-4 h-4 ${receiptData.statusDetail?.refundAction === 'forgiven' ? 'text-white' : 'text-violet-600 dark:text-violet-400'}"></i>
                       </span>
                         <div>
-                        <div class="font-bold text-sm ${receiptData.statusDetail?.refundAction === 'forgiven' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">Forgiven</div>
-                        <div class="text-[10px] ${receiptData.statusDetail?.refundAction === 'forgiven' ? 'text-white/80' : 'text-slate-500'}">No refund needed</div>
+                        <div class="font-bold text-sm ${receiptData.statusDetail?.refundAction === 'forgiven' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${isArR ? 'متسامَح عنه' : 'Forgiven'}</div>
+                        <div class="text-[10px] ${receiptData.statusDetail?.refundAction === 'forgiven' ? 'text-white/80' : 'text-slate-500'}">${isArR ? 'لا حاجة لاسترجاع' : 'No refund needed'}</div>
                           </div>
                         </div>
                   </button>
@@ -18894,8 +19018,8 @@ function renderModal() {
                         <i data-lucide="clock" class="w-4 h-4 ${receiptData.statusDetail?.refundAction === 'undecided' ? 'text-white' : 'text-slate-600 dark:text-slate-400'}"></i>
                       </span>
                       <div>
-                        <div class="font-bold text-sm ${receiptData.statusDetail?.refundAction === 'undecided' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">Undecided</div>
-                        <div class="text-[10px] ${receiptData.statusDetail?.refundAction === 'undecided' ? 'text-white/80' : 'text-slate-500'}">Decide later</div>
+                        <div class="font-bold text-sm ${receiptData.statusDetail?.refundAction === 'undecided' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${isArR ? 'غير محسوم' : 'Undecided'}</div>
+                        <div class="text-[10px] ${receiptData.statusDetail?.refundAction === 'undecided' ? 'text-white/80' : 'text-slate-500'}">${isArR ? 'يُقرر لاحقاً' : 'Decide later'}</div>
                       </div>
                     </div>
                   </button>
@@ -18903,15 +19027,15 @@ function renderModal() {
                 <div id="cancel-refund-status-section" class="${(receiptData.status === 'Canceled' && (receiptData.statusDetail?.refundAction === 'full' || receiptData.statusDetail?.refundAction === 'partial')) ? '' : 'hidden'} pt-3 border-t border-rose-200 dark:border-rose-800/50 space-y-2">
                   <div class="text-xs font-bold text-rose-800 dark:text-rose-200 flex items-center space-x-2">
                     <i data-lucide="loader" class="w-3 h-3"></i>
-                    <span>Refund Progress</span>
+                    <span>${isArR ? 'حالة الاسترجاع' : 'Refund Progress'}</span>
               </div>
                   <input type="hidden" id="status-cancel-refund-status" value="${receiptData.statusDetail?.refundStatus || 'pending'}" />
                   <div class="flex space-x-2">
                     <button type="button" onclick="selectRefundStatus('pending')" class="refund-status-btn flex-1 py-2.5 px-4 rounded-xl text-sm font-bold transition-all duration-300 ${receiptData.statusDetail?.refundStatus !== 'refunded' ? 'bg-gradient-to-r from-amber-400 to-orange-500 text-white shadow-lg shadow-amber-500/30' : 'bg-white/60 dark:bg-slate-800/60 text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-slate-700 hover:border-amber-300'}" data-value="pending">
-                      <i data-lucide="hourglass" class="w-4 h-4 inline mr-1.5"></i>Pending
+                      <i data-lucide="hourglass" class="w-4 h-4 inline mr-1.5"></i>${trStatus('Pending')}
                     </button>
                     <button type="button" onclick="selectRefundStatus('refunded')" class="refund-status-btn flex-1 py-2.5 px-4 rounded-xl text-sm font-bold transition-all duration-300 ${receiptData.statusDetail?.refundStatus === 'refunded' ? 'bg-gradient-to-r from-emerald-400 to-green-500 text-white shadow-lg shadow-emerald-500/30' : 'bg-white/60 dark:bg-slate-800/60 text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-slate-700 hover:border-emerald-300'}" data-value="refunded">
-                      <i data-lucide="check-circle" class="w-4 h-4 inline mr-1.5"></i>Refunded
+                      <i data-lucide="check-circle" class="w-4 h-4 inline mr-1.5"></i>${isArR ? 'تم الاسترجاع' : 'Refunded'}
                     </button>
                   </div>
                 </div>
@@ -18924,8 +19048,8 @@ function renderModal() {
                     <i data-lucide="help-circle" class="w-5 h-5 text-white"></i>
                   </span>
                   <div>
-                    <div class="text-sm font-bold text-indigo-900 dark:text-indigo-100">What's the situation?</div>
-                    <div class="text-xs text-indigo-600/80 dark:text-indigo-300/80">Was this receipt paid or empty?</div>
+                    <div class="text-sm font-bold text-indigo-900 dark:text-indigo-100">${isArR ? 'ما هو الوضع؟' : "What's the situation?"}</div>
+                    <div class="text-xs text-indigo-600/80 dark:text-indigo-300/80">${isArR ? 'هل كان هذا الوصل مدفوعاً أم فارغاً؟' : 'Was this receipt paid or empty?'}</div>
                   </div>
                 </div>
                 <input type="hidden" id="status-lost-resolution" value="${receiptData.statusDetail?.lostResolution || ''}" />
@@ -18936,8 +19060,8 @@ function renderModal() {
                         <i data-lucide="inbox" class="w-6 h-6 ${receiptData.statusDetail?.lostResolution === 'empty' ? 'text-white' : 'text-slate-500 dark:text-slate-400'}"></i>
                       </span>
                       <div>
-                        <div class="font-bold text-sm ${receiptData.statusDetail?.lostResolution === 'empty' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">Empty</div>
-                        <div class="text-[10px] ${receiptData.statusDetail?.lostResolution === 'empty' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">No payment received</div>
+                        <div class="font-bold text-sm ${receiptData.statusDetail?.lostResolution === 'empty' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${isArR ? 'فارغ' : 'Empty'}</div>
+                        <div class="text-[10px] ${receiptData.statusDetail?.lostResolution === 'empty' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">${isArR ? 'لم يُستلم أي دفع' : 'No payment received'}</div>
                       </div>
                     </div>
                   </button>
@@ -18947,8 +19071,8 @@ function renderModal() {
                         <i data-lucide="wallet" class="w-6 h-6 ${receiptData.statusDetail?.lostResolution === 'paid' ? 'text-white' : 'text-emerald-600 dark:text-emerald-400'}"></i>
                       </span>
                       <div>
-                        <div class="font-bold text-sm ${receiptData.statusDetail?.lostResolution === 'paid' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">Paid</div>
-                        <div class="text-[10px] ${receiptData.statusDetail?.lostResolution === 'paid' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">Receipt was lost</div>
+                        <div class="font-bold text-sm ${receiptData.statusDetail?.lostResolution === 'paid' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${trStatus('Paid')}</div>
+                        <div class="text-[10px] ${receiptData.statusDetail?.lostResolution === 'paid' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">${isArR ? 'الوصل فُقد' : 'Receipt was lost'}</div>
                       </div>
                     </div>
                   </button>
@@ -18961,17 +19085,17 @@ function renderModal() {
               <div class="flex items-center justify-between mb-2">
                 <div class="flex items-center space-x-2">
                   <i data-lucide="wallet" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
-                  <h3 class="text-sm font-bold text-slate-700 dark:text-slate-300">Financial Details</h3>
+                  <h3 class="text-sm font-bold text-slate-700 dark:text-slate-300">${isArR ? 'التفاصيل المالية' : 'Financial Details'}</h3>
                 </div>
                 <button type="button" onclick="addReceiptPaymentSplit()" class="text-emerald-600 hover:text-emerald-700 text-xs font-bold flex items-center space-x-1">
                   <i data-lucide="plus-circle" class="w-3 h-3"></i>
-                  <span>Add Split</span>
+                  <span>${isArR ? 'إضافة تقسيم' : 'Add Split'}</span>
                 </button>
               </div>
 
               <!-- Payment Methods Label -->
               <div class="mb-2">
-                <label class="text-[10px] font-bold text-slate-500 uppercase">Payment Methods</label>
+                <label class="text-[10px] font-bold text-slate-500 uppercase">${isArR ? 'طرق الدفع' : 'Payment Methods'}</label>
                 </div>
 
               <!-- Dynamic Financial Content -->
@@ -18986,10 +19110,10 @@ function renderModal() {
                 <div class="flex items-center justify-between">
                   <label class="text-xs font-bold text-slate-600 dark:text-slate-400 flex items-center space-x-1">
                     <i data-lucide="image" class="w-3 h-3"></i>
-                    <span>Photos</span>
+                    <span>${isArR ? 'الصور' : 'Photos'}</span>
                   </label>
                   <label class="text-xs text-indigo-600 hover:text-indigo-700 font-medium flex items-center space-x-1 cursor-pointer">
-                    <i data-lucide="upload" class="w-3 h-3"></i><span>Add Photo</span>
+                    <i data-lucide="upload" class="w-3 h-3"></i><span>${isArR ? 'إضافة صورة' : 'Add Photo'}</span>
                     <input type="file" accept="image/*" multiple class="hidden" onchange="uploadReceiptPhotos(this.files)" />
                   </label>
                 </div>
@@ -19000,9 +19124,9 @@ function renderModal() {
             <!-- Action Buttons -->
             <div class="flex space-x-2 px-1 pt-3 border-t border-slate-200 dark:border-slate-700">
               <button type="button" onclick="saveReceiptFromModal()" class="flex-1 btn-shine bg-purple-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-purple-700">
-                <i data-lucide="check" class="w-4 h-4 inline mr-1.5"></i>${isEdit ? 'Save' : 'Create'}
+                <i data-lucide="check" class="w-4 h-4 inline mr-1.5"></i>${isArR ? (isEdit ? 'حفظ' : 'إنشاء') : (isEdit ? 'Save' : 'Create')}
               </button>
-              <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-slate-300">Cancel</button>
+              <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-slate-300">${isArR ? 'إلغاء' : 'Cancel'}</button>
             </div>
           </div>
         `;
@@ -19013,50 +19137,51 @@ function renderModal() {
       const transferCustomers = getVisibleRecords(state.customers).filter(c => c.id !== transferReceipt.customerId);
       const transferUsage = getReceiptUsageStats(transferReceipt);
       const availableUSD = transferUsage.remainingUSD;
+      const isArT = state.language === 'ar';
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center">
           <i data-lucide="swap" class="w-6 h-6 mr-2 text-blue-600"></i>
-          Transfer Receipt Balance
+          ${isArT ? 'تحويل رصيد الوصل' : 'Transfer Receipt Balance'}
         </h2>
         <div class="space-y-4">
           <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl border border-blue-200 dark:border-blue-800">
-            <div class="text-xs text-slate-500 mb-1">Available Balance</div>
+            <div class="text-xs text-slate-500 mb-1">${isArT ? 'الرصيد المتاح' : 'Available Balance'}</div>
             <div class="text-lg font-bold text-blue-700 dark:text-blue-200">$${availableUSD.toFixed(2)} USD</div>
             <div class="text-xs text-slate-500">~ ${(availableUSD * (transferReceipt.exchangeRate || state.defaultExchangeRate || 1)).toFixed(2)} LYD</div>
           </div>
 
           ${transferCustomers.length === 0 ? `
             <div class="p-3 rounded-lg bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-200 text-sm">
-              No other customers available to transfer to. Please add another customer first.
+              ${isArT ? 'لا يوجد عملاء آخرون للتحويل إليهم. الرجاء إضافة عميل آخر أولاً.' : 'No other customers available to transfer to. Please add another customer first.'}
                 </div>
           ` : `
             <div>
-              <label class="block text-sm font-medium mb-2">Transfer to Customer *</label>
+              <label class="block text-sm font-medium mb-2">${isArT ? 'التحويل إلى العميل *' : 'Transfer to Customer *'}</label>
               <select id="transfer-target-customer" class="w-full glass-input px-4 py-2 rounded-xl">
-                <option value="">Select customer</option>
+                <option value="">${isArT ? 'اختر العميل' : 'Select customer'}</option>
                 ${transferCustomers.map(c => `<option value="${c.id}">${Security.escapeHtml(c.name || '')}</option>`).join('')}
               </select>
                 </div>
             <div>
-              <label class="block text-sm font-medium mb-2">Amount (USD) *</label>
+              <label class="block text-sm font-medium mb-2">${isArT ? 'المبلغ (USD) *' : 'Amount (USD) *'}</label>
               <input type="text" inputmode="decimal" id="transfer-amount-usd" value="${availableUSD.toFixed(2)}" class="w-full glass-input px-4 py-2 rounded-xl" min="0" max="${availableUSD.toFixed(2)}" oninput="sanitizeMoneyInput(this)" />
-              <p class="text-xs text-slate-500 mt-1">Available: $${availableUSD.toFixed(2)}</p>
+              <p class="text-xs text-slate-500 mt-1">${isArT ? 'المتاح:' : 'Available:'} $${availableUSD.toFixed(2)}</p>
               </div>
             <div>
-              <label class="block text-sm font-medium mb-2">Note (optional)</label>
-              <textarea id="transfer-note" class="w-full glass-input px-4 py-2 rounded-xl" rows="3" placeholder="Why are you transferring?"></textarea>
+              <label class="block text-sm font-medium mb-2">${isArT ? 'ملاحظة (اختياري)' : 'Note (optional)'}</label>
+              <textarea id="transfer-note" class="w-full glass-input px-4 py-2 rounded-xl" rows="3" placeholder="${isArT ? 'لماذا تقوم بالتحويل؟' : 'Why are you transferring?'}"></textarea>
             </div>
           `}
 
           ${transferReceipt.transfers && transferReceipt.transfers.length > 0 ? `
             <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
               <div class="text-xs font-bold text-slate-600 dark:text-slate-300 mb-2 flex items-center space-x-1">
-                <i data-lucide="history" class="w-3 h-3"></i><span>Transfer History</span>
+                <i data-lucide="history" class="w-3 h-3"></i><span>${isArT ? 'سجل التحويلات' : 'Transfer History'}</span>
               </div>
               <div class="space-y-1 text-xs text-slate-600 dark:text-slate-300 max-h-24 overflow-y-auto custom-scrollbar pr-1">
                 ${transferReceipt.transfers.map(t => {
                   const targetCustomer = state.customers.find(c => c.id === t.toCustomerId);
-                  const name = targetCustomer ? targetCustomer.name : 'Unknown';
+                  const name = targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown');
                   return `<div class="flex justify-between">
                     <span>${new Date(t.date).toLocaleString()}</span>
                     <span class="font-medium">$${(t.amountUSD || 0).toFixed(2)} → ${name}</span>
@@ -19068,9 +19193,9 @@ function renderModal() {
 
           <div class="flex space-x-3 pt-2 border-t border-slate-200 dark:border-slate-700 mt-2">
             <button type="button" onclick="saveReceiptTransfer()" class="flex-1 btn-shine bg-blue-600 text-white px-4 py-2 rounded-xl font-bold" ${transferCustomers.length === 0 ? 'disabled' : ''}>
-              <i data-lucide="check" class="w-4 h-4 inline mr-1.5"></i>Transfer
+              <i data-lucide="check" class="w-4 h-4 inline mr-1.5"></i>${isArT ? 'تحويل' : 'Transfer'}
               </button>
-            <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2 rounded-xl font-bold">Cancel</button>
+            <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2 rounded-xl font-bold">${isArT ? 'إلغاء' : 'Cancel'}</button>
             </div>
           </div>
         `;
@@ -19079,20 +19204,21 @@ function renderModal() {
       const splitReceipt = state.modalData;
       const splitExistingPayments = splitReceipt.payments || [];
       const splitDeliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
-      
+      const isArS = state.language === 'ar';
+
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center">
           <i data-lucide="credit-card" class="w-6 h-6 mr-2 text-purple-600"></i>
-          Manage Split Payments
+          ${isArS ? 'إدارة تقسيمات الدفع' : 'Manage Split Payments'}
         </h2>
         <div class="space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar pr-2">
           <!-- Target receipt id frozen at render time (same defense as the main
                receipt form): saveSplitPayments reads THIS, not state.modalData. -->
           <input type="hidden" id="split-payments-receipt-id" value="${Security.escapeHtml(String(splitReceipt.id || ''))}" />
           <div class="p-4 bg-indigo-50 dark:bg-indigo-900/20 rounded-xl">
-            <div class="text-sm font-medium text-indigo-700 dark:text-indigo-300 mb-2">Receipt Total</div>
+            <div class="text-sm font-medium text-indigo-700 dark:text-indigo-300 mb-2">${isArS ? 'إجمالي الوصل' : 'Receipt Total'}</div>
             <div class="text-2xl font-bold text-indigo-600">$${splitReceipt.amountUSD?.toFixed(2)} = ${splitReceipt.amountLocal?.toFixed(2)} LYD</div>
-            <div class="text-xs text-slate-500 mt-1">Exchange Rate: ${splitReceipt.exchangeRate}</div>
+            <div class="text-xs text-slate-500 mt-1">${isArS ? 'سعر الصرف:' : 'Exchange Rate:'} ${splitReceipt.exchangeRate}</div>
           </div>
 
           <div id="split-payments-container" class="space-y-3">
@@ -19100,36 +19226,36 @@ function renderModal() {
               <div class="split-payment-item p-4 rounded-lg">
                 <div class="grid grid-cols-2 gap-3">
                   <div>
-                    <label class="block text-xs font-medium mb-1">Payment Method</label>
+                    <label class="block text-xs font-medium mb-1">${isArS ? 'طريقة الدفع' : 'Payment Method'}</label>
                     <select class="split-method w-full glass-input px-3 py-2 rounded-lg text-sm">
-                      ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${m}</option>`).join('')}
+                      ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
                     </select>
                   </div>
                   <div>
-                    <label class="block text-xs font-medium mb-1">Amount (LYD)</label>
+                    <label class="block text-xs font-medium mb-1">${isArS ? 'المبلغ (دينار)' : 'Amount (LYD)'}</label>
                     <input type="text" inputmode="decimal" class="split-amount w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.amount}" oninput="sanitizeMoneyInput(this)" />
                   </div>
                   <div>
-                    <label class="block text-xs font-medium mb-1">Exchange Rate</label>
+                    <label class="block text-xs font-medium mb-1">${isArS ? 'سعر الصرف' : 'Exchange Rate'}</label>
                     <input type="text" inputmode="decimal" class="split-rate w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate || state.defaultExchangeRate}" oninput="sanitizeMoneyInput(this, 4)" />
                   </div>
                   <div>
-                    <label class="block text-xs font-medium mb-1">USD Rate (Rate 2)</label>
+                    <label class="block text-xs font-medium mb-1">${isArS ? 'سعر الدولار (سعر 2)' : 'USD Rate (Rate 2)'}</label>
                     <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate2 !== undefined ? payment.rate2 : (payment.rate || state.defaultExchangeRate)}" oninput="sanitizeMoneyInput(this, 4)" />
                   </div>
                   <div>
-                    <label class="block text-xs font-medium mb-1">Collection Type</label>
+                    <label class="block text-xs font-medium mb-1">${isArS ? 'نوع التحصيل' : 'Collection Type'}</label>
                     <select class="split-collection w-full glass-input px-3 py-2 rounded-lg text-sm">
-                      <option value="office" ${payment.collectionType === 'office' ? 'selected' : ''}>Office</option>
-                      <option value="delivery" ${payment.collectionType === 'delivery' ? 'selected' : ''}>Delivery</option>
-                      <option value="bank" ${payment.collectionType === 'bank' ? 'selected' : ''}>Bank</option>
+                      <option value="office" ${payment.collectionType === 'office' ? 'selected' : ''}>${trStatus('office')}</option>
+                      <option value="delivery" ${payment.collectionType === 'delivery' ? 'selected' : ''}>${trStatus('delivery')}</option>
+                      <option value="bank" ${payment.collectionType === 'bank' ? 'selected' : ''}>${trStatus('bank')}</option>
                     </select>
                   </div>
                   ${splitDeliveryUsers.length > 0 ? `
                     <div class="col-span-2">
-                      <label class="block text-xs font-medium mb-1">Delivery Person</label>
+                      <label class="block text-xs font-medium mb-1">${isArS ? 'موظف التوصيل' : 'Delivery Person'}</label>
                       <select class="split-delivery-person w-full glass-input px-3 py-2 rounded-lg text-sm">
-                        <option value="">None</option>
+                        <option value="">${isArS ? 'بدون' : 'None'}</option>
                         ${splitDeliveryUsers.map(u => `<option value="${u.id}" ${payment.deliveryPersonId === u.id ? 'selected' : ''}>${Security.escapeHtml(u.name || '')}</option>`).join('')}
                       </select>
                     </div>
@@ -19137,7 +19263,7 @@ function renderModal() {
                   <div class="col-span-2 flex justify-end">
                     <button type="button" onclick="this.closest('.split-payment-item').remove(); lucide.createIcons()" class="text-rose-600 hover:text-rose-700 text-sm font-medium flex items-center space-x-1">
                       <i data-lucide="trash-2" class="w-4 h-4"></i>
-                      <span>Remove</span>
+                      <span>${isArS ? 'إزالة' : 'Remove'}</span>
                     </button>
                   </div>
                 </div>
@@ -19147,14 +19273,14 @@ function renderModal() {
 
           <button type="button" onclick="addSplitPayment()" class="w-full btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
             <i data-lucide="plus-circle" class="w-4 h-4"></i>
-            <span>Add Payment Split</span>
+            <span>${isArS ? 'إضافة تقسيم دفع' : 'Add Payment Split'}</span>
           </button>
 
           <div class="flex space-x-3 pt-4 border-t border-slate-200 dark:border-slate-700">
             <button onclick="saveSplitPayments()" class="flex-1 btn-shine bg-purple-600 text-white px-4 py-3 rounded-xl font-bold">
-              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>Save Split Payments
+              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>${isArS ? 'حفظ تقسيمات الدفع' : 'Save Split Payments'}
             </button>
-            <button onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold">Cancel</button>
+            <button onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold">${isArS ? 'إلغاء' : 'Cancel'}</button>
           </div>
         </div>
       `;
@@ -19173,25 +19299,26 @@ function renderModal() {
       const topUpWorkingDays = existingTopUps.reduce((sum, t) => sum + (parseInt(t.extendDays, 10) || 0), 0);
       const topUpBaseEndOk = topUpBaseEnd && !isNaN(new Date(topUpBaseEnd).getTime());
       const topUpNewEnd = topUpBaseEndOk ? new Date(new Date(topUpBaseEnd).getTime() + topUpWorkingDays * 86400000) : null;
+      const isArTU = state.language === 'ar';
 
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center">
           <i data-lucide="trending-up" class="w-6 h-6 mr-2 text-blue-600"></i>
-          Manage Top-ups
+          ${isArTU ? 'إدارة الشحنات الإضافية' : 'Manage Top-ups'}
         </h2>
         <div class="space-y-4">
           <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl">
-            <div class="text-sm font-medium text-blue-700 dark:text-blue-300">Ad Details</div>
-            <div class="text-lg font-bold text-blue-600 mt-1">Original: $${topUpBase} → New: $${(topUpBase + topUpWorkingTotal).toFixed(2)}</div>
-            ${topUpBaseEndOk ? `<div class="text-sm font-medium text-blue-700 dark:text-blue-300 mt-1">End: ${new Date(topUpBaseEnd).toLocaleDateString()}${topUpWorkingDays > 0 ? ` → <span class="font-bold">${topUpNewEnd.toLocaleDateString()}</span> (+${topUpWorkingDays} day${topUpWorkingDays > 1 ? 's' : ''})` : ''}</div>` : ''}
-            ${existingTopUps.length > 0 ? `<div class="text-xs text-slate-500 mt-1">Total top-ups: $${topUpWorkingTotal.toFixed(2)}</div>` : ''}
+            <div class="text-sm font-medium text-blue-700 dark:text-blue-300">${isArTU ? 'تفاصيل الإعلان' : 'Ad Details'}</div>
+            <div class="text-lg font-bold text-blue-600 mt-1">${isArTU ? 'الأصلي' : 'Original'}: $${topUpBase} → ${isArTU ? 'الجديد' : 'New'}: $${(topUpBase + topUpWorkingTotal).toFixed(2)}</div>
+            ${topUpBaseEndOk ? `<div class="text-sm font-medium text-blue-700 dark:text-blue-300 mt-1">${isArTU ? 'النهاية' : 'End'}: ${new Date(topUpBaseEnd).toLocaleDateString()}${topUpWorkingDays > 0 ? ` → <span class="font-bold">${topUpNewEnd.toLocaleDateString()}</span> (${isArTU ? `+${topUpWorkingDays} يوم` : `+${topUpWorkingDays} day${topUpWorkingDays > 1 ? 's' : ''}`})` : ''}</div>` : ''}
+            ${existingTopUps.length > 0 ? `<div class="text-xs text-slate-500 mt-1">${isArTU ? 'إجمالي الشحنات' : 'Total top-ups'}: $${topUpWorkingTotal.toFixed(2)}</div>` : ''}
           </div>
 
           <div id="topups-container" class="space-y-2">
             ${existingTopUps.map((topup, idx) => `
               <div class="p-3 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-between">
                 <div>
-                  <div class="font-medium">$${topup.amount}${(parseInt(topup.extendDays, 10) || 0) > 0 ? ` <span class="text-xs font-bold text-emerald-600">+${topup.extendDays} day${topup.extendDays > 1 ? 's' : ''}</span>` : ''}</div>
+                  <div class="font-medium">$${topup.amount}${(parseInt(topup.extendDays, 10) || 0) > 0 ? ` <span class="text-xs font-bold text-emerald-600">${isArTU ? `+${topup.extendDays} يوم` : `+${topup.extendDays} day${topup.extendDays > 1 ? 's' : ''}`}</span>` : ''}</div>
                   <div class="text-xs text-slate-500">${new Date(topup.date).toLocaleDateString()} - ${Security.escapeHtml(topup.note || '')}</div>
                 </div>
                 <button type="button" onclick="removeTopUp(${idx})" class="text-rose-500 hover:text-rose-700">
@@ -19202,86 +19329,87 @@ function renderModal() {
           </div>
 
           <div class="p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl space-y-3">
-            <h4 class="text-sm font-medium">Add New Top-up</h4>
+            <h4 class="text-sm font-medium">${isArTU ? 'إضافة شحنة جديدة' : 'Add New Top-up'}</h4>
             <div class="grid grid-cols-3 gap-3">
               <div>
-                <label class="block text-xs mb-1">Amount (USD)</label>
+                <label class="block text-xs mb-1">${isArTU ? 'المبلغ (USD)' : 'Amount (USD)'}</label>
                 <input type="text" inputmode="decimal" id="topup-amount" class="w-full glass-input px-3 py-2 rounded-lg" placeholder="0.00" oninput="sanitizeMoneyInput(this)" />
               </div>
               <div>
-                <label class="block text-xs mb-1">Date</label>
+                <label class="block text-xs mb-1">${isArTU ? 'التاريخ' : 'Date'}</label>
                 <input type="date" id="topup-date" value="${getTodayDateString()}" class="w-full glass-input px-3 py-2 rounded-lg" />
               </div>
               <div>
-                <label class="block text-xs mb-1">Extend (days)</label>
+                <label class="block text-xs mb-1">${isArTU ? 'تمديد (أيام)' : 'Extend (days)'}</label>
                 <input type="number" min="0" step="1" id="topup-extend-days" class="w-full glass-input px-3 py-2 rounded-lg" placeholder="0" />
               </div>
             </div>
             <div>
-              <label class="block text-xs mb-1">Note</label>
-              <input type="text" id="topup-note" class="w-full glass-input px-3 py-2 rounded-lg" placeholder="Reason for top-up..." />
+              <label class="block text-xs mb-1">${isArTU ? 'ملاحظة' : 'Note'}</label>
+              <input type="text" id="topup-note" class="w-full glass-input px-3 py-2 rounded-lg" placeholder="${isArTU ? 'سبب الشحنة...' : 'Reason for top-up...'}" />
             </div>
             <button type="button" onclick="addNewTopUp()" class="w-full btn-shine bg-blue-600 text-white px-4 py-2 rounded-xl font-bold">
-              <i data-lucide="plus" class="w-4 h-4 inline mr-2"></i>Add Top-up
+              <i data-lucide="plus" class="w-4 h-4 inline mr-2"></i>${isArTU ? 'إضافة شحنة' : 'Add Top-up'}
             </button>
           </div>
 
           <div class="flex space-x-3 pt-4 border-t border-slate-200 dark:border-slate-700">
             <button onclick="saveTopUps()" class="flex-1 btn-shine bg-blue-600 text-white px-4 py-3 rounded-xl font-bold">
-              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>Save Top-ups
+              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>${isArTU ? 'حفظ الشحنات' : 'Save Top-ups'}
             </button>
-            <button onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold">Cancel</button>
+            <button onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold">${isArTU ? 'إلغاء' : 'Cancel'}</button>
           </div>
         </div>
       `;
       break;
     case 'refund':
       const refundAd = state.modalData;
-      
+      const isArRf = state.language === 'ar';
+
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center">
           <i data-lucide="arrow-left-circle" class="w-6 h-6 mr-2 text-rose-600"></i>
-          Manage Refund
+          ${isArRf ? 'إدارة الاسترجاع' : 'Manage Refund'}
         </h2>
         <div class="space-y-4">
           <div class="p-4 bg-rose-50 dark:bg-rose-900/20 rounded-xl">
-            <div class="text-sm font-medium text-rose-700 dark:text-rose-300">Ad Amount</div>
+            <div class="text-sm font-medium text-rose-700 dark:text-rose-300">${isArRf ? 'مبلغ الإعلان' : 'Ad Amount'}</div>
             <div class="text-2xl font-bold text-rose-600">$${refundAd.amountUSD} (${refundAd.amountLocal} LYD)</div>
             ${refundAd.refundType && refundAd.refundType !== 'None' ? `
-              <div class="text-xs text-slate-500 mt-2">Current Refund: ${refundAd.refundType} - $${refundAd.refundAmount || 0} (${refundAd.refundStatus || 'Pending'})</div>
+              <div class="text-xs text-slate-500 mt-2">${isArRf ? 'الاسترجاع الحالي' : 'Current Refund'}: ${trStatus(refundAd.refundType)} - $${refundAd.refundAmount || 0} (${trStatus(refundAd.refundStatus || 'Pending')})</div>
             ` : ''}
           </div>
 
           <div>
-            <label class="block text-sm font-medium mb-2">Refund Type</label>
+            <label class="block text-sm font-medium mb-2">${isArRf ? 'نوع الاسترجاع' : 'Refund Type'}</label>
             <select id="refund-type" class="w-full glass-input px-4 py-2 rounded-xl" onchange="toggleRefundAmount(this.value)">
-              ${REFUND_TYPES.map(t => `<option value="${t}" ${refundAd.refundType === t ? 'selected' : ''}>${t}</option>`).join('')}
+              ${REFUND_TYPES.map(t => `<option value="${t}" ${refundAd.refundType === t ? 'selected' : ''}>${trStatus(t)}</option>`).join('')}
             </select>
           </div>
 
           <div id="refund-amount-section" class="${!refundAd.refundType || refundAd.refundType === 'None' ? 'hidden' : ''}">
-            <label class="block text-sm font-medium mb-2">Refund Amount (USD)</label>
+            <label class="block text-sm font-medium mb-2">${isArRf ? 'مبلغ الاسترجاع (USD)' : 'Refund Amount (USD)'}</label>
             <input type="text" inputmode="decimal" id="refund-amount" value="${refundAd.refundAmount || (refundAd.refundType === 'Full' ? refundAd.amountUSD : 0)}" class="w-full glass-input px-4 py-2 rounded-xl" oninput="sanitizeMoneyInput(this)" />
           </div>
 
           <div id="refund-status-section" class="${!refundAd.refundType || refundAd.refundType === 'None' ? 'hidden' : ''}">
-            <label class="block text-sm font-medium mb-2">Refund Status</label>
+            <label class="block text-sm font-medium mb-2">${isArRf ? 'حالة الاسترجاع' : 'Refund Status'}</label>
             <select id="refund-status" class="w-full glass-input px-4 py-2 rounded-xl">
-              <option value="Pending" ${refundAd.refundStatus === 'Pending' ? 'selected' : ''}>Pending</option>
-              <option value="Refunded" ${refundAd.refundStatus === 'Refunded' ? 'selected' : ''}>Refunded</option>
+              <option value="Pending" ${refundAd.refundStatus === 'Pending' ? 'selected' : ''}>${trStatus('Pending')}</option>
+              <option value="Refunded" ${refundAd.refundStatus === 'Refunded' ? 'selected' : ''}>${isArRf ? 'تم الاسترجاع' : 'Refunded'}</option>
             </select>
           </div>
 
           <div class="p-3 bg-amber-50 dark:bg-amber-900/20 rounded-xl flex items-start space-x-2">
             <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-600 mt-0.5"></i>
-            <p class="text-xs text-amber-700 dark:text-amber-300">Refunds will mark the ad status as Canceled and track the refund amount.</p>
+            <p class="text-xs text-amber-700 dark:text-amber-300">${isArRf ? 'الاسترجاع سيغيّر حالة الإعلان إلى ملغي وسيتتبع مبلغ الاسترجاع.' : 'Refunds will mark the ad status as Canceled and track the refund amount.'}</p>
           </div>
 
           <div class="flex space-x-3 pt-4 border-t border-slate-200 dark:border-slate-700">
             <button onclick="saveRefund()" class="flex-1 btn-shine bg-rose-600 text-white px-4 py-3 rounded-xl font-bold">
-              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>Save Refund
+              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>${isArRf ? 'حفظ الاسترجاع' : 'Save Refund'}
             </button>
-            <button onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold">Cancel</button>
+            <button onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold">${isArRf ? 'إلغاء' : 'Cancel'}</button>
           </div>
         </div>
       `;
@@ -19305,7 +19433,7 @@ function renderModal() {
             <div class="font-mono text-sm break-all select-all text-slate-800 dark:text-slate-200">${Security.escapeHtml(key)}</div>
           </div>
           <div class="flex space-x-3">
-            <button type="button" onclick="copyTextToClipboard('${key}').then(ok => showNotification(ok ? 'Copied' : 'Copy Failed', ok ? 'Recovery key copied' : 'Please copy manually', ok ? 'success' : 'error'))" class="flex-1 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
+            <button type="button" onclick="copyTextToClipboard('${key}').then(ok => showNotification(ok ? '${rtl ? 'تم النسخ' : 'Copied'}' : '${rtl ? 'فشل النسخ' : 'Copy Failed'}', ok ? '${rtl ? 'تم نسخ مفتاح الاستعادة' : 'Recovery key copied'}' : '${rtl ? 'الرجاء النسخ يدوياً' : 'Please copy manually'}', ok ? 'success' : 'error'))" class="flex-1 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
               <i data-lucide="copy" class="w-4 h-4 inline mr-2"></i>${rtl ? 'نسخ' : 'Copy'}
             </button>
             <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300">
@@ -19340,7 +19468,7 @@ function renderModal() {
               </div>
               <div>
                 <label class="block text-sm font-medium mb-2">${t('newPassword')}</label>
-                <input type="password" id="pwreset-new" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="Min. 8 characters" minlength="8" />
+                <input type="password" id="pwreset-new" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? '8 أحرف على الأقل' : 'Min. 8 characters'}" minlength="8" />
               </div>
               <div>
                 <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
@@ -19415,7 +19543,7 @@ function renderModal() {
             </div>
             <div>
               <label class="block text-sm font-medium mb-2">${t('newPassword')}</label>
-              <input type="password" id="pwreset-new" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="Min. 8 characters" minlength="8" ${hasRecovery ? '' : 'disabled'} />
+              <input type="password" id="pwreset-new" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? '8 أحرف على الأقل' : 'Min. 8 characters'}" minlength="8" ${hasRecovery ? '' : 'disabled'} />
             </div>
             <div>
               <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
@@ -19454,7 +19582,7 @@ function renderModal() {
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('newPassword')}</label>
-            <input type="password" id="cp-new" required minlength="8" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="Min. 8 characters" />
+            <input type="password" id="cp-new" required minlength="8" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? '8 أحرف على الأقل' : 'Min. 8 characters'}" />
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
@@ -19682,7 +19810,7 @@ function renderModal() {
         await handleModalSubmit();
       } catch (err) {
         console.error('Modal submit error:', err);
-        showNotification('Error', 'Failed to save changes', 'error');
+        showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'فشل حفظ التغييرات' : 'Failed to save changes', 'error');
       } finally {
         submitting = false;
         if (submitBtn) submitBtn.disabled = false;
@@ -19737,8 +19865,9 @@ async function handleModalSubmit() {
       break;
     }
     case 'change-password': {
+      const isArCP = state.language === 'ar';
       if (!state.currentUser?.id) {
-        showNotification('Error', 'Not logged in', 'error');
+        showNotification(isArCP ? 'خطأ' : 'Error', isArCP ? 'لم يتم تسجيل الدخول' : 'Not logged in', 'error');
         return;
       }
 
@@ -19747,24 +19876,24 @@ async function handleModalSubmit() {
       const confirmPw = String(document.getElementById('cp-confirm')?.value || '');
 
       if (!currentPw) {
-        showNotification('Validation', 'Current password is required', 'error');
+        showNotification(isArCP ? 'تنبيه' : 'Validation', isArCP ? 'كلمة المرور الحالية مطلوبة' : 'Current password is required', 'error');
         return;
       }
       if (!newPw || newPw.length < 8) {
-        showNotification('Validation', 'Password must be at least 8 characters', 'error');
+        showNotification(isArCP ? 'تنبيه' : 'Validation', isArCP ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
         return;
       }
       if (newPw !== confirmPw) {
-        showNotification('Validation', 'Passwords do not match', 'error');
+        showNotification(isArCP ? 'تنبيه' : 'Validation', isArCP ? 'كلمتا المرور غير متطابقتين' : 'Passwords do not match', 'error');
         return;
       }
 
       if (isServerModeEnabled()) {
         try {
           await apiChangePassword(currentPw, newPw);
-          showNotification('Success', 'Password changed successfully', 'success');
+          showNotification(isArCP ? 'نجاح' : 'Success', isArCP ? 'تم تغيير كلمة المرور بنجاح' : 'Password changed successfully', 'success');
         } catch (e) {
-          showNotification('Error', e.message || 'Failed to change password', 'error');
+          showNotification(isArCP ? 'خطأ' : 'Error', e.message || (isArCP ? 'فشل تغيير كلمة المرور' : 'Failed to change password'), 'error');
           return;
         }
         break;
@@ -19773,7 +19902,7 @@ async function handleModalSubmit() {
       // Local mode
       const user = state.users.find(u => u && !u._deleted && u.id === state.currentUser.id) || state.currentUser;
       if (!user) {
-        showNotification('Error', 'User not found', 'error');
+        showNotification(isArCP ? 'خطأ' : 'Error', isArCP ? 'المستخدم غير موجود' : 'User not found', 'error');
         return;
       }
 
@@ -19787,7 +19916,7 @@ async function handleModalSubmit() {
       }
 
       if (!ok) {
-        showNotification('Error', 'Current password is incorrect', 'error');
+        showNotification(isArCP ? 'خطأ' : 'Error', isArCP ? 'كلمة المرور الحالية غير صحيحة' : 'Current password is incorrect', 'error');
         addSecurityLog('password_change_bad_current', user.email || user.id);
         return;
       }
@@ -19800,7 +19929,7 @@ async function handleModalSubmit() {
         passwordIterations: hashed.iterations
       });
       addSecurityLog('password_changed', user.email || user.id);
-      showNotification('Success', 'Password changed successfully', 'success');
+      showNotification(isArCP ? 'نجاح' : 'Success', isArCP ? 'تم تغيير كلمة المرور بنجاح' : 'Password changed successfully', 'success');
       break;
     }
     case 'customer': {
@@ -19870,6 +19999,7 @@ async function handleModalSubmit() {
     }
     case 'ad':
       try {
+      const isArSubAd = state.language === 'ar';
       const paymentStatus = document.getElementById('ad-payment-status')?.value || 'paid';
       const collectionMethod = document.getElementById('ad-collection-method')?.value || '';
       const adLinkInputs = Array.from(document.querySelectorAll('.ad-link-input')).map(i => (i.value || '').trim()).filter(Boolean);
@@ -19905,14 +20035,14 @@ async function handleModalSubmit() {
       // Get page ID
       const pageId = document.getElementById('ad-page')?.value || '';
       if (!pageId) {
-        showNotification('Error', 'Please select a page', 'error');
+        showNotification(isArSubAd ? 'خطأ' : 'Error', isArSubAd ? 'الرجاء اختيار صفحة' : 'Please select a page', 'error');
         return;
       }
       
       // Get customer ID from searchable dropdown hidden field
       const customerId = document.getElementById('ad-customer-id')?.value;
       if (!customerId) {
-        showNotification('Error', 'Please select a customer', 'error');
+        showNotification(isArSubAd ? 'خطأ' : 'Error', isArSubAd ? 'الرجاء اختيار عميل' : 'Please select a customer', 'error');
         return;
       }
 
@@ -19926,7 +20056,7 @@ async function handleModalSubmit() {
         .map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) }));
 
       if (isPaid && allocations.length === 0) {
-        showNotification('Validation', 'Please link at least one receipt to fund this ad.', 'error');
+        showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'الرجاء ربط وصل واحد على الأقل لتمويل هذا الإعلان.' : 'Please link at least one receipt to fund this ad.', 'error');
         return;
       }
 
@@ -19945,7 +20075,7 @@ async function handleModalSubmit() {
 
         // Validate total allocations make sense (should be > 0)
         if (totalAllocated <= 0) {
-          showNotification('Validation', 'Total allocation amount must be greater than zero.', 'error');
+          showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'إجمالي مبلغ التخصيص يجب أن يكون أكبر من صفر.' : 'Total allocation amount must be greater than zero.', 'error');
           return;
         }
 
@@ -19955,7 +20085,7 @@ async function handleModalSubmit() {
         for (const [receiptId, plannedTotal] of totalsByReceipt.entries()) {
           const receipt = state.receipts.find(r => String(r.id) === String(receiptId));
           if (!receipt) {
-            showNotification('Validation', 'One of the selected receipts is missing.', 'error');
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'أحد الوصولات المختارة مفقود.' : 'One of the selected receipts is missing.', 'error');
             return;
           }
           // Calculate remaining balance (total - used - transferred)
@@ -19975,8 +20105,10 @@ async function handleModalSubmit() {
 
           if (plannedTotal > remaining + 0.0001) {
             showNotification(
-              'Validation',
-              `Planned spend ($${plannedTotal.toFixed(2)}) exceeds available balance ($${remaining.toFixed(2)}) for receipt ${receipt.serialNumber || receipt.id}.`,
+              isArSubAd ? 'تنبيه' : 'Validation',
+              isArSubAd
+                ? `الصرف المخطط ($${plannedTotal.toFixed(2)}) يتجاوز الرصيد المتاح ($${remaining.toFixed(2)}) للوصل ${receipt.serialNumber || receipt.id}.`
+                : `Planned spend ($${plannedTotal.toFixed(2)}) exceeds available balance ($${remaining.toFixed(2)}) for receipt ${receipt.serialNumber || receipt.id}.`,
               'error'
             );
             return;
@@ -19990,33 +20122,33 @@ async function handleModalSubmit() {
       // Additional validation when not paid
       if (paymentStatus === 'not_paid') {
         if (!collectionMethod) {
-          showNotification('Validation', 'Please choose how payment will be collected.', 'error');
+          showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'الرجاء اختيار طريقة تحصيل الدفع.' : 'Please choose how payment will be collected.', 'error');
           return;
         }
         if (collectionMethod === 'driver') {
           const linkedReceiptId = document.getElementById('ad-linked-receipt-id')?.value || '';
           if (!linkedReceiptId) {
-            showNotification('Validation', 'Select a pending Temporary Delivery Receipt (D#) or create one first.', 'error');
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'اختر وصل توصيل مؤقت معلق (D#) أو أنشئ واحداً أولاً.' : 'Select a pending Temporary Delivery Receipt (D#) or create one first.', 'error');
             return;
           }
           const linkedReceipt = state.receipts.find(r => r && !r._deleted && String(r.id) === String(linkedReceiptId));
           if (!linkedReceipt || !isTempDeliveryReceiptNo(linkedReceipt.tempReceiptNo)) {
-            showNotification('Validation', 'Selected receipt is not a valid pending Temporary Delivery Receipt.', 'error');
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'الوصل المختار ليس وصل توصيل مؤقتاً معلقاً صالحاً.' : 'Selected receipt is not a valid pending Temporary Delivery Receipt.', 'error');
             return;
           }
           if (String(linkedReceipt.customerId || '') !== String(customerId || '')) {
-            showNotification('Validation', 'Selected receipt belongs to a different customer.', 'error');
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'الوصل المختار يخص عميلاً آخر.' : 'Selected receipt belongs to a different customer.', 'error');
             return;
           }
           const ds = String(linkedReceipt.deliveryStatus || '');
           if (ds === 'Delivered' || ds === 'Office' || ds === 'Canceled') {
-            showNotification('Validation', 'Selected receipt is not pending delivery anymore. Please choose another one.', 'error');
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'الوصل المختار لم يعد معلقاً للتوصيل. الرجاء اختيار وصل آخر.' : 'Selected receipt is not pending delivery anymore. Please choose another one.', 'error');
             return;
           }
           const assignedDriver = String(linkedReceipt.deliveryPersonId || '').trim();
           // Delivery assignment must come from the receipt (single source of truth).
           if (!assignedDriver) {
-            showNotification('Validation', 'This receipt has no assigned driver. Please assign a driver in the Receipt first.', 'error');
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'هذا الوصل بلا سائق معيّن. الرجاء تعيين سائق في الوصل أولاً.' : 'This receipt has no assigned driver. Please assign a driver in the Receipt first.', 'error');
             return;
           }
 
@@ -20063,8 +20195,10 @@ async function handleModalSubmit() {
           
           if (dueAmountToUseUSD > effectiveAvailable + 0.01) {
             showNotification(
-              'Validation',
-              `Due credit spend ($${dueAmountToUseUSD.toFixed(2)}) exceeds available ($${effectiveAvailable.toFixed(2)}).`,
+              isArSubAd ? 'تنبيه' : 'Validation',
+              isArSubAd
+                ? `صرف الرصيد المستحق ($${dueAmountToUseUSD.toFixed(2)}) يتجاوز المتاح ($${effectiveAvailable.toFixed(2)}).`
+                : `Due credit spend ($${dueAmountToUseUSD.toFixed(2)}) exceeds available ($${effectiveAvailable.toFixed(2)}).`,
               'error'
             );
             return;
@@ -20103,7 +20237,7 @@ async function handleModalSubmit() {
           // Soft-deleted receipts stay in state.receipts with _deleted=true —
           // money can NOT be drawn from a deleted receipt.
           if (!receipt || receipt._deleted) {
-            showNotification('Validation', 'One of the merged receipts is missing or was deleted.', 'error');
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'أحد الوصولات المدمجة مفقود أو تم حذفه.' : 'One of the merged receipts is missing or was deleted.', 'error');
             return;
           }
           const usageStats = getReceiptUsageStats(receipt);
@@ -20122,8 +20256,10 @@ async function handleModalSubmit() {
           }
           if (plannedTotal > remaining + 0.0001) {
             showNotification(
-              'Validation',
-              `Merged spend ($${plannedTotal.toFixed(2)}) exceeds available balance ($${remaining.toFixed(2)}) for receipt ${receipt.serialNumber || receipt.id}.`,
+              isArSubAd ? 'تنبيه' : 'Validation',
+              isArSubAd
+                ? `الصرف المدمج ($${plannedTotal.toFixed(2)}) يتجاوز الرصيد المتاح ($${remaining.toFixed(2)}) للوصل ${receipt.serialNumber || receipt.id}.`
+                : `Merged spend ($${plannedTotal.toFixed(2)}) exceeds available balance ($${remaining.toFixed(2)}) for receipt ${receipt.serialNumber || receipt.id}.`,
               'error'
             );
             return;
@@ -20288,15 +20424,16 @@ async function handleModalSubmit() {
       closeModal();
       } catch (error) {
         console.error('Error saving ad:', error);
-        showNotification('Error', `Failed to save ad: ${error.message}`, 'error');
+        showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? `فشل حفظ الإعلان: ${error.message}` : `Failed to save ad: ${error.message}`, 'error');
       }
       break;
     case 'user':
+      const isArSubU = state.language === 'ar';
       const isAdminEditor = isCurrentUserAdmin();
       const editingId = state.modalData?.id;
       const isSelfEdit = !!(isEdit && editingId && String(state.currentUser?.id || '') === String(editingId));
       if (!isAdminEditor && !isSelfEdit) {
-        showNotification('Access Denied', state.language === 'ar' ? 'إدارة المستخدمين للأدمن فقط' : 'Admin only', 'error');
+        showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'إدارة المستخدمين للأدمن فقط' : 'Admin only', 'error');
         return;
       }
 
@@ -20343,7 +20480,7 @@ async function handleModalSubmit() {
       // SERVER MODE: users are managed by backend (Admin only)
       if (isServerModeEnabled()) {
         if (!isAdminEditor) {
-          showNotification('Access Denied', state.language === 'ar' ? 'هذه العملية للأدمن فقط' : 'Admin only', 'error');
+          showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'هذه العملية للأدمن فقط' : 'Admin only', 'error');
           return;
         }
       if (isEdit) {
@@ -20355,7 +20492,7 @@ async function handleModalSubmit() {
         const newPassword = document.getElementById('user-password').value;
           if (newPassword) {
             if (String(newPassword).length < 8) {
-              showNotification('Validation Error', 'Password must be at least 8 characters', 'error');
+              showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
               return;
             }
             payload.password = newPassword;
@@ -20378,11 +20515,11 @@ async function handleModalSubmit() {
             markCollectionDirty('users');
           }
           saveState();
-          showNotification('Updated', 'User updated successfully', 'success');
+          showNotification(isArSubU ? 'تم التحديث' : 'Updated', isArSubU ? 'تم تحديث المستخدم بنجاح' : 'User updated successfully', 'success');
         } else {
           const rawPassword = document.getElementById('user-password').value;
           if (!rawPassword || String(rawPassword).length < 8) {
-            showNotification('Validation Error', 'Password must be at least 8 characters', 'error');
+            showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
             return;
           }
 
@@ -20399,13 +20536,13 @@ async function handleModalSubmit() {
             state.users.unshift({ ...created, _lastModified: Date.now(), _deleted: false });
             markCollectionDirty('users');
             saveState();
-            showNotification('Success', 'User added successfully', 'success');
+            showNotification(isArSubU ? 'نجاح' : 'Success', isArSubU ? 'تمت إضافة المستخدم بنجاح' : 'User added successfully', 'success');
 
             if (!isAdminRole(userRole)) {
               setTimeout(() => showPermissionsModal(created.id), 500);
             }
           } else {
-            showNotification('Error', 'Failed to create user', 'error');
+            showNotification(isArSubU ? 'خطأ' : 'Error', isArSubU ? 'فشل إنشاء المستخدم' : 'Failed to create user', 'error');
           }
         }
         break;
@@ -20422,7 +20559,7 @@ async function handleModalSubmit() {
         const newPassword = document.getElementById('user-password').value;
         if (newPassword) {
           if (String(newPassword).length < 8) {
-            showNotification('Validation Error', 'Password must be at least 8 characters', 'error');
+            showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
             return;
           }
           const hashed = await Security.hashPassword(newPassword, null, { algo: 'pbkdf2-sha256' });
@@ -20448,15 +20585,15 @@ async function handleModalSubmit() {
         }
         
         updateRecord(state.users, state.modalData.id, updates);
-        showNotification('Updated', 'User updated successfully', 'success');
+        showNotification(isArSubU ? 'تم التحديث' : 'Updated', isArSubU ? 'تم تحديث المستخدم بنجاح' : 'User updated successfully', 'success');
       } else {
         if (!isAdminEditor) {
-          showNotification('Access Denied', state.language === 'ar' ? 'إنشاء المستخدمين للأدمن فقط' : 'Admin only', 'error');
+          showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'إنشاء المستخدمين للأدمن فقط' : 'Admin only', 'error');
           return;
         }
         const rawPassword = document.getElementById('user-password').value;
         if (!rawPassword || String(rawPassword).length < 8) {
-          showNotification('Validation Error', 'Password must be at least 8 characters', 'error');
+          showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
           return;
         }
         const hashed = await Security.hashPassword(rawPassword, null, { algo: 'pbkdf2-sha256' });
@@ -20472,7 +20609,7 @@ async function handleModalSubmit() {
           permissions: getDefaultPermissions(userRole)
         };
         addRecord(state.users, user);
-        showNotification('Success', 'User added successfully', 'success');
+        showNotification(isArSubU ? 'نجاح' : 'Success', isArSubU ? 'تمت إضافة المستخدم بنجاح' : 'User added successfully', 'success');
         
         // Show permission modal for non-admin users
         if (!isAdminRole(userRole)) {
@@ -20563,12 +20700,13 @@ async function handleModalSubmit() {
       break;
     }
     case 'receipt':
+      const isArSubR = state.language === 'ar';
       const receiptAmountEl = document.getElementById('receipt-amount');
       const receiptRateEl = document.getElementById('receipt-rate');
       const receiptFeeEl = document.getElementById('receipt-fee');
       const receiptDiscountEl = document.getElementById('receipt-discount');
       if (!receiptAmountEl || !receiptRateEl) {
-        showNotification('Error', 'Receipt form elements not found', 'error');
+        showNotification(isArSubR ? 'خطأ' : 'Error', isArSubR ? 'عناصر نموذج الوصل غير موجودة' : 'Receipt form elements not found', 'error');
         return;
       }
       const receiptAmountUSD = parseFloat(receiptAmountEl.value);
@@ -20586,7 +20724,7 @@ async function handleModalSubmit() {
       // Get customer ID from searchable dropdown hidden field
       const receiptCustomerId = document.getElementById('receipt-customer-id').value;
       if (!receiptCustomerId) {
-        showNotification('Error', 'Please select a customer', 'error');
+        showNotification(isArSubR ? 'خطأ' : 'Error', isArSubR ? 'الرجاء اختيار عميل' : 'Please select a customer', 'error');
         return;
       }
       
@@ -20595,7 +20733,7 @@ async function handleModalSubmit() {
       const oldSerialNumber = isEdit ? (state.modalData?.serialNumber || '').trim() : '';
       
       if (isEdit && oldSerialNumber && !newSerialNumber) {
-        showNotification('Validation Error', state.language === 'ar' ? 'لا يمكن حذف رقم الوصل الموجود' : 'Cannot remove existing receipt serial number. Please enter a serial number.', 'error');
+        showNotification(isArSubR ? 'خطأ في الإدخال' : 'Validation Error', isArSubR ? 'لا يمكن حذف رقم الوصل الموجود' : 'Cannot remove existing receipt serial number. Please enter a serial number.', 'error');
         return;
       }
       
@@ -20704,7 +20842,7 @@ function closeModal() {
 function deleteCustomer(id) {
   // Permission check
   if (!currentUserHasPermission('customers', 'delete')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف العملاء' : 'You do not have permission to delete customers', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف العملاء' : 'You do not have permission to delete customers', 'error');
     return;
   }
   const customer = state.customers.find(c => c.id === id);
@@ -20752,7 +20890,13 @@ function deleteCustomer(id) {
     });
     deleteRecord(state.customers, id);
     const deletedCount = linkedReceipts.length + linkedAds.length;
-    showNotification('Deleted', `Customer deleted${deletedCount > 0 ? ` along with ${deletedCount} linked record(s)` : ''}`, 'success');
+    showNotification(
+      isAr ? 'تم الحذف' : 'Deleted',
+      isAr
+        ? `تم حذف العميل${deletedCount > 0 ? ` مع ${deletedCount} سجل مرتبط` : ''}`
+        : `Customer deleted${deletedCount > 0 ? ` along with ${deletedCount} linked record(s)` : ''}`,
+      'success'
+    );
     render();
   }
 }
@@ -20760,12 +20904,12 @@ function deleteCustomer(id) {
 function deletePage(id) {
   // Permission check
   if (!currentUserHasPermission('pages', 'delete')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الصفحات' : 'You do not have permission to delete pages', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الصفحات' : 'You do not have permission to delete pages', 'error');
     return;
   }
-  if (confirm('Delete this page?')) {
+  if (confirm(state.language === 'ar' ? 'هل تريد حذف هذه الصفحة؟' : 'Delete this page?')) {
     deleteRecord(state.pages, id);
-    showNotification('Deleted', 'Page deleted', 'success');
+    showNotification(state.language === 'ar' ? 'تم الحذف' : 'Deleted', state.language === 'ar' ? 'تم حذف الصفحة' : 'Page deleted', 'success');
     render();
   }
 }
@@ -20774,7 +20918,7 @@ function deleteReceipt(id) {
   // Permission check
   const receipt = state.receipts.find(r => r.id === id);
   if (!canActOnRecord('receipts', 'delete', receipt?.createdBy)) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الوصولات' : 'You do not have permission to delete this receipt', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الوصولات' : 'You do not have permission to delete this receipt', 'error');
     return;
   }
   const serialNo = receipt?.serialNumber || receipt?.tempReceiptNo || receipt?.finalReceiptNo || id.slice(0, 8);
@@ -20856,7 +21000,7 @@ function deleteAd(id) {
   // Permission check
   const ad = state.ads.find(a => a.id === id);
   if (!canActOnRecord('ads', 'delete', ad?.creatorId)) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الإعلانات' : 'You do not have permission to delete this ad', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الإعلانات' : 'You do not have permission to delete this ad', 'error');
     return;
   }
   const customer = state.customers.find(c => c.id === ad?.customerId);
@@ -20867,7 +21011,7 @@ function deleteAd(id) {
     : `Are you sure you want to delete this ad?\n\nCustomer: ${customerName}\nAmount: $${amountUSD}\n\n⚠️ This action cannot be undone!`;
   if (confirm(warning)) {
     deleteRecord(state.ads, id);
-    showNotification('Deleted', 'Ad deleted', 'success');
+    showNotification(state.language === 'ar' ? 'تم الحذف' : 'Deleted', state.language === 'ar' ? 'تم حذف الإعلان' : 'Ad deleted', 'success');
     render();
   }
 }
@@ -23447,10 +23591,11 @@ async function saveClothesOrderFromModal() {
 function stopAd(id) {
   // Permission check
   if (!canActOnRecord('ads', 'stopAd', state.ads.find(a => a.id === id)?.creatorId)) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإيقاف الإعلانات' : 'You do not have permission to stop ads', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإيقاف الإعلانات' : 'You do not have permission to stop ads', 'error');
     return;
   }
-  
+
+  const isAr = state.language === 'ar';
   const ad = state.ads.find(a => a.id === id);
   if (!ad) return;
   
@@ -23473,7 +23618,7 @@ function stopAd(id) {
           <div class="flex items-center justify-between">
             <h2 class="text-xl font-bold text-slate-800 dark:text-white flex items-center">
               <i data-lucide="${isAlreadyStopped ? 'edit' : 'square'}" class="w-5 h-5 mr-2 text-orange-500"></i>
-              ${isAlreadyStopped ? 'Edit Stop Details' : 'Stop Ad'}
+              ${isAlreadyStopped ? (isAr ? 'تعديل تفاصيل الإيقاف' : 'Edit Stop Details') : (isAr ? 'إيقاف الإعلان' : 'Stop Ad')}
             </h2>
             <button onclick="document.getElementById('stop-ad-modal').remove()" class="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors">
               <i data-lucide="x" class="w-5 h-5"></i>
@@ -23484,26 +23629,26 @@ function stopAd(id) {
         <div class="p-6 space-y-4">
           <div>
             <p class="text-sm text-slate-600 dark:text-slate-400 mb-2">
-              <strong>Customer:</strong> ${Security.escapeHtml(customer?.name || 'Unknown')}<br>
-              <strong>Ad Amount:</strong> $${adAmountUSD.toFixed(2)}<br>
-              <strong>Currently Allocated:</strong> $${totalAllocated.toFixed(2)}
-              ${isAlreadyStopped && ad.stoppedAt ? `<br><strong>Stopped On:</strong> ${new Date(ad.stoppedAt).toLocaleString()}` : ''}
+              <strong>${isAr ? 'العميل' : 'Customer'}:</strong> ${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}<br>
+              <strong>${isAr ? 'مبلغ الإعلان' : 'Ad Amount'}:</strong> $${adAmountUSD.toFixed(2)}<br>
+              <strong>${isAr ? 'المخصص حالياً' : 'Currently Allocated'}:</strong> $${totalAllocated.toFixed(2)}
+              ${isAlreadyStopped && ad.stoppedAt ? `<br><strong>${isAr ? 'تاريخ الإيقاف' : 'Stopped On'}:</strong> ${new Date(ad.stoppedAt).toLocaleString()}` : ''}
             </p>
           </div>
           
           ${isAlreadyStopped ? `
             <div class="bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 rounded-xl p-3">
-              <div class="text-xs font-medium text-orange-800 dark:text-orange-200 mb-2">Previous Entry:</div>
+              <div class="text-xs font-medium text-orange-800 dark:text-orange-200 mb-2">${isAr ? 'الإدخال السابق:' : 'Previous Entry:'}</div>
               <div class="text-xs text-slate-600 dark:text-slate-400 space-y-1">
-                <div>Spent: <span class="font-bold text-orange-600">$${currentSpentUSD.toFixed(2)}</span></div>
-                <div>Remaining Returned: <span class="font-bold text-emerald-600">$${previousRemaining.toFixed(2)}</span></div>
+                <div>${isAr ? 'المصروف' : 'Spent'}: <span class="font-bold text-orange-600">$${currentSpentUSD.toFixed(2)}</span></div>
+                <div>${isAr ? 'المتبقي المُرجَع' : 'Remaining Returned'}: <span class="font-bold text-emerald-600">$${previousRemaining.toFixed(2)}</span></div>
               </div>
             </div>
           ` : ''}
           
           <div>
             <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-              Amount Spent (USD) *
+              ${isAr ? 'المبلغ المصروف (دولار) *' : 'Amount Spent (USD) *'}
             </label>
             <input 
               type="text" 
@@ -23515,20 +23660,20 @@ function stopAd(id) {
               class="w-full glass-input px-4 py-2 rounded-xl text-lg font-bold focus:ring-2 focus:ring-orange-500"
               placeholder="0.00"
             />
-            <p class="text-xs text-slate-500 mt-1">${isAlreadyStopped ? 'Edit the amount spent to update the remaining balance' : 'Enter how much was actually spent on this ad'}</p>
+            <p class="text-xs text-slate-500 mt-1">${isAlreadyStopped ? (isAr ? 'عدّل المبلغ المصروف لتحديث الرصيد المتبقي' : 'Edit the amount spent to update the remaining balance') : (isAr ? 'أدخل المبلغ الذي تم صرفه فعلياً على هذا الإعلان' : 'Enter how much was actually spent on this ad')}</p>
           </div>
           
           <div id="stop-ad-calculations" class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-4 space-y-2">
             <div class="flex justify-between text-sm">
-              <span class="text-slate-600 dark:text-slate-400">Ad Amount:</span>
+              <span class="text-slate-600 dark:text-slate-400">${isAr ? 'مبلغ الإعلان:' : 'Ad Amount:'}</span>
               <span class="font-bold">$${adAmountUSD.toFixed(2)}</span>
             </div>
             <div class="flex justify-between text-sm">
-              <span class="text-slate-600 dark:text-slate-400">Amount Spent:</span>
+              <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ المصروف:' : 'Amount Spent:'}</span>
               <span class="font-bold text-orange-600" id="stop-ad-spent-display">$${currentSpentUSD.toFixed(2)}</span>
             </div>
             <div class="border-t border-slate-200 dark:border-slate-700 pt-2 flex justify-between">
-              <span class="text-sm font-medium text-emerald-600">Remaining ${isAlreadyStopped ? '(will be updated)' : '(will be returned)'}:</span>
+              <span class="text-sm font-medium text-emerald-600">${isAr ? 'المتبقي' : 'Remaining'} ${isAlreadyStopped ? (isAr ? '(سيتم تحديثه)' : '(will be updated)') : (isAr ? '(سيتم إرجاعه)' : '(will be returned)')}:</span>
               <span class="text-sm font-bold text-emerald-600" id="stop-ad-remaining">$${(adAmountUSD - currentSpentUSD).toFixed(2)}</span>
             </div>
           </div>
@@ -23538,13 +23683,13 @@ function stopAd(id) {
               onclick="document.getElementById('stop-ad-modal').remove()" 
               class="flex-1 px-4 py-3 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl font-bold hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
             >
-              Cancel
+              ${isAr ? 'إلغاء' : 'Cancel'}
             </button>
             <button 
               onclick="confirmStopAd('${id}')" 
               class="flex-1 px-4 py-3 bg-orange-600 text-white rounded-xl font-bold hover:bg-orange-700 transition-colors"
             >
-              ${isAlreadyStopped ? 'Update' : 'Stop Ad'}
+              ${isAlreadyStopped ? (isAr ? 'تحديث' : 'Update') : (isAr ? 'إيقاف الإعلان' : 'Stop Ad')}
             </button>
           </div>
         </div>
@@ -23580,6 +23725,7 @@ function stopAd(id) {
 }
 
 function confirmStopAd(id) {
+  const isAr = state.language === 'ar';
   const ad = state.ads.find(a => a.id === id);
   if (!ad) return;
   
@@ -23590,7 +23736,7 @@ function confirmStopAd(id) {
   const adAmountUSD = ad.amountUSD || 0;
   
   if (spentUSD < 0 || spentUSD > adAmountUSD) {
-    showNotification('Error', 'Spent amount must be between 0 and ad amount', 'error');
+    showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'يجب أن يكون المبلغ المصروف بين صفر ومبلغ الإعلان' : 'Spent amount must be between 0 and ad amount', 'error');
     return;
   }
   
@@ -23693,8 +23839,10 @@ function confirmStopAd(id) {
       const remaining = receipt ? (getReceiptUsageStats(receipt).remainingUSD || 0) : 0;
       if (inc > remaining + 0.01) {
         showNotification(
-          'Validation',
-          `Cannot increase spent: receipt ${receipt ? (receipt.serialNumber || receipt.finalReceiptNo || rid) : rid} only has $${remaining.toFixed(2)} left (needs $${inc.toFixed(2)} more).`,
+          isAr ? 'تحقق' : 'Validation',
+          isAr
+            ? `لا يمكن زيادة المصروف: الوصل ${receipt ? (receipt.serialNumber || receipt.finalReceiptNo || rid) : rid} لم يتبقَّ فيه سوى $${remaining.toFixed(2)} (يحتاج $${inc.toFixed(2)} إضافية).`
+            : `Cannot increase spent: receipt ${receipt ? (receipt.serialNumber || receipt.finalReceiptNo || rid) : rid} only has $${remaining.toFixed(2)} left (needs $${inc.toFixed(2)} more).`,
           'error'
         );
         return;
@@ -23713,8 +23861,10 @@ function confirmStopAd(id) {
       const remaining = dueUsage ? (dueUsage.remainingDueUSD || 0) : 0;
       if (inc > remaining + 0.01) {
         showNotification(
-          'Validation',
-          `Cannot increase spent: the delivery receipt's due credit only has $${remaining.toFixed(2)} left (needs $${inc.toFixed(2)} more).`,
+          isAr ? 'تحقق' : 'Validation',
+          isAr
+            ? `لا يمكن زيادة المصروف: رصيد الاستحقاق لوصل التوصيل لم يتبقَّ فيه سوى $${remaining.toFixed(2)} (يحتاج $${inc.toFixed(2)} إضافية).`
+            : `Cannot increase spent: the delivery receipt's due credit only has $${remaining.toFixed(2)} left (needs $${inc.toFixed(2)} more).`,
           'error'
         );
         return;
@@ -23809,9 +23959,18 @@ function confirmStopAd(id) {
   document.getElementById('stop-ad-modal')?.remove();
   
   // Show notification
-  const actionText = isEditing ? 'updated' : 'stopped';
-  const balanceText = remainingDifference !== 0 || !isEditing ? `$${Math.abs(isEditing ? remainingDifference : newRemainingUSD).toFixed(2)} ${isEditing ? (remainingDifference > 0 ? 'returned' : 'used') : 'returned'} to receipt${ad.receiptAllocations && ad.receiptAllocations.length > 1 ? 's' : ''} and customer balance` : 'No balance changes';
-  showNotification(`Ad ${actionText.charAt(0).toUpperCase() + actionText.slice(1)}`, `Ad ${actionText} successfully. ${balanceText}.`, 'success');
+  if (isAr) {
+    const amountTxt = `$${Math.abs(isEditing ? remainingDifference : newRemainingUSD).toFixed(2)}`;
+    const verbAr = isEditing ? (remainingDifference > 0 ? 'أُرجع' : 'استُخدم') : 'أُرجع';
+    const balanceTextAr = remainingDifference !== 0 || !isEditing
+      ? `${verbAr} ${amountTxt} إلى ${ad.receiptAllocations && ad.receiptAllocations.length > 1 ? 'الوصولات' : 'الوصل'} ورصيد العميل`
+      : 'لا توجد تغييرات على الرصيد';
+    showNotification(isEditing ? 'تم تحديث الإعلان' : 'تم إيقاف الإعلان', `${isEditing ? 'تم تحديث الإعلان بنجاح' : 'تم إيقاف الإعلان بنجاح'}. ${balanceTextAr}.`, 'success');
+  } else {
+    const actionText = isEditing ? 'updated' : 'stopped';
+    const balanceText = remainingDifference !== 0 || !isEditing ? `$${Math.abs(isEditing ? remainingDifference : newRemainingUSD).toFixed(2)} ${isEditing ? (remainingDifference > 0 ? 'returned' : 'used') : 'returned'} to receipt${ad.receiptAllocations && ad.receiptAllocations.length > 1 ? 's' : ''} and customer balance` : 'No balance changes';
+    showNotification(`Ad ${actionText.charAt(0).toUpperCase() + actionText.slice(1)}`, `Ad ${actionText} successfully. ${balanceText}.`, 'success');
+  }
   
   // Refresh view
   render();
@@ -23820,7 +23979,7 @@ function confirmStopAd(id) {
 
 function deleteUser(id) {
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', state.language === 'ar' ? 'حذف المستخدمين للأدمن فقط' : 'Admin only', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'حذف المستخدمين للأدمن فقط' : 'Admin only', 'error');
     return;
   }
   if (confirm(state.language === 'ar' ? 'هل تريد حذف هذا المستخدم؟' : 'Delete this user?')) {
@@ -23851,7 +24010,7 @@ function updateExchangeRate(value) {
     userId: state.currentUser?.id || 'system'
   };
   addRecord(state.exchangeRateHistory, record);
-  showNotification('Updated', state.language === 'ar' ? 'تم تحديث سعر الصرف' : 'Exchange rate updated', 'success');
+  showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث سعر الصرف' : 'Exchange rate updated', 'success');
 }
 
 // Print ONE receipt card. window.print() alone printed the whole Receipts
@@ -23960,15 +24119,16 @@ function exportData() {
   createAutoBackup();
   
   addAuditLog('Export', 'system', 'Data exported successfully');
-  showNotification('Exported', 'Data exported successfully', 'success');
+  showNotification(state.language === 'ar' ? 'تم التصدير' : 'Exported', state.language === 'ar' ? 'تم تصدير البيانات بنجاح' : 'Data exported successfully', 'success');
 }
 
 function importData() {
+  const isAr = state.language === 'ar';
   // In server mode, import must go through the backend (Admin only) to keep the server as source of truth.
   async function importDataToServer(sanitizedImport) {
     const role = String(state.currentUser?.role || '').toLowerCase();
     if (role !== 'admin') {
-      showNotification('Not Allowed', 'Only Admins can import in server mode.', 'error');
+      showNotification(isAr ? 'غير مسموح' : 'Not Allowed', isAr ? 'الاستيراد في وضع الخادم للأدمن فقط.' : 'Only Admins can import in server mode.', 'error');
       return;
     }
 
@@ -23977,8 +24137,10 @@ function importData() {
     for (const k of requiredCollections) {
       if (!Array.isArray(sanitizedImport?.[k])) {
         showNotification(
-          'Invalid Backup',
-          `Backup file is missing "${k}" array. Please import a valid Albayan backup JSON (Export Backup).`,
+          isAr ? 'نسخة احتياطية غير صالحة' : 'Invalid Backup',
+          isAr
+            ? `ملف النسخة الاحتياطية ينقصه مصفوفة "${k}". الرجاء استيراد ملف نسخة احتياطية صالح من Albayan (تصدير نسخة احتياطية).`
+            : `Backup file is missing "${k}" array. Please import a valid Albayan backup JSON (Export Backup).`,
           'error'
         );
         return;
@@ -23994,15 +24156,15 @@ function importData() {
         const actual = DataIntegrity.calculateChecksum(copy);
         if (String(actual) !== String(meta.checksum)) {
           showNotification(
-            'Invalid Backup',
-            'Backup file integrity check failed (checksum mismatch). Please re-export a fresh backup and try again.',
+            isAr ? 'نسخة احتياطية غير صالحة' : 'Invalid Backup',
+            isAr ? 'فشل التحقق من سلامة ملف النسخة الاحتياطية (عدم تطابق checksum). الرجاء إعادة تصدير نسخة جديدة والمحاولة مرة أخرى.' : 'Backup file integrity check failed (checksum mismatch). Please re-export a fresh backup and try again.',
             'error'
           );
           return;
         }
       } catch {
         // If checksum verification itself fails, do not proceed.
-        showNotification('Invalid Backup', 'Backup file integrity check failed. Please re-export and try again.', 'error');
+        showNotification(isAr ? 'نسخة احتياطية غير صالحة' : 'Invalid Backup', isAr ? 'فشل التحقق من سلامة ملف النسخة الاحتياطية. الرجاء إعادة التصدير والمحاولة مرة أخرى.' : 'Backup file integrity check failed. Please re-export and try again.', 'error');
         return;
       }
     }
@@ -24018,12 +24180,14 @@ function importData() {
     };
 
     const ok1 = confirm(
-      `SERVER IMPORT (Admin)\n\nThis will overwrite/replace server data for ALL users.\n\nBackup contains (visible / deleted):\n- Customers: ${counts.customers.visible} / ${counts.customers.deleted}\n- Pages: ${counts.pages.visible} / ${counts.pages.deleted}\n- Ads: ${counts.ads.visible} / ${counts.ads.deleted}\n- Receipts: ${counts.receipts.visible} / ${counts.receipts.deleted}\n- Exchange Rates: ${counts.exchangeRateHistory.visible} / ${counts.exchangeRateHistory.deleted}\n\nContinue?`
+      isAr
+        ? `استيراد إلى الخادم (أدمن)\n\nسيتم استبدال/الكتابة فوق بيانات الخادم لجميع المستخدمين.\n\nتحتوي النسخة الاحتياطية على (ظاهر / محذوف):\n- العملاء: ${counts.customers.visible} / ${counts.customers.deleted}\n- الصفحات: ${counts.pages.visible} / ${counts.pages.deleted}\n- الإعلانات: ${counts.ads.visible} / ${counts.ads.deleted}\n- الوصولات: ${counts.receipts.visible} / ${counts.receipts.deleted}\n- أسعار الصرف: ${counts.exchangeRateHistory.visible} / ${counts.exchangeRateHistory.deleted}\n\nهل تريد المتابعة؟`
+        : `SERVER IMPORT (Admin)\n\nThis will overwrite/replace server data for ALL users.\n\nBackup contains (visible / deleted):\n- Customers: ${counts.customers.visible} / ${counts.customers.deleted}\n- Pages: ${counts.pages.visible} / ${counts.pages.deleted}\n- Ads: ${counts.ads.visible} / ${counts.ads.deleted}\n- Receipts: ${counts.receipts.visible} / ${counts.receipts.deleted}\n- Exchange Rates: ${counts.exchangeRateHistory.visible} / ${counts.exchangeRateHistory.deleted}\n\nContinue?`
     );
     if (!ok1) return;
-    const phrase = String(prompt('Type IMPORT to confirm (case-sensitive):') || '');
+    const phrase = String(prompt(isAr ? 'اكتب IMPORT للتأكيد (حساس لحالة الأحرف):' : 'Type IMPORT to confirm (case-sensitive):') || '');
     if (phrase !== 'IMPORT') {
-      showNotification('Cancelled', 'Import cancelled.', 'info');
+      showNotification(isAr ? 'تم الإلغاء' : 'Cancelled', isAr ? 'تم إلغاء الاستيراد.' : 'Import cancelled.', 'info');
       return;
     }
 
@@ -24091,7 +24255,7 @@ function importData() {
         return !idsAll.has(id) || deletedIds.has(id);
       });
       if (toDelete.length) {
-        showNotification('Import', `Deleting ${toDelete.length} old ${collection} records...`, 'info');
+        showNotification(isAr ? 'استيراد' : 'Import', isAr ? `جارٍ حذف ${toDelete.length} سجلاً قديماً من ${collection}...` : `Deleting ${toDelete.length} old ${collection} records...`, 'info');
         await mapLimit(toDelete, 5, async (rec) => {
           try {
             await apiDeleteEntity(collection, String(rec.id));
@@ -24105,13 +24269,13 @@ function importData() {
       // Restore ACTIVE backup records only (deleted records stay deleted on the server)
       let done = 0;
       const total = activeList.length;
-      if (total) showNotification('Import', `Importing ${total} ${collection} records...`, 'info');
+      if (total) showNotification(isAr ? 'استيراد' : 'Import', isAr ? `جارٍ استيراد ${total} سجلاً من ${collection}...` : `Importing ${total} ${collection} records...`, 'info');
       await mapLimit(activeList, 5, async (rec) => {
         const id = String(rec.id || '');
         await apiAdminRestoreEntity(collection, id, rec);
         done++;
         if (total >= 50 && done % 50 === 0) {
-          showNotification('Import', `${collection}: ${done}/${total}...`, 'info');
+          showNotification(isAr ? 'استيراد' : 'Import', `${collection}: ${done}/${total}...`, 'info');
         }
       });
 
@@ -24153,7 +24317,7 @@ function importData() {
     };
 
     try {
-      showNotification('Import', 'Starting server import...', 'info');
+      showNotification(isAr ? 'استيراد' : 'Import', isAr ? 'جارٍ بدء الاستيراد إلى الخادم...' : 'Starting server import...', 'info');
       // Replace core collections only (server is source of truth)
       await applyCollectionReplace('customers', sanitizedImport.customers);
       await applyCollectionReplace('pages', sanitizedImport.pages);
@@ -24170,11 +24334,11 @@ function importData() {
       // Reload fresh server state
       await serverLoadAllData();
       saveState();
-      showNotification('Imported', 'Server import completed successfully.', 'success');
+      showNotification(isAr ? 'تم الاستيراد' : 'Imported', isAr ? 'اكتمل الاستيراد إلى الخادم بنجاح.' : 'Server import completed successfully.', 'success');
       render();
     } catch (e) {
       console.error('Server import failed:', e);
-      showNotification('Import Failed', e?.message || 'Server import failed', 'error');
+      showNotification(isAr ? 'فشل الاستيراد' : 'Import Failed', e?.message || (isAr ? 'فشل الاستيراد إلى الخادم' : 'Server import failed'), 'error');
     }
   }
 
@@ -24186,7 +24350,7 @@ function importData() {
     
     // Validate file size (max 50MB)
     if (file.size > 50 * 1024 * 1024) {
-      showNotification('Error', 'File too large. Maximum size is 50MB.', 'error');
+      showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'الملف كبير جداً. الحد الأقصى للحجم 50 ميغابايت.' : 'File too large. Maximum size is 50MB.', 'error');
       return;
     }
     
@@ -24210,8 +24374,8 @@ function importData() {
           const actual = DataIntegrity.calculateChecksum(copy);
           if (String(actual) !== String(sanitizedImport._exportMetadata.checksum)) {
             showNotification(
-              'Invalid Backup',
-              'Backup file integrity check failed (checksum mismatch). Please re-export a fresh backup and try again.',
+              isAr ? 'نسخة احتياطية غير صالحة' : 'Invalid Backup',
+              isAr ? 'فشل التحقق من سلامة ملف النسخة الاحتياطية (عدم تطابق checksum). الرجاء إعادة تصدير نسخة جديدة والمحاولة مرة أخرى.' : 'Backup file integrity check failed (checksum mismatch). Please re-export a fresh backup and try again.',
               'error'
             );
             return;
@@ -24235,7 +24399,7 @@ function importData() {
         // Check record limits
         for (const arr of requiredArrays) {
           if (sanitizedImport[arr] && sanitizedImport[arr].length > STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION) {
-            showNotification('Warning', `${arr} data truncated to ${STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION} records`, 'warning');
+            showNotification(isAr ? 'تحذير' : 'Warning', isAr ? `تم اقتصاص بيانات ${arr} إلى ${STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION} سجل` : `${arr} data truncated to ${STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION} records`, 'warning');
             sanitizedImport[arr] = sanitizedImport[arr].slice(0, STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION);
           }
         }
@@ -24289,11 +24453,11 @@ function importData() {
         
         saveState();
         addAuditLog('Import', 'system', 'Data imported successfully');
-        showNotification('Imported', 'Data imported and validated successfully', 'success');
+        showNotification(isAr ? 'تم الاستيراد' : 'Imported', isAr ? 'تم استيراد البيانات والتحقق منها بنجاح' : 'Data imported and validated successfully', 'success');
         render();
       } catch (error) {
         addSecurityLog('import_error', error.message);
-        showNotification('Error', 'Failed to import data: ' + error.message, 'error');
+        showNotification(isAr ? 'خطأ' : 'Error', (isAr ? 'فشل استيراد البيانات: ' : 'Failed to import data: ') + error.message, 'error');
       }
     };
     reader.readAsText(file);
@@ -24303,7 +24467,7 @@ function importData() {
 
 async function clearAllData() {
   if (isServerModeEnabled()) {
-    showNotification('Not Allowed', 'Clear-all is disabled in server mode. Use backend admin tools.', 'error');
+    showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'مسح جميع البيانات معطّل في وضع الخادم. استخدم أدوات إدارة الخادم.' : 'Clear-all is disabled in server mode. Use backend admin tools.', 'error');
     return;
   }
   if (confirm(state.language === 'ar' ? 'مسح جميع البيانات؟ لا يمكن التراجع عن هذا الإجراء!' : 'Clear all data? This cannot be undone!')) {
@@ -24326,7 +24490,7 @@ async function clearAllData() {
     }
     
     saveState();
-    showNotification('Cleared', 'All data cleared', 'success');
+    showNotification(state.language === 'ar' ? 'تم المسح' : 'Cleared', state.language === 'ar' ? 'تم مسح جميع البيانات' : 'All data cleared', 'success');
     render();
   }
 }
@@ -24344,7 +24508,7 @@ async function init() {
   applyTheme();
   document.documentElement.setAttribute('dir', getDir());
   
-  setLoadingStatus('Initializing database...');
+  setLoadingStatus(state.language === 'ar' ? 'جارٍ تهيئة قاعدة البيانات...' : 'Initializing database...');
   
   // Initialize IndexedDB for persistent audit log storage
   await initIndexedDB();
@@ -24357,8 +24521,10 @@ async function init() {
       window.__albayanFileModeWarned = true;
       try {
         showNotification(
-          'Run via Server',
-          'You opened Albayan from a local file (file://). For full functionality, serve it over HTTP instead (e.g. the backend at http://127.0.0.1:8000/ or "npx serve").',
+          state.language === 'ar' ? 'شغّل عبر خادم' : 'Run via Server',
+          state.language === 'ar'
+            ? 'لقد فتحت البيان من ملف محلي (//:file). للحصول على كامل الوظائف، شغّله عبر HTTP بدلاً من ذلك (مثلاً الخادم على /http://127.0.0.1:8000 أو "npx serve").'
+            : 'You opened Albayan from a local file (file://). For full functionality, serve it over HTTP instead (e.g. the backend at http://127.0.0.1:8000/ or "npx serve").',
           'warning'
         );
       } catch (_) {}
@@ -24403,10 +24569,10 @@ async function init() {
   }
   // #endregion
   
-  setLoadingStatus('Loading preferences...');
+  setLoadingStatus(state.language === 'ar' ? 'جارٍ تحميل التفضيلات...' : 'Loading preferences...');
   const legacyCollections = loadState();
 
-  setLoadingStatus('Connecting to server...');
+  setLoadingStatus(state.language === 'ar' ? 'جارٍ الاتصال بالسيرفر...' : 'Connecting to server...');
   // Detect backend (multi-user internet mode)
   const serverOk = await apiHealthCheck();
   state.serverDetected = !!serverOk;
@@ -24424,7 +24590,7 @@ async function init() {
     if (state.cloudConfig) state.cloudConfig.enabled = false;
 
     // INSTANT LOAD: First load cached data from IndexedDB (shows data instantly)
-    setLoadingStatus('Loading cached data...');
+    setLoadingStatus(state.language === 'ar' ? 'جارٍ تحميل البيانات المخزنة...' : 'Loading cached data...');
     const cachedCollections = loadState(); // This already loads from localStorage
     if (db) {
       try {
@@ -24436,7 +24602,7 @@ async function init() {
     }
 
     // Restore login from backend cookie session
-    setLoadingStatus('Checking session...');
+    setLoadingStatus(state.language === 'ar' ? 'جارٍ التحقق من الجلسة...' : 'Checking session...');
     const me = await apiAuthMe().catch(() => null);
     if (me) {
       state.currentUser = me;
@@ -24448,7 +24614,7 @@ async function init() {
       }
       
       // PERFORMANCE: Show UI immediately with cached data, then update from server
-      setLoadingStatus('Ready!');
+      setLoadingStatus(state.language === 'ar' ? 'جاهز!' : 'Ready!');
       
       // Render UI immediately with cached data
       render();
@@ -24471,7 +24637,7 @@ async function init() {
         console.warn('Server data load failed:', e);
           // Only show warning if we have no cached data
           if (!state.ads?.length && !state.receipts?.length && !state.customers?.length) {
-            showNotification('Server Warning', 'Some data failed to load. Try Refresh.', 'warning');
+            showNotification(state.language === 'ar' ? 'تحذير السيرفر' : 'Server Warning', state.language === 'ar' ? 'فشل تحميل بعض البيانات. جرّب التحديث.' : 'Some data failed to load. Try Refresh.', 'warning');
           }
         });
       }
@@ -24484,7 +24650,7 @@ async function init() {
     }
   } else {
     // Offline/local mode (single-device)
-    setLoadingStatus('Loading local data...');
+    setLoadingStatus(state.language === 'ar' ? 'جارٍ تحميل البيانات المحلية...' : 'Loading local data...');
     // Load huge data collections (IndexedDB-first), migrate legacy localStorage if needed
     await loadCollectionsFromStorage(legacyCollections);
 
@@ -24565,7 +24731,7 @@ async function init() {
     }
   }
   
-  setLoadingStatus('Ready!');
+  setLoadingStatus(state.language === 'ar' ? 'جاهز!' : 'Ready!');
   
   // Check for cloud sync URL parameter (with security validation)
   const params = new URLSearchParams(window.location.search);
@@ -24604,7 +24770,7 @@ async function init() {
           endpoint: Security.sanitizeInput(config.endpoint, { maxLength: 500 }),
           apiKey: config.apiKey
         };
-        showNotification('System Connected', 'Synchronizing data...', 'success');
+        showNotification(state.language === 'ar' ? 'تم توصيل النظام' : 'System Connected', state.language === 'ar' ? 'جارٍ مزامنة البيانات...' : 'Synchronizing data...', 'success');
 
         // Remove param from URL
         const newUrl = window.location.protocol + "//" + window.location.host + window.location.pathname;

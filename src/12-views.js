@@ -170,9 +170,10 @@ function render() {
 }
 
 function renderFirstRunSetup() {
+  const isAr = state.language === 'ar';
   const modeNote = isServerModeEnabled()
-    ? 'Server mode detected. Please login with your server account.'
-    : 'First time setup (local testing). Create an Admin account to start.';
+    ? (isAr ? 'تم اكتشاف وضع السيرفر. يرجى تسجيل الدخول بحساب السيرفر الخاص بك.' : 'Server mode detected. Please login with your server account.')
+    : (isAr ? 'الإعداد لأول مرة (تجربة محلية). أنشئ حساب مدير للبدء.' : 'First time setup (local testing). Create an Admin account to start.');
 
   return `
     <div class="min-h-screen flex items-center justify-center p-4">
@@ -185,15 +186,15 @@ function renderFirstRunSetup() {
 
         <div class="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 mb-6">
           <div class="text-xs text-slate-600 dark:text-slate-300">
-            <div class="font-bold mb-1">Why this setup?</div>
-            <div>For local testing you need one admin user. For internet deployment, users must be created on the server.</div>
+            <div class="font-bold mb-1">${isAr ? 'لماذا هذا الإعداد؟' : 'Why this setup?'}</div>
+            <div>${isAr ? 'للتجربة المحلية تحتاج إلى مستخدم مدير واحد. أما للنشر على الإنترنت، فيجب إنشاء المستخدمين على السيرفر.' : 'For local testing you need one admin user. For internet deployment, users must be created on the server.'}</div>
           </div>
         </div>
 
         <form id="first-run-form" class="space-y-4">
           <div>
-            <label class="block text-sm font-medium mb-2">Admin Name</label>
-            <input type="text" id="first-name" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="Your name" maxlength="100" />
+            <label class="block text-sm font-medium mb-2">${isAr ? 'اسم المدير' : 'Admin Name'}</label>
+            <input type="text" id="first-name" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'اسمك' : 'Your name'}" maxlength="100" />
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('email')}</label>
@@ -201,14 +202,14 @@ function renderFirstRunSetup() {
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('password')}</label>
-            <input type="password" id="first-password" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="Min. 8 characters" minlength="8" />
+            <input type="password" id="first-password" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? '8 أحرف على الأقل' : 'Min. 8 characters'}" minlength="8" />
           </div>
           <div>
-            <label class="block text-sm font-medium mb-2">Confirm Password</label>
-            <input type="password" id="first-password-confirm" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="Repeat password" minlength="8" />
+            <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
+            <input type="password" id="first-password-confirm" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'أعد كتابة كلمة المرور' : 'Repeat password'}" minlength="8" />
           </div>
           <button type="submit" class="w-full btn-shine alb-btn-primary text-white font-bold py-3 rounded-xl transition-all">
-            Create Admin (Local)
+            ${isAr ? 'إنشاء مدير (محلي)' : 'Create Admin (Local)'}
           </button>
         </form>
 
@@ -226,7 +227,7 @@ function attachFirstRunHandlers() {
     e.preventDefault();
     try {
       if (isServerModeEnabled()) {
-        showNotification('Server Mode', 'Server mode is enabled. Please login with your server account.', 'error');
+        showNotification(state.language === 'ar' ? 'وضع السيرفر' : 'Server Mode', state.language === 'ar' ? 'وضع السيرفر مفعّل. يرجى تسجيل الدخول بحساب السيرفر الخاص بك.' : 'Server mode is enabled. Please login with your server account.', 'error');
         render();
         return;
       }
@@ -236,20 +237,21 @@ function attachFirstRunHandlers() {
       const password = document.getElementById('first-password').value;
       const confirm = document.getElementById('first-password-confirm').value;
 
+      const _vErr = state.language === 'ar' ? 'خطأ في التحقق' : 'Validation Error';
       if (!name) {
-        showNotification('Validation Error', 'Name is required', 'error');
+        showNotification(_vErr, state.language === 'ar' ? 'الاسم مطلوب' : 'Name is required', 'error');
         return;
       }
       if (!Security.isValidEmail(email)) {
-        showNotification('Validation Error', 'Please enter a valid email', 'error');
+        showNotification(_vErr, state.language === 'ar' ? 'يرجى إدخال بريد إلكتروني صالح' : 'Please enter a valid email', 'error');
         return;
       }
       if (!password || String(password).length < 8) {
-        showNotification('Validation Error', 'Password must be at least 8 characters', 'error');
+        showNotification(_vErr, state.language === 'ar' ? 'يجب أن تكون كلمة المرور 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
         return;
       }
       if (password !== confirm) {
-        showNotification('Validation Error', 'Passwords do not match', 'error');
+        showNotification(_vErr, state.language === 'ar' ? 'كلمتا المرور غير متطابقتين' : 'Passwords do not match', 'error');
         return;
       }
 
@@ -279,7 +281,7 @@ function attachFirstRunHandlers() {
       state.currentView = getPostLoginLandingViewForUser(admin);
       saveState();
 
-      showNotification('Success', 'Admin account created (local)', 'success');
+      showNotification(state.language === 'ar' ? 'نجاح' : 'Success', state.language === 'ar' ? 'تم إنشاء حساب المدير (محلي)' : 'Admin account created (local)', 'success');
       render();
 
       // Generate a Recovery Key on first run (recommended for safe password resets in local mode)
@@ -290,7 +292,7 @@ function attachFirstRunHandlers() {
       }
     } catch (err) {
       console.error('First run setup error:', err);
-      showNotification('Error', 'Failed to create admin', 'error');
+      showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'فشل إنشاء حساب المدير' : 'Failed to create admin', 'error');
     }
   });
 }
@@ -526,8 +528,8 @@ function renderSidebar() {
         <div class="flex-1 flex items-center justify-center p-6">
           <div class="text-center">
             <i data-lucide="lock" class="w-12 h-12 mx-auto text-slate-300 mb-3"></i>
-            <p class="text-sm text-slate-500">No access granted</p>
-            <p class="text-xs text-slate-400 mt-1">Contact admin for permissions</p>
+            <p class="text-sm text-slate-500">${state.language === 'ar' ? 'لا توجد صلاحية' : 'No access granted'}</p>
+            <p class="text-xs text-slate-400 mt-1">${state.language === 'ar' ? 'تواصل مع المدير للحصول على الصلاحيات' : 'Contact admin for permissions'}</p>
           </div>
         </div>
         <div class="p-4 border-t border-white/10">
@@ -577,7 +579,7 @@ function renderSidebar() {
             <div class="font-bold text-sm text-slate-800 dark:text-white truncate">${Security.escapeHtml(state.currentUser?.name || 'User')}</div>
             <div class="text-xs text-slate-500 truncate">${Security.escapeHtml(state.currentUser?.role || 'Employee')}</div>
           </div>
-          <button onclick="editUser('${state.currentUser?.id}')" class="p-2 rounded-lg hover:bg-white/50 dark:hover:bg-slate-700/50 transition-colors" title="Edit Your Profile">
+          <button onclick="editUser('${state.currentUser?.id}')" class="p-2 rounded-lg hover:bg-white/50 dark:hover:bg-slate-700/50 transition-colors" title="${state.language === 'ar' ? 'تعديل ملفك الشخصي' : 'Edit Your Profile'}">
             <i data-lucide="settings" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
           </button>
         </div>
@@ -620,7 +622,7 @@ function renderView() {
     case 'settings': return renderSettingsView();
     case 'delivery-dashboard': return renderDeliveryDashboard();
     case 'no-access': return renderNoAccessView();
-    default: return `<div class="text-center py-12"><h2 class="text-2xl font-bold mb-4">${t('welcome')}</h2><p class="text-slate-500">Select a view from the sidebar</p></div>`;
+    default: return `<div class="text-center py-12"><h2 class="text-2xl font-bold mb-4">${t('welcome')}</h2><p class="text-slate-500">${state.language === 'ar' ? 'اختر صفحة من القائمة الجانبية' : 'Select a view from the sidebar'}</p></div>`;
   }
 }
 
@@ -848,7 +850,7 @@ function renderServicePlaceholder() {
   const isRTL = state.language === 'ar';
   
   if (!service) {
-    return `<div class="text-center py-12"><p class="text-slate-500">Service not found</p></div>`;
+    return `<div class="text-center py-12"><p class="text-slate-500">${isRTL ? 'الخدمة غير موجودة' : 'Service not found'}</p></div>`;
   }
   
   const serviceName = isRTL ? service.nameAr : service.name;
@@ -908,7 +910,7 @@ function walletTransferFromUi() {
 
     const toUser = findUserByEmailOrId(toValue);
     if (!toUser?.id) {
-      showNotification('Validation', state.language === 'ar' ? 'المستلم غير موجود' : 'Recipient not found', 'error');
+      showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'المستلم غير موجود' : 'Recipient not found', 'error');
       return;
     }
 
@@ -917,7 +919,7 @@ function walletTransferFromUi() {
     if (!Number.isFinite(amountMinor) || amountMinor <= 0) throw new Error('Invalid amount');
     const fingerprint = `${state.currentUser.id}|${toUser.id}|${currency}|${amountMinor}|${String(memoValue || '').trim()}`;
     if (WalletUiGuard.hit(fingerprint)) {
-      showNotification('Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
+      showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
       return;
     }
     WALLET.transfer(state.currentUser.id, toUser.id, 0, { memo: memoValue, currency, amountMinor, idempotencyKey: `p2p:${Security.generateSecureId('idem')}` });
@@ -929,10 +931,10 @@ function walletTransferFromUi() {
     if (amtEl) amtEl.value = '';
     if (memoEl) memoEl.value = '';
 
-    showNotification('Success', state.language === 'ar' ? 'تم التحويل بنجاح' : 'Transfer completed', 'success');
+    showNotification(state.language === 'ar' ? 'نجاح' : 'Success', state.language === 'ar' ? 'تم التحويل بنجاح' : 'Transfer completed', 'success');
     render();
   } catch (e) {
-    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e?.message || 'Transfer failed', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e?.message || (state.language === 'ar' ? 'فشل التحويل' : 'Transfer failed'), 'error');
   }
 }
 
@@ -940,7 +942,7 @@ function walletTopUpFromUi() {
   try {
     if (!state.currentUser?.id) return;
     if (!isAdminRole(state.currentUser.role)) {
-      showNotification('Not Allowed', state.language === 'ar' ? 'للأدمن فقط' : 'Admin only', 'error');
+      showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'للأدمن فقط' : 'Admin only', 'error');
       return;
     }
     const toValue = document.getElementById('wallet-topup-to')?.value || '';
@@ -950,7 +952,7 @@ function walletTopUpFromUi() {
 
     const toUser = findUserByEmailOrId(toValue);
     if (!toUser?.id) {
-      showNotification('Validation', state.language === 'ar' ? 'المستلم غير موجود' : 'Recipient not found', 'error');
+      showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'المستلم غير موجود' : 'Recipient not found', 'error');
       return;
     }
 
@@ -959,7 +961,7 @@ function walletTopUpFromUi() {
     if (!Number.isFinite(amountMinor) || amountMinor <= 0) throw new Error('Invalid amount');
     const fingerprint = `${toUser.id}|${currency}|${amountMinor}|${String(memoValue || '').trim()}`;
     if (WalletUiGuard.hit(fingerprint)) {
-      showNotification('Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
+      showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
       return;
     }
     WALLET.credit(toUser.id, 0, { memo: memoValue || 'Top-up', currency, amountMinor, idempotencyKey: `topup:${Security.generateSecureId('idem')}` });
@@ -971,10 +973,10 @@ function walletTopUpFromUi() {
     if (amtEl) amtEl.value = '';
     if (memoEl) memoEl.value = '';
 
-    showNotification('Success', state.language === 'ar' ? 'تم الشحن' : 'Top-up completed', 'success');
+    showNotification(state.language === 'ar' ? 'نجاح' : 'Success', state.language === 'ar' ? 'تم الشحن' : 'Top-up completed', 'success');
     render();
   } catch (e) {
-    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e?.message || 'Top-up failed', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e?.message || (state.language === 'ar' ? 'فشل الشحن' : 'Top-up failed'), 'error');
   }
 }
 
@@ -987,10 +989,10 @@ function cancelSubscriptionFromUi(serviceId) {
     const ok = confirm(isRTL ? 'هل تريد إلغاء الاشتراك؟' : 'Cancel this subscription?');
     if (!ok) return;
     SUBSCRIPTIONS.cancel(state.currentUser.id, sid);
-    showNotification('Success', isRTL ? 'تم إلغاء الاشتراك' : 'Subscription canceled', 'success');
+    showNotification(isRTL ? 'نجاح' : 'Success', isRTL ? 'تم إلغاء الاشتراك' : 'Subscription canceled', 'success');
     render();
   } catch (e) {
-    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e?.message || 'Failed to cancel subscription', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e?.message || (state.language === 'ar' ? 'فشل إلغاء الاشتراك' : 'Failed to cancel subscription'), 'error');
   }
 }
 
@@ -1141,7 +1143,7 @@ function renderWalletView() {
           </div>
         ` : `
           <div class="glass-panel p-6 rounded-2xl">
-            <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-4">${t('topUp')} (Admin)</h3>
+            <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-4">${t('topUp')} (${isRTL ? 'أدمن' : 'Admin'})</h3>
             <div class="space-y-4">
               <div>
                 <label class="block text-sm font-medium mb-2">${t('recipient')}</label>
@@ -1306,7 +1308,7 @@ function renderAnalyticsView() {
   const topCustomers = Object.entries(spendByCustomer)
     .map(([customerId, spend]) => ({
       customerId,
-      name: state.customers.find(c => c.id === customerId)?.name || 'Unknown',
+      name: state.customers.find(c => c.id === customerId)?.name || (isAr ? 'غير معروف' : 'Unknown'),
       spend
     }))
     .sort((a, b) => b.spend - a.spend)
@@ -1321,7 +1323,7 @@ function renderAnalyticsView() {
   const topPages = Object.entries(adsByPage)
     .map(([pageId, count]) => ({
       pageId,
-      name: state.pages.find(p => p.id === pageId)?.name || 'Unknown',
+      name: state.pages.find(p => p.id === pageId)?.name || (isAr ? 'غير معروف' : 'Unknown'),
       count
     }))
     .sort((a, b) => b.count - a.count)
@@ -1525,7 +1527,7 @@ function renderAnalyticsView() {
                 <div class="flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/50">
                   <div>
                     <p class="font-medium">${Security.escapeHtml(item.type || '')}: ${Security.escapeHtml(item.name || '')}</p>
-                    <p class="text-[11px] text-slate-500">$${item.value.toFixed(2)} • ${Security.escapeHtml(item.status || '')}</p>
+                    <p class="text-[11px] text-slate-500">$${item.value.toFixed(2)} • ${Security.escapeHtml(trStatus(item.status || ''))}</p>
                   </div>
                   <span class="text-[10px] text-slate-400">${item.at ? new Date(item.at).toLocaleDateString() : ''}</span>
                 </div>
@@ -1626,18 +1628,19 @@ function updateCustomersViewFiltered() {
 }
 
 function renderCustomersGrid(customers) {
+  const isAr = state.language === 'ar';
   if (!Array.isArray(customers) || customers.length === 0) {
-    return '<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="users" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">No customers found</p></div>';
+    return `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="users" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${isAr ? 'لا يوجد عملاء' : 'No customers found'}</p></div>`;
   }
 
   const totalCustomers = customers.length;
   const statsIndex = buildCustomerStatsIndex();
   return customers.map((c, idx) => {
           const stats = getCustomerStats(c.id, statsIndex);
-          const lastAdText = stats.lastAdDate 
+          const lastAdText = stats.lastAdDate
             ? new Date(stats.lastAdDate).toLocaleDateString()
-            : 'Never';
-          
+            : (isAr ? 'أبداً' : 'Never');
+
     const phones = Array.isArray(c.phones) ? c.phones : [];
     const profileLinks = Array.isArray(c.profileLinks) ? c.profileLinks : [];
           // Display number: total - index (so first item = highest number, matching newest-first sort)
@@ -1653,14 +1656,14 @@ function renderCustomersGrid(customers) {
                   </div>
                   <div class="flex items-center space-x-2 mt-1">
                     <span class="text-xs px-2 py-1 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 rounded-full">${Security.escapeHtml(c.platform || '')}</span>
-                    ${stats.linkedPagesCount > 0 ? `<span class="text-xs px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-full">${stats.linkedPagesCount} pages</span>` : ''}
+                    ${stats.linkedPagesCount > 0 ? `<span class="text-xs px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-full">${stats.linkedPagesCount} ${isAr ? 'صفحة' : 'pages'}</span>` : ''}
                   </div>
                 </div>
                 <div class="flex space-x-1">
-                  <button onclick="editCustomer('${c.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="Edit">
+                  <button onclick="editCustomer('${c.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${t('edit')}">
                     <i data-lucide="edit" class="w-4 h-4"></i>
                   </button>
-                  <button onclick="deleteCustomer('${c.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="Delete">
+                  <button onclick="deleteCustomer('${c.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="${t('delete')}">
                     <i data-lucide="trash-2" class="w-4 h-4"></i>
                   </button>
                 </div>
@@ -1670,7 +1673,7 @@ function renderCustomersGrid(customers) {
                 <div class="flex items-start space-x-2">
                   <i data-lucide="phone" class="w-4 h-4 text-slate-400 mt-0.5"></i>
                   <div class="flex-1">
-              ${phones.length > 0 ? phones.map(phone => `<div class="text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone || '')}</div>`).join('') : '<span class="text-slate-400">No phone</span>'}
+              ${phones.length > 0 ? phones.map(phone => `<div class="text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone || '')}</div>`).join('') : `<span class="text-slate-400">${isAr ? 'لا يوجد هاتف' : 'No phone'}</span>`}
                   </div>
                 </div>
 
@@ -1686,43 +1689,43 @@ function renderCustomersGrid(customers) {
                 <!-- Last Ad -->
                 <div class="flex items-center space-x-2 text-xs">
                   <i data-lucide="clock" class="w-3 h-3 text-slate-400"></i>
-                  <span class="text-slate-600 dark:text-slate-400">Last ad: ${lastAdText}</span>
+                  <span class="text-slate-600 dark:text-slate-400">${isAr ? 'آخر إعلان' : 'Last ad'}: ${lastAdText}</span>
                 </div>
 
                 <!-- Financial Summary -->
                 <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
                   <!-- LYD Section - TOTAL PAID -->
                   <div class="mb-2">
-                    <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">Total Paid (LYD)</div>
+                    <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">${isAr ? 'إجمالي المدفوع (LYD)' : 'Total Paid (LYD)'}</div>
                     <div class="grid grid-cols-3 gap-1 text-xs">
                       <div class="text-center p-1.5 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
-                        <div class="text-[10px] text-slate-400">Spent</div>
+                        <div class="text-[10px] text-slate-400">${isAr ? 'المصروف' : 'Spent'}</div>
                         <div class="font-bold text-slate-700 dark:text-slate-300">${stats.totalSpentLYD.toFixed(0)}</div>
                       </div>
                       <div class="text-center p-1.5 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg">
-                        <div class="text-[10px] text-emerald-600">Paid</div>
+                        <div class="text-[10px] text-emerald-600">${isAr ? 'المدفوع' : 'Paid'}</div>
                         <div class="font-bold text-emerald-600">${stats.totalPaidLYD.toFixed(0)}</div>
                       </div>
                       <div class="text-center p-1.5 ${stats.balanceLYD >= 0 ? 'bg-blue-50 dark:bg-blue-900/20' : 'bg-rose-50 dark:bg-rose-900/20'} rounded-lg">
-                        <div class="text-[10px] ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">Balance</div>
+                        <div class="text-[10px] ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${isAr ? 'الرصيد' : 'Balance'}</div>
                         <div class="font-bold ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceLYD >= 0 ? '+' : ''}${stats.balanceLYD.toFixed(0)}</div>
                       </div>
                     </div>
                   </div>
                   <!-- USD Section - TOTAL ADS CREDIT -->
                   <div>
-                    <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">Ads Credit (USD)</div>
+                    <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">${isAr ? 'رصيد الإعلانات (USD)' : 'Ads Credit (USD)'}</div>
                     <div class="grid grid-cols-3 gap-1 text-xs">
                       <div class="text-center p-1.5 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
-                        <div class="text-[10px] text-slate-400">Spent</div>
+                        <div class="text-[10px] text-slate-400">${isAr ? 'المصروف' : 'Spent'}</div>
                         <div class="font-bold text-slate-700 dark:text-slate-300">$${stats.totalSpentUSD.toFixed(2)}</div>
                       </div>
                       <div class="text-center p-1.5 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg">
-                        <div class="text-[10px] text-emerald-600">Paid</div>
+                        <div class="text-[10px] text-emerald-600">${isAr ? 'المدفوع' : 'Paid'}</div>
                         <div class="font-bold text-emerald-600">$${stats.totalPaidUSD.toFixed(2)}</div>
                       </div>
                       <div class="text-center p-1.5 ${stats.balanceUSD >= 0 ? 'bg-blue-50 dark:bg-blue-900/20' : 'bg-rose-50 dark:bg-rose-900/20'} rounded-lg">
-                        <div class="text-[10px] ${stats.balanceUSD >= 0 ? 'text-blue-600' : 'text-rose-600'}">Balance</div>
+                        <div class="text-[10px] ${stats.balanceUSD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${isAr ? 'الرصيد' : 'Balance'}</div>
                         <div class="font-bold ${stats.balanceUSD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceUSD >= 0 ? '+' : ''}$${stats.balanceUSD.toFixed(2)}</div>
                       </div>
                     </div>
@@ -1749,6 +1752,7 @@ function loadMoreCustomers() {
 }
 
 function renderCustomersView() {
+  const isAr = state.language === 'ar';
   const allFilteredCustomers = getFilteredCustomers();
   const allCustomers = getVisibleRecords(state.customers);
 
@@ -1781,7 +1785,7 @@ function renderCustomersView() {
       <div class="flex justify-between items-center">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('customers')}</h1>
-          <p id="customers-count" class="text-sm text-slate-500 mt-1">${allFilteredCustomers.length} of ${allCustomers.length} customers</p>
+          <p id="customers-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allFilteredCustomers.length} من ${allCustomers.length} عميل` : `${allFilteredCustomers.length} of ${allCustomers.length} customers`}</p>
         </div>
         <button onclick="showCustomerModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
           <i data-lucide="user-plus" class="w-4 h-4"></i>
@@ -1791,29 +1795,29 @@ function renderCustomersView() {
 
       <!-- Stats Cards -->
       <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-        ${renderStatCard('Total Customers', allCustomers.length, 'users', 'from-indigo-500 to-purple-600')}
-        ${renderStatCard('Lifetime Revenue (Receipts)', totalRevenue.toFixed(0) + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}
-        ${renderStatCard('Outstanding Debts', totalDebts.toFixed(0) + ' LYD', 'alert-circle', 'from-rose-500 to-pink-600')}
+        ${renderStatCard(isAr ? 'إجمالي العملاء' : 'Total Customers', allCustomers.length, 'users', 'from-indigo-500 to-purple-600')}
+        ${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', totalRevenue.toFixed(0) + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}
+        ${renderStatCard(isAr ? 'الديون المستحقة' : 'Outstanding Debts', totalDebts.toFixed(0) + ' LYD', 'alert-circle', 'from-rose-500 to-pink-600')}
       </div>
 
       <!-- Search and Filters -->
       <div class="glass-panel rounded-xl p-4">
         <div class="flex flex-col md:flex-row gap-4">
-          <input type="text" id="customer-search" placeholder="Search customers..." value="${Security.escapeHtml(state.customerSearch || '')}" class="flex-1 glass-input px-4 py-2 rounded-lg" oninput="onCustomerSearchInput(this.value)" autocomplete="off" />
+          <input type="text" id="customer-search" placeholder="${isAr ? 'بحث عن عملاء...' : 'Search customers...'}" value="${Security.escapeHtml(state.customerSearch || '')}" class="flex-1 glass-input px-4 py-2 rounded-lg" oninput="onCustomerSearchInput(this.value)" autocomplete="off" />
           
           <div class="flex gap-2">
             <!-- Sort Dropdown -->
             <div class="relative">
               <select id="customer-sort" onchange="state.customerSort = this.value; render();" class="glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
-                <option value="newest" ${state.customerSort === 'newest' ? 'selected' : ''}>Newest First</option>
-                <option value="oldest" ${state.customerSort === 'oldest' ? 'selected' : ''}>Oldest First</option>
-                <option value="lastActive" ${state.customerSort === 'lastActive' ? 'selected' : ''}>Last Active (Recently)</option>
-                <option value="highestPaid" ${state.customerSort === 'highestPaid' ? 'selected' : ''}>Highest Paid (Revenue)</option>
-                <option value="lowestPaid" ${state.customerSort === 'lowestPaid' ? 'selected' : ''}>Lowest Paid</option>
-                <option value="mostSpend" ${state.customerSort === 'mostSpend' ? 'selected' : ''}>Most Spend (Ads)</option>
-                <option value="leastSpend" ${state.customerSort === 'leastSpend' ? 'selected' : ''}>Least Spend</option>
-                <option value="biggestCredit" ${state.customerSort === 'biggestCredit' ? 'selected' : ''}>Biggest Credit Balance</option>
-                <option value="highestDebt" ${state.customerSort === 'highestDebt' ? 'selected' : ''}>Highest Debt</option>
+                <option value="newest" ${state.customerSort === 'newest' ? 'selected' : ''}>${isAr ? 'الأحدث أولاً' : 'Newest First'}</option>
+                <option value="oldest" ${state.customerSort === 'oldest' ? 'selected' : ''}>${isAr ? 'الأقدم أولاً' : 'Oldest First'}</option>
+                <option value="lastActive" ${state.customerSort === 'lastActive' ? 'selected' : ''}>${isAr ? 'آخر نشاط (حديثاً)' : 'Last Active (Recently)'}</option>
+                <option value="highestPaid" ${state.customerSort === 'highestPaid' ? 'selected' : ''}>${isAr ? 'الأعلى دفعاً (إيراد)' : 'Highest Paid (Revenue)'}</option>
+                <option value="lowestPaid" ${state.customerSort === 'lowestPaid' ? 'selected' : ''}>${isAr ? 'الأقل دفعاً' : 'Lowest Paid'}</option>
+                <option value="mostSpend" ${state.customerSort === 'mostSpend' ? 'selected' : ''}>${isAr ? 'الأكثر إنفاقاً (إعلانات)' : 'Most Spend (Ads)'}</option>
+                <option value="leastSpend" ${state.customerSort === 'leastSpend' ? 'selected' : ''}>${isAr ? 'الأقل إنفاقاً' : 'Least Spend'}</option>
+                <option value="biggestCredit" ${state.customerSort === 'biggestCredit' ? 'selected' : ''}>${isAr ? 'أكبر رصيد دائن' : 'Biggest Credit Balance'}</option>
+                <option value="highestDebt" ${state.customerSort === 'highestDebt' ? 'selected' : ''}>${isAr ? 'أعلى دين' : 'Highest Debt'}</option>
               </select>
               <i data-lucide="arrow-up-down" class="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400"></i>
             </div>
@@ -1821,9 +1825,9 @@ function renderCustomersView() {
             <!-- Financial Filter -->
             <div class="relative">
               <select id="customer-financial-filter" onchange="state.customerFinancialFilter = this.value; render();" class="glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
-                <option value="all" ${state.customerFinancialFilter === 'all' ? 'selected' : ''}>All Financials</option>
-                <option value="hasCredit" ${state.customerFinancialFilter === 'hasCredit' ? 'selected' : ''}>Has Credit</option>
-                <option value="hasDebt" ${state.customerFinancialFilter === 'hasDebt' ? 'selected' : ''}>Has Debt</option>
+                <option value="all" ${state.customerFinancialFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات المالية' : 'All Financials'}</option>
+                <option value="hasCredit" ${state.customerFinancialFilter === 'hasCredit' ? 'selected' : ''}>${isAr ? 'لديه رصيد دائن' : 'Has Credit'}</option>
+                <option value="hasDebt" ${state.customerFinancialFilter === 'hasDebt' ? 'selected' : ''}>${isAr ? 'عليه دين' : 'Has Debt'}</option>
               </select>
               <i data-lucide="filter" class="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400"></i>
             </div>
@@ -1861,6 +1865,7 @@ function loadMoreReceipts() {
 }
 
 function renderReceiptsView() {
+  const isArV = state.language === 'ar';
   const allReceipts = getVisibleRecords(state.receipts);
   // PERFORMANCE: one Map lookup per receipt instead of scanning the whole
   // customers array for every receipt (same strict-equality semantics).
@@ -1951,11 +1956,11 @@ function renderReceiptsView() {
       <div class="flex justify-between items-center">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('receipts')}</h1>
-          <p id="receipts-count" class="text-sm text-slate-500 mt-1">${filteredReceipts.length}${hasActiveFilters ? ` of ${allReceipts.length}` : ''} receipts</p>
+          <p id="receipts-count" class="text-sm text-slate-500 mt-1">${filteredReceipts.length}${hasActiveFilters ? (isArV ? ` من ${allReceipts.length}` : ` of ${allReceipts.length}`) : ''} ${isArV ? 'وصل' : 'receipts'}</p>
         </div>
         <button onclick="showReceiptModal()" class="btn-shine bg-purple-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
           <i data-lucide="receipt" class="w-4 h-4"></i>
-          <span>New Receipt</span>
+          <span>${isArV ? 'وصل جديد' : 'New Receipt'}</span>
         </button>
       </div>
 
@@ -1968,7 +1973,7 @@ function renderReceiptsView() {
             <input 
               type="text" 
               id="receipt-search-input"
-              placeholder="Search by customer, serial #, or phone..." 
+              placeholder="${isArV ? 'بحث بالعميل أو الرقم التسلسلي أو الهاتف...' : 'Search by customer, serial #, or phone...'}"
               value="${Security.escapeHtml(state.receiptSearch || '')}"
               oninput="updateReceiptSearch(this.value)"
               class="w-full pl-12 pr-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all placeholder:text-slate-400"
@@ -1980,49 +1985,49 @@ function renderReceiptsView() {
           <div class="flex flex-wrap gap-2">
             <!-- Status Filter -->
             <select onchange="updateReceiptFilter('status', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptStatusFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
-              <option value="all" ${state.receiptStatusFilter === 'all' ? 'selected' : ''}>All Status</option>
-              <option value="paid" ${state.receiptStatusFilter === 'paid' ? 'selected' : ''}>✓ Paid</option>
-              <option value="pending" ${state.receiptStatusFilter === 'pending' ? 'selected' : ''}>⏳ Pending</option>
-              <option value="cancelled" ${state.receiptStatusFilter === 'cancelled' ? 'selected' : ''}>✕ Cancelled</option>
+              <option value="all" ${state.receiptStatusFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل الحالات' : 'All Status'}</option>
+              <option value="paid" ${state.receiptStatusFilter === 'paid' ? 'selected' : ''}>✓ ${isArV ? 'مدفوع' : 'Paid'}</option>
+              <option value="pending" ${state.receiptStatusFilter === 'pending' ? 'selected' : ''}>⏳ ${isArV ? 'قيد الانتظار' : 'Pending'}</option>
+              <option value="cancelled" ${state.receiptStatusFilter === 'cancelled' ? 'selected' : ''}>✕ ${isArV ? 'ملغي' : 'Cancelled'}</option>
             </select>
             
             <!-- Payment Method Filter -->
             <select onchange="updateReceiptFilter('payment', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptPaymentFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
-              <option value="all" ${state.receiptPaymentFilter === 'all' ? 'selected' : ''}>All Payments</option>
-              <option value="cash" ${state.receiptPaymentFilter === 'cash' ? 'selected' : ''}>💵 Cash</option>
+              <option value="all" ${state.receiptPaymentFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل طرق الدفع' : 'All Payments'}</option>
+              <option value="cash" ${state.receiptPaymentFilter === 'cash' ? 'selected' : ''}>💵 ${isArV ? 'نقدي' : 'Cash'}</option>
               <option value="usdt" ${state.receiptPaymentFilter === 'usdt' ? 'selected' : ''}>💎 USDT</option>
-              <option value="bank" ${state.receiptPaymentFilter === 'bank' ? 'selected' : ''}>🏦 Bank Transfer</option>
-              <option value="split" ${state.receiptPaymentFilter === 'split' ? 'selected' : ''}>📊 Split Payment</option>
+              <option value="bank" ${state.receiptPaymentFilter === 'bank' ? 'selected' : ''}>🏦 ${isArV ? 'حوالة مصرفية' : 'Bank Transfer'}</option>
+              <option value="split" ${state.receiptPaymentFilter === 'split' ? 'selected' : ''}>📊 ${isArV ? 'دفعات مقسّمة' : 'Split Payment'}</option>
             </select>
             
             <!-- Date Filter -->
             <select onchange="updateReceiptFilter('date', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptDateFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
-              <option value="all" ${state.receiptDateFilter === 'all' ? 'selected' : ''}>All Time</option>
-              <option value="today" ${state.receiptDateFilter === 'today' ? 'selected' : ''}>📅 Today</option>
-              <option value="week" ${state.receiptDateFilter === 'week' ? 'selected' : ''}>📆 This Week</option>
-              <option value="month" ${state.receiptDateFilter === 'month' ? 'selected' : ''}>🗓️ This Month</option>
+              <option value="all" ${state.receiptDateFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل الأوقات' : 'All Time'}</option>
+              <option value="today" ${state.receiptDateFilter === 'today' ? 'selected' : ''}>📅 ${isArV ? 'اليوم' : 'Today'}</option>
+              <option value="week" ${state.receiptDateFilter === 'week' ? 'selected' : ''}>📆 ${isArV ? 'هذا الأسبوع' : 'This Week'}</option>
+              <option value="month" ${state.receiptDateFilter === 'month' ? 'selected' : ''}>🗓️ ${isArV ? 'هذا الشهر' : 'This Month'}</option>
             </select>
             
             <!-- Collected Filter -->
             <select onchange="updateReceiptFilter('collected', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptCollectedFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
-              <option value="all" ${state.receiptCollectedFilter === 'all' ? 'selected' : ''}>All Collection</option>
-              <option value="collected" ${state.receiptCollectedFilter === 'collected' ? 'selected' : ''}>✓ Collected</option>
-              <option value="not-collected" ${state.receiptCollectedFilter === 'not-collected' ? 'selected' : ''}>○ Not Collected</option>
+              <option value="all" ${state.receiptCollectedFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل حالات التحصيل' : 'All Collection'}</option>
+              <option value="collected" ${state.receiptCollectedFilter === 'collected' ? 'selected' : ''}>✓ ${isArV ? 'مُحصَّل' : 'Collected'}</option>
+              <option value="not-collected" ${state.receiptCollectedFilter === 'not-collected' ? 'selected' : ''}>○ ${isArV ? 'غير مُحصَّل' : 'Not Collected'}</option>
             </select>
             
             <!-- Sort By -->
             <select onchange="updateReceiptFilter('sort', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer">
-              <option value="newest" ${state.receiptSortBy === 'newest' ? 'selected' : ''}>🕐 Newest First</option>
-              <option value="oldest" ${state.receiptSortBy === 'oldest' ? 'selected' : ''}>🕐 Oldest First</option>
-              <option value="amount-high" ${state.receiptSortBy === 'amount-high' ? 'selected' : ''}>💰 Highest Amount</option>
-              <option value="amount-low" ${state.receiptSortBy === 'amount-low' ? 'selected' : ''}>💰 Lowest Amount</option>
+              <option value="newest" ${state.receiptSortBy === 'newest' ? 'selected' : ''}>🕐 ${isArV ? 'الأحدث أولاً' : 'Newest First'}</option>
+              <option value="oldest" ${state.receiptSortBy === 'oldest' ? 'selected' : ''}>🕐 ${isArV ? 'الأقدم أولاً' : 'Oldest First'}</option>
+              <option value="amount-high" ${state.receiptSortBy === 'amount-high' ? 'selected' : ''}>💰 ${isArV ? 'الأعلى مبلغاً' : 'Highest Amount'}</option>
+              <option value="amount-low" ${state.receiptSortBy === 'amount-low' ? 'selected' : ''}>💰 ${isArV ? 'الأقل مبلغاً' : 'Lowest Amount'}</option>
             </select>
             
             <!-- Clear Filters Button (span uses display:contents so the button stays a direct flex item) -->
             <span id="receipt-clear-filters" class="contents">${hasActiveFilters ? `
               <button onclick="clearAllReceiptFilters()" class="px-4 py-3 bg-rose-100 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400 border-2 border-rose-200 dark:border-rose-800 rounded-xl text-sm font-bold hover:bg-rose-200 dark:hover:bg-rose-900/50 transition-all flex items-center space-x-2">
                 <i data-lucide="x-circle" class="w-4 h-4"></i>
-                <span>Clear</span>
+                <span>${isArV ? 'مسح' : 'Clear'}</span>
               </button>
             ` : ''}</span>
           </div>
@@ -2031,18 +2036,18 @@ function renderReceiptsView() {
         <!-- Active Filters Display -->
         <div id="receipt-active-filters">${hasActiveFilters ? `
           <div class="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
-            <span class="text-xs font-medium text-slate-500">Active filters:</span>
+            <span class="text-xs font-medium text-slate-500">${isArV ? 'الفلاتر النشطة:' : 'Active filters:'}</span>
             ${state.receiptSearch ? `<span class="px-2 py-1 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full text-xs font-medium flex items-center"><i data-lucide="search" class="w-3 h-3 mr-1"></i>"${Security.escapeHtml(state.receiptSearch)}"</span>` : ''}
-            ${state.receiptStatusFilter !== 'all' ? `<span class="px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-full text-xs font-medium">${state.receiptStatusFilter}</span>` : ''}
-            ${state.receiptPaymentFilter !== 'all' ? `<span class="px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded-full text-xs font-medium">${state.receiptPaymentFilter}</span>` : ''}
-            ${state.receiptDateFilter !== 'all' ? `<span class="px-2 py-1 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-full text-xs font-medium">${state.receiptDateFilter}</span>` : ''}
-            ${state.receiptCollectedFilter !== 'all' ? `<span class="px-2 py-1 ${state.receiptCollectedFilter === 'collected' ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300' : 'bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300'} rounded-full text-xs font-medium">${state.receiptCollectedFilter}</span>` : ''}
+            ${state.receiptStatusFilter !== 'all' ? `<span class="px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-full text-xs font-medium">${isArV ? ({ paid: 'مدفوع', pending: 'قيد الانتظار', cancelled: 'ملغي' })[state.receiptStatusFilter] || state.receiptStatusFilter : state.receiptStatusFilter}</span>` : ''}
+            ${state.receiptPaymentFilter !== 'all' ? `<span class="px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded-full text-xs font-medium">${isArV ? ({ cash: 'نقدي', usdt: 'USDT', bank: 'حوالة مصرفية', split: 'دفعات مقسّمة' })[state.receiptPaymentFilter] || state.receiptPaymentFilter : state.receiptPaymentFilter}</span>` : ''}
+            ${state.receiptDateFilter !== 'all' ? `<span class="px-2 py-1 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-full text-xs font-medium">${isArV ? ({ today: 'اليوم', week: 'هذا الأسبوع', month: 'هذا الشهر' })[state.receiptDateFilter] || state.receiptDateFilter : state.receiptDateFilter}</span>` : ''}
+            ${state.receiptCollectedFilter !== 'all' ? `<span class="px-2 py-1 ${state.receiptCollectedFilter === 'collected' ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300' : 'bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300'} rounded-full text-xs font-medium">${isArV ? (state.receiptCollectedFilter === 'collected' ? 'مُحصَّل' : 'غير مُحصَّل') : state.receiptCollectedFilter}</span>` : ''}
           </div>
         ` : ''}</div>
       </div>
 
       <div id="receipts-grid" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        ${filteredReceipts.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${hasActiveFilters ? 'search-x' : 'receipt'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${hasActiveFilters ? 'No receipts match your filters' : 'No receipts yet'}</p>${hasActiveFilters ? '<button onclick="clearAllReceiptFilters()" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">Clear all filters</button>' : ''}</div>` : visibleReceipts.map((receipt, idx) => {
+        ${filteredReceipts.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${hasActiveFilters ? 'search-x' : 'receipt'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${hasActiveFilters ? (isArV ? 'لا توجد وصولات مطابقة للفلاتر' : 'No receipts match your filters') : (isArV ? 'لا توجد وصولات بعد' : 'No receipts yet')}</p>${hasActiveFilters ? `<button onclick="clearAllReceiptFilters()" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">${isArV ? 'مسح كل الفلاتر' : 'Clear all filters'}</button>` : ''}</div>` : visibleReceipts.map((receipt, idx) => {
           const customer = customersById.get(receipt.customerId);
           const displayFinalNo = receipt.finalReceiptNo || receipt.serialNumber || '';
           const displayTempNo = receipt.tempReceiptNo || '';
@@ -2057,7 +2062,7 @@ function renderReceiptsView() {
           const usage = getReceiptUsageStats(receipt);
           const hasTransfers = (receipt.transfers && receipt.transfers.length > 0);
           const lastTransfer = hasTransfers ? receipt.transfers[receipt.transfers.length - 1] : null;
-          const lastTransferName = lastTransfer ? (customersById.get(lastTransfer.toCustomerId)?.name || 'Unknown') : '';
+          const lastTransferName = lastTransfer ? (customersById.get(lastTransfer.toCustomerId)?.name || (isArV ? 'غير معروف' : 'Unknown')) : '';
           const lastTransferNameSafe = Security.escapeHtml(String(lastTransferName || ''));
           // Defensive: ensure exchange rate is always positive and reasonable
           const rawFxRate = (receipt.exchangeRate || state.defaultExchangeRate || 1);
@@ -2067,9 +2072,9 @@ function renderReceiptsView() {
 
           const creatorId = receipt.createdBy || receipt.creatorId || '';
           const creatorNameRaw = creatorId
-            ? (state.users.find(u => String(u.id) === String(creatorId))?.name || (creatorId === 'system' ? 'System' : 'Unknown'))
-            : 'Unknown';
-          const creatorName = Security.escapeHtml(String(creatorNameRaw || 'Unknown'));
+            ? (state.users.find(u => String(u.id) === String(creatorId))?.name || (creatorId === 'system' ? (isArV ? 'النظام' : 'System') : (isArV ? 'غير معروف' : 'Unknown')))
+            : (isArV ? 'غير معروف' : 'Unknown');
+          const creatorName = Security.escapeHtml(String(creatorNameRaw || (isArV ? 'غير معروف' : 'Unknown')));
           
           return `
             <div class="glass-panel rounded-2xl p-6 hover:scale-[1.01] transition-transform">
@@ -2077,60 +2082,60 @@ function renderReceiptsView() {
                 <div>
                   <div class="flex items-center gap-2">
                     <span class="px-2 py-0.5 rounded-md bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400 text-xs font-bold">#${receiptDisplayNum}</span>
-                  <h3 class="text-lg font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || 'Unknown')}</h3>
+                  <h3 class="text-lg font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || (isArV ? 'غير معروف' : 'Unknown'))}</h3>
                   </div>
                   ${(displayTempNo || displayFinalNo) ? `
                     <p class="text-sm text-indigo-600 font-medium">
-                      Serial: ${displayTempNo && displayFinalNo ? `${displayTempNo} → ${displayFinalNo}` : (displayTempNo ? `${displayTempNo} (Temp)` : displayFinalNo)}
+                      ${isArV ? 'الرقم التسلسلي' : 'Serial'}: ${displayTempNo && displayFinalNo ? `${displayTempNo} → ${displayFinalNo}` : (displayTempNo ? `${displayTempNo} ${isArV ? '(مؤقت)' : '(Temp)'}` : displayFinalNo)}
                     </p>
                   ` : ''}
                   <p class="text-xs text-slate-400 mt-1">${new Date(receipt.createdAt || receipt.startDate).toLocaleString()}</p>
                   <div class="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1 text-[10px] text-slate-500">
-                    <span class="inline-flex items-center gap-1" title="Created by">
+                    <span class="inline-flex items-center gap-1" title="${isArV ? 'تم الإنشاء بواسطة' : 'Created by'}">
                       <i data-lucide="user" class="w-3 h-3"></i>
                       <span>${state.language === 'ar' ? 'تم الإنشاء بواسطة' : 'Created by'}: <span class="font-medium text-slate-700 dark:text-slate-300">${creatorName}</span></span>
                     </span>
-                    <span class="inline-flex items-center gap-1" title="Ads credit usage from this receipt">
+                    <span class="inline-flex items-center gap-1" title="${isArV ? 'استخدام رصيد الإعلانات من هذا الوصل' : 'Ads credit usage from this receipt'}">
                       <i data-lucide="trending-down" class="w-3 h-3"></i>
                       <span>${state.language === 'ar' ? 'رصيد الإعلانات' : 'Ads credit'}: <span class="font-semibold text-emerald-600">$${usage.usedUSD.toFixed(2)}</span> ${state.language === 'ar' ? 'مصروف' : 'spent'} • <span class="font-semibold text-blue-600">$${usage.remainingUSD.toFixed(2)}</span> ${state.language === 'ar' ? 'متبقي' : 'left'} <span class="text-slate-400">(${remainingLYD.toFixed(2)} LYD)</span></span>
                     </span>
                   </div>
                   ${receipt.updatedAt ? `
                     <div class="flex items-center mt-0.5 space-x-2">
-                      <p class="text-[10px] text-amber-500 flex items-center"><i data-lucide="edit-3" class="w-2.5 h-2.5 mr-1"></i>Edited: ${new Date(receipt.updatedAt).toLocaleString()}</p>
-                      ${receipt.editCount ? `<button onclick="showReceiptEditHistory('${receipt.id}')" class="text-[10px] px-1.5 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-full hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors font-medium">${receipt.editCount} edit${receipt.editCount > 1 ? 's' : ''}</button>` : ''}
+                      <p class="text-[10px] text-amber-500 flex items-center"><i data-lucide="edit-3" class="w-2.5 h-2.5 mr-1"></i>${isArV ? 'عُدِّل' : 'Edited'}: ${new Date(receipt.updatedAt).toLocaleString()}</p>
+                      ${receipt.editCount ? `<button onclick="showReceiptEditHistory('${receipt.id}')" class="text-[10px] px-1.5 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-full hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors font-medium">${isArV ? `${receipt.editCount} تعديل` : `${receipt.editCount} edit${receipt.editCount > 1 ? 's' : ''}`}</button>` : ''}
                     </div>
                   ` : ''}
                 </div>
                 <div class="text-right">
                   <div class="text-2xl font-bold text-emerald-600">$${receipt.amountUSD?.toFixed(2)}</div>
                   <div class="text-sm text-slate-500">${receipt.amountLocal?.toFixed(2)} LYD</div>
-                  ${receipt.isPaid ? '<div class="text-xs text-emerald-600 mt-1">✓ Paid</div>' : '<div class="text-xs text-amber-600 mt-1">⏳ Unpaid</div>'}
+                  ${receipt.isPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isArV ? 'مدفوع' : 'Paid'}</div>` : `<div class="text-xs text-amber-600 mt-1">⏳ ${isArV ? 'غير مدفوع' : 'Unpaid'}</div>`}
                   ${receipt.paymentResult ? `
                     <div class="text-[10px] mt-1 ${receipt.paymentResult === 'UNDERPAID' ? 'text-rose-600' : receipt.paymentResult === 'OVERPAID' ? 'text-blue-600' : 'text-emerald-600'} font-bold">
-                      ${receipt.paymentResult === 'PAID_EXACT' ? 'Paid exact' : receipt.paymentResult === 'OVERPAID' ? `Overpaid +${Number(receipt.overpaidAmount || 0).toFixed(0)} LYD` : `Remaining ${Number(receipt.remainingDue || 0).toFixed(0)} LYD`}
+                      ${receipt.paymentResult === 'PAID_EXACT' ? (isArV ? 'مدفوع بالضبط' : 'Paid exact') : receipt.paymentResult === 'OVERPAID' ? `${isArV ? 'دفع زائد' : 'Overpaid'} +${Number(receipt.overpaidAmount || 0).toFixed(0)} LYD` : `${isArV ? 'المتبقي' : 'Remaining'} ${Number(receipt.remainingDue || 0).toFixed(0)} LYD`}
                     </div>
                   ` : ''}
                   ${receipt.feeDifferenceStatus ? `
                     <div class="text-[10px] ${receipt.feeDifferenceStatus === 'SAME' ? 'text-slate-500' : receipt.feeDifferenceStatus === 'LOWER' ? 'text-amber-600' : 'text-purple-600'} font-bold">
-                      Fee ${receipt.feeDifferenceStatus.toLowerCase()}
+                      ${isArV ? `العمولة ${({ SAME: 'مطابقة', LOWER: 'أقل', HIGHER: 'أعلى' })[receipt.feeDifferenceStatus] || receipt.feeDifferenceStatus}` : `Fee ${receipt.feeDifferenceStatus.toLowerCase()}`}
                     </div>
                   ` : ''}
-                  ${hasTransfers ? `<div class="text-xs text-blue-600 mt-1 flex items-center justify-end space-x-1" title="Transferred${lastTransferNameSafe ? ' to ' + lastTransferNameSafe : ''}"><i data-lucide="swap" class="w-3 h-3"></i><span>Transferred</span></div>` : ''}
+                  ${hasTransfers ? `<div class="text-xs text-blue-600 mt-1 flex items-center justify-end space-x-1" title="${isArV ? 'تم التحويل' : 'Transferred'}${lastTransferNameSafe ? (isArV ? ' إلى ' : ' to ') + lastTransferNameSafe : ''}"><i data-lucide="swap" class="w-3 h-3"></i><span>${isArV ? 'تم التحويل' : 'Transferred'}</span></div>` : ''}
                 </div>
               </div>
 
               <div class="space-y-2 mb-4 text-sm border-t border-b border-slate-200 dark:border-slate-700 py-3">
-                <div class="flex justify-between"><span class="text-slate-500">Exchange Rate:</span><span class="font-medium">${receipt.exchangeRate?.toFixed(2)}</span></div>
-                ${receipt.officeFee ? `<div class="flex justify-between"><span class="text-slate-500">Office Fee:</span><span class="font-medium text-amber-600">+${receipt.officeFee?.toFixed(2)} LYD</span></div>` : ''}
-                ${receipt.discount ? `<div class="flex justify-between"><span class="text-slate-500">Discount:</span><span class="font-medium text-emerald-600">-${receipt.discount?.toFixed(2)} LYD</span></div>` : ''}
+                <div class="flex justify-between"><span class="text-slate-500">${isArV ? 'سعر الصرف' : 'Exchange Rate'}:</span><span class="font-medium">${receipt.exchangeRate?.toFixed(2)}</span></div>
+                ${receipt.officeFee ? `<div class="flex justify-between"><span class="text-slate-500">${isArV ? 'عمولة المكتب' : 'Office Fee'}:</span><span class="font-medium text-amber-600">+${receipt.officeFee?.toFixed(2)} LYD</span></div>` : ''}
+                ${receipt.discount ? `<div class="flex justify-between"><span class="text-slate-500">${isArV ? 'الخصم' : 'Discount'}:</span><span class="font-medium text-emerald-600">-${receipt.discount?.toFixed(2)} LYD</span></div>` : ''}
               </div>
 
               ${hasMultiplePayments ? `
                 <div class="mb-4">
                   <h4 class="text-xs font-bold text-slate-500 uppercase mb-2 flex items-center">
                     <i data-lucide="credit-card" class="w-3 h-3 mr-1"></i>
-                    Split Payments (${payments.length})
+                    ${isArV ? `الدفعات المقسّمة (${payments.length})` : `Split Payments (${payments.length})`}
                   </h4>
                   <div class="space-y-2">
                     ${payments.map((payment, idx) => {
@@ -2139,9 +2144,9 @@ function renderReceiptsView() {
                       return `
                       <div class="split-payment-item flex justify-between items-center">
                         <div>
-                          <span class="font-medium text-sm">${payment.method}</span>
-                          ${payment.collectionType ? `<span class="text-xs text-slate-500 ml-2 px-2 py-0.5 bg-slate-100 dark:bg-slate-800 rounded">${payment.collectionType}</span>` : ''}
-                          ${payment.deliveryPersonId ? `<div class="text-xs text-slate-500">${Security.escapeHtml(state.users.find(u => u.id === payment.deliveryPersonId)?.name || 'Unknown')}</div>` : ''}
+                          <span class="font-medium text-sm">${trMethod(payment.method)}</span>
+                          ${payment.collectionType ? `<span class="text-xs text-slate-500 ml-2 px-2 py-0.5 bg-slate-100 dark:bg-slate-800 rounded">${trStatus(payment.collectionType)}</span>` : ''}
+                          ${payment.deliveryPersonId ? `<div class="text-xs text-slate-500">${Security.escapeHtml(state.users.find(u => u.id === payment.deliveryPersonId)?.name || (isArV ? 'غير معروف' : 'Unknown'))}</div>` : ''}
                         </div>
                         <div class="text-right">
                           <div class="font-bold text-indigo-600">${r1.toFixed(2)} LYD</div>
@@ -2151,43 +2156,43 @@ function renderReceiptsView() {
                     `}).join('')}
                   </div>
                   <div class="mt-2 pt-2 border-t border-slate-200 dark:border-slate-700 flex justify-between font-bold text-emerald-600">
-                    <span>Total Paid:</span><span>${totalPaid.toFixed(2)} LYD</span>
+                    <span>${isArV ? 'إجمالي المدفوع' : 'Total Paid'}:</span><span>${totalPaid.toFixed(2)} LYD</span>
                   </div>
                 </div>
               ` : `
                 <div class="mb-4">
                   <h4 class="text-xs font-bold text-slate-500 uppercase mb-2 flex items-center">
                     <i data-lucide="activity" class="w-3 h-3 mr-1"></i>
-                    Usage & Balance
+                    ${isArV ? 'الاستخدام والرصيد' : 'Usage & Balance'}
                   </h4>
                   <div class="grid grid-cols-2 gap-3 text-sm">
                     <div>
                       <div class="text-slate-500 text-xs mb-1 flex items-center space-x-1">
-                        <i data-lucide="link-2" class="w-3 h-3"></i><span>Linked Ads</span>
+                        <i data-lucide="link-2" class="w-3 h-3"></i><span>${isArV ? 'الإعلانات المرتبطة' : 'Linked Ads'}</span>
                       </div>
                       <div class="font-bold text-slate-700 dark:text-slate-300">${usage.fundedAds.length}</div>
                     </div>
                     <div>
                       <div class="text-slate-500 text-xs mb-1 flex items-center space-x-1">
-                        <i data-lucide="gauge" class="w-3 h-3"></i><span>Status</span>
+                        <i data-lucide="gauge" class="w-3 h-3"></i><span>${t('status')}</span>
                       </div>
-                      <span class="status-badge status-${usage.usageStatus.toLowerCase().replace(' ', '-')}">${usage.usageStatus}</span>
+                      <span class="status-badge status-${usage.usageStatus.toLowerCase().replace(' ', '-')}">${trStatus(usage.usageStatus)}</span>
                     </div>
                     <div class="col-span-2">
                       <div class="text-slate-500 text-xs mb-1 flex items-center space-x-1">
-                        <i data-lucide="clock" class="w-3 h-3"></i><span>Last Used</span>
+                        <i data-lucide="clock" class="w-3 h-3"></i><span>${isArV ? 'آخر استخدام' : 'Last Used'}</span>
                       </div>
                       <div class="text-xs text-slate-600 dark:text-slate-400">${formatDateShort(usage.lastUsedAt)}</div>
                     </div>
                     <div class="col-span-2 flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/40">
                       <div class="text-xs text-slate-600 dark:text-slate-300 flex items-center space-x-2">
                         <i data-lucide="swap" class="w-3 h-3"></i>
-                        <span>Transferred: $${usage.transferredUSD.toFixed(2)}</span>
-                        ${hasTransfers && lastTransferName ? `<span class="text-[10px] px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-100">Last: ${lastTransferName}</span>` : ''}
+                        <span>${isArV ? 'المُحوَّل' : 'Transferred'}: $${usage.transferredUSD.toFixed(2)}</span>
+                        ${hasTransfers && lastTransferName ? `<span class="text-[10px] px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-100">${isArV ? 'الأخير' : 'Last'}: ${lastTransferName}</span>` : ''}
                       </div>
                       <div class="flex items-center space-x-3">
-                        ${hasTransfers ? `<button class="text-xs text-blue-600 hover:text-blue-700" title="View transfer history" onclick="showReceiptTransferHistory('${receipt.id}')">History</button>` : ''}
-                        <button class="text-xs text-blue-600 hover:text-blue-700" title="Transfer balance" onclick="showReceiptTransferModal('${receipt.id}')">Transfer</button>
+                        ${hasTransfers ? `<button class="text-xs text-blue-600 hover:text-blue-700" title="${isArV ? 'عرض سجل التحويلات' : 'View transfer history'}" onclick="showReceiptTransferHistory('${receipt.id}')">${isArV ? 'السجل' : 'History'}</button>` : ''}
+                        <button class="text-xs text-blue-600 hover:text-blue-700" title="${isArV ? 'تحويل الرصيد' : 'Transfer balance'}" onclick="showReceiptTransferModal('${receipt.id}')">${isArV ? 'تحويل' : 'Transfer'}</button>
                       </div>
                     </div>
                   </div>
@@ -2217,7 +2222,7 @@ function renderReceiptsView() {
                       ${!receipt.collected ? (isAr ? 'لم يُحصَّل' : 'Not Collected') : fully ? (isAr ? 'تم التحصيل' : 'Collected') : (isAr ? 'تحصيل جزئي' : 'Partially Collected')}
                     </span>
                     ${receipt.collectedAt ? `<span class="text-[10px] text-slate-500">${new Date(receipt.collectedAt).toLocaleDateString()}</span>` : ''}
-                    ${receipt.collectedBy ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">${Security.escapeHtml(state.users.find(u => u.id === receipt.collectedBy)?.name || 'Admin')}</span>` : ''}
+                    ${receipt.collectedBy ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">${Security.escapeHtml(state.users.find(u => u.id === receipt.collectedBy)?.name || (isArV ? 'مدير' : 'Admin'))}</span>` : ''}
                   </div>
                   <div class="flex items-center gap-2 flex-shrink-0">
                     ${receipt.collected ? `<button onclick="uncollectReceipt('${receipt.id}')" class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-300 transition-all" title="${isAr ? 'إلغاء التحصيل' : 'Undo collection'}">${isAr ? 'إلغاء' : 'Undo'}</button>` : ''}
@@ -2233,7 +2238,7 @@ function renderReceiptsView() {
                   </div>
                   ${Array.isArray(receipt.collectedPayments) && receipt.collectedPayments.length && !receipt.collectedMatchesReceipt ? `
                     <div class="flex flex-wrap gap-1 mt-1">
-                      ${receipt.collectedPayments.map(p => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">${Security.escapeHtml(p.method)}: ${(Number(p.amount) || 0).toFixed(0)} LYD</span>`).join('')}
+                      ${receipt.collectedPayments.map(p => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">${Security.escapeHtml(trMethod(p.method))}: ${(Number(p.amount) || 0).toFixed(0)} LYD</span>`).join('')}
                     </div>
                   ` : ''}
                 ` : ''}
@@ -2242,15 +2247,15 @@ function renderReceiptsView() {
 
               <div class="flex flex-col space-y-2 pt-3 border-t border-slate-200 dark:border-slate-700">
                 <div class="flex justify-between items-center">
-                  <span class="status-badge status-${(receipt.status || '').toLowerCase()}">${receipt.status || 'Unknown'}</span>
+                  <span class="status-badge status-${(receipt.status || '').toLowerCase()}">${trStatus(receipt.status || 'Unknown')}</span>
                   <div class="flex space-x-2">
-                    <button onclick="showReceiptTransferModal('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="Transfer balance">
+                    <button onclick="showReceiptTransferModal('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="${isArV ? 'تحويل الرصيد' : 'Transfer balance'}">
                       <i data-lucide="swap" class="w-4 h-4"></i>
                     </button>
                     <button onclick="manageSplitPayments('${receipt.id}')" class="text-purple-600 hover:text-purple-700" title="${state.language === 'ar' ? 'تعديل الدفعات المقسّمة' : 'Manage split payments'}"><i data-lucide="credit-card" class="w-4 h-4"></i></button>
-                    <button onclick="editReceipt('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="Edit"><i data-lucide="edit" class="w-4 h-4"></i></button>
-                    <button onclick="printReceiptCard(this)" class="text-slate-600 hover:text-slate-700" title="Print"><i data-lucide="printer" class="w-4 h-4"></i></button>
-                    <button onclick="deleteReceipt('${receipt.id}')" class="text-rose-600 hover:text-rose-700" title="Delete"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                    <button onclick="editReceipt('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="${t('edit')}"><i data-lucide="edit" class="w-4 h-4"></i></button>
+                    <button onclick="printReceiptCard(this)" class="text-slate-600 hover:text-slate-700" title="${t('print')}"><i data-lucide="printer" class="w-4 h-4"></i></button>
+                    <button onclick="deleteReceipt('${receipt.id}')" class="text-rose-600 hover:text-rose-700" title="${t('delete')}"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
                   </div>
                 </div>
               </div>
@@ -2271,6 +2276,7 @@ function renderReceiptsView() {
 }
 
 function renderPagesView() {
+  const isAr = state.language === 'ar';
   const visiblePages = getVisibleRecords(state.pages);
   
   return `
@@ -2278,7 +2284,7 @@ function renderPagesView() {
       <div class="flex justify-between items-center">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('pages')}</h1>
-          <p class="text-sm text-slate-500 mt-1">${visiblePages.length} Facebook pages</p>
+          <p class="text-sm text-slate-500 mt-1">${isAr ? `${visiblePages.length} صفحة فيسبوك` : `${visiblePages.length} Facebook pages`}</p>
         </div>
         <button onclick="showPageModal()" class="btn-shine bg-blue-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
           <i data-lucide="file-plus" class="w-4 h-4"></i>
@@ -2287,7 +2293,7 @@ function renderPagesView() {
       </div>
 
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        ${visiblePages.length === 0 ? '<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="file-text" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">No pages yet</p></div>' : visiblePages.map((p, idx) => {
+        ${visiblePages.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="file-text" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${isAr ? 'لا توجد صفحات بعد' : 'No pages yet'}</p></div>` : visiblePages.map((p, idx) => {
           const linkedCustomers = p.customerIds ? p.customerIds.map(cid => state.customers.find(c => c.id === cid)).filter(Boolean) : [];
           const pageAds = getVisibleRecords(state.ads).filter(ad => ad.pageId === p.id && ad.recordType === 'ad');
           
@@ -2296,9 +2302,9 @@ function renderPagesView() {
           const lastAdDate = pageAds.length > 0 
             ? Math.max(...pageAds.map(ad => new Date(ad.date || ad.createdAt).getTime()))
             : null;
-          const lastAdText = lastAdDate 
+          const lastAdText = lastAdDate
             ? new Date(lastAdDate).toLocaleDateString()
-            : 'Never';
+            : (isAr ? 'أبداً' : 'Never');
           // Display number: total - index (so first item = highest number)
           const pageDisplayNum = visiblePages.length - idx;
           
@@ -2316,10 +2322,10 @@ function renderPagesView() {
                   <p class="text-sm text-slate-500 mt-1">${Security.escapeHtml(p.category || '')}</p>
                 </div>
                 <div class="flex space-x-1">
-                  <button onclick="editPage('${p.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="Edit">
+                  <button onclick="editPage('${p.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${t('edit')}">
                     <i data-lucide="edit" class="w-4 h-4"></i>
                   </button>
-                  <button onclick="deletePage('${p.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="Delete">
+                  <button onclick="deletePage('${p.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="${t('delete')}">
                     <i data-lucide="trash-2" class="w-4 h-4"></i>
                   </button>
                 </div>
@@ -2330,7 +2336,7 @@ function renderPagesView() {
                   <div>
                   <div class="text-xs font-medium text-slate-500 mb-1.5 flex items-center">
                     <i data-lucide="user" class="w-3 h-3 mr-1"></i>
-                    Owner${linkedCustomers.length > 1 ? 's' : ''}
+                    ${isAr ? (linkedCustomers.length > 1 ? 'المالكون' : 'المالك') : `Owner${linkedCustomers.length > 1 ? 's' : ''}`}
                     </div>
                   ${linkedCustomers.length > 0 ? `
                     <div class="space-y-1">
@@ -2340,26 +2346,26 @@ function renderPagesView() {
                           <span>${Security.escapeHtml(c.name || '')}</span>
                         </div>
                       `).join('')}
-                      ${linkedCustomers.length > 2 ? `<div class="text-xs text-slate-500 ml-3.5">+${linkedCustomers.length - 2} more</div>` : ''}
+                      ${linkedCustomers.length > 2 ? `<div class="text-xs text-slate-500 ml-3.5">+${linkedCustomers.length - 2} ${isAr ? 'آخرون' : 'more'}</div>` : ''}
                     </div>
-                  ` : '<div class="text-sm text-slate-400 ml-4">No owner</div>'}
+                  ` : `<div class="text-sm text-slate-400 ml-4">${isAr ? 'لا يوجد مالك' : 'No owner'}</div>`}
                   </div>
 
                 <!-- Last Ad Time -->
                   <div class="flex items-center space-x-2 text-xs">
                   <i data-lucide="clock" class="w-3 h-3 text-slate-400"></i>
-                  <span class="text-slate-600 dark:text-slate-400">Last ad: ${lastAdText}</span>
+                  <span class="text-slate-600 dark:text-slate-400">${isAr ? 'آخر إعلان' : 'Last ad'}: ${lastAdText}</span>
                   </div>
 
                 <!-- Stats -->
                 <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
                   <div class="grid grid-cols-2 gap-3 text-xs">
                     <div>
-                      <div class="text-slate-500 mb-1">Total Ads</div>
+                      <div class="text-slate-500 mb-1">${t('totalAds')}</div>
                       <div class="font-bold text-slate-700 dark:text-slate-300">${pageAds.length}</div>
                     </div>
                     <div>
-                      <div class="text-slate-500 mb-1">Total Spend</div>
+                      <div class="text-slate-500 mb-1">${isAr ? 'إجمالي الإنفاق' : 'Total Spend'}</div>
                       <div class="font-bold text-emerald-600 dark:text-emerald-400">${totalSpent.toFixed(0)} LYD</div>
                     </div>
                   </div>
@@ -2428,13 +2434,14 @@ function renderAdsView() {
   const allAds = getFilteredAds(customersById);
   const adF = state.adFilters || {};
   const visiblePages = getVisibleRecords(state.pages || []);
+  const isAr = state.language === 'ar';
 
   return `
     <div class="space-y-6 animate-fade-in-up">
       <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('ads')}</h1>
-          <p id="ads-count" class="text-sm text-slate-500 mt-1">${allAds.length} total ads</p>
+          <p id="ads-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allAds.length} إجمالي الإعلانات` : `${allAds.length} total ads`}</p>
         </div>
         <div class="flex flex-wrap gap-2">
           <button onclick="showAdModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
@@ -2449,41 +2456,41 @@ function renderAdsView() {
 
       <div class="glass-panel rounded-xl p-4">
         <div class="flex flex-col md:flex-row gap-2">
-          <input type="text" id="ad-search" placeholder="Search by customer, phone, serial or page..." value="${Security.escapeHtml(state.adSearch || '')}" class="flex-1 glass-input px-4 py-2 rounded-lg" oninput="onAdSearchInput(this.value)" autocomplete="off" />
+          <input type="text" id="ad-search" placeholder="${isAr ? 'بحث بالعميل أو الهاتف أو الرقم التسلسلي أو الصفحة...' : 'Search by customer, phone, serial or page...'}" value="${Security.escapeHtml(state.adSearch || '')}" class="flex-1 glass-input px-4 py-2 rounded-lg" oninput="onAdSearchInput(this.value)" autocomplete="off" />
           <select onchange="updateAdFilter('status', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
-            <option value="all" ${(adF.status || 'all') === 'all' ? 'selected' : ''}>All Status</option>
-            ${AD_STATUSES.map(s => `<option value="${s}" ${adF.status === s ? 'selected' : ''}>${s}</option>`).join('')}
+            <option value="all" ${(adF.status || 'all') === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All Status'}</option>
+            ${AD_STATUSES.map(s => `<option value="${s}" ${adF.status === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
           </select>
           <select onchange="updateAdFilter('payment', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
-            <option value="all" ${(adF.payment || 'all') === 'all' ? 'selected' : ''}>All Payments</option>
-            <option value="paid" ${adF.payment === 'paid' ? 'selected' : ''}>Paid</option>
-            <option value="not_paid" ${adF.payment === 'not_paid' ? 'selected' : ''}>Not Paid</option>
-            <option value="wont_pay" ${adF.payment === 'wont_pay' ? 'selected' : ''}>Won't Pay</option>
+            <option value="all" ${(adF.payment || 'all') === 'all' ? 'selected' : ''}>${isAr ? 'كل طرق الدفع' : 'All Payments'}</option>
+            <option value="paid" ${adF.payment === 'paid' ? 'selected' : ''}>${isAr ? 'مدفوع' : 'Paid'}</option>
+            <option value="not_paid" ${adF.payment === 'not_paid' ? 'selected' : ''}>${isAr ? 'غير مدفوع' : 'Not Paid'}</option>
+            <option value="wont_pay" ${adF.payment === 'wont_pay' ? 'selected' : ''}>${isAr ? 'لن يدفع' : "Won't Pay"}</option>
           </select>
           <select onchange="updateAdFilter('page', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm max-w-[180px]">
-            <option value="all" ${(adF.page || 'all') === 'all' ? 'selected' : ''}>All Pages</option>
+            <option value="all" ${(adF.page || 'all') === 'all' ? 'selected' : ''}>${isAr ? 'كل الصفحات' : 'All Pages'}</option>
             ${visiblePages.map(p => `<option value="${Security.escapeHtml(p.id)}" ${adF.page === p.id ? 'selected' : ''}>${Security.escapeHtml(p.name || '')}</option>`).join('')}
           </select>
         </div>
       </div>
 
       <div id="ads-table-container" class="glass-panel rounded-2xl p-6 overflow-x-auto">
-        ${allAds.length === 0 ? '<div class="text-center py-12"><i data-lucide="inbox" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">No ads yet</p></div>' : `
+        ${allAds.length === 0 ? `<div class="text-center py-12"><i data-lucide="inbox" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${isAr ? 'لا توجد إعلانات بعد' : 'No ads yet'}</p></div>` : `
           <table class="w-full text-sm">
             <thead>
               <tr class="border-b-2 border-indigo-200 dark:border-indigo-800">
                 <th class="text-left py-3 px-2 w-12">#</th>
-                <th class="text-left py-3 px-2">Customer</th>
-                <th class="text-left py-3 px-2">Page</th>
-                <th class="text-left py-3 px-2">Amount</th>
-                <th class="text-left py-3 px-2">Rate</th>
-                <th class="text-left py-3 px-2">Local</th>
-                <th class="text-left py-3 px-2">Payment</th>
-                <th class="text-left py-3 px-2">Status</th>
-                <th class="text-left py-3 px-2">Delivery</th>
-                <th class="text-left py-3 px-2">Serial</th>
-                <th class="text-left py-3 px-2">Date</th>
-                <th class="text-left py-3 px-2">Actions</th>
+                <th class="text-left py-3 px-2">${isAr ? 'العميل' : 'Customer'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'الصفحة' : 'Page'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'المبلغ' : 'Amount'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'السعر' : 'Rate'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'بالعملة المحلية' : 'Local'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'الدفع' : 'Payment'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'الحالة' : 'Status'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'التوصيل' : 'Delivery'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'الرقم التسلسلي' : 'Serial'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'التاريخ' : 'Date'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'إجراءات' : 'Actions'}</th>
               </tr>
             </thead>
             <tbody>
@@ -2538,11 +2545,11 @@ function renderAdsView() {
                 return `
                   <tr class="border-b border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50">
                     <td class="py-3 px-2" data-label="#">
-                      <div class="font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || 'Unknown')}</div>
+                      <div class="font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</div>
                       ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
                     </td>
                     <td class="py-3 px-2 hidden md:table-cell">
-                      <div class="font-medium">${Security.escapeHtml(customer?.name || 'Unknown')}</div>
+                      <div class="font-medium">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</div>
                       ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
                     </td>
                     <td class="py-3 px-2" data-label="Page">
@@ -2557,8 +2564,8 @@ function renderAdsView() {
                     <td class="py-3 px-2" data-label="Payment">
                       ${paymentMethods.length ? `
                         <div class="flex flex-wrap gap-1">
-                          ${paymentMethods.slice(0, 3).map(m => `<span class="payment-badge text-xs">${Security.escapeHtml(m)}</span>`).join('')}
-                          ${paymentMethods.length > 3 ? `<span class="text-xs text-slate-500" title="${Security.escapeHtml(paymentMethods.slice(3).join(', '))}">+${paymentMethods.length - 3}</span>` : ''}
+                          ${paymentMethods.slice(0, 3).map(m => `<span class="payment-badge text-xs">${Security.escapeHtml(trMethod(m))}</span>`).join('')}
+                          ${paymentMethods.length > 3 ? `<span class="text-xs text-slate-500" title="${Security.escapeHtml(paymentMethods.slice(3).map(m => trMethod(m)).join(', '))}">+${paymentMethods.length - 3}</span>` : ''}
                         </div>
                       ` : '<span class="text-xs text-slate-400">-</span>'}
                     </td>
@@ -2574,12 +2581,12 @@ function renderAdsView() {
                         'Canceled': 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
                         'Lost': 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
                         'Stopped': 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
-                      })[ad.status] || 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300'}">${Security.escapeHtml(ad.status || 'Active')}</span>
-                      ${ad.isPaid ? '<div class="text-xs text-emerald-600 mt-1">✓ Paid</div>' : ''}
+                      })[ad.status] || 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300'}">${Security.escapeHtml(trStatus(ad.status || 'Active'))}</span>
+                      ${ad.isPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isAr ? 'مدفوع' : 'Paid'}</div>` : ''}
                       ${ad.status === 'Stopped' && ad.spentUSD !== undefined ? `
                         <div class="text-xs mt-1 space-y-0.5">
-                          <div class="text-orange-600">Spent: $${ad.spentUSD.toFixed(2)}</div>
-                          <div class="text-emerald-600">Remaining: $${((ad.amountUSD || 0) - ad.spentUSD).toFixed(2)}</div>
+                          <div class="text-orange-600">${isAr ? 'المصروف' : 'Spent'}: $${ad.spentUSD.toFixed(2)}</div>
+                          <div class="text-emerald-600">${isAr ? 'المتبقي' : 'Remaining'}: $${((ad.amountUSD || 0) - ad.spentUSD).toFixed(2)}</div>
                         </div>
                       ` : ''}
                     </td>
@@ -2588,14 +2595,14 @@ function renderAdsView() {
                            changes happen via the Deliveries page / delivery
                            dashboard flows, not inline in this table. -->
                       <div class="inline-block px-2 py-1 rounded-lg text-xs delivery-${effectiveDeliveryStatus.toLowerCase().replace(' ', '')} bg-slate-100 dark:bg-slate-700">
-                        ${effectiveDeliveryStatus}
-                        ${isLinkedToDeliveryReceipt ? '<div class="text-[10px] text-slate-400 mt-0.5">via Receipt</div>' : ''}
+                        ${trStatus(effectiveDeliveryStatus)}
+                        ${isLinkedToDeliveryReceipt ? `<div class="text-[10px] text-slate-400 mt-0.5">${isAr ? 'عبر وصل' : 'via Receipt'}</div>` : ''}
                       </div>
                       ${deliveryPerson ? `<div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(deliveryPerson.name || '')}</div>` : ''}
                     </td>
                     <td class="py-3 px-2" data-label="Serial">
                       ${serialDisplay ? `<span class="font-mono text-xs">${Security.escapeHtml(serialDisplay)}</span>` : '-'}
-                      ${ad.editCount ? `<button onclick="showAdEditHistory('${ad.id}')" class="block mt-1 text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium">${ad.editCount} edit${ad.editCount > 1 ? 's' : ''}</button>` : ''}
+                      ${ad.editCount ? `<button onclick="showAdEditHistory('${ad.id}')" class="block mt-1 text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium">${isAr ? `${ad.editCount} تعديل` : `${ad.editCount} edit${ad.editCount > 1 ? 's' : ''}`}</button>` : ''}
                     </td>
                     <td class="py-3 px-2 text-xs" data-label="Date">
                       <div class="text-slate-500">${(() => { const d = new Date(ad.startDate); return isNaN(d) ? '-' : d.toLocaleDateString(); })()}</div>
@@ -2604,7 +2611,7 @@ function renderAdsView() {
                         // of the latest top-up — visible without opening the ad.
                         const e = new Date(ad.endDate);
                         const endLine = !isNaN(e) && ad.endDate
-                          ? `<div class="text-slate-700 dark:text-slate-300 font-medium">End: ${e.toLocaleDateString()}${(parseFloat(ad.extraTimeMinutes) || 0) > 0 ? ` <span class="text-amber-600">+${ad.extraTimeMinutes}m</span>` : ''}</div>`
+                          ? `<div class="text-slate-700 dark:text-slate-300 font-medium">${isAr ? 'الانتهاء' : 'End'}: ${e.toLocaleDateString()}${(parseFloat(ad.extraTimeMinutes) || 0) > 0 ? ` <span class="text-amber-600">+${ad.extraTimeMinutes}${isAr ? 'د' : 'm'}</span>` : ''}</div>`
                           : '';
                         const ups = Array.isArray(ad.topUps) ? ad.topUps : [];
                         let upLine = '';
@@ -2612,27 +2619,27 @@ function renderAdsView() {
                           const lastDate = ups.map(t => t && t.date).filter(Boolean).sort().slice(-1)[0];
                           const ld = lastDate ? new Date(lastDate) : null;
                           const when = ld && !isNaN(ld) ? `: ${ld.toLocaleDateString()}` : '';
-                          upLine = `<div class="text-emerald-600 dark:text-emerald-400 font-medium" title="${ups.length} top-up(s), total $${ups.reduce((s, t) => s + (parseFloat(t && t.amount) || 0), 0).toFixed(2)}">&#8593; Topped up${when}</div>`;
+                          upLine = `<div class="text-emerald-600 dark:text-emerald-400 font-medium" title="${isAr ? `${ups.length} عملية شحن، الإجمالي $` : `${ups.length} top-up(s), total $`}${ups.reduce((s, t) => s + (parseFloat(t && t.amount) || 0), 0).toFixed(2)}">&#8593; ${isAr ? 'تم الشحن' : 'Topped up'}${when}</div>`;
                         }
                         return endLine + upLine;
                       })()}
                     </td>
                     <td class="py-3 px-2" data-label="Actions">
                       <div class="flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
-                        <button onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="Top-ups">
+                        <button onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="${isAr ? 'عمليات الشحن' : 'Top-ups'}">
                           <i data-lucide="trending-up" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.topUps && ad.topUps.length > 0 ? `<span class="text-xs">${ad.topUps.length}</span>` : ''}
                         </button>
-                        <button onclick="manageRefund('${ad.id}')" class="text-amber-600 hover:text-amber-700 p-2 md:p-0" title="Refund">
+                        <button onclick="manageRefund('${ad.id}')" class="text-amber-600 hover:text-amber-700 p-2 md:p-0" title="${isAr ? 'استرجاع' : 'Refund'}">
                           <i data-lucide="arrow-left-circle" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.refundType && ad.refundType !== 'None' ? `<span class="text-xs">!</span>` : ''}
                         </button>
-                        <button onclick="stopAd('${ad.id}')" class="text-orange-600 hover:text-orange-700 p-2 md:p-0" title="${ad.status === 'Stopped' ? 'Edit Stop Details' : 'Stop Ad'}">
+                        <button onclick="stopAd('${ad.id}')" class="text-orange-600 hover:text-orange-700 p-2 md:p-0" title="${ad.status === 'Stopped' ? (isAr ? 'تعديل تفاصيل الإيقاف' : 'Edit Stop Details') : (isAr ? 'إيقاف الإعلان' : 'Stop Ad')}">
                           <i data-lucide="${ad.status === 'Stopped' ? 'edit' : 'square'}" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.status === 'Stopped' ? '<span class="text-xs">!</span>' : ''}
                         </button>
-                        <button onclick="editAd('${ad.id}')" class="text-indigo-600 hover:text-indigo-700 p-2 md:p-0" title="Edit"><i data-lucide="edit" class="w-5 h-5 md:w-4 md:h-4"></i></button>
-                        <button onclick="deleteAd('${ad.id}')" class="text-rose-600 hover:text-rose-700 p-2 md:p-0" title="Delete"><i data-lucide="trash-2" class="w-5 h-5 md:w-4 md:h-4"></i></button>
+                        <button onclick="editAd('${ad.id}')" class="text-indigo-600 hover:text-indigo-700 p-2 md:p-0" title="${t('edit')}"><i data-lucide="edit" class="w-5 h-5 md:w-4 md:h-4"></i></button>
+                        <button onclick="deleteAd('${ad.id}')" class="text-rose-600 hover:text-rose-700 p-2 md:p-0" title="${t('delete')}"><i data-lucide="trash-2" class="w-5 h-5 md:w-4 md:h-4"></i></button>
                       </div>
                     </td>
                   </tr>
@@ -2647,6 +2654,7 @@ function renderAdsView() {
 }
 
 function renderDeliveriesView() {
+  const isAr = state.language === 'ar';
   // Deliveries are tracked ONLY on receipts (ads are not a delivery source of truth).
   const allReceipts = getVisibleRecords(state.receipts);
   const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
@@ -2731,21 +2739,21 @@ function renderDeliveriesView() {
       <!-- Header -->
       <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
         <div>
-          <h1 class="text-2xl font-bold text-slate-800 dark:text-white">Delivery Operations</h1>
-          <p class="text-sm text-slate-500 mt-0.5">${deliveryReceipts.length} deliveries • Tracking receipts only</p>
+          <h1 class="text-2xl font-bold text-slate-800 dark:text-white">${isAr ? 'عمليات التوصيل' : 'Delivery Operations'}</h1>
+          <p class="text-sm text-slate-500 mt-0.5">${isAr ? `${deliveryReceipts.length} توصيلة • تتبع الوصولات فقط` : `${deliveryReceipts.length} deliveries • Tracking receipts only`}</p>
         </div>
         <div class="flex items-center space-x-2">
           <button onclick="refreshDeliveries()" class="glass-panel px-3 py-2 rounded-xl text-sm font-medium flex items-center space-x-2 hover:bg-slate-100 dark:hover:bg-slate-800">
             <i data-lucide="refresh-cw" class="w-4 h-4"></i>
-            <span>Refresh</span>
+            <span>${isAr ? 'تحديث' : 'Refresh'}</span>
           </button>
-          <button onclick="checkStuckDeliveries()" class="glass-panel px-3 py-2 rounded-xl text-sm font-medium flex items-center space-x-2 hover:bg-amber-50 dark:hover:bg-amber-900/20" title="Find deliveries stuck in progress for more than 3 days">
+          <button onclick="checkStuckDeliveries()" class="glass-panel px-3 py-2 rounded-xl text-sm font-medium flex items-center space-x-2 hover:bg-amber-50 dark:hover:bg-amber-900/20" title="${isAr ? 'البحث عن توصيلات عالقة قيد التنفيذ لأكثر من 3 أيام' : 'Find deliveries stuck in progress for more than 3 days'}">
             <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-600"></i>
-            <span class="text-amber-700 dark:text-amber-400">Check Stuck</span>
+            <span class="text-amber-700 dark:text-amber-400">${isAr ? 'فحص العالقة' : 'Check Stuck'}</span>
           </button>
           <button onclick="exportDeliveryReport()" class="btn-shine bg-indigo-600 text-white px-3 py-2 rounded-xl text-sm font-bold flex items-center space-x-2">
             <i data-lucide="download" class="w-4 h-4"></i>
-            <span>Export</span>
+            <span>${t('export')}</span>
           </button>
         </div>
       </div>
@@ -2754,36 +2762,36 @@ function renderDeliveriesView() {
       <div class="glass-panel rounded-2xl p-4">
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <div class="p-3 rounded-xl bg-amber-50 dark:bg-amber-900/15 border-l-4 border-amber-500">
-            <div class="text-[11px] font-bold text-amber-700 dark:text-amber-400 uppercase tracking-wide">Pending Delivery</div>
+            <div class="text-[11px] font-bold text-amber-700 dark:text-amber-400 uppercase tracking-wide">${isAr ? 'بانتظار التوصيل' : 'Pending Delivery'}</div>
             <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.pendingDelivery}</div>
-            <div class="text-[11px] text-slate-500">Receipts not yet delivered</div>
+            <div class="text-[11px] text-slate-500">${isAr ? 'وصولات لم تُوصَّل بعد' : 'Receipts not yet delivered'}</div>
           </div>
           <div class="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-900/15 border-l-4 border-emerald-500">
-            <div class="text-[11px] font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wide">Uncollected Value</div>
+            <div class="text-[11px] font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wide">${isAr ? 'قيمة غير مُحصَّلة' : 'Uncollected Value'}</div>
             <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.uncollectedLYD.toLocaleString()} <span class="text-sm">LYD</span></div>
-            <div class="text-[11px] text-slate-500">To be collected from customers</div>
+            <div class="text-[11px] text-slate-500">${isAr ? 'للتحصيل من العملاء' : 'To be collected from customers'}</div>
           </div>
           <div class="p-3 rounded-xl bg-purple-50 dark:bg-purple-900/15 border-l-4 border-purple-500">
-            <div class="text-[11px] font-bold text-purple-700 dark:text-purple-400 uppercase tracking-wide">Held by Drivers</div>
+            <div class="text-[11px] font-bold text-purple-700 dark:text-purple-400 uppercase tracking-wide">${isAr ? 'بحوزة السائقين' : 'Held by Drivers'}</div>
             <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.heldByDrivers}</div>
-            <div class="text-[11px] text-slate-500">Delivered but not in office</div>
+            <div class="text-[11px] text-slate-500">${isAr ? 'تم توصيلها لكن ليست في المكتب' : 'Delivered but not in office'}</div>
           </div>
           <div class="p-3 rounded-xl bg-blue-50 dark:bg-blue-900/15 border-l-4 border-blue-500">
-            <div class="text-[11px] font-bold text-blue-700 dark:text-blue-400 uppercase tracking-wide">Driver Cash Value</div>
+            <div class="text-[11px] font-bold text-blue-700 dark:text-blue-400 uppercase tracking-wide">${isAr ? 'قيمة نقد السائقين' : 'Driver Cash Value'}</div>
             <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.driverCashLYD.toLocaleString()} <span class="text-sm">LYD</span></div>
-            <div class="text-[11px] text-slate-500">To be collected from drivers</div>
+            <div class="text-[11px] text-slate-500">${isAr ? 'للتحصيل من السائقين' : 'To be collected from drivers'}</div>
           </div>
         </div>
         <!-- Pipeline as a slim strip (same numbers, no icon towers) -->
         <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700 flex flex-wrap items-center gap-x-5 gap-y-1 text-sm">
-          <span class="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Pipeline</span>
-          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-slate-400"></span>Pending Assignment <b>${stats.pendingAssignment}</b></span>
+          <span class="text-[11px] font-bold text-slate-400 uppercase tracking-wide">${isAr ? 'خط السير' : 'Pipeline'}</span>
+          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-slate-400"></span>${isAr ? 'بانتظار التعيين' : 'Pending Assignment'} <b>${stats.pendingAssignment}</b></span>
           <span class="text-slate-300">→</span>
-          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-blue-500"></span>In Progress <b>${stats.inProgress}</b></span>
+          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-blue-500"></span>${isAr ? 'قيد التوصيل' : 'In Progress'} <b>${stats.inProgress}</b></span>
           <span class="text-slate-300">→</span>
-          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>Completed <b>${stats.completed}</b></span>
+          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>${isAr ? 'مكتمل' : 'Completed'} <b>${stats.completed}</b></span>
           <span class="text-slate-300">→</span>
-          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>Canceled <b>${stats.canceled}</b></span>
+          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>${isAr ? 'ملغي' : 'Canceled'} <b>${stats.canceled}</b></span>
         </div>
       </div>
 
@@ -2791,24 +2799,24 @@ function renderDeliveriesView() {
       <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
         <!-- Driver Performance (compact rows, same numbers) -->
         <div class="glass-panel rounded-2xl p-4">
-          <h2 class="text-base font-bold text-slate-800 dark:text-white mb-3">Driver Performance</h2>
+          <h2 class="text-base font-bold text-slate-800 dark:text-white mb-3">${isAr ? 'أداء السائقين' : 'Driver Performance'}</h2>
           <div class="space-y-2 max-h-80 overflow-y-auto">
             ${driverPerformance.length === 0 ? `
-              <div class="text-center py-6 text-slate-500 text-sm">No delivery drivers found</div>
+              <div class="text-center py-6 text-slate-500 text-sm">${isAr ? 'لا يوجد سائقو توصيل' : 'No delivery drivers found'}</div>
             ` : driverPerformance.map((driver, idx) => `
               <div class="p-3 rounded-xl border ${idx === 0 && driver.totalAssigned > 0 ? 'border-amber-300 bg-amber-50/60 dark:bg-amber-900/15 dark:border-amber-700' : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50'}">
                 <div class="flex items-center justify-between gap-2">
                   <div class="font-bold text-sm text-slate-800 dark:text-white truncate">
                     ${idx === 0 && driver.totalAssigned > 0 ? '⭐ ' : ''}${Security.escapeHtml(driver.name || '')}
-                    <span class="font-normal text-xs text-slate-500">• ${driver.totalAssigned} assigned</span>
+                    <span class="font-normal text-xs text-slate-500">• ${driver.totalAssigned} ${isAr ? 'مُعيَّنة' : 'assigned'}</span>
                   </div>
                   <div class="text-sm font-black ${driver.successRate >= 80 ? 'text-emerald-600' : driver.successRate >= 50 ? 'text-amber-600' : 'text-slate-500'}">${driver.successRate}%</div>
                 </div>
                 <div class="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-slate-600 dark:text-slate-300">
-                  <span>Pending <b>${driver.pending}</b></span>
-                  <span class="text-blue-600 dark:text-blue-400">Active <b>${driver.inProgress}</b></span>
-                  <span class="text-emerald-600 dark:text-emerald-400">Done <b>${driver.completed}</b></span>
-                  <span class="text-purple-600 dark:text-purple-400">Held <b>${driver.heldCash.toLocaleString()}</b> LYD</span>
+                  <span>${isAr ? 'معلّقة' : 'Pending'} <b>${driver.pending}</b></span>
+                  <span class="text-blue-600 dark:text-blue-400">${isAr ? 'نشطة' : 'Active'} <b>${driver.inProgress}</b></span>
+                  <span class="text-emerald-600 dark:text-emerald-400">${isAr ? 'منجزة' : 'Done'} <b>${driver.completed}</b></span>
+                  <span class="text-purple-600 dark:text-purple-400">${isAr ? 'بحوزته' : 'Held'} <b>${driver.heldCash.toLocaleString()}</b> LYD</span>
                 </div>
               </div>
             `).join('')}
@@ -2818,18 +2826,18 @@ function renderDeliveriesView() {
         <!-- Delivery Log -->
         <div class="xl:col-span-2 glass-panel rounded-2xl p-4">
           <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 mb-3">
-            <h2 class="text-base font-bold text-slate-800 dark:text-white">Delivery Log</h2>
+            <h2 class="text-base font-bold text-slate-800 dark:text-white">${isAr ? 'سجل التوصيل' : 'Delivery Log'}</h2>
             <div class="flex flex-wrap items-center gap-2 w-full md:w-auto">
               <div class="relative flex-1 md:flex-none">
                 <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"></i>
-                <input type="text" placeholder="Search..." value="${Security.escapeHtml(searchTerm)}" oninput="filterDeliveries('search', this.value)" class="glass-input w-full md:w-40 pl-9 pr-3 py-2 rounded-lg text-sm">
+                <input type="text" placeholder="${isAr ? 'بحث...' : 'Search...'}" value="${Security.escapeHtml(searchTerm)}" oninput="filterDeliveries('search', this.value)" class="glass-input w-full md:w-40 pl-9 pr-3 py-2 rounded-lg text-sm">
               </div>
               <select onchange="filterDeliveries('status', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
-                <option value="all" ${filterStatus === 'all' ? 'selected' : ''}>All Status</option>
-                ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${filterStatus === s ? 'selected' : ''}>${s}</option>`).join('')}
+                <option value="all" ${filterStatus === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All Status'}</option>
+                ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${filterStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
               </select>
               <select onchange="filterDeliveries('driver', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
-                <option value="all" ${filterDriver === 'all' ? 'selected' : ''}>All Drivers</option>
+                <option value="all" ${filterDriver === 'all' ? 'selected' : ''}>${isAr ? 'كل السائقين' : 'All Drivers'}</option>
                 ${deliveryUsers.map(u => `<option value="${u.id}" ${filterDriver === u.id ? 'selected' : ''}>${Security.escapeHtml(u.name || '')}</option>`).join('')}
               </select>
             </div>
@@ -2840,13 +2848,13 @@ function renderDeliveriesView() {
             <table class="w-full text-sm">
               <thead>
                 <tr class="bg-slate-50 dark:bg-slate-800/50">
-                  <th class="text-left px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">Customer</th>
-                  <th class="text-left px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">Delivery Person</th>
-                  <th class="text-right px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">Amount</th>
-                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">Status</th>
-                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">Office Handover</th>
-                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">Date</th>
-                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">Actions</th>
+                  <th class="text-left px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'العميل' : 'Customer'}</th>
+                  <th class="text-left px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'السائق' : 'Delivery Person'}</th>
+                  <th class="text-right px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'المبلغ' : 'Amount'}</th>
+                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'الحالة' : 'Status'}</th>
+                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'التسليم للمكتب' : 'Office Handover'}</th>
+                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'التاريخ' : 'Date'}</th>
+                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'إجراءات' : 'Actions'}</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
@@ -2854,7 +2862,7 @@ function renderDeliveriesView() {
                   <tr>
                     <td colspan="7" class="px-4 py-12 text-center">
                       <i data-lucide="inbox" class="w-12 h-12 mx-auto text-slate-300 mb-3"></i>
-                      <p class="text-slate-500">No deliveries found</p>
+                      <p class="text-slate-500">${isAr ? 'لا توجد توصيلات' : 'No deliveries found'}</p>
                     </td>
                   </tr>
                 ` : filteredDeliveries.slice(0, 20).map(ad => {
@@ -2880,9 +2888,9 @@ function renderDeliveriesView() {
                             ${isReceipt ? '<i data-lucide="receipt" class="w-4 h-4"></i>' : (customer?.name?.charAt(0) || '?')}
                           </div>
                           <div>
-                            <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || 'Unknown')}</div>
-                            <div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber || customer?.phones?.[0] || 'No phone')}</div>
-                            <span class="text-[10px] px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 font-medium">Receipt</span>
+                            <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</div>
+                            <div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber || customer?.phones?.[0] || (isAr ? 'لا يوجد هاتف' : 'No phone'))}</div>
+                            <span class="text-[10px] px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 font-medium">${isAr ? 'وصل' : 'Receipt'}</span>
                           </div>
                         </div>
                       </td>
@@ -2896,21 +2904,21 @@ function renderDeliveriesView() {
                           </div>
                         ` : (canAssign ? `
                           <select onchange="assignDelivery('${ad.id}', this.value)" class="glass-input px-2 py-1 rounded-lg text-xs">
-                            <option value="">Assign...</option>
+                            <option value="">${isAr ? 'تعيين...' : 'Assign...'}</option>
                             ${deliveryUsers.map(u => `<option value="${u.id}">${Security.escapeHtml(u.name || '')}</option>`).join('')}
                           </select>
-                        ` : `<span class="text-xs text-slate-400">Unassigned</span>`)}
+                        ` : `<span class="text-xs text-slate-400">${isAr ? 'غير مُعيَّن' : 'Unassigned'}</span>`)}
                       </td>
                       <td class="px-4 py-3 text-right">
                         <div class="font-bold text-emerald-600">${debtLocal.toLocaleString()} LYD</div>
                         <div class="text-xs text-slate-500">$${debtUSD.toFixed(2)}</div>
                         ${String(ad.deliveryStatus || '') === 'Delivered' ? `
-                          <div class="text-[10px] text-slate-500 mt-1">Collected: <span class="font-bold text-slate-700 dark:text-slate-300">${collectedCash.toLocaleString()} LYD</span></div>
+                          <div class="text-[10px] text-slate-500 mt-1">${isAr ? 'المُحصَّل' : 'Collected'}: <span class="font-bold text-slate-700 dark:text-slate-300">${collectedCash.toLocaleString()} LYD</span></div>
                         ` : ''}
                       </td>
                       <td class="px-4 py-3 text-center">
                         <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-bold ${statusColors[ad.deliveryStatus] || 'bg-slate-100 text-slate-700'}">
-                          ${ad.deliveryStatus}
+                          ${trStatus(ad.deliveryStatus)}
                         </span>
                       </td>
                       <td class="px-4 py-3 text-center">
@@ -2919,16 +2927,16 @@ function renderDeliveriesView() {
                         ` : receivedInOffice ? `
                           <div class="inline-flex flex-col items-center gap-1">
                             <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">
-                              <i data-lucide="check" class="w-3 h-3 mr-1"></i>Received
+                              <i data-lucide="check" class="w-3 h-3 mr-1"></i>${isAr ? 'تم الاستلام' : 'Received'}
                             </span>
-                            ${canOffice ? `<button onclick="undoOfficeHandover('${ad.id}')" class="text-[10px] font-bold text-rose-600 hover:text-rose-700">Undo</button>` : ''}
+                            ${canOffice ? `<button onclick="undoOfficeHandover('${ad.id}')" class="text-[10px] font-bold text-rose-600 hover:text-rose-700">${isAr ? 'تراجع' : 'Undo'}</button>` : ''}
                           </div>
                         ` : `
                           ${canOffice ? `
                             <button onclick="markOfficeHandover('${ad.id}')" class="inline-flex items-center px-2 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-700 hover:bg-amber-200 dark:bg-amber-900/30 dark:text-amber-300 transition-colors">
-                              <i data-lucide="hand" class="w-3 h-3 mr-1"></i>Receive
+                              <i data-lucide="hand" class="w-3 h-3 mr-1"></i>${isAr ? 'استلام' : 'Receive'}
                             </button>
-                          ` : `<span class="text-xs text-slate-500">Pending</span>`}
+                          ` : `<span class="text-xs text-slate-500">${isAr ? 'قيد الانتظار' : 'Pending'}</span>`}
                         `}
                       </td>
                       <td class="px-4 py-3 text-center">
@@ -2937,13 +2945,13 @@ function renderDeliveriesView() {
                       <td class="px-4 py-3">
                         <div class="flex items-center justify-center space-x-1">
                           <select onchange="updateDeliveryStatus('${ad.id}', this.value)" class="glass-input px-2 py-1 rounded-lg text-xs w-24">
-                            ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${s}</option>`).join('')}
+                            ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
                           </select>
-                          <button onclick="showDeliveryDetails('${ad.id}')" class="p-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-300 transition-colors" title="View Details">
+                          <button onclick="showDeliveryDetails('${ad.id}')" class="p-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-300 transition-colors" title="${isAr ? 'عرض التفاصيل' : 'View Details'}">
                             <i data-lucide="eye" class="w-4 h-4"></i>
                           </button>
                           ${canAssign && String(ad.deliveryStatus || '') !== 'Delivered' ? `
-                            <button onclick="removeDeliveryMission('${ad.id}')" class="p-1.5 rounded-lg bg-rose-100 text-rose-700 hover:bg-rose-200 dark:bg-rose-900/30 dark:text-rose-300 transition-colors" title="Delete Mission">
+                            <button onclick="removeDeliveryMission('${ad.id}')" class="p-1.5 rounded-lg bg-rose-100 text-rose-700 hover:bg-rose-200 dark:bg-rose-900/30 dark:text-rose-300 transition-colors" title="${isAr ? 'حذف المهمة' : 'Delete Mission'}">
                               <i data-lucide="trash-2" class="w-4 h-4"></i>
                             </button>
                           ` : ''}
@@ -2957,7 +2965,7 @@ function renderDeliveriesView() {
           </div>
           ${filteredDeliveries.length > 20 ? `
             <div class="mt-3 text-center text-sm text-slate-500">
-              Showing 20 of ${filteredDeliveries.length} deliveries
+              ${isAr ? `عرض 20 من ${filteredDeliveries.length} توصيلة` : `Showing 20 of ${filteredDeliveries.length} deliveries`}
             </div>
           ` : ''}
         </div>
@@ -2966,14 +2974,14 @@ function renderDeliveriesView() {
       <!-- Active Deliveries (compact cards, same actions) -->
       <div class="glass-panel rounded-2xl p-4">
         <h2 class="text-base font-bold text-slate-800 dark:text-white mb-3">
-          Active Deliveries
+          ${isAr ? 'التوصيلات النشطة' : 'Active Deliveries'}
           <span class="ml-1 px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">${activeDeliveries.length}</span>
         </h2>
         <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
           ${activeDeliveries.length === 0 ? `
             <div class="col-span-full py-8 text-center">
-              <p class="text-slate-500 font-medium">All caught up!</p>
-              <p class="text-sm text-slate-400">No pending deliveries at the moment</p>
+              <p class="text-slate-500 font-medium">${isAr ? 'كل شيء منجز!' : 'All caught up!'}</p>
+              <p class="text-sm text-slate-400">${isAr ? 'لا توجد توصيلات معلّقة حالياً' : 'No pending deliveries at the moment'}</p>
             </div>
           ` : activeDeliveries.map(ad => {
             const customer = state.customers.find(c => c.id === ad.customerId);
@@ -2984,12 +2992,12 @@ function renderDeliveriesView() {
               <div class="rounded-xl border ${isUrgent ? 'border-rose-300 dark:border-rose-700' : 'border-slate-200 dark:border-slate-700'} bg-white dark:bg-slate-800/50 p-3">
                 <div class="flex items-start justify-between gap-2 mb-2">
                   <div class="min-w-0">
-                    <h3 class="font-bold text-sm text-slate-800 dark:text-white truncate">${Security.escapeHtml(customer?.name || 'Unknown')}</h3>
-                    <p class="text-xs text-slate-500 truncate">${Security.escapeHtml(ad.phoneNumber || customer?.phones?.[0] || 'No phone')}</p>
+                    <h3 class="font-bold text-sm text-slate-800 dark:text-white truncate">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</h3>
+                    <p class="text-xs text-slate-500 truncate">${Security.escapeHtml(ad.phoneNumber || customer?.phones?.[0] || (isAr ? 'لا يوجد هاتف' : 'No phone'))}</p>
                   </div>
                   <div class="flex flex-col items-end gap-1 flex-shrink-0">
-                    <span class="px-2 py-0.5 rounded-lg text-[11px] font-bold ${ad.deliveryStatus === 'In Progress' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'}">${ad.deliveryStatus}</span>
-                    ${isUrgent ? '<span class="px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase bg-rose-500 text-white">Urgent</span>' : ''}
+                    <span class="px-2 py-0.5 rounded-lg text-[11px] font-bold ${ad.deliveryStatus === 'In Progress' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'}">${trStatus(ad.deliveryStatus)}</span>
+                    ${isUrgent ? `<span class="px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase bg-rose-500 text-white">${isAr ? 'عاجل' : 'Urgent'}</span>` : ''}
                   </div>
                 </div>
 
@@ -2999,26 +3007,26 @@ function renderDeliveriesView() {
                 </div>
 
                 ${deliveryPerson ? `
-                  <div class="mb-2 text-xs font-medium text-indigo-700 dark:text-indigo-300">Driver: ${Security.escapeHtml(deliveryPerson.name || '')}</div>
+                  <div class="mb-2 text-xs font-medium text-indigo-700 dark:text-indigo-300">${isAr ? 'السائق' : 'Driver'}: ${Security.escapeHtml(deliveryPerson.name || '')}</div>
                 ` : (canAssign ? `
                   <select onchange="assignDelivery('${ad.id}', this.value)" class="w-full glass-input px-3 py-2 rounded-lg text-sm mb-2">
-                    <option value="">Assign driver...</option>
+                    <option value="">${isAr ? 'تعيين سائق...' : 'Assign driver...'}</option>
                     ${deliveryUsers.map(u => `<option value="${u.id}">${Security.escapeHtml(u.name || '')}</option>`).join('')}
                   </select>
-                ` : `<div class="mb-2 text-xs text-slate-400">Unassigned</div>`)}
+                ` : `<div class="mb-2 text-xs text-slate-400">${isAr ? 'غير مُعيَّن' : 'Unassigned'}</div>`)}
 
                 <div class="flex space-x-2">
                   ${String(ad.deliveryStatus || '') !== 'Delivered' && String(ad.deliveryStatus || '') !== 'Canceled' ? `
                     <button onclick="openDeliveryCancelModal('${ad.id}')" class="flex-1 bg-rose-600 text-white px-3 py-1.5 rounded-lg text-sm font-bold flex items-center justify-center space-x-1">
                       <i data-lucide="x-circle" class="w-4 h-4"></i>
-                      <span>Cancel</span>
+                      <span>${t('cancel')}</span>
                     </button>
                   ` : ''}
-                  <button onclick="showDeliveryDetails('${ad.id}')" class="bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 px-3 py-1.5 rounded-lg text-sm" title="View Details">
+                  <button onclick="showDeliveryDetails('${ad.id}')" class="bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 px-3 py-1.5 rounded-lg text-sm" title="${isAr ? 'عرض التفاصيل' : 'View Details'}">
                     <i data-lucide="more-horizontal" class="w-4 h-4"></i>
                   </button>
                   ${canAssign && String(ad.deliveryStatus || '') !== 'Delivered' ? `
-                    <button onclick="removeDeliveryMission('${ad.id}')" class="bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 px-3 py-1.5 rounded-lg text-sm" title="Delete Mission">
+                    <button onclick="removeDeliveryMission('${ad.id}')" class="bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 px-3 py-1.5 rounded-lg text-sm" title="${isAr ? 'حذف المهمة' : 'Delete Mission'}">
                       <i data-lucide="trash-2" class="w-4 h-4"></i>
                     </button>
                   ` : ''}
@@ -3045,7 +3053,7 @@ function filterDeliveries(type, value) {
 
 // Refresh deliveries
 function refreshDeliveries() {
-  showNotification('Refreshing', 'Delivery data updated', 'success');
+  showNotification(state.language === 'ar' ? 'جارٍ التحديث' : 'Refreshing', state.language === 'ar' ? 'تم تحديث بيانات التوصيل' : 'Delivery data updated', 'success');
   render();
   lucide.createIcons();
 }
@@ -3082,22 +3090,23 @@ function exportDeliveryReport() {
   a.download = `delivery-report-${getTodayDateString()}.csv`;
   a.click();
   URL.revokeObjectURL(url);
-  showNotification('Export Complete', 'Delivery report downloaded', 'success');
+  showNotification(state.language === 'ar' ? 'اكتمل التصدير' : 'Export Complete', state.language === 'ar' ? 'تم تنزيل تقرير التوصيل' : 'Delivery report downloaded', 'success');
 }
 
 // Check for stuck deliveries (In Progress for more than X hours)
 async function checkStuckDeliveries() {
+  const isAr = state.language === 'ar';
   if (!isCurrentUserAdmin() && !currentUserHasPermission('deliveries', 'assign')) {
-    showNotification('Access Denied', 'Admin or delivery manager only', 'error');
+    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'للأدمن أو مسؤول التوصيل فقط' : 'Admin or delivery manager only', 'error');
     return;
   }
-  
-  const hoursInput = prompt('Find deliveries stuck for more than how many hours? (default: 72 = 3 days)', '72');
+
+  const hoursInput = prompt(isAr ? 'البحث عن توصيلات عالقة لأكثر من كم ساعة؟ (الافتراضي: 72 = 3 أيام)' : 'Find deliveries stuck for more than how many hours? (default: 72 = 3 days)', '72');
   if (!hoursInput) return;
-  
+
   const hours = parseInt(hoursInput);
   if (isNaN(hours) || hours < 1) {
-    showNotification('Validation Error', 'Minimum 1 hour required', 'error');
+    showNotification(isAr ? 'خطأ في التحقق' : 'Validation Error', isAr ? 'الحد الأدنى ساعة واحدة' : 'Minimum 1 hour required', 'error');
     return;
   }
   
@@ -3113,14 +3122,14 @@ async function checkStuckDeliveries() {
     
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'Check failed' }));
-      showNotification('Error', err.detail || 'Check failed', 'error');
+      showNotification(isAr ? 'خطأ' : 'Error', err.detail || (isAr ? 'فشل الفحص' : 'Check failed'), 'error');
       return;
     }
-    
+
     const result = await res.json();
-    
+
     if (result.stuck_count === 0) {
-      showNotification('All Good!', `No deliveries stuck for more than ${hours} hours`, 'success');
+      showNotification(isAr ? 'كل شيء جيد!' : 'All Good!', isAr ? `لا توجد توصيلات عالقة لأكثر من ${hours} ساعة` : `No deliveries stuck for more than ${hours} hours`, 'success');
       return;
     }
     
@@ -3137,17 +3146,17 @@ async function checkStuckDeliveries() {
         <div class="p-3 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700">
           <div class="flex justify-between items-start mb-2">
             <div>
-              <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || 'Unknown')}</div>
-              <div class="text-xs text-slate-500">Receipt: ${Security.escapeHtml(d.tempReceiptNo || d.finalReceiptNo || d.id)}</div>
+              <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</div>
+              <div class="text-xs text-slate-500">${isAr ? 'الوصل' : 'Receipt'}: ${Security.escapeHtml(d.tempReceiptNo || d.finalReceiptNo || d.id)}</div>
             </div>
             <div class="text-right">
-              <div class="text-sm font-bold text-amber-700">${d.hoursStuck}h stuck</div>
-              <div class="text-xs text-slate-500">${Security.escapeHtml(driver?.name || 'Unassigned')}</div>
+              <div class="text-sm font-bold text-amber-700">${isAr ? `عالقة منذ ${d.hoursStuck} ساعة` : `${d.hoursStuck}h stuck`}</div>
+              <div class="text-xs text-slate-500">${Security.escapeHtml(driver?.name || (isAr ? 'غير مُعيَّن' : 'Unassigned'))}</div>
             </div>
           </div>
           <div class="flex justify-between text-xs">
-            <span class="text-slate-600 dark:text-slate-400">Amount: ${(d.amountLocal || 0).toLocaleString()} LYD</span>
-            <button onclick="navigateTo('deliveries'); this.closest('#app-modal').remove();" class="text-indigo-600 hover:text-indigo-700 font-bold">View →</button>
+            <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ' : 'Amount'}: ${(d.amountLocal || 0).toLocaleString()} LYD</span>
+            <button onclick="navigateTo('deliveries'); this.closest('#app-modal').remove();" class="text-indigo-600 hover:text-indigo-700 font-bold">${isAr ? 'عرض ←' : 'View →'}</button>
           </div>
         </div>
       `;
@@ -3161,8 +3170,8 @@ async function checkStuckDeliveries() {
               <i data-lucide="alert-triangle" class="w-5 h-5 text-white"></i>
             </span>
             <div>
-              <div class="text-lg font-bold text-slate-800 dark:text-white">⚠️ Stuck Deliveries</div>
-              <div class="text-xs text-slate-500">${result.stuck_count} found (> ${hours} hours)</div>
+              <div class="text-lg font-bold text-slate-800 dark:text-white">⚠️ ${isAr ? 'توصيلات عالقة' : 'Stuck Deliveries'}</div>
+              <div class="text-xs text-slate-500">${isAr ? `تم العثور على ${result.stuck_count} (أكثر من ${hours} ساعة)` : `${result.stuck_count} found (> ${hours} hours)`}</div>
             </div>
           </div>
           <button onclick="this.closest('#app-modal').remove()" class="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
@@ -3176,15 +3185,15 @@ async function checkStuckDeliveries() {
         
         <div class="mt-4 pt-4 border-t border-slate-200 dark:border-slate-700 text-center text-xs text-slate-500">
           <i data-lucide="info" class="w-3 h-3 inline mr-1"></i>
-          Consider following up with drivers or canceling stuck deliveries
+          ${isAr ? 'يُنصح بمتابعة السائقين أو إلغاء التوصيلات العالقة' : 'Consider following up with drivers or canceling stuck deliveries'}
         </div>
       </div>
     `;
-    
+
     document.body.appendChild(modal);
     IconQueue.schedule(modal);
   } catch (error) {
-    showNotification('Error', 'Check failed: ' + error.message, 'error');
+    showNotification(isAr ? 'خطأ' : 'Error', (isAr ? 'فشل الفحص: ' : 'Check failed: ') + error.message, 'error');
   }
 }
 
@@ -3223,18 +3232,19 @@ function setOfficeHandover(itemId, received) {
   const id = String(itemId || '');
   if (!id) return;
 
+  const isAr = state.language === 'ar';
   const roleLower = String(state.currentUser?.role || '').toLowerCase();
   if (!roleLower) {
-    showNotification('Access Denied', 'Please login', 'error');
+    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'يرجى تسجيل الدخول' : 'Please login', 'error');
     return;
   }
   // Office handover is an office/admin action (not a driver action).
   if (roleLower === 'delivery') {
-    showNotification('Not Allowed', 'Office handover can only be done by office/admin.', 'warning');
+    showNotification(isAr ? 'غير مسموح' : 'Not Allowed', isAr ? 'التسليم للمكتب يتم فقط بواسطة المكتب/الأدمن.' : 'Office handover can only be done by office/admin.', 'warning');
     return;
   }
   if (!currentUserHasPermission('deliveries', 'markCollected') && !isCurrentUserAdmin()) {
-    showNotification('Access Denied', 'You do not have permission to mark office handover', 'error');
+    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'ليس لديك صلاحية تسجيل التسليم للمكتب' : 'You do not have permission to mark office handover', 'error');
     return;
   }
 
@@ -3258,7 +3268,7 @@ function setOfficeHandover(itemId, received) {
   else updateRecord(state.ads, id, updates);
 
   addAuditLog('update', id, next ? 'Office handover marked as received' : 'Office handover undone', { isReceipt: !!receipt });
-  showNotification('Success', next ? 'Cash received at office' : 'Office handover undone', 'success');
+  showNotification(isAr ? 'نجاح' : 'Success', next ? (isAr ? 'تم استلام النقد في المكتب' : 'Cash received at office') : (isAr ? 'تم التراجع عن التسليم للمكتب' : 'Office handover undone'), 'success');
   render();
   if (window.lucide) lucide.createIcons();
 }
@@ -3277,23 +3287,24 @@ function removeDeliveryMission(itemId) {
   const id = String(itemId || '');
   if (!id) return;
 
+  const isAr = state.language === 'ar';
   const roleLower = String(state.currentUser?.role || '').toLowerCase();
   if (!roleLower) {
-    showNotification('Access Denied', 'Please login', 'error');
+    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'يرجى تسجيل الدخول' : 'Please login', 'error');
     return;
   }
   if (roleLower === 'delivery') {
-    showNotification('Not Allowed', 'Drivers cannot delete delivery missions.', 'warning');
+    showNotification(isAr ? 'غير مسموح' : 'Not Allowed', isAr ? 'لا يمكن للسائقين حذف مهام التوصيل.' : 'Drivers cannot delete delivery missions.', 'warning');
     return;
   }
   if (!currentUserHasPermission('deliveries', 'assign') && !isCurrentUserAdmin()) {
-    showNotification('Access Denied', 'You do not have permission to remove delivery missions', 'error');
+    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'ليس لديك صلاحية إزالة مهام التوصيل' : 'You do not have permission to remove delivery missions', 'error');
     return;
   }
 
   const receipt = state.receipts.find(r => r && !r._deleted && String(r.id) === id);
   if (!receipt) {
-    showNotification('Error', 'Delivery receipt not found', 'error');
+    showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'وصل التوصيل غير موجود' : 'Delivery receipt not found', 'error');
     return;
   }
 
@@ -3340,13 +3351,14 @@ function removeDeliveryMission(itemId) {
     statusDetail: nextStatusDetail
   });
 
-  showNotification('Removed', 'Delivery mission removed', 'success');
+  showNotification(state.language === 'ar' ? 'تمت الإزالة' : 'Removed', state.language === 'ar' ? 'تمت إزالة مهمة التوصيل' : 'Delivery mission removed', 'success');
   render();
   if (window.lucide) lucide.createIcons();
 }
 
 // Show delivery details modal
 function showDeliveryDetails(itemId) {
+  const isAr = state.language === 'ar';
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
   const ad = isReceipt || state.ads.find(a => a.id === itemId);
@@ -3372,7 +3384,7 @@ function showDeliveryDetails(itemId) {
           <span class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
             <i data-lucide="truck" class="w-5 h-5 text-white"></i>
           </span>
-          <span>Delivery Details</span>
+          <span>${isAr ? 'تفاصيل التوصيل' : 'Delivery Details'}</span>
         </h2>
         <button onclick="this.closest('#app-modal').remove()" class="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
           <i data-lucide="x" class="w-4 h-4 text-slate-600 dark:text-slate-300"></i>
@@ -3387,10 +3399,10 @@ function showDeliveryDetails(itemId) {
               ${customer?.name?.charAt(0) || '?'}
             </div>
             <div>
-              <h3 class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || 'Unknown')}</h3>
+              <h3 class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</h3>
               <p class="text-sm text-slate-500 flex items-center space-x-1">
                 <i data-lucide="phone" class="w-3 h-3"></i>
-                <span>${Security.escapeHtml(ad.phoneNumber || customer?.phones?.[0] || 'No phone')}</span>
+                <span>${Security.escapeHtml(ad.phoneNumber || customer?.phones?.[0] || (isAr ? 'لا يوجد هاتف' : 'No phone'))}</span>
               </p>
             </div>
           </div>
@@ -3399,11 +3411,11 @@ function showDeliveryDetails(itemId) {
         <!-- Amount Details -->
         <div class="grid grid-cols-2 gap-3">
           <div class="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-100 dark:border-emerald-800">
-            <div class="text-xs text-emerald-600 dark:text-emerald-400 font-medium mb-1">Amount (LYD)</div>
+            <div class="text-xs text-emerald-600 dark:text-emerald-400 font-medium mb-1">${isAr ? 'المبلغ (LYD)' : 'Amount (LYD)'}</div>
             <div class="text-2xl font-black text-emerald-700 dark:text-emerald-300">${(ad.amountLocal || 0).toLocaleString()}</div>
           </div>
           <div class="p-4 rounded-xl bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800">
-            <div class="text-xs text-blue-600 dark:text-blue-400 font-medium mb-1">Amount (USD)</div>
+            <div class="text-xs text-blue-600 dark:text-blue-400 font-medium mb-1">${isAr ? 'المبلغ (USD)' : 'Amount (USD)'}</div>
             <div class="text-2xl font-black text-blue-700 dark:text-blue-300">$${(ad.amountUSD || 0).toFixed(2)}</div>
           </div>
         </div>
@@ -3411,15 +3423,15 @@ function showDeliveryDetails(itemId) {
         <!-- Status & Driver -->
         <div class="grid grid-cols-2 gap-3">
           <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
-            <div class="text-xs text-slate-500 font-medium mb-2">Status</div>
+            <div class="text-xs text-slate-500 font-medium mb-2">${t('status')}</div>
             <select onchange="updateDeliveryStatus('${ad.id}', this.value); this.closest('#app-modal').remove();" class="w-full glass-input px-3 py-2 rounded-lg text-sm font-medium">
-              ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${s}</option>`).join('')}
+              ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
             </select>
           </div>
           <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
-            <div class="text-xs text-slate-500 font-medium mb-2">Driver</div>
+            <div class="text-xs text-slate-500 font-medium mb-2">${isAr ? 'السائق' : 'Driver'}</div>
             <select onchange="assignDelivery('${ad.id}', this.value); this.closest('#app-modal').remove();" class="w-full glass-input px-3 py-2 rounded-lg text-sm font-medium">
-              <option value="">Unassigned</option>
+              <option value="">${isAr ? 'غير مُعيَّن' : 'Unassigned'}</option>
               ${deliveryUsers.map(u => `<option value="${u.id}" ${ad.deliveryPersonId === u.id ? 'selected' : ''}>${Security.escapeHtml(u.name || '')}</option>`).join('')}
             </select>
           </div>
@@ -3427,26 +3439,26 @@ function showDeliveryDetails(itemId) {
         
         <!-- Tracking Info -->
         <div class="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
-          <div class="text-xs text-slate-500 font-medium mb-3">Tracking Information</div>
+          <div class="text-xs text-slate-500 font-medium mb-3">${isAr ? 'معلومات التتبع' : 'Tracking Information'}</div>
           <div class="space-y-2 text-sm">
             <div class="flex justify-between">
-              <span class="text-slate-500">Payment Method:</span>
-              <span class="font-medium">${ad.paymentMethod || 'N/A'}</span>
+              <span class="text-slate-500">${isAr ? 'طريقة الدفع' : 'Payment Method'}:</span>
+              <span class="font-medium">${ad.paymentMethod ? trMethod(ad.paymentMethod) : (isAr ? 'غير متوفر' : 'N/A')}</span>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-500">Wasil Card:</span>
-              <span class="font-mono">${ad.deliveryCardNumber || 'N/A'}</span>
+              <span class="text-slate-500">${isAr ? 'بطاقة واصل' : 'Wasil Card'}:</span>
+              <span class="font-mono">${ad.deliveryCardNumber || (isAr ? 'غير متوفر' : 'N/A')}</span>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-500">Collected:</span>
-              <span class="${ad.isPaid ? 'text-emerald-600 font-bold' : 'text-amber-600'}">${ad.isPaid ? 'Yes' : 'No'}</span>
+              <span class="text-slate-500">${isAr ? 'مُحصَّل' : 'Collected'}:</span>
+              <span class="${ad.isPaid ? 'text-emerald-600 font-bold' : 'text-amber-600'}">${ad.isPaid ? (isAr ? 'نعم' : 'Yes') : (isAr ? 'لا' : 'No')}</span>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-500">Office Handover:</span>
-              <span class="${receivedInOffice ? 'text-emerald-600 font-bold' : 'text-amber-600'}">${receivedInOffice ? 'Yes' : 'No'}</span>
+              <span class="text-slate-500">${isAr ? 'التسليم للمكتب' : 'Office Handover'}:</span>
+              <span class="${receivedInOffice ? 'text-emerald-600 font-bold' : 'text-amber-600'}">${receivedInOffice ? (isAr ? 'نعم' : 'Yes') : (isAr ? 'لا' : 'No')}</span>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-500">Created:</span>
+              <span class="text-slate-500">${isAr ? 'تاريخ الإنشاء' : 'Created'}:</span>
               <span>${formatDateShort(ad.createdAt || ad.date)}</span>
             </div>
           </div>
@@ -3457,34 +3469,34 @@ function showDeliveryDetails(itemId) {
           ${!ad.isPaid ? `
             <button onclick="markAsCollected('${ad.id}'); this.closest('#app-modal').remove();" class="flex-1 btn-shine bg-gradient-to-r from-emerald-500 to-teal-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2">
               <i data-lucide="dollar-sign" class="w-5 h-5"></i>
-              <span>Mark Collected</span>
+              <span>${isAr ? 'تسجيل التحصيل' : 'Mark Collected'}</span>
             </button>
           ` : !receivedInOffice ? `
             ${canOffice ? `
               <button onclick="markOfficeHandover('${ad.id}'); this.closest('#app-modal').remove();" class="flex-1 btn-shine bg-gradient-to-r from-purple-500 to-indigo-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2">
                 <i data-lucide="hand" class="w-5 h-5"></i>
-                <span>Office Handover</span>
+                <span>${isAr ? 'تسليم للمكتب' : 'Office Handover'}</span>
               </button>
             ` : `
               <div class="flex-1 px-4 py-3 rounded-xl bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 font-bold flex items-center justify-center space-x-2">
                 <i data-lucide="clock" class="w-5 h-5"></i>
-                <span>Pending Office</span>
+                <span>${isAr ? 'بانتظار المكتب' : 'Pending Office'}</span>
               </div>
             `}
           ` : `
             <div class="flex-1 px-4 py-3 rounded-xl bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 font-bold flex items-center justify-center space-x-2">
               <i data-lucide="check-circle" class="w-5 h-5"></i>
-              <span>Received</span>
+              <span>${isAr ? 'تم الاستلام' : 'Received'}</span>
             </div>
           `}
           <button onclick="${editHandler}('${ad.id}'); this.closest('#app-modal').remove();" class="btn-shine bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2">
             <i data-lucide="edit" class="w-5 h-5"></i>
-            <span>Edit</span>
+            <span>${t('edit')}</span>
           </button>
           ${canOffice && receivedInOffice ? `
             <button onclick="undoOfficeHandover('${ad.id}'); this.closest('#app-modal').remove();" class="btn-shine bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2">
               <i data-lucide="rotate-ccw" class="w-5 h-5"></i>
-              <span>Undo</span>
+              <span>${isAr ? 'تراجع' : 'Undo'}</span>
             </button>
           ` : ''}
         </div>
@@ -3497,6 +3509,7 @@ function showDeliveryDetails(itemId) {
 }
 
 function renderDeliveryDashboard() {
+  const isAr = state.language === 'ar';
   const filterStatus = String(state.deliveryDashboardFilterStatus || 'all');
   const uid = String(state.currentUser?.id || '');
   const receiptDeliveries = getVisibleRecords(state.receipts)
@@ -3537,38 +3550,38 @@ function renderDeliveryDashboard() {
       <!-- Header with Logout -->
       <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
         <div>
-          <h1 class="text-xl sm:text-2xl md:text-3xl font-bold text-slate-800 dark:text-white">Delivery Dashboard</h1>
-          <p class="text-xs sm:text-sm text-slate-500 mt-1">Welcome, ${Security.escapeHtml(state.currentUser?.name || '')}!</p>
+          <h1 class="text-xl sm:text-2xl md:text-3xl font-bold text-slate-800 dark:text-white">${isAr ? 'لوحة التوصيل' : 'Delivery Dashboard'}</h1>
+          <p class="text-xs sm:text-sm text-slate-500 mt-1">${isAr ? `مرحباً، ${Security.escapeHtml(state.currentUser?.name || '')}!` : `Welcome, ${Security.escapeHtml(state.currentUser?.name || '')}!`}</p>
         </div>
         <div class="flex items-center gap-2 w-full sm:w-auto">
-          <button onclick="refreshDeliveryDashboard()" class="btn-shine bg-blue-600 text-white px-3 py-2 rounded-xl font-bold flex items-center justify-center space-x-1 flex-1 sm:flex-none text-sm" title="Refresh to see latest updates">
+          <button onclick="refreshDeliveryDashboard()" class="btn-shine bg-blue-600 text-white px-3 py-2 rounded-xl font-bold flex items-center justify-center space-x-1 flex-1 sm:flex-none text-sm" title="${isAr ? 'حدِّث لرؤية آخر التحديثات' : 'Refresh to see latest updates'}">
             <i data-lucide="refresh-cw" class="w-4 h-4"></i>
-            <span>Refresh</span>
+            <span>${isAr ? 'تحديث' : 'Refresh'}</span>
           </button>
           <button onclick="handleLogout()" class="btn-shine bg-rose-600 text-white px-3 py-2 rounded-xl font-bold flex items-center justify-center space-x-1 flex-1 sm:flex-none text-sm">
             <i data-lucide="log-out" class="w-4 h-4"></i>
-            <span>Logout</span>
+            <span>${t('logout')}</span>
           </button>
         </div>
       </div>
 
       <!-- Stats -->
       <div class="grid grid-cols-2 gap-2 md:gap-4 md:grid-cols-4">
-        ${renderStatCard('Needs Delivery', needsDelivery.length, 'clock', 'from-amber-500 to-orange-600', "setDeliveryDashboardFilter('Needs Delivery')", filterStatus === 'Needs Delivery')}
-        ${renderStatCard('In Progress', inProgress.length, 'truck', 'from-blue-500 to-cyan-600', "setDeliveryDashboardFilter('In Progress')", filterStatus === 'In Progress')}
-        ${renderStatCard('Delivered', delivered.length, 'check-circle', 'from-emerald-500 to-teal-600', "setDeliveryDashboardFilter('Delivered')", filterStatus === 'Delivered')}
-        ${renderStatCard('Held', `${heldByDriver.length} (${cashHeldByDriver.toFixed(0)} LYD)`, 'wallet', 'from-purple-500 to-pink-600', "setDeliveryDashboardFilter('Held')", filterStatus === 'Held')}
+        ${renderStatCard(trStatus('Needs Delivery'), needsDelivery.length, 'clock', 'from-amber-500 to-orange-600', "setDeliveryDashboardFilter('Needs Delivery')", filterStatus === 'Needs Delivery')}
+        ${renderStatCard(trStatus('In Progress'), inProgress.length, 'truck', 'from-blue-500 to-cyan-600', "setDeliveryDashboardFilter('In Progress')", filterStatus === 'In Progress')}
+        ${renderStatCard(trStatus('Delivered'), delivered.length, 'check-circle', 'from-emerald-500 to-teal-600', "setDeliveryDashboardFilter('Delivered')", filterStatus === 'Delivered')}
+        ${renderStatCard(isAr ? 'بحوزة السائق' : 'Held', `${heldByDriver.length} (${cashHeldByDriver.toFixed(0)} LYD)`, 'wallet', 'from-purple-500 to-pink-600', "setDeliveryDashboardFilter('Held')", filterStatus === 'Held')}
       </div>
 
       <!-- My Deliveries -->
       <div class="glass-panel rounded-2xl p-3 md:p-6">
         <div class="flex items-center justify-between mb-3 md:mb-4">
-          <h2 class="text-lg md:text-xl font-bold">My Deliveries ${filterStatus !== 'all' ? `<span class="ml-1 md:ml-2 text-xs md:text-sm font-bold text-indigo-600">(${Security.escapeHtml(filterStatus)})</span>` : ''}</h2>
+          <h2 class="text-lg md:text-xl font-bold">${isAr ? 'توصيلاتي' : 'My Deliveries'} ${filterStatus !== 'all' ? `<span class="ml-1 md:ml-2 text-xs md:text-sm font-bold text-indigo-600">(${Security.escapeHtml(filterStatus === 'Held' ? (isAr ? 'بحوزة السائق' : 'Held') : trStatus(filterStatus))})</span>` : ''}</h2>
           ${filterStatus !== 'all' ? `
-            <button type="button" onclick="setDeliveryDashboardFilter('all')" class="text-xs font-bold text-slate-600 hover:text-slate-800">Show All</button>
+            <button type="button" onclick="setDeliveryDashboardFilter('all')" class="text-xs font-bold text-slate-600 hover:text-slate-800">${isAr ? 'عرض الكل' : 'Show All'}</button>
           ` : ''}
         </div>
-        ${visibleDeliveries.length === 0 ? '<p class="text-center text-slate-500 py-8">No deliveries for this filter</p>' : `
+        ${visibleDeliveries.length === 0 ? `<p class="text-center text-slate-500 py-8">${isAr ? 'لا توجد توصيلات لهذا الفلتر' : 'No deliveries for this filter'}</p>` : `
           <div class="space-y-3 w-full">
             ${visibleDeliveries.map(ad => {
               const customer = state.customers.find(c => c.id === ad.customerId);
@@ -3581,19 +3594,19 @@ function renderDeliveryDashboard() {
                   <div class="flex flex-col gap-3 md:gap-4">
                     <div class="w-full min-w-0">
                       <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 sm:gap-2">
-                        <h3 class="font-bold text-base md:text-lg truncate">${Security.escapeHtml(customer?.name || 'Unknown')}</h3>
+                        <h3 class="font-bold text-base md:text-lg truncate">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</h3>
                         ${phone ? `
                           <div class="flex items-center gap-2 flex-shrink-0">
-                            <a href="tel:${encodeURIComponent(phone)}" class="text-xs font-bold text-blue-600 hover:text-blue-700 px-2 py-1 bg-blue-50 rounded-lg">Call</a>
+                            <a href="tel:${encodeURIComponent(phone)}" class="text-xs font-bold text-blue-600 hover:text-blue-700 px-2 py-1 bg-blue-50 rounded-lg">${isAr ? 'اتصال' : 'Call'}</a>
                             ${wa ? `<a href="${wa}" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-emerald-600 hover:text-emerald-700 px-2 py-1 bg-emerald-50 rounded-lg">WhatsApp</a>` : ''}
-                            <button type="button" data-phone="${Security.escapeHtml(phone)}" onclick='copyTextToClipboard(this.dataset.phone).then(ok => showNotification(ok ? "Copied" : "Copy Failed", ok ? "Phone number copied" : "Could not copy phone number", ok ? "success" : "error"))' class="text-xs font-bold text-slate-600 hover:text-slate-700 px-2 py-1 bg-slate-100 rounded-lg">Copy</button>
+                            <button type="button" data-phone="${Security.escapeHtml(phone)}" onclick='copyTextToClipboard(this.dataset.phone).then(ok => showNotification(ok ? ${JSON.stringify(isAr ? 'تم النسخ' : 'Copied')} : ${JSON.stringify(isAr ? 'فشل النسخ' : 'Copy Failed')}, ok ? ${JSON.stringify(isAr ? 'تم نسخ رقم الهاتف' : 'Phone number copied')} : ${JSON.stringify(isAr ? 'تعذّر نسخ رقم الهاتف' : 'Could not copy phone number')}, ok ? "success" : "error"))' class="text-xs font-bold text-slate-600 hover:text-slate-700 px-2 py-1 bg-slate-100 rounded-lg">${isAr ? 'نسخ' : 'Copy'}</button>
                           </div>
                         ` : ''}
                       </div>
-                      <p class="text-xs md:text-sm text-slate-500 mt-1">${Security.escapeHtml(phone || 'No phone')}</p>
+                      <p class="text-xs md:text-sm text-slate-500 mt-1">${Security.escapeHtml(phone || (isAr ? 'لا يوجد هاتف' : 'No phone'))}</p>
                       ${ad.isReceipt && (displayTempNo || displayFinalNo) ? `
                         <div class="text-xs text-indigo-600 font-bold mt-1">
-                          Receipt: ${displayTempNo && displayFinalNo ? `${displayTempNo} → ${displayFinalNo}` : (displayTempNo ? `${displayTempNo} (Temp)` : displayFinalNo)}
+                          ${isAr ? 'الوصل' : 'Receipt'}: ${displayTempNo && displayFinalNo ? `${displayTempNo} → ${displayFinalNo}` : (displayTempNo ? `${displayTempNo} ${isAr ? '(مؤقت)' : '(Temp)'}` : displayFinalNo)}
                         </div>
                       ` : ''}
                       ${ad.isReceipt && ad.deliveryPlaceName ? `
@@ -3603,57 +3616,57 @@ function renderDeliveryDashboard() {
                       ` : ''}
                       ${ad.isReceipt && (ad.quotedDeliveryFee !== undefined && ad.quotedDeliveryFee !== null) ? `
                         <div class="text-[11px] text-slate-500 mt-0.5">
-                          Quoted fee: <span class="font-bold text-emerald-600">${Number(ad.quotedDeliveryFee || 0).toFixed(0)} LYD</span>
+                          ${isAr ? 'الرسوم المتفق عليها' : 'Quoted fee'}: <span class="font-bold text-emerald-600">${Number(ad.quotedDeliveryFee || 0).toFixed(0)} LYD</span>
                         </div>
                       ` : ''}
                       ${ad.isReceipt && ad.deliveryInstructions ? `
                         <div class="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/30 rounded-lg p-2 mt-1 border border-amber-200 dark:border-amber-800">
-                          <span class="font-bold">📝 Instructions:</span> ${Security.escapeHtml(String(ad.deliveryInstructions || ''))}
+                          <span class="font-bold">📝 ${isAr ? 'تعليمات' : 'Instructions'}:</span> ${Security.escapeHtml(String(ad.deliveryInstructions || ''))}
                         </div>
                       ` : ''}
                       <div class="flex flex-wrap items-center gap-1.5 md:gap-2 mt-2">
                         <span class="text-xs font-bold text-emerald-600">$${Number(ad.amountUSD || 0).toFixed(2)} (${Number(ad.amountLocal || 0).toFixed(0)} LYD)</span>
-                        <span class="payment-badge text-[10px] md:text-xs">${Security.escapeHtml(ad.paymentMethod || '')}</span>
-                        <span class="delivery-${(ad.deliveryStatus || '').toLowerCase().replace(' ', '')} px-2 py-0.5 md:py-1 rounded-full text-[10px] md:text-xs font-bold">${Security.escapeHtml(ad.deliveryStatus || '')}</span>
+                        <span class="payment-badge text-[10px] md:text-xs">${Security.escapeHtml(trMethod(ad.paymentMethod || ''))}</span>
+                        <span class="delivery-${(ad.deliveryStatus || '').toLowerCase().replace(' ', '')} px-2 py-0.5 md:py-1 rounded-full text-[10px] md:text-xs font-bold">${Security.escapeHtml(trStatus(ad.deliveryStatus || ''))}</span>
                         ${ad.editCount ? `<button onclick="showReceiptEditHistory('${ad.id}')" class="text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium flex items-center gap-1"><i data-lucide="history" class="w-3 h-3"></i>${ad.editCount}</button>` : ''}
                       </div>
                     </div>
                     <div class="flex flex-row md:flex-col gap-2 w-full md:w-auto">
                       ${ad.deliveryStatus === 'Needs Delivery' ? `
                         <button onclick="acceptDelivery('${ad.id}')" class="btn-shine bg-blue-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="check" class="w-4 h-4 mr-1"></i>Accept
+                          <i data-lucide="check" class="w-4 h-4 mr-1"></i>${isAr ? 'قبول' : 'Accept'}
                         </button>
                         <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>Cancel
+                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>${t('cancel')}
                         </button>
                       ` : ''}
                       ${ad.deliveryStatus === 'In Progress' && ad.isReceipt ? `
                         <button onclick="openReceiptDeliveryCompletionModal('${ad.id}')" class="btn-shine bg-emerald-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="check-circle" class="w-4 h-4 mr-1"></i>Delivered
+                          <i data-lucide="check-circle" class="w-4 h-4 mr-1"></i>${isAr ? 'تم التوصيل' : 'Delivered'}
                         </button>
                         <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>Cancel
+                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>${t('cancel')}
                         </button>
                       ` : ''}
                       ${ad.deliveryStatus === 'In Progress' && !ad.isReceipt && !ad.isPaid ? `
                         <button onclick="markAsCollected('${ad.id}')" class="btn-shine bg-emerald-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="dollar-sign" class="w-4 h-4 mr-1"></i>Collected
+                          <i data-lucide="dollar-sign" class="w-4 h-4 mr-1"></i>${isAr ? 'تم التحصيل' : 'Collected'}
                         </button>
                         <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>Cancel
+                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>${t('cancel')}
                         </button>
                       ` : ''}
                       ${ad.deliveryStatus === 'In Progress' && !ad.isReceipt && ad.isPaid ? `
                         <button onclick="markAsDelivered('${ad.id}')" class="btn-shine bg-emerald-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="check-circle" class="w-4 h-4 mr-1"></i>Delivered
+                          <i data-lucide="check-circle" class="w-4 h-4 mr-1"></i>${isAr ? 'تم التوصيل' : 'Delivered'}
                         </button>
                         <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>Cancel
+                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>${t('cancel')}
                         </button>
                       ` : ''}
                       ${ad.deliveryStatus === 'Delivered' ? `
                         <div class="text-emerald-600 font-bold text-sm flex items-center justify-center py-2">
-                          <i data-lucide="check-circle" class="w-4 h-4 mr-1"></i>Complete
+                          <i data-lucide="check-circle" class="w-4 h-4 mr-1"></i>${isAr ? 'مكتمل' : 'Complete'}
                         </div>
                       ` : ''}
                     </div>
@@ -3680,12 +3693,12 @@ function setDeliveryDashboardFilter(status) {
 async function refreshDeliveryDashboard() {
   if (!isServerModeEnabled()) {
     render();
-    showNotification('Refreshed', 'Dashboard refreshed', 'success');
+    showNotification(state.language === 'ar' ? 'تم التحديث' : 'Refreshed', state.language === 'ar' ? 'تم تحديث اللوحة' : 'Dashboard refreshed', 'success');
     return;
   }
 
   updateSyncIndicator('syncing');
-  showNotification('Syncing', 'Fetching latest data...', 'info');
+  showNotification(state.language === 'ar' ? 'جارٍ المزامنة' : 'Syncing', state.language === 'ar' ? 'جارٍ جلب أحدث البيانات...' : 'Fetching latest data...', 'info');
 
   try {
     // Clear cache to force fresh data
@@ -3708,11 +3721,11 @@ async function refreshDeliveryDashboard() {
     render();
     if (window.lucide) lucide.createIcons();
     updateSyncIndicator('synced');
-    showNotification('Refreshed', 'Dashboard updated with latest data', 'success');
+    showNotification(state.language === 'ar' ? 'تم التحديث' : 'Refreshed', state.language === 'ar' ? 'تم تحديث اللوحة بأحدث البيانات' : 'Dashboard updated with latest data', 'success');
   } catch (e) {
     console.error('Failed to refresh delivery dashboard:', e);
     updateSyncIndicator('error');
-    showNotification('Refresh Failed', 'Could not fetch latest data. Please try again.', 'error');
+    showNotification(state.language === 'ar' ? 'فشل التحديث' : 'Refresh Failed', state.language === 'ar' ? 'تعذّر جلب أحدث البيانات. يرجى المحاولة مجدداً.' : 'Could not fetch latest data. Please try again.', 'error');
     // Still render with current data
     render();
   }
@@ -3725,6 +3738,7 @@ function _findAdForDeliveryModal(adId) {
 }
 
 function openDeliveryCancelModal(itemId) {
+  const isAr = state.language === 'ar';
   const rid = String(itemId || '');
   const receipt = _findReceiptForDeliveryModal(rid);
   const ad = receipt ? null : _findAdForDeliveryModal(rid);
@@ -3732,23 +3746,23 @@ function openDeliveryCancelModal(itemId) {
   const itemType = receipt ? 'receipt' : 'ad';
 
   if (!item) {
-    showNotification('Error', 'Delivery not found', 'error');
+    showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'التوصيلة غير موجودة' : 'Delivery not found', 'error');
     return;
   }
 
   const roleLower = String(state.currentUser?.role || '').toLowerCase();
   if (roleLower === 'delivery') {
     if (String(item.deliveryPersonId || '') !== String(state.currentUser?.id || '')) {
-      showNotification('Access Denied', 'This delivery is not assigned to you', 'error');
+      showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'هذه التوصيلة غير مُعيَّنة لك' : 'This delivery is not assigned to you', 'error');
       return;
     }
   } else if (!roleLower) {
-    showNotification('Access Denied', 'Please login', 'error');
+    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'يرجى تسجيل الدخول' : 'Please login', 'error');
     return;
   }
 
   if (String(item.deliveryStatus || '') === 'Delivered') {
-    showNotification('Not Allowed', 'Already delivered.', 'warning');
+    showNotification(isAr ? 'غير مسموح' : 'Not Allowed', isAr ? 'تم التوصيل بالفعل.' : 'Already delivered.', 'warning');
     return;
   }
 
@@ -3772,10 +3786,10 @@ function openDeliveryCancelModal(itemId) {
             <i data-lucide="x-circle" class="w-5 h-5 text-white"></i>
           </span>
           <div>
-            <div class="text-lg font-bold text-slate-800 dark:text-white">Cancel Delivery</div>
+            <div class="text-lg font-bold text-slate-800 dark:text-white">${isAr ? 'إلغاء التوصيل' : 'Cancel Delivery'}</div>
             <div class="text-xs text-slate-500">
-              ${Security.escapeHtml(customer?.name || 'Unknown')}
-              ${ref ? ` • ${itemType === 'receipt' ? 'Receipt' : 'Delivery'} ${Security.escapeHtml(ref)}` : ''}
+              ${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}
+              ${ref ? ` • ${itemType === 'receipt' ? (isAr ? 'وصل' : 'Receipt') : (isAr ? 'توصيل' : 'Delivery')} ${Security.escapeHtml(ref)}` : ''}
               ${phone ? ` • ${Security.escapeHtml(phone)}` : ''}
             </div>
           </div>
@@ -3787,13 +3801,13 @@ function openDeliveryCancelModal(itemId) {
 
       <div class="space-y-3">
         <div>
-          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">Reason *</label>
-          <textarea id="delivery-cancel-reason" rows="3" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="Why are you cancelling?"></textarea>
+          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isAr ? 'السبب *' : 'Reason *'}</label>
+          <textarea id="delivery-cancel-reason" rows="3" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isAr ? 'لماذا تقوم بالإلغاء؟' : 'Why are you cancelling?'}"></textarea>
         </div>
         <div class="flex space-x-2 pt-2 border-t border-slate-200 dark:border-slate-700">
-          <button type="button" onclick="this.closest('#delivery-cancel-modal').remove()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-slate-300">Close</button>
+          <button type="button" onclick="this.closest('#delivery-cancel-modal').remove()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-slate-300">${isAr ? 'إغلاق' : 'Close'}</button>
           <button type="button" onclick='submitDeliveryCancel(${JSON.stringify(itemType)}, ${JSON.stringify(String(item.id || ""))})' class="flex-1 btn-shine bg-rose-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold">
-            Confirm Cancel
+            ${isAr ? 'تأكيد الإلغاء' : 'Confirm Cancel'}
           </button>
         </div>
       </div>
@@ -3809,7 +3823,7 @@ function submitDeliveryCancel(itemType, itemId) {
   const id = String(itemId || '');
   const reason = String(document.getElementById('delivery-cancel-reason')?.value || '').trim();
   if (!reason) {
-    showNotification('Validation', 'Cancel reason is required.', 'error');
+    showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'سبب الإلغاء مطلوب.' : 'Cancel reason is required.', 'error');
     return;
   }
 
@@ -3844,17 +3858,18 @@ function submitDeliveryCancel(itemType, itemId) {
 
   document.getElementById('delivery-cancel-modal')?.remove();
   document.getElementById('delivery-complete-modal')?.remove();
-  showNotification('Canceled', 'Delivery canceled', 'success');
+  showNotification(state.language === 'ar' ? 'أُلغيت' : 'Canceled', state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled', 'success');
   render();
 }
 
 function renderReconciliationView() {
+  const isAr = state.language === 'ar';
   const visibleAds = getVisibleRecords(state.ads).filter(ad => ad.spentUSD);
   return `
     <div class="space-y-6">
       <h1 class="text-3xl font-bold">${t('jobReconciliation')}</h1>
       <div class="glass-panel rounded-2xl p-6">
-        ${visibleAds.length === 0 ? '<p class="text-center text-slate-500 py-8">No reconciliation data</p>' : `
+        ${visibleAds.length === 0 ? `<p class="text-center text-slate-500 py-8">${isAr ? 'لا توجد بيانات تسوية' : 'No reconciliation data'}</p>` : `
           <div class="space-y-3">
             ${visibleAds.map(ad => {
               const customer = state.customers.find(c => c.id === ad.customerId);
@@ -3863,8 +3878,8 @@ function renderReconciliationView() {
               return `<div class="${reconClass} p-4 rounded-lg">
                 <div class="flex justify-between items-center">
                   <div>
-                    <span class="font-medium">${Security.escapeHtml(customer?.name || 'Unknown')}</span>
-                    <p class="text-sm">Collected: $${ad.amountUSD} | Spent: $${ad.spentUSD} | Diff: $${diff.toFixed(2)}</p>
+                    <span class="font-medium">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</span>
+                    <p class="text-sm">${isAr ? 'المُحصَّل' : 'Collected'}: $${ad.amountUSD} | ${isAr ? 'المصروف' : 'Spent'}: $${ad.spentUSD} | ${isAr ? 'الفرق' : 'Diff'}: $${diff.toFixed(2)}</p>
                   </div>
                 </div>
               </div>`;
@@ -3877,6 +3892,7 @@ function renderReconciliationView() {
 }
 
 function renderUsersView() {
+  const isAr = state.language === 'ar';
   const visibleUsers = getVisibleRecords(state.users);
   const isAdmin = isCurrentUserAdmin();
   
@@ -3885,7 +3901,7 @@ function renderUsersView() {
       <div class="flex justify-between items-center">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('users')}</h1>
-          <p class="text-sm text-slate-500 mt-1">${visibleUsers.length} system users</p>
+          <p class="text-sm text-slate-500 mt-1">${isAr ? `${visibleUsers.length} مستخدم في النظام` : `${visibleUsers.length} system users`}</p>
         </div>
         ${isAdmin ? `
         <button onclick="showUserModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
@@ -3912,8 +3928,8 @@ function renderUsersView() {
                   <div class="flex-1">
                     <h3 class="font-bold text-lg text-slate-800 dark:text-white">${Security.escapeHtml(u.name || '')}</h3>
                     <div class="flex items-center space-x-2 mt-1">
-                      <span class="text-xs px-2 py-1 ${isAdminRole(u.role) ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300' : isDeliveryRole(u.role) ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'} rounded-full font-medium">${u.role}</span>
-                      ${u.id === state.currentUser?.id ? '<span class="text-xs text-indigo-600 font-medium">(You)</span>' : ''}
+                      <span class="text-xs px-2 py-1 ${isAdminRole(u.role) ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300' : isDeliveryRole(u.role) ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'} rounded-full font-medium">${isAr ? (({ 'Admin': 'مدير', 'Employee': 'موظف', 'Delivery': 'سائق توصيل' })[u.role] || u.role) : u.role}</span>
+                      ${u.id === state.currentUser?.id ? `<span class="text-xs text-indigo-600 font-medium">${isAr ? '(أنت)' : '(You)'}</span>` : ''}
                     </div>
                   </div>
                 </div>
@@ -3924,17 +3940,17 @@ function renderUsersView() {
                     </button>
                   ` : ''}
                   ${isAdmin && u.id !== state.currentUser?.id && !isAdminRole(u.role) ? `
-                    <button onclick="showPermissionsModal('${u.id}')" class="text-purple-600 hover:text-purple-700 p-1" title="Manage Permissions">
+                    <button onclick="showPermissionsModal('${u.id}')" class="text-purple-600 hover:text-purple-700 p-1" title="${isAr ? 'إدارة الصلاحيات' : 'Manage Permissions'}">
                       <i data-lucide="shield" class="w-4 h-4"></i>
                     </button>
                   ` : ''}
                   ${isAdmin || u.id === state.currentUser?.id ? `
-                  <button onclick="editUser('${u.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${u.id === state.currentUser?.id ? 'Edit Your Profile' : 'Edit'}">
+                  <button onclick="editUser('${u.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${u.id === state.currentUser?.id ? (isAr ? 'تعديل ملفك الشخصي' : 'Edit Your Profile') : t('edit')}">
                     <i data-lucide="edit" class="w-4 h-4"></i>
                   </button>
                   ` : ''}
                   ${isAdmin && u.id !== state.currentUser?.id ? `
-                    <button onclick="deleteUser('${u.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="Delete">
+                    <button onclick="deleteUser('${u.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="${t('delete')}">
                       <i data-lucide="trash-2" class="w-4 h-4"></i>
                     </button>
                   ` : ''}
@@ -3949,25 +3965,25 @@ function renderUsersView() {
 
                 ${isDeliveryRole(u.role) && u.stats ? `
                   <div class="mt-3 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg space-y-1">
-                    <div class="text-xs font-bold text-blue-700 dark:text-blue-300 uppercase mb-2">Delivery Stats</div>
-                    <div class="flex justify-between text-xs"><span>Total Assigned:</span><span class="font-bold">${u.stats.totalAds || 0}</span></div>
-                    <div class="flex justify-between text-xs"><span>Accepted:</span><span class="font-bold text-blue-600">${u.stats.accepted || 0}</span></div>
-                    <div class="flex justify-between text-xs"><span>Collected:</span><span class="font-bold text-emerald-600">${u.stats.collected || 0}</span></div>
-                    <div class="flex justify-between text-xs"><span>Fees Earned:</span><span class="font-bold text-purple-600">${deliveryFeesLYD.toFixed(0)} LYD</span></div>
+                    <div class="text-xs font-bold text-blue-700 dark:text-blue-300 uppercase mb-2">${isAr ? 'إحصائيات التوصيل' : 'Delivery Stats'}</div>
+                    <div class="flex justify-between text-xs"><span>${isAr ? 'إجمالي المُعيَّن:' : 'Total Assigned:'}</span><span class="font-bold">${u.stats.totalAds || 0}</span></div>
+                    <div class="flex justify-between text-xs"><span>${isAr ? 'المقبول:' : 'Accepted:'}</span><span class="font-bold text-blue-600">${u.stats.accepted || 0}</span></div>
+                    <div class="flex justify-between text-xs"><span>${isAr ? 'المُحصَّل:' : 'Collected:'}</span><span class="font-bold text-emerald-600">${u.stats.collected || 0}</span></div>
+                    <div class="flex justify-between text-xs"><span>${isAr ? 'الرسوم المكتسبة:' : 'Fees Earned:'}</span><span class="font-bold text-purple-600">${deliveryFeesLYD.toFixed(0)} LYD</span></div>
                   </div>
                 ` : ''}
 
                 ${userAds.length > 0 ? `
                   <div class="flex items-center space-x-2 text-xs text-slate-500 mt-2">
                     <i data-lucide="megaphone" class="w-3 h-3"></i>
-                    <span>Created ${userAds.length} ads</span>
+                    <span>${isAr ? `أنشأ ${userAds.length} إعلان` : `Created ${userAds.length} ads`}</span>
                   </div>
                 ` : ''}
 
                 ${deliveredAds.length > 0 ? `
                   <div class="flex items-center space-x-2 text-xs text-emerald-600 mt-2">
                     <i data-lucide="truck" class="w-3 h-3"></i>
-                    <span>Delivered ${deliveredAds.length} ads</span>
+                    <span>${isAr ? `وصَّل ${deliveredAds.length} إعلان` : `Delivered ${deliveredAds.length} ads`}</span>
                   </div>
                 ` : ''}
                 
@@ -3979,7 +3995,7 @@ function renderUsersView() {
                       <div class="flex items-center justify-between mb-2">
                         <div class="flex items-center space-x-1">
                           <i data-lucide="shield" class="w-3 h-3 text-purple-600"></i>
-                          <span class="text-[10px] font-bold text-purple-700 dark:text-purple-300 uppercase">Permissions</span>
+                          <span class="text-[10px] font-bold text-purple-700 dark:text-purple-300 uppercase">${isAr ? 'الصلاحيات' : 'Permissions'}</span>
                         </div>
                         <span class="text-xs font-bold ${permSummary.percentage > 50 ? 'text-emerald-600' : 'text-purple-600'}">${permSummary.granted}/${permSummary.total}</span>
                       </div>
@@ -3989,7 +4005,7 @@ function renderUsersView() {
                       ${isAdmin ? `
                       <button onclick="showPermissionsModal('${u.id}')" class="mt-2 w-full text-xs text-purple-600 hover:text-purple-700 font-medium flex items-center justify-center space-x-1">
                         <i data-lucide="settings" class="w-3 h-3"></i>
-                        <span>Manage Access</span>
+                        <span>${isAr ? 'إدارة الوصول' : 'Manage Access'}</span>
                       </button>
                       ` : `
                         <div class="mt-2 text-[11px] text-slate-500 text-center">
@@ -4002,7 +4018,7 @@ function renderUsersView() {
                   <div class="mt-3 p-3 bg-amber-50 dark:bg-amber-900/20 rounded-lg text-center">
                     <div class="flex items-center justify-center space-x-1 text-amber-700 dark:text-amber-300">
                       <i data-lucide="crown" class="w-4 h-4"></i>
-                      <span class="text-xs font-bold">Full Admin Access</span>
+                      <span class="text-xs font-bold">${isAr ? 'صلاحيات مدير كاملة' : 'Full Admin Access'}</span>
                     </div>
                   </div>
                 `}
@@ -4016,6 +4032,7 @@ function renderUsersView() {
 }
 
 function renderAuditView() {
+  const isAr = state.language === 'ar';
   const allLogs = getVisibleRecords(state.logs);
   
   // Apply filters
@@ -4105,20 +4122,20 @@ function renderAuditView() {
             </span>
             <span>${t('auditLogs')}</span>
           </h1>
-          <p class="text-sm text-slate-500 mt-1">${totalLogs.toLocaleString()} total entries ${hasActiveFilters ? `(filtered from ${allLogs.length.toLocaleString()})` : ''}</p>
+          <p class="text-sm text-slate-500 mt-1">${isAr ? `${totalLogs.toLocaleString()} إجمالي السجلات` : `${totalLogs.toLocaleString()} total entries`} ${hasActiveFilters ? (isAr ? `(مصفّاة من ${allLogs.length.toLocaleString()})` : `(filtered from ${allLogs.length.toLocaleString()})`) : ''}</p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
-          <button onclick="backupAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 border-2 border-emerald-200 dark:border-emerald-800 transition-all" title="Create full backup of all logs">
+          <button onclick="backupAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 border-2 border-emerald-200 dark:border-emerald-800 transition-all" title="${isAr ? 'إنشاء نسخة احتياطية كاملة من كل السجلات' : 'Create full backup of all logs'}">
             <i data-lucide="archive" class="w-4 h-4 text-emerald-600"></i>
-            <span class="text-emerald-700 dark:text-emerald-400">Backup</span>
+            <span class="text-emerald-700 dark:text-emerald-400">${isAr ? 'نسخ احتياطي' : 'Backup'}</span>
           </button>
-          <button onclick="restoreAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-blue-50 dark:hover:bg-blue-900/20 border-2 border-blue-200 dark:border-blue-800 transition-all" title="Restore logs from backup file">
+          <button onclick="restoreAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-blue-50 dark:hover:bg-blue-900/20 border-2 border-blue-200 dark:border-blue-800 transition-all" title="${isAr ? 'استرجاع السجلات من ملف نسخة احتياطية' : 'Restore logs from backup file'}">
             <i data-lucide="upload" class="w-4 h-4 text-blue-600"></i>
-            <span class="text-blue-700 dark:text-blue-400">Restore</span>
+            <span class="text-blue-700 dark:text-blue-400">${isAr ? 'استرجاع' : 'Restore'}</span>
           </button>
-          <button onclick="cleanupAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-rose-50 dark:hover:bg-rose-900/20 border-2 border-rose-200 dark:border-rose-800 transition-all" title="Delete old audit logs (keeps last 1 year)">
+          <button onclick="cleanupAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-rose-50 dark:hover:bg-rose-900/20 border-2 border-rose-200 dark:border-rose-800 transition-all" title="${isAr ? 'حذف سجلات التدقيق القديمة (يحتفظ بآخر سنة)' : 'Delete old audit logs (keeps last 1 year)'}">
             <i data-lucide="trash-2" class="w-4 h-4 text-rose-600"></i>
-            <span class="text-rose-700 dark:text-rose-400">Cleanup</span>
+            <span class="text-rose-700 dark:text-rose-400">${isAr ? 'تنظيف' : 'Cleanup'}</span>
           </button>
           <div class="w-px h-6 bg-slate-300 dark:bg-slate-600"></div>
           <button onclick="exportAuditLogs('csv')" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all">
@@ -4139,18 +4156,18 @@ function renderAuditView() {
             <i data-lucide="database" class="w-4 h-4 text-indigo-600 dark:text-indigo-300"></i>
           </div>
           <div>
-            <div class="text-xs font-bold text-indigo-700 dark:text-indigo-300">Persistent Storage Enabled</div>
-            <div class="text-[10px] text-indigo-600/70 dark:text-indigo-400/70">${db ? 'IndexedDB Active - Logs stored permanently' : 'LocalStorage Only - Consider backing up'}</div>
+            <div class="text-xs font-bold text-indigo-700 dark:text-indigo-300">${isAr ? 'التخزين الدائم مفعّل' : 'Persistent Storage Enabled'}</div>
+            <div class="text-[10px] text-indigo-600/70 dark:text-indigo-400/70">${db ? (isAr ? 'IndexedDB نشط - السجلات محفوظة بشكل دائم' : 'IndexedDB Active - Logs stored permanently') : (isAr ? 'LocalStorage فقط - يُنصح بالنسخ الاحتياطي' : 'LocalStorage Only - Consider backing up')}</div>
           </div>
         </div>
         <div class="flex items-center space-x-4 text-xs">
           <div class="text-center">
             <div class="font-bold text-indigo-700 dark:text-indigo-300">${allLogs.length.toLocaleString()}</div>
-            <div class="text-[10px] text-indigo-600/70 dark:text-indigo-400/70">Total Logs</div>
+            <div class="text-[10px] text-indigo-600/70 dark:text-indigo-400/70">${isAr ? 'إجمالي السجلات' : 'Total Logs'}</div>
           </div>
           <div class="text-center">
             <div class="font-bold text-indigo-700 dark:text-indigo-300">${db ? '∞' : Math.min(allLogs.length, MAX_LOGS_IN_LOCALSTORAGE || 500)}</div>
-            <div class="text-[10px] text-indigo-600/70 dark:text-indigo-400/70">In Storage</div>
+            <div class="text-[10px] text-indigo-600/70 dark:text-indigo-400/70">${isAr ? 'في التخزين' : 'In Storage'}</div>
           </div>
           <div class="w-2 h-2 rounded-full ${db ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}"></div>
         </div>
@@ -4163,28 +4180,28 @@ function renderAuditView() {
             <i data-lucide="activity" class="w-5 h-5 text-blue-600"></i>
           </div>
           <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.length.toLocaleString()}</div>
-          <div class="text-xs text-slate-500">Total Logs</div>
+          <div class="text-xs text-slate-500">${isAr ? 'إجمالي السجلات' : 'Total Logs'}</div>
         </div>
         <div class="glass-panel rounded-xl p-4 text-center">
           <div class="w-10 h-10 mx-auto mb-2 rounded-lg bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center">
             <i data-lucide="plus-circle" class="w-5 h-5 text-emerald-600"></i>
           </div>
           <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'create').length.toLocaleString()}</div>
-          <div class="text-xs text-slate-500">Creates</div>
+          <div class="text-xs text-slate-500">${isAr ? 'إنشاء' : 'Creates'}</div>
         </div>
         <div class="glass-panel rounded-xl p-4 text-center">
           <div class="w-10 h-10 mx-auto mb-2 rounded-lg bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center">
             <i data-lucide="edit-3" class="w-5 h-5 text-amber-600"></i>
           </div>
           <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'update').length.toLocaleString()}</div>
-          <div class="text-xs text-slate-500">Updates</div>
+          <div class="text-xs text-slate-500">${isAr ? 'تعديلات' : 'Updates'}</div>
         </div>
         <div class="glass-panel rounded-xl p-4 text-center">
           <div class="w-10 h-10 mx-auto mb-2 rounded-lg bg-rose-100 dark:bg-rose-900/30 flex items-center justify-center">
             <i data-lucide="trash-2" class="w-5 h-5 text-rose-600"></i>
           </div>
           <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'delete' || l.action === 'Delete').length.toLocaleString()}</div>
-          <div class="text-xs text-slate-500">Deletes</div>
+          <div class="text-xs text-slate-500">${isAr ? 'حذف' : 'Deletes'}</div>
         </div>
       </div>
 
@@ -4196,7 +4213,7 @@ function renderAuditView() {
             <i data-lucide="search" class="w-5 h-5 absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"></i>
             <input 
               type="text" 
-              placeholder="Search logs by description, user, action..." 
+              placeholder="${isAr ? 'ابحث في السجلات بالوصف أو المستخدم أو الإجراء...' : 'Search logs by description, user, action...'}"
               value="${Security.escapeHtml(state.auditSearch || '')}"
               oninput="updateAuditFilter('search', this.value)"
               class="w-full pl-12 pr-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all"
@@ -4207,42 +4224,42 @@ function renderAuditView() {
           <!-- Filter Dropdowns -->
           <div class="flex flex-wrap gap-2">
             <select onchange="updateAuditFilter('action', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditActionFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
-              <option value="all">All Actions</option>
+              <option value="all">${isAr ? 'كل الإجراءات' : 'All Actions'}</option>
               ${uniqueActions.map(a => `<option value="${Security.escapeHtml(a)}" ${state.auditActionFilter === a ? 'selected' : ''}>${Security.escapeHtml(a)}</option>`).join('')}
             </select>
-            
+
             <select onchange="updateAuditFilter('category', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditCategoryFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
-              <option value="all">All Categories</option>
-              <option value="auth" ${state.auditCategoryFilter === 'auth' ? 'selected' : ''}>🔐 Auth</option>
-              <option value="data" ${state.auditCategoryFilter === 'data' ? 'selected' : ''}>💾 Data</option>
-              <option value="financial" ${state.auditCategoryFilter === 'financial' ? 'selected' : ''}>💰 Financial</option>
-              <option value="general" ${state.auditCategoryFilter === 'general' ? 'selected' : ''}>📄 General</option>
+              <option value="all">${isAr ? 'كل الفئات' : 'All Categories'}</option>
+              <option value="auth" ${state.auditCategoryFilter === 'auth' ? 'selected' : ''}>🔐 ${isAr ? 'مصادقة' : 'Auth'}</option>
+              <option value="data" ${state.auditCategoryFilter === 'data' ? 'selected' : ''}>💾 ${isAr ? 'بيانات' : 'Data'}</option>
+              <option value="financial" ${state.auditCategoryFilter === 'financial' ? 'selected' : ''}>💰 ${isAr ? 'مالي' : 'Financial'}</option>
+              <option value="general" ${state.auditCategoryFilter === 'general' ? 'selected' : ''}>📄 ${isAr ? 'عام' : 'General'}</option>
             </select>
-            
+
             <select onchange="updateAuditFilter('severity', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditSeverityFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
-              <option value="all">All Severity</option>
-              <option value="info" ${state.auditSeverityFilter === 'info' ? 'selected' : ''}>ℹ️ Info</option>
-              <option value="warning" ${state.auditSeverityFilter === 'warning' ? 'selected' : ''}>⚠️ Warning</option>
-              <option value="error" ${state.auditSeverityFilter === 'error' ? 'selected' : ''}>❌ Error</option>
-              <option value="critical" ${state.auditSeverityFilter === 'critical' ? 'selected' : ''}>🚨 Critical</option>
+              <option value="all">${isAr ? 'كل درجات الخطورة' : 'All Severity'}</option>
+              <option value="info" ${state.auditSeverityFilter === 'info' ? 'selected' : ''}>ℹ️ ${isAr ? 'معلومة' : 'Info'}</option>
+              <option value="warning" ${state.auditSeverityFilter === 'warning' ? 'selected' : ''}>⚠️ ${isAr ? 'تحذير' : 'Warning'}</option>
+              <option value="error" ${state.auditSeverityFilter === 'error' ? 'selected' : ''}>❌ ${isAr ? 'خطأ' : 'Error'}</option>
+              <option value="critical" ${state.auditSeverityFilter === 'critical' ? 'selected' : ''}>🚨 ${isAr ? 'حرج' : 'Critical'}</option>
             </select>
-            
+
             <select onchange="updateAuditFilter('user', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditUserFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
-              <option value="all">All Users</option>
+              <option value="all">${isAr ? 'كل المستخدمين' : 'All Users'}</option>
               ${uniqueUsers.map(userId => {
                 const user = state.users.find(u => u.id === userId);
                 return `<option value="${Security.escapeHtml(userId)}" ${state.auditUserFilter === userId ? 'selected' : ''}>${Security.escapeHtml(user?.name || userId)}</option>`;
               }).join('')}
             </select>
             
-            <input type="date" value="${Security.escapeHtml(state.auditDateFrom || '')}" onchange="updateAuditFilter('dateFrom', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditDateFrom ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}" title="From Date" />
+            <input type="date" value="${Security.escapeHtml(state.auditDateFrom || '')}" onchange="updateAuditFilter('dateFrom', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditDateFrom ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}" title="${isAr ? 'من تاريخ' : 'From Date'}" />
             
-            <input type="date" value="${Security.escapeHtml(state.auditDateTo || '')}" onchange="updateAuditFilter('dateTo', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditDateTo ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}" title="To Date" />
+            <input type="date" value="${Security.escapeHtml(state.auditDateTo || '')}" onchange="updateAuditFilter('dateTo', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditDateTo ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}" title="${isAr ? 'إلى تاريخ' : 'To Date'}" />
             
             ${hasActiveFilters ? `
               <button onclick="clearAuditFilters()" class="px-3 py-2 bg-rose-100 dark:bg-rose-900/30 text-rose-600 border-2 border-rose-200 dark:border-rose-800 rounded-xl text-xs font-bold hover:bg-rose-200 transition-all flex items-center space-x-1">
                 <i data-lucide="x-circle" class="w-3 h-3"></i>
-                <span>Clear</span>
+                <span>${isAr ? 'مسح' : 'Clear'}</span>
               </button>
             ` : ''}
           </div>
@@ -4254,21 +4271,21 @@ function renderAuditView() {
         ${paginatedLogs.length === 0 ? `
           <div class="p-12 text-center">
             <i data-lucide="${hasActiveFilters ? 'search-x' : 'file-clock'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i>
-            <p class="text-slate-500 font-medium">${hasActiveFilters ? 'No logs match your filters' : 'No activity logs yet'}</p>
-            ${hasActiveFilters ? '<button onclick="clearAuditFilters()" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">Clear all filters</button>' : ''}
+            <p class="text-slate-500 font-medium">${hasActiveFilters ? (isAr ? 'لا توجد سجلات مطابقة للفلاتر' : 'No logs match your filters') : (isAr ? 'لا توجد سجلات نشاط بعد' : 'No activity logs yet')}</p>
+            ${hasActiveFilters ? `<button onclick="clearAuditFilters()" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">${isAr ? 'مسح كل الفلاتر' : 'Clear all filters'}</button>` : ''}
           </div>
         ` : `
           <div class="overflow-x-auto">
             <table class="w-full text-sm">
               <thead class="bg-slate-50 dark:bg-slate-800/50">
                 <tr>
-                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">Timestamp</th>
-                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">User</th>
-                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">Action</th>
-                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">Category</th>
-                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">Description</th>
-                  <th class="text-center px-4 py-3 text-xs font-bold text-slate-500 uppercase">Severity</th>
-                  <th class="text-center px-4 py-3 text-xs font-bold text-slate-500 uppercase">Details</th>
+                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'الوقت' : 'Timestamp'}</th>
+                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'المستخدم' : 'User'}</th>
+                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'الإجراء' : 'Action'}</th>
+                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'الفئة' : 'Category'}</th>
+                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'الوصف' : 'Description'}</th>
+                  <th class="text-center px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'الخطورة' : 'Severity'}</th>
+                  <th class="text-center px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'التفاصيل' : 'Details'}</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
@@ -4287,7 +4304,7 @@ function renderAuditView() {
                           <div class="w-7 h-7 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white text-xs font-bold">
                             ${(log.userName || user?.name || 'S').charAt(0).toUpperCase()}
                           </div>
-                          <span class="text-xs font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.userName || user?.name || 'System')}</span>
+                          <span class="text-xs font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.userName || user?.name || (isAr ? 'النظام' : 'System'))}</span>
                         </div>
                       </td>
                       <td class="px-4 py-3">
@@ -4307,11 +4324,11 @@ function renderAuditView() {
                       </td>
                       <td class="px-4 py-3 text-center">
                         <span class="inline-flex px-2 py-1 rounded-full text-[10px] font-bold uppercase ${severityColors[severity] || severityColors['info']}">
-                          ${severity}
+                          ${isAr ? (({ info: 'معلومة', warning: 'تحذير', error: 'خطأ', critical: 'حرج' })[severity] || severity) : severity}
                         </span>
                       </td>
                       <td class="px-4 py-3 text-center">
-                        <button onclick="showLogDetails('${log.id}')" class="p-1.5 rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors" title="View Details">
+                        <button onclick="showLogDetails('${log.id}')" class="p-1.5 rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors" title="${isAr ? 'عرض التفاصيل' : 'View Details'}">
                           <i data-lucide="eye" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
                         </button>
                       </td>
@@ -4325,16 +4342,16 @@ function renderAuditView() {
           <!-- Pagination -->
           <div class="px-4 py-3 border-t border-slate-200 dark:border-slate-700 flex flex-col md:flex-row items-center justify-between gap-3">
             <div class="flex items-center space-x-2 text-xs text-slate-500">
-              <span>Show</span>
+              <span>${isAr ? 'عرض' : 'Show'}</span>
               <select onchange="updateAuditPageSize(this.value)" class="px-2 py-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs">
                 <option value="25" ${state.auditPageSize === 25 ? 'selected' : ''}>25</option>
                 <option value="50" ${state.auditPageSize === 50 ? 'selected' : ''}>50</option>
                 <option value="100" ${state.auditPageSize === 100 ? 'selected' : ''}>100</option>
                 <option value="250" ${state.auditPageSize === 250 ? 'selected' : ''}>250</option>
               </select>
-              <span>entries</span>
+              <span>${isAr ? 'سجل' : 'entries'}</span>
               <span class="text-slate-400">|</span>
-              <span>Showing ${startIndex + 1}-${Math.min(startIndex + state.auditPageSize, totalLogs)} of ${totalLogs}</span>
+              <span>${isAr ? `عرض ${startIndex + 1}-${Math.min(startIndex + state.auditPageSize, totalLogs)} من ${totalLogs}` : `Showing ${startIndex + 1}-${Math.min(startIndex + state.auditPageSize, totalLogs)} of ${totalLogs}`}</span>
             </div>
             
             <div class="flex items-center space-x-1">
@@ -4346,7 +4363,7 @@ function renderAuditView() {
               </button>
               
               <span class="px-3 py-1.5 text-xs font-bold text-slate-700 dark:text-slate-300">
-                Page ${currentPage} of ${totalPages || 1}
+                ${isAr ? `صفحة ${currentPage} من ${totalPages || 1}` : `Page ${currentPage} of ${totalPages || 1}`}
               </span>
               
               <button onclick="updateAuditPage(${currentPage + 1})" ${currentPage >= totalPages ? 'disabled' : ''} class="px-3 py-1.5 rounded-lg text-xs font-medium ${currentPage >= totalPages ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700'}">
@@ -4426,6 +4443,7 @@ function updateAuditPageSize(size) {
 }
 
 function showLogDetails(logId) {
+  const isAr = state.language === 'ar';
   const log = state.logs.find(l => l.id === logId);
   if (!log) return;
   
@@ -4442,7 +4460,7 @@ function showLogDetails(logId) {
           <span class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
             <i data-lucide="file-text" class="w-5 h-5 text-white"></i>
           </span>
-          <span>Log Details</span>
+          <span>${isAr ? 'تفاصيل السجل' : 'Log Details'}</span>
         </h2>
         <button onclick="this.closest('#app-modal').remove()" class="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
           <i data-lucide="x" class="w-4 h-4 text-slate-600 dark:text-slate-300"></i>
@@ -4452,44 +4470,44 @@ function showLogDetails(logId) {
       <div class="space-y-4">
         <div class="grid grid-cols-2 gap-4">
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">Log ID</div>
+            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'معرّف السجل' : 'Log ID'}</div>
             <div class="text-xs font-mono text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.id)}</div>
           </div>
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">Timestamp</div>
+            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'الوقت' : 'Timestamp'}</div>
             <div class="text-xs text-slate-700 dark:text-slate-300">${new Date(log.date).toLocaleString()}</div>
           </div>
         </div>
-        
+
         <div class="grid grid-cols-3 gap-4">
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">User</div>
-            <div class="text-xs text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.userName || user?.name || 'System')}</div>
+            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'المستخدم' : 'User'}</div>
+            <div class="text-xs text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.userName || user?.name || (isAr ? 'النظام' : 'System'))}</div>
           </div>
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">Action</div>
+            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'الإجراء' : 'Action'}</div>
             <div class="text-xs font-bold text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.action)}</div>
           </div>
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">Category</div>
+            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'الفئة' : 'Category'}</div>
             <div class="text-xs text-slate-700 dark:text-slate-300 capitalize">${Security.escapeHtml(log.category || 'general')}</div>
           </div>
         </div>
-        
+
         <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
-          <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">Description</div>
+          <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'الوصف' : 'Description'}</div>
           <div class="text-sm text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.description)}</div>
         </div>
-        
+
         ${log.resourceId ? `
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">Resource ID</div>
+            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'معرّف المورد' : 'Resource ID'}</div>
             <div class="text-xs font-mono text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.resourceId)}</div>
           </div>
         ` : ''}
-        
+
         <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
-          <div class="text-[10px] font-bold text-slate-400 uppercase mb-2">Metadata</div>
+          <div class="text-[10px] font-bold text-slate-400 uppercase mb-2">${isAr ? 'بيانات إضافية' : 'Metadata'}</div>
           <pre class="text-xs text-slate-600 dark:text-slate-400 overflow-x-auto whitespace-pre-wrap bg-slate-100 dark:bg-slate-900 p-3 rounded-lg">${Security.escapeHtml(JSON.stringify(log.metadata || {}, null, 2))}</pre>
         </div>
       </div>
@@ -4532,7 +4550,7 @@ function exportAuditLogs(format) {
     downloadFile(json, `audit-logs-${new Date().toISOString().split('T')[0]}.json`, 'application/json');
   }
   
-  showNotification('Export Complete', `Audit logs exported as ${format.toUpperCase()}`, 'success');
+  showNotification(state.language === 'ar' ? 'اكتمل التصدير' : 'Export Complete', state.language === 'ar' ? `تم تصدير سجلات التدقيق بصيغة ${format.toUpperCase()}` : `Audit logs exported as ${format.toUpperCase()}`, 'success');
 }
 
 function downloadFile(content, filename, mimeType) {
@@ -4565,7 +4583,7 @@ async function backupAuditLogs() {
   // Add backup log entry
   addAuditLog('backup', 'system', `Backed up ${allLogs.length} audit logs`, { backupSize: json.length });
   
-  showNotification('Backup Complete', `${allLogs.length} logs backed up successfully`, 'success');
+  showNotification(state.language === 'ar' ? 'اكتمل النسخ الاحتياطي' : 'Backup Complete', state.language === 'ar' ? `تم نسخ ${allLogs.length} سجل احتياطياً بنجاح` : `${allLogs.length} logs backed up successfully`, 'success');
 }
 
 // Restore audit logs from backup file
@@ -4584,7 +4602,7 @@ function restoreAuditLogs() {
         const backup = JSON.parse(event.target.result);
         
         if (!backup.logs || !Array.isArray(backup.logs)) {
-          showNotification('Error', 'Invalid backup file format', 'error');
+          showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'صيغة ملف النسخة الاحتياطية غير صالحة' : 'Invalid backup file format', 'error');
           return;
         }
         
@@ -4619,12 +4637,12 @@ function restoreAuditLogs() {
           totalInBackup: backup.totalLogs
         });
         
-        showNotification('Restore Complete', `Imported ${imported} new logs (${backup.totalLogs - imported} duplicates skipped)`, 'success');
+        showNotification(state.language === 'ar' ? 'اكتمل الاسترجاع' : 'Restore Complete', state.language === 'ar' ? `تم استيراد ${imported} سجل جديد (تم تخطي ${backup.totalLogs - imported} مكرر)` : `Imported ${imported} new logs (${backup.totalLogs - imported} duplicates skipped)`, 'success');
         render();
         lucide.createIcons();
       } catch (error) {
         console.error('Restore error:', error);
-        showNotification('Error', 'Failed to restore backup: ' + error.message, 'error');
+        showNotification(state.language === 'ar' ? 'خطأ' : 'Error', (state.language === 'ar' ? 'فشل استرجاع النسخة الاحتياطية: ' : 'Failed to restore backup: ') + error.message, 'error');
       }
     };
     
@@ -4636,21 +4654,22 @@ function restoreAuditLogs() {
 
 // Cleanup old audit logs
 async function cleanupAuditLogs() {
+  const isAr = state.language === 'ar';
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', 'Admin only', 'error');
+    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'للأدمن فقط' : 'Admin only', 'error');
     return;
   }
-  
-  const daysToKeep = prompt('Delete audit logs older than how many days? (default: 365)', '365');
+
+  const daysToKeep = prompt(isAr ? 'حذف سجلات التدقيق الأقدم من كم يوم؟ (الافتراضي: 365)' : 'Delete audit logs older than how many days? (default: 365)', '365');
   if (!daysToKeep) return;
-  
+
   const days = parseInt(daysToKeep);
   if (isNaN(days) || days < 30) {
-    showNotification('Validation Error', 'Minimum 30 days required', 'error');
+    showNotification(isAr ? 'خطأ في التحقق' : 'Validation Error', isAr ? 'الحد الأدنى 30 يوماً' : 'Minimum 30 days required', 'error');
     return;
   }
-  
-  if (!confirm(`⚠️ Delete all audit logs older than ${days} days?\n\nThis action cannot be undone.\nConsider backing up first.`)) {
+
+  if (!confirm(isAr ? `⚠️ حذف كل سجلات التدقيق الأقدم من ${days} يوماً؟\n\nلا يمكن التراجع عن هذا الإجراء.\nيُنصح بعمل نسخة احتياطية أولاً.` : `⚠️ Delete all audit logs older than ${days} days?\n\nThis action cannot be undone.\nConsider backing up first.`)) {
     return;
   }
   
@@ -4666,14 +4685,14 @@ async function cleanupAuditLogs() {
     
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'Cleanup failed' }));
-      showNotification('Error', err.detail || 'Cleanup failed', 'error');
+      showNotification(isAr ? 'خطأ' : 'Error', err.detail || (isAr ? 'فشل التنظيف' : 'Cleanup failed'), 'error');
       return;
     }
-    
+
     const result = await res.json();
     showNotification(
-      'Cleanup Complete',
-      `Deleted ${result.deleted_count} old audit logs`,
+      isAr ? 'اكتمل التنظيف' : 'Cleanup Complete',
+      isAr ? `تم حذف ${result.deleted_count} سجل تدقيق قديم` : `Deleted ${result.deleted_count} old audit logs`,
       'success'
     );
     
@@ -4684,11 +4703,12 @@ async function cleanupAuditLogs() {
       lucide.createIcons();
     }
   } catch (error) {
-    showNotification('Error', 'Cleanup failed: ' + error.message, 'error');
+    showNotification(isAr ? 'خطأ' : 'Error', (isAr ? 'فشل التنظيف: ' : 'Cleanup failed: ') + error.message, 'error');
   }
 }
 
 function renderSettingsView() {
+  const isAr = state.language === 'ar';
   const history = state.exchangeRateHistory || [];
   
   return `
@@ -4797,25 +4817,25 @@ function renderSettingsView() {
       <div class="glass-panel rounded-2xl p-6">
         <h2 class="text-xl font-bold mb-4 flex items-center">
           <i data-lucide="dollar-sign" class="w-5 h-5 mr-2 text-emerald-600"></i>
-          Exchange Rate Management
+          ${isAr ? 'إدارة سعر الصرف' : 'Exchange Rate Management'}
         </h2>
         <div class="space-y-4">
           <div class="flex flex-col md:flex-row md:items-center space-y-2 md:space-y-0 md:space-x-4">
-            <label class="text-sm font-medium text-slate-700 dark:text-slate-300">Current Rate (USD to LYD):</label>
+            <label class="text-sm font-medium text-slate-700 dark:text-slate-300">${isAr ? 'السعر الحالي (USD إلى LYD):' : 'Current Rate (USD to LYD):'}</label>
             <input type="text" id="default-rate-input" inputmode="decimal" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" onchange="updateExchangeRate(this.value)" class="glass-input px-4 py-2 rounded-xl w-32 font-bold text-emerald-600" />
-            <button onclick="updateExchangeRate(document.getElementById('default-rate-input').value)" class="btn-shine bg-emerald-600 text-white px-4 py-2 rounded-xl text-sm">Save Rate</button>
+            <button onclick="updateExchangeRate(document.getElementById('default-rate-input').value)" class="btn-shine bg-emerald-600 text-white px-4 py-2 rounded-xl text-sm">${isAr ? 'حفظ السعر' : 'Save Rate'}</button>
           </div>
 
           ${history.length > 0 ? `
             <div class="mt-6">
-              <h3 class="text-sm font-bold text-slate-500 uppercase mb-3">Rate History (Last 10)</h3>
+              <h3 class="text-sm font-bold text-slate-500 uppercase mb-3">${isAr ? 'سجل الأسعار (آخر 10)' : 'Rate History (Last 10)'}</h3>
               <div class="overflow-x-auto">
                 <table class="w-full text-sm">
                   <thead>
                     <tr class="border-b border-slate-200 dark:border-slate-700">
-                      <th class="text-left py-2">Date</th>
-                      <th class="text-left py-2">Rate</th>
-                      <th class="text-left py-2">Changed By</th>
+                      <th class="text-left py-2">${isAr ? 'التاريخ' : 'Date'}</th>
+                      <th class="text-left py-2">${isAr ? 'السعر' : 'Rate'}</th>
+                      <th class="text-left py-2">${isAr ? 'غُيِّر بواسطة' : 'Changed By'}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -4825,7 +4845,7 @@ function renderSettingsView() {
                         <tr class="border-b border-slate-100 dark:border-slate-800">
                           <td class="py-2 text-xs text-slate-500">${new Date(h.date).toLocaleString()}</td>
                           <td class="py-2 font-mono font-bold text-emerald-600">${h.rate.toFixed(2)}</td>
-                          <td class="py-2 text-slate-600 dark:text-slate-400">${Security.escapeHtml(user?.name || 'System')}</td>
+                          <td class="py-2 text-slate-600 dark:text-slate-400">${Security.escapeHtml(user?.name || (isAr ? 'النظام' : 'System'))}</td>
                         </tr>
                       `;
                     }).join('')}
@@ -4841,26 +4861,26 @@ function renderSettingsView() {
       <div class="glass-panel rounded-2xl p-6">
         <h2 class="text-xl font-bold mb-4 flex items-center">
           <i data-lucide="database" class="w-5 h-5 mr-2 text-blue-600"></i>
-          Data Management
+          ${isAr ? 'إدارة البيانات' : 'Data Management'}
         </h2>
         <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
           <button onclick="exportData()" class="btn-shine bg-blue-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-blue-700">
             <i data-lucide="download" class="w-5 h-5"></i>
-            <span>Export Backup</span>
+            <span>${isAr ? 'تصدير نسخة احتياطية' : 'Export Backup'}</span>
           </button>
           <button onclick="importData()" class="btn-shine bg-green-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-green-700">
             <i data-lucide="upload" class="w-5 h-5"></i>
-            <span>Import Backup</span>
+            <span>${isAr ? 'استيراد نسخة احتياطية' : 'Import Backup'}</span>
           </button>
           <button onclick="clearAllData()" class="btn-shine bg-rose-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-rose-700">
             <i data-lucide="trash-2" class="w-5 h-5"></i>
-            <span>Clear All Data</span>
+            <span>${isAr ? 'مسح كل البيانات' : 'Clear All Data'}</span>
           </button>
         </div>
         <div class="mt-4 p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl">
           <p class="text-sm text-slate-600 dark:text-slate-400">
             <i data-lucide="info" class="w-4 h-4 inline mr-1"></i>
-            Your data is stored locally in your browser. Export regularly to create backups.
+            ${isAr ? 'بياناتك مخزنة محلياً في متصفحك. صدِّر بانتظام لإنشاء نسخ احتياطية.' : 'Your data is stored locally in your browser. Export regularly to create backups.'}
           </p>
         </div>
       </div>
@@ -4870,22 +4890,22 @@ function renderSettingsView() {
         <div class="glass-panel rounded-2xl p-6">
           <h2 class="text-xl font-bold mb-4 flex items-center">
             <i data-lucide="cloud" class="w-5 h-5 mr-2 text-indigo-600"></i>
-            Cloud Sync
+            ${isAr ? 'المزامنة السحابية' : 'Cloud Sync'}
           </h2>
           <div class="space-y-4">
             <div class="flex items-center space-x-3 p-4 bg-emerald-50 dark:bg-emerald-900/20 rounded-xl">
               <i data-lucide="check-circle" class="w-5 h-5 text-emerald-600"></i>
               <div class="flex-1">
-                <p class="font-medium text-emerald-700 dark:text-emerald-300">Cloud Sync Enabled</p>
-                <p class="text-xs text-emerald-600 dark:text-emerald-400 mt-1">Last sync: ${state.lastCloudSync ? new Date(state.lastCloudSync).toLocaleString() : 'Never'}</p>
+                <p class="font-medium text-emerald-700 dark:text-emerald-300">${isAr ? 'المزامنة السحابية مفعّلة' : 'Cloud Sync Enabled'}</p>
+                <p class="text-xs text-emerald-600 dark:text-emerald-400 mt-1">${isAr ? 'آخر مزامنة' : 'Last sync'}: ${state.lastCloudSync ? new Date(state.lastCloudSync).toLocaleString() : (isAr ? 'أبداً' : 'Never')}</p>
               </div>
             </div>
             <div class="flex space-x-3">
               <button onclick="pushToCloud()" class="flex-1 btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold">
-                <i data-lucide="upload-cloud" class="w-4 h-4 inline mr-2"></i>Push Now
+                <i data-lucide="upload-cloud" class="w-4 h-4 inline mr-2"></i>${isAr ? 'رفع الآن' : 'Push Now'}
               </button>
               <button onclick="pullFromCloud()" class="flex-1 btn-shine bg-blue-600 text-white px-4 py-2 rounded-xl font-bold">
-                <i data-lucide="download-cloud" class="w-4 h-4 inline mr-2"></i>Pull Now
+                <i data-lucide="download-cloud" class="w-4 h-4 inline mr-2"></i>${isAr ? 'تنزيل الآن' : 'Pull Now'}
               </button>
             </div>
           </div>
@@ -4894,13 +4914,13 @@ function renderSettingsView() {
 
       <!-- App Info -->
       <div class="glass-panel rounded-2xl p-6">
-        <h2 class="text-xl font-bold mb-4">Application Info</h2>
+        <h2 class="text-xl font-bold mb-4">${isAr ? 'معلومات التطبيق' : 'Application Info'}</h2>
         <div class="space-y-2 text-sm">
-          <div class="flex justify-between"><span class="text-slate-500">Version:</span><span class="font-mono">3.5.0 Vanilla</span></div>
-          <div class="flex justify-between"><span class="text-slate-500">Total Ads:</span><span class="font-bold">${getVisibleRecords(state.ads).length}</span></div>
-          <div class="flex justify-between"><span class="text-slate-500">Total Customers:</span><span class="font-bold">${getVisibleRecords(state.customers).length}</span></div>
-          <div class="flex justify-between"><span class="text-slate-500">Total Users:</span><span class="font-bold">${getVisibleRecords(state.users).length}</span></div>
-          <div class="flex justify-between"><span class="text-slate-500">Audit Logs:</span><span class="font-bold">${getVisibleRecords(state.logs).length}</span></div>
+          <div class="flex justify-between"><span class="text-slate-500">${isAr ? 'الإصدار:' : 'Version:'}</span><span class="font-mono">3.5.0 Vanilla</span></div>
+          <div class="flex justify-between"><span class="text-slate-500">${isAr ? 'إجمالي الإعلانات:' : 'Total Ads:'}</span><span class="font-bold">${getVisibleRecords(state.ads).length}</span></div>
+          <div class="flex justify-between"><span class="text-slate-500">${isAr ? 'إجمالي العملاء:' : 'Total Customers:'}</span><span class="font-bold">${getVisibleRecords(state.customers).length}</span></div>
+          <div class="flex justify-between"><span class="text-slate-500">${isAr ? 'إجمالي المستخدمين:' : 'Total Users:'}</span><span class="font-bold">${getVisibleRecords(state.users).length}</span></div>
+          <div class="flex justify-between"><span class="text-slate-500">${isAr ? 'سجلات التدقيق:' : 'Audit Logs:'}</span><span class="font-bold">${getVisibleRecords(state.logs).length}</span></div>
         </div>
       </div>
     </div>

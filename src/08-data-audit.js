@@ -719,11 +719,12 @@ function getDeliveryReceiptDueUsage(receipt) {
 }
 
 function formatDateShort(date) {
-  if (!date) return 'Never';
+  const never = state.language === 'ar' ? 'أبداً' : 'Never';
+  if (!date) return never;
   try {
     return new Date(date).toLocaleString();
   } catch (e) {
-    return 'Never';
+    return never;
   }
 }
 

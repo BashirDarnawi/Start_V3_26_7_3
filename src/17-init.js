@@ -12,7 +12,7 @@ async function init() {
   applyTheme();
   document.documentElement.setAttribute('dir', getDir());
   
-  setLoadingStatus('Initializing database...');
+  setLoadingStatus(state.language === 'ar' ? 'جارٍ تهيئة قاعدة البيانات...' : 'Initializing database...');
   
   // Initialize IndexedDB for persistent audit log storage
   await initIndexedDB();
@@ -25,8 +25,10 @@ async function init() {
       window.__albayanFileModeWarned = true;
       try {
         showNotification(
-          'Run via Server',
-          'You opened Albayan from a local file (file://). For full functionality, serve it over HTTP instead (e.g. the backend at http://127.0.0.1:8000/ or "npx serve").',
+          state.language === 'ar' ? 'شغّل عبر خادم' : 'Run via Server',
+          state.language === 'ar'
+            ? 'لقد فتحت البيان من ملف محلي (//:file). للحصول على كامل الوظائف، شغّله عبر HTTP بدلاً من ذلك (مثلاً الخادم على /http://127.0.0.1:8000 أو "npx serve").'
+            : 'You opened Albayan from a local file (file://). For full functionality, serve it over HTTP instead (e.g. the backend at http://127.0.0.1:8000/ or "npx serve").',
           'warning'
         );
       } catch (_) {}
@@ -71,10 +73,10 @@ async function init() {
   }
   // #endregion
   
-  setLoadingStatus('Loading preferences...');
+  setLoadingStatus(state.language === 'ar' ? 'جارٍ تحميل التفضيلات...' : 'Loading preferences...');
   const legacyCollections = loadState();
 
-  setLoadingStatus('Connecting to server...');
+  setLoadingStatus(state.language === 'ar' ? 'جارٍ الاتصال بالسيرفر...' : 'Connecting to server...');
   // Detect backend (multi-user internet mode)
   const serverOk = await apiHealthCheck();
   state.serverDetected = !!serverOk;
@@ -92,7 +94,7 @@ async function init() {
     if (state.cloudConfig) state.cloudConfig.enabled = false;
 
     // INSTANT LOAD: First load cached data from IndexedDB (shows data instantly)
-    setLoadingStatus('Loading cached data...');
+    setLoadingStatus(state.language === 'ar' ? 'جارٍ تحميل البيانات المخزنة...' : 'Loading cached data...');
     const cachedCollections = loadState(); // This already loads from localStorage
     if (db) {
       try {
@@ -104,7 +106,7 @@ async function init() {
     }
 
     // Restore login from backend cookie session
-    setLoadingStatus('Checking session...');
+    setLoadingStatus(state.language === 'ar' ? 'جارٍ التحقق من الجلسة...' : 'Checking session...');
     const me = await apiAuthMe().catch(() => null);
     if (me) {
       state.currentUser = me;
@@ -116,7 +118,7 @@ async function init() {
       }
       
       // PERFORMANCE: Show UI immediately with cached data, then update from server
-      setLoadingStatus('Ready!');
+      setLoadingStatus(state.language === 'ar' ? 'جاهز!' : 'Ready!');
       
       // Render UI immediately with cached data
       render();
@@ -139,7 +141,7 @@ async function init() {
         console.warn('Server data load failed:', e);
           // Only show warning if we have no cached data
           if (!state.ads?.length && !state.receipts?.length && !state.customers?.length) {
-            showNotification('Server Warning', 'Some data failed to load. Try Refresh.', 'warning');
+            showNotification(state.language === 'ar' ? 'تحذير السيرفر' : 'Server Warning', state.language === 'ar' ? 'فشل تحميل بعض البيانات. جرّب التحديث.' : 'Some data failed to load. Try Refresh.', 'warning');
           }
         });
       }
@@ -152,7 +154,7 @@ async function init() {
     }
   } else {
     // Offline/local mode (single-device)
-    setLoadingStatus('Loading local data...');
+    setLoadingStatus(state.language === 'ar' ? 'جارٍ تحميل البيانات المحلية...' : 'Loading local data...');
     // Load huge data collections (IndexedDB-first), migrate legacy localStorage if needed
     await loadCollectionsFromStorage(legacyCollections);
 
@@ -233,7 +235,7 @@ async function init() {
     }
   }
   
-  setLoadingStatus('Ready!');
+  setLoadingStatus(state.language === 'ar' ? 'جاهز!' : 'Ready!');
   
   // Check for cloud sync URL parameter (with security validation)
   const params = new URLSearchParams(window.location.search);
@@ -272,7 +274,7 @@ async function init() {
           endpoint: Security.sanitizeInput(config.endpoint, { maxLength: 500 }),
           apiKey: config.apiKey
         };
-        showNotification('System Connected', 'Synchronizing data...', 'success');
+        showNotification(state.language === 'ar' ? 'تم توصيل النظام' : 'System Connected', state.language === 'ar' ? 'جارٍ مزامنة البيانات...' : 'Synchronizing data...', 'success');
 
         // Remove param from URL
         const newUrl = window.location.protocol + "//" + window.location.host + window.location.pathname;

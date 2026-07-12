@@ -147,6 +147,76 @@ function t(key) {
   return lang[key] || key;
 }
 
+// Arabic display names for DYNAMIC status/enum values stored in records.
+// IMPORTANT: this is DISPLAY ONLY — never store the translated value, and CSS
+// class derivation (e.g. status-${s.toLowerCase()}) must keep using the RAW
+// English value. Unmapped values (and English mode) pass through unchanged.
+const STATUS_TRANSLATIONS_AR = {
+  // Payment / receipt status
+  'Paid': 'مدفوع',
+  'Not Paid': 'غير مدفوع',
+  'Unpaid': 'غير مدفوع',
+  'Pending': 'قيد الانتظار',
+  "Won't Pay": 'لن يدفع',
+  // Ad lifecycle
+  'Active': 'نشط',
+  'Paused': 'متوقف مؤقتاً',
+  'Completed': 'مكتمل',
+  'Canceled': 'ملغي',
+  'Cancelled': 'ملغي',
+  'Lost': 'ضائع',
+  'Stopped': 'موقوف',
+  'posted': 'منشور',
+  // Delivery pipeline
+  'Needs Delivery': 'بحاجة توصيل',
+  'In Progress': 'قيد التوصيل',
+  'Delivered': 'تم التوصيل',
+  'Office': 'المكتب',
+  // Receipt usage
+  'Unused': 'غير مستخدم',
+  'Partially Used': 'مستخدم جزئياً',
+  'Fully Used': 'مستخدم بالكامل',
+  'Unknown': 'غير معروف',
+  // Delivered payment results
+  'PAID_EXACT': 'مدفوع بالضبط',
+  'OVERPAID': 'دفع زائد',
+  'UNDERPAID': 'دفع ناقص',
+  // Collection types
+  'office': 'المكتب',
+  'delivery': 'توصيل',
+  'bank': 'مصرف',
+  // Refund
+  'None': 'بدون',
+  'Full': 'كامل',
+  'Partial': 'جزئي',
+};
+
+// Translate a stored status/enum value for display (Arabic mode only).
+function trStatus(value) {
+  if (state.language !== 'ar') return value == null ? '' : String(value);
+  const s = String(value == null ? '' : value).trim();
+  return STATUS_TRANSLATIONS_AR[s] || s;
+}
+
+// Payment channel names: Libyana/Madar/LTT/Sadad/USDT are proper names and
+// stay as-is; only the generic words are localized.
+const METHOD_TRANSLATIONS_AR = {
+  'Cash (LYD)': 'نقدي (LYD)',
+  'Cash (USD)': 'نقدي (USD)',
+  'Bank Transfer': 'حوالة مصرفية',
+  'Bank Transfer (LYD)': 'حوالة مصرفية (LYD)',
+  'Bank Transfer (USD)': 'حوالة مصرفية (USD)',
+  'Transfer Office': 'مكتب صرافة',
+  'Split Payment': 'دفعات مقسّمة',
+};
+
+// Translate a payment-method LABEL for display (values stay raw English).
+function trMethod(value) {
+  if (state.language !== 'ar') return value == null ? '' : String(value);
+  const s = String(value == null ? '' : value).trim();
+  return METHOD_TRANSLATIONS_AR[s] || s;
+}
+
 function getDir() {
   return state.language === 'ar' ? 'rtl' : 'ltr';
 }

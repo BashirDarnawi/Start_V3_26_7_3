@@ -14,18 +14,18 @@ function renderModal() {
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center">
           <i data-lucide="user" class="w-6 h-6 mr-2 text-indigo-600"></i>
-          ${isEdit ? 'Edit' : 'Add'} Customer
+          ${state.language === 'ar' ? (isEdit ? 'تعديل عميل' : 'إضافة عميل') : `${isEdit ? 'Edit' : 'Add'} Customer`}
         </h2>
         <form id="modal-form" class="space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar pr-2">
           <!-- Name -->
           <div>
-            <label class="block text-sm font-medium mb-2">Name *</label>
-            <input type="text" id="customer-name" value="${Security.escapeHtml(custData.name || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" placeholder="Customer name" />
+            <label class="block text-sm font-medium mb-2">${state.language === 'ar' ? 'الاسم *' : 'Name *'}</label>
+            <input type="text" id="customer-name" value="${Security.escapeHtml(custData.name || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${state.language === 'ar' ? 'اسم العميل' : 'Customer name'}" />
           </div>
 
           <!-- Platform -->
           <div>
-            <label class="block text-sm font-medium mb-2">Platform *</label>
+            <label class="block text-sm font-medium mb-2">${state.language === 'ar' ? 'المنصة *' : 'Platform *'}</label>
             <select id="customer-platform" class="w-full glass-input px-4 py-2 rounded-xl">
               ${PLATFORMS.map(p => `<option value="${p}" ${custData.platform === p ? 'selected' : ''}>${p}</option>`).join('')}
             </select>
@@ -33,23 +33,23 @@ function renderModal() {
 
           <!-- Join Date -->
           <div>
-            <label class="block text-sm font-medium mb-2">Join Date</label>
+            <label class="block text-sm font-medium mb-2">${state.language === 'ar' ? 'تاريخ الانضمام' : 'Join Date'}</label>
             <input type="date" id="customer-joindate" value="${Security.escapeHtml(custData.joinDate ? custData.joinDate.split('T')[0] : getTodayDateString())}" class="w-full glass-input px-4 py-2 rounded-xl" />
           </div>
 
           <!-- Phone Numbers -->
           <div>
             <div class="flex justify-between items-center mb-2">
-              <label class="block text-sm font-medium">Phone Numbers *</label>
+              <label class="block text-sm font-medium">${state.language === 'ar' ? 'أرقام الهاتف *' : 'Phone Numbers *'}</label>
               <button type="button" onclick="addPhoneField()" class="text-indigo-600 hover:text-indigo-700 text-sm font-medium flex items-center space-x-1">
                 <i data-lucide="plus-circle" class="w-4 h-4"></i>
-                <span>Add Phone</span>
+                <span>${state.language === 'ar' ? 'إضافة هاتف' : 'Add Phone'}</span>
               </button>
             </div>
             <div id="phone-fields-container" class="space-y-2">
               ${phones.map((phone, index) => `
                 <div class="flex items-center space-x-2 phone-field-group">
-                  <input type="tel" class="customer-phone flex-1 glass-input px-4 py-2 rounded-xl" value="${Security.escapeHtml(phone || '')}" placeholder="Phone number" ${index === 0 ? 'required' : ''} />
+                  <input type="tel" class="customer-phone flex-1 glass-input px-4 py-2 rounded-xl" value="${Security.escapeHtml(phone || '')}" placeholder="${state.language === 'ar' ? 'رقم الهاتف' : 'Phone number'}" ${index === 0 ? 'required' : ''} />
                   ${index > 0 ? `
                     <button type="button" onclick="this.parentElement.remove(); lucide.createIcons()" class="text-rose-600 hover:text-rose-700">
                       <i data-lucide="trash-2" class="w-4 h-4"></i>
@@ -63,10 +63,10 @@ function renderModal() {
           <!-- Profile Links -->
           <div>
             <div class="flex justify-between items-center mb-2">
-              <label class="block text-sm font-medium">Profile Links</label>
+              <label class="block text-sm font-medium">${state.language === 'ar' ? 'روابط الملف الشخصي' : 'Profile Links'}</label>
               <button type="button" onclick="addProfileLinkField()" class="text-indigo-600 hover:text-indigo-700 text-sm font-medium flex items-center space-x-1">
                 <i data-lucide="plus-circle" class="w-4 h-4"></i>
-                <span>Add Link</span>
+                <span>${state.language === 'ar' ? 'إضافة رابط' : 'Add Link'}</span>
               </button>
             </div>
             <div id="profile-links-container" class="space-y-2">
@@ -80,7 +80,7 @@ function renderModal() {
               `).join('') : `
                 <div class="text-center py-4 text-sm text-slate-400">
                   <i data-lucide="link" class="w-8 h-8 mx-auto mb-2 opacity-50"></i>
-                  <p>No profile links yet. Click "Add Link" to add one.</p>
+                  <p>${state.language === 'ar' ? 'لا توجد روابط بعد. اضغط "إضافة رابط" لإضافة واحد.' : 'No profile links yet. Click "Add Link" to add one.'}</p>
                 </div>
               `}
             </div>
@@ -88,9 +88,9 @@ function renderModal() {
 
           <div class="flex space-x-3 pt-4 border-t border-slate-200 dark:border-slate-700">
             <button type="submit" class="flex-1 btn-shine bg-indigo-600 text-white px-4 py-3 rounded-xl font-bold hover:bg-indigo-700">
-              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>${isEdit ? 'Save Changes' : 'Create Customer'}
+              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>${state.language === 'ar' ? (isEdit ? 'حفظ التغييرات' : 'إنشاء عميل') : (isEdit ? 'Save Changes' : 'Create Customer')}
             </button>
-            <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold hover:bg-slate-300">Cancel</button>
+            <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold hover:bg-slate-300">${state.language === 'ar' ? 'إلغاء' : 'Cancel'}</button>
           </div>
         </form>
       `;
@@ -104,17 +104,18 @@ function renderModal() {
       const durationDaysDefault = (adData.days !== undefined ? adData.days : (adData.startDate && adData.endDate ? Math.max(0, Math.round((new Date(adData.endDate) - new Date(adData.startDate)) / (1000 * 60 * 60 * 24))) : ''));
       const isAdminUser = isCurrentUserAdmin();
       const adCreator = isEdit && adData.creatorId ? state.users.find(u => u.id === adData.creatorId) : state.currentUser;
-      
+      const isArAd = state.language === 'ar';
+
       if (visiblePages.length === 0) {
         modalContent = `
           <div class="text-center py-8">
             <div class="w-20 h-20 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center shadow-xl">
               <i data-lucide="file-text" class="w-10 h-10 text-white"></i>
             </div>
-            <h2 class="text-xl font-bold text-slate-800 dark:text-white mb-2">No Pages Found</h2>
-            <p class="text-slate-500 mb-4">Please add a Facebook Page first before creating an ad.</p>
+            <h2 class="text-xl font-bold text-slate-800 dark:text-white mb-2">${isArAd ? 'لا توجد صفحات' : 'No Pages Found'}</h2>
+            <p class="text-slate-500 mb-4">${isArAd ? 'الرجاء إضافة صفحة فيسبوك أولاً قبل إنشاء إعلان.' : 'Please add a Facebook Page first before creating an ad.'}</p>
             <button onclick="closeModal(); navigateTo('pages')" class="btn-shine bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-6 py-3 rounded-xl font-bold">
-              <i data-lucide="plus" class="w-4 h-4 inline mr-2"></i>Add Page
+              <i data-lucide="plus" class="w-4 h-4 inline mr-2"></i>${isArAd ? 'إضافة صفحة' : 'Add Page'}
             </button>
           </div>
         `;
@@ -131,8 +132,8 @@ function renderModal() {
                 <i data-lucide="megaphone" class="w-5 h-5 text-white"></i>
               </span>
               <div>
-                <h2 class="text-lg font-bold text-slate-800 dark:text-white">${isEdit ? 'Edit' : 'New'} Ad</h2>
-                <p class="text-slate-400 text-xs">Fill all sections below</p>
+                <h2 class="text-lg font-bold text-slate-800 dark:text-white">${isArAd ? (isEdit ? 'تعديل إعلان' : 'إعلان جديد') : `${isEdit ? 'Edit' : 'New'} Ad`}</h2>
+                <p class="text-slate-400 text-xs">${isArAd ? 'املأ جميع الأقسام أدناه' : 'Fill all sections below'}</p>
               </div>
             </div>
             <button type="button" onclick="closeModal()" class="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-rose-100 hover:text-rose-600 transition-colors">
@@ -147,7 +148,7 @@ function renderModal() {
             <div class="bg-gradient-to-r from-slate-50 to-slate-100 dark:from-slate-800/50 dark:to-slate-800/30 rounded-xl p-4 space-y-3 border border-slate-200 dark:border-slate-700">
               <div class="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
                 <span class="w-5 h-5 rounded-full bg-indigo-600 text-white flex items-center justify-center text-[10px]">1</span>
-                Basic Info
+                ${isArAd ? 'معلومات أساسية' : 'Basic Info'}
               </div>
               
               <!-- Creator -->
@@ -156,19 +157,19 @@ function renderModal() {
                   <div class="w-7 h-7 rounded-full bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center text-indigo-600 font-bold text-xs">
                     ${adCreator?.name?.charAt(0) || 'U'}
                   </div>
-                  <span class="text-sm text-slate-600 dark:text-slate-300">${Security.escapeHtml(adCreator?.name || 'Unknown')}</span>
+                  <span class="text-sm text-slate-600 dark:text-slate-300">${Security.escapeHtml(adCreator?.name || (isArAd ? 'غير معروف' : 'Unknown'))}</span>
                 </div>
                 <span class="px-2 py-0.5 rounded-full text-[9px] font-bold ${isAdminUser ? 'bg-amber-100 text-amber-600' : 'bg-slate-200 text-slate-500'}">
-                  ${isAdminUser ? 'ADMIN' : 'USER'}
+                  ${isAdminUser ? (isArAd ? 'أدمن' : 'ADMIN') : (isArAd ? 'مستخدم' : 'USER')}
                 </span>
               </div>
               <input type="hidden" id="ad-creator-id" value="${adCreator?.id || state.currentUser?.id || ''}" />
               
               <!-- Page Selection -->
               <div>
-                <label class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">Page *</label>
+                <label class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">${isArAd ? 'الصفحة *' : 'Page *'}</label>
                 <div class="relative">
-                  <input type="text" id="ad-page-search" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-3 py-2 rounded-lg text-sm" placeholder="Search pages..." oninput="filterAdPages()" onfocus="showAdPageDropdown()" value="${Security.escapeHtml((state.pages.find(p => p.id === adData.pageId)?.name) || '')}" autocomplete="off" />
+                  <input type="text" id="ad-page-search" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-3 py-2 rounded-lg text-sm" placeholder="${isArAd ? 'ابحث في الصفحات...' : 'Search pages...'}" oninput="filterAdPages()" onfocus="showAdPageDropdown()" value="${Security.escapeHtml((state.pages.find(p => p.id === adData.pageId)?.name) || '')}" autocomplete="off" />
                   <div id="ad-page-dropdown" class="absolute z-20 mt-1 w-full bg-white dark:bg-slate-800 rounded-lg shadow-xl max-h-48 overflow-y-auto hidden border border-slate-200 dark:border-slate-600">
                     ${visiblePages.map(p => `
                       <div class="page-option px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer text-sm" data-name="${Security.escapeHtml((p.name || '').toLowerCase())}" onclick="selectAdPage('${p.id}')">
@@ -182,7 +183,7 @@ function renderModal() {
               
               <!-- Customer -->
               <div id="ad-customer-section" class="${adData.pageId ? '' : 'hidden'}">
-                <label class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">Customer <span class="text-slate-400" id="ad-customer-hint">(auto-selected)</span></label>
+                <label class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">${isArAd ? 'العميل' : 'Customer'} <span class="text-slate-400" id="ad-customer-hint">${isArAd ? '(يُختار تلقائياً)' : '(auto-selected)'}</span></label>
                 <div id="ad-customer-display" class="bg-white dark:bg-slate-900 rounded-lg p-2"></div>
                 <input type="hidden" id="ad-customer-id" value="${adData.customerId || ''}" required />
               </div>
@@ -192,23 +193,23 @@ function renderModal() {
             <div class="bg-gradient-to-r from-emerald-50 to-teal-50 dark:from-emerald-900/20 dark:to-teal-900/20 rounded-xl p-4 space-y-3 border border-emerald-200 dark:border-emerald-800">
               <div class="text-xs font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wider flex items-center gap-2">
                 <span class="w-5 h-5 rounded-full bg-emerald-600 text-white flex items-center justify-center text-[10px]">2</span>
-                Payment Status
+                ${isArAd ? 'حالة الدفع' : 'Payment Status'}
               </div>
               <div class="grid grid-cols-3 gap-2">
                 <button type="button" onclick="setAdPaymentStatus('paid')" id="ad-pay-status-paid"
                   class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'border-emerald-500 bg-emerald-100 dark:bg-emerald-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
                   <i data-lucide="check-circle" class="w-5 h-5 ${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'text-emerald-600' : 'text-slate-400'}"></i>
-                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'text-emerald-700' : 'text-slate-500'}">Paid</span>
+                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'text-emerald-700' : 'text-slate-500'}">${trStatus('Paid')}</span>
                 </button>
                 <button type="button" onclick="setAdPaymentStatus('not_paid')" id="ad-pay-status-not-paid"
                   class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adData.paymentStatus === 'not_paid' ? 'border-amber-500 bg-amber-100 dark:bg-amber-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
                   <i data-lucide="clock" class="w-5 h-5 ${adData.paymentStatus === 'not_paid' ? 'text-amber-600' : 'text-slate-400'}"></i>
-                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'not_paid' ? 'text-amber-700' : 'text-slate-500'}">Not Paid</span>
+                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'not_paid' ? 'text-amber-700' : 'text-slate-500'}">${isArAd ? 'غير مدفوع' : 'Not Paid'}</span>
                 </button>
                 <button type="button" onclick="setAdPaymentStatus('wont_pay')" id="ad-pay-status-wont"
                   class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adData.paymentStatus === 'wont_pay' ? 'border-rose-500 bg-rose-100 dark:bg-rose-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
                   <i data-lucide="x-octagon" class="w-5 h-5 ${adData.paymentStatus === 'wont_pay' ? 'text-rose-600' : 'text-slate-400'}"></i>
-                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'wont_pay' ? 'text-rose-700' : 'text-slate-500'}">Won't Pay</span>
+                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'wont_pay' ? 'text-rose-700' : 'text-slate-500'}">${isArAd ? 'لن يدفع' : "Won't Pay"}</span>
                 </button>
               </div>
               <input type="hidden" id="ad-payment-status" value="${adData.paymentStatus || 'paid'}" />
@@ -217,26 +218,26 @@ function renderModal() {
             <!-- NOT PAID OPTIONS -->
             <div id="ad-not-paid-options" class="${adData.paymentStatus === 'not_paid' ? '' : 'hidden'}">
               <div class="p-4 rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 space-y-3">
-                <label class="block text-xs font-bold text-amber-700">How will payment be collected?</label>
+                <label class="block text-xs font-bold text-amber-700">${isArAd ? 'كيف سيتم تحصيل الدفع؟' : 'How will payment be collected?'}</label>
                 <div class="grid grid-cols-2 gap-2">
                   <button type="button" onclick="setAdCollectionMethod('in_shop')" id="ad-collect-shop"
                     class="p-3 rounded-lg border-2 flex flex-col items-center ${adData.collectionMethod === 'in_shop' ? 'border-blue-500 bg-blue-50' : 'border-slate-200 bg-white'}">
                     <i data-lucide="store" class="w-5 h-5 ${adData.collectionMethod === 'in_shop' ? 'text-blue-600' : 'text-slate-400'}"></i>
-                    <span class="text-xs font-medium mt-1">In Shop</span>
+                    <span class="text-xs font-medium mt-1">${isArAd ? 'في المحل' : 'In Shop'}</span>
                   </button>
                   <button type="button" onclick="setAdCollectionMethod('driver')" id="ad-collect-driver"
                     class="p-3 rounded-lg border-2 flex flex-col items-center ${adData.collectionMethod === 'driver' ? 'border-violet-500 bg-violet-50' : 'border-slate-200 bg-white'}">
                     <i data-lucide="truck" class="w-5 h-5 ${adData.collectionMethod === 'driver' ? 'text-violet-600' : 'text-slate-400'}"></i>
-                    <span class="text-xs font-medium mt-1">Driver</span>
+                    <span class="text-xs font-medium mt-1">${isArAd ? 'سائق' : 'Driver'}</span>
                   </button>
                 </div>
                 <input type="hidden" id="ad-collection-method" value="${adData.collectionMethod || ''}" />
                 <div id="ad-collection-details" class="${adData.collectionMethod ? '' : 'hidden'} pt-2 border-t border-amber-200">
                   <div id="ad-driver-select" class="hidden"></div>
                   <div id="ad-temp-receipt-link" class="hidden mt-2 p-3 bg-white rounded-lg border border-violet-200 space-y-3">
-                    <label class="block text-xs font-bold text-violet-700">Link Delivery Receipt (D#)</label>
+                    <label class="block text-xs font-bold text-violet-700">${isArAd ? 'ربط وصل توصيل (D#)' : 'Link Delivery Receipt (D#)'}</label>
                     <select id="ad-temp-receipt-id" class="w-full border border-slate-200 px-3 py-2 rounded-lg text-sm" onchange="onAdTempReceiptChange(this.value)">
-                      <option value="">Select pending receipt...</option>
+                      <option value="">${isArAd ? 'اختر وصلاً معلقاً...' : 'Select pending receipt...'}</option>
                     </select>
                     <div id="ad-temp-receipt-hint" class="text-xs text-slate-500"></div>
                     <input type="hidden" id="ad-linked-receipt-id" value="${adData.receiptId || ''}" />
@@ -244,18 +245,18 @@ function renderModal() {
                     <!-- Due Amount Usage Section -->
                     <div id="ad-due-amount-section" class="hidden p-3 bg-violet-50 rounded-lg border border-violet-200 space-y-2">
                       <div class="flex items-center justify-between">
-                        <span class="text-xs font-semibold text-violet-700">Use Credit from Due Receipt</span>
-                        <span id="ad-due-available" class="text-xs text-violet-600 font-medium">Available: $0.00</span>
+                        <span class="text-xs font-semibold text-violet-700">${isArAd ? 'استخدام رصيد من الوصل المستحق' : 'Use Credit from Due Receipt'}</span>
+                        <span id="ad-due-available" class="text-xs text-violet-600 font-medium">${isArAd ? 'المتاح: $0.00' : 'Available: $0.00'}</span>
                   </div>
                       <div class="grid grid-cols-2 gap-2">
                         <div>
-                          <label class="block text-[10px] text-slate-500 mb-1">Planned Spend (USD)</label>
+                          <label class="block text-[10px] text-slate-500 mb-1">${isArAd ? 'الصرف المخطط (USD)' : 'Planned Spend (USD)'}</label>
                           <input type="text" id="ad-due-amount-to-use" inputmode="decimal" class="w-full border border-violet-300 px-3 py-2 rounded-lg text-sm bg-white" placeholder="0.00" oninput="sanitizeMoneyInput(this); onAdDueAmountChange()" onfocus="this.select()" />
                 </div>
                         <div>
-                          <label class="block text-[10px] text-slate-500 mb-1">Use All</label>
+                          <label class="block text-[10px] text-slate-500 mb-1">${isArAd ? 'استخدام الكل' : 'Use All'}</label>
                           <button type="button" onclick="useAllDueAmount()" class="w-full bg-violet-600 text-white px-3 py-2 rounded-lg text-sm font-medium hover:bg-violet-700">
-                            Use Full Credit
+                            ${isArAd ? 'استخدام كامل الرصيد' : 'Use Full Credit'}
                           </button>
                         </div>
                       </div>
@@ -266,20 +267,20 @@ function renderModal() {
                     <div id="ad-merge-funds-toggle" class="hidden">
                       <button type="button" onclick="toggleMergePaidFunds()" class="flex items-center gap-2 text-xs text-blue-600 hover:text-blue-700 font-medium">
                         <i data-lucide="plus-circle" class="w-4 h-4" id="ad-merge-icon"></i>
-                        <span id="ad-merge-text">Add Paid Receipt Funds</span>
+                        <span id="ad-merge-text">${isArAd ? 'إضافة أموال من وصل مدفوع' : 'Add Paid Receipt Funds'}</span>
                       </button>
                     </div>
                     
                     <!-- Merged Paid Funds Section (hidden by default) -->
                     <div id="ad-merged-paid-funds" class="hidden mt-2 p-3 bg-blue-50 rounded-lg border border-blue-200 space-y-2">
                       <div class="flex items-center justify-between">
-                        <span class="text-xs font-bold text-blue-700">Also Use Paid Receipt Funds</span>
+                        <span class="text-xs font-bold text-blue-700">${isArAd ? 'استخدام أموال وصل مدفوع أيضاً' : 'Also Use Paid Receipt Funds'}</span>
                         <button type="button" onclick="addAdFundingAllocationForMerge()" class="text-xs bg-blue-600 text-white px-2 py-1 rounded-lg font-medium hover:bg-blue-700">
-                          + Add Receipt
+                          ${isArAd ? '+ إضافة وصل' : '+ Add Receipt'}
                         </button>
                       </div>
                       <div id="ad-merged-funding-list" class="space-y-2 bg-white rounded-lg p-2 min-h-[40px]">
-                        <div class="text-xs text-slate-400 text-center py-1">Click "+ Add Receipt" to use paid funds</div>
+                        <div class="text-xs text-slate-400 text-center py-1">${isArAd ? 'اضغط "+ إضافة وصل" لاستخدام الأموال المدفوعة' : 'Click "+ Add Receipt" to use paid funds'}</div>
                       </div>
                       <div id="ad-merged-funding-summary" class="text-xs text-blue-600 font-medium"></div>
                     </div>
@@ -292,8 +293,8 @@ function renderModal() {
             <div id="ad-unpaid-financial" class="${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'hidden' : (adData.paymentStatus === 'not_paid' && adData.collectionMethod === 'driver' ? 'hidden' : '')}">
               <div class="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 space-y-2">
                 <div class="flex justify-between items-center">
-                  <span class="text-xs font-bold text-slate-600">Financial Details</span>
-                  <button type="button" onclick="addReceiptPaymentSplit()" class="text-xs text-emerald-600 font-medium">+ Add Split</button>
+                  <span class="text-xs font-bold text-slate-600">${isArAd ? 'التفاصيل المالية' : 'Financial Details'}</span>
+                  <button type="button" onclick="addReceiptPaymentSplit()" class="text-xs text-emerald-600 font-medium">${isArAd ? '+ إضافة تقسيم' : '+ Add Split'}</button>
                 </div>
                 <div id="receipt-financial-section">
                   ${renderReceiptFinancials(
@@ -324,14 +325,14 @@ function renderModal() {
               <div class="flex items-center justify-between">
                 <div class="text-xs font-bold text-blue-700 dark:text-blue-400 uppercase tracking-wider flex items-center gap-2">
                   <span class="w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center text-[10px]">3</span>
-                  Receipt Funding
+                  ${isArAd ? 'تمويل من الوصولات' : 'Receipt Funding'}
                 </div>
                 <button type="button" onclick="addAdFundingAllocation()" class="text-xs bg-blue-600 text-white px-2 py-1 rounded-lg font-medium hover:bg-blue-700">
-                  + Add Receipt
+                  ${isArAd ? '+ إضافة وصل' : '+ Add Receipt'}
                 </button>
               </div>
               <div id="ad-funding-list" class="space-y-2 bg-white dark:bg-slate-900 rounded-lg p-2 min-h-[60px]">
-                <div class="text-xs text-slate-400 text-center py-2">Select a page & customer first</div>
+                <div class="text-xs text-slate-400 text-center py-2">${isArAd ? 'اختر صفحة وعميلاً أولاً' : 'Select a page & customer first'}</div>
               </div>
               <div id="ad-funding-summary" class="text-xs text-blue-600 font-medium"></div>
             </div>
@@ -340,19 +341,19 @@ function renderModal() {
             <div class="bg-gradient-to-r from-purple-50 to-pink-50 dark:from-purple-900/20 dark:to-pink-900/20 rounded-xl p-4 space-y-3 border border-purple-200 dark:border-purple-800">
               <div class="text-xs font-bold text-purple-700 dark:text-purple-400 uppercase tracking-wider flex items-center gap-2">
                 <span class="w-5 h-5 rounded-full bg-purple-600 text-white flex items-center justify-center text-[10px]">4</span>
-                Ad Duration
+                ${isArAd ? 'مدة الإعلان' : 'Ad Duration'}
               </div>
               <div class="grid grid-cols-3 gap-2">
                 <div>
-                  <label class="block text-xs text-slate-500 mb-1">Start</label>
+                  <label class="block text-xs text-slate-500 mb-1">${isArAd ? 'البداية' : 'Start'}</label>
                   <input type="date" id="ad-start-date" value="${Security.escapeHtml(adData.startDate ? adData.startDate.split('T')[0] : getTodayDateString())}" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-2 py-2 rounded-lg text-sm" onchange="updateAdDays()" />
                 </div>
                 <div>
-                  <label class="block text-xs text-slate-500 mb-1">End</label>
+                  <label class="block text-xs text-slate-500 mb-1">${isArAd ? 'النهاية' : 'End'}</label>
                   <input type="date" id="ad-end-date" value="${Security.escapeHtml(adData.endDate ? adData.endDate.split('T')[0] : getTodayDateString())}" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-2 py-2 rounded-lg text-sm" onchange="updateAdDays()" />
                 </div>
                 <div>
-                  <label class="block text-xs text-slate-500 mb-1">Days</label>
+                  <label class="block text-xs text-slate-500 mb-1">${isArAd ? 'الأيام' : 'Days'}</label>
                   <input type="number" id="ad-days" min="0" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-2 py-2 rounded-lg text-sm" value="${Security.escapeHtml(String(durationDaysDefault || ''))}" oninput="updateAdEndDateFromDays()" />
                 </div>
               </div>
@@ -363,15 +364,15 @@ function renderModal() {
               <div class="flex items-center justify-between">
                 <div class="text-xs font-bold text-orange-700 dark:text-orange-400 uppercase tracking-wider flex items-center gap-2">
                   <span class="w-5 h-5 rounded-full bg-orange-600 text-white flex items-center justify-center text-[10px]">5</span>
-                  Photos
+                  ${isArAd ? 'الصور' : 'Photos'}
                 </div>
                 <label class="text-xs bg-orange-600 text-white px-2 py-1 rounded-lg font-medium cursor-pointer hover:bg-orange-700">
-                  + Upload
+                  ${isArAd ? '+ رفع' : '+ Upload'}
                   <input type="file" accept="image/*" multiple class="hidden" onchange="uploadAdPhotos(this.files)" />
                 </label>
               </div>
               <div id="ad-photo-previews" class="grid grid-cols-4 gap-2 min-h-[40px] bg-white dark:bg-slate-900 rounded-lg p-2">
-                <div class="text-xs text-slate-400 col-span-4 text-center py-2">No photos yet</div>
+                <div class="text-xs text-slate-400 col-span-4 text-center py-2">${isArAd ? 'لا توجد صور بعد' : 'No photos yet'}</div>
               </div>
             </div>
 
@@ -380,10 +381,10 @@ function renderModal() {
               <div class="flex items-center justify-between">
                 <div class="text-xs font-bold text-cyan-700 dark:text-cyan-400 uppercase tracking-wider flex items-center gap-2">
                   <span class="w-5 h-5 rounded-full bg-cyan-600 text-white flex items-center justify-center text-[10px]">6</span>
-                  Ad Links
+                  ${isArAd ? 'روابط الإعلان' : 'Ad Links'}
                 </div>
                 <button type="button" onclick="addAdLinkInput('')" class="text-xs bg-cyan-600 text-white px-2 py-1 rounded-lg font-medium hover:bg-cyan-700">
-                  + Add Link
+                  ${isArAd ? '+ إضافة رابط' : '+ Add Link'}
                 </button>
               </div>
               <div id="ad-links-list" class="space-y-2">
@@ -403,10 +404,10 @@ function renderModal() {
           <!-- FIXED FOOTER -->
           <div class="flex-shrink-0 pt-4 border-t border-slate-200 dark:border-slate-700 flex gap-3">
             <button type="submit" form="modal-form" class="flex-1 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white px-4 py-3 rounded-xl font-bold text-sm shadow-lg">
-              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>${isEdit ? 'Save Changes' : 'Create Ad'}
+              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>${isArAd ? (isEdit ? 'حفظ التغييرات' : 'إنشاء إعلان') : (isEdit ? 'Save Changes' : 'Create Ad')}
             </button>
             <button type="button" onclick="closeModal()" class="px-6 py-3 rounded-xl font-medium text-sm bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-200">
-              Cancel
+              ${isArAd ? 'إلغاء' : 'Cancel'}
             </button>
           </div>
         </div>
@@ -417,6 +418,7 @@ function renderModal() {
       const isAdminEditor = isCurrentUserAdmin();
       const isSelfEdit = isEdit && String(userData.id || '') === String(state.currentUser?.id || '');
       const userPermSummary = isEdit && !isAdminRole(userData.role) ? getPermissionSummary(userData.permissions || {}) : null;
+      const isArU = state.language === 'ar';
       modalContent = `
         <div class="flex items-center justify-between mb-6">
           <div class="flex items-center space-x-3">
@@ -424,8 +426,8 @@ function renderModal() {
               ${userData.name ? userData.name.charAt(0) : '<i data-lucide="user-plus" class="w-6 h-6"></i>'}
             </div>
             <div>
-              <h2 class="text-xl font-bold text-slate-800 dark:text-white">${isEdit ? (isSelfEdit ? 'Edit Profile' : 'Edit User') : 'Add New User'}</h2>
-              <p class="text-xs text-slate-500">${isEdit ? (isSelfEdit ? 'Update your profile details' : 'Update user details and access') : 'Create account with permissions'}</p>
+              <h2 class="text-xl font-bold text-slate-800 dark:text-white">${isArU ? (isEdit ? (isSelfEdit ? 'تعديل الملف الشخصي' : 'تعديل مستخدم') : 'إضافة مستخدم جديد') : (isEdit ? (isSelfEdit ? 'Edit Profile' : 'Edit User') : 'Add New User')}</h2>
+              <p class="text-xs text-slate-500">${isArU ? (isEdit ? (isSelfEdit ? 'حدّث بيانات ملفك الشخصي' : 'حدّث بيانات المستخدم وصلاحياته') : 'إنشاء حساب مع صلاحيات') : (isEdit ? (isSelfEdit ? 'Update your profile details' : 'Update user details and access') : 'Create account with permissions')}</p>
             </div>
           </div>
           <button type="button" onclick="closeModal()" class="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
@@ -436,24 +438,24 @@ function renderModal() {
         <form id="modal-form" class="space-y-5">
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">Full Name *</label>
+              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? 'الاسم الكامل *' : 'Full Name *'}</label>
               <input type="text" id="user-name" value="${Security.escapeHtml(userData.name || '')}" required class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="John Doe" />
             </div>
             <div>
-              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">Email Address *</label>
+              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? 'البريد الإلكتروني *' : 'Email Address *'}</label>
               <input type="email" id="user-email" value="${Security.escapeHtml(userData.email || '')}" required class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="john@company.com" />
             </div>
           </div>
           
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">Password ${isEdit ? '(leave blank to keep)' : '*'}</label>
-              <input type="password" id="user-password" ${!isEdit ? 'required' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : 'Min. 8 characters'}" />
+              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? `كلمة المرور ${isEdit ? '(اتركها فارغة للإبقاء عليها)' : '*'}` : `Password ${isEdit ? '(leave blank to keep)' : '*'}`}</label>
+              <input type="password" id="user-password" ${!isEdit ? 'required' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : (isArU ? '8 أحرف على الأقل' : 'Min. 8 characters')}" />
             </div>
             <div>
-              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">Role *</label>
+              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? 'الدور *' : 'Role *'}</label>
               <select id="user-role" onchange="updateUserRoleInfo(this.value)" class="w-full glass-input px-4 py-2.5 rounded-xl" ${isAdminEditor ? '' : 'disabled'}>
-                ${USER_ROLES.map(r => `<option value="${r}" ${userData.role === r ? 'selected' : ''}>${r}</option>`).join('')}
+                ${USER_ROLES.map(r => `<option value="${r}" ${userData.role === r ? 'selected' : ''}>${isArU ? ({ 'Admin': 'أدمن', 'Employee': 'موظف', 'Delivery': 'توصيل' }[r] || r) : r}</option>`).join('')}
               </select>
               ${!isAdminEditor ? `
                 <div class="mt-1 text-[11px] text-slate-400">
@@ -471,14 +473,14 @@ function renderModal() {
               </div>
               <div class="flex-1">
                 <div id="role-title" class="font-bold text-sm text-slate-700 dark:text-slate-300">
-                  ${isAdminRole(userData.role) ? 'Full Administrator' : isDeliveryRole(userData.role) ? 'Delivery Driver' : 'Employee'}
+                  ${isAdminRole(userData.role) ? (isArU ? 'أدمن كامل الصلاحيات' : 'Full Administrator') : isDeliveryRole(userData.role) ? (isArU ? 'سائق توصيل' : 'Delivery Driver') : (isArU ? 'موظف' : 'Employee')}
                 </div>
                 <div id="role-desc" class="text-xs text-slate-500">
-                  ${isAdminRole(userData.role) ? 'Complete access to all features. No restrictions.' : isDeliveryRole(userData.role) ? 'Access to delivery operations only.' : 'Standard employee access. Customize permissions after creation.'}
+                  ${isAdminRole(userData.role) ? (isArU ? 'وصول كامل لجميع الميزات. بلا قيود.' : 'Complete access to all features. No restrictions.') : isDeliveryRole(userData.role) ? (isArU ? 'وصول لعمليات التوصيل فقط.' : 'Access to delivery operations only.') : (isArU ? 'وصول موظف قياسي. يمكن تخصيص الصلاحيات بعد الإنشاء.' : 'Standard employee access. Customize permissions after creation.')}
                 </div>
               </div>
               ${isAdminRole(userData.role) ? `
-                <span class="px-2 py-1 rounded-lg bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 text-xs font-bold">ALL ACCESS</span>
+                <span class="px-2 py-1 rounded-lg bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 text-xs font-bold">${isArU ? 'وصول كامل' : 'ALL ACCESS'}</span>
               ` : ''}
             </div>
           </div>
@@ -489,9 +491,9 @@ function renderModal() {
               <div class="flex items-center justify-between mb-3">
                 <div class="flex items-center space-x-2">
                   <i data-lucide="shield" class="w-4 h-4 text-purple-600"></i>
-                  <span class="text-sm font-bold text-purple-700 dark:text-purple-300">Current Permissions</span>
+                  <span class="text-sm font-bold text-purple-700 dark:text-purple-300">${isArU ? 'الصلاحيات الحالية' : 'Current Permissions'}</span>
                 </div>
-                <span class="text-xs font-bold text-purple-600">${userPermSummary.granted}/${userPermSummary.total} granted</span>
+                <span class="text-xs font-bold text-purple-600">${userPermSummary.granted}/${userPermSummary.total} ${isArU ? 'ممنوحة' : 'granted'}</span>
               </div>
               <div class="w-full h-2 bg-purple-200 dark:bg-purple-800 rounded-full overflow-hidden mb-3">
                 <div class="h-full bg-gradient-to-r from-purple-500 to-indigo-500 rounded-full" style="width: ${userPermSummary.percentage}%"></div>
@@ -499,7 +501,7 @@ function renderModal() {
               ${isAdminEditor ? `
               <button type="button" onclick="closeModal(); setTimeout(() => showPermissionsModal('${userData.id}'), 200)" class="w-full py-2 rounded-lg text-xs font-bold text-purple-600 hover:bg-purple-100 dark:hover:bg-purple-800/30 transition-colors flex items-center justify-center space-x-2">
                 <i data-lucide="settings" class="w-3 h-3"></i>
-                <span>Manage Detailed Permissions</span>
+                <span>${isArU ? 'إدارة الصلاحيات التفصيلية' : 'Manage Detailed Permissions'}</span>
               </button>
               ` : `
                 <div class="text-[11px] text-slate-500 text-center">
@@ -513,10 +515,9 @@ function renderModal() {
               <div class="flex items-start space-x-3">
                 <i data-lucide="info" class="w-5 h-5 text-blue-600 mt-0.5"></i>
                 <div>
-                  <div class="text-sm font-bold text-blue-700 dark:text-blue-300">Permissions Setup</div>
+                  <div class="text-sm font-bold text-blue-700 dark:text-blue-300">${isArU ? 'إعداد الصلاحيات' : 'Permissions Setup'}</div>
                   <p class="text-xs text-blue-600 dark:text-blue-400 mt-1">
-                    After creating this user, you'll be able to configure their detailed permissions. 
-                    Default permissions will be assigned based on their role.
+                    ${isArU ? 'بعد إنشاء هذا المستخدم، يمكنك ضبط صلاحياته التفصيلية. سيتم تعيين صلاحيات افتراضية حسب دوره.' : `After creating this user, you'll be able to configure their detailed permissions. Default permissions will be assigned based on their role.`}
                   </p>
                 </div>
               </div>
@@ -526,9 +527,9 @@ function renderModal() {
           <div class="flex space-x-3 pt-2">
             <button type="submit" class="flex-1 btn-shine bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2">
               <i data-lucide="${isEdit ? 'save' : 'user-plus'}" class="w-4 h-4"></i>
-              <span>${isEdit ? 'Save Changes' : 'Create User'}</span>
+              <span>${isArU ? (isEdit ? 'حفظ التغييرات' : 'إنشاء مستخدم') : (isEdit ? 'Save Changes' : 'Create User')}</span>
             </button>
-            <button type="button" onclick="closeModal()" class="px-6 py-3 bg-slate-200 dark:bg-slate-700 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors">Cancel</button>
+            <button type="button" onclick="closeModal()" class="px-6 py-3 bg-slate-200 dark:bg-slate-700 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors">${isArU ? 'إلغاء' : 'Cancel'}</button>
           </div>
         </form>
       `;
@@ -538,26 +539,27 @@ function renderModal() {
       const pageCustomers = getVisibleRecords(state.customers);
       const existingCustomerIds = pageData.customerIds || [];
       const isAdminPage = isAdminRole(state.currentUser?.role);
-      
+      const isArP = state.language === 'ar';
+
       if (pageCustomers.length === 0) {
         modalContent = `
-          <h2 class="text-2xl font-bold mb-4">Add Page</h2>
+          <h2 class="text-2xl font-bold mb-4">${isArP ? 'إضافة صفحة' : 'Add Page'}</h2>
           <div class="text-center py-8">
             <i data-lucide="alert-circle" class="w-12 h-12 mx-auto text-amber-500 mb-4"></i>
-            <p class="text-slate-600 dark:text-slate-400 mb-4">No customers found. Please add a customer first.</p>
-            <button onclick="closeModal(); navigateTo('customers')" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold">Go to Customers</button>
+            <p class="text-slate-600 dark:text-slate-400 mb-4">${isArP ? 'لا يوجد عملاء. الرجاء إضافة عميل أولاً.' : 'No customers found. Please add a customer first.'}</p>
+            <button onclick="closeModal(); navigateTo('customers')" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold">${isArP ? 'الذهاب إلى العملاء' : 'Go to Customers'}</button>
           </div>
         `;
       } else {
       modalContent = `
-        <h2 class="text-2xl font-bold mb-4">${isEdit ? 'Edit' : 'Add'} Page</h2>
+        <h2 class="text-2xl font-bold mb-4">${isArP ? (isEdit ? 'تعديل صفحة' : 'إضافة صفحة') : `${isEdit ? 'Edit' : 'Add'} Page`}</h2>
         <form id="modal-form" class="space-y-4">
           <div>
-              <label class="block text-sm font-medium mb-2">Page Name *</label>
+              <label class="block text-sm font-medium mb-2">${isArP ? 'اسم الصفحة *' : 'Page Name *'}</label>
             <input type="text" id="page-name" value="${Security.escapeHtml(pageData.name || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" />
           </div>
           <div>
-              <label class="block text-sm font-medium mb-2">Category *</label>
+              <label class="block text-sm font-medium mb-2">${isArP ? 'الفئة *' : 'Category *'}</label>
             <input type="text" id="page-category" list="page-category-suggestions" autocomplete="off" value="${Security.escapeHtml(pageData.category || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" />
             <!-- Suggest previously-used categories while typing (user request):
                  picking an existing one avoids near-duplicate categories like
@@ -579,14 +581,14 @@ function renderModal() {
             <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl border border-blue-200 dark:border-blue-800">
               <div class="flex items-center space-x-2 mb-3">
                 <i data-lucide="users" class="w-4 h-4 text-blue-600"></i>
-                <label class="text-sm font-bold text-blue-900 dark:text-blue-100">Link to Customer(s) *</label>
+                <label class="text-sm font-bold text-blue-900 dark:text-blue-100">${isArP ? 'ربط بعميل (أو عملاء) *' : 'Link to Customer(s) *'}</label>
               </div>
               
               ${!isAdminPage ? `
                 <div class="mb-3 p-2 bg-amber-100 dark:bg-amber-900/20 rounded-lg">
                   <p class="text-xs text-amber-800 dark:text-amber-200">
                     <i data-lucide="info" class="w-3 h-3 inline mr-1"></i>
-                    You can only link a page to one customer
+                    ${isArP ? 'يمكنك ربط الصفحة بعميل واحد فقط' : 'You can only link a page to one customer'}
                   </p>
                 </div>
               ` : ''}
@@ -595,7 +597,7 @@ function renderModal() {
                 <input 
                   type="text" 
                   id="page-customer-search" 
-                  placeholder="Search for customer..."
+                  placeholder="${isArP ? 'ابحث عن عميل...' : 'Search for customer...'}"
                   class="w-full glass-input px-4 py-2 rounded-xl"
                   oninput="filterPageCustomers()"
                   onfocus="showPageCustomerDropdown()"
@@ -604,7 +606,7 @@ function renderModal() {
                   ${pageCustomers.map(c => `
                     <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" onclick="selectPageCustomer('${c.id}', '${isAdminPage}')">
                       <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
-                      <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || 'No phone')}</div>
+                      <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (isArP ? 'لا يوجد هاتف' : 'No phone'))}</div>
                     </div>
                   `).join('')}
                 </div>
@@ -626,7 +628,7 @@ function renderModal() {
                   ` : '';
                 }).join('')}
                 <div id="page-no-customers" class="${existingCustomerIds.length > 0 ? 'hidden' : ''} text-sm text-slate-400 text-center py-4 border-2 border-dashed border-slate-200 dark:border-slate-700 rounded-lg">
-                  No customers selected yet. Please search and select at least one customer above.
+                  ${isArP ? 'لم يتم اختيار عملاء بعد. الرجاء البحث واختيار عميل واحد على الأقل أعلاه.' : 'No customers selected yet. Please search and select at least one customer above.'}
                 </div>
               </div>
               
@@ -635,8 +637,8 @@ function renderModal() {
                   <div class="flex items-start space-x-2">
                     <i data-lucide="alert-triangle" class="w-4 h-4 text-rose-600 mt-0.5"></i>
                     <div>
-                      <p class="text-xs font-bold text-rose-900 dark:text-rose-100">Warning: Multiple Customers</p>
-                      <p class="text-xs text-rose-700 dark:text-rose-300 mt-1">This page is linked to multiple customers. This is uncommon and may cause confusion. Are you sure this is what you want?</p>
+                      <p class="text-xs font-bold text-rose-900 dark:text-rose-100">${isArP ? 'تحذير: عدة عملاء' : 'Warning: Multiple Customers'}</p>
+                      <p class="text-xs text-rose-700 dark:text-rose-300 mt-1">${isArP ? 'هذه الصفحة مرتبطة بعدة عملاء. هذا غير شائع وقد يسبب التباساً. هل أنت متأكد أن هذا ما تريده؟' : 'This page is linked to multiple customers. This is uncommon and may cause confusion. Are you sure this is what you want?'}</p>
                     </div>
                   </div>
                 </div>
@@ -644,8 +646,8 @@ function renderModal() {
             </div>
             
           <div class="flex space-x-3">
-            <button type="submit" class="flex-1 btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold">${isEdit ? 'Save Changes' : 'Create Page'}</button>
-            <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2 rounded-xl font-bold">Cancel</button>
+            <button type="submit" class="flex-1 btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold">${isArP ? (isEdit ? 'حفظ التغييرات' : 'إنشاء صفحة') : (isEdit ? 'Save Changes' : 'Create Page')}</button>
+            <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2 rounded-xl font-bold">${isArP ? 'إلغاء' : 'Cancel'}</button>
           </div>
         </form>
       `;
@@ -658,17 +660,18 @@ function renderModal() {
       const defaultRate1 = getDefaultRate1(PAYMENT_METHODS[0]);
       const existingPayments = receiptData.payments || [{ method: PAYMENT_METHODS[0], amount: 0, rate: defaultRate1, rate2: state.defaultExchangeRate, collectionType: 'office', deliveryPersonId: '' }];
       const receiptDeliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
+      const isArR = state.language === 'ar';
       // Copy (not alias) the live record's photos so add/remove in the modal
       // does not mutate the saved receipt when the user cancels.
       state.tempReceiptPhotos = (receiptData.photos || []).slice();
       
       if (receiptCustomers.length === 0) {
         modalContent = `
-          <h2 class="text-2xl font-bold mb-4">Add Receipt</h2>
+          <h2 class="text-2xl font-bold mb-4">${isArR ? 'إضافة وصل' : 'Add Receipt'}</h2>
           <div class="text-center py-8">
             <i data-lucide="alert-circle" class="w-12 h-12 mx-auto text-amber-500 mb-4"></i>
-            <p class="text-slate-600 dark:text-slate-400 mb-4">No customers found. Please add a customer first.</p>
-            <button onclick="closeModal(); navigateTo('customers')" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold">Go to Customers</button>
+            <p class="text-slate-600 dark:text-slate-400 mb-4">${isArR ? 'لا يوجد عملاء. الرجاء إضافة عميل أولاً.' : 'No customers found. Please add a customer first.'}</p>
+            <button onclick="closeModal(); navigateTo('customers')" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold">${isArR ? 'الذهاب إلى العملاء' : 'Go to Customers'}</button>
           </div>
         `;
       } else {
@@ -693,12 +696,12 @@ function renderModal() {
               <div>
                 <label class="block text-xs font-medium text-slate-500 mb-2 flex items-center">
                   <i data-lucide="phone" class="w-3 h-3 mr-1"></i>
-                  Search phone...
+                  ${isArR ? 'بحث برقم الهاتف...' : 'Search phone...'}
                 </label>
-                <input 
-                  type="text" 
-                  id="receipt-phone-search" 
-                  placeholder="Type phone number..."
+                <input
+                  type="text"
+                  id="receipt-phone-search"
+                  placeholder="${isArR ? 'اكتب رقم الهاتف...' : 'Type phone number...'}"
                   class="w-full glass-input px-3 py-2 rounded-lg text-sm"
                   oninput="filterReceiptPhones()"
                   onfocus="showReceiptPhoneDropdown()"
@@ -713,18 +716,18 @@ function renderModal() {
                 </div>
               </div>
               <div>
-                <label class="block text-xs font-medium text-slate-500 mb-2">Select phone first...</label>
-                <input type="text" id="receipt-customer-name" readonly class="w-full glass-input px-3 py-2 rounded-lg text-sm bg-slate-100 dark:bg-slate-800" placeholder="Customer will appear here" />
+                <label class="block text-xs font-medium text-slate-500 mb-2">${isArR ? 'اختر الهاتف أولاً...' : 'Select phone first...'}</label>
+                <input type="text" id="receipt-customer-name" readonly class="w-full glass-input px-3 py-2 rounded-lg text-sm bg-slate-100 dark:bg-slate-800" placeholder="${isArR ? 'سيظهر العميل هنا' : 'Customer will appear here'}" />
                 <input type="hidden" id="receipt-customer-id" value="${receiptData.customerId || ''}" />
               </div>
             </div>
 
             <!-- Receipt Number -->
             <div class="px-1">
-              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1.5">Receipt Number</label>
+              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1.5">${isArR ? 'رقم الوصل' : 'Receipt Number'}</label>
               <input type="text" id="receipt-serial" value="${receiptData.serialNumber || receiptData.finalReceiptNo || receiptData.tempReceiptNo || ''}" 
                 class="w-full glass-input px-3 py-2 rounded-lg text-sm" 
-                placeholder="e.g., 12345" 
+                placeholder="${isArR ? 'مثال: 12345' : 'e.g., 12345'}"
                 oninput="validateReceiptNumberInput(this)"
                 onblur="checkReceiptNumberDuplicate(this)" />
               <div id="receipt-serial-error" class="hidden mt-1 text-xs text-rose-500 font-medium"></div>
@@ -733,12 +736,12 @@ function renderModal() {
 
             <!-- Status Tabs -->
             <div class="px-1">
-              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1.5">Status</label>
+              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1.5">${isArR ? 'الحالة' : 'Status'}</label>
               <div class="grid grid-cols-4 gap-1.5" id="receipt-status-tabs">
-                <button type="button" onclick="setReceiptStatus(this, 'Paid')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${!receiptData.status || receiptData.status === 'Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Paid">Paid</button>
-                <button type="button" onclick="setReceiptStatus(this, 'Not Paid')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Not Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Not Paid">Not Paid</button>
-                <button type="button" onclick="setReceiptStatus(this, 'Canceled')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Canceled' ? 'bg-rose-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Canceled">Canceled</button>
-                <button type="button" onclick="setReceiptStatus(this, 'Lost')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Lost' ? 'bg-slate-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Lost">Lost</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Paid')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${!receiptData.status || receiptData.status === 'Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Paid">${trStatus('Paid')}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Not Paid')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Not Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Not Paid">${isArR ? 'غير مدفوع' : 'Not Paid'}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Canceled')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Canceled' ? 'bg-rose-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Canceled">${isArR ? 'ملغي' : 'Canceled'}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Lost')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Lost' ? 'bg-slate-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Lost">${isArR ? 'مفقود' : 'Lost'}</button>
               </div>
               <input type="hidden" id="receipt-status" value="${receiptData.status || 'Paid'}" />
 
@@ -750,8 +753,8 @@ function renderModal() {
                       <i data-lucide="check-circle-2" class="w-5 h-5 text-white"></i>
                     </span>
                     <div>
-                      <div class="text-sm font-bold text-blue-900 dark:text-blue-100">Payment Collected</div>
-                      <div class="text-xs text-blue-600/80 dark:text-blue-300/80">Choose how the payment was collected</div>
+                      <div class="text-sm font-bold text-blue-900 dark:text-blue-100">${isArR ? 'تم تحصيل الدفع' : 'Payment Collected'}</div>
+                      <div class="text-xs text-blue-600/80 dark:text-blue-300/80">${isArR ? 'اختر كيف تم تحصيل الدفع' : 'Choose how the payment was collected'}</div>
                     </div>
                   </div>
                 </div>
@@ -765,8 +768,8 @@ function renderModal() {
                         <i data-lucide="store" class="w-6 h-6 ${(!receiptData.statusDetail?.paidCollection || receiptData.statusDetail?.paidCollection === 'office') ? 'text-white' : 'text-blue-600 dark:text-blue-400'}"></i>
                       </span>
                       <div>
-                        <div class="font-bold text-sm ${(!receiptData.statusDetail?.paidCollection || receiptData.statusDetail?.paidCollection === 'office') ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">In Office</div>
-                        <div class="text-[10px] ${(!receiptData.statusDetail?.paidCollection || receiptData.statusDetail?.paidCollection === 'office') ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">Paid in shop/office</div>
+                        <div class="font-bold text-sm ${(!receiptData.statusDetail?.paidCollection || receiptData.statusDetail?.paidCollection === 'office') ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${isArR ? 'في المكتب' : 'In Office'}</div>
+                        <div class="text-[10px] ${(!receiptData.statusDetail?.paidCollection || receiptData.statusDetail?.paidCollection === 'office') ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">${isArR ? 'تم الدفع في المحل/المكتب' : 'Paid in shop/office'}</div>
                       </div>
                     </div>
                   </button>
@@ -777,8 +780,8 @@ function renderModal() {
                         <i data-lucide="truck" class="w-6 h-6 ${receiptData.statusDetail?.paidCollection === 'delivery' ? 'text-white' : 'text-emerald-600 dark:text-emerald-400'}"></i>
                       </span>
                       <div>
-                        <div class="font-bold text-sm ${receiptData.statusDetail?.paidCollection === 'delivery' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">By Delivery</div>
-                        <div class="text-[10px] ${receiptData.statusDetail?.paidCollection === 'delivery' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">Driver collected payment</div>
+                        <div class="font-bold text-sm ${receiptData.statusDetail?.paidCollection === 'delivery' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${isArR ? 'عبر التوصيل' : 'By Delivery'}</div>
+                        <div class="text-[10px] ${receiptData.statusDetail?.paidCollection === 'delivery' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">${isArR ? 'السائق حصّل الدفع' : 'Driver collected payment'}</div>
                       </div>
                     </div>
                   </button>
@@ -787,10 +790,10 @@ function renderModal() {
                 <div id="paid-delivery-person-section" class="${receiptData.statusDetail?.paidCollection === 'delivery' ? '' : 'hidden'} mt-3 p-3 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-700">
                   <label class="block text-xs font-bold text-emerald-700 dark:text-emerald-300 mb-2 flex items-center space-x-2">
                     <i data-lucide="user-check" class="w-4 h-4"></i>
-                    <span>Delivery Person (optional)</span>
+                    <span>${isArR ? 'موظف التوصيل (اختياري)' : 'Delivery Person (optional)'}</span>
                   </label>
                   <select id="paid-delivery-person" class="w-full glass-input px-3 py-2 rounded-lg text-sm border border-emerald-200 dark:border-emerald-700 focus:ring-2 focus:ring-emerald-500/20">
-                    <option value="">Select delivery person...</option>
+                    <option value="">${isArR ? 'اختر موظف التوصيل...' : 'Select delivery person...'}</option>
                     ${getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role)).map(u =>
                       `<option value="${u.id}" ${receiptData.deliveryPersonId === u.id ? 'selected' : ''}>${Security.escapeHtml(u.name || '')}</option>`
                     ).join('')}
@@ -806,17 +809,17 @@ function renderModal() {
                       <i data-lucide="clock" class="w-5 h-5 text-white"></i>
                     </span>
                     <div>
-                      <div class="text-sm font-bold text-amber-900 dark:text-amber-100">Payment Pending</div>
+                      <div class="text-sm font-bold text-amber-900 dark:text-amber-100">${isArR ? 'الدفع معلّق' : 'Payment Pending'}</div>
                       <div class="text-xs text-amber-600/80 dark:text-amber-300/80 flex items-center space-x-1">
                         <i data-lucide="lock" class="w-3 h-3"></i>
-                        <span>Receipt # locked until paid</span>
+                        <span>${isArR ? 'رقم الوصل مقفل حتى يتم الدفع' : 'Receipt # locked until paid'}</span>
               </div>
                 </div>
                   </div>
                   ${isAdminReceipt ? `
                     <label class="flex items-center space-x-2 px-3 py-2 rounded-xl bg-white/60 dark:bg-slate-800/60 border border-amber-200 dark:border-amber-700 cursor-pointer hover:bg-white dark:hover:bg-slate-800 transition-all">
                       <input type="checkbox" id="status-not-paid-admin-override" class="w-4 h-4 rounded border-amber-400 text-amber-600 focus:ring-amber-500" onchange="updateReceiptStatusUI('Not Paid')" ${receiptData.statusDetail?.allowSerialOverride ? 'checked' : ''}/>
-                      <span class="text-xs font-bold text-amber-800 dark:text-amber-200">Admin Override</span>
+                      <span class="text-xs font-bold text-amber-800 dark:text-amber-200">${isArR ? 'تجاوز الأدمن' : 'Admin Override'}</span>
                     </label>
                   ` : ''}
                       </div>
@@ -824,7 +827,7 @@ function renderModal() {
                 <div class="pt-3 border-t border-amber-200/60 dark:border-amber-700/40">
                   <div class="text-xs font-bold text-amber-800 dark:text-amber-200 mb-3 flex items-center space-x-2">
                     <i data-lucide="map-pin" class="w-3 h-3"></i>
-                    <span>How will customer pay?</span>
+                    <span>${isArR ? 'كيف سيدفع العميل؟' : 'How will customer pay?'}</span>
                   </div>
                   <input type="hidden" id="notpaid-collection-value" value="${receiptData.statusDetail?.notPaidCollection || 'office'}" />
                         <div class="grid grid-cols-2 gap-3">
@@ -834,8 +837,8 @@ function renderModal() {
                           <i data-lucide="store" class="w-6 h-6 ${!receiptData.statusDetail?.notPaidCollection || receiptData.statusDetail?.notPaidCollection === 'office' ? 'text-white' : 'text-blue-600 dark:text-blue-400'}"></i>
                         </span>
                           <div>
-                          <div class="font-bold text-sm ${!receiptData.statusDetail?.notPaidCollection || receiptData.statusDetail?.notPaidCollection === 'office' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">In Shop</div>
-                          <div class="text-[10px] ${!receiptData.statusDetail?.notPaidCollection || receiptData.statusDetail?.notPaidCollection === 'office' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">Customer visits office</div>
+                          <div class="font-bold text-sm ${!receiptData.statusDetail?.notPaidCollection || receiptData.statusDetail?.notPaidCollection === 'office' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${isArR ? 'في المحل' : 'In Shop'}</div>
+                          <div class="text-[10px] ${!receiptData.statusDetail?.notPaidCollection || receiptData.statusDetail?.notPaidCollection === 'office' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">${isArR ? 'العميل يزور المكتب' : 'Customer visits office'}</div>
                           </div>
                       </div>
                     </button>
@@ -845,8 +848,8 @@ function renderModal() {
                           <i data-lucide="truck" class="w-6 h-6 ${receiptData.statusDetail?.notPaidCollection === 'delivery' ? 'text-white' : 'text-emerald-600 dark:text-emerald-400'}"></i>
                         </span>
                           <div>
-                          <div class="font-bold text-sm ${receiptData.statusDetail?.notPaidCollection === 'delivery' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">Delivery</div>
-                          <div class="text-[10px] ${receiptData.statusDetail?.notPaidCollection === 'delivery' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">Driver collects payment</div>
+                          <div class="font-bold text-sm ${receiptData.statusDetail?.notPaidCollection === 'delivery' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${isArR ? 'توصيل' : 'Delivery'}</div>
+                          <div class="text-[10px] ${receiptData.statusDetail?.notPaidCollection === 'delivery' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">${isArR ? 'السائق يحصّل الدفع' : 'Driver collects payment'}</div>
                         </div>
                       </div>
                     </button>
@@ -856,10 +859,10 @@ function renderModal() {
                   <div id="notpaid-delivery-person-section" class="${receiptData.statusDetail?.notPaidCollection === 'delivery' ? '' : 'hidden'} mt-3 p-3 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-700">
                     <label class="block text-xs font-bold text-emerald-700 dark:text-emerald-300 mb-2 flex items-center space-x-2">
                       <i data-lucide="user-check" class="w-4 h-4"></i>
-                      <span>Assign Delivery Person</span>
+                      <span>${isArR ? 'تعيين موظف التوصيل' : 'Assign Delivery Person'}</span>
                     </label>
                     <select id="notpaid-delivery-person" class="w-full glass-input px-3 py-2 rounded-lg text-sm border border-emerald-200 dark:border-emerald-700 focus:ring-2 focus:ring-emerald-500/20">
-                      <option value="">Select delivery person...</option>
+                      <option value="">${isArR ? 'اختر موظف التوصيل...' : 'Select delivery person...'}</option>
                       ${getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role)).map(u => 
                         `<option value="${u.id}" ${receiptData.deliveryPersonId === u.id ? 'selected' : ''}>${Security.escapeHtml(u.name || '')}</option>`
                       ).join('')}
@@ -870,19 +873,19 @@ function renderModal() {
                   <div id="receipt-delivery-info" class="hidden mt-3 p-3 rounded-xl bg-white/70 dark:bg-slate-800/60 border border-emerald-200 dark:border-emerald-800 space-y-3">
                     <div class="text-xs font-bold text-emerald-700 dark:text-emerald-300 flex items-center space-x-2">
                       <i data-lucide="map-pin" class="w-4 h-4"></i>
-                      <span>Delivery Info (Required)</span>
+                      <span>${isArR ? 'معلومات التوصيل (مطلوبة)' : 'Delivery Info (Required)'}</span>
                     </div>
                     <div>
-                      <label class="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1">Place name *</label>
-                      <input type="text" id="receipt-delivery-place" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="Neighborhood / address / destination" value="${Security.escapeHtml(receiptData.deliveryPlaceName || '')}" maxlength="200" />
+                      <label class="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1">${isArR ? 'اسم المكان *' : 'Place name *'}</label>
+                      <input type="text" id="receipt-delivery-place" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isArR ? 'الحي / العنوان / الوجهة' : 'Neighborhood / address / destination'}" value="${Security.escapeHtml(receiptData.deliveryPlaceName || '')}" maxlength="200" />
                     </div>
                     <div>
-                      <label class="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1">Quoted delivery fee (LYD) *</label>
+                      <label class="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1">${isArR ? 'سعر التوصيل المتفق عليه (دينار) *' : 'Quoted delivery fee (LYD) *'}</label>
                       <input type="text" inputmode="decimal" id="receipt-quoted-delivery-fee" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="0.00" value="${(receiptData.quotedDeliveryFee ?? '')}" oninput="sanitizeMoneyInput(this)" />
                     </div>
                     <div>
-                      <label class="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1">Instructions (optional)</label>
-                      <textarea id="receipt-delivery-instructions" rows="2" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="Landmarks, notes...">${Security.escapeHtml(receiptData.deliveryInstructions || '')}</textarea>
+                      <label class="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1">${isArR ? 'تعليمات (اختياري)' : 'Instructions (optional)'}</label>
+                      <textarea id="receipt-delivery-instructions" rows="2" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isArR ? 'معالم، ملاحظات...' : 'Landmarks, notes...'}">${Security.escapeHtml(receiptData.deliveryInstructions || '')}</textarea>
                     </div>
                   </div>
                           </div>
@@ -895,8 +898,8 @@ function renderModal() {
                     <i data-lucide="rotate-ccw" class="w-5 h-5 text-white"></i>
                   </span>
                           <div>
-                    <div class="text-sm font-bold text-rose-900 dark:text-rose-100">What happened?</div>
-                    <div class="text-xs text-rose-600/80 dark:text-rose-300/80">Choose the cancellation outcome</div>
+                    <div class="text-sm font-bold text-rose-900 dark:text-rose-100">${isArR ? 'ماذا حدث؟' : 'What happened?'}</div>
+                    <div class="text-xs text-rose-600/80 dark:text-rose-300/80">${isArR ? 'اختر نتيجة الإلغاء' : 'Choose the cancellation outcome'}</div>
                           </div>
                           </div>
                 <input type="hidden" id="status-cancel-refund-action" value="${receiptData.statusDetail?.refundAction || ''}" />
@@ -907,8 +910,8 @@ function renderModal() {
                         <i data-lucide="banknote" class="w-4 h-4 ${receiptData.statusDetail?.refundAction === 'full' ? 'text-white' : 'text-emerald-600 dark:text-emerald-400'}"></i>
                       </span>
                           <div>
-                        <div class="font-bold text-sm ${receiptData.statusDetail?.refundAction === 'full' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">Full Refund</div>
-                        <div class="text-[10px] ${receiptData.statusDetail?.refundAction === 'full' ? 'text-white/80' : 'text-slate-500'}">Return all money</div>
+                        <div class="font-bold text-sm ${receiptData.statusDetail?.refundAction === 'full' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${isArR ? 'استرجاع كامل' : 'Full Refund'}</div>
+                        <div class="text-[10px] ${receiptData.statusDetail?.refundAction === 'full' ? 'text-white/80' : 'text-slate-500'}">${isArR ? 'إرجاع كل المال' : 'Return all money'}</div>
                           </div>
                           </div>
                   </button>
@@ -918,8 +921,8 @@ function renderModal() {
                         <i data-lucide="pie-chart" class="w-4 h-4 ${receiptData.statusDetail?.refundAction === 'partial' ? 'text-white' : 'text-amber-600 dark:text-amber-400'}"></i>
                       </span>
                       <div>
-                        <div class="font-bold text-sm ${receiptData.statusDetail?.refundAction === 'partial' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">Partial Refund</div>
-                        <div class="text-[10px] ${receiptData.statusDetail?.refundAction === 'partial' ? 'text-white/80' : 'text-slate-500'}">Return some money</div>
+                        <div class="font-bold text-sm ${receiptData.statusDetail?.refundAction === 'partial' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${isArR ? 'استرجاع جزئي' : 'Partial Refund'}</div>
+                        <div class="text-[10px] ${receiptData.statusDetail?.refundAction === 'partial' ? 'text-white/80' : 'text-slate-500'}">${isArR ? 'إرجاع جزء من المال' : 'Return some money'}</div>
                         </div>
                     </div>
                   </button>
@@ -929,8 +932,8 @@ function renderModal() {
                         <i data-lucide="heart-handshake" class="w-4 h-4 ${receiptData.statusDetail?.refundAction === 'forgiven' ? 'text-white' : 'text-violet-600 dark:text-violet-400'}"></i>
                       </span>
                         <div>
-                        <div class="font-bold text-sm ${receiptData.statusDetail?.refundAction === 'forgiven' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">Forgiven</div>
-                        <div class="text-[10px] ${receiptData.statusDetail?.refundAction === 'forgiven' ? 'text-white/80' : 'text-slate-500'}">No refund needed</div>
+                        <div class="font-bold text-sm ${receiptData.statusDetail?.refundAction === 'forgiven' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${isArR ? 'متسامَح عنه' : 'Forgiven'}</div>
+                        <div class="text-[10px] ${receiptData.statusDetail?.refundAction === 'forgiven' ? 'text-white/80' : 'text-slate-500'}">${isArR ? 'لا حاجة لاسترجاع' : 'No refund needed'}</div>
                           </div>
                         </div>
                   </button>
@@ -940,8 +943,8 @@ function renderModal() {
                         <i data-lucide="clock" class="w-4 h-4 ${receiptData.statusDetail?.refundAction === 'undecided' ? 'text-white' : 'text-slate-600 dark:text-slate-400'}"></i>
                       </span>
                       <div>
-                        <div class="font-bold text-sm ${receiptData.statusDetail?.refundAction === 'undecided' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">Undecided</div>
-                        <div class="text-[10px] ${receiptData.statusDetail?.refundAction === 'undecided' ? 'text-white/80' : 'text-slate-500'}">Decide later</div>
+                        <div class="font-bold text-sm ${receiptData.statusDetail?.refundAction === 'undecided' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${isArR ? 'غير محسوم' : 'Undecided'}</div>
+                        <div class="text-[10px] ${receiptData.statusDetail?.refundAction === 'undecided' ? 'text-white/80' : 'text-slate-500'}">${isArR ? 'يُقرر لاحقاً' : 'Decide later'}</div>
                       </div>
                     </div>
                   </button>
@@ -949,15 +952,15 @@ function renderModal() {
                 <div id="cancel-refund-status-section" class="${(receiptData.status === 'Canceled' && (receiptData.statusDetail?.refundAction === 'full' || receiptData.statusDetail?.refundAction === 'partial')) ? '' : 'hidden'} pt-3 border-t border-rose-200 dark:border-rose-800/50 space-y-2">
                   <div class="text-xs font-bold text-rose-800 dark:text-rose-200 flex items-center space-x-2">
                     <i data-lucide="loader" class="w-3 h-3"></i>
-                    <span>Refund Progress</span>
+                    <span>${isArR ? 'حالة الاسترجاع' : 'Refund Progress'}</span>
               </div>
                   <input type="hidden" id="status-cancel-refund-status" value="${receiptData.statusDetail?.refundStatus || 'pending'}" />
                   <div class="flex space-x-2">
                     <button type="button" onclick="selectRefundStatus('pending')" class="refund-status-btn flex-1 py-2.5 px-4 rounded-xl text-sm font-bold transition-all duration-300 ${receiptData.statusDetail?.refundStatus !== 'refunded' ? 'bg-gradient-to-r from-amber-400 to-orange-500 text-white shadow-lg shadow-amber-500/30' : 'bg-white/60 dark:bg-slate-800/60 text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-slate-700 hover:border-amber-300'}" data-value="pending">
-                      <i data-lucide="hourglass" class="w-4 h-4 inline mr-1.5"></i>Pending
+                      <i data-lucide="hourglass" class="w-4 h-4 inline mr-1.5"></i>${trStatus('Pending')}
                     </button>
                     <button type="button" onclick="selectRefundStatus('refunded')" class="refund-status-btn flex-1 py-2.5 px-4 rounded-xl text-sm font-bold transition-all duration-300 ${receiptData.statusDetail?.refundStatus === 'refunded' ? 'bg-gradient-to-r from-emerald-400 to-green-500 text-white shadow-lg shadow-emerald-500/30' : 'bg-white/60 dark:bg-slate-800/60 text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-slate-700 hover:border-emerald-300'}" data-value="refunded">
-                      <i data-lucide="check-circle" class="w-4 h-4 inline mr-1.5"></i>Refunded
+                      <i data-lucide="check-circle" class="w-4 h-4 inline mr-1.5"></i>${isArR ? 'تم الاسترجاع' : 'Refunded'}
                     </button>
                   </div>
                 </div>
@@ -970,8 +973,8 @@ function renderModal() {
                     <i data-lucide="help-circle" class="w-5 h-5 text-white"></i>
                   </span>
                   <div>
-                    <div class="text-sm font-bold text-indigo-900 dark:text-indigo-100">What's the situation?</div>
-                    <div class="text-xs text-indigo-600/80 dark:text-indigo-300/80">Was this receipt paid or empty?</div>
+                    <div class="text-sm font-bold text-indigo-900 dark:text-indigo-100">${isArR ? 'ما هو الوضع؟' : "What's the situation?"}</div>
+                    <div class="text-xs text-indigo-600/80 dark:text-indigo-300/80">${isArR ? 'هل كان هذا الوصل مدفوعاً أم فارغاً؟' : 'Was this receipt paid or empty?'}</div>
                   </div>
                 </div>
                 <input type="hidden" id="status-lost-resolution" value="${receiptData.statusDetail?.lostResolution || ''}" />
@@ -982,8 +985,8 @@ function renderModal() {
                         <i data-lucide="inbox" class="w-6 h-6 ${receiptData.statusDetail?.lostResolution === 'empty' ? 'text-white' : 'text-slate-500 dark:text-slate-400'}"></i>
                       </span>
                       <div>
-                        <div class="font-bold text-sm ${receiptData.statusDetail?.lostResolution === 'empty' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">Empty</div>
-                        <div class="text-[10px] ${receiptData.statusDetail?.lostResolution === 'empty' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">No payment received</div>
+                        <div class="font-bold text-sm ${receiptData.statusDetail?.lostResolution === 'empty' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${isArR ? 'فارغ' : 'Empty'}</div>
+                        <div class="text-[10px] ${receiptData.statusDetail?.lostResolution === 'empty' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">${isArR ? 'لم يُستلم أي دفع' : 'No payment received'}</div>
                       </div>
                     </div>
                   </button>
@@ -993,8 +996,8 @@ function renderModal() {
                         <i data-lucide="wallet" class="w-6 h-6 ${receiptData.statusDetail?.lostResolution === 'paid' ? 'text-white' : 'text-emerald-600 dark:text-emerald-400'}"></i>
                       </span>
                       <div>
-                        <div class="font-bold text-sm ${receiptData.statusDetail?.lostResolution === 'paid' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">Paid</div>
-                        <div class="text-[10px] ${receiptData.statusDetail?.lostResolution === 'paid' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">Receipt was lost</div>
+                        <div class="font-bold text-sm ${receiptData.statusDetail?.lostResolution === 'paid' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}">${trStatus('Paid')}</div>
+                        <div class="text-[10px] ${receiptData.statusDetail?.lostResolution === 'paid' ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}">${isArR ? 'الوصل فُقد' : 'Receipt was lost'}</div>
                       </div>
                     </div>
                   </button>
@@ -1007,17 +1010,17 @@ function renderModal() {
               <div class="flex items-center justify-between mb-2">
                 <div class="flex items-center space-x-2">
                   <i data-lucide="wallet" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
-                  <h3 class="text-sm font-bold text-slate-700 dark:text-slate-300">Financial Details</h3>
+                  <h3 class="text-sm font-bold text-slate-700 dark:text-slate-300">${isArR ? 'التفاصيل المالية' : 'Financial Details'}</h3>
                 </div>
                 <button type="button" onclick="addReceiptPaymentSplit()" class="text-emerald-600 hover:text-emerald-700 text-xs font-bold flex items-center space-x-1">
                   <i data-lucide="plus-circle" class="w-3 h-3"></i>
-                  <span>Add Split</span>
+                  <span>${isArR ? 'إضافة تقسيم' : 'Add Split'}</span>
                 </button>
               </div>
 
               <!-- Payment Methods Label -->
               <div class="mb-2">
-                <label class="text-[10px] font-bold text-slate-500 uppercase">Payment Methods</label>
+                <label class="text-[10px] font-bold text-slate-500 uppercase">${isArR ? 'طرق الدفع' : 'Payment Methods'}</label>
                 </div>
 
               <!-- Dynamic Financial Content -->
@@ -1032,10 +1035,10 @@ function renderModal() {
                 <div class="flex items-center justify-between">
                   <label class="text-xs font-bold text-slate-600 dark:text-slate-400 flex items-center space-x-1">
                     <i data-lucide="image" class="w-3 h-3"></i>
-                    <span>Photos</span>
+                    <span>${isArR ? 'الصور' : 'Photos'}</span>
                   </label>
                   <label class="text-xs text-indigo-600 hover:text-indigo-700 font-medium flex items-center space-x-1 cursor-pointer">
-                    <i data-lucide="upload" class="w-3 h-3"></i><span>Add Photo</span>
+                    <i data-lucide="upload" class="w-3 h-3"></i><span>${isArR ? 'إضافة صورة' : 'Add Photo'}</span>
                     <input type="file" accept="image/*" multiple class="hidden" onchange="uploadReceiptPhotos(this.files)" />
                   </label>
                 </div>
@@ -1046,9 +1049,9 @@ function renderModal() {
             <!-- Action Buttons -->
             <div class="flex space-x-2 px-1 pt-3 border-t border-slate-200 dark:border-slate-700">
               <button type="button" onclick="saveReceiptFromModal()" class="flex-1 btn-shine bg-purple-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-purple-700">
-                <i data-lucide="check" class="w-4 h-4 inline mr-1.5"></i>${isEdit ? 'Save' : 'Create'}
+                <i data-lucide="check" class="w-4 h-4 inline mr-1.5"></i>${isArR ? (isEdit ? 'حفظ' : 'إنشاء') : (isEdit ? 'Save' : 'Create')}
               </button>
-              <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-slate-300">Cancel</button>
+              <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-slate-300">${isArR ? 'إلغاء' : 'Cancel'}</button>
             </div>
           </div>
         `;
@@ -1059,50 +1062,51 @@ function renderModal() {
       const transferCustomers = getVisibleRecords(state.customers).filter(c => c.id !== transferReceipt.customerId);
       const transferUsage = getReceiptUsageStats(transferReceipt);
       const availableUSD = transferUsage.remainingUSD;
+      const isArT = state.language === 'ar';
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center">
           <i data-lucide="swap" class="w-6 h-6 mr-2 text-blue-600"></i>
-          Transfer Receipt Balance
+          ${isArT ? 'تحويل رصيد الوصل' : 'Transfer Receipt Balance'}
         </h2>
         <div class="space-y-4">
           <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl border border-blue-200 dark:border-blue-800">
-            <div class="text-xs text-slate-500 mb-1">Available Balance</div>
+            <div class="text-xs text-slate-500 mb-1">${isArT ? 'الرصيد المتاح' : 'Available Balance'}</div>
             <div class="text-lg font-bold text-blue-700 dark:text-blue-200">$${availableUSD.toFixed(2)} USD</div>
             <div class="text-xs text-slate-500">~ ${(availableUSD * (transferReceipt.exchangeRate || state.defaultExchangeRate || 1)).toFixed(2)} LYD</div>
           </div>
 
           ${transferCustomers.length === 0 ? `
             <div class="p-3 rounded-lg bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-200 text-sm">
-              No other customers available to transfer to. Please add another customer first.
+              ${isArT ? 'لا يوجد عملاء آخرون للتحويل إليهم. الرجاء إضافة عميل آخر أولاً.' : 'No other customers available to transfer to. Please add another customer first.'}
                 </div>
           ` : `
             <div>
-              <label class="block text-sm font-medium mb-2">Transfer to Customer *</label>
+              <label class="block text-sm font-medium mb-2">${isArT ? 'التحويل إلى العميل *' : 'Transfer to Customer *'}</label>
               <select id="transfer-target-customer" class="w-full glass-input px-4 py-2 rounded-xl">
-                <option value="">Select customer</option>
+                <option value="">${isArT ? 'اختر العميل' : 'Select customer'}</option>
                 ${transferCustomers.map(c => `<option value="${c.id}">${Security.escapeHtml(c.name || '')}</option>`).join('')}
               </select>
                 </div>
             <div>
-              <label class="block text-sm font-medium mb-2">Amount (USD) *</label>
+              <label class="block text-sm font-medium mb-2">${isArT ? 'المبلغ (USD) *' : 'Amount (USD) *'}</label>
               <input type="text" inputmode="decimal" id="transfer-amount-usd" value="${availableUSD.toFixed(2)}" class="w-full glass-input px-4 py-2 rounded-xl" min="0" max="${availableUSD.toFixed(2)}" oninput="sanitizeMoneyInput(this)" />
-              <p class="text-xs text-slate-500 mt-1">Available: $${availableUSD.toFixed(2)}</p>
+              <p class="text-xs text-slate-500 mt-1">${isArT ? 'المتاح:' : 'Available:'} $${availableUSD.toFixed(2)}</p>
               </div>
             <div>
-              <label class="block text-sm font-medium mb-2">Note (optional)</label>
-              <textarea id="transfer-note" class="w-full glass-input px-4 py-2 rounded-xl" rows="3" placeholder="Why are you transferring?"></textarea>
+              <label class="block text-sm font-medium mb-2">${isArT ? 'ملاحظة (اختياري)' : 'Note (optional)'}</label>
+              <textarea id="transfer-note" class="w-full glass-input px-4 py-2 rounded-xl" rows="3" placeholder="${isArT ? 'لماذا تقوم بالتحويل؟' : 'Why are you transferring?'}"></textarea>
             </div>
           `}
 
           ${transferReceipt.transfers && transferReceipt.transfers.length > 0 ? `
             <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
               <div class="text-xs font-bold text-slate-600 dark:text-slate-300 mb-2 flex items-center space-x-1">
-                <i data-lucide="history" class="w-3 h-3"></i><span>Transfer History</span>
+                <i data-lucide="history" class="w-3 h-3"></i><span>${isArT ? 'سجل التحويلات' : 'Transfer History'}</span>
               </div>
               <div class="space-y-1 text-xs text-slate-600 dark:text-slate-300 max-h-24 overflow-y-auto custom-scrollbar pr-1">
                 ${transferReceipt.transfers.map(t => {
                   const targetCustomer = state.customers.find(c => c.id === t.toCustomerId);
-                  const name = targetCustomer ? targetCustomer.name : 'Unknown';
+                  const name = targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown');
                   return `<div class="flex justify-between">
                     <span>${new Date(t.date).toLocaleString()}</span>
                     <span class="font-medium">$${(t.amountUSD || 0).toFixed(2)} → ${name}</span>
@@ -1114,9 +1118,9 @@ function renderModal() {
 
           <div class="flex space-x-3 pt-2 border-t border-slate-200 dark:border-slate-700 mt-2">
             <button type="button" onclick="saveReceiptTransfer()" class="flex-1 btn-shine bg-blue-600 text-white px-4 py-2 rounded-xl font-bold" ${transferCustomers.length === 0 ? 'disabled' : ''}>
-              <i data-lucide="check" class="w-4 h-4 inline mr-1.5"></i>Transfer
+              <i data-lucide="check" class="w-4 h-4 inline mr-1.5"></i>${isArT ? 'تحويل' : 'Transfer'}
               </button>
-            <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2 rounded-xl font-bold">Cancel</button>
+            <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2 rounded-xl font-bold">${isArT ? 'إلغاء' : 'Cancel'}</button>
             </div>
           </div>
         `;
@@ -1125,20 +1129,21 @@ function renderModal() {
       const splitReceipt = state.modalData;
       const splitExistingPayments = splitReceipt.payments || [];
       const splitDeliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
-      
+      const isArS = state.language === 'ar';
+
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center">
           <i data-lucide="credit-card" class="w-6 h-6 mr-2 text-purple-600"></i>
-          Manage Split Payments
+          ${isArS ? 'إدارة تقسيمات الدفع' : 'Manage Split Payments'}
         </h2>
         <div class="space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar pr-2">
           <!-- Target receipt id frozen at render time (same defense as the main
                receipt form): saveSplitPayments reads THIS, not state.modalData. -->
           <input type="hidden" id="split-payments-receipt-id" value="${Security.escapeHtml(String(splitReceipt.id || ''))}" />
           <div class="p-4 bg-indigo-50 dark:bg-indigo-900/20 rounded-xl">
-            <div class="text-sm font-medium text-indigo-700 dark:text-indigo-300 mb-2">Receipt Total</div>
+            <div class="text-sm font-medium text-indigo-700 dark:text-indigo-300 mb-2">${isArS ? 'إجمالي الوصل' : 'Receipt Total'}</div>
             <div class="text-2xl font-bold text-indigo-600">$${splitReceipt.amountUSD?.toFixed(2)} = ${splitReceipt.amountLocal?.toFixed(2)} LYD</div>
-            <div class="text-xs text-slate-500 mt-1">Exchange Rate: ${splitReceipt.exchangeRate}</div>
+            <div class="text-xs text-slate-500 mt-1">${isArS ? 'سعر الصرف:' : 'Exchange Rate:'} ${splitReceipt.exchangeRate}</div>
           </div>
 
           <div id="split-payments-container" class="space-y-3">
@@ -1146,36 +1151,36 @@ function renderModal() {
               <div class="split-payment-item p-4 rounded-lg">
                 <div class="grid grid-cols-2 gap-3">
                   <div>
-                    <label class="block text-xs font-medium mb-1">Payment Method</label>
+                    <label class="block text-xs font-medium mb-1">${isArS ? 'طريقة الدفع' : 'Payment Method'}</label>
                     <select class="split-method w-full glass-input px-3 py-2 rounded-lg text-sm">
-                      ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${m}</option>`).join('')}
+                      ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
                     </select>
                   </div>
                   <div>
-                    <label class="block text-xs font-medium mb-1">Amount (LYD)</label>
+                    <label class="block text-xs font-medium mb-1">${isArS ? 'المبلغ (دينار)' : 'Amount (LYD)'}</label>
                     <input type="text" inputmode="decimal" class="split-amount w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.amount}" oninput="sanitizeMoneyInput(this)" />
                   </div>
                   <div>
-                    <label class="block text-xs font-medium mb-1">Exchange Rate</label>
+                    <label class="block text-xs font-medium mb-1">${isArS ? 'سعر الصرف' : 'Exchange Rate'}</label>
                     <input type="text" inputmode="decimal" class="split-rate w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate || state.defaultExchangeRate}" oninput="sanitizeMoneyInput(this, 4)" />
                   </div>
                   <div>
-                    <label class="block text-xs font-medium mb-1">USD Rate (Rate 2)</label>
+                    <label class="block text-xs font-medium mb-1">${isArS ? 'سعر الدولار (سعر 2)' : 'USD Rate (Rate 2)'}</label>
                     <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate2 !== undefined ? payment.rate2 : (payment.rate || state.defaultExchangeRate)}" oninput="sanitizeMoneyInput(this, 4)" />
                   </div>
                   <div>
-                    <label class="block text-xs font-medium mb-1">Collection Type</label>
+                    <label class="block text-xs font-medium mb-1">${isArS ? 'نوع التحصيل' : 'Collection Type'}</label>
                     <select class="split-collection w-full glass-input px-3 py-2 rounded-lg text-sm">
-                      <option value="office" ${payment.collectionType === 'office' ? 'selected' : ''}>Office</option>
-                      <option value="delivery" ${payment.collectionType === 'delivery' ? 'selected' : ''}>Delivery</option>
-                      <option value="bank" ${payment.collectionType === 'bank' ? 'selected' : ''}>Bank</option>
+                      <option value="office" ${payment.collectionType === 'office' ? 'selected' : ''}>${trStatus('office')}</option>
+                      <option value="delivery" ${payment.collectionType === 'delivery' ? 'selected' : ''}>${trStatus('delivery')}</option>
+                      <option value="bank" ${payment.collectionType === 'bank' ? 'selected' : ''}>${trStatus('bank')}</option>
                     </select>
                   </div>
                   ${splitDeliveryUsers.length > 0 ? `
                     <div class="col-span-2">
-                      <label class="block text-xs font-medium mb-1">Delivery Person</label>
+                      <label class="block text-xs font-medium mb-1">${isArS ? 'موظف التوصيل' : 'Delivery Person'}</label>
                       <select class="split-delivery-person w-full glass-input px-3 py-2 rounded-lg text-sm">
-                        <option value="">None</option>
+                        <option value="">${isArS ? 'بدون' : 'None'}</option>
                         ${splitDeliveryUsers.map(u => `<option value="${u.id}" ${payment.deliveryPersonId === u.id ? 'selected' : ''}>${Security.escapeHtml(u.name || '')}</option>`).join('')}
                       </select>
                     </div>
@@ -1183,7 +1188,7 @@ function renderModal() {
                   <div class="col-span-2 flex justify-end">
                     <button type="button" onclick="this.closest('.split-payment-item').remove(); lucide.createIcons()" class="text-rose-600 hover:text-rose-700 text-sm font-medium flex items-center space-x-1">
                       <i data-lucide="trash-2" class="w-4 h-4"></i>
-                      <span>Remove</span>
+                      <span>${isArS ? 'إزالة' : 'Remove'}</span>
                     </button>
                   </div>
                 </div>
@@ -1193,14 +1198,14 @@ function renderModal() {
 
           <button type="button" onclick="addSplitPayment()" class="w-full btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
             <i data-lucide="plus-circle" class="w-4 h-4"></i>
-            <span>Add Payment Split</span>
+            <span>${isArS ? 'إضافة تقسيم دفع' : 'Add Payment Split'}</span>
           </button>
 
           <div class="flex space-x-3 pt-4 border-t border-slate-200 dark:border-slate-700">
             <button onclick="saveSplitPayments()" class="flex-1 btn-shine bg-purple-600 text-white px-4 py-3 rounded-xl font-bold">
-              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>Save Split Payments
+              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>${isArS ? 'حفظ تقسيمات الدفع' : 'Save Split Payments'}
             </button>
-            <button onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold">Cancel</button>
+            <button onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold">${isArS ? 'إلغاء' : 'Cancel'}</button>
           </div>
         </div>
       `;
@@ -1219,25 +1224,26 @@ function renderModal() {
       const topUpWorkingDays = existingTopUps.reduce((sum, t) => sum + (parseInt(t.extendDays, 10) || 0), 0);
       const topUpBaseEndOk = topUpBaseEnd && !isNaN(new Date(topUpBaseEnd).getTime());
       const topUpNewEnd = topUpBaseEndOk ? new Date(new Date(topUpBaseEnd).getTime() + topUpWorkingDays * 86400000) : null;
+      const isArTU = state.language === 'ar';
 
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center">
           <i data-lucide="trending-up" class="w-6 h-6 mr-2 text-blue-600"></i>
-          Manage Top-ups
+          ${isArTU ? 'إدارة الشحنات الإضافية' : 'Manage Top-ups'}
         </h2>
         <div class="space-y-4">
           <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl">
-            <div class="text-sm font-medium text-blue-700 dark:text-blue-300">Ad Details</div>
-            <div class="text-lg font-bold text-blue-600 mt-1">Original: $${topUpBase} → New: $${(topUpBase + topUpWorkingTotal).toFixed(2)}</div>
-            ${topUpBaseEndOk ? `<div class="text-sm font-medium text-blue-700 dark:text-blue-300 mt-1">End: ${new Date(topUpBaseEnd).toLocaleDateString()}${topUpWorkingDays > 0 ? ` → <span class="font-bold">${topUpNewEnd.toLocaleDateString()}</span> (+${topUpWorkingDays} day${topUpWorkingDays > 1 ? 's' : ''})` : ''}</div>` : ''}
-            ${existingTopUps.length > 0 ? `<div class="text-xs text-slate-500 mt-1">Total top-ups: $${topUpWorkingTotal.toFixed(2)}</div>` : ''}
+            <div class="text-sm font-medium text-blue-700 dark:text-blue-300">${isArTU ? 'تفاصيل الإعلان' : 'Ad Details'}</div>
+            <div class="text-lg font-bold text-blue-600 mt-1">${isArTU ? 'الأصلي' : 'Original'}: $${topUpBase} → ${isArTU ? 'الجديد' : 'New'}: $${(topUpBase + topUpWorkingTotal).toFixed(2)}</div>
+            ${topUpBaseEndOk ? `<div class="text-sm font-medium text-blue-700 dark:text-blue-300 mt-1">${isArTU ? 'النهاية' : 'End'}: ${new Date(topUpBaseEnd).toLocaleDateString()}${topUpWorkingDays > 0 ? ` → <span class="font-bold">${topUpNewEnd.toLocaleDateString()}</span> (${isArTU ? `+${topUpWorkingDays} يوم` : `+${topUpWorkingDays} day${topUpWorkingDays > 1 ? 's' : ''}`})` : ''}</div>` : ''}
+            ${existingTopUps.length > 0 ? `<div class="text-xs text-slate-500 mt-1">${isArTU ? 'إجمالي الشحنات' : 'Total top-ups'}: $${topUpWorkingTotal.toFixed(2)}</div>` : ''}
           </div>
 
           <div id="topups-container" class="space-y-2">
             ${existingTopUps.map((topup, idx) => `
               <div class="p-3 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-between">
                 <div>
-                  <div class="font-medium">$${topup.amount}${(parseInt(topup.extendDays, 10) || 0) > 0 ? ` <span class="text-xs font-bold text-emerald-600">+${topup.extendDays} day${topup.extendDays > 1 ? 's' : ''}</span>` : ''}</div>
+                  <div class="font-medium">$${topup.amount}${(parseInt(topup.extendDays, 10) || 0) > 0 ? ` <span class="text-xs font-bold text-emerald-600">${isArTU ? `+${topup.extendDays} يوم` : `+${topup.extendDays} day${topup.extendDays > 1 ? 's' : ''}`}</span>` : ''}</div>
                   <div class="text-xs text-slate-500">${new Date(topup.date).toLocaleDateString()} - ${Security.escapeHtml(topup.note || '')}</div>
                 </div>
                 <button type="button" onclick="removeTopUp(${idx})" class="text-rose-500 hover:text-rose-700">
@@ -1248,86 +1254,87 @@ function renderModal() {
           </div>
 
           <div class="p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl space-y-3">
-            <h4 class="text-sm font-medium">Add New Top-up</h4>
+            <h4 class="text-sm font-medium">${isArTU ? 'إضافة شحنة جديدة' : 'Add New Top-up'}</h4>
             <div class="grid grid-cols-3 gap-3">
               <div>
-                <label class="block text-xs mb-1">Amount (USD)</label>
+                <label class="block text-xs mb-1">${isArTU ? 'المبلغ (USD)' : 'Amount (USD)'}</label>
                 <input type="text" inputmode="decimal" id="topup-amount" class="w-full glass-input px-3 py-2 rounded-lg" placeholder="0.00" oninput="sanitizeMoneyInput(this)" />
               </div>
               <div>
-                <label class="block text-xs mb-1">Date</label>
+                <label class="block text-xs mb-1">${isArTU ? 'التاريخ' : 'Date'}</label>
                 <input type="date" id="topup-date" value="${getTodayDateString()}" class="w-full glass-input px-3 py-2 rounded-lg" />
               </div>
               <div>
-                <label class="block text-xs mb-1">Extend (days)</label>
+                <label class="block text-xs mb-1">${isArTU ? 'تمديد (أيام)' : 'Extend (days)'}</label>
                 <input type="number" min="0" step="1" id="topup-extend-days" class="w-full glass-input px-3 py-2 rounded-lg" placeholder="0" />
               </div>
             </div>
             <div>
-              <label class="block text-xs mb-1">Note</label>
-              <input type="text" id="topup-note" class="w-full glass-input px-3 py-2 rounded-lg" placeholder="Reason for top-up..." />
+              <label class="block text-xs mb-1">${isArTU ? 'ملاحظة' : 'Note'}</label>
+              <input type="text" id="topup-note" class="w-full glass-input px-3 py-2 rounded-lg" placeholder="${isArTU ? 'سبب الشحنة...' : 'Reason for top-up...'}" />
             </div>
             <button type="button" onclick="addNewTopUp()" class="w-full btn-shine bg-blue-600 text-white px-4 py-2 rounded-xl font-bold">
-              <i data-lucide="plus" class="w-4 h-4 inline mr-2"></i>Add Top-up
+              <i data-lucide="plus" class="w-4 h-4 inline mr-2"></i>${isArTU ? 'إضافة شحنة' : 'Add Top-up'}
             </button>
           </div>
 
           <div class="flex space-x-3 pt-4 border-t border-slate-200 dark:border-slate-700">
             <button onclick="saveTopUps()" class="flex-1 btn-shine bg-blue-600 text-white px-4 py-3 rounded-xl font-bold">
-              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>Save Top-ups
+              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>${isArTU ? 'حفظ الشحنات' : 'Save Top-ups'}
             </button>
-            <button onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold">Cancel</button>
+            <button onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold">${isArTU ? 'إلغاء' : 'Cancel'}</button>
           </div>
         </div>
       `;
       break;
     case 'refund':
       const refundAd = state.modalData;
-      
+      const isArRf = state.language === 'ar';
+
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center">
           <i data-lucide="arrow-left-circle" class="w-6 h-6 mr-2 text-rose-600"></i>
-          Manage Refund
+          ${isArRf ? 'إدارة الاسترجاع' : 'Manage Refund'}
         </h2>
         <div class="space-y-4">
           <div class="p-4 bg-rose-50 dark:bg-rose-900/20 rounded-xl">
-            <div class="text-sm font-medium text-rose-700 dark:text-rose-300">Ad Amount</div>
+            <div class="text-sm font-medium text-rose-700 dark:text-rose-300">${isArRf ? 'مبلغ الإعلان' : 'Ad Amount'}</div>
             <div class="text-2xl font-bold text-rose-600">$${refundAd.amountUSD} (${refundAd.amountLocal} LYD)</div>
             ${refundAd.refundType && refundAd.refundType !== 'None' ? `
-              <div class="text-xs text-slate-500 mt-2">Current Refund: ${refundAd.refundType} - $${refundAd.refundAmount || 0} (${refundAd.refundStatus || 'Pending'})</div>
+              <div class="text-xs text-slate-500 mt-2">${isArRf ? 'الاسترجاع الحالي' : 'Current Refund'}: ${trStatus(refundAd.refundType)} - $${refundAd.refundAmount || 0} (${trStatus(refundAd.refundStatus || 'Pending')})</div>
             ` : ''}
           </div>
 
           <div>
-            <label class="block text-sm font-medium mb-2">Refund Type</label>
+            <label class="block text-sm font-medium mb-2">${isArRf ? 'نوع الاسترجاع' : 'Refund Type'}</label>
             <select id="refund-type" class="w-full glass-input px-4 py-2 rounded-xl" onchange="toggleRefundAmount(this.value)">
-              ${REFUND_TYPES.map(t => `<option value="${t}" ${refundAd.refundType === t ? 'selected' : ''}>${t}</option>`).join('')}
+              ${REFUND_TYPES.map(t => `<option value="${t}" ${refundAd.refundType === t ? 'selected' : ''}>${trStatus(t)}</option>`).join('')}
             </select>
           </div>
 
           <div id="refund-amount-section" class="${!refundAd.refundType || refundAd.refundType === 'None' ? 'hidden' : ''}">
-            <label class="block text-sm font-medium mb-2">Refund Amount (USD)</label>
+            <label class="block text-sm font-medium mb-2">${isArRf ? 'مبلغ الاسترجاع (USD)' : 'Refund Amount (USD)'}</label>
             <input type="text" inputmode="decimal" id="refund-amount" value="${refundAd.refundAmount || (refundAd.refundType === 'Full' ? refundAd.amountUSD : 0)}" class="w-full glass-input px-4 py-2 rounded-xl" oninput="sanitizeMoneyInput(this)" />
           </div>
 
           <div id="refund-status-section" class="${!refundAd.refundType || refundAd.refundType === 'None' ? 'hidden' : ''}">
-            <label class="block text-sm font-medium mb-2">Refund Status</label>
+            <label class="block text-sm font-medium mb-2">${isArRf ? 'حالة الاسترجاع' : 'Refund Status'}</label>
             <select id="refund-status" class="w-full glass-input px-4 py-2 rounded-xl">
-              <option value="Pending" ${refundAd.refundStatus === 'Pending' ? 'selected' : ''}>Pending</option>
-              <option value="Refunded" ${refundAd.refundStatus === 'Refunded' ? 'selected' : ''}>Refunded</option>
+              <option value="Pending" ${refundAd.refundStatus === 'Pending' ? 'selected' : ''}>${trStatus('Pending')}</option>
+              <option value="Refunded" ${refundAd.refundStatus === 'Refunded' ? 'selected' : ''}>${isArRf ? 'تم الاسترجاع' : 'Refunded'}</option>
             </select>
           </div>
 
           <div class="p-3 bg-amber-50 dark:bg-amber-900/20 rounded-xl flex items-start space-x-2">
             <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-600 mt-0.5"></i>
-            <p class="text-xs text-amber-700 dark:text-amber-300">Refunds will mark the ad status as Canceled and track the refund amount.</p>
+            <p class="text-xs text-amber-700 dark:text-amber-300">${isArRf ? 'الاسترجاع سيغيّر حالة الإعلان إلى ملغي وسيتتبع مبلغ الاسترجاع.' : 'Refunds will mark the ad status as Canceled and track the refund amount.'}</p>
           </div>
 
           <div class="flex space-x-3 pt-4 border-t border-slate-200 dark:border-slate-700">
             <button onclick="saveRefund()" class="flex-1 btn-shine bg-rose-600 text-white px-4 py-3 rounded-xl font-bold">
-              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>Save Refund
+              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>${isArRf ? 'حفظ الاسترجاع' : 'Save Refund'}
             </button>
-            <button onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold">Cancel</button>
+            <button onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold">${isArRf ? 'إلغاء' : 'Cancel'}</button>
           </div>
         </div>
       `;
@@ -1351,7 +1358,7 @@ function renderModal() {
             <div class="font-mono text-sm break-all select-all text-slate-800 dark:text-slate-200">${Security.escapeHtml(key)}</div>
           </div>
           <div class="flex space-x-3">
-            <button type="button" onclick="copyTextToClipboard('${key}').then(ok => showNotification(ok ? 'Copied' : 'Copy Failed', ok ? 'Recovery key copied' : 'Please copy manually', ok ? 'success' : 'error'))" class="flex-1 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
+            <button type="button" onclick="copyTextToClipboard('${key}').then(ok => showNotification(ok ? '${rtl ? 'تم النسخ' : 'Copied'}' : '${rtl ? 'فشل النسخ' : 'Copy Failed'}', ok ? '${rtl ? 'تم نسخ مفتاح الاستعادة' : 'Recovery key copied'}' : '${rtl ? 'الرجاء النسخ يدوياً' : 'Please copy manually'}', ok ? 'success' : 'error'))" class="flex-1 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
               <i data-lucide="copy" class="w-4 h-4 inline mr-2"></i>${rtl ? 'نسخ' : 'Copy'}
             </button>
             <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300">
@@ -1386,7 +1393,7 @@ function renderModal() {
               </div>
               <div>
                 <label class="block text-sm font-medium mb-2">${t('newPassword')}</label>
-                <input type="password" id="pwreset-new" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="Min. 8 characters" minlength="8" />
+                <input type="password" id="pwreset-new" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? '8 أحرف على الأقل' : 'Min. 8 characters'}" minlength="8" />
               </div>
               <div>
                 <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
@@ -1461,7 +1468,7 @@ function renderModal() {
             </div>
             <div>
               <label class="block text-sm font-medium mb-2">${t('newPassword')}</label>
-              <input type="password" id="pwreset-new" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="Min. 8 characters" minlength="8" ${hasRecovery ? '' : 'disabled'} />
+              <input type="password" id="pwreset-new" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? '8 أحرف على الأقل' : 'Min. 8 characters'}" minlength="8" ${hasRecovery ? '' : 'disabled'} />
             </div>
             <div>
               <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
@@ -1500,7 +1507,7 @@ function renderModal() {
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('newPassword')}</label>
-            <input type="password" id="cp-new" required minlength="8" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="Min. 8 characters" />
+            <input type="password" id="cp-new" required minlength="8" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? '8 أحرف على الأقل' : 'Min. 8 characters'}" />
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
@@ -1728,7 +1735,7 @@ function renderModal() {
         await handleModalSubmit();
       } catch (err) {
         console.error('Modal submit error:', err);
-        showNotification('Error', 'Failed to save changes', 'error');
+        showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'فشل حفظ التغييرات' : 'Failed to save changes', 'error');
       } finally {
         submitting = false;
         if (submitBtn) submitBtn.disabled = false;
@@ -1783,8 +1790,9 @@ async function handleModalSubmit() {
       break;
     }
     case 'change-password': {
+      const isArCP = state.language === 'ar';
       if (!state.currentUser?.id) {
-        showNotification('Error', 'Not logged in', 'error');
+        showNotification(isArCP ? 'خطأ' : 'Error', isArCP ? 'لم يتم تسجيل الدخول' : 'Not logged in', 'error');
         return;
       }
 
@@ -1793,24 +1801,24 @@ async function handleModalSubmit() {
       const confirmPw = String(document.getElementById('cp-confirm')?.value || '');
 
       if (!currentPw) {
-        showNotification('Validation', 'Current password is required', 'error');
+        showNotification(isArCP ? 'تنبيه' : 'Validation', isArCP ? 'كلمة المرور الحالية مطلوبة' : 'Current password is required', 'error');
         return;
       }
       if (!newPw || newPw.length < 8) {
-        showNotification('Validation', 'Password must be at least 8 characters', 'error');
+        showNotification(isArCP ? 'تنبيه' : 'Validation', isArCP ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
         return;
       }
       if (newPw !== confirmPw) {
-        showNotification('Validation', 'Passwords do not match', 'error');
+        showNotification(isArCP ? 'تنبيه' : 'Validation', isArCP ? 'كلمتا المرور غير متطابقتين' : 'Passwords do not match', 'error');
         return;
       }
 
       if (isServerModeEnabled()) {
         try {
           await apiChangePassword(currentPw, newPw);
-          showNotification('Success', 'Password changed successfully', 'success');
+          showNotification(isArCP ? 'نجاح' : 'Success', isArCP ? 'تم تغيير كلمة المرور بنجاح' : 'Password changed successfully', 'success');
         } catch (e) {
-          showNotification('Error', e.message || 'Failed to change password', 'error');
+          showNotification(isArCP ? 'خطأ' : 'Error', e.message || (isArCP ? 'فشل تغيير كلمة المرور' : 'Failed to change password'), 'error');
           return;
         }
         break;
@@ -1819,7 +1827,7 @@ async function handleModalSubmit() {
       // Local mode
       const user = state.users.find(u => u && !u._deleted && u.id === state.currentUser.id) || state.currentUser;
       if (!user) {
-        showNotification('Error', 'User not found', 'error');
+        showNotification(isArCP ? 'خطأ' : 'Error', isArCP ? 'المستخدم غير موجود' : 'User not found', 'error');
         return;
       }
 
@@ -1833,7 +1841,7 @@ async function handleModalSubmit() {
       }
 
       if (!ok) {
-        showNotification('Error', 'Current password is incorrect', 'error');
+        showNotification(isArCP ? 'خطأ' : 'Error', isArCP ? 'كلمة المرور الحالية غير صحيحة' : 'Current password is incorrect', 'error');
         addSecurityLog('password_change_bad_current', user.email || user.id);
         return;
       }
@@ -1846,7 +1854,7 @@ async function handleModalSubmit() {
         passwordIterations: hashed.iterations
       });
       addSecurityLog('password_changed', user.email || user.id);
-      showNotification('Success', 'Password changed successfully', 'success');
+      showNotification(isArCP ? 'نجاح' : 'Success', isArCP ? 'تم تغيير كلمة المرور بنجاح' : 'Password changed successfully', 'success');
       break;
     }
     case 'customer': {
@@ -1916,6 +1924,7 @@ async function handleModalSubmit() {
     }
     case 'ad':
       try {
+      const isArSubAd = state.language === 'ar';
       const paymentStatus = document.getElementById('ad-payment-status')?.value || 'paid';
       const collectionMethod = document.getElementById('ad-collection-method')?.value || '';
       const adLinkInputs = Array.from(document.querySelectorAll('.ad-link-input')).map(i => (i.value || '').trim()).filter(Boolean);
@@ -1951,14 +1960,14 @@ async function handleModalSubmit() {
       // Get page ID
       const pageId = document.getElementById('ad-page')?.value || '';
       if (!pageId) {
-        showNotification('Error', 'Please select a page', 'error');
+        showNotification(isArSubAd ? 'خطأ' : 'Error', isArSubAd ? 'الرجاء اختيار صفحة' : 'Please select a page', 'error');
         return;
       }
       
       // Get customer ID from searchable dropdown hidden field
       const customerId = document.getElementById('ad-customer-id')?.value;
       if (!customerId) {
-        showNotification('Error', 'Please select a customer', 'error');
+        showNotification(isArSubAd ? 'خطأ' : 'Error', isArSubAd ? 'الرجاء اختيار عميل' : 'Please select a customer', 'error');
         return;
       }
 
@@ -1972,7 +1981,7 @@ async function handleModalSubmit() {
         .map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) }));
 
       if (isPaid && allocations.length === 0) {
-        showNotification('Validation', 'Please link at least one receipt to fund this ad.', 'error');
+        showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'الرجاء ربط وصل واحد على الأقل لتمويل هذا الإعلان.' : 'Please link at least one receipt to fund this ad.', 'error');
         return;
       }
 
@@ -1991,7 +2000,7 @@ async function handleModalSubmit() {
 
         // Validate total allocations make sense (should be > 0)
         if (totalAllocated <= 0) {
-          showNotification('Validation', 'Total allocation amount must be greater than zero.', 'error');
+          showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'إجمالي مبلغ التخصيص يجب أن يكون أكبر من صفر.' : 'Total allocation amount must be greater than zero.', 'error');
           return;
         }
 
@@ -2001,7 +2010,7 @@ async function handleModalSubmit() {
         for (const [receiptId, plannedTotal] of totalsByReceipt.entries()) {
           const receipt = state.receipts.find(r => String(r.id) === String(receiptId));
           if (!receipt) {
-            showNotification('Validation', 'One of the selected receipts is missing.', 'error');
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'أحد الوصولات المختارة مفقود.' : 'One of the selected receipts is missing.', 'error');
             return;
           }
           // Calculate remaining balance (total - used - transferred)
@@ -2021,8 +2030,10 @@ async function handleModalSubmit() {
 
           if (plannedTotal > remaining + 0.0001) {
             showNotification(
-              'Validation',
-              `Planned spend ($${plannedTotal.toFixed(2)}) exceeds available balance ($${remaining.toFixed(2)}) for receipt ${receipt.serialNumber || receipt.id}.`,
+              isArSubAd ? 'تنبيه' : 'Validation',
+              isArSubAd
+                ? `الصرف المخطط ($${plannedTotal.toFixed(2)}) يتجاوز الرصيد المتاح ($${remaining.toFixed(2)}) للوصل ${receipt.serialNumber || receipt.id}.`
+                : `Planned spend ($${plannedTotal.toFixed(2)}) exceeds available balance ($${remaining.toFixed(2)}) for receipt ${receipt.serialNumber || receipt.id}.`,
               'error'
             );
             return;
@@ -2036,33 +2047,33 @@ async function handleModalSubmit() {
       // Additional validation when not paid
       if (paymentStatus === 'not_paid') {
         if (!collectionMethod) {
-          showNotification('Validation', 'Please choose how payment will be collected.', 'error');
+          showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'الرجاء اختيار طريقة تحصيل الدفع.' : 'Please choose how payment will be collected.', 'error');
           return;
         }
         if (collectionMethod === 'driver') {
           const linkedReceiptId = document.getElementById('ad-linked-receipt-id')?.value || '';
           if (!linkedReceiptId) {
-            showNotification('Validation', 'Select a pending Temporary Delivery Receipt (D#) or create one first.', 'error');
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'اختر وصل توصيل مؤقت معلق (D#) أو أنشئ واحداً أولاً.' : 'Select a pending Temporary Delivery Receipt (D#) or create one first.', 'error');
             return;
           }
           const linkedReceipt = state.receipts.find(r => r && !r._deleted && String(r.id) === String(linkedReceiptId));
           if (!linkedReceipt || !isTempDeliveryReceiptNo(linkedReceipt.tempReceiptNo)) {
-            showNotification('Validation', 'Selected receipt is not a valid pending Temporary Delivery Receipt.', 'error');
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'الوصل المختار ليس وصل توصيل مؤقتاً معلقاً صالحاً.' : 'Selected receipt is not a valid pending Temporary Delivery Receipt.', 'error');
             return;
           }
           if (String(linkedReceipt.customerId || '') !== String(customerId || '')) {
-            showNotification('Validation', 'Selected receipt belongs to a different customer.', 'error');
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'الوصل المختار يخص عميلاً آخر.' : 'Selected receipt belongs to a different customer.', 'error');
             return;
           }
           const ds = String(linkedReceipt.deliveryStatus || '');
           if (ds === 'Delivered' || ds === 'Office' || ds === 'Canceled') {
-            showNotification('Validation', 'Selected receipt is not pending delivery anymore. Please choose another one.', 'error');
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'الوصل المختار لم يعد معلقاً للتوصيل. الرجاء اختيار وصل آخر.' : 'Selected receipt is not pending delivery anymore. Please choose another one.', 'error');
             return;
           }
           const assignedDriver = String(linkedReceipt.deliveryPersonId || '').trim();
           // Delivery assignment must come from the receipt (single source of truth).
           if (!assignedDriver) {
-            showNotification('Validation', 'This receipt has no assigned driver. Please assign a driver in the Receipt first.', 'error');
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'هذا الوصل بلا سائق معيّن. الرجاء تعيين سائق في الوصل أولاً.' : 'This receipt has no assigned driver. Please assign a driver in the Receipt first.', 'error');
             return;
           }
 
@@ -2109,8 +2120,10 @@ async function handleModalSubmit() {
           
           if (dueAmountToUseUSD > effectiveAvailable + 0.01) {
             showNotification(
-              'Validation',
-              `Due credit spend ($${dueAmountToUseUSD.toFixed(2)}) exceeds available ($${effectiveAvailable.toFixed(2)}).`,
+              isArSubAd ? 'تنبيه' : 'Validation',
+              isArSubAd
+                ? `صرف الرصيد المستحق ($${dueAmountToUseUSD.toFixed(2)}) يتجاوز المتاح ($${effectiveAvailable.toFixed(2)}).`
+                : `Due credit spend ($${dueAmountToUseUSD.toFixed(2)}) exceeds available ($${effectiveAvailable.toFixed(2)}).`,
               'error'
             );
             return;
@@ -2149,7 +2162,7 @@ async function handleModalSubmit() {
           // Soft-deleted receipts stay in state.receipts with _deleted=true —
           // money can NOT be drawn from a deleted receipt.
           if (!receipt || receipt._deleted) {
-            showNotification('Validation', 'One of the merged receipts is missing or was deleted.', 'error');
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'أحد الوصولات المدمجة مفقود أو تم حذفه.' : 'One of the merged receipts is missing or was deleted.', 'error');
             return;
           }
           const usageStats = getReceiptUsageStats(receipt);
@@ -2168,8 +2181,10 @@ async function handleModalSubmit() {
           }
           if (plannedTotal > remaining + 0.0001) {
             showNotification(
-              'Validation',
-              `Merged spend ($${plannedTotal.toFixed(2)}) exceeds available balance ($${remaining.toFixed(2)}) for receipt ${receipt.serialNumber || receipt.id}.`,
+              isArSubAd ? 'تنبيه' : 'Validation',
+              isArSubAd
+                ? `الصرف المدمج ($${plannedTotal.toFixed(2)}) يتجاوز الرصيد المتاح ($${remaining.toFixed(2)}) للوصل ${receipt.serialNumber || receipt.id}.`
+                : `Merged spend ($${plannedTotal.toFixed(2)}) exceeds available balance ($${remaining.toFixed(2)}) for receipt ${receipt.serialNumber || receipt.id}.`,
               'error'
             );
             return;
@@ -2334,15 +2349,16 @@ async function handleModalSubmit() {
       closeModal();
       } catch (error) {
         console.error('Error saving ad:', error);
-        showNotification('Error', `Failed to save ad: ${error.message}`, 'error');
+        showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? `فشل حفظ الإعلان: ${error.message}` : `Failed to save ad: ${error.message}`, 'error');
       }
       break;
     case 'user':
+      const isArSubU = state.language === 'ar';
       const isAdminEditor = isCurrentUserAdmin();
       const editingId = state.modalData?.id;
       const isSelfEdit = !!(isEdit && editingId && String(state.currentUser?.id || '') === String(editingId));
       if (!isAdminEditor && !isSelfEdit) {
-        showNotification('Access Denied', state.language === 'ar' ? 'إدارة المستخدمين للأدمن فقط' : 'Admin only', 'error');
+        showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'إدارة المستخدمين للأدمن فقط' : 'Admin only', 'error');
         return;
       }
 
@@ -2389,7 +2405,7 @@ async function handleModalSubmit() {
       // SERVER MODE: users are managed by backend (Admin only)
       if (isServerModeEnabled()) {
         if (!isAdminEditor) {
-          showNotification('Access Denied', state.language === 'ar' ? 'هذه العملية للأدمن فقط' : 'Admin only', 'error');
+          showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'هذه العملية للأدمن فقط' : 'Admin only', 'error');
           return;
         }
       if (isEdit) {
@@ -2401,7 +2417,7 @@ async function handleModalSubmit() {
         const newPassword = document.getElementById('user-password').value;
           if (newPassword) {
             if (String(newPassword).length < 8) {
-              showNotification('Validation Error', 'Password must be at least 8 characters', 'error');
+              showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
               return;
             }
             payload.password = newPassword;
@@ -2424,11 +2440,11 @@ async function handleModalSubmit() {
             markCollectionDirty('users');
           }
           saveState();
-          showNotification('Updated', 'User updated successfully', 'success');
+          showNotification(isArSubU ? 'تم التحديث' : 'Updated', isArSubU ? 'تم تحديث المستخدم بنجاح' : 'User updated successfully', 'success');
         } else {
           const rawPassword = document.getElementById('user-password').value;
           if (!rawPassword || String(rawPassword).length < 8) {
-            showNotification('Validation Error', 'Password must be at least 8 characters', 'error');
+            showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
             return;
           }
 
@@ -2445,13 +2461,13 @@ async function handleModalSubmit() {
             state.users.unshift({ ...created, _lastModified: Date.now(), _deleted: false });
             markCollectionDirty('users');
             saveState();
-            showNotification('Success', 'User added successfully', 'success');
+            showNotification(isArSubU ? 'نجاح' : 'Success', isArSubU ? 'تمت إضافة المستخدم بنجاح' : 'User added successfully', 'success');
 
             if (!isAdminRole(userRole)) {
               setTimeout(() => showPermissionsModal(created.id), 500);
             }
           } else {
-            showNotification('Error', 'Failed to create user', 'error');
+            showNotification(isArSubU ? 'خطأ' : 'Error', isArSubU ? 'فشل إنشاء المستخدم' : 'Failed to create user', 'error');
           }
         }
         break;
@@ -2468,7 +2484,7 @@ async function handleModalSubmit() {
         const newPassword = document.getElementById('user-password').value;
         if (newPassword) {
           if (String(newPassword).length < 8) {
-            showNotification('Validation Error', 'Password must be at least 8 characters', 'error');
+            showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
             return;
           }
           const hashed = await Security.hashPassword(newPassword, null, { algo: 'pbkdf2-sha256' });
@@ -2494,15 +2510,15 @@ async function handleModalSubmit() {
         }
         
         updateRecord(state.users, state.modalData.id, updates);
-        showNotification('Updated', 'User updated successfully', 'success');
+        showNotification(isArSubU ? 'تم التحديث' : 'Updated', isArSubU ? 'تم تحديث المستخدم بنجاح' : 'User updated successfully', 'success');
       } else {
         if (!isAdminEditor) {
-          showNotification('Access Denied', state.language === 'ar' ? 'إنشاء المستخدمين للأدمن فقط' : 'Admin only', 'error');
+          showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'إنشاء المستخدمين للأدمن فقط' : 'Admin only', 'error');
           return;
         }
         const rawPassword = document.getElementById('user-password').value;
         if (!rawPassword || String(rawPassword).length < 8) {
-          showNotification('Validation Error', 'Password must be at least 8 characters', 'error');
+          showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
           return;
         }
         const hashed = await Security.hashPassword(rawPassword, null, { algo: 'pbkdf2-sha256' });
@@ -2518,7 +2534,7 @@ async function handleModalSubmit() {
           permissions: getDefaultPermissions(userRole)
         };
         addRecord(state.users, user);
-        showNotification('Success', 'User added successfully', 'success');
+        showNotification(isArSubU ? 'نجاح' : 'Success', isArSubU ? 'تمت إضافة المستخدم بنجاح' : 'User added successfully', 'success');
         
         // Show permission modal for non-admin users
         if (!isAdminRole(userRole)) {
@@ -2609,12 +2625,13 @@ async function handleModalSubmit() {
       break;
     }
     case 'receipt':
+      const isArSubR = state.language === 'ar';
       const receiptAmountEl = document.getElementById('receipt-amount');
       const receiptRateEl = document.getElementById('receipt-rate');
       const receiptFeeEl = document.getElementById('receipt-fee');
       const receiptDiscountEl = document.getElementById('receipt-discount');
       if (!receiptAmountEl || !receiptRateEl) {
-        showNotification('Error', 'Receipt form elements not found', 'error');
+        showNotification(isArSubR ? 'خطأ' : 'Error', isArSubR ? 'عناصر نموذج الوصل غير موجودة' : 'Receipt form elements not found', 'error');
         return;
       }
       const receiptAmountUSD = parseFloat(receiptAmountEl.value);
@@ -2632,7 +2649,7 @@ async function handleModalSubmit() {
       // Get customer ID from searchable dropdown hidden field
       const receiptCustomerId = document.getElementById('receipt-customer-id').value;
       if (!receiptCustomerId) {
-        showNotification('Error', 'Please select a customer', 'error');
+        showNotification(isArSubR ? 'خطأ' : 'Error', isArSubR ? 'الرجاء اختيار عميل' : 'Please select a customer', 'error');
         return;
       }
       
@@ -2641,7 +2658,7 @@ async function handleModalSubmit() {
       const oldSerialNumber = isEdit ? (state.modalData?.serialNumber || '').trim() : '';
       
       if (isEdit && oldSerialNumber && !newSerialNumber) {
-        showNotification('Validation Error', state.language === 'ar' ? 'لا يمكن حذف رقم الوصل الموجود' : 'Cannot remove existing receipt serial number. Please enter a serial number.', 'error');
+        showNotification(isArSubR ? 'خطأ في الإدخال' : 'Validation Error', isArSubR ? 'لا يمكن حذف رقم الوصل الموجود' : 'Cannot remove existing receipt serial number. Please enter a serial number.', 'error');
         return;
       }
       
@@ -2750,7 +2767,7 @@ function closeModal() {
 function deleteCustomer(id) {
   // Permission check
   if (!currentUserHasPermission('customers', 'delete')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف العملاء' : 'You do not have permission to delete customers', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف العملاء' : 'You do not have permission to delete customers', 'error');
     return;
   }
   const customer = state.customers.find(c => c.id === id);
@@ -2798,7 +2815,13 @@ function deleteCustomer(id) {
     });
     deleteRecord(state.customers, id);
     const deletedCount = linkedReceipts.length + linkedAds.length;
-    showNotification('Deleted', `Customer deleted${deletedCount > 0 ? ` along with ${deletedCount} linked record(s)` : ''}`, 'success');
+    showNotification(
+      isAr ? 'تم الحذف' : 'Deleted',
+      isAr
+        ? `تم حذف العميل${deletedCount > 0 ? ` مع ${deletedCount} سجل مرتبط` : ''}`
+        : `Customer deleted${deletedCount > 0 ? ` along with ${deletedCount} linked record(s)` : ''}`,
+      'success'
+    );
     render();
   }
 }
@@ -2806,12 +2829,12 @@ function deleteCustomer(id) {
 function deletePage(id) {
   // Permission check
   if (!currentUserHasPermission('pages', 'delete')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الصفحات' : 'You do not have permission to delete pages', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الصفحات' : 'You do not have permission to delete pages', 'error');
     return;
   }
-  if (confirm('Delete this page?')) {
+  if (confirm(state.language === 'ar' ? 'هل تريد حذف هذه الصفحة؟' : 'Delete this page?')) {
     deleteRecord(state.pages, id);
-    showNotification('Deleted', 'Page deleted', 'success');
+    showNotification(state.language === 'ar' ? 'تم الحذف' : 'Deleted', state.language === 'ar' ? 'تم حذف الصفحة' : 'Page deleted', 'success');
     render();
   }
 }
@@ -2820,7 +2843,7 @@ function deleteReceipt(id) {
   // Permission check
   const receipt = state.receipts.find(r => r.id === id);
   if (!canActOnRecord('receipts', 'delete', receipt?.createdBy)) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الوصولات' : 'You do not have permission to delete this receipt', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الوصولات' : 'You do not have permission to delete this receipt', 'error');
     return;
   }
   const serialNo = receipt?.serialNumber || receipt?.tempReceiptNo || receipt?.finalReceiptNo || id.slice(0, 8);
@@ -2902,7 +2925,7 @@ function deleteAd(id) {
   // Permission check
   const ad = state.ads.find(a => a.id === id);
   if (!canActOnRecord('ads', 'delete', ad?.creatorId)) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الإعلانات' : 'You do not have permission to delete this ad', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الإعلانات' : 'You do not have permission to delete this ad', 'error');
     return;
   }
   const customer = state.customers.find(c => c.id === ad?.customerId);
@@ -2913,7 +2936,7 @@ function deleteAd(id) {
     : `Are you sure you want to delete this ad?\n\nCustomer: ${customerName}\nAmount: $${amountUSD}\n\n⚠️ This action cannot be undone!`;
   if (confirm(warning)) {
     deleteRecord(state.ads, id);
-    showNotification('Deleted', 'Ad deleted', 'success');
+    showNotification(state.language === 'ar' ? 'تم الحذف' : 'Deleted', state.language === 'ar' ? 'تم حذف الإعلان' : 'Ad deleted', 'success');
     render();
   }
 }

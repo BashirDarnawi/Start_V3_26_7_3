@@ -190,7 +190,7 @@ function navigateToInternal(view, pushHistory = true) {
   
   // Secret ideas gating: only Admin can access the platform hub pages
   if (!isCurrentUserAdmin() && PLATFORM_ADMIN_ONLY_VIEWS.has(String(view || ''))) {
-    showNotification('Restricted', state.language === 'ar' ? 'هذه الميزات مخفية حالياً' : 'These features are hidden for now', 'info');
+    showNotification(state.language === 'ar' ? 'غير متاح' : 'Restricted', state.language === 'ar' ? 'هذه الميزات مخفية حالياً' : 'These features are hidden for now', 'info');
     state.currentView = getAlbayanManagerLandingViewForUser(state.currentUser);
     state.isMobileMenuOpen = false;
     if (pushHistory) updateUrlForView(state.currentView);
@@ -203,7 +203,7 @@ function navigateToInternal(view, pushHistory = true) {
   if (!isCurrentUserAdmin() && !userCanAccessView(state.currentUser, view)) {
     // Special views that don't need permissions
     if (view !== 'delivery-dashboard' && view !== 'no-access') {
-      showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية' : `You don't have permission to access this page`, 'error');
+      showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية' : `You don't have permission to access this page`, 'error');
       return;
     }
   }
@@ -255,22 +255,23 @@ function renderCommandPalette() {
   
   if (!state.commandPaletteOpen) return;
   
+  const isAr = state.language === 'ar';
   const commands = [
-    { id: 'analytics', label: 'Analytics', icon: 'layout-dashboard', action: () => navigateTo('analytics') },
-    { id: 'customers', label: 'Customers', icon: 'smile', action: () => navigateTo('customers') },
-    { id: 'receipts', label: 'Receipts', icon: 'receipt', action: () => navigateTo('receipts') },
-    { id: 'pages', label: 'Pages', icon: 'file-text', action: () => navigateTo('pages') },
-    { id: 'ads', label: 'Ads', icon: 'megaphone', action: () => navigateTo('ads') },
-    { id: 'deliveries', label: 'Deliveries', icon: 'truck', action: () => navigateTo('deliveries') },
-    { id: 'users', label: 'Users', icon: 'users', action: () => navigateTo('users') },
-    { id: 'settings', label: 'Settings', icon: 'settings', action: () => navigateTo('settings') },
-    { id: 'add-customer', label: 'Add Customer', icon: 'user-plus', action: () => { toggleCommandPalette(); showCustomerModal(); } },
-    { id: 'add-ad', label: 'Add Ad', icon: 'plus-circle', action: () => { toggleCommandPalette(); showAdModal(); } },
-    { id: 'add-receipt', label: 'Add Receipt', icon: 'receipt', action: () => { toggleCommandPalette(); showReceiptModal(); } },
-    { id: 'export', label: 'Export Data', icon: 'download', action: () => { toggleCommandPalette(); exportData(); } },
-    { id: 'dark-mode', label: 'Toggle Dark Mode', icon: 'moon', action: () => { toggleCommandPalette(); toggleTheme(); } },
-    { id: 'language', label: 'Toggle Language', icon: 'globe', action: () => { toggleCommandPalette(); toggleLanguage(); } },
-    { id: 'logout', label: 'Logout', icon: 'log-out', action: () => { toggleCommandPalette(); handleLogout(); } },
+    { id: 'analytics', label: isAr ? 'التحليلات' : 'Analytics', icon: 'layout-dashboard', action: () => navigateTo('analytics') },
+    { id: 'customers', label: isAr ? 'العملاء' : 'Customers', icon: 'smile', action: () => navigateTo('customers') },
+    { id: 'receipts', label: isAr ? 'الوصولات' : 'Receipts', icon: 'receipt', action: () => navigateTo('receipts') },
+    { id: 'pages', label: isAr ? 'الصفحات' : 'Pages', icon: 'file-text', action: () => navigateTo('pages') },
+    { id: 'ads', label: isAr ? 'الإعلانات' : 'Ads', icon: 'megaphone', action: () => navigateTo('ads') },
+    { id: 'deliveries', label: isAr ? 'التوصيلات' : 'Deliveries', icon: 'truck', action: () => navigateTo('deliveries') },
+    { id: 'users', label: isAr ? 'المستخدمون' : 'Users', icon: 'users', action: () => navigateTo('users') },
+    { id: 'settings', label: isAr ? 'الإعدادات' : 'Settings', icon: 'settings', action: () => navigateTo('settings') },
+    { id: 'add-customer', label: isAr ? 'إضافة عميل' : 'Add Customer', icon: 'user-plus', action: () => { toggleCommandPalette(); showCustomerModal(); } },
+    { id: 'add-ad', label: isAr ? 'إضافة إعلان' : 'Add Ad', icon: 'plus-circle', action: () => { toggleCommandPalette(); showAdModal(); } },
+    { id: 'add-receipt', label: isAr ? 'إضافة وصل' : 'Add Receipt', icon: 'receipt', action: () => { toggleCommandPalette(); showReceiptModal(); } },
+    { id: 'export', label: isAr ? 'تصدير البيانات' : 'Export Data', icon: 'download', action: () => { toggleCommandPalette(); exportData(); } },
+    { id: 'dark-mode', label: isAr ? 'تبديل الوضع الداكن' : 'Toggle Dark Mode', icon: 'moon', action: () => { toggleCommandPalette(); toggleTheme(); } },
+    { id: 'language', label: isAr ? 'تبديل اللغة' : 'Toggle Language', icon: 'globe', action: () => { toggleCommandPalette(); toggleLanguage(); } },
+    { id: 'logout', label: isAr ? 'تسجيل الخروج' : 'Logout', icon: 'log-out', action: () => { toggleCommandPalette(); handleLogout(); } },
   ];
   
   const modal = document.createElement('div');
@@ -284,7 +285,7 @@ function renderCommandPalette() {
         <input 
           type="text" 
           id="command-search" 
-          placeholder="Type a command or search..."
+          placeholder="${isAr ? 'اكتب أمراً أو ابحث...' : 'Type a command or search...'}"
           class="flex-1 bg-transparent outline-none text-slate-800 dark:text-white"
           oninput="filterCommands(this.value)"
         />
@@ -442,13 +443,13 @@ async function pushToCloud() {
     state.lastCloudSync = new Date().toISOString();
     saveState();
     renderSyncStatus();
-    showNotification('Synced', 'Data pushed to cloud', 'success');
+    showNotification(state.language === 'ar' ? 'تمت المزامنة' : 'Synced', state.language === 'ar' ? 'تم رفع البيانات إلى السحابة' : 'Data pushed to cloud', 'success');
     
   } catch (error) {
     console.error('Cloud push error:', error);
     state.cloudSyncStatus = 'error';
     renderSyncStatus();
-    showNotification('Sync Error', error.message, 'error');
+    showNotification(state.language === 'ar' ? 'خطأ في المزامنة' : 'Sync Error', error.message, 'error');
   }
 }
 
@@ -530,7 +531,7 @@ function renderSyncStatus() {
         ${statusIcons[state.cloudSyncStatus]}
       </div>
       <span class="text-xs font-medium text-slate-700 dark:text-slate-300">
-        ${state.cloudSyncStatus === 'syncing' ? 'Syncing...' : state.cloudSyncStatus === 'success' ? 'Synced' : state.cloudSyncStatus === 'error' ? 'Error' : 'Ready'}
+        ${state.cloudSyncStatus === 'syncing' ? (state.language === 'ar' ? 'جارٍ المزامنة...' : 'Syncing...') : state.cloudSyncStatus === 'success' ? (state.language === 'ar' ? 'تمت المزامنة' : 'Synced') : state.cloudSyncStatus === 'error' ? (state.language === 'ar' ? 'خطأ' : 'Error') : (state.language === 'ar' ? 'جاهز' : 'Ready')}
       </span>
     </div>
   `;

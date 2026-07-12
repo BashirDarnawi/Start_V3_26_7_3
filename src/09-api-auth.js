@@ -299,7 +299,7 @@ async function apiLogin(email, password) {
   const cooldownCheck = isRateLimited('login');
   if (cooldownCheck.limited) {
     const minutes = Math.ceil(cooldownCheck.retryAfter / 60);
-    const err = new Error(`Too many login attempts. Please wait ${minutes} minute(s) before trying again.`);
+    const err = new Error(state.language === 'ar' ? `محاولات دخول كثيرة جداً. الرجاء الانتظار ${minutes} دقيقة قبل المحاولة مرة أخرى.` : `Too many login attempts. Please wait ${minutes} minute(s) before trying again.`);
     err.status = 429;
     err.retryAfter = cooldownCheck.retryAfter;
     throw err;
@@ -313,7 +313,7 @@ async function apiLogin(email, password) {
     // If rate limited, show a user-friendly message
     if (e?.status === 429) {
       const minutes = Math.ceil((e.retryAfter || 60) / 60);
-      showNotification('Too Many Attempts', `Please wait ${minutes} minute(s) before trying again.`, 'error');
+      showNotification(state.language === 'ar' ? 'محاولات كثيرة جداً' : 'Too Many Attempts', state.language === 'ar' ? `الرجاء الانتظار ${minutes} دقيقة قبل المحاولة مرة أخرى.` : `Please wait ${minutes} minute(s) before trying again.`, 'error');
     }
     throw e;
   }
@@ -414,7 +414,7 @@ function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
       }
     } catch (e) {
       if (!quiet) {
-        showNotification('Server Error', `Failed to save user changes: ${e?.message || 'Error'}`, 'error');
+        showNotification(state.language === 'ar' ? 'خطأ في السيرفر' : 'Server Error', state.language === 'ar' ? `فشل حفظ تغييرات المستخدم: ${e?.message || 'خطأ'}` : `Failed to save user changes: ${e?.message || 'Error'}`, 'error');
       }
     }
   }, _serverUserUpdate.debounceMs);
@@ -696,7 +696,7 @@ async function serverLoadAllData() {
     const pct = Math.round((loadedCount / collections.length) * 100);
     // Update any loading indicator if present
     const progressEl = document.getElementById('loading-progress');
-    if (progressEl) progressEl.textContent = `Loading data... ${pct}%`;
+    if (progressEl) progressEl.textContent = state.language === 'ar' ? `جارٍ تحميل البيانات... ${pct}%` : `Loading data... ${pct}%`;
   };
 
   for (let i = 0; i < collections.length; i += CONCURRENCY) {
@@ -792,8 +792,10 @@ async function serverLoadAllData() {
     // Admins can still see this warning for troubleshooting.
     if (isCurrentUserAdmin()) {
       showNotification(
-        'Limited Access',
-        `Your account cannot access: ${forbidden.join(', ')}. Ask an Admin to grant permissions.`,
+        state.language === 'ar' ? 'وصول محدود' : 'Limited Access',
+        state.language === 'ar'
+          ? `حسابك لا يمكنه الوصول إلى: ${forbidden.join(', ')}. اطلب من المسؤول منح الصلاحيات.`
+          : `Your account cannot access: ${forbidden.join(', ')}. Ask an Admin to grant permissions.`,
         'warning'
       );
     }
@@ -814,8 +816,10 @@ async function serverLoadAllData() {
     });
     if (names.length) {
     showNotification(
-      'Server Warning',
-      `Some data failed to load: ${names.join(', ')}. You can try Refresh.`,
+      state.language === 'ar' ? 'تحذير السيرفر' : 'Server Warning',
+      state.language === 'ar'
+        ? `فشل تحميل بعض البيانات: ${names.join(', ')}. يمكنك تجربة التحديث.`
+        : `Some data failed to load: ${names.join(', ')}. You can try Refresh.`,
       'warning'
     );
   }

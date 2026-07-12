@@ -56,9 +56,10 @@ function showReceiptPhoneDropdown() {
 // ==========================================
 
 function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUsers) {
+  const isArF = state.language === 'ar';
   // BUG FIX: Check if array exists and has elements before accessing
   if (!Array.isArray(existingPayments) || existingPayments.length === 0) {
-    return '<div class="text-xs text-slate-400 p-4">No payments configured</div>';
+    return `<div class="text-xs text-slate-400 p-4">${isArF ? 'لا توجد دفعات معدة' : 'No payments configured'}</div>`;
   }
   
   const isSplit = existingPayments.length > 1;
@@ -72,20 +73,20 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
           <!-- Header -->
           <div class="flex items-center space-x-2 mb-4 pb-3 border-b border-slate-100 dark:border-slate-700">
             <i data-lucide="credit-card" class="w-4 h-4 text-slate-500"></i>
-            <span class="text-xs font-bold text-slate-500 uppercase">PAYMENT #1</span>
+            <span class="text-xs font-bold text-slate-500 uppercase">${isArF ? 'الدفعة رقم 1' : 'PAYMENT #1'}</span>
           </div>
 
           <div class="space-y-4">
             <!-- Payment Method & Amount Row -->
             <div class="grid grid-cols-2 gap-4">
               <div>
-                <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1.5">Payment Method</label>
+                <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1.5">${isArF ? 'طريقة الدفع' : 'Payment Method'}</label>
                 <select class="payment-method w-full glass-input px-3 py-2 rounded-lg text-sm font-medium border border-slate-200 dark:border-slate-600 focus:ring-2 focus:ring-indigo-500/20" onchange="onPaymentMethodChange(this)">
-                  ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${m}</option>`).join('')}
+                  ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
                 </select>
               </div>
               <div>
-                <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1.5">Amount</label>
+                <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1.5">${isArF ? 'المبلغ' : 'Amount'}</label>
                 <input type="text" inputmode="decimal" class="payment-amount w-full glass-input px-3 py-2 rounded-lg text-sm font-bold border border-slate-200 dark:border-slate-600 focus:ring-2 focus:ring-indigo-500/20" value="${payment.amount || 0}" placeholder="0" oninput="sanitizeMoneyInput(this); updateReceiptTotals()" />
               </div>
             </div>
@@ -93,7 +94,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             <!-- Rates Row -->
             <div class="grid grid-cols-2 gap-4">
               <div class="bg-slate-50 dark:bg-slate-900/50 p-3 rounded-lg border border-slate-200 dark:border-slate-700">
-                <label class="text-[10px] font-bold text-slate-500 uppercase mb-1.5 block">RATE 1</label>
+                <label class="text-[10px] font-bold text-slate-500 uppercase mb-1.5 block">${isArF ? 'السعر 1' : 'RATE 1'}</label>
                 <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${payment.rate || state.defaultExchangeRate}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
                 <div class="text-center pt-2 border-t border-slate-200 dark:border-slate-700">
                   <div class="text-[10px] font-bold text-slate-400 mb-0.5">R1:</div>
@@ -101,7 +102,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
                 </div>
               </div>
               <div class="bg-slate-50 dark:bg-slate-900/50 p-3 rounded-lg border border-slate-200 dark:border-slate-700">
-                <label class="text-[10px] font-bold text-slate-500 uppercase mb-1.5 block">RATE 2</label>
+                <label class="text-[10px] font-bold text-slate-500 uppercase mb-1.5 block">${isArF ? 'السعر 2' : 'RATE 2'}</label>
                 <input type="text" inputmode="decimal" class="payment-rate2 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${payment.rate2 !== undefined ? payment.rate2 : state.defaultExchangeRate}" placeholder="0" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
                 <div class="text-center pt-2 border-t border-slate-200 dark:border-slate-700">
                   <div class="text-[10px] font-bold text-slate-400 mb-0.5">R2:</div>
@@ -116,17 +117,17 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             <!-- Integrated Totals -->
             <div class="mt-4 pt-4 border-t border-slate-100 dark:border-slate-700 grid grid-cols-2 gap-4">
               <div>
-                <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">TOTAL PAID (LYD)</div>
+                <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي المدفوع (LYD)' : 'TOTAL PAID (LYD)'}</div>
                 <div class="p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg border border-slate-200 dark:border-slate-700">
                   <div id="receipt-total-lyd" class="text-xl font-bold text-slate-800 dark:text-white">0.00</div>
                   <div class="text-[10px] font-bold text-slate-400 mt-1">LYD</div>
                 </div>
               </div>
               <div>
-                <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">TOTAL ADS CREDIT (USD)</div>
+                <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي رصيد الإعلانات (USD)' : 'TOTAL ADS CREDIT (USD)'}</div>
                 <div class="p-3 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg border border-emerald-100 dark:border-emerald-900/30">
                   <div id="receipt-total-usd" class="text-xl font-bold text-emerald-600">$0.00</div>
-                  <div class="text-[10px] text-emerald-600/70 mt-1 leading-tight">Sum of all converted payments (Excluding Amount 2)</div>
+                  <div class="text-[10px] text-emerald-600/70 mt-1 leading-tight">${isArF ? 'مجموع كل الدفعات المحوّلة (باستثناء المبلغ 2)' : 'Sum of all converted payments (Excluding Amount 2)'}</div>
                 </div>
               </div>
             </div>
@@ -134,12 +135,12 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             <!-- Footer Stats -->
             <div class="flex justify-between items-center pt-2 text-[10px] text-slate-400">
               <div>
-                <div class="font-bold">Net Paid (After Fees):</div>
+                <div class="font-bold">${isArF ? 'صافي المدفوع (بعد الرسوم):' : 'Net Paid (After Fees):'}</div>
                 <div id="receipt-net-paid" class="text-indigo-600 font-bold text-xs">0.00 LYD</div>
               </div>
               <div class="text-right">
-                <div>Market Rate: <span id="receipt-market-rate" class="text-slate-600 dark:text-slate-300 font-bold">${state.defaultExchangeRate.toFixed(2)}</span></div>
-                <div>Actual Avg Rate: <span id="receipt-avg-rate" class="text-emerald-600 font-bold">0.0000</span></div>
+                <div>${isArF ? 'سعر السوق' : 'Market Rate'}: <span id="receipt-market-rate" class="text-slate-600 dark:text-slate-300 font-bold">${state.defaultExchangeRate.toFixed(2)}</span></div>
+                <div>${isArF ? 'متوسط السعر الفعلي' : 'Actual Avg Rate'}: <span id="receipt-avg-rate" class="text-emerald-600 font-bold">0.0000</span></div>
               </div>
             </div>
             
@@ -159,7 +160,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
         <div class="flex items-center justify-between mb-3">
           <div class="flex items-center space-x-2">
             <i data-lucide="credit-card" class="w-4 h-4 text-slate-400"></i>
-            <span class="text-xs font-bold text-slate-500 uppercase">PAYMENT #${idx + 1}</span>
+            <span class="text-xs font-bold text-slate-500 uppercase">${isArF ? `الدفعة رقم ${idx + 1}` : `PAYMENT #${idx + 1}`}</span>
           </div>
           <button type="button" onclick="removeReceiptPaymentSplit(this)" class="text-rose-500 hover:text-rose-700 transition-colors">
             <i data-lucide="trash-2" class="w-4 h-4"></i>
@@ -169,20 +170,20 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
         <div class="space-y-3">
           <div class="grid grid-cols-2 gap-3">
             <div>
-              <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Payment Method</label>
+              <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">${isArF ? 'طريقة الدفع' : 'Payment Method'}</label>
               <select class="payment-method w-full glass-input px-3 py-2 rounded-lg text-sm font-medium border border-slate-200 dark:border-slate-600" onchange="onPaymentMethodChange(this)">
-                ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${m}</option>`).join('')}
+                ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
               </select>
             </div>
             <div>
-              <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Amount</label>
+              <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">${isArF ? 'المبلغ' : 'Amount'}</label>
               <input type="text" inputmode="decimal" class="payment-amount w-full glass-input px-3 py-2 rounded-lg text-sm font-bold border border-slate-200 dark:border-slate-600" value="${payment.amount || 0}" placeholder="0" oninput="sanitizeMoneyInput(this); updateReceiptTotals()" />
             </div>
           </div>
 
           <div class="grid grid-cols-2 gap-3">
             <div class="bg-slate-50 dark:bg-slate-900/50 p-2 rounded-lg border border-slate-200 dark:border-slate-700">
-              <label class="text-[10px] font-bold text-slate-500 uppercase mb-1 block">RATE 1</label>
+              <label class="text-[10px] font-bold text-slate-500 uppercase mb-1 block">${isArF ? 'السعر 1' : 'RATE 1'}</label>
               <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${payment.rate || state.defaultExchangeRate}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
               <div class="text-center pt-1 border-t border-slate-200 dark:border-slate-700">
                 <span class="text-[9px] font-bold text-slate-400">R1: </span>
@@ -190,7 +191,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
               </div>
             </div>
             <div class="bg-slate-50 dark:bg-slate-900/50 p-2 rounded-lg border border-slate-200 dark:border-slate-700">
-              <label class="text-[10px] font-bold text-slate-500 uppercase mb-1 block">RATE 2</label>
+              <label class="text-[10px] font-bold text-slate-500 uppercase mb-1 block">${isArF ? 'السعر 2' : 'RATE 2'}</label>
               <input type="text" inputmode="decimal" class="payment-rate2 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${payment.rate2 !== undefined ? payment.rate2 : state.defaultExchangeRate}" placeholder="0" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
               <div class="text-center pt-1 border-t border-slate-200 dark:border-slate-700">
                 <span class="text-[9px] font-bold text-slate-400">R2: </span>
@@ -215,17 +216,17 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
       <div id="receipt-totals-section" class="mt-4 pt-4 border-t-2 border-slate-200 dark:border-slate-700">
         <div class="grid grid-cols-2 gap-4">
           <div>
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">TOTAL PAID (LYD)</div>
+            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي المدفوع (LYD)' : 'TOTAL PAID (LYD)'}</div>
             <div class="p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg border border-slate-200 dark:border-slate-700">
               <div id="receipt-total-lyd" class="text-xl font-bold text-slate-800 dark:text-white">0.00</div>
               <div class="text-[10px] font-bold text-slate-400 mt-1">LYD</div>
             </div>
           </div>
           <div>
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">TOTAL ADS CREDIT (USD)</div>
+            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي رصيد الإعلانات (USD)' : 'TOTAL ADS CREDIT (USD)'}</div>
             <div class="p-3 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg border border-emerald-100 dark:border-emerald-900/30">
               <div id="receipt-total-usd" class="text-xl font-bold text-emerald-600">$0.00</div>
-              <div class="text-[10px] text-emerald-600/70 mt-1">Sum of all R2 values</div>
+              <div class="text-[10px] text-emerald-600/70 mt-1">${isArF ? 'مجموع كل قيم R2' : 'Sum of all R2 values'}</div>
             </div>
           </div>
         </div>
@@ -233,15 +234,15 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
         <div class="mt-3 px-4 py-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg border border-slate-200 dark:border-slate-700">
           <div class="flex justify-between items-center text-xs">
             <div>
-              <span class="text-slate-500 font-bold">Net Paid:</span> 
+              <span class="text-slate-500 font-bold">${isArF ? 'صافي المدفوع:' : 'Net Paid:'}</span>
               <span id="receipt-net-paid" class="text-indigo-600 font-bold ml-1">0.00 LYD</span>
             </div>
             <div>
-              <span class="text-slate-500 font-bold">Market Rate:</span> 
+              <span class="text-slate-500 font-bold">${isArF ? 'سعر السوق:' : 'Market Rate:'}</span>
               <span id="receipt-market-rate" class="text-slate-600 font-bold ml-1">${state.defaultExchangeRate.toFixed(2)}</span>
             </div>
             <div>
-              <span class="text-slate-500 font-bold">Avg Rate:</span> 
+              <span class="text-slate-500 font-bold">${isArF ? 'متوسط السعر:' : 'Avg Rate:'}</span>
               <span id="receipt-avg-rate" class="text-emerald-600 font-bold ml-1">0.0000</span>
             </div>
           </div>
@@ -284,7 +285,7 @@ function addReceiptPaymentSplit() {
   const currentPayments = getReceiptPaymentData();
   // BUG FIX: Check if PAYMENT_METHODS array exists and has elements
   if (!Array.isArray(PAYMENT_METHODS) || PAYMENT_METHODS.length === 0) {
-    showNotification('Error', 'Payment methods not configured', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'طرق الدفع غير معدة' : 'Payment methods not configured', 'error');
     return;
   }
   const defaultRate1 = getDefaultRate1(PAYMENT_METHODS[0]);
@@ -379,7 +380,7 @@ function filterPageCustomers() {
     dropdown.innerHTML = filtered.map(c => `
       <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" onclick="selectPageCustomer('${c.id}', '${isAdminRole(state.currentUser?.role)}')">
         <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
-        <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || 'No phone')}</div>
+        <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (state.language === 'ar' ? 'لا يوجد هاتف' : 'No phone'))}</div>
       </div>
     `).join('');
     dropdown.classList.remove('hidden');
@@ -396,7 +397,7 @@ function showPageCustomerDropdown() {
     dropdown.innerHTML = customers.map(c => `
       <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" onclick="selectPageCustomer('${c.id}', '${isAdminRole(state.currentUser?.role)}')">
         <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
-        <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || 'No phone')}</div>
+        <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (state.language === 'ar' ? 'لا يوجد هاتف' : 'No phone'))}</div>
       </div>
     `).join('');
     dropdown.classList.remove('hidden');
@@ -415,7 +416,7 @@ function selectPageCustomer(customerId, isAdmin) {
   // Check if already selected
   const existing = container.querySelector(`[data-customer-id="${customerId}"]`);
   if (existing) {
-    showNotification('Already Selected', 'This customer is already linked to this page', 'info');
+    showNotification(state.language === 'ar' ? 'محدد مسبقاً' : 'Already Selected', state.language === 'ar' ? 'هذا العميل مرتبط بهذه الصفحة بالفعل' : 'This customer is already linked to this page', 'info');
     dropdown.classList.add('hidden');
     return;
   }
@@ -423,7 +424,7 @@ function selectPageCustomer(customerId, isAdmin) {
   // Check if non-admin trying to add multiple
   const currentCount = container.querySelectorAll('.page-customer-item').length;
   if (isAdmin === 'false' && currentCount >= 1) {
-    showNotification('Limit Reached', 'You can only link one customer. Remove the existing customer first.', 'error');
+    showNotification(state.language === 'ar' ? 'تم بلوغ الحد' : 'Limit Reached', state.language === 'ar' ? 'يمكنك ربط عميل واحد فقط. احذف العميل الحالي أولاً.' : 'You can only link one customer. Remove the existing customer first.', 'error');
     dropdown.classList.add('hidden');
     return;
   }
@@ -596,15 +597,15 @@ function onPaymentMethodChange(selectElement) {
         // Make field read-only and style it
         serialInput.readOnly = true;
         serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-        serialInput.title = `Auto-generated for ${paymentMethod}`;
+        serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${paymentMethod}` : `Auto-generated for ${paymentMethod}`;
         // Show notification about auto-generated serial
-        showNotification('Auto Serial', `Receipt number auto-set to ${nextSerial} for ${paymentMethod}`, 'info');
+        showNotification(state.language === 'ar' ? 'رقم تلقائي' : 'Auto Serial', state.language === 'ar' ? `تم تعيين رقم الوصل تلقائياً إلى ${nextSerial} لـ ${paymentMethod}` : `Receipt number auto-set to ${nextSerial} for ${paymentMethod}`, 'info');
       }
     } else if (serialInput) {
       // If already has value and is auto-serial method, keep it locked
       serialInput.readOnly = true;
       serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-      serialInput.title = `Auto-generated for ${paymentMethod}`;
+      serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${paymentMethod}` : `Auto-generated for ${paymentMethod}`;
     }
   }
   
@@ -649,7 +650,7 @@ function updateAutoSerialForReceipt() {
       // Make field read-only
       serialInput.readOnly = true;
       serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-      serialInput.title = `Auto-generated for ${autoSerialMethod}`;
+      serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${autoSerialMethod}` : `Auto-generated for ${autoSerialMethod}`;
     }
   }
   
@@ -679,7 +680,7 @@ function updateSerialLockState() {
     // Lock the serial field
     serialInput.readOnly = true;
     serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-    serialInput.title = `Auto-generated for ${autoSerialMethod}`;
+    serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${autoSerialMethod}` : `Auto-generated for ${autoSerialMethod}`;
   } else {
     // Unlock the serial field if no auto-serial methods are present
     serialInput.readOnly = false;
@@ -899,6 +900,7 @@ async function saveReceiptFromModal() {
 }
 
 async function _saveReceiptFromModalInner() {
+  const isArV = state.language === 'ar';
   try {
   // Resolve the edit target from the FROZEN hidden field written when this form
   // was rendered — NOT from the mutable global state.modalData, which a stray
@@ -913,7 +915,7 @@ async function _saveReceiptFromModalInner() {
 
   const customerId = document.getElementById('receipt-customer-id').value;
   if (!customerId) {
-    showNotification('Error', 'Please select a customer by phone', 'error');
+    showNotification(isArV ? 'خطأ' : 'Error', isArV ? 'الرجاء اختيار عميل عن طريق رقم الهاتف' : 'Please select a customer by phone', 'error');
     return;
   }
   
@@ -1001,7 +1003,7 @@ async function _saveReceiptFromModalInner() {
   // Enforce Not Paid rules
   if (status === 'Not Paid') {
     if (!statusDetail.notPaidCollection) {
-      showNotification('Validation', 'Select how the customer will pay (shop or delivery).', 'error');
+      showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'اختر كيف سيدفع العميل (المحل أو التوصيل).' : 'Select how the customer will pay (shop or delivery).', 'error');
       return;
     }
     if (!isCurrentUserAdmin()) {
@@ -1014,7 +1016,7 @@ async function _saveReceiptFromModalInner() {
   // Enforce Cancel rules
   if (status === 'Canceled') {
     if (!statusDetail.refundAction) {
-      showNotification('Validation', 'Select a cancellation outcome.', 'error');
+      showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'اختر نتيجة الإلغاء.' : 'Select a cancellation outcome.', 'error');
       return;
     }
     if (statusDetail.refundAction === 'full' || statusDetail.refundAction === 'partial') {
@@ -1028,7 +1030,7 @@ async function _saveReceiptFromModalInner() {
   
   // Lost rules
   if (status === 'Lost' && !statusDetail.lostResolution) {
-    showNotification('Validation', 'Select lost resolution (empty or paid).', 'error');
+    showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'اختر نتيجة الفقدان (فارغ أو مدفوع).' : 'Select lost resolution (empty or paid).', 'error');
     return;
   }
   
@@ -1041,11 +1043,11 @@ async function _saveReceiptFromModalInner() {
   if (isTempDelivery) {
     // In server mode, the backend generates tempReceiptNo safely, so it's OK to be empty before save.
     if (!serialNumber && !isServerModeEnabled()) {
-      showNotification('Validation', 'Temporary delivery receipt number is missing. Please re-select Delivery or reopen the receipt form.', 'error');
+      showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'رقم وصل التوصيل المؤقت مفقود. الرجاء إعادة اختيار التوصيل أو إعادة فتح نموذج الوصل.' : 'Temporary delivery receipt number is missing. Please re-select Delivery or reopen the receipt form.', 'error');
       return;
     }
     if (serialNumber && !isTempDeliveryReceiptNo(serialNumber)) {
-      showNotification('Validation', 'Temporary receipt number must look like D12, D13, ...', 'error');
+      showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'رقم الوصل المؤقت يجب أن يكون بالشكل D12، D13، ...' : 'Temporary receipt number must look like D12, D13, ...', 'error');
       return;
     }
   }
@@ -1063,7 +1065,7 @@ async function _saveReceiptFromModalInner() {
       serialInputEl.focus();
     }
     if (window.lucide) lucide.createIcons();
-    showNotification('Validation', state.language === 'ar'
+    showNotification(isArV ? 'تحقق' : 'Validation', state.language === 'ar'
       ? 'لا يمكن حفظ الوصل بدون رقم عندما تكون الحالة (مدفوع/ملغي/ضائع).'
       : 'You cannot save without a receipt number when status is Paid/Canceled/Lost.', 'error');
     return;
@@ -1078,7 +1080,7 @@ async function _saveReceiptFromModalInner() {
         (String(r.tempReceiptNo || '').trim() === serialNumber || String(r.serialNumber || '').trim() === serialNumber || String(r.finalReceiptNo || '').trim() === serialNumber)
       );
       if (existingTemp) {
-        showNotification('Duplicate Temp Receipt', `Temporary receipt number "${serialNumber}" already exists. Please reopen the receipt form to generate a new one.`, 'error');
+        showNotification(isArV ? 'وصل مؤقت مكرر' : 'Duplicate Temp Receipt', isArV ? `رقم الوصل المؤقت "${serialNumber}" موجود بالفعل. الرجاء إعادة فتح نموذج الوصل لتوليد رقم جديد.` : `Temporary receipt number "${serialNumber}" already exists. Please reopen the receipt form to generate a new one.`, 'error');
         return;
       }
     }
@@ -1088,13 +1090,13 @@ async function _saveReceiptFromModalInner() {
     // - Auto-serial receipts (LTT/Libyana/Madar): S-prefix + digits (S1, S2, S3, etc.)
     const isAutoSerial = isAutoSerialNumber(serialNumber);
     if (!isTempDelivery && !isAutoSerial && !/^\d+$/.test(serialNumber)) {
-      showNotification('Invalid Receipt Number', 'Receipt number must contain only digits (0-9) or be S-prefixed (S1, S2) for LTT/Libyana/Madar', 'error');
+      showNotification(isArV ? 'رقم وصل غير صالح' : 'Invalid Receipt Number', isArV ? 'رقم الوصل يجب أن يحتوي على أرقام فقط (0-9) أو يبدأ بحرف S (مثل S1، S2) لطرق LTT/Libyana/Madar' : 'Receipt number must contain only digits (0-9) or be S-prefixed (S1, S2) for LTT/Libyana/Madar', 'error');
       return;
     }
     
     // Check if it starts with zero (only for non-auto-serial receipts)
     if (!isTempDelivery && !isAutoSerial && serialNumber.startsWith('0')) {
-      showNotification('Invalid Receipt Number', 'Receipt number cannot start with zero', 'error');
+      showNotification(isArV ? 'رقم وصل غير صالح' : 'Invalid Receipt Number', isArV ? 'رقم الوصل لا يمكن أن يبدأ بصفر' : 'Receipt number cannot start with zero', 'error');
       return;
     }
     
@@ -1107,7 +1109,7 @@ async function _saveReceiptFromModalInner() {
     
     if (existingReceipt) {
       const customer = state.customers.find(c => c.id === existingReceipt.customerId);
-      const customerName = customer ? customer.name : 'Unknown';
+      const customerName = customer ? customer.name : (state.language === 'ar' ? 'غير معروف' : 'Unknown');
       
       // Show detailed duplicate warning
       showDuplicateReceiptWarning(serialNumber, customerName, existingReceipt.customerId);
@@ -1159,15 +1161,15 @@ async function _saveReceiptFromModalInner() {
   const deliveryInstructions = String(document.getElementById('receipt-delivery-instructions')?.value || '').trim();
   if (isTempDelivery) {
     if (!receiptDeliveryPersonId) {
-      showNotification('Validation', 'Please assign a delivery person.', 'error');
+      showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'الرجاء تعيين سائق توصيل.' : 'Please assign a delivery person.', 'error');
       return;
     }
     if (!deliveryPlaceName) {
-      showNotification('Validation', 'Delivery place name is required.', 'error');
+      showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'اسم مكان التوصيل مطلوب.' : 'Delivery place name is required.', 'error');
       return;
     }
     if (!(quotedDeliveryFee >= 0) || !Number.isFinite(quotedDeliveryFee)) {
-      showNotification('Validation', 'Quoted delivery fee is required.', 'error');
+      showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'رسوم التوصيل المتفق عليها مطلوبة.' : 'Quoted delivery fee is required.', 'error');
       return;
     }
   }
@@ -1296,7 +1298,7 @@ async function _saveReceiptFromModalInner() {
         const created = await apiCreateEntity('receipts', receipt);
         const saved = created?.data ? Security.sanitizeObject(created.data) : null;
         if (!saved || !saved.id) {
-          showNotification('Server Error', 'Failed to create receipt: invalid server response', 'error');
+          showNotification(isArV ? 'خطأ في الخادم' : 'Server Error', isArV ? 'فشل إنشاء الوصل: استجابة غير صالحة من الخادم' : 'Failed to create receipt: invalid server response', 'error');
           return;
         }
         // Insert into local state
@@ -1308,7 +1310,7 @@ async function _saveReceiptFromModalInner() {
       } catch (e) {
         const status = e?.status ? `HTTP ${e.status}` : '';
         const detail = (e?.payload && typeof e.payload === 'object' && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
-        showNotification('Server Error', `Failed to create receipt: ${status ? status + ' - ' : ''}${detail}`, 'error');
+        showNotification(isArV ? 'خطأ في الخادم' : 'Server Error', `${isArV ? 'فشل إنشاء الوصل' : 'Failed to create receipt'}: ${status ? status + ' - ' : ''}${detail}`, 'error');
         return; // keep modal open so user can retry
       }
     } else {
@@ -1353,7 +1355,7 @@ async function _saveReceiptFromModalInner() {
   
   } catch (error) {
     console.error('Error saving receipt:', error);
-    showNotification('Error', 'Failed to save receipt: ' + error.message, 'error');
+    showNotification(isArV ? 'خطأ' : 'Error', (isArV ? 'فشل حفظ الوصل: ' : 'Failed to save receipt: ') + error.message, 'error');
     
     // Still try to close the modal even if there was an error
     state.activeModal = null;
@@ -1391,7 +1393,7 @@ function validateReceiptNumberInput(input) {
     setTimeout(() => input.classList.remove('animate-shake'), 300);
     
     if (errorDiv) {
-      errorDiv.innerHTML = '<i data-lucide="alert-circle" class="w-3 h-3 inline mr-1"></i>Receipt number cannot start with zero';
+      errorDiv.innerHTML = '<i data-lucide="alert-circle" class="w-3 h-3 inline mr-1"></i>' + (state.language === 'ar' ? 'رقم الوصل لا يمكن أن يبدأ بصفر' : 'Receipt number cannot start with zero');
       errorDiv.classList.remove('hidden');
       input.classList.add('border-rose-500', 'focus:ring-rose-500/20');
       if (window.lucide) lucide.createIcons();
@@ -1443,10 +1445,10 @@ function checkReceiptNumberDuplicate(input) {
       errorDiv.innerHTML = `
         <div class="flex items-center space-x-2">
           <i data-lucide="alert-circle" class="w-3 h-3"></i>
-          <span>Already exists! Linked to: <strong>${customerName}</strong></span>
-          <button type="button" onclick="goToCustomerFromWarning('${existingReceipt.customerId}')" 
+          <span>${state.language === 'ar' ? 'موجود بالفعل! مرتبط بـ:' : 'Already exists! Linked to:'} <strong>${customerName}</strong></span>
+          <button type="button" onclick="goToCustomerFromWarning('${existingReceipt.customerId}')"
             class="ml-1 text-indigo-600 hover:text-indigo-700 underline font-bold">
-            View Customer →
+            ${state.language === 'ar' ? 'عرض العميل ←' : 'View Customer →'}
           </button>
         </div>
       `;
@@ -1462,6 +1464,7 @@ function checkReceiptNumberDuplicate(input) {
 
 // Duplicate receipt warning
 function showDuplicateReceiptWarning(receiptNumber, customerName, customerId) {
+  const isArDup = state.language === 'ar';
   const warningModal = document.createElement('div');
   warningModal.className = 'fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm';
   warningModal.id = 'duplicate-receipt-warning';
@@ -1473,9 +1476,9 @@ function showDuplicateReceiptWarning(receiptNumber, customerName, customerId) {
           <i data-lucide="alert-triangle" class="w-6 h-6 text-rose-600"></i>
         </div>
         <div>
-          <h3 class="text-xl font-bold text-slate-800 dark:text-white mb-2">Receipt Number Already Exists</h3>
+          <h3 class="text-xl font-bold text-slate-800 dark:text-white mb-2">${isArDup ? 'رقم الوصل موجود بالفعل' : 'Receipt Number Already Exists'}</h3>
           <p class="text-sm text-slate-600 dark:text-slate-400">
-            Receipt number <span class="font-mono font-bold text-rose-600">#${receiptNumber}</span> is already saved.
+            ${isArDup ? 'رقم الوصل' : 'Receipt number'} <span class="font-mono font-bold text-rose-600">#${receiptNumber}</span> ${isArDup ? 'محفوظ بالفعل.' : 'is already saved.'}
           </p>
         </div>
       </div>
@@ -1483,18 +1486,18 @@ function showDuplicateReceiptWarning(receiptNumber, customerName, customerId) {
       <div class="p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl mb-4">
         <div class="flex items-center space-x-2 mb-2">
           <i data-lucide="user" class="w-4 h-4 text-slate-500"></i>
-          <span class="text-xs font-medium text-slate-500 uppercase">Linked to Customer</span>
+          <span class="text-xs font-medium text-slate-500 uppercase">${isArDup ? 'مرتبط بالعميل' : 'Linked to Customer'}</span>
         </div>
         <p class="text-lg font-bold text-slate-800 dark:text-white">${customerName}</p>
       </div>
       
       <div class="flex space-x-3">
         <button onclick="closeDuplicateWarning()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors">
-          Close
+          ${isArDup ? 'إغلاق' : 'Close'}
         </button>
         <button onclick="goToCustomerFromWarning('${customerId}')" class="flex-1 btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
           <i data-lucide="arrow-right" class="w-4 h-4"></i>
-          <span>View Customer</span>
+          <span>${isArDup ? 'عرض العميل' : 'View Customer'}</span>
         </button>
       </div>
     </div>
@@ -1601,6 +1604,7 @@ function updateReceiptStatusUI(status) {
   const deliveryInfo = document.getElementById('receipt-delivery-info');
 
   const currentStatus = status || document.getElementById('receipt-status')?.value || 'Paid';
+  const isArS = state.language === 'ar';
   const isAdmin = isCurrentUserAdmin();
   const isTempDelivery = currentStatus === 'Not Paid' && notPaidCollection === 'delivery';
 
@@ -1628,20 +1632,20 @@ function updateReceiptStatusUI(status) {
         if (!isTempDeliveryReceiptNo(existing)) {
           serialInput.value = '';
         }
-        serialInput.placeholder = 'Temporary number (server-generated)';
+        serialInput.placeholder = isArS ? 'رقم مؤقت (يولّده الخادم)' : 'Temporary number (server-generated)';
         if (tempHint) {
           tempHint.classList.remove('hidden');
           tempHint.textContent = isTempDeliveryReceiptNo(existing)
-            ? `Temporary number: ${existing} (Pending Delivery)`
-            : 'Temporary number will be assigned when saved (Pending Delivery)';
+            ? (isArS ? `الرقم المؤقت: ${existing} (بانتظار التوصيل)` : `Temporary number: ${existing} (Pending Delivery)`)
+            : (isArS ? 'سيتم تعيين الرقم المؤقت عند الحفظ (بانتظار التوصيل)' : 'Temporary number will be assigned when saved (Pending Delivery)');
         }
       } else {
         // Local mode fallback: generate a best-effort D{n}.
-        serialInput.placeholder = 'Temporary number (auto)';
+        serialInput.placeholder = isArS ? 'رقم مؤقت (تلقائي)' : 'Temporary number (auto)';
         const tempNo = ensureTempDeliveryReceiptNoInReceiptForm();
         if (tempHint) {
           tempHint.classList.remove('hidden');
-          tempHint.textContent = `Temporary number: ${tempNo} (Pending Delivery)`;
+          tempHint.textContent = isArS ? `الرقم المؤقت: ${tempNo} (بانتظار التوصيل)` : `Temporary number: ${tempNo} (Pending Delivery)`;
         }
       }
       const overrideLabel = adminOverride?.closest('label');
@@ -1651,7 +1655,9 @@ function updateReceiptStatusUI(status) {
       const allow = isAdmin && adminOverride?.checked;
       serialInput.disabled = !allow;
       serialInput.readOnly = false;
-      serialInput.placeholder = allow ? 'Admin entering receipt number' : 'Locked until paid';
+      serialInput.placeholder = allow
+        ? (isArS ? 'الأدمن يدخل رقم الوصل' : 'Admin entering receipt number')
+        : (isArS ? 'مقفل حتى الدفع' : 'Locked until paid');
       if (!allow) serialInput.value = '';
       if (tempHint) tempHint.classList.add('hidden');
       const overrideLabel = adminOverride?.closest('label');
@@ -1660,7 +1666,7 @@ function updateReceiptStatusUI(status) {
     } else {
       serialInput.disabled = false;
       serialInput.readOnly = false;
-      serialInput.placeholder = 'e.g., 12345';
+      serialInput.placeholder = isArS ? 'مثال: 12345' : 'e.g., 12345';
       if (tempHint) tempHint.classList.add('hidden');
       const overrideLabel = adminOverride?.closest('label');
       if (overrideLabel) overrideLabel.classList.toggle('hidden', !isAdmin);
@@ -1815,7 +1821,7 @@ function handleAdCustomerChange(customerId, preserveFunding = false) {
   const pageSelect = document.getElementById('ad-page');
   if (pageSelect) {
     const pages = getPagesForCustomer(customerId);
-    pageSelect.innerHTML = `<option value="">Select page</option>${pages.map(p => `<option value="${Security.escapeHtml(p.id)}">${Security.escapeHtml(p.name)}</option>`).join('')}`;
+    pageSelect.innerHTML = `<option value="">${state.language === 'ar' ? 'اختر صفحة' : 'Select page'}</option>${pages.map(p => `<option value="${Security.escapeHtml(p.id)}">${Security.escapeHtml(p.name)}</option>`).join('')}`;
     if (preserveFunding && state.modalData?.pageId && pages.some(p => p.id === state.modalData.pageId)) {
       pageSelect.value = state.modalData.pageId;
     } else {
@@ -1842,6 +1848,7 @@ function handleAdPageChange(preserveFunding = false) {
 
 // Select a page in the Add Ad modal (Page-first workflow)
 function selectAdPage(pageId, preserveFunding = false) {
+  const isArP = state.language === 'ar';
   const pageInput = document.getElementById('ad-page');
   const pageSearch = document.getElementById('ad-page-search');
   const customerSection = document.getElementById('ad-customer-section');
@@ -1904,18 +1911,18 @@ function selectAdPage(pageId, preserveFunding = false) {
       customerDisplay.innerHTML = `
         <div class="p-3 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 text-center">
           <i data-lucide="alert-triangle" class="w-5 h-5 mx-auto mb-1 text-amber-500"></i>
-          <p class="text-xs text-amber-700 dark:text-amber-300">No customers linked.</p>
-          <button type="button" onclick="closeModal(); navigateTo('pages')" class="mt-1 text-xs text-amber-600 hover:text-amber-700 font-medium">Link →</button>
+          <p class="text-xs text-amber-700 dark:text-amber-300">${isArP ? 'لا يوجد عملاء مرتبطون.' : 'No customers linked.'}</p>
+          <button type="button" onclick="closeModal(); navigateTo('pages')" class="mt-1 text-xs text-amber-600 hover:text-amber-700 font-medium">${isArP ? 'ربط ←' : 'Link →'}</button>
         </div>
       `;
     }
     if (customerIdInput) customerIdInput.value = '';
-    if (customerHint) customerHint.textContent = '(no customers)';
+    if (customerHint) customerHint.textContent = isArP ? '(لا يوجد عملاء)' : '(no customers)';
   } else if (linkedCustomers.length === 1) {
     // Single customer - auto-select
     const customer = linkedCustomers[0];
     if (customerIdInput) customerIdInput.value = customer.id;
-    if (customerHint) customerHint.textContent = '(auto-selected)';
+    if (customerHint) customerHint.textContent = isArP ? '(محدد تلقائياً)' : '(auto-selected)';
     if (customerDisplay) {
       customerDisplay.innerHTML = `
         <div class="flex items-center space-x-3 p-2.5 rounded-lg bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
@@ -1924,7 +1931,7 @@ function selectAdPage(pageId, preserveFunding = false) {
           </div>
           <div class="flex-1 min-w-0">
             <div class="font-medium text-sm text-slate-700 dark:text-slate-200 truncate">${Security.escapeHtml(customer.name || '')}</div>
-            <div class="text-[10px] text-slate-400">${Security.escapeHtml(customer.platform || '')} • ${Security.escapeHtml(customer.phones?.[0] || 'No phone')}</div>
+            <div class="text-[10px] text-slate-400">${Security.escapeHtml(customer.platform || '')} • ${Security.escapeHtml(customer.phones?.[0] || (state.language === 'ar' ? 'لا يوجد هاتف' : 'No phone'))}</div>
           </div>
           <span class="text-[10px] text-indigo-600 dark:text-indigo-400">✓</span>
         </div>
@@ -1932,13 +1939,13 @@ function selectAdPage(pageId, preserveFunding = false) {
     }
   } else {
     // Multiple customers - show selection cards
-    if (customerHint) customerHint.textContent = '(select one)';
+    if (customerHint) customerHint.textContent = isArP ? '(اختر واحداً)' : '(select one)';
     const currentCustomerId = customerIdInput?.value || '';
     if (customerDisplay) {
       customerDisplay.innerHTML = `
         <div class="relative mb-2">
           <i data-lucide="search" class="w-3 h-3 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"></i>
-          <input type="text" placeholder="Search..." class="w-full glass-input pl-8 pr-3 py-1.5 rounded-lg text-xs" oninput="filterAdCustomers(this.value)" />
+          <input type="text" placeholder="${isArP ? 'بحث...' : 'Search...'}" class="w-full glass-input pl-8 pr-3 py-1.5 rounded-lg text-xs" oninput="filterAdCustomers(this.value)" />
         </div>
         <div id="ad-customer-cards" class="grid grid-cols-2 gap-2 max-h-28 overflow-y-auto">
           ${linkedCustomers.map(c => {
@@ -2021,6 +2028,7 @@ function getPendingTempDeliveryReceiptsForCustomer(customerId) {
 }
 
 function refreshAdTempReceiptOptions() {
+  const isArT = state.language === 'ar';
   const paymentStatus = document.getElementById('ad-payment-status')?.value || '';
   const collectionMethod = document.getElementById('ad-collection-method')?.value || '';
   const customerId = document.getElementById('ad-customer-id')?.value || '';
@@ -2035,7 +2043,7 @@ function refreshAdTempReceiptOptions() {
   if (!shouldShow) {
     hidden.value = '';
     if (hint) hint.textContent = '';
-    select.innerHTML = '<option value="">Select pending receipt...</option>';
+    select.innerHTML = `<option value="">${isArT ? 'اختر وصلاً معلقاً...' : 'Select pending receipt...'}</option>`;
     return;
   }
 
@@ -2043,13 +2051,13 @@ function refreshAdTempReceiptOptions() {
   const current = String(hidden.value || '').trim() || String(state.modalData?.receiptId || '').trim();
 
   select.innerHTML = [
-    '<option value="">Select pending receipt...</option>',
+    `<option value="">${isArT ? 'اختر وصلاً معلقاً...' : 'Select pending receipt...'}</option>`,
     ...receipts.map(r => {
       // Calculate available credit in USD
       const dueUsage = getDeliveryReceiptDueUsage(r);
       const availableUSD = dueUsage.remainingDueUSD;
       const place = String(r.deliveryPlaceName || '').trim();
-      const label = `${r.tempReceiptNo}${place ? ' • ' + place : ''} • $${availableUSD.toFixed(2)} available`;
+      const label = `${r.tempReceiptNo}${place ? ' • ' + place : ''} • $${availableUSD.toFixed(2)} ${isArT ? 'متاح' : 'available'}`;
       const selected = String(r.id) === current ? 'selected' : '';
       return `<option value="${r.id}" ${selected}>${Security.escapeHtml(label)}</option>`;
     })
@@ -2065,6 +2073,7 @@ function refreshAdTempReceiptOptions() {
 }
 
 function onAdTempReceiptChange(receiptId) {
+  const isArC = state.language === 'ar';
   const hidden = document.getElementById('ad-linked-receipt-id');
   const hint = document.getElementById('ad-temp-receipt-hint');
   const driverSelect = document.getElementById('ad-delivery-person');
@@ -2087,7 +2096,7 @@ function onAdTempReceiptChange(receiptId) {
 
   const r = state.receipts.find(x => x && !x._deleted && String(x.id) === rid);
   if (!r) {
-    if (hint) hint.textContent = 'Selected receipt not found. Try Refresh.';
+    if (hint) hint.textContent = isArC ? 'الوصل المحدد غير موجود. جرّب التحديث.' : 'Selected receipt not found. Try Refresh.';
     if (driverSelect) driverSelect.disabled = false;
     if (dueSection) dueSection.classList.add('hidden');
     if (mergeToggle) mergeToggle.classList.add('hidden');
@@ -2096,7 +2105,7 @@ function onAdTempReceiptChange(receiptId) {
 
   const customerId = document.getElementById('ad-customer-id')?.value || '';
   if (customerId && String(r.customerId || '') !== String(customerId)) {
-    if (hint) hint.textContent = 'Receipt customer mismatch. Please select the correct customer.';
+    if (hint) hint.textContent = isArC ? 'عميل الوصل غير مطابق. الرجاء اختيار العميل الصحيح.' : 'Receipt customer mismatch. Please select the correct customer.';
     if (dueSection) dueSection.classList.add('hidden');
     if (mergeToggle) mergeToggle.classList.add('hidden');
   } else {
@@ -2126,13 +2135,13 @@ function onAdTempReceiptChange(receiptId) {
     }
     const exchangeRate = dueUsage.exchangeRate || state.defaultExchangeRate || 1;
     
-    const txt = `${r.tempReceiptNo}${r.finalReceiptNo || r.serialNumber ? ` → ${r.finalReceiptNo || r.serialNumber}` : ''}${place ? ` • ${place}` : ''} • Quoted fee ${fee.toFixed(0)} LYD`;
+    const txt = `${r.tempReceiptNo}${r.finalReceiptNo || r.serialNumber ? ` → ${r.finalReceiptNo || r.serialNumber}` : ''}${place ? ` • ${place}` : ''} • ${isArC ? 'الرسوم المتفق عليها' : 'Quoted fee'} ${fee.toFixed(0)} LYD`;
     if (hint) hint.textContent = txt;
     
     // Show due amount section if there's available credit
     if (availableUSD > 0.01) {
       if (dueSection) dueSection.classList.remove('hidden');
-      if (dueAvailable) dueAvailable.textContent = `Available: $${availableUSD.toFixed(2)} (${(availableUSD * exchangeRate).toFixed(0)} LYD)`;
+      if (dueAvailable) dueAvailable.textContent = `${isArC ? 'المتاح' : 'Available'}: $${availableUSD.toFixed(2)} (${(availableUSD * exchangeRate).toFixed(0)} LYD)`;
       if (dueInput) {
         // Store the max due amount in USD for validation
         dueInput.dataset.maxDue = availableUSD.toString();
@@ -2171,7 +2180,7 @@ function onAdTempReceiptChange(receiptId) {
       initMergeFunding();
       reflectMergeFundingUI();
       // Update hint to show that credit is fully used
-      if (hint) hint.textContent += ' • ⚠️ Credit fully used';
+      if (hint) hint.textContent += isArC ? ' • ⚠️ الرصيد مستخدم بالكامل' : ' • ⚠️ Credit fully used';
     }
 
     updateAdDueSummary();
@@ -2253,10 +2262,13 @@ function updateAdDueSummary() {
   const usingLYD = usingUSD * exchangeRate;
   const remainingLYD = remainingUSD * exchangeRate;
   
+  const isArD = state.language === 'ar';
   if (usingUSD > 0) {
-    summary.innerHTML = `Using <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> (${usingLYD.toFixed(0)} LYD) from due. ${remainingUSD > 0 ? `<span class="text-slate-400">$${remainingUSD.toFixed(2)} (${remainingLYD.toFixed(0)} LYD) will remain.</span>` : '<span class="text-emerald-600">Full credit will be used.</span>'}`;
+    summary.innerHTML = isArD
+      ? `سيتم استخدام <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> (${usingLYD.toFixed(0)} LYD) من المستحق. ${remainingUSD > 0 ? `<span class="text-slate-400">سيتبقى $${remainingUSD.toFixed(2)} (${remainingLYD.toFixed(0)} LYD).</span>` : '<span class="text-emerald-600">سيتم استخدام الرصيد بالكامل.</span>'}`
+      : `Using <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> (${usingLYD.toFixed(0)} LYD) from due. ${remainingUSD > 0 ? `<span class="text-slate-400">$${remainingUSD.toFixed(2)} (${remainingLYD.toFixed(0)} LYD) will remain.</span>` : '<span class="text-emerald-600">Full credit will be used.</span>'}`;
   } else {
-    summary.innerHTML = '<span class="text-amber-600">Enter amount to use from due receipt.</span>';
+    summary.innerHTML = `<span class="text-amber-600">${isArD ? 'أدخل المبلغ المراد استخدامه من الوصل المستحق.' : 'Enter amount to use from due receipt.'}</span>`;
   }
 }
 
@@ -2270,7 +2282,7 @@ function reflectMergeFundingUI() {
   const mergeText = document.getElementById('ad-merge-text');
   if (mergedSection) mergedSection.classList.remove('hidden');
   if (mergeIcon) mergeIcon.setAttribute('data-lucide', 'minus-circle');
-  if (mergeText) mergeText.textContent = 'Remove Paid Receipt Funds';
+  if (mergeText) mergeText.textContent = state.language === 'ar' ? 'إزالة أموال الوصولات المدفوعة' : 'Remove Paid Receipt Funds';
   renderAdMergedFundingList();
   if (window.lucide) lucide.createIcons();
 }
@@ -2287,12 +2299,12 @@ function toggleMergePaidFunds() {
   if (state.tempMergeFunding.enabled) {
     if (mergedSection) mergedSection.classList.remove('hidden');
     if (mergeIcon) mergeIcon.setAttribute('data-lucide', 'minus-circle');
-    if (mergeText) mergeText.textContent = 'Remove Paid Receipt Funds';
+    if (mergeText) mergeText.textContent = state.language === 'ar' ? 'إزالة أموال الوصولات المدفوعة' : 'Remove Paid Receipt Funds';
     renderAdMergedFundingList();
   } else {
     if (mergedSection) mergedSection.classList.add('hidden');
     if (mergeIcon) mergeIcon.setAttribute('data-lucide', 'plus-circle');
-    if (mergeText) mergeText.textContent = 'Add Paid Receipt Funds';
+    if (mergeText) mergeText.textContent = state.language === 'ar' ? 'إضافة أموال وصولات مدفوعة' : 'Add Paid Receipt Funds';
     // Clear allocations when disabled
     state.tempMergeFunding.allocations = [];
   }
@@ -2352,16 +2364,17 @@ function getPaidReceiptsForMerge(customerId) {
 
 // Render the merged funding list (for Not Paid + Driver + Merge)
 function renderAdMergedFundingList() {
+  const isArM = state.language === 'ar';
   const list = document.getElementById('ad-merged-funding-list');
   if (!list) return;
-  
+
   initMergeFunding();
   const allocations = state.tempMergeFunding.allocations || [];
   const customerId = document.getElementById('ad-customer-id')?.value || '';
   const receipts = getPaidReceiptsForMerge(customerId);
   
   if (allocations.length === 0) {
-    list.innerHTML = `<div class="py-2 text-center text-xs text-slate-400">Click "+ Add Receipt" to use paid funds</div>`;
+    list.innerHTML = `<div class="py-2 text-center text-xs text-slate-400">${isArM ? 'اضغط "+ إضافة وصل" لاستخدام الأموال المدفوعة' : 'Click "+ Add Receipt" to use paid funds'}</div>`;
     refreshAdMergedFundingSummary();
     return;
   }
@@ -2377,7 +2390,7 @@ function renderAdMergedFundingList() {
       const usage = getReceiptUsageStats(r);
       const avail = Math.round(((usage.remainingUSD || 0) + getEditingAdExistingAllocationUSD(r.id, 'merged')) * 100) / 100;
       const serial = r.serialNumber || r.finalReceiptNo || (r.id ? String(r.id).slice(0,6) : '???');
-      const label = `#${serial} • $${avail.toFixed(2)} avail`;
+      const label = `#${serial} • $${avail.toFixed(2)} ${isArM ? 'متاح' : 'avail'}`;
       return `<option value="${r.id || ''}" ${alloc.receiptId === r.id ? 'selected' : ''}>${Security.escapeHtml(label)}</option>`;
     }).join('');
 
@@ -2393,25 +2406,25 @@ function renderAdMergedFundingList() {
     return `
       <div class="p-2 bg-slate-50 rounded-lg space-y-2">
         <div class="flex items-center justify-between">
-          <span class="text-xs text-slate-500">Paid Receipt #${idx + 1}</span>
-          <button type="button" onclick="removeAdMergeFundingAllocation(${idx})" class="text-xs text-rose-500 hover:text-rose-600">Remove</button>
+          <span class="text-xs text-slate-500">${isArM ? `وصل مدفوع رقم ${idx + 1}` : `Paid Receipt #${idx + 1}`}</span>
+          <button type="button" onclick="removeAdMergeFundingAllocation(${idx})" class="text-xs text-rose-500 hover:text-rose-600">${isArM ? 'إزالة' : 'Remove'}</button>
         </div>
         <div class="grid grid-cols-2 gap-2">
           <div>
-            <label class="block text-[10px] text-slate-400 mb-1">Receipt</label>
+            <label class="block text-[10px] text-slate-400 mb-1">${isArM ? 'الوصل' : 'Receipt'}</label>
             <select class="w-full border border-slate-200 px-2 py-1.5 rounded-lg text-sm" onchange="updateAdMergeFundingReceipt(${idx}, this.value)">
-              <option value="">Select...</option>
+              <option value="">${isArM ? 'اختر...' : 'Select...'}</option>
               ${optionsHtml}
             </select>
           </div>
           <div>
-            <label class="block text-[10px] text-slate-400 mb-1">Use Amount (USD)</label>
+            <label class="block text-[10px] text-slate-400 mb-1">${isArM ? 'المبلغ المستخدم (USD)' : 'Use Amount (USD)'}</label>
             <input type="text" inputmode="decimal" class="w-full border border-slate-200 px-2 py-1.5 rounded-lg text-sm" value="${alloc.amountUSD || ''}" oninput="sanitizeMoneyInput(this); updateAdMergeFundingAmount(${idx}, this.value)" onfocus="this.select()" />
           </div>
         </div>
         ${receipt ? `
           <div class="text-[10px] text-slate-400">
-            Available: <span class="text-emerald-600 font-medium">$${receiptRemaining.toFixed(2)}</span>
+            ${isArM ? 'المتاح' : 'Available'}: <span class="text-emerald-600 font-medium">$${receiptRemaining.toFixed(2)}</span>
           </div>
         ` : ''}
       </div>
@@ -2437,7 +2450,7 @@ function refreshAdMergedFundingSummary() {
   
   const totalUSD = allocations.reduce((sum, a) => sum + (parseFloat(a.amountUSD) || 0), 0);
   summary.innerHTML = `<div class="flex items-center justify-between py-1">
-    <span class="text-xs text-blue-600">Total from Paid Receipts</span>
+    <span class="text-xs text-blue-600">${state.language === 'ar' ? 'الإجمالي من الوصولات المدفوعة' : 'Total from Paid Receipts'}</span>
     <span class="text-sm font-semibold text-blue-700">$${totalUSD.toFixed(2)}</span>
   </div>`;
 }
@@ -2445,7 +2458,7 @@ function refreshAdMergedFundingSummary() {
 function openTempDeliveryReceiptFromAd() {
   const customerId = document.getElementById('ad-customer-id')?.value || '';
   if (!customerId) {
-    showNotification('Validation', 'Select a customer first.', 'error');
+    showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'اختر عميلاً أولاً.' : 'Select a customer first.', 'error');
     return;
   }
   const customer = state.customers.find(c => c && !c._deleted && String(c.id) === String(customerId));
@@ -2795,7 +2808,7 @@ function renderAdPhotoPreviews() {
   if (!container) return;
   const photos = state.tempAdPhotos || [];
   if (!photos.length) {
-    container.innerHTML = `<div class="text-xs text-slate-400 col-span-4">No photos yet. Click "Add Photo" to upload.</div>`;
+    container.innerHTML = `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. اضغط "إضافة صورة" للرفع.' : 'No photos yet. Click "Add Photo" to upload.'}</div>`;
     return;
   }
   container.innerHTML = photos.map((src, idx) => `
@@ -2852,7 +2865,7 @@ function renderReceiptPhotoPreviews() {
   if (!container) return;
   const photos = state.tempReceiptPhotos || [];
   if (!photos.length) {
-    container.innerHTML = `<div class="text-xs text-slate-400 col-span-4">No photos yet. Click "Add Photo" to upload.</div>`;
+    container.innerHTML = `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. اضغط "إضافة صورة" للرفع.' : 'No photos yet. Click "Add Photo" to upload.'}</div>`;
     return;
   }
   container.innerHTML = photos.map((src, idx) => `
@@ -2884,7 +2897,7 @@ function updateAdLocalAmount() {
   const rate = parseFloat(rateInput.value) || 1;
   const localAmount = amount * rate;
   
-  displayEl.innerHTML = `Local: <span class="font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(localAmount.toLocaleString())} LYD</span>`;
+  displayEl.innerHTML = `${state.language === 'ar' ? 'بالعملة المحلية' : 'Local'}: <span class="font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(localAmount.toLocaleString())} LYD</span>`;
 }
 
 function addAdFundingAllocation() {
@@ -3016,6 +3029,7 @@ function refreshAdFundingRow(idx) {
 }
 
 function renderAdFundingList() {
+  const isArL = state.language === 'ar';
   const list = document.getElementById('ad-funding-list');
   if (!list) return;
 
@@ -3054,13 +3068,13 @@ function renderAdFundingList() {
   
   if (!customerId) {
     // In the Ad modal, customer selection depends on picking a Page first.
-    list.innerHTML = `<div class="py-3 text-center text-xs text-slate-400">Select a page & customer first</div>`;
+    list.innerHTML = `<div class="py-3 text-center text-xs text-slate-400">${isArL ? 'اختر صفحة وعميلاً أولاً' : 'Select a page & customer first'}</div>`;
     refreshAdFundingSummary();
     return;
   }
   
   if (receipts.length === 0) {
-    list.innerHTML = `<div class="py-3 text-center text-xs text-slate-400">No receipts with remaining balance</div>`;
+    list.innerHTML = `<div class="py-3 text-center text-xs text-slate-400">${isArL ? 'لا توجد وصولات برصيد متبقٍ' : 'No receipts with remaining balance'}</div>`;
     refreshAdFundingSummary();
     return;
   }
@@ -3074,7 +3088,7 @@ function renderAdFundingList() {
       renderAdFundingList();
       return;
     }
-    list.innerHTML = `<div class="py-3 text-center text-xs text-slate-400">Click "+ Add" to link a receipt</div>`;
+    list.innerHTML = `<div class="py-3 text-center text-xs text-slate-400">${isArL ? 'اضغط "+ إضافة" لربط وصل' : 'Click "+ Add" to link a receipt'}</div>`;
     refreshAdFundingSummary();
     return;
   }
@@ -3111,27 +3125,27 @@ function renderAdFundingList() {
     return `
       <div class="space-y-2">
         <div class="flex items-center justify-between">
-          <span class="text-xs text-slate-500 flex items-center gap-1"><i data-lucide="receipt" class="w-3 h-3"></i>Receipt Allocation #${idx + 1}</span>
-          <button type="button" onclick="removeAdFundingAllocation(${idx})" class="text-xs text-rose-500 hover:text-rose-600">Remove</button>
+          <span class="text-xs text-slate-500 flex items-center gap-1"><i data-lucide="receipt" class="w-3 h-3"></i>${isArL ? `تخصيص الوصل رقم ${idx + 1}` : `Receipt Allocation #${idx + 1}`}</span>
+          <button type="button" onclick="removeAdFundingAllocation(${idx})" class="text-xs text-rose-500 hover:text-rose-600">${isArL ? 'إزالة' : 'Remove'}</button>
         </div>
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <label class="block text-[10px] text-slate-400 mb-1">Receipt</label>
+            <label class="block text-[10px] text-slate-400 mb-1">${isArL ? 'الوصل' : 'Receipt'}</label>
             <select class="w-full glass-input px-2 py-1.5 rounded-lg text-sm" onchange="updateAdFundingReceipt(${idx}, this.value)">
-              <option value="">Select...</option>
+              <option value="">${isArL ? 'اختر...' : 'Select...'}</option>
               ${optionsHtml}
             </select>
           </div>
           <div>
-            <label class="block text-[10px] text-slate-400 mb-1">Planned Spend (USD)</label>
+            <label class="block text-[10px] text-slate-400 mb-1">${isArL ? 'الإنفاق المخطط (USD)' : 'Planned Spend (USD)'}</label>
             <input type="text" inputmode="decimal" class="w-full glass-input px-2 py-1.5 rounded-lg text-sm" value="${alloc.amountUSD || ''}" oninput="sanitizeMoneyInput(this); updateAdFundingAmount(${idx}, this.value)" onfocus="this.select()" />
           </div>
         </div>
         ${receipt ? `
           <div class="text-[10px] text-slate-400 space-y-0.5">
-            <div>Remaining: <span id="ad-funding-remaining-${idx}" class="text-emerald-600 dark:text-emerald-400 font-medium">$${receiptRemaining.toFixed(2)}</span></div>
-            <div>Balance: <span id="ad-funding-balance-${idx}" class="text-blue-600 dark:text-blue-400 font-medium">$${balance.toFixed(2)}</span></div>
-            <div>Rate: <span id="ad-funding-rate-${idx}" class="text-slate-600 dark:text-slate-300">${receiptRate}</span></div>
+            <div>${isArL ? 'المتبقي' : 'Remaining'}: <span id="ad-funding-remaining-${idx}" class="text-emerald-600 dark:text-emerald-400 font-medium">$${receiptRemaining.toFixed(2)}</span></div>
+            <div>${isArL ? 'الرصيد' : 'Balance'}: <span id="ad-funding-balance-${idx}" class="text-blue-600 dark:text-blue-400 font-medium">$${balance.toFixed(2)}</span></div>
+            <div>${isArL ? 'السعر' : 'Rate'}: <span id="ad-funding-rate-${idx}" class="text-slate-600 dark:text-slate-300">${receiptRate}</span></div>
           </div>
         ` : ''}
       </div>
@@ -3142,7 +3156,7 @@ function renderAdFundingList() {
   if (window.lucide) lucide.createIcons();
   } catch (err) {
     console.error('Error rendering ad funding list:', err);
-    list.innerHTML = `<div class="py-3 text-center text-xs text-rose-500">Error loading receipts. Please refresh.</div>`;
+    list.innerHTML = `<div class="py-3 text-center text-xs text-rose-500">${isArL ? 'خطأ في تحميل الوصولات. الرجاء التحديث.' : 'Error loading receipts. Please refresh.'}</div>`;
   }
 }
 
@@ -3176,7 +3190,7 @@ function refreshAdFundingSummary() {
   
   summary.innerHTML = `
     <div class="flex items-center justify-between py-1.5">
-      <span class="text-xs text-slate-500">Total Balance</span>
+      <span class="text-xs text-slate-500">${state.language === 'ar' ? 'إجمالي الرصيد' : 'Total Balance'}</span>
       <span class="text-sm font-semibold ${totalBalance > 0 ? 'text-emerald-600' : 'text-slate-500'}">$${totalBalance.toFixed(2)}</span>
     </div>
   `;
@@ -3370,7 +3384,7 @@ function addPhoneField() {
   const div = document.createElement('div');
   div.className = 'flex items-center space-x-2 phone-field-group';
   div.innerHTML = `
-    <input type="tel" class="customer-phone flex-1 glass-input px-4 py-2 rounded-xl" placeholder="Phone number" />
+    <input type="tel" class="customer-phone flex-1 glass-input px-4 py-2 rounded-xl" placeholder="${state.language === 'ar' ? 'رقم الهاتف' : 'Phone number'}" />
     <button type="button" onclick="this.parentElement.remove(); lucide.createIcons()" class="text-rose-600 hover:text-rose-700">
       <i data-lucide="trash-2" class="w-4 h-4"></i>
     </button>
@@ -3401,7 +3415,7 @@ function addProfileLinkField() {
 function showCustomerModal() {
   // Permission check for creating customers
   if (!currentUserHasPermission('customers', 'add')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإضافة عملاء' : 'You do not have permission to add customers', 'error');
+    showNotification(state.language === 'ar' ? 'رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإضافة عملاء' : 'You do not have permission to add customers', 'error');
     return;
   }
   state.activeModal = 'customer';
@@ -3413,7 +3427,7 @@ function showCustomerModal() {
 function showPageModal() {
   // Permission check for creating pages
   if (!currentUserHasPermission('pages', 'add')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإضافة صفحات' : 'You do not have permission to add pages', 'error');
+    showNotification(state.language === 'ar' ? 'رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإضافة صفحات' : 'You do not have permission to add pages', 'error');
     return;
   }
   state.activeModal = 'page';
@@ -3425,11 +3439,11 @@ function showPageModal() {
 function showAdModal() {
   // Permission check for creating ads
   if (!currentUserHasPermission('ads', 'add')) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإنشاء إعلانات' : 'You do not have permission to create ads', 'error');
+    showNotification(state.language === 'ar' ? 'رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإنشاء إعلانات' : 'You do not have permission to create ads', 'error');
     return;
   }
   if (getVisibleRecords(state.customers).length === 0) {
-    showNotification('No Customers', 'Please add a customer first', 'warning');
+    showNotification(state.language === 'ar' ? 'لا يوجد عملاء' : 'No Customers', state.language === 'ar' ? 'الرجاء إضافة عميل أولاً' : 'Please add a customer first', 'warning');
     return;
   }
   state.activeModal = 'ad';
@@ -3440,7 +3454,7 @@ function showAdModal() {
 
 function showUserModal() {
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', state.language === 'ar' ? 'هذه الميزة للأدمن فقط' : 'Admin only', 'error');
+    showNotification(state.language === 'ar' ? 'رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'هذه الميزة للأدمن فقط' : 'Admin only', 'error');
     return;
   }
   state.activeModal = 'user';
@@ -3458,27 +3472,28 @@ function updateUserRoleInfo(role) {
   
   if (!roleIcon || !roleTitle || !roleDesc) return;
   
+  const isArR = state.language === 'ar';
   const roleConfig = {
     'Admin': {
       icon: 'crown',
-      title: 'Full Administrator',
-      desc: 'Complete access to all features. No restrictions.',
+      title: isArR ? 'مدير كامل الصلاحيات' : 'Full Administrator',
+      desc: isArR ? 'وصول كامل لجميع الميزات. بدون قيود.' : 'Complete access to all features. No restrictions.',
       bgColor: 'bg-amber-100 dark:bg-amber-900/30',
       iconColor: 'text-amber-600',
-      badge: '<span class="px-2 py-1 rounded-lg bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 text-xs font-bold">ALL ACCESS</span>'
+      badge: `<span class="px-2 py-1 rounded-lg bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 text-xs font-bold">${isArR ? 'وصول كامل' : 'ALL ACCESS'}</span>`
     },
     'Delivery': {
       icon: 'truck',
-      title: 'Delivery Driver',
-      desc: 'Access to delivery operations only.',
+      title: isArR ? 'سائق توصيل' : 'Delivery Driver',
+      desc: isArR ? 'وصول لعمليات التوصيل فقط.' : 'Access to delivery operations only.',
       bgColor: 'bg-cyan-100 dark:bg-cyan-900/30',
       iconColor: 'text-cyan-600',
       badge: ''
     },
     'Employee': {
       icon: 'user-check',
-      title: 'Employee',
-      desc: 'Standard employee access. Customize permissions after creation.',
+      title: isArR ? 'موظف' : 'Employee',
+      desc: isArR ? 'وصول موظف قياسي. يمكن تخصيص الصلاحيات بعد الإنشاء.' : 'Standard employee access. Customize permissions after creation.',
       bgColor: 'bg-emerald-100 dark:bg-emerald-900/30',
       iconColor: 'text-emerald-600',
       badge: ''

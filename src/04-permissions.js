@@ -569,11 +569,11 @@ function showRecoveryKeyModal(plainKey) {
 
 async function generateAndShowRecoveryKey() {
   if (isServerModeEnabled()) {
-    showNotification('Not Available', 'Recovery keys are for local mode only. Use email reset on the server.', 'info');
+    showNotification(state.language === 'ar' ? 'غير متاح' : 'Not Available', state.language === 'ar' ? 'مفاتيح الاستعادة للوضع المحلي فقط. استخدم إعادة التعيين عبر البريد الإلكتروني على السيرفر.' : 'Recovery keys are for local mode only. Use email reset on the server.', 'info');
     return;
   }
   if (!state.currentUser || !isAdminRole(state.currentUser.role)) {
-    showNotification('Access Denied', 'Only Admin can generate a recovery key.', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'فقط المسؤول يمكنه إنشاء مفتاح استعادة.' : 'Only Admin can generate a recovery key.', 'error');
     return;
   }
   const key = generateRecoveryKeyPlain();
@@ -606,15 +606,15 @@ async function passwordResetRequestServer() {
     const emailInput = document.getElementById('pwreset-email');
     const email = Security.sanitizeInput(String(emailInput?.value || '').toLowerCase().trim(), { maxLength: 120 });
     if (!Security.isValidEmail(email)) {
-      showNotification('Validation', 'Please enter a valid email address', 'error');
+      showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'الرجاء إدخال بريد إلكتروني صحيح' : 'Please enter a valid email address', 'error');
       return;
     }
     const res = await apiPasswordResetRequest(email);
     state.modalData = { step: 'confirm', email, token: String(res?.resetCode || '') };
     renderModal();
-    showNotification('Reset Code Sent', 'If this account exists, you will receive a reset code.', 'success');
+    showNotification(state.language === 'ar' ? 'تم إرسال رمز إعادة التعيين' : 'Reset Code Sent', state.language === 'ar' ? 'إذا كان هذا الحساب موجوداً، ستستلم رمز إعادة تعيين.' : 'If this account exists, you will receive a reset code.', 'success');
   } catch (e) {
-    showNotification('Error', e.message || 'Failed to request reset', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e.message || (state.language === 'ar' ? 'فشل طلب إعادة التعيين' : 'Failed to request reset'), 'error');
   }
 }
 
@@ -625,31 +625,31 @@ async function passwordResetConfirmServer() {
     const confirm = String(document.getElementById('pwreset-confirm')?.value || '');
 
     if (!token) {
-      showNotification('Validation', 'Reset code is required', 'error');
+      showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'رمز إعادة التعيين مطلوب' : 'Reset code is required', 'error');
       return;
     }
     if (!newPassword || newPassword.length < 8) {
-      showNotification('Validation', 'Password must be at least 8 characters', 'error');
+      showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'يجب أن تكون كلمة المرور 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
       return;
     }
     if (newPassword !== confirm) {
-      showNotification('Validation', 'Passwords do not match', 'error');
+      showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'كلمتا المرور غير متطابقتين' : 'Passwords do not match', 'error');
       return;
     }
 
     await apiPasswordResetConfirm(token, newPassword);
     closeModal();
-    showNotification('Success', 'Password reset successfully. Please sign in.', 'success');
+    showNotification(state.language === 'ar' ? 'نجاح' : 'Success', state.language === 'ar' ? 'تمت إعادة تعيين كلمة المرور بنجاح. الرجاء تسجيل الدخول.' : 'Password reset successfully. Please sign in.', 'success');
     render();
   } catch (e) {
-    showNotification('Reset Failed', e.message || 'Invalid or expired reset code', 'error');
+    showNotification(state.language === 'ar' ? 'فشلت إعادة التعيين' : 'Reset Failed', e.message || (state.language === 'ar' ? 'رمز إعادة التعيين غير صحيح أو منتهي الصلاحية' : 'Invalid or expired reset code'), 'error');
   }
 }
 
 async function passwordResetConfirmLocal() {
   try {
     if (isServerModeEnabled()) {
-      showNotification('Server Mode', 'Use server password reset.', 'info');
+      showNotification(state.language === 'ar' ? 'وضع السيرفر' : 'Server Mode', state.language === 'ar' ? 'استخدم إعادة تعيين كلمة المرور عبر السيرفر.' : 'Use server password reset.', 'info');
       return;
     }
     const email = Security.sanitizeInput(String(document.getElementById('pwreset-email')?.value || '').toLowerCase().trim(), { maxLength: 120 });
@@ -658,11 +658,11 @@ async function passwordResetConfirmLocal() {
     const confirm = String(document.getElementById('pwreset-confirm')?.value || '');
 
     if (!Security.isValidEmail(email)) {
-      showNotification('Validation', 'Please enter a valid email address', 'error');
+      showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'الرجاء إدخال بريد إلكتروني صحيح' : 'Please enter a valid email address', 'error');
       return;
     }
     if (!state.localRecovery?.hash || !state.localRecovery?.salt) {
-      showNotification('Recovery Not Set', 'No recovery key is configured. Ask Admin to create one in Settings → Security.', 'error');
+      showNotification(state.language === 'ar' ? 'مفتاح الاستعادة غير مُعدّ' : 'Recovery Not Set', state.language === 'ar' ? 'لا يوجد مفتاح استعادة مُعدّ. اطلب من المسؤول إنشاء واحد من الإعدادات ← الأمان.' : 'No recovery key is configured. Ask Admin to create one in Settings → Security.', 'error');
       return;
     }
     const ok = await Security.verifyPassword(
@@ -673,22 +673,22 @@ async function passwordResetConfirmLocal() {
       state.localRecovery.iterations || 310000
     );
     if (!ok) {
-      showNotification('Invalid Recovery Key', 'The recovery key is incorrect.', 'error');
+      showNotification(state.language === 'ar' ? 'مفتاح استعادة غير صحيح' : 'Invalid Recovery Key', state.language === 'ar' ? 'مفتاح الاستعادة غير صحيح.' : 'The recovery key is incorrect.', 'error');
       addSecurityLog('password_reset_bad_recovery_key', email);
       return;
     }
     if (!newPassword || newPassword.length < 8) {
-      showNotification('Validation', 'Password must be at least 8 characters', 'error');
+      showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'يجب أن تكون كلمة المرور 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
       return;
     }
     if (newPassword !== confirm) {
-      showNotification('Validation', 'Passwords do not match', 'error');
+      showNotification(state.language === 'ar' ? 'تحقق' : 'Validation', state.language === 'ar' ? 'كلمتا المرور غير متطابقتين' : 'Passwords do not match', 'error');
       return;
     }
 
     const user = state.users.find(u => u && !u._deleted && String(u.email || '').toLowerCase() === email);
     if (!user) {
-      showNotification('Not Found', 'No user found with this email (local).', 'error');
+      showNotification(state.language === 'ar' ? 'غير موجود' : 'Not Found', state.language === 'ar' ? 'لا يوجد مستخدم بهذا البريد الإلكتروني (محلي).' : 'No user found with this email (local).', 'error');
       return;
     }
 
@@ -705,11 +705,11 @@ async function passwordResetConfirmLocal() {
     flushDirtyCollections().catch(() => {});
 
     closeModal();
-    showNotification('Success', 'Password reset successfully. Please sign in.', 'success');
+    showNotification(state.language === 'ar' ? 'نجاح' : 'Success', state.language === 'ar' ? 'تمت إعادة تعيين كلمة المرور بنجاح. الرجاء تسجيل الدخول.' : 'Password reset successfully. Please sign in.', 'success');
     render();
   } catch (e) {
     console.error('Local password reset error:', e);
-    showNotification('Error', e.message || 'Failed to reset password', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e.message || (state.language === 'ar' ? 'فشلت إعادة تعيين كلمة المرور' : 'Failed to reset password'), 'error');
   }
 }
 
@@ -843,17 +843,17 @@ function _listAllStoredPasskeys() {
 async function passkeyRegisterCurrentUser() {
   try {
     if (!_isPasskeySupported()) {
-      showNotification('Not Supported', 'Passkeys require HTTPS or localhost.', 'error');
+      showNotification(state.language === 'ar' ? 'غير مدعوم' : 'Not Supported', state.language === 'ar' ? 'مفاتيح المرور تتطلب HTTPS أو localhost.' : 'Passkeys require HTTPS or localhost.', 'error');
       return;
     }
     if (!state.currentUser?.id) {
-      showNotification('Not Logged In', 'Please login first to add a passkey.', 'error');
+      showNotification(state.language === 'ar' ? 'غير مسجل الدخول' : 'Not Logged In', state.language === 'ar' ? 'الرجاء تسجيل الدخول أولاً لإضافة مفتاح مرور.' : 'Please login first to add a passkey.', 'error');
       return;
     }
 
     const rpId = _getRpId();
     if (!rpId) {
-      showNotification('Not Supported', 'Passkeys require a web origin (HTTPS/localhost).', 'error');
+      showNotification(state.language === 'ar' ? 'غير مدعوم' : 'Not Supported', state.language === 'ar' ? 'مفاتيح المرور تتطلب أصل ويب (HTTPS/localhost).' : 'Passkeys require a web origin (HTTPS/localhost).', 'error');
       return;
     }
 
@@ -937,34 +937,34 @@ async function passkeyRegisterCurrentUser() {
       updateRecord(state.users, user.id, { passkeys: user.passkeys });
     }
 
-    showNotification('Success', 'Passkey added successfully', 'success');
+    showNotification(state.language === 'ar' ? 'نجاح' : 'Success', state.language === 'ar' ? 'تمت إضافة مفتاح المرور بنجاح' : 'Passkey added successfully', 'success');
     render(); // refresh settings UI
   } catch (e) {
     console.error('Passkey register error:', e);
-    showNotification('Error', e.message || 'Failed to add passkey', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e.message || (state.language === 'ar' ? 'فشلت إضافة مفتاح المرور' : 'Failed to add passkey'), 'error');
   }
 }
 
 async function passkeySignIn() {
   try {
     if (isServerModeEnabled()) {
-      showNotification('Not Available', 'Passkey sign-in requires server WebAuthn endpoints (next step).', 'info');
+      showNotification(state.language === 'ar' ? 'غير متاح' : 'Not Available', state.language === 'ar' ? 'تسجيل الدخول بمفتاح المرور يتطلب دعم WebAuthn على السيرفر (قريباً).' : 'Passkey sign-in requires server WebAuthn endpoints (next step).', 'info');
       return;
     }
     if (!_isPasskeySupported()) {
-      showNotification('Not Supported', 'Passkeys require HTTPS or localhost.', 'error');
+      showNotification(state.language === 'ar' ? 'غير مدعوم' : 'Not Supported', state.language === 'ar' ? 'مفاتيح المرور تتطلب HTTPS أو localhost.' : 'Passkeys require HTTPS or localhost.', 'error');
       return;
     }
 
     const rpId = _getRpId();
     if (!rpId) {
-      showNotification('Not Supported', 'Passkeys require a web origin (HTTPS/localhost).', 'error');
+      showNotification(state.language === 'ar' ? 'غير مدعوم' : 'Not Supported', state.language === 'ar' ? 'مفاتيح المرور تتطلب أصل ويب (HTTPS/localhost).' : 'Passkeys require a web origin (HTTPS/localhost).', 'error');
       return;
     }
 
     const stored = _listAllStoredPasskeys();
     if (stored.length === 0) {
-      showNotification('No Passkeys', 'No passkeys found. Login with password then add one in Settings → Security.', 'info');
+      showNotification(state.language === 'ar' ? 'لا توجد مفاتيح مرور' : 'No Passkeys', state.language === 'ar' ? 'لا توجد مفاتيح مرور. سجّل الدخول بكلمة المرور ثم أضف واحداً من الإعدادات ← الأمان.' : 'No passkeys found. Login with password then add one in Settings → Security.', 'info');
       return;
     }
 
@@ -1034,18 +1034,18 @@ async function passkeySignIn() {
     }
     state.currentView = getPostLoginLandingViewForUser(user);
     saveState();
-    showNotification('Welcome!', `Logged in as ${Security.escapeHtml(user.name || user.email || user.id)}`, 'success');
+    showNotification(state.language === 'ar' ? 'مرحباً!' : 'Welcome!', state.language === 'ar' ? `تم تسجيل الدخول باسم ${Security.escapeHtml(user.name || user.email || user.id)}` : `Logged in as ${Security.escapeHtml(user.name || user.email || user.id)}`, 'success');
     render();
   } catch (e) {
     console.error('Passkey sign-in error:', e);
-    showNotification('Passkey Login Failed', e.message || 'Failed to sign in with passkey', 'error');
+    showNotification(state.language === 'ar' ? 'فشل الدخول بمفتاح المرور' : 'Passkey Login Failed', e.message || (state.language === 'ar' ? 'فشل تسجيل الدخول بمفتاح المرور' : 'Failed to sign in with passkey'), 'error');
   }
 }
 
 function removePasskey(credentialId) {
   try {
     if (!state.currentUser?.id) {
-      showNotification('Error', 'Not logged in', 'error');
+      showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'غير مسجل الدخول' : 'Not logged in', 'error');
       return;
     }
     const id = String(credentialId || '').trim();
@@ -1055,11 +1055,11 @@ function removePasskey(credentialId) {
     const keys = Array.isArray(user.passkeys) ? user.passkeys : [];
     const next = keys.filter(k => k && k.id !== id);
     updateRecord(state.users, user.id, { passkeys: next });
-    showNotification('Removed', 'Passkey removed', 'success');
+    showNotification(state.language === 'ar' ? 'تم الحذف' : 'Removed', state.language === 'ar' ? 'تم حذف مفتاح المرور' : 'Passkey removed', 'success');
     render();
   } catch (e) {
     console.error('removePasskey error:', e);
-    showNotification('Error', e.message || 'Failed to remove passkey', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e.message || (state.language === 'ar' ? 'فشل حذف مفتاح المرور' : 'Failed to remove passkey'), 'error');
   }
 }
 

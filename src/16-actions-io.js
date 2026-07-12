@@ -1,10 +1,11 @@
 function stopAd(id) {
   // Permission check
   if (!canActOnRecord('ads', 'stopAd', state.ads.find(a => a.id === id)?.creatorId)) {
-    showNotification('Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإيقاف الإعلانات' : 'You do not have permission to stop ads', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإيقاف الإعلانات' : 'You do not have permission to stop ads', 'error');
     return;
   }
-  
+
+  const isAr = state.language === 'ar';
   const ad = state.ads.find(a => a.id === id);
   if (!ad) return;
   
@@ -27,7 +28,7 @@ function stopAd(id) {
           <div class="flex items-center justify-between">
             <h2 class="text-xl font-bold text-slate-800 dark:text-white flex items-center">
               <i data-lucide="${isAlreadyStopped ? 'edit' : 'square'}" class="w-5 h-5 mr-2 text-orange-500"></i>
-              ${isAlreadyStopped ? 'Edit Stop Details' : 'Stop Ad'}
+              ${isAlreadyStopped ? (isAr ? 'تعديل تفاصيل الإيقاف' : 'Edit Stop Details') : (isAr ? 'إيقاف الإعلان' : 'Stop Ad')}
             </h2>
             <button onclick="document.getElementById('stop-ad-modal').remove()" class="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors">
               <i data-lucide="x" class="w-5 h-5"></i>
@@ -38,26 +39,26 @@ function stopAd(id) {
         <div class="p-6 space-y-4">
           <div>
             <p class="text-sm text-slate-600 dark:text-slate-400 mb-2">
-              <strong>Customer:</strong> ${Security.escapeHtml(customer?.name || 'Unknown')}<br>
-              <strong>Ad Amount:</strong> $${adAmountUSD.toFixed(2)}<br>
-              <strong>Currently Allocated:</strong> $${totalAllocated.toFixed(2)}
-              ${isAlreadyStopped && ad.stoppedAt ? `<br><strong>Stopped On:</strong> ${new Date(ad.stoppedAt).toLocaleString()}` : ''}
+              <strong>${isAr ? 'العميل' : 'Customer'}:</strong> ${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}<br>
+              <strong>${isAr ? 'مبلغ الإعلان' : 'Ad Amount'}:</strong> $${adAmountUSD.toFixed(2)}<br>
+              <strong>${isAr ? 'المخصص حالياً' : 'Currently Allocated'}:</strong> $${totalAllocated.toFixed(2)}
+              ${isAlreadyStopped && ad.stoppedAt ? `<br><strong>${isAr ? 'تاريخ الإيقاف' : 'Stopped On'}:</strong> ${new Date(ad.stoppedAt).toLocaleString()}` : ''}
             </p>
           </div>
           
           ${isAlreadyStopped ? `
             <div class="bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 rounded-xl p-3">
-              <div class="text-xs font-medium text-orange-800 dark:text-orange-200 mb-2">Previous Entry:</div>
+              <div class="text-xs font-medium text-orange-800 dark:text-orange-200 mb-2">${isAr ? 'الإدخال السابق:' : 'Previous Entry:'}</div>
               <div class="text-xs text-slate-600 dark:text-slate-400 space-y-1">
-                <div>Spent: <span class="font-bold text-orange-600">$${currentSpentUSD.toFixed(2)}</span></div>
-                <div>Remaining Returned: <span class="font-bold text-emerald-600">$${previousRemaining.toFixed(2)}</span></div>
+                <div>${isAr ? 'المصروف' : 'Spent'}: <span class="font-bold text-orange-600">$${currentSpentUSD.toFixed(2)}</span></div>
+                <div>${isAr ? 'المتبقي المُرجَع' : 'Remaining Returned'}: <span class="font-bold text-emerald-600">$${previousRemaining.toFixed(2)}</span></div>
               </div>
             </div>
           ` : ''}
           
           <div>
             <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-              Amount Spent (USD) *
+              ${isAr ? 'المبلغ المصروف (دولار) *' : 'Amount Spent (USD) *'}
             </label>
             <input 
               type="text" 
@@ -69,20 +70,20 @@ function stopAd(id) {
               class="w-full glass-input px-4 py-2 rounded-xl text-lg font-bold focus:ring-2 focus:ring-orange-500"
               placeholder="0.00"
             />
-            <p class="text-xs text-slate-500 mt-1">${isAlreadyStopped ? 'Edit the amount spent to update the remaining balance' : 'Enter how much was actually spent on this ad'}</p>
+            <p class="text-xs text-slate-500 mt-1">${isAlreadyStopped ? (isAr ? 'عدّل المبلغ المصروف لتحديث الرصيد المتبقي' : 'Edit the amount spent to update the remaining balance') : (isAr ? 'أدخل المبلغ الذي تم صرفه فعلياً على هذا الإعلان' : 'Enter how much was actually spent on this ad')}</p>
           </div>
           
           <div id="stop-ad-calculations" class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-4 space-y-2">
             <div class="flex justify-between text-sm">
-              <span class="text-slate-600 dark:text-slate-400">Ad Amount:</span>
+              <span class="text-slate-600 dark:text-slate-400">${isAr ? 'مبلغ الإعلان:' : 'Ad Amount:'}</span>
               <span class="font-bold">$${adAmountUSD.toFixed(2)}</span>
             </div>
             <div class="flex justify-between text-sm">
-              <span class="text-slate-600 dark:text-slate-400">Amount Spent:</span>
+              <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ المصروف:' : 'Amount Spent:'}</span>
               <span class="font-bold text-orange-600" id="stop-ad-spent-display">$${currentSpentUSD.toFixed(2)}</span>
             </div>
             <div class="border-t border-slate-200 dark:border-slate-700 pt-2 flex justify-between">
-              <span class="text-sm font-medium text-emerald-600">Remaining ${isAlreadyStopped ? '(will be updated)' : '(will be returned)'}:</span>
+              <span class="text-sm font-medium text-emerald-600">${isAr ? 'المتبقي' : 'Remaining'} ${isAlreadyStopped ? (isAr ? '(سيتم تحديثه)' : '(will be updated)') : (isAr ? '(سيتم إرجاعه)' : '(will be returned)')}:</span>
               <span class="text-sm font-bold text-emerald-600" id="stop-ad-remaining">$${(adAmountUSD - currentSpentUSD).toFixed(2)}</span>
             </div>
           </div>
@@ -92,13 +93,13 @@ function stopAd(id) {
               onclick="document.getElementById('stop-ad-modal').remove()" 
               class="flex-1 px-4 py-3 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl font-bold hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
             >
-              Cancel
+              ${isAr ? 'إلغاء' : 'Cancel'}
             </button>
             <button 
               onclick="confirmStopAd('${id}')" 
               class="flex-1 px-4 py-3 bg-orange-600 text-white rounded-xl font-bold hover:bg-orange-700 transition-colors"
             >
-              ${isAlreadyStopped ? 'Update' : 'Stop Ad'}
+              ${isAlreadyStopped ? (isAr ? 'تحديث' : 'Update') : (isAr ? 'إيقاف الإعلان' : 'Stop Ad')}
             </button>
           </div>
         </div>
@@ -134,6 +135,7 @@ function stopAd(id) {
 }
 
 function confirmStopAd(id) {
+  const isAr = state.language === 'ar';
   const ad = state.ads.find(a => a.id === id);
   if (!ad) return;
   
@@ -144,7 +146,7 @@ function confirmStopAd(id) {
   const adAmountUSD = ad.amountUSD || 0;
   
   if (spentUSD < 0 || spentUSD > adAmountUSD) {
-    showNotification('Error', 'Spent amount must be between 0 and ad amount', 'error');
+    showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'يجب أن يكون المبلغ المصروف بين صفر ومبلغ الإعلان' : 'Spent amount must be between 0 and ad amount', 'error');
     return;
   }
   
@@ -247,8 +249,10 @@ function confirmStopAd(id) {
       const remaining = receipt ? (getReceiptUsageStats(receipt).remainingUSD || 0) : 0;
       if (inc > remaining + 0.01) {
         showNotification(
-          'Validation',
-          `Cannot increase spent: receipt ${receipt ? (receipt.serialNumber || receipt.finalReceiptNo || rid) : rid} only has $${remaining.toFixed(2)} left (needs $${inc.toFixed(2)} more).`,
+          isAr ? 'تحقق' : 'Validation',
+          isAr
+            ? `لا يمكن زيادة المصروف: الوصل ${receipt ? (receipt.serialNumber || receipt.finalReceiptNo || rid) : rid} لم يتبقَّ فيه سوى $${remaining.toFixed(2)} (يحتاج $${inc.toFixed(2)} إضافية).`
+            : `Cannot increase spent: receipt ${receipt ? (receipt.serialNumber || receipt.finalReceiptNo || rid) : rid} only has $${remaining.toFixed(2)} left (needs $${inc.toFixed(2)} more).`,
           'error'
         );
         return;
@@ -267,8 +271,10 @@ function confirmStopAd(id) {
       const remaining = dueUsage ? (dueUsage.remainingDueUSD || 0) : 0;
       if (inc > remaining + 0.01) {
         showNotification(
-          'Validation',
-          `Cannot increase spent: the delivery receipt's due credit only has $${remaining.toFixed(2)} left (needs $${inc.toFixed(2)} more).`,
+          isAr ? 'تحقق' : 'Validation',
+          isAr
+            ? `لا يمكن زيادة المصروف: رصيد الاستحقاق لوصل التوصيل لم يتبقَّ فيه سوى $${remaining.toFixed(2)} (يحتاج $${inc.toFixed(2)} إضافية).`
+            : `Cannot increase spent: the delivery receipt's due credit only has $${remaining.toFixed(2)} left (needs $${inc.toFixed(2)} more).`,
           'error'
         );
         return;
@@ -363,9 +369,18 @@ function confirmStopAd(id) {
   document.getElementById('stop-ad-modal')?.remove();
   
   // Show notification
-  const actionText = isEditing ? 'updated' : 'stopped';
-  const balanceText = remainingDifference !== 0 || !isEditing ? `$${Math.abs(isEditing ? remainingDifference : newRemainingUSD).toFixed(2)} ${isEditing ? (remainingDifference > 0 ? 'returned' : 'used') : 'returned'} to receipt${ad.receiptAllocations && ad.receiptAllocations.length > 1 ? 's' : ''} and customer balance` : 'No balance changes';
-  showNotification(`Ad ${actionText.charAt(0).toUpperCase() + actionText.slice(1)}`, `Ad ${actionText} successfully. ${balanceText}.`, 'success');
+  if (isAr) {
+    const amountTxt = `$${Math.abs(isEditing ? remainingDifference : newRemainingUSD).toFixed(2)}`;
+    const verbAr = isEditing ? (remainingDifference > 0 ? 'أُرجع' : 'استُخدم') : 'أُرجع';
+    const balanceTextAr = remainingDifference !== 0 || !isEditing
+      ? `${verbAr} ${amountTxt} إلى ${ad.receiptAllocations && ad.receiptAllocations.length > 1 ? 'الوصولات' : 'الوصل'} ورصيد العميل`
+      : 'لا توجد تغييرات على الرصيد';
+    showNotification(isEditing ? 'تم تحديث الإعلان' : 'تم إيقاف الإعلان', `${isEditing ? 'تم تحديث الإعلان بنجاح' : 'تم إيقاف الإعلان بنجاح'}. ${balanceTextAr}.`, 'success');
+  } else {
+    const actionText = isEditing ? 'updated' : 'stopped';
+    const balanceText = remainingDifference !== 0 || !isEditing ? `$${Math.abs(isEditing ? remainingDifference : newRemainingUSD).toFixed(2)} ${isEditing ? (remainingDifference > 0 ? 'returned' : 'used') : 'returned'} to receipt${ad.receiptAllocations && ad.receiptAllocations.length > 1 ? 's' : ''} and customer balance` : 'No balance changes';
+    showNotification(`Ad ${actionText.charAt(0).toUpperCase() + actionText.slice(1)}`, `Ad ${actionText} successfully. ${balanceText}.`, 'success');
+  }
   
   // Refresh view
   render();
@@ -374,7 +389,7 @@ function confirmStopAd(id) {
 
 function deleteUser(id) {
   if (!isCurrentUserAdmin()) {
-    showNotification('Access Denied', state.language === 'ar' ? 'حذف المستخدمين للأدمن فقط' : 'Admin only', 'error');
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'حذف المستخدمين للأدمن فقط' : 'Admin only', 'error');
     return;
   }
   if (confirm(state.language === 'ar' ? 'هل تريد حذف هذا المستخدم؟' : 'Delete this user?')) {
@@ -405,7 +420,7 @@ function updateExchangeRate(value) {
     userId: state.currentUser?.id || 'system'
   };
   addRecord(state.exchangeRateHistory, record);
-  showNotification('Updated', state.language === 'ar' ? 'تم تحديث سعر الصرف' : 'Exchange rate updated', 'success');
+  showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث سعر الصرف' : 'Exchange rate updated', 'success');
 }
 
 // Print ONE receipt card. window.print() alone printed the whole Receipts
@@ -514,15 +529,16 @@ function exportData() {
   createAutoBackup();
   
   addAuditLog('Export', 'system', 'Data exported successfully');
-  showNotification('Exported', 'Data exported successfully', 'success');
+  showNotification(state.language === 'ar' ? 'تم التصدير' : 'Exported', state.language === 'ar' ? 'تم تصدير البيانات بنجاح' : 'Data exported successfully', 'success');
 }
 
 function importData() {
+  const isAr = state.language === 'ar';
   // In server mode, import must go through the backend (Admin only) to keep the server as source of truth.
   async function importDataToServer(sanitizedImport) {
     const role = String(state.currentUser?.role || '').toLowerCase();
     if (role !== 'admin') {
-      showNotification('Not Allowed', 'Only Admins can import in server mode.', 'error');
+      showNotification(isAr ? 'غير مسموح' : 'Not Allowed', isAr ? 'الاستيراد في وضع الخادم للأدمن فقط.' : 'Only Admins can import in server mode.', 'error');
       return;
     }
 
@@ -531,8 +547,10 @@ function importData() {
     for (const k of requiredCollections) {
       if (!Array.isArray(sanitizedImport?.[k])) {
         showNotification(
-          'Invalid Backup',
-          `Backup file is missing "${k}" array. Please import a valid Albayan backup JSON (Export Backup).`,
+          isAr ? 'نسخة احتياطية غير صالحة' : 'Invalid Backup',
+          isAr
+            ? `ملف النسخة الاحتياطية ينقصه مصفوفة "${k}". الرجاء استيراد ملف نسخة احتياطية صالح من Albayan (تصدير نسخة احتياطية).`
+            : `Backup file is missing "${k}" array. Please import a valid Albayan backup JSON (Export Backup).`,
           'error'
         );
         return;
@@ -548,15 +566,15 @@ function importData() {
         const actual = DataIntegrity.calculateChecksum(copy);
         if (String(actual) !== String(meta.checksum)) {
           showNotification(
-            'Invalid Backup',
-            'Backup file integrity check failed (checksum mismatch). Please re-export a fresh backup and try again.',
+            isAr ? 'نسخة احتياطية غير صالحة' : 'Invalid Backup',
+            isAr ? 'فشل التحقق من سلامة ملف النسخة الاحتياطية (عدم تطابق checksum). الرجاء إعادة تصدير نسخة جديدة والمحاولة مرة أخرى.' : 'Backup file integrity check failed (checksum mismatch). Please re-export a fresh backup and try again.',
             'error'
           );
           return;
         }
       } catch {
         // If checksum verification itself fails, do not proceed.
-        showNotification('Invalid Backup', 'Backup file integrity check failed. Please re-export and try again.', 'error');
+        showNotification(isAr ? 'نسخة احتياطية غير صالحة' : 'Invalid Backup', isAr ? 'فشل التحقق من سلامة ملف النسخة الاحتياطية. الرجاء إعادة التصدير والمحاولة مرة أخرى.' : 'Backup file integrity check failed. Please re-export and try again.', 'error');
         return;
       }
     }
@@ -572,12 +590,14 @@ function importData() {
     };
 
     const ok1 = confirm(
-      `SERVER IMPORT (Admin)\n\nThis will overwrite/replace server data for ALL users.\n\nBackup contains (visible / deleted):\n- Customers: ${counts.customers.visible} / ${counts.customers.deleted}\n- Pages: ${counts.pages.visible} / ${counts.pages.deleted}\n- Ads: ${counts.ads.visible} / ${counts.ads.deleted}\n- Receipts: ${counts.receipts.visible} / ${counts.receipts.deleted}\n- Exchange Rates: ${counts.exchangeRateHistory.visible} / ${counts.exchangeRateHistory.deleted}\n\nContinue?`
+      isAr
+        ? `استيراد إلى الخادم (أدمن)\n\nسيتم استبدال/الكتابة فوق بيانات الخادم لجميع المستخدمين.\n\nتحتوي النسخة الاحتياطية على (ظاهر / محذوف):\n- العملاء: ${counts.customers.visible} / ${counts.customers.deleted}\n- الصفحات: ${counts.pages.visible} / ${counts.pages.deleted}\n- الإعلانات: ${counts.ads.visible} / ${counts.ads.deleted}\n- الوصولات: ${counts.receipts.visible} / ${counts.receipts.deleted}\n- أسعار الصرف: ${counts.exchangeRateHistory.visible} / ${counts.exchangeRateHistory.deleted}\n\nهل تريد المتابعة؟`
+        : `SERVER IMPORT (Admin)\n\nThis will overwrite/replace server data for ALL users.\n\nBackup contains (visible / deleted):\n- Customers: ${counts.customers.visible} / ${counts.customers.deleted}\n- Pages: ${counts.pages.visible} / ${counts.pages.deleted}\n- Ads: ${counts.ads.visible} / ${counts.ads.deleted}\n- Receipts: ${counts.receipts.visible} / ${counts.receipts.deleted}\n- Exchange Rates: ${counts.exchangeRateHistory.visible} / ${counts.exchangeRateHistory.deleted}\n\nContinue?`
     );
     if (!ok1) return;
-    const phrase = String(prompt('Type IMPORT to confirm (case-sensitive):') || '');
+    const phrase = String(prompt(isAr ? 'اكتب IMPORT للتأكيد (حساس لحالة الأحرف):' : 'Type IMPORT to confirm (case-sensitive):') || '');
     if (phrase !== 'IMPORT') {
-      showNotification('Cancelled', 'Import cancelled.', 'info');
+      showNotification(isAr ? 'تم الإلغاء' : 'Cancelled', isAr ? 'تم إلغاء الاستيراد.' : 'Import cancelled.', 'info');
       return;
     }
 
@@ -645,7 +665,7 @@ function importData() {
         return !idsAll.has(id) || deletedIds.has(id);
       });
       if (toDelete.length) {
-        showNotification('Import', `Deleting ${toDelete.length} old ${collection} records...`, 'info');
+        showNotification(isAr ? 'استيراد' : 'Import', isAr ? `جارٍ حذف ${toDelete.length} سجلاً قديماً من ${collection}...` : `Deleting ${toDelete.length} old ${collection} records...`, 'info');
         await mapLimit(toDelete, 5, async (rec) => {
           try {
             await apiDeleteEntity(collection, String(rec.id));
@@ -659,13 +679,13 @@ function importData() {
       // Restore ACTIVE backup records only (deleted records stay deleted on the server)
       let done = 0;
       const total = activeList.length;
-      if (total) showNotification('Import', `Importing ${total} ${collection} records...`, 'info');
+      if (total) showNotification(isAr ? 'استيراد' : 'Import', isAr ? `جارٍ استيراد ${total} سجلاً من ${collection}...` : `Importing ${total} ${collection} records...`, 'info');
       await mapLimit(activeList, 5, async (rec) => {
         const id = String(rec.id || '');
         await apiAdminRestoreEntity(collection, id, rec);
         done++;
         if (total >= 50 && done % 50 === 0) {
-          showNotification('Import', `${collection}: ${done}/${total}...`, 'info');
+          showNotification(isAr ? 'استيراد' : 'Import', `${collection}: ${done}/${total}...`, 'info');
         }
       });
 
@@ -707,7 +727,7 @@ function importData() {
     };
 
     try {
-      showNotification('Import', 'Starting server import...', 'info');
+      showNotification(isAr ? 'استيراد' : 'Import', isAr ? 'جارٍ بدء الاستيراد إلى الخادم...' : 'Starting server import...', 'info');
       // Replace core collections only (server is source of truth)
       await applyCollectionReplace('customers', sanitizedImport.customers);
       await applyCollectionReplace('pages', sanitizedImport.pages);
@@ -724,11 +744,11 @@ function importData() {
       // Reload fresh server state
       await serverLoadAllData();
       saveState();
-      showNotification('Imported', 'Server import completed successfully.', 'success');
+      showNotification(isAr ? 'تم الاستيراد' : 'Imported', isAr ? 'اكتمل الاستيراد إلى الخادم بنجاح.' : 'Server import completed successfully.', 'success');
       render();
     } catch (e) {
       console.error('Server import failed:', e);
-      showNotification('Import Failed', e?.message || 'Server import failed', 'error');
+      showNotification(isAr ? 'فشل الاستيراد' : 'Import Failed', e?.message || (isAr ? 'فشل الاستيراد إلى الخادم' : 'Server import failed'), 'error');
     }
   }
 
@@ -740,7 +760,7 @@ function importData() {
     
     // Validate file size (max 50MB)
     if (file.size > 50 * 1024 * 1024) {
-      showNotification('Error', 'File too large. Maximum size is 50MB.', 'error');
+      showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'الملف كبير جداً. الحد الأقصى للحجم 50 ميغابايت.' : 'File too large. Maximum size is 50MB.', 'error');
       return;
     }
     
@@ -764,8 +784,8 @@ function importData() {
           const actual = DataIntegrity.calculateChecksum(copy);
           if (String(actual) !== String(sanitizedImport._exportMetadata.checksum)) {
             showNotification(
-              'Invalid Backup',
-              'Backup file integrity check failed (checksum mismatch). Please re-export a fresh backup and try again.',
+              isAr ? 'نسخة احتياطية غير صالحة' : 'Invalid Backup',
+              isAr ? 'فشل التحقق من سلامة ملف النسخة الاحتياطية (عدم تطابق checksum). الرجاء إعادة تصدير نسخة جديدة والمحاولة مرة أخرى.' : 'Backup file integrity check failed (checksum mismatch). Please re-export a fresh backup and try again.',
               'error'
             );
             return;
@@ -789,7 +809,7 @@ function importData() {
         // Check record limits
         for (const arr of requiredArrays) {
           if (sanitizedImport[arr] && sanitizedImport[arr].length > STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION) {
-            showNotification('Warning', `${arr} data truncated to ${STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION} records`, 'warning');
+            showNotification(isAr ? 'تحذير' : 'Warning', isAr ? `تم اقتصاص بيانات ${arr} إلى ${STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION} سجل` : `${arr} data truncated to ${STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION} records`, 'warning');
             sanitizedImport[arr] = sanitizedImport[arr].slice(0, STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION);
           }
         }
@@ -843,11 +863,11 @@ function importData() {
         
         saveState();
         addAuditLog('Import', 'system', 'Data imported successfully');
-        showNotification('Imported', 'Data imported and validated successfully', 'success');
+        showNotification(isAr ? 'تم الاستيراد' : 'Imported', isAr ? 'تم استيراد البيانات والتحقق منها بنجاح' : 'Data imported and validated successfully', 'success');
         render();
       } catch (error) {
         addSecurityLog('import_error', error.message);
-        showNotification('Error', 'Failed to import data: ' + error.message, 'error');
+        showNotification(isAr ? 'خطأ' : 'Error', (isAr ? 'فشل استيراد البيانات: ' : 'Failed to import data: ') + error.message, 'error');
       }
     };
     reader.readAsText(file);
@@ -857,7 +877,7 @@ function importData() {
 
 async function clearAllData() {
   if (isServerModeEnabled()) {
-    showNotification('Not Allowed', 'Clear-all is disabled in server mode. Use backend admin tools.', 'error');
+    showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'مسح جميع البيانات معطّل في وضع الخادم. استخدم أدوات إدارة الخادم.' : 'Clear-all is disabled in server mode. Use backend admin tools.', 'error');
     return;
   }
   if (confirm(state.language === 'ar' ? 'مسح جميع البيانات؟ لا يمكن التراجع عن هذا الإجراء!' : 'Clear all data? This cannot be undone!')) {
@@ -880,7 +900,7 @@ async function clearAllData() {
     }
     
     saveState();
-    showNotification('Cleared', 'All data cleared', 'success');
+    showNotification(state.language === 'ar' ? 'تم المسح' : 'Cleared', state.language === 'ar' ? 'تم مسح جميع البيانات' : 'All data cleared', 'success');
     render();
   }
 }
