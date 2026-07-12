@@ -4069,6 +4069,7 @@ function trStatus(value) {
 // Payment channel names: Libyana/Madar/LTT/Sadad/USDT are proper names and
 // stay as-is; only the generic words are localized.
 const METHOD_TRANSLATIONS_AR = {
+  'Transfer': 'تحويل',
   'Cash (LYD)': 'نقدي (LYD)',
   'Cash (USD)': 'نقدي (USD)',
   'Bank Transfer': 'حوالة مصرفية',
@@ -9377,6 +9378,16 @@ function renderReceiptsView() {
                       <i data-lucide="trending-down" class="w-3 h-3"></i>
                       <span>${state.language === 'ar' ? 'رصيد الإعلانات' : 'Ads credit'}: <span class="font-semibold text-emerald-600">$${usage.usedUSD.toFixed(2)}</span> ${state.language === 'ar' ? 'مصروف' : 'spent'} • <span class="font-semibold text-blue-600">$${usage.remainingUSD.toFixed(2)}</span> ${state.language === 'ar' ? 'متبقي' : 'left'} <span class="text-slate-400">(${remainingLYD.toFixed(2)} LYD)</span></span>
                     </span>
+                    ${receipt.receiptType === 'TRANSFER_IN' ? (() => {
+                      const srcR = state.receipts.find(x => x.id === receipt.transferFromReceiptId);
+                      const srcCust = state.customers.find(c => c.id === receipt.transferFromCustomerId);
+                      const srcNo = srcR ? (srcR.serialNumber || srcR.finalReceiptNo || srcR.tempReceiptNo || '') : '';
+                      const from = `${srcNo ? '#' + srcNo : ''}${srcCust ? (srcNo ? ' • ' : '') + srcCust.name : ''}`;
+                      return `<span class="inline-flex items-center gap-1 text-blue-600 font-medium" title="${isArV ? 'وصل ناتج عن تحويل رصيد' : 'Created by a balance transfer'}">
+                        <i data-lucide="swap" class="w-3 h-3"></i>
+                        <span>${isArV ? 'محوّل من' : 'Transferred in from'}: ${Security.escapeHtml(from || (isArV ? 'وصل آخر' : 'another receipt'))}</span>
+                      </span>`;
+                    })() : ''}
                   </div>
                   ${receipt.updatedAt ? `
                     <div class="flex items-center mt-0.5 space-x-2">
@@ -9794,7 +9805,7 @@ function renderAdsView() {
                 // Serial: ads rarely carry their own serial number — fall back
                 // to the linked receipt number(s): the delivery receipt
                 // (D#/final no) or the funding receipts' serials.
-                const _rcptNo = (rc) => rc ? String(rc.serialNumber || rc.finalReceiptNo || rc.tempReceiptNo || '').trim() : '';
+                const _rcptNo = (rc) => rc ? String(rc.serialNumber || rc.finalReceiptNo || rc.tempReceiptNo || (rc.receiptType === 'TRANSFER_IN' ? (state.language === 'ar' ? 'تحويل' : 'TRF') : '')).trim() : '';
                 let serialDisplay = String(ad.serialNumber || '').trim();
                 if (!serialDisplay) {
                   const serialNos = [...new Set(
@@ -14275,19 +14286,73 @@ function saveReceiptTransfer() {
     return;
   }
 
+  const rate = receipt.exchangeRate || state.defaultExchangeRate || 1;
+  const nowIso = new Date().toISOString();
+  const amountLocal = Math.round(amountUSD * rate * 100) / 100;
+
+  // MONEY-MATH FIX: the transfer must actually ARRIVE somewhere. Previously it
+  // only reduced the source receipt's remaining (via transfers[]) — the target
+  // customer received nothing usable, so the money effectively vanished (it
+  // never appeared in their Receipt Funding options when creating an ad).
+  // Now every transfer creates a REAL receipt for the receiving customer,
+  // typed TRANSFER_IN and linked back to the source. Accounting stays balanced:
+  // source remaining goes down by X, target gains a receipt worth X.
+  const inReceipt = {
+    id: generateId('receipt'),
+    recordType: 'receipt',
+    customerId: targetCustomerId,
+    amountUSD: Math.round(amountUSD * 100) / 100,
+    exchangeRate: rate,
+    amountLocal,
+    status: 'Paid',
+    isPaid: true,
+    paymentMethod: 'Transfer',
+    receiptType: 'TRANSFER_IN',
+    transferFromReceiptId: receipt.id,
+    transferFromCustomerId: receipt.customerId,
+    serialNumber: '',
+    payments: [],
+    phoneNumber: '',
+    // The office already holds this money (it lives on the source receipt's
+    // physical collection), so mark it collected via Transfer — otherwise the
+    // card would nag to "collect" cash that doesn't physically change hands.
+    collected: true,
+    collectedAmount: amountLocal,
+    collectedPayments: [{ method: 'Transfer', amount: amountLocal }],
+    collectedMatchesReceipt: true,
+    collectedAt: nowIso,
+    collectedBy: state.currentUser?.id || 'admin',
+    deliveryStatus: 'Office',
+    isReceivedInOffice: true,
+    startDate: nowIso,
+    endDate: nowIso,
+    collectionDate: nowIso,
+    createdAt: nowIso,
+    note: note || ''
+  };
+
   const transfer = {
     id: generateId('transfer'),
     toCustomerId: targetCustomerId,
+    toReceiptId: inReceipt.id,
     amountUSD,
-    amountLocal: amountUSD * (receipt.exchangeRate || state.defaultExchangeRate || 1),
-    date: new Date().toISOString(),
+    amountLocal,
+    date: nowIso,
     note
   };
 
+  addRecord(state.receipts, inReceipt);
   const updatedTransfers = [...(receipt.transfers || []), transfer];
   updateRecord(state.receipts, receipt.id, { transfers: updatedTransfers });
-  addLog('transfer', 'receipt', receipt.id, `Transferred $${amountUSD.toFixed(2)} to customer`, { toCustomerId: targetCustomerId });
-  showNotification(state.language === 'ar' ? 'تم التحويل' : 'Transferred', state.language === 'ar' ? 'تم تحويل رصيد الوصل بنجاح' : 'Receipt balance transferred successfully', 'success');
+  addLog('transfer', 'receipt', receipt.id, `Transferred $${amountUSD.toFixed(2)} to customer (receipt ${inReceipt.id})`, { toCustomerId: targetCustomerId, toReceiptId: inReceipt.id });
+  const targetName = state.customers.find(c => c.id === targetCustomerId)?.name || '';
+  showNotification(
+    state.language === 'ar' ? 'تم التحويل' : 'Transferred',
+    state.language === 'ar'
+      ? `تم تحويل $${amountUSD.toFixed(2)} إلى ${targetName} — أُنشئ وصل تحويل جاهز للاستخدام.`
+      : `Transferred $${amountUSD.toFixed(2)} to ${targetName} — a transfer receipt was created and is ready to use.`,
+    'success'
+  );
   closeModal();
   render();
 }
@@ -16942,7 +17007,7 @@ function renderAdMergedFundingList() {
     const optionsHtml = receipts.filter(r => !usedElsewhere.has(r.id)).map(r => {
       const usage = getReceiptUsageStats(r);
       const avail = Math.round(((usage.remainingUSD || 0) + getEditingAdExistingAllocationUSD(r.id, 'merged')) * 100) / 100;
-      const serial = r.serialNumber || r.finalReceiptNo || (r.id ? String(r.id).slice(0,6) : '???');
+      const serial = r.serialNumber || r.finalReceiptNo || (r.receiptType === 'TRANSFER_IN' ? (state.language === 'ar' ? 'تحويل' : 'TRF') : (r.id ? String(r.id).slice(0,6) : '???'));
       const label = `#${serial} • $${avail.toFixed(2)} ${isArM ? 'متاح' : 'avail'}`;
       return `<option value="${r.id || ''}" ${alloc.receiptId === r.id ? 'selected' : ''}>${Security.escapeHtml(label)}</option>`;
     }).join('');
@@ -17655,7 +17720,7 @@ function renderAdFundingList() {
       allocations.filter((a, i) => i !== idx && a && a.receiptId).map(a => a.receiptId)
     );
     const optionsHtml = receipts.filter(r => !usedElsewhere.has(r.id)).map(r => {
-      const serial = r.serialNumber || r.finalReceiptNo || (r.id ? String(r.id).slice(0,6) : '???');
+      const serial = r.serialNumber || r.finalReceiptNo || (r.receiptType === 'TRANSFER_IN' ? (state.language === 'ar' ? 'تحويل' : 'TRF') : (r.id ? String(r.id).slice(0,6) : '???'));
       const label = `#${serial} • $${(r.amountUSD || 0).toFixed(2)}`;
       return `<option value="${r.id || ''}" ${alloc.receiptId === r.id ? 'selected' : ''}>${Security.escapeHtml(label)}</option>`;
     }).join('');

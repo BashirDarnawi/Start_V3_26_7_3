@@ -2068,19 +2068,73 @@ function saveReceiptTransfer() {
     return;
   }
 
+  const rate = receipt.exchangeRate || state.defaultExchangeRate || 1;
+  const nowIso = new Date().toISOString();
+  const amountLocal = Math.round(amountUSD * rate * 100) / 100;
+
+  // MONEY-MATH FIX: the transfer must actually ARRIVE somewhere. Previously it
+  // only reduced the source receipt's remaining (via transfers[]) — the target
+  // customer received nothing usable, so the money effectively vanished (it
+  // never appeared in their Receipt Funding options when creating an ad).
+  // Now every transfer creates a REAL receipt for the receiving customer,
+  // typed TRANSFER_IN and linked back to the source. Accounting stays balanced:
+  // source remaining goes down by X, target gains a receipt worth X.
+  const inReceipt = {
+    id: generateId('receipt'),
+    recordType: 'receipt',
+    customerId: targetCustomerId,
+    amountUSD: Math.round(amountUSD * 100) / 100,
+    exchangeRate: rate,
+    amountLocal,
+    status: 'Paid',
+    isPaid: true,
+    paymentMethod: 'Transfer',
+    receiptType: 'TRANSFER_IN',
+    transferFromReceiptId: receipt.id,
+    transferFromCustomerId: receipt.customerId,
+    serialNumber: '',
+    payments: [],
+    phoneNumber: '',
+    // The office already holds this money (it lives on the source receipt's
+    // physical collection), so mark it collected via Transfer — otherwise the
+    // card would nag to "collect" cash that doesn't physically change hands.
+    collected: true,
+    collectedAmount: amountLocal,
+    collectedPayments: [{ method: 'Transfer', amount: amountLocal }],
+    collectedMatchesReceipt: true,
+    collectedAt: nowIso,
+    collectedBy: state.currentUser?.id || 'admin',
+    deliveryStatus: 'Office',
+    isReceivedInOffice: true,
+    startDate: nowIso,
+    endDate: nowIso,
+    collectionDate: nowIso,
+    createdAt: nowIso,
+    note: note || ''
+  };
+
   const transfer = {
     id: generateId('transfer'),
     toCustomerId: targetCustomerId,
+    toReceiptId: inReceipt.id,
     amountUSD,
-    amountLocal: amountUSD * (receipt.exchangeRate || state.defaultExchangeRate || 1),
-    date: new Date().toISOString(),
+    amountLocal,
+    date: nowIso,
     note
   };
 
+  addRecord(state.receipts, inReceipt);
   const updatedTransfers = [...(receipt.transfers || []), transfer];
   updateRecord(state.receipts, receipt.id, { transfers: updatedTransfers });
-  addLog('transfer', 'receipt', receipt.id, `Transferred $${amountUSD.toFixed(2)} to customer`, { toCustomerId: targetCustomerId });
-  showNotification(state.language === 'ar' ? 'تم التحويل' : 'Transferred', state.language === 'ar' ? 'تم تحويل رصيد الوصل بنجاح' : 'Receipt balance transferred successfully', 'success');
+  addLog('transfer', 'receipt', receipt.id, `Transferred $${amountUSD.toFixed(2)} to customer (receipt ${inReceipt.id})`, { toCustomerId: targetCustomerId, toReceiptId: inReceipt.id });
+  const targetName = state.customers.find(c => c.id === targetCustomerId)?.name || '';
+  showNotification(
+    state.language === 'ar' ? 'تم التحويل' : 'Transferred',
+    state.language === 'ar'
+      ? `تم تحويل $${amountUSD.toFixed(2)} إلى ${targetName} — أُنشئ وصل تحويل جاهز للاستخدام.`
+      : `Transferred $${amountUSD.toFixed(2)} to ${targetName} — a transfer receipt was created and is ready to use.`,
+    'success'
+  );
   closeModal();
   render();
 }

@@ -2099,6 +2099,16 @@ function renderReceiptsView() {
                       <i data-lucide="trending-down" class="w-3 h-3"></i>
                       <span>${state.language === 'ar' ? 'رصيد الإعلانات' : 'Ads credit'}: <span class="font-semibold text-emerald-600">$${usage.usedUSD.toFixed(2)}</span> ${state.language === 'ar' ? 'مصروف' : 'spent'} • <span class="font-semibold text-blue-600">$${usage.remainingUSD.toFixed(2)}</span> ${state.language === 'ar' ? 'متبقي' : 'left'} <span class="text-slate-400">(${remainingLYD.toFixed(2)} LYD)</span></span>
                     </span>
+                    ${receipt.receiptType === 'TRANSFER_IN' ? (() => {
+                      const srcR = state.receipts.find(x => x.id === receipt.transferFromReceiptId);
+                      const srcCust = state.customers.find(c => c.id === receipt.transferFromCustomerId);
+                      const srcNo = srcR ? (srcR.serialNumber || srcR.finalReceiptNo || srcR.tempReceiptNo || '') : '';
+                      const from = `${srcNo ? '#' + srcNo : ''}${srcCust ? (srcNo ? ' • ' : '') + srcCust.name : ''}`;
+                      return `<span class="inline-flex items-center gap-1 text-blue-600 font-medium" title="${isArV ? 'وصل ناتج عن تحويل رصيد' : 'Created by a balance transfer'}">
+                        <i data-lucide="swap" class="w-3 h-3"></i>
+                        <span>${isArV ? 'محوّل من' : 'Transferred in from'}: ${Security.escapeHtml(from || (isArV ? 'وصل آخر' : 'another receipt'))}</span>
+                      </span>`;
+                    })() : ''}
                   </div>
                   ${receipt.updatedAt ? `
                     <div class="flex items-center mt-0.5 space-x-2">
@@ -2516,7 +2526,7 @@ function renderAdsView() {
                 // Serial: ads rarely carry their own serial number — fall back
                 // to the linked receipt number(s): the delivery receipt
                 // (D#/final no) or the funding receipts' serials.
-                const _rcptNo = (rc) => rc ? String(rc.serialNumber || rc.finalReceiptNo || rc.tempReceiptNo || '').trim() : '';
+                const _rcptNo = (rc) => rc ? String(rc.serialNumber || rc.finalReceiptNo || rc.tempReceiptNo || (rc.receiptType === 'TRANSFER_IN' ? (state.language === 'ar' ? 'تحويل' : 'TRF') : '')).trim() : '';
                 let serialDisplay = String(ad.serialNumber || '').trim();
                 if (!serialDisplay) {
                   const serialNos = [...new Set(

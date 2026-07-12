@@ -201,6 +201,7 @@ function trStatus(value) {
 // Payment channel names: Libyana/Madar/LTT/Sadad/USDT are proper names and
 // stay as-is; only the generic words are localized.
 const METHOD_TRANSLATIONS_AR = {
+  'Transfer': 'تحويل',
   'Cash (LYD)': 'نقدي (LYD)',
   'Cash (USD)': 'نقدي (USD)',
   'Bank Transfer': 'حوالة مصرفية',
