@@ -2095,15 +2095,9 @@ function saveReceiptTransfer() {
     serialNumber: '',
     payments: [],
     phoneNumber: '',
-    // The office already holds this money (it lives on the source receipt's
-    // physical collection), so mark it collected via Transfer — otherwise the
-    // card would nag to "collect" cash that doesn't physically change hands.
-    collected: true,
-    collectedAmount: amountLocal,
-    collectedPayments: [{ method: 'Transfer', amount: amountLocal }],
-    collectedMatchesReceipt: true,
-    collectedAt: nowIso,
-    collectedBy: state.currentUser?.id || 'admin',
+    // Starts NOT collected (user request): collection is an explicit action
+    // the admin records, same as any other receipt.
+    collected: false,
     deliveryStatus: 'Office',
     isReceivedInOffice: true,
     startDate: nowIso,
