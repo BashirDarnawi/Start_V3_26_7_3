@@ -1266,38 +1266,48 @@ function renderAnalyticsView() {
   const unpaidAdRevenue = unpaidAds.reduce((sum, ad) => sum + (ad.amountUSD || 0), 0);
   const totalAdRevenue = paidAdRevenue + unpaidAdRevenue;  // Keep for backwards compatibility
 
-  const totalReceiptsUSD = receipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
-  const paidReceipts = receipts.filter(r => (r.status || '').toLowerCase() === 'paid');
-  const pendingReceipts = receipts.filter(r => {
+  // MONEY-MATH: TRANSFER_IN receipts are money MOVED between customers, not
+  // new money — exclude them from every revenue/volume/collection aggregate
+  // (they would double-count the same dollars already inside the source
+  // receipt). They DO count in the availability below (the moved money is
+  // still usable by the target customer).
+  const revenueReceipts = receipts.filter(r => !isTransferInReceipt(r));
+  const totalReceiptsUSD = revenueReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
+  const paidReceipts = revenueReceipts.filter(r => (r.status || '').toLowerCase() === 'paid');
+  const pendingReceipts = revenueReceipts.filter(r => {
     const s = (r.status || '').toLowerCase();
     return s === 'pending' || s === 'not paid';
   });
   const paidUSD = paidReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
   const pendingUSD = pendingReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
 
-  // Calculate actual balance: paid receipts - used funds - transferred funds.
-  // MONEY-MATH: transfers consume a receipt exactly like usage does (the
-  // per-receipt cards already subtract them), so the dashboard must subtract
-  // them too or every transferred dollar shows as still "available".
-  const totalUsedFromReceipts = paidReceipts.reduce((sum, r) => {
+  // Available balance = what is still spendable across ALL paid receipts
+  // INCLUDING transfer-ins: each receipt's remaining already subtracts its own
+  // usage and outgoing transfers, and the transfer-in receipt carries the
+  // moved money on the target side — summing remaining keeps transfers
+  // availability-neutral (source −X, target +X).
+  const allPaidInclTransfers = receipts.filter(r => (r.status || '').toLowerCase() === 'paid');
+  let totalUsedFromReceipts = 0;
+  const availableReceiptBalance = Math.max(allPaidInclTransfers.reduce((sum, r) => {
     const stats = getReceiptUsageStats(r);
-    return sum + (stats.usedUSD || 0) + (stats.transferredUSD || 0);
-  }, 0);
-  const availableReceiptBalance = Math.max(paidUSD - totalUsedFromReceipts, 0);
-  
-  // Collection status (admin collected vs not collected)
-  const collectedReceipts = receipts.filter(r => r.collected);
-  const notCollectedReceipts = receipts.filter(r => !r.collected);
+    totalUsedFromReceipts += (stats.usedUSD || 0);
+    return sum + (stats.remainingUSD || 0);
+  }, 0), 0);
+
+  // Collection status (admin collected vs not collected) — real cash only:
+  // the physical money of a transfer lives on the SOURCE receipt.
+  const collectedReceipts = revenueReceipts.filter(r => r.collected);
+  const notCollectedReceipts = revenueReceipts.filter(r => !r.collected);
   const collectedUSD = collectedReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
   const notCollectedUSD = notCollectedReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
-  const collectionRate = receipts.length > 0 ? ((collectedReceipts.length / receipts.length) * 100).toFixed(1) : 0;
+  const collectionRate = revenueReceipts.length > 0 ? ((collectedReceipts.length / revenueReceipts.length) * 100).toFixed(1) : 0;
 
   const deliveryAds = ads.filter(a => a.deliveryStatus && a.deliveryStatus !== 'Office');
   const activeDeliveries = deliveryAds.filter(a => (a.deliveryStatus || '').toLowerCase() !== 'completed').length;
   const completedDeliveries = deliveryAds.filter(a => (a.deliveryStatus || '').toLowerCase() === 'completed').length;
 
   const adsLast7 = ads.filter(a => new Date(a.createdAt || 0).getTime() >= last7).length;
-  const receiptsLast7 = receipts.filter(r => new Date(r.createdAt || 0).getTime() >= last7).length;
+  const receiptsLast7 = revenueReceipts.filter(r => new Date(r.createdAt || 0).getTime() >= last7).length;
 
   // Top customers by spend
   const spendByCustomer = {};
@@ -1400,7 +1410,7 @@ function renderAnalyticsView() {
             <div>
               <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">${isAr ? 'حالة التحصيل' : 'Collection Status'}</p>
               <div class="flex items-baseline space-x-2">
-                <p class="text-2xl font-bold text-slate-800 dark:text-white">${collectedReceipts.length}/${receipts.length}</p>
+                <p class="text-2xl font-bold text-slate-800 dark:text-white">${collectedReceipts.length}/${revenueReceipts.length}</p>
                 <span class="text-sm font-medium ${collectionRate >= 80 ? 'text-emerald-600' : collectionRate >= 50 ? 'text-amber-600' : 'text-rose-600'}">${collectionRate}%</span>
               </div>
               <div class="flex items-center space-x-3 mt-2 text-xs">
@@ -1439,7 +1449,7 @@ function renderAnalyticsView() {
           <div class="grid grid-cols-2 gap-3 text-sm">
             <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
               <p class="text-slate-500 text-xs">${isAr ? 'الوصولات' : 'Receipts'}</p>
-              <p class="text-xl font-bold text-slate-800 dark:text-white">${receipts.length}</p>
+              <p class="text-xl font-bold text-slate-800 dark:text-white">${revenueReceipts.length}</p>
               <p class="text-[11px] text-slate-500">${isAr ? `${receiptsLast7} في آخر 7 أيام` : `${receiptsLast7} created in last 7 days`}</p>
             </div>
             <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
@@ -1779,6 +1789,13 @@ function renderCustomersView() {
       totalDebts += Math.abs(stats.balance);
     }
   });
+  // MONEY-MATH: per-customer stats count TRANSFER_IN receipts (correct for the
+  // customer's own credit ledger), but summed BUSINESS-WIDE that would count
+  // every transferred dinar twice — once in the source customer's receipt and
+  // once in the recipient's transfer receipt. Remove the transfer-in portion.
+  totalRevenue -= getVisibleRecords(state.receipts)
+    .filter(r => isTransferInReceipt(r) && (String(r.status || '') === 'Paid' || r.isPaid === true))
+    .reduce((s, r) => s + (r.amountLocal || 0), 0);
   
   return `
     <div class="space-y-6 animate-fade-in-up">

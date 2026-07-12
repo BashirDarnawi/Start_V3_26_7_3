@@ -554,6 +554,15 @@ function enforceSecretFeaturesGate() {
 // RECEIPT USAGE / TRANSFER HELPERS
 // ==========================================
 
+// A TRANSFER_IN receipt is money MOVED from another receipt, not new money:
+// it must count for the target customer's usable balance, but must be EXCLUDED
+// from business-wide revenue/volume/collection aggregates (otherwise every
+// transferred dollar is counted twice — once in the source receipt and once
+// in the transfer receipt).
+function isTransferInReceipt(r) {
+  return String(r?.receiptType || '') === 'TRANSFER_IN';
+}
+
 // Compute usage stats for a receipt based on ads funded by this receipt
 function getReceiptUsageStats(receipt) {
   // Handle both receipt object and receipt ID
