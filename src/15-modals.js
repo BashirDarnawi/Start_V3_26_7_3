@@ -1225,6 +1225,9 @@ function renderModal() {
       const topUpBaseEndOk = topUpBaseEnd && !isNaN(new Date(topUpBaseEnd).getTime());
       const topUpNewEnd = topUpBaseEndOk ? new Date(new Date(topUpBaseEnd).getTime() + topUpWorkingDays * 86400000) : null;
       const isArTU = state.language === 'ar';
+      // Receipt money still spendable given the working list — shown so the
+      // user always knows how much they CAN top up (null = not receipt-funded).
+      const topUpAvailable = _topUpAvailableNow(existingTopUps);
 
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center">
@@ -1234,8 +1237,9 @@ function renderModal() {
         <div class="space-y-4">
           <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl">
             <div class="text-sm font-medium text-blue-700 dark:text-blue-300">${isArTU ? 'تفاصيل الإعلان' : 'Ad Details'}</div>
-            <div class="text-lg font-bold text-blue-600 mt-1">${isArTU ? 'الأصلي' : 'Original'}: $${topUpBase} → ${isArTU ? 'الجديد' : 'New'}: $${(topUpBase + topUpWorkingTotal).toFixed(2)}</div>
-            ${topUpBaseEndOk ? `<div class="text-sm font-medium text-blue-700 dark:text-blue-300 mt-1">${isArTU ? 'النهاية' : 'End'}: ${new Date(topUpBaseEnd).toLocaleDateString()}${topUpWorkingDays > 0 ? ` → <span class="font-bold">${topUpNewEnd.toLocaleDateString()}</span> (${isArTU ? `+${topUpWorkingDays} يوم` : `+${topUpWorkingDays} day${topUpWorkingDays > 1 ? 's' : ''}`})` : ''}</div>` : ''}
+            <div class="text-lg font-bold text-blue-600 mt-1">${isArTU ? 'الأصلي' : 'Original'}: $${(parseFloat(topUpBase) || 0).toFixed(2)} → ${isArTU ? 'الجديد' : 'New'}: <span id="topup-preview-new">$${((parseFloat(topUpBase) || 0) + topUpWorkingTotal).toFixed(2)}</span></div>
+            ${topUpBaseEndOk ? `<div class="text-sm font-medium text-blue-700 dark:text-blue-300 mt-1">${isArTU ? 'النهاية' : 'End'}: <span id="topup-preview-end" class="font-bold">${topUpNewEnd.toLocaleDateString()}</span> <span id="topup-preview-end-extra" class="text-xs">${topUpWorkingDays > 0 ? (isArTU ? `(الأصلية ${new Date(topUpBaseEnd).toLocaleDateString()} + ${topUpWorkingDays} يوم)` : `(original ${new Date(topUpBaseEnd).toLocaleDateString()} + ${topUpWorkingDays} day${topUpWorkingDays > 1 ? 's' : ''})`) : ''}</span></div>` : ''}
+            ${topUpAvailable !== null ? `<div class="text-sm font-bold mt-1 text-blue-700 dark:text-blue-300">${isArTU ? 'المتاح من وصولات التمويل' : 'Available on funding receipt(s)'}: <span id="topup-preview-available" class="${topUpAvailable < 0.01 ? 'text-rose-600' : 'text-emerald-600'}">$${topUpAvailable.toFixed(2)}</span></div>` : ''}
             ${existingTopUps.length > 0 ? `<div class="text-xs text-slate-500 mt-1">${isArTU ? 'إجمالي الشحنات' : 'Total top-ups'}: $${topUpWorkingTotal.toFixed(2)}</div>` : ''}
           </div>
 
@@ -1258,7 +1262,7 @@ function renderModal() {
             <div class="grid grid-cols-3 gap-3">
               <div>
                 <label class="block text-xs mb-1">${isArTU ? 'المبلغ (USD)' : 'Amount (USD)'}</label>
-                <input type="text" inputmode="decimal" id="topup-amount" class="w-full glass-input px-3 py-2 rounded-lg" placeholder="0.00" oninput="sanitizeMoneyInput(this)" />
+                <input type="text" inputmode="decimal" id="topup-amount" class="w-full glass-input px-3 py-2 rounded-lg" placeholder="0.00" oninput="sanitizeMoneyInput(this); _refreshTopUpPreview()" />
               </div>
               <div>
                 <label class="block text-xs mb-1">${isArTU ? 'التاريخ' : 'Date'}</label>
@@ -1266,7 +1270,7 @@ function renderModal() {
               </div>
               <div>
                 <label class="block text-xs mb-1">${isArTU ? 'تمديد (أيام)' : 'Extend (days)'}</label>
-                <input type="number" min="0" step="1" id="topup-extend-days" class="w-full glass-input px-3 py-2 rounded-lg" placeholder="0" />
+                <input type="number" min="0" step="1" id="topup-extend-days" class="w-full glass-input px-3 py-2 rounded-lg" placeholder="0" oninput="_refreshTopUpPreview()" />
               </div>
             </div>
             <div>

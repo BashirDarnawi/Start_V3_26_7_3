@@ -2279,6 +2279,93 @@ function _readTopUpForm() {
   };
 }
 
+// Which receipts fund this ad and how much money they still hold. Top-up
+// money is drawn FROM these receipts, so this drives the "Available" line in
+// the top-ups modal and the overdraft guard. Returns null for ads that are
+// not receipt-funded (unpaid ads owe money instead of spending receipt
+// balance) — their top-ups keep the old free-form behavior.
+function getAdFundingAvailability(ad) {
+  if (!ad) return null;
+  const ps = String(ad.paymentStatus || '').toLowerCase();
+  // Missing paymentStatus counts as paid — same default the Ad modal uses.
+  const isPaidAd = ad.isPaid === true || ps === 'paid' || ps === '';
+  if (!isPaidAd) return null;
+  const ids = [];
+  if (Array.isArray(ad.receiptAllocations)) {
+    ad.receiptAllocations.forEach(a => { if (a && a.receiptId) ids.push(String(a.receiptId)); });
+  }
+  if (ad.fundingReceiptId) ids.push(String(ad.fundingReceiptId));
+  if (ad.receiptId) ids.push(String(ad.receiptId));
+  const perReceipt = [];
+  let totalRemaining = 0;
+  [...new Set(ids)].forEach(id => {
+    const receipt = (state.receipts || []).find(r => r && String(r.id) === id);
+    if (!receipt) return;
+    const remaining = Math.max(getReceiptUsageStats(receipt).remainingUSD || 0, 0);
+    perReceipt.push({ receipt, remaining });
+    totalRemaining += remaining;
+  });
+  if (!perReceipt.length) return null;
+  return {
+    totalRemaining: Math.round(totalRemaining * 100) / 100,
+    perReceipt,
+    hasAllocations: Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length > 0
+  };
+}
+
+// Receipt money still available given the modal's working list. The saved
+// top-ups are already inside each receipt's remaining balance, so only the
+// DIFFERENCE between the working list and what's saved moves the number
+// (removing a saved top-up makes money available again). Returns null when
+// the ad isn't receipt-funded.
+function _topUpAvailableNow(workingList) {
+  const ad = state.ads.find(a => a.id === state.modalData?.id);
+  const funding = getAdFundingAvailability(ad);
+  if (!funding) return null;
+  const savedTotal = (ad.topUps || []).reduce((s, t) => s + (parseFloat(t.amount) || 0), 0);
+  const workingTotal = (workingList || tempTopUps).reduce((s, t) => s + (parseFloat(t.amount) || 0), 0);
+  return Math.round((funding.totalRemaining - (workingTotal - savedTotal)) * 100) / 100;
+}
+
+// Live preview (user request): while typing in the Add New Top-up form the
+// Ad Details numbers update immediately — new total, new END DATE and how
+// much receipt money stays available — so nothing is a surprise after saving.
+function _refreshTopUpPreview() {
+  const ad = state.ads.find(a => a.id === state.modalData?.id);
+  if (!ad) return;
+  const isAr = state.language === 'ar';
+  const typedAmount = Math.max(parseFloat(document.getElementById('topup-amount')?.value) || 0, 0);
+  const typedDays = Math.max(parseInt(document.getElementById('topup-extend-days')?.value, 10) || 0, 0);
+
+  const base = parseFloat(ad.initialAmountUSD || ad.amountUSD) || 0;
+  const workingTotal = tempTopUps.reduce((s, t) => s + (parseFloat(t.amount) || 0), 0) + typedAmount;
+  const newEl = document.getElementById('topup-preview-new');
+  if (newEl) newEl.textContent = `$${(base + workingTotal).toFixed(2)}`;
+
+  const baseEnd = ad.initialEndDate || ad.endDate || '';
+  const endEl = document.getElementById('topup-preview-end');
+  const endExtraEl = document.getElementById('topup-preview-end-extra');
+  if (endEl && baseEnd && !isNaN(new Date(baseEnd).getTime())) {
+    const days = tempTopUps.reduce((s, t) => s + (parseInt(t.extendDays, 10) || 0), 0) + typedDays;
+    endEl.textContent = new Date(new Date(baseEnd).getTime() + days * 86400000).toLocaleDateString();
+    if (endExtraEl) {
+      endExtraEl.textContent = days > 0
+        ? (isAr ? `(الأصلية ${new Date(baseEnd).toLocaleDateString()} + ${days} يوم)` : `(original ${new Date(baseEnd).toLocaleDateString()} + ${days} day${days > 1 ? 's' : ''})`)
+        : '';
+    }
+  }
+
+  const availEl = document.getElementById('topup-preview-available');
+  if (availEl) {
+    const avail = _topUpAvailableNow(tempTopUps);
+    if (avail !== null) {
+      const after = Math.round((avail - typedAmount) * 100) / 100;
+      availEl.textContent = `$${after.toFixed(2)}`;
+      availEl.className = after < -0.009 ? 'text-rose-600' : (after < 0.01 ? 'text-amber-600' : 'text-emerald-600');
+    }
+  }
+}
+
 function addNewTopUp() {
   const entry = _readTopUpForm();
   if (entry === null && !document.getElementById('topup-amount')) {
@@ -2292,6 +2379,21 @@ function addNewTopUp() {
       'error'
     );
     return;
+  }
+  // Balance guard (user request): a top-up spends MORE of the customer's
+  // receipt money, so it cannot exceed what the funding receipts still hold.
+  if (entry.amount > 0) {
+    const available = _topUpAvailableNow(tempTopUps);
+    if (available !== null && entry.amount > available + 0.01) {
+      showNotification(
+        state.language === 'ar' ? 'رصيد غير كافٍ' : 'Not enough balance',
+        state.language === 'ar'
+          ? `المتبقي في وصولات التمويل $${available.toFixed(2)} فقط — لا يمكن إضافة $${entry.amount.toFixed(2)}`
+          : `The funding receipt(s) only have $${available.toFixed(2)} left — cannot add $${entry.amount.toFixed(2)}`,
+        'error'
+      );
+      return;
+    }
   }
   tempTopUps.push(entry);
   // Re-render modal to show new top-up
@@ -2307,20 +2409,38 @@ function saveTopUps() {
   const adId = state.modalData.id;
   const ad = state.ads.find(a => a.id === adId);
   if (!ad) return;
+  const isArTU = state.language === 'ar';
 
   // Forgiving save: anything still typed in the form counts as a top-up too
   // (the user should not need to click "Add Top-up" before "Save Top-ups").
+  // Built WITHOUT touching tempTopUps so a failed balance check below leaves
+  // the modal's working list exactly as the user sees it.
   const pending = _readTopUpForm();
-  if (pending) tempTopUps.push(pending);
+  const allTopUps = (pending ? [...tempTopUps, pending] : tempTopUps).map(t => ({ ...t }));
 
   // tempTopUps is the COMPLETE working list (seeded from ad.topUps on open,
   // plus/minus edits). initialAmountUSD / initialEndDate are the values BEFORE
   // any top-up, so the new totals are base + EVERY top-up — removing a top-up
   // later correctly shrinks both the amount and the end date again.
-  const allTopUps = tempTopUps.map(t => ({ ...t }));
   const baseAmountUSD = ad.initialAmountUSD || ad.amountUSD;
   const totalTopUps = allTopUps.reduce((sum, t) => sum + (parseFloat(t.amount) || 0), 0);
   const newAmountUSD = Math.round((baseAmountUSD + totalTopUps) * 100) / 100;
+
+  // Balance guard (user request): top-up money comes from the receipts that
+  // fund this ad — not from thin air — so the net NEW money (delta) cannot
+  // exceed what those receipts still hold.
+  const funding = getAdFundingAvailability(ad);
+  const delta = Math.round((newAmountUSD - (parseFloat(ad.amountUSD) || 0)) * 100) / 100;
+  if (funding && delta > 0.009 && delta > funding.totalRemaining + 0.01) {
+    showNotification(
+      isArTU ? 'رصيد غير كافٍ' : 'Not enough balance',
+      isArTU
+        ? `التعبئة تحتاج $${delta.toFixed(2)} والمتبقي في وصولات التمويل $${funding.totalRemaining.toFixed(2)} فقط`
+        : `These top-ups need $${delta.toFixed(2)} but the funding receipt(s) only have $${funding.totalRemaining.toFixed(2)} left`,
+      'error'
+    );
+    return;
+  }
 
   const updates = {
     topUps: allTopUps,
@@ -2339,10 +2459,45 @@ function saveTopUps() {
     if (totalExtendDays > 0) newEndDisplay = new Date(updates.endDate).toLocaleDateString();
   }
 
+  // Charge / refund the funding receipts so the money model stays balanced:
+  // added top-up money grows this ad's allocation rows (the receipts'
+  // remaining balance drops everywhere it is shown), removed top-ups give the
+  // money back. Ads WITHOUT allocation rows are counted by their full
+  // amountUSD automatically (getReceiptUsageStats fallback), so only explicit
+  // allocation rows need updating here.
+  if (funding && funding.hasAllocations && Math.abs(delta) > 0.009) {
+    const allocations = ad.receiptAllocations.map(a => ({ ...a }));
+    if (delta > 0) {
+      let rest = delta;
+      for (const src of funding.perReceipt) {
+        if (rest <= 0.001) break;
+        const take = Math.min(src.remaining, rest);
+        if (take <= 0) continue;
+        const alloc = allocations.find(a => String(a.receiptId) === String(src.receipt.id));
+        if (alloc) alloc.amountUSD = Math.round(((parseFloat(alloc.amountUSD) || 0) + take) * 100) / 100;
+        else allocations.push({ receiptId: src.receipt.id, amountUSD: Math.round(take * 100) / 100 });
+        rest = Math.round((rest - take) * 100) / 100;
+      }
+      // Rounding crumbs (a cent at most) go on the first row so the
+      // allocations always add up to the ad's new amount.
+      if (rest > 0.001 && allocations.length) {
+        allocations[0].amountUSD = Math.round(((parseFloat(allocations[0].amountUSD) || 0) + rest) * 100) / 100;
+      }
+    } else {
+      let refund = -delta;
+      for (let i = allocations.length - 1; i >= 0 && refund > 0.001; i--) {
+        const cur = parseFloat(allocations[i].amountUSD) || 0;
+        const back = Math.min(cur, refund);
+        allocations[i].amountUSD = Math.round((cur - back) * 100) / 100;
+        refund = Math.round((refund - back) * 100) / 100;
+      }
+    }
+    updates.receiptAllocations = allocations;
+  }
+
   updateRecord(state.ads, adId, updates);
 
   tempTopUps = [];
-  const isArTU = state.language === 'ar';
   showNotification(
     isArTU ? 'تم الحفظ' : 'Saved',
     (isArTU ? `تم حفظ التعبئة. المبلغ الجديد: $${newAmountUSD.toFixed(2)}` : `Top-ups saved. New amount: $${newAmountUSD.toFixed(2)}`)
