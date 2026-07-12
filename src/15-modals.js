@@ -2768,6 +2768,101 @@ function closeModal() {
   }, 50);
 }
 
+// ---- Delete-cascade helpers ----
+// When a receipt disappears, every record that references it must be updated
+// too, or money numbers go wrong (user report: deleting a transferred-in
+// receipt left the source receipt still showing the money as gone). These are
+// shared by deleteReceipt AND deleteCustomer so both paths clean up the same
+// way.
+
+// Remove every funding reference to `receiptId` from visible ads (allocation
+// rows, merged mirror, direct id fields). Returns how many ads were touched.
+function cleanupAdFundingLinks(receiptId) {
+  const linkedAds = state.ads.filter(a =>
+    (a.receiptId === receiptId || a.linkedDeliveryReceiptId === receiptId || a.fundingReceiptId === receiptId ||
+     (Array.isArray(a.receiptAllocations) && a.receiptAllocations.some(alloc => alloc.receiptId === receiptId)) ||
+     (Array.isArray(a.dueAllocations) && a.dueAllocations.some(alloc => alloc.receiptId === receiptId)))
+    && !a._deleted
+  );
+  linkedAds.forEach(ad => {
+    let changed = false;
+    if (Array.isArray(ad.receiptAllocations)) {
+      const before = ad.receiptAllocations.length;
+      ad.receiptAllocations = ad.receiptAllocations.filter(alloc => alloc.receiptId !== receiptId);
+      if (ad.receiptAllocations.length !== before) changed = true;
+    }
+    if (Array.isArray(ad.dueAllocations)) {
+      const before = ad.dueAllocations.length;
+      ad.dueAllocations = ad.dueAllocations.filter(alloc => alloc.receiptId !== receiptId);
+      if (ad.dueAllocations.length !== before) changed = true;
+    }
+    // The merged-funding mirror too — leaving it stale would let the next ad
+    // edit reseed the merge editor from it and re-write an allocation that
+    // draws money from the deleted receipt.
+    if (Array.isArray(ad.mergedPaidAllocations)) {
+      const before = ad.mergedPaidAllocations.length;
+      ad.mergedPaidAllocations = ad.mergedPaidAllocations.filter(alloc => alloc.receiptId !== receiptId);
+      if (ad.mergedPaidAllocations.length !== before) {
+        changed = true;
+        ad.hasMergedPaidFunds = ad.mergedPaidAllocations.length > 0;
+      }
+    }
+    if (ad.receiptId === receiptId) { ad.receiptId = ''; changed = true; }
+    if (ad.linkedDeliveryReceiptId === receiptId) { ad.linkedDeliveryReceiptId = ''; changed = true; }
+    if (ad.fundingReceiptId === receiptId) { ad.fundingReceiptId = ''; changed = true; }
+    if (Array.isArray(ad.receiptIds)) {
+      const before = ad.receiptIds.length;
+      ad.receiptIds = ad.receiptIds.filter(rid => rid !== receiptId);
+      if (ad.receiptIds.length !== before) changed = true;
+    }
+    if (changed) {
+      ad._lastModified = getMonotonicTime();
+      markCollectionDirty('ads');
+      if (isServerModeEnabled()) {
+        apiUpdateEntity('ads', ad.id, ad).catch(() => {});
+      }
+    }
+  });
+  return linkedAds.length;
+}
+
+// If `receipt` is a transferred-in receipt, give the money BACK to the source
+// receipt by removing the paired transfers[] entry (the deduction). Without
+// this, deleting a transferred-in receipt made the money vanish: the target
+// lost it AND the source still showed it as transferred away. Returns the
+// source receipt when money was returned, else null.
+function undoTransferIntoReceipt(receipt) {
+  if (!receipt || String(receipt.receiptType || '') !== 'TRANSFER_IN') return null;
+  const source = state.receipts.find(r => r && !r._deleted && String(r.id) === String(receipt.transferFromReceiptId || ''));
+  if (!source || !Array.isArray(source.transfers)) return null;
+  const kept = source.transfers.filter(t => String(t?.toReceiptId || '') !== String(receipt.id));
+  if (kept.length === source.transfers.length) return null;
+  updateRecord(state.receipts, source.id, { transfers: kept });
+  return source;
+}
+
+// If `receipt` was a transfer SOURCE, its outgoing transfers created paired
+// TRANSFER_IN receipts for other customers. Deleting the source removes that
+// money's origin, so the paired receipts must be deleted too — otherwise the
+// other customers keep spendable money that no longer exists anywhere.
+// Handles onward (chained) transfers; `seen` guards against cycles. Returns
+// how many paired receipts were deleted.
+function cascadeDeleteOutgoingTransfers(receipt, seen) {
+  seen = seen || new Set();
+  if (!receipt || seen.has(String(receipt.id))) return 0;
+  seen.add(String(receipt.id));
+  let count = 0;
+  (Array.isArray(receipt.transfers) ? receipt.transfers : []).forEach(t => {
+    const target = state.receipts.find(r => r && !r._deleted && String(r.id) === String(t?.toReceiptId || ''));
+    if (!target) return;
+    count += cascadeDeleteOutgoingTransfers(target, seen);
+    cleanupAdFundingLinks(target.id);
+    deleteRecord(state.receipts, target.id);
+    count += 1;
+  });
+  return count;
+}
+
 function deleteCustomer(id) {
   // Permission check
   if (!currentUserHasPermission('customers', 'delete')) {
@@ -2802,6 +2897,13 @@ function deleteCustomer(id) {
   if (confirm(warning)) {
     // Cascade delete: also delete linked receipts and ads
     linkedReceipts.forEach(receipt => {
+      // Same link cleanup deleteReceipt does. Without it, ads of OTHER
+      // customers funded by these receipts kept dead allocation rows, money
+      // transferred IN from another customer stayed deducted at its source,
+      // and money transferred OUT lived on as spendable phantom receipts.
+      cleanupAdFundingLinks(receipt.id);
+      undoTransferIntoReceipt(receipt);
+      cascadeDeleteOutgoingTransfers(receipt);
       receipt._deleted = true;
       receipt._lastModified = getMonotonicTime();
       markCollectionDirty('receipts');
@@ -2860,6 +2962,16 @@ function deleteReceipt(id) {
     && !a._deleted
   );
   const isArDel = state.language === 'ar';
+  // Transfer links in BOTH directions (user report: deleting a transferred-in
+  // receipt must give the money back to the source; deleting a source must
+  // also remove the transferred-in receipts it created for other customers).
+  const isTransferIn = String(receipt?.receiptType || '') === 'TRANSFER_IN';
+  const transferSource = isTransferIn
+    ? state.receipts.find(r => r && !r._deleted && String(r.id) === String(receipt.transferFromReceiptId || ''))
+    : null;
+  const outgoingTargets = (Array.isArray(receipt?.transfers) ? receipt.transfers : [])
+    .map(t => state.receipts.find(r => r && !r._deleted && String(r.id) === String(t?.toReceiptId || '')))
+    .filter(Boolean);
   let warning = isArDel
     ? `هل أنت متأكد من حذف الوصل رقم ${serialNo} ($${amountUSD})؟`
     : `Are you sure you want to delete receipt #${serialNo} ($${amountUSD})?`;
@@ -2868,59 +2980,29 @@ function deleteReceipt(id) {
       ? `\n\n⚠️ تحذير: ${linkedAds.length} إعلان(ات) ممولة من هذا الوصل. سيتم تنظيف ارتباطات التمويل الخاصة بها.`
       : `\n\n⚠️ WARNING: ${linkedAds.length} ad(s) are funded by this receipt. Their allocation references will be cleaned up.`;
   }
+  if (transferSource) {
+    const srcLabel = transferSource.serialNumber || transferSource.id.slice(0, 8);
+    warning += isArDel
+      ? `\n\n↩️ هذا وصل محوَّل — سيعود مبلغه ($${amountUSD}) إلى الوصل الأصلي رقم ${srcLabel}.`
+      : `\n\n↩️ This is a transferred-in receipt — its $${amountUSD} will return to source receipt #${srcLabel}.`;
+  }
+  if (outgoingTargets.length > 0) {
+    warning += isArDel
+      ? `\n\n⚠️ هذا الوصل حوَّل أموالاً إلى ${outgoingTargets.length} وصل(ات) لعملاء آخرين — سيتم حذفها أيضاً لأن مصدر أموالها سيختفي.`
+      : `\n\n⚠️ This receipt transferred money to ${outgoingTargets.length} receipt(s) of other customers — those will be deleted too, because their money's source is being removed.`;
+  }
   if (confirm(warning)) {
-    // Clean up allocation references in linked ads
-    linkedAds.forEach(ad => {
-      let changed = false;
-      // Remove from receiptAllocations
-      if (Array.isArray(ad.receiptAllocations)) {
-        const before = ad.receiptAllocations.length;
-        ad.receiptAllocations = ad.receiptAllocations.filter(alloc => alloc.receiptId !== id);
-        if (ad.receiptAllocations.length !== before) changed = true;
-      }
-      // Remove from dueAllocations
-      if (Array.isArray(ad.dueAllocations)) {
-        const before = ad.dueAllocations.length;
-        ad.dueAllocations = ad.dueAllocations.filter(alloc => alloc.receiptId !== id);
-        if (ad.dueAllocations.length !== before) changed = true;
-      }
-      // Remove from mergedPaidAllocations (the merged-funding mirror). Leaving
-      // it stale would let the next ad edit reseed the merge editor from it and
-      // re-write an allocation that draws money from the deleted receipt.
-      if (Array.isArray(ad.mergedPaidAllocations)) {
-        const before = ad.mergedPaidAllocations.length;
-        ad.mergedPaidAllocations = ad.mergedPaidAllocations.filter(alloc => alloc.receiptId !== id);
-        if (ad.mergedPaidAllocations.length !== before) {
-          changed = true;
-          ad.hasMergedPaidFunds = ad.mergedPaidAllocations.length > 0;
-        }
-      }
-      // Clear linked receipt references
-      if (ad.receiptId === id) { ad.receiptId = ''; changed = true; }
-      if (ad.linkedDeliveryReceiptId === id) { ad.linkedDeliveryReceiptId = ''; changed = true; }
-      if (ad.fundingReceiptId === id) { ad.fundingReceiptId = ''; changed = true; }
-      // Remove from receiptIds array
-      if (Array.isArray(ad.receiptIds)) {
-        const before = ad.receiptIds.length;
-        ad.receiptIds = ad.receiptIds.filter(rid => rid !== id);
-        if (ad.receiptIds.length !== before) changed = true;
-      }
-      if (changed) {
-        ad._lastModified = getMonotonicTime();
-        markCollectionDirty('ads');
-        if (isServerModeEnabled()) {
-          apiUpdateEntity('ads', ad.id, ad).catch(() => {});
-        }
-      }
-    });
+    // Clean up every record that references this receipt (shared helpers,
+    // also used by deleteCustomer so both delete paths behave the same).
+    cleanupAdFundingLinks(id);
+    const returnedTo = undoTransferIntoReceipt(receipt);
+    const cascadeCount = cascadeDeleteOutgoingTransfers(receipt);
     deleteRecord(state.receipts, id);
-    showNotification(
-      isArDel ? 'تم الحذف' : 'Deleted',
-      isArDel
-        ? `تم حذف الوصل${linkedAds.length > 0 ? ` (تم تنظيف ${linkedAds.length} ارتباط تمويل)` : ''}`
-        : `Receipt deleted${linkedAds.length > 0 ? ` (${linkedAds.length} ad allocation(s) cleaned up)` : ''}`,
-      'success'
-    );
+    let detail = isArDel ? 'تم حذف الوصل' : 'Receipt deleted';
+    if (linkedAds.length > 0) detail += isArDel ? ` (تم تنظيف ${linkedAds.length} ارتباط تمويل)` : ` (${linkedAds.length} ad allocation(s) cleaned up)`;
+    if (returnedTo) detail += isArDel ? ` — عاد $${amountUSD} إلى الوصل رقم ${returnedTo.serialNumber || returnedTo.id.slice(0, 8)}` : ` — $${amountUSD} returned to receipt #${returnedTo.serialNumber || returnedTo.id.slice(0, 8)}`;
+    if (cascadeCount > 0) detail += isArDel ? ` — تم حذف ${cascadeCount} وصل محوَّل مرتبط` : ` — ${cascadeCount} linked transferred-in receipt(s) deleted`;
+    showNotification(isArDel ? 'تم الحذف' : 'Deleted', detail, 'success');
     render();
   }
 }
@@ -2935,9 +3017,23 @@ function deleteAd(id) {
   const customer = state.customers.find(c => c.id === ad?.customerId);
   const customerName = customer?.name || 'Unknown';
   const amountUSD = ad?.amountUSD?.toFixed(2) || '0.00';
-  const warning = state.language === 'ar'
-    ? `هل أنت متأكد من حذف هذا الإعلان؟\n\nالعميل: ${customerName}\nالمبلغ: $${amountUSD}\n\n⚠️ لا يمكن التراجع عن هذا الإجراء!`
-    : `Are you sure you want to delete this ad?\n\nCustomer: ${customerName}\nAmount: $${amountUSD}\n\n⚠️ This action cannot be undone!`;
+  // Reassure the user about where the money goes: allocations of a deleted ad
+  // stop counting against the receipts, so the funded amount becomes available
+  // again automatically.
+  const fundedUSD = Array.isArray(ad?.receiptAllocations)
+    ? Math.round(ad.receiptAllocations.reduce((s, a) => s + (parseFloat(a?.amountUSD) || 0), 0) * 100) / 100
+    : 0;
+  let warning = state.language === 'ar'
+    ? `هل أنت متأكد من حذف هذا الإعلان؟\n\nالعميل: ${customerName}\nالمبلغ: $${amountUSD}`
+    : `Are you sure you want to delete this ad?\n\nCustomer: ${customerName}\nAmount: $${amountUSD}`;
+  if (fundedUSD > 0) {
+    warning += state.language === 'ar'
+      ? `\n\n↩️ سيعود $${fundedUSD.toFixed(2)} إلى رصيد وصل(وصولات) التمويل.`
+      : `\n\n↩️ $${fundedUSD.toFixed(2)} will return to the funding receipt(s) balance.`;
+  }
+  warning += state.language === 'ar'
+    ? `\n\n⚠️ لا يمكن التراجع عن هذا الإجراء!`
+    : `\n\n⚠️ This action cannot be undone!`;
   if (confirm(warning)) {
     deleteRecord(state.ads, id);
     showNotification(state.language === 'ar' ? 'تم الحذف' : 'Deleted', state.language === 'ar' ? 'تم حذف الإعلان' : 'Ad deleted', 'success');
