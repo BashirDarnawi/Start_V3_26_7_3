@@ -630,9 +630,16 @@ function getReceiptUsageStats(receipt) {
     // full ad spend here would count the same dollars on two receipts at once
     // (e.g. a delivery ad matched via linkedDeliveryReceiptId but funded
     // entirely from a merged paid receipt).
+    // "Has allocation data" means the arrays are PRESENT — even when empty.
+    // Empty arrays happen when a funding receipt was deleted and the cleanup
+    // stripped its rows; falling back to the full ad spend then would charge
+    // the WHOLE ad to some other linked receipt (e.g. the delivery receipt
+    // matched via ad.receiptId), inventing usage out of nothing. The
+    // spentUSD/amountUSD fallback is only for legacy records that predate
+    // allocations entirely (no arrays at all).
     const hasAllocationData =
-      (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length > 0) ||
-      (Array.isArray(ad.dueAllocations) && ad.dueAllocations.length > 0);
+      Array.isArray(ad.receiptAllocations) ||
+      Array.isArray(ad.dueAllocations);
     if (hasAllocationData) {
       return sum;
     }

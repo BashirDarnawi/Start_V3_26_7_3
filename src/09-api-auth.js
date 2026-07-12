@@ -597,6 +597,15 @@ async function apiPatchEntity(collection, id, updates, expectedLastModified) {
   , 2, 500);
 }
 
+// Full-record update used by the delete-cascade cleanup (15-modals.js). This
+// name was referenced there but never defined, so in server mode deleting a
+// receipt that funded an ad crashed with a ReferenceError HALF-WAY through the
+// cleanup — the receipt survived while the ad lost its funding locally.
+// Delegates to apiPatchEntity, which brings retry + timeout handling.
+async function apiUpdateEntity(collection, id, record) {
+  return await apiPatchEntity(collection, id, record);
+}
+
 async function apiAdminRestoreEntity(collection, id, record) {
   const data = (record && typeof record === 'object') ? record : {};
   const createdAt = Number(data._created);

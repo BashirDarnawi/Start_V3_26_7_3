@@ -2013,8 +2013,11 @@ async function handleModalSubmit() {
 
         for (const [receiptId, plannedTotal] of totalsByReceipt.entries()) {
           const receipt = state.receipts.find(r => String(r.id) === String(receiptId));
-          if (!receipt) {
-            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'أحد الوصولات المختارة مفقود.' : 'One of the selected receipts is missing.', 'error');
+          // Soft-deleted receipts stay in state.receipts with _deleted=true —
+          // money can NOT be drawn from a deleted receipt (a stale open modal
+          // could still reference one deleted meanwhile on another device).
+          if (!receipt || receipt._deleted) {
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'أحد الوصولات المختارة مفقود أو تم حذفه.' : 'One of the selected receipts is missing or was deleted.', 'error');
             return;
           }
           // Calculate remaining balance (total - used - transferred)
@@ -2815,6 +2818,19 @@ function cleanupAdFundingLinks(receiptId) {
       ad.receiptIds = ad.receiptIds.filter(rid => rid !== receiptId);
       if (ad.receiptIds.length !== before) changed = true;
     }
+    // The stop-ad snapshot too: a later stop-amount edit recomputes the
+    // surviving receipts' shares from this baseline, so a deleted receipt
+    // left inside would dilute the pool and undercharge the survivors.
+    if (ad.stopAllocationBaseline && typeof ad.stopAllocationBaseline === 'object') {
+      ['receipt', 'due', 'merged'].forEach(k => {
+        const arr = ad.stopAllocationBaseline[k];
+        if (Array.isArray(arr)) {
+          const before = arr.length;
+          ad.stopAllocationBaseline[k] = arr.filter(a => String(a?.receiptId || '') !== String(receiptId));
+          if (ad.stopAllocationBaseline[k].length !== before) changed = true;
+        }
+      });
+    }
     if (changed) {
       ad._lastModified = getMonotonicTime();
       markCollectionDirty('ads');
@@ -2829,14 +2845,36 @@ function cleanupAdFundingLinks(receiptId) {
 // If `receipt` is a transferred-in receipt, give the money BACK to the source
 // receipt by removing the paired transfers[] entry (the deduction). Without
 // this, deleting a transferred-in receipt made the money vanish: the target
-// lost it AND the source still showed it as transferred away. Returns the
-// source receipt when money was returned, else null.
+// lost it AND the source still showed it as transferred away.
+// Money the target ALREADY SPENT on ads stays deducted at the source — only
+// the unspent remainder returns (the entry shrinks instead of disappearing).
+// IMPORTANT: callers must run this BEFORE cleanupAdFundingLinks, because the
+// spent amount is read from the allocations that cleanup strips.
+// Returns the source receipt when money was returned, else null.
 function undoTransferIntoReceipt(receipt) {
   if (!receipt || String(receipt.receiptType || '') !== 'TRANSFER_IN') return null;
   const source = state.receipts.find(r => r && !r._deleted && String(r.id) === String(receipt.transferFromReceiptId || ''));
   if (!source || !Array.isArray(source.transfers)) return null;
-  const kept = source.transfers.filter(t => String(t?.toReceiptId || '') !== String(receipt.id));
-  if (kept.length === source.transfers.length) return null;
+  const spentUSD = Math.max(getReceiptUsageStats(receipt).usedUSD || 0, 0);
+  let changed = false;
+  const kept = [];
+  source.transfers.forEach(t => {
+    if (String(t?.toReceiptId || '') !== String(receipt.id)) { kept.push(t); return; }
+    changed = true;
+    if (spentUSD > 0.009) {
+      // Keep the deduction for the spent part only.
+      const rate = (parseFloat(t?.amountUSD) || 0) > 0 && Number.isFinite(parseFloat(t?.amountLocal))
+        ? (parseFloat(t.amountLocal) / parseFloat(t.amountUSD))
+        : (receipt.exchangeRate || 0);
+      kept.push({
+        ...t,
+        amountUSD: Math.round(spentUSD * 100) / 100,
+        amountLocal: Math.round(spentUSD * rate * 100) / 100,
+        note: `${t?.note || ''}${t?.note ? ' — ' : ''}shrunk to spent portion after transfer receipt was deleted`.trim()
+      });
+    }
+  });
+  if (!changed) return null;
   updateRecord(state.receipts, source.id, { transfers: kept });
   return source;
 }
@@ -2895,28 +2933,32 @@ function deleteCustomer(id) {
     }
   }
   if (confirm(warning)) {
-    // Cascade delete: also delete linked receipts and ads
+    // Cascade delete: the customer's ADS first, then their receipts. Deleting
+    // the ads first releases the money they spent, so the transfer undo below
+    // returns the full unspent amount to other customers' source receipts.
+    // deleteRecord (instead of a bare _deleted flag with a fire-and-forget
+    // server call) gives every cascaded record the standard server push with
+    // rollback, error notification and audit log.
+    linkedAds.forEach(ad => {
+      deleteRecord(state.ads, ad.id);
+    });
     linkedReceipts.forEach(receipt => {
       // Same link cleanup deleteReceipt does. Without it, ads of OTHER
       // customers funded by these receipts kept dead allocation rows, money
       // transferred IN from another customer stayed deducted at its source,
       // and money transferred OUT lived on as spendable phantom receipts.
-      cleanupAdFundingLinks(receipt.id);
+      // Undo BEFORE cleanup: the undo reads spent amounts from allocations.
       undoTransferIntoReceipt(receipt);
+      cleanupAdFundingLinks(receipt.id);
       cascadeDeleteOutgoingTransfers(receipt);
-      receipt._deleted = true;
-      receipt._lastModified = getMonotonicTime();
-      markCollectionDirty('receipts');
-      if (isServerModeEnabled()) {
-        apiDeleteEntity('receipts', receipt.id).catch(() => {});
-      }
+      deleteRecord(state.receipts, receipt.id);
     });
-    linkedAds.forEach(ad => {
-      ad._deleted = true;
-      ad._lastModified = getMonotonicTime();
-      markCollectionDirty('ads');
-      if (isServerModeEnabled()) {
-        apiDeleteEntity('ads', ad.id).catch(() => {});
+    // Unlink the customer from pages: page.customerIds kept the ghost id, so
+    // the Pages view still showed the deleted customer as owner and every
+    // page save re-persisted the dangling link.
+    getVisibleRecords(state.pages).forEach(page => {
+      if (Array.isArray(page.customerIds) && page.customerIds.includes(id)) {
+        updateRecord(state.pages, page.id, { customerIds: page.customerIds.filter(cid => cid !== id) });
       }
     });
     deleteRecord(state.customers, id);
@@ -2938,7 +2980,18 @@ function deletePage(id) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الصفحات' : 'You do not have permission to delete pages', 'error');
     return;
   }
-  if (confirm(state.language === 'ar' ? 'هل تريد حذف هذه الصفحة؟' : 'Delete this page?')) {
+  const isArPg = state.language === 'ar';
+  let pageWarning = isArPg ? 'هل تريد حذف هذه الصفحة؟' : 'Delete this page?';
+  // Ads keep pointing at the deleted page's id for history. Recreating a page
+  // with the same name makes a NEW id, so those ads would not appear under it
+  // — the user must know this before deleting.
+  const pageAdsCount = state.ads.filter(a => a && !a._deleted && a.recordType !== 'receipt' && String(a.pageId || '') === String(id)).length;
+  if (pageAdsCount > 0) {
+    pageWarning += isArPg
+      ? `\n\n⚠️ ${pageAdsCount} إعلان(ات) تابعة لهذه الصفحة. ستبقى الإعلانات وسجلها، لكن صفحة جديدة بنفس الاسم لن تشملها.`
+      : `\n\n⚠️ ${pageAdsCount} ad(s) belong to this page. The ads and their history stay, but a NEW page with the same name will not include them.`;
+  }
+  if (confirm(pageWarning)) {
     deleteRecord(state.pages, id);
     showNotification(state.language === 'ar' ? 'تم الحذف' : 'Deleted', state.language === 'ar' ? 'تم حذف الصفحة' : 'Page deleted', 'success');
     render();
@@ -2994,8 +3047,10 @@ function deleteReceipt(id) {
   if (confirm(warning)) {
     // Clean up every record that references this receipt (shared helpers,
     // also used by deleteCustomer so both delete paths behave the same).
-    cleanupAdFundingLinks(id);
+    // Order matters: the transfer undo reads how much of this receipt was
+    // SPENT from its allocations, so it must run before cleanup strips them.
     const returnedTo = undoTransferIntoReceipt(receipt);
+    cleanupAdFundingLinks(id);
     const cascadeCount = cascadeDeleteOutgoingTransfers(receipt);
     deleteRecord(state.receipts, id);
     let detail = isArDel ? 'تم حذف الوصل' : 'Receipt deleted';

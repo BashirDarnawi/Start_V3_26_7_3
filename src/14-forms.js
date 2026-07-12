@@ -1227,8 +1227,24 @@ async function _saveReceiptFromModalInner() {
   // Get customer name for logging
   const linkedCustomer = state.customers.find(c => c.id === customerId);
   const customerName = linkedCustomer ? linkedCustomer.name : 'customer';
-  
+
   if (editTarget) {
+    // Money already committed cannot be edited away: ads funded from this
+    // receipt (including delivery-due funding) plus money transferred to
+    // other customers set the floor for the new total. Below it, those
+    // records would hold money the receipt no longer contains.
+    const committedStats = getReceiptUsageStats(editTarget);
+    const committedUSD = Math.round(((committedStats.usedUSD || 0) + (committedStats.transferredUSD || 0)) * 100) / 100;
+    if (totalUSD < committedUSD - 0.01) {
+      showNotification(
+        state.language === 'ar' ? 'غير ممكن' : 'Not possible',
+        state.language === 'ar'
+          ? `$${committedUSD.toFixed(2)} من هذا الوصل مستخدمة بالفعل (إعلانات وتحويلات) — لا يمكن خفض الإجمالي إلى $${totalUSD.toFixed(2)}. حرِّر المبلغ أولاً (عدِّل/أوقف الإعلانات أو احذف التحويل).`
+          : `$${committedUSD.toFixed(2)} of this receipt is already used (ads + transfers) — the total cannot go down to $${totalUSD.toFixed(2)}. Free the money first (edit/stop the ads or delete the transfer).`,
+        'error'
+      );
+      return;
+    }
     // Update existing - Track changes for edit history
     const oldReceipt = editTarget;
     const changes = [];
@@ -1900,7 +1916,9 @@ function selectAdPage(pageId, preserveFunding = false) {
   if (!page) return;
   
   const linkedCustomerIds = page.customerIds || [];
-  const linkedCustomers = state.customers.filter(c => linkedCustomerIds.includes(c.id));
+  // Deleted customers must never be offered (or auto-selected) as the ad's
+  // customer — page.customerIds can still hold ids of customers deleted later.
+  const linkedCustomers = state.customers.filter(c => c && !c._deleted && linkedCustomerIds.includes(c.id));
   
   // Show customer section
   if (customerSection) customerSection.classList.remove('hidden');

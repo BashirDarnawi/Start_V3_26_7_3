@@ -2118,7 +2118,11 @@ function renderReceiptsView() {
                     </span>
                     ${receipt.receiptType === 'TRANSFER_IN' ? (() => {
                       const srcR = state.receipts.find(x => x.id === receipt.transferFromReceiptId);
-                      const srcCust = state.customers.find(c => c.id === receipt.transferFromCustomerId);
+                      // Prefer the LIVE source receipt's current customer over the
+                      // snapshot taken at transfer time — the source may have been
+                      // reassigned to a different customer since.
+                      const srcCust = state.customers.find(c => c.id === (srcR?.customerId || receipt.transferFromCustomerId))
+                        || state.customers.find(c => c.id === receipt.transferFromCustomerId);
                       const srcNo = srcR ? (srcR.serialNumber || srcR.finalReceiptNo || srcR.tempReceiptNo || '') : '';
                       const from = `${srcNo ? '#' + srcNo : ''}${srcCust ? (srcNo ? ' • ' : '') + srcCust.name : ''}`;
                       return `<span class="inline-flex items-center gap-1 text-blue-600 font-medium" title="${isArV ? 'وصل ناتج عن تحويل رصيد' : 'Created by a balance transfer'}">
@@ -2219,7 +2223,7 @@ function renderReceiptsView() {
                       </div>
                       <div class="flex items-center space-x-3">
                         ${hasTransfers ? `<button class="text-xs text-blue-600 hover:text-blue-700" title="${isArV ? 'عرض سجل التحويلات' : 'View transfer history'}" onclick="showReceiptTransferHistory('${receipt.id}')">${isArV ? 'السجل' : 'History'}</button>` : ''}
-                        <button class="text-xs text-blue-600 hover:text-blue-700" title="${isArV ? 'تحويل الرصيد' : 'Transfer balance'}" onclick="showReceiptTransferModal('${receipt.id}')">${isArV ? 'تحويل' : 'Transfer'}</button>
+                        ${_isTransferableReceipt(receipt) ? `<button class="text-xs text-blue-600 hover:text-blue-700" title="${isArV ? 'تحويل الرصيد' : 'Transfer balance'}" onclick="showReceiptTransferModal('${receipt.id}')">${isArV ? 'تحويل' : 'Transfer'}</button>` : ''}
                       </div>
                     </div>
                   </div>
@@ -2276,9 +2280,9 @@ function renderReceiptsView() {
                 <div class="flex justify-between items-center">
                   <span class="status-badge status-${(receipt.status || '').toLowerCase()}">${trStatus(receipt.status || 'Unknown')}</span>
                   <div class="flex space-x-2">
-                    <button onclick="showReceiptTransferModal('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="${isArV ? 'تحويل الرصيد' : 'Transfer balance'}">
+                    ${_isTransferableReceipt(receipt) ? `<button onclick="showReceiptTransferModal('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="${isArV ? 'تحويل الرصيد' : 'Transfer balance'}">
                       <i data-lucide="swap" class="w-4 h-4"></i>
-                    </button>
+                    </button>` : ''}
                     <button onclick="manageSplitPayments('${receipt.id}')" class="text-purple-600 hover:text-purple-700" title="${state.language === 'ar' ? 'تعديل الدفعات المقسّمة' : 'Manage split payments'}"><i data-lucide="credit-card" class="w-4 h-4"></i></button>
                     <button onclick="editReceipt('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="${t('edit')}"><i data-lucide="edit" class="w-4 h-4"></i></button>
                     <button onclick="printReceiptCard(this)" class="text-slate-600 hover:text-slate-700" title="${t('print')}"><i data-lucide="printer" class="w-4 h-4"></i></button>

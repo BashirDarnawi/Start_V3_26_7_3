@@ -139,8 +139,22 @@ function getCustomerStats(customerId, statsIndex = null) {
     if (st === 'Canceled' || st === 'Lost') return false;
     return st === 'Paid' || r.isPaid === true;
   });
-  const totalPaidLYD = paidReceipts.reduce((sum, receipt) => sum + (receipt.amountLocal || 0), 0);
-  const totalPaidUSD = paidReceipts.reduce((sum, receipt) => sum + (receipt.amountUSD || 0), 0);
+  // Money transferred OUT to another customer is no longer this customer's
+  // credit — the recipient's transferred-in receipt counts it instead.
+  // Without this deduction the same dollars showed as credit on BOTH
+  // customer cards at once (double-counted per-customer credit).
+  let transferredOutUSD = 0;
+  let transferredOutLYD = 0;
+  paidReceipts.forEach(receipt => {
+    (Array.isArray(receipt.transfers) ? receipt.transfers : []).forEach(tr => {
+      const tUSD = parseFloat(tr?.amountUSD) || 0;
+      const tLocal = parseFloat(tr?.amountLocal);
+      transferredOutUSD += tUSD;
+      transferredOutLYD += Number.isFinite(tLocal) ? tLocal : tUSD * (receipt.exchangeRate || 0);
+    });
+  });
+  const totalPaidLYD = paidReceipts.reduce((sum, receipt) => sum + (receipt.amountLocal || 0), 0) - transferredOutLYD;
+  const totalPaidUSD = paidReceipts.reduce((sum, receipt) => sum + (receipt.amountUSD || 0), 0) - transferredOutUSD;
   
   // Calculate total spent USD from ads
   // For stopped ads, use spentUSD; for others, use amountUSD (the planned/active amount)
@@ -295,6 +309,25 @@ function editAd(id) {
   renderModal();
 }
 
+// Transferred-in receipts mirror money deducted from their SOURCE receipt.
+// Editing their amount/payments would break that mirror in either direction
+// (invent money the sender never gave, or silently zero it), so edits are
+// blocked: to change a transfer, delete the transferred-in receipt (the money
+// returns to the source) and transfer again.
+function _blockTransferInEdit(receipt) {
+  if (String(receipt?.receiptType || '') !== 'TRANSFER_IN') return false;
+  const src = state.receipts.find(r => r && !r._deleted && String(r.id) === String(receipt.transferFromReceiptId || ''));
+  const srcLabel = src ? (src.serialNumber || src.finalReceiptNo || src.id.slice(0, 8)) : '';
+  showNotification(
+    state.language === 'ar' ? 'وصل محوَّل' : 'Transfer receipt',
+    state.language === 'ar'
+      ? `هذا الوصل يعكس مبلغاً محوَّلاً من الوصل الأصلي${srcLabel ? ` رقم ${srcLabel}` : ''} ولا يمكن تعديله. لتغييره: احذفه (يعود المبلغ للوصل الأصلي) ثم حوِّل من جديد.`
+      : `This receipt mirrors money transferred from source receipt${srcLabel ? ` #${srcLabel}` : ''} and cannot be edited. To change it: delete it (the money returns to the source) and transfer again.`,
+    'warning'
+  );
+  return true;
+}
+
 function editReceipt(id) {
   // Permission check for editing receipts
   const receipt = state.receipts.find(r => r.id === id);
@@ -302,6 +335,7 @@ function editReceipt(id) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
     return;
   }
+  if (_blockTransferInEdit(receipt)) return;
   state.activeModal = 'receipt';
   state.modalData = receipt;
   updateUrlParams({ modal: 'receipt', id }); // URL tracking
@@ -1805,7 +1839,8 @@ function showReceiptModal() {
 function manageSplitPayments(receiptId) {
   const receipt = state.receipts.find(a => a.id === receiptId);
   if (!receipt) return;
-  
+  if (_blockTransferInEdit(receipt)) return;
+
   state.activeModal = 'split-payments';
   state.modalData = receipt;
   updateUrlParams({ modal: 'split-payments', id: receiptId }); // URL tracking
@@ -1837,14 +1872,33 @@ function manageRefund(adId) {
 }
 
 // Open transfer modal for a receipt
+// Only money the business actually RECEIVED can move between customers.
+// A "Not Paid" receipt (and a Canceled/Lost one) holds no real money, but the
+// transfer used to accept it anyway and mint a spendable Paid receipt for the
+// target customer — money invented out of nothing.
+function _isTransferableReceipt(r) {
+  const st = String(r?.status || '');
+  if (st === 'Canceled' || st === 'Lost') return false;
+  return st === 'Paid' || r?.isPaid === true;
+}
+
 function showReceiptTransferModal(receiptId) {
   // Permission check
   if (!currentUserHasPermission('receipts', 'transfer')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتحويل الرصيد' : 'You do not have permission to transfer receipt balance', 'error');
     return;
   }
+  const receipt = state.receipts.find(r => r.id === receiptId);
+  if (!_isTransferableReceipt(receipt)) {
+    showNotification(
+      state.language === 'ar' ? 'غير ممكن' : 'Not possible',
+      state.language === 'ar' ? 'يمكن تحويل الرصيد من الوصولات المدفوعة فقط.' : 'Balance can only be transferred from paid receipts.',
+      'error'
+    );
+    return;
+  }
   state.activeModal = 'receipt-transfer';
-  state.modalData = state.receipts.find(r => r.id === receiptId);
+  state.modalData = receipt;
   renderModal();
 }
 
@@ -2040,6 +2094,16 @@ function saveReceiptTransfer() {
   const receiptId = state.modalData?.id;
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
+  // Defense in depth: the modal opener already blocks this, but the save must
+  // never mint spendable money from an unpaid/canceled receipt.
+  if (!_isTransferableReceipt(receipt)) {
+    showNotification(
+      state.language === 'ar' ? 'غير ممكن' : 'Not possible',
+      state.language === 'ar' ? 'يمكن تحويل الرصيد من الوصولات المدفوعة فقط.' : 'Balance can only be transferred from paid receipts.',
+      'error'
+    );
+    return;
+  }
 
   const targetCustomerEl = document.getElementById('transfer-target-customer');
   const amountUSDElement = document.getElementById('transfer-amount-usd');
@@ -2245,6 +2309,23 @@ function saveSplitPayments() {
   if (totalR2 % 1 !== 0) totalR2 = Math.round((totalR2 + 0.01) * 100) / 100;
   const avgRate = (totalR2 > 0 && totalR1 > 0) ? (totalR1 / totalR2) : state.defaultExchangeRate;
 
+  // Money already committed cannot be edited away: ads funded from this
+  // receipt plus money transferred to other customers set the floor for the
+  // new total. Below it, ads/transfers would hold money the receipt no longer
+  // contains.
+  const committedStats = getReceiptUsageStats(state.receipts.find(r => r.id === receiptId));
+  const committedUSD = Math.round(((committedStats.usedUSD || 0) + (committedStats.transferredUSD || 0)) * 100) / 100;
+  if (totalR2 < committedUSD - 0.01) {
+    showNotification(
+      state.language === 'ar' ? 'غير ممكن' : 'Not possible',
+      state.language === 'ar'
+        ? `$${committedUSD.toFixed(2)} من هذا الوصل مستخدمة بالفعل (إعلانات وتحويلات) — لا يمكن خفض الإجمالي إلى $${totalR2.toFixed(2)}. حرِّر المبلغ أولاً (عدِّل/أوقف الإعلانات أو احذف التحويل).`
+        : `$${committedUSD.toFixed(2)} of this receipt is already used (ads + transfers) — the total cannot go down to $${totalR2.toFixed(2)}. Free the money first (edit/stop the ads or delete the transfer).`,
+      'error'
+    );
+    return;
+  }
+
   updateRecord(state.receipts, receiptId, {
     payments,
     amountLocal: totalR1,
@@ -2299,7 +2380,9 @@ function getAdFundingAvailability(ad) {
   const perReceipt = [];
   let totalRemaining = 0;
   [...new Set(ids)].forEach(id => {
-    const receipt = (state.receipts || []).find(r => r && String(r.id) === id);
+    // Skip soft-deleted receipts: a ghost receipt holds no spendable money,
+    // so it must not count as "available" nor be charged by a top-up.
+    const receipt = (state.receipts || []).find(r => r && !r._deleted && String(r.id) === id);
     if (!receipt) return;
     const remaining = Math.max(getReceiptUsageStats(receipt).remainingUSD || 0, 0);
     perReceipt.push({ receipt, remaining });
@@ -2529,10 +2612,13 @@ function toggleRefundAmount(refundType) {
 
 function saveRefund() {
   const adId = state.modalData.id;
+  const ad = state.ads.find(a => a.id === adId) || state.modalData;
   const refundType = document.getElementById('refund-type').value;
-  const refundAmount = parseFloat(document.getElementById('refund-amount').value) || 0;
+  let refundAmount = parseFloat(document.getElementById('refund-amount').value) || 0;
   const refundStatus = document.getElementById('refund-status').value;
-  
+  // A refund can never exceed the ad's amount.
+  refundAmount = Math.min(refundAmount, parseFloat(ad.amountUSD) || 0);
+
   const updates = {
     refundType,
     refundAmount: refundType !== 'None' ? refundAmount : 0,
@@ -2540,7 +2626,27 @@ function saveRefund() {
     status: refundType !== 'None' ? 'Canceled' : state.modalData.status,
     canceledBy: refundType !== 'None' ? state.currentUser?.id : state.modalData.canceledBy
   };
-  
+
+  // The refunded money must actually RETURN in the books. Previously the
+  // refund was only recorded as text: the ad's allocations kept the receipt
+  // fully used (the customer could not fund a replacement ad) and customer
+  // stats kept counting the canceled ad at full spend.
+  if (refundType !== 'None' && refundAmount > 0) {
+    if (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length) {
+      const allocations = ad.receiptAllocations.map(a => ({ ...a }));
+      let refund = refundAmount;
+      for (let i = allocations.length - 1; i >= 0 && refund > 0.001; i--) {
+        const cur = parseFloat(allocations[i].amountUSD) || 0;
+        const back = Math.min(cur, refund);
+        allocations[i].amountUSD = Math.round((cur - back) * 100) / 100;
+        refund = Math.round((refund - back) * 100) / 100;
+      }
+      updates.receiptAllocations = allocations;
+    }
+    // The canceled ad only truly "spent" what was kept after the refund.
+    updates.spentUSD = Math.max(Math.round(((parseFloat(ad.amountUSD) || 0) - refundAmount) * 100) / 100, 0);
+  }
+
   updateRecord(state.ads, adId, updates);
   showNotification(state.language === 'ar' ? 'تم الحفظ' : 'Saved', state.language === 'ar' ? `تم تطبيق الاسترجاع (${trStatus(refundType)})` : `Refund ${refundType} applied`, refundType !== 'None' ? 'warning' : 'success');
   closeModal();

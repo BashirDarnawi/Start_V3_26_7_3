@@ -4915,9 +4915,16 @@ function getReceiptUsageStats(receipt) {
     // full ad spend here would count the same dollars on two receipts at once
     // (e.g. a delivery ad matched via linkedDeliveryReceiptId but funded
     // entirely from a merged paid receipt).
+    // "Has allocation data" means the arrays are PRESENT — even when empty.
+    // Empty arrays happen when a funding receipt was deleted and the cleanup
+    // stripped its rows; falling back to the full ad spend then would charge
+    // the WHOLE ad to some other linked receipt (e.g. the delivery receipt
+    // matched via ad.receiptId), inventing usage out of nothing. The
+    // spentUSD/amountUSD fallback is only for legacy records that predate
+    // allocations entirely (no arrays at all).
     const hasAllocationData =
-      (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length > 0) ||
-      (Array.isArray(ad.dueAllocations) && ad.dueAllocations.length > 0);
+      Array.isArray(ad.receiptAllocations) ||
+      Array.isArray(ad.dueAllocations);
     if (hasAllocationData) {
       return sum;
     }
@@ -5702,6 +5709,15 @@ async function apiPatchEntity(collection, id, updates, expectedLastModified) {
       { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
     )
   , 2, 500);
+}
+
+// Full-record update used by the delete-cascade cleanup (15-modals.js). This
+// name was referenced there but never defined, so in server mode deleting a
+// receipt that funded an ad crashed with a ReferenceError HALF-WAY through the
+// cleanup — the receipt survived while the ad lost its funding locally.
+// Delegates to apiPatchEntity, which brings retry + timeout handling.
+async function apiUpdateEntity(collection, id, record) {
+  return await apiPatchEntity(collection, id, record);
 }
 
 async function apiAdminRestoreEntity(collection, id, record) {
@@ -9406,7 +9422,11 @@ function renderReceiptsView() {
                     </span>
                     ${receipt.receiptType === 'TRANSFER_IN' ? (() => {
                       const srcR = state.receipts.find(x => x.id === receipt.transferFromReceiptId);
-                      const srcCust = state.customers.find(c => c.id === receipt.transferFromCustomerId);
+                      // Prefer the LIVE source receipt's current customer over the
+                      // snapshot taken at transfer time — the source may have been
+                      // reassigned to a different customer since.
+                      const srcCust = state.customers.find(c => c.id === (srcR?.customerId || receipt.transferFromCustomerId))
+                        || state.customers.find(c => c.id === receipt.transferFromCustomerId);
                       const srcNo = srcR ? (srcR.serialNumber || srcR.finalReceiptNo || srcR.tempReceiptNo || '') : '';
                       const from = `${srcNo ? '#' + srcNo : ''}${srcCust ? (srcNo ? ' • ' : '') + srcCust.name : ''}`;
                       return `<span class="inline-flex items-center gap-1 text-blue-600 font-medium" title="${isArV ? 'وصل ناتج عن تحويل رصيد' : 'Created by a balance transfer'}">
@@ -9507,7 +9527,7 @@ function renderReceiptsView() {
                       </div>
                       <div class="flex items-center space-x-3">
                         ${hasTransfers ? `<button class="text-xs text-blue-600 hover:text-blue-700" title="${isArV ? 'عرض سجل التحويلات' : 'View transfer history'}" onclick="showReceiptTransferHistory('${receipt.id}')">${isArV ? 'السجل' : 'History'}</button>` : ''}
-                        <button class="text-xs text-blue-600 hover:text-blue-700" title="${isArV ? 'تحويل الرصيد' : 'Transfer balance'}" onclick="showReceiptTransferModal('${receipt.id}')">${isArV ? 'تحويل' : 'Transfer'}</button>
+                        ${_isTransferableReceipt(receipt) ? `<button class="text-xs text-blue-600 hover:text-blue-700" title="${isArV ? 'تحويل الرصيد' : 'Transfer balance'}" onclick="showReceiptTransferModal('${receipt.id}')">${isArV ? 'تحويل' : 'Transfer'}</button>` : ''}
                       </div>
                     </div>
                   </div>
@@ -9564,9 +9584,9 @@ function renderReceiptsView() {
                 <div class="flex justify-between items-center">
                   <span class="status-badge status-${(receipt.status || '').toLowerCase()}">${trStatus(receipt.status || 'Unknown')}</span>
                   <div class="flex space-x-2">
-                    <button onclick="showReceiptTransferModal('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="${isArV ? 'تحويل الرصيد' : 'Transfer balance'}">
+                    ${_isTransferableReceipt(receipt) ? `<button onclick="showReceiptTransferModal('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="${isArV ? 'تحويل الرصيد' : 'Transfer balance'}">
                       <i data-lucide="swap" class="w-4 h-4"></i>
-                    </button>
+                    </button>` : ''}
                     <button onclick="manageSplitPayments('${receipt.id}')" class="text-purple-600 hover:text-purple-700" title="${state.language === 'ar' ? 'تعديل الدفعات المقسّمة' : 'Manage split payments'}"><i data-lucide="credit-card" class="w-4 h-4"></i></button>
                     <button onclick="editReceipt('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="${t('edit')}"><i data-lucide="edit" class="w-4 h-4"></i></button>
                     <button onclick="printReceiptCard(this)" class="text-slate-600 hover:text-slate-700" title="${t('print')}"><i data-lucide="printer" class="w-4 h-4"></i></button>
@@ -12383,8 +12403,22 @@ function getCustomerStats(customerId, statsIndex = null) {
     if (st === 'Canceled' || st === 'Lost') return false;
     return st === 'Paid' || r.isPaid === true;
   });
-  const totalPaidLYD = paidReceipts.reduce((sum, receipt) => sum + (receipt.amountLocal || 0), 0);
-  const totalPaidUSD = paidReceipts.reduce((sum, receipt) => sum + (receipt.amountUSD || 0), 0);
+  // Money transferred OUT to another customer is no longer this customer's
+  // credit — the recipient's transferred-in receipt counts it instead.
+  // Without this deduction the same dollars showed as credit on BOTH
+  // customer cards at once (double-counted per-customer credit).
+  let transferredOutUSD = 0;
+  let transferredOutLYD = 0;
+  paidReceipts.forEach(receipt => {
+    (Array.isArray(receipt.transfers) ? receipt.transfers : []).forEach(tr => {
+      const tUSD = parseFloat(tr?.amountUSD) || 0;
+      const tLocal = parseFloat(tr?.amountLocal);
+      transferredOutUSD += tUSD;
+      transferredOutLYD += Number.isFinite(tLocal) ? tLocal : tUSD * (receipt.exchangeRate || 0);
+    });
+  });
+  const totalPaidLYD = paidReceipts.reduce((sum, receipt) => sum + (receipt.amountLocal || 0), 0) - transferredOutLYD;
+  const totalPaidUSD = paidReceipts.reduce((sum, receipt) => sum + (receipt.amountUSD || 0), 0) - transferredOutUSD;
   
   // Calculate total spent USD from ads
   // For stopped ads, use spentUSD; for others, use amountUSD (the planned/active amount)
@@ -12539,6 +12573,25 @@ function editAd(id) {
   renderModal();
 }
 
+// Transferred-in receipts mirror money deducted from their SOURCE receipt.
+// Editing their amount/payments would break that mirror in either direction
+// (invent money the sender never gave, or silently zero it), so edits are
+// blocked: to change a transfer, delete the transferred-in receipt (the money
+// returns to the source) and transfer again.
+function _blockTransferInEdit(receipt) {
+  if (String(receipt?.receiptType || '') !== 'TRANSFER_IN') return false;
+  const src = state.receipts.find(r => r && !r._deleted && String(r.id) === String(receipt.transferFromReceiptId || ''));
+  const srcLabel = src ? (src.serialNumber || src.finalReceiptNo || src.id.slice(0, 8)) : '';
+  showNotification(
+    state.language === 'ar' ? 'وصل محوَّل' : 'Transfer receipt',
+    state.language === 'ar'
+      ? `هذا الوصل يعكس مبلغاً محوَّلاً من الوصل الأصلي${srcLabel ? ` رقم ${srcLabel}` : ''} ولا يمكن تعديله. لتغييره: احذفه (يعود المبلغ للوصل الأصلي) ثم حوِّل من جديد.`
+      : `This receipt mirrors money transferred from source receipt${srcLabel ? ` #${srcLabel}` : ''} and cannot be edited. To change it: delete it (the money returns to the source) and transfer again.`,
+    'warning'
+  );
+  return true;
+}
+
 function editReceipt(id) {
   // Permission check for editing receipts
   const receipt = state.receipts.find(r => r.id === id);
@@ -12546,6 +12599,7 @@ function editReceipt(id) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
     return;
   }
+  if (_blockTransferInEdit(receipt)) return;
   state.activeModal = 'receipt';
   state.modalData = receipt;
   updateUrlParams({ modal: 'receipt', id }); // URL tracking
@@ -14049,7 +14103,8 @@ function showReceiptModal() {
 function manageSplitPayments(receiptId) {
   const receipt = state.receipts.find(a => a.id === receiptId);
   if (!receipt) return;
-  
+  if (_blockTransferInEdit(receipt)) return;
+
   state.activeModal = 'split-payments';
   state.modalData = receipt;
   updateUrlParams({ modal: 'split-payments', id: receiptId }); // URL tracking
@@ -14081,14 +14136,33 @@ function manageRefund(adId) {
 }
 
 // Open transfer modal for a receipt
+// Only money the business actually RECEIVED can move between customers.
+// A "Not Paid" receipt (and a Canceled/Lost one) holds no real money, but the
+// transfer used to accept it anyway and mint a spendable Paid receipt for the
+// target customer — money invented out of nothing.
+function _isTransferableReceipt(r) {
+  const st = String(r?.status || '');
+  if (st === 'Canceled' || st === 'Lost') return false;
+  return st === 'Paid' || r?.isPaid === true;
+}
+
 function showReceiptTransferModal(receiptId) {
   // Permission check
   if (!currentUserHasPermission('receipts', 'transfer')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتحويل الرصيد' : 'You do not have permission to transfer receipt balance', 'error');
     return;
   }
+  const receipt = state.receipts.find(r => r.id === receiptId);
+  if (!_isTransferableReceipt(receipt)) {
+    showNotification(
+      state.language === 'ar' ? 'غير ممكن' : 'Not possible',
+      state.language === 'ar' ? 'يمكن تحويل الرصيد من الوصولات المدفوعة فقط.' : 'Balance can only be transferred from paid receipts.',
+      'error'
+    );
+    return;
+  }
   state.activeModal = 'receipt-transfer';
-  state.modalData = state.receipts.find(r => r.id === receiptId);
+  state.modalData = receipt;
   renderModal();
 }
 
@@ -14284,6 +14358,16 @@ function saveReceiptTransfer() {
   const receiptId = state.modalData?.id;
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
+  // Defense in depth: the modal opener already blocks this, but the save must
+  // never mint spendable money from an unpaid/canceled receipt.
+  if (!_isTransferableReceipt(receipt)) {
+    showNotification(
+      state.language === 'ar' ? 'غير ممكن' : 'Not possible',
+      state.language === 'ar' ? 'يمكن تحويل الرصيد من الوصولات المدفوعة فقط.' : 'Balance can only be transferred from paid receipts.',
+      'error'
+    );
+    return;
+  }
 
   const targetCustomerEl = document.getElementById('transfer-target-customer');
   const amountUSDElement = document.getElementById('transfer-amount-usd');
@@ -14489,6 +14573,23 @@ function saveSplitPayments() {
   if (totalR2 % 1 !== 0) totalR2 = Math.round((totalR2 + 0.01) * 100) / 100;
   const avgRate = (totalR2 > 0 && totalR1 > 0) ? (totalR1 / totalR2) : state.defaultExchangeRate;
 
+  // Money already committed cannot be edited away: ads funded from this
+  // receipt plus money transferred to other customers set the floor for the
+  // new total. Below it, ads/transfers would hold money the receipt no longer
+  // contains.
+  const committedStats = getReceiptUsageStats(state.receipts.find(r => r.id === receiptId));
+  const committedUSD = Math.round(((committedStats.usedUSD || 0) + (committedStats.transferredUSD || 0)) * 100) / 100;
+  if (totalR2 < committedUSD - 0.01) {
+    showNotification(
+      state.language === 'ar' ? 'غير ممكن' : 'Not possible',
+      state.language === 'ar'
+        ? `$${committedUSD.toFixed(2)} من هذا الوصل مستخدمة بالفعل (إعلانات وتحويلات) — لا يمكن خفض الإجمالي إلى $${totalR2.toFixed(2)}. حرِّر المبلغ أولاً (عدِّل/أوقف الإعلانات أو احذف التحويل).`
+        : `$${committedUSD.toFixed(2)} of this receipt is already used (ads + transfers) — the total cannot go down to $${totalR2.toFixed(2)}. Free the money first (edit/stop the ads or delete the transfer).`,
+      'error'
+    );
+    return;
+  }
+
   updateRecord(state.receipts, receiptId, {
     payments,
     amountLocal: totalR1,
@@ -14543,7 +14644,9 @@ function getAdFundingAvailability(ad) {
   const perReceipt = [];
   let totalRemaining = 0;
   [...new Set(ids)].forEach(id => {
-    const receipt = (state.receipts || []).find(r => r && String(r.id) === id);
+    // Skip soft-deleted receipts: a ghost receipt holds no spendable money,
+    // so it must not count as "available" nor be charged by a top-up.
+    const receipt = (state.receipts || []).find(r => r && !r._deleted && String(r.id) === id);
     if (!receipt) return;
     const remaining = Math.max(getReceiptUsageStats(receipt).remainingUSD || 0, 0);
     perReceipt.push({ receipt, remaining });
@@ -14773,10 +14876,13 @@ function toggleRefundAmount(refundType) {
 
 function saveRefund() {
   const adId = state.modalData.id;
+  const ad = state.ads.find(a => a.id === adId) || state.modalData;
   const refundType = document.getElementById('refund-type').value;
-  const refundAmount = parseFloat(document.getElementById('refund-amount').value) || 0;
+  let refundAmount = parseFloat(document.getElementById('refund-amount').value) || 0;
   const refundStatus = document.getElementById('refund-status').value;
-  
+  // A refund can never exceed the ad's amount.
+  refundAmount = Math.min(refundAmount, parseFloat(ad.amountUSD) || 0);
+
   const updates = {
     refundType,
     refundAmount: refundType !== 'None' ? refundAmount : 0,
@@ -14784,7 +14890,27 @@ function saveRefund() {
     status: refundType !== 'None' ? 'Canceled' : state.modalData.status,
     canceledBy: refundType !== 'None' ? state.currentUser?.id : state.modalData.canceledBy
   };
-  
+
+  // The refunded money must actually RETURN in the books. Previously the
+  // refund was only recorded as text: the ad's allocations kept the receipt
+  // fully used (the customer could not fund a replacement ad) and customer
+  // stats kept counting the canceled ad at full spend.
+  if (refundType !== 'None' && refundAmount > 0) {
+    if (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length) {
+      const allocations = ad.receiptAllocations.map(a => ({ ...a }));
+      let refund = refundAmount;
+      for (let i = allocations.length - 1; i >= 0 && refund > 0.001; i--) {
+        const cur = parseFloat(allocations[i].amountUSD) || 0;
+        const back = Math.min(cur, refund);
+        allocations[i].amountUSD = Math.round((cur - back) * 100) / 100;
+        refund = Math.round((refund - back) * 100) / 100;
+      }
+      updates.receiptAllocations = allocations;
+    }
+    // The canceled ad only truly "spent" what was kept after the refund.
+    updates.spentUSD = Math.max(Math.round(((parseFloat(ad.amountUSD) || 0) - refundAmount) * 100) / 100, 0);
+  }
+
   updateRecord(state.ads, adId, updates);
   showNotification(state.language === 'ar' ? 'تم الحفظ' : 'Saved', state.language === 'ar' ? `تم تطبيق الاسترجاع (${trStatus(refundType)})` : `Refund ${refundType} applied`, refundType !== 'None' ? 'warning' : 'success');
   closeModal();
@@ -16020,8 +16146,24 @@ async function _saveReceiptFromModalInner() {
   // Get customer name for logging
   const linkedCustomer = state.customers.find(c => c.id === customerId);
   const customerName = linkedCustomer ? linkedCustomer.name : 'customer';
-  
+
   if (editTarget) {
+    // Money already committed cannot be edited away: ads funded from this
+    // receipt (including delivery-due funding) plus money transferred to
+    // other customers set the floor for the new total. Below it, those
+    // records would hold money the receipt no longer contains.
+    const committedStats = getReceiptUsageStats(editTarget);
+    const committedUSD = Math.round(((committedStats.usedUSD || 0) + (committedStats.transferredUSD || 0)) * 100) / 100;
+    if (totalUSD < committedUSD - 0.01) {
+      showNotification(
+        state.language === 'ar' ? 'غير ممكن' : 'Not possible',
+        state.language === 'ar'
+          ? `$${committedUSD.toFixed(2)} من هذا الوصل مستخدمة بالفعل (إعلانات وتحويلات) — لا يمكن خفض الإجمالي إلى $${totalUSD.toFixed(2)}. حرِّر المبلغ أولاً (عدِّل/أوقف الإعلانات أو احذف التحويل).`
+          : `$${committedUSD.toFixed(2)} of this receipt is already used (ads + transfers) — the total cannot go down to $${totalUSD.toFixed(2)}. Free the money first (edit/stop the ads or delete the transfer).`,
+        'error'
+      );
+      return;
+    }
     // Update existing - Track changes for edit history
     const oldReceipt = editTarget;
     const changes = [];
@@ -16693,7 +16835,9 @@ function selectAdPage(pageId, preserveFunding = false) {
   if (!page) return;
   
   const linkedCustomerIds = page.customerIds || [];
-  const linkedCustomers = state.customers.filter(c => linkedCustomerIds.includes(c.id));
+  // Deleted customers must never be offered (or auto-selected) as the ad's
+  // customer — page.customerIds can still hold ids of customers deleted later.
+  const linkedCustomers = state.customers.filter(c => c && !c._deleted && linkedCustomerIds.includes(c.id));
   
   // Show customer section
   if (customerSection) customerSection.classList.remove('hidden');
@@ -20328,8 +20472,11 @@ async function handleModalSubmit() {
 
         for (const [receiptId, plannedTotal] of totalsByReceipt.entries()) {
           const receipt = state.receipts.find(r => String(r.id) === String(receiptId));
-          if (!receipt) {
-            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'أحد الوصولات المختارة مفقود.' : 'One of the selected receipts is missing.', 'error');
+          // Soft-deleted receipts stay in state.receipts with _deleted=true —
+          // money can NOT be drawn from a deleted receipt (a stale open modal
+          // could still reference one deleted meanwhile on another device).
+          if (!receipt || receipt._deleted) {
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'أحد الوصولات المختارة مفقود أو تم حذفه.' : 'One of the selected receipts is missing or was deleted.', 'error');
             return;
           }
           // Calculate remaining balance (total - used - transferred)
@@ -21130,6 +21277,19 @@ function cleanupAdFundingLinks(receiptId) {
       ad.receiptIds = ad.receiptIds.filter(rid => rid !== receiptId);
       if (ad.receiptIds.length !== before) changed = true;
     }
+    // The stop-ad snapshot too: a later stop-amount edit recomputes the
+    // surviving receipts' shares from this baseline, so a deleted receipt
+    // left inside would dilute the pool and undercharge the survivors.
+    if (ad.stopAllocationBaseline && typeof ad.stopAllocationBaseline === 'object') {
+      ['receipt', 'due', 'merged'].forEach(k => {
+        const arr = ad.stopAllocationBaseline[k];
+        if (Array.isArray(arr)) {
+          const before = arr.length;
+          ad.stopAllocationBaseline[k] = arr.filter(a => String(a?.receiptId || '') !== String(receiptId));
+          if (ad.stopAllocationBaseline[k].length !== before) changed = true;
+        }
+      });
+    }
     if (changed) {
       ad._lastModified = getMonotonicTime();
       markCollectionDirty('ads');
@@ -21144,14 +21304,36 @@ function cleanupAdFundingLinks(receiptId) {
 // If `receipt` is a transferred-in receipt, give the money BACK to the source
 // receipt by removing the paired transfers[] entry (the deduction). Without
 // this, deleting a transferred-in receipt made the money vanish: the target
-// lost it AND the source still showed it as transferred away. Returns the
-// source receipt when money was returned, else null.
+// lost it AND the source still showed it as transferred away.
+// Money the target ALREADY SPENT on ads stays deducted at the source — only
+// the unspent remainder returns (the entry shrinks instead of disappearing).
+// IMPORTANT: callers must run this BEFORE cleanupAdFundingLinks, because the
+// spent amount is read from the allocations that cleanup strips.
+// Returns the source receipt when money was returned, else null.
 function undoTransferIntoReceipt(receipt) {
   if (!receipt || String(receipt.receiptType || '') !== 'TRANSFER_IN') return null;
   const source = state.receipts.find(r => r && !r._deleted && String(r.id) === String(receipt.transferFromReceiptId || ''));
   if (!source || !Array.isArray(source.transfers)) return null;
-  const kept = source.transfers.filter(t => String(t?.toReceiptId || '') !== String(receipt.id));
-  if (kept.length === source.transfers.length) return null;
+  const spentUSD = Math.max(getReceiptUsageStats(receipt).usedUSD || 0, 0);
+  let changed = false;
+  const kept = [];
+  source.transfers.forEach(t => {
+    if (String(t?.toReceiptId || '') !== String(receipt.id)) { kept.push(t); return; }
+    changed = true;
+    if (spentUSD > 0.009) {
+      // Keep the deduction for the spent part only.
+      const rate = (parseFloat(t?.amountUSD) || 0) > 0 && Number.isFinite(parseFloat(t?.amountLocal))
+        ? (parseFloat(t.amountLocal) / parseFloat(t.amountUSD))
+        : (receipt.exchangeRate || 0);
+      kept.push({
+        ...t,
+        amountUSD: Math.round(spentUSD * 100) / 100,
+        amountLocal: Math.round(spentUSD * rate * 100) / 100,
+        note: `${t?.note || ''}${t?.note ? ' — ' : ''}shrunk to spent portion after transfer receipt was deleted`.trim()
+      });
+    }
+  });
+  if (!changed) return null;
   updateRecord(state.receipts, source.id, { transfers: kept });
   return source;
 }
@@ -21210,28 +21392,32 @@ function deleteCustomer(id) {
     }
   }
   if (confirm(warning)) {
-    // Cascade delete: also delete linked receipts and ads
+    // Cascade delete: the customer's ADS first, then their receipts. Deleting
+    // the ads first releases the money they spent, so the transfer undo below
+    // returns the full unspent amount to other customers' source receipts.
+    // deleteRecord (instead of a bare _deleted flag with a fire-and-forget
+    // server call) gives every cascaded record the standard server push with
+    // rollback, error notification and audit log.
+    linkedAds.forEach(ad => {
+      deleteRecord(state.ads, ad.id);
+    });
     linkedReceipts.forEach(receipt => {
       // Same link cleanup deleteReceipt does. Without it, ads of OTHER
       // customers funded by these receipts kept dead allocation rows, money
       // transferred IN from another customer stayed deducted at its source,
       // and money transferred OUT lived on as spendable phantom receipts.
-      cleanupAdFundingLinks(receipt.id);
+      // Undo BEFORE cleanup: the undo reads spent amounts from allocations.
       undoTransferIntoReceipt(receipt);
+      cleanupAdFundingLinks(receipt.id);
       cascadeDeleteOutgoingTransfers(receipt);
-      receipt._deleted = true;
-      receipt._lastModified = getMonotonicTime();
-      markCollectionDirty('receipts');
-      if (isServerModeEnabled()) {
-        apiDeleteEntity('receipts', receipt.id).catch(() => {});
-      }
+      deleteRecord(state.receipts, receipt.id);
     });
-    linkedAds.forEach(ad => {
-      ad._deleted = true;
-      ad._lastModified = getMonotonicTime();
-      markCollectionDirty('ads');
-      if (isServerModeEnabled()) {
-        apiDeleteEntity('ads', ad.id).catch(() => {});
+    // Unlink the customer from pages: page.customerIds kept the ghost id, so
+    // the Pages view still showed the deleted customer as owner and every
+    // page save re-persisted the dangling link.
+    getVisibleRecords(state.pages).forEach(page => {
+      if (Array.isArray(page.customerIds) && page.customerIds.includes(id)) {
+        updateRecord(state.pages, page.id, { customerIds: page.customerIds.filter(cid => cid !== id) });
       }
     });
     deleteRecord(state.customers, id);
@@ -21253,7 +21439,18 @@ function deletePage(id) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الصفحات' : 'You do not have permission to delete pages', 'error');
     return;
   }
-  if (confirm(state.language === 'ar' ? 'هل تريد حذف هذه الصفحة؟' : 'Delete this page?')) {
+  const isArPg = state.language === 'ar';
+  let pageWarning = isArPg ? 'هل تريد حذف هذه الصفحة؟' : 'Delete this page?';
+  // Ads keep pointing at the deleted page's id for history. Recreating a page
+  // with the same name makes a NEW id, so those ads would not appear under it
+  // — the user must know this before deleting.
+  const pageAdsCount = state.ads.filter(a => a && !a._deleted && a.recordType !== 'receipt' && String(a.pageId || '') === String(id)).length;
+  if (pageAdsCount > 0) {
+    pageWarning += isArPg
+      ? `\n\n⚠️ ${pageAdsCount} إعلان(ات) تابعة لهذه الصفحة. ستبقى الإعلانات وسجلها، لكن صفحة جديدة بنفس الاسم لن تشملها.`
+      : `\n\n⚠️ ${pageAdsCount} ad(s) belong to this page. The ads and their history stay, but a NEW page with the same name will not include them.`;
+  }
+  if (confirm(pageWarning)) {
     deleteRecord(state.pages, id);
     showNotification(state.language === 'ar' ? 'تم الحذف' : 'Deleted', state.language === 'ar' ? 'تم حذف الصفحة' : 'Page deleted', 'success');
     render();
@@ -21309,8 +21506,10 @@ function deleteReceipt(id) {
   if (confirm(warning)) {
     // Clean up every record that references this receipt (shared helpers,
     // also used by deleteCustomer so both delete paths behave the same).
-    cleanupAdFundingLinks(id);
+    // Order matters: the transfer undo reads how much of this receipt was
+    // SPENT from its allocations, so it must run before cleanup strips them.
     const returnedTo = undoTransferIntoReceipt(receipt);
+    cleanupAdFundingLinks(id);
     const cascadeCount = cascadeDeleteOutgoingTransfers(receipt);
     deleteRecord(state.receipts, id);
     let detail = isArDel ? 'تم حذف الوصل' : 'Receipt deleted';
