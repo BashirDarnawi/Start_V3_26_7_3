@@ -4684,6 +4684,18 @@ function getVisibleRecords(array) {
   return array.filter(item => item && !item._deleted);
 }
 
+// Safe CSV cell for EVERY user-derived field in any export. Two problems this
+// solves: (1) a value containing a comma, quote or newline used to shift every
+// later column (broken/misaligned CSV); (2) a value starting with = + - @ (or a
+// control char) executes as a FORMULA when the file is opened in Excel/Sheets
+// (CSV injection). We always quote + double internal quotes, and prefix a
+// dangerous leading char with an apostrophe so it is treated as text.
+function csvCell(value) {
+  let s = (value === null || value === undefined) ? '' : String(value);
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return '"' + s.replace(/"/g, '""') + '"';
+}
+
 function getRecordType(record) {
   if (record.email) return 'User';
   if (record.platform) return 'Customer';
@@ -5681,8 +5693,15 @@ async function apiLoadCollectionAll(collection) {
     const limit = SERVER_API.pageSize || 300;
     const timeoutMs = getCollectionTimeout(collection);
     let pageCount = 0;
-    const maxPages = 50; // Safety limit to prevent infinite loops
+    // Safety cap against infinite loops. Must be high enough to load the
+    // designed maximum collection size (STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION,
+    // 100k) — the old flat 50 pages capped every collection at 50×300 = 15,000
+    // records and silently returned only the NEWEST 15k as if complete, dropping
+    // the oldest from view and understating every total.
+    const _maxRecords = (typeof STORAGE_CONFIG !== 'undefined' && STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION) || 100000;
+    const maxPages = Math.ceil(_maxRecords / limit) + 5;
     let partial = false;
+    let lastPageFull = false;
 
     while (pageCount < maxPages) {
       pageCount++;
@@ -5698,13 +5717,14 @@ async function apiLoadCollectionAll(collection) {
           300 // 300ms base delay (faster retry)
         );
 
-        if (!Array.isArray(items) || items.length === 0) break;
+        if (!Array.isArray(items) || items.length === 0) { lastPageFull = false; break; }
 
         for (const entity of items) {
           if (entity && entity.data) all.push(entity.data);
         }
 
-        if (items.length < limit) break;
+        if (items.length < limit) { lastPageFull = false; break; }
+        lastPageFull = true;
         offset += limit;
       } catch (pageError) {
         // Partial load: only accept it if it is not WORSE than what the app
@@ -5719,6 +5739,14 @@ async function apiLoadCollectionAll(collection) {
         }
         throw pageError;
       }
+    }
+
+    // If we stopped because we hit the page cap while the last page was still
+    // full, the server has MORE records than we fetched — do not treat this as
+    // an authoritative complete load (don't cache), and warn loudly.
+    if (lastPageFull && pageCount >= maxPages) {
+      console.warn(`[apiLoadCollectionAll] ${collection}: hit ${maxPages}-page cap (${all.length} records) with a full final page — collection exceeds the supported maximum and was truncated.`);
+      partial = true;
     }
 
     // Update cache only for complete loads — never persist a truncated result.
@@ -5879,7 +5907,7 @@ async function serverLoadAllData() {
   // Load collections in parallel for faster initial load
   // Use higher concurrency for initial load, but still limit to avoid overwhelming server
   const results = {};
-  const collections = ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory', 'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings'];
+  const collections = ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory', 'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings', 'walletTransactions', 'serviceSubscriptions'];
   const CONCURRENCY = SERVER_API.initialLoadConcurrency || 3;
 
   // Show loading progress
@@ -6071,7 +6099,9 @@ function computeServerCursorFromState() {
     _maxLastModifiedFromArray(state.clothesProducts),
     _maxLastModifiedFromArray(state.clothesShipments),
     _maxLastModifiedFromArray(state.clothesOrders),
-    _maxLastModifiedFromArray(state.clothesSettings)
+    _maxLastModifiedFromArray(state.clothesSettings),
+    _maxLastModifiedFromArray(state.walletTransactions),
+    _maxLastModifiedFromArray(state.serviceSubscriptions)
   );
 }
 
@@ -6243,7 +6273,7 @@ async function serverLiveSyncOnce() {
     }
   };
 
-  const [adsDelta, receiptsDelta, customersDelta, pagesDelta, exhDelta, clothesProductsDelta, clothesShipmentsDelta, clothesOrdersDelta, clothesSettingsDelta] = await Promise.all([
+  const [adsDelta, receiptsDelta, customersDelta, pagesDelta, exhDelta, clothesProductsDelta, clothesShipmentsDelta, clothesOrdersDelta, clothesSettingsDelta, walletTxDelta, subsDelta] = await Promise.all([
     safeSince('ads'),
     safeSince('receipts'),
     safeSince('customers'),
@@ -6252,7 +6282,12 @@ async function serverLiveSyncOnce() {
     safeSince('clothesProducts'),
     safeSince('clothesShipments'),
     safeSince('clothesOrders'),
-    safeSince('clothesSettings')
+    safeSince('clothesSettings'),
+    // Wallet ledger + subscriptions were written to the server but never
+    // pulled back, so balances reset after logout and never synced between
+    // devices. They are append-only, so delta sync is safe.
+    safeSince('walletTransactions'),
+    safeSince('serviceSubscriptions')
   ]);
 
   let changed = false;
@@ -6265,6 +6300,8 @@ async function serverLiveSyncOnce() {
   changed = applyServerDelta('clothesShipments', clothesShipmentsDelta) || changed;
   changed = applyServerDelta('clothesOrders', clothesOrdersDelta) || changed;
   changed = applyServerDelta('clothesSettings', clothesSettingsDelta) || changed;
+  changed = applyServerDelta('walletTransactions', walletTxDelta) || changed;
+  changed = applyServerDelta('serviceSubscriptions', subsDelta) || changed;
   
   // Ensure data migration on live sync (only if data changed, debounced to not block render)
   if (changed) {
@@ -6284,7 +6321,9 @@ async function serverLiveSyncOnce() {
     _maxLastModifiedFromArray(clothesProductsDelta),
     _maxLastModifiedFromArray(clothesShipmentsDelta),
     _maxLastModifiedFromArray(clothesOrdersDelta),
-    _maxLastModifiedFromArray(clothesSettingsDelta)
+    _maxLastModifiedFromArray(clothesSettingsDelta),
+    _maxLastModifiedFromArray(walletTxDelta),
+    _maxLastModifiedFromArray(subsDelta)
   );
   // Deltas come straight from the server, so maxDelta is a trustworthy server
   // timestamp — record it as the watermark for future cursor seeds.
@@ -8633,11 +8672,14 @@ function renderAnalyticsView() {
   const now = Date.now();
   const last7 = now - 7 * 24 * 60 * 60 * 1000;
 
-  // Calculate ad revenue - separate paid vs pending/unpaid for clarity
+  // Calculate ad revenue - separate paid vs pending/unpaid for clarity.
+  // Uses the SAME status-aware spend rule as the customer cards
+  // (getAdSpendUSD) so a Stopped ad that spent $100 counts as $100, not its
+  // full $500, and the two screens can't contradict each other.
   const paidAds = ads.filter(ad => ad.isPaid === true || ad.paymentStatus === 'paid');
   const unpaidAds = ads.filter(ad => ad.isPaid !== true && ad.paymentStatus !== 'paid');
-  const paidAdRevenue = paidAds.reduce((sum, ad) => sum + (ad.amountUSD || 0), 0);
-  const unpaidAdRevenue = unpaidAds.reduce((sum, ad) => sum + (ad.amountUSD || 0), 0);
+  const paidAdRevenue = paidAds.reduce((sum, ad) => sum + getAdSpendUSD(ad), 0);
+  const unpaidAdRevenue = unpaidAds.reduce((sum, ad) => sum + getAdSpendUSD(ad), 0);
   const totalAdRevenue = paidAdRevenue + unpaidAdRevenue;  // Keep for backwards compatibility
 
   // MONEY-MATH: TRANSFER_IN receipts are money MOVED between customers, not
@@ -8676,9 +8718,13 @@ function renderAnalyticsView() {
   const notCollectedUSD = notCollectedReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
   const collectionRate = revenueReceipts.length > 0 ? ((collectedReceipts.length / revenueReceipts.length) * 100).toFixed(1) : 0;
 
+  // Delivery tracking. The terminal "done" status is 'Delivered' (there is no
+  // 'completed' status in DELIVERY_STATUSES), so the old check counted 0
+  // completed forever and lumped Delivered + Canceled into "active". Active =
+  // still in the pipeline; Completed = Delivered.
   const deliveryAds = ads.filter(a => a.deliveryStatus && a.deliveryStatus !== 'Office');
-  const activeDeliveries = deliveryAds.filter(a => (a.deliveryStatus || '').toLowerCase() !== 'completed').length;
-  const completedDeliveries = deliveryAds.filter(a => (a.deliveryStatus || '').toLowerCase() === 'completed').length;
+  const activeDeliveries = deliveryAds.filter(a => a.deliveryStatus === 'Needs Delivery' || a.deliveryStatus === 'In Progress').length;
+  const completedDeliveries = deliveryAds.filter(a => a.deliveryStatus === 'Delivered').length;
 
   const adsLast7 = ads.filter(a => new Date(a.createdAt || 0).getTime() >= last7).length;
   const receiptsLast7 = revenueReceipts.filter(r => new Date(r.createdAt || 0).getTime() >= last7).length;
@@ -8687,7 +8733,9 @@ function renderAnalyticsView() {
   const spendByCustomer = {};
   ads.forEach(ad => {
     if (!ad.customerId) return;
-    spendByCustomer[ad.customerId] = (spendByCustomer[ad.customerId] || 0) + (ad.amountUSD || 0);
+    // Status-aware spend (matches the customer card's "Spent") so the same
+    // customer isn't ranked by a different number here than on their card.
+    spendByCustomer[ad.customerId] = (spendByCustomer[ad.customerId] || 0) + getAdSpendUSD(ad);
   });
   const topCustomers = Object.entries(spendByCustomer)
     .map(([customerId, spend]) => ({
@@ -9163,14 +9211,13 @@ function renderCustomersView() {
       totalDebts += Math.abs(stats.balance);
     }
   });
-  // MONEY-MATH: per-customer stats count TRANSFER_IN receipts (correct for the
-  // customer's own credit ledger), but summed BUSINESS-WIDE that would count
-  // every transferred dinar twice — once in the source customer's receipt and
-  // once in the recipient's transfer receipt. Remove the transfer-in portion.
-  totalRevenue -= getVisibleRecords(state.receipts)
-    .filter(r => isTransferInReceipt(r) && (String(r.status || '') === 'Paid' || r.isPaid === true))
-    .reduce((s, r) => s + (r.amountLocal || 0), 0);
-  
+  // MONEY-MATH: getCustomerStats already subtracts each source customer's
+  // transferred-OUT money from its totalPaid, and the recipient's TRANSFER_IN
+  // receipt adds the same amount back — so summed business-wide the transfers
+  // cancel out and this total already equals the real cash received. (An
+  // earlier extra subtraction of transfer-ins here double-counted every
+  // transfer and understated revenue.)
+
   return `
     <div class="space-y-6 animate-fade-in-up">
       <div class="flex justify-between items-center">
@@ -10483,7 +10530,7 @@ function exportDeliveryReport() {
     const collected = Number(r.amountCollectedFromCustomer ?? (String(r.deliveryStatus || '') === 'Delivered' ? (r.amountLocal || 0) : 0)) || 0;
     const remaining = Number(r.remainingDue ?? Math.max(0, debt - collected)) || 0;
     const received = (typeof r.isReceivedInOffice === 'boolean') ? r.isReceivedInOffice : !!r.officeHandover;
-    csv += `"${customer?.name || 'Unknown'}","${r.phoneNumber || customer?.phones?.[0] || ''}",${debt},${collected},${remaining},"${r.deliveryStatus || ''}","${driver?.name || ''}",${received ? 'Yes' : 'No'},"${formatDateShort(r.createdAt || r.date)}"\n`;
+    csv += `${csvCell(customer?.name || 'Unknown')},${csvCell(r.phoneNumber || customer?.phones?.[0] || '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(formatDateShort(r.createdAt || r.date))}\n`;
   });
   
   // Prepend a UTF-8 BOM so Excel reads Arabic customer/driver names correctly
@@ -11465,17 +11512,22 @@ function renderAuditView() {
     // User filter
     if (state.auditUserFilter !== 'all' && log.userId !== state.auditUserFilter) return false;
     
-    // Date range filter
+    // Date range filter. `new Date('2026-07-12')` parses as UTC midnight, which
+    // is a different LOCAL day on any non-UTC device, so both boundaries used
+    // to hide or include the wrong entries. Build each boundary from the Y/M/D
+    // components as a LOCAL time so a whole calendar day is matched exactly,
+    // regardless of the device's timezone.
+    const _localDayStart = (ymd) => {
+      const [y, m, d] = String(ymd).split('-').map(Number);
+      return new Date(y, (m || 1) - 1, d || 1, 0, 0, 0, 0);
+    };
     if (state.auditDateFrom) {
-      const logDate = new Date(log.date);
-      const fromDate = new Date(state.auditDateFrom);
-      if (logDate < fromDate) return false;
+      if (new Date(log.date) < _localDayStart(state.auditDateFrom)) return false;
     }
     if (state.auditDateTo) {
-      const logDate = new Date(log.date);
-      const toDate = new Date(state.auditDateTo);
+      const toDate = _localDayStart(state.auditDateTo);
       toDate.setHours(23, 59, 59, 999);
-      if (logDate > toDate) return false;
+      if (new Date(log.date) > toDate) return false;
     }
     
     return true;
@@ -11937,12 +11989,15 @@ function exportAuditLogs(format) {
         // with the stored Gregorian timestamps.
         date.toLocaleDateString('en-CA'),                       // YYYY-MM-DD
         date.toLocaleTimeString('en-GB', { hour12: false }),    // HH:MM:SS
-        log.userName || user?.name || 'System',
-        log.action,
-        log.category || 'general',
-        log.severity || 'info',
-        `"${(log.description || '').replace(/"/g, '""')}"`,
-        log.resourceId || ''
+        // Every free-text cell must be escaped — the User name (free text, may
+        // contain a comma like "Ahmad, Ltd") used to shift all later columns
+        // because only Description was quoted.
+        csvCell(log.userName || user?.name || 'System'),
+        csvCell(log.action),
+        csvCell(log.category || 'general'),
+        csvCell(log.severity || 'info'),
+        csvCell(log.description || ''),
+        csvCell(log.resourceId || '')
       ].join(',');
     });
     
@@ -12089,12 +12144,15 @@ async function cleanupAuditLogs() {
       'success'
     );
     
-    // Refresh audit logs from server
+    // Refresh from server. The old code called syncFromServer(), which does
+    // not exist, so it threw a ReferenceError that the catch turned into a
+    // false "Cleanup failed" toast AFTER the cleanup had actually succeeded —
+    // and the view never re-rendered. serverLiveSyncOnce is the real sync fn.
     if (isServerModeEnabled()) {
-      await syncFromServer();
-      render();
-      lucide.createIcons();
+      await serverLiveSyncOnce();
     }
+    render();
+    lucide.createIcons();
   } catch (error) {
     showNotification(isAr ? 'خطأ' : 'Error', (isAr ? 'فشل التنظيف: ' : 'Cleanup failed: ') + error.message, 'error');
   }
@@ -12443,6 +12501,21 @@ function buildCustomerStatsIndex() {
   return { adsByCustomer, receiptsByCustomer, pagesByCustomer };
 }
 
+// Status-aware USD "spent" for a single ad — the ONE definition of how much
+// an ad counts as spent, so the customer cards and the analytics panels can
+// never disagree (they used to: analytics counted full amountUSD for every
+// status, so the same customer's "Spend" and "Spent" showed different numbers,
+// and a Stopped ad that spent $100 was counted at its full $500).
+function getAdSpendUSD(ad) {
+  if (!ad) return 0;
+  if (ad.status === 'Stopped' && ad.spentUSD !== undefined) return parseFloat(ad.spentUSD) || 0;
+  if (['Completed', 'Canceled', 'Lost'].includes(ad.status)) {
+    return ad.spentUSD !== undefined ? (parseFloat(ad.spentUSD) || 0) : (parseFloat(ad.amountUSD) || 0);
+  }
+  if (['Pending', 'Paused'].includes(ad.status)) return 0;
+  return parseFloat(ad.amountUSD) || 0;
+}
+
 function getCustomerStats(customerId, statsIndex = null) {
   const customerAds = statsIndex
     ? (statsIndex.adsByCustomer.get(customerId) || [])
@@ -12478,29 +12551,24 @@ function getCustomerStats(customerId, statsIndex = null) {
   const totalPaidLYD = paidReceipts.reduce((sum, receipt) => sum + (receipt.amountLocal || 0), 0) - transferredOutLYD;
   const totalPaidUSD = paidReceipts.reduce((sum, receipt) => sum + (receipt.amountUSD || 0), 0) - transferredOutUSD;
   
-  // Calculate total spent USD from ads
-  // For stopped ads, use spentUSD; for others, use amountUSD (the planned/active amount)
-  const totalSpentUSD = customerAds.reduce((sum, ad) => {
-    if (ad.status === 'Stopped' && ad.spentUSD !== undefined) {
-      return sum + ad.spentUSD;
-    }
-    // For active/completed ads, count the full amount as spent
-    if (['Completed', 'Canceled', 'Lost'].includes(ad.status)) {
-      return sum + (ad.spentUSD !== undefined ? ad.spentUSD : (ad.amountUSD || 0));
-    }
-    // For pending/paused ads, don't count as spent yet
-    if (['Pending', 'Paused'].includes(ad.status)) {
-      return sum;
-    }
-    return sum + (ad.amountUSD || 0);
-  }, 0);
-  
+  // Calculate total spent USD from ads (status-aware, shared with analytics)
+  const totalSpentUSD = customerAds.reduce((sum, ad) => sum + getAdSpendUSD(ad), 0);
+
   // Calculate spent LYD proportionally based on USD spent
   // This ensures spentLYD cannot exceed paidLYD
   let totalSpentLYD = 0;
   if (totalPaidUSD > 0) {
     // Proportional calculation: (spentUSD / paidUSD) * paidLYD
     totalSpentLYD = (totalSpentUSD / totalPaidUSD) * totalPaidLYD;
+  } else if (totalSpentUSD > 0) {
+    // No paid receipts but real ad spend = pure debt. Derive the LYD figure
+    // from each ad's OWN exchange rate so the LYD balance reflects the debt
+    // instead of showing a misleading 0 (which styled the card as positive
+    // and made the "has debt" filter miss a genuine debtor).
+    totalSpentLYD = customerAds.reduce((sum, ad) => {
+      const rate = parseFloat(ad.exchangeRate) || state.defaultExchangeRate || 0;
+      return sum + getAdSpendUSD(ad) * rate;
+    }, 0);
   }
   
   // Calculate balance (paid - spent)
@@ -14599,7 +14667,10 @@ function saveSplitPayments() {
   paymentItems.forEach(item => {
     const method = item.querySelector('.split-method').value;
     const amount = parseFloat(item.querySelector('.split-amount').value) || 0;
-    const rate = parseFloat(item.querySelector('.split-rate').value) || state.defaultExchangeRate;
+    // Rate 1 reads identically to the live preview (`|| 0`) — see the note in
+    // saveReceiptFromModal. The old `|| defaultExchangeRate` fallback squared
+    // the stored exchangeRate for zero-rate methods on a no-op Save.
+    const rate = parseFloat(item.querySelector('.split-rate').value) || 0;
     // 0/blank Rate 2 means "no USD ads credit" (matches saveReceiptFromModal),
     // NOT "fall back to the LYD rate" — the old fallback fabricated ads credit
     // out of a zero-rate receipt on a no-op Save.
@@ -14948,8 +15019,10 @@ function saveRefund() {
   const refundType = document.getElementById('refund-type').value;
   let refundAmount = parseFloat(document.getElementById('refund-amount').value) || 0;
   const refundStatus = document.getElementById('refund-status').value;
-  // A refund can never exceed the ad's amount.
-  refundAmount = Math.min(refundAmount, parseFloat(ad.amountUSD) || 0);
+  const amountUSD = parseFloat(ad.amountUSD) || 0;
+  // A refund is between 0 and the ad's amount.
+  refundAmount = Math.min(Math.max(refundAmount, 0), amountUSD);
+  if (refundType === 'None') refundAmount = 0;
 
   const updates = {
     refundType,
@@ -14959,13 +15032,29 @@ function saveRefund() {
     canceledBy: refundType !== 'None' ? state.currentUser?.id : state.modalData.canceledBy
   };
 
-  // The refunded money must actually RETURN in the books. Previously the
-  // refund was only recorded as text: the ad's allocations kept the receipt
-  // fully used (the customer could not fund a replacement ad) and customer
-  // stats kept counting the canceled ad at full spend.
-  if (refundType !== 'None' && refundAmount > 0) {
-    if (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length) {
-      const allocations = ad.receiptAllocations.map(a => ({ ...a }));
+  // The refunded money must actually RETURN in the books, and this must be
+  // IDEMPOTENT: re-opening and re-saving a refund (or changing its amount, or
+  // flipping Pending→Refunded) must reconcile to the SAME end-state — never
+  // subtract again from the already-reduced allocations. We snapshot the
+  // pre-refund allocations ONCE (refundAllocationBaseline) and always rebuild
+  // the target from that untouched baseline, mirroring confirmStopAd.
+  // Previously each re-save re-subtracted refundAmount, fabricating spendable
+  // receipt balance the customer never got back.
+  if (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length) {
+    if (refundType === 'None') {
+      // Undoing the refund: restore the full allocations from the baseline
+      // and clear it so a future refund re-snapshots fresh.
+      if (Array.isArray(ad.refundAllocationBaseline)) {
+        updates.receiptAllocations = ad.refundAllocationBaseline.map(a => ({ ...a }));
+        updates.refundAllocationBaseline = null;
+      }
+    } else {
+      let baseline = Array.isArray(ad.refundAllocationBaseline) ? ad.refundAllocationBaseline : null;
+      if (!baseline) {
+        baseline = ad.receiptAllocations.map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) || 0 }));
+        updates.refundAllocationBaseline = baseline;
+      }
+      const allocations = baseline.map(a => ({ ...a }));
       let refund = refundAmount;
       for (let i = allocations.length - 1; i >= 0 && refund > 0.001; i--) {
         const cur = parseFloat(allocations[i].amountUSD) || 0;
@@ -14975,9 +15064,12 @@ function saveRefund() {
       }
       updates.receiptAllocations = allocations;
     }
-    // The canceled ad only truly "spent" what was kept after the refund.
-    updates.spentUSD = Math.max(Math.round(((parseFloat(ad.amountUSD) || 0) - refundAmount) * 100) / 100, 0);
   }
+  // Derived from the ad amount (not compounding). Undoing (None) restores the
+  // full spend by clearing spentUSD.
+  updates.spentUSD = refundType !== 'None'
+    ? Math.max(Math.round((amountUSD - refundAmount) * 100) / 100, 0)
+    : undefined;
 
   updateRecord(state.ads, adId, updates);
   showNotification(state.language === 'ar' ? 'تم الحفظ' : 'Saved', state.language === 'ar' ? `تم تطبيق الاسترجاع (${trStatus(refundType)})` : `Refund ${refundType} applied`, refundType !== 'None' ? 'warning' : 'success');
@@ -15257,7 +15349,10 @@ function getReceiptPaymentData() {
     payments.push({
       method: item.querySelector('.payment-method').value,
       amount: parseFloat(item.querySelector('.payment-amount').value) || 0,
-      rate: parseFloat(item.querySelector('.payment-rate1').value) || state.defaultExchangeRate,
+      // Read Rate 1 as the preview does (`|| 0`) so a zero-rate method's
+      // auto-filled 0.00 is honored instead of being replaced by the default
+      // rate (which squared the stored exchange rate). See saveReceiptFromModal.
+      rate: parseFloat(item.querySelector('.payment-rate1').value) || 0,
       rate2: rate2Value !== '' && rate2Value !== null ? parseFloat(rate2Value) : state.defaultExchangeRate,
       collectionType: item.querySelector('.collection-type').value,
       deliveryPersonId: item.querySelector('.delivery-person')?.value || ''
@@ -15913,7 +16008,13 @@ async function _saveReceiptFromModalInner() {
   paymentItems.forEach(item => {
     const method = item.querySelector('.payment-method').value;
     const amount = parseFloat(item.querySelector('.payment-amount').value) || 0;
-    const rate = parseFloat(item.querySelector('.payment-rate1').value) || state.defaultExchangeRate;
+    // Rate 1 MUST read identically to the live preview (updateReceiptTotals /
+    // getPaymentTotalsFromDom both use `|| 0`). The old `|| defaultExchangeRate`
+    // fallback fired on the legit 0.00 that zero-rate methods (Sadad, Bank
+    // Transfer LYD, LTT…) auto-fill, so the saved receipt got amountLocal
+    // multiplied by the default rate and a SQUARED exchangeRate — "what you
+    // saw before saving" was not what got saved.
+    const rate = parseFloat(item.querySelector('.payment-rate1').value) || 0;
     const rate2 = parseFloat(item.querySelector('.payment-rate2').value) || 0;
     const collectionType = item.querySelector('.collection-type').value;
     const deliveryPersonSelect = item.querySelector('.delivery-person');
@@ -20921,7 +21022,29 @@ async function handleModalSubmit() {
         );
         return;
       }
-      
+
+      // Email must be unique. In server mode the DB enforces this (returns 409),
+      // but in local mode nothing did — a duplicate email meant login always
+      // resolved to the FIRST matching user, permanently locking the other user
+      // out of their own account. Reject a duplicate against any other
+      // non-deleted user (excluding the one being edited).
+      {
+        const _editingUserId = state.modalData?.id;
+        const dup = (state.users || []).some(u =>
+          u && !u._deleted &&
+          String(u.id) !== String(_editingUserId || '') &&
+          String(u.email || '').toLowerCase() === userEmail
+        );
+        if (dup) {
+          showNotification(
+            state.language === 'ar' ? 'خطأ في الإدخال' : 'Validation Error',
+            state.language === 'ar' ? 'هذا البريد الإلكتروني مستخدم بالفعل' : 'This email is already in use',
+            'error'
+          );
+          return;
+        }
+      }
+
       // Get default permissions based on role
       const getDefaultPermissions = (role) => {
         switch (role) {
@@ -22016,7 +22139,10 @@ function renderClothesDashboardTab() {
 // ------------------------------------------
 
 function _clothesCsvCell(v) {
-  return `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+  // Delegate to the shared escaper so clothes exports also get the
+  // formula-injection guard (a product name / customer note starting with
+  // = + - @ used to execute as a spreadsheet formula on open).
+  return csvCell(v);
 }
 
 function _clothesDownloadCsv(rows, filenameBase) {
@@ -22768,6 +22894,38 @@ function applyClothesShipmentStockDelta(shipment, sign) {
   }
 }
 
+// Which of a shipment's lines can NOT be fully removed from stock because the
+// pieces were already sold (current variant stock < the shipment's quantity).
+// Aggregates per product+variant so multiple lines don't mis-report.
+function _clothesShipmentUnreceiveShortfall(shipment) {
+  const need = new Map(); // pid||color||size -> {productId, color, size, qty}
+  (Array.isArray(shipment?.lines) ? shipment.lines : []).forEach(line => {
+    const color = String(line?.color || '').trim();
+    const size = String(line?.size || '').trim();
+    const key = `${line?.productId || ''}||${color.toLowerCase()}||${size.toLowerCase()}`;
+    const prev = need.get(key) || { productId: line?.productId || '', color, size, qty: 0 };
+    prev.qty += Math.max(0, Math.floor(Number(line?.qty) || 0));
+    need.set(key, prev);
+  });
+  const out = [];
+  for (const { productId, color, size, qty } of need.values()) {
+    if (qty === 0) continue;
+    const product = (state.clothesProducts || []).find(p => p && p.id === productId);
+    const variants = Array.isArray(product?.variants) ? product.variants : [];
+    const match = variants.find(v =>
+      String(v?.color || '').trim().toLowerCase() === color.toLowerCase() &&
+      String(v?.size || '').trim().toLowerCase() === size.toLowerCase()
+    );
+    const available = match ? Math.max(0, Math.floor(Number(match.qty) || 0)) : 0;
+    if (available < qty) {
+      const variant = [color, size].filter(Boolean).join('/');
+      const name = product ? String(product.name || '') : clothesProductNameById(productId);
+      out.push(`${name}${variant ? ' ' + variant : ''}: ${clothesIsAr() ? 'المتوفر' : 'in stock'} ${available}, ${clothesIsAr() ? 'يلزم إرجاع' : 'need to remove'} ${qty}`);
+    }
+  }
+  return out;
+}
+
 function setClothesShipmentStatus(shipmentId, newStatus) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
@@ -22785,6 +22943,23 @@ function setClothesShipmentStatus(shipmentId, newStatus) {
     updates.stockApplied = true;
     updates.receivedAt = new Date().toISOString();
   } else if (shipment.status === 'Received' && newStatus !== 'Received' && shipment.stockApplied) {
+    // Un-receiving removes this shipment's pieces from stock. If some of those
+    // pieces were already SOLD, the removal would floor at zero and silently
+    // under-remove — and a later order cancel would then restore full
+    // quantities, inventing phantom stock. Block it: the sale must be reversed
+    // first so the pieces are physically back before the shipment is undone.
+    const short = _clothesShipmentUnreceiveShortfall(shipment);
+    if (short.length) {
+      showNotification(
+        isAr ? 'غير ممكن' : 'Not allowed',
+        (isAr
+          ? 'لا يمكن إرجاع هذه الشحنة لأن بعض قطعها بيعت بالفعل. ألغِ/أرجِع الطلبات التي باعتها أولاً:\n\n'
+          : 'Cannot un-receive: some of its pieces are already sold. Cancel/return the orders that sold them first:\n\n') + short.join('\n'),
+        'error'
+      );
+      updateClothesShipmentsFiltered();
+      return;
+    }
     const ok = confirm(isAr
       ? 'إرجاع الشحنة إلى حالة سابقة؟ سيتم خصم كمياتها من المخزون مرة أخرى.'
       : 'Move this shipment back? Its quantities will be REMOVED from stock again.');
@@ -24153,8 +24328,19 @@ function printClothesOrderSlip(orderId) {
 
 // Checks stock for the requested lines; returns a human list of shortages.
 function getClothesOrderStockShortages(lines) {
-  const shortages = [];
+  // Aggregate requested quantity per product+variant BEFORE comparing to
+  // stock. Two lines for the same Red/M each ≤ stock individually still
+  // oversell when their sum exceeds stock — the deduction is cumulative, so
+  // the check must be too.
+  const requestedByKey = new Map();
   for (const line of lines) {
+    const key = `${line.productId}||${String(line.color || '').trim().toLowerCase()}||${String(line.size || '').trim().toLowerCase()}`;
+    const prev = requestedByKey.get(key) || { line, qty: 0 };
+    prev.qty += Math.max(0, Math.floor(Number(line.qty) || 0));
+    requestedByKey.set(key, prev);
+  }
+  const shortages = [];
+  for (const { line, qty } of requestedByKey.values()) {
     const product = getVisibleClothesProducts().find(p => p.id === line.productId);
     if (!product) continue;
     const variants = Array.isArray(product.variants) ? product.variants : [];
@@ -24163,9 +24349,9 @@ function getClothesOrderStockShortages(lines) {
       String(v?.size || '').trim().toLowerCase() === String(line.size || '').trim().toLowerCase()
     );
     const available = match ? Math.max(0, Math.floor(Number(match.qty) || 0)) : 0;
-    if (line.qty > available) {
+    if (qty > available) {
       const variant = [line.color, line.size].filter(Boolean).join('/');
-      shortages.push(`${product.name}${variant ? ' ' + variant : ''}: ${available} ${clothesIsAr() ? 'متوفر' : 'available'}, ${line.qty} ${clothesIsAr() ? 'مطلوب' : 'requested'}`);
+      shortages.push(`${product.name}${variant ? ' ' + variant : ''}: ${available} ${clothesIsAr() ? 'متوفر' : 'available'}, ${qty} ${clothesIsAr() ? 'مطلوب' : 'requested'}`);
     }
   }
   return shortages;
@@ -24196,20 +24382,23 @@ async function saveClothesOrderFromModal() {
     const product = getVisibleClothesProducts().find(p => p.id === productId)
       // Deleted products keep their historical cost for the snapshot.
       || (state.clothesProducts || []).find(p => p && p.id === productId);
-    // Cost snapshot: profit stays correct even if the product's cost price
-    // changes later. Re-snapshotted on every save of this order — but when
-    // the product no longer exists at all, KEEP the line's previous snapshot
-    // instead of writing 0 (a 0 cost silently inflated profit numbers).
+    // Cost snapshot: FROZEN at sale time so profit stays correct even if the
+    // product's cost price changes later. An existing line already carries its
+    // snapshot — keep it, so editing an order for an unrelated reason (e.g.
+    // fixing a phone number) never silently rewrites historical profit. Only a
+    // newly-added line takes the current product cost. (A line whose product
+    // was deleted also keeps its snapshot via the same branch.)
     const prevSnap = Number(l?.costUSDAtSale);
+    const hasPrevSnap = Number.isFinite(prevSnap);
     lines.push({
       productId,
       color: String(l?.color || '').trim(),
       size: String(l?.size || '').trim(),
       qty,
       priceLYD: clothesParseMoney(l?.priceLYD),
-      costUSDAtSale: product
-        ? Math.round(((Number(product.costUSD) || 0)) * 100) / 100
-        : (Number.isFinite(prevSnap) ? prevSnap : 0)
+      costUSDAtSale: hasPrevSnap
+        ? Math.round(prevSnap * 100) / 100
+        : (product ? Math.round(((Number(product.costUSD) || 0)) * 100) / 100 : 0)
     });
   }
   if (lines.length === 0) {

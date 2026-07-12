@@ -517,8 +517,15 @@ async function apiLoadCollectionAll(collection) {
     const limit = SERVER_API.pageSize || 300;
     const timeoutMs = getCollectionTimeout(collection);
     let pageCount = 0;
-    const maxPages = 50; // Safety limit to prevent infinite loops
+    // Safety cap against infinite loops. Must be high enough to load the
+    // designed maximum collection size (STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION,
+    // 100k) — the old flat 50 pages capped every collection at 50×300 = 15,000
+    // records and silently returned only the NEWEST 15k as if complete, dropping
+    // the oldest from view and understating every total.
+    const _maxRecords = (typeof STORAGE_CONFIG !== 'undefined' && STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION) || 100000;
+    const maxPages = Math.ceil(_maxRecords / limit) + 5;
     let partial = false;
+    let lastPageFull = false;
 
     while (pageCount < maxPages) {
       pageCount++;
@@ -534,13 +541,14 @@ async function apiLoadCollectionAll(collection) {
           300 // 300ms base delay (faster retry)
         );
 
-        if (!Array.isArray(items) || items.length === 0) break;
+        if (!Array.isArray(items) || items.length === 0) { lastPageFull = false; break; }
 
         for (const entity of items) {
           if (entity && entity.data) all.push(entity.data);
         }
 
-        if (items.length < limit) break;
+        if (items.length < limit) { lastPageFull = false; break; }
+        lastPageFull = true;
         offset += limit;
       } catch (pageError) {
         // Partial load: only accept it if it is not WORSE than what the app
@@ -555,6 +563,14 @@ async function apiLoadCollectionAll(collection) {
         }
         throw pageError;
       }
+    }
+
+    // If we stopped because we hit the page cap while the last page was still
+    // full, the server has MORE records than we fetched — do not treat this as
+    // an authoritative complete load (don't cache), and warn loudly.
+    if (lastPageFull && pageCount >= maxPages) {
+      console.warn(`[apiLoadCollectionAll] ${collection}: hit ${maxPages}-page cap (${all.length} records) with a full final page — collection exceeds the supported maximum and was truncated.`);
+      partial = true;
     }
 
     // Update cache only for complete loads — never persist a truncated result.
@@ -715,7 +731,7 @@ async function serverLoadAllData() {
   // Load collections in parallel for faster initial load
   // Use higher concurrency for initial load, but still limit to avoid overwhelming server
   const results = {};
-  const collections = ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory', 'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings'];
+  const collections = ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory', 'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings', 'walletTransactions', 'serviceSubscriptions'];
   const CONCURRENCY = SERVER_API.initialLoadConcurrency || 3;
 
   // Show loading progress

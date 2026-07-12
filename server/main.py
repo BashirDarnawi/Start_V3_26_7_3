@@ -344,29 +344,41 @@ ORIGIN_BYPASS_PATH_PREFIXES = ("/api/health",)
 # Default: 20 attempts per 15 minutes per IP+email (increased from 10 for better UX on flaky networks)
 _LOGIN_WINDOW_MS = int(os.getenv("ALBAYAN_LOGIN_WINDOW_MS", str(15 * 60 * 1000)))
 _LOGIN_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_LOGIN_MAX_ATTEMPTS", "20"))
+# IP-independent per-account cap (defense against IP rotation). Higher than the
+# per-IP cap so a shared office IP with a few users' honest mistakes never trips
+# it, but far below what brute-forcing a password would need.
+_LOGIN_EMAIL_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_LOGIN_EMAIL_MAX_ATTEMPTS", "60"))
 
 PASSWORD_RESET_TOKEN_MS = int(os.getenv("ALBAYAN_PASSWORD_RESET_TOKEN_MS", str(15 * 60 * 1000)))
 PASSWORD_RESET_DEV_RETURN_CODE = os.getenv("ALBAYAN_DEV_PASSWORD_RESET_RETURN_CODE", "").strip().lower() in {"1", "true", "yes"}
 
 _RESET_WINDOW_MS = int(os.getenv("ALBAYAN_RESET_WINDOW_MS", str(15 * 60 * 1000)))
 _RESET_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_RESET_MAX_ATTEMPTS", "5"))
+_RESET_EMAIL_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_RESET_EMAIL_MAX_ATTEMPTS", "15"))
 
 
 def _client_ip(request: Request) -> str:
-    """Real client IP, preferring X-Forwarded-For when behind ALB/Cloudflare.
+    """Real client IP for rate limiting, behind Cloudflare + ALB.
 
-    Without this, request.client.host is the load-balancer node IP in
-    production, so every user shares one rate-limit bucket: a single attacker
-    could lock out password resets platform-wide, or lock any victim's login by
-    spamming their email. The access-log middleware already trusts X-Forwarded-For
-    the same way, so this is consistent with the existing proxy assumption.
+    SECURITY: the old version returned the LEFTMOST X-Forwarded-For entry, which
+    is fully client-controlled — proxies APPEND, so a client-supplied
+    `X-Forwarded-For: <random>` survives as element [0]. An attacker could then
+    rotate that value each request and get a fresh (ip,email) rate-limit bucket,
+    bypassing brute-force protection entirely. We now prefer Cloudflare's
+    CF-Connecting-IP (Cloudflare overwrites any client-supplied value at its
+    edge), and for the XFF fallback we take the RIGHTMOST entry (added by the
+    closest trusted proxy) which a client cannot forge, rather than the spoofable
+    leftmost one.
     """
     try:
+        cf = request.headers.get("cf-connecting-ip")
+        if cf and cf.strip():
+            return cf.strip()
         xff = request.headers.get("x-forwarded-for")
         if xff:
-            first = xff.split(",")[0].strip()
-            if first:
-                return first
+            parts = [p.strip() for p in xff.split(",") if p.strip()]
+            if parts:
+                return parts[-1]
     except Exception:
         pass
     return request.client.host if request.client else "unknown"
@@ -387,13 +399,23 @@ def _rate_check(request: Request, email: str) -> tuple[bool, int]:
         - wait_ms: Milliseconds to wait if rate limited
     """
     from .rate_limiter import check_rate_limit
-    
+
     key = f"login:{_rate_key(request, email)}"
     is_allowed, attempts_left, retry_after_ms = check_rate_limit(key, _LOGIN_MAX_ATTEMPTS, _LOGIN_WINDOW_MS)
-    
+
     if not is_allowed:
         return False, int(retry_after_ms or 0)
-    
+
+    # Defense in depth: an IP-independent per-account bucket. Even if an
+    # attacker rotates IPs (or a forged proxy header) to dodge the (ip,email)
+    # bucket above, a single account still can't be guessed more than
+    # _LOGIN_EMAIL_MAX_ATTEMPTS times per window. Set high enough not to lock
+    # out a legitimate user's honest mistakes across a shared office IP.
+    email_key = f"login:email:{email.lower()}"
+    ok2, _left2, retry2 = check_rate_limit(email_key, _LOGIN_EMAIL_MAX_ATTEMPTS, _LOGIN_WINDOW_MS)
+    if not ok2:
+        return False, int(retry2 or 0)
+
     return True, 0
 
 
@@ -407,13 +429,20 @@ def _reset_rate_check(request: Request, email: str) -> tuple[bool, int]:
         - wait_ms: Milliseconds to wait if rate limited
     """
     from .rate_limiter import check_rate_limit
-    
+
     key = f"reset:{_rate_key(request, email)}"
     is_allowed, attempts_left, retry_after_ms = check_rate_limit(key, _RESET_MAX_ATTEMPTS, _RESET_WINDOW_MS)
-    
+
     if not is_allowed:
         return False, int(retry_after_ms or 0)
-    
+
+    # IP-independent per-account bucket (see _rate_check) so IP rotation can't
+    # grant unlimited reset requests against one email.
+    email_key = f"reset:email:{email.lower()}"
+    ok2, _left2, retry2 = check_rate_limit(email_key, _RESET_EMAIL_MAX_ATTEMPTS, _RESET_WINDOW_MS)
+    if not ok2:
+        return False, int(retry2 or 0)
+
     return True, 0
 
 
@@ -2380,6 +2409,13 @@ def get_collection(
         if not uid:
             raise HTTPException(status_code=403, detail="Forbidden")
 
+        # Wallet ledger and subscriptions are admin-only money records. Drivers
+        # now pull the whole collection list on login (so wallet balances sync
+        # back), but they must not receive other users' wallet/subscription
+        # data — return an empty set for them.
+        if collection in {"walletTransactions", "serviceSubscriptions"}:
+            return []
+
         if collection in {"ads", "receipts"}:
             items = list_entities(
                 collection,
@@ -2766,6 +2802,22 @@ def update_collection_item(
                     )
 
             if desired == "Delivered":
+                # SECURITY: a finalized delivery is TERMINAL. The transition
+                # check above only fires when desired != current_status, so a
+                # Delivered->Delivered no-op slipped through and re-ran this
+                # settlement computation — letting the assigned driver rewrite
+                # amountCollectedFromCustomer, amountUSD, status and the proof
+                # image on an already-completed delivery (even down to 0,
+                # pocketing the cash). Block re-settlement of a receipt that is
+                # already Delivered or Canceled. A legitimate first-time
+                # In Progress -> Delivered has current_status 'In Progress' and
+                # passes; a driver's office-handover update (isReceivedInOffice,
+                # desired == "") never enters this block.
+                if current_status in {"Delivered", "Canceled"}:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Receipt delivery is already finalized ('{current_status}') and cannot be re-settled",
+                    )
                 # Required fields (driver must confirm)
                 final_no = sanitize_str(
                     str(updates.get("finalReceiptNo") or updates.get("serialNumber") or "")
@@ -3677,12 +3729,40 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
     if invalid_fields:
         raise HTTPException(status_code=400, detail=f"Invalid field(s): {', '.join(invalid_fields)}")
 
+    # LOCKOUT GUARD: never let the LAST active admin lose admin (by being
+    # soft-deleted or demoted). Without this, an admin could self-demote (or
+    # delete the only other admin then self-demote) and leave the platform with
+    # zero admins — every admin-only endpoint (users, import, restore, audit)
+    # then 403s and recovery needs direct DB access.
+    existing_role = str(existing.get("role") or "").lower()
+    removing_admin = existing_role == "admin" and (
+        (body.deleted is True)
+        or (body.role is not None and sanitize_str(body.role).lower() != "admin")
+    )
+    if removing_admin:
+        with db_conn() as conn:
+            other = conn.execute(
+                text("SELECT COUNT(*) AS n FROM users WHERE lower(role) = 'admin' AND deleted = false AND id != :id"),
+                {"id": user_id},
+            ).mappings().first()
+        if not other or int(other["n"]) < 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot remove the last remaining admin. Promote another user to Admin first.",
+            )
+
     try:
         with db_conn() as conn:
             # SECURITY: Only use whitelisted fields in SQL construction
             set_clause = ", ".join([f"{k} = :{k}" for k in update_fields.keys() if k in ALLOWED_USER_UPDATE_FIELDS])
             params = {**update_fields, "id": user_id}
             conn.execute(text(f"UPDATE users SET {set_clause} WHERE id = :id"), params)
+            # SECURITY: an admin-initiated password change (or a soft-delete)
+            # must evict the target's existing sessions in the SAME transaction,
+            # or a stolen/active session survives the reset until natural
+            # expiry (up to 8h). Mirrors self-service change_password.
+            if "password_hash" in update_fields or update_fields.get("deleted") is True:
+                conn.execute(text("DELETE FROM sessions WHERE user_id = :uid"), {"uid": user_id})
     except IntegrityError:
         # Changing email to one already used by another user.
         raise HTTPException(status_code=409, detail="A user with this email already exists")

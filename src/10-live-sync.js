@@ -39,7 +39,9 @@ function computeServerCursorFromState() {
     _maxLastModifiedFromArray(state.clothesProducts),
     _maxLastModifiedFromArray(state.clothesShipments),
     _maxLastModifiedFromArray(state.clothesOrders),
-    _maxLastModifiedFromArray(state.clothesSettings)
+    _maxLastModifiedFromArray(state.clothesSettings),
+    _maxLastModifiedFromArray(state.walletTransactions),
+    _maxLastModifiedFromArray(state.serviceSubscriptions)
   );
 }
 
@@ -211,7 +213,7 @@ async function serverLiveSyncOnce() {
     }
   };
 
-  const [adsDelta, receiptsDelta, customersDelta, pagesDelta, exhDelta, clothesProductsDelta, clothesShipmentsDelta, clothesOrdersDelta, clothesSettingsDelta] = await Promise.all([
+  const [adsDelta, receiptsDelta, customersDelta, pagesDelta, exhDelta, clothesProductsDelta, clothesShipmentsDelta, clothesOrdersDelta, clothesSettingsDelta, walletTxDelta, subsDelta] = await Promise.all([
     safeSince('ads'),
     safeSince('receipts'),
     safeSince('customers'),
@@ -220,7 +222,12 @@ async function serverLiveSyncOnce() {
     safeSince('clothesProducts'),
     safeSince('clothesShipments'),
     safeSince('clothesOrders'),
-    safeSince('clothesSettings')
+    safeSince('clothesSettings'),
+    // Wallet ledger + subscriptions were written to the server but never
+    // pulled back, so balances reset after logout and never synced between
+    // devices. They are append-only, so delta sync is safe.
+    safeSince('walletTransactions'),
+    safeSince('serviceSubscriptions')
   ]);
 
   let changed = false;
@@ -233,6 +240,8 @@ async function serverLiveSyncOnce() {
   changed = applyServerDelta('clothesShipments', clothesShipmentsDelta) || changed;
   changed = applyServerDelta('clothesOrders', clothesOrdersDelta) || changed;
   changed = applyServerDelta('clothesSettings', clothesSettingsDelta) || changed;
+  changed = applyServerDelta('walletTransactions', walletTxDelta) || changed;
+  changed = applyServerDelta('serviceSubscriptions', subsDelta) || changed;
   
   // Ensure data migration on live sync (only if data changed, debounced to not block render)
   if (changed) {
@@ -252,7 +261,9 @@ async function serverLiveSyncOnce() {
     _maxLastModifiedFromArray(clothesProductsDelta),
     _maxLastModifiedFromArray(clothesShipmentsDelta),
     _maxLastModifiedFromArray(clothesOrdersDelta),
-    _maxLastModifiedFromArray(clothesSettingsDelta)
+    _maxLastModifiedFromArray(clothesSettingsDelta),
+    _maxLastModifiedFromArray(walletTxDelta),
+    _maxLastModifiedFromArray(subsDelta)
   );
   // Deltas come straight from the server, so maxDelta is a trustworthy server
   // timestamp — record it as the watermark for future cursor seeds.

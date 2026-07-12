@@ -1259,11 +1259,14 @@ function renderAnalyticsView() {
   const now = Date.now();
   const last7 = now - 7 * 24 * 60 * 60 * 1000;
 
-  // Calculate ad revenue - separate paid vs pending/unpaid for clarity
+  // Calculate ad revenue - separate paid vs pending/unpaid for clarity.
+  // Uses the SAME status-aware spend rule as the customer cards
+  // (getAdSpendUSD) so a Stopped ad that spent $100 counts as $100, not its
+  // full $500, and the two screens can't contradict each other.
   const paidAds = ads.filter(ad => ad.isPaid === true || ad.paymentStatus === 'paid');
   const unpaidAds = ads.filter(ad => ad.isPaid !== true && ad.paymentStatus !== 'paid');
-  const paidAdRevenue = paidAds.reduce((sum, ad) => sum + (ad.amountUSD || 0), 0);
-  const unpaidAdRevenue = unpaidAds.reduce((sum, ad) => sum + (ad.amountUSD || 0), 0);
+  const paidAdRevenue = paidAds.reduce((sum, ad) => sum + getAdSpendUSD(ad), 0);
+  const unpaidAdRevenue = unpaidAds.reduce((sum, ad) => sum + getAdSpendUSD(ad), 0);
   const totalAdRevenue = paidAdRevenue + unpaidAdRevenue;  // Keep for backwards compatibility
 
   // MONEY-MATH: TRANSFER_IN receipts are money MOVED between customers, not
@@ -1302,9 +1305,13 @@ function renderAnalyticsView() {
   const notCollectedUSD = notCollectedReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
   const collectionRate = revenueReceipts.length > 0 ? ((collectedReceipts.length / revenueReceipts.length) * 100).toFixed(1) : 0;
 
+  // Delivery tracking. The terminal "done" status is 'Delivered' (there is no
+  // 'completed' status in DELIVERY_STATUSES), so the old check counted 0
+  // completed forever and lumped Delivered + Canceled into "active". Active =
+  // still in the pipeline; Completed = Delivered.
   const deliveryAds = ads.filter(a => a.deliveryStatus && a.deliveryStatus !== 'Office');
-  const activeDeliveries = deliveryAds.filter(a => (a.deliveryStatus || '').toLowerCase() !== 'completed').length;
-  const completedDeliveries = deliveryAds.filter(a => (a.deliveryStatus || '').toLowerCase() === 'completed').length;
+  const activeDeliveries = deliveryAds.filter(a => a.deliveryStatus === 'Needs Delivery' || a.deliveryStatus === 'In Progress').length;
+  const completedDeliveries = deliveryAds.filter(a => a.deliveryStatus === 'Delivered').length;
 
   const adsLast7 = ads.filter(a => new Date(a.createdAt || 0).getTime() >= last7).length;
   const receiptsLast7 = revenueReceipts.filter(r => new Date(r.createdAt || 0).getTime() >= last7).length;
@@ -1313,7 +1320,9 @@ function renderAnalyticsView() {
   const spendByCustomer = {};
   ads.forEach(ad => {
     if (!ad.customerId) return;
-    spendByCustomer[ad.customerId] = (spendByCustomer[ad.customerId] || 0) + (ad.amountUSD || 0);
+    // Status-aware spend (matches the customer card's "Spent") so the same
+    // customer isn't ranked by a different number here than on their card.
+    spendByCustomer[ad.customerId] = (spendByCustomer[ad.customerId] || 0) + getAdSpendUSD(ad);
   });
   const topCustomers = Object.entries(spendByCustomer)
     .map(([customerId, spend]) => ({
@@ -1789,14 +1798,13 @@ function renderCustomersView() {
       totalDebts += Math.abs(stats.balance);
     }
   });
-  // MONEY-MATH: per-customer stats count TRANSFER_IN receipts (correct for the
-  // customer's own credit ledger), but summed BUSINESS-WIDE that would count
-  // every transferred dinar twice — once in the source customer's receipt and
-  // once in the recipient's transfer receipt. Remove the transfer-in portion.
-  totalRevenue -= getVisibleRecords(state.receipts)
-    .filter(r => isTransferInReceipt(r) && (String(r.status || '') === 'Paid' || r.isPaid === true))
-    .reduce((s, r) => s + (r.amountLocal || 0), 0);
-  
+  // MONEY-MATH: getCustomerStats already subtracts each source customer's
+  // transferred-OUT money from its totalPaid, and the recipient's TRANSFER_IN
+  // receipt adds the same amount back — so summed business-wide the transfers
+  // cancel out and this total already equals the real cash received. (An
+  // earlier extra subtraction of transfer-ins here double-counted every
+  // transfer and understated revenue.)
+
   return `
     <div class="space-y-6 animate-fade-in-up">
       <div class="flex justify-between items-center">
@@ -3109,7 +3117,7 @@ function exportDeliveryReport() {
     const collected = Number(r.amountCollectedFromCustomer ?? (String(r.deliveryStatus || '') === 'Delivered' ? (r.amountLocal || 0) : 0)) || 0;
     const remaining = Number(r.remainingDue ?? Math.max(0, debt - collected)) || 0;
     const received = (typeof r.isReceivedInOffice === 'boolean') ? r.isReceivedInOffice : !!r.officeHandover;
-    csv += `"${customer?.name || 'Unknown'}","${r.phoneNumber || customer?.phones?.[0] || ''}",${debt},${collected},${remaining},"${r.deliveryStatus || ''}","${driver?.name || ''}",${received ? 'Yes' : 'No'},"${formatDateShort(r.createdAt || r.date)}"\n`;
+    csv += `${csvCell(customer?.name || 'Unknown')},${csvCell(r.phoneNumber || customer?.phones?.[0] || '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(formatDateShort(r.createdAt || r.date))}\n`;
   });
   
   // Prepend a UTF-8 BOM so Excel reads Arabic customer/driver names correctly
@@ -4091,17 +4099,22 @@ function renderAuditView() {
     // User filter
     if (state.auditUserFilter !== 'all' && log.userId !== state.auditUserFilter) return false;
     
-    // Date range filter
+    // Date range filter. `new Date('2026-07-12')` parses as UTC midnight, which
+    // is a different LOCAL day on any non-UTC device, so both boundaries used
+    // to hide or include the wrong entries. Build each boundary from the Y/M/D
+    // components as a LOCAL time so a whole calendar day is matched exactly,
+    // regardless of the device's timezone.
+    const _localDayStart = (ymd) => {
+      const [y, m, d] = String(ymd).split('-').map(Number);
+      return new Date(y, (m || 1) - 1, d || 1, 0, 0, 0, 0);
+    };
     if (state.auditDateFrom) {
-      const logDate = new Date(log.date);
-      const fromDate = new Date(state.auditDateFrom);
-      if (logDate < fromDate) return false;
+      if (new Date(log.date) < _localDayStart(state.auditDateFrom)) return false;
     }
     if (state.auditDateTo) {
-      const logDate = new Date(log.date);
-      const toDate = new Date(state.auditDateTo);
+      const toDate = _localDayStart(state.auditDateTo);
       toDate.setHours(23, 59, 59, 999);
-      if (logDate > toDate) return false;
+      if (new Date(log.date) > toDate) return false;
     }
     
     return true;
@@ -4563,12 +4576,15 @@ function exportAuditLogs(format) {
         // with the stored Gregorian timestamps.
         date.toLocaleDateString('en-CA'),                       // YYYY-MM-DD
         date.toLocaleTimeString('en-GB', { hour12: false }),    // HH:MM:SS
-        log.userName || user?.name || 'System',
-        log.action,
-        log.category || 'general',
-        log.severity || 'info',
-        `"${(log.description || '').replace(/"/g, '""')}"`,
-        log.resourceId || ''
+        // Every free-text cell must be escaped — the User name (free text, may
+        // contain a comma like "Ahmad, Ltd") used to shift all later columns
+        // because only Description was quoted.
+        csvCell(log.userName || user?.name || 'System'),
+        csvCell(log.action),
+        csvCell(log.category || 'general'),
+        csvCell(log.severity || 'info'),
+        csvCell(log.description || ''),
+        csvCell(log.resourceId || '')
       ].join(',');
     });
     
@@ -4715,12 +4731,15 @@ async function cleanupAuditLogs() {
       'success'
     );
     
-    // Refresh audit logs from server
+    // Refresh from server. The old code called syncFromServer(), which does
+    // not exist, so it threw a ReferenceError that the catch turned into a
+    // false "Cleanup failed" toast AFTER the cleanup had actually succeeded —
+    // and the view never re-rendered. serverLiveSyncOnce is the real sync fn.
     if (isServerModeEnabled()) {
-      await syncFromServer();
-      render();
-      lucide.createIcons();
+      await serverLiveSyncOnce();
     }
+    render();
+    lucide.createIcons();
   } catch (error) {
     showNotification(isAr ? 'خطأ' : 'Error', (isAr ? 'فشل التنظيف: ' : 'Cleanup failed: ') + error.message, 'error');
   }

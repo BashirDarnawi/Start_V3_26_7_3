@@ -2394,7 +2394,29 @@ async function handleModalSubmit() {
         );
         return;
       }
-      
+
+      // Email must be unique. In server mode the DB enforces this (returns 409),
+      // but in local mode nothing did — a duplicate email meant login always
+      // resolved to the FIRST matching user, permanently locking the other user
+      // out of their own account. Reject a duplicate against any other
+      // non-deleted user (excluding the one being edited).
+      {
+        const _editingUserId = state.modalData?.id;
+        const dup = (state.users || []).some(u =>
+          u && !u._deleted &&
+          String(u.id) !== String(_editingUserId || '') &&
+          String(u.email || '').toLowerCase() === userEmail
+        );
+        if (dup) {
+          showNotification(
+            state.language === 'ar' ? 'خطأ في الإدخال' : 'Validation Error',
+            state.language === 'ar' ? 'هذا البريد الإلكتروني مستخدم بالفعل' : 'This email is already in use',
+            'error'
+          );
+          return;
+        }
+      }
+
       // Get default permissions based on role
       const getDefaultPermissions = (role) => {
         switch (role) {

@@ -352,7 +352,10 @@ function renderClothesDashboardTab() {
 // ------------------------------------------
 
 function _clothesCsvCell(v) {
-  return `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+  // Delegate to the shared escaper so clothes exports also get the
+  // formula-injection guard (a product name / customer note starting with
+  // = + - @ used to execute as a spreadsheet formula on open).
+  return csvCell(v);
 }
 
 function _clothesDownloadCsv(rows, filenameBase) {
@@ -1104,6 +1107,38 @@ function applyClothesShipmentStockDelta(shipment, sign) {
   }
 }
 
+// Which of a shipment's lines can NOT be fully removed from stock because the
+// pieces were already sold (current variant stock < the shipment's quantity).
+// Aggregates per product+variant so multiple lines don't mis-report.
+function _clothesShipmentUnreceiveShortfall(shipment) {
+  const need = new Map(); // pid||color||size -> {productId, color, size, qty}
+  (Array.isArray(shipment?.lines) ? shipment.lines : []).forEach(line => {
+    const color = String(line?.color || '').trim();
+    const size = String(line?.size || '').trim();
+    const key = `${line?.productId || ''}||${color.toLowerCase()}||${size.toLowerCase()}`;
+    const prev = need.get(key) || { productId: line?.productId || '', color, size, qty: 0 };
+    prev.qty += Math.max(0, Math.floor(Number(line?.qty) || 0));
+    need.set(key, prev);
+  });
+  const out = [];
+  for (const { productId, color, size, qty } of need.values()) {
+    if (qty === 0) continue;
+    const product = (state.clothesProducts || []).find(p => p && p.id === productId);
+    const variants = Array.isArray(product?.variants) ? product.variants : [];
+    const match = variants.find(v =>
+      String(v?.color || '').trim().toLowerCase() === color.toLowerCase() &&
+      String(v?.size || '').trim().toLowerCase() === size.toLowerCase()
+    );
+    const available = match ? Math.max(0, Math.floor(Number(match.qty) || 0)) : 0;
+    if (available < qty) {
+      const variant = [color, size].filter(Boolean).join('/');
+      const name = product ? String(product.name || '') : clothesProductNameById(productId);
+      out.push(`${name}${variant ? ' ' + variant : ''}: ${clothesIsAr() ? 'المتوفر' : 'in stock'} ${available}, ${clothesIsAr() ? 'يلزم إرجاع' : 'need to remove'} ${qty}`);
+    }
+  }
+  return out;
+}
+
 function setClothesShipmentStatus(shipmentId, newStatus) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
@@ -1121,6 +1156,23 @@ function setClothesShipmentStatus(shipmentId, newStatus) {
     updates.stockApplied = true;
     updates.receivedAt = new Date().toISOString();
   } else if (shipment.status === 'Received' && newStatus !== 'Received' && shipment.stockApplied) {
+    // Un-receiving removes this shipment's pieces from stock. If some of those
+    // pieces were already SOLD, the removal would floor at zero and silently
+    // under-remove — and a later order cancel would then restore full
+    // quantities, inventing phantom stock. Block it: the sale must be reversed
+    // first so the pieces are physically back before the shipment is undone.
+    const short = _clothesShipmentUnreceiveShortfall(shipment);
+    if (short.length) {
+      showNotification(
+        isAr ? 'غير ممكن' : 'Not allowed',
+        (isAr
+          ? 'لا يمكن إرجاع هذه الشحنة لأن بعض قطعها بيعت بالفعل. ألغِ/أرجِع الطلبات التي باعتها أولاً:\n\n'
+          : 'Cannot un-receive: some of its pieces are already sold. Cancel/return the orders that sold them first:\n\n') + short.join('\n'),
+        'error'
+      );
+      updateClothesShipmentsFiltered();
+      return;
+    }
     const ok = confirm(isAr
       ? 'إرجاع الشحنة إلى حالة سابقة؟ سيتم خصم كمياتها من المخزون مرة أخرى.'
       : 'Move this shipment back? Its quantities will be REMOVED from stock again.');
@@ -2489,8 +2541,19 @@ function printClothesOrderSlip(orderId) {
 
 // Checks stock for the requested lines; returns a human list of shortages.
 function getClothesOrderStockShortages(lines) {
-  const shortages = [];
+  // Aggregate requested quantity per product+variant BEFORE comparing to
+  // stock. Two lines for the same Red/M each ≤ stock individually still
+  // oversell when their sum exceeds stock — the deduction is cumulative, so
+  // the check must be too.
+  const requestedByKey = new Map();
   for (const line of lines) {
+    const key = `${line.productId}||${String(line.color || '').trim().toLowerCase()}||${String(line.size || '').trim().toLowerCase()}`;
+    const prev = requestedByKey.get(key) || { line, qty: 0 };
+    prev.qty += Math.max(0, Math.floor(Number(line.qty) || 0));
+    requestedByKey.set(key, prev);
+  }
+  const shortages = [];
+  for (const { line, qty } of requestedByKey.values()) {
     const product = getVisibleClothesProducts().find(p => p.id === line.productId);
     if (!product) continue;
     const variants = Array.isArray(product.variants) ? product.variants : [];
@@ -2499,9 +2562,9 @@ function getClothesOrderStockShortages(lines) {
       String(v?.size || '').trim().toLowerCase() === String(line.size || '').trim().toLowerCase()
     );
     const available = match ? Math.max(0, Math.floor(Number(match.qty) || 0)) : 0;
-    if (line.qty > available) {
+    if (qty > available) {
       const variant = [line.color, line.size].filter(Boolean).join('/');
-      shortages.push(`${product.name}${variant ? ' ' + variant : ''}: ${available} ${clothesIsAr() ? 'متوفر' : 'available'}, ${line.qty} ${clothesIsAr() ? 'مطلوب' : 'requested'}`);
+      shortages.push(`${product.name}${variant ? ' ' + variant : ''}: ${available} ${clothesIsAr() ? 'متوفر' : 'available'}, ${qty} ${clothesIsAr() ? 'مطلوب' : 'requested'}`);
     }
   }
   return shortages;
@@ -2532,20 +2595,23 @@ async function saveClothesOrderFromModal() {
     const product = getVisibleClothesProducts().find(p => p.id === productId)
       // Deleted products keep their historical cost for the snapshot.
       || (state.clothesProducts || []).find(p => p && p.id === productId);
-    // Cost snapshot: profit stays correct even if the product's cost price
-    // changes later. Re-snapshotted on every save of this order — but when
-    // the product no longer exists at all, KEEP the line's previous snapshot
-    // instead of writing 0 (a 0 cost silently inflated profit numbers).
+    // Cost snapshot: FROZEN at sale time so profit stays correct even if the
+    // product's cost price changes later. An existing line already carries its
+    // snapshot — keep it, so editing an order for an unrelated reason (e.g.
+    // fixing a phone number) never silently rewrites historical profit. Only a
+    // newly-added line takes the current product cost. (A line whose product
+    // was deleted also keeps its snapshot via the same branch.)
     const prevSnap = Number(l?.costUSDAtSale);
+    const hasPrevSnap = Number.isFinite(prevSnap);
     lines.push({
       productId,
       color: String(l?.color || '').trim(),
       size: String(l?.size || '').trim(),
       qty,
       priceLYD: clothesParseMoney(l?.priceLYD),
-      costUSDAtSale: product
-        ? Math.round(((Number(product.costUSD) || 0)) * 100) / 100
-        : (Number.isFinite(prevSnap) ? prevSnap : 0)
+      costUSDAtSale: hasPrevSnap
+        ? Math.round(prevSnap * 100) / 100
+        : (product ? Math.round(((Number(product.costUSD) || 0)) * 100) / 100 : 0)
     });
   }
   if (lines.length === 0) {

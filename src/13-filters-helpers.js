@@ -121,6 +121,21 @@ function buildCustomerStatsIndex() {
   return { adsByCustomer, receiptsByCustomer, pagesByCustomer };
 }
 
+// Status-aware USD "spent" for a single ad — the ONE definition of how much
+// an ad counts as spent, so the customer cards and the analytics panels can
+// never disagree (they used to: analytics counted full amountUSD for every
+// status, so the same customer's "Spend" and "Spent" showed different numbers,
+// and a Stopped ad that spent $100 was counted at its full $500).
+function getAdSpendUSD(ad) {
+  if (!ad) return 0;
+  if (ad.status === 'Stopped' && ad.spentUSD !== undefined) return parseFloat(ad.spentUSD) || 0;
+  if (['Completed', 'Canceled', 'Lost'].includes(ad.status)) {
+    return ad.spentUSD !== undefined ? (parseFloat(ad.spentUSD) || 0) : (parseFloat(ad.amountUSD) || 0);
+  }
+  if (['Pending', 'Paused'].includes(ad.status)) return 0;
+  return parseFloat(ad.amountUSD) || 0;
+}
+
 function getCustomerStats(customerId, statsIndex = null) {
   const customerAds = statsIndex
     ? (statsIndex.adsByCustomer.get(customerId) || [])
@@ -156,29 +171,24 @@ function getCustomerStats(customerId, statsIndex = null) {
   const totalPaidLYD = paidReceipts.reduce((sum, receipt) => sum + (receipt.amountLocal || 0), 0) - transferredOutLYD;
   const totalPaidUSD = paidReceipts.reduce((sum, receipt) => sum + (receipt.amountUSD || 0), 0) - transferredOutUSD;
   
-  // Calculate total spent USD from ads
-  // For stopped ads, use spentUSD; for others, use amountUSD (the planned/active amount)
-  const totalSpentUSD = customerAds.reduce((sum, ad) => {
-    if (ad.status === 'Stopped' && ad.spentUSD !== undefined) {
-      return sum + ad.spentUSD;
-    }
-    // For active/completed ads, count the full amount as spent
-    if (['Completed', 'Canceled', 'Lost'].includes(ad.status)) {
-      return sum + (ad.spentUSD !== undefined ? ad.spentUSD : (ad.amountUSD || 0));
-    }
-    // For pending/paused ads, don't count as spent yet
-    if (['Pending', 'Paused'].includes(ad.status)) {
-      return sum;
-    }
-    return sum + (ad.amountUSD || 0);
-  }, 0);
-  
+  // Calculate total spent USD from ads (status-aware, shared with analytics)
+  const totalSpentUSD = customerAds.reduce((sum, ad) => sum + getAdSpendUSD(ad), 0);
+
   // Calculate spent LYD proportionally based on USD spent
   // This ensures spentLYD cannot exceed paidLYD
   let totalSpentLYD = 0;
   if (totalPaidUSD > 0) {
     // Proportional calculation: (spentUSD / paidUSD) * paidLYD
     totalSpentLYD = (totalSpentUSD / totalPaidUSD) * totalPaidLYD;
+  } else if (totalSpentUSD > 0) {
+    // No paid receipts but real ad spend = pure debt. Derive the LYD figure
+    // from each ad's OWN exchange rate so the LYD balance reflects the debt
+    // instead of showing a misleading 0 (which styled the card as positive
+    // and made the "has debt" filter miss a genuine debtor).
+    totalSpentLYD = customerAds.reduce((sum, ad) => {
+      const rate = parseFloat(ad.exchangeRate) || state.defaultExchangeRate || 0;
+      return sum + getAdSpendUSD(ad) * rate;
+    }, 0);
   }
   
   // Calculate balance (paid - spent)
@@ -2277,7 +2287,10 @@ function saveSplitPayments() {
   paymentItems.forEach(item => {
     const method = item.querySelector('.split-method').value;
     const amount = parseFloat(item.querySelector('.split-amount').value) || 0;
-    const rate = parseFloat(item.querySelector('.split-rate').value) || state.defaultExchangeRate;
+    // Rate 1 reads identically to the live preview (`|| 0`) — see the note in
+    // saveReceiptFromModal. The old `|| defaultExchangeRate` fallback squared
+    // the stored exchangeRate for zero-rate methods on a no-op Save.
+    const rate = parseFloat(item.querySelector('.split-rate').value) || 0;
     // 0/blank Rate 2 means "no USD ads credit" (matches saveReceiptFromModal),
     // NOT "fall back to the LYD rate" — the old fallback fabricated ads credit
     // out of a zero-rate receipt on a no-op Save.
@@ -2626,8 +2639,10 @@ function saveRefund() {
   const refundType = document.getElementById('refund-type').value;
   let refundAmount = parseFloat(document.getElementById('refund-amount').value) || 0;
   const refundStatus = document.getElementById('refund-status').value;
-  // A refund can never exceed the ad's amount.
-  refundAmount = Math.min(refundAmount, parseFloat(ad.amountUSD) || 0);
+  const amountUSD = parseFloat(ad.amountUSD) || 0;
+  // A refund is between 0 and the ad's amount.
+  refundAmount = Math.min(Math.max(refundAmount, 0), amountUSD);
+  if (refundType === 'None') refundAmount = 0;
 
   const updates = {
     refundType,
@@ -2637,13 +2652,29 @@ function saveRefund() {
     canceledBy: refundType !== 'None' ? state.currentUser?.id : state.modalData.canceledBy
   };
 
-  // The refunded money must actually RETURN in the books. Previously the
-  // refund was only recorded as text: the ad's allocations kept the receipt
-  // fully used (the customer could not fund a replacement ad) and customer
-  // stats kept counting the canceled ad at full spend.
-  if (refundType !== 'None' && refundAmount > 0) {
-    if (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length) {
-      const allocations = ad.receiptAllocations.map(a => ({ ...a }));
+  // The refunded money must actually RETURN in the books, and this must be
+  // IDEMPOTENT: re-opening and re-saving a refund (or changing its amount, or
+  // flipping Pending→Refunded) must reconcile to the SAME end-state — never
+  // subtract again from the already-reduced allocations. We snapshot the
+  // pre-refund allocations ONCE (refundAllocationBaseline) and always rebuild
+  // the target from that untouched baseline, mirroring confirmStopAd.
+  // Previously each re-save re-subtracted refundAmount, fabricating spendable
+  // receipt balance the customer never got back.
+  if (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length) {
+    if (refundType === 'None') {
+      // Undoing the refund: restore the full allocations from the baseline
+      // and clear it so a future refund re-snapshots fresh.
+      if (Array.isArray(ad.refundAllocationBaseline)) {
+        updates.receiptAllocations = ad.refundAllocationBaseline.map(a => ({ ...a }));
+        updates.refundAllocationBaseline = null;
+      }
+    } else {
+      let baseline = Array.isArray(ad.refundAllocationBaseline) ? ad.refundAllocationBaseline : null;
+      if (!baseline) {
+        baseline = ad.receiptAllocations.map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) || 0 }));
+        updates.refundAllocationBaseline = baseline;
+      }
+      const allocations = baseline.map(a => ({ ...a }));
       let refund = refundAmount;
       for (let i = allocations.length - 1; i >= 0 && refund > 0.001; i--) {
         const cur = parseFloat(allocations[i].amountUSD) || 0;
@@ -2653,9 +2684,12 @@ function saveRefund() {
       }
       updates.receiptAllocations = allocations;
     }
-    // The canceled ad only truly "spent" what was kept after the refund.
-    updates.spentUSD = Math.max(Math.round(((parseFloat(ad.amountUSD) || 0) - refundAmount) * 100) / 100, 0);
   }
+  // Derived from the ad amount (not compounding). Undoing (None) restores the
+  // full spend by clearing spentUSD.
+  updates.spentUSD = refundType !== 'None'
+    ? Math.max(Math.round((amountUSD - refundAmount) * 100) / 100, 0)
+    : undefined;
 
   updateRecord(state.ads, adId, updates);
   showNotification(state.language === 'ar' ? 'تم الحفظ' : 'Saved', state.language === 'ar' ? `تم تطبيق الاسترجاع (${trStatus(refundType)})` : `Refund ${refundType} applied`, refundType !== 'None' ? 'warning' : 'success');

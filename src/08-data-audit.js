@@ -399,6 +399,18 @@ function getVisibleRecords(array) {
   return array.filter(item => item && !item._deleted);
 }
 
+// Safe CSV cell for EVERY user-derived field in any export. Two problems this
+// solves: (1) a value containing a comma, quote or newline used to shift every
+// later column (broken/misaligned CSV); (2) a value starting with = + - @ (or a
+// control char) executes as a FORMULA when the file is opened in Excel/Sheets
+// (CSV injection). We always quote + double internal quotes, and prefix a
+// dangerous leading char with an apostrophe so it is treated as text.
+function csvCell(value) {
+  let s = (value === null || value === undefined) ? '' : String(value);
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return '"' + s.replace(/"/g, '""') + '"';
+}
+
 function getRecordType(record) {
   if (record.email) return 'User';
   if (record.platform) return 'Customer';

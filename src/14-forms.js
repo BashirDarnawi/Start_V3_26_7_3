@@ -270,7 +270,10 @@ function getReceiptPaymentData() {
     payments.push({
       method: item.querySelector('.payment-method').value,
       amount: parseFloat(item.querySelector('.payment-amount').value) || 0,
-      rate: parseFloat(item.querySelector('.payment-rate1').value) || state.defaultExchangeRate,
+      // Read Rate 1 as the preview does (`|| 0`) so a zero-rate method's
+      // auto-filled 0.00 is honored instead of being replaced by the default
+      // rate (which squared the stored exchange rate). See saveReceiptFromModal.
+      rate: parseFloat(item.querySelector('.payment-rate1').value) || 0,
       rate2: rate2Value !== '' && rate2Value !== null ? parseFloat(rate2Value) : state.defaultExchangeRate,
       collectionType: item.querySelector('.collection-type').value,
       deliveryPersonId: item.querySelector('.delivery-person')?.value || ''
@@ -926,7 +929,13 @@ async function _saveReceiptFromModalInner() {
   paymentItems.forEach(item => {
     const method = item.querySelector('.payment-method').value;
     const amount = parseFloat(item.querySelector('.payment-amount').value) || 0;
-    const rate = parseFloat(item.querySelector('.payment-rate1').value) || state.defaultExchangeRate;
+    // Rate 1 MUST read identically to the live preview (updateReceiptTotals /
+    // getPaymentTotalsFromDom both use `|| 0`). The old `|| defaultExchangeRate`
+    // fallback fired on the legit 0.00 that zero-rate methods (Sadad, Bank
+    // Transfer LYD, LTT…) auto-fill, so the saved receipt got amountLocal
+    // multiplied by the default rate and a SQUARED exchangeRate — "what you
+    // saw before saving" was not what got saved.
+    const rate = parseFloat(item.querySelector('.payment-rate1').value) || 0;
     const rate2 = parseFloat(item.querySelector('.payment-rate2').value) || 0;
     const collectionType = item.querySelector('.collection-type').value;
     const deliveryPersonSelect = item.querySelector('.delivery-person');
