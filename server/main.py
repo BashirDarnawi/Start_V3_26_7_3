@@ -3933,6 +3933,30 @@ def list_users_public(user: dict[str, Any] = Depends(current_user)):
     return rows
 
 
+def _free_email_if_soft_deleted(email: str, now: int) -> bool:
+    """Deleted users are only soft-deleted (their row is kept for audit and
+    restore), so their email keeps holding the unique constraint FOREVER —
+    deleting a user then re-adding them with the same address failed with a
+    confusing error. If the address is held by a soft-deleted row, rename that
+    tombstone's email (prefix keeps it a valid, unique address) so the live
+    address can be reused. Returns True when an address was freed."""
+    e = str(email).lower().strip()
+    if not e:
+        return False
+    with db_conn() as conn:
+        row = conn.execute(
+            text("SELECT id, deleted FROM users WHERE lower(email) = :e LIMIT 1"),
+            {"e": e},
+        ).mappings().first()
+        if not row or not bool(row["deleted"]):
+            return False
+        conn.execute(
+            text("UPDATE users SET email = :new_e, last_modified = :now WHERE id = :id"),
+            {"new_e": f"deleted{now}.{e}", "now": now, "id": str(row["id"])},
+        )
+    return True
+
+
 @app.post("/api/users", response_model=UserPublic)
 def create_user(body: CreateUserRequest, request: Request, admin: dict[str, Any] = Depends(current_user)):
     require_same_origin(request)
@@ -3948,7 +3972,7 @@ def create_user(body: CreateUserRequest, request: Request, admin: dict[str, Any]
     permissions_json = json_dumps(body.permissions or {})
     user_id = new_id("user")
 
-    try:
+    def _insert() -> None:
         with db_conn() as conn:
             conn.execute(
                 text(
@@ -3980,9 +4004,18 @@ def create_user(body: CreateUserRequest, request: Request, admin: dict[str, Any]
                     "last_modified": now,
                 },
             )
+
+    try:
+        _insert()
     except IntegrityError:
-        # Duplicate email (unique constraint) — return a clear 409, not a 500.
-        raise HTTPException(status_code=409, detail="A user with this email already exists")
+        # Duplicate email. If the holder is a soft-deleted user, free the
+        # address and retry so "delete user, then re-add them" just works.
+        if not _free_email_if_soft_deleted(str(body.email), now):
+            raise HTTPException(status_code=409, detail="A user with this email already exists")
+        try:
+            _insert()
+        except IntegrityError:
+            raise HTTPException(status_code=409, detail="A user with this email already exists")
 
     audit(str(admin.get("id")), "create", "users", user_id, f"Created user {body.email}", {})
     created = _get_user_by_id(user_id)
@@ -4091,7 +4124,7 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
                 detail="Cannot remove the last remaining admin. Promote another user to Admin first.",
             )
 
-    try:
+    def _apply_update() -> None:
         with db_conn() as conn:
             # SECURITY: Only use whitelisted fields in SQL construction
             set_clause = ", ".join([f"{k} = :{k}" for k in update_fields.keys() if k in ALLOWED_USER_UPDATE_FIELDS])
@@ -4103,9 +4136,19 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
             # expiry (up to 8h). Mirrors self-service change_password.
             if "password_hash" in update_fields or update_fields.get("deleted") is True:
                 conn.execute(text("DELETE FROM sessions WHERE user_id = :uid"), {"uid": user_id})
+
+    try:
+        _apply_update()
     except IntegrityError:
-        # Changing email to one already used by another user.
-        raise HTTPException(status_code=409, detail="A user with this email already exists")
+        # Changing email to one already used by another user. If that other
+        # user is soft-deleted, free the address and retry (same rule as
+        # create_user) so old deleted accounts never hold emails hostage.
+        if body.email is None or not _free_email_if_soft_deleted(str(body.email), now):
+            raise HTTPException(status_code=409, detail="A user with this email already exists")
+        try:
+            _apply_update()
+        except IntegrityError:
+            raise HTTPException(status_code=409, detail="A user with this email already exists")
 
     audit(str(admin.get("id")), "update", "users", user_id, f"Updated user {user_id}", {})
     # Use include-deleted fetch so "delete user" can return a response instead of 404

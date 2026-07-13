@@ -1739,7 +1739,14 @@ function renderModal() {
         await handleModalSubmit();
       } catch (err) {
         console.error('Modal submit error:', err);
-        showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'فشل حفظ التغييرات' : 'Failed to save changes', 'error');
+        // Surface the server's actual reason (e.g. "A user with this email
+        // already exists") instead of a generic message that hides it.
+        const detail = String(err?.message || '').trim();
+        showNotification(
+          state.language === 'ar' ? 'خطأ' : 'Error',
+          detail || (state.language === 'ar' ? 'فشل حفظ التغييرات' : 'Failed to save changes'),
+          'error'
+        );
       } finally {
         submitting = false;
         if (submitBtn) submitBtn.disabled = false;

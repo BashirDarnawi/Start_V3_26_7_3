@@ -469,6 +469,43 @@ class TestUsersCrudPermissions:
         assert r2.status_code == 403
 
 
+class TestReuseDeletedUserEmail:
+    """Deleting a user is a soft-delete; their email must NOT stay locked —
+    re-adding a user with the same address used to fail with a confusing
+    'Failed to save changes'."""
+
+    def test_recreate_after_soft_delete(self, employee):
+        admin = employee["admin"]
+        email = "reuse-me@tests.albayanhub.com"
+        first = _create_user(admin, "Reuse Me", email, "Password123!Secure",
+                             "Employee", {"analytics": ["view"]})
+        r = client.patch(f"/api/users/{first['id']}", json={"deleted": True}, cookies=admin)
+        assert r.status_code == 200
+
+        # Re-create with the SAME email — used to 409.
+        second = _create_user(admin, "Reuse Me Again", email, "Password123!Secure",
+                              "Employee", {"analytics": ["view"]})
+        assert second["email"] == email
+        assert second["id"] != first["id"]
+
+        # The new account can log in.
+        _, body = _login(email, "Password123!Secure")
+        assert (body.get("user") or {}).get("id") == second["id"]
+
+    def test_change_email_onto_deleted_users_address(self, employee):
+        admin = employee["admin"]
+        a = _create_user(admin, "Holder", "holder@tests.albayanhub.com",
+                         "Password123!Secure", "Employee", {})
+        b = _create_user(admin, "Mover", "mover@tests.albayanhub.com",
+                         "Password123!Secure", "Employee", {})
+        r = client.patch(f"/api/users/{a['id']}", json={"deleted": True}, cookies=admin)
+        assert r.status_code == 200
+        r2 = client.patch(f"/api/users/{b['id']}",
+                          json={"email": "holder@tests.albayanhub.com"}, cookies=admin)
+        assert r2.status_code == 200, r2.text[:300]
+        assert r2.json()["email"] == "holder@tests.albayanhub.com"
+
+
 class TestPatchPermissionsThenRelogin:
     def test_admin_patch_then_relogin_shows_update(self, employee):
         admin = employee["admin"]
