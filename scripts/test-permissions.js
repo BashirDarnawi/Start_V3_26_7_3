@@ -671,6 +671,31 @@ check('server serves index.html for every client path (no 404 on refresh)', () =
   assert(missing.length === 0, `paths missing from the server's FRONTEND_ROUTES: ${missing.join(', ')}`);
 });
 
+console.log('\n=== MONEY SAFETY: stale-state bugs found by the audit ===');
+
+check('a stored rate of 0 is NOT re-rendered as the market rate (was: receipt money rewritten on re-save)', () => {
+  S.defaultExchangeRate = 5.5;
+  // Bank transfers / Sadad / USDT / LTT legitimately store rate 0.
+  assert(sandbox.paymentRate1Value({ method: 'Sadad', rate: 0 }) === 0,
+    'a stored 0 rate was replaced by the market rate — reopening the receipt would inflate its LYD total');
+  assert(sandbox.paymentRate1Value({ method: 'Cash (LYD)', rate: 9.5 }) === 9.5, 'a real rate must be shown as-is');
+  // Only a genuinely absent rate falls back — to the method's own default.
+  assert(sandbox.paymentRate1Value({ method: 'Sadad' }) === 0, 'missing rate should fall back to the method default (0)');
+  assert(sandbox.paymentRate1Value({ method: 'Cash (LYD)' }) === 1, 'Cash (LYD) default rate is 1');
+});
+
+check('every zero-rate method really does default to 0', () => {
+  for (const m of ['Bank Transfer (LYD)', 'Bank Transfer (USD)', 'Sadad', 'USDT', 'LTT', 'Cash (USD)']) {
+    assert(sandbox.getDefaultRate1(m) === 0, `${m} should default Rate 1 to 0`);
+  }
+});
+
+check('getSelectedPaymentMethods reads the live rows (no invented "Cash (USD)")', () => {
+  setPaymentRows(['Bank Transfer (LYD)', 'Cash (LYD)']);
+  const methods = sandbox.getSelectedPaymentMethods();
+  assert(methods.length === 2 && methods[0] === 'Bank Transfer (LYD)', `got ${JSON.stringify(methods)}`);
+});
+
 // ---------- report ----------
 console.log(`\n${'='.repeat(60)}`);
 if (failures.length) {

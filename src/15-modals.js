@@ -100,7 +100,10 @@ function renderModal() {
       const visiblePages = getVisibleRecords(state.pages);
       const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
       const adData = state.modalData || {};
-      state.tempAdPhotos = adData.adPhotos || adData.photos || state.tempAdPhotos || [];
+      // Copy (not alias) the live record's photos — the receipt modal already
+      // does this (see state.tempReceiptPhotos below). Aliasing meant adding or
+      // removing a photo mutated the SAVED ad immediately, even on Cancel.
+      state.tempAdPhotos = (adData.adPhotos || adData.photos || []).slice();
       const durationDaysDefault = (adData.days !== undefined ? adData.days : (adData.startDate && adData.endDate ? Math.max(0, Math.round((new Date(adData.endDate) - new Date(adData.startDate)) / (1000 * 60 * 60 * 24))) : ''));
       const isAdminUser = isCurrentUserAdmin();
       const adCreator = isEdit && adData.creatorId ? state.users.find(u => u.id === adData.creatorId) : state.currentUser;
@@ -1162,11 +1165,11 @@ function renderModal() {
                   </div>
                   <div>
                     <label class="block text-xs font-medium mb-1">${isArS ? 'سعر الصرف' : 'Exchange Rate'}</label>
-                    <input type="text" inputmode="decimal" class="split-rate w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate || state.defaultExchangeRate}" oninput="sanitizeMoneyInput(this, 4)" />
+                    <input type="text" inputmode="decimal" class="split-rate w-full glass-input px-3 py-2 rounded-lg text-sm" value="${paymentRate1Value(payment)}" oninput="sanitizeMoneyInput(this, 4)" />
                   </div>
                   <div>
                     <label class="block text-xs font-medium mb-1">${isArS ? 'سعر الدولار (سعر 2)' : 'USD Rate (Rate 2)'}</label>
-                    <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate2 !== undefined ? payment.rate2 : (payment.rate || state.defaultExchangeRate)}" oninput="sanitizeMoneyInput(this, 4)" />
+                    <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate2 !== undefined && payment.rate2 !== null && payment.rate2 !== '' ? payment.rate2 : paymentRate1Value(payment)}" oninput="sanitizeMoneyInput(this, 4)" />
                   </div>
                   <div>
                     <label class="block text-xs font-medium mb-1">${isArS ? 'نوع التحصيل' : 'Collection Type'}</label>
@@ -1677,11 +1680,15 @@ function renderModal() {
       // form never renumbers an existing receipt.
       initReceiptSerialOnOpen();
       updateReceiptStatusUI(document.getElementById('receipt-status')?.value || 'Paid');
-      // Pre-populate customer if editing
+      // Pre-populate customer if editing. Use the RECEIPT's own stored phone —
+      // seeding the customer's first phone rewrote receipt.phoneNumber on save
+      // for any receipt taken on a second number.
       if (state.modalData && state.modalData.customerId) {
         const customer = state.customers.find(c => c.id === state.modalData.customerId);
         if (customer && Array.isArray(customer.phones) && customer.phones.length > 0) {
-          selectReceiptPhone(customer.phones[0], customer.id);
+          const stored = String(state.modalData.phoneNumber || '').trim();
+          const phone = (stored && customer.phones.includes(stored)) ? stored : customer.phones[0];
+          selectReceiptPhone(phone, customer.id);
         }
       }
       renderReceiptPhotoPreviews();
@@ -1959,7 +1966,16 @@ async function handleModalSubmit() {
         amountUSD = totals.totalR2;
       }
       
-      let exchangeRate = parseFloat(document.getElementById('ad-rate')?.value || state.defaultExchangeRate);
+      // #ad-rate does NOT exist in the ad modal template — reading it always
+      // fell through to the CURRENT global default, so every save silently
+      // rewrote a saved ad's exchangeRate (and any LYD figure derived from it)
+      // with today's market rate instead of the rate the ad was created at.
+      // Keep the ad's own stored rate on edit; use the default only for a new ad.
+      let exchangeRate = parseFloat(
+        (isEdit && Number.isFinite(Number(state.modalData?.exchangeRate)) && Number(state.modalData.exchangeRate) > 0)
+          ? state.modalData.exchangeRate
+          : state.defaultExchangeRate
+      );
       const isPaid = paymentStatus === 'paid';
       // These three inputs do NOT exist in the ad modal template. Reading them
       // always yielded false/undefined, which on EDIT erased spentUSD /
@@ -2184,6 +2200,18 @@ async function handleModalSubmit() {
             showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'أحد الوصولات المدمجة مفقود أو تم حذفه.' : 'One of the merged receipts is missing or was deleted.', 'error');
             return;
           }
+          // A receipt belongs to ONE customer — an ad may never be funded from
+          // another customer's money (the merged rows survived a customer change).
+          if (String(receipt.customerId || '') !== String(customerId || '')) {
+            showNotification(
+              isArSubAd ? 'تنبيه' : 'Validation',
+              isArSubAd
+                ? 'لا يمكن تمويل الإعلان من وصل عميل آخر. أزل الوصولات المدمجة غير المطابقة.'
+                : "An ad cannot be funded from another customer's receipt. Remove the mismatched merged receipts.",
+              'error'
+            );
+            return;
+          }
           const usageStats = getReceiptUsageStats(receipt);
           let remaining = usageStats.remainingUSD || 0;
           // If editing, add back what this ad already merged from this receipt
@@ -2258,7 +2286,22 @@ async function handleModalSubmit() {
         hasMergedPaidFunds: mergedAllocations.length > 0,
         mergedPaidAllocations: mergedAllocations
       };
-      
+
+      // Re-baseline the top-up arithmetic. saveTopUps derives the ad's amount
+      // and end date from initialAmountUSD/initialEndDate + the top-ups. Those
+      // baselines are written ONLY by saveTopUps, so an amount/end-date edited
+      // here was silently REVERTED by the next top-up save (and the funding
+      // receipt re-charged). Rebase them off what we are saving now.
+      if (isEdit && Array.isArray(state.modalData?.topUps) && state.modalData.topUps.length > 0) {
+        const topUpUSD = state.modalData.topUps.reduce((s, t) => s + (parseFloat(t.amount) || 0), 0);
+        const topUpDays = state.modalData.topUps.reduce((s, t) => s + (parseInt(t.extendDays, 10) || 0), 0);
+        adUpdates.initialAmountUSD = Math.max(0, Math.round((amountUSD - topUpUSD) * 100) / 100);
+        const endMs = new Date(adUpdates.endDate).getTime();
+        if (!Number.isNaN(endMs)) {
+          adUpdates.initialEndDate = new Date(endMs - topUpDays * 86400000).toISOString();
+        }
+      }
+
       if (isPaid && (!state.modalData || !state.modalData.collectionDate)) {
         adUpdates.collectionDate = new Date().toISOString();
       }

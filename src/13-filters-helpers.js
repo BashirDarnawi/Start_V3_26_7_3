@@ -2434,6 +2434,12 @@ function saveSplitPayments() {
 
   updateRecord(state.receipts, receiptId, {
     payments,
+    // The top-level method is DERIVED from the rows — without this it kept the
+    // method the receipt was created with and contradicted its own payments
+    // (breaking the receipts payment-method filter and the printed receipt).
+    paymentMethod: payments.length > 1
+      ? 'Split Payment'
+      : (payments[0]?.method || ''),
     amountLocal: totalR1,
     amountUSD: totalR2,
     exchangeRate: avgRate

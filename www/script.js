@@ -15339,6 +15339,12 @@ function saveSplitPayments() {
 
   updateRecord(state.receipts, receiptId, {
     payments,
+    // The top-level method is DERIVED from the rows — without this it kept the
+    // method the receipt was created with and contradicted its own payments
+    // (breaking the receipts payment-method filter and the printed receipt).
+    paymentMethod: payments.length > 1
+      ? 'Split Payment'
+      : (payments[0]?.method || ''),
     amountLocal: totalR1,
     amountUSD: totalR2,
     exchangeRate: avgRate
@@ -15814,7 +15820,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             <div class="grid grid-cols-2 gap-4">
               <div class="bg-slate-50 dark:bg-slate-900/50 p-3 rounded-lg border border-slate-200 dark:border-slate-700">
                 <label class="text-[10px] font-bold text-slate-500 uppercase mb-1.5 block">${isArF ? 'السعر 1' : 'RATE 1'}</label>
-                <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${payment.rate || state.defaultExchangeRate}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
+                <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${paymentRate1Value(payment)}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
                 <div class="text-center pt-2 border-t border-slate-200 dark:border-slate-700">
                   <div class="text-[10px] font-bold text-slate-400 mb-0.5">R1:</div>
                   <span class="payment-r1-display text-sm font-bold text-indigo-600">0.00 LYD</span>
@@ -15903,7 +15909,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
           <div class="grid grid-cols-2 gap-3">
             <div class="bg-slate-50 dark:bg-slate-900/50 p-2 rounded-lg border border-slate-200 dark:border-slate-700">
               <label class="text-[10px] font-bold text-slate-500 uppercase mb-1 block">${isArF ? 'السعر 1' : 'RATE 1'}</label>
-              <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${payment.rate || state.defaultExchangeRate}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
+              <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${paymentRate1Value(payment)}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
               <div class="text-center pt-1 border-t border-slate-200 dark:border-slate-700">
                 <span class="text-[9px] font-bold text-slate-400">R1: </span>
                 <span class="payment-r1-display text-xs font-bold text-indigo-600">0.00 LYD</span>
@@ -16225,6 +16231,24 @@ document.addEventListener('click', (e) => {
   }
 });
 
+// Rate 1 to SHOW for a stored payment row.
+// MONEY-MATH: 0 is a REAL rate — the app itself fills Rate 1 with 0.00 for
+// every zero-rate method (Bank Transfer LYD/USD, Sadad, USDT, LTT, Cash (USD)).
+// The old `payment.rate || state.defaultExchangeRate` treated that 0 as
+// "missing" and re-rendered the market rate, so simply reopening such a receipt
+// (or adding/removing a split row) showed an inflated LYD total — and saving it
+// again REWROTE amountLocal/exchangeRate with money the customer never paid.
+// Only a genuinely absent rate falls back to the default.
+function paymentRate1Value(payment) {
+  const r = payment ? payment.rate : undefined;
+  if (r === undefined || r === null || r === '') {
+    return payment && payment.method !== undefined
+      ? getDefaultRate1(payment.method)
+      : state.defaultExchangeRate;
+  }
+  return r;
+}
+
 // Get default Rate 1 based on payment method
 function getDefaultRate1(paymentMethod) {
   const zeroRateMethods = ['Bank Transfer', 'Bank Transfer (LYD)', 'Bank Transfer (USD)', 'Sadad', 'USDT', 'Cash (USD)', 'LTT'];
@@ -16304,6 +16328,15 @@ function isAutoSerialNumber(serial) {
   if (!serial) return false;
   const s = String(serial).trim().toUpperCase();
   return new RegExp(`^[${AUTO_SERIAL_PREFIXES.join('')}]\\d+$`).test(s);
+}
+
+// The payment methods currently selected in the receipt form, in row order.
+function getSelectedPaymentMethods() {
+  return Array.from(document.querySelectorAll('.payment-split-item'))
+    .map(item => item.querySelector('.payment-method'))
+    .filter(Boolean)
+    .map(sel => String(sel.value || '').trim())
+    .filter(Boolean);
 }
 
 // The auto-serial method to number this receipt by — but ONLY when EVERY
@@ -16743,7 +16776,7 @@ async function _saveReceiptFromModalInner() {
     totalR1 += r1;
     totalR2 += r2;
   });
-  
+
   // Add 0.01 to TOTAL ADS CREDIT (USD) only if it has decimals
   // Snap to 2 decimals first so binary float residue (e.g. a sum landing on
   // 100.00000000000001) doesn't trip the "has decimals" rule on a whole total.
@@ -16758,7 +16791,20 @@ async function _saveReceiptFromModalInner() {
   const avgRate = (totalUSD > 0 && totalLYD > 0) ? (totalLYD / totalUSD) : state.defaultExchangeRate;
   const status = document.getElementById('receipt-status').value || 'Paid';
   const photos = state.tempReceiptPhotos || [];
-  
+
+  // A receipt records money that was RECEIVED. Rows with amount 0 are dropped
+  // from payments[] above, so an all-zero form used to save a receipt with NO
+  // payments at all — which then invented a payment method nobody picked. Only
+  // a "Not Paid" receipt may legitimately carry no payment yet.
+  if (payments.length === 0 && status !== 'Not Paid') {
+    showNotification(
+      isArV ? 'تحقق' : 'Validation',
+      isArV ? 'أدخل مبلغ الدفع (لا يمكن حفظ وصل بدون مبلغ).' : 'Enter a payment amount (a receipt cannot be saved with no money).',
+      'error'
+    );
+    return;
+  }
+
   // Collect status detail fields
   const statusDetail = {
     paidCollection: document.getElementById('paid-collection-value')?.value || 'office',
@@ -16812,9 +16858,13 @@ async function _saveReceiptFromModalInner() {
   const serialErrEl = document.getElementById('receipt-serial-error');
   // Safety net: an auto-numbered payment method must never save without its
   // serial (e.g. the field was left empty because the method was pre-selected).
+  // It must NOT fire for a temp-delivery receipt (those carry a D-number) nor
+  // for a "Not Paid" receipt, whose number the form deliberately hides — issuing
+  // one there would burn a number on a receipt that shows none.
   {
     const autoMethod = getSelectedAutoSerialMethod();
-    if (autoMethod && serialInputEl && !String(serialInputEl.value || '').trim()) {
+    const serialApplies = !isTempDelivery && status !== 'Not Paid';
+    if (serialApplies && autoMethod && serialInputEl && !String(serialInputEl.value || '').trim()) {
       const next = getNextAutoSerialNumber(autoMethod);
       if (next) serialInputEl.value = next;
     }
@@ -16902,13 +16952,25 @@ async function _saveReceiptFromModalInner() {
   // Determine delivery status and delivery person based on status and collection method
   let receiptDeliveryStatus = 'Office';
   let receiptDeliveryPersonId = '';
+  // MONEY-MATH: isPaid must be DERIVED from the status, not defaulted to true.
+  // 'Canceled'/'Lost' used to inherit the true default, so switching a NEVER-PAID
+  // receipt to Canceled/Lost flipped it to paid and minted spendable ad credit
+  // from money the business never received. A canceled/lost receipt only counts
+  // as paid if it really held money before (or a Lost one is resolved as paid).
   let receiptIsPaid = true;
   let receiptIsReceivedInOffice = true;
-  
+
+  if (status === 'Canceled' || status === 'Lost') {
+    const heldMoneyBefore = !!(editTarget && (editTarget.isPaid === true || String(editTarget.status || '') === 'Paid'));
+    const lostPaid = status === 'Lost' && String(statusDetail.lostResolution || '') === 'paid';
+    receiptIsPaid = heldMoneyBefore || lostPaid;
+    receiptIsReceivedInOffice = receiptIsPaid;
+  }
+
   if (status === 'Not Paid') {
     receiptIsPaid = false;
     receiptIsReceivedInOffice = false;
-    
+
     if (statusDetail.notPaidCollection === 'delivery') {
       receiptDeliveryStatus = 'Needs Delivery';
       // Get delivery person from the first payment with a delivery person, or from a dedicated field
@@ -16971,7 +17033,15 @@ async function _saveReceiptFromModalInner() {
     amountUSD: totalUSD,
     exchangeRate: avgRate,
     amountLocal: totalLYD,
-    paymentMethod: (Array.isArray(payments) && payments.length > 1) ? 'Split Payment' : (Array.isArray(payments) && payments.length > 0 ? payments[0]?.method : 'Cash (USD)'),
+    // Derived from the rows the user actually chose. When every amount is 0 the
+    // rows are dropped from payments[], and this used to invent 'Cash (USD)' —
+    // a method nobody picked, contradicting the auto-serial that was issued for
+    // the real method. Fall back to the SELECTED method instead.
+    paymentMethod: (Array.isArray(payments) && payments.length > 1)
+      ? 'Split Payment'
+      : (Array.isArray(payments) && payments.length > 0
+          ? payments[0]?.method
+          : (getSelectedPaymentMethods()[0] || editTarget?.paymentMethod || '')),
     status,
     statusDetail,
     isPaid: receiptIsPaid,
@@ -17464,7 +17534,15 @@ function updateReceiptStatusUI(status) {
       serialInput.placeholder = allow
         ? (isArS ? 'الأدمن يدخل رقم الوصل' : 'Admin entering receipt number')
         : (isArS ? 'مقفل حتى الدفع' : 'Locked until paid');
-      if (!allow) serialInput.value = '';
+      // Stash the number instead of destroying it: the user may be only
+      // glancing at "Not Paid" and switch back — the receipt's real number
+      // used to be wiped from the form and then saved as empty.
+      if (!allow) {
+        if (String(serialInput.value || '').trim()) {
+          serialInput.dataset.stashedSerial = serialInput.value;
+        }
+        serialInput.value = '';
+      }
       if (tempHint) tempHint.classList.add('hidden');
       const overrideLabel = adminOverride?.closest('label');
       if (overrideLabel) overrideLabel.classList.toggle('hidden', !isAdmin);
@@ -17473,10 +17551,18 @@ function updateReceiptStatusUI(status) {
       serialInput.disabled = false;
       serialInput.readOnly = false;
       serialInput.placeholder = isArS ? 'مثال: 12345' : 'e.g., 12345';
+      // Switching back out of "Not Paid": restore the number we stashed above.
+      if (!String(serialInput.value || '').trim() && serialInput.dataset.stashedSerial) {
+        serialInput.value = serialInput.dataset.stashedSerial;
+        delete serialInput.dataset.stashedSerial;
+      }
       if (tempHint) tempHint.classList.add('hidden');
       const overrideLabel = adminOverride?.closest('label');
       if (overrideLabel) overrideLabel.classList.toggle('hidden', !isAdmin);
       show(deliveryInfo, false);
+      // This branch just cleared readOnly — re-apply the auto-serial rules so a
+      // Paid receipt on an auto-numbered method keeps its number and its lock.
+      syncReceiptSerialWithPaymentMethods({ reissue: false });
     }
   }
 
@@ -17638,9 +17724,20 @@ function handleAdCustomerChange(customerId, preserveFunding = false) {
   state.tempAdFunding = state.tempAdFunding || { allocations: [] };
   if (!preserveFunding) {
     state.tempAdFunding.allocations = [];
+    // MERGED funding is customer-scoped too. It used to survive a customer
+    // change, so an ad could be funded from ANOTHER customer's receipt.
+    clearAdMergeFunding();
   }
-  
+
   renderAdFundingList();
+}
+
+// Receipts belong to a customer: whenever the ad's customer/page changes, the
+// merged-funds allocations from the previous customer must go with it.
+function clearAdMergeFunding() {
+  state.tempMergeFunding = { allocations: [], enabled: false };
+  try { if (typeof renderAdMergedFundingList === 'function') renderAdMergedFundingList(); } catch (_) {}
+  try { if (typeof reflectMergeFundingUI === 'function') reflectMergeFundingUI(); } catch (_) {}
 }
 
 function handleAdPageChange(preserveFunding = false) {
@@ -17648,6 +17745,7 @@ function handleAdPageChange(preserveFunding = false) {
   state.tempAdFunding = state.tempAdFunding || { allocations: [] };
   if (!preserveFunding) {
   state.tempAdFunding.allocations = [];
+  clearAdMergeFunding();
   }
   renderAdFundingList();
 }
@@ -17812,6 +17910,7 @@ function selectAdCustomer(customerId, preserveFunding = false) {
   if (!preserveFunding && changedCustomer) {
     state.tempAdFunding = state.tempAdFunding || { allocations: [] };
     state.tempAdFunding.allocations = [];
+    clearAdMergeFunding();
   }
   // Refresh Receipt Funding UI after choosing customer (critical for multi-customer pages)
   renderAdFundingList();
@@ -17857,9 +17956,29 @@ function refreshAdTempReceiptOptions() {
 
   const receipts = getPendingTempDeliveryReceiptsForCustomer(customerId);
   const current = String(hidden.value || '').trim() || String(state.modalData?.receiptId || '').trim();
+  const isEditingSavedAd = !!state.modalData?.id;
+
+  // The list only holds PENDING delivery receipts. A saved ad whose receipt has
+  // since been delivered would therefore find its own link missing from the
+  // options — and the auto-suggest below would silently RE-LINK the ad to a
+  // different receipt (spending another receipt's money). Keep the ad's own
+  // receipt in the list, marked as no longer pending.
+  const linkedReceipt = current
+    ? getVisibleRecords(state.receipts).find(r => String(r.id) === current)
+    : null;
+  const linkedIsListed = !!linkedReceipt && receipts.some(r => String(r.id) === current);
+  const extraOption = (linkedReceipt && !linkedIsListed)
+    ? (() => {
+        const place = String(linkedReceipt.deliveryPlaceName || '').trim();
+        const note = isArT ? 'غير معلق' : 'no longer pending';
+        const label = `${linkedReceipt.tempReceiptNo || linkedReceipt.serialNumber || linkedReceipt.id.slice(0, 8)}${place ? ' • ' + place : ''} • (${note})`;
+        return `<option value="${linkedReceipt.id}" selected>${Security.escapeHtml(label)}</option>`;
+      })()
+    : '';
 
   select.innerHTML = [
     `<option value="">${isArT ? 'اختر وصلاً معلقاً...' : 'Select pending receipt...'}</option>`,
+    extraOption,
     ...receipts.map(r => {
       // Calculate available credit in USD
       const dueUsage = getDeliveryReceiptDueUsage(r);
@@ -17871,9 +17990,10 @@ function refreshAdTempReceiptOptions() {
     })
   ].join('');
 
-  // Auto-suggest: if nothing selected yet and there is a pending receipt, pick the newest.
+  // Auto-suggest the newest pending receipt — but ONLY for a NEW ad. Never
+  // pick a receipt on the user's behalf for an ad that is already saved.
   let selectedId = String(select.value || '').trim();
-  if (!selectedId && receipts.length > 0) {
+  if (!selectedId && !isEditingSavedAd && receipts.length > 0) {
     selectedId = String(receipts[0].id);
     select.value = selectedId;
   }
@@ -17969,12 +18089,18 @@ function onAdTempReceiptChange(receiptId) {
           }
         }
         
-        // Default to existing value, or full available amount for new ads
+        // Default to existing value, or full available amount for new ads.
+        // The field is stamped with the receipt it belongs to: switching the
+        // linked receipt used to KEEP the previous receipt's amount (the
+        // "Available" label updated, the amount did not), so the ad could be
+        // saved spending more than the new receipt actually holds.
+        const belongsToThisReceipt = dueInput.dataset.receiptId === rid;
         if (prefillValue !== null) {
           dueInput.value = prefillValue.toFixed(2);
-        } else if (!dueInput.value) {
+        } else if (!dueInput.value || !belongsToThisReceipt) {
           dueInput.value = availableUSD.toFixed(2);
         }
+        dueInput.dataset.receiptId = rid;
       }
       // Show merge toggle to allow combining with paid receipts
       if (mergeToggle) mergeToggle.classList.remove('hidden');
@@ -19438,7 +19564,10 @@ function renderModal() {
       const visiblePages = getVisibleRecords(state.pages);
       const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
       const adData = state.modalData || {};
-      state.tempAdPhotos = adData.adPhotos || adData.photos || state.tempAdPhotos || [];
+      // Copy (not alias) the live record's photos — the receipt modal already
+      // does this (see state.tempReceiptPhotos below). Aliasing meant adding or
+      // removing a photo mutated the SAVED ad immediately, even on Cancel.
+      state.tempAdPhotos = (adData.adPhotos || adData.photos || []).slice();
       const durationDaysDefault = (adData.days !== undefined ? adData.days : (adData.startDate && adData.endDate ? Math.max(0, Math.round((new Date(adData.endDate) - new Date(adData.startDate)) / (1000 * 60 * 60 * 24))) : ''));
       const isAdminUser = isCurrentUserAdmin();
       const adCreator = isEdit && adData.creatorId ? state.users.find(u => u.id === adData.creatorId) : state.currentUser;
@@ -20500,11 +20629,11 @@ function renderModal() {
                   </div>
                   <div>
                     <label class="block text-xs font-medium mb-1">${isArS ? 'سعر الصرف' : 'Exchange Rate'}</label>
-                    <input type="text" inputmode="decimal" class="split-rate w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate || state.defaultExchangeRate}" oninput="sanitizeMoneyInput(this, 4)" />
+                    <input type="text" inputmode="decimal" class="split-rate w-full glass-input px-3 py-2 rounded-lg text-sm" value="${paymentRate1Value(payment)}" oninput="sanitizeMoneyInput(this, 4)" />
                   </div>
                   <div>
                     <label class="block text-xs font-medium mb-1">${isArS ? 'سعر الدولار (سعر 2)' : 'USD Rate (Rate 2)'}</label>
-                    <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate2 !== undefined ? payment.rate2 : (payment.rate || state.defaultExchangeRate)}" oninput="sanitizeMoneyInput(this, 4)" />
+                    <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate2 !== undefined && payment.rate2 !== null && payment.rate2 !== '' ? payment.rate2 : paymentRate1Value(payment)}" oninput="sanitizeMoneyInput(this, 4)" />
                   </div>
                   <div>
                     <label class="block text-xs font-medium mb-1">${isArS ? 'نوع التحصيل' : 'Collection Type'}</label>
@@ -21015,11 +21144,15 @@ function renderModal() {
       // form never renumbers an existing receipt.
       initReceiptSerialOnOpen();
       updateReceiptStatusUI(document.getElementById('receipt-status')?.value || 'Paid');
-      // Pre-populate customer if editing
+      // Pre-populate customer if editing. Use the RECEIPT's own stored phone —
+      // seeding the customer's first phone rewrote receipt.phoneNumber on save
+      // for any receipt taken on a second number.
       if (state.modalData && state.modalData.customerId) {
         const customer = state.customers.find(c => c.id === state.modalData.customerId);
         if (customer && Array.isArray(customer.phones) && customer.phones.length > 0) {
-          selectReceiptPhone(customer.phones[0], customer.id);
+          const stored = String(state.modalData.phoneNumber || '').trim();
+          const phone = (stored && customer.phones.includes(stored)) ? stored : customer.phones[0];
+          selectReceiptPhone(phone, customer.id);
         }
       }
       renderReceiptPhotoPreviews();
@@ -21297,7 +21430,16 @@ async function handleModalSubmit() {
         amountUSD = totals.totalR2;
       }
       
-      let exchangeRate = parseFloat(document.getElementById('ad-rate')?.value || state.defaultExchangeRate);
+      // #ad-rate does NOT exist in the ad modal template — reading it always
+      // fell through to the CURRENT global default, so every save silently
+      // rewrote a saved ad's exchangeRate (and any LYD figure derived from it)
+      // with today's market rate instead of the rate the ad was created at.
+      // Keep the ad's own stored rate on edit; use the default only for a new ad.
+      let exchangeRate = parseFloat(
+        (isEdit && Number.isFinite(Number(state.modalData?.exchangeRate)) && Number(state.modalData.exchangeRate) > 0)
+          ? state.modalData.exchangeRate
+          : state.defaultExchangeRate
+      );
       const isPaid = paymentStatus === 'paid';
       // These three inputs do NOT exist in the ad modal template. Reading them
       // always yielded false/undefined, which on EDIT erased spentUSD /
@@ -21522,6 +21664,18 @@ async function handleModalSubmit() {
             showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'أحد الوصولات المدمجة مفقود أو تم حذفه.' : 'One of the merged receipts is missing or was deleted.', 'error');
             return;
           }
+          // A receipt belongs to ONE customer — an ad may never be funded from
+          // another customer's money (the merged rows survived a customer change).
+          if (String(receipt.customerId || '') !== String(customerId || '')) {
+            showNotification(
+              isArSubAd ? 'تنبيه' : 'Validation',
+              isArSubAd
+                ? 'لا يمكن تمويل الإعلان من وصل عميل آخر. أزل الوصولات المدمجة غير المطابقة.'
+                : "An ad cannot be funded from another customer's receipt. Remove the mismatched merged receipts.",
+              'error'
+            );
+            return;
+          }
           const usageStats = getReceiptUsageStats(receipt);
           let remaining = usageStats.remainingUSD || 0;
           // If editing, add back what this ad already merged from this receipt
@@ -21596,7 +21750,22 @@ async function handleModalSubmit() {
         hasMergedPaidFunds: mergedAllocations.length > 0,
         mergedPaidAllocations: mergedAllocations
       };
-      
+
+      // Re-baseline the top-up arithmetic. saveTopUps derives the ad's amount
+      // and end date from initialAmountUSD/initialEndDate + the top-ups. Those
+      // baselines are written ONLY by saveTopUps, so an amount/end-date edited
+      // here was silently REVERTED by the next top-up save (and the funding
+      // receipt re-charged). Rebase them off what we are saving now.
+      if (isEdit && Array.isArray(state.modalData?.topUps) && state.modalData.topUps.length > 0) {
+        const topUpUSD = state.modalData.topUps.reduce((s, t) => s + (parseFloat(t.amount) || 0), 0);
+        const topUpDays = state.modalData.topUps.reduce((s, t) => s + (parseInt(t.extendDays, 10) || 0), 0);
+        adUpdates.initialAmountUSD = Math.max(0, Math.round((amountUSD - topUpUSD) * 100) / 100);
+        const endMs = new Date(adUpdates.endDate).getTime();
+        if (!Number.isNaN(endMs)) {
+          adUpdates.initialEndDate = new Date(endMs - topUpDays * 86400000).toISOString();
+        }
+      }
+
       if (isPaid && (!state.modalData || !state.modalData.collectionDate)) {
         adUpdates.collectionDate = new Date().toISOString();
       }
