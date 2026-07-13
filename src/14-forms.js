@@ -1470,7 +1470,7 @@ function checkReceiptNumberDuplicate(input) {
       errorDiv.innerHTML = `
         <div class="flex items-center space-x-2">
           <i data-lucide="alert-circle" class="w-3 h-3"></i>
-          <span>${state.language === 'ar' ? 'موجود بالفعل! مرتبط بـ:' : 'Already exists! Linked to:'} <strong>${customerName}</strong></span>
+          <span>${state.language === 'ar' ? 'موجود بالفعل! مرتبط بـ:' : 'Already exists! Linked to:'} <strong>${Security.escapeHtml(customerName)}</strong></span>
           <button type="button" onclick="goToCustomerFromWarning('${existingReceipt.customerId}')"
             class="ml-1 text-indigo-600 hover:text-indigo-700 underline font-bold">
             ${state.language === 'ar' ? 'عرض العميل ←' : 'View Customer →'}
@@ -1513,7 +1513,7 @@ function showDuplicateReceiptWarning(receiptNumber, customerName, customerId) {
           <i data-lucide="user" class="w-4 h-4 text-slate-500"></i>
           <span class="text-xs font-medium text-slate-500 uppercase">${isArDup ? 'مرتبط بالعميل' : 'Linked to Customer'}</span>
         </div>
-        <p class="text-lg font-bold text-slate-800 dark:text-white">${customerName}</p>
+        <p class="text-lg font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customerName)}</p>
       </div>
       
       <div class="flex space-x-3">

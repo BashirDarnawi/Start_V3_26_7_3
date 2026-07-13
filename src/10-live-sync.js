@@ -16,7 +16,12 @@ const _serverLiveSync = {
   // values — otherwise a device whose clock runs fast would seed the cursor
   // minutes ahead of server time and silently skip everyone else's updates
   // (the server's updated_since window only looks back 15s).
-  serverWatermark: 0
+  serverWatermark: 0,
+  // Bumped on every logout / stopServerLiveSync. A sync tick snapshots it before
+  // its awaits and bails if it changed, so an in-flight fetch that resolves
+  // AFTER the user logged out can no longer re-populate the wiped state (which
+  // would leak the previous user's data into the login screen / next session).
+  sessionEpoch: 0
 };
 
 function _maxLastModifiedFromArray(arr) {
@@ -137,6 +142,12 @@ async function serverLiveSyncOnce() {
   if (!SERVER_API.liveSyncEnabled) return;
   if (document.visibilityState === 'hidden') return;
 
+  // Snapshot the session epoch. After any await we bail if the user logged out
+  // (epoch bumped / currentUser cleared) so a late response can't resurrect the
+  // wiped state — the "logout wipe undone by an in-flight sync" bug.
+  const _epoch = _serverLiveSync.sessionEpoch;
+  const _syncAborted = () => !state.currentUser || _serverLiveSync.sessionEpoch !== _epoch;
+
   const roleLower = String(state.currentUser.role || '').toLowerCase();
 
   // Delivery users: do a small "replace" sync of only assigned deliveries + linked customers.
@@ -157,6 +168,9 @@ async function serverLiveSyncOnce() {
       safeAll('receipts'),
       safeAll('customers')
     ]);
+
+    // Bail if the user logged out while these were in flight (see _syncAborted).
+    if (_syncAborted()) return;
 
     // Only treat the tick as "changed" when the fetched payload actually
     // differs from the previous one. Comparing against state would always
@@ -229,6 +243,10 @@ async function serverLiveSyncOnce() {
     safeSince('walletTransactions'),
     safeSince('serviceSubscriptions')
   ]);
+
+  // Logged out (or a new session started) while these fetches were in flight?
+  // Drop the result — applying it would re-fill the just-wiped state.
+  if (_syncAborted()) return;
 
   let changed = false;
   changed = applyServerDelta('ads', adsDelta) || changed;
@@ -383,6 +401,8 @@ async function manualSyncData() {
 window.manualSyncData = manualSyncData;
 
 function stopServerLiveSync() {
+  // Invalidate any in-flight sync tick so its result is discarded (see field doc).
+  _serverLiveSync.sessionEpoch = (_serverLiveSync.sessionEpoch || 0) + 1;
   if (_serverLiveSync.timer) {
     clearInterval(_serverLiveSync.timer);
     _serverLiveSync.timer = null;

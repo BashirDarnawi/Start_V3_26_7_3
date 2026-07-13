@@ -2765,6 +2765,8 @@ function closeModal() {
   // Discard any pending (unsaved) clothes-product/shipment edits
   _clothesTempVariants = [];
   _clothesTempPhoto = null;
+  if (typeof _clothesPhotoToken === 'number') _clothesPhotoToken++; // invalidate pending photo callback
+
   _clothesTempShipLines = [];
   _clothesTempOrderLines = [];
   

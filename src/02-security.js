@@ -23,6 +23,22 @@ const Security = {
     return div.textContent || div.innerText || '';
   },
 
+  // Return a URL safe to put in an href/src, or '#' for an unsafe scheme.
+  // escapeHtml alone does NOT neutralize javascript:/data:/vbscript: URLs, so
+  // any user-supplied link (e.g. a customer profile link stored raw) must pass
+  // through here before rendering. Allows http/https/mailto/tel and
+  // relative / protocol-relative URLs.
+  safeUrl: (url) => {
+    const s = String(url == null ? '' : url).trim();
+    if (!s) return '#';
+    // Collapse control chars / whitespace that could hide a scheme like
+    // "java\tscript:alert(1)".
+    const cleaned = s.replace(/[\u0000-\u0020\u007f]+/g, '');
+    if (/^(?:https?:|mailto:|tel:)/i.test(cleaned)) return s;   // known-safe scheme
+    if (/^[a-z][a-z0-9+.\-]*:/i.test(cleaned)) return '#';       // any other explicit scheme -> block
+    return s;                                                    // no scheme (relative/anchor) -> ok
+  },
+
   // Sanitize input - remove dangerous characters and patterns
   sanitizeInput: (input, options = {}) => {
     if (input === null || input === undefined) return '';

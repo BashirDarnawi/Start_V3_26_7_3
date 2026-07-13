@@ -83,6 +83,15 @@ class TestSetupAdmin:
         except Exception:
             pass
 
+    def test_bootstrap_sentinel_created(self):
+        # The atomic one-time guard writes a fixed-PK sentinel row so two
+        # concurrent bootstraps collide instead of both creating an admin.
+        with db.db_conn() as conn:
+            n = conn.execute(
+                text("SELECT COUNT(*) FROM entities WHERE type = '_bootstrap' AND id = 'singleton'")
+            ).scalar()
+        assert int(n or 0) == 1
+
     def test_blocked_once_a_user_exists(self):
         r = client.post(
             "/api/auth/setup-admin",

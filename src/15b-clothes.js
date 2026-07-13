@@ -793,6 +793,9 @@ function deleteClothesProduct(id) {
 // Temp modal state (seeded on open, cleared in closeModal)
 let _clothesTempVariants = [];
 let _clothesTempPhoto = null;
+// Generation token for async photo compression — bumped on every product modal
+// open/close so a callback that resolves after the modal changed is discarded.
+let _clothesPhotoToken = 0;
 
 function showClothesProductModal() {
   if (!clothesCanUse()) return;
@@ -800,6 +803,7 @@ function showClothesProductModal() {
   state.modalData = null;
   _clothesTempVariants = [{ color: '', size: '', qty: 0 }];
   _clothesTempPhoto = null;
+  _clothesPhotoToken++; // invalidate any pending photo-compression callback
   renderModal();
 }
 
@@ -814,6 +818,7 @@ function editClothesProduct(id) {
     ? variants.map(v => ({ color: String(v?.color || ''), size: String(v?.size || ''), qty: Math.max(0, Math.floor(Number(v?.qty) || 0)) }))
     : [{ color: '', size: '', qty: 0 }];
   _clothesTempPhoto = product.photo || null;
+  _clothesPhotoToken++; // invalidate any pending photo callback from a prior modal
   renderModal();
 }
 
@@ -958,10 +963,13 @@ function refreshClothesPhotoPreview() {
 function onClothesProductPhotoSelected(input) {
   const file = input?.files && input.files[0];
   if (!file) return;
+  const myToken = ++_clothesPhotoToken;
   compressImageToDataUrl(file).then((dataUrl) => {
+    if (myToken !== _clothesPhotoToken || state.activeModal !== 'clothes-product') return; // modal changed — discard
     _clothesTempPhoto = dataUrl;
     refreshClothesPhotoPreview();
   }).catch(() => {
+    if (myToken !== _clothesPhotoToken) return;
     showNotification('Error', clothesIsAr() ? 'تعذر قراءة الصورة' : 'Could not read the image', 'error');
   });
   // Allow re-selecting the same file later
@@ -970,6 +978,7 @@ function onClothesProductPhotoSelected(input) {
 
 function removeClothesProductPhoto() {
   _clothesTempPhoto = null;
+  _clothesPhotoToken++; // a pending compression must not undo the removal
   refreshClothesPhotoPreview();
 }
 
@@ -1007,6 +1016,12 @@ async function saveClothesProductFromModal() {
 
   const editingId = String(document.getElementById('clothes-product-editing-id')?.value || '').trim();
   const editTarget = editingId ? getVisibleClothesProducts().find(p => p.id === editingId) : null;
+  // Editing a record that vanished (deleted on another device mid-edit) must
+  // NOT silently create a duplicate — abort and tell the user to reopen.
+  if (editingId && !editTarget) {
+    showNotification(isAr ? 'تعذّر الحفظ' : 'Cannot save', isAr ? 'تم حذف هذا المنتج. أعد فتح القائمة.' : 'This product was deleted. Please reopen the list.', 'error');
+    return false;
+  }
 
   const payload = { name, category, note, photo: _clothesTempPhoto, costUSD, priceLYD, variants };
 
@@ -1712,6 +1727,10 @@ async function saveClothesShipmentFromModal() {
 
   const editingId = String(document.getElementById('clothes-shipment-editing-id')?.value || '').trim();
   const editTarget = editingId ? getVisibleClothesShipments().find(s => s.id === editingId) : null;
+  if (editingId && !editTarget) {
+    showNotification(isAr ? 'تعذّر الحفظ' : 'Cannot save', isAr ? 'تم حذف هذه الشحنة. أعد فتح القائمة.' : 'This shipment was deleted. Please reopen the list.', 'error');
+    return false;
+  }
   if (editTarget && editTarget.status === 'Received') {
     showNotification(isAr ? 'غير ممكن' : 'Not allowed', isAr ? 'لا يمكن تعديل شحنة مستلمة.' : 'Cannot edit a Received shipment.', 'error');
     return false;
@@ -1861,9 +1880,11 @@ function applyClothesOrderStockDelta(order, sign) {
         if (back === 0) continue;
         if (match) {
           match.qty = Math.max(0, Math.floor(Number(match.qty) || 0) + back);
-        } else {
-          variants.push({ color, size, qty: back });
         }
+        // else: the variant was renamed/removed from the product AFTER this
+        // sale. Do NOT recreate it — pushing it back resurrected the deleted
+        // variant as phantom stock in the products grid. The merchant changed
+        // the variant set on purpose, so the restored pieces are dropped.
       }
     }
     updateRecord(state.clothesProducts, pid, { variants });
@@ -2425,6 +2446,11 @@ function onClothesOrderLineField(idx, field, value) {
     // New product = new variant list: reset the picked color/size
     line.color = '';
     line.size = '';
+    // A different product has a different cost — drop the frozen cost snapshot
+    // so saveClothesOrderFromModal re-snapshots from the NEW product's cost.
+    // Without this, swapping a line's product on an existing order kept the old
+    // product's cost and reported wrong (even sign-flipped) profit.
+    delete line.costUSDAtSale;
     // Convenience: prefill unit price from the product's selling price when empty
     if (!String(line.priceLYD || '').trim()) {
       const p = getVisibleClothesProducts().find(x => x.id === line.productId);
@@ -2636,6 +2662,10 @@ async function saveClothesOrderFromModal() {
 
   const editingId = String(document.getElementById('clothes-order-editing-id')?.value || '').trim();
   const editTarget = editingId ? getVisibleClothesOrders().find(o => o.id === editingId) : null;
+  if (editingId && !editTarget) {
+    showNotification(isAr ? 'تعذّر الحفظ' : 'Cannot save', isAr ? 'تم حذف هذا الطلب. أعد فتح القائمة.' : 'This order was deleted. Please reopen the list.', 'error');
+    return false;
+  }
   if (editTarget && !clothesOrderIsActiveStatus(editTarget.status)) {
     showNotification(isAr ? 'غير ممكن' : 'Not allowed', isAr ? 'لا يمكن تعديل طلب مرتجع أو ملغى.' : 'Cannot edit a Returned/Canceled order.', 'error');
     return false;

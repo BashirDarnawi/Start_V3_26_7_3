@@ -1867,9 +1867,31 @@ function manageSplitPayments(receiptId) {
   renderModal();
 }
 
+// A top-up adds budget to a LIVE ad. Terminal or refunded ads must NOT be
+// toppable: topping up a refunded ad grew its allocation rows but left the
+// refund's frozen baseline stale, so re-saving the refund erased the top-up's
+// charge and freed that money to be spent again — fabricated receipt balance
+// (audit round-3 #1).
+function _isAdToppable(ad) {
+  if (!ad) return false;
+  if (['Canceled', 'Completed', 'Lost', 'Stopped'].includes(String(ad.status || ''))) return false;
+  if (ad.refundType && ad.refundType !== 'None') return false;
+  if (Array.isArray(ad.refundAllocationBaseline)) return false;
+  return true;
+}
+
 function manageTopUps(adId) {
   const ad = state.ads.find(a => a.id === adId);
   if (!ad) return;
+  if (!_isAdToppable(ad)) {
+    const isAr = state.language === 'ar';
+    showNotification(
+      isAr ? 'غير ممكن' : 'Not possible',
+      isAr ? 'لا يمكن تعبئة إعلان منتهٍ أو مُسترجَع — التعبئة للإعلانات النشطة فقط.' : 'A finished or refunded ad cannot be topped up — top-ups apply to active ads only.',
+      'error'
+    );
+    return;
+  }
 
   // Seed the working list with a COPY of the ad's existing top-ups, so the
   // modal shows them, the X button can delete them, and newly-added ones
@@ -2515,6 +2537,9 @@ function saveTopUps() {
   const adId = state.modalData.id;
   const ad = state.ads.find(a => a.id === adId);
   if (!ad) return;
+  // Defense-in-depth: never charge/extend a terminal or refunded ad (see
+  // _isAdToppable). manageTopUps already blocks opening the modal for these.
+  if (!_isAdToppable(ad)) { closeModal(); return; }
   const isArTU = state.language === 'ar';
 
   // Forgiving save: anything still typed in the form counts as a top-up too
@@ -2660,29 +2685,58 @@ function saveRefund() {
   // the target from that untouched baseline, mirroring confirmStopAd.
   // Previously each re-save re-subtracted refundAmount, fabricating spendable
   // receipt balance the customer never got back.
-  if (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length) {
-    if (refundType === 'None') {
-      // Undoing the refund: restore the full allocations from the baseline
-      // and clear it so a future refund re-snapshots fresh.
-      if (Array.isArray(ad.refundAllocationBaseline)) {
-        updates.receiptAllocations = ad.refundAllocationBaseline.map(a => ({ ...a }));
-        updates.refundAllocationBaseline = null;
-      }
-    } else {
+  // Reduce a frozen baseline array by `amount` from the tail; returns the
+  // rebuilt array and how much refund is still unspent.
+  const _reduceFromBaseline = (baseline, amount) => {
+    const arr = baseline.map(a => ({ ...a }));
+    let refund = amount;
+    for (let i = arr.length - 1; i >= 0 && refund > 0.001; i--) {
+      const cur = parseFloat(arr[i].amountUSD) || 0;
+      const back = Math.min(cur, refund);
+      arr[i].amountUSD = Math.round((cur - back) * 100) / 100;
+      refund = Math.round((refund - back) * 100) / 100;
+    }
+    return { arr, remaining: refund };
+  };
+
+  if (refundType === 'None') {
+    // Undoing the refund: restore BOTH allocation sets from their baselines and
+    // clear them so a future refund re-snapshots fresh.
+    if (Array.isArray(ad.refundAllocationBaseline)) {
+      updates.receiptAllocations = ad.refundAllocationBaseline.map(a => ({ ...a }));
+      updates.refundAllocationBaseline = null;
+    }
+    if (Array.isArray(ad.refundDueBaseline)) {
+      updates.dueAllocations = ad.refundDueBaseline.map(a => ({ ...a }));
+      updates.refundDueBaseline = null;
+    }
+  } else {
+    // A refund frees the ad's WHOLE funding. Return paid-receipt allocations
+    // first, then delivery-DUE allocations for the remainder. Previously only
+    // receiptAllocations were reduced, so an ad funded from delivery due credit
+    // kept that credit locked forever after a full refund (audit round-3 #5).
+    // Both use frozen baselines so re-saving a refund is idempotent.
+    let remaining = refundAmount;
+    if ((Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length) || Array.isArray(ad.refundAllocationBaseline)) {
       let baseline = Array.isArray(ad.refundAllocationBaseline) ? ad.refundAllocationBaseline : null;
       if (!baseline) {
         baseline = ad.receiptAllocations.map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) || 0 }));
         updates.refundAllocationBaseline = baseline;
       }
-      const allocations = baseline.map(a => ({ ...a }));
-      let refund = refundAmount;
-      for (let i = allocations.length - 1; i >= 0 && refund > 0.001; i--) {
-        const cur = parseFloat(allocations[i].amountUSD) || 0;
-        const back = Math.min(cur, refund);
-        allocations[i].amountUSD = Math.round((cur - back) * 100) / 100;
-        refund = Math.round((refund - back) * 100) / 100;
+      const { arr, remaining: left } = _reduceFromBaseline(baseline, remaining);
+      updates.receiptAllocations = arr;
+      remaining = left;
+    }
+    // Rebuild due from baseline whenever a due baseline already exists (so a
+    // smaller re-save correctly restores due) OR the refund reaches into due.
+    if (Array.isArray(ad.refundDueBaseline) || (remaining > 0.001 && Array.isArray(ad.dueAllocations) && ad.dueAllocations.length)) {
+      let dueBaseline = Array.isArray(ad.refundDueBaseline) ? ad.refundDueBaseline : null;
+      if (!dueBaseline) {
+        dueBaseline = ad.dueAllocations.map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) || 0 }));
+        updates.refundDueBaseline = dueBaseline;
       }
-      updates.receiptAllocations = allocations;
+      const { arr } = _reduceFromBaseline(dueBaseline, remaining);
+      updates.dueAllocations = arr;
     }
   }
   // Derived from the ad amount (not compounding). Undoing (None) restores the

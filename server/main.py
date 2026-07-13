@@ -2083,6 +2083,18 @@ def setup_admin(payload: SetupAdminRequest, request: Request):
     """
     require_same_origin(request)
 
+    # Rate-limit per client IP so the endpoint cannot be flooded (even before an
+    # admin exists). Unlike login this is keyed on a constant, not the email, so
+    # rotating emails can't get fresh buckets.
+    allowed, wait_ms = _rate_check(request, "__setup_admin__")
+    if not allowed:
+        wait_seconds = max(1, int(wait_ms / 1000))
+        raise HTTPException(
+            status_code=429,
+            detail="Too many setup attempts. Please wait and try again.",
+            headers={"Retry-After": str(wait_seconds)},
+        )
+
     email = str(payload.email).strip().lower()
     name = (payload.name or "").strip() or "Admin"
     password = payload.password or ""
@@ -2090,16 +2102,35 @@ def setup_admin(payload: SetupAdminRequest, request: Request):
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
 
     now = now_ms()
-    pw = hash_password(password, iterations=PBKDF2_ITERATIONS_DEFAULT)
     user_id = new_id("user")
 
     with db_conn() as conn:
+        # Cheap already-initialized guard FIRST — return 409 before spending any
+        # CPU on PBKDF2 so a flood against an initialized server stays cheap.
         existing = conn.execute(
             text("SELECT COUNT(*) FROM users WHERE deleted = false")
         ).scalar()
         if int(existing or 0) > 0:
-            # Already initialized — this endpoint only bootstraps a fresh server.
             raise HTTPException(status_code=409, detail="Server already initialized. Use normal login.")
+
+        # Atomic one-time guard against a TOCTOU race: two concurrent bootstraps
+        # (different emails) could both pass the COUNT above under READ COMMITTED
+        # and both insert an admin. A fixed-PK sentinel row makes them collide —
+        # only one INSERT wins; the loser gets IntegrityError -> 409 and its whole
+        # transaction (admin included) rolls back. Works on Postgres and SQLite.
+        try:
+            conn.execute(
+                text(
+                    "INSERT INTO entities (type, id, data_json, deleted, created_at, created_by, last_modified) "
+                    "VALUES ('_bootstrap', 'singleton', '{}', false, :now, NULL, :now)"
+                ),
+                {"now": now},
+            )
+        except IntegrityError:
+            raise HTTPException(status_code=409, detail="Server already initialized. Use normal login.")
+
+        # We are the sole bootstrapper — safe to spend the KDF cost now.
+        pw = hash_password(password, iterations=PBKDF2_ITERATIONS_DEFAULT)
         conn.execute(
             text(
                 """
@@ -3371,30 +3402,40 @@ def admin_bulk_import(
                     "created_by": col_created_by,
                     "last_modified": int(now),
                 }
-                if existing:
-                    conn.execute(
-                        text(
-                            """
-                            UPDATE entities
-                            SET data_json = :data_json,
-                                deleted = :deleted,
-                                created_at = :created_at,
-                                created_by = :created_by,
-                                last_modified = :last_modified
-                            WHERE type = :type AND id = :id
-                            """
-                        ),
-                        payload,
-                    )
-                else:
-                    conn.execute(
-                        text(
-                            """
-                            INSERT INTO entities (type, id, data_json, deleted, created_at, created_by, last_modified)
-                            VALUES (:type, :id, :data_json, :deleted, :created_at, :created_by, :last_modified)
-                            """
-                        ),
-                        payload,
+                # A backup whose active set has two records sharing a unique
+                # field (e.g. two receipts with the same serialNumber after a
+                # swap) trips a partial unique index. Surface a clear 409 instead
+                # of an opaque 500; the whole import transaction rolls back.
+                try:
+                    if existing:
+                        conn.execute(
+                            text(
+                                """
+                                UPDATE entities
+                                SET data_json = :data_json,
+                                    deleted = :deleted,
+                                    created_at = :created_at,
+                                    created_by = :created_by,
+                                    last_modified = :last_modified
+                                WHERE type = :type AND id = :id
+                                """
+                            ),
+                            payload,
+                        )
+                    else:
+                        conn.execute(
+                            text(
+                                """
+                                INSERT INTO entities (type, id, data_json, deleted, created_at, created_by, last_modified)
+                                VALUES (:type, :id, :data_json, :deleted, :created_at, :created_by, :last_modified)
+                                """
+                            ),
+                            payload,
+                        )
+                except IntegrityError:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Import conflict in '{name}' (record {rid}): a unique field (e.g. receipt number) collides. The backup was not applied.",
                     )
                 restored += 1
 

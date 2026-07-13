@@ -1759,7 +1759,7 @@ function renderCustomersGrid(customers) {
                   <div class="flex items-start space-x-2">
                     <i data-lucide="link" class="w-4 h-4 text-slate-400 mt-0.5"></i>
                     <div class="flex-1">
-                ${profileLinks.map(link => `<a href="${Security.escapeHtml(link || '')}" target="_blank" rel="noopener noreferrer" class="text-indigo-600 hover:text-indigo-700 text-xs block truncate">${Security.escapeHtml(link || '')}</a>`).join('')}
+                ${profileLinks.map(link => `<a href="${Security.escapeHtml(Security.safeUrl(link))}" target="_blank" rel="noopener noreferrer" class="text-indigo-600 hover:text-indigo-700 text-xs block truncate">${Security.escapeHtml(link || '')}</a>`).join('')}
                     </div>
                   </div>
                 ` : ''}
@@ -2724,10 +2724,11 @@ function renderAdsView() {
                     </td>
                     <td class="py-3 px-2" data-label="Actions">
                       <div class="flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
+                        ${_isAdToppable(ad) ? `
                         <button onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="${isAr ? 'عمليات الشحن' : 'Top-ups'}">
                           <i data-lucide="trending-up" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.topUps && ad.topUps.length > 0 ? `<span class="text-xs">${ad.topUps.length}</span>` : ''}
-                        </button>
+                        </button>` : ''}
                         <button onclick="manageRefund('${ad.id}')" class="text-amber-600 hover:text-amber-700 p-2 md:p-0" title="${isAr ? 'استرجاع' : 'Refund'}">
                           <i data-lucide="arrow-left-circle" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.refundType && ad.refundType !== 'None' ? `<span class="text-xs">!</span>` : ''}
@@ -3169,6 +3170,15 @@ function exportDeliveryReport() {
   const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
   
   let csv = 'Customer,Phone,Debt LYD,Collected LYD,Remaining Due,Status,Driver,Office Received,Date\n';
+  // Pin the CSV Date column to the Gregorian calendar with ASCII digits so it
+  // is sortable and matches the app's stored timestamps. formatDateShort uses
+  // toLocaleString() with no locale, which renders Hijri / Arabic-Indic digits
+  // on an ar-SA device — unsortable text in Excel.
+  const _csvDateGreg = (v) => {
+    const d = new Date(v);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleDateString('en-CA') + ' ' + d.toLocaleTimeString('en-GB', { hour12: false });
+  };
   deliveryAds.forEach(r => {
     const customer = state.customers.find(c => c.id === r.customerId);
     const driver = r.deliveryPersonId ? deliveryUsers.find(u => u.id === r.deliveryPersonId) : null;
@@ -3176,7 +3186,7 @@ function exportDeliveryReport() {
     const collected = Number(r.amountCollectedFromCustomer ?? (String(r.deliveryStatus || '') === 'Delivered' ? (r.amountLocal || 0) : 0)) || 0;
     const remaining = Number(r.remainingDue ?? Math.max(0, debt - collected)) || 0;
     const received = (typeof r.isReceivedInOffice === 'boolean') ? r.isReceivedInOffice : !!r.officeHandover;
-    csv += `${csvCell(customer?.name || 'Unknown')},${csvCell(r.phoneNumber || customer?.phones?.[0] || '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(formatDateShort(r.createdAt || r.date))}\n`;
+    csv += `${csvCell(customer?.name || 'Unknown')},${csvCell(r.phoneNumber || customer?.phones?.[0] || '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
   });
   
   // Prepend a UTF-8 BOM so Excel reads Arabic customer/driver names correctly

@@ -233,6 +233,22 @@ const Security = {
     return div.textContent || div.innerText || '';
   },
 
+  // Return a URL safe to put in an href/src, or '#' for an unsafe scheme.
+  // escapeHtml alone does NOT neutralize javascript:/data:/vbscript: URLs, so
+  // any user-supplied link (e.g. a customer profile link stored raw) must pass
+  // through here before rendering. Allows http/https/mailto/tel and
+  // relative / protocol-relative URLs.
+  safeUrl: (url) => {
+    const s = String(url == null ? '' : url).trim();
+    if (!s) return '#';
+    // Collapse control chars / whitespace that could hide a scheme like
+    // "java\tscript:alert(1)".
+    const cleaned = s.replace(/[\u0000-\u0020\u007f]+/g, '');
+    if (/^(?:https?:|mailto:|tel:)/i.test(cleaned)) return s;   // known-safe scheme
+    if (/^[a-z][a-z0-9+.\-]*:/i.test(cleaned)) return '#';       // any other explicit scheme -> block
+    return s;                                                    // no scheme (relative/anchor) -> ok
+  },
+
   // Sanitize input - remove dangerous characters and patterns
   sanitizeInput: (input, options = {}) => {
     if (input === null || input === undefined) return '';
@@ -6095,7 +6111,12 @@ const _serverLiveSync = {
   // values — otherwise a device whose clock runs fast would seed the cursor
   // minutes ahead of server time and silently skip everyone else's updates
   // (the server's updated_since window only looks back 15s).
-  serverWatermark: 0
+  serverWatermark: 0,
+  // Bumped on every logout / stopServerLiveSync. A sync tick snapshots it before
+  // its awaits and bails if it changed, so an in-flight fetch that resolves
+  // AFTER the user logged out can no longer re-populate the wiped state (which
+  // would leak the previous user's data into the login screen / next session).
+  sessionEpoch: 0
 };
 
 function _maxLastModifiedFromArray(arr) {
@@ -6216,6 +6237,12 @@ async function serverLiveSyncOnce() {
   if (!SERVER_API.liveSyncEnabled) return;
   if (document.visibilityState === 'hidden') return;
 
+  // Snapshot the session epoch. After any await we bail if the user logged out
+  // (epoch bumped / currentUser cleared) so a late response can't resurrect the
+  // wiped state — the "logout wipe undone by an in-flight sync" bug.
+  const _epoch = _serverLiveSync.sessionEpoch;
+  const _syncAborted = () => !state.currentUser || _serverLiveSync.sessionEpoch !== _epoch;
+
   const roleLower = String(state.currentUser.role || '').toLowerCase();
 
   // Delivery users: do a small "replace" sync of only assigned deliveries + linked customers.
@@ -6236,6 +6263,9 @@ async function serverLiveSyncOnce() {
       safeAll('receipts'),
       safeAll('customers')
     ]);
+
+    // Bail if the user logged out while these were in flight (see _syncAborted).
+    if (_syncAborted()) return;
 
     // Only treat the tick as "changed" when the fetched payload actually
     // differs from the previous one. Comparing against state would always
@@ -6308,6 +6338,10 @@ async function serverLiveSyncOnce() {
     safeSince('walletTransactions'),
     safeSince('serviceSubscriptions')
   ]);
+
+  // Logged out (or a new session started) while these fetches were in flight?
+  // Drop the result — applying it would re-fill the just-wiped state.
+  if (_syncAborted()) return;
 
   let changed = false;
   changed = applyServerDelta('ads', adsDelta) || changed;
@@ -6462,6 +6496,8 @@ async function manualSyncData() {
 window.manualSyncData = manualSyncData;
 
 function stopServerLiveSync() {
+  // Invalidate any in-flight sync tick so its result is discarded (see field doc).
+  _serverLiveSync.sessionEpoch = (_serverLiveSync.sessionEpoch || 0) + 1;
   if (_serverLiveSync.timer) {
     clearInterval(_serverLiveSync.timer);
     _serverLiveSync.timer = null;
@@ -9206,7 +9242,7 @@ function renderCustomersGrid(customers) {
                   <div class="flex items-start space-x-2">
                     <i data-lucide="link" class="w-4 h-4 text-slate-400 mt-0.5"></i>
                     <div class="flex-1">
-                ${profileLinks.map(link => `<a href="${Security.escapeHtml(link || '')}" target="_blank" rel="noopener noreferrer" class="text-indigo-600 hover:text-indigo-700 text-xs block truncate">${Security.escapeHtml(link || '')}</a>`).join('')}
+                ${profileLinks.map(link => `<a href="${Security.escapeHtml(Security.safeUrl(link))}" target="_blank" rel="noopener noreferrer" class="text-indigo-600 hover:text-indigo-700 text-xs block truncate">${Security.escapeHtml(link || '')}</a>`).join('')}
                     </div>
                   </div>
                 ` : ''}
@@ -10171,10 +10207,11 @@ function renderAdsView() {
                     </td>
                     <td class="py-3 px-2" data-label="Actions">
                       <div class="flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
+                        ${_isAdToppable(ad) ? `
                         <button onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="${isAr ? 'عمليات الشحن' : 'Top-ups'}">
                           <i data-lucide="trending-up" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.topUps && ad.topUps.length > 0 ? `<span class="text-xs">${ad.topUps.length}</span>` : ''}
-                        </button>
+                        </button>` : ''}
                         <button onclick="manageRefund('${ad.id}')" class="text-amber-600 hover:text-amber-700 p-2 md:p-0" title="${isAr ? 'استرجاع' : 'Refund'}">
                           <i data-lucide="arrow-left-circle" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.refundType && ad.refundType !== 'None' ? `<span class="text-xs">!</span>` : ''}
@@ -10616,6 +10653,15 @@ function exportDeliveryReport() {
   const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
   
   let csv = 'Customer,Phone,Debt LYD,Collected LYD,Remaining Due,Status,Driver,Office Received,Date\n';
+  // Pin the CSV Date column to the Gregorian calendar with ASCII digits so it
+  // is sortable and matches the app's stored timestamps. formatDateShort uses
+  // toLocaleString() with no locale, which renders Hijri / Arabic-Indic digits
+  // on an ar-SA device — unsortable text in Excel.
+  const _csvDateGreg = (v) => {
+    const d = new Date(v);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleDateString('en-CA') + ' ' + d.toLocaleTimeString('en-GB', { hour12: false });
+  };
   deliveryAds.forEach(r => {
     const customer = state.customers.find(c => c.id === r.customerId);
     const driver = r.deliveryPersonId ? deliveryUsers.find(u => u.id === r.deliveryPersonId) : null;
@@ -10623,7 +10669,7 @@ function exportDeliveryReport() {
     const collected = Number(r.amountCollectedFromCustomer ?? (String(r.deliveryStatus || '') === 'Delivered' ? (r.amountLocal || 0) : 0)) || 0;
     const remaining = Number(r.remainingDue ?? Math.max(0, debt - collected)) || 0;
     const received = (typeof r.isReceivedInOffice === 'boolean') ? r.isReceivedInOffice : !!r.officeHandover;
-    csv += `${csvCell(customer?.name || 'Unknown')},${csvCell(r.phoneNumber || customer?.phones?.[0] || '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(formatDateShort(r.createdAt || r.date))}\n`;
+    csv += `${csvCell(customer?.name || 'Unknown')},${csvCell(r.phoneNumber || customer?.phones?.[0] || '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
   });
   
   // Prepend a UTF-8 BOM so Excel reads Arabic customer/driver names correctly
@@ -14340,9 +14386,31 @@ function manageSplitPayments(receiptId) {
   renderModal();
 }
 
+// A top-up adds budget to a LIVE ad. Terminal or refunded ads must NOT be
+// toppable: topping up a refunded ad grew its allocation rows but left the
+// refund's frozen baseline stale, so re-saving the refund erased the top-up's
+// charge and freed that money to be spent again — fabricated receipt balance
+// (audit round-3 #1).
+function _isAdToppable(ad) {
+  if (!ad) return false;
+  if (['Canceled', 'Completed', 'Lost', 'Stopped'].includes(String(ad.status || ''))) return false;
+  if (ad.refundType && ad.refundType !== 'None') return false;
+  if (Array.isArray(ad.refundAllocationBaseline)) return false;
+  return true;
+}
+
 function manageTopUps(adId) {
   const ad = state.ads.find(a => a.id === adId);
   if (!ad) return;
+  if (!_isAdToppable(ad)) {
+    const isAr = state.language === 'ar';
+    showNotification(
+      isAr ? 'غير ممكن' : 'Not possible',
+      isAr ? 'لا يمكن تعبئة إعلان منتهٍ أو مُسترجَع — التعبئة للإعلانات النشطة فقط.' : 'A finished or refunded ad cannot be topped up — top-ups apply to active ads only.',
+      'error'
+    );
+    return;
+  }
 
   // Seed the working list with a COPY of the ad's existing top-ups, so the
   // modal shows them, the X button can delete them, and newly-added ones
@@ -14988,6 +15056,9 @@ function saveTopUps() {
   const adId = state.modalData.id;
   const ad = state.ads.find(a => a.id === adId);
   if (!ad) return;
+  // Defense-in-depth: never charge/extend a terminal or refunded ad (see
+  // _isAdToppable). manageTopUps already blocks opening the modal for these.
+  if (!_isAdToppable(ad)) { closeModal(); return; }
   const isArTU = state.language === 'ar';
 
   // Forgiving save: anything still typed in the form counts as a top-up too
@@ -15133,29 +15204,58 @@ function saveRefund() {
   // the target from that untouched baseline, mirroring confirmStopAd.
   // Previously each re-save re-subtracted refundAmount, fabricating spendable
   // receipt balance the customer never got back.
-  if (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length) {
-    if (refundType === 'None') {
-      // Undoing the refund: restore the full allocations from the baseline
-      // and clear it so a future refund re-snapshots fresh.
-      if (Array.isArray(ad.refundAllocationBaseline)) {
-        updates.receiptAllocations = ad.refundAllocationBaseline.map(a => ({ ...a }));
-        updates.refundAllocationBaseline = null;
-      }
-    } else {
+  // Reduce a frozen baseline array by `amount` from the tail; returns the
+  // rebuilt array and how much refund is still unspent.
+  const _reduceFromBaseline = (baseline, amount) => {
+    const arr = baseline.map(a => ({ ...a }));
+    let refund = amount;
+    for (let i = arr.length - 1; i >= 0 && refund > 0.001; i--) {
+      const cur = parseFloat(arr[i].amountUSD) || 0;
+      const back = Math.min(cur, refund);
+      arr[i].amountUSD = Math.round((cur - back) * 100) / 100;
+      refund = Math.round((refund - back) * 100) / 100;
+    }
+    return { arr, remaining: refund };
+  };
+
+  if (refundType === 'None') {
+    // Undoing the refund: restore BOTH allocation sets from their baselines and
+    // clear them so a future refund re-snapshots fresh.
+    if (Array.isArray(ad.refundAllocationBaseline)) {
+      updates.receiptAllocations = ad.refundAllocationBaseline.map(a => ({ ...a }));
+      updates.refundAllocationBaseline = null;
+    }
+    if (Array.isArray(ad.refundDueBaseline)) {
+      updates.dueAllocations = ad.refundDueBaseline.map(a => ({ ...a }));
+      updates.refundDueBaseline = null;
+    }
+  } else {
+    // A refund frees the ad's WHOLE funding. Return paid-receipt allocations
+    // first, then delivery-DUE allocations for the remainder. Previously only
+    // receiptAllocations were reduced, so an ad funded from delivery due credit
+    // kept that credit locked forever after a full refund (audit round-3 #5).
+    // Both use frozen baselines so re-saving a refund is idempotent.
+    let remaining = refundAmount;
+    if ((Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length) || Array.isArray(ad.refundAllocationBaseline)) {
       let baseline = Array.isArray(ad.refundAllocationBaseline) ? ad.refundAllocationBaseline : null;
       if (!baseline) {
         baseline = ad.receiptAllocations.map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) || 0 }));
         updates.refundAllocationBaseline = baseline;
       }
-      const allocations = baseline.map(a => ({ ...a }));
-      let refund = refundAmount;
-      for (let i = allocations.length - 1; i >= 0 && refund > 0.001; i--) {
-        const cur = parseFloat(allocations[i].amountUSD) || 0;
-        const back = Math.min(cur, refund);
-        allocations[i].amountUSD = Math.round((cur - back) * 100) / 100;
-        refund = Math.round((refund - back) * 100) / 100;
+      const { arr, remaining: left } = _reduceFromBaseline(baseline, remaining);
+      updates.receiptAllocations = arr;
+      remaining = left;
+    }
+    // Rebuild due from baseline whenever a due baseline already exists (so a
+    // smaller re-save correctly restores due) OR the refund reaches into due.
+    if (Array.isArray(ad.refundDueBaseline) || (remaining > 0.001 && Array.isArray(ad.dueAllocations) && ad.dueAllocations.length)) {
+      let dueBaseline = Array.isArray(ad.refundDueBaseline) ? ad.refundDueBaseline : null;
+      if (!dueBaseline) {
+        dueBaseline = ad.dueAllocations.map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) || 0 }));
+        updates.refundDueBaseline = dueBaseline;
       }
-      updates.receiptAllocations = allocations;
+      const { arr } = _reduceFromBaseline(dueBaseline, remaining);
+      updates.dueAllocations = arr;
     }
   }
   // Derived from the ad amount (not compounding). Undoing (None) restores the
@@ -16642,7 +16742,7 @@ function checkReceiptNumberDuplicate(input) {
       errorDiv.innerHTML = `
         <div class="flex items-center space-x-2">
           <i data-lucide="alert-circle" class="w-3 h-3"></i>
-          <span>${state.language === 'ar' ? 'موجود بالفعل! مرتبط بـ:' : 'Already exists! Linked to:'} <strong>${customerName}</strong></span>
+          <span>${state.language === 'ar' ? 'موجود بالفعل! مرتبط بـ:' : 'Already exists! Linked to:'} <strong>${Security.escapeHtml(customerName)}</strong></span>
           <button type="button" onclick="goToCustomerFromWarning('${existingReceipt.customerId}')"
             class="ml-1 text-indigo-600 hover:text-indigo-700 underline font-bold">
             ${state.language === 'ar' ? 'عرض العميل ←' : 'View Customer →'}
@@ -16685,7 +16785,7 @@ function showDuplicateReceiptWarning(receiptNumber, customerName, customerId) {
           <i data-lucide="user" class="w-4 h-4 text-slate-500"></i>
           <span class="text-xs font-medium text-slate-500 uppercase">${isArDup ? 'مرتبط بالعميل' : 'Linked to Customer'}</span>
         </div>
-        <p class="text-lg font-bold text-slate-800 dark:text-white">${customerName}</p>
+        <p class="text-lg font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customerName)}</p>
       </div>
       
       <div class="flex space-x-3">
@@ -21486,6 +21586,8 @@ function closeModal() {
   // Discard any pending (unsaved) clothes-product/shipment edits
   _clothesTempVariants = [];
   _clothesTempPhoto = null;
+  if (typeof _clothesPhotoToken === 'number') _clothesPhotoToken++; // invalidate pending photo callback
+
   _clothesTempShipLines = [];
   _clothesTempOrderLines = [];
   
@@ -22673,6 +22775,9 @@ function deleteClothesProduct(id) {
 // Temp modal state (seeded on open, cleared in closeModal)
 let _clothesTempVariants = [];
 let _clothesTempPhoto = null;
+// Generation token for async photo compression — bumped on every product modal
+// open/close so a callback that resolves after the modal changed is discarded.
+let _clothesPhotoToken = 0;
 
 function showClothesProductModal() {
   if (!clothesCanUse()) return;
@@ -22680,6 +22785,7 @@ function showClothesProductModal() {
   state.modalData = null;
   _clothesTempVariants = [{ color: '', size: '', qty: 0 }];
   _clothesTempPhoto = null;
+  _clothesPhotoToken++; // invalidate any pending photo-compression callback
   renderModal();
 }
 
@@ -22694,6 +22800,7 @@ function editClothesProduct(id) {
     ? variants.map(v => ({ color: String(v?.color || ''), size: String(v?.size || ''), qty: Math.max(0, Math.floor(Number(v?.qty) || 0)) }))
     : [{ color: '', size: '', qty: 0 }];
   _clothesTempPhoto = product.photo || null;
+  _clothesPhotoToken++; // invalidate any pending photo callback from a prior modal
   renderModal();
 }
 
@@ -22838,10 +22945,13 @@ function refreshClothesPhotoPreview() {
 function onClothesProductPhotoSelected(input) {
   const file = input?.files && input.files[0];
   if (!file) return;
+  const myToken = ++_clothesPhotoToken;
   compressImageToDataUrl(file).then((dataUrl) => {
+    if (myToken !== _clothesPhotoToken || state.activeModal !== 'clothes-product') return; // modal changed — discard
     _clothesTempPhoto = dataUrl;
     refreshClothesPhotoPreview();
   }).catch(() => {
+    if (myToken !== _clothesPhotoToken) return;
     showNotification('Error', clothesIsAr() ? 'تعذر قراءة الصورة' : 'Could not read the image', 'error');
   });
   // Allow re-selecting the same file later
@@ -22850,6 +22960,7 @@ function onClothesProductPhotoSelected(input) {
 
 function removeClothesProductPhoto() {
   _clothesTempPhoto = null;
+  _clothesPhotoToken++; // a pending compression must not undo the removal
   refreshClothesPhotoPreview();
 }
 
@@ -22887,6 +22998,12 @@ async function saveClothesProductFromModal() {
 
   const editingId = String(document.getElementById('clothes-product-editing-id')?.value || '').trim();
   const editTarget = editingId ? getVisibleClothesProducts().find(p => p.id === editingId) : null;
+  // Editing a record that vanished (deleted on another device mid-edit) must
+  // NOT silently create a duplicate — abort and tell the user to reopen.
+  if (editingId && !editTarget) {
+    showNotification(isAr ? 'تعذّر الحفظ' : 'Cannot save', isAr ? 'تم حذف هذا المنتج. أعد فتح القائمة.' : 'This product was deleted. Please reopen the list.', 'error');
+    return false;
+  }
 
   const payload = { name, category, note, photo: _clothesTempPhoto, costUSD, priceLYD, variants };
 
@@ -23592,6 +23709,10 @@ async function saveClothesShipmentFromModal() {
 
   const editingId = String(document.getElementById('clothes-shipment-editing-id')?.value || '').trim();
   const editTarget = editingId ? getVisibleClothesShipments().find(s => s.id === editingId) : null;
+  if (editingId && !editTarget) {
+    showNotification(isAr ? 'تعذّر الحفظ' : 'Cannot save', isAr ? 'تم حذف هذه الشحنة. أعد فتح القائمة.' : 'This shipment was deleted. Please reopen the list.', 'error');
+    return false;
+  }
   if (editTarget && editTarget.status === 'Received') {
     showNotification(isAr ? 'غير ممكن' : 'Not allowed', isAr ? 'لا يمكن تعديل شحنة مستلمة.' : 'Cannot edit a Received shipment.', 'error');
     return false;
@@ -23741,9 +23862,11 @@ function applyClothesOrderStockDelta(order, sign) {
         if (back === 0) continue;
         if (match) {
           match.qty = Math.max(0, Math.floor(Number(match.qty) || 0) + back);
-        } else {
-          variants.push({ color, size, qty: back });
         }
+        // else: the variant was renamed/removed from the product AFTER this
+        // sale. Do NOT recreate it — pushing it back resurrected the deleted
+        // variant as phantom stock in the products grid. The merchant changed
+        // the variant set on purpose, so the restored pieces are dropped.
       }
     }
     updateRecord(state.clothesProducts, pid, { variants });
@@ -24305,6 +24428,11 @@ function onClothesOrderLineField(idx, field, value) {
     // New product = new variant list: reset the picked color/size
     line.color = '';
     line.size = '';
+    // A different product has a different cost — drop the frozen cost snapshot
+    // so saveClothesOrderFromModal re-snapshots from the NEW product's cost.
+    // Without this, swapping a line's product on an existing order kept the old
+    // product's cost and reported wrong (even sign-flipped) profit.
+    delete line.costUSDAtSale;
     // Convenience: prefill unit price from the product's selling price when empty
     if (!String(line.priceLYD || '').trim()) {
       const p = getVisibleClothesProducts().find(x => x.id === line.productId);
@@ -24516,6 +24644,10 @@ async function saveClothesOrderFromModal() {
 
   const editingId = String(document.getElementById('clothes-order-editing-id')?.value || '').trim();
   const editTarget = editingId ? getVisibleClothesOrders().find(o => o.id === editingId) : null;
+  if (editingId && !editTarget) {
+    showNotification(isAr ? 'تعذّر الحفظ' : 'Cannot save', isAr ? 'تم حذف هذا الطلب. أعد فتح القائمة.' : 'This order was deleted. Please reopen the list.', 'error');
+    return false;
+  }
   if (editTarget && !clothesOrderIsActiveStatus(editTarget.status)) {
     showNotification(isAr ? 'غير ممكن' : 'Not allowed', isAr ? 'لا يمكن تعديل طلب مرتجع أو ملغى.' : 'Cannot edit a Returned/Canceled order.', 'error');
     return false;
