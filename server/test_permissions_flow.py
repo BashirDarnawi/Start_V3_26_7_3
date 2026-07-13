@@ -530,3 +530,46 @@ class TestPatchPermissionsThenRelogin:
             cookies=admin,
         )
         assert r2.status_code == 200
+
+
+class TestAutoSerialNumbers:
+    """Receipt numbers auto-issued by the app for payment methods that come
+    with no provider receipt: B (bank transfers), O (transfer office),
+    E (Sadad/USDT), S (LTT/Libyana/Madar). The server must accept them and
+    still enforce uniqueness + reject junk."""
+
+    def test_server_accepts_prefixed_serials(self, employee):
+        from server.main import _is_valid_serial_number
+        for ok in ("S1", "B1", "B23", "O7", "E4", "12629"):
+            assert _is_valid_serial_number(ok), f"{ok} should be a valid serial"
+        for bad in ("", "0", "01", "B0", "B01", "D3", "X1", "B", "abc", "-1"):
+            assert not _is_valid_serial_number(bad), f"{bad} must be rejected"
+
+    def test_create_receipt_with_bank_serial_and_uniqueness(self, employee):
+        admin = employee["admin"]
+        r = client.post("/api/collections/receipts", json={"data": {
+            "customerName": "Bank Guy", "status": "Paid",
+            "paymentMethod": "Bank Transfer (LYD)", "serialNumber": "B1",
+        }}, cookies=admin)
+        assert r.status_code == 200, r.text[:300]
+
+        # The same auto-serial cannot be reused.
+        dup = client.post("/api/collections/receipts", json={"data": {
+            "customerName": "Other", "status": "Paid",
+            "paymentMethod": "Bank Transfer (USD)", "serialNumber": "B1",
+        }}, cookies=admin)
+        assert dup.status_code == 409, f"duplicate B1 must 409, got {dup.status_code}"
+
+        # A different group's number is fine.
+        other = client.post("/api/collections/receipts", json={"data": {
+            "customerName": "Office Guy", "status": "Paid",
+            "paymentMethod": "Transfer Office", "serialNumber": "O1",
+        }}, cookies=admin)
+        assert other.status_code == 200, other.text[:300]
+
+    def test_invalid_serial_rejected(self, employee):
+        bad = client.post("/api/collections/receipts", json={"data": {
+            "customerName": "Bad", "status": "Paid",
+            "paymentMethod": "Sadad", "serialNumber": "E0",
+        }}, cookies=employee["admin"])
+        assert bad.status_code == 400, f"E0 must be rejected, got {bad.status_code}"

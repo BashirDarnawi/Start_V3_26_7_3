@@ -82,7 +82,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
               <div>
                 <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1.5">${isArF ? 'طريقة الدفع' : 'Payment Method'}</label>
                 <select class="payment-method w-full glass-input px-3 py-2 rounded-lg text-sm font-medium border border-slate-200 dark:border-slate-600 focus:ring-2 focus:ring-indigo-500/20" onchange="onPaymentMethodChange(this)">
-                  ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
+                  ${paymentMethodOptions(payment.method).map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
                 </select>
               </div>
               <div>
@@ -172,7 +172,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             <div>
               <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">${isArF ? 'طريقة الدفع' : 'Payment Method'}</label>
               <select class="payment-method w-full glass-input px-3 py-2 rounded-lg text-sm font-medium border border-slate-200 dark:border-slate-600" onchange="onPaymentMethodChange(this)">
-                ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
+                ${paymentMethodOptions(payment.method).map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
               </select>
             </div>
             <div>
@@ -519,51 +519,83 @@ function getDefaultRate1(paymentMethod) {
   return state.defaultExchangeRate; // Default for others
 }
 
-// Payment methods that get auto-serial numbers (S-prefix: S1, S2, S3...)
-const AUTO_SERIAL_PAYMENT_METHODS = ['LTT', 'Libyana', 'Madar'];
-const AUTO_SERIAL_PREFIX = 'S'; // Prefix for auto-generated serial numbers
+// AUTO-SERIAL GROUPS
+// Some payment methods have no paper receipt from the provider, so the app
+// issues its own sequential number. Each group owns an INDEPENDENT counter:
+//   S — LTT / Libyana / Madar          (S1, S2, …)
+//   B — Bank Transfer (LYD) / (USD)    (B1, B2, …)
+//   O — Transfer Office                (O1, O2, …)
+//   E — Sadad / USDT                   (E1, E2, …)
+// The serial field is READ-ONLY for these methods (see updateSerialLockState).
+const AUTO_SERIAL_GROUPS = {
+  S: ['LTT', 'Libyana', 'Madar'],
+  B: ['Bank Transfer (LYD)', 'Bank Transfer (USD)', 'Bank Transfer'],
+  O: ['Transfer Office'],
+  E: ['Sadad', 'USDT']
+};
+const AUTO_SERIAL_PREFIXES = Object.keys(AUTO_SERIAL_GROUPS);
+const AUTO_SERIAL_PAYMENT_METHODS = Object.values(AUTO_SERIAL_GROUPS).flat();
 
-// Get the next serial number for auto-serial payment methods (returns S1, S2, S3...)
-function getNextAutoSerialNumber(paymentMethod) {
-  if (!AUTO_SERIAL_PAYMENT_METHODS.includes(paymentMethod)) return null;
-  
-  // Find all receipts that use ANY of the auto-serial payment methods (LTT, Libyana, Madar share the same sequence)
-  const receipts = getVisibleRecords(state.receipts);
-  let maxSerialNumber = 0;
-  
-  receipts.forEach(receipt => {
-    // Check if this receipt uses ANY of the auto-serial payment methods
-    const receiptPaymentMethod = receipt.paymentMethod || '';
-    const payments = receipt.payments || [];
-    const usesAutoSerialMethod = AUTO_SERIAL_PAYMENT_METHODS.includes(receiptPaymentMethod) || 
-                                  payments.some(p => AUTO_SERIAL_PAYMENT_METHODS.includes(p.method));
-    
-    if (usesAutoSerialMethod && receipt.serialNumber) {
-      const serial = String(receipt.serialNumber).trim();
-      // Extract number from S-prefixed serial (S1, S2, etc.) or plain number (legacy: 1, 2, etc.)
-      let serialNum = 0;
-      if (serial.toUpperCase().startsWith(AUTO_SERIAL_PREFIX)) {
-        // New format: S1, S2, S3...
-        serialNum = parseInt(serial.substring(AUTO_SERIAL_PREFIX.length), 10);
-      } else {
-        // Legacy format: plain number (1, 2, 3...)
-        serialNum = parseInt(serial, 10);
-      }
-      if (!isNaN(serialNum) && serialNum > maxSerialNumber) {
-        maxSerialNumber = serialNum;
-      }
-    }
-  });
-  
-  // Return with S prefix: S1, S2, S3...
-  return `${AUTO_SERIAL_PREFIX}${maxSerialNumber + 1}`;
+// Which counter does this payment method draw from? null = manual serial.
+function getAutoSerialPrefix(paymentMethod) {
+  const m = String(paymentMethod || '').trim();
+  for (const [prefix, methods] of Object.entries(AUTO_SERIAL_GROUPS)) {
+    if (methods.includes(m)) return prefix;
+  }
+  return null;
 }
 
-// Check if a serial number is an auto-generated S-serial (S1, S2, etc.)
+// Next serial for the group a payment method belongs to (e.g. 'B3').
+function getNextAutoSerialNumber(paymentMethod) {
+  const prefix = getAutoSerialPrefix(paymentMethod);
+  if (!prefix) return null;
+  const groupMethods = AUTO_SERIAL_GROUPS[prefix];
+
+  const receipts = getVisibleRecords(state.receipts);
+  let maxSerialNumber = 0;
+
+  receipts.forEach(receipt => {
+    // A receipt belongs to the group if its method — or any of its split
+    // payments — is in the group.
+    const receiptPaymentMethod = receipt.paymentMethod || '';
+    const payments = Array.isArray(receipt.payments) ? receipt.payments : [];
+    const usesGroupMethod = groupMethods.includes(receiptPaymentMethod)
+      || payments.some(p => groupMethods.includes(p && p.method));
+
+    if (!usesGroupMethod || !receipt.serialNumber) return;
+    const serial = String(receipt.serialNumber).trim().toUpperCase();
+
+    let serialNum = 0;
+    if (serial.startsWith(prefix)) {
+      serialNum = parseInt(serial.substring(prefix.length), 10);
+    } else if (prefix === 'S' && /^\d+$/.test(serial)) {
+      // Legacy: the S group used bare numbers before the prefix existed.
+      serialNum = parseInt(serial, 10);
+    } else {
+      return; // a serial from a different group never advances this counter
+    }
+    if (!isNaN(serialNum) && serialNum > maxSerialNumber) maxSerialNumber = serialNum;
+  });
+
+  return `${prefix}${maxSerialNumber + 1}`;
+}
+
+// Is this an app-generated serial (S1 / B2 / O3 / E4)?
 function isAutoSerialNumber(serial) {
   if (!serial) return false;
   const s = String(serial).trim().toUpperCase();
-  return s.startsWith(AUTO_SERIAL_PREFIX) && /^S\d+$/.test(s);
+  return new RegExp(`^[${AUTO_SERIAL_PREFIXES.join('')}]\\d+$`).test(s);
+}
+
+// The auto-serial method selected in the receipt form (first payment row that
+// uses one), or null when every row is a manual-serial method.
+function getSelectedAutoSerialMethod() {
+  const paymentItems = document.querySelectorAll('.payment-split-item');
+  for (const item of paymentItems) {
+    const methodSelect = item.querySelector('.payment-method');
+    if (methodSelect && getAutoSerialPrefix(methodSelect.value)) return methodSelect.value;
+  }
+  return null;
 }
 
 // Handle payment method change
@@ -590,31 +622,36 @@ function onPaymentMethodChange(selectElement) {
     rate2Input.value = state.defaultExchangeRate.toFixed(2);
   }
   
-  // Auto-set serial number for LTT, Libyana, Madar payment methods
+  // Auto-serial: assign (or re-assign) the receipt number for methods whose
+  // provider issues no paper receipt — B for bank transfers, O for transfer
+  // office, E for Sadad/USDT, S for LTT/Libyana/Madar.
   const serialInput = document.getElementById('receipt-serial');
-  if (AUTO_SERIAL_PAYMENT_METHODS.includes(paymentMethod)) {
-    if (serialInput && !serialInput.value) {
+  const prefix = getAutoSerialPrefix(paymentMethod);
+  if (serialInput && prefix) {
+    const current = String(serialInput.value || '').trim().toUpperCase();
+    const isEditingSaved = !!state.modalData?.id;
+    // Take a number when the field is empty, or when the existing value is an
+    // auto-serial from a DIFFERENT group (the user switched method on a new
+    // receipt). Never renumber a receipt that is already saved.
+    const wrongGroup = isAutoSerialNumber(current) && !current.startsWith(prefix);
+    if (!current || (wrongGroup && !isEditingSaved)) {
       const nextSerial = getNextAutoSerialNumber(paymentMethod);
       if (nextSerial) {
         serialInput.value = nextSerial;
-        // Make field read-only and style it
-        serialInput.readOnly = true;
-        serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-        serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${paymentMethod}` : `Auto-generated for ${paymentMethod}`;
-        // Show notification about auto-generated serial
-        showNotification(state.language === 'ar' ? 'رقم تلقائي' : 'Auto Serial', state.language === 'ar' ? `تم تعيين رقم الوصل تلقائياً إلى ${nextSerial} لـ ${paymentMethod}` : `Receipt number auto-set to ${nextSerial} for ${paymentMethod}`, 'info');
+        showNotification(
+          state.language === 'ar' ? 'رقم تلقائي' : 'Auto Serial',
+          state.language === 'ar'
+            ? `تم تعيين رقم الوصل تلقائياً إلى ${nextSerial} لـ ${trMethod(paymentMethod)}`
+            : `Receipt number auto-set to ${nextSerial} for ${paymentMethod}`,
+          'info'
+        );
       }
-    } else if (serialInput) {
-      // If already has value and is auto-serial method, keep it locked
-      serialInput.readOnly = true;
-      serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-      serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${paymentMethod}` : `Auto-generated for ${paymentMethod}`;
     }
   }
-  
+
   // Check if we need to update the serial lock state based on all payment methods
   updateSerialLockState();
-  
+
   // Update totals
   updateReceiptTotals();
 }
@@ -630,62 +667,37 @@ function ceilingRound(value) {
   return result;
 }
 
-// Auto-update serial number for receipts with LTT, Libyana, or Madar payment methods
+// Fill in the auto-serial when the receipt form opens (or a payment row is
+// added/removed) and keep the field locked for auto-serial methods.
 function updateAutoSerialForReceipt() {
   const serialInput = document.getElementById('receipt-serial');
   if (!serialInput) return;
-  
-  const paymentItems = document.querySelectorAll('.payment-split-item');
-  let autoSerialMethod = null;
-  
-  // Check if any payment method requires auto-serial
-  paymentItems.forEach((item) => {
-    const methodSelect = item.querySelector('.payment-method');
-    if (methodSelect && AUTO_SERIAL_PAYMENT_METHODS.includes(methodSelect.value)) {
-      autoSerialMethod = methodSelect.value;
-    }
-  });
-  
-  if (autoSerialMethod && !serialInput.value) {
+
+  const autoSerialMethod = getSelectedAutoSerialMethod();
+  if (autoSerialMethod && !String(serialInput.value || '').trim()) {
     const nextSerial = getNextAutoSerialNumber(autoSerialMethod);
-    if (nextSerial) {
-      serialInput.value = nextSerial;
-      // Make field read-only
-      serialInput.readOnly = true;
-      serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-      serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${autoSerialMethod}` : `Auto-generated for ${autoSerialMethod}`;
-    }
+    if (nextSerial) serialInput.value = nextSerial;
   }
-  
+
   // Update lock state
   updateSerialLockState();
 }
 
-// Update serial field lock state based on payment methods
+// The serial field is read-only whenever an auto-serial method is selected —
+// these receipts are numbered by the app, never by hand.
 function updateSerialLockState() {
   const serialInput = document.getElementById('receipt-serial');
   if (!serialInput) return;
-  
-  const paymentItems = document.querySelectorAll('.payment-split-item');
-  let hasAutoSerialMethod = false;
-  let autoSerialMethod = null;
-  
-  // Check if any payment method requires auto-serial
-  paymentItems.forEach((item) => {
-    const methodSelect = item.querySelector('.payment-method');
-    if (methodSelect && AUTO_SERIAL_PAYMENT_METHODS.includes(methodSelect.value)) {
-      hasAutoSerialMethod = true;
-      autoSerialMethod = methodSelect.value;
-    }
-  });
-  
-  if (hasAutoSerialMethod) {
-    // Lock the serial field
+
+  const autoSerialMethod = getSelectedAutoSerialMethod();
+
+  if (autoSerialMethod) {
     serialInput.readOnly = true;
     serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-    serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${autoSerialMethod}` : `Auto-generated for ${autoSerialMethod}`;
+    serialInput.title = state.language === 'ar'
+      ? `مولّد تلقائياً لـ ${trMethod(autoSerialMethod)} (لا يمكن تعديله)`
+      : `Auto-generated for ${autoSerialMethod} (not editable)`;
   } else {
-    // Unlock the serial field if no auto-serial methods are present
     serialInput.readOnly = false;
     serialInput.classList.remove('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
     serialInput.title = '';
@@ -1044,9 +1056,18 @@ async function _saveReceiptFromModalInner() {
   }
   
   // Validate receipt number
-  const serialNumber = document.getElementById('receipt-serial').value.trim();
   const serialInputEl = document.getElementById('receipt-serial');
   const serialErrEl = document.getElementById('receipt-serial-error');
+  // Safety net: an auto-numbered payment method must never save without its
+  // serial (e.g. the field was left empty because the method was pre-selected).
+  {
+    const autoMethod = getSelectedAutoSerialMethod();
+    if (autoMethod && serialInputEl && !String(serialInputEl.value || '').trim()) {
+      const next = getNextAutoSerialNumber(autoMethod);
+      if (next) serialInputEl.value = next;
+    }
+  }
+  const serialNumber = document.getElementById('receipt-serial').value.trim();
 
   // Temp delivery receipts must have a D{n} temporary number.
   if (isTempDelivery) {
@@ -1401,10 +1422,18 @@ async function _saveReceiptFromModalInner() {
 function validateReceiptNumberInput(input) {
   const errorDiv = document.getElementById('receipt-serial-error');
   const originalValue = input.value;
-  
+
+  // App-generated serials (S1 / B2 / O3 / E4) are valid as-is — never strip
+  // their prefix. The field is read-only for those methods anyway.
+  if (isAutoSerialNumber(originalValue)) {
+    if (errorDiv) errorDiv.classList.add('hidden');
+    input.classList.remove('border-rose-500', 'focus:ring-rose-500/20');
+    return;
+  }
+
   // Remove any non-digit characters
   let value = input.value.replace(/[^0-9]/g, '');
-  
+
   // Check if user tried to enter non-digit characters
   if (originalValue !== value && originalValue.length > 0) {
     input.classList.add('animate-shake');

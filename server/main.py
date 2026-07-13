@@ -120,19 +120,27 @@ def _receipt_serial_exists(serial: str, *, exclude_id: str | None = None) -> boo
     return False
 
 
+# Auto-serial prefixes issued by the app for payment methods that come with no
+# provider receipt (must mirror AUTO_SERIAL_GROUPS in src/14-forms.js):
+#   S = LTT / Libyana / Madar   B = Bank Transfer (LYD|USD)
+#   O = Transfer Office         E = Sadad / USDT
+AUTO_SERIAL_PREFIXES = ("S", "B", "O", "E")
+
+
 def _is_valid_serial_number(serial: str) -> bool:
     """
     Check if a serial number is valid.
     Valid formats:
     - Regular: digits only, no leading zeros (1, 123, 456, etc.)
-    - Auto-serial (LTT/Libyana/Madar): S-prefix + digits (S1, S2, S3, etc.)
+    - Auto-serial: prefix + digits, no leading zeros (S1, B2, O3, E4, ...)
     """
     serial = str(serial or "").strip()
     if not serial:
         return False
-    # S-prefixed auto-serial (S1, S2, S3...)
-    if serial.upper().startswith("S") and len(serial) > 1:
-        return serial[1:].isdigit() and not serial[1:].startswith("0")
+    # Prefixed auto-serial (S1, B2, O3, E4...)
+    if len(serial) > 1 and serial[0].upper() in AUTO_SERIAL_PREFIXES:
+        rest = serial[1:]
+        return rest.isdigit() and not rest.startswith("0")
     # Regular numeric serial
     return serial.isdigit() and not serial.startswith("0")
 

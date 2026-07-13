@@ -2,11 +2,24 @@
 // CONSTANTS & ENUMS
 // ==========================================
 
+// The generic 'Bank Transfer' was removed — it duplicated the explicit
+// LYD/USD variants. LEGACY_PAYMENT_METHODS keeps it selectable ONLY on
+// receipts that already carry it, so old records still display/save correctly.
 const PAYMENT_METHODS = [
-  'Cash (LYD)', 'Cash (USD)', 'Libyana', 'Madar', 'LTT', 
-  'Transfer Office', 'Bank Transfer', 'Bank Transfer (LYD)', 
+  'Cash (LYD)', 'Cash (USD)', 'Libyana', 'Madar', 'LTT',
+  'Transfer Office', 'Bank Transfer (LYD)',
   'Bank Transfer (USD)', 'Sadad', 'USDT'
 ];
+const LEGACY_PAYMENT_METHODS = ['Bank Transfer'];
+
+// Payment methods for a given select: the current list, plus the record's own
+// legacy method when it is no longer offered (so editing an old receipt does
+// not silently switch its payment method).
+function paymentMethodOptions(currentMethod) {
+  const m = String(currentMethod || '').trim();
+  if (m && !PAYMENT_METHODS.includes(m)) return [...PAYMENT_METHODS, m];
+  return PAYMENT_METHODS;
+}
 
 const AD_STATUSES = ['Pending', 'Paused', 'Completed', 'Canceled', 'Lost', 'Stopped'];
 const DELIVERY_STATUSES = ['Needs Delivery', 'In Progress', 'Delivered', 'Canceled', 'Office'];

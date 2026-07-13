@@ -418,6 +418,92 @@ check('permissions survive even when state.users lacks the record (login-respons
   assert(!visible(sandbox.renderSidebar()).includes('No access granted'), 'sidebar locked despite valid permissions');
 });
 
+console.log('\n=== RECEIPT AUTO-SERIALS: B / O / E / S groups ===');
+
+check('generic "Bank Transfer" is gone; the LYD/USD variants remain', () => {
+  const methods = vm.runInContext('PAYMENT_METHODS', sandbox);
+  assert(!methods.includes('Bank Transfer'), 'the duplicate generic Bank Transfer is still offered');
+  assert(methods.includes('Bank Transfer (LYD)') && methods.includes('Bank Transfer (USD)'), 'the LYD/USD variants must remain');
+});
+
+check('an old receipt using the removed "Bank Transfer" keeps it in its dropdown', () => {
+  const opts = sandbox.paymentMethodOptions('Bank Transfer');
+  assert(opts.includes('Bank Transfer'), 'legacy method dropped from an existing receipt');
+  assert(!sandbox.paymentMethodOptions('Cash (LYD)').includes('Bank Transfer'), 'legacy method offered on a new receipt');
+});
+
+check('each payment method maps to the right counter prefix', () => {
+  const cases = {
+    'Bank Transfer (LYD)': 'B', 'Bank Transfer (USD)': 'B', 'Bank Transfer': 'B',
+    'Transfer Office': 'O',
+    'Sadad': 'E', 'USDT': 'E',
+    'LTT': 'S', 'Libyana': 'S', 'Madar': 'S'
+  };
+  for (const [method, prefix] of Object.entries(cases)) {
+    assert(sandbox.getAutoSerialPrefix(method) === prefix, `${method} should map to ${prefix}, got ${sandbox.getAutoSerialPrefix(method)}`);
+  }
+  // Cash keeps a manual, hand-typed receipt number
+  assert(sandbox.getAutoSerialPrefix('Cash (LYD)') === null, 'Cash (LYD) must stay manual');
+  assert(sandbox.getAutoSerialPrefix('Cash (USD)') === null, 'Cash (USD) must stay manual');
+});
+
+check('first receipt of each group starts at 1 (B1 / O1 / E1 / S1)', () => {
+  S.receipts = [];
+  assert(sandbox.getNextAutoSerialNumber('Bank Transfer (LYD)') === 'B1', 'bank transfer must start at B1');
+  assert(sandbox.getNextAutoSerialNumber('Transfer Office') === 'O1', 'transfer office must start at O1');
+  assert(sandbox.getNextAutoSerialNumber('Sadad') === 'E1', 'Sadad must start at E1');
+  assert(sandbox.getNextAutoSerialNumber('USDT') === 'E1', 'USDT shares the E counter');
+  assert(sandbox.getNextAutoSerialNumber('LTT') === 'S1', 'LTT must start at S1');
+});
+
+check('counters are independent and increment per group', () => {
+  S.receipts = [
+    { id: 'x1', paymentMethod: 'Bank Transfer (LYD)', serialNumber: 'B1' },
+    { id: 'x2', paymentMethod: 'Bank Transfer (USD)', serialNumber: 'B2' },
+    { id: 'x3', paymentMethod: 'Transfer Office', serialNumber: 'O1' },
+    { id: 'x4', paymentMethod: 'Sadad', serialNumber: 'E1' },
+    { id: 'x5', paymentMethod: 'Cash (LYD)', serialNumber: '12629' }
+  ];
+  assert(sandbox.getNextAutoSerialNumber('Bank Transfer (USD)') === 'B3', 'B counter should be at B3');
+  assert(sandbox.getNextAutoSerialNumber('Transfer Office') === 'O2', 'O counter should be at O2');
+  assert(sandbox.getNextAutoSerialNumber('USDT') === 'E2', 'E counter should be at E2 (shared with Sadad)');
+  assert(sandbox.getNextAutoSerialNumber('LTT') === 'S1', 'S counter must not be advanced by other groups');
+});
+
+check('split payments feed their group counter', () => {
+  S.receipts = [
+    { id: 'y1', paymentMethod: '', payments: [{ method: 'Cash (LYD)' }, { method: 'Transfer Office' }], serialNumber: 'O7' }
+  ];
+  assert(sandbox.getNextAutoSerialNumber('Transfer Office') === 'O8', 'split payment did not advance the O counter');
+});
+
+check('legacy bare numbers still advance the S counter only', () => {
+  S.receipts = [
+    { id: 'z1', paymentMethod: 'Libyana', serialNumber: '4' }, // pre-prefix legacy
+    { id: 'z2', paymentMethod: 'Bank Transfer (LYD)', serialNumber: 'B9' }
+  ];
+  assert(sandbox.getNextAutoSerialNumber('Madar') === 'S5', 'legacy numeric serial should continue the S sequence');
+  assert(sandbox.getNextAutoSerialNumber('Bank Transfer (USD)') === 'B10', 'B counter must be independent');
+});
+
+check('isAutoSerialNumber recognises S/B/O/E and rejects plain numbers', () => {
+  for (const s of ['S1', 'B2', 'O33', 'E7', 'b4', 'o1']) {
+    assert(sandbox.isAutoSerialNumber(s) === true, `${s} should be recognised as an auto-serial`);
+  }
+  for (const s of ['12629', '', 'D3', 'X1', 'B', 'BB1']) {
+    assert(sandbox.isAutoSerialNumber(s) === false, `${s} must NOT be treated as an auto-serial`);
+  }
+});
+
+check('typing cannot corrupt an auto-serial (validator preserves the prefix)', () => {
+  const input = { value: 'B12', classList: { add() {}, remove() {} } };
+  sandbox.validateReceiptNumberInput(input);
+  assert(input.value === 'B12', `auto-serial was mangled to "${input.value}"`);
+  const manual = { value: '0123', classList: { add() {}, remove() {} } };
+  sandbox.validateReceiptNumberInput(manual);
+  assert(manual.value === '123', 'manual serials must still strip a leading zero');
+});
+
 // ---------- report ----------
 console.log(`\n${'='.repeat(60)}`);
 if (failures.length) {

@@ -1139,7 +1139,7 @@ function updateReceiptDeliveryCompletionComputed() {
     if (debtCmp.paymentResult === 'UNDERPAID') debtEl.textContent = isArC ? `الدفع: ناقص (المتبقي ${debtCmp.remainingDue.toFixed(0)} LYD)` : `Payment: UNDERPAID (${debtCmp.remainingDue.toFixed(0)} LYD remaining)`;
   }
 
-  // Validate (allow S-prefixed auto-serials for LTT/Libyana/Madar)
+  // Validate (allow app-generated auto-serials: S/B/O/E + digits)
   const errEl = document.getElementById('delivery-final-receipt-error');
   const isAutoSerialValidation = isAutoSerialNumber(finalNo);
   let ok = true;
@@ -1148,7 +1148,7 @@ function updateReceiptDeliveryCompletionComputed() {
     if (errEl) errEl.textContent = isArC ? 'رقم الوصل النهائي مطلوب.' : 'Final receipt number is required.';
   } else if (!isAutoSerialValidation && (!/^\d+$/.test(finalNo) || finalNo.startsWith('0'))) {
     ok = false;
-    if (errEl) errEl.textContent = isArC ? 'رقم الوصل النهائي يجب أن يكون أرقاماً (بدون صفر في البداية) أو ببادئة S (S1, S2).' : 'Final receipt number must be digits (no leading 0) or S-prefixed (S1, S2).';
+    if (errEl) errEl.textContent = isArC ? 'رقم الوصل النهائي يجب أن يكون أرقاماً (بدون صفر في البداية) أو رقماً تلقائياً (S1, B1, O1, E1).' : 'Final receipt number must be digits (no leading 0) or an auto-serial (S1, B1, O1, E1).';
   } else if (_receiptFinalNoExists(finalNo, receipt.id)) {
     ok = false;
     if (errEl) errEl.textContent = isArC ? 'رقم الوصل النهائي موجود بالفعل.' : 'Final receipt number already exists.';
@@ -1303,12 +1303,12 @@ async function submitReceiptDeliveryCompletion(receiptId) {
   const isArDrv = state.language === 'ar';
   const drvValidationTitle = isArDrv ? 'خطأ في الإدخال' : 'Validation';
 
-  // Allow S-prefixed auto-serial numbers (S1, S2, etc.) for LTT/Libyana/Madar
+  // Allow app-generated auto-serial numbers (S1 / B1 / O1 / E1)
   const isAutoSerialFinal = isAutoSerialNumber(finalNo);
   if (!finalNo || (!isAutoSerialFinal && (!/^\d+$/.test(finalNo) || finalNo.startsWith('0')))) {
     showNotification(drvValidationTitle, isArDrv
-      ? 'رقم الوصل النهائي مطلوب (أرقام فقط، بدون صفر في البداية، أو بادئة S لـ LTT/ليبيانا/المدار).'
-      : 'Final receipt number is required (digits only, no leading 0, or S-prefix for LTT/Libyana/Madar).', 'error');
+      ? 'رقم الوصل النهائي مطلوب (أرقام فقط، بدون صفر في البداية، أو رقم تلقائي مثل S1 / B1 / O1 / E1).'
+      : 'Final receipt number is required (digits only, no leading 0, or an auto-serial like S1 / B1 / O1 / E1).', 'error');
     return;
   }
   if (_receiptFinalNoExists(finalNo, receipt.id)) {
@@ -1765,7 +1765,7 @@ function _collectEditorView(receiptId, receipt) {
       <div class="col-span-7">
         ${idx === 0 ? `<label class="block text-[10px] text-slate-400 mb-1">${isAr ? 'الطريقة' : 'Method'}</label>` : ''}
         <select onchange="updateCollectPaymentRow(${idx}, 'method', this.value)" class="w-full glass-input px-2 py-1.5 rounded-lg text-sm">
-          ${PAYMENT_METHODS.map(m => `<option value="${m}" ${p.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
+          ${paymentMethodOptions(p.method).map(m => `<option value="${m}" ${p.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
         </select>
       </div>
       <div class="col-span-4">
