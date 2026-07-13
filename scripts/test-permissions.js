@@ -1,0 +1,428 @@
+/**
+ * Permission enforcement tests for the built bundle (script.js).
+ *
+ * Loads script.js in a stubbed browser sandbox (init() never runs because
+ * document.readyState is 'loading') and drives the real render/handler
+ * functions with different permission sets, asserting that a user only ever
+ * sees and does what their permissions allow.
+ *
+ * Run: node scripts/test-permissions.js
+ */
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+
+const SCRIPT = path.join(__dirname, '..', 'script.js');
+
+// ---------- minimal browser stubs ----------
+function makeElement() {
+  const el = {
+    id: '', className: '', value: '', style: {},
+    dataset: {}, checked: false, files: [], classList: { add() {}, remove() {}, toggle() {} },
+    appendChild() {}, removeChild() {}, remove() {}, setAttribute() {}, getAttribute() { return null; },
+    addEventListener() {}, removeEventListener() {}, click() {}, focus() {}, select() {},
+    querySelector() { return null; }, querySelectorAll() { return []; },
+    closest() { return null; }, insertAdjacentHTML() {}, scrollTop: 0
+  };
+  // Security.escapeHtml() sets textContent and reads back innerHTML, relying on
+  // the browser to escape &, < and >. Emulate that faithfully — without it every
+  // escaped string would render EMPTY and the leak assertions would pass falsely.
+  let _text = '';
+  let _html = '';
+  Object.defineProperty(el, 'textContent', {
+    get: () => _text,
+    set: (v) => {
+      _text = String(v);
+      _html = _text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+  });
+  Object.defineProperty(el, 'innerHTML', {
+    get: () => _html,
+    set: (v) => { _html = String(v); _text = _html.replace(/<[^>]*>/g, ''); }
+  });
+  return el;
+}
+
+function makeSandbox() {
+  const doc = {
+    readyState: 'loading', // keeps init() from auto-running
+    body: makeElement(),
+    documentElement: makeElement(),
+    head: makeElement(),
+    createElement: () => makeElement(),
+    createTextNode: () => makeElement(),
+    getElementById: () => null,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    addEventListener() {}, removeEventListener() {},
+    execCommand() {}, cookie: ''
+  };
+  const store = () => {
+    const m = new Map();
+    return {
+      getItem: k => (m.has(k) ? m.get(k) : null),
+      setItem: (k, v) => m.set(k, String(v)),
+      removeItem: k => m.delete(k),
+      clear: () => m.clear(),
+      key: () => null, length: 0
+    };
+  };
+  const win = {
+    location: { hostname: 'localhost', origin: 'http://localhost', pathname: '/', search: '', href: 'http://localhost/', protocol: 'http:', reload() {} },
+    history: { pushState() {}, replaceState() {} },
+    addEventListener() {}, removeEventListener() {},
+    matchMedia: () => ({ matches: false, addEventListener() {}, addListener() {} }),
+    requestAnimationFrame: cb => setTimeout(cb, 0),
+    cancelAnimationFrame: () => {},
+    localStorage: store(), sessionStorage: store(),
+    navigator: { userAgent: 'node-test', onLine: true, clipboard: { writeText: async () => {} }, credentials: {} },
+    isSecureContext: true,
+    print() {}, alert() {}, confirm: () => true, prompt: () => null,
+    scrollTo() {}, innerWidth: 1280, innerHeight: 900,
+    fetch: async () => ({ ok: true, status: 200, text: async () => '[]', headers: { get: () => null } }),
+    URL: { createObjectURL: () => 'blob:x', revokeObjectURL() {} },
+    Blob: function () {},
+    crypto: { getRandomValues: a => { for (let i = 0; i < a.length; i++) a[i] = (i * 7 + 3) % 256; return a; }, randomUUID: () => 'uuid-test', subtle: {} }
+  };
+  const sandbox = {
+    window: win, document: doc, navigator: win.navigator, location: win.location, history: win.history,
+    localStorage: win.localStorage, sessionStorage: win.sessionStorage, crypto: win.crypto,
+    fetch: win.fetch, Blob: win.Blob, URL: win.URL, isSecureContext: true,
+    setTimeout, clearTimeout, setInterval, clearInterval, console,
+    indexedDB: undefined,
+    lucide: { createIcons() {} },
+    IntersectionObserver: function () { return { observe() {}, disconnect() {}, unobserve() {} }; },
+    MutationObserver: function () { return { observe() {}, disconnect() {} }; },
+    alert: win.alert, confirm: win.confirm, prompt: win.prompt,
+    requestAnimationFrame: win.requestAnimationFrame, cancelAnimationFrame: win.cancelAnimationFrame,
+    matchMedia: win.matchMedia, addEventListener() {}, removeEventListener() {}
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+  return sandbox;
+}
+
+const sandbox = makeSandbox();
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(SCRIPT, 'utf8'), sandbox, { filename: 'script.js' });
+
+// `const`/`let` top-level declarations (state, PERMISSION_MODULES, …) live in
+// the context's global LEXICAL scope, not on the global object — pull the ones
+// the tests need across the boundary. Function declarations are already global
+// object properties, so they are reachable as sandbox.<name>.
+const bridged = vm.runInContext(
+  '({ state, PERMISSION_MODULES })',
+  sandbox
+);
+
+// ---------- test scaffolding ----------
+let passed = 0;
+const failures = [];
+function check(name, fn) {
+  try {
+    fn();
+    passed++;
+    console.log(`  PASS  ${name}`);
+  } catch (e) {
+    failures.push(`${name}: ${e.message}`);
+    console.log(`  FAIL  ${name}\n        ${e.message}`);
+  }
+}
+function assert(cond, msg) { if (!cond) throw new Error(msg || 'assertion failed'); }
+
+// Strip HTML comments before asserting: section comments like
+// "<!-- Driver Performance & Delivery Log Grid -->" are not visible content and
+// would otherwise make a leak assertion fail (or pass) for the wrong reason.
+function visible(html) { return String(html).replace(/<!--[\s\S]*?-->/g, ''); }
+
+const S = bridged.state;
+
+const ADMIN = { id: 'u-admin', name: 'Bashir', role: 'Admin', permissions: {} };
+const OTHER = { id: 'u-other', name: 'Abdu', role: 'Employee', permissions: {} };
+
+// Build an employee with an explicit permission map.
+function employee(permissions) {
+  return { id: 'u-emp', name: 'Albayan', role: 'Employee', permissions };
+}
+
+function loginAs(user) {
+  S.currentUser = user;
+  S.users = [ADMIN, OTHER, user].filter((v, i, a) => a.findIndex(x => x.id === v.id) === i);
+  S.serverMode = false; // exercise the local-log path (server path is covered by pytest)
+}
+
+// A device-local audit trail holding entries from THREE different users —
+// exactly the shared-browser situation from the production report.
+function seedLogs() {
+  S.logs = [
+    { id: 'log-1', userId: 'u-admin', userName: 'Bashir', action: 'Logout', category: 'auth', severity: 'info', description: 'User Bashir logged out', date: new Date().toISOString() },
+    { id: 'log-2', userId: 'u-other', userName: 'Abdu', action: 'Logout', category: 'auth', severity: 'info', description: 'User Abdu logged out', date: new Date().toISOString() },
+    { id: 'log-3', userId: 'u-emp', userName: 'Albayan', action: 'Update', category: 'general', severity: 'info', description: 'Updated Receipt', date: new Date().toISOString() }
+  ];
+}
+
+function seedBusinessData() {
+  S.customers = [{ id: 'c1', name: 'Cust One', platform: 'Facebook', phones: ['0911234567'], profileLinks: [], createdBy: 'u-admin' }];
+  S.receipts = [{ id: 'r1', customerId: 'c1', amountUSD: 100, status: 'Paid', isPaid: true, deliveryStatus: 'Needs Delivery', deliveryPersonId: '', createdBy: 'u-admin', editHistory: [{ date: new Date().toISOString(), userName: 'Bashir', changes: [] }], transfers: [] }];
+  S.ads = [{ id: 'a1', customerId: 'c1', amountUSD: 50, isPaid: true, paymentStatus: 'paid', createdBy: 'u-admin' }];
+  S.pages = [];
+  S.exchangeRateHistory = [];
+  S.logs = S.logs || [];
+}
+
+const notes = [];
+sandbox.showNotification = (t, m, k) => notes.push({ t, m, k });
+sandbox.render = () => {};
+sandbox.renderModal = () => {};
+sandbox.RenderQueue = { schedule() {} };
+sandbox.IconQueue = { schedule() {} };
+function lastNote() { return notes[notes.length - 1]; }
+function clearNotes() { notes.length = 0; }
+
+console.log('\n=== AUDIT LOGS: viewOwn must never reveal another user\'s activity ===');
+seedLogs(); seedBusinessData();
+
+check('viewOwn-only employee sees ONLY their own log entries', () => {
+  loginAs(employee({ auditLogs: ['viewOwn'] }));
+  const visible = sandbox.getVisibleAuditLogs();
+  assert(visible.length === 1, `expected 1 own log, got ${visible.length}`);
+  assert(visible[0].id === 'log-3', 'wrong log returned');
+});
+
+check('viewOwn-only employee: rendered Audit screen contains no other user\'s entry', () => {
+  loginAs(employee({ auditLogs: ['viewOwn'] }));
+  const html = visible(sandbox.renderAuditView());
+  assert(!html.includes('Bashir logged out'), "admin's log leaked into the page");
+  assert(!html.includes('Abdu logged out'), "another user's log leaked into the page");
+  assert(html.includes('Updated Receipt'), 'own log entry is missing');
+});
+
+check('viewOwn-only employee: user-filter dropdown does not enumerate other users', () => {
+  loginAs(employee({ auditLogs: ['viewOwn'] }));
+  const html = visible(sandbox.renderAuditView());
+  const optionArea = html.split('All Users')[1] || '';
+  assert(!optionArea.includes('u-admin'), 'admin id exposed in the users filter');
+  assert(!optionArea.includes('u-other'), 'other user id exposed in the users filter');
+});
+
+check('auditLogs.view (full) DOES see every entry', () => {
+  loginAs(employee({ auditLogs: ['view'] }));
+  const visible = sandbox.getVisibleAuditLogs();
+  assert(visible.length === 3, `expected all 3 logs, got ${visible.length}`);
+});
+
+check('no auditLogs permission => no logs at all + no-access screen', () => {
+  loginAs(employee({ analytics: ['view'] }));
+  assert(sandbox.getVisibleAuditLogs().length === 0, 'logs returned without permission');
+  const html = visible(sandbox.renderAuditView());
+  assert(!html.includes('Updated Receipt') && !html.includes('Bashir logged out'), 'logs rendered without permission');
+});
+
+check('Admin sees everything (role bypass)', () => {
+  loginAs(ADMIN);
+  assert(sandbox.getVisibleAuditLogs().length === 3, 'admin should see all logs');
+});
+
+console.log('\n=== AUDIT LOGS: action buttons + handlers are permission-gated ===');
+
+check('viewOwn-only employee: Backup/Restore/Cleanup/CSV/JSON buttons are NOT rendered', () => {
+  loginAs(employee({ auditLogs: ['viewOwn'] }));
+  const html = visible(sandbox.renderAuditView());
+  assert(!html.includes('backupAuditLogs()'), 'Backup button rendered');
+  assert(!html.includes('restoreAuditLogs()'), 'Restore button rendered');
+  assert(!html.includes('cleanupAuditLogs()'), 'Cleanup button rendered');
+  assert(!html.includes("exportAuditLogs('csv')"), 'CSV button rendered');
+});
+
+check('auditLogs.export grants the CSV/JSON/Backup buttons only', () => {
+  loginAs(employee({ auditLogs: ['view', 'export'] }));
+  const html = visible(sandbox.renderAuditView());
+  assert(html.includes("exportAuditLogs('csv')"), 'CSV button missing for export holder');
+  assert(html.includes('backupAuditLogs()'), 'Backup button missing for export holder');
+  assert(!html.includes('cleanupAuditLogs()'), 'Cleanup button must need the clear permission');
+});
+
+check('exportAuditLogs handler refuses without auditLogs.export', () => {
+  loginAs(employee({ auditLogs: ['viewOwn'] }));
+  clearNotes();
+  sandbox.exportAuditLogs('csv');
+  assert(lastNote() && /Access Denied/i.test(lastNote().t), 'export was not blocked');
+});
+
+check('restoreAuditLogs handler refuses without auditLogs.clear', () => {
+  loginAs(employee({ auditLogs: ['view', 'export'] }));
+  clearNotes();
+  sandbox.restoreAuditLogs();
+  assert(lastNote() && /Access Denied/i.test(lastNote().t), 'restore was not blocked');
+});
+
+check('showLogDetails refuses another user\'s entry for a viewOwn user', () => {
+  loginAs(employee({ auditLogs: ['viewOwn'] }));
+  clearNotes();
+  sandbox.showLogDetails('log-1'); // the admin's entry
+  assert(lastNote() && /Access Denied/i.test(lastNote().t), "another user's log detail was opened");
+});
+
+console.log('\n=== CUSTOMERS: viewContacts / viewBalance ===');
+
+check('without viewContacts, phone numbers are masked', () => {
+  loginAs(employee({ customers: ['view'] }));
+  const html = visible(sandbox.renderCustomersGrid(S.customers));
+  assert(!html.includes('0911234567'), 'phone number leaked');
+});
+
+check('with viewContacts, phone numbers are shown', () => {
+  loginAs(employee({ customers: ['view', 'viewContacts'] }));
+  const html = visible(sandbox.renderCustomersGrid(S.customers));
+  assert(html.includes('0911234567'), 'phone number missing for permitted user');
+});
+
+check('without viewBalance, balances are hidden', () => {
+  loginAs(employee({ customers: ['view', 'viewContacts'] }));
+  const html = visible(sandbox.renderCustomersGrid(S.customers));
+  assert(/Balances hidden|الأرصدة محجوبة/.test(html), 'balances not hidden');
+  assert(!html.includes('Ads Credit (USD)'), 'financial grid rendered without viewBalance');
+});
+
+check('with viewBalance, balances are shown', () => {
+  loginAs(employee({ customers: ['view', 'viewBalance'] }));
+  const html = visible(sandbox.renderCustomersGrid(S.customers));
+  assert(html.includes('Ads Credit (USD)'), 'financial grid missing for permitted user');
+});
+
+console.log('\n=== ANALYTICS: viewFinancials / viewSensitive ===');
+
+check('without viewFinancials, money KPIs are not rendered', () => {
+  loginAs(employee({ analytics: ['view'] }));
+  const html = visible(sandbox.renderAnalyticsView());
+  assert(!html.includes('Ad Revenue (Paid)'), 'revenue KPI leaked');
+  assert(!html.includes('Available Balance'), 'balance KPI leaked');
+  assert(!html.includes('Revenue & Collections'), 'cashflow panel leaked');
+});
+
+check('with viewFinancials, money KPIs render', () => {
+  loginAs(employee({ analytics: ['view', 'viewFinancials'] }));
+  const html = visible(sandbox.renderAnalyticsView());
+  assert(html.includes('Ad Revenue (Paid)'), 'revenue KPI missing for permitted user');
+});
+
+check('viewSensitive gates the detailed breakdowns (Top Customers spend)', () => {
+  loginAs(employee({ analytics: ['view', 'viewFinancials'] }));
+  assert(!visible(sandbox.renderAnalyticsView()).includes('Top Customers (Spend)'), 'sensitive panel leaked');
+  loginAs(employee({ analytics: ['view', 'viewFinancials', 'viewSensitive'] }));
+  assert(visible(sandbox.renderAnalyticsView()).includes('Top Customers (Spend)'), 'sensitive panel missing for permitted user');
+});
+
+console.log('\n=== DELIVERIES: viewStats + action gating ===');
+
+check('without viewStats, driver performance + money tiles are hidden', () => {
+  loginAs(employee({ deliveries: ['view'] }));
+  const html = visible(sandbox.renderDeliveriesView());
+  assert(!html.includes('Driver Performance'), 'driver performance leaked');
+  assert(!html.includes('Uncollected Value'), 'money tile leaked');
+});
+
+check('with viewStats, they are shown', () => {
+  loginAs(employee({ deliveries: ['view', 'viewStats'] }));
+  const html = visible(sandbox.renderDeliveriesView());
+  assert(html.includes('Driver Performance'), 'driver performance missing for permitted user');
+});
+
+check('acceptDelivery refuses without deliveries.accept', () => {
+  loginAs(employee({ deliveries: ['view'] }));
+  clearNotes();
+  sandbox.acceptDelivery('r1');
+  assert(lastNote() && /Access Denied/i.test(lastNote().t), 'accept was not blocked');
+  assert(S.receipts[0].deliveryStatus === 'Needs Delivery', 'record was mutated despite denial');
+});
+
+check('markAsCollected refuses without deliveries.markCollected', () => {
+  loginAs(employee({ deliveries: ['view'] }));
+  clearNotes();
+  sandbox.markAsCollected('r1');
+  assert(lastNote() && /Access Denied/i.test(lastNote().t), 'markCollected was not blocked');
+});
+
+check('assigned driver CAN accept their own delivery (role path still works)', () => {
+  const driver = { id: 'u-driver', name: 'Driver', role: 'Delivery', permissions: {} };
+  S.receipts[0].deliveryPersonId = 'u-driver';
+  loginAs(driver);
+  assert(sandbox.canDoDeliveryAction('accept', 'r1') === true, 'assigned driver was blocked from their own delivery');
+  S.receipts[0].deliveryPersonId = '';
+});
+
+console.log('\n=== RECEIPTS / ADS / SETTINGS ===');
+
+check('receipt edit history refuses without receipts.viewHistory', () => {
+  loginAs(employee({ receipts: ['view'] }));
+  clearNotes();
+  sandbox.showReceiptEditHistory('r1');
+  assert(lastNote() && /Access Denied/i.test(lastNote().t), 'history was not blocked');
+});
+
+check('uploadAdPhotos refuses without ads.uploadPhotos', () => {
+  loginAs(employee({ ads: ['view', 'add'] }));
+  clearNotes();
+  sandbox.uploadAdPhotos([{ name: 'x.png' }]);
+  assert(lastNote() && /Access Denied/i.test(lastNote().t), 'photo upload was not blocked');
+});
+
+check('updateExchangeRate refuses without settings.manageExchangeRate', () => {
+  loginAs(employee({ settings: ['view', 'edit'] }));
+  clearNotes();
+  const before = S.defaultExchangeRate;
+  sandbox.updateExchangeRate('9.99');
+  assert(lastNote() && /Access Denied/i.test(lastNote().t), 'rate change was not blocked');
+  assert(S.defaultExchangeRate === before, 'exchange rate was mutated despite denial');
+});
+
+check('updateExchangeRate works WITH settings.manageExchangeRate', () => {
+  loginAs(employee({ settings: ['view', 'manageExchangeRate'] }));
+  clearNotes();
+  sandbox.updateExchangeRate('7.25');
+  assert(S.defaultExchangeRate === 7.25, 'permitted rate change did not apply');
+});
+
+check('exportData (full backup) is Admin only', () => {
+  loginAs(employee({ settings: ['view', 'edit'], auditLogs: ['view', 'export'] }));
+  clearNotes();
+  sandbox.exportData();
+  assert(lastNote() && /Access Denied/i.test(lastNote().t), 'full backup export was not blocked');
+});
+
+check('settings screen hides the exchange-rate editor without the permission', () => {
+  loginAs(employee({ settings: ['view'] }));
+  const html = visible(sandbox.renderSettingsView());
+  assert(!html.includes('updateExchangeRate('), 'rate editor rendered without permission');
+  assert(!html.includes('exportData()'), 'backup export button rendered for non-admin');
+});
+
+console.log('\n=== SIDEBAR: the original lockout must stay fixed ===');
+
+check('employee with full permissions sees the full sidebar', () => {
+  const all = {};
+  for (const [mod, cfg] of Object.entries(bridged.PERMISSION_MODULES)) all[mod] = Object.keys(cfg.permissions);
+  loginAs(employee(all));
+  const html = visible(sandbox.renderSidebar());
+  assert(!html.includes('No access granted'), 'fully-permissioned employee is locked out');
+  for (const label of ['analytics', 'customers', 'receipts', 'pages', 'ads', 'deliveries', 'users', 'audit', 'settings']) {
+    assert(html.includes(`navigateTo('${label}')`), `sidebar is missing the ${label} link`);
+  }
+});
+
+check('permissions survive even when state.users lacks the record (login-response fallback)', () => {
+  const emp = employee({ analytics: ['view'], receipts: ['view'] });
+  S.currentUser = emp;
+  S.users = []; // the users-list fetch failed — this used to lock the whole UI
+  assert(sandbox.currentUserHasPermission('analytics', 'view') === true, 'permission lost when users list is empty');
+  assert(!visible(sandbox.renderSidebar()).includes('No access granted'), 'sidebar locked despite valid permissions');
+});
+
+// ---------- report ----------
+console.log(`\n${'='.repeat(60)}`);
+if (failures.length) {
+  console.log(`FAILED: ${failures.length} of ${passed + failures.length}`);
+  failures.forEach(f => console.log(`  - ${f}`));
+  process.exit(1);
+}
+console.log(`ALL ${passed} PERMISSION TESTS PASSED`);

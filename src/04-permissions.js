@@ -403,6 +403,53 @@ function canManageUsersAction(action) {
   return isCurrentUserAdmin() || currentUserHasPermission('users', action);
 }
 
+// Admin role OR the named permission. Use for every capability the
+// Permissions Manager advertises, so a granted toggle actually does something.
+function can(module, action) {
+  return isCurrentUserAdmin() || currentUserHasPermission(module, action);
+}
+
+// The audit trail the current user is allowed to SEE.
+// auditLogs.view => all entries; auditLogs.viewOwn => only their own.
+// Without either, nothing. state.logs is a DEVICE-LOCAL trail (it can hold
+// entries written while a different user was logged in on this browser), so
+// this scoping is what keeps a viewOwn user from reading someone else's
+// activity — never render or export state.logs directly.
+function getVisibleAuditLogs() {
+  // In server mode the server's trail is authoritative AND already scoped by
+  // the caller's auditLogs.view/viewOwn permission (GET /api/audit).
+  const source = isServerModeEnabled()
+    ? (Array.isArray(state.serverLogs) ? state.serverLogs : [])
+    : getVisibleRecords(state.logs);
+
+  if (can('auditLogs', 'view')) return source;
+  if (currentUserHasPermission('auditLogs', 'viewOwn')) {
+    const uid = String(state.currentUser?.id || '');
+    return source.filter(l => String(l?.userId || '') === uid);
+  }
+  return [];
+}
+
+// Refresh the server audit trail, then re-render the Audit Logs screen.
+// Cheap guard so the render loop can call it without re-entering.
+let _auditFetchInFlight = false;
+async function refreshServerAuditLogs({ force = false } = {}) {
+  if (!isServerModeEnabled() || !state.currentUser?.id) return;
+  if (_auditFetchInFlight) return;
+  const fresh = Date.now() - (state.serverLogsLoadedAt || 0) < 15000;
+  if (!force && fresh) return;
+  _auditFetchInFlight = true;
+  try {
+    state.serverLogs = await apiListAuditLogs(500);
+    state.serverLogsLoadedAt = Date.now();
+    if (state.currentView === 'audit') RenderQueue.schedule('auditLogs(server)');
+  } catch (e) {
+    console.warn('[Audit] Failed to load server logs:', e?.message || e);
+  } finally {
+    _auditFetchInFlight = false;
+  }
+}
+
 // Get permission summary for display
 function getPermissionSummary(permissions) {
   let total = 0;

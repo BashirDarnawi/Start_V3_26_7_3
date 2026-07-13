@@ -1817,6 +1817,53 @@ function canManageUsersAction(action) {
   return isCurrentUserAdmin() || currentUserHasPermission('users', action);
 }
 
+// Admin role OR the named permission. Use for every capability the
+// Permissions Manager advertises, so a granted toggle actually does something.
+function can(module, action) {
+  return isCurrentUserAdmin() || currentUserHasPermission(module, action);
+}
+
+// The audit trail the current user is allowed to SEE.
+// auditLogs.view => all entries; auditLogs.viewOwn => only their own.
+// Without either, nothing. state.logs is a DEVICE-LOCAL trail (it can hold
+// entries written while a different user was logged in on this browser), so
+// this scoping is what keeps a viewOwn user from reading someone else's
+// activity — never render or export state.logs directly.
+function getVisibleAuditLogs() {
+  // In server mode the server's trail is authoritative AND already scoped by
+  // the caller's auditLogs.view/viewOwn permission (GET /api/audit).
+  const source = isServerModeEnabled()
+    ? (Array.isArray(state.serverLogs) ? state.serverLogs : [])
+    : getVisibleRecords(state.logs);
+
+  if (can('auditLogs', 'view')) return source;
+  if (currentUserHasPermission('auditLogs', 'viewOwn')) {
+    const uid = String(state.currentUser?.id || '');
+    return source.filter(l => String(l?.userId || '') === uid);
+  }
+  return [];
+}
+
+// Refresh the server audit trail, then re-render the Audit Logs screen.
+// Cheap guard so the render loop can call it without re-entering.
+let _auditFetchInFlight = false;
+async function refreshServerAuditLogs({ force = false } = {}) {
+  if (!isServerModeEnabled() || !state.currentUser?.id) return;
+  if (_auditFetchInFlight) return;
+  const fresh = Date.now() - (state.serverLogsLoadedAt || 0) < 15000;
+  if (!force && fresh) return;
+  _auditFetchInFlight = true;
+  try {
+    state.serverLogs = await apiListAuditLogs(500);
+    state.serverLogsLoadedAt = Date.now();
+    if (state.currentView === 'audit') RenderQueue.schedule('auditLogs(server)');
+  } catch (e) {
+    console.warn('[Audit] Failed to load server logs:', e?.message || e);
+  } finally {
+    _auditFetchInFlight = false;
+  }
+}
+
 // Get permission summary for display
 function getPermissionSummary(permissions) {
   let total = 0;
@@ -3114,6 +3161,11 @@ const state = {
   customers: [],
   pages: [],
   logs: [],
+  // Server-side audit trail (server mode only). Fetched from GET /api/audit,
+  // which scopes rows by auditLogs.view / viewOwn — this is what the Audit
+  // Logs screen renders in server mode, NOT the device-local `logs` above.
+  serverLogs: [],
+  serverLogsLoadedAt: 0,
   walletTransactions: [], // ledger entries (huge-data safe via IndexedDB)
   serviceSubscriptions: [], // structured subscriptions (huge-data safe via IndexedDB)
 
@@ -5625,6 +5677,30 @@ function invalidateUsersListCache() {
   _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000 };
 }
 
+// The server's audit trail. GET /api/audit enforces auditLogs.view (all rows)
+// vs auditLogs.viewOwn (own rows only), so what comes back is already scoped
+// to the caller — unlike the device-local state.logs trail.
+async function apiListAuditLogs(limit = 500) {
+  const rows = await apiJson(`/api/audit?limit=${encodeURIComponent(limit)}&offset=0`, { method: 'GET' }, { timeoutMs: 15000 });
+  if (!Array.isArray(rows)) return [];
+  return rows.map((r) => {
+    const uid = String(r.user_id || '');
+    const u = (state.users || []).find(x => x && String(x.id) === uid);
+    return {
+      id: String(r.id || ''),
+      date: new Date(Number(r.ts) || 0).toISOString(),
+      userId: uid,
+      userName: u?.name || (uid ? uid : 'System'),
+      action: String(r.action || ''),
+      category: String(r.resource_type || 'general'),
+      severity: 'info',
+      description: String(r.message || ''),
+      resourceId: String(r.resource_id || ''),
+      metadata: (r.metadata && typeof r.metadata === 'object') ? r.metadata : {}
+    };
+  });
+}
+
 async function apiCreateUser(user) {
   const res = await apiJson('/api/users', { method: 'POST', body: user }, { timeoutMs: 20000 });
   invalidateUsersListCache();
@@ -7049,6 +7125,15 @@ function handleLogout() {
     try { if (typeof _pendingRequests !== 'undefined' && _pendingRequests && _pendingRequests.clear) _pendingRequests.clear(); } catch (_) {}
     _serverLiveSync.serverWatermark = 0;
     _serverLiveSync.cursor = 0;
+    // The audit trail is NOT in PERSISTED_COLLECTIONS (logs live in their own
+    // IndexedDB store), so it used to survive logout: the next user on a
+    // shared device inherited the previous user's Login/Logout/CRUD entries
+    // and saw them in the Audit Logs screen. Wipe it here too — in server mode
+    // the server (/api/audit) is the authoritative trail.
+    state.logs = [];
+    if (db) {
+      try { clearIndexedDBLogs().catch(() => {}); } catch (_) {}
+    }
     // Also drop the cached copies in IndexedDB so a full page reload by a
     // different user on this device doesn't surface them before re-auth.
     if (db) {
@@ -8946,6 +9031,12 @@ function renderAnalyticsView() {
   const now = Date.now();
   const last7 = now - 7 * 24 * 60 * 60 * 1000;
 
+  // analytics.viewFinancials gates every money figure on this screen;
+  // analytics.viewSensitive gates the detailed breakdowns (used/paid splits,
+  // collected-vs-outstanding amounts, per-customer spend).
+  const canViewFinancials = can('analytics', 'viewFinancials');
+  const canViewSensitive = can('analytics', 'viewSensitive');
+
   // Calculate ad revenue - separate paid vs pending/unpaid for clarity.
   // Uses the SAME status-aware spend rule as the customer cards
   // (getAdSpendUSD) so a Stopped ad that spent $100 counts as $100, not its
@@ -9067,8 +9158,14 @@ function renderAnalyticsView() {
         </div>
       </div>
 
-      <!-- KPI Grid -->
+      <!-- KPI Grid — money figures require analytics.viewFinancials -->
       <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+        ${!canViewFinancials ? `
+        ${renderStatCard(isAr ? 'الإعلانات' : 'Ads', ads.length, 'megaphone', 'from-emerald-500 to-teal-600')}
+        ${renderStatCard(isAr ? 'الوصولات' : 'Receipts', revenueReceipts.length, 'file-text', 'from-indigo-500 to-purple-600')}
+        ${renderStatCard(isAr ? 'العملاء' : 'Customers', getVisibleRecords(state.customers).length, 'users', 'from-blue-500 to-cyan-600')}
+        ${renderStatCard(isAr ? 'حالة التحصيل' : 'Collection Status', `${collectedReceipts.length}/${revenueReceipts.length}`, 'wallet', 'from-amber-500 to-orange-600')}
+        ` : `
         <!-- Show paid ad revenue separately for clarity -->
         <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform">
           <div class="absolute inset-0 bg-gradient-to-br from-emerald-500 to-teal-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
@@ -9091,14 +9188,14 @@ function renderAnalyticsView() {
             <div>
               <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">${isAr ? 'الرصيد المتاح' : 'Available Balance'}</p>
               <p class="text-2xl font-bold text-slate-800 dark:text-white">$${availableReceiptBalance.toFixed(2)}</p>
-              <p class="text-xs text-slate-500 mt-1">${isAr ? 'مستخدم' : 'Used'}: $${totalUsedFromReceipts.toFixed(2)} / ${isAr ? 'مدفوع' : 'Paid'}: $${paidUSD.toFixed(2)}</p>
+              ${canViewSensitive ? `<p class="text-xs text-slate-500 mt-1">${isAr ? 'مستخدم' : 'Used'}: $${totalUsedFromReceipts.toFixed(2)} / ${isAr ? 'مدفوع' : 'Paid'}: $${paidUSD.toFixed(2)}</p>` : ''}
             </div>
             <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center shadow-lg">
               <i data-lucide="piggy-bank" class="w-6 h-6 text-white"></i>
             </div>
           </div>
         </div>
-        
+
         <!-- Collection Status Card -->
         <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform cursor-pointer" onclick="state.receiptCollectedFilter='not-collected';navigateTo('receipts');">
           <div class="absolute inset-0 bg-gradient-to-br from-amber-500 to-orange-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
@@ -9109,10 +9206,12 @@ function renderAnalyticsView() {
                 <p class="text-2xl font-bold text-slate-800 dark:text-white">${collectedReceipts.length}/${revenueReceipts.length}</p>
                 <span class="text-sm font-medium ${collectionRate >= 80 ? 'text-emerald-600' : collectionRate >= 50 ? 'text-amber-600' : 'text-rose-600'}">${collectionRate}%</span>
               </div>
+              ${canViewSensitive ? `
               <div class="flex items-center space-x-3 mt-2 text-xs">
                 <span class="text-emerald-600 font-medium">✓ $${collectedUSD.toFixed(0)}</span>
                 <span class="text-amber-600 font-medium">○ $${notCollectedUSD.toFixed(0)}</span>
               </div>
+              ` : ''}
             </div>
             <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shadow-lg">
               <i data-lucide="wallet" class="w-6 h-6 text-white"></i>
@@ -9123,10 +9222,12 @@ function renderAnalyticsView() {
             <div class="h-full bg-gradient-to-r from-emerald-500 to-teal-500 rounded-full transition-all duration-500" style="width: ${collectionRate}%"></div>
           </div>
         </div>
+        `}
       </div>
 
       <!-- Tracking Panels -->
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        ${canViewFinancials ? `
         <div class="glass-panel rounded-2xl p-5 space-y-4">
           <div class="flex items-center justify-between">
             <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">${isAr ? 'الإيرادات والتحصيلات' : 'Revenue & Collections'}</h2>
@@ -9136,6 +9237,7 @@ function renderAnalyticsView() {
           ${renderProgress(isAr ? 'المعلّق (وصولات)' : 'Pending (Receipts)', pendingUSD, Math.max(paidUSD + pendingUSD, 1), 'bg-amber-500')}
           ${renderProgress(isAr ? 'إيراد الإعلانات (الكل)' : 'Ad Revenue (all time)', totalAdRevenue, Math.max(totalAdRevenue, 1), 'bg-indigo-500')}
         </div>
+        ` : ''}
 
         <div class="glass-panel rounded-2xl p-5 space-y-4">
           <div class="flex items-center justify-between">
@@ -9182,6 +9284,7 @@ function renderAnalyticsView() {
 
       <!-- Lists -->
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        ${canViewSensitive ? `
         <div class="glass-panel rounded-2xl p-5">
           <div class="flex items-center justify-between mb-3">
             <h3 class="font-bold text-slate-800 dark:text-white">${isAr ? 'أفضل العملاء (إنفاق)' : 'Top Customers (Spend)'}</h3>
@@ -9201,6 +9304,7 @@ function renderAnalyticsView() {
             </div>
           `}
         </div>
+        ` : ''}
 
         <div class="glass-panel rounded-2xl p-5">
           <div class="flex items-center justify-between mb-3">
@@ -9341,6 +9445,11 @@ function renderCustomersGrid(customers) {
 
   const totalCustomers = customers.length;
   const statsIndex = buildCustomerStatsIndex();
+  // customers.viewContacts / customers.viewBalance are real permissions — a
+  // user without them must not see phone numbers or money figures.
+  const canSeeContacts = can('customers', 'viewContacts');
+  const canSeeBalance = can('customers', 'viewBalance');
+  const HIDDEN = isAr ? 'محجوب' : 'Hidden';
   return customers.map((c, idx) => {
           const stats = getCustomerStats(c.id, statsIndex);
           const lastAdText = stats.lastAdDate
@@ -9379,11 +9488,13 @@ function renderCustomersGrid(customers) {
                 <div class="flex items-start space-x-2">
                   <i data-lucide="phone" class="w-4 h-4 text-slate-400 mt-0.5"></i>
                   <div class="flex-1">
-              ${phones.length > 0 ? phones.map(phone => `<div class="text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone || '')}</div>`).join('') : `<span class="text-slate-400">${isAr ? 'لا يوجد هاتف' : 'No phone'}</span>`}
+              ${!canSeeContacts
+                ? `<span class="text-slate-400">••• ${HIDDEN}</span>`
+                : (phones.length > 0 ? phones.map(phone => `<div class="text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone || '')}</div>`).join('') : `<span class="text-slate-400">${isAr ? 'لا يوجد هاتف' : 'No phone'}</span>`)}
                   </div>
                 </div>
 
-          ${profileLinks.length > 0 ? `
+          ${canSeeContacts && profileLinks.length > 0 ? `
                   <div class="flex items-start space-x-2">
                     <i data-lucide="link" class="w-4 h-4 text-slate-400 mt-0.5"></i>
                     <div class="flex-1">
@@ -9398,7 +9509,12 @@ function renderCustomersGrid(customers) {
                   <span class="text-slate-600 dark:text-slate-400">${isAr ? 'آخر إعلان' : 'Last ad'}: ${lastAdText}</span>
                 </div>
 
-                <!-- Financial Summary -->
+                <!-- Financial Summary (customers.viewBalance) -->
+                ${!canSeeBalance ? `
+                <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700 text-center text-xs text-slate-400">
+                  <i data-lucide="lock" class="w-3 h-3 inline mr-1"></i>${isAr ? 'الأرصدة محجوبة' : 'Balances hidden'}
+                </div>
+                ` : `
                 <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
                   <!-- LYD Section - TOTAL PAID -->
                   <div class="mb-2">
@@ -9437,6 +9553,7 @@ function renderCustomersGrid(customers) {
                     </div>
                   </div>
                 </div>
+                `}
               </div>
             </div>
           `;
@@ -9499,17 +9616,21 @@ function renderCustomersView() {
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('customers')}</h1>
           <p id="customers-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allFilteredCustomers.length} من ${allCustomers.length} عميل` : `${allFilteredCustomers.length} of ${allCustomers.length} customers`}</p>
         </div>
+        ${can('customers', 'add') ? `
         <button onclick="showCustomerModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
           <i data-lucide="user-plus" class="w-4 h-4"></i>
           <span>${t('addCustomer')}</span>
         </button>
+        ` : ''}
       </div>
 
-      <!-- Stats Cards -->
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <!-- Stats Cards (money figures require customers.viewBalance) -->
+      <div class="grid grid-cols-1 ${can('customers', 'viewBalance') ? 'md:grid-cols-3' : ''} gap-6">
         ${renderStatCard(isAr ? 'إجمالي العملاء' : 'Total Customers', allCustomers.length, 'users', 'from-indigo-500 to-purple-600')}
+        ${can('customers', 'viewBalance') ? `
         ${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', totalRevenue.toFixed(0) + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}
         ${renderStatCard(isAr ? 'الديون المستحقة' : 'Outstanding Debts', totalDebts.toFixed(0) + ' LYD', 'alert-circle', 'from-rose-500 to-pink-600')}
+        ` : ''}
       </div>
 
       <!-- Search and Filters -->
@@ -10456,8 +10577,12 @@ function renderDeliveriesView() {
   filteredDeliveries.sort((a, b) => new Date(b.createdAt || b.date || 0) - new Date(a.createdAt || a.date || 0));
 
   const roleLower = String(state.currentUser?.role || '').toLowerCase();
-  const canAssign = roleLower !== 'delivery' && (currentUserHasPermission('deliveries', 'assign') || isCurrentUserAdmin());
-  const canOffice = roleLower !== 'delivery' && (currentUserHasPermission('deliveries', 'markCollected') || isCurrentUserAdmin());
+  const canAssign = roleLower !== 'delivery' && can('deliveries', 'assign');
+  const canOffice = roleLower !== 'delivery' && can('deliveries', 'markCollected');
+  // deliveries.viewStats gates the aggregate money tiles and the per-driver
+  // performance panel (held cash, success rates) — it is a real permission.
+  const canViewDeliveryStats = can('deliveries', 'viewStats');
+  const canExportDeliveries = can('deliveries', 'viewStats') || can('receipts', 'export');
 
   const activeDeliveries = deliveryReceipts.filter(d => d.deliveryStatus === 'In Progress' || d.deliveryStatus === 'Needs Delivery');
 
@@ -10474,17 +10599,22 @@ function renderDeliveriesView() {
             <i data-lucide="refresh-cw" class="w-4 h-4"></i>
             <span>${isAr ? 'تحديث' : 'Refresh'}</span>
           </button>
+          ${canAssign ? `
           <button onclick="checkStuckDeliveries()" class="glass-panel px-3 py-2 rounded-xl text-sm font-medium flex items-center space-x-2 hover:bg-amber-50 dark:hover:bg-amber-900/20" title="${isAr ? 'البحث عن توصيلات عالقة قيد التنفيذ لأكثر من 3 أيام' : 'Find deliveries stuck in progress for more than 3 days'}">
             <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-600"></i>
             <span class="text-amber-700 dark:text-amber-400">${isAr ? 'فحص العالقة' : 'Check Stuck'}</span>
           </button>
+          ` : ''}
+          ${canExportDeliveries ? `
           <button onclick="exportDeliveryReport()" class="btn-shine bg-indigo-600 text-white px-3 py-2 rounded-xl text-sm font-bold flex items-center space-x-2">
             <i data-lucide="download" class="w-4 h-4"></i>
             <span>${t('export')}</span>
           </button>
+          ` : ''}
         </div>
       </div>
 
+      ${!canViewDeliveryStats ? '' : `
       <!-- Stats (compact): 4 money/count tiles + pipeline strip in one panel -->
       <div class="glass-panel rounded-2xl p-4">
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -10521,9 +10651,11 @@ function renderDeliveriesView() {
           <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>${isAr ? 'ملغي' : 'Canceled'} <b>${stats.canceled}</b></span>
         </div>
       </div>
+      `}
 
       <!-- Driver Performance & Delivery Log Grid -->
       <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+        ${!canViewDeliveryStats ? '' : `
         <!-- Driver Performance (compact rows, same numbers) -->
         <div class="glass-panel rounded-2xl p-4">
           <h2 class="text-base font-bold text-slate-800 dark:text-white mb-3">${isAr ? 'أداء السائقين' : 'Driver Performance'}</h2>
@@ -10549,9 +10681,10 @@ function renderDeliveriesView() {
             `).join('')}
           </div>
         </div>
+        `}
 
         <!-- Delivery Log -->
-        <div class="xl:col-span-2 glass-panel rounded-2xl p-4">
+        <div class="${canViewDeliveryStats ? 'xl:col-span-2' : 'xl:col-span-3'} glass-panel rounded-2xl p-4">
           <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 mb-3">
             <h2 class="text-base font-bold text-slate-800 dark:text-white">${isAr ? 'سجل التوصيل' : 'Delivery Log'}</h2>
             <div class="flex flex-wrap items-center gap-2 w-full md:w-auto">
@@ -10787,6 +10920,16 @@ function refreshDeliveries() {
 
 // Export delivery report
 function exportDeliveryReport() {
+  // The report carries customer phones + money owed — require an export-level
+  // permission, not just the ability to see the deliveries screen.
+  if (!can('deliveries', 'viewStats') && !can('receipts', 'export')) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تحتاج صلاحية تصدير/إحصاءات التوصيل' : 'Requires delivery statistics or receipt export permission',
+      'error'
+    );
+    return;
+  }
   // Delivery Operations: receipts are the source of truth (ads must not create deliveries).
   const deliveryAds = getVisibleRecords(state.receipts).filter(r => {
     const ds = String(r?.deliveryStatus || '').trim();
@@ -11773,8 +11916,19 @@ function renderUsersView() {
 
 function renderAuditView() {
   const isAr = state.language === 'ar';
-  const allLogs = getVisibleRecords(state.logs);
-  
+  // PERMISSION SCOPING: auditLogs.view sees everything; auditLogs.viewOwn sees
+  // only their own entries. Every count, stat tile, filter dropdown and table
+  // row below derives from allLogs, so scoping here scopes the whole screen.
+  const canViewAllLogs = can('auditLogs', 'view');
+  const canViewOwnLogs = canViewAllLogs || currentUserHasPermission('auditLogs', 'viewOwn');
+  const canExportLogs = can('auditLogs', 'export');
+  const canClearLogs = can('auditLogs', 'clear');
+  if (!canViewOwnLogs) return renderNoAccessView();
+  // In server mode pull the authoritative, server-scoped trail (no-op when
+  // fresh; re-renders this view when it arrives).
+  refreshServerAuditLogs();
+  const allLogs = getVisibleAuditLogs();
+
   // Apply filters
   let filteredLogs = allLogs.filter(log => {
     // Search filter
@@ -11870,10 +12024,13 @@ function renderAuditView() {
           <p class="text-sm text-slate-500 mt-1">${isAr ? `${totalLogs.toLocaleString()} إجمالي السجلات` : `${totalLogs.toLocaleString()} total entries`} ${hasActiveFilters ? (isAr ? `(مصفّاة من ${allLogs.length.toLocaleString()})` : `(filtered from ${allLogs.length.toLocaleString()})`) : ''}</p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
+          ${canExportLogs ? `
           <button onclick="backupAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 border-2 border-emerald-200 dark:border-emerald-800 transition-all" title="${isAr ? 'إنشاء نسخة احتياطية كاملة من كل السجلات' : 'Create full backup of all logs'}">
             <i data-lucide="archive" class="w-4 h-4 text-emerald-600"></i>
             <span class="text-emerald-700 dark:text-emerald-400">${isAr ? 'نسخ احتياطي' : 'Backup'}</span>
           </button>
+          ` : ''}
+          ${canClearLogs ? `
           <button onclick="restoreAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-blue-50 dark:hover:bg-blue-900/20 border-2 border-blue-200 dark:border-blue-800 transition-all" title="${isAr ? 'استرجاع السجلات من ملف نسخة احتياطية' : 'Restore logs from backup file'}">
             <i data-lucide="upload" class="w-4 h-4 text-blue-600"></i>
             <span class="text-blue-700 dark:text-blue-400">${isAr ? 'استرجاع' : 'Restore'}</span>
@@ -11882,6 +12039,8 @@ function renderAuditView() {
             <i data-lucide="trash-2" class="w-4 h-4 text-rose-600"></i>
             <span class="text-rose-700 dark:text-rose-400">${isAr ? 'تنظيف' : 'Cleanup'}</span>
           </button>
+          ` : ''}
+          ${canExportLogs ? `
           <div class="w-px h-6 bg-slate-300 dark:bg-slate-600"></div>
           <button onclick="exportAuditLogs('csv')" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all">
             <i data-lucide="download" class="w-4 h-4"></i>
@@ -11891,6 +12050,7 @@ function renderAuditView() {
             <i data-lucide="file-json" class="w-4 h-4"></i>
             <span>JSON</span>
           </button>
+          ` : ''}
         </div>
       </div>
       
@@ -12191,7 +12351,13 @@ function showLogDetails(logId) {
   const isAr = state.language === 'ar';
   const log = state.logs.find(l => l.id === logId);
   if (!log) return;
-  
+  // Reachable with an arbitrary id — enforce the same scope as the table:
+  // a viewOwn-only user may only open their OWN entries.
+  if (!can('auditLogs', 'view') && String(log.userId || '') !== String(state.currentUser?.id || '')) {
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'لا يمكنك عرض سجل مستخدم آخر' : "You cannot view another user's log entry", 'error');
+    return;
+  }
+
   const user = state.users.find(u => u.id === log.userId);
   const modal = document.getElementById('app-modal') || document.createElement('div');
   modal.id = 'app-modal';
@@ -12264,8 +12430,13 @@ function showLogDetails(logId) {
 }
 
 function exportAuditLogs(format) {
-  const allLogs = getVisibleRecords(state.logs);
-  
+  if (!can('auditLogs', 'export')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية تصدير السجلات' : 'Requires the Export Logs permission', 'error');
+    return;
+  }
+  // Scoped: a viewOwn-only user exports only their own entries.
+  const allLogs = getVisibleAuditLogs();
+
   if (format === 'csv') {
     const headers = ['Date', 'Time', 'User', 'Action', 'Category', 'Severity', 'Description', 'Resource ID'];
     const rows = allLogs.map(log => {
@@ -12315,8 +12486,13 @@ function downloadFile(content, filename, mimeType) {
 
 // Backup all audit logs for permanent storage
 async function backupAuditLogs() {
-  const allLogs = getVisibleRecords(state.logs);
-  
+  if (!can('auditLogs', 'export')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية تصدير السجلات' : 'Requires the Export Logs permission', 'error');
+    return;
+  }
+  // A backup is a full export — scope it exactly like the export above.
+  const allLogs = getVisibleAuditLogs();
+
   const backup = {
     version: '1.0',
     exportDate: new Date().toISOString(),
@@ -12336,10 +12512,15 @@ async function backupAuditLogs() {
 
 // Restore audit logs from backup file
 function restoreAuditLogs() {
+  // Restore WRITES to the audit trail — same privilege as clearing it.
+  if (!can('auditLogs', 'clear')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية مسح/استرجاع السجلات' : 'Requires the Clear Logs permission', 'error');
+    return;
+  }
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = '.json';
-  
+
   input.onchange = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -12438,6 +12619,7 @@ async function cleanupAuditLogs() {
     // and the view never re-rendered. serverLiveSyncOnce is the real sync fn.
     if (isServerModeEnabled()) {
       await serverLiveSyncOnce();
+      await refreshServerAuditLogs({ force: true });
     }
     render();
     lucide.createIcons();
@@ -12561,8 +12743,13 @@ function renderSettingsView() {
         <div class="space-y-4">
           <div class="flex flex-col md:flex-row md:items-center space-y-2 md:space-y-0 md:space-x-4">
             <label class="text-sm font-medium text-slate-700 dark:text-slate-300">${isAr ? 'السعر الحالي (USD إلى LYD):' : 'Current Rate (USD to LYD):'}</label>
+            ${can('settings', 'manageExchangeRate') ? `
             <input type="text" id="default-rate-input" inputmode="decimal" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" onchange="updateExchangeRate(this.value)" class="glass-input px-4 py-2 rounded-xl w-32 font-bold text-emerald-600" />
             <button onclick="updateExchangeRate(document.getElementById('default-rate-input').value)" class="btn-shine bg-emerald-600 text-white px-4 py-2 rounded-xl text-sm">${isAr ? 'حفظ السعر' : 'Save Rate'}</button>
+            ` : `
+            <span class="px-4 py-2 rounded-xl w-32 font-bold text-emerald-600 bg-slate-100 dark:bg-slate-800">${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}</span>
+            <span class="text-xs text-slate-400">${isAr ? 'التعديل يحتاج صلاحية' : 'Editing requires permission'}</span>
+            `}
           </div>
 
           ${history.length > 0 ? `
@@ -12603,6 +12790,7 @@ function renderSettingsView() {
           ${isAr ? 'إدارة البيانات' : 'Data Management'}
         </h2>
         <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+          ${isCurrentUserAdmin() ? `
           <button onclick="exportData()" class="btn-shine bg-blue-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-blue-700">
             <i data-lucide="download" class="w-5 h-5"></i>
             <span>${isAr ? 'تصدير نسخة احتياطية' : 'Export Backup'}</span>
@@ -12615,6 +12803,7 @@ function renderSettingsView() {
             <i data-lucide="trash-2" class="w-5 h-5"></i>
             <span>${isAr ? 'مسح كل البيانات' : 'Clear All Data'}</span>
           </button>
+          ` : ''}
         </div>
         <div class="mt-4 p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl">
           <p class="text-sm text-slate-600 dark:text-slate-400">
@@ -13500,8 +13689,35 @@ function importUserPermissions(userId) {
   input.click();
 }
 
+// A delivery action is allowed when the user holds the matching deliveries.*
+// permission (office staff), OR when they are the assigned driver acting on
+// their OWN delivery. The server enforces the same rule.
+function canDoDeliveryAction(action, itemId) {
+  if (can('deliveries', action)) return true;
+  if (isDeliveryRole(state.currentUser?.role)) {
+    const item = (state.receipts || []).find(r => r.id === itemId)
+      || (state.ads || []).find(a => a.id === itemId);
+    if (item && String(item.deliveryPersonId || '') === String(state.currentUser?.id || '')) return true;
+  }
+  return false;
+}
+
+function denyDeliveryAction() {
+  showNotification(
+    state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+    state.language === 'ar' ? 'لا تملك صلاحية لهذا الإجراء' : 'You do not have permission for this action',
+    'error'
+  );
+}
+
 function assignDelivery(itemId, userId) {
   if (!userId) return;
+  const already = ((state.receipts || []).find(r => r.id === itemId) || (state.ads || []).find(a => a.id === itemId) || {}).deliveryPersonId;
+  const neededAction = String(already || '').trim() ? 'reassign' : 'assign';
+  if (!can('deliveries', neededAction) && !can('deliveries', 'assign')) {
+    denyDeliveryAction();
+    return;
+  }
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
   if (isReceipt) {
@@ -13517,6 +13733,12 @@ function updateDeliveryStatus(itemId, status) {
   const s = String(status || '').trim();
   if (!s) return;
   if (s === 'Canceled') {
+    // Cancelling is an assign-level action for office staff; the assigned
+    // driver may cancel their own delivery.
+    if (!canDoDeliveryAction('assign', itemId)) {
+      denyDeliveryAction();
+      return;
+    }
     // Require a reason (handled by modal)
     openDeliveryCancelModal(itemId);
     return;
@@ -13528,6 +13750,12 @@ function updateDeliveryStatus(itemId, status) {
   }
   if (s === 'Delivered' && String(state.currentUser?.role || '').toLowerCase() !== 'delivery') {
     showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'فقط سائق التوصيل المعيَّن يمكنه تحديد التوصيل كـ"تم التوصيل".' : 'Only the assigned delivery driver can mark a delivery as Delivered.', 'warning');
+    return;
+  }
+  // In Progress => accept; anything else => assign-level change.
+  const neededAction = s === 'In Progress' ? 'accept' : 'assign';
+  if (!canDoDeliveryAction(neededAction, itemId)) {
+    denyDeliveryAction();
     return;
   }
   // Check if it's a receipt or an ad
@@ -13542,6 +13770,10 @@ function updateDeliveryStatus(itemId, status) {
 }
 
 function markAsCollected(itemId) {
+  if (!canDoDeliveryAction('markCollected', itemId)) {
+    denyDeliveryAction();
+    return;
+  }
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
   if (isReceipt) {
@@ -13574,13 +13806,17 @@ function markAsCollected(itemId) {
 }
 
 function acceptDelivery(itemId) {
+  if (!canDoDeliveryAction('accept', itemId)) {
+    denyDeliveryAction();
+    return;
+  }
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
   const updateData = {
     deliveryStatus: 'In Progress',
     acceptedDate: new Date().toISOString()
   };
-  
+
   if (isReceipt) {
     updateRecord(state.receipts, itemId, updateData);
   } else {
@@ -14618,6 +14854,10 @@ function showReceiptTransferHistory(receiptId) {
   const transfers = receipt?.transfers || [];
   if (!receipt) return;
   const isArT = state.language === 'ar';
+  if (!can('receipts', 'viewHistory')) {
+    showNotification(isArT ? 'تم رفض الوصول' : 'Access Denied', isArT ? 'تحتاج صلاحية عرض سجل الوصل' : 'Requires the View History permission', 'error');
+    return;
+  }
   if (transfers.length === 0) {
     showNotification(isArT ? 'التحويلات' : 'Transfers', isArT ? 'لا توجد تحويلات مسجلة لهذا الوصل.' : 'No transfers recorded for this receipt.', 'info');
     return;
@@ -14636,8 +14876,12 @@ function showReceiptTransferHistory(receiptId) {
 function showReceiptEditHistory(receiptId) {
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
-  
+
   const isArH = state.language === 'ar';
+  if (!can('receipts', 'viewHistory')) {
+    showNotification(isArH ? 'تم رفض الوصول' : 'Access Denied', isArH ? 'تحتاج صلاحية عرض سجل الوصل' : 'Requires the View History permission', 'error');
+    return;
+  }
   const editHistory = receipt.editHistory || [];
   if (editHistory.length === 0) {
     showNotification(isArH ? 'سجل التعديلات' : 'Edit History', isArH ? 'لا يوجد سجل تعديلات لهذا الوصل.' : 'No edit history recorded for this receipt.', 'info');
@@ -18241,6 +18485,14 @@ function updateAdEndDateFromDays() {
 // Upload and preview ad photos
 function uploadAdPhotos(fileList) {
   if (!fileList || !fileList.length) return;
+  if (!can('ads', 'uploadPhotos')) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تحتاج صلاحية رفع صور الإعلانات' : 'Requires the Upload Photos permission',
+      'error'
+    );
+    return;
+  }
   state.tempAdPhotos = state.tempAdPhotos || [];
   Array.from(fileList).forEach(file => {
     compressImageToDataUrl(file).then((dataUrl) => {
@@ -25328,6 +25580,17 @@ function deleteUser(id) {
 }
 
 function updateExchangeRate(value) {
+  // The rate drives every money conversion in the app — it is gated on
+  // settings.manageExchangeRate (the server rejects the write too).
+  if (!can('settings', 'manageExchangeRate')) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تحتاج صلاحية إدارة سعر الصرف' : 'Requires the Manage Exchange Rate permission',
+      'error'
+    );
+    render();
+    return;
+  }
   // MONEY-MATH: an empty/invalid field parseFloats to NaN; storing it poisons
   // every later save (amountLocal = amountUSD * NaN) while showing a green
   // success toast. Validate first, keep the previous rate on bad input.
@@ -25376,9 +25639,19 @@ function printReceiptCard(btn) {
 }
 
 function exportData() {
+  // A full-state backup contains every user, customer, receipt, ad AND the
+  // device-local audit trail — Admin only (its counterpart importData is too).
+  if (!isCurrentUserAdmin()) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تصدير النسخة الاحتياطية الكاملة للمدير فقط' : 'Full backup export is Admin only',
+      'error'
+    );
+    return;
+  }
   // Create secure export (no plaintext secrets)
   const exportState = JSON.parse(JSON.stringify(state));
-  
+
   // Remove sensitive data from export
   if (exportState.users) {
     exportState.users = exportState.users.map(u => {

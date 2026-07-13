@@ -1328,6 +1328,12 @@ function renderAnalyticsView() {
   const now = Date.now();
   const last7 = now - 7 * 24 * 60 * 60 * 1000;
 
+  // analytics.viewFinancials gates every money figure on this screen;
+  // analytics.viewSensitive gates the detailed breakdowns (used/paid splits,
+  // collected-vs-outstanding amounts, per-customer spend).
+  const canViewFinancials = can('analytics', 'viewFinancials');
+  const canViewSensitive = can('analytics', 'viewSensitive');
+
   // Calculate ad revenue - separate paid vs pending/unpaid for clarity.
   // Uses the SAME status-aware spend rule as the customer cards
   // (getAdSpendUSD) so a Stopped ad that spent $100 counts as $100, not its
@@ -1449,8 +1455,14 @@ function renderAnalyticsView() {
         </div>
       </div>
 
-      <!-- KPI Grid -->
+      <!-- KPI Grid — money figures require analytics.viewFinancials -->
       <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+        ${!canViewFinancials ? `
+        ${renderStatCard(isAr ? 'الإعلانات' : 'Ads', ads.length, 'megaphone', 'from-emerald-500 to-teal-600')}
+        ${renderStatCard(isAr ? 'الوصولات' : 'Receipts', revenueReceipts.length, 'file-text', 'from-indigo-500 to-purple-600')}
+        ${renderStatCard(isAr ? 'العملاء' : 'Customers', getVisibleRecords(state.customers).length, 'users', 'from-blue-500 to-cyan-600')}
+        ${renderStatCard(isAr ? 'حالة التحصيل' : 'Collection Status', `${collectedReceipts.length}/${revenueReceipts.length}`, 'wallet', 'from-amber-500 to-orange-600')}
+        ` : `
         <!-- Show paid ad revenue separately for clarity -->
         <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform">
           <div class="absolute inset-0 bg-gradient-to-br from-emerald-500 to-teal-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
@@ -1473,14 +1485,14 @@ function renderAnalyticsView() {
             <div>
               <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">${isAr ? 'الرصيد المتاح' : 'Available Balance'}</p>
               <p class="text-2xl font-bold text-slate-800 dark:text-white">$${availableReceiptBalance.toFixed(2)}</p>
-              <p class="text-xs text-slate-500 mt-1">${isAr ? 'مستخدم' : 'Used'}: $${totalUsedFromReceipts.toFixed(2)} / ${isAr ? 'مدفوع' : 'Paid'}: $${paidUSD.toFixed(2)}</p>
+              ${canViewSensitive ? `<p class="text-xs text-slate-500 mt-1">${isAr ? 'مستخدم' : 'Used'}: $${totalUsedFromReceipts.toFixed(2)} / ${isAr ? 'مدفوع' : 'Paid'}: $${paidUSD.toFixed(2)}</p>` : ''}
             </div>
             <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center shadow-lg">
               <i data-lucide="piggy-bank" class="w-6 h-6 text-white"></i>
             </div>
           </div>
         </div>
-        
+
         <!-- Collection Status Card -->
         <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform cursor-pointer" onclick="state.receiptCollectedFilter='not-collected';navigateTo('receipts');">
           <div class="absolute inset-0 bg-gradient-to-br from-amber-500 to-orange-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
@@ -1491,10 +1503,12 @@ function renderAnalyticsView() {
                 <p class="text-2xl font-bold text-slate-800 dark:text-white">${collectedReceipts.length}/${revenueReceipts.length}</p>
                 <span class="text-sm font-medium ${collectionRate >= 80 ? 'text-emerald-600' : collectionRate >= 50 ? 'text-amber-600' : 'text-rose-600'}">${collectionRate}%</span>
               </div>
+              ${canViewSensitive ? `
               <div class="flex items-center space-x-3 mt-2 text-xs">
                 <span class="text-emerald-600 font-medium">✓ $${collectedUSD.toFixed(0)}</span>
                 <span class="text-amber-600 font-medium">○ $${notCollectedUSD.toFixed(0)}</span>
               </div>
+              ` : ''}
             </div>
             <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shadow-lg">
               <i data-lucide="wallet" class="w-6 h-6 text-white"></i>
@@ -1505,10 +1519,12 @@ function renderAnalyticsView() {
             <div class="h-full bg-gradient-to-r from-emerald-500 to-teal-500 rounded-full transition-all duration-500" style="width: ${collectionRate}%"></div>
           </div>
         </div>
+        `}
       </div>
 
       <!-- Tracking Panels -->
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        ${canViewFinancials ? `
         <div class="glass-panel rounded-2xl p-5 space-y-4">
           <div class="flex items-center justify-between">
             <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">${isAr ? 'الإيرادات والتحصيلات' : 'Revenue & Collections'}</h2>
@@ -1518,6 +1534,7 @@ function renderAnalyticsView() {
           ${renderProgress(isAr ? 'المعلّق (وصولات)' : 'Pending (Receipts)', pendingUSD, Math.max(paidUSD + pendingUSD, 1), 'bg-amber-500')}
           ${renderProgress(isAr ? 'إيراد الإعلانات (الكل)' : 'Ad Revenue (all time)', totalAdRevenue, Math.max(totalAdRevenue, 1), 'bg-indigo-500')}
         </div>
+        ` : ''}
 
         <div class="glass-panel rounded-2xl p-5 space-y-4">
           <div class="flex items-center justify-between">
@@ -1564,6 +1581,7 @@ function renderAnalyticsView() {
 
       <!-- Lists -->
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        ${canViewSensitive ? `
         <div class="glass-panel rounded-2xl p-5">
           <div class="flex items-center justify-between mb-3">
             <h3 class="font-bold text-slate-800 dark:text-white">${isAr ? 'أفضل العملاء (إنفاق)' : 'Top Customers (Spend)'}</h3>
@@ -1583,6 +1601,7 @@ function renderAnalyticsView() {
             </div>
           `}
         </div>
+        ` : ''}
 
         <div class="glass-panel rounded-2xl p-5">
           <div class="flex items-center justify-between mb-3">
@@ -1723,6 +1742,11 @@ function renderCustomersGrid(customers) {
 
   const totalCustomers = customers.length;
   const statsIndex = buildCustomerStatsIndex();
+  // customers.viewContacts / customers.viewBalance are real permissions — a
+  // user without them must not see phone numbers or money figures.
+  const canSeeContacts = can('customers', 'viewContacts');
+  const canSeeBalance = can('customers', 'viewBalance');
+  const HIDDEN = isAr ? 'محجوب' : 'Hidden';
   return customers.map((c, idx) => {
           const stats = getCustomerStats(c.id, statsIndex);
           const lastAdText = stats.lastAdDate
@@ -1761,11 +1785,13 @@ function renderCustomersGrid(customers) {
                 <div class="flex items-start space-x-2">
                   <i data-lucide="phone" class="w-4 h-4 text-slate-400 mt-0.5"></i>
                   <div class="flex-1">
-              ${phones.length > 0 ? phones.map(phone => `<div class="text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone || '')}</div>`).join('') : `<span class="text-slate-400">${isAr ? 'لا يوجد هاتف' : 'No phone'}</span>`}
+              ${!canSeeContacts
+                ? `<span class="text-slate-400">••• ${HIDDEN}</span>`
+                : (phones.length > 0 ? phones.map(phone => `<div class="text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone || '')}</div>`).join('') : `<span class="text-slate-400">${isAr ? 'لا يوجد هاتف' : 'No phone'}</span>`)}
                   </div>
                 </div>
 
-          ${profileLinks.length > 0 ? `
+          ${canSeeContacts && profileLinks.length > 0 ? `
                   <div class="flex items-start space-x-2">
                     <i data-lucide="link" class="w-4 h-4 text-slate-400 mt-0.5"></i>
                     <div class="flex-1">
@@ -1780,7 +1806,12 @@ function renderCustomersGrid(customers) {
                   <span class="text-slate-600 dark:text-slate-400">${isAr ? 'آخر إعلان' : 'Last ad'}: ${lastAdText}</span>
                 </div>
 
-                <!-- Financial Summary -->
+                <!-- Financial Summary (customers.viewBalance) -->
+                ${!canSeeBalance ? `
+                <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700 text-center text-xs text-slate-400">
+                  <i data-lucide="lock" class="w-3 h-3 inline mr-1"></i>${isAr ? 'الأرصدة محجوبة' : 'Balances hidden'}
+                </div>
+                ` : `
                 <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
                   <!-- LYD Section - TOTAL PAID -->
                   <div class="mb-2">
@@ -1819,6 +1850,7 @@ function renderCustomersGrid(customers) {
                     </div>
                   </div>
                 </div>
+                `}
               </div>
             </div>
           `;
@@ -1881,17 +1913,21 @@ function renderCustomersView() {
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('customers')}</h1>
           <p id="customers-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allFilteredCustomers.length} من ${allCustomers.length} عميل` : `${allFilteredCustomers.length} of ${allCustomers.length} customers`}</p>
         </div>
+        ${can('customers', 'add') ? `
         <button onclick="showCustomerModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
           <i data-lucide="user-plus" class="w-4 h-4"></i>
           <span>${t('addCustomer')}</span>
         </button>
+        ` : ''}
       </div>
 
-      <!-- Stats Cards -->
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <!-- Stats Cards (money figures require customers.viewBalance) -->
+      <div class="grid grid-cols-1 ${can('customers', 'viewBalance') ? 'md:grid-cols-3' : ''} gap-6">
         ${renderStatCard(isAr ? 'إجمالي العملاء' : 'Total Customers', allCustomers.length, 'users', 'from-indigo-500 to-purple-600')}
+        ${can('customers', 'viewBalance') ? `
         ${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', totalRevenue.toFixed(0) + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}
         ${renderStatCard(isAr ? 'الديون المستحقة' : 'Outstanding Debts', totalDebts.toFixed(0) + ' LYD', 'alert-circle', 'from-rose-500 to-pink-600')}
+        ` : ''}
       </div>
 
       <!-- Search and Filters -->
@@ -2838,8 +2874,12 @@ function renderDeliveriesView() {
   filteredDeliveries.sort((a, b) => new Date(b.createdAt || b.date || 0) - new Date(a.createdAt || a.date || 0));
 
   const roleLower = String(state.currentUser?.role || '').toLowerCase();
-  const canAssign = roleLower !== 'delivery' && (currentUserHasPermission('deliveries', 'assign') || isCurrentUserAdmin());
-  const canOffice = roleLower !== 'delivery' && (currentUserHasPermission('deliveries', 'markCollected') || isCurrentUserAdmin());
+  const canAssign = roleLower !== 'delivery' && can('deliveries', 'assign');
+  const canOffice = roleLower !== 'delivery' && can('deliveries', 'markCollected');
+  // deliveries.viewStats gates the aggregate money tiles and the per-driver
+  // performance panel (held cash, success rates) — it is a real permission.
+  const canViewDeliveryStats = can('deliveries', 'viewStats');
+  const canExportDeliveries = can('deliveries', 'viewStats') || can('receipts', 'export');
 
   const activeDeliveries = deliveryReceipts.filter(d => d.deliveryStatus === 'In Progress' || d.deliveryStatus === 'Needs Delivery');
 
@@ -2856,17 +2896,22 @@ function renderDeliveriesView() {
             <i data-lucide="refresh-cw" class="w-4 h-4"></i>
             <span>${isAr ? 'تحديث' : 'Refresh'}</span>
           </button>
+          ${canAssign ? `
           <button onclick="checkStuckDeliveries()" class="glass-panel px-3 py-2 rounded-xl text-sm font-medium flex items-center space-x-2 hover:bg-amber-50 dark:hover:bg-amber-900/20" title="${isAr ? 'البحث عن توصيلات عالقة قيد التنفيذ لأكثر من 3 أيام' : 'Find deliveries stuck in progress for more than 3 days'}">
             <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-600"></i>
             <span class="text-amber-700 dark:text-amber-400">${isAr ? 'فحص العالقة' : 'Check Stuck'}</span>
           </button>
+          ` : ''}
+          ${canExportDeliveries ? `
           <button onclick="exportDeliveryReport()" class="btn-shine bg-indigo-600 text-white px-3 py-2 rounded-xl text-sm font-bold flex items-center space-x-2">
             <i data-lucide="download" class="w-4 h-4"></i>
             <span>${t('export')}</span>
           </button>
+          ` : ''}
         </div>
       </div>
 
+      ${!canViewDeliveryStats ? '' : `
       <!-- Stats (compact): 4 money/count tiles + pipeline strip in one panel -->
       <div class="glass-panel rounded-2xl p-4">
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -2903,9 +2948,11 @@ function renderDeliveriesView() {
           <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>${isAr ? 'ملغي' : 'Canceled'} <b>${stats.canceled}</b></span>
         </div>
       </div>
+      `}
 
       <!-- Driver Performance & Delivery Log Grid -->
       <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+        ${!canViewDeliveryStats ? '' : `
         <!-- Driver Performance (compact rows, same numbers) -->
         <div class="glass-panel rounded-2xl p-4">
           <h2 class="text-base font-bold text-slate-800 dark:text-white mb-3">${isAr ? 'أداء السائقين' : 'Driver Performance'}</h2>
@@ -2931,9 +2978,10 @@ function renderDeliveriesView() {
             `).join('')}
           </div>
         </div>
+        `}
 
         <!-- Delivery Log -->
-        <div class="xl:col-span-2 glass-panel rounded-2xl p-4">
+        <div class="${canViewDeliveryStats ? 'xl:col-span-2' : 'xl:col-span-3'} glass-panel rounded-2xl p-4">
           <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 mb-3">
             <h2 class="text-base font-bold text-slate-800 dark:text-white">${isAr ? 'سجل التوصيل' : 'Delivery Log'}</h2>
             <div class="flex flex-wrap items-center gap-2 w-full md:w-auto">
@@ -3169,6 +3217,16 @@ function refreshDeliveries() {
 
 // Export delivery report
 function exportDeliveryReport() {
+  // The report carries customer phones + money owed — require an export-level
+  // permission, not just the ability to see the deliveries screen.
+  if (!can('deliveries', 'viewStats') && !can('receipts', 'export')) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تحتاج صلاحية تصدير/إحصاءات التوصيل' : 'Requires delivery statistics or receipt export permission',
+      'error'
+    );
+    return;
+  }
   // Delivery Operations: receipts are the source of truth (ads must not create deliveries).
   const deliveryAds = getVisibleRecords(state.receipts).filter(r => {
     const ds = String(r?.deliveryStatus || '').trim();
@@ -4155,8 +4213,19 @@ function renderUsersView() {
 
 function renderAuditView() {
   const isAr = state.language === 'ar';
-  const allLogs = getVisibleRecords(state.logs);
-  
+  // PERMISSION SCOPING: auditLogs.view sees everything; auditLogs.viewOwn sees
+  // only their own entries. Every count, stat tile, filter dropdown and table
+  // row below derives from allLogs, so scoping here scopes the whole screen.
+  const canViewAllLogs = can('auditLogs', 'view');
+  const canViewOwnLogs = canViewAllLogs || currentUserHasPermission('auditLogs', 'viewOwn');
+  const canExportLogs = can('auditLogs', 'export');
+  const canClearLogs = can('auditLogs', 'clear');
+  if (!canViewOwnLogs) return renderNoAccessView();
+  // In server mode pull the authoritative, server-scoped trail (no-op when
+  // fresh; re-renders this view when it arrives).
+  refreshServerAuditLogs();
+  const allLogs = getVisibleAuditLogs();
+
   // Apply filters
   let filteredLogs = allLogs.filter(log => {
     // Search filter
@@ -4252,10 +4321,13 @@ function renderAuditView() {
           <p class="text-sm text-slate-500 mt-1">${isAr ? `${totalLogs.toLocaleString()} إجمالي السجلات` : `${totalLogs.toLocaleString()} total entries`} ${hasActiveFilters ? (isAr ? `(مصفّاة من ${allLogs.length.toLocaleString()})` : `(filtered from ${allLogs.length.toLocaleString()})`) : ''}</p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
+          ${canExportLogs ? `
           <button onclick="backupAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 border-2 border-emerald-200 dark:border-emerald-800 transition-all" title="${isAr ? 'إنشاء نسخة احتياطية كاملة من كل السجلات' : 'Create full backup of all logs'}">
             <i data-lucide="archive" class="w-4 h-4 text-emerald-600"></i>
             <span class="text-emerald-700 dark:text-emerald-400">${isAr ? 'نسخ احتياطي' : 'Backup'}</span>
           </button>
+          ` : ''}
+          ${canClearLogs ? `
           <button onclick="restoreAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-blue-50 dark:hover:bg-blue-900/20 border-2 border-blue-200 dark:border-blue-800 transition-all" title="${isAr ? 'استرجاع السجلات من ملف نسخة احتياطية' : 'Restore logs from backup file'}">
             <i data-lucide="upload" class="w-4 h-4 text-blue-600"></i>
             <span class="text-blue-700 dark:text-blue-400">${isAr ? 'استرجاع' : 'Restore'}</span>
@@ -4264,6 +4336,8 @@ function renderAuditView() {
             <i data-lucide="trash-2" class="w-4 h-4 text-rose-600"></i>
             <span class="text-rose-700 dark:text-rose-400">${isAr ? 'تنظيف' : 'Cleanup'}</span>
           </button>
+          ` : ''}
+          ${canExportLogs ? `
           <div class="w-px h-6 bg-slate-300 dark:bg-slate-600"></div>
           <button onclick="exportAuditLogs('csv')" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all">
             <i data-lucide="download" class="w-4 h-4"></i>
@@ -4273,6 +4347,7 @@ function renderAuditView() {
             <i data-lucide="file-json" class="w-4 h-4"></i>
             <span>JSON</span>
           </button>
+          ` : ''}
         </div>
       </div>
       
@@ -4573,7 +4648,13 @@ function showLogDetails(logId) {
   const isAr = state.language === 'ar';
   const log = state.logs.find(l => l.id === logId);
   if (!log) return;
-  
+  // Reachable with an arbitrary id — enforce the same scope as the table:
+  // a viewOwn-only user may only open their OWN entries.
+  if (!can('auditLogs', 'view') && String(log.userId || '') !== String(state.currentUser?.id || '')) {
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'لا يمكنك عرض سجل مستخدم آخر' : "You cannot view another user's log entry", 'error');
+    return;
+  }
+
   const user = state.users.find(u => u.id === log.userId);
   const modal = document.getElementById('app-modal') || document.createElement('div');
   modal.id = 'app-modal';
@@ -4646,8 +4727,13 @@ function showLogDetails(logId) {
 }
 
 function exportAuditLogs(format) {
-  const allLogs = getVisibleRecords(state.logs);
-  
+  if (!can('auditLogs', 'export')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية تصدير السجلات' : 'Requires the Export Logs permission', 'error');
+    return;
+  }
+  // Scoped: a viewOwn-only user exports only their own entries.
+  const allLogs = getVisibleAuditLogs();
+
   if (format === 'csv') {
     const headers = ['Date', 'Time', 'User', 'Action', 'Category', 'Severity', 'Description', 'Resource ID'];
     const rows = allLogs.map(log => {
@@ -4697,8 +4783,13 @@ function downloadFile(content, filename, mimeType) {
 
 // Backup all audit logs for permanent storage
 async function backupAuditLogs() {
-  const allLogs = getVisibleRecords(state.logs);
-  
+  if (!can('auditLogs', 'export')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية تصدير السجلات' : 'Requires the Export Logs permission', 'error');
+    return;
+  }
+  // A backup is a full export — scope it exactly like the export above.
+  const allLogs = getVisibleAuditLogs();
+
   const backup = {
     version: '1.0',
     exportDate: new Date().toISOString(),
@@ -4718,10 +4809,15 @@ async function backupAuditLogs() {
 
 // Restore audit logs from backup file
 function restoreAuditLogs() {
+  // Restore WRITES to the audit trail — same privilege as clearing it.
+  if (!can('auditLogs', 'clear')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية مسح/استرجاع السجلات' : 'Requires the Clear Logs permission', 'error');
+    return;
+  }
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = '.json';
-  
+
   input.onchange = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -4820,6 +4916,7 @@ async function cleanupAuditLogs() {
     // and the view never re-rendered. serverLiveSyncOnce is the real sync fn.
     if (isServerModeEnabled()) {
       await serverLiveSyncOnce();
+      await refreshServerAuditLogs({ force: true });
     }
     render();
     lucide.createIcons();
@@ -4943,8 +5040,13 @@ function renderSettingsView() {
         <div class="space-y-4">
           <div class="flex flex-col md:flex-row md:items-center space-y-2 md:space-y-0 md:space-x-4">
             <label class="text-sm font-medium text-slate-700 dark:text-slate-300">${isAr ? 'السعر الحالي (USD إلى LYD):' : 'Current Rate (USD to LYD):'}</label>
+            ${can('settings', 'manageExchangeRate') ? `
             <input type="text" id="default-rate-input" inputmode="decimal" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" onchange="updateExchangeRate(this.value)" class="glass-input px-4 py-2 rounded-xl w-32 font-bold text-emerald-600" />
             <button onclick="updateExchangeRate(document.getElementById('default-rate-input').value)" class="btn-shine bg-emerald-600 text-white px-4 py-2 rounded-xl text-sm">${isAr ? 'حفظ السعر' : 'Save Rate'}</button>
+            ` : `
+            <span class="px-4 py-2 rounded-xl w-32 font-bold text-emerald-600 bg-slate-100 dark:bg-slate-800">${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}</span>
+            <span class="text-xs text-slate-400">${isAr ? 'التعديل يحتاج صلاحية' : 'Editing requires permission'}</span>
+            `}
           </div>
 
           ${history.length > 0 ? `
@@ -4985,6 +5087,7 @@ function renderSettingsView() {
           ${isAr ? 'إدارة البيانات' : 'Data Management'}
         </h2>
         <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+          ${isCurrentUserAdmin() ? `
           <button onclick="exportData()" class="btn-shine bg-blue-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-blue-700">
             <i data-lucide="download" class="w-5 h-5"></i>
             <span>${isAr ? 'تصدير نسخة احتياطية' : 'Export Backup'}</span>
@@ -4997,6 +5100,7 @@ function renderSettingsView() {
             <i data-lucide="trash-2" class="w-5 h-5"></i>
             <span>${isAr ? 'مسح كل البيانات' : 'Clear All Data'}</span>
           </button>
+          ` : ''}
         </div>
         <div class="mt-4 p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl">
           <p class="text-sm text-slate-600 dark:text-slate-400">

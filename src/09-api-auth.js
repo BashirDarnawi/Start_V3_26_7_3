@@ -396,6 +396,30 @@ function invalidateUsersListCache() {
   _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000 };
 }
 
+// The server's audit trail. GET /api/audit enforces auditLogs.view (all rows)
+// vs auditLogs.viewOwn (own rows only), so what comes back is already scoped
+// to the caller — unlike the device-local state.logs trail.
+async function apiListAuditLogs(limit = 500) {
+  const rows = await apiJson(`/api/audit?limit=${encodeURIComponent(limit)}&offset=0`, { method: 'GET' }, { timeoutMs: 15000 });
+  if (!Array.isArray(rows)) return [];
+  return rows.map((r) => {
+    const uid = String(r.user_id || '');
+    const u = (state.users || []).find(x => x && String(x.id) === uid);
+    return {
+      id: String(r.id || ''),
+      date: new Date(Number(r.ts) || 0).toISOString(),
+      userId: uid,
+      userName: u?.name || (uid ? uid : 'System'),
+      action: String(r.action || ''),
+      category: String(r.resource_type || 'general'),
+      severity: 'info',
+      description: String(r.message || ''),
+      resourceId: String(r.resource_id || ''),
+      metadata: (r.metadata && typeof r.metadata === 'object') ? r.metadata : {}
+    };
+  });
+}
+
 async function apiCreateUser(user) {
   const res = await apiJson('/api/users', { method: 'POST', body: user }, { timeoutMs: 20000 });
   invalidateUsersListCache();

@@ -456,6 +456,17 @@ function deleteUser(id) {
 }
 
 function updateExchangeRate(value) {
+  // The rate drives every money conversion in the app — it is gated on
+  // settings.manageExchangeRate (the server rejects the write too).
+  if (!can('settings', 'manageExchangeRate')) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تحتاج صلاحية إدارة سعر الصرف' : 'Requires the Manage Exchange Rate permission',
+      'error'
+    );
+    render();
+    return;
+  }
   // MONEY-MATH: an empty/invalid field parseFloats to NaN; storing it poisons
   // every later save (amountLocal = amountUSD * NaN) while showing a green
   // success toast. Validate first, keep the previous rate on bad input.
@@ -504,9 +515,19 @@ function printReceiptCard(btn) {
 }
 
 function exportData() {
+  // A full-state backup contains every user, customer, receipt, ad AND the
+  // device-local audit trail — Admin only (its counterpart importData is too).
+  if (!isCurrentUserAdmin()) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تصدير النسخة الاحتياطية الكاملة للمدير فقط' : 'Full backup export is Admin only',
+      'error'
+    );
+    return;
+  }
   // Create secure export (no plaintext secrets)
   const exportState = JSON.parse(JSON.stringify(state));
-  
+
   // Remove sensitive data from export
   if (exportState.users) {
     exportState.users = exportState.users.map(u => {

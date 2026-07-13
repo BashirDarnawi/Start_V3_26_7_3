@@ -832,8 +832,35 @@ function importUserPermissions(userId) {
   input.click();
 }
 
+// A delivery action is allowed when the user holds the matching deliveries.*
+// permission (office staff), OR when they are the assigned driver acting on
+// their OWN delivery. The server enforces the same rule.
+function canDoDeliveryAction(action, itemId) {
+  if (can('deliveries', action)) return true;
+  if (isDeliveryRole(state.currentUser?.role)) {
+    const item = (state.receipts || []).find(r => r.id === itemId)
+      || (state.ads || []).find(a => a.id === itemId);
+    if (item && String(item.deliveryPersonId || '') === String(state.currentUser?.id || '')) return true;
+  }
+  return false;
+}
+
+function denyDeliveryAction() {
+  showNotification(
+    state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+    state.language === 'ar' ? 'لا تملك صلاحية لهذا الإجراء' : 'You do not have permission for this action',
+    'error'
+  );
+}
+
 function assignDelivery(itemId, userId) {
   if (!userId) return;
+  const already = ((state.receipts || []).find(r => r.id === itemId) || (state.ads || []).find(a => a.id === itemId) || {}).deliveryPersonId;
+  const neededAction = String(already || '').trim() ? 'reassign' : 'assign';
+  if (!can('deliveries', neededAction) && !can('deliveries', 'assign')) {
+    denyDeliveryAction();
+    return;
+  }
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
   if (isReceipt) {
@@ -849,6 +876,12 @@ function updateDeliveryStatus(itemId, status) {
   const s = String(status || '').trim();
   if (!s) return;
   if (s === 'Canceled') {
+    // Cancelling is an assign-level action for office staff; the assigned
+    // driver may cancel their own delivery.
+    if (!canDoDeliveryAction('assign', itemId)) {
+      denyDeliveryAction();
+      return;
+    }
     // Require a reason (handled by modal)
     openDeliveryCancelModal(itemId);
     return;
@@ -860,6 +893,12 @@ function updateDeliveryStatus(itemId, status) {
   }
   if (s === 'Delivered' && String(state.currentUser?.role || '').toLowerCase() !== 'delivery') {
     showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'فقط سائق التوصيل المعيَّن يمكنه تحديد التوصيل كـ"تم التوصيل".' : 'Only the assigned delivery driver can mark a delivery as Delivered.', 'warning');
+    return;
+  }
+  // In Progress => accept; anything else => assign-level change.
+  const neededAction = s === 'In Progress' ? 'accept' : 'assign';
+  if (!canDoDeliveryAction(neededAction, itemId)) {
+    denyDeliveryAction();
     return;
   }
   // Check if it's a receipt or an ad
@@ -874,6 +913,10 @@ function updateDeliveryStatus(itemId, status) {
 }
 
 function markAsCollected(itemId) {
+  if (!canDoDeliveryAction('markCollected', itemId)) {
+    denyDeliveryAction();
+    return;
+  }
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
   if (isReceipt) {
@@ -906,13 +949,17 @@ function markAsCollected(itemId) {
 }
 
 function acceptDelivery(itemId) {
+  if (!canDoDeliveryAction('accept', itemId)) {
+    denyDeliveryAction();
+    return;
+  }
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
   const updateData = {
     deliveryStatus: 'In Progress',
     acceptedDate: new Date().toISOString()
   };
-  
+
   if (isReceipt) {
     updateRecord(state.receipts, itemId, updateData);
   } else {
@@ -1950,6 +1997,10 @@ function showReceiptTransferHistory(receiptId) {
   const transfers = receipt?.transfers || [];
   if (!receipt) return;
   const isArT = state.language === 'ar';
+  if (!can('receipts', 'viewHistory')) {
+    showNotification(isArT ? 'تم رفض الوصول' : 'Access Denied', isArT ? 'تحتاج صلاحية عرض سجل الوصل' : 'Requires the View History permission', 'error');
+    return;
+  }
   if (transfers.length === 0) {
     showNotification(isArT ? 'التحويلات' : 'Transfers', isArT ? 'لا توجد تحويلات مسجلة لهذا الوصل.' : 'No transfers recorded for this receipt.', 'info');
     return;
@@ -1968,8 +2019,12 @@ function showReceiptTransferHistory(receiptId) {
 function showReceiptEditHistory(receiptId) {
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
-  
+
   const isArH = state.language === 'ar';
+  if (!can('receipts', 'viewHistory')) {
+    showNotification(isArH ? 'تم رفض الوصول' : 'Access Denied', isArH ? 'تحتاج صلاحية عرض سجل الوصل' : 'Requires the View History permission', 'error');
+    return;
+  }
   const editHistory = receipt.editHistory || [];
   if (editHistory.length === 0) {
     showNotification(isArH ? 'سجل التعديلات' : 'Edit History', isArH ? 'لا يوجد سجل تعديلات لهذا الوصل.' : 'No edit history recorded for this receipt.', 'info');

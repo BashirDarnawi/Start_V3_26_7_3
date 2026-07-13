@@ -860,6 +860,15 @@ function handleLogout() {
     try { if (typeof _pendingRequests !== 'undefined' && _pendingRequests && _pendingRequests.clear) _pendingRequests.clear(); } catch (_) {}
     _serverLiveSync.serverWatermark = 0;
     _serverLiveSync.cursor = 0;
+    // The audit trail is NOT in PERSISTED_COLLECTIONS (logs live in their own
+    // IndexedDB store), so it used to survive logout: the next user on a
+    // shared device inherited the previous user's Login/Logout/CRUD entries
+    // and saw them in the Audit Logs screen. Wipe it here too — in server mode
+    // the server (/api/audit) is the authoritative trail.
+    state.logs = [];
+    if (db) {
+      try { clearIndexedDBLogs().catch(() => {}); } catch (_) {}
+    }
     // Also drop the cached copies in IndexedDB so a full page reload by a
     // different user on this device doesn't surface them before re-auth.
     if (db) {

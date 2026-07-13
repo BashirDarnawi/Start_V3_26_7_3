@@ -2820,6 +2820,14 @@ function updateAdEndDateFromDays() {
 // Upload and preview ad photos
 function uploadAdPhotos(fileList) {
   if (!fileList || !fileList.length) return;
+  if (!can('ads', 'uploadPhotos')) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تحتاج صلاحية رفع صور الإعلانات' : 'Requires the Upload Photos permission',
+      'error'
+    );
+    return;
+  }
   state.tempAdPhotos = state.tempAdPhotos || [];
   Array.from(fileList).forEach(file => {
     compressImageToDataUrl(file).then((dataUrl) => {

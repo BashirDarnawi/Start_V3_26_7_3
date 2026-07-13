@@ -588,6 +588,11 @@ const state = {
   customers: [],
   pages: [],
   logs: [],
+  // Server-side audit trail (server mode only). Fetched from GET /api/audit,
+  // which scopes rows by auditLogs.view / viewOwn — this is what the Audit
+  // Logs screen renders in server mode, NOT the device-local `logs` above.
+  serverLogs: [],
+  serverLogsLoadedAt: 0,
   walletTransactions: [], // ledger entries (huge-data safe via IndexedDB)
   serviceSubscriptions: [], // structured subscriptions (huge-data safe via IndexedDB)
 
