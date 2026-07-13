@@ -408,6 +408,8 @@ function showPermissionsModal(userId) {
     showNotification(state.language === 'ar' ? 'معلومة' : 'Info', state.language === 'ar' ? 'المدراء لديهم صلاحية كاملة افتراضياً' : 'Administrators have full access by default', 'info');
     return;
   }
+
+  updateUrlParams({ modal: 'permissions', id: String(userId) }); // URL tracking
   
   const userPermissions = user.permissions || {};
   const permSummary = getPermissionSummary(userPermissions);
@@ -1693,6 +1695,7 @@ function openCollectReceiptModal(receiptId) {
   _collectReceiptId = receiptId;
   _collectTargetLYD = targetLYD;
   _tempCollectPayments = [];
+  updateUrlParams({ modal: 'collect-receipt', id: receiptId }); // URL tracking
 
   document.getElementById('collect-receipt-modal')?.remove();
   const html = `
@@ -1948,6 +1951,7 @@ function manageTopUps(adId) {
 
   state.activeModal = 'top-ups';
   state.modalData = ad;
+  updateUrlParams({ modal: 'top-ups', id: adId }); // URL tracking
   renderModal();
 }
 
@@ -1957,6 +1961,7 @@ function manageRefund(adId) {
   
   state.activeModal = 'refund';
   state.modalData = ad;
+  updateUrlParams({ modal: 'refund', id: adId }); // URL tracking
   renderModal();
 }
 
@@ -1988,6 +1993,7 @@ function showReceiptTransferModal(receiptId) {
   }
   state.activeModal = 'receipt-transfer';
   state.modalData = receipt;
+  updateUrlParams({ modal: 'receipt-transfer', id: receiptId }); // URL tracking
   renderModal();
 }
 

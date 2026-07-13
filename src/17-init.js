@@ -229,12 +229,19 @@ async function init() {
   // URL Routing: If user is logged in, check URL for initial view
   if (state.currentUser) {
     const urlView = getViewFromUrl();
-    // Only use URL view if it's valid and user has access
+    // Only use URL view if it's valid and the user may open it. Platform views
+    // (services hub, wallet, smart systems, service pages) are Admin-only, but
+    // an Admin MUST be able to deep-link into them.
     if (urlView && urlView !== 'services-hub') {
-      const canAccess = isCurrentUserAdmin() || userCanAccessView(state.currentUser, urlView) ||
-        (urlView === 'delivery-dashboard' && isDeliveryRole(state.currentUser?.role));
-      if (canAccess && !PLATFORM_ADMIN_ONLY_VIEWS.has(urlView)) {
+      const isPlatformView = PLATFORM_ADMIN_ONLY_VIEWS.has(urlView);
+      const canAccess = isPlatformView
+        ? isCurrentUserAdmin()
+        : (isCurrentUserAdmin() || userCanAccessView(state.currentUser, urlView) ||
+           (urlView === 'delivery-dashboard' && isDeliveryRole(state.currentUser?.role)));
+      if (canAccess) {
         state.currentView = urlView;
+        // Re-apply what the link carries (Clothes tab, service id)
+        restoreViewStateFromUrl(urlView);
       }
     }
     // Update URL to match current view (in case we changed it)

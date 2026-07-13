@@ -504,6 +504,97 @@ check('typing cannot corrupt an auto-serial (validator preserves the prefix)', (
   assert(manual.value === '123', 'manual serials must still strip a leading zero');
 });
 
+console.log('\n=== MIXED PAYMENTS: cash in the split => manual receipt number ===');
+
+// Drive the real DOM-reading helper by stubbing the payment rows on the page.
+function setPaymentRows(methods) {
+  const rows = methods.map(m => ({
+    querySelector: (sel) => (sel === '.payment-method' ? { value: m } : null)
+  }));
+  sandbox.document.querySelectorAll = (sel) =>
+    (sel === '.payment-split-item' ? rows : []);
+}
+
+check('all-auto split (Libyana + Sadad) still auto-numbers', () => {
+  setPaymentRows(['Libyana', 'Sadad']);
+  assert(sandbox.getSelectedAutoSerialMethod() === 'Libyana', 'an all-auto split must auto-number from the first row');
+});
+
+check('Cash + Libyana => NO auto number (user types the paper receipt number)', () => {
+  setPaymentRows(['Cash (LYD)', 'Libyana']);
+  assert(sandbox.getSelectedAutoSerialMethod() === null, 'a split containing Cash must require a manual number');
+});
+
+check('Libyana + Cash (any position) => still manual', () => {
+  setPaymentRows(['Libyana', 'Cash (USD)']);
+  assert(sandbox.getSelectedAutoSerialMethod() === null, 'Cash anywhere in the split forces a manual number');
+});
+
+check('single Bank Transfer row => auto B number', () => {
+  setPaymentRows(['Bank Transfer (LYD)']);
+  assert(sandbox.getSelectedAutoSerialMethod() === 'Bank Transfer (LYD)', 'a lone bank transfer must auto-number');
+});
+
+check('single Cash row => manual', () => {
+  setPaymentRows(['Cash (LYD)']);
+  assert(sandbox.getSelectedAutoSerialMethod() === null, 'cash-only must stay manual');
+});
+
+check('no payment rows => manual (nothing to number from)', () => {
+  setPaymentRows([]);
+  assert(sandbox.getSelectedAutoSerialMethod() === null, 'empty form must not auto-number');
+});
+
+console.log('\n=== URLs: every view and modal is addressable ===');
+
+check('every renderView case has a URL path', () => {
+  const map = vm.runInContext('VIEW_TO_PATH', sandbox);
+  const views = ['services-hub', 'smart-systems', 'clothes-system', 'service-placeholder', 'wallet',
+    'analytics', 'customers', 'receipts', 'pages', 'ads', 'deliveries', 'reconciliation',
+    'users', 'audit', 'settings', 'delivery-dashboard', 'no-access'];
+  const missing = views.filter(v => !map[v]);
+  assert(missing.length === 0, `views without a URL: ${missing.join(', ')}`);
+});
+
+check('paths are unique and round-trip back to their view', () => {
+  const map = vm.runInContext('VIEW_TO_PATH', sandbox);
+  const back = vm.runInContext('PATH_TO_VIEW', sandbox);
+  const paths = Object.values(map);
+  assert(new Set(paths).size === paths.length, 'two views share the same path');
+  for (const [view, path] of Object.entries(map)) {
+    assert(back[path] === view, `${path} does not map back to ${view}`);
+  }
+});
+
+check('every record modal has a URL handler with a real opener', () => {
+  const handlers = vm.runInContext('MODAL_URL_HANDLERS', sandbox);
+  const expected = ['ad', 'receipt', 'customer', 'page', 'user', 'split-payments', 'top-ups',
+    'refund', 'receipt-transfer', 'collect-receipt', 'permissions', 'wallet-topup',
+    'clothes-product', 'clothes-shipment', 'clothes-order'];
+  const missing = expected.filter(m => !handlers[m]);
+  assert(missing.length === 0, `modals without a URL handler: ${missing.join(', ')}`);
+  for (const [name, h] of Object.entries(handlers)) {
+    assert(typeof h.open === 'function', `${name}: open() is not wired`);
+  }
+});
+
+check('secret dialogs are NOT addressable by URL', () => {
+  const handlers = vm.runInContext('MODAL_URL_HANDLERS', sandbox);
+  for (const secret of ['recovery-key', 'password-reset', 'change-password']) {
+    assert(!handlers[secret], `${secret} must never be reachable from a link`);
+  }
+});
+
+check('server serves index.html for every client path (no 404 on refresh)', () => {
+  const map = vm.runInContext('VIEW_TO_PATH', sandbox);
+  const py = fs.readFileSync(path.join(__dirname, '..', 'server', 'main.py'), 'utf8');
+  const block = py.split('FRONTEND_ROUTES = {')[1].split('}')[0];
+  const missing = Object.values(map)
+    .filter(p => p !== '/')
+    .filter(p => !block.includes(`"${p}"`));
+  assert(missing.length === 0, `paths missing from the server's FRONTEND_ROUTES: ${missing.join(', ')}`);
+});
+
 // ---------- report ----------
 console.log(`\n${'='.repeat(60)}`);
 if (failures.length) {

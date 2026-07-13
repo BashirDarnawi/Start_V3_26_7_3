@@ -4172,6 +4172,8 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
 # ==========================================
 # Serve index.html for all frontend routes (SPA routing)
 # This allows URLs like /ads, /receipts, /customers to work
+# Must stay in sync with VIEW_TO_PATH in src/11-routing-cloud.js — every view
+# needs a real URL that survives a refresh / a shared link.
 FRONTEND_ROUTES = {
     "/analytics",
     "/ads",
@@ -4188,6 +4190,7 @@ FRONTEND_ROUTES = {
     "/no-access",
     "/smart-systems",
     "/clothes-system",
+    "/service",
     "/wallet",
     "/account",
 }

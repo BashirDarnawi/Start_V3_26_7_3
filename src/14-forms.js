@@ -587,15 +587,24 @@ function isAutoSerialNumber(serial) {
   return new RegExp(`^[${AUTO_SERIAL_PREFIXES.join('')}]\\d+$`).test(s);
 }
 
-// The auto-serial method selected in the receipt form (first payment row that
-// uses one), or null when every row is a manual-serial method.
+// The auto-serial method to number this receipt by — but ONLY when EVERY
+// payment row is auto-numbered. If any row is a manual method (Cash), the
+// customer got a real paper receipt, so its number must be typed by hand and
+// the field stays editable. Returns null in that case (and when there are no
+// payment rows at all).
 function getSelectedAutoSerialMethod() {
   const paymentItems = document.querySelectorAll('.payment-split-item');
+  let firstAuto = null;
+  let rows = 0;
   for (const item of paymentItems) {
     const methodSelect = item.querySelector('.payment-method');
-    if (methodSelect && getAutoSerialPrefix(methodSelect.value)) return methodSelect.value;
+    if (!methodSelect) continue;
+    rows++;
+    const prefix = getAutoSerialPrefix(methodSelect.value);
+    if (!prefix) return null; // a manual method is present -> manual number
+    if (!firstAuto) firstAuto = methodSelect.value;
   }
-  return null;
+  return rows > 0 ? firstAuto : null;
 }
 
 // Handle payment method change
@@ -622,30 +631,45 @@ function onPaymentMethodChange(selectElement) {
     rate2Input.value = state.defaultExchangeRate.toFixed(2);
   }
   
-  // Auto-serial: assign (or re-assign) the receipt number for methods whose
-  // provider issues no paper receipt — B for bank transfers, O for transfer
-  // office, E for Sadad/USDT, S for LTT/Libyana/Madar.
+  // Auto-serial: number the receipt ourselves ONLY when every payment row is
+  // an auto-numbered method (B bank transfers, O transfer office, E Sadad/USDT,
+  // S LTT/Libyana/Madar). The moment a manual method (Cash) is in the mix there
+  // IS a paper receipt, so the user types its number instead.
   const serialInput = document.getElementById('receipt-serial');
-  const prefix = getAutoSerialPrefix(paymentMethod);
-  if (serialInput && prefix) {
-    const current = String(serialInput.value || '').trim().toUpperCase();
-    const isEditingSaved = !!state.modalData?.id;
-    // Take a number when the field is empty, or when the existing value is an
-    // auto-serial from a DIFFERENT group (the user switched method on a new
-    // receipt). Never renumber a receipt that is already saved.
-    const wrongGroup = isAutoSerialNumber(current) && !current.startsWith(prefix);
-    if (!current || (wrongGroup && !isEditingSaved)) {
-      const nextSerial = getNextAutoSerialNumber(paymentMethod);
-      if (nextSerial) {
-        serialInput.value = nextSerial;
-        showNotification(
-          state.language === 'ar' ? 'رقم تلقائي' : 'Auto Serial',
-          state.language === 'ar'
-            ? `تم تعيين رقم الوصل تلقائياً إلى ${nextSerial} لـ ${trMethod(paymentMethod)}`
-            : `Receipt number auto-set to ${nextSerial} for ${paymentMethod}`,
-          'info'
-        );
+  const autoMethod = getSelectedAutoSerialMethod();
+  if (serialInput) {
+    if (autoMethod) {
+      const prefix = getAutoSerialPrefix(autoMethod);
+      const current = String(serialInput.value || '').trim().toUpperCase();
+      const isEditingSaved = !!state.modalData?.id;
+      // Take a number when the field is empty, or when the existing value is an
+      // auto-serial from a DIFFERENT group (the user switched method on a new
+      // receipt). Never renumber a receipt that is already saved.
+      const wrongGroup = isAutoSerialNumber(current) && !current.startsWith(prefix);
+      if (!current || (wrongGroup && !isEditingSaved)) {
+        const nextSerial = getNextAutoSerialNumber(autoMethod);
+        if (nextSerial) {
+          serialInput.value = nextSerial;
+          showNotification(
+            state.language === 'ar' ? 'رقم تلقائي' : 'Auto Serial',
+            state.language === 'ar'
+              ? `تم تعيين رقم الوصل تلقائياً إلى ${nextSerial} لـ ${trMethod(autoMethod)}`
+              : `Receipt number auto-set to ${nextSerial} for ${autoMethod}`,
+            'info'
+          );
+        }
       }
+    } else if (isAutoSerialNumber(serialInput.value) && !state.modalData?.id) {
+      // A manual method just joined the split on a NEW receipt: drop the
+      // app-issued number so the real receipt number gets typed in.
+      serialInput.value = '';
+      showNotification(
+        state.language === 'ar' ? 'رقم الوصل مطلوب' : 'Receipt Number Required',
+        state.language === 'ar'
+          ? 'الدفع يشمل طريقة بإيصال ورقي — أدخل رقم الوصل يدوياً.'
+          : 'This payment includes a method with a paper receipt — enter the receipt number manually.',
+        'info'
+      );
     }
   }
 
@@ -674,9 +698,15 @@ function updateAutoSerialForReceipt() {
   if (!serialInput) return;
 
   const autoSerialMethod = getSelectedAutoSerialMethod();
-  if (autoSerialMethod && !String(serialInput.value || '').trim()) {
-    const nextSerial = getNextAutoSerialNumber(autoSerialMethod);
-    if (nextSerial) serialInput.value = nextSerial;
+  if (autoSerialMethod) {
+    if (!String(serialInput.value || '').trim()) {
+      const nextSerial = getNextAutoSerialNumber(autoSerialMethod);
+      if (nextSerial) serialInput.value = nextSerial;
+    }
+  } else if (isAutoSerialNumber(serialInput.value) && !state.modalData?.id) {
+    // A manual (paper-receipt) method is now part of the split on a NEW
+    // receipt — clear the app-issued number so the real one is entered.
+    serialInput.value = '';
   }
 
   // Update lock state

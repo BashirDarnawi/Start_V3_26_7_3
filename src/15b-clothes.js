@@ -23,7 +23,17 @@ const CLOTHES_PRODUCTS_PAGE_SIZE = 30;
 function setClothesTab(tabId) {
   if (!CLOTHES_TABS.some(tab => tab.id === tabId)) return;
   _clothesActiveTab = tabId;
+  // Each tab is its own address: /clothes-system?tab=orders
+  try { updateUrlParams({ tab: tabId }, true); } catch (_) {}
   render();
+}
+
+// Restore the active tab from ?tab= when the Clothes System is opened by URL.
+function restoreClothesTabFromUrl() {
+  try {
+    const tab = getUrlParams().tab;
+    if (tab && CLOTHES_TABS.some(t => t.id === tab)) _clothesActiveTab = tab;
+  } catch (_) {}
 }
 
 // ------------------------------------------
@@ -804,6 +814,7 @@ function showClothesProductModal() {
   _clothesTempVariants = [{ color: '', size: '', qty: 0 }];
   _clothesTempPhoto = null;
   _clothesPhotoToken++; // invalidate any pending photo-compression callback
+  updateUrlParams({ modal: 'clothes-product', id: 'new' }); // URL tracking
   renderModal();
 }
 
@@ -819,6 +830,7 @@ function editClothesProduct(id) {
     : [{ color: '', size: '', qty: 0 }];
   _clothesTempPhoto = product.photo || null;
   _clothesPhotoToken++; // invalidate any pending photo callback from a prior modal
+  updateUrlParams({ modal: 'clothes-product', id }); // URL tracking
   renderModal();
 }
 
@@ -1490,6 +1502,7 @@ function showClothesShipmentModal() {
   state.activeModal = 'clothes-shipment';
   state.modalData = null;
   _clothesTempShipLines = [{ productId: '', color: '', size: '', qty: 0, unitCostUSD: '' }];
+  updateUrlParams({ modal: 'clothes-shipment', id: 'new' }); // URL tracking
   renderModal();
 }
 
@@ -1507,6 +1520,7 @@ function editClothesShipment(id) {
   }
   state.activeModal = 'clothes-shipment';
   state.modalData = shipment;
+  updateUrlParams({ modal: 'clothes-shipment', id }); // URL tracking
   const lines = Array.isArray(shipment.lines) ? shipment.lines : [];
   _clothesTempShipLines = lines.length
     ? lines.map(l => ({
@@ -2258,6 +2272,7 @@ function showClothesOrderModal() {
   state.activeModal = 'clothes-order';
   state.modalData = null;
   _clothesTempOrderLines = [{ productId: '', color: '', size: '', qty: 1, priceLYD: '' }];
+  updateUrlParams({ modal: 'clothes-order', id: 'new' }); // URL tracking
   renderModal();
 }
 
@@ -2275,6 +2290,7 @@ function editClothesOrder(id) {
   }
   state.activeModal = 'clothes-order';
   state.modalData = order;
+  updateUrlParams({ modal: 'clothes-order', id }); // URL tracking
   const lines = Array.isArray(order.lines) ? order.lines : [];
   _clothesTempOrderLines = lines.length
     ? lines.map(l => ({

@@ -7186,6 +7186,7 @@ const VIEW_TO_PATH = {
   // Platform views (admin only)
   'smart-systems': '/smart-systems',
   'clothes-system': '/clothes-system',
+  'service-placeholder': '/service',
   'wallet': '/wallet'
 };
 
@@ -7214,8 +7215,32 @@ function getUrlParams() {
     filter: params.get('filter'),
     search: params.get('search'),
     tab: params.get('tab'),
-    page: params.get('page')
+    page: params.get('page'),
+    service: params.get('service')
   };
+}
+
+// Sub-state that belongs in the URL for a given view (so the link reopens the
+// exact same screen): the Clothes System tab, the service being viewed.
+function viewUrlParamsFor(view) {
+  if (view === 'clothes-system') {
+    return { tab: (typeof _clothesActiveTab !== 'undefined' && _clothesActiveTab) || null };
+  }
+  if (view === 'service-placeholder') {
+    return { service: state.viewData?.serviceId || null };
+  }
+  return {};
+}
+
+// Re-apply the sub-state carried in the URL when a view is opened by link.
+function restoreViewStateFromUrl(view) {
+  const params = getUrlParams();
+  if (view === 'clothes-system' && typeof restoreClothesTabFromUrl === 'function') {
+    restoreClothesTabFromUrl();
+  }
+  if (view === 'service-placeholder' && params.service) {
+    state.viewData = { serviceId: params.service };
+  }
 }
 
 // Update URL with parameters (for modals, filters, etc.)
@@ -7254,15 +7279,24 @@ function clearUrlParams(keys) {
   window.history.replaceState({ view: state.currentView }, '', newUrl);
 }
 
-// Update browser URL without reload
+// Update browser URL without reload. Carries the view's sub-state (Clothes
+// tab, service id) so the address always reproduces the screen you are on.
 function updateUrlForView(view, replace = false) {
   const path = VIEW_TO_PATH[view] || '/';
-  const newUrl = window.location.origin + path;
+  const sub = viewUrlParamsFor(view);
+  const search = new URLSearchParams();
+  for (const [k, v] of Object.entries(sub)) {
+    if (v !== null && v !== undefined && v !== '') search.set(k, String(v));
+  }
+  const qs = search.toString();
+  const newUrl = window.location.origin + path + (qs ? `?${qs}` : '');
 
-  // Already on this path: don't push a duplicate history entry, but still
-  // stamp {view} on the current entry — otherwise the initial entry keeps a
-  // null state and popstate falls back to services-hub/Restricted.
-  if (window.location.pathname === path) {
+  // Already on this exact address: don't push a duplicate history entry, but
+  // still stamp {view} on the current entry — otherwise the initial entry
+  // keeps a null state and popstate falls back to services-hub/Restricted.
+  const samePlace = window.location.pathname === path
+    && (window.location.search || '') === (qs ? `?${qs}` : '');
+  if (samePlace) {
     try { window.history.replaceState({ view }, '', newUrl); } catch (_) {}
     return;
   }
@@ -7283,60 +7317,61 @@ function updateUrlForView(view, replace = false) {
 function setupUrlRouting() {
   window.addEventListener('popstate', (event) => {
     const view = event.state?.view || getViewFromUrl();
+    // The address in the bar is the source of truth after back/forward:
+    // re-apply the view's sub-state (Clothes tab, service id) before rendering.
+    restoreViewStateFromUrl(view);
     // Navigate without pushing to history (already handled by popstate)
     navigateToInternal(view, false);
-    
+
     // Also restore modal state from URL params
     restoreModalFromUrl();
   });
 }
 
+// Every modal that has a shareable link: how to (re)open it from ?modal=&id=.
+// `open` re-runs the real opener so the modal's temp state (variants, split
+// lines, idempotency keys…) is initialised exactly as a click would.
+// Security note: recovery-key / password-reset / change-password are
+// deliberately NOT linkable — a URL must never resurrect a secrets dialog.
+const MODAL_URL_HANDLERS = {
+  'ad':               { newOpen: () => showAdModal(),        open: (id) => editAd(id) },
+  'receipt':          { newOpen: () => showReceiptModal(),   open: (id) => editReceipt(id) },
+  'customer':         { newOpen: () => showCustomerModal(),  open: (id) => editCustomer(id) },
+  'page':             { newOpen: () => showPageModal(),      open: (id) => editPage(id) },
+  'user':             { newOpen: () => showUserModal(),      open: (id) => editUser(id) },
+  'split-payments':   { open: (id) => manageSplitPayments(id) },
+  'top-ups':          { open: (id) => manageTopUps(id) },
+  'refund':           { open: (id) => manageRefund(id) },
+  'receipt-transfer': { open: (id) => showReceiptTransferModal(id) },
+  'collect-receipt':  { open: (id) => openCollectReceiptModal(id) },
+  'permissions':      { open: (id) => showPermissionsModal(id) },
+  'wallet-topup':     { open: (id) => showWalletTopupModal(id) },
+  'clothes-product':  { newOpen: () => showClothesProductModal(),  open: (id) => editClothesProduct(id) },
+  'clothes-shipment': { newOpen: () => showClothesShipmentModal(), open: (id) => editClothesShipment(id) },
+  'clothes-order':    { newOpen: () => showClothesOrderModal(),    open: (id) => editClothesOrder(id) }
+};
+
 // Restore modal from URL params (e.g., ?modal=ad&id=123 or ?modal=ad&id=new)
 function restoreModalFromUrl() {
   const params = getUrlParams();
-  
+
   if (params.modal) {
-    // Handle "new" modal (create new record)
-    if (params.id === 'new') {
-      setTimeout(() => {
-        state.activeModal = params.modal;
-        state.modalData = null;
-        renderModal();
-      }, 100);
-      return;
-    }
-    
-    // Find and open the modal for existing record
-    if (params.id) {
-      setTimeout(() => {
-        let record = null;
-        switch (params.modal) {
-          case 'ad':
-            record = state.ads.find(a => String(a.id) === String(params.id));
-            break;
-          case 'receipt':
-            record = state.receipts.find(r => String(r.id) === String(params.id));
-            break;
-          case 'customer':
-            record = state.customers.find(c => String(c.id) === String(params.id));
-            break;
-          case 'page':
-            record = state.pages.find(p => String(p.id) === String(params.id));
-            break;
-          case 'user':
-            record = state.users.find(u => String(u.id) === String(params.id));
-            break;
-          case 'split-payments':
-            record = state.receipts.find(r => String(r.id) === String(params.id));
-            break;
+    const handler = MODAL_URL_HANDLERS[params.modal];
+    if (!handler || !params.id) return;
+
+    // Re-open via the real opener so permissions are re-checked and the
+    // modal's temp state is seeded properly.
+    setTimeout(() => {
+      try {
+        if (params.id === 'new') {
+          if (handler.newOpen) handler.newOpen();
+          return;
         }
-        if (record) {
-          state.activeModal = params.modal;
-          state.modalData = record;
-          renderModal();
-        }
-      }, 100);
-    }
+        if (handler.open) handler.open(params.id);
+      } catch (e) {
+        console.warn('[restoreModalFromUrl] failed to open', params.modal, e?.message || e);
+      }
+    }, 100);
   } else {
     // No modal in URL, close any open modal
     if (state.activeModal) {
@@ -13278,6 +13313,8 @@ function showPermissionsModal(userId) {
     showNotification(state.language === 'ar' ? 'معلومة' : 'Info', state.language === 'ar' ? 'المدراء لديهم صلاحية كاملة افتراضياً' : 'Administrators have full access by default', 'info');
     return;
   }
+
+  updateUrlParams({ modal: 'permissions', id: String(userId) }); // URL tracking
   
   const userPermissions = user.permissions || {};
   const permSummary = getPermissionSummary(userPermissions);
@@ -14563,6 +14600,7 @@ function openCollectReceiptModal(receiptId) {
   _collectReceiptId = receiptId;
   _collectTargetLYD = targetLYD;
   _tempCollectPayments = [];
+  updateUrlParams({ modal: 'collect-receipt', id: receiptId }); // URL tracking
 
   document.getElementById('collect-receipt-modal')?.remove();
   const html = `
@@ -14818,6 +14856,7 @@ function manageTopUps(adId) {
 
   state.activeModal = 'top-ups';
   state.modalData = ad;
+  updateUrlParams({ modal: 'top-ups', id: adId }); // URL tracking
   renderModal();
 }
 
@@ -14827,6 +14866,7 @@ function manageRefund(adId) {
   
   state.activeModal = 'refund';
   state.modalData = ad;
+  updateUrlParams({ modal: 'refund', id: adId }); // URL tracking
   renderModal();
 }
 
@@ -14858,6 +14898,7 @@ function showReceiptTransferModal(receiptId) {
   }
   state.activeModal = 'receipt-transfer';
   state.modalData = receipt;
+  updateUrlParams({ modal: 'receipt-transfer', id: receiptId }); // URL tracking
   renderModal();
 }
 
@@ -16265,15 +16306,24 @@ function isAutoSerialNumber(serial) {
   return new RegExp(`^[${AUTO_SERIAL_PREFIXES.join('')}]\\d+$`).test(s);
 }
 
-// The auto-serial method selected in the receipt form (first payment row that
-// uses one), or null when every row is a manual-serial method.
+// The auto-serial method to number this receipt by — but ONLY when EVERY
+// payment row is auto-numbered. If any row is a manual method (Cash), the
+// customer got a real paper receipt, so its number must be typed by hand and
+// the field stays editable. Returns null in that case (and when there are no
+// payment rows at all).
 function getSelectedAutoSerialMethod() {
   const paymentItems = document.querySelectorAll('.payment-split-item');
+  let firstAuto = null;
+  let rows = 0;
   for (const item of paymentItems) {
     const methodSelect = item.querySelector('.payment-method');
-    if (methodSelect && getAutoSerialPrefix(methodSelect.value)) return methodSelect.value;
+    if (!methodSelect) continue;
+    rows++;
+    const prefix = getAutoSerialPrefix(methodSelect.value);
+    if (!prefix) return null; // a manual method is present -> manual number
+    if (!firstAuto) firstAuto = methodSelect.value;
   }
-  return null;
+  return rows > 0 ? firstAuto : null;
 }
 
 // Handle payment method change
@@ -16300,30 +16350,45 @@ function onPaymentMethodChange(selectElement) {
     rate2Input.value = state.defaultExchangeRate.toFixed(2);
   }
   
-  // Auto-serial: assign (or re-assign) the receipt number for methods whose
-  // provider issues no paper receipt — B for bank transfers, O for transfer
-  // office, E for Sadad/USDT, S for LTT/Libyana/Madar.
+  // Auto-serial: number the receipt ourselves ONLY when every payment row is
+  // an auto-numbered method (B bank transfers, O transfer office, E Sadad/USDT,
+  // S LTT/Libyana/Madar). The moment a manual method (Cash) is in the mix there
+  // IS a paper receipt, so the user types its number instead.
   const serialInput = document.getElementById('receipt-serial');
-  const prefix = getAutoSerialPrefix(paymentMethod);
-  if (serialInput && prefix) {
-    const current = String(serialInput.value || '').trim().toUpperCase();
-    const isEditingSaved = !!state.modalData?.id;
-    // Take a number when the field is empty, or when the existing value is an
-    // auto-serial from a DIFFERENT group (the user switched method on a new
-    // receipt). Never renumber a receipt that is already saved.
-    const wrongGroup = isAutoSerialNumber(current) && !current.startsWith(prefix);
-    if (!current || (wrongGroup && !isEditingSaved)) {
-      const nextSerial = getNextAutoSerialNumber(paymentMethod);
-      if (nextSerial) {
-        serialInput.value = nextSerial;
-        showNotification(
-          state.language === 'ar' ? 'رقم تلقائي' : 'Auto Serial',
-          state.language === 'ar'
-            ? `تم تعيين رقم الوصل تلقائياً إلى ${nextSerial} لـ ${trMethod(paymentMethod)}`
-            : `Receipt number auto-set to ${nextSerial} for ${paymentMethod}`,
-          'info'
-        );
+  const autoMethod = getSelectedAutoSerialMethod();
+  if (serialInput) {
+    if (autoMethod) {
+      const prefix = getAutoSerialPrefix(autoMethod);
+      const current = String(serialInput.value || '').trim().toUpperCase();
+      const isEditingSaved = !!state.modalData?.id;
+      // Take a number when the field is empty, or when the existing value is an
+      // auto-serial from a DIFFERENT group (the user switched method on a new
+      // receipt). Never renumber a receipt that is already saved.
+      const wrongGroup = isAutoSerialNumber(current) && !current.startsWith(prefix);
+      if (!current || (wrongGroup && !isEditingSaved)) {
+        const nextSerial = getNextAutoSerialNumber(autoMethod);
+        if (nextSerial) {
+          serialInput.value = nextSerial;
+          showNotification(
+            state.language === 'ar' ? 'رقم تلقائي' : 'Auto Serial',
+            state.language === 'ar'
+              ? `تم تعيين رقم الوصل تلقائياً إلى ${nextSerial} لـ ${trMethod(autoMethod)}`
+              : `Receipt number auto-set to ${nextSerial} for ${autoMethod}`,
+            'info'
+          );
+        }
       }
+    } else if (isAutoSerialNumber(serialInput.value) && !state.modalData?.id) {
+      // A manual method just joined the split on a NEW receipt: drop the
+      // app-issued number so the real receipt number gets typed in.
+      serialInput.value = '';
+      showNotification(
+        state.language === 'ar' ? 'رقم الوصل مطلوب' : 'Receipt Number Required',
+        state.language === 'ar'
+          ? 'الدفع يشمل طريقة بإيصال ورقي — أدخل رقم الوصل يدوياً.'
+          : 'This payment includes a method with a paper receipt — enter the receipt number manually.',
+        'info'
+      );
     }
   }
 
@@ -16352,9 +16417,15 @@ function updateAutoSerialForReceipt() {
   if (!serialInput) return;
 
   const autoSerialMethod = getSelectedAutoSerialMethod();
-  if (autoSerialMethod && !String(serialInput.value || '').trim()) {
-    const nextSerial = getNextAutoSerialNumber(autoSerialMethod);
-    if (nextSerial) serialInput.value = nextSerial;
+  if (autoSerialMethod) {
+    if (!String(serialInput.value || '').trim()) {
+      const nextSerial = getNextAutoSerialNumber(autoSerialMethod);
+      if (nextSerial) serialInput.value = nextSerial;
+    }
+  } else if (isAutoSerialNumber(serialInput.value) && !state.modalData?.id) {
+    // A manual (paper-receipt) method is now part of the split on a NEW
+    // receipt — clear the app-issued number so the real one is entered.
+    serialInput.value = '';
   }
 
   // Update lock state
@@ -22034,6 +22105,7 @@ function showWalletTopupModal(userId) {
   // Idempotency key fixed at open time: even a double submit of this same
   // form can only ever create ONE credit transaction.
   state.modalData = { userId: String(userId), idempotencyKey: Security.generateSecureId('topup') };
+  updateUrlParams({ modal: 'wallet-topup', id: String(userId) }); // URL tracking
   renderModal();
 }
 
@@ -22472,7 +22544,17 @@ const CLOTHES_PRODUCTS_PAGE_SIZE = 30;
 function setClothesTab(tabId) {
   if (!CLOTHES_TABS.some(tab => tab.id === tabId)) return;
   _clothesActiveTab = tabId;
+  // Each tab is its own address: /clothes-system?tab=orders
+  try { updateUrlParams({ tab: tabId }, true); } catch (_) {}
   render();
+}
+
+// Restore the active tab from ?tab= when the Clothes System is opened by URL.
+function restoreClothesTabFromUrl() {
+  try {
+    const tab = getUrlParams().tab;
+    if (tab && CLOTHES_TABS.some(t => t.id === tab)) _clothesActiveTab = tab;
+  } catch (_) {}
 }
 
 // ------------------------------------------
@@ -23253,6 +23335,7 @@ function showClothesProductModal() {
   _clothesTempVariants = [{ color: '', size: '', qty: 0 }];
   _clothesTempPhoto = null;
   _clothesPhotoToken++; // invalidate any pending photo-compression callback
+  updateUrlParams({ modal: 'clothes-product', id: 'new' }); // URL tracking
   renderModal();
 }
 
@@ -23268,6 +23351,7 @@ function editClothesProduct(id) {
     : [{ color: '', size: '', qty: 0 }];
   _clothesTempPhoto = product.photo || null;
   _clothesPhotoToken++; // invalidate any pending photo callback from a prior modal
+  updateUrlParams({ modal: 'clothes-product', id }); // URL tracking
   renderModal();
 }
 
@@ -23939,6 +24023,7 @@ function showClothesShipmentModal() {
   state.activeModal = 'clothes-shipment';
   state.modalData = null;
   _clothesTempShipLines = [{ productId: '', color: '', size: '', qty: 0, unitCostUSD: '' }];
+  updateUrlParams({ modal: 'clothes-shipment', id: 'new' }); // URL tracking
   renderModal();
 }
 
@@ -23956,6 +24041,7 @@ function editClothesShipment(id) {
   }
   state.activeModal = 'clothes-shipment';
   state.modalData = shipment;
+  updateUrlParams({ modal: 'clothes-shipment', id }); // URL tracking
   const lines = Array.isArray(shipment.lines) ? shipment.lines : [];
   _clothesTempShipLines = lines.length
     ? lines.map(l => ({
@@ -24707,6 +24793,7 @@ function showClothesOrderModal() {
   state.activeModal = 'clothes-order';
   state.modalData = null;
   _clothesTempOrderLines = [{ productId: '', color: '', size: '', qty: 1, priceLYD: '' }];
+  updateUrlParams({ modal: 'clothes-order', id: 'new' }); // URL tracking
   renderModal();
 }
 
@@ -24724,6 +24811,7 @@ function editClothesOrder(id) {
   }
   state.activeModal = 'clothes-order';
   state.modalData = order;
+  updateUrlParams({ modal: 'clothes-order', id }); // URL tracking
   const lines = Array.isArray(order.lines) ? order.lines : [];
   _clothesTempOrderLines = lines.length
     ? lines.map(l => ({
@@ -26444,12 +26532,19 @@ async function init() {
   // URL Routing: If user is logged in, check URL for initial view
   if (state.currentUser) {
     const urlView = getViewFromUrl();
-    // Only use URL view if it's valid and user has access
+    // Only use URL view if it's valid and the user may open it. Platform views
+    // (services hub, wallet, smart systems, service pages) are Admin-only, but
+    // an Admin MUST be able to deep-link into them.
     if (urlView && urlView !== 'services-hub') {
-      const canAccess = isCurrentUserAdmin() || userCanAccessView(state.currentUser, urlView) ||
-        (urlView === 'delivery-dashboard' && isDeliveryRole(state.currentUser?.role));
-      if (canAccess && !PLATFORM_ADMIN_ONLY_VIEWS.has(urlView)) {
+      const isPlatformView = PLATFORM_ADMIN_ONLY_VIEWS.has(urlView);
+      const canAccess = isPlatformView
+        ? isCurrentUserAdmin()
+        : (isCurrentUserAdmin() || userCanAccessView(state.currentUser, urlView) ||
+           (urlView === 'delivery-dashboard' && isDeliveryRole(state.currentUser?.role)));
+      if (canAccess) {
         state.currentView = urlView;
+        // Re-apply what the link carries (Clothes tab, service id)
+        restoreViewStateFromUrl(urlView);
       }
     }
     // Update URL to match current view (in case we changed it)

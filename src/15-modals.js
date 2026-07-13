@@ -2770,6 +2770,7 @@ function showWalletTopupModal(userId) {
   // Idempotency key fixed at open time: even a double submit of this same
   // form can only ever create ONE credit transaction.
   state.modalData = { userId: String(userId), idempotencyKey: Security.generateSecureId('topup') };
+  updateUrlParams({ modal: 'wallet-topup', id: String(userId) }); // URL tracking
   renderModal();
 }
 
