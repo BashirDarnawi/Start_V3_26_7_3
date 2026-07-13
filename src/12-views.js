@@ -537,9 +537,10 @@ function renderSidebar() {
     'reconciliation': 'analytics', // Part of analytics
     'users': 'users',
     'audit': 'auditLogs',
-    'settings': 'settings'
+    'settings': 'settings',
+    'clothes-system': 'clothesProducts'
   };
-  
+
   const allNavItems = [
     { id: 'analytics', icon: 'layout-dashboard', label: 'analytics' },
     { id: 'customers', icon: 'smile', label: 'customers' },
@@ -553,24 +554,33 @@ function renderSidebar() {
     { id: 'settings', icon: 'settings', label: 'settings' },
   ];
 
+  // Clothes System entry for non-admins holding clothes permissions. Admins
+  // reach it via the Services Hub; without this, a permissioned employee has
+  // no way to open it unless it happens to be their landing view.
+  if (!isAdminRole(state.currentUser?.role)) {
+    allNavItems.push({ id: 'clothes-system', icon: 'shirt', label: 'clothesSystem' });
+  }
+
   // Delivery users have a special dashboard view (not permission-gated).
   if (isDeliveryRole(state.currentUser?.role)) {
     allNavItems.unshift({ id: 'delivery-dashboard', icon: 'layout-dashboard', label: 'dashboard' });
   }
-  
+
   // Filter nav items based on permissions (Admin sees all, others based on their permissions)
   const navItems = allNavItems.filter(item => {
     // Admin sees everything
     if (isAdminRole(state.currentUser?.role)) return true;
-    
-    // Delivery role - show delivery dashboard + deliveries
+
+    // Delivery role: dashboard + deliveries always available (their permission
+    // records may be minimal); anything ELSE they were explicitly granted still
+    // shows through the permission check below (union, not replacement).
     if (isDeliveryRole(state.currentUser?.role)) {
-      return item.id === 'delivery-dashboard' || item.id === 'deliveries';
+      if (item.id === 'delivery-dashboard' || item.id === 'deliveries') return true;
     }
-    
+
     // Check if user has view permission for this module
     const permModule = navItemPermissions[item.id];
-    return currentUserHasPermission(permModule, 'view') || 
+    return currentUserHasPermission(permModule, 'view') ||
            currentUserHasPermission(permModule, 'viewOwn');
   });
   
@@ -4003,7 +4013,11 @@ function renderUsersView() {
   const isAr = state.language === 'ar';
   const visibleUsers = getVisibleRecords(state.users);
   const isAdmin = isCurrentUserAdmin();
-  
+  const canAddUsers = canManageUsersAction('add');
+  const canEditUsers = canManageUsersAction('edit');
+  const canDeleteUsers = canManageUsersAction('delete');
+  const canManagePerms = canManageUsersAction('managePermissions');
+
   return `
     <div class="space-y-6 animate-fade-in-up">
       <div class="flex justify-between items-center">
@@ -4011,7 +4025,7 @@ function renderUsersView() {
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('users')}</h1>
           <p class="text-sm text-slate-500 mt-1">${isAr ? `${visibleUsers.length} مستخدم في النظام` : `${visibleUsers.length} system users`}</p>
         </div>
-        ${isAdmin ? `
+        ${canAddUsers ? `
         <button onclick="showUserModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
           <i data-lucide="user-plus" class="w-4 h-4"></i>
           <span>${t('addUser')}</span>
@@ -4047,17 +4061,17 @@ function renderUsersView() {
                       <i data-lucide="banknote" class="w-4 h-4"></i>
                     </button>
                   ` : ''}
-                  ${isAdmin && u.id !== state.currentUser?.id && !isAdminRole(u.role) ? `
+                  ${canManagePerms && u.id !== state.currentUser?.id && !isAdminRole(u.role) ? `
                     <button onclick="showPermissionsModal('${u.id}')" class="text-purple-600 hover:text-purple-700 p-1" title="${isAr ? 'إدارة الصلاحيات' : 'Manage Permissions'}">
                       <i data-lucide="shield" class="w-4 h-4"></i>
                     </button>
                   ` : ''}
-                  ${isAdmin || u.id === state.currentUser?.id ? `
+                  ${u.id === state.currentUser?.id || (canEditUsers && (isAdmin || !isAdminRole(u.role))) ? `
                   <button onclick="editUser('${u.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${u.id === state.currentUser?.id ? (isAr ? 'تعديل ملفك الشخصي' : 'Edit Your Profile') : t('edit')}">
                     <i data-lucide="edit" class="w-4 h-4"></i>
                   </button>
                   ` : ''}
-                  ${isAdmin && u.id !== state.currentUser?.id ? `
+                  ${canDeleteUsers && u.id !== state.currentUser?.id && (isAdmin || !isAdminRole(u.role)) ? `
                     <button onclick="deleteUser('${u.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="${t('delete')}">
                       <i data-lucide="trash-2" class="w-4 h-4"></i>
                     </button>
@@ -4110,14 +4124,14 @@ function renderUsersView() {
                       <div class="w-full h-1.5 bg-purple-200 dark:bg-purple-800 rounded-full overflow-hidden">
                         <div class="h-full bg-gradient-to-r from-purple-500 to-indigo-500 rounded-full transition-all" style="width: ${permSummary.percentage}%"></div>
                       </div>
-                      ${isAdmin ? `
+                      ${canManagePerms ? `
                       <button onclick="showPermissionsModal('${u.id}')" class="mt-2 w-full text-xs text-purple-600 hover:text-purple-700 font-medium flex items-center justify-center space-x-1">
                         <i data-lucide="settings" class="w-3 h-3"></i>
                         <span>${isAr ? 'إدارة الوصول' : 'Manage Access'}</span>
                       </button>
                       ` : `
                         <div class="mt-2 text-[11px] text-slate-500 text-center">
-                          ${state.language === 'ar' ? 'التعديل للأدمن فقط' : 'Admin only'}
+                          ${state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires Manage Permissions'}
                         </div>
                       `}
                     </div>
@@ -4771,8 +4785,8 @@ function restoreAuditLogs() {
 // Cleanup old audit logs
 async function cleanupAuditLogs() {
   const isAr = state.language === 'ar';
-  if (!isCurrentUserAdmin()) {
-    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'للأدمن فقط' : 'Admin only', 'error');
+  if (!(isCurrentUserAdmin() || currentUserHasPermission('auditLogs', 'clear'))) {
+    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'تحتاج صلاحية مسح السجلات' : 'Requires the Clear Logs permission', 'error');
     return;
   }
 

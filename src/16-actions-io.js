@@ -388,9 +388,17 @@ function confirmStopAd(id) {
 }
 
 function deleteUser(id) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'حذف المستخدمين للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('delete')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية حذف المستخدمين' : 'Requires the Delete Users permission', 'error');
     return;
+  }
+  // Non-admins can never remove an Admin account (server enforces this too).
+  {
+    const _target = (state.users || []).find(u => u && String(u.id) === String(id));
+    if (!isCurrentUserAdmin() && _target && isAdminRole(_target.role)) {
+      showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'فقط المدير يمكنه حذف حساب مدير' : 'Only an Admin can delete an Admin account', 'error');
+      return;
+    }
   }
   const isArDU = state.language === 'ar';
 

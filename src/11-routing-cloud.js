@@ -11,15 +11,17 @@ const VIEW_TO_PATH = {
   'receipts': '/receipts',
   'pages': '/pages',
   'users': '/users',
-  'audit-logs': '/audit-logs',
+  'deliveries': '/deliveries',
+  'reconciliation': '/reconciliation',
+  'settings': '/settings',
+  // The Audit Logs view id is 'audit' (see renderView switch)
+  'audit': '/audit-logs',
   'delivery-dashboard': '/delivery',
-  'receipt-balance': '/receipt-balance',
   'no-access': '/no-access',
   // Platform views (admin only)
   'smart-systems': '/smart-systems',
   'clothes-system': '/clothes-system',
-  'wallet': '/wallet',
-  'account': '/account'
+  'wallet': '/wallet'
 };
 
 // Reverse map: path to view
@@ -91,10 +93,15 @@ function clearUrlParams(keys) {
 function updateUrlForView(view, replace = false) {
   const path = VIEW_TO_PATH[view] || '/';
   const newUrl = window.location.origin + path;
-  
-  // Don't update if already on this path
-  if (window.location.pathname === path) return;
-  
+
+  // Already on this path: don't push a duplicate history entry, but still
+  // stamp {view} on the current entry — otherwise the initial entry keeps a
+  // null state and popstate falls back to services-hub/Restricted.
+  if (window.location.pathname === path) {
+    try { window.history.replaceState({ view }, '', newUrl); } catch (_) {}
+    return;
+  }
+
   try {
     if (replace) {
       window.history.replaceState({ view }, '', newUrl);
@@ -201,8 +208,11 @@ function navigateToInternal(view, pushHistory = true) {
   
   // Check permission (Admin always allowed)
   if (!isCurrentUserAdmin() && !userCanAccessView(state.currentUser, view)) {
-    // Special views that don't need permissions
-    if (view !== 'delivery-dashboard' && view !== 'no-access') {
+    // Special views that don't need permissions (delivery dashboard is for
+    // the Delivery role only — other roles must hold a real permission)
+    const isExempt = view === 'no-access' ||
+      (view === 'delivery-dashboard' && isDeliveryRole(state.currentUser?.role));
+    if (!isExempt) {
       showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية' : `You don't have permission to access this page`, 'error');
       return;
     }

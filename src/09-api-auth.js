@@ -360,16 +360,18 @@ async function apiListUsersForUi() {
     return _usersListCache.data;
   }
   
-  // Admins can access full list; others get minimal list
+  // Admins (and users with the users.view permission) can access the full
+  // list; others get the minimal public list.
   try {
-    const result = await withRetry(
-      () => apiJson('/api/users', { method: 'GET' }, { timeoutMs: 10000 }), // Faster timeout
-      2, 300 // Faster retry
-    );
-    _usersListCache = { data: result, timestamp: now, cacheDurationMs: 30000 };
-    return result;
-  } catch (e) {
-    if (e?.status === 403) {
+    try {
+      const result = await withRetry(
+        () => apiJson('/api/users', { method: 'GET' }, { timeoutMs: 10000 }), // Faster timeout
+        2, 300 // Faster retry
+      );
+      _usersListCache = { data: result, timestamp: now, cacheDurationMs: 30000 };
+      return result;
+    } catch (e) {
+      if (e?.status !== 403) throw e;
       const result = await withRetry(
         () => apiJson('/api/users/public', { method: 'GET' }, { timeoutMs: 10000 }),
         2, 300
@@ -377,7 +379,8 @@ async function apiListUsersForUi() {
       _usersListCache = { data: result, timestamp: now, cacheDurationMs: 30000 };
       return result;
     }
-    // On error, return cached data even if stale
+  } catch (e) {
+    // On error (either endpoint), return cached data even if stale
     if (_usersListCache.data) {
       console.warn('[apiListUsersForUi] Using stale cache due to error');
       return _usersListCache.data;
@@ -386,12 +389,23 @@ async function apiListUsersForUi() {
   }
 }
 
+// The users-list cache must never outlive a user mutation, or the next
+// live-sync tick re-serves pre-edit permissions and overwrites fresh local
+// state with stale data.
+function invalidateUsersListCache() {
+  _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000 };
+}
+
 async function apiCreateUser(user) {
-  return await apiJson('/api/users', { method: 'POST', body: user }, { timeoutMs: 20000 });
+  const res = await apiJson('/api/users', { method: 'POST', body: user }, { timeoutMs: 20000 });
+  invalidateUsersListCache();
+  return res;
 }
 
 async function apiUpdateUser(userId, updates) {
-  return await apiJson(`/api/users/${encodeURIComponent(userId)}`, { method: 'PATCH', body: updates }, { timeoutMs: 20000 });
+  const res = await apiJson(`/api/users/${encodeURIComponent(userId)}`, { method: 'PATCH', body: updates }, { timeoutMs: 20000 });
+  invalidateUsersListCache();
+  return res;
 }
 
 // Debounced server-side persistence for user permission changes.
@@ -408,7 +422,9 @@ function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
   const uid = String(userId || '');
   if (!uid) return;
   if (!isServerModeEnabled()) return;
-  if (!isCurrentUserAdmin()) return;
+  // Permission edits are made by Admins or users.managePermissions holders;
+  // the server enforces the same rule.
+  if (!canManageUsersAction('managePermissions')) return;
 
   const prev = _serverUserUpdate.pending.get(uid) || {};
   _serverUserUpdate.pending.set(uid, { ...prev, ...(updates && typeof updates === 'object' ? updates : {}) });
@@ -439,6 +455,35 @@ function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
   }, _serverUserUpdate.debounceMs);
 
   _serverUserUpdate.timers.set(uid, t);
+}
+
+// Fire all debounce-pending user updates IMMEDIATELY. Called on pagehide and
+// logout: without this, closing/reloading the tab within the 700ms debounce
+// silently drops a permission grant — the admin's screen keeps showing 90/90
+// (saved locally) while the server row never received it.
+// Uses raw fetch with keepalive so the request survives page teardown, and no
+// navigation-abort signal is attached.
+function flushPendingUserUpdates() {
+  const inflight = [];
+  try {
+    for (const [uid, timer] of _serverUserUpdate.timers) {
+      clearTimeout(timer);
+      _serverUserUpdate.timers.delete(uid);
+      const payload = _serverUserUpdate.pending.get(uid);
+      _serverUserUpdate.pending.delete(uid);
+      if (!payload || Object.keys(payload).length === 0) continue;
+      try {
+        inflight.push(fetch(`${getServerBaseUrl()}/api/users/${encodeURIComponent(uid)}`, {
+          method: 'PATCH',
+          credentials: 'include',
+          keepalive: true,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }).then(() => { try { invalidateUsersListCache(); } catch (_) {} }).catch(() => {}));
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return Promise.allSettled(inflight);
 }
 
 // Collection data cache for instant loading
@@ -492,9 +537,14 @@ function isRefreshThrottled() {
   return false;
 }
 
-// Cancel pending requests when the page is being unloaded (refresh/back)
+// Cancel pending requests when the page is being unloaded (refresh/back).
+// FIRST flush any debounce-pending user updates (permission grants) with
+// keepalive so they are not silently lost with the page.
 try {
-  window.addEventListener('pagehide', () => cancelPendingRequests(), { passive: true });
+  window.addEventListener('pagehide', () => {
+    try { flushPendingUserUpdates(); } catch (_) {}
+    cancelPendingRequests();
+  }, { passive: true });
 } catch (_) {}
 
 // Get timeout based on collection type (larger collections need more time)
@@ -819,6 +869,10 @@ async function serverLoadAllData() {
   } catch (e) {
     failed.push({ collection: 'users', status: e?.status || null, message: e?.message || 'Failed to load users' });
   }
+  // ALWAYS keep the current user (with their login-response permissions) in
+  // state.users — even when the users-list fetch failed. hasPermission and the
+  // sidebar read state.users; without this, a failed fetch locks the whole UI.
+  if (typeof upsertCurrentUserIntoUsers === 'function') upsertCurrentUserIntoUsers();
 
   state.serverLastSyncAt = new Date().toISOString();
 
@@ -899,5 +953,8 @@ async function serverLoadAllData() {
     });
   }
   // #endregion
+  // Let callers (login flow) distinguish a clean load from a partial one so
+  // they don't show "All data synchronized successfully" over missing data.
+  return { failed, forbidden };
 }
 

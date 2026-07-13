@@ -110,6 +110,10 @@ async function init() {
     const me = await apiAuthMe().catch(() => null);
     if (me) {
       state.currentUser = me;
+      // Merge the fresh session user (with permissions) into state.users BEFORE
+      // the first render — the cached users list can be empty (wiped by logout,
+      // private browsing) or stale, and hasPermission reads state.users.
+      upsertCurrentUserIntoUsers();
       // Restore last page for Admin. Non-admins always land inside Albayan Manager (secret ideas hidden).
       if (String(me.role || '').toLowerCase() === 'admin') {
         state.currentView = String(state.currentView || '').trim() || 'services-hub';
@@ -227,7 +231,8 @@ async function init() {
     const urlView = getViewFromUrl();
     // Only use URL view if it's valid and user has access
     if (urlView && urlView !== 'services-hub') {
-      const canAccess = isCurrentUserAdmin() || userCanAccessView(state.currentUser, urlView) || urlView === 'delivery-dashboard';
+      const canAccess = isCurrentUserAdmin() || userCanAccessView(state.currentUser, urlView) ||
+        (urlView === 'delivery-dashboard' && isDeliveryRole(state.currentUser?.role));
       if (canAccess && !PLATFORM_ADMIN_ONLY_VIEWS.has(urlView)) {
         state.currentView = urlView;
       }

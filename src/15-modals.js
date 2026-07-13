@@ -2364,14 +2364,26 @@ async function handleModalSubmit() {
       const isAdminEditor = isCurrentUserAdmin();
       const editingId = state.modalData?.id;
       const isSelfEdit = !!(isEdit && editingId && String(state.currentUser?.id || '') === String(editingId));
-      if (!isAdminEditor && !isSelfEdit) {
-        showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'إدارة المستخدمين للأدمن فقط' : 'Admin only', 'error');
+      const canDoUserOp = isEdit ? (isSelfEdit || canManageUsersAction('edit')) : canManageUsersAction('add');
+      if (!canDoUserOp) {
+        showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'لا تملك صلاحية إدارة المستخدمين' : 'You lack the required Users permission', 'error');
         return;
       }
 
       const roleEl = document.getElementById('user-role');
       let userRole = Security.sanitizeInput((roleEl ? roleEl.value : (state.modalData?.role || '')), { maxLength: 20 });
-      if (!isAdminEditor && isEdit) userRole = state.modalData?.role || userRole;
+      // Only Admins / changeRole holders may alter roles; everyone else keeps the stored role.
+      if (isEdit && !canManageUsersAction('changeRole')) userRole = state.modalData?.role || userRole;
+      // Anti-escalation: only a real Admin can create or promote to Admin.
+      if (!isAdminEditor && isAdminRole(userRole)) {
+        showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'فقط المدير يمكنه منح دور المدير' : 'Only an Admin can grant the Admin role', 'error');
+        return;
+      }
+      // Non-admins can never edit an Admin account.
+      if (isEdit && !isSelfEdit && !isAdminEditor && isAdminRole(state.modalData?.role)) {
+        showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'فقط المدير يمكنه تعديل حساب مدير' : 'Only an Admin can modify an Admin account', 'error');
+        return;
+      }
       const userName = Security.sanitizeInput(document.getElementById('user-name').value, { maxLength: 100 });
       const userEmail = Security.sanitizeInput(document.getElementById('user-email').value, { maxLength: 120 }).toLowerCase();
 
@@ -2431,12 +2443,8 @@ async function handleModalSubmit() {
         }
       };
       
-      // SERVER MODE: users are managed by backend (Admin only)
+      // SERVER MODE: users are managed by backend (permission-gated there too)
       if (isServerModeEnabled()) {
-        if (!isAdminEditor) {
-          showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'هذه العملية للأدمن فقط' : 'Admin only', 'error');
-          return;
-        }
       if (isEdit) {
           const payload = {
             name: userName,
@@ -2449,7 +2457,12 @@ async function handleModalSubmit() {
               showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
               return;
             }
-            payload.password = newPassword;
+            if (isSelfEdit && !isAdminEditor) {
+              // Server requires the current password for self-changes.
+              showNotification(isArSubU ? 'غير مدعوم هنا' : 'Not Supported Here', isArSubU ? 'لتغيير كلمة مرورك استخدم الإعدادات ← تغيير كلمة المرور' : 'To change your own password use Settings → Change Password', 'info');
+            } else {
+              payload.password = newPassword;
+            }
           }
 
           // Role-based permissions defaults

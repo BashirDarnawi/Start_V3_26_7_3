@@ -1555,13 +1555,13 @@ const PERMISSION_MODULES = {
     icon: 'settings',
     color: 'slate',
     description: 'System settings',
+    // NOTE: backup/restore/clearData were removed — those are whole-database
+    // operations the server only ever allows for the Admin ROLE, so offering
+    // them as grantable toggles was misleading (they never did anything).
     permissions: {
       view: { label: 'View Settings', description: 'View system settings' },
       edit: { label: 'Edit Settings', description: 'Edit system settings' },
-      manageExchangeRate: { label: 'Manage Exchange Rate', description: 'Change exchange rates' },
-      backup: { label: 'Backup Data', description: 'Backup system data' },
-      restore: { label: 'Restore Data', description: 'Restore from backup' },
-      clearData: { label: 'Clear Data', description: 'Clear all system data' }
+      manageExchangeRate: { label: 'Manage Exchange Rate', description: 'Change exchange rates' }
     }
   },
   auditLogs: {
@@ -1569,11 +1569,12 @@ const PERMISSION_MODULES = {
     icon: 'file-clock',
     color: 'violet',
     description: 'System audit trail',
+    // NOTE: 'backup' was removed — no code ever honored it (log backup is an
+    // Admin-role operation), so the toggle was decorative.
     permissions: {
       view: { label: 'View Audit Logs', description: 'View all audit logs' },
       viewOwn: { label: 'View Own Logs', description: 'View only own activity' },
       export: { label: 'Export Logs', description: 'Export audit logs' },
-      backup: { label: 'Backup Logs', description: 'Backup audit logs' },
       clear: { label: 'Clear Logs', description: 'Clear audit logs' }
     }
   },
@@ -1738,10 +1739,18 @@ const PERMISSION_TEMPLATES = {
 function hasPermission(userId, module, action) {
   // System/admin always has access
   if (!userId || userId === 'system') return true;
-  
-  const user = state.users.find(u => u.id === userId);
+
+  let user = (state.users || []).find(u => u && u.id === userId);
+  // FALLBACK: state.users can be empty or hold a permission-less stub (e.g. the
+  // /api/users/public list only carries {id,name,role}). The login and
+  // /api/auth/me responses always carry the caller's full permissions on
+  // state.currentUser — use that as the source of truth for the current user
+  // so the whole UI can never lock out a properly-permissioned account.
+  if ((!user || !user.permissions) && state.currentUser && String(state.currentUser.id) === String(userId)) {
+    user = state.currentUser;
+  }
   if (!user) return false;
-  
+
   // Admins have all permissions
   if (String(user.role || '').toLowerCase() === 'admin') return true;
   
@@ -1757,28 +1766,55 @@ function hasPermission(userId, module, action) {
   return modulePerms.includes(action) || modulePerms.some(p => String(p).toLowerCase() === String(action).toLowerCase());
 }
 
-// Refresh current user's permissions from server
+// Refresh current user's permissions from server.
+// Returns true when the permissions actually changed (callers use this to
+// schedule a re-render so a locked sidebar can recover without re-login).
 async function refreshCurrentUserPermissions() {
-  if (!isServerModeEnabled() || !state.currentUser?.id) return;
+  if (!isServerModeEnabled() || !state.currentUser?.id) return false;
   try {
     const me = await apiAuthMe();
     if (me && me.permissions) {
+      const changed = JSON.stringify(state.currentUser.permissions || null) !== JSON.stringify(me.permissions);
       state.currentUser.permissions = me.permissions;
-      // Also update in users array
-      const idx = state.users.findIndex(u => u.id === me.id);
-      if (idx !== -1) {
-        state.users[idx].permissions = me.permissions;
-      }
-      console.log('[Permissions] Refreshed current user permissions');
+      // Also update in users array — UPSERT: if the record is missing (users
+      // list fetch failed or returned permission-less stubs), insert it so the
+      // periodic refresh can repair an empty state.users.
+      upsertCurrentUserIntoUsers();
+      if (changed) console.log('[Permissions] Refreshed current user permissions');
+      return changed;
     }
   } catch (e) {
     console.warn('[Permissions] Failed to refresh:', e?.message || e);
+  }
+  return false;
+}
+
+// Ensure state.users contains the current user's record WITH permissions.
+// state.currentUser always carries the full permission map from the server
+// login / /api/auth/me response; the users list for non-admins does not
+// (GET /api/users/public returns only {id,name,role}).
+function upsertCurrentUserIntoUsers() {
+  const cu = state.currentUser;
+  if (!cu || !cu.id) return;
+  if (!Array.isArray(state.users)) state.users = [];
+  const idx = state.users.findIndex(u => u && String(u.id) === String(cu.id));
+  if (idx === -1) {
+    state.users.push(cu);
+  } else {
+    state.users[idx] = { ...state.users[idx], ...cu };
   }
 }
 
 // Check if current user has permission
 function currentUserHasPermission(module, action) {
   return hasPermission(state.currentUser?.id, module, action);
+}
+
+// User-management capability: Admin role OR the matching users.* permission.
+// The server enforces the same rule (plus anti-escalation guards), so these
+// buttons/actions now work for permission-granted non-admins too.
+function canManageUsersAction(action) {
+  return isCurrentUserAdmin() || currentUserHasPermission('users', action);
 }
 
 // Get permission summary for display
@@ -4905,7 +4941,8 @@ function enforceSecretFeaturesGate() {
   }
   // Also check if user has permission for the current Albayan Manager view
   const view = String(state.currentView || '');
-  if (view && view !== 'delivery-dashboard' && view !== 'no-access' && !userCanAccessView(state.currentUser, view)) {
+  const _deliveryExempt = view === 'delivery-dashboard' && isDeliveryRole(state.currentUser?.role);
+  if (view && !_deliveryExempt && view !== 'no-access' && !userCanAccessView(state.currentUser, view)) {
     // User doesn't have permission for this view, find first allowed view
     state.currentView = getAlbayanManagerLandingViewForUser(state.currentUser);
     state.viewData = null;
@@ -5552,16 +5589,18 @@ async function apiListUsersForUi() {
     return _usersListCache.data;
   }
   
-  // Admins can access full list; others get minimal list
+  // Admins (and users with the users.view permission) can access the full
+  // list; others get the minimal public list.
   try {
-    const result = await withRetry(
-      () => apiJson('/api/users', { method: 'GET' }, { timeoutMs: 10000 }), // Faster timeout
-      2, 300 // Faster retry
-    );
-    _usersListCache = { data: result, timestamp: now, cacheDurationMs: 30000 };
-    return result;
-  } catch (e) {
-    if (e?.status === 403) {
+    try {
+      const result = await withRetry(
+        () => apiJson('/api/users', { method: 'GET' }, { timeoutMs: 10000 }), // Faster timeout
+        2, 300 // Faster retry
+      );
+      _usersListCache = { data: result, timestamp: now, cacheDurationMs: 30000 };
+      return result;
+    } catch (e) {
+      if (e?.status !== 403) throw e;
       const result = await withRetry(
         () => apiJson('/api/users/public', { method: 'GET' }, { timeoutMs: 10000 }),
         2, 300
@@ -5569,7 +5608,8 @@ async function apiListUsersForUi() {
       _usersListCache = { data: result, timestamp: now, cacheDurationMs: 30000 };
       return result;
     }
-    // On error, return cached data even if stale
+  } catch (e) {
+    // On error (either endpoint), return cached data even if stale
     if (_usersListCache.data) {
       console.warn('[apiListUsersForUi] Using stale cache due to error');
       return _usersListCache.data;
@@ -5578,12 +5618,23 @@ async function apiListUsersForUi() {
   }
 }
 
+// The users-list cache must never outlive a user mutation, or the next
+// live-sync tick re-serves pre-edit permissions and overwrites fresh local
+// state with stale data.
+function invalidateUsersListCache() {
+  _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000 };
+}
+
 async function apiCreateUser(user) {
-  return await apiJson('/api/users', { method: 'POST', body: user }, { timeoutMs: 20000 });
+  const res = await apiJson('/api/users', { method: 'POST', body: user }, { timeoutMs: 20000 });
+  invalidateUsersListCache();
+  return res;
 }
 
 async function apiUpdateUser(userId, updates) {
-  return await apiJson(`/api/users/${encodeURIComponent(userId)}`, { method: 'PATCH', body: updates }, { timeoutMs: 20000 });
+  const res = await apiJson(`/api/users/${encodeURIComponent(userId)}`, { method: 'PATCH', body: updates }, { timeoutMs: 20000 });
+  invalidateUsersListCache();
+  return res;
 }
 
 // Debounced server-side persistence for user permission changes.
@@ -5600,7 +5651,9 @@ function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
   const uid = String(userId || '');
   if (!uid) return;
   if (!isServerModeEnabled()) return;
-  if (!isCurrentUserAdmin()) return;
+  // Permission edits are made by Admins or users.managePermissions holders;
+  // the server enforces the same rule.
+  if (!canManageUsersAction('managePermissions')) return;
 
   const prev = _serverUserUpdate.pending.get(uid) || {};
   _serverUserUpdate.pending.set(uid, { ...prev, ...(updates && typeof updates === 'object' ? updates : {}) });
@@ -5631,6 +5684,35 @@ function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
   }, _serverUserUpdate.debounceMs);
 
   _serverUserUpdate.timers.set(uid, t);
+}
+
+// Fire all debounce-pending user updates IMMEDIATELY. Called on pagehide and
+// logout: without this, closing/reloading the tab within the 700ms debounce
+// silently drops a permission grant — the admin's screen keeps showing 90/90
+// (saved locally) while the server row never received it.
+// Uses raw fetch with keepalive so the request survives page teardown, and no
+// navigation-abort signal is attached.
+function flushPendingUserUpdates() {
+  const inflight = [];
+  try {
+    for (const [uid, timer] of _serverUserUpdate.timers) {
+      clearTimeout(timer);
+      _serverUserUpdate.timers.delete(uid);
+      const payload = _serverUserUpdate.pending.get(uid);
+      _serverUserUpdate.pending.delete(uid);
+      if (!payload || Object.keys(payload).length === 0) continue;
+      try {
+        inflight.push(fetch(`${getServerBaseUrl()}/api/users/${encodeURIComponent(uid)}`, {
+          method: 'PATCH',
+          credentials: 'include',
+          keepalive: true,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }).then(() => { try { invalidateUsersListCache(); } catch (_) {} }).catch(() => {}));
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return Promise.allSettled(inflight);
 }
 
 // Collection data cache for instant loading
@@ -5684,9 +5766,14 @@ function isRefreshThrottled() {
   return false;
 }
 
-// Cancel pending requests when the page is being unloaded (refresh/back)
+// Cancel pending requests when the page is being unloaded (refresh/back).
+// FIRST flush any debounce-pending user updates (permission grants) with
+// keepalive so they are not silently lost with the page.
 try {
-  window.addEventListener('pagehide', () => cancelPendingRequests(), { passive: true });
+  window.addEventListener('pagehide', () => {
+    try { flushPendingUserUpdates(); } catch (_) {}
+    cancelPendingRequests();
+  }, { passive: true });
 } catch (_) {}
 
 // Get timeout based on collection type (larger collections need more time)
@@ -6011,6 +6098,10 @@ async function serverLoadAllData() {
   } catch (e) {
     failed.push({ collection: 'users', status: e?.status || null, message: e?.message || 'Failed to load users' });
   }
+  // ALWAYS keep the current user (with their login-response permissions) in
+  // state.users — even when the users-list fetch failed. hasPermission and the
+  // sidebar read state.users; without this, a failed fetch locks the whole UI.
+  if (typeof upsertCurrentUserIntoUsers === 'function') upsertCurrentUserIntoUsers();
 
   state.serverLastSyncAt = new Date().toISOString();
 
@@ -6091,6 +6182,9 @@ async function serverLoadAllData() {
     });
   }
   // #endregion
+  // Let callers (login flow) distinguish a clean load from a partial one so
+  // they don't show "All data synchronized successfully" over missing data.
+  return { failed, forbidden };
 }
 
 // ==========================================
@@ -6395,6 +6489,7 @@ async function serverLiveSyncOnce() {
   if ((now - (_serverLiveSync.lastUsersSyncAt || 0)) > (SERVER_API.usersSyncIntervalMs || 60000)) {
     _serverLiveSync.lastUsersSyncAt = now;
     try {
+      const usersBefore = JSON.stringify(state.users || []);
       const usersList = await apiListUsersForUi();
       if (Array.isArray(usersList)) {
         const byId = new Map();
@@ -6402,10 +6497,26 @@ async function serverLiveSyncOnce() {
           if (u && u.id) byId.set(u.id, u);
         }
         if (state.currentUser?.id) byId.set(state.currentUser.id, { ...byId.get(state.currentUser.id), ...state.currentUser });
+        // Records with a debounce-pending server update (admin mid-edit in the
+        // Permissions Manager) must keep the LOCAL version — the fetched list
+        // may predate the pending PATCH and would silently revert the edits.
+        try {
+          if (typeof _serverUserUpdate === 'object' && _serverUserUpdate?.pending?.size) {
+            for (const uid of _serverUserUpdate.pending.keys()) {
+              const local = (state.users || []).find(u => u && String(u.id) === String(uid));
+              if (local) byId.set(local.id, local);
+            }
+          }
+        } catch (_) {}
         state.users = Array.from(byId.values());
       }
-      // Also refresh current user's permissions (so they don't need to re-login for new permissions)
-      await refreshCurrentUserPermissions();
+      // Also refresh current user's permissions (so they don't need to re-login
+      // for new permissions). Either change must trigger a re-render — without
+      // it, a locked sidebar stays locked even after the data recovers.
+      const permsChanged = await refreshCurrentUserPermissions();
+      if (permsChanged || usersBefore !== JSON.stringify(state.users || [])) {
+        changed = true;
+      }
     } catch (e) {
       // User list sync failure - non-critical, just log in debug mode
       if (ALBAYAN_DEBUG_MODE) console.warn('[serverLiveSyncOnce] Users sync failed:', e?.message || e);
@@ -6614,6 +6725,10 @@ async function handleLogin(email, password) {
       }
 
       state.currentUser = user;
+      // Seed state.users immediately: the first render happens BEFORE
+      // serverLoadAllData, and hasPermission/sidebar read state.users — on a
+      // fresh device it would otherwise be empty and show "No access granted".
+      upsertCurrentUserIntoUsers();
       // #region agent log
       try {
         if (typeof window.__albayanDebugEmit === 'function') {
@@ -6652,8 +6767,12 @@ async function handleLogin(email, password) {
       document.body.appendChild(loadingOverlay);
 
       try {
-        await serverLoadAllData();
-        showNotification(state.language === 'ar' ? 'تم تحميل البيانات' : 'Data Loaded', state.language === 'ar' ? 'تمت مزامنة جميع البيانات بنجاح' : 'All data synchronized successfully', 'success');
+        const loadResult = await serverLoadAllData();
+        if (loadResult && Array.isArray(loadResult.failed) && loadResult.failed.length > 0) {
+          showNotification(state.language === 'ar' ? 'تحميل جزئي' : 'Partially Loaded', state.language === 'ar' ? 'تم تسجيل الدخول، لكن فشل تحميل بعض البيانات. جرّب التحديث.' : 'Logged in, but some data failed to load. Try Refresh.', 'warning');
+        } else {
+          showNotification(state.language === 'ar' ? 'تم تحميل البيانات' : 'Data Loaded', state.language === 'ar' ? 'تمت مزامنة جميع البيانات بنجاح' : 'All data synchronized successfully', 'success');
+        }
       } catch (e) {
         // serverLoadAllData should be tolerant, but keep a belt-and-suspenders guard.
         console.warn('Server data load failed after login:', e);
@@ -6892,9 +7011,15 @@ function handleLogout() {
   if (state.currentUser) {
     addAuditLog('Logout', state.currentUser.id, `User ${Security.escapeHtml(state.currentUser.name)} logged out`);
   }
-  
+
+  // Persist any debounce-pending user updates (e.g. a permission grant made
+  // within the last 700ms) BEFORE the session is destroyed, and only send the
+  // server logout after they settle so it can't invalidate the session first.
+  let _flushP = null;
+  try { if (typeof flushPendingUserUpdates === 'function') _flushP = flushPendingUserUpdates(); } catch (_) {}
+
   if (isServerModeEnabled()) {
-    apiLogout().catch(() => {});
+    Promise.resolve(_flushP).then(() => apiLogout()).catch(() => {});
   }
 
   stopServerLiveSync();
@@ -6953,15 +7078,17 @@ const VIEW_TO_PATH = {
   'receipts': '/receipts',
   'pages': '/pages',
   'users': '/users',
-  'audit-logs': '/audit-logs',
+  'deliveries': '/deliveries',
+  'reconciliation': '/reconciliation',
+  'settings': '/settings',
+  // The Audit Logs view id is 'audit' (see renderView switch)
+  'audit': '/audit-logs',
   'delivery-dashboard': '/delivery',
-  'receipt-balance': '/receipt-balance',
   'no-access': '/no-access',
   // Platform views (admin only)
   'smart-systems': '/smart-systems',
   'clothes-system': '/clothes-system',
-  'wallet': '/wallet',
-  'account': '/account'
+  'wallet': '/wallet'
 };
 
 // Reverse map: path to view
@@ -7033,10 +7160,15 @@ function clearUrlParams(keys) {
 function updateUrlForView(view, replace = false) {
   const path = VIEW_TO_PATH[view] || '/';
   const newUrl = window.location.origin + path;
-  
-  // Don't update if already on this path
-  if (window.location.pathname === path) return;
-  
+
+  // Already on this path: don't push a duplicate history entry, but still
+  // stamp {view} on the current entry — otherwise the initial entry keeps a
+  // null state and popstate falls back to services-hub/Restricted.
+  if (window.location.pathname === path) {
+    try { window.history.replaceState({ view }, '', newUrl); } catch (_) {}
+    return;
+  }
+
   try {
     if (replace) {
       window.history.replaceState({ view }, '', newUrl);
@@ -7143,8 +7275,11 @@ function navigateToInternal(view, pushHistory = true) {
   
   // Check permission (Admin always allowed)
   if (!isCurrentUserAdmin() && !userCanAccessView(state.currentUser, view)) {
-    // Special views that don't need permissions
-    if (view !== 'delivery-dashboard' && view !== 'no-access') {
+    // Special views that don't need permissions (delivery dashboard is for
+    // the Delivery role only — other roles must hold a real permission)
+    const isExempt = view === 'no-access' ||
+      (view === 'delivery-dashboard' && isDeliveryRole(state.currentUser?.role));
+    if (!isExempt) {
       showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية' : `You don't have permission to access this page`, 'error');
       return;
     }
@@ -8020,9 +8155,10 @@ function renderSidebar() {
     'reconciliation': 'analytics', // Part of analytics
     'users': 'users',
     'audit': 'auditLogs',
-    'settings': 'settings'
+    'settings': 'settings',
+    'clothes-system': 'clothesProducts'
   };
-  
+
   const allNavItems = [
     { id: 'analytics', icon: 'layout-dashboard', label: 'analytics' },
     { id: 'customers', icon: 'smile', label: 'customers' },
@@ -8036,24 +8172,33 @@ function renderSidebar() {
     { id: 'settings', icon: 'settings', label: 'settings' },
   ];
 
+  // Clothes System entry for non-admins holding clothes permissions. Admins
+  // reach it via the Services Hub; without this, a permissioned employee has
+  // no way to open it unless it happens to be their landing view.
+  if (!isAdminRole(state.currentUser?.role)) {
+    allNavItems.push({ id: 'clothes-system', icon: 'shirt', label: 'clothesSystem' });
+  }
+
   // Delivery users have a special dashboard view (not permission-gated).
   if (isDeliveryRole(state.currentUser?.role)) {
     allNavItems.unshift({ id: 'delivery-dashboard', icon: 'layout-dashboard', label: 'dashboard' });
   }
-  
+
   // Filter nav items based on permissions (Admin sees all, others based on their permissions)
   const navItems = allNavItems.filter(item => {
     // Admin sees everything
     if (isAdminRole(state.currentUser?.role)) return true;
-    
-    // Delivery role - show delivery dashboard + deliveries
+
+    // Delivery role: dashboard + deliveries always available (their permission
+    // records may be minimal); anything ELSE they were explicitly granted still
+    // shows through the permission check below (union, not replacement).
     if (isDeliveryRole(state.currentUser?.role)) {
-      return item.id === 'delivery-dashboard' || item.id === 'deliveries';
+      if (item.id === 'delivery-dashboard' || item.id === 'deliveries') return true;
     }
-    
+
     // Check if user has view permission for this module
     const permModule = navItemPermissions[item.id];
-    return currentUserHasPermission(permModule, 'view') || 
+    return currentUserHasPermission(permModule, 'view') ||
            currentUserHasPermission(permModule, 'viewOwn');
   });
   
@@ -11486,7 +11631,11 @@ function renderUsersView() {
   const isAr = state.language === 'ar';
   const visibleUsers = getVisibleRecords(state.users);
   const isAdmin = isCurrentUserAdmin();
-  
+  const canAddUsers = canManageUsersAction('add');
+  const canEditUsers = canManageUsersAction('edit');
+  const canDeleteUsers = canManageUsersAction('delete');
+  const canManagePerms = canManageUsersAction('managePermissions');
+
   return `
     <div class="space-y-6 animate-fade-in-up">
       <div class="flex justify-between items-center">
@@ -11494,7 +11643,7 @@ function renderUsersView() {
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('users')}</h1>
           <p class="text-sm text-slate-500 mt-1">${isAr ? `${visibleUsers.length} مستخدم في النظام` : `${visibleUsers.length} system users`}</p>
         </div>
-        ${isAdmin ? `
+        ${canAddUsers ? `
         <button onclick="showUserModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
           <i data-lucide="user-plus" class="w-4 h-4"></i>
           <span>${t('addUser')}</span>
@@ -11530,17 +11679,17 @@ function renderUsersView() {
                       <i data-lucide="banknote" class="w-4 h-4"></i>
                     </button>
                   ` : ''}
-                  ${isAdmin && u.id !== state.currentUser?.id && !isAdminRole(u.role) ? `
+                  ${canManagePerms && u.id !== state.currentUser?.id && !isAdminRole(u.role) ? `
                     <button onclick="showPermissionsModal('${u.id}')" class="text-purple-600 hover:text-purple-700 p-1" title="${isAr ? 'إدارة الصلاحيات' : 'Manage Permissions'}">
                       <i data-lucide="shield" class="w-4 h-4"></i>
                     </button>
                   ` : ''}
-                  ${isAdmin || u.id === state.currentUser?.id ? `
+                  ${u.id === state.currentUser?.id || (canEditUsers && (isAdmin || !isAdminRole(u.role))) ? `
                   <button onclick="editUser('${u.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${u.id === state.currentUser?.id ? (isAr ? 'تعديل ملفك الشخصي' : 'Edit Your Profile') : t('edit')}">
                     <i data-lucide="edit" class="w-4 h-4"></i>
                   </button>
                   ` : ''}
-                  ${isAdmin && u.id !== state.currentUser?.id ? `
+                  ${canDeleteUsers && u.id !== state.currentUser?.id && (isAdmin || !isAdminRole(u.role)) ? `
                     <button onclick="deleteUser('${u.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="${t('delete')}">
                       <i data-lucide="trash-2" class="w-4 h-4"></i>
                     </button>
@@ -11593,14 +11742,14 @@ function renderUsersView() {
                       <div class="w-full h-1.5 bg-purple-200 dark:bg-purple-800 rounded-full overflow-hidden">
                         <div class="h-full bg-gradient-to-r from-purple-500 to-indigo-500 rounded-full transition-all" style="width: ${permSummary.percentage}%"></div>
                       </div>
-                      ${isAdmin ? `
+                      ${canManagePerms ? `
                       <button onclick="showPermissionsModal('${u.id}')" class="mt-2 w-full text-xs text-purple-600 hover:text-purple-700 font-medium flex items-center justify-center space-x-1">
                         <i data-lucide="settings" class="w-3 h-3"></i>
                         <span>${isAr ? 'إدارة الوصول' : 'Manage Access'}</span>
                       </button>
                       ` : `
                         <div class="mt-2 text-[11px] text-slate-500 text-center">
-                          ${state.language === 'ar' ? 'التعديل للأدمن فقط' : 'Admin only'}
+                          ${state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires Manage Permissions'}
                         </div>
                       `}
                     </div>
@@ -12254,8 +12403,8 @@ function restoreAuditLogs() {
 // Cleanup old audit logs
 async function cleanupAuditLogs() {
   const isAr = state.language === 'ar';
-  if (!isCurrentUserAdmin()) {
-    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'للأدمن فقط' : 'Admin only', 'error');
+  if (!(isCurrentUserAdmin() || currentUserHasPermission('auditLogs', 'clear'))) {
+    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'تحتاج صلاحية مسح السجلات' : 'Requires the Clear Logs permission', 'error');
     return;
   }
 
@@ -12897,7 +13046,7 @@ function editPage(id) {
 }
 
 function editUser(id) {
-  if (!isCurrentUserAdmin() && String(id) !== String(state.currentUser?.id || '')) {
+  if (!canManageUsersAction('edit') && String(id) !== String(state.currentUser?.id || '')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يمكنك تعديل مستخدمين آخرين' : 'You cannot edit other users', 'error');
     return;
   }
@@ -12912,8 +13061,8 @@ function editUser(id) {
 // ==========================================
 
 function showPermissionsModal(userId) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Permissions Manager is Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -13131,8 +13280,8 @@ function refreshPermissionsModalUi(userId, moduleKey = null) {
 }
 
 function togglePermission(userId, moduleKey, permKey, enabled) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -13167,8 +13316,8 @@ function togglePermission(userId, moduleKey, permKey, enabled) {
 }
 
 function toggleModulePermissions(userId, moduleKey, enableAll) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -13208,8 +13357,8 @@ function toggleModulePermissions(userId, moduleKey, enableAll) {
 }
 
 function applyPermissionTemplate(userId, templateKey) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -13245,8 +13394,8 @@ function applyPermissionTemplate(userId, templateKey) {
 }
 
 function clearAllPermissions(userId) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -13275,8 +13424,8 @@ function clearAllPermissions(userId) {
 }
 
 function exportUserPermissions(userId) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -13297,8 +13446,8 @@ function exportUserPermissions(userId) {
 }
 
 function importUserPermissions(userId) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const input = document.createElement('input');
@@ -21185,14 +21334,26 @@ async function handleModalSubmit() {
       const isAdminEditor = isCurrentUserAdmin();
       const editingId = state.modalData?.id;
       const isSelfEdit = !!(isEdit && editingId && String(state.currentUser?.id || '') === String(editingId));
-      if (!isAdminEditor && !isSelfEdit) {
-        showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'إدارة المستخدمين للأدمن فقط' : 'Admin only', 'error');
+      const canDoUserOp = isEdit ? (isSelfEdit || canManageUsersAction('edit')) : canManageUsersAction('add');
+      if (!canDoUserOp) {
+        showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'لا تملك صلاحية إدارة المستخدمين' : 'You lack the required Users permission', 'error');
         return;
       }
 
       const roleEl = document.getElementById('user-role');
       let userRole = Security.sanitizeInput((roleEl ? roleEl.value : (state.modalData?.role || '')), { maxLength: 20 });
-      if (!isAdminEditor && isEdit) userRole = state.modalData?.role || userRole;
+      // Only Admins / changeRole holders may alter roles; everyone else keeps the stored role.
+      if (isEdit && !canManageUsersAction('changeRole')) userRole = state.modalData?.role || userRole;
+      // Anti-escalation: only a real Admin can create or promote to Admin.
+      if (!isAdminEditor && isAdminRole(userRole)) {
+        showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'فقط المدير يمكنه منح دور المدير' : 'Only an Admin can grant the Admin role', 'error');
+        return;
+      }
+      // Non-admins can never edit an Admin account.
+      if (isEdit && !isSelfEdit && !isAdminEditor && isAdminRole(state.modalData?.role)) {
+        showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'فقط المدير يمكنه تعديل حساب مدير' : 'Only an Admin can modify an Admin account', 'error');
+        return;
+      }
       const userName = Security.sanitizeInput(document.getElementById('user-name').value, { maxLength: 100 });
       const userEmail = Security.sanitizeInput(document.getElementById('user-email').value, { maxLength: 120 }).toLowerCase();
 
@@ -21252,12 +21413,8 @@ async function handleModalSubmit() {
         }
       };
       
-      // SERVER MODE: users are managed by backend (Admin only)
+      // SERVER MODE: users are managed by backend (permission-gated there too)
       if (isServerModeEnabled()) {
-        if (!isAdminEditor) {
-          showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'هذه العملية للأدمن فقط' : 'Admin only', 'error');
-          return;
-        }
       if (isEdit) {
           const payload = {
             name: userName,
@@ -21270,7 +21427,12 @@ async function handleModalSubmit() {
               showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
               return;
             }
-            payload.password = newPassword;
+            if (isSelfEdit && !isAdminEditor) {
+              // Server requires the current password for self-changes.
+              showNotification(isArSubU ? 'غير مدعوم هنا' : 'Not Supported Here', isArSubU ? 'لتغيير كلمة مرورك استخدم الإعدادات ← تغيير كلمة المرور' : 'To change your own password use Settings → Change Password', 'info');
+            } else {
+              payload.password = newPassword;
+            }
           }
 
           // Role-based permissions defaults
@@ -25091,9 +25253,17 @@ function confirmStopAd(id) {
 }
 
 function deleteUser(id) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'حذف المستخدمين للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('delete')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية حذف المستخدمين' : 'Requires the Delete Users permission', 'error');
     return;
+  }
+  // Non-admins can never remove an Admin account (server enforces this too).
+  {
+    const _target = (state.users || []).find(u => u && String(u.id) === String(id));
+    if (!isCurrentUserAdmin() && _target && isAdminRole(_target.role)) {
+      showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'فقط المدير يمكنه حذف حساب مدير' : 'Only an Admin can delete an Admin account', 'error');
+      return;
+    }
   }
   const isArDU = state.language === 'ar';
 
@@ -25829,6 +25999,10 @@ async function init() {
     const me = await apiAuthMe().catch(() => null);
     if (me) {
       state.currentUser = me;
+      // Merge the fresh session user (with permissions) into state.users BEFORE
+      // the first render — the cached users list can be empty (wiped by logout,
+      // private browsing) or stale, and hasPermission reads state.users.
+      upsertCurrentUserIntoUsers();
       // Restore last page for Admin. Non-admins always land inside Albayan Manager (secret ideas hidden).
       if (String(me.role || '').toLowerCase() === 'admin') {
         state.currentView = String(state.currentView || '').trim() || 'services-hub';
@@ -25946,7 +26120,8 @@ async function init() {
     const urlView = getViewFromUrl();
     // Only use URL view if it's valid and user has access
     if (urlView && urlView !== 'services-hub') {
-      const canAccess = isCurrentUserAdmin() || userCanAccessView(state.currentUser, urlView) || urlView === 'delivery-dashboard';
+      const canAccess = isCurrentUserAdmin() || userCanAccessView(state.currentUser, urlView) ||
+        (urlView === 'delivery-dashboard' && isDeliveryRole(state.currentUser?.role));
       if (canAccess && !PLATFORM_ADMIN_ONLY_VIEWS.has(urlView)) {
         state.currentView = urlView;
       }

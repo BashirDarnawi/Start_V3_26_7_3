@@ -300,6 +300,7 @@ async function serverLiveSyncOnce() {
   if ((now - (_serverLiveSync.lastUsersSyncAt || 0)) > (SERVER_API.usersSyncIntervalMs || 60000)) {
     _serverLiveSync.lastUsersSyncAt = now;
     try {
+      const usersBefore = JSON.stringify(state.users || []);
       const usersList = await apiListUsersForUi();
       if (Array.isArray(usersList)) {
         const byId = new Map();
@@ -307,10 +308,26 @@ async function serverLiveSyncOnce() {
           if (u && u.id) byId.set(u.id, u);
         }
         if (state.currentUser?.id) byId.set(state.currentUser.id, { ...byId.get(state.currentUser.id), ...state.currentUser });
+        // Records with a debounce-pending server update (admin mid-edit in the
+        // Permissions Manager) must keep the LOCAL version — the fetched list
+        // may predate the pending PATCH and would silently revert the edits.
+        try {
+          if (typeof _serverUserUpdate === 'object' && _serverUserUpdate?.pending?.size) {
+            for (const uid of _serverUserUpdate.pending.keys()) {
+              const local = (state.users || []).find(u => u && String(u.id) === String(uid));
+              if (local) byId.set(local.id, local);
+            }
+          }
+        } catch (_) {}
         state.users = Array.from(byId.values());
       }
-      // Also refresh current user's permissions (so they don't need to re-login for new permissions)
-      await refreshCurrentUserPermissions();
+      // Also refresh current user's permissions (so they don't need to re-login
+      // for new permissions). Either change must trigger a re-render — without
+      // it, a locked sidebar stays locked even after the data recovers.
+      const permsChanged = await refreshCurrentUserPermissions();
+      if (permsChanged || usersBefore !== JSON.stringify(state.users || [])) {
+        changed = true;
+      }
     } catch (e) {
       // User list sync failure - non-critical, just log in debug mode
       if (ALBAYAN_DEBUG_MODE) console.warn('[serverLiveSyncOnce] Users sync failed:', e?.message || e);
@@ -519,6 +536,10 @@ async function handleLogin(email, password) {
       }
 
       state.currentUser = user;
+      // Seed state.users immediately: the first render happens BEFORE
+      // serverLoadAllData, and hasPermission/sidebar read state.users — on a
+      // fresh device it would otherwise be empty and show "No access granted".
+      upsertCurrentUserIntoUsers();
       // #region agent log
       try {
         if (typeof window.__albayanDebugEmit === 'function') {
@@ -557,8 +578,12 @@ async function handleLogin(email, password) {
       document.body.appendChild(loadingOverlay);
 
       try {
-        await serverLoadAllData();
-        showNotification(state.language === 'ar' ? 'تم تحميل البيانات' : 'Data Loaded', state.language === 'ar' ? 'تمت مزامنة جميع البيانات بنجاح' : 'All data synchronized successfully', 'success');
+        const loadResult = await serverLoadAllData();
+        if (loadResult && Array.isArray(loadResult.failed) && loadResult.failed.length > 0) {
+          showNotification(state.language === 'ar' ? 'تحميل جزئي' : 'Partially Loaded', state.language === 'ar' ? 'تم تسجيل الدخول، لكن فشل تحميل بعض البيانات. جرّب التحديث.' : 'Logged in, but some data failed to load. Try Refresh.', 'warning');
+        } else {
+          showNotification(state.language === 'ar' ? 'تم تحميل البيانات' : 'Data Loaded', state.language === 'ar' ? 'تمت مزامنة جميع البيانات بنجاح' : 'All data synchronized successfully', 'success');
+        }
       } catch (e) {
         // serverLoadAllData should be tolerant, but keep a belt-and-suspenders guard.
         console.warn('Server data load failed after login:', e);
@@ -797,9 +822,15 @@ function handleLogout() {
   if (state.currentUser) {
     addAuditLog('Logout', state.currentUser.id, `User ${Security.escapeHtml(state.currentUser.name)} logged out`);
   }
-  
+
+  // Persist any debounce-pending user updates (e.g. a permission grant made
+  // within the last 700ms) BEFORE the session is destroyed, and only send the
+  // server logout after they settle so it can't invalidate the session first.
+  let _flushP = null;
+  try { if (typeof flushPendingUserUpdates === 'function') _flushP = flushPendingUserUpdates(); } catch (_) {}
+
   if (isServerModeEnabled()) {
-    apiLogout().catch(() => {});
+    Promise.resolve(_flushP).then(() => apiLogout()).catch(() => {});
   }
 
   stopServerLiveSync();

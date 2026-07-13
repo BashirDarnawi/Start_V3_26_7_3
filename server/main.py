@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -2517,6 +2517,61 @@ def _action_for_collection(collection: str, op: str) -> str:
     return op
 
 
+# Per-user money records. There is NO grantable permission module for these
+# (they never appear in the frontend's PERMISSION_MODULES), so a module-based
+# check would 403 every non-admin forever — even one holding all permissions.
+# Instead, non-admins get ownership-scoped access to their own rows.
+PERSONAL_SCOPED_COLLECTIONS = {"walletTransactions", "serviceSubscriptions"}
+
+
+def _owns_personal_record(collection: str, data: dict[str, Any] | None, uid: str) -> bool:
+    d = data or {}
+    if collection == "walletTransactions":
+        return str(d.get("fromUserId") or "") == uid or str(d.get("toUserId") or "") == uid
+    return str(d.get("userId") or "") == uid
+
+
+# Fields a PATCH may touch under the deliveries.* permissions (office staff
+# managing the delivery workflow on ads/receipts without full edit rights).
+_DELIVERY_WORKFLOW_FIELDS = {
+    "deliveryPersonId", "deliveryStatus", "acceptedDate", "deliveredAt",
+    "collectionDate", "isPaid", "isReceivedInOffice", "receivedInOfficeAt",
+    "deliveryCancelReason", "deliveryCancelledAt", "deliveryCancelledBy",
+    "deliveryNotes", "_lastModified",
+}
+
+
+def _delivery_patch_allowed(user: dict[str, Any], existing: dict[str, Any], updates: dict[str, Any]) -> bool:
+    """The deliveries permission group (assign/reassign/accept/complete/
+    markCollected) previously had no server-side meaning for non-delivery
+    roles — the frontend gates delivery actions on it, but the server only
+    accepted ads/receipts edit. Allow a PATCH that touches ONLY delivery-
+    workflow fields when the caller holds the matching deliveries.* grants."""
+    keys = set(updates.keys())
+    if not keys or not keys.issubset(_DELIVERY_WORKFLOW_FIELDS):
+        return False
+
+    def has(action: str) -> bool:
+        return user_has_permission(user, "deliveries", action)
+
+    if "deliveryPersonId" in keys:
+        already = bool(str(((existing.get("data") or {}).get("deliveryPersonId")) or "").strip())
+        if not (has("reassign") if already else has("assign")):
+            return False
+    if "deliveryStatus" in keys:
+        target = str(updates.get("deliveryStatus") or "")
+        needed = {"In Progress": "accept", "Delivered": "complete"}.get(target)
+        if needed:
+            if not has(needed):
+                return False
+        elif not (has("assign") or has("reassign")):
+            return False
+    if keys & {"isReceivedInOffice", "receivedInOfficeAt"}:
+        if not has("markCollected"):
+            return False
+    return has("accept") or has("complete") or has("assign") or has("reassign") or has("markCollected")
+
+
 @app.get("/api/collections/{collection}", response_model=list[EntityResponse])
 def get_collection(
     collection: str,
@@ -2527,19 +2582,26 @@ def get_collection(
     user: dict[str, Any] = Depends(current_user),
 ):
     role_lower = str(user.get("role") or "").lower()
+
+    # Personal money records (wallet ledger, subscriptions): every non-admin —
+    # regardless of role or granted permissions — receives ONLY their own rows.
+    # Previously these 403'd for all non-delivery non-admins (no grantable
+    # module exists), so employees' wallet/subscription data was silently
+    # wiped to [] on every load.
+    if collection in PERSONAL_SCOPED_COLLECTIONS and role_lower != "admin":
+        uid = sanitize_str(str(user.get("id") or ""))[:80]
+        if not uid:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        rows = _page_all(collection, updated_since=updated_since, include_deleted=False)
+        own = [i for i in rows if _owns_personal_record(collection, i.get("data"), uid)]
+        return [EntityResponse(**i) for i in own[offset : offset + max(1, int(limit))]]
+
     # Delivery users should only see records assigned to them (deliveryPersonId == user.id).
     # This avoids leaking the full Ads/Receipts/Customers database to drivers.
     if role_lower == "delivery":
         uid = sanitize_str(str(user.get("id") or ""))[:80]
         if not uid:
             raise HTTPException(status_code=403, detail="Forbidden")
-
-        # Wallet ledger and subscriptions are admin-only money records. Drivers
-        # now pull the whole collection list on login (so wallet balances sync
-        # back), but they must not receive other users' wallet/subscription
-        # data — return an empty set for them.
-        if collection in {"walletTransactions", "serviceSubscriptions"}:
-            return []
 
         if collection in {"ads", "receipts"}:
             items = list_entities(
@@ -2586,6 +2648,12 @@ def get_collection(
     action = _action_for_collection(collection, "view")
     can_view_all = user_has_permission(user, module, action)
     can_view_own = user_has_permission(user, module, action, record_creator_id=str(user.get("id") or ""))
+    # Exchange-rate history is non-sensitive reference data every client needs
+    # to render historical money conversions (same policy as /api/bootstrap) —
+    # readable by ANY authenticated user. Writes stay gated on
+    # settings.manageExchangeRate via _action_for_collection.
+    if collection == "exchangeRateHistory":
+        can_view_all = True
     if not can_view_all and not can_view_own:
         raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -2621,9 +2689,20 @@ def get_collection_item(
             raise HTTPException(status_code=403, detail="Forbidden")
         return EntityResponse(**item)
 
+    # Personal money records: non-admins may fetch ONLY their own rows.
+    if collection in PERSONAL_SCOPED_COLLECTIONS and role_lower != "admin":
+        item = get_entity(collection, entity_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="Not found")
+        if not _owns_personal_record(collection, item.get("data"), str(user.get("id") or "")):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return EntityResponse(**item)
+
     module = _module_for_collection(collection)
     action = _action_for_collection(collection, "view")
-    if not user_has_permission(user, module, action) and not user_has_permission(
+    # Exchange-rate history: non-sensitive reference data, readable by any
+    # authenticated user (mirrors get_collection / bootstrap).
+    if collection != "exchangeRateHistory" and not user_has_permission(user, module, action) and not user_has_permission(
         user, module, action, record_creator_id=str(user.get("id") or "")
     ):
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -2634,6 +2713,8 @@ def get_collection_item(
 
     # If user only has viewOwn, enforce creator ownership
     creator = item.get("createdBy") or (item.get("data") or {}).get("createdBy") or (item.get("data") or {}).get("creatorId")
+    if collection == "exchangeRateHistory":
+        return EntityResponse(**item)
     if user_has_permission(user, module, action):
         return EntityResponse(**item)
     if user_has_permission(user, module, action, record_creator_id=str(creator or "")):
@@ -2651,7 +2732,19 @@ def create_collection_item(
 ):
     require_same_origin(request)
     module = _module_for_collection(collection)
-    if not user_has_permission(user, module, _action_for_collection(collection, "add")):
+    if collection in PERSONAL_SCOPED_COLLECTIONS and str(user.get("role") or "").lower() != "admin":
+        # Self-referential writes only: a non-admin can spend from (never mint
+        # into) their own wallet, and can create subscriptions only for
+        # themselves. Everything else on these collections is admin-only.
+        _d = sanitize_json(body.data or {}) or {}
+        _uid = str(user.get("id") or "")
+        if collection == "walletTransactions":
+            if str(_d.get("fromUserId") or "") != _uid:
+                raise HTTPException(status_code=403, detail="Forbidden")
+        else:  # serviceSubscriptions
+            if str(_d.get("userId") or "") != _uid:
+                raise HTTPException(status_code=403, detail="Forbidden")
+    elif not user_has_permission(user, module, _action_for_collection(collection, "add")):
         raise HTTPException(status_code=403, detail="Forbidden")
 
     entity_id = sanitize_str(body.id or "")[:80] or new_id(collection[:10] or "id")
@@ -3070,9 +3163,35 @@ def update_collection_item(
         audit(str(user.get("id")), "update", collection, entity_id, f"Updated {collection} {entity_id} (delivery)", {})
         return EntityResponse(**saved)
 
+    # Personal money records: a non-admin may only CANCEL their own
+    # subscription (wallet ledger rows are immutable — corrections are new
+    # transactions). Cancellation may only set status/canceledAt/expiresAt.
+    if collection in PERSONAL_SCOPED_COLLECTIONS and role_lower != "admin":
+        if collection != "serviceSubscriptions":
+            raise HTTPException(status_code=403, detail="Forbidden")
+        _d0 = existing.get("data") or {}
+        _uid = str(user.get("id") or "")
+        if str(_d0.get("userId") or "") != _uid:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        _updates = sanitize_json(body.data or {}) or {}
+        _allowed_keys = {"status", "canceledAt", "cancelledAt", "expiresAt", "_lastModified"}
+        if (set(_updates.keys()) - _allowed_keys) or str(_updates.get("status") or "") != "canceled":
+            raise HTTPException(status_code=403, detail="Only self-cancellation is allowed")
+        if body.expectedLastModified is not None:
+            meta = get_entity_meta(collection, entity_id)
+            if meta and int(meta.get("last_modified") or 0) != int(body.expectedLastModified):
+                raise HTTPException(status_code=409, detail="Conflict: record has changed")
+        saved = patch_entity(collection, entity_id, _updates, _uid)
+        audit(_uid, "update", collection, entity_id, f"Canceled subscription {entity_id}", {})
+        return EntityResponse(**saved)
+
     creator = existing.get("createdBy") or (existing.get("data") or {}).get("createdBy") or (existing.get("data") or {}).get("creatorId")
     if not user_has_permission(user, module, _action_for_collection(collection, "edit"), record_creator_id=str(creator or "")):
-        raise HTTPException(status_code=403, detail="Forbidden")
+        # Delivery-workflow PATCHes (assign/accept/complete/collect) are also
+        # authorized by the deliveries.* permission group.
+        _dw_updates = sanitize_json(body.data or {}) or {}
+        if not (collection in {"ads", "receipts"} and _delivery_patch_allowed(user, existing, _dw_updates)):
+            raise HTTPException(status_code=403, detail="Forbidden")
 
     # Optimistic concurrency: if client provides expectedLastModified, enforce it
     if body.expectedLastModified is not None:
@@ -3551,22 +3670,35 @@ def list_audit(
     offset: int = 0,
     user: dict[str, Any] = Depends(current_user),
 ):
-    # Only admins can view global audit logs for now
-    if str(user.get("role") or "").lower() != "admin":
+    # auditLogs.view => full log; auditLogs.viewOwn => only own activity.
+    # Admins pass automatically via the role bypass in user_has_permission.
+    can_view_all = user_has_permission(user, "auditLogs", "view")
+    can_view_own = user_has_permission(user, "auditLogs", "viewOwn")
+    if not can_view_all and not can_view_own:
         raise HTTPException(status_code=403, detail="Forbidden")
 
     limit = max(1, min(int(limit), 1000))
     offset = max(0, int(offset))
 
     with db_conn() as conn:
-        rows = (
-            conn.execute(
-                text("SELECT * FROM audit_logs ORDER BY ts DESC LIMIT :limit OFFSET :offset"),
-                {"limit": limit, "offset": offset},
+        if can_view_all:
+            rows = (
+                conn.execute(
+                    text("SELECT * FROM audit_logs ORDER BY ts DESC LIMIT :limit OFFSET :offset"),
+                    {"limit": limit, "offset": offset},
+                )
+                .mappings()
+                .all()
             )
-            .mappings()
-            .all()
-        )
+        else:
+            rows = (
+                conn.execute(
+                    text("SELECT * FROM audit_logs WHERE user_id = :uid ORDER BY ts DESC LIMIT :limit OFFSET :offset"),
+                    {"uid": str(user.get("id") or ""), "limit": limit, "offset": offset},
+                )
+                .mappings()
+                .all()
+            )
         rows = [dict(r) for r in rows]
         for r in rows:
             r["metadata"] = json_loads(r.get("metadata_json") or "{}") or {}
@@ -3577,15 +3709,27 @@ def list_audit(
 @app.post("/api/audit/cleanup")
 def cleanup_audit_logs(
     days_to_keep: int = 365,
-    user: dict[str, Any] = Depends(require_admin),
+    payload: dict[str, Any] | None = Body(default=None),
+    user: dict[str, Any] = Depends(current_user),
     request: Request = None,
 ):
     """
     Delete audit logs older than specified days (default: 1 year).
-    Admin-only operation with CSRF protection.
+    Requires the auditLogs.clear permission (admins pass automatically).
+    CSRF-protected.
     """
     require_same_origin(request)
-    
+    if not user_has_permission(user, "auditLogs", "clear"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # The client sends days_to_keep in the JSON body (query param also
+    # accepted for backwards compatibility; body wins).
+    if isinstance(payload, dict) and payload.get("days_to_keep") is not None:
+        try:
+            days_to_keep = int(payload.get("days_to_keep"))
+        except (TypeError, ValueError):
+            days_to_keep = 365
+
     days_to_keep = max(30, min(int(days_to_keep), 3650))  # Min 30 days, max 10 years
     cutoff_ts = now_ms() - (days_to_keep * 24 * 60 * 60 * 1000)
     
@@ -3621,11 +3765,13 @@ def cleanup_audit_logs(
 
 
 @app.get("/api/audit/stats")
-def audit_stats(admin: dict[str, Any] = Depends(require_admin)):
+def audit_stats(user: dict[str, Any] = Depends(current_user)):
     """
     Get audit log statistics (total count, oldest entry, size estimates).
-    Admin-only operation.
+    Requires auditLogs.view (admins pass automatically).
     """
+    if not user_has_permission(user, "auditLogs", "view"):
+        raise HTTPException(status_code=403, detail="Forbidden")
     with db_conn() as conn:
         stats_row = conn.execute(
             text("""
@@ -3652,16 +3798,28 @@ def audit_stats(admin: dict[str, Any] = Depends(require_admin)):
 
 @app.post("/api/deliveries/check-stuck")
 def check_stuck_deliveries(
+    request: Request,
     hours_threshold: int = 72,
-    user: dict[str, Any] = Depends(require_admin),
-    request: Request = None,
+    payload: dict[str, Any] | None = Body(default=None),
+    user: dict[str, Any] = Depends(current_user),
 ):
     """
     Find deliveries that have been 'In Progress' for more than X hours (default: 72h = 3 days).
-    Admin-only operation. Returns stuck delivery receipts for manual review.
+    Requires the deliveries.assign permission (admins pass automatically) —
+    matching the client-side gate. Returns stuck delivery receipts for review.
     """
     require_same_origin(request)
-    
+    if not user_has_permission(user, "deliveries", "assign"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # The client sends hours_threshold in the JSON body; also accept the query
+    # param for backwards compatibility (body wins).
+    if isinstance(payload, dict) and payload.get("hours_threshold") is not None:
+        try:
+            hours_threshold = int(payload.get("hours_threshold"))
+        except (TypeError, ValueError):
+            hours_threshold = 72
+
     hours_threshold = max(1, min(int(hours_threshold), 720))  # Min 1 hour, max 30 days
     cutoff_ts = now_ms() - (hours_threshold * 60 * 60 * 1000)
     
@@ -3742,7 +3900,16 @@ def check_stuck_deliveries(
 
 
 @app.get("/api/users", response_model=list[UserPublic])
-def list_users(admin: dict[str, Any] = Depends(require_admin)):
+def list_users(user: dict[str, Any] = Depends(current_user)):
+    # Admins pass via the role bypass inside user_has_permission; non-admins
+    # need the users.view permission (managePermissions implies needing the
+    # list too). Previously this was role-gated, which made the users.view
+    # permission sold in the Permissions Manager unenforceable.
+    if not (
+        user_has_permission(user, "users", "view")
+        or user_has_permission(user, "users", "managePermissions")
+    ):
+        raise HTTPException(status_code=403, detail="Forbidden")
     with db_conn() as conn:
         rows = (
             conn.execute(text("SELECT * FROM users WHERE deleted = false ORDER BY email ASC"))
@@ -3767,8 +3934,14 @@ def list_users_public(user: dict[str, Any] = Depends(current_user)):
 
 
 @app.post("/api/users", response_model=UserPublic)
-def create_user(body: CreateUserRequest, request: Request, admin: dict[str, Any] = Depends(require_admin)):
+def create_user(body: CreateUserRequest, request: Request, admin: dict[str, Any] = Depends(current_user)):
     require_same_origin(request)
+    # users.add permission (admins pass automatically). Anti-escalation: a
+    # non-admin can never create an Admin account.
+    if not user_has_permission(admin, "users", "add"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if str(admin.get("role") or "").lower() != "admin" and sanitize_str(body.role).lower() == "admin":
+        raise HTTPException(status_code=403, detail="Only an Admin can create Admin accounts")
     now = now_ms()
     pw = hash_password(body.password, iterations=PBKDF2_ITERATIONS_DEFAULT)
 
@@ -3819,7 +3992,7 @@ def create_user(body: CreateUserRequest, request: Request, admin: dict[str, Any]
 
 
 @app.patch("/api/users/{user_id}", response_model=UserPublic)
-def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: dict[str, Any] = Depends(require_admin)):
+def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: dict[str, Any] = Depends(current_user)):
     require_same_origin(request)
     user_id = sanitize_str(user_id)[:80]
     now = now_ms()
@@ -3827,6 +4000,38 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
     existing = _get_user_by_id(user_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Not found")
+
+    # Permission gating. Admins pass everything (role bypass inside
+    # user_has_permission); non-admins need the matching users.* permission
+    # per field, may self-edit name/email, and can NEVER touch an Admin
+    # account, grant the Admin role, or delete themselves.
+    _actor_is_admin = str(admin.get("role") or "").lower() == "admin"
+    _is_self = str(admin.get("id") or "") == user_id
+    if not _actor_is_admin:
+        if str(existing.get("role") or "").lower() == "admin":
+            raise HTTPException(status_code=403, detail="Only an Admin can modify an Admin account")
+        if body.role is not None and sanitize_str(body.role).lower() == "admin":
+            raise HTTPException(status_code=403, detail="Only an Admin can grant the Admin role")
+
+        def _need(perm: str) -> None:
+            if not user_has_permission(admin, "users", perm):
+                raise HTTPException(status_code=403, detail="Forbidden")
+
+        if (body.name is not None or body.email is not None) and not _is_self:
+            _need("edit")
+        if body.password is not None:
+            if _is_self:
+                # Self password changes must verify the current password.
+                raise HTTPException(status_code=400, detail="Use /api/auth/password-change to change your own password")
+            _need("resetPassword")
+        if body.role is not None and sanitize_str(body.role) != str(existing.get("role") or ""):
+            _need("changeRole")
+        if body.permissions is not None:
+            _need("managePermissions")
+        if body.deleted is not None:
+            if body.deleted is True and _is_self:
+                raise HTTPException(status_code=400, detail="You cannot delete your own account")
+            _need("delete")
 
     # SECURITY: Whitelist allowed fields to prevent SQL injection
     ALLOWED_USER_UPDATE_FIELDS = {
@@ -3918,16 +4123,20 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
 # This allows URLs like /ads, /receipts, /customers to work
 FRONTEND_ROUTES = {
     "/analytics",
-    "/ads", 
+    "/ads",
     "/customers",
     "/receipts",
     "/pages",
     "/users",
+    "/deliveries",
+    "/reconciliation",
+    "/settings",
     "/audit-logs",
     "/delivery",
     "/receipt-balance",
     "/no-access",
     "/smart-systems",
+    "/clothes-system",
     "/wallet",
     "/account",
 }

@@ -604,7 +604,8 @@ function enforceSecretFeaturesGate() {
   }
   // Also check if user has permission for the current Albayan Manager view
   const view = String(state.currentView || '');
-  if (view && view !== 'delivery-dashboard' && view !== 'no-access' && !userCanAccessView(state.currentUser, view)) {
+  const _deliveryExempt = view === 'delivery-dashboard' && isDeliveryRole(state.currentUser?.role);
+  if (view && !_deliveryExempt && view !== 'no-access' && !userCanAccessView(state.currentUser, view)) {
     // User doesn't have permission for this view, find first allowed view
     state.currentView = getAlbayanManagerLandingViewForUser(state.currentUser);
     state.viewData = null;

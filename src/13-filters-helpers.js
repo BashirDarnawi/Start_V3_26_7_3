@@ -378,7 +378,7 @@ function editPage(id) {
 }
 
 function editUser(id) {
-  if (!isCurrentUserAdmin() && String(id) !== String(state.currentUser?.id || '')) {
+  if (!canManageUsersAction('edit') && String(id) !== String(state.currentUser?.id || '')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يمكنك تعديل مستخدمين آخرين' : 'You cannot edit other users', 'error');
     return;
   }
@@ -393,8 +393,8 @@ function editUser(id) {
 // ==========================================
 
 function showPermissionsModal(userId) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Permissions Manager is Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -612,8 +612,8 @@ function refreshPermissionsModalUi(userId, moduleKey = null) {
 }
 
 function togglePermission(userId, moduleKey, permKey, enabled) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -648,8 +648,8 @@ function togglePermission(userId, moduleKey, permKey, enabled) {
 }
 
 function toggleModulePermissions(userId, moduleKey, enableAll) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -689,8 +689,8 @@ function toggleModulePermissions(userId, moduleKey, enableAll) {
 }
 
 function applyPermissionTemplate(userId, templateKey) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -726,8 +726,8 @@ function applyPermissionTemplate(userId, templateKey) {
 }
 
 function clearAllPermissions(userId) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -756,8 +756,8 @@ function clearAllPermissions(userId) {
 }
 
 function exportUserPermissions(userId) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -778,8 +778,8 @@ function exportUserPermissions(userId) {
 }
 
 function importUserPermissions(userId) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const input = document.createElement('input');

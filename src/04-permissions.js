@@ -141,13 +141,13 @@ const PERMISSION_MODULES = {
     icon: 'settings',
     color: 'slate',
     description: 'System settings',
+    // NOTE: backup/restore/clearData were removed — those are whole-database
+    // operations the server only ever allows for the Admin ROLE, so offering
+    // them as grantable toggles was misleading (they never did anything).
     permissions: {
       view: { label: 'View Settings', description: 'View system settings' },
       edit: { label: 'Edit Settings', description: 'Edit system settings' },
-      manageExchangeRate: { label: 'Manage Exchange Rate', description: 'Change exchange rates' },
-      backup: { label: 'Backup Data', description: 'Backup system data' },
-      restore: { label: 'Restore Data', description: 'Restore from backup' },
-      clearData: { label: 'Clear Data', description: 'Clear all system data' }
+      manageExchangeRate: { label: 'Manage Exchange Rate', description: 'Change exchange rates' }
     }
   },
   auditLogs: {
@@ -155,11 +155,12 @@ const PERMISSION_MODULES = {
     icon: 'file-clock',
     color: 'violet',
     description: 'System audit trail',
+    // NOTE: 'backup' was removed — no code ever honored it (log backup is an
+    // Admin-role operation), so the toggle was decorative.
     permissions: {
       view: { label: 'View Audit Logs', description: 'View all audit logs' },
       viewOwn: { label: 'View Own Logs', description: 'View only own activity' },
       export: { label: 'Export Logs', description: 'Export audit logs' },
-      backup: { label: 'Backup Logs', description: 'Backup audit logs' },
       clear: { label: 'Clear Logs', description: 'Clear audit logs' }
     }
   },
@@ -324,10 +325,18 @@ const PERMISSION_TEMPLATES = {
 function hasPermission(userId, module, action) {
   // System/admin always has access
   if (!userId || userId === 'system') return true;
-  
-  const user = state.users.find(u => u.id === userId);
+
+  let user = (state.users || []).find(u => u && u.id === userId);
+  // FALLBACK: state.users can be empty or hold a permission-less stub (e.g. the
+  // /api/users/public list only carries {id,name,role}). The login and
+  // /api/auth/me responses always carry the caller's full permissions on
+  // state.currentUser — use that as the source of truth for the current user
+  // so the whole UI can never lock out a properly-permissioned account.
+  if ((!user || !user.permissions) && state.currentUser && String(state.currentUser.id) === String(userId)) {
+    user = state.currentUser;
+  }
   if (!user) return false;
-  
+
   // Admins have all permissions
   if (String(user.role || '').toLowerCase() === 'admin') return true;
   
@@ -343,28 +352,55 @@ function hasPermission(userId, module, action) {
   return modulePerms.includes(action) || modulePerms.some(p => String(p).toLowerCase() === String(action).toLowerCase());
 }
 
-// Refresh current user's permissions from server
+// Refresh current user's permissions from server.
+// Returns true when the permissions actually changed (callers use this to
+// schedule a re-render so a locked sidebar can recover without re-login).
 async function refreshCurrentUserPermissions() {
-  if (!isServerModeEnabled() || !state.currentUser?.id) return;
+  if (!isServerModeEnabled() || !state.currentUser?.id) return false;
   try {
     const me = await apiAuthMe();
     if (me && me.permissions) {
+      const changed = JSON.stringify(state.currentUser.permissions || null) !== JSON.stringify(me.permissions);
       state.currentUser.permissions = me.permissions;
-      // Also update in users array
-      const idx = state.users.findIndex(u => u.id === me.id);
-      if (idx !== -1) {
-        state.users[idx].permissions = me.permissions;
-      }
-      console.log('[Permissions] Refreshed current user permissions');
+      // Also update in users array — UPSERT: if the record is missing (users
+      // list fetch failed or returned permission-less stubs), insert it so the
+      // periodic refresh can repair an empty state.users.
+      upsertCurrentUserIntoUsers();
+      if (changed) console.log('[Permissions] Refreshed current user permissions');
+      return changed;
     }
   } catch (e) {
     console.warn('[Permissions] Failed to refresh:', e?.message || e);
+  }
+  return false;
+}
+
+// Ensure state.users contains the current user's record WITH permissions.
+// state.currentUser always carries the full permission map from the server
+// login / /api/auth/me response; the users list for non-admins does not
+// (GET /api/users/public returns only {id,name,role}).
+function upsertCurrentUserIntoUsers() {
+  const cu = state.currentUser;
+  if (!cu || !cu.id) return;
+  if (!Array.isArray(state.users)) state.users = [];
+  const idx = state.users.findIndex(u => u && String(u.id) === String(cu.id));
+  if (idx === -1) {
+    state.users.push(cu);
+  } else {
+    state.users[idx] = { ...state.users[idx], ...cu };
   }
 }
 
 // Check if current user has permission
 function currentUserHasPermission(module, action) {
   return hasPermission(state.currentUser?.id, module, action);
+}
+
+// User-management capability: Admin role OR the matching users.* permission.
+// The server enforces the same rule (plus anti-escalation guards), so these
+// buttons/actions now work for permission-granted non-admins too.
+function canManageUsersAction(action) {
+  return isCurrentUserAdmin() || currentUserHasPermission('users', action);
 }
 
 // Get permission summary for display
