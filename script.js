@@ -15318,7 +15318,9 @@ function saveSplitPayments() {
   // Snap to 2 decimals first so binary float residue doesn't trip the rule.
   totalR2 = Math.round(totalR2 * 100) / 100;
   if (totalR2 % 1 !== 0) totalR2 = Math.round((totalR2 + 0.01) * 100) / 100;
-  const avgRate = (totalR2 > 0 && totalR1 > 0) ? (totalR1 / totalR2) : state.defaultExchangeRate;
+  // Same rule as the receipt form: a single payment stores the rate the user
+  // typed; a split stores the effective average.
+  const avgRate = receiptExchangeRate(payments, totalR1, totalR2);
 
   // Money already committed cannot be edited away: ads funded from this
   // receipt plus money transferred to other customers set the floor for the
@@ -16445,15 +16447,37 @@ function syncReceiptSerialWithPaymentMethods({ reissue = false } = {}) {
   updateSerialLockState();
 }
 
-// Helper function to always round UP to 2 decimal places
-// This ensures any value with decimals beyond 2 places rounds up
-// Example: 90.100143062 becomes 90.11, not 90.10
+// Round UP to 2 decimal places (credit is granted in the customer's favour).
+// Example: 90.100143062 -> 90.11.
+//
+// MONEY-MATH: it must NOT round up on binary floating-point residue. 291 / 9.7
+// is 30.000000000000004 in JS, so the old Math.ceil(v * 100) turned an exact
+// $30.00 into $30.01 — and the "+0.01 when it has decimals" rule below then
+// made it $30.02, which in turn made the stored exchange rate 291/30.02 = 9.69
+// instead of the 9.70 the user typed. Treat a value that is within a
+// hair of a cent boundary as being ON it, then ceil.
+const MONEY_EPSILON = 1e-6;
+
+// The rate to STORE on a receipt.
+// Single payment  -> exactly the rate the user typed (Rate 2).
+// Split payments  -> the effective average (rows can carry different rates).
+function receiptExchangeRate(payments, totalLYD, totalUSD) {
+  const rows = Array.isArray(payments) ? payments : [];
+  if (rows.length === 1) {
+    const r = Number(rows[0]?.rate2);
+    if (Number.isFinite(r) && r > 0) return r;
+  }
+  if (totalUSD > 0 && totalLYD > 0) return totalLYD / totalUSD;
+  return state.defaultExchangeRate;
+}
+
 function ceilingRound(value) {
-  if (value === 0 || !value || isNaN(value)) return 0;
-  // Always round up: multiply by 100, use Math.ceil, then divide by 100
-  // This ensures 90.10000001 becomes 90.11
-  const result = Math.ceil(value * 100) / 100;
-  return result;
+  const v = Number(value);
+  if (!Number.isFinite(v) || v === 0) return 0;
+  const cents = v * 100;
+  const nearest = Math.round(cents);
+  if (Math.abs(cents - nearest) < MONEY_EPSILON) return nearest / 100;
+  return Math.ceil(cents) / 100;
 }
 
 // Called when a payment row is ADDED or REMOVED — the set of methods changed,
@@ -16788,7 +16812,12 @@ async function _saveReceiptFromModalInner() {
   const totalLYD = totalR1;
   const totalUSD = totalR2;
   // BUG FIX: Prevent division by zero (defense in depth, already checked totalUSD > 0)
-  const avgRate = (totalUSD > 0 && totalLYD > 0) ? (totalLYD / totalUSD) : state.defaultExchangeRate;
+  // The receipt's exchange rate. With a SINGLE payment, store exactly the rate
+  // the user typed — deriving it as LYD/USD made the card show 9.69 for a rate
+  // of 9.70, because the credit total is rounded up in the customer's favour.
+  // With a split (different rates per row) the effective average is the only
+  // meaningful figure, so keep deriving it there.
+  const avgRate = receiptExchangeRate(payments, totalLYD, totalUSD);
   const status = document.getElementById('receipt-status').value || 'Paid';
   const photos = state.tempReceiptPhotos || [];
 
@@ -17022,7 +17051,13 @@ async function _saveReceiptFromModalInner() {
   // Normal receipts: send serialNumber only.
   const tempReceiptNo = isTempDelivery ? serialNumber : (editTarget?.tempReceiptNo || '');
   const serialFinal = isTempDelivery ? (editTarget?.serialNumber || editTarget?.finalReceiptNo || '') : serialNumber;
-  const finalReceiptNo = (editTarget?.finalReceiptNo || '') || (serialFinal || '');
+  // finalReceiptNo must FOLLOW the number the user just entered. It used to
+  // prefer the stored value, so editing a receipt's number changed only
+  // serialNumber while the lists/cards (which show finalReceiptNo first) kept
+  // displaying the OLD number — the edit looked like it never happened.
+  const finalReceiptNo = isTempDelivery
+    ? (editTarget?.finalReceiptNo || '')
+    : (serialFinal || '');
 
   const receipt = {
     id: editTarget ? editTarget.id : generateId('receipt'),

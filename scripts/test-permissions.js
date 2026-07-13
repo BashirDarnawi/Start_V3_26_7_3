@@ -696,6 +696,37 @@ check('getSelectedPaymentMethods reads the live rows (no invented "Cash (USD)")'
   assert(methods.length === 2 && methods[0] === 'Bank Transfer (LYD)', `got ${JSON.stringify(methods)}`);
 });
 
+console.log('\n=== MONEY MATH: no phantom cents from floating-point residue ===');
+
+check('291 LYD at rate 9.70 gives exactly $30.00 (was $30.02)', () => {
+  const r2 = sandbox.ceilingRound(291 / 9.7);
+  assert(r2 === 30, `291/9.7 should credit $30.00, got $${r2}`);
+  // the "+0.01 when it has decimals" rule must not fire on a whole number
+  assert(r2 % 1 === 0, 'a whole-dollar credit must not gain a cent');
+});
+
+check('the receipt stores the rate the user typed (was 9.69 for 9.70)', () => {
+  const rate = sandbox.receiptExchangeRate([{ method: 'Cash (LYD)', rate2: 9.7 }], 291, 30);
+  assert(rate === 9.7, `expected the typed rate 9.7, got ${rate}`);
+});
+
+check('a split still stores the effective average rate', () => {
+  const rate = sandbox.receiptExchangeRate(
+    [{ method: 'Cash (LYD)', rate2: 9.7 }, { method: 'Libyana', rate2: 9.0 }], 300, 31.5);
+  assert(Math.abs(rate - (300 / 31.5)) < 1e-9, `split should average, got ${rate}`);
+});
+
+check('rounding UP in the customer\'s favour still happens for real fractions', () => {
+  assert(sandbox.ceilingRound(90.100143062) === 90.11, 'must round up to 90.11');
+  assert(sandbox.ceilingRound(100 / 9.5) === 10.53, '100/9.5 must round up to 10.53');
+  // A genuine fraction of a cent still rounds up (the business rule)...
+  assert(sandbox.ceilingRound(30.0001) === 30.01, 'a real fraction must still round up');
+  // ...but binary residue from a division must NOT invent one.
+  assert(sandbox.ceilingRound(291 / 9.7) === 30, 'float residue must not create a phantom cent');
+  assert(sandbox.ceilingRound(873 / 9.7) === 90, 'float residue must not create a phantom cent (x3)');
+  assert(sandbox.ceilingRound(0) === 0 && sandbox.ceilingRound(NaN) === 0, 'zero/NaN stay 0');
+});
+
 // ---------- report ----------
 console.log(`\n${'='.repeat(60)}`);
 if (failures.length) {

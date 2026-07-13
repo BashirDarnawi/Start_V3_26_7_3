@@ -2413,7 +2413,9 @@ function saveSplitPayments() {
   // Snap to 2 decimals first so binary float residue doesn't trip the rule.
   totalR2 = Math.round(totalR2 * 100) / 100;
   if (totalR2 % 1 !== 0) totalR2 = Math.round((totalR2 + 0.01) * 100) / 100;
-  const avgRate = (totalR2 > 0 && totalR1 > 0) ? (totalR1 / totalR2) : state.defaultExchangeRate;
+  // Same rule as the receipt form: a single payment stores the rate the user
+  // typed; a split stores the effective average.
+  const avgRate = receiptExchangeRate(payments, totalR1, totalR2);
 
   // Money already committed cannot be edited away: ads funded from this
   // receipt plus money transferred to other customers set the floor for the
