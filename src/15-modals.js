@@ -1673,8 +1673,9 @@ function renderModal() {
       updateReceiptTotals();
       // Auto-serial: fill the number for a NEW receipt whose payment method is
       // auto-numbered, and lock the field whenever such a method is selected
-      // (including when EDITING a receipt that already uses one).
-      updateAutoSerialForReceipt();
+      // (including when EDITING a receipt that already uses one). Opening the
+      // form never renumbers an existing receipt.
+      initReceiptSerialOnOpen();
       updateReceiptStatusUI(document.getElementById('receipt-status')?.value || 'Paid');
       // Pre-populate customer if editing
       if (state.modalData && state.modalData.customerId) {

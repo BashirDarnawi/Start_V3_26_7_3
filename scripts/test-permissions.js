@@ -135,6 +135,16 @@ function assert(cond, msg) { if (!cond) throw new Error(msg || 'assertion failed
 // would otherwise make a leak assertion fail (or pass) for the wrong reason.
 function visible(html) { return String(html).replace(/<!--[\s\S]*?-->/g, ''); }
 
+// Stub the receipt form's payment rows so the real DOM-reading helpers
+// (getSelectedAutoSerialMethod, syncReceiptSerialWithPaymentMethods) can run.
+function setPaymentRows(methods) {
+  const rows = methods.map(m => ({
+    querySelector: (sel) => (sel === '.payment-method' ? { value: m } : null)
+  }));
+  sandbox.document.querySelectorAll = (sel) =>
+    (sel === '.payment-split-item' ? rows : []);
+}
+
 const S = bridged.state;
 
 const ADMIN = { id: 'u-admin', name: 'Bashir', role: 'Admin', permissions: {} };
@@ -506,15 +516,6 @@ check('typing cannot corrupt an auto-serial (validator preserves the prefix)', (
 
 console.log('\n=== MIXED PAYMENTS: cash in the split => manual receipt number ===');
 
-// Drive the real DOM-reading helper by stubbing the payment rows on the page.
-function setPaymentRows(methods) {
-  const rows = methods.map(m => ({
-    querySelector: (sel) => (sel === '.payment-method' ? { value: m } : null)
-  }));
-  sandbox.document.querySelectorAll = (sel) =>
-    (sel === '.payment-split-item' ? rows : []);
-}
-
 check('all-auto split (Libyana + Sadad) still auto-numbers', () => {
   setPaymentRows(['Libyana', 'Sadad']);
   assert(sandbox.getSelectedAutoSerialMethod() === 'Libyana', 'an all-auto split must auto-number from the first row');
@@ -543,6 +544,81 @@ check('single Cash row => manual', () => {
 check('no payment rows => manual (nothing to number from)', () => {
   setPaymentRows([]);
   assert(sandbox.getSelectedAutoSerialMethod() === null, 'empty form must not auto-number');
+});
+
+console.log('\n=== SERIAL RE-SYNC when the payment method changes (the reported bug) ===');
+
+// Drive the real sync function against a stubbed Receipt Number field.
+function serialField(initial) {
+  const el = { value: initial, readOnly: false, title: '', classList: { add() {}, remove() {} } };
+  sandbox.document.getElementById = (id) => (id === 'receipt-serial' ? el : null);
+  return el;
+}
+
+check('cash receipt (manual number) switched to Bank Transfer => gets a B number', () => {
+  S.receipts = [{ id: 'r-old', paymentMethod: 'Bank Transfer (LYD)', serialNumber: 'B4' }];
+  S.modalData = { id: 'r-saved' };            // EDITING a saved receipt
+  const el = serialField('12851');            // its old paper number from cash
+  setPaymentRows(['Bank Transfer (LYD)']);    // user switches the method
+  sandbox.syncReceiptSerialWithPaymentMethods({ reissue: true });
+  assert(el.value === 'B5', `expected B5, got "${el.value}" (the stale paper number was kept)`);
+  assert(el.readOnly === true, 'the field must lock once it is app-numbered');
+  S.modalData = null;
+});
+
+check('new receipt: typed number then switched to Transfer Office => gets an O number', () => {
+  S.receipts = [];
+  const el = serialField('999');
+  setPaymentRows(['Transfer Office']);
+  sandbox.syncReceiptSerialWithPaymentMethods({ reissue: true });
+  assert(el.value === 'O1', `expected O1, got "${el.value}"`);
+});
+
+check('switching between auto groups re-issues from the new counter', () => {
+  S.receipts = [{ id: 'a', paymentMethod: 'Sadad', serialNumber: 'E2' }];
+  const el = serialField('B7');
+  setPaymentRows(['USDT']);
+  sandbox.syncReceiptSerialWithPaymentMethods({ reissue: true });
+  assert(el.value === 'E3', `expected E3, got "${el.value}"`);
+});
+
+check('a number already in the right group is KEPT (no pointless renumbering)', () => {
+  S.receipts = [{ id: 'a', paymentMethod: 'Bank Transfer (LYD)', serialNumber: 'B9' }];
+  S.modalData = { id: 'a' };
+  const el = serialField('B9');
+  setPaymentRows(['Bank Transfer (USD)']); // same B group
+  sandbox.syncReceiptSerialWithPaymentMethods({ reissue: true });
+  assert(el.value === 'B9', `B9 should have been kept, got "${el.value}"`);
+  S.modalData = null;
+});
+
+check('adding a Cash row to an auto-numbered receipt clears the app number', () => {
+  S.receipts = [];
+  const el = serialField('B3');
+  setPaymentRows(['Bank Transfer (LYD)', 'Cash (LYD)']);
+  sandbox.syncReceiptSerialWithPaymentMethods({ reissue: true });
+  assert(el.value === '', `app number must be cleared, got "${el.value}"`);
+  assert(el.readOnly === false, 'the field must unlock so a paper number can be typed');
+});
+
+check('merely OPENING a saved receipt never renumbers it', () => {
+  S.receipts = [{ id: 'r1', paymentMethod: 'Libyana', serialNumber: '4' }]; // legacy bare number
+  S.modalData = { id: 'r1' };
+  const el = serialField('4');
+  setPaymentRows(['Libyana']);
+  sandbox.syncReceiptSerialWithPaymentMethods({ reissue: false });
+  assert(el.value === '4', `open must not renumber; got "${el.value}"`);
+  S.modalData = null;
+});
+
+check('a saved legacy S receipt keeps its bare number when switching within the S group', () => {
+  S.receipts = [{ id: 'r1', paymentMethod: 'Libyana', serialNumber: '4' }];
+  S.modalData = { id: 'r1' };
+  const el = serialField('4');
+  setPaymentRows(['Madar']); // same S group
+  sandbox.syncReceiptSerialWithPaymentMethods({ reissue: true });
+  assert(el.value === '4', `legacy S number should be kept, got "${el.value}"`);
+  S.modalData = null;
 });
 
 console.log('\n=== URLs: every view and modal is addressable ===');
