@@ -5434,6 +5434,31 @@ def _financial_apply_refund(
         stored_due_baseline if isinstance(stored_due_baseline, list) else current_due,
         "refundDueBaseline",
     )
+    # An ad from before the allocation arrays holds its due usage in the dueAmountToUse*
+    # mirror with no row, so the baseline above comes back EMPTY and the refund released
+    # nothing — the delivery credit stayed locked forever. That is bug #51 on the server,
+    # for exactly the records the fix is meant to serve. Stand the mirror up as the
+    # allocation it represents so the refund has something to give back.
+    if not isinstance(stored_due_baseline, list) and not due_baseline:
+        linked_due_id = str(existing.get("linkedDeliveryReceiptId") or "")
+        legacy_due_minor = 0
+        if linked_due_id:
+            legacy_due_minor = _financial_minor(
+                existing.get("dueAmountToUseUSD"), "stored due allocation"
+            )
+            if legacy_due_minor == 0 and existing.get("dueAmountToUseLYD"):
+                local_minor = _financial_minor(
+                    existing.get("dueAmountToUseLYD"), "stored due allocation"
+                )
+                rate = _financial_rate(existing.get("exchangeRate"))
+                legacy_due_minor = int(
+                    (Decimal(local_minor) / rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+                )
+        if legacy_due_minor > 0:
+            due_baseline = _financial_allocations(
+                [{"receiptId": linked_due_id, "amountUSD": _financial_usd(legacy_due_minor)}],
+                "refundDueBaseline",
+            )
     if refund_type == "None":
         result["receiptAllocations"] = paid_baseline
         result["dueAllocations"] = due_baseline
@@ -5472,6 +5497,12 @@ def _financial_apply_refund(
     result["dueAmountToUseUSD"] = _financial_usd(
         sum(_financial_minor(row["amountUSD"], "due allocation") for row in due)
     )
+    # The usage readers fall back to the LYD half whenever the USD half is zero, so a stale
+    # value would re-lock the very credit this refund is returning. Clearing it is safe ONLY
+    # because the baseline above already folded it into a real allocation row — never zero
+    # this without folding first, or an ad's true due usage is erased and the receipt reads
+    # as free while the ad still holds it.
+    result["dueAmountToUseLYD"] = 0.0
     result["hasMergedPaidFunds"] = bool(paid) and str(result.get("paymentStatus")) == "not_paid"
     return result
 
