@@ -163,6 +163,17 @@ Start_V3/
 
 ## 🚀 Quick Start
 
+### Prerequisites
+
+- Node.js 22 or newer
+- Docker Desktop
+
+Install the JavaScript tools once:
+
+```bash
+npm ci
+```
+
 ### Frontend only (local mode)
 ```bash
 # Node.js
@@ -174,11 +185,37 @@ npx serve
 ```
 
 ### Full stack (server mode)
-```bash
-# Requires Docker; creates PostgreSQL + the API + serves the frontend
-docker compose up --build
-# Then visit http://127.0.0.1:8000
+
+On Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+# Open .env and replace every CHANGE_ME value before continuing.
+docker compose up --build -d
+docker compose exec albayan python -m server.create_admin --email you@example.com --name Admin
 ```
+
+The last command asks you for an admin password without saving it in shell
+history. Then open `http://127.0.0.1:8000`.
+
+Do not expose a fresh, uninitialized server to the internet. For production,
+use HTTPS, set `ALBAYAN_COOKIE_SECURE=true`, and follow `deploy/README.md`.
+
+### Test and prepare a mobile release
+
+```bash
+# JavaScript + complete backend tests (uses Docker when local Python is absent)
+npm test
+
+# Build, test, copy www, sync Android/iOS, and verify generated files
+npm run release:prepare
+
+# Read-only repeatable release check
+npm run release:check
+```
+
+GitHub Actions also checks PostgreSQL migrations, the non-root Docker image,
+Android lint/unit tests, and an unsigned iOS Simulator build.
 
 ### Credentials
 
@@ -501,10 +538,10 @@ compatibility with old saved settings.
 
 ### What's Better
 - ✅ Faster load times
-- ✅ No build process
+- ✅ Small, transparent build process
 - ✅ Simpler debugging
 - ✅ Easier deployment
-- ✅ Zero dependencies (except CDN)
+- ✅ Few runtime dependencies
 
 ### What's Removed
 - Command Palette search functionality (UI present, search TBD)
@@ -542,7 +579,7 @@ Same as original React version - use at your own risk.
 
 ---
 
-## ✨ YOU NOW HAVE ALL FEATURES!
+## ✨ Current Feature Coverage
 
 Every feature from your React app has been converted to vanilla JavaScript:
 - ✅ Complete CRUD for all entities
@@ -564,4 +601,3 @@ Every feature from your React app has been converted to vanilla JavaScript:
 **Nothing was removed or simplified!** 🎉
 
 Open `index.html` and start using your fully-featured ad management system!
-

@@ -56,6 +56,67 @@ const LIMIT_CONSTANTS = {
 
 let db = null;
 
+// Business-data caches are isolated by workspace + authenticated user. Local
+// mode keeps the historical unscoped keys so existing single-device data is
+// preserved. Server mode activates a different scope only AFTER /api/auth/me
+// or login has identified the user, so pre-auth startup can never render the
+// previous user's cached customers, receipts or wallet rows.
+let _collectionStorageScope = 'local';
+
+function _hashStorageScope(value) {
+  const input = String(value || '');
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function setCollectionStorageScope(scope) {
+  const next = String(scope || 'server:anonymous');
+  if (next === _collectionStorageScope) return next;
+  _collectionStorageScope = next;
+  _corruptedCollections.clear();
+  // A debounced write created for user A must not run after user B's scope is
+  // activated. In-flight IDB writes capture their keys below and remain safe.
+  try {
+    if (typeof resetDirtyCollectionQueueForScopeChange === 'function') {
+      resetDirtyCollectionQueueForScopeChange();
+    }
+  } catch (_) {}
+  return next;
+}
+
+function activateLocalCollectionStorage() {
+  return setCollectionStorageScope('local');
+}
+
+function activateAnonymousServerCollectionStorage() {
+  return setCollectionStorageScope('server:anonymous');
+}
+
+function activateServerCollectionStorage(user) {
+  const userId = String(user?.id || '').trim();
+  if (!Security.isValidRecordId(userId)) throw new Error('Cannot activate cache: invalid authenticated user id');
+  let serverIdentity = '';
+  try {
+    serverIdentity = (typeof getServerBaseUrl === 'function' && getServerBaseUrl()) || window.location?.origin || 'server';
+  } catch (_) {
+    serverIdentity = 'server';
+  }
+  return setCollectionStorageScope(`server:${_hashStorageScope(String(serverIdentity).toLowerCase())}:${userId}`);
+}
+
+function getCollectionStorageScope() {
+  return _collectionStorageScope;
+}
+
+function _scopedCollectionStorageName(collectionName, capturedScope = _collectionStorageScope) {
+  const name = String(collectionName || '');
+  return capturedScope === 'local' ? name : `${capturedScope}:${name}`;
+}
+
 /**
  * Initialize IndexedDB for large data storage and caching.
  * Creates necessary object stores and handles version upgrades.
@@ -253,12 +314,12 @@ function idbClear(storeName) {
   });
 }
 
-function getCollectionMetaKey(collectionName) {
-  return `collection:${collectionName}:meta`;
+function getCollectionMetaKey(collectionName, capturedScope = _collectionStorageScope) {
+  return `collection:${_scopedCollectionStorageName(collectionName, capturedScope)}:meta`;
 }
 
-function getCollectionChunkKey(collectionName, index) {
-  return `collection:${collectionName}:chunk:${index}`;
+function getCollectionChunkKey(collectionName, index, capturedScope = _collectionStorageScope) {
+  return `collection:${_scopedCollectionStorageName(collectionName, capturedScope)}:chunk:${index}`;
 }
 
 /**
@@ -273,9 +334,13 @@ async function saveCollectionToIndexedDB(collectionName, data) {
   if (!db) return false;
   const name = String(collectionName || '');
   if (!name) return false;
+  // Capture the scope before the first await. A logout/login during the write
+  // cannot redirect later chunks into a different user's namespace.
+  const capturedScope = _collectionStorageScope;
+  const dataKey = _scopedCollectionStorageName(name, capturedScope);
 
   try {
-    const metaKey = getCollectionMetaKey(name);
+    const metaKey = getCollectionMetaKey(name, capturedScope);
     const prevMeta = await idbGet(DATA_STORE_NAME, metaKey);
     const prevChunkCount = prevMeta?.chunkCount || 0;
 
@@ -284,7 +349,7 @@ async function saveCollectionToIndexedDB(collectionName, data) {
     const recordCount = isArray ? data.length : 0;
     if (!isArray || recordCount <= STORAGE_CONFIG.CHUNK_SIZE) {
       const record = {
-        key: name,
+        key: dataKey,
         type: 'collection',
         data,
         checksum: DataIntegrity.calculateChecksum(data),
@@ -297,7 +362,7 @@ async function saveCollectionToIndexedDB(collectionName, data) {
       // load prefer the stale chunked copy).
       const deleteKeys = [];
       if (prevChunkCount > 0) {
-        for (let i = 0; i < prevChunkCount; i++) deleteKeys.push(getCollectionChunkKey(name, i));
+        for (let i = 0; i < prevChunkCount; i++) deleteKeys.push(getCollectionChunkKey(name, i, capturedScope));
         deleteKeys.push(metaKey);
       }
       await idbAtomicWrite([record], deleteKeys);
@@ -317,7 +382,7 @@ async function saveCollectionToIndexedDB(collectionName, data) {
     for (let i = 0; i < chunkCount; i++) {
       const chunk = data.slice(i * chunkSize, (i + 1) * chunkSize);
       puts.push({
-        key: getCollectionChunkKey(name, i),
+        key: getCollectionChunkKey(name, i, capturedScope),
         type: 'collection_chunk',
         collection: name,
         index: i,
@@ -339,10 +404,10 @@ async function saveCollectionToIndexedDB(collectionName, data) {
     const deleteKeys = [];
     // Leftover old chunks beyond the new count
     if (prevChunkCount > chunkCount) {
-      for (let i = chunkCount; i < prevChunkCount; i++) deleteKeys.push(getCollectionChunkKey(name, i));
+      for (let i = chunkCount; i < prevChunkCount; i++) deleteKeys.push(getCollectionChunkKey(name, i, capturedScope));
     }
     // Legacy single-record storage, if it exists
-    deleteKeys.push(name);
+    deleteKeys.push(dataKey);
 
     await idbAtomicWrite(puts, deleteKeys);
     return true;
@@ -365,9 +430,11 @@ async function loadCollectionFromIndexedDB(collectionName) {
   if (!db) return null;
   const name = String(collectionName || '');
   if (!name) return null;
+  const capturedScope = _collectionStorageScope;
+  const dataKey = _scopedCollectionStorageName(name, capturedScope);
 
   try {
-    const metaKey = getCollectionMetaKey(name);
+    const metaKey = getCollectionMetaKey(name, capturedScope);
     const meta = await idbGet(DATA_STORE_NAME, metaKey);
 
     // Chunked layout
@@ -375,7 +442,7 @@ async function loadCollectionFromIndexedDB(collectionName) {
       const chunks = [];
       let missingChunk = false;
       for (let i = 0; i < meta.chunkCount; i++) {
-        const chunk = await idbGet(DATA_STORE_NAME, getCollectionChunkKey(name, i));
+        const chunk = await idbGet(DATA_STORE_NAME, getCollectionChunkKey(name, i, capturedScope));
         if (chunk && Array.isArray(chunk.data)) {
           chunks.push(...chunk.data);
         } else {
@@ -414,7 +481,7 @@ async function loadCollectionFromIndexedDB(collectionName) {
     }
 
     // Legacy single-record layout
-    const record = await idbGet(DATA_STORE_NAME, name);
+    const record = await idbGet(DATA_STORE_NAME, dataKey);
     if (record) {
       const currentChecksum = DataIntegrity.calculateChecksum(record.data);
       if (record.checksum && currentChecksum !== record.checksum) {
@@ -583,4 +650,3 @@ async function clearIndexedDBLogs() {
     }
   });
 }
-

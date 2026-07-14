@@ -371,15 +371,35 @@ function hasPermission(userId, module, action) {
 async function refreshCurrentUserPermissions() {
   if (!isServerModeEnabled() || !state.currentUser?.id) return false;
   try {
+    const currentId = String(state.currentUser.id || '');
+    const beforeAccess = JSON.stringify({
+      role: String(state.currentUser.role || '').toLowerCase(),
+      permissions: state.currentUser.permissions || {},
+      subscriptions: Array.isArray(state.currentUser.subscriptions) ? state.currentUser.subscriptions : []
+    });
     const me = await apiAuthMe();
-    if (me && me.permissions) {
-      const changed = JSON.stringify(state.currentUser.permissions || null) !== JSON.stringify(me.permissions);
-      state.currentUser.permissions = me.permissions;
+    if (me && String(me.id || '') === currentId) {
+      // Role is authorization state too. Copying permissions alone left a
+      // demoted Admin permanently Admin in the browser when both maps were
+      // empty, even though the server had already revoked that access.
+      state.currentUser = {
+        ...state.currentUser,
+        ...Security.sanitizeObject(me),
+        role: String(me.role || state.currentUser.role || ''),
+        permissions: (me.permissions && typeof me.permissions === 'object') ? me.permissions : {},
+        subscriptions: Array.isArray(me.subscriptions) ? me.subscriptions : (state.currentUser.subscriptions || [])
+      };
+      const afterAccess = JSON.stringify({
+        role: String(state.currentUser.role || '').toLowerCase(),
+        permissions: state.currentUser.permissions || {},
+        subscriptions: Array.isArray(state.currentUser.subscriptions) ? state.currentUser.subscriptions : []
+      });
+      const changed = beforeAccess !== afterAccess;
       // Also update in users array — UPSERT: if the record is missing (users
       // list fetch failed or returned permission-less stubs), insert it so the
       // periodic refresh can repair an empty state.users.
       upsertCurrentUserIntoUsers();
-      if (changed) console.log('[Permissions] Refreshed current user permissions');
+      if (changed) console.log('[Permissions] Refreshed current user access');
       return changed;
     }
   } catch (e) {
@@ -505,6 +525,10 @@ function hasSubscription(serviceId) {
   if (isAdminRole(state.currentUser.role)) return true; // Admin gets all
   const uid = String(state.currentUser.id || '');
   if (uid && SUBSCRIPTIONS.isActive(uid, serviceId)) return true;
+  // In server mode only the server-owned subscription ledger is authoritative.
+  // The legacy array can be stale after cancellation (and is mutable client
+  // state), so it must never grant server-backed access.
+  if (isServerModeEnabled()) return false;
   const subs = state.currentUser.subscriptions || [];
   return subs.includes(serviceId);
 }
@@ -569,7 +593,7 @@ function openServiceById(id) {
   if (SMART_SYSTEMS_CHILDREN[id]) return handleSmartSystemClick(id);
 }
 
-function handleSubscribe(subscribeToId, navigateToId = subscribeToId) {
+async function handleSubscribe(subscribeToId, navigateToId = subscribeToId) {
   if (!state.currentUser?.id) return;
   try {
     // If already active, just continue
@@ -581,14 +605,14 @@ function handleSubscribe(subscribeToId, navigateToId = subscribeToId) {
 
     const offer = getServiceSubscriptionOffer(subscribeToId);
     const idem = String(state.modalData?.idempotencyKey || '').trim() || Security.generateSecureId('idem');
-    SUBSCRIPTIONS.subscribe(state.currentUser.id, subscribeToId, { ...offer, idempotencyKey: idem });
+    await SUBSCRIPTIONS.subscribe(state.currentUser.id, subscribeToId, { ...offer, idempotencyKey: idem });
 
     // Optional legacy mirror (keeps older UI logic compatible)
-    if (!Array.isArray(state.currentUser.subscriptions)) state.currentUser.subscriptions = [];
-    if (!state.currentUser.subscriptions.includes(subscribeToId)) {
+    if (!isServerModeEnabled() && !Array.isArray(state.currentUser.subscriptions)) state.currentUser.subscriptions = [];
+    if (!isServerModeEnabled() && !state.currentUser.subscriptions.includes(subscribeToId)) {
       state.currentUser.subscriptions.push(subscribeToId);
       // persist into the actual user record too (not only session)
-      updateRecord(state.users, state.currentUser.id, { subscriptions: state.currentUser.subscriptions });
+      await updateRecord(state.users, state.currentUser.id, { subscriptions: state.currentUser.subscriptions });
     }
 
     closeModal();
@@ -665,7 +689,7 @@ function showRecoveryKeyModal(plainKey) {
 
 async function generateAndShowRecoveryKey() {
   if (isServerModeEnabled()) {
-    showNotification(state.language === 'ar' ? 'غير متاح' : 'Not Available', state.language === 'ar' ? 'مفاتيح الاستعادة للوضع المحلي فقط. استخدم إعادة التعيين عبر البريد الإلكتروني على السيرفر.' : 'Recovery keys are for local mode only. Use email reset on the server.', 'info');
+    showNotification(state.language === 'ar' ? 'غير متاح' : 'Not Available', state.language === 'ar' ? 'مفاتيح الاستعادة للوضع المحلي فقط. تواصل مع المدير لإعادة تعيين كلمة المرور.' : 'Recovery keys are for local mode only. Contact an administrator to reset a server password.', 'info');
     return;
   }
   if (!state.currentUser || !isAdminRole(state.currentUser.role)) {
@@ -678,9 +702,19 @@ async function generateAndShowRecoveryKey() {
 }
 
 function showPasswordResetModal() {
+  if (isServerModeEnabled()) {
+    showNotification(
+      state.language === 'ar' ? 'تواصل مع المدير' : 'Contact an Administrator',
+      state.language === 'ar'
+        ? 'إرسال رموز إعادة التعيين عبر البريد غير مفعّل على هذا الخادم. اطلب من المدير إعادة تعيين كلمة المرور.'
+        : 'Email reset codes are not configured on this server. Ask an administrator to reset your password.',
+      'info'
+    );
+    return;
+  }
   state.activeModal = 'password-reset';
   state.modalData = {
-    step: isServerModeEnabled() ? 'request' : 'local',
+    step: 'local',
     email: '',
     token: ''
   };
@@ -795,7 +829,8 @@ async function passwordResetConfirmLocal() {
       passwordAlgo: hashed.algo,
       passwordIterations: hashed.iterations
     };
-    updateRecord(state.users, user.id, updates);
+    const resetSaved = await updateRecord(state.users, user.id, updates);
+    if (!resetSaved) return;
     markCollectionDirty('users');
     saveState();
     flushDirtyCollections().catch(() => {});
@@ -938,6 +973,16 @@ function _listAllStoredPasskeys() {
 
 async function passkeyRegisterCurrentUser() {
   try {
+    if (isServerModeEnabled()) {
+      showNotification(
+        state.language === 'ar' ? 'غير متاح' : 'Not Available',
+        state.language === 'ar'
+          ? 'إضافة مفتاح مرور تتطلب دعم WebAuthn على الخادم (قريباً).'
+          : 'Adding a passkey requires server WebAuthn endpoints (coming soon).',
+        'info'
+      );
+      return;
+    }
     if (!_isPasskeySupported()) {
       showNotification(state.language === 'ar' ? 'غير مدعوم' : 'Not Supported', state.language === 'ar' ? 'مفاتيح المرور تتطلب HTTPS أو localhost.' : 'Passkeys require HTTPS or localhost.', 'error');
       return;
@@ -1021,16 +1066,17 @@ async function passkeyRegisterCurrentUser() {
       ext: true
     };
 
-    if (!Array.isArray(user.passkeys)) user.passkeys = [];
-    const exists = user.passkeys.some(k => k && k.id === credentialId);
+    const existingPasskeys = Array.isArray(user.passkeys) ? user.passkeys : [];
+    const exists = existingPasskeys.some(k => k && k.id === credentialId);
     if (!exists) {
-      user.passkeys.push({
+      const nextPasskeys = [...existingPasskeys, {
         id: credentialId,
         publicKeyJwk: jwk,
         alg: 'ES256',
         createdAt: Date.now()
-      });
-      updateRecord(state.users, user.id, { passkeys: user.passkeys });
+      }];
+      const saved = await updateRecord(state.users, user.id, { passkeys: nextPasskeys });
+      if (!saved) return;
     }
 
     showNotification(state.language === 'ar' ? 'نجاح' : 'Success', state.language === 'ar' ? 'تمت إضافة مفتاح المرور بنجاح' : 'Passkey added successfully', 'success');
@@ -1138,8 +1184,18 @@ async function passkeySignIn() {
   }
 }
 
-function removePasskey(credentialId) {
+async function removePasskey(credentialId) {
   try {
+    if (isServerModeEnabled()) {
+      showNotification(
+        state.language === 'ar' ? 'غير متاح' : 'Not Available',
+        state.language === 'ar'
+          ? 'إدارة مفاتيح المرور تتطلب دعم WebAuthn على الخادم.'
+          : 'Managing passkeys requires server WebAuthn endpoints.',
+        'info'
+      );
+      return;
+    }
     if (!state.currentUser?.id) {
       showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'غير مسجل الدخول' : 'Not logged in', 'error');
       return;
@@ -1150,7 +1206,8 @@ function removePasskey(credentialId) {
     if (!user) return;
     const keys = Array.isArray(user.passkeys) ? user.passkeys : [];
     const next = keys.filter(k => k && k.id !== id);
-    updateRecord(state.users, user.id, { passkeys: next });
+    const saved = await updateRecord(state.users, user.id, { passkeys: next });
+    if (!saved) return;
     showNotification(state.language === 'ar' ? 'تم الحذف' : 'Removed', state.language === 'ar' ? 'تم حذف مفتاح المرور' : 'Passkey removed', 'success');
     render();
   } catch (e) {
@@ -1169,4 +1226,3 @@ async function apiChangePassword(currentPassword, newPassword) {
   const payload = { currentPassword, newPassword };
   return await apiJson('/api/auth/password-change', { method: 'POST', body: payload }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
 }
-

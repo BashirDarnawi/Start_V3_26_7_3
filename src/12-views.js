@@ -174,7 +174,7 @@ function render() {
 
 function renderFirstRunSetup() {
   const isAr = state.language === 'ar';
-  const serverSetup = isServerModeEnabled() && state.needsServerSetup;
+  const serverSetup = isServerModeEnabled() && state.needsServerSetup && state.serverSetupEnabled === true;
   const modeNote = serverSetup
     ? (isAr ? 'الخادم جديد ولا يحتوي على أي حساب بعد. أنشئ حساب المدير الأول للبدء.' : 'This server is fresh and has no account yet. Create the first admin to begin.')
     : (isAr ? 'الإعداد لأول مرة (تجربة محلية). أنشئ حساب مدير للبدء.' : 'First time setup (local testing). Create an Admin account to start.');
@@ -214,6 +214,11 @@ function renderFirstRunSetup() {
             <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
             <input type="password" id="first-password-confirm" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'أعد كتابة كلمة المرور' : 'Repeat password'}" minlength="8" />
           </div>
+          ${serverSetup ? `<div>
+            <label class="block text-sm font-medium mb-2">${isAr ? 'رمز إعداد الخادم' : 'Server Setup Token'}</label>
+            <input type="password" id="first-setup-token" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="ALBAYAN_SETUP_TOKEN" minlength="16" maxlength="256" autocomplete="off" />
+            <p class="mt-1 text-xs text-slate-500">${isAr ? 'أدخل الرمز الذي أضافه مشغل الخادم.' : 'Enter the random token configured by the server operator.'}</p>
+          </div>` : ''}
           <button type="submit" class="w-full btn-shine alb-btn-primary text-white font-bold py-3 rounded-xl transition-all">
             ${serverSetup ? (isAr ? 'إنشاء حساب المدير' : 'Create Admin') : (isAr ? 'إنشاء مدير (محلي)' : 'Create Admin (Local)')}
           </button>
@@ -228,6 +233,17 @@ function renderFirstRunSetup() {
 
 // Open the server first-run setup screen from the login page.
 function startServerSetup() {
+  if (!isServerModeEnabled() || state.serverSetupEnabled !== true) {
+    state.needsServerSetup = false;
+    showNotification(
+      state.language === 'ar' ? 'إعداد الخادم مطلوب' : 'Server Setup Required',
+      state.language === 'ar'
+        ? 'إعداد المتصفح معطّل. استخدم متغيرات ALBAYAN_BOOTSTRAP_ADMIN_* أو أمر إنشاء المدير من الطرفية.'
+        : 'Browser setup is disabled. Use the ALBAYAN_BOOTSTRAP_ADMIN_* environment variables or the create-admin CLI command.',
+      'warning'
+    );
+    return;
+  }
   state.needsServerSetup = true;
   render();
 }
@@ -249,6 +265,8 @@ function attachFirstRunHandlers() {
       const email = Security.sanitizeInput(document.getElementById('first-email').value, { maxLength: 120 }).toLowerCase();
       const password = document.getElementById('first-password').value;
       const confirm = document.getElementById('first-password-confirm').value;
+      const serverSetup = isServerModeEnabled() && state.needsServerSetup && state.serverSetupEnabled === true;
+      const setupToken = serverSetup ? String(document.getElementById('first-setup-token')?.value || '') : '';
 
       const _vErr = state.language === 'ar' ? 'خطأ في التحقق' : 'Validation Error';
       if (!name) {
@@ -267,16 +285,24 @@ function attachFirstRunHandlers() {
         showNotification(_vErr, state.language === 'ar' ? 'كلمتا المرور غير متطابقتين' : 'Passwords do not match', 'error');
         return;
       }
+      if (serverSetup && setupToken.length < 16) {
+        showNotification(_vErr, state.language === 'ar' ? 'رمز إعداد الخادم مطلوب' : 'The server setup token is required', 'error');
+        return;
+      }
 
       // Server mode first-run: create the first admin ON THE SERVER (one-time,
       // then the server rejects further setup calls) and log straight in.
-      if (isServerModeEnabled() && state.needsServerSetup) {
+      if (serverSetup) {
         try {
-          const user = await apiSetupAdmin(name, email, password);
+          const user = await apiSetupAdmin(name, email, password, setupToken);
           if (!user) throw new Error('setup failed');
           state.needsServerSetup = false;
           state.serverHasNoUsers = false;
+          cancelPendingRequests();
+          invalidateUsersListCache();
+          advanceServerSessionEpoch();
           state.currentUser = user;
+          activateServerCollectionStorage(user);
           if (!Array.isArray(state.currentUser.subscriptions)) {
             state.currentUser.subscriptions = isAdminRole(state.currentUser.role) ? Object.keys(SERVICES) : [];
           }
@@ -284,7 +310,10 @@ function attachFirstRunHandlers() {
           saveState();
           showNotification(state.language === 'ar' ? 'تم إنشاء المدير' : 'Admin Created', state.language === 'ar' ? 'تم إنشاء حساب المدير وتسجيل الدخول.' : 'Admin account created and logged in.', 'success');
           render();
-          try { await serverLoadAllData(); } catch (_) {}
+          try {
+            const loadResult = await serverLoadAllData();
+            if (loadResult?.aborted) return;
+          } catch (_) {}
           startServerLiveSync();
           render();
         } catch (err) {
@@ -298,6 +327,21 @@ function attachFirstRunHandlers() {
           );
           if (already) { state.needsServerSetup = false; render(); }
         }
+        return;
+      }
+
+      // A stale/forged setup screen must never create a device-local Admin
+      // while the app is configured for the shared server.
+      if (isServerModeEnabled()) {
+        state.needsServerSetup = false;
+        showNotification(
+          state.language === 'ar' ? 'إعداد الخادم مطلوب' : 'Server Setup Required',
+          state.language === 'ar'
+            ? 'إعداد المتصفح غير متاح. اطلب من مشغل الخادم إنشاء حساب المدير.'
+            : 'Browser setup is unavailable. Ask the server operator to create the administrator account.',
+          'warning'
+        );
+        render();
         return;
       }
 
@@ -362,7 +406,7 @@ function renderLogin() {
             <p class="text-slate-500 mt-2">${t('signInTitle')}</p>
           </div>
 
-          ${(isServerModeEnabled() && state.serverHasNoUsers) ? `
+          ${(isServerModeEnabled() && state.serverHasNoUsers && state.serverSetupEnabled === true) ? `
           <button type="button" onclick="startServerSetup()" class="w-full mb-5 text-left rounded-2xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-900/20 p-4 hover:shadow-md transition-all">
             <div class="flex items-center gap-3">
               <i data-lucide="user-plus" class="w-5 h-5 text-indigo-600 flex-shrink-0"></i>
@@ -373,6 +417,13 @@ function renderLogin() {
               <i data-lucide="${isRTL ? 'chevron-left' : 'chevron-right'}" class="w-4 h-4 text-indigo-400 ml-auto flex-shrink-0"></i>
             </div>
           </button>
+          ` : (isServerModeEnabled() && state.serverHasNoUsers) ? `
+          <div class="w-full mb-5 rounded-2xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-200">
+            <div class="font-bold mb-1">${isRTL ? 'إعداد الخادم مطلوب' : 'Server setup required'}</div>
+            <div class="text-xs">${isRTL
+              ? 'إعداد المتصفح معطّل. اطلب من مشغل الخادم استخدام متغيرات ALBAYAN_BOOTSTRAP_ADMIN_* أو أمر إنشاء المدير من الطرفية.'
+              : 'Browser setup is disabled. Ask the server operator to use ALBAYAN_BOOTSTRAP_ADMIN_* or the create-admin CLI command.'}</div>
+          </div>
           ` : ''}
 
           <form id="login-form" class="space-y-4">
@@ -392,9 +443,9 @@ function renderLogin() {
             </div>
 
             <div class="flex items-center justify-between pt-1">
-              <button type="button" onclick="showPasswordResetModal()" class="text-sm font-medium alb-link">
-                ${t('forgotPassword')}
-              </button>
+              ${isServerModeEnabled()
+                ? `<span class="text-xs text-slate-500">${isRTL ? 'نسيت كلمة المرور؟ تواصل مع المدير.' : 'Forgot your password? Contact an administrator.'}</span>`
+                : `<button type="button" onclick="showPasswordResetModal()" class="text-sm font-medium alb-link">${t('forgotPassword')}</button>`}
               <button type="button" onclick="toggleLanguage()" class="text-sm font-bold text-slate-500 alb-hover-brand">
                 ${state.language === 'en' ? 'العربية' : 'English'}
               </button>
@@ -969,7 +1020,7 @@ function findUserByEmailOrId(value) {
   return u || null;
 }
 
-function walletTransferFromUi() {
+async function walletTransferFromUi() {
   try {
     if (!state.currentUser?.id) return;
     const toValue = document.getElementById('wallet-transfer-to')?.value || '';
@@ -991,7 +1042,24 @@ function walletTransferFromUi() {
       showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
       return;
     }
-    WALLET.transfer(state.currentUser.id, toUser.id, 0, { memo: memoValue, currency, amountMinor, idempotencyKey: `p2p:${Security.generateSecureId('idem')}` });
+    const submitBtn = document.getElementById('wallet-transfer-submit');
+    if (submitBtn?.disabled) return;
+    const canReuseKey = String(submitBtn?.dataset.operationFingerprint || '') === fingerprint;
+    const operationKey = (canReuseKey ? String(submitBtn?.dataset.idempotencyKey || '') : '') || `p2p:${Security.generateSecureId('idem')}`;
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.dataset.idempotencyKey = operationKey;
+      submitBtn.dataset.operationFingerprint = fingerprint;
+    }
+    try {
+      await WALLET.transfer(state.currentUser.id, toUser.id, 0, { memo: memoValue, currency, amountMinor, idempotencyKey: operationKey });
+      if (submitBtn) {
+        delete submitBtn.dataset.idempotencyKey;
+        delete submitBtn.dataset.operationFingerprint;
+      }
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
 
     const toEl = document.getElementById('wallet-transfer-to');
     const amtEl = document.getElementById('wallet-transfer-amount');
@@ -1007,7 +1075,7 @@ function walletTransferFromUi() {
   }
 }
 
-function walletTopUpFromUi() {
+async function walletTopUpFromUi() {
   try {
     if (!state.currentUser?.id) return;
     if (!isAdminRole(state.currentUser.role)) {
@@ -1033,7 +1101,24 @@ function walletTopUpFromUi() {
       showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
       return;
     }
-    WALLET.credit(toUser.id, 0, { memo: memoValue || 'Top-up', currency, amountMinor, idempotencyKey: `topup:${Security.generateSecureId('idem')}` });
+    const submitBtn = document.getElementById('wallet-topup-submit');
+    if (submitBtn?.disabled) return;
+    const canReuseKey = String(submitBtn?.dataset.operationFingerprint || '') === fingerprint;
+    const operationKey = (canReuseKey ? String(submitBtn?.dataset.idempotencyKey || '') : '') || `topup:${Security.generateSecureId('idem')}`;
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.dataset.idempotencyKey = operationKey;
+      submitBtn.dataset.operationFingerprint = fingerprint;
+    }
+    try {
+      await WALLET.credit(toUser.id, 0, { memo: memoValue || 'Top-up', currency, amountMinor, idempotencyKey: operationKey });
+      if (submitBtn) {
+        delete submitBtn.dataset.idempotencyKey;
+        delete submitBtn.dataset.operationFingerprint;
+      }
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
 
     const toEl = document.getElementById('wallet-topup-to');
     const amtEl = document.getElementById('wallet-topup-amount');
@@ -1049,7 +1134,7 @@ function walletTopUpFromUi() {
   }
 }
 
-function cancelSubscriptionFromUi(serviceId) {
+async function cancelSubscriptionFromUi(serviceId) {
   try {
     if (!state.currentUser?.id) return;
     const sid = String(serviceId || '').trim();
@@ -1057,7 +1142,7 @@ function cancelSubscriptionFromUi(serviceId) {
     const isRTL = state.language === 'ar';
     const ok = confirm(isRTL ? 'هل تريد إلغاء الاشتراك؟' : 'Cancel this subscription?');
     if (!ok) return;
-    SUBSCRIPTIONS.cancel(state.currentUser.id, sid);
+    await SUBSCRIPTIONS.cancel(state.currentUser.id, sid);
     showNotification(isRTL ? 'نجاح' : 'Success', isRTL ? 'تم إلغاء الاشتراك' : 'Subscription canceled', 'success');
     render();
   } catch (e) {
@@ -1192,7 +1277,7 @@ function renderWalletView() {
                 <input id="wallet-transfer-memo" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isRTL ? 'اختياري' : 'Optional'}" maxlength="180" />
               </div>
             </div>
-            <button onclick="walletTransferFromUi()" class="w-full btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
+            <button id="wallet-transfer-submit" onclick="walletTransferFromUi()" class="w-full btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 disabled:opacity-50" type="button">
               <i data-lucide="send" class="w-4 h-4 inline mr-2"></i>${t('send')}
             </button>
             <div class="text-[11px] text-slate-400">
@@ -1234,7 +1319,7 @@ function renderWalletView() {
                   <input id="wallet-topup-memo" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isRTL ? 'اختياري' : 'Optional'}" maxlength="180" />
                 </div>
               </div>
-              <button onclick="walletTopUpFromUi()" class="w-full btn-shine bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700">
+              <button id="wallet-topup-submit" onclick="walletTopUpFromUi()" class="w-full btn-shine bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700 disabled:opacity-50" type="button">
                 <i data-lucide="plus" class="w-4 h-4 inline mr-2"></i>${t('topUp')}
               </button>
             </div>
@@ -3392,7 +3477,7 @@ function _getOutstandingDueLocal(item) {
   return 0;
 }
 
-function setOfficeHandover(itemId, received) {
+async function setOfficeHandover(itemId, received) {
   const id = String(itemId || '');
   if (!id) return;
 
@@ -3428,8 +3513,10 @@ function setOfficeHandover(itemId, received) {
     officeHandoverAt: next ? nowIso : ''
   };
 
-  if (receipt) updateRecord(state.receipts, id, updates);
-  else updateRecord(state.ads, id, updates);
+  const saved = receipt
+    ? await updateRecord(state.receipts, id, updates)
+    : await updateRecord(state.ads, id, updates);
+  if (!saved) return;
 
   addAuditLog('update', id, next ? 'Office handover marked as received' : 'Office handover undone', { isReceipt: !!receipt });
   showNotification(isAr ? 'نجاح' : 'Success', next ? (isAr ? 'تم استلام النقد في المكتب' : 'Cash received at office') : (isAr ? 'تم التراجع عن التسليم للمكتب' : 'Office handover undone'), 'success');
@@ -3447,7 +3534,7 @@ function undoOfficeHandover(itemId) {
 }
 
 // "Delete mission" (remove from delivery tracking) without deleting the receipt itself.
-function removeDeliveryMission(itemId) {
+async function removeDeliveryMission(itemId) {
   const id = String(itemId || '');
   if (!id) return;
 
@@ -3500,7 +3587,7 @@ function removeDeliveryMission(itemId) {
     nextStatusDetail.notPaidCollection = 'office';
   }
 
-  updateRecord(state.receipts, id, {
+  const saved = await updateRecord(state.receipts, id, {
     deliveryStatus: 'Office',
     deliveryPersonId: '',
     acceptedDate: '',
@@ -3514,6 +3601,7 @@ function removeDeliveryMission(itemId) {
     deliveryHistory: nextHistory,
     statusDetail: nextStatusDetail
   });
+  if (!saved) return;
 
   showNotification(state.language === 'ar' ? 'تمت الإزالة' : 'Removed', state.language === 'ar' ? 'تمت إزالة مهمة التوصيل' : 'Delivery mission removed', 'success');
   render();
@@ -3866,8 +3954,8 @@ async function refreshDeliveryDashboard() {
 
   try {
     // Clear cache to force fresh data
-    _collectionCache.receipts = { data: null, timestamp: 0 };
-    _collectionCache.customers = { data: null, timestamp: 0 };
+    _collectionCache.receipts = { data: null, timestamp: 0, identity: '' };
+    _collectionCache.customers = { data: null, timestamp: 0, identity: '' };
 
     // Force immediate sync from server
     const [receipts, customers] = await Promise.all([
@@ -3982,7 +4070,7 @@ function openDeliveryCancelModal(itemId) {
   IconQueue.schedule(modal);
 }
 
-function submitDeliveryCancel(itemType, itemId) {
+async function submitDeliveryCancel(itemType, itemId) {
   const type = String(itemType || '');
   const id = String(itemId || '');
   const reason = String(document.getElementById('delivery-cancel-reason')?.value || '').trim();
@@ -3999,16 +4087,22 @@ function submitDeliveryCancel(itemType, itemId) {
     if (!receipt) return;
     const nextHistory = Array.isArray(receipt.deliveryHistory) ? [...receipt.deliveryHistory] : [];
     nextHistory.push({ ts: nowIso, userId: uid, action: 'CANCELLED_BY_DRIVER', reason });
-    updateRecord(state.receipts, receipt.id, {
+    const receiptSaved = await updateRecord(state.receipts, receipt.id, {
       deliveryStatus: 'Canceled',
       deliveryCancelReason: reason,
       deliveryCancelledAt: nowIso,
       deliveryCancelledBy: uid,
       deliveryHistory: nextHistory
     });
+    if (!receiptSaved) return;
     // The canceled delivery's debt will never be collected — release any ad
     // funding that was drawn from its due credit.
-    const releasedAds = releaseCanceledDeliveryDueFunding(receipt.id);
+    let releasedAds = 0;
+    try {
+      releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);
+    } catch (_) {
+      return;
+    }
     if (releasedAds > 0) {
       showNotification(
         state.language === 'ar' ? 'تنبيه' : 'Notice',
@@ -4023,13 +4117,14 @@ function submitDeliveryCancel(itemType, itemId) {
     if (!ad) return;
     const nextHistory = Array.isArray(ad.deliveryHistory) ? [...ad.deliveryHistory] : [];
     nextHistory.push({ ts: nowIso, userId: uid, action: 'CANCELLED_BY_DRIVER', reason });
-    updateRecord(state.ads, ad.id, {
+    const adSaved = await updateRecord(state.ads, ad.id, {
       deliveryStatus: 'Canceled',
       deliveryCancelReason: reason,
       deliveryCancelledAt: nowIso,
       deliveryCancelledBy: uid,
       deliveryHistory: nextHistory
     });
+    if (!adSaved) return;
   }
 
   document.getElementById('delivery-cancel-modal')?.remove();
@@ -4944,8 +5039,8 @@ function renderSettingsView() {
             <i data-lucide="info" class="w-4 h-4 inline mr-1"></i>
             ${isServerModeEnabled()
               ? (state.language === 'ar'
-                ? 'في وضع السيرفر: استخدم \"نسيت كلمة المرور\" للحصول على رمز استعادة (أو البريد الإلكتروني لاحقاً).'
-                : 'Server mode: use \"Forgot password\" to get a reset code (email later).')
+                ? 'في وضع السيرفر: تواصل مع المدير لإعادة تعيين كلمة المرور.'
+                : 'Server mode: contact an administrator to reset your password.')
               : (state.language === 'ar'
                 ? 'في الوضع المحلي: أنشئ مفتاح استعادة لاسترجاع كلمة المرور عند نسيانها.'
                 : 'Local mode: create a Recovery Key to reset passwords if forgotten.')}
@@ -5090,11 +5185,11 @@ function renderSettingsView() {
           ${isCurrentUserAdmin() ? `
           <button onclick="exportData()" class="btn-shine bg-blue-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-blue-700">
             <i data-lucide="download" class="w-5 h-5"></i>
-            <span>${isAr ? 'تصدير نسخة احتياطية' : 'Export Backup'}</span>
+            <span>${isServerModeEnabled() ? (isAr ? 'تصدير تقرير جزئي' : 'Export Partial Report') : (isAr ? 'تصدير نسخة احتياطية' : 'Export Backup')}</span>
           </button>
           <button onclick="importData()" class="btn-shine bg-green-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-green-700">
             <i data-lucide="upload" class="w-5 h-5"></i>
-            <span>${isAr ? 'استيراد نسخة احتياطية' : 'Import Backup'}</span>
+            <span>${isServerModeEnabled() ? (isAr ? 'استيراد الخادم معطّل' : 'Server Import Disabled') : (isAr ? 'استيراد نسخة احتياطية' : 'Import Backup')}</span>
           </button>
           <button onclick="clearAllData()" class="btn-shine bg-rose-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-rose-700">
             <i data-lucide="trash-2" class="w-5 h-5"></i>
@@ -5105,7 +5200,9 @@ function renderSettingsView() {
         <div class="mt-4 p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl">
           <p class="text-sm text-slate-600 dark:text-slate-400">
             <i data-lucide="info" class="w-4 h-4 inline mr-1"></i>
-            ${isAr ? 'بياناتك مخزنة محلياً في متصفحك. صدِّر بانتظام لإنشاء نسخ احتياطية.' : 'Your data is stored locally in your browser. Export regularly to create backups.'}
+            ${isServerModeEnabled()
+              ? (isAr ? 'وضع الخادم: التصدير تقرير غير معتمد وغير قابل للاستعادة، ولا يتضمن بيانات الملابس. الاستعادة تتطلب صيانة آمنة خارج التطبيق.' : 'Server mode: export is a non-authoritative, non-restorable report and omits clothes data. Restore requires a safe offline maintenance workflow.')
+              : (isAr ? 'بياناتك مخزنة محلياً في متصفحك. صدِّر بانتظام لإنشاء نسخ احتياطية.' : 'Your data is stored locally in your browser. Export regularly to create backups.')}
           </p>
         </div>
       </div>
@@ -5151,4 +5248,3 @@ function renderSettingsView() {
     </div>
   `;
 }
-

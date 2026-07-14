@@ -19,7 +19,7 @@ from sqlalchemy import (
     create_engine,
     text,
 )
-from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.engine import Connection, Engine, URL
 from sqlalchemy.pool import StaticPool
 
 
@@ -46,12 +46,48 @@ def _sqlite_url(path: Path) -> str:
     return f"sqlite+pysqlite:///{path}"
 
 
-def get_database_url() -> str:
+def get_database_url() -> str | URL:
     # Preferred for production (Postgres):
     # DATABASE_URL=postgresql+psycopg://user:pass@host:5432/dbname
     url = (os.getenv("DATABASE_URL") or os.getenv("ALBAYAN_DATABASE_URL") or "").strip()
     if url:
         return url
+
+    # Safer production alternative to embedding credentials in a URL. URL.create
+    # performs the required escaping, so passwords containing @, %, :, / or
+    # spaces cannot corrupt URL parsing. DATABASE_URL above remains the explicit
+    # highest-precedence override for platforms that provide one.
+    discrete_names = (
+        "ALBAYAN_DB_HOST",
+        "ALBAYAN_DB_PORT",
+        "ALBAYAN_DB_NAME",
+        "ALBAYAN_DB_USER",
+        "ALBAYAN_DB_PASSWORD",
+    )
+    if any(os.getenv(name) is not None for name in discrete_names):
+        host = (os.getenv("ALBAYAN_DB_HOST") or "").strip()
+        database = (os.getenv("ALBAYAN_DB_NAME") or "").strip()
+        username = (os.getenv("ALBAYAN_DB_USER") or "").strip()
+        password = os.getenv("ALBAYAN_DB_PASSWORD")
+        try:
+            port = int((os.getenv("ALBAYAN_DB_PORT") or "5432").strip())
+        except ValueError as exc:
+            raise RuntimeError("ALBAYAN_DB_PORT must be an integer") from exc
+        if not host or not database or not username or password is None:
+            raise RuntimeError(
+                "Discrete database config requires ALBAYAN_DB_HOST, ALBAYAN_DB_NAME, "
+                "ALBAYAN_DB_USER, and ALBAYAN_DB_PASSWORD"
+            )
+        if port < 1 or port > 65535:
+            raise RuntimeError("ALBAYAN_DB_PORT must be between 1 and 65535")
+        return URL.create(
+            "postgresql+psycopg",
+            username=username,
+            password=password,
+            host=host,
+            port=port,
+            database=database,
+        )
 
     # Dev fallback: SQLite (still supported for local testing)
     env_path = os.getenv("ALBAYAN_DB_PATH", "").strip()
@@ -63,7 +99,7 @@ def get_database_url() -> str:
 
 
 _ENGINE: Optional[Engine] = None
-_ENGINE_URL: Optional[str] = None
+_ENGINE_URL: Optional[str | URL] = None
 
 
 def get_engine() -> Engine:
@@ -83,12 +119,13 @@ def get_engine() -> Engine:
         _ENGINE_URL = None
     connect_args = {}
     # Needed for SQLite threading in dev mode
-    if url.startswith("sqlite"):
+    url_text = str(url)
+    if url_text.startswith("sqlite"):
         connect_args = {"check_same_thread": False}
 
     # Special case: in-memory SQLite needs a shared pool, otherwise each connection sees a blank DB.
-    is_sqlite_memory = url.endswith(":///:memory:") or url.endswith("://:memory:") or url.endswith(":memory:")
-    if url.startswith("sqlite") and is_sqlite_memory:
+    is_sqlite_memory = url_text.endswith(":///:memory:") or url_text.endswith("://:memory:") or url_text.endswith(":memory:")
+    if url_text.startswith("sqlite") and is_sqlite_memory:
         _ENGINE = create_engine(
             url,
             pool_pre_ping=True,
@@ -213,6 +250,10 @@ def define_schema():
         Index("entities_created_by", entities_table.c.created_by)
         # Composite index for common query pattern: type + deleted + last_modified (for sync queries)
         Index("entities_type_deleted_modified", entities_table.c.type, entities_table.c.deleted, entities_table.c.last_modified)
+        # Stable keyset pagination. Include id as the deterministic tie-breaker
+        # used by both full snapshots and delta sync.
+        Index("entities_type_created_id", entities_table.c.type, entities_table.c.created_at, entities_table.c.id)
+        Index("entities_type_modified_id", entities_table.c.type, entities_table.c.last_modified, entities_table.c.id)
 
     if AUDIT_LOGS not in METADATA.tables:
         Table(
@@ -259,5 +300,4 @@ def init_db():
     engine = get_engine()
     define_schema()
     METADATA.create_all(engine)
-
 

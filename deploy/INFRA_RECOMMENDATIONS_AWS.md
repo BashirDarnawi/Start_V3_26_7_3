@@ -1,4 +1,7 @@
-# AWS / ALB / ECS Recommendations (Albayan)
+# Historical AWS / ALB / ECS Recommendations (Albayan)
+
+> This is not the current production platform. Albayan production is hosted by
+> Libyan Spider. Keep this file only as reference if an AWS migration is planned.
 
 This file is a practical checklist to keep Albayan stable under load and during rapid refreshes.
 
@@ -51,5 +54,4 @@ This file is a practical checklist to keep Albayan stable under load and during 
 - The backend now logs **JSON access logs** with `request_id` so you can correlate UI issues with CloudWatch logs.
 - The frontend now sends **`X-Request-ID`** on every API request.
 - The frontend now limits server-load concurrency (no more 5 collections in parallel) to reduce refresh spikes.
-
 

@@ -1,10 +1,15 @@
 import json
+import hashlib
 import math
 import os
+import re
 import secrets
 import threading
 import traceback
 import uuid
+from contextlib import nullcontext
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Optional
 
@@ -14,20 +19,51 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # SQLite doesn't support row-level locking, so we use a threading lock for counter operations
 _SQLITE_COUNTER_LOCK = threading.Lock()
+# SQLite has no SELECT ... FOR UPDATE.  Serialize read/merge/write entity
+# patches in-process; the conditional UPDATE below also detects a writer in a
+# different process instead of silently overwriting its newer version.
+_SQLITE_ENTITY_PATCH_LOCK = threading.Lock()
+# Clothes orders and their product stock must commit as one unit. PostgreSQL
+# uses row/advisory locks; SQLite needs a process-wide transaction guard.
+_SQLITE_CLOTHES_LOCK = threading.Lock()
+# User-role membership must be serialized when enforcing the invariant that
+# at least one active Admin always remains.
+_SQLITE_ADMIN_MEMBERSHIP_LOCK = threading.Lock()
+# Password-reset codes are one-shot capabilities. SQLite needs an in-process
+# guard around the conditional claim; PostgreSQL serializes the row update.
+_SQLITE_PASSWORD_RESET_LOCK = threading.Lock()
+# Wallet balance checks and ledger inserts must be serialized in SQLite too;
+# Postgres uses row locks on the participating user records instead.
+_SQLITE_WALLET_LOCK = threading.Lock()
+# Receipt transfers, ad funding, ad stops and receipt capacity edits share one
+# money pool. SQLite has no row locks, so those operations need one guard too.
+_SQLITE_FINANCIAL_LOCK = threading.Lock()
 
 # Debug mode: set ALBAYAN_DEBUG_MODE=true to enable debug endpoints
 DEBUG_MODE = os.getenv("ALBAYAN_DEBUG_MODE", "").strip().lower() in {"1", "true", "yes"}
+# Whole-backup replacement is a maintenance operation. It is disabled on a
+# live API unless an operator makes the risk explicit for an offline window.
+ENABLE_ONLINE_IMPORT = os.getenv("ALBAYAN_ENABLE_ONLINE_IMPORT", "").strip().lower() in {"1", "true", "yes"}
+SETUP_TOKEN = os.getenv("ALBAYAN_SETUP_TOKEN", "")
 
 from .db import db_conn, get_engine, init_db, json_dumps, json_loads, now_ms
-from .rbac import user_has_permission
+from .rbac import VALID_USER_ROLES, normalize_permissions, user_has_permission
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from .schemas import (
     AdminBulkImportRequest,
     AdminRestoreEntityRequest,
+    AdMutationRequest,
+    AdMutationResponse,
+    AdStopRequest,
+    AdStopResponse,
     BatchDeleteRequest,
     BootstrapResponse,
     ChangePasswordRequest,
+    ClothesOrderMutationRequest,
+    ClothesOrderMutationResponse,
+    ClothesShipmentMutationRequest,
+    ClothesShipmentMutationResponse,
     CreateUserRequest,
     EntityCreateRequest,
     EntityResponse,
@@ -36,9 +72,15 @@ from .schemas import (
     LoginResponse,
     PasswordResetConfirmRequest,
     PasswordResetRequest,
+    ReceiptTransferRequest,
+    ReceiptTransferResponse,
     SetupAdminRequest,
+    SubscriptionPurchaseRequest,
     UpdateUserRequest,
     UserPublic,
+    WalletReversalRequest,
+    WalletTopUpRequest,
+    WalletTransferRequest,
 )
 from .security import (
     PBKDF2_ITERATIONS_DEFAULT,
@@ -345,6 +387,10 @@ else:
 ORIGIN_SECRET_HEADER = os.getenv("ALBAYAN_ORIGIN_HEADER", "X-Albayan-Origin").strip() or "X-Albayan-Origin"
 # Allow a comma-separated list to support secret rotation with zero downtime.
 ORIGIN_SECRETS = [s.strip() for s in os.getenv("ALBAYAN_ORIGIN_SECRET", "").split(",") if s.strip()]
+# Forwarded client-IP headers are trustworthy only when every request reaches
+# us through a configured proxy that overwrites them. Direct deployments must
+# default to the socket peer address so clients cannot rotate limiter buckets.
+TRUST_PROXY_HEADERS = os.getenv("ALBAYAN_TRUST_PROXY_HEADERS", "").strip().lower() in {"1", "true", "yes"}
 # ALB health checks can't send custom headers, so this path must remain reachable.
 ORIGIN_BYPASS_PATH_PREFIXES = ("/api/health",)
 
@@ -364,6 +410,9 @@ PASSWORD_RESET_DEV_RETURN_CODE = os.getenv("ALBAYAN_DEV_PASSWORD_RESET_RETURN_CO
 _RESET_WINDOW_MS = int(os.getenv("ALBAYAN_RESET_WINDOW_MS", str(15 * 60 * 1000)))
 _RESET_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_RESET_MAX_ATTEMPTS", "5"))
 _RESET_EMAIL_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_RESET_EMAIL_MAX_ATTEMPTS", "15"))
+_SETUP_WINDOW_MS = int(os.getenv("ALBAYAN_SETUP_WINDOW_MS", str(15 * 60 * 1000)))
+_SETUP_IP_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_SETUP_IP_MAX_ATTEMPTS", "10"))
+_SETUP_GLOBAL_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_SETUP_GLOBAL_MAX_ATTEMPTS", "100"))
 
 
 def _client_ip(request: Request) -> str:
@@ -379,17 +428,18 @@ def _client_ip(request: Request) -> str:
     closest trusted proxy) which a client cannot forge, rather than the spoofable
     leftmost one.
     """
-    try:
-        cf = request.headers.get("cf-connecting-ip")
-        if cf and cf.strip():
-            return cf.strip()
-        xff = request.headers.get("x-forwarded-for")
-        if xff:
-            parts = [p.strip() for p in xff.split(",") if p.strip()]
-            if parts:
-                return parts[-1]
-    except Exception:
-        pass
+    if TRUST_PROXY_HEADERS:
+        try:
+            cf = request.headers.get("cf-connecting-ip")
+            if cf and cf.strip():
+                return cf.strip()
+            xff = request.headers.get("x-forwarded-for")
+            if xff:
+                parts = [p.strip() for p in xff.split(",") if p.strip()]
+                if parts:
+                    return parts[-1]
+        except Exception:
+            pass
     return request.client.host if request.client else "unknown"
 
 
@@ -453,6 +503,38 @@ def _reset_rate_check(request: Request, email: str) -> tuple[bool, int]:
         return False, int(retry2 or 0)
 
     return True, 0
+
+
+def _reset_confirm_rate_check(request: Request, token_hash: str) -> tuple[bool, int]:
+    """Limit confirms by peer IP and one-way token hash, never a global key."""
+    from .rate_limiter import check_rate_limit
+
+    ip_key = f"reset-confirm:ip:{_client_ip(request)}"
+    allowed, _left, retry = check_rate_limit(
+        ip_key, _RESET_EMAIL_MAX_ATTEMPTS, _RESET_WINDOW_MS
+    )
+    if not allowed:
+        return False, int(retry or 0)
+    token_key = f"reset-confirm:token:{token_hash}"
+    allowed, _left, retry = check_rate_limit(
+        token_key, _RESET_MAX_ATTEMPTS, _RESET_WINDOW_MS
+    )
+    return bool(allowed), 0 if allowed else int(retry or 0)
+
+
+def _setup_rate_check(request: Request) -> tuple[bool, int]:
+    """Dedicated bootstrap limiter; never consumes login/account buckets."""
+    from .rate_limiter import check_rate_limit
+
+    allowed, _left, retry = check_rate_limit(
+        f"setup:ip:{_client_ip(request)}", _SETUP_IP_MAX_ATTEMPTS, _SETUP_WINDOW_MS
+    )
+    if not allowed:
+        return False, int(retry or 0)
+    allowed, _left, retry = check_rate_limit(
+        "setup:global", _SETUP_GLOBAL_MAX_ATTEMPTS, _SETUP_WINDOW_MS
+    )
+    return bool(allowed), 0 if allowed else int(retry or 0)
 
 
 BLOCKED_KEYS = {"__proto__", "prototype", "constructor"}
@@ -540,6 +622,91 @@ def sanitize_str(s: str, max_length: int = MAX_INPUT_LENGTH) -> str:
     if s_low.startswith("javascript:") or s_low.startswith("vbscript:"):
         return ""
     return s
+
+
+SAFE_ENTITY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$")
+
+# These are relationship identifiers consumed by current business flows and
+# must match the browser validator in src/02-security.js.  Deliberately do not
+# validate every nested key named ``id``: passkeys[].id, for example, is an
+# opaque WebAuthn credential and is not a database record identifier.
+RELATIONSHIP_ID_FIELDS = {
+    "adId",
+    "customerId",
+    "creatorId",
+    "deliveryPersonId",
+    "driverId",
+    "fromUserId",
+    "fundingReceiptId",
+    "linkedDeliveryReceiptId",
+    "linkedReceiptId",
+    "orderId",
+    "pageId",
+    "paymentTxId",
+    "productId",
+    "receiptId",
+    "referenceId",
+    "resourceId",
+    "serviceId",
+    "shipmentId",
+    "targetCustomerId",
+    "targetUserId",
+    "toCustomerId",
+    "toReceiptId",
+    "toUserId",
+    "transactionId",
+    "transferFromCustomerId",
+    "transferFromReceiptId",
+    "userId",
+}
+RELATIONSHIP_ID_LIST_FIELDS = {
+    "adReceiptIds",
+    "customerIds",
+    "linkedCustomerIds",
+    "receiptIds",
+}
+
+
+def validate_entity_id(value: Any) -> str:
+    """Reject unsafe IDs exactly as supplied; never sanitize/rewrite them."""
+    raw = str(value or "")
+    if not SAFE_ENTITY_ID_RE.fullmatch(raw):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid entity id (use 1-80 letters, numbers, dot, underscore, colon or hyphen)",
+        )
+    return raw
+
+
+def validate_relationship_ids(value: Any, path: str = "data", depth: int = 0) -> None:
+    """Reject unsafe known relationship IDs without rewriting stored links."""
+    if depth > 12 or value is None:
+        return
+    if isinstance(value, list):
+        for index, child in enumerate(value):
+            validate_relationship_ids(child, f"{path}[{index}]", depth + 1)
+        return
+    if not isinstance(value, dict):
+        return
+
+    for key, child in value.items():
+        child_path = f"{path}.{key}"
+        if key in RELATIONSHIP_ID_FIELDS:
+            blank = child is None or (isinstance(child, str) and child.strip() == "")
+            if not blank and (not isinstance(child, str) or not SAFE_ENTITY_ID_RE.fullmatch(child)):
+                raise HTTPException(status_code=400, detail=f"Unsafe relationship identifier at {child_path}")
+        elif key in RELATIONSHIP_ID_LIST_FIELDS and child is not None:
+            if not isinstance(child, list):
+                raise HTTPException(status_code=400, detail=f"Invalid relationship identifier list at {child_path}")
+            for index, item in enumerate(child):
+                if not isinstance(item, str) or not SAFE_ENTITY_ID_RE.fullmatch(item):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Unsafe relationship identifier at {child_path}[{index}]",
+                    )
+
+        if isinstance(child, (dict, list)):
+            validate_relationship_ids(child, child_path, depth + 1)
 
 
 def sanitize_json(obj: Any, depth: int = 0, parent_key: str = "") -> Any:
@@ -939,7 +1106,13 @@ def list_entities(
     include_deleted: bool = False,
     created_by: str | None = None,
     assigned_to: str | None = None,
+    personal_user_id: str | None = None,
+    referenced_customer_by: str | None = None,
     id_in: list[str] | None = None,
+    before_created_at: int | None = None,
+    before_id: str | None = None,
+    after_last_modified: int | None = None,
+    after_id: str | None = None,
 ) -> list[dict[str, Any]]:
     entity_type = sanitize_str(entity_type)[:40]
     if not entity_type:
@@ -952,15 +1125,12 @@ def list_entities(
     offset = requested_offset
 
     dialect = str(get_engine().dialect.name or "")
-    python_assigned_to: str | None = None
     if assigned_to is not None:
         assigned_to = sanitize_str(str(assigned_to))[:80] or None
-        # Postgres can filter JSON in SQL. For SQLite/dev, do a safe Python filter.
-        if assigned_to and dialect != "postgresql":
-            python_assigned_to = assigned_to
-            # Fetch a bounded superset then slice after filtering.
-            limit = 1000
-            offset = 0
+    if personal_user_id is not None:
+        personal_user_id = sanitize_str(str(personal_user_id))[:80] or None
+    if referenced_customer_by is not None:
+        referenced_customer_by = sanitize_str(str(referenced_customer_by))[:80] or None
 
     where = ["type = :type"]
     params: dict[str, Any] = {"type": entity_type}
@@ -974,14 +1144,63 @@ def list_entities(
         # its cursor, so re-scan the last 15s each poll. applyServerDelta upserts
         # by id, so re-delivered records are idempotent — no missed writes.
         params["updated_since"] = max(0, int(updated_since) - 15000)
+    if before_created_at is not None and before_id is not None:
+        where.append(
+            "(created_at < :before_created_at OR "
+            "(created_at = :before_created_at AND id < :before_id))"
+        )
+        params["before_created_at"] = int(before_created_at)
+        params["before_id"] = validate_entity_id(before_id)
+        offset = 0
+    if after_last_modified is not None and after_id is not None:
+        where.append(
+            "(last_modified > :after_last_modified OR "
+            "(last_modified = :after_last_modified AND id > :after_id))"
+        )
+        params["after_last_modified"] = int(after_last_modified)
+        params["after_id"] = validate_entity_id(after_id)
+        offset = 0
     if created_by is not None:
         where.append("created_by = :created_by")
         params["created_by"] = created_by
 
-    if assigned_to and dialect == "postgresql":
-        # data_json is stored as TEXT; cast to jsonb for filtering.
-        where.append("(data_json::jsonb ->> 'deliveryPersonId') = :delivery_person_id")
+    if assigned_to:
+        json_delivery = (
+            "(data_json::jsonb ->> 'deliveryPersonId')"
+            if dialect == "postgresql"
+            else "json_extract(data_json, '$.deliveryPersonId')"
+        )
+        where.append(f"{json_delivery} = :delivery_person_id")
         params["delivery_person_id"] = assigned_to
+
+    if personal_user_id:
+        if dialect == "postgresql":
+            json_value = lambda key: f"(data_json::jsonb ->> '{key}')"
+        else:
+            json_value = lambda key: f"json_extract(data_json, '$.{key}')"
+        if entity_type == "walletTransactions":
+            where.append(
+                f"({json_value('fromUserId')}=:personal_uid OR "
+                f"{json_value('toUserId')}=:personal_uid)"
+            )
+        else:
+            where.append(f"{json_value('userId')}=:personal_uid")
+        params["personal_uid"] = personal_user_id
+
+    if referenced_customer_by:
+        if dialect == "postgresql":
+            customer_expr = "(d.data_json::jsonb ->> 'customerId')"
+            assigned_expr = "(d.data_json::jsonb ->> 'deliveryPersonId')"
+        else:
+            customer_expr = "json_extract(d.data_json, '$.customerId')"
+            assigned_expr = "json_extract(d.data_json, '$.deliveryPersonId')"
+        where.append(
+            "EXISTS (SELECT 1 FROM entities d "
+            "WHERE d.type IN ('ads','receipts') AND d.deleted=false "
+            f"AND {customer_expr}=entities.id "
+            f"AND {assigned_expr}=:referenced_delivery_uid)"
+        )
+        params["referenced_delivery_uid"] = referenced_customer_by
 
     if id_in is not None:
         # Safe bounded "IN" filter (used for delivery-scoped customer reads)
@@ -1000,7 +1219,7 @@ def list_entities(
     # an edit committed mid-load cannot move a row across the OFFSET window and
     # cause a record to be skipped or duplicated. Delta queries keep
     # last_modified ordering (they re-scan by cursor and upsert idempotently).
-    order_by = "last_modified DESC" if updated_since is not None else "created_at DESC, id DESC"
+    order_by = "last_modified ASC, id ASC" if updated_since is not None else "created_at DESC, id DESC"
     sql = f"SELECT * FROM entities WHERE {' AND '.join(where)} ORDER BY {order_by} LIMIT :limit OFFSET :offset"
     params["limit"] = limit
     params["offset"] = offset
@@ -1044,13 +1263,6 @@ def list_entities(
                     "data": data,
                 }
             )
-        if python_assigned_to:
-            out = [
-                e
-                for e in out
-                if str((e.get("data") or {}).get("deliveryPersonId") or "") == str(python_assigned_to)
-            ]
-            out = out[requested_offset : requested_offset + requested_limit]
         return out
 
 
@@ -1120,7 +1332,7 @@ def upsert_entity(entity_type: str, entity_id: str, data: dict[str, Any], user_i
     """
     now = now_ms()
     entity_type = sanitize_str(entity_type)[:40]
-    entity_id = sanitize_str(entity_id)[:80]
+    entity_id = validate_entity_id(entity_id)
     if not entity_type or not entity_id:
         raise HTTPException(status_code=400, detail="Invalid entity id/type")
 
@@ -1223,7 +1435,14 @@ def upsert_entity(entity_type: str, entity_id: str, data: dict[str, Any], user_i
     }
 
 
-def patch_entity(entity_type: str, entity_id: str, updates: dict[str, Any], user_id: str) -> dict[str, Any]:
+def patch_entity(
+    entity_type: str,
+    entity_id: str,
+    updates: dict[str, Any],
+    user_id: str,
+    *,
+    expected_last_modified: int | None = None,
+) -> dict[str, Any]:
     """
     Partially update an existing entity (merge semantics).
     
@@ -1248,19 +1467,79 @@ def patch_entity(entity_type: str, entity_id: str, updates: dict[str, Any], user
         - Protected fields are removed before merge
         - Uses database transaction for atomicity
     """
-    existing = get_entity(entity_type, entity_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Not found")
+    entity_type = sanitize_str(entity_type)[:40]
+    entity_id = validate_entity_id(entity_id)
+    if not entity_type:
+        raise HTTPException(status_code=400, detail="Invalid entity type")
 
-    data = existing["data"] or {}
     upd = sanitize_json(updates)
+    if not isinstance(upd, dict):
+        raise HTTPException(status_code=400, detail="Invalid update data")
     # Protected keys
-    for k in ["id", "_created", "createdBy", "createdAt", "creatorId"]:
+    for k in ["id", "_created", "_lastModified", "createdBy", "createdAt", "creatorId"]:
         if k in upd:
             del upd[k]
 
-    data.update(upd)
-    return upsert_entity(entity_type, entity_id, data, user_id, create_if_missing=False)
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_ENTITY_PATCH_LOCK
+    with guard:
+        with db_conn() as conn:
+            lock_suffix = " FOR UPDATE" if postgres else ""
+            row = conn.execute(
+                text(
+                    "SELECT type, id, data_json, deleted, created_at, created_by, last_modified "
+                    "FROM entities WHERE type=:type AND id=:id LIMIT 1" + lock_suffix
+                ),
+                {"type": entity_type, "id": entity_id},
+            ).mappings().first()
+            if not row:
+                raise HTTPException(status_code=404, detail="Not found")
+
+            baseline = int(row["last_modified"])
+            if expected_last_modified is not None and baseline != int(expected_last_modified):
+                raise HTTPException(status_code=409, detail="Conflict: record has changed")
+
+            data = json_loads(row["data_json"]) or {}
+            if not isinstance(data, dict):
+                data = {}
+            data.update(upd)
+            modified = max(now_ms(), baseline + 1)
+            data["id"] = entity_id
+            data["_created"] = data.get("_created") or int(row["created_at"])
+            data["_lastModified"] = modified
+            if row.get("created_by") is not None:
+                data["createdBy"] = str(row["created_by"])
+            else:
+                data.pop("createdBy", None)
+
+            try:
+                result = conn.execute(
+                    text(
+                        "UPDATE entities SET data_json=:data_json, last_modified=:modified "
+                        "WHERE type=:type AND id=:id AND last_modified=:baseline"
+                    ),
+                    {
+                        "data_json": json_dumps(data),
+                        "modified": modified,
+                        "type": entity_type,
+                        "id": entity_id,
+                        "baseline": baseline,
+                    },
+                )
+            except IntegrityError:
+                raise HTTPException(status_code=409, detail="Receipt number already exists")
+            if result.rowcount != 1:
+                raise HTTPException(status_code=409, detail="Conflict: record has changed")
+
+            return {
+                "id": entity_id,
+                "type": entity_type,
+                "deleted": bool(row["deleted"]),
+                "createdAt": int(row["created_at"]),
+                "createdBy": row.get("created_by"),
+                "lastModified": modified,
+                "data": data,
+            }
 
 
 def get_entity_meta(entity_type: str, entity_id: str) -> Optional[dict[str, Any]]:
@@ -2061,7 +2340,9 @@ def login(payload: LoginRequest, request: Request):
     
     # Reset rate limit on successful login so user isn't penalized for previous failed attempts
     from .rate_limiter import reset_rate_limit
-    reset_rate_limit(f"login:{_rate_key(request, str(payload.email))}")
+    login_email = str(payload.email).lower()
+    reset_rate_limit(f"login:{_rate_key(request, login_email)}")
+    reset_rate_limit(f"login:email:{login_email}")
     
     audit(user["id"], "login", "auth", user["id"], f"User {user['email']} logged in", {})
     return resp
@@ -2076,7 +2357,11 @@ def needs_setup(request: Request):
     does (whether the server is initialized) — never any user data."""
     with db_conn() as conn:
         n = conn.execute(text("SELECT COUNT(*) FROM users WHERE deleted = false")).scalar()
-    return {"needsSetup": int(n or 0) == 0}
+    setup_enabled = len(SETUP_TOKEN) >= 16
+    return {
+        "needsSetup": int(n or 0) == 0 and setup_enabled,
+        "setupEnabled": setup_enabled,
+    }
 
 
 @app.post("/api/auth/setup-admin", response_model=LoginResponse)
@@ -2091,10 +2376,25 @@ def setup_admin(payload: SetupAdminRequest, request: Request):
     """
     require_same_origin(request)
 
-    # Rate-limit per client IP so the endpoint cannot be flooded (even before an
-    # admin exists). Unlike login this is keyed on a constant, not the email, so
-    # rotating emails can't get fresh buckets.
-    allowed, wait_ms = _rate_check(request, "__setup_admin__")
+    # Cheap already-initialized guard first: after bootstrap this endpoint is
+    # permanently inert and does not consume any rate-limit bucket.
+    with db_conn() as conn:
+        existing_count = conn.execute(
+            text("SELECT COUNT(*) FROM users WHERE deleted = false")
+        ).scalar()
+    if int(existing_count or 0) > 0:
+        raise HTTPException(status_code=409, detail="Server already initialized. Use normal login.")
+
+    # Browser setup is disabled unless the operator supplied a strong one-time
+    # secret out of band. Fresh deployments can always use create_admin or the
+    # bootstrap environment variables instead.
+    if len(SETUP_TOKEN) < 16:
+        raise HTTPException(
+            status_code=503,
+            detail="Browser setup is disabled. Configure ALBAYAN_SETUP_TOKEN or use the admin CLI.",
+        )
+
+    allowed, wait_ms = _setup_rate_check(request)
     if not allowed:
         wait_seconds = max(1, int(wait_ms / 1000))
         raise HTTPException(
@@ -2102,6 +2402,9 @@ def setup_admin(payload: SetupAdminRequest, request: Request):
             detail="Too many setup attempts. Please wait and try again.",
             headers={"Retry-After": str(wait_seconds)},
         )
+    submitted_token = str(payload.setupToken or "")
+    if not secrets.compare_digest(submitted_token.encode("utf-8"), SETUP_TOKEN.encode("utf-8")):
+        raise HTTPException(status_code=403, detail="Invalid setup token")
 
     email = str(payload.email).strip().lower()
     name = (payload.name or "").strip() or "Admin"
@@ -2343,7 +2646,7 @@ def password_reset_request(body: PasswordResetRequest, request: Request):
 
     resp: dict[str, Any] = {"ok": True}
     # Dev/testing only: optionally return the reset code in the response.
-    if PASSWORD_RESET_DEV_RETURN_CODE:
+    if DEBUG_MODE and PASSWORD_RESET_DEV_RETURN_CODE:
         resp["resetCode"] = token
     return resp
 
@@ -2351,11 +2654,6 @@ def password_reset_request(body: PasswordResetRequest, request: Request):
 @app.post("/api/auth/password-reset/confirm")
 def password_reset_confirm(body: PasswordResetConfirmRequest, request: Request):
     require_same_origin(request)
-
-    # SECURITY: Rate limit password reset confirm to prevent brute force attacks
-    allowed, wait_ms = _reset_rate_check(request, "reset_confirm")
-    if not allowed:
-        raise HTTPException(status_code=429, detail=f"Too many attempts. Try again in {int(wait_ms/1000)}s")
 
     # SECURITY: Validate token format and length (secrets.token_urlsafe(32) produces ~43 char tokens)
     token = sanitize_str(body.token)[:256]
@@ -2369,56 +2667,88 @@ def password_reset_confirm(body: PasswordResetConfirmRequest, request: Request):
         raise HTTPException(status_code=400, detail="Invalid or expired reset code")
 
     token_hash = hash_token(token)
+    # Confirm attempts are isolated by peer IP and the one-way token hash.
+    # Never feed a pseudo-email into _reset_rate_check: that creates one global
+    # account bucket an attacker can exhaust for every user.
+    allowed, wait_ms = _reset_confirm_rate_check(request, token_hash)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=f"Too many attempts. Try again in {int(wait_ms/1000)}s")
     now = now_ms()
-
+    # Reject random well-formed tokens before paying the deliberately expensive
+    # PBKDF2 cost. This is only a cheap capability lookup (the response remains
+    # the same generic 400); the conditional claim below is still the atomic
+    # source of truth if two valid confirms race.
     with db_conn() as conn:
-        row = (
-            conn.execute(
-                text("SELECT * FROM password_resets WHERE token_hash = :token_hash LIMIT 1"),
-                {"token_hash": token_hash},
-            )
-            .mappings()
-            .first()
-        )
-
-        if not row:
-            raise HTTPException(status_code=400, detail="Invalid or expired reset code")
-
-        if row.get("used_at") is not None:
-            raise HTTPException(status_code=400, detail="Invalid or expired reset code")
-
-        if int(row.get("expires_at") or 0) <= now:
-            conn.execute(text("DELETE FROM password_resets WHERE id = :id"), {"id": row["id"]})
-            raise HTTPException(status_code=400, detail="Invalid or expired reset code")
-
-        user_id = str(row.get("user_id"))
-        pw = hash_password(body.newPassword, iterations=PBKDF2_ITERATIONS_DEFAULT)
-
-        conn.execute(
+        plausible = conn.execute(
             text(
-                """
-                UPDATE users
-                SET password_hash = :password_hash,
-                    password_salt = :password_salt,
-                    password_algo = :password_algo,
-                    password_iterations = :password_iterations,
-                    last_modified = :last_modified
-                WHERE id = :id
-                """
+                "SELECT 1 FROM password_resets WHERE token_hash=:token_hash "
+                "AND used_at IS NULL AND expires_at>:now LIMIT 1"
             ),
-            {
-                "password_hash": pw.hash_hex,
-                "password_salt": pw.salt_hex,
-                "password_algo": pw.algo,
-                "password_iterations": pw.iterations,
-                "last_modified": now,
-                "id": user_id,
-            },
-        )
+            {"token_hash": token_hash, "now": now},
+        ).first()
+    if not plausible:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset code")
+    # PBKDF2 is deliberately expensive. Do it before taking the database lock,
+    # then atomically claim the one-shot token and change the password in the
+    # same transaction. The conditional UPDATE guarantees exactly one winner.
+    pw = hash_password(body.newPassword, iterations=PBKDF2_ITERATIONS_DEFAULT)
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_PASSWORD_RESET_LOCK
 
-        # Mark token used and invalidate sessions
-        conn.execute(text("UPDATE password_resets SET used_at = :used_at WHERE id = :id"), {"used_at": now, "id": row["id"]})
-        conn.execute(text("DELETE FROM sessions WHERE user_id = :user_id"), {"user_id": user_id})
+    with guard:
+        with db_conn() as conn:
+            row = (
+                conn.execute(
+                    text(
+                        "SELECT id, user_id FROM password_resets "
+                        "WHERE token_hash=:token_hash LIMIT 1"
+                    ),
+                    {"token_hash": token_hash},
+                )
+                .mappings()
+                .first()
+            )
+            if not row:
+                raise HTTPException(status_code=400, detail="Invalid or expired reset code")
+
+            claimed = conn.execute(
+                text(
+                    "UPDATE password_resets SET used_at=:used_at "
+                    "WHERE id=:id AND used_at IS NULL AND expires_at>:now"
+                ),
+                {"used_at": now, "now": now, "id": row["id"]},
+            )
+            if claimed.rowcount != 1:
+                raise HTTPException(status_code=400, detail="Invalid or expired reset code")
+
+            user_id = str(row.get("user_id"))
+            updated = conn.execute(
+                text(
+                    """
+                    UPDATE users
+                    SET password_hash = :password_hash,
+                        password_salt = :password_salt,
+                        password_algo = :password_algo,
+                        password_iterations = :password_iterations,
+                        last_modified = :last_modified
+                    WHERE id = :id AND deleted=false
+                    """
+                ),
+                {
+                    "password_hash": pw.hash_hex,
+                    "password_salt": pw.salt_hex,
+                    "password_algo": pw.algo,
+                    "password_iterations": pw.iterations,
+                    "last_modified": now,
+                    "id": user_id,
+                },
+            )
+            if updated.rowcount != 1:
+                raise HTTPException(status_code=400, detail="Invalid or expired reset code")
+            conn.execute(
+                text("DELETE FROM sessions WHERE user_id = :user_id"),
+                {"user_id": user_id},
+            )
 
     audit(user_id, "password_reset", "auth", user_id, "Password reset via token", {})
     return {"ok": True}
@@ -2531,6 +2861,3276 @@ def _action_for_collection(collection: str, op: str) -> str:
 # Instead, non-admins get ownership-scoped access to their own rows.
 PERSONAL_SCOPED_COLLECTIONS = {"walletTransactions", "serviceSubscriptions"}
 
+WALLET_CURRENCIES = frozenset({"LYD", "USD", "EUR"})
+MAX_WALLET_AMOUNT_MINOR = 1_000_000_000_000
+
+# Server-owned subscription catalog.  Client-supplied price, currency, expiry,
+# and duration are deliberately ignored.  Current UI offers are free; changing
+# a service to paid must happen here (or in a future catalog table), never in a
+# browser bundle.
+SERVICE_SUBSCRIPTION_CATALOG: dict[str, dict[str, Any]] = {
+    "international_shipping": {"priceMinor": 0, "currency": "LYD", "durationDays": 30},
+    "local_shipping": {"priceMinor": 0, "currency": "LYD", "durationDays": 30},
+    "warehouse": {"priceMinor": 0, "currency": "LYD", "durationDays": 30},
+    "smart_systems": {"priceMinor": 0, "currency": "LYD", "durationDays": 30},
+    "clothes_system": {"priceMinor": 0, "currency": "LYD", "durationDays": 30},
+}
+
+
+def _iso_utc(dt: datetime | None = None) -> str:
+    return (dt or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _entity_from_db_row(row: Any) -> dict[str, Any]:
+    d = dict(row)
+    return {
+        "id": str(d["id"]),
+        "type": str(d["type"]),
+        "deleted": bool(d["deleted"]),
+        "createdAt": int(d["created_at"]),
+        "createdBy": d.get("created_by"),
+        "lastModified": int(d["last_modified"]),
+        "data": json_loads(d.get("data_json") or "{}") or {},
+    }
+
+
+def _insert_entity_in_transaction(
+    conn: Any,
+    collection: str,
+    entity_id: str | None,
+    data: dict[str, Any],
+    created_by: str,
+) -> dict[str, Any]:
+    """Insert one entity using an already-open transaction."""
+    collection = sanitize_str(str(collection or ""))[:40]
+    entity_id = validate_entity_id(entity_id or new_id(collection[:10] or "id"))
+    if not collection or not entity_id:
+        raise HTTPException(status_code=400, detail="Invalid entity id/type")
+    existing = conn.execute(
+        text("SELECT id FROM entities WHERE type = :type AND id = :id LIMIT 1"),
+        {"type": collection, "id": entity_id},
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="ID already exists")
+
+    now = now_ms()
+    clean = sanitize_json(data or {}) or {}
+    clean["id"] = entity_id
+    clean["_created"] = now
+    clean["_lastModified"] = now
+    clean["_deleted"] = False
+    clean["createdBy"] = created_by
+    conn.execute(
+        text(
+            """
+            INSERT INTO entities (type, id, data_json, deleted, created_at, created_by, last_modified)
+            VALUES (:type, :id, :data_json, false, :created_at, :created_by, :last_modified)
+            """
+        ),
+        {
+            "type": collection,
+            "id": entity_id,
+            "data_json": json_dumps(clean),
+            "created_at": now,
+            "created_by": created_by,
+            "last_modified": now,
+        },
+    )
+    return {
+        "id": entity_id,
+        "type": collection,
+        "deleted": False,
+        "createdAt": now,
+        "createdBy": created_by,
+        "lastModified": now,
+        "data": clean,
+    }
+
+
+def _find_entity_by_idempotency(conn: Any, collection: str, key: str) -> dict[str, Any] | None:
+    rows = conn.execute(
+        text("SELECT * FROM entities WHERE type = :type AND deleted = false"),
+        {"type": collection},
+    ).mappings().all()
+    for row in rows:
+        data = json_loads(row.get("data_json") or "{}") or {}
+        if str(data.get("idempotencyKey") or "") == key:
+            return _entity_from_db_row(row)
+    return None
+
+
+def _wallet_amount_minor(data: dict[str, Any]) -> int:
+    try:
+        amount = int(data.get("amountMinor"))
+    except (TypeError, ValueError, OverflowError):
+        try:
+            amount = round(float(data.get("amount")) * 100)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+    return amount if amount > 0 else 0
+
+
+def _wallet_balance_minor(conn: Any, user_id: str, currency: str) -> int:
+    balance = 0
+    rows = conn.execute(
+        text("SELECT data_json FROM entities WHERE type = 'walletTransactions' AND deleted = false")
+    ).mappings().all()
+    for row in rows:
+        data = json_loads(row.get("data_json") or "{}") or {}
+        if str(data.get("currency") or "").upper() != currency:
+            continue
+        amount = _wallet_amount_minor(data)
+        if str(data.get("toUserId") or "") == user_id:
+            balance += amount
+        if str(data.get("fromUserId") or "") == user_id:
+            balance -= amount
+    return balance
+
+
+def _lock_and_validate_wallet_users(conn: Any, user_ids: list[str], *, postgres: bool) -> None:
+    """Validate active wallet participants and lock them in stable order."""
+    for uid in sorted({sanitize_str(str(x or ""))[:80] for x in user_ids if x and x != "system"}):
+        suffix = " FOR UPDATE" if postgres else ""
+        row = conn.execute(
+            text(f"SELECT id FROM users WHERE id = :id AND deleted = false{suffix}"),
+            {"id": uid},
+        ).first()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Wallet user not found: {uid}")
+
+
+def _lock_idempotency_key(conn: Any, key: str, *, postgres: bool, namespace: str = "wallet") -> None:
+    """Serialize equal idempotency keys, including across different users."""
+    if not postgres:
+        # Every SQLite money operation already holds _SQLITE_WALLET_LOCK.
+        return
+    conn.execute(
+        text(
+            "SELECT pg_advisory_xact_lock("
+            "hashtextextended(CAST(:key AS text), 0)"
+            ")"
+        ),
+        {"key": f"{namespace}:{key}"},
+    )
+
+
+def _validate_wallet_values(amount_minor: Any, currency: Any, idempotency_key: Any) -> tuple[int, str, str]:
+    if isinstance(amount_minor, bool):
+        raise HTTPException(status_code=400, detail="amountMinor must be an integer")
+    if isinstance(amount_minor, float) and not amount_minor.is_integer():
+        raise HTTPException(status_code=400, detail="amountMinor must be an integer")
+    try:
+        amount = int(amount_minor)
+    except (TypeError, ValueError, OverflowError):
+        raise HTTPException(status_code=400, detail="amountMinor must be an integer")
+    if amount <= 0 or amount > MAX_WALLET_AMOUNT_MINOR:
+        raise HTTPException(status_code=400, detail="Invalid amountMinor")
+    cur = sanitize_str(str(currency or "")).upper()[:3]
+    if cur not in WALLET_CURRENCIES:
+        raise HTTPException(status_code=400, detail="Unsupported wallet currency")
+    idem = sanitize_str(str(idempotency_key or ""))[:120]
+    if len(idem) < 8:
+        raise HTTPException(status_code=400, detail="idempotencyKey is required (minimum 8 characters)")
+    return amount, cur, idem
+
+
+def _wallet_transfer_atomic(
+    actor: dict[str, Any],
+    *,
+    to_user_id: str,
+    amount_minor: Any,
+    currency: Any,
+    idempotency_key: Any,
+    memo: Any = None,
+    requested_id: str | None = None,
+) -> tuple[dict[str, Any], bool]:
+    from_uid = sanitize_str(str(actor.get("id") or ""))[:80]
+    to_uid = sanitize_str(str(to_user_id or ""))[:80]
+    amount, cur, idem = _validate_wallet_values(amount_minor, currency, idempotency_key)
+    if not from_uid or not to_uid:
+        raise HTTPException(status_code=400, detail="Missing wallet participant")
+    if to_uid == "system":
+        raise HTTPException(status_code=403, detail="Transfers to the system account require a server operation")
+    if from_uid == to_uid:
+        raise HTTPException(status_code=400, detail="Cannot transfer to self")
+
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_WALLET_LOCK
+    with guard:
+        with db_conn() as conn:
+            _lock_and_validate_wallet_users(conn, [from_uid, to_uid], postgres=postgres)
+            _lock_idempotency_key(conn, idem, postgres=postgres)
+            prior = _find_entity_by_idempotency(conn, "walletTransactions", idem)
+            if prior:
+                d = prior.get("data") or {}
+                same = (
+                    str(d.get("type") or "") == "transfer"
+                    and str(d.get("fromUserId") or "") == from_uid
+                    and str(d.get("toUserId") or "") == to_uid
+                    and str(d.get("currency") or "") == cur
+                    and _wallet_amount_minor(d) == amount
+                )
+                if not same:
+                    raise HTTPException(status_code=409, detail="Idempotency key was already used for another operation")
+                return prior, False
+            if _wallet_balance_minor(conn, from_uid, cur) < amount:
+                raise HTTPException(status_code=409, detail="Insufficient wallet balance")
+            data = {
+                "type": "transfer",
+                "schemaVersion": 2,
+                "amountMinor": amount,
+                "amount": amount / 100,
+                "currency": cur,
+                "fromUserId": from_uid,
+                "toUserId": to_uid,
+                "memo": sanitize_str(str(memo or "Transfer"))[:180],
+                "idempotencyKey": idem,
+                "status": "posted",
+                "createdAt": _iso_utc(),
+            }
+            return _insert_entity_in_transaction(
+                conn, "walletTransactions", requested_id, data, from_uid
+            ), True
+
+
+def _wallet_top_up_atomic(
+    admin: dict[str, Any],
+    *,
+    user_id: str,
+    amount_minor: Any,
+    currency: Any,
+    idempotency_key: Any,
+    memo: Any = None,
+    requested_id: str | None = None,
+) -> tuple[dict[str, Any], bool]:
+    if str(admin.get("role") or "").lower() != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    uid = sanitize_str(str(user_id or ""))[:80]
+    amount, cur, idem = _validate_wallet_values(amount_minor, currency, idempotency_key)
+    if not uid or uid == "system":
+        raise HTTPException(status_code=400, detail="Invalid top-up recipient")
+
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_WALLET_LOCK
+    with guard:
+        with db_conn() as conn:
+            _lock_and_validate_wallet_users(conn, [uid], postgres=postgres)
+            _lock_idempotency_key(conn, idem, postgres=postgres)
+            prior = _find_entity_by_idempotency(conn, "walletTransactions", idem)
+            if prior:
+                d = prior.get("data") or {}
+                same = (
+                    str(d.get("type") or "") == "credit"
+                    and not d.get("fromUserId")
+                    and str(d.get("toUserId") or "") == uid
+                    and str(d.get("currency") or "") == cur
+                    and _wallet_amount_minor(d) == amount
+                )
+                if not same:
+                    raise HTTPException(status_code=409, detail="Idempotency key was already used for another operation")
+                return prior, False
+            data = {
+                "type": "credit",
+                "schemaVersion": 2,
+                "amountMinor": amount,
+                "amount": amount / 100,
+                "currency": cur,
+                "fromUserId": None,
+                "toUserId": uid,
+                "memo": sanitize_str(str(memo or "Top-up"))[:180],
+                "idempotencyKey": idem,
+                "status": "posted",
+                "createdAt": _iso_utc(),
+            }
+            return _insert_entity_in_transaction(
+                conn, "walletTransactions", requested_id, data, str(admin.get("id") or "system")
+            ), True
+
+
+def _wallet_reversal_atomic(
+    admin: dict[str, Any], transaction_id: str, memo: Any = None
+) -> tuple[dict[str, Any], bool]:
+    if str(admin.get("role") or "").lower() != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    tx_id = sanitize_str(str(transaction_id or ""))[:80]
+    if not tx_id:
+        raise HTTPException(status_code=400, detail="Missing transactionId")
+    idem = f"rev:{tx_id}"
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_WALLET_LOCK
+    with guard:
+        with db_conn() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT * FROM entities WHERE type = 'walletTransactions' "
+                    "AND id = :id AND deleted = false LIMIT 1"
+                ),
+                {"id": tx_id},
+            ).mappings().first()
+            if not row:
+                raise HTTPException(status_code=404, detail="Wallet transaction not found")
+            original = _entity_from_db_row(row)
+            od = original.get("data") or {}
+            if str(od.get("type") or "") == "reversal":
+                raise HTTPException(status_code=400, detail="A reversal cannot itself be reversed")
+            from_uid = sanitize_str(str(od.get("toUserId") or "system"))[:80] or "system"
+            to_uid = sanitize_str(str(od.get("fromUserId") or "system"))[:80] or "system"
+            _lock_and_validate_wallet_users(conn, [from_uid, to_uid], postgres=postgres)
+            _lock_idempotency_key(conn, idem, postgres=postgres)
+            prior = _find_entity_by_idempotency(conn, "walletTransactions", idem)
+            if prior:
+                return prior, False
+            amount = _wallet_amount_minor(od)
+            cur = sanitize_str(str(od.get("currency") or "")).upper()[:3]
+            if amount <= 0 or cur not in WALLET_CURRENCIES:
+                raise HTTPException(status_code=400, detail="Original wallet transaction is invalid")
+            data = {
+                "type": "reversal",
+                "schemaVersion": 2,
+                "amountMinor": amount,
+                "amount": amount / 100,
+                "currency": cur,
+                "fromUserId": from_uid,
+                "toUserId": to_uid,
+                "memo": sanitize_str(str(memo or f"Reversal of {tx_id}"))[:180],
+                "idempotencyKey": idem,
+                "status": "posted",
+                "referenceType": "reversalOf",
+                "referenceId": tx_id,
+                "createdAt": _iso_utc(),
+            }
+            return _insert_entity_in_transaction(
+                conn, "walletTransactions", None, data, str(admin.get("id") or "system")
+            ), True
+
+
+def _parse_subscription_expiry(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _subscription_purchase_atomic(
+    actor: dict[str, Any],
+    *,
+    service_id: str,
+    idempotency_key: str,
+    user_id: str | None = None,
+    requested_id: str | None = None,
+) -> tuple[dict[str, Any], bool, dict[str, Any] | None]:
+    actor_uid = sanitize_str(str(actor.get("id") or ""))[:80]
+    target_uid = sanitize_str(str(user_id or actor_uid))[:80]
+    if not actor_uid or not target_uid:
+        raise HTTPException(status_code=400, detail="Missing subscription user")
+    if target_uid != actor_uid and str(actor.get("role") or "").lower() != "admin":
+        raise HTTPException(status_code=403, detail="Cannot subscribe another user")
+    sid = sanitize_str(str(service_id or ""))[:80]
+    offer = SERVICE_SUBSCRIPTION_CATALOG.get(sid)
+    if not offer:
+        raise HTTPException(status_code=400, detail="Service is not available for subscription")
+    idem = sanitize_str(str(idempotency_key or ""))[:120]
+    if len(idem) < 8:
+        raise HTTPException(status_code=400, detail="idempotencyKey is required (minimum 8 characters)")
+    amount, cur, _ = _validate_wallet_values(
+        max(1, int(offer.get("priceMinor") or 0)), offer.get("currency"), idem
+    )
+    price_minor = int(offer.get("priceMinor") or 0)
+    if price_minor < 0:
+        raise HTTPException(status_code=500, detail="Invalid server service price")
+    # _validate_wallet_values requires a positive amount, so restore the
+    # catalog's legitimate zero price after validating currency/idempotency.
+    if price_minor == 0:
+        amount = 0
+    duration_days = int(offer.get("durationDays") or 0)
+    if duration_days < 1 or duration_days > 3660:
+        raise HTTPException(status_code=500, detail="Invalid server subscription duration")
+
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_WALLET_LOCK
+    with guard:
+        with db_conn() as conn:
+            _lock_and_validate_wallet_users(conn, [target_uid], postgres=postgres)
+            _lock_idempotency_key(conn, idem, postgres=postgres, namespace="subscription")
+            prior = _find_entity_by_idempotency(conn, "serviceSubscriptions", idem)
+            if prior:
+                d = prior.get("data") or {}
+                if str(d.get("userId") or "") != target_uid or str(d.get("serviceId") or "") != sid:
+                    raise HTTPException(status_code=409, detail="Idempotency key was already used for another operation")
+                payment = None
+                payment_id = str(d.get("paymentTxId") or "")
+                if payment_id:
+                    prow = conn.execute(
+                        text("SELECT * FROM entities WHERE type='walletTransactions' AND id=:id LIMIT 1"),
+                        {"id": payment_id},
+                    ).mappings().first()
+                    payment = _entity_from_db_row(prow) if prow else None
+                return prior, False, payment
+
+            now_dt = datetime.now(timezone.utc)
+            rows = conn.execute(
+                text("SELECT data_json FROM entities WHERE type='serviceSubscriptions' AND deleted=false")
+            ).mappings().all()
+            for row in rows:
+                d = json_loads(row.get("data_json") or "{}") or {}
+                if str(d.get("userId") or "") != target_uid or str(d.get("serviceId") or "") != sid:
+                    continue
+                if str(d.get("status") or "").lower() != "active":
+                    continue
+                expiry = _parse_subscription_expiry(d.get("expiresAt"))
+                if expiry is None or expiry > now_dt:
+                    raise HTTPException(status_code=409, detail="Service subscription is already active")
+
+            payment: dict[str, Any] | None = None
+            if amount > 0:
+                if _wallet_balance_minor(conn, target_uid, cur) < amount:
+                    raise HTTPException(status_code=409, detail="Insufficient wallet balance")
+                payment_idempotency = f"subpay:{idem}"
+                _lock_idempotency_key(conn, payment_idempotency, postgres=postgres)
+                if _find_entity_by_idempotency(conn, "walletTransactions", payment_idempotency):
+                    # A committed purchase would already have returned through
+                    # the subscription-idempotency branch above.  A lone row
+                    # with this key is therefore a conflicting legacy/manual
+                    # operation and must never be charged again.
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Subscription payment idempotency key is already in use",
+                    )
+                payment_data = {
+                    "type": "service_payment",
+                    "schemaVersion": 2,
+                    "amountMinor": amount,
+                    "amount": amount / 100,
+                    "currency": cur,
+                    "fromUserId": target_uid,
+                    "toUserId": "system",
+                    "memo": f"Subscription: {sid}",
+                    "idempotencyKey": payment_idempotency,
+                    "status": "posted",
+                    "referenceType": "subscription",
+                    "referenceId": sid,
+                    "createdAt": _iso_utc(now_dt),
+                }
+                payment = _insert_entity_in_transaction(
+                    conn, "walletTransactions", None, payment_data, actor_uid
+                )
+
+            expires = now_dt + timedelta(days=duration_days)
+            subscription_data = {
+                "userId": target_uid,
+                "serviceId": sid,
+                "status": "active",
+                "startedAt": _iso_utc(now_dt),
+                "expiresAt": _iso_utc(expires),
+                "priceMinor": amount,
+                "price": amount / 100,
+                "currency": cur,
+                "paymentTxId": payment.get("id") if payment else None,
+                "idempotencyKey": idem,
+                "createdAt": _iso_utc(now_dt),
+            }
+            subscription = _insert_entity_in_transaction(
+                conn, "serviceSubscriptions", requested_id, subscription_data, actor_uid
+            )
+            return subscription, True, payment
+
+
+def _subscription_cancel_atomic(
+    actor: dict[str, Any], entity_id: str, expected_last_modified: int | None
+) -> dict[str, Any]:
+    """Apply exactly one active -> canceled transition under a DB/user lock."""
+    sub_id = validate_entity_id(entity_id)
+    initial = get_entity("serviceSubscriptions", sub_id)
+    if not initial:
+        raise HTTPException(status_code=404, detail="Not found")
+    initial_data = initial.get("data") or {}
+    target_uid = sanitize_str(str(initial_data.get("userId") or ""))[:80]
+    actor_uid = sanitize_str(str(actor.get("id") or ""))[:80]
+    if not target_uid or not actor_uid:
+        raise HTTPException(status_code=400, detail="Subscription has an invalid user")
+    if str(actor.get("role") or "").lower() != "admin" and target_uid != actor_uid:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_WALLET_LOCK
+    with guard:
+        with db_conn() as conn:
+            _lock_and_validate_wallet_users(conn, [target_uid], postgres=postgres)
+            suffix = " FOR UPDATE" if postgres else ""
+            row = conn.execute(
+                text(
+                    "SELECT * FROM entities WHERE type='serviceSubscriptions' "
+                    f"AND id=:id AND deleted=false LIMIT 1{suffix}"
+                ),
+                {"id": sub_id},
+            ).mappings().first()
+            if not row:
+                raise HTTPException(status_code=404, detail="Not found")
+            current = _entity_from_db_row(row)
+            data = current.get("data") or {}
+            if str(actor.get("role") or "").lower() != "admin" and str(data.get("userId") or "") != actor_uid:
+                raise HTTPException(status_code=403, detail="Forbidden")
+            if expected_last_modified is not None and int(current["lastModified"]) != int(expected_last_modified):
+                raise HTTPException(status_code=409, detail="Conflict: record has changed")
+            if str(data.get("status") or "").lower() != "active":
+                raise HTTPException(status_code=409, detail="Only an active subscription can be canceled")
+
+            canceled_at = _iso_utc()
+            modified = now_ms()
+            data.update(
+                {
+                    "status": "canceled",
+                    "canceledAt": canceled_at,
+                    "expiresAt": canceled_at,
+                    "canceledBy": actor_uid,
+                    "_lastModified": modified,
+                }
+            )
+            conn.execute(
+                text(
+                    "UPDATE entities SET data_json=:data, last_modified=:modified "
+                    "WHERE type='serviceSubscriptions' AND id=:id"
+                ),
+                {"data": json_dumps(data), "modified": modified, "id": sub_id},
+            )
+            return {
+                **current,
+                "lastModified": modified,
+                "data": data,
+            }
+
+
+CLOTHES_ORDER_STATUSES = frozenset({"New", "On the way", "Delivered", "Returned", "Canceled"})
+CLOTHES_ORDER_ACTIVE_STATUSES = frozenset({"New", "On the way", "Delivered"})
+CLOTHES_PAYMENT_STATUSES = frozenset({"Not Paid", "Partially Paid", "Paid"})
+CLOTHES_ORDER_MUTATION_COLLECTION = "clothesOrderMutations"
+CLOTHES_SHIPMENT_STATUSES = frozenset({"Ordered", "Shipped", "Arrived", "Received"})
+CLOTHES_SHIPMENT_MUTATION_COLLECTION = "clothesShipmentMutations"
+CLOTHES_ORDER_SERVER_CONTROLLED_COLLECTIONS = frozenset(
+    {
+        "clothesOrders",
+        CLOTHES_ORDER_MUTATION_COLLECTION,
+        CLOTHES_SHIPMENT_MUTATION_COLLECTION,
+    }
+)
+CLOTHES_INVENTORY_RESTORE_BLOCKED_COLLECTIONS = frozenset(
+    {*CLOTHES_ORDER_SERVER_CONTROLLED_COLLECTIONS, "clothesProducts", "clothesShipments"}
+)
+GENERIC_RESTORE_BLOCKED_COLLECTIONS = frozenset(
+    {*CLOTHES_INVENTORY_RESTORE_BLOCKED_COLLECTIONS, "ads", "receipts"}
+)
+CLOTHES_BUSINESS_COLLECTIONS = frozenset(
+    {"clothesProducts", "clothesShipments", "clothesOrders", "clothesSettings"}
+)
+_CLOTHES_ORDER_EDITABLE_FIELDS = frozenset(
+    {
+        "customerName",
+        "customerPhone",
+        "note",
+        "lines",
+        "deliveryFeeLYD",
+        "paymentStatus",
+        "amountPaidLYD",
+        "paymentMethod",
+    }
+)
+
+
+def _has_active_clothes_subscription(user: dict[str, Any]) -> bool:
+    if str(user.get("role") or "").lower() == "admin":
+        return True
+    uid = sanitize_str(str(user.get("id") or ""))[:80]
+    if not uid:
+        return False
+    dialect = str(get_engine().dialect.name or "")
+    with db_conn() as conn:
+        try:
+            if dialect == "postgresql":
+                sql = (
+                    "SELECT data_json FROM entities WHERE type='serviceSubscriptions' "
+                    "AND deleted=false AND (data_json::jsonb ->> 'userId')=:uid "
+                    "AND (data_json::jsonb ->> 'serviceId')='clothes_system' "
+                    "AND lower(data_json::jsonb ->> 'status')='active'"
+                )
+            else:
+                sql = (
+                    "SELECT data_json FROM entities WHERE type='serviceSubscriptions' "
+                    "AND deleted=false AND json_extract(data_json, '$.userId')=:uid "
+                    "AND json_extract(data_json, '$.serviceId')='clothes_system' "
+                    "AND lower(json_extract(data_json, '$.status'))='active'"
+                )
+            rows = conn.execute(text(sql), {"uid": uid}).mappings().all()
+        except Exception:
+            rows = conn.execute(
+                text(
+                    "SELECT data_json FROM entities "
+                    "WHERE type='serviceSubscriptions' AND deleted=false"
+                )
+            ).mappings().all()
+    now_dt = datetime.now(timezone.utc)
+    for row in rows:
+        data = json_loads(row.get("data_json") or "{}") or {}
+        if (
+            str(data.get("userId") or "") != uid
+            or str(data.get("serviceId") or "") != "clothes_system"
+            or str(data.get("status") or "").lower() != "active"
+        ):
+            continue
+        expiry = _parse_subscription_expiry(data.get("expiresAt"))
+        if expiry is None or expiry > now_dt:
+            return True
+    return False
+
+
+def _require_clothes_subscription(user: dict[str, Any]) -> None:
+    if not _has_active_clothes_subscription(user):
+        raise HTTPException(status_code=403, detail="An active clothes_system subscription is required")
+
+
+def _clothes_money(value: Any, field: str) -> float:
+    if isinstance(value, bool):
+        raise HTTPException(status_code=400, detail=f"{field} must be a non-negative number")
+    try:
+        amount = float(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        raise HTTPException(status_code=400, detail=f"{field} must be a non-negative number")
+    if not math.isfinite(amount) or amount < 0 or amount > MAX_FINANCIAL_AMOUNT:
+        raise HTTPException(status_code=400, detail=f"Invalid {field}")
+    return round(amount, 2)
+
+
+def _clothes_variant_key(color: Any, size: Any) -> tuple[str, str]:
+    return (str(color or "").strip().lower(), str(size or "").strip().lower())
+
+
+def _clothes_find_variant(product_data: dict[str, Any], color: Any, size: Any) -> dict[str, Any] | None:
+    variants = product_data.get("variants")
+    if not isinstance(variants, list):
+        return None
+    wanted = _clothes_variant_key(color, size)
+    for variant in variants:
+        if isinstance(variant, dict) and _clothes_variant_key(variant.get("color"), variant.get("size")) == wanted:
+            return variant
+    return None
+
+
+def _clothes_lock_row(
+    conn: Any,
+    collection: str,
+    entity_id: str,
+    *,
+    postgres: bool,
+) -> Any | None:
+    suffix = " FOR UPDATE" if postgres else ""
+    return conn.execute(
+        text(
+            "SELECT type, id, data_json, deleted, created_at, created_by, last_modified "
+            "FROM entities WHERE type=:type AND id=:id LIMIT 1" + suffix
+        ),
+        {"type": collection, "id": entity_id},
+    ).mappings().first()
+
+
+def _clothes_require_permission(
+    actor: dict[str, Any], module: str, action: str, creator_id: Any = None
+) -> None:
+    if not user_has_permission(
+        actor,
+        module,
+        action,
+        record_creator_id=str(creator_id or ""),
+    ):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
+def _clothes_write_row(
+    conn: Any,
+    row: Any,
+    data: dict[str, Any],
+    *,
+    deleted: bool | None = None,
+) -> dict[str, Any]:
+    baseline = int(row["last_modified"])
+    modified = max(now_ms(), baseline + 1)
+    next_deleted = bool(row["deleted"]) if deleted is None else bool(deleted)
+    clean = sanitize_json(data or {}) or {}
+    clean["id"] = str(row["id"])
+    clean["_created"] = clean.get("_created") or int(row["created_at"])
+    clean["_lastModified"] = modified
+    clean["_deleted"] = next_deleted
+    if row.get("created_by") is not None:
+        clean["createdBy"] = str(row["created_by"])
+    else:
+        clean.pop("createdBy", None)
+    result = conn.execute(
+        text(
+            "UPDATE entities SET data_json=:data, deleted=:deleted, last_modified=:modified "
+            "WHERE type=:type AND id=:id AND last_modified=:baseline"
+        ),
+        {
+            "data": json_dumps(clean),
+            "deleted": next_deleted,
+            "modified": modified,
+            "type": str(row["type"]),
+            "id": str(row["id"]),
+            "baseline": baseline,
+        },
+    )
+    if result.rowcount != 1:
+        raise HTTPException(status_code=409, detail="Conflict: record has changed")
+    return {
+        "id": str(row["id"]),
+        "type": str(row["type"]),
+        "deleted": next_deleted,
+        "createdAt": int(row["created_at"]),
+        "createdBy": row.get("created_by"),
+        "lastModified": modified,
+        "data": clean,
+    }
+
+
+def _clothes_parse_order_lines(raw_lines: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_lines, list) or not raw_lines or len(raw_lines) > 500:
+        raise HTTPException(status_code=400, detail="Order must contain 1-500 lines")
+    parsed: list[dict[str, Any]] = []
+    total_qty = 0
+    for index, raw in enumerate(raw_lines):
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=400, detail=f"Invalid order line {index + 1}")
+        product_id = validate_entity_id(raw.get("productId"))
+        qty_raw = raw.get("qty")
+        if isinstance(qty_raw, bool):
+            raise HTTPException(status_code=400, detail=f"Invalid quantity on line {index + 1}")
+        try:
+            qty = int(qty_raw)
+        except (TypeError, ValueError, OverflowError):
+            raise HTTPException(status_code=400, detail=f"Invalid quantity on line {index + 1}")
+        if qty <= 0 or qty > 1_000_000 or str(qty) != str(qty_raw).strip():
+            raise HTTPException(status_code=400, detail=f"Invalid quantity on line {index + 1}")
+        total_qty += qty
+        if total_qty > 10_000_000:
+            raise HTTPException(status_code=400, detail="Order quantity is too large")
+        parsed.append(
+            {
+                "productId": product_id,
+                "color": sanitize_str(str(raw.get("color") or ""), 60),
+                "size": sanitize_str(str(raw.get("size") or ""), 60),
+                "qty": qty,
+                "priceLYD": _clothes_money(raw.get("priceLYD"), f"line {index + 1} priceLYD"),
+            }
+        )
+    return parsed
+
+
+def _clothes_load_products_for_update(
+    conn: Any,
+    product_ids: set[str],
+    actor: dict[str, Any],
+    *,
+    postgres: bool,
+) -> dict[str, tuple[Any, dict[str, Any]]]:
+    products: dict[str, tuple[Any, dict[str, Any]]] = {}
+    for product_id in sorted(product_ids):
+        row = _clothes_lock_row(conn, "clothesProducts", product_id, postgres=postgres)
+        if not row:
+            continue
+        _clothes_require_permission(actor, "clothesProducts", "edit", row.get("created_by"))
+        data = json_loads(row.get("data_json") or "{}") or {}
+        if not isinstance(data, dict):
+            data = {}
+        products[product_id] = (row, data)
+    return products
+
+
+def _clothes_restore_order_stock(
+    lines: Any,
+    products: dict[str, tuple[Any, dict[str, Any]]],
+    changed: set[str],
+) -> None:
+    if not isinstance(lines, list):
+        raise HTTPException(status_code=409, detail="Order stock history is invalid")
+    for line in lines:
+        if not isinstance(line, dict):
+            raise HTTPException(status_code=409, detail="Order stock history is invalid")
+        product_id = str(line.get("productId") or "")
+        product_entry = products.get(product_id)
+        if not product_entry or bool(product_entry[0]["deleted"]):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot restore stock because product is missing: {product_id}",
+            )
+        variant = _clothes_find_variant(product_entry[1], line.get("color"), line.get("size"))
+        if not variant:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot restore stock because product variant is missing: {product_id}",
+            )
+        try:
+            ordered = int(line.get("qty") or 0)
+            deducted = int(line.get("deductedQty", ordered))
+            available = int(variant.get("qty") or 0)
+        except (TypeError, ValueError, OverflowError):
+            raise HTTPException(status_code=409, detail="Order stock history is invalid")
+        if ordered <= 0 or deducted <= 0 or deducted > ordered or available < 0:
+            raise HTTPException(status_code=409, detail="Order stock history is invalid")
+        variant["qty"] = available + deducted
+        changed.add(product_id)
+
+
+def _clothes_deduct_order_stock(
+    lines: list[dict[str, Any]],
+    products: dict[str, tuple[Any, dict[str, Any]]],
+    changed: set[str],
+) -> None:
+    for line in lines:
+        product_id = line["productId"]
+        product_entry = products.get(product_id)
+        if not product_entry or bool(product_entry[0]["deleted"]):
+            raise HTTPException(status_code=404, detail=f"Product not found: {product_id}")
+        variant = _clothes_find_variant(product_entry[1], line.get("color"), line.get("size"))
+        if not variant:
+            raise HTTPException(status_code=409, detail=f"Product variant is unavailable: {product_id}")
+        available = max(0, int(variant.get("qty") or 0))
+        qty = int(line["qty"])
+        if available < qty:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Insufficient stock for {product_id}: {available} available, {qty} requested",
+            )
+        variant["qty"] = available - qty
+        line["deductedQty"] = qty
+        changed.add(product_id)
+
+
+def _clothes_normalize_order_payload(
+    raw_data: dict[str, Any],
+    lines: list[dict[str, Any]],
+    products: dict[str, tuple[Any, dict[str, Any]]],
+    old_data: dict[str, Any] | None,
+) -> dict[str, Any]:
+    unknown = set(raw_data.keys()) - _CLOTHES_ORDER_EDITABLE_FIELDS
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Server-controlled order fields: {', '.join(sorted(unknown))}")
+    customer_name = sanitize_str(str(raw_data.get("customerName") or ""), 120)
+    if not customer_name:
+        raise HTTPException(status_code=400, detail="customerName is required")
+
+    snapshots: dict[tuple[str, str, str], list[float]] = {}
+    for old_line in (old_data or {}).get("lines", []) if isinstance((old_data or {}).get("lines"), list) else []:
+        if not isinstance(old_line, dict):
+            continue
+        key = (
+            str(old_line.get("productId") or ""),
+            *_clothes_variant_key(old_line.get("color"), old_line.get("size")),
+        )
+        snapshots.setdefault(key, []).append(_clothes_money(old_line.get("costUSDAtSale"), "costUSDAtSale"))
+
+    for line in lines:
+        key = (line["productId"], *_clothes_variant_key(line.get("color"), line.get("size")))
+        prior = snapshots.get(key) or []
+        if prior:
+            line["costUSDAtSale"] = prior.pop(0)
+        else:
+            product_entry = products.get(line["productId"])
+            if not product_entry or bool(product_entry[0]["deleted"]):
+                raise HTTPException(status_code=404, detail=f"Product not found: {line['productId']}")
+            line["costUSDAtSale"] = _clothes_money(product_entry[1].get("costUSD"), "product costUSD")
+
+    delivery_fee = _clothes_money(raw_data.get("deliveryFeeLYD"), "deliveryFeeLYD")
+    goods_total = round(sum(int(line["qty"]) * float(line["priceLYD"]) for line in lines), 2)
+    total = round(goods_total + delivery_fee, 2)
+    payment_status = str(raw_data.get("paymentStatus") or "Not Paid")
+    if payment_status not in CLOTHES_PAYMENT_STATUSES:
+        raise HTTPException(status_code=400, detail="Invalid paymentStatus")
+    amount_paid = _clothes_money(raw_data.get("amountPaidLYD"), "amountPaidLYD")
+    if payment_status == "Paid":
+        amount_paid = total
+    elif payment_status == "Not Paid":
+        amount_paid = 0.0
+    elif amount_paid > total:
+        raise HTTPException(status_code=400, detail="amountPaidLYD cannot exceed the order total")
+
+    paid_at = (old_data or {}).get("paidAt")
+    if payment_status == "Paid" and not paid_at:
+        paid_at = _iso_utc()
+    return {
+        "customerName": customer_name,
+        "customerPhone": sanitize_str(str(raw_data.get("customerPhone") or ""), 40),
+        "note": sanitize_str(str(raw_data.get("note") or ""), 500),
+        "lines": lines,
+        "deliveryFeeLYD": delivery_fee,
+        "paymentStatus": payment_status,
+        "amountPaidLYD": amount_paid,
+        "paymentMethod": sanitize_str(str(raw_data.get("paymentMethod") or ""), 60),
+        "paidAt": paid_at,
+    }
+
+
+def _clothes_read_mutation_result(
+    conn: Any, marker: dict[str, Any]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    marker_data = marker.get("data") or {}
+    order_id = validate_entity_id(marker_data.get("orderId"))
+    row = _clothes_lock_row(conn, "clothesOrders", order_id, postgres=False)
+    if not row:
+        raise HTTPException(status_code=409, detail="Idempotent order result no longer exists")
+    order = _entity_from_db_row(row)
+    products: list[dict[str, Any]] = []
+    for product_id in marker_data.get("updatedProductIds") or []:
+        try:
+            pid = validate_entity_id(product_id)
+        except HTTPException:
+            continue
+        product_row = _clothes_lock_row(conn, "clothesProducts", pid, postgres=False)
+        if product_row:
+            products.append(_entity_from_db_row(product_row))
+    return order, products
+
+
+def _clothes_mutation_marker_id(namespace: str, idempotency_key: str) -> str:
+    digest = hashlib.sha256(
+        f"{namespace}\0{idempotency_key}".encode("utf-8")
+    ).hexdigest()
+    return f"clothes_idem_{digest[:48]}"
+
+
+def _clothes_get_mutation_marker(
+    conn: Any,
+    collection: str,
+    namespace: str,
+    idempotency_key: str,
+) -> dict[str, Any] | None:
+    marker_id = _clothes_mutation_marker_id(namespace, idempotency_key)
+    row = _clothes_lock_row(conn, collection, marker_id, postgres=False)
+    return _entity_from_db_row(row) if row else None
+
+
+def _clothes_order_mutation_atomic(
+    actor: dict[str, Any],
+    *,
+    action: str,
+    idempotency_key: str,
+    order_id: str | None = None,
+    expected_last_modified: int | None = None,
+    data: dict[str, Any] | None = None,
+    status: str | None = None,
+    payment_status: str | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]], bool]:
+    actor_id = validate_entity_id(actor.get("id"))
+    act = str(action or "")
+    if act not in {"create", "update", "status", "payment", "delete"}:
+        raise HTTPException(status_code=400, detail="Invalid clothes order action")
+    idem = sanitize_str(str(idempotency_key or ""), 120)
+    if len(idem) < 8:
+        raise HTTPException(status_code=400, detail="idempotencyKey is required (minimum 8 characters)")
+    # A retry with the same idempotency key must address the same order even
+    # when an older client omitted orderId. Deriving the fallback from the key
+    # keeps both the request hash and result stable across network retries.
+    fallback_id = f"clothes_order_{hashlib.sha256(idem.encode('utf-8')).hexdigest()[:32]}"
+    target_id = validate_entity_id(order_id or fallback_id)
+    raw_data = data or {}
+    if not isinstance(raw_data, dict):
+        raise HTTPException(status_code=400, detail="Invalid order data")
+    validate_relationship_ids(raw_data, "clothes order")
+    clean_data = sanitize_json(raw_data) or {}
+    request_payload = {
+        "action": act,
+        "orderId": target_id,
+        "expectedLastModified": expected_last_modified,
+        "status": status,
+        "paymentStatus": payment_status,
+        "data": clean_data,
+    }
+    request_hash = hashlib.sha256(json_dumps(request_payload).encode("utf-8")).hexdigest()
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_CLOTHES_LOCK
+
+    with guard:
+        with db_conn() as conn:
+            _lock_idempotency_key(
+                conn,
+                idem,
+                postgres=postgres,
+                namespace="clothesOrder",
+            )
+            prior_marker = _clothes_get_mutation_marker(
+                conn, CLOTHES_ORDER_MUTATION_COLLECTION, "order", idem
+            )
+            if prior_marker:
+                marker_data = prior_marker.get("data") or {}
+                if (
+                    str(marker_data.get("actorId") or "") != actor_id
+                    or str(marker_data.get("requestHash") or "") != request_hash
+                ):
+                    raise HTTPException(status_code=409, detail="Idempotency key was already used")
+                order, products = _clothes_read_mutation_result(conn, prior_marker)
+                return order, products, True
+
+            order_row = _clothes_lock_row(conn, "clothesOrders", target_id, postgres=postgres)
+            order_data = (
+                json_loads(order_row.get("data_json") or "{}") or {} if order_row else {}
+            )
+            if not isinstance(order_data, dict):
+                order_data = {}
+
+            if act == "create":
+                _clothes_require_permission(actor, "clothesOrders", "add")
+                if order_row:
+                    raise HTTPException(status_code=409, detail="Order ID already exists")
+            else:
+                if not order_row or bool(order_row["deleted"]):
+                    raise HTTPException(status_code=404, detail="Order not found")
+                permission_action = "delete" if act == "delete" else "edit"
+                _clothes_require_permission(
+                    actor, "clothesOrders", permission_action, order_row.get("created_by")
+                )
+                if expected_last_modified is None:
+                    raise HTTPException(status_code=400, detail="expectedLastModified is required")
+                if int(order_row["last_modified"]) != int(expected_last_modified):
+                    raise HTTPException(status_code=409, detail="Conflict: order has changed")
+
+            new_lines: list[dict[str, Any]] = []
+            if act in {"create", "update"}:
+                new_lines = _clothes_parse_order_lines(clean_data.get("lines"))
+            old_lines = order_data.get("lines") if isinstance(order_data.get("lines"), list) else []
+            product_ids = {
+                str(line.get("productId") or "")
+                for line in [*old_lines, *new_lines]
+                if isinstance(line, dict) and line.get("productId")
+            }
+            products = _clothes_load_products_for_update(
+                conn, product_ids, actor, postgres=postgres
+            )
+            changed_products: set[str] = set()
+
+            if act == "create":
+                normalized = _clothes_normalize_order_payload(clean_data, new_lines, products, None)
+                _clothes_deduct_order_stock(new_lines, products, changed_products)
+                _lock_idempotency_key(
+                    conn, "global", postgres=postgres, namespace="clothesOrderNumber"
+                )
+                max_order_no = 0
+                for existing in conn.execute(
+                    text("SELECT data_json FROM entities WHERE type='clothesOrders'")
+                ).mappings().all():
+                    existing_data = json_loads(existing.get("data_json") or "{}") or {}
+                    try:
+                        max_order_no = max(max_order_no, int(existing_data.get("orderNo") or 0))
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+                normalized.update(
+                    {
+                        "orderNo": max_order_no + 1,
+                        "status": "New",
+                        "stockDeducted": True,
+                        "deliveredAt": None,
+                        "createdAt": _iso_utc(),
+                    }
+                )
+                order = _insert_entity_in_transaction(
+                    conn, "clothesOrders", target_id, normalized, actor_id
+                )
+            elif act == "update":
+                if str(order_data.get("status") or "") not in CLOTHES_ORDER_ACTIVE_STATUSES:
+                    raise HTTPException(status_code=409, detail="Returned/Canceled orders cannot be edited")
+                if order_data.get("stockDeducted") is not True:
+                    raise HTTPException(status_code=409, detail="Active order stock state is inconsistent")
+                normalized = _clothes_normalize_order_payload(clean_data, new_lines, products, order_data)
+                _clothes_restore_order_stock(old_lines, products, changed_products)
+                _clothes_deduct_order_stock(new_lines, products, changed_products)
+                next_order = dict(order_data)
+                next_order.update(normalized)
+                next_order["stockDeducted"] = True
+                order = _clothes_write_row(conn, order_row, next_order)
+            elif act == "status":
+                next_status = str(status or "")
+                if next_status not in CLOTHES_ORDER_STATUSES:
+                    raise HTTPException(status_code=400, detail="Invalid order status")
+                current_status = str(order_data.get("status") or "")
+                if current_status not in CLOTHES_ORDER_STATUSES:
+                    raise HTTPException(status_code=409, detail="Order has an invalid current status")
+                was_active = current_status in CLOTHES_ORDER_ACTIVE_STATUSES
+                will_be_active = next_status in CLOTHES_ORDER_ACTIVE_STATUSES
+                next_order = dict(order_data)
+                if was_active and not will_be_active:
+                    if order_data.get("stockDeducted") is True:
+                        _clothes_restore_order_stock(old_lines, products, changed_products)
+                    next_order["stockDeducted"] = False
+                elif not was_active and will_be_active:
+                    if order_data.get("stockDeducted") is True:
+                        raise HTTPException(status_code=409, detail="Inactive order stock state is inconsistent")
+                    reactivated_lines = [dict(line) for line in old_lines if isinstance(line, dict)]
+                    _clothes_deduct_order_stock(reactivated_lines, products, changed_products)
+                    next_order["lines"] = reactivated_lines
+                    next_order["stockDeducted"] = True
+                next_order["status"] = next_status
+                if next_status == "Delivered" and not next_order.get("deliveredAt"):
+                    next_order["deliveredAt"] = _iso_utc()
+                order = _clothes_write_row(conn, order_row, next_order)
+            elif act == "payment":
+                next_payment = str(payment_status or "")
+                if next_payment not in CLOTHES_PAYMENT_STATUSES:
+                    raise HTTPException(status_code=400, detail="Invalid payment status")
+                next_order = dict(order_data)
+                total = round(
+                    sum(
+                        max(0, int(line.get("qty") or 0)) * float(line.get("priceLYD") or 0)
+                        for line in old_lines
+                        if isinstance(line, dict)
+                    )
+                    + float(order_data.get("deliveryFeeLYD") or 0),
+                    2,
+                )
+                next_order["paymentStatus"] = next_payment
+                if next_payment == "Paid":
+                    next_order["amountPaidLYD"] = total
+                    next_order["paidAt"] = next_order.get("paidAt") or _iso_utc()
+                elif next_payment == "Not Paid":
+                    next_order["amountPaidLYD"] = 0.0
+                order = _clothes_write_row(conn, order_row, next_order)
+            else:
+                if order_data.get("stockDeducted") is True:
+                    _clothes_restore_order_stock(old_lines, products, changed_products)
+                next_order = dict(order_data)
+                next_order["stockDeducted"] = False
+                order = _clothes_write_row(conn, order_row, next_order, deleted=True)
+
+            updated_products: list[dict[str, Any]] = []
+            for product_id in sorted(changed_products):
+                product_row, product_data = products[product_id]
+                updated_products.append(
+                    _clothes_write_row(conn, product_row, product_data)
+                )
+
+            _insert_entity_in_transaction(
+                conn,
+                CLOTHES_ORDER_MUTATION_COLLECTION,
+                _clothes_mutation_marker_id("order", idem),
+                {
+                    "actorId": actor_id,
+                    "idempotencyKey": idem,
+                    "requestHash": request_hash,
+                    "action": act,
+                    "orderId": target_id,
+                    "updatedProductIds": sorted(changed_products),
+                    "createdAt": _iso_utc(),
+                },
+                actor_id,
+            )
+            return order, updated_products, False
+
+
+@app.post(
+    "/api/clothes/orders/mutate",
+    response_model=ClothesOrderMutationResponse,
+)
+def mutate_clothes_order(
+    body: ClothesOrderMutationRequest,
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+):
+    require_same_origin(request)
+    _require_clothes_subscription(user)
+    order, updated_products, replayed = _clothes_order_mutation_atomic(
+        user,
+        action=body.action,
+        idempotency_key=body.idempotencyKey,
+        order_id=body.orderId,
+        expected_last_modified=body.expectedLastModified,
+        data=body.data,
+        status=body.status,
+        payment_status=body.paymentStatus,
+    )
+    if not replayed:
+        audit(
+            str(user.get("id")),
+            body.action,
+            "clothesOrders",
+            order["id"],
+            f"Clothes order {body.action}",
+            {"updatedProducts": [product["id"] for product in updated_products]},
+        )
+    return ClothesOrderMutationResponse(
+        order=EntityResponse(**order),
+        updatedProducts=[EntityResponse(**product) for product in updated_products],
+        replayed=replayed,
+    )
+
+
+def _clothes_parse_shipment_lines(raw_lines: Any) -> list[dict[str, Any]]:
+    """Validate persisted shipment lines before they can affect inventory."""
+    if not isinstance(raw_lines, list) or not raw_lines or len(raw_lines) > 500:
+        raise HTTPException(status_code=409, detail="Shipment has invalid inventory lines")
+    parsed: list[dict[str, Any]] = []
+    total_qty = 0
+    for index, raw in enumerate(raw_lines):
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=409, detail=f"Invalid shipment line {index + 1}")
+        product_id = validate_entity_id(raw.get("productId"))
+        qty_raw = raw.get("qty")
+        if isinstance(qty_raw, bool):
+            raise HTTPException(status_code=409, detail=f"Invalid quantity on shipment line {index + 1}")
+        try:
+            qty = int(qty_raw)
+        except (TypeError, ValueError, OverflowError):
+            raise HTTPException(status_code=409, detail=f"Invalid quantity on shipment line {index + 1}")
+        if qty <= 0 or qty > 1_000_000 or str(qty) != str(qty_raw).strip():
+            raise HTTPException(status_code=409, detail=f"Invalid quantity on shipment line {index + 1}")
+        total_qty += qty
+        if total_qty > 10_000_000:
+            raise HTTPException(status_code=409, detail="Shipment quantity is too large")
+        parsed.append(
+            {
+                "productId": product_id,
+                "color": sanitize_str(str(raw.get("color") or ""), 60),
+                "size": sanitize_str(str(raw.get("size") or ""), 60),
+                "qty": qty,
+            }
+        )
+    return parsed
+
+
+def _clothes_apply_shipment_stock(
+    lines: list[dict[str, Any]],
+    products: dict[str, tuple[Any, dict[str, Any]]],
+    changed: set[str],
+    *,
+    receive: bool,
+) -> None:
+    for line in lines:
+        product_id = line["productId"]
+        product_entry = products.get(product_id)
+        if not product_entry or bool(product_entry[0]["deleted"]):
+            raise HTTPException(status_code=409, detail=f"Shipment product is missing: {product_id}")
+        product_data = product_entry[1]
+        variants = product_data.get("variants")
+        if not isinstance(variants, list):
+            variants = []
+            product_data["variants"] = variants
+        variant = _clothes_find_variant(product_data, line.get("color"), line.get("size"))
+        if not variant:
+            if not receive:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Cannot un-receive missing product variant: {product_id}",
+                )
+            variant = {
+                "color": line.get("color") or "",
+                "size": line.get("size") or "",
+                "qty": 0,
+            }
+            variants.append(variant)
+        try:
+            available = int(variant.get("qty") or 0)
+        except (TypeError, ValueError, OverflowError):
+            raise HTTPException(status_code=409, detail=f"Invalid stock quantity: {product_id}")
+        if available < 0:
+            raise HTTPException(status_code=409, detail=f"Invalid stock quantity: {product_id}")
+        qty = int(line["qty"])
+        if not receive and available < qty:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot un-receive {product_id}: {available} available, {qty} required",
+            )
+        variant["qty"] = available + qty if receive else available - qty
+        changed.add(product_id)
+
+
+def _clothes_read_shipment_mutation_result(
+    conn: Any, marker: dict[str, Any]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    marker_data = marker.get("data") or {}
+    shipment_id = validate_entity_id(marker_data.get("shipmentId"))
+    row = _clothes_lock_row(conn, "clothesShipments", shipment_id, postgres=False)
+    if not row:
+        raise HTTPException(status_code=409, detail="Idempotent shipment result no longer exists")
+    shipment = _entity_from_db_row(row)
+    products: list[dict[str, Any]] = []
+    for product_id in marker_data.get("updatedProductIds") or []:
+        try:
+            pid = validate_entity_id(product_id)
+        except HTTPException:
+            continue
+        product_row = _clothes_lock_row(conn, "clothesProducts", pid, postgres=False)
+        if product_row:
+            products.append(_entity_from_db_row(product_row))
+    return shipment, products
+
+
+def _clothes_shipment_mutation_atomic(
+    actor: dict[str, Any],
+    *,
+    action: str,
+    idempotency_key: str,
+    shipment_id: str,
+    expected_last_modified: int,
+    status: str | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]], bool]:
+    actor_id = validate_entity_id(actor.get("id"))
+    act = str(action or "")
+    if act not in {"status", "delete"}:
+        raise HTTPException(status_code=400, detail="Invalid clothes shipment action")
+    idem = sanitize_str(str(idempotency_key or ""), 120)
+    if len(idem) < 8:
+        raise HTTPException(status_code=400, detail="idempotencyKey is required (minimum 8 characters)")
+    target_id = validate_entity_id(shipment_id)
+    request_payload = {
+        "action": act,
+        "shipmentId": target_id,
+        "expectedLastModified": expected_last_modified,
+        "status": status,
+    }
+    request_hash = hashlib.sha256(json_dumps(request_payload).encode("utf-8")).hexdigest()
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_CLOTHES_LOCK
+
+    with guard:
+        with db_conn() as conn:
+            _lock_idempotency_key(conn, idem, postgres=postgres, namespace="clothesShipment")
+            prior_marker = _clothes_get_mutation_marker(
+                conn, CLOTHES_SHIPMENT_MUTATION_COLLECTION, "shipment", idem
+            )
+            if prior_marker:
+                marker_data = prior_marker.get("data") or {}
+                if (
+                    str(marker_data.get("actorId") or "") != actor_id
+                    or str(marker_data.get("requestHash") or "") != request_hash
+                ):
+                    raise HTTPException(status_code=409, detail="Idempotency key was already used")
+                shipment, products = _clothes_read_shipment_mutation_result(conn, prior_marker)
+                return shipment, products, True
+
+            shipment_row = _clothes_lock_row(
+                conn, "clothesShipments", target_id, postgres=postgres
+            )
+            if not shipment_row or bool(shipment_row["deleted"]):
+                raise HTTPException(status_code=404, detail="Shipment not found")
+            permission_action = "delete" if act == "delete" else "edit"
+            _clothes_require_permission(
+                actor,
+                "clothesShipments",
+                permission_action,
+                shipment_row.get("created_by"),
+            )
+            if int(shipment_row["last_modified"]) != int(expected_last_modified):
+                raise HTTPException(status_code=409, detail="Conflict: shipment has changed")
+            shipment_data = json_loads(shipment_row.get("data_json") or "{}") or {}
+            if not isinstance(shipment_data, dict):
+                raise HTTPException(status_code=409, detail="Shipment data is invalid")
+
+            current_status = str(shipment_data.get("status") or "")
+            stock_applied = shipment_data.get("stockApplied") is True
+            if current_status not in CLOTHES_SHIPMENT_STATUSES:
+                raise HTTPException(status_code=409, detail="Shipment has an invalid current status")
+            if (current_status == "Received") != stock_applied:
+                raise HTTPException(status_code=409, detail="Shipment stock state is inconsistent")
+
+            changed_products: set[str] = set()
+            products: dict[str, tuple[Any, dict[str, Any]]] = {}
+            next_shipment = dict(shipment_data)
+            if act == "delete":
+                if current_status == "Received" or stock_applied:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="A received shipment must be un-received before deletion",
+                    )
+                shipment = _clothes_write_row(
+                    conn, shipment_row, next_shipment, deleted=True
+                )
+            else:
+                next_status = str(status or "")
+                if next_status not in CLOTHES_SHIPMENT_STATUSES:
+                    raise HTTPException(status_code=400, detail="Invalid shipment status")
+                if next_status != current_status and (
+                    next_status == "Received" or current_status == "Received"
+                ):
+                    lines = _clothes_parse_shipment_lines(shipment_data.get("lines"))
+                    products = _clothes_load_products_for_update(
+                        conn,
+                        {line["productId"] for line in lines},
+                        actor,
+                        postgres=postgres,
+                    )
+                    if next_status == "Received":
+                        _clothes_apply_shipment_stock(
+                            lines, products, changed_products, receive=True
+                        )
+                        next_shipment["stockApplied"] = True
+                        next_shipment["receivedAt"] = _iso_utc()
+                    else:
+                        _clothes_apply_shipment_stock(
+                            lines, products, changed_products, receive=False
+                        )
+                        next_shipment["stockApplied"] = False
+                        next_shipment["receivedAt"] = None
+                next_shipment["status"] = next_status
+                shipment = _clothes_write_row(conn, shipment_row, next_shipment)
+
+            updated_products: list[dict[str, Any]] = []
+            for product_id in sorted(changed_products):
+                product_row, product_data = products[product_id]
+                updated_products.append(_clothes_write_row(conn, product_row, product_data))
+
+            _insert_entity_in_transaction(
+                conn,
+                CLOTHES_SHIPMENT_MUTATION_COLLECTION,
+                _clothes_mutation_marker_id("shipment", idem),
+                {
+                    "actorId": actor_id,
+                    "idempotencyKey": idem,
+                    "requestHash": request_hash,
+                    "action": act,
+                    "shipmentId": target_id,
+                    "updatedProductIds": sorted(changed_products),
+                    "createdAt": _iso_utc(),
+                },
+                actor_id,
+            )
+            return shipment, updated_products, False
+
+
+def _clothes_referenced_variant_keys(
+    conn: Any,
+    product_id: str,
+    candidate_keys: set[tuple[str, str]],
+) -> set[tuple[str, str]]:
+    """Return product variants still referenced by order/shipment history."""
+    if not candidate_keys:
+        return set()
+    found: set[tuple[str, str]] = set()
+    rows = conn.execute(
+        text(
+            "SELECT type, data_json FROM entities "
+            "WHERE type IN ('clothesOrders','clothesShipments') AND deleted=false"
+        )
+    ).mappings().all()
+    for row in rows:
+        record = json_loads(row.get("data_json") or "{}") or {}
+        if not isinstance(record, dict):
+            continue
+        lines = record.get("lines")
+        if not isinstance(lines, list):
+            continue
+        for line in lines:
+            if not isinstance(line, dict) or str(line.get("productId") or "") != product_id:
+                continue
+            key = _clothes_variant_key(line.get("color"), line.get("size"))
+            if key in candidate_keys:
+                found.add(key)
+    return found
+
+
+def _clothes_product_is_referenced(conn: Any, product_id: str) -> bool:
+    rows = conn.execute(
+        text(
+            "SELECT data_json FROM entities "
+            "WHERE type IN ('clothesOrders','clothesShipments') AND deleted=false"
+        )
+    ).mappings().all()
+    for row in rows:
+        record = json_loads(row.get("data_json") or "{}") or {}
+        for line in record.get("lines") if isinstance(record, dict) and isinstance(record.get("lines"), list) else []:
+            if isinstance(line, dict) and str(line.get("productId") or "") == product_id:
+                return True
+    return False
+
+
+def _clothes_validate_variants(raw_variants: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_variants, list) or len(raw_variants) > 2000:
+        raise HTTPException(status_code=400, detail="variants must be a list of at most 2000 items")
+    variants: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, raw in enumerate(raw_variants):
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=400, detail=f"Invalid product variant {index + 1}")
+        color = sanitize_str(str(raw.get("color") or ""), 60)
+        size = sanitize_str(str(raw.get("size") or ""), 60)
+        key = _clothes_variant_key(color, size)
+        if key in seen:
+            raise HTTPException(status_code=400, detail="Duplicate product variant")
+        seen.add(key)
+        qty_raw = raw.get("qty")
+        if isinstance(qty_raw, bool):
+            raise HTTPException(status_code=400, detail=f"Invalid quantity on variant {index + 1}")
+        try:
+            qty = int(qty_raw)
+        except (TypeError, ValueError, OverflowError):
+            raise HTTPException(status_code=400, detail=f"Invalid quantity on variant {index + 1}")
+        if qty < 0 or qty > 1_000_000 or str(qty) != str(qty_raw).strip():
+            raise HTTPException(status_code=400, detail=f"Invalid quantity on variant {index + 1}")
+        clean = sanitize_json(raw) or {}
+        clean.update({"color": color, "size": size, "qty": qty})
+        variants.append(clean)
+    return variants
+
+
+def _clothes_patch_product_atomic(
+    actor: dict[str, Any],
+    product_id: str,
+    updates: dict[str, Any],
+    expected_last_modified: int | None,
+) -> dict[str, Any]:
+    """Patch product metadata/stock under the same locks as orders/shipments."""
+    target_id = validate_entity_id(product_id)
+    clean_updates = sanitize_json(updates or {}) or {}
+    for key in ["id", "_created", "_lastModified", "createdBy", "createdAt", "creatorId"]:
+        clean_updates.pop(key, None)
+    if "variants" in clean_updates:
+        if expected_last_modified is None:
+            raise HTTPException(status_code=400, detail="expectedLastModified is required for stock changes")
+        clean_updates["variants"] = _clothes_validate_variants(clean_updates.get("variants"))
+
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_CLOTHES_LOCK
+    with guard:
+        with db_conn() as conn:
+            row = _clothes_lock_row(conn, "clothesProducts", target_id, postgres=postgres)
+            if not row or bool(row["deleted"]):
+                raise HTTPException(status_code=404, detail="Product not found")
+            _clothes_require_permission(actor, "clothesProducts", "edit", row.get("created_by"))
+            if expected_last_modified is not None and int(row["last_modified"]) != int(expected_last_modified):
+                raise HTTPException(status_code=409, detail="Conflict: product has changed")
+            product_data = json_loads(row.get("data_json") or "{}") or {}
+            if not isinstance(product_data, dict):
+                product_data = {}
+            if "variants" in clean_updates:
+                old_keys = {
+                    _clothes_variant_key(item.get("color"), item.get("size"))
+                    for item in product_data.get("variants", [])
+                    if isinstance(item, dict)
+                }
+                new_keys = {
+                    _clothes_variant_key(item.get("color"), item.get("size"))
+                    for item in clean_updates["variants"]
+                }
+                removed = old_keys - new_keys
+                referenced = _clothes_referenced_variant_keys(conn, target_id, removed)
+                if referenced:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="A referenced product variant cannot be removed",
+                    )
+            product_data.update(clean_updates)
+            return _clothes_write_row(conn, row, product_data)
+
+
+def _clothes_delete_product_atomic(actor: dict[str, Any], product_id: str) -> dict[str, Any]:
+    target_id = validate_entity_id(product_id)
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_CLOTHES_LOCK
+    with guard:
+        with db_conn() as conn:
+            row = _clothes_lock_row(conn, "clothesProducts", target_id, postgres=postgres)
+            if not row or bool(row["deleted"]):
+                raise HTTPException(status_code=404, detail="Product not found")
+            _clothes_require_permission(actor, "clothesProducts", "delete", row.get("created_by"))
+            if _clothes_product_is_referenced(conn, target_id):
+                raise HTTPException(status_code=409, detail="A referenced product cannot be deleted")
+            data = json_loads(row.get("data_json") or "{}") or {}
+            return _clothes_write_row(conn, row, data if isinstance(data, dict) else {}, deleted=True)
+
+
+def _clothes_validate_and_lock_shipment_products(
+    conn: Any,
+    raw_lines: Any,
+    *,
+    postgres: bool,
+) -> None:
+    try:
+        lines = _clothes_parse_shipment_lines(raw_lines)
+    except HTTPException as exc:
+        raise HTTPException(status_code=400, detail=exc.detail)
+    for product_id in sorted({line["productId"] for line in lines}):
+        row = _clothes_lock_row(conn, "clothesProducts", product_id, postgres=postgres)
+        if not row or bool(row["deleted"]):
+            raise HTTPException(status_code=409, detail=f"Shipment product is missing: {product_id}")
+
+
+def _clothes_create_inventory_entity_atomic(
+    actor: dict[str, Any],
+    collection: str,
+    entity_id: str,
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    """Create a product/shipment inside the shared inventory lock domain."""
+    target_id = validate_entity_id(entity_id)
+    clean = sanitize_json(data or {}) or {}
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_CLOTHES_LOCK
+    try:
+        with guard:
+            with db_conn() as conn:
+                _lock_idempotency_key(
+                    conn, target_id, postgres=postgres, namespace=f"{collection}Create"
+                )
+                if collection == "clothesProducts":
+                    clean["variants"] = _clothes_validate_variants(clean.get("variants", []))
+                elif collection == "clothesShipments":
+                    clean["status"] = "Ordered"
+                    clean["stockApplied"] = False
+                    clean["receivedAt"] = None
+                    _clothes_validate_and_lock_shipment_products(
+                        conn, clean.get("lines"), postgres=postgres
+                    )
+                else:
+                    raise HTTPException(status_code=400, detail="Invalid inventory collection")
+                return _insert_entity_in_transaction(
+                    conn, collection, target_id, clean, str(actor.get("id") or "system")
+                )
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="ID already exists")
+
+
+def _clothes_patch_shipment_atomic(
+    actor: dict[str, Any],
+    shipment_id: str,
+    updates: dict[str, Any],
+    expected_last_modified: int | None,
+) -> dict[str, Any]:
+    target_id = validate_entity_id(shipment_id)
+    clean_updates = sanitize_json(updates or {}) or {}
+    if set(clean_updates) & {"status", "stockApplied", "receivedAt"}:
+        raise HTTPException(
+            status_code=405,
+            detail="Shipment status must be changed through the transactional clothes API",
+        )
+    for key in ["id", "_created", "_lastModified", "createdBy", "createdAt", "creatorId"]:
+        clean_updates.pop(key, None)
+    if expected_last_modified is None:
+        raise HTTPException(status_code=400, detail="expectedLastModified is required")
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_CLOTHES_LOCK
+    with guard:
+        with db_conn() as conn:
+            row = _clothes_lock_row(conn, "clothesShipments", target_id, postgres=postgres)
+            if not row or bool(row["deleted"]):
+                raise HTTPException(status_code=404, detail="Shipment not found")
+            _clothes_require_permission(actor, "clothesShipments", "edit", row.get("created_by"))
+            if int(row["last_modified"]) != int(expected_last_modified):
+                raise HTTPException(status_code=409, detail="Conflict: shipment has changed")
+            data = json_loads(row.get("data_json") or "{}") or {}
+            if not isinstance(data, dict):
+                raise HTTPException(status_code=409, detail="Shipment data is invalid")
+            if str(data.get("status") or "") == "Received" or data.get("stockApplied") is True:
+                raise HTTPException(status_code=409, detail="A received shipment cannot be edited")
+            if "lines" in clean_updates:
+                _clothes_validate_and_lock_shipment_products(
+                    conn, clean_updates.get("lines"), postgres=postgres
+                )
+            data.update(clean_updates)
+            return _clothes_write_row(conn, row, data)
+
+
+# ---------------------------------------------------------------------------
+# Receipt/ad money operations
+# ---------------------------------------------------------------------------
+
+RECEIPT_TRANSFER_MUTATION_COLLECTION = "receiptTransferMutations"
+AD_FUNDING_MUTATION_COLLECTION = "adFundingMutations"
+AD_STOP_MUTATION_COLLECTION = "adStopMutations"
+FINANCIAL_MUTATION_COLLECTIONS = frozenset(
+    {
+        RECEIPT_TRANSFER_MUTATION_COLLECTION,
+        AD_FUNDING_MUTATION_COLLECTION,
+        AD_STOP_MUTATION_COLLECTION,
+    }
+)
+
+# These fields decide how much receipt credit an ad consumes. They may only be
+# changed by the transactional endpoints below. Delivery-only fields remain
+# available through the generic workflow routes.
+AD_FUNDING_FIELDS = frozenset(
+    {
+        "amountUSD",
+        "amountLocal",
+        "initialAmountUSD",
+        "spentUSD",
+        "stoppedAt",
+        "stopAllocationBaseline",
+        "receiptAllocations",
+        "dueAllocations",
+        "mergedPaidAllocations",
+        "receiptIds",
+        "receiptId",
+        "fundingReceiptId",
+        "linkedDeliveryReceiptId",
+        "dueAmountToUseUSD",
+        "dueAmountToUseLYD",
+        "hasMergedPaidFunds",
+        "isPaid",
+        "refundAllocationBaseline",
+        "refundDueBaseline",
+        "refundType",
+        "refundAmount",
+        "refundStatus",
+        "topUps",
+    }
+)
+RECEIPT_TRANSFER_FIELDS = frozenset(
+    {
+        "transfers",
+        "receiptType",
+        "transferFromReceiptId",
+        "transferFromCustomerId",
+        "sourceReceiptId",
+        "sourceCustomerId",
+        "toReceiptId",
+        "toCustomerId",
+    }
+)
+RECEIPT_CAPACITY_FIELDS = frozenset(
+    {
+        "amountUSD",
+        "amountLocal",
+        "debtAmountUSD",
+        "debtAmountLocal",
+        "exchangeRate",
+        "customerId",
+        "status",
+        "isPaid",
+        "payments",
+    }
+)
+
+
+def _financial_minor(value: Any, field: str, *, allow_zero: bool = True) -> int:
+    """Convert a stored/requested USD value to exact cents."""
+    if isinstance(value, bool):
+        raise HTTPException(status_code=400, detail=f"{field} must be a money amount")
+    try:
+        amount = Decimal(str(0 if value is None or value == "" else value))
+    except (InvalidOperation, ValueError, TypeError):
+        raise HTTPException(status_code=400, detail=f"Invalid {field}")
+    if not amount.is_finite() or amount < 0 or amount > Decimal(str(MAX_FINANCIAL_AMOUNT)):
+        raise HTTPException(status_code=400, detail=f"Invalid {field}")
+    minor = int((amount * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    if not allow_zero and minor <= 0:
+        raise HTTPException(status_code=400, detail=f"{field} must be greater than zero")
+    return minor
+
+
+def _financial_usd(minor: int) -> float:
+    return float((Decimal(int(minor)) / Decimal(100)).quantize(Decimal("0.01")))
+
+
+def _financial_rate(value: Any) -> Decimal:
+    try:
+        rate = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        rate = Decimal(1)
+    if not rate.is_finite() or rate <= 0 or rate > Decimal(str(MAX_EXCHANGE_RATE)):
+        rate = Decimal(1)
+    return rate
+
+
+def _financial_row_data(row: Any) -> dict[str, Any]:
+    data = json_loads(row.get("data_json") or "{}") or {}
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=409, detail="Stored financial record is invalid")
+    return data
+
+
+def _financial_marker_id(namespace: str, idempotency_key: str) -> str:
+    digest = hashlib.sha256(f"{namespace}\0{idempotency_key}".encode("utf-8")).hexdigest()
+    return f"financial_idem_{digest[:48]}"
+
+
+def _financial_request_hash(payload: dict[str, Any]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _financial_get_marker(
+    conn: Any, collection: str, namespace: str, idempotency_key: str
+) -> dict[str, Any] | None:
+    row = _clothes_lock_row(
+        conn,
+        collection,
+        _financial_marker_id(namespace, idempotency_key),
+        postgres=False,
+    )
+    return _entity_from_db_row(row) if row else None
+
+
+def _financial_check_marker(
+    marker: dict[str, Any] | None, actor_id: str, request_hash: str
+) -> dict[str, Any] | None:
+    if not marker:
+        return None
+    data = marker.get("data") or {}
+    if (
+        str(data.get("actorId") or "") != actor_id
+        or str(data.get("requestHash") or "") != request_hash
+    ):
+        raise HTTPException(status_code=409, detail="Idempotency key was already used")
+    return data
+
+
+def _financial_insert_marker(
+    conn: Any,
+    collection: str,
+    namespace: str,
+    idempotency_key: str,
+    actor_id: str,
+    request_hash: str,
+    result: dict[str, Any],
+) -> None:
+    _insert_entity_in_transaction(
+        conn,
+        collection,
+        _financial_marker_id(namespace, idempotency_key),
+        {
+            "actorId": actor_id,
+            "requestHash": request_hash,
+            "idempotencyKey": idempotency_key,
+            **result,
+        },
+        actor_id,
+    )
+
+
+def _financial_active_rows(conn: Any, collection: str) -> list[Any]:
+    return conn.execute(
+        text(
+            "SELECT type,id,data_json,deleted,created_at,created_by,last_modified "
+            "FROM entities WHERE type=:type AND deleted=false"
+        ),
+        {"type": collection},
+    ).mappings().all()
+
+
+def _financial_allocations(raw: Any, field: str, *, allow_empty: bool = True) -> list[dict[str, Any]]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or len(raw) > 500:
+        raise HTTPException(status_code=400, detail=f"{field} must be a list")
+    totals: dict[str, int] = {}
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise HTTPException(status_code=400, detail=f"Invalid {field}[{index}]")
+        receipt_id = validate_entity_id(entry.get("receiptId"))
+        amount = _financial_minor(entry.get("amountUSD"), f"{field}[{index}].amountUSD")
+        if amount <= 0:
+            continue
+        totals[receipt_id] = totals.get(receipt_id, 0) + amount
+        if totals[receipt_id] > 1_000_000_000:
+            raise HTTPException(status_code=400, detail=f"Invalid {field} total")
+    rows = [
+        {"receiptId": receipt_id, "amountUSD": _financial_usd(amount)}
+        for receipt_id, amount in sorted(totals.items())
+    ]
+    if not allow_empty and not rows:
+        raise HTTPException(status_code=400, detail=f"{field} must contain funding")
+    return rows
+
+
+def _financial_allocation_map(raw: Any) -> dict[str, int]:
+    result: dict[str, int] = {}
+    if not isinstance(raw, list):
+        return result
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        receipt_id = str(entry.get("receiptId") or "")
+        if not receipt_id:
+            continue
+        result[receipt_id] = result.get(receipt_id, 0) + _financial_minor(
+            entry.get("amountUSD"), "stored allocation"
+        )
+    return result
+
+
+def _financial_ad_general_usage(ad: dict[str, Any], receipt_id: str) -> int:
+    """Mirror getReceiptUsageStats, including legacy records."""
+    receipt_map = _financial_allocation_map(ad.get("receiptAllocations"))
+    due_map = _financial_allocation_map(ad.get("dueAllocations"))
+    receipt_sum = receipt_map.get(receipt_id, 0)
+    due_sum = due_map.get(receipt_id, 0)
+    legacy_due = 0
+    if str(ad.get("linkedDeliveryReceiptId") or "") == receipt_id and due_sum == 0:
+        legacy_due = _financial_minor(ad.get("dueAmountToUseUSD"), "stored due allocation")
+        if legacy_due == 0 and ad.get("dueAmountToUseLYD"):
+            local_minor = _financial_minor(ad.get("dueAmountToUseLYD"), "stored due allocation")
+            rate = _financial_rate(ad.get("exchangeRate"))
+            legacy_due = int((Decimal(local_minor) / rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    explicit = receipt_sum + due_sum + legacy_due
+    if explicit > 0:
+        return explicit
+    if isinstance(ad.get("receiptAllocations"), list) or isinstance(ad.get("dueAllocations"), list):
+        return 0
+    references = {
+        str(ad.get("fundingReceiptId") or ""),
+        str(ad.get("receiptId") or ""),
+        str(ad.get("linkedDeliveryReceiptId") or ""),
+    }
+    if receipt_id not in references:
+        return 0
+    fallback = ad.get("spentUSD") if ad.get("spentUSD") is not None else ad.get("amountUSD")
+    return _financial_minor(fallback, "stored legacy ad amount")
+
+
+def _financial_ad_due_usage(ad: dict[str, Any], receipt_id: str) -> int:
+    due = _financial_allocation_map(ad.get("dueAllocations")).get(receipt_id, 0)
+    if due > 0:
+        return due
+    if str(ad.get("linkedDeliveryReceiptId") or "") != receipt_id:
+        return 0
+    direct = _financial_minor(ad.get("dueAmountToUseUSD"), "stored due allocation")
+    if direct:
+        return direct
+    local = _financial_minor(ad.get("dueAmountToUseLYD"), "stored due allocation")
+    if not local:
+        return 0
+    return int(
+        (Decimal(local) / _financial_rate(ad.get("exchangeRate"))).quantize(
+            Decimal("1"), rounding=ROUND_HALF_UP
+        )
+    )
+
+
+def _financial_usage(
+    ad_rows: list[Any], receipt_id: str, *, due: bool = False, exclude_ad_id: str | None = None
+) -> int:
+    total = 0
+    for row in ad_rows:
+        if exclude_ad_id and str(row.get("id") or "") == exclude_ad_id:
+            continue
+        ad = _financial_row_data(row)
+        if str(ad.get("recordType") or "") == "receipt":
+            continue
+        total += (
+            _financial_ad_due_usage(ad, receipt_id)
+            if due
+            else _financial_ad_general_usage(ad, receipt_id)
+        )
+    return total
+
+
+def _financial_outgoing(data: dict[str, Any]) -> int:
+    transfers = data.get("transfers")
+    if transfers is None:
+        return 0
+    if not isinstance(transfers, list):
+        raise HTTPException(status_code=409, detail="Stored receipt transfers are invalid")
+    total = 0
+    for transfer in transfers:
+        if not isinstance(transfer, dict):
+            raise HTTPException(status_code=409, detail="Stored receipt transfer is invalid")
+        total += _financial_minor(transfer.get("amountUSD"), "stored transfer")
+    return total
+
+
+def _financial_due_total(data: dict[str, Any]) -> int:
+    local_value = data.get("debtAmountLocal")
+    if local_value is None:
+        local_value = data.get("amountLocal")
+    local = _financial_minor(local_value, "receipt due amount")
+    rate = _financial_rate(data.get("exchangeRate"))
+    if local > 0 and rate > 0:
+        return int((Decimal(local) / rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    usd_value = data.get("debtAmountUSD")
+    if usd_value is None:
+        usd_value = data.get("amountUSD")
+    return _financial_minor(usd_value, "receipt due amount")
+
+
+def _financial_receipt_ids(ad: dict[str, Any]) -> set[str]:
+    ids: set[str] = set()
+    for field in ("receiptAllocations", "dueAllocations", "mergedPaidAllocations"):
+        if isinstance(ad.get(field), list):
+            for entry in ad[field]:
+                if isinstance(entry, dict) and entry.get("receiptId"):
+                    ids.add(str(entry["receiptId"]))
+    for field in ("receiptId", "fundingReceiptId", "linkedDeliveryReceiptId"):
+        if ad.get(field):
+            ids.add(str(ad[field]))
+    for baseline_name in (
+        "stopAllocationBaseline",
+        "refundAllocationBaseline",
+        "refundDueBaseline",
+    ):
+        baseline = ad.get(baseline_name)
+        if isinstance(baseline, list):
+            baseline = {"receipt": baseline}
+        if isinstance(baseline, dict):
+            for value in baseline.values():
+                if isinstance(value, list):
+                    for entry in value:
+                        if isinstance(entry, dict) and entry.get("receiptId"):
+                            ids.add(str(entry["receiptId"]))
+    return {validate_entity_id(value) for value in ids if value}
+
+
+def _financial_lock_receipts(
+    conn: Any, receipt_ids: set[str] | list[str], *, postgres: bool
+) -> dict[str, Any]:
+    locked: dict[str, Any] = {}
+    for receipt_id in sorted(set(receipt_ids)):
+        locked[receipt_id] = _clothes_lock_row(
+            conn, "receipts", receipt_id, postgres=postgres
+        )
+    return locked
+
+
+def _financial_entity_result(conn: Any, collection: str, entity_id: str) -> dict[str, Any]:
+    row = _clothes_lock_row(conn, collection, entity_id, postgres=False)
+    if not row:
+        raise HTTPException(status_code=409, detail="Idempotent operation result is missing")
+    return _entity_from_db_row(row)
+
+
+def _receipt_transfer_atomic(
+    actor: dict[str, Any], body: ReceiptTransferRequest
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], bool]:
+    actor_id = validate_entity_id(actor.get("id"))
+    if not user_has_permission(actor, "receipts", "transfer"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    source_id = validate_entity_id(body.sourceReceiptId)
+    target_customer_id = validate_entity_id(body.targetCustomerId)
+    target_receipt_id = validate_entity_id(body.targetReceiptId)
+    idem = sanitize_str(body.idempotencyKey, 120)
+    note = sanitize_str(str(body.note or ""), 500)
+    request_hash = _financial_request_hash(
+        {
+            "sourceReceiptId": source_id,
+            "targetCustomerId": target_customer_id,
+            "targetReceiptId": target_receipt_id,
+            "amountMinorUSD": body.amountMinorUSD,
+            "expectedSourceLastModified": body.expectedSourceLastModified,
+            "note": note,
+        }
+    )
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK
+    with guard:
+        with db_conn() as conn:
+            _lock_idempotency_key(conn, idem, postgres=postgres, namespace="receiptTransfer")
+            prior = _financial_check_marker(
+                _financial_get_marker(
+                    conn, RECEIPT_TRANSFER_MUTATION_COLLECTION, "receiptTransfer", idem
+                ),
+                actor_id,
+                request_hash,
+            )
+            if prior:
+                source = _financial_entity_result(conn, "receipts", str(prior.get("sourceReceiptId")))
+                target = _financial_entity_result(conn, "receipts", str(prior.get("targetReceiptId")))
+                return source, target, prior.get("transfer") or {}, True
+
+            source_row = _clothes_lock_row(conn, "receipts", source_id, postgres=postgres)
+            if not source_row or bool(source_row["deleted"]):
+                raise HTTPException(status_code=404, detail="Source receipt not found")
+            if int(source_row["last_modified"]) != int(body.expectedSourceLastModified):
+                raise HTTPException(status_code=409, detail="Conflict: source receipt has changed")
+            source = _financial_row_data(source_row)
+            source_status = str(source.get("status") or "")
+            if source_status in {"Canceled", "Lost"} or not (
+                source_status == "Paid" or source.get("isPaid") is True
+            ):
+                raise HTTPException(status_code=400, detail="Only a paid receipt can transfer balance")
+            source_customer_id = validate_entity_id(source.get("customerId"))
+            if source_customer_id == target_customer_id:
+                raise HTTPException(status_code=400, detail="Target customer must be different")
+
+            customer_rows: dict[str, Any] = {}
+            for customer_id in sorted({source_customer_id, target_customer_id}):
+                customer_rows[customer_id] = _clothes_lock_row(
+                    conn, "customers", customer_id, postgres=postgres
+                )
+            if not customer_rows.get(source_customer_id) or bool(customer_rows[source_customer_id]["deleted"]):
+                raise HTTPException(status_code=409, detail="Source receipt customer is not active")
+            if not customer_rows.get(target_customer_id) or bool(customer_rows[target_customer_id]["deleted"]):
+                raise HTTPException(status_code=404, detail="Target customer not found")
+            if _clothes_lock_row(conn, "receipts", target_receipt_id, postgres=postgres):
+                raise HTTPException(status_code=409, detail="Target receipt ID already exists")
+
+            ad_rows = _financial_active_rows(conn, "ads")
+            total = _financial_minor(source.get("amountUSD"), "receipt amount")
+            committed = _financial_usage(ad_rows, source_id) + _financial_outgoing(source)
+            if committed + int(body.amountMinorUSD) > total:
+                raise HTTPException(status_code=409, detail="Insufficient available receipt balance")
+
+            try:
+                rate = Decimal(str(source.get("exchangeRate")))
+            except (InvalidOperation, ValueError, TypeError):
+                rate = Decimal(0)
+            if not rate.is_finite() or rate <= 0 or rate > Decimal(str(MAX_EXCHANGE_RATE)):
+                raise HTTPException(status_code=409, detail="Source receipt has an invalid exchange rate")
+            local_minor = int(
+                (Decimal(int(body.amountMinorUSD)) * rate).quantize(
+                    Decimal("1"), rounding=ROUND_HALF_UP
+                )
+            )
+            now_iso = _iso_utc()
+            transfer = {
+                "id": f"transfer_{hashlib.sha256(idem.encode('utf-8')).hexdigest()[:32]}",
+                "toCustomerId": target_customer_id,
+                "toReceiptId": target_receipt_id,
+                "amountUSD": _financial_usd(body.amountMinorUSD),
+                "amountLocal": _financial_usd(local_minor),
+                "date": now_iso,
+                "note": note,
+            }
+            transfers = list(source.get("transfers") or [])
+            transfers.append(transfer)
+            source["transfers"] = transfers
+            saved_source = _clothes_write_row(conn, source_row, source)
+            target_data = {
+                "recordType": "receipt",
+                "customerId": target_customer_id,
+                "amountUSD": _financial_usd(body.amountMinorUSD),
+                "exchangeRate": float(rate),
+                "amountLocal": _financial_usd(local_minor),
+                "status": "Paid",
+                "isPaid": True,
+                "paymentMethod": "Transfer",
+                "receiptType": "TRANSFER_IN",
+                "transferFromReceiptId": source_id,
+                "transferFromCustomerId": source_customer_id,
+                "serialNumber": "",
+                "payments": [],
+                "phoneNumber": "",
+                "collected": False,
+                "deliveryStatus": "Office",
+                "isReceivedInOffice": True,
+                "startDate": now_iso,
+                "endDate": now_iso,
+                "collectionDate": now_iso,
+                "createdAt": now_iso,
+                "note": note,
+            }
+            saved_target = _insert_entity_in_transaction(
+                conn, "receipts", target_receipt_id, target_data, actor_id
+            )
+            _financial_insert_marker(
+                conn,
+                RECEIPT_TRANSFER_MUTATION_COLLECTION,
+                "receiptTransfer",
+                idem,
+                actor_id,
+                request_hash,
+                {
+                    "sourceReceiptId": source_id,
+                    "targetReceiptId": target_receipt_id,
+                    "transfer": transfer,
+                },
+            )
+            return saved_source, saved_target, transfer, False
+
+
+def _financial_collection_payments(raw: Any) -> tuple[list[dict[str, Any]], int]:
+    if raw is None:
+        return [], 0
+    if not isinstance(raw, list) or len(raw) > 100:
+        raise HTTPException(status_code=400, detail="collectionPayments must be a list")
+    usd_methods = {"USDT", "Bank Transfer (USD)", "Cash (USD)"}
+    payments: list[dict[str, Any]] = []
+    total_minor = 0
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise HTTPException(status_code=400, detail=f"Invalid collectionPayments[{index}]")
+        method = sanitize_str(str(entry.get("method") or ""), 80)
+        if not method:
+            raise HTTPException(status_code=400, detail="Payment method is required")
+        try:
+            amount = Decimal(str(entry.get("amount", 0)))
+            rate1 = Decimal(str(entry.get("rate", 0) or 0))
+            rate2 = Decimal(str(entry.get("rate2", 0) or 0))
+        except (InvalidOperation, ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Invalid collection payment")
+        if (
+            not amount.is_finite()
+            or not rate1.is_finite()
+            or not rate2.is_finite()
+            or amount < 0
+            or rate1 < 0
+            or rate2 <= 0
+            or amount > Decimal(str(MAX_FINANCIAL_AMOUNT))
+            or rate1 > Decimal(str(MAX_EXCHANGE_RATE))
+            or rate2 > Decimal(str(MAX_EXCHANGE_RATE))
+        ):
+            raise HTTPException(status_code=400, detail="Invalid collection payment")
+        r1 = amount * rate1
+        raw_usd = (r1 / rate2) if method in usd_methods else (amount / rate2)
+        row_minor = int((raw_usd * 100).quantize(Decimal("1"), rounding=ROUND_CEILING))
+        total_minor += row_minor
+        payments.append(
+            {
+                "method": method,
+                "amount": float(amount),
+                "rate": float(rate1),
+                "rate2": float(rate2),
+                "collectionType": sanitize_str(str(entry.get("collectionType") or ""), 40),
+                "deliveryPersonId": (
+                    validate_entity_id(entry.get("deliveryPersonId"))
+                    if entry.get("deliveryPersonId")
+                    else ""
+                ),
+            }
+        )
+    # Preserve the application's historical customer-favouring one-cent total
+    # adjustment, but do it with integers (no floating point residue).
+    if total_minor % 100:
+        total_minor += 1
+    if total_minor > 1_000_000_000:
+        raise HTTPException(status_code=400, detail="Collection payment total is too large")
+    return payments, total_minor
+
+
+def _financial_topups(raw: Any) -> tuple[list[dict[str, Any]], int]:
+    if not isinstance(raw, list) or len(raw) > 200:
+        raise HTTPException(status_code=400, detail="topUps must be a list")
+    result: list[dict[str, Any]] = []
+    total = 0
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise HTTPException(status_code=400, detail=f"Invalid topUps[{index}]")
+        amount = _financial_minor(entry.get("amount"), f"topUps[{index}].amount")
+        try:
+            days = int(entry.get("extendDays", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            raise HTTPException(status_code=400, detail="Invalid top-up extension")
+        if days < 0 or days > 36500:
+            raise HTTPException(status_code=400, detail="Invalid top-up extension")
+        if amount == 0 and days == 0:
+            raise HTTPException(status_code=400, detail="A top-up must add money or time")
+        row = sanitize_json(entry) or {}
+        row["amount"] = _financial_usd(amount)
+        row["extendDays"] = days
+        result.append(row)
+        total += amount
+    return result, total
+
+
+def _financial_validate_paid_receipts(
+    receipt_allocations: list[dict[str, Any]],
+    *,
+    customer_id: str,
+    locked_receipts: dict[str, Any],
+    ad_rows: list[Any],
+    current_ad_id: str | None,
+) -> None:
+    for allocation in receipt_allocations:
+        receipt_id = str(allocation["receiptId"])
+        row = locked_receipts.get(receipt_id)
+        if not row or bool(row["deleted"]):
+            raise HTTPException(status_code=404, detail=f"Funding receipt not found: {receipt_id}")
+        data = _financial_row_data(row)
+        status = str(data.get("status") or "")
+        if status in {"Canceled", "Lost"} or not (
+            status == "Paid" or data.get("isPaid") is True
+        ):
+            raise HTTPException(status_code=400, detail="Ad funding requires paid receipts")
+        if str(data.get("customerId") or "") != customer_id:
+            raise HTTPException(status_code=400, detail="Funding receipt belongs to another customer")
+        total = _financial_minor(data.get("amountUSD"), "receipt amount")
+        committed = _financial_usage(
+            ad_rows, receipt_id, exclude_ad_id=current_ad_id
+        ) + _financial_outgoing(data)
+        requested = _financial_minor(allocation.get("amountUSD"), "receipt allocation")
+        if committed + requested > total:
+            raise HTTPException(status_code=409, detail=f"Insufficient balance on receipt {receipt_id}")
+
+
+def _financial_validate_due_receipt(
+    due_allocations: list[dict[str, Any]],
+    *,
+    linked_receipt_id: str,
+    customer_id: str,
+    locked_receipts: dict[str, Any],
+    ad_rows: list[Any],
+    current_ad_id: str | None,
+    require_pending: bool = True,
+) -> None:
+    if any(str(row.get("receiptId") or "") != linked_receipt_id for row in due_allocations):
+        raise HTTPException(status_code=400, detail="Due funding must use the linked delivery receipt")
+    row = locked_receipts.get(linked_receipt_id)
+    if not row or bool(row["deleted"]):
+        raise HTTPException(status_code=404, detail="Linked delivery receipt not found")
+    data = _financial_row_data(row)
+    if str(data.get("customerId") or "") != customer_id:
+        raise HTTPException(status_code=400, detail="Linked delivery receipt belongs to another customer")
+    temp_number = str(data.get("tempReceiptNo") or "")
+    delivery_status = str(data.get("deliveryStatus") or "")
+    if require_pending and (
+        not (temp_number.startswith("D") and temp_number[1:].isdigit())
+        or delivery_status in {"Delivered", "Office", "Canceled"}
+        or str(data.get("status") or "") in {"Canceled", "Lost"}
+        or not str(data.get("deliveryPersonId") or "").strip()
+    ):
+        raise HTTPException(status_code=400, detail="Linked receipt is not a pending assigned delivery receipt")
+    requested = sum(
+        _financial_minor(entry.get("amountUSD"), "due allocation") for entry in due_allocations
+    )
+    committed = _financial_usage(
+        ad_rows, linked_receipt_id, due=True, exclude_ad_id=current_ad_id
+    )
+    if committed + requested > _financial_due_total(data):
+        raise HTTPException(status_code=409, detail="Insufficient delivery due credit")
+
+
+def _financial_derive_ad(
+    actor: dict[str, Any],
+    requested: dict[str, Any],
+    existing: dict[str, Any] | None,
+    *,
+    locked_receipts: dict[str, Any],
+    ad_rows: list[Any],
+    current_ad_id: str | None,
+) -> dict[str, Any]:
+    """Merge ordinary ad edits, then replace every funding mirror."""
+    base = dict(existing or {})
+    clean = sanitize_json(requested or {}) or {}
+    for key in (
+        "id",
+        "_created",
+        "_lastModified",
+        "_deleted",
+        "createdAt",
+        "createdBy",
+        "creatorId",
+        "amountUSD",
+        "amountLocal",
+        "initialAmountUSD",
+        "spentUSD",
+        "stoppedAt",
+        "stopAllocationBaseline",
+        "receiptIds",
+        "fundingReceiptId",
+        "dueAmountToUseUSD",
+        "dueAmountToUseLYD",
+        "hasMergedPaidFunds",
+        "isPaid",
+    ):
+        clean.pop(key, None)
+    # Only /stop changes into or out of Stopped. Ordinary edit payloads often
+    # echo the current status, which is harmless and kept stable here.
+    requested_status = str(clean.pop("status", "") or "")
+    old_status = str((existing or {}).get("status") or "")
+    if existing and requested_status and requested_status != old_status:
+        raise HTTPException(status_code=405, detail="Ad status changes require their dedicated workflow")
+    base.update(clean)
+    base["status"] = old_status or "Active"
+    base["recordType"] = "ad"
+    base["creatorId"] = str((existing or {}).get("creatorId") or actor.get("id") or "")
+
+    customer_id = validate_entity_id(base.get("customerId"))
+    payment_status = str(base.get("paymentStatus") or "paid").lower()
+    if payment_status not in {"paid", "not_paid", "wont_pay"}:
+        raise HTTPException(status_code=400, detail="Invalid ad paymentStatus")
+    collection_method = str(base.get("collectionMethod") or "")
+    paid_request = base.get("receiptAllocations")
+    due_request = base.get("dueAllocations")
+    merged_request = base.get("mergedPaidAllocations")
+    linked_id = str(base.get("linkedDeliveryReceiptId") or "")
+
+    paid_allocations: list[dict[str, Any]] = []
+    due_allocations: list[dict[str, Any]] = []
+    payments: list[dict[str, Any]] = []
+    amount_minor = 0
+    if payment_status == "paid":
+        paid_allocations = _financial_allocations(
+            paid_request, "receiptAllocations", allow_empty=False
+        )
+        _financial_validate_paid_receipts(
+            paid_allocations,
+            customer_id=customer_id,
+            locked_receipts=locked_receipts,
+            ad_rows=ad_rows,
+            current_ad_id=current_ad_id,
+        )
+        amount_minor = sum(
+            _financial_minor(row["amountUSD"], "receipt allocation")
+            for row in paid_allocations
+        )
+        linked_id = ""
+        collection_method = ""
+    elif payment_status == "not_paid" and collection_method == "driver":
+        linked_id = validate_entity_id(linked_id or base.get("receiptId"))
+        merged_allocations = _financial_allocations(
+            merged_request if merged_request is not None else paid_request,
+            "mergedPaidAllocations",
+        )
+        if paid_request is not None:
+            supplied_paid = _financial_allocations(paid_request, "receiptAllocations")
+            if merged_request is not None and supplied_paid != merged_allocations:
+                raise HTTPException(status_code=400, detail="Merged paid allocation mirrors disagree")
+        paid_allocations = merged_allocations
+        due_allocations = _financial_allocations(due_request, "dueAllocations")
+        _financial_validate_paid_receipts(
+            paid_allocations,
+            customer_id=customer_id,
+            locked_receipts=locked_receipts,
+            ad_rows=ad_rows,
+            current_ad_id=current_ad_id,
+        )
+        _financial_validate_due_receipt(
+            due_allocations,
+            linked_receipt_id=linked_id,
+            customer_id=customer_id,
+            locked_receipts=locked_receipts,
+            ad_rows=ad_rows,
+            current_ad_id=current_ad_id,
+        )
+        amount_minor = sum(
+            _financial_minor(row["amountUSD"], "ad allocation")
+            for row in [*paid_allocations, *due_allocations]
+        )
+        base["deliveryPersonId"] = ""
+        base["deliveryStatus"] = "Office"
+    else:
+        if any(
+            _financial_allocations(value, name)
+            for name, value in (
+                ("receiptAllocations", paid_request),
+                ("dueAllocations", due_request),
+                ("mergedPaidAllocations", merged_request),
+            )
+        ):
+            raise HTTPException(status_code=400, detail="This unpaid ad cannot use receipt funding")
+        payments, amount_minor = _financial_collection_payments(base.get("collectionPayments"))
+        linked_id = ""
+
+    rate = _financial_rate(base.get("exchangeRate"))
+    local_minor = int(
+        (Decimal(amount_minor) * rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    )
+    paid_ids = [str(row["receiptId"]) for row in paid_allocations]
+    due_minor = sum(
+        _financial_minor(row["amountUSD"], "due allocation") for row in due_allocations
+    )
+    base.update(
+        {
+            "customerId": customer_id,
+            "paymentStatus": payment_status,
+            "collectionMethod": collection_method,
+            "collectionPayments": [] if payment_status == "paid" else payments,
+            "paymentMethod": "" if payment_status == "paid" else (payments[0]["method"] if payments else ""),
+            "exchangeRate": float(rate),
+            "amountUSD": _financial_usd(amount_minor),
+            "amountLocal": _financial_usd(local_minor),
+            "receiptAllocations": paid_allocations,
+            "mergedPaidAllocations": paid_allocations
+            if payment_status == "not_paid" and collection_method == "driver"
+            else [],
+            "dueAllocations": due_allocations,
+            "receiptIds": paid_ids,
+            "fundingReceiptId": paid_ids[0] if paid_ids else "",
+            "linkedDeliveryReceiptId": linked_id,
+            "receiptId": linked_id if linked_id else (paid_ids[0] if paid_ids else ""),
+            "dueAmountToUseUSD": _financial_usd(due_minor),
+            "hasMergedPaidFunds": bool(paid_allocations)
+            if payment_status == "not_paid" and collection_method == "driver"
+            else False,
+            "isPaid": payment_status == "paid",
+        }
+    )
+    topups = base.get("topUps") if isinstance(base.get("topUps"), list) else []
+    topup_minor = sum(_financial_minor(row.get("amount"), "top-up") for row in topups if isinstance(row, dict))
+    base["initialAmountUSD"] = _financial_usd(max(amount_minor - topup_minor, 0))
+    return base
+
+
+def _financial_reduce_allocations(
+    allocations: list[dict[str, Any]], amount_minor: int
+) -> tuple[list[dict[str, Any]], int]:
+    result = [dict(row) for row in allocations]
+    remaining = int(amount_minor)
+    for row in reversed(result):
+        if remaining <= 0:
+            break
+        current = _financial_minor(row.get("amountUSD"), "allocation")
+        returned = min(current, remaining)
+        row["amountUSD"] = _financial_usd(current - returned)
+        remaining -= returned
+    return result, remaining
+
+
+def _financial_apply_refund(
+    actor: dict[str, Any], requested: dict[str, Any], existing: dict[str, Any]
+) -> dict[str, Any]:
+    result = dict(existing)
+    refund_type = str(requested.get("refundType") or "None")
+    if refund_type not in {"None", "Full", "Partial"}:
+        raise HTTPException(status_code=400, detail="Invalid refundType")
+    ad_amount = _financial_minor(existing.get("amountUSD"), "ad amount")
+    refund_amount = 0 if refund_type == "None" else _financial_minor(
+        requested.get("refundAmount"), "refundAmount"
+    )
+    if refund_type == "Full":
+        refund_amount = ad_amount
+    if refund_amount > ad_amount:
+        raise HTTPException(status_code=400, detail="Refund exceeds ad amount")
+
+    current_paid = _financial_allocations(existing.get("receiptAllocations"), "receiptAllocations")
+    current_due = _financial_allocations(existing.get("dueAllocations"), "dueAllocations")
+    stored_paid_baseline = existing.get("refundAllocationBaseline")
+    stored_due_baseline = existing.get("refundDueBaseline")
+    paid_baseline = _financial_allocations(
+        stored_paid_baseline if isinstance(stored_paid_baseline, list) else current_paid,
+        "refundAllocationBaseline",
+    )
+    due_baseline = _financial_allocations(
+        stored_due_baseline if isinstance(stored_due_baseline, list) else current_due,
+        "refundDueBaseline",
+    )
+    if refund_type == "None":
+        result["receiptAllocations"] = paid_baseline
+        result["dueAllocations"] = due_baseline
+        result["refundAllocationBaseline"] = None
+        result["refundDueBaseline"] = None
+        result["refundType"] = "None"
+        result["refundAmount"] = 0
+        result.pop("refundStatus", None)
+        result.pop("spentUSD", None)
+        # Undo returns to the status that existed before the refund. Legacy
+        # rows did not save it, so Active is the conservative usable default.
+        result["status"] = str(existing.get("preRefundStatus") or "Active")
+        result.pop("preRefundStatus", None)
+    else:
+        reduced_paid, remaining = _financial_reduce_allocations(paid_baseline, refund_amount)
+        reduced_due, _ = _financial_reduce_allocations(due_baseline, remaining)
+        result["receiptAllocations"] = reduced_paid
+        result["dueAllocations"] = reduced_due
+        result["refundAllocationBaseline"] = paid_baseline
+        result["refundDueBaseline"] = due_baseline
+        result["refundType"] = refund_type
+        result["refundAmount"] = _financial_usd(refund_amount)
+        result["refundStatus"] = sanitize_str(str(requested.get("refundStatus") or "Pending"), 40)
+        result["preRefundStatus"] = str(existing.get("preRefundStatus") or existing.get("status") or "Active")
+        result["status"] = "Canceled"
+        result["canceledBy"] = str(actor.get("id") or "")
+        result["spentUSD"] = _financial_usd(ad_amount - refund_amount)
+    paid = _financial_allocations(result.get("receiptAllocations"), "receiptAllocations")
+    due = _financial_allocations(result.get("dueAllocations"), "dueAllocations")
+    result["receiptAllocations"] = paid
+    result["dueAllocations"] = due
+    if str(result.get("paymentStatus") or "") == "not_paid" and str(result.get("collectionMethod") or "") == "driver":
+        result["mergedPaidAllocations"] = paid
+    result["receiptIds"] = [row["receiptId"] for row in paid]
+    result["fundingReceiptId"] = paid[0]["receiptId"] if paid else ""
+    result["dueAmountToUseUSD"] = _financial_usd(
+        sum(_financial_minor(row["amountUSD"], "due allocation") for row in due)
+    )
+    result["hasMergedPaidFunds"] = bool(paid) and str(result.get("paymentStatus")) == "not_paid"
+    return result
+
+
+def _financial_validate_ad_plan(
+    ad: dict[str, Any],
+    *,
+    locked_receipts: dict[str, Any],
+    ad_rows: list[Any],
+    current_ad_id: str,
+) -> None:
+    customer_id = validate_entity_id(ad.get("customerId"))
+    paid = _financial_allocations(ad.get("receiptAllocations"), "receiptAllocations")
+    _financial_validate_paid_receipts(
+        paid,
+        customer_id=customer_id,
+        locked_receipts=locked_receipts,
+        ad_rows=ad_rows,
+        current_ad_id=current_ad_id,
+    )
+    due = _financial_allocations(ad.get("dueAllocations"), "dueAllocations")
+    linked = str(ad.get("linkedDeliveryReceiptId") or "")
+    if due:
+        _financial_validate_due_receipt(
+            due,
+            linked_receipt_id=validate_entity_id(linked),
+            customer_id=customer_id,
+            locked_receipts=locked_receipts,
+            ad_rows=ad_rows,
+            current_ad_id=current_ad_id,
+            require_pending=False,
+        )
+
+
+def _ad_mutation_atomic(
+    actor: dict[str, Any], body: AdMutationRequest
+) -> tuple[dict[str, Any], bool]:
+    actor_id = validate_entity_id(actor.get("id"))
+    ad_id = validate_entity_id(body.adId)
+    idem = sanitize_str(body.idempotencyKey, 120)
+    clean_request = sanitize_json(body.data or {}) or {}
+    validate_relationship_ids(clean_request, "ad data")
+    request_hash = _financial_request_hash(
+        {
+            "action": body.action,
+            "adId": ad_id,
+            "expectedLastModified": body.expectedLastModified,
+            "data": clean_request,
+        }
+    )
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK
+    with guard:
+        with db_conn() as conn:
+            _lock_idempotency_key(conn, idem, postgres=postgres, namespace="adFunding")
+            prior = _financial_check_marker(
+                _financial_get_marker(conn, AD_FUNDING_MUTATION_COLLECTION, "adFunding", idem),
+                actor_id,
+                request_hash,
+            )
+            if prior:
+                return _financial_entity_result(conn, "ads", str(prior.get("adId"))), True
+
+            initial_row = _clothes_lock_row(conn, "ads", ad_id, postgres=False)
+            initial_data = _financial_row_data(initial_row) if initial_row else {}
+            if body.action == "create":
+                if not user_has_permission(actor, "ads", "add"):
+                    raise HTTPException(status_code=403, detail="Forbidden")
+                if initial_row:
+                    raise HTTPException(status_code=409, detail="Ad ID already exists")
+            else:
+                if not initial_row or bool(initial_row["deleted"]):
+                    raise HTTPException(status_code=404, detail="Ad not found")
+                if body.expectedLastModified is None:
+                    raise HTTPException(status_code=400, detail="expectedLastModified is required")
+
+            # Discover both old and requested receipt identities before taking
+            # row locks. Re-reading the ad after the locks detects any race.
+            discovery = dict(initial_data)
+            discovery.update(clean_request)
+            receipt_ids = _financial_receipt_ids(discovery) | _financial_receipt_ids(initial_data)
+            locked_receipts = _financial_lock_receipts(conn, receipt_ids, postgres=postgres)
+            ad_row = _clothes_lock_row(conn, "ads", ad_id, postgres=postgres)
+            if body.action == "create":
+                if ad_row:
+                    raise HTTPException(status_code=409, detail="Ad ID already exists")
+                existing: dict[str, Any] | None = None
+            else:
+                if not ad_row or bool(ad_row["deleted"]):
+                    raise HTTPException(status_code=404, detail="Ad not found")
+                if int(ad_row["last_modified"]) != int(body.expectedLastModified):
+                    raise HTTPException(status_code=409, detail="Conflict: ad has changed")
+                existing = _financial_row_data(ad_row)
+                creator = ad_row.get("created_by") or existing.get("creatorId")
+                if not user_has_permission(
+                    actor, "ads", "edit", record_creator_id=str(creator or "")
+                ):
+                    raise HTTPException(status_code=403, detail="Forbidden")
+                if _financial_receipt_ids(existing) - set(locked_receipts):
+                    raise HTTPException(status_code=409, detail="Conflict: ad funding has changed")
+
+            is_refund = body.action == "update" and "refundType" in clean_request
+            if existing is not None and not is_refund and (
+                str(existing.get("status") or "") in {"Stopped", "Canceled", "Completed", "Lost"}
+                or (existing.get("refundType") and str(existing.get("refundType")) != "None")
+            ):
+                raise HTTPException(status_code=409, detail="A terminal or refunded ad cannot be edited")
+            ad_rows = _financial_active_rows(conn, "ads")
+            is_topup = body.action == "update" and "topUps" in clean_request and not is_refund
+            if is_refund:
+                assert existing is not None
+                saved_data = _financial_apply_refund(actor, clean_request, existing)
+                _financial_validate_ad_plan(
+                    saved_data,
+                    locked_receipts=locked_receipts,
+                    ad_rows=ad_rows,
+                    current_ad_id=ad_id,
+                )
+            else:
+                prepared_request = dict(clean_request)
+                if is_topup:
+                    assert existing is not None
+                    if str(existing.get("paymentStatus") or "") != "paid" or str(existing.get("status") or "") in {
+                        "Canceled", "Completed", "Lost", "Stopped"
+                    } or (existing.get("refundType") and existing.get("refundType") != "None"):
+                        raise HTTPException(status_code=409, detail="Only active paid ads can be topped up")
+                    topups, topup_total = _financial_topups(clean_request.get("topUps"))
+                    old_topups = existing.get("topUps") if isinstance(existing.get("topUps"), list) else []
+                    old_topup_total = sum(
+                        _financial_minor(row.get("amount"), "stored top-up")
+                        for row in old_topups
+                        if isinstance(row, dict)
+                    )
+                    old_amount = _financial_minor(existing.get("amountUSD"), "ad amount")
+                    base_minor = _financial_minor(existing.get("initialAmountUSD"), "initial ad amount") \
+                        if existing.get("initialAmountUSD") is not None \
+                        else max(old_amount - old_topup_total, 0)
+                    expected_total = base_minor + topup_total
+                    supplied_allocations = _financial_allocations(
+                        clean_request.get("receiptAllocations", existing.get("receiptAllocations")),
+                        "receiptAllocations",
+                        allow_empty=False,
+                    )
+                    if sum(_financial_minor(row["amountUSD"], "allocation") for row in supplied_allocations) != expected_total:
+                        raise HTTPException(status_code=400, detail="Top-up allocations do not match the server total")
+                    prepared_request = {
+                        **existing,
+                        **clean_request,
+                        "topUps": topups,
+                        "receiptAllocations": supplied_allocations,
+                    }
+                    base_end_raw = str(existing.get("initialEndDate") or existing.get("endDate") or "")
+                    if base_end_raw:
+                        try:
+                            base_end = datetime.fromisoformat(base_end_raw.replace("Z", "+00:00"))
+                        except ValueError:
+                            raise HTTPException(status_code=409, detail="Stored ad end date is invalid")
+                        if base_end.tzinfo is None:
+                            base_end = base_end.replace(tzinfo=timezone.utc)
+                        extension_days = sum(int(row.get("extendDays") or 0) for row in topups)
+                        prepared_request["initialEndDate"] = _iso_utc(base_end)
+                        prepared_request["endDate"] = _iso_utc(
+                            base_end + timedelta(days=extension_days)
+                        )
+                saved_data = _financial_derive_ad(
+                    actor,
+                    prepared_request,
+                    existing,
+                    locked_receipts=locked_receipts,
+                    ad_rows=ad_rows,
+                    current_ad_id=ad_id if existing else None,
+                )
+                if is_topup:
+                    saved_data["initialAmountUSD"] = _financial_usd(base_minor)
+
+            # The customer itself must be active; funding receipts were already
+            # locked in deterministic order above.
+            customer_id = validate_entity_id(saved_data.get("customerId"))
+            customer_row = _clothes_lock_row(conn, "customers", customer_id, postgres=postgres)
+            if not customer_row or bool(customer_row["deleted"]):
+                raise HTTPException(status_code=404, detail="Ad customer not found")
+
+            if body.action == "create":
+                saved = _insert_entity_in_transaction(conn, "ads", ad_id, saved_data, actor_id)
+            else:
+                assert ad_row is not None
+                saved = _clothes_write_row(conn, ad_row, saved_data)
+            _financial_insert_marker(
+                conn,
+                AD_FUNDING_MUTATION_COLLECTION,
+                "adFunding",
+                idem,
+                actor_id,
+                request_hash,
+                {"adId": ad_id},
+            )
+            return saved, False
+
+
+def _financial_proportional_plan(
+    entries: list[tuple[str, str, int]], target_minor: int
+) -> dict[tuple[str, str], int]:
+    """Allocate exact cents by baseline share using deterministic remainders."""
+    positive = [(pool, receipt_id, amount) for pool, receipt_id, amount in entries if amount > 0]
+    total = sum(amount for _, _, amount in positive)
+    if not positive or total <= 0:
+        return {(pool, receipt_id): 0 for pool, receipt_id, _ in entries}
+    target = min(max(int(target_minor), 0), total)
+    plan: dict[tuple[str, str], int] = {}
+    remainders: list[tuple[int, str, str]] = []
+    assigned = 0
+    for pool, receipt_id, amount in positive:
+        quotient, remainder = divmod(amount * target, total)
+        plan[(pool, receipt_id)] = quotient
+        assigned += quotient
+        remainders.append((remainder, pool, receipt_id))
+    for _remainder, pool, receipt_id in sorted(
+        remainders, key=lambda row: (-row[0], row[1], row[2])
+    )[: target - assigned]:
+        plan[(pool, receipt_id)] += 1
+    for pool, receipt_id, _ in entries:
+        plan.setdefault((pool, receipt_id), 0)
+    return plan
+
+
+def _financial_stop_baseline(ad: dict[str, Any]) -> dict[str, Any]:
+    stored = ad.get("stopAllocationBaseline")
+    if isinstance(stored, dict):
+        receipt = _financial_allocations(stored.get("receipt"), "stop baseline receipt")
+        due = _financial_allocations(stored.get("due"), "stop baseline due")
+        merged = _financial_allocations(stored.get("merged"), "stop baseline merged")
+        legacy = _financial_minor(stored.get("dueLegacy"), "stop baseline legacy due")
+        return {
+            "receipt": receipt,
+            "due": due,
+            "merged": merged,
+            "dueLegacy": _financial_usd(legacy),
+        }
+    receipt = _financial_allocations(ad.get("receiptAllocations"), "receiptAllocations")
+    due = _financial_allocations(ad.get("dueAllocations"), "dueAllocations")
+    merged = _financial_allocations(ad.get("mergedPaidAllocations"), "mergedPaidAllocations")
+    legacy = 0
+    if not due:
+        legacy = _financial_minor(ad.get("dueAmountToUseUSD"), "legacy due allocation")
+    return {
+        "receipt": receipt,
+        "due": due,
+        "merged": merged,
+        "dueLegacy": _financial_usd(legacy),
+    }
+
+
+def _financial_apply_stop(ad: dict[str, Any], spent_minor: int) -> dict[str, Any]:
+    amount_minor = _financial_minor(ad.get("amountUSD"), "ad amount")
+    if spent_minor < 0 or spent_minor > amount_minor:
+        raise HTTPException(status_code=400, detail="Spent amount must be between zero and the ad amount")
+    baseline = _financial_stop_baseline(ad)
+    receipt_map = _financial_allocation_map(baseline.get("receipt"))
+    due_map = _financial_allocation_map(baseline.get("due"))
+    legacy_minor = _financial_minor(baseline.get("dueLegacy"), "stop baseline legacy due")
+    linked_id = str(ad.get("linkedDeliveryReceiptId") or "")
+    entries: list[tuple[str, str, int]] = [
+        *(('receipt', receipt_id, amount) for receipt_id, amount in sorted(receipt_map.items())),
+        *(('due', receipt_id, amount) for receipt_id, amount in sorted(due_map.items())),
+    ]
+    if legacy_minor and linked_id:
+        entries.append(("legacyDue", linked_id, legacy_minor))
+    pool_total = sum(entry[2] for entry in entries)
+    if pool_total > 0 and spent_minor > pool_total:
+        raise HTTPException(status_code=409, detail="Spent amount exceeds the ad's funding baseline")
+    plan = _financial_proportional_plan(entries, spent_minor)
+    receipt_plan = [
+        {"receiptId": receipt_id, "amountUSD": _financial_usd(plan[("receipt", receipt_id)])}
+        for receipt_id in sorted(receipt_map)
+    ]
+    due_plan = [
+        {"receiptId": receipt_id, "amountUSD": _financial_usd(plan[("due", receipt_id)])}
+        for receipt_id in sorted(due_map)
+    ]
+    result = dict(ad)
+    result["stopAllocationBaseline"] = baseline
+    result["receiptAllocations"] = receipt_plan
+    result["dueAllocations"] = due_plan
+    if str(result.get("paymentStatus") or "") == "not_paid" and str(result.get("collectionMethod") or "") == "driver":
+        result["mergedPaidAllocations"] = [dict(row) for row in receipt_plan]
+    else:
+        result["mergedPaidAllocations"] = []
+    due_total = sum(plan[("due", receipt_id)] for receipt_id in due_map)
+    if legacy_minor and linked_id:
+        due_total += plan[("legacyDue", linked_id)]
+    result["dueAmountToUseUSD"] = _financial_usd(due_total)
+    result["receiptIds"] = [row["receiptId"] for row in receipt_plan]
+    result["fundingReceiptId"] = receipt_plan[0]["receiptId"] if receipt_plan else ""
+    result["hasMergedPaidFunds"] = bool(receipt_plan) and str(result.get("paymentStatus")) == "not_paid"
+    result["status"] = "Stopped"
+    result["spentUSD"] = _financial_usd(spent_minor)
+    if not result.get("stoppedAt"):
+        result["stoppedAt"] = _iso_utc()
+    result["lastUpdated"] = _iso_utc()
+    return result
+
+
+def _ad_stop_atomic(
+    actor: dict[str, Any], ad_id_raw: str, body: AdStopRequest
+) -> tuple[dict[str, Any], bool]:
+    actor_id = validate_entity_id(actor.get("id"))
+    ad_id = validate_entity_id(ad_id_raw)
+    if not user_has_permission(actor, "ads", "stopAd"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    idem = sanitize_str(body.idempotencyKey, 120)
+    request_hash = _financial_request_hash(
+        {
+            "adId": ad_id,
+            "spentMinorUSD": body.spentMinorUSD,
+            "expectedLastModified": body.expectedLastModified,
+        }
+    )
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK
+    with guard:
+        with db_conn() as conn:
+            _lock_idempotency_key(conn, idem, postgres=postgres, namespace="adStop")
+            prior = _financial_check_marker(
+                _financial_get_marker(conn, AD_STOP_MUTATION_COLLECTION, "adStop", idem),
+                actor_id,
+                request_hash,
+            )
+            if prior:
+                return _financial_entity_result(conn, "ads", str(prior.get("adId"))), True
+            initial = _clothes_lock_row(conn, "ads", ad_id, postgres=False)
+            if not initial or bool(initial["deleted"]):
+                raise HTTPException(status_code=404, detail="Ad not found")
+            initial_data = _financial_row_data(initial)
+            locked_receipts = _financial_lock_receipts(
+                conn, _financial_receipt_ids(initial_data), postgres=postgres
+            )
+            ad_row = _clothes_lock_row(conn, "ads", ad_id, postgres=postgres)
+            if not ad_row or bool(ad_row["deleted"]):
+                raise HTTPException(status_code=404, detail="Ad not found")
+            if int(ad_row["last_modified"]) != int(body.expectedLastModified):
+                raise HTTPException(status_code=409, detail="Conflict: ad has changed")
+            ad = _financial_row_data(ad_row)
+            if _financial_receipt_ids(ad) - set(locked_receipts):
+                raise HTTPException(status_code=409, detail="Conflict: ad funding has changed")
+            if str(ad.get("status") or "") in {"Canceled", "Completed", "Lost"} or (
+                ad.get("refundType") and str(ad.get("refundType")) != "None"
+            ):
+                raise HTTPException(status_code=409, detail="A terminal or refunded ad cannot be stopped")
+            plan = _financial_apply_stop(ad, int(body.spentMinorUSD))
+            _financial_validate_ad_plan(
+                plan,
+                locked_receipts=locked_receipts,
+                ad_rows=_financial_active_rows(conn, "ads"),
+                current_ad_id=ad_id,
+            )
+            saved = _clothes_write_row(conn, ad_row, plan)
+            _financial_insert_marker(
+                conn,
+                AD_STOP_MUTATION_COLLECTION,
+                "adStop",
+                idem,
+                actor_id,
+                request_hash,
+                {"adId": ad_id},
+            )
+            return saved, False
+
+
+def _financial_receipt_transferable(data: dict[str, Any]) -> bool:
+    status = str(data.get("status") or "")
+    return status not in {"Canceled", "Lost"} and (
+        status == "Paid" or data.get("isPaid") is True
+    )
+
+
+def _financial_release_canceled_due(
+    conn: Any,
+    receipt_id: str,
+    ad_rows: list[Any],
+    *,
+    postgres: bool,
+) -> list[dict[str, Any]]:
+    affected = [
+        row
+        for row in ad_rows
+        if receipt_id in _financial_receipt_ids(_financial_row_data(row))
+        and _financial_ad_due_usage(_financial_row_data(row), receipt_id) > 0
+    ]
+    saved: list[dict[str, Any]] = []
+    for discovered in sorted(affected, key=lambda row: str(row.get("id") or "")):
+        ad_row = _clothes_lock_row(
+            conn, "ads", str(discovered["id"]), postgres=postgres
+        )
+        if not ad_row or bool(ad_row["deleted"]):
+            continue
+        ad = _financial_row_data(ad_row)
+        due = [
+            dict(entry)
+            for entry in (ad.get("dueAllocations") or [])
+            if isinstance(entry, dict) and str(entry.get("receiptId") or "") != receipt_id
+        ]
+        ad["dueAllocations"] = due
+        if str(ad.get("linkedDeliveryReceiptId") or "") == receipt_id:
+            ad["dueAmountToUseUSD"] = 0.0
+            ad["dueAmountToUseLYD"] = 0.0
+        baseline = ad.get("stopAllocationBaseline")
+        if isinstance(baseline, dict):
+            next_baseline = dict(baseline)
+            next_baseline["due"] = [
+                dict(entry)
+                for entry in (baseline.get("due") or [])
+                if isinstance(entry, dict) and str(entry.get("receiptId") or "") != receipt_id
+            ]
+            if str(ad.get("linkedDeliveryReceiptId") or "") == receipt_id:
+                next_baseline["dueLegacy"] = 0.0
+            ad["stopAllocationBaseline"] = next_baseline
+        if isinstance(ad.get("refundDueBaseline"), list):
+            ad["refundDueBaseline"] = [
+                dict(entry)
+                for entry in ad["refundDueBaseline"]
+                if isinstance(entry, dict) and str(entry.get("receiptId") or "") != receipt_id
+            ]
+        saved.append(_clothes_write_row(conn, ad_row, ad))
+    return saved
+
+
+def _financial_patch_receipt_atomic(
+    actor: dict[str, Any],
+    receipt_id_raw: str,
+    updates: dict[str, Any],
+    expected_last_modified: int | None,
+) -> dict[str, Any]:
+    receipt_id = validate_entity_id(receipt_id_raw)
+    clean = sanitize_json(updates or {}) or {}
+    if set(clean) & (RECEIPT_TRANSFER_FIELDS - {"receiptType"}):
+        raise HTTPException(status_code=405, detail="Receipt transfer fields are server-controlled")
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK
+    with guard:
+        with db_conn() as conn:
+            row = _clothes_lock_row(conn, "receipts", receipt_id, postgres=postgres)
+            if not row or bool(row["deleted"]):
+                raise HTTPException(status_code=404, detail="Receipt not found")
+            if expected_last_modified is not None and int(row["last_modified"]) != int(expected_last_modified):
+                raise HTTPException(status_code=409, detail="Conflict: receipt has changed")
+            old = _financial_row_data(row)
+            if "receiptType" in clean:
+                requested_type = str(clean.get("receiptType") or "")
+                old_type = str(old.get("receiptType") or "")
+                if old_type == "TRANSFER_IN" or requested_type != old_type:
+                    raise HTTPException(status_code=405, detail="Receipt type is server-controlled")
+                clean.pop("receiptType", None)
+            if str(old.get("receiptType") or "") == "TRANSFER_IN" and set(clean) & RECEIPT_CAPACITY_FIELDS:
+                raise HTTPException(status_code=405, detail="Transferred-in receipt money fields are immutable")
+            merged = dict(old)
+            for key in ("id", "_created", "_lastModified", "_deleted", "createdBy", "createdAt", "creatorId"):
+                clean.pop(key, None)
+            merged.update(clean)
+            ad_rows = _financial_active_rows(conn, "ads")
+            if str(merged.get("deliveryStatus") or "") == "Canceled" and str(old.get("deliveryStatus") or "") != "Canceled":
+                _financial_release_canceled_due(
+                    conn, receipt_id, ad_rows, postgres=postgres
+                )
+                ad_rows = _financial_active_rows(conn, "ads")
+            general_used = _financial_usage(ad_rows, receipt_id)
+            due_used = _financial_usage(ad_rows, receipt_id, due=True)
+            primary_used = max(general_used - due_used, 0)
+            outgoing = _financial_outgoing(old)
+            new_total = _financial_minor(merged.get("amountUSD"), "receipt amount")
+            if new_total < general_used + outgoing:
+                raise HTTPException(status_code=409, detail="Receipt amount is below committed ads and transfers")
+            if _financial_due_total(merged) < due_used:
+                raise HTTPException(status_code=409, detail="Receipt due amount is below committed ads")
+            if (primary_used > 0 or outgoing > 0) and not _financial_receipt_transferable(merged):
+                raise HTTPException(status_code=409, detail="A funded or transferred receipt must remain paid")
+            if str(merged.get("customerId") or "") != str(old.get("customerId") or "") and (
+                general_used > 0 or outgoing > 0
+            ):
+                raise HTTPException(status_code=409, detail="A committed receipt cannot change customer")
+            return _clothes_write_row(conn, row, merged)
+
+
+def _financial_receipt_reference_reason(
+    conn: Any, receipt_id: str, data: dict[str, Any] | None = None
+) -> str | None:
+    receipt = data
+    if receipt is None:
+        row = _clothes_lock_row(conn, "receipts", receipt_id, postgres=False)
+        if not row or bool(row["deleted"]):
+            return None
+        receipt = _financial_row_data(row)
+    if _financial_outgoing(receipt) > 0:
+        return "outgoing transfer"
+    if str(receipt.get("receiptType") or "") == "TRANSFER_IN" or receipt.get("transferFromReceiptId"):
+        return "incoming transfer"
+    for ad_row in _financial_active_rows(conn, "ads"):
+        if receipt_id in _financial_receipt_ids(_financial_row_data(ad_row)):
+            return "ad funding"
+    for other_row in _financial_active_rows(conn, "receipts"):
+        if str(other_row.get("id") or "") == receipt_id:
+            continue
+        other = _financial_row_data(other_row)
+        if str(other.get("transferFromReceiptId") or "") == receipt_id:
+            return "linked transfer receipt"
+        for transfer in other.get("transfers") or []:
+            if isinstance(transfer, dict) and str(transfer.get("toReceiptId") or "") == receipt_id:
+                return "linked transfer"
+    return None
+
+
+def _financial_delete_receipt_atomic(receipt_id_raw: str) -> dict[str, Any]:
+    receipt_id = validate_entity_id(receipt_id_raw)
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK
+    with guard:
+        with db_conn() as conn:
+            row = _clothes_lock_row(conn, "receipts", receipt_id, postgres=postgres)
+            if not row or bool(row["deleted"]):
+                raise HTTPException(status_code=404, detail="Not found")
+            data = _financial_row_data(row)
+            reason = _financial_receipt_reference_reason(conn, receipt_id, data)
+            if reason:
+                raise HTTPException(status_code=409, detail=f"Receipt cannot be deleted while linked to {reason}")
+            return _clothes_write_row(conn, row, data, deleted=True)
+
+
+def _financial_delete_customer_atomic(customer_id_raw: str) -> dict[str, Any]:
+    """Delete an unreferenced customer without allowing a partial cascade."""
+    customer_id = validate_entity_id(customer_id_raw)
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK
+    with guard:
+        with db_conn() as conn:
+            row = _clothes_lock_row(conn, "customers", customer_id, postgres=postgres)
+            if not row or bool(row["deleted"]):
+                raise HTTPException(status_code=404, detail="Not found")
+            for collection in ("receipts", "ads"):
+                for linked_row in _financial_active_rows(conn, collection):
+                    linked = _financial_row_data(linked_row)
+                    if str(linked.get("customerId") or "") == customer_id:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Customer cannot be deleted while linked records exist",
+                        )
+            return _clothes_write_row(
+                conn, row, _financial_row_data(row), deleted=True
+            )
+
+
+@app.post("/api/receipts/transfers", response_model=ReceiptTransferResponse)
+def transfer_receipt_balance(
+    body: ReceiptTransferRequest,
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+):
+    require_same_origin(request)
+    source, target, transfer, replayed = _receipt_transfer_atomic(user, body)
+    if not replayed:
+        audit(
+            str(user.get("id")),
+            "transfer",
+            "receipts",
+            source["id"],
+            "Transferred receipt balance",
+            {"targetReceiptId": target["id"], "amountUSD": transfer.get("amountUSD")},
+        )
+    return ReceiptTransferResponse(
+        sourceReceipt=EntityResponse(**source),
+        targetReceipt=EntityResponse(**target),
+        transfer=transfer,
+        replayed=replayed,
+    )
+
+
+@app.post("/api/ads/mutate", response_model=AdMutationResponse)
+def mutate_ad_funding(
+    body: AdMutationRequest,
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+):
+    require_same_origin(request)
+    ad, replayed = _ad_mutation_atomic(user, body)
+    if not replayed:
+        audit(
+            str(user.get("id")), body.action, "ads", ad["id"], f"Ad {body.action}", {}
+        )
+    return AdMutationResponse(ad=EntityResponse(**ad), replayed=replayed)
+
+
+@app.post("/api/ads/{ad_id}/stop", response_model=AdStopResponse)
+def stop_ad_atomic(
+    ad_id: str,
+    body: AdStopRequest,
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+):
+    require_same_origin(request)
+    ad, replayed = _ad_stop_atomic(user, ad_id, body)
+    if not replayed:
+        audit(str(user.get("id")), "stop", "ads", ad["id"], "Stopped ad", {})
+    return AdStopResponse(ad=EntityResponse(**ad), replayed=replayed)
+
+
+@app.post(
+    "/api/clothes/shipments/mutate",
+    response_model=ClothesShipmentMutationResponse,
+)
+def mutate_clothes_shipment(
+    body: ClothesShipmentMutationRequest,
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+):
+    require_same_origin(request)
+    _require_clothes_subscription(user)
+    shipment, updated_products, replayed = _clothes_shipment_mutation_atomic(
+        user,
+        action=body.action,
+        idempotency_key=body.idempotencyKey,
+        shipment_id=body.shipmentId,
+        expected_last_modified=body.expectedLastModified,
+        status=body.status,
+    )
+    if not replayed:
+        audit(
+            str(user.get("id")),
+            body.action,
+            "clothesShipments",
+            shipment["id"],
+            f"Clothes shipment {body.action}",
+            {"updatedProducts": [product["id"] for product in updated_products]},
+        )
+    return ClothesShipmentMutationResponse(
+        shipment=EntityResponse(**shipment),
+        updatedProducts=[EntityResponse(**product) for product in updated_products],
+        replayed=replayed,
+    )
+
+
+@app.post("/api/wallet/transfers", response_model=EntityResponse)
+def create_wallet_transfer(
+    body: WalletTransferRequest,
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+):
+    require_same_origin(request)
+    saved, created = _wallet_transfer_atomic(
+        user,
+        to_user_id=body.toUserId,
+        amount_minor=body.amountMinor,
+        currency=body.currency,
+        idempotency_key=body.idempotencyKey,
+        memo=body.memo,
+    )
+    if created:
+        audit(str(user.get("id")), "create", "walletTransactions", saved["id"], "Created wallet transfer", {})
+    return EntityResponse(**saved)
+
+
+@app.post("/api/wallet/top-ups", response_model=EntityResponse)
+def create_wallet_top_up(
+    body: WalletTopUpRequest,
+    request: Request,
+    admin: dict[str, Any] = Depends(require_admin),
+):
+    require_same_origin(request)
+    saved, created = _wallet_top_up_atomic(
+        admin,
+        user_id=body.userId,
+        amount_minor=body.amountMinor,
+        currency=body.currency,
+        idempotency_key=body.idempotencyKey,
+        memo=body.memo,
+    )
+    if created:
+        audit(str(admin.get("id")), "create", "walletTransactions", saved["id"], "Created wallet top-up", {})
+    return EntityResponse(**saved)
+
+
+@app.post("/api/wallet/reversals", response_model=EntityResponse)
+def create_wallet_reversal(
+    body: WalletReversalRequest,
+    request: Request,
+    admin: dict[str, Any] = Depends(require_admin),
+):
+    require_same_origin(request)
+    saved, created = _wallet_reversal_atomic(admin, body.transactionId, body.memo)
+    if created:
+        audit(str(admin.get("id")), "create", "walletTransactions", saved["id"], "Created wallet reversal", {})
+    return EntityResponse(**saved)
+
+
+@app.post("/api/subscriptions/purchase", response_model=EntityResponse)
+def purchase_subscription(
+    body: SubscriptionPurchaseRequest,
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+):
+    require_same_origin(request)
+    saved, created, payment = _subscription_purchase_atomic(
+        user,
+        service_id=body.serviceId,
+        idempotency_key=body.idempotencyKey,
+        user_id=body.userId,
+    )
+    if created:
+        audit(
+            str(user.get("id")),
+            "create",
+            "serviceSubscriptions",
+            saved["id"],
+            f"Purchased subscription {body.serviceId}",
+            {"paymentTxId": payment.get("id") if payment else None},
+        )
+    return EntityResponse(**saved)
+
 
 def _owns_personal_record(collection: str, data: dict[str, Any] | None, uid: str) -> bool:
     d = data or {}
@@ -2543,10 +6143,39 @@ def _owns_personal_record(collection: str, data: dict[str, Any] | None, uid: str
 # managing the delivery workflow on ads/receipts without full edit rights).
 _DELIVERY_WORKFLOW_FIELDS = {
     "deliveryPersonId", "deliveryStatus", "acceptedDate", "deliveredAt",
-    "collectionDate", "isPaid", "isReceivedInOffice", "receivedInOfficeAt",
+    "isReceivedInOffice", "receivedInOfficeAt", "officeHandover", "officeHandoverAt",
     "deliveryCancelReason", "deliveryCancelledAt", "deliveryCancelledBy",
     "deliveryNotes", "_lastModified",
 }
+
+_DELIVERY_PAYMENT_FIELDS = {
+    "isPaid", "status", "collectionDate", "paymentResult", "overpaidAmount",
+    "remainingDue", "feeDifferenceStatus", "feeDiff", "debtAmountLocal",
+    "debtAmountUSD", "amountLocal", "amountUSD", "amountCollectedFromCustomer",
+    "actualDeliveryFeeCollected", "deliveryFeeCollected", "finalReceiptNo",
+    "serialNumber", "receiptImage", "photos",
+}
+
+_DELIVERY_TRANSITIONS: dict[str, set[str]] = {
+    "": {"Needs Delivery", "In Progress", "Office"},
+    "Office": {"Needs Delivery", "In Progress"},
+    "Needs Delivery": {"In Progress", "Canceled", "Office"},
+    "In Progress": {"Canceled"},  # Delivered uses assigned-driver proof flow.
+    "Delivered": set(),
+    "Canceled": set(),
+}
+
+
+def _active_delivery_user(user_id: Any) -> bool:
+    uid = sanitize_str(str(user_id or ""))[:80]
+    if not uid:
+        return False
+    with db_conn() as conn:
+        row = conn.execute(
+            text("SELECT id FROM users WHERE id=:id AND lower(role)='delivery' AND deleted=false LIMIT 1"),
+            {"id": uid},
+        ).first()
+    return row is not None
 
 
 def _delivery_patch_allowed(user: dict[str, Any], existing: dict[str, Any], updates: dict[str, Any]) -> bool:
@@ -2562,22 +6191,173 @@ def _delivery_patch_allowed(user: dict[str, Any], existing: dict[str, Any], upda
     def has(action: str) -> bool:
         return user_has_permission(user, "deliveries", action)
 
+    data = existing.get("data") or {}
+    current_status = str(data.get("deliveryStatus") or "").strip()
+    target_status = str(updates.get("deliveryStatus") or "").strip()
+
     if "deliveryPersonId" in keys:
-        already = bool(str(((existing.get("data") or {}).get("deliveryPersonId")) or "").strip())
+        if current_status in {"Delivered", "Canceled"}:
+            return False
+        already = bool(str(data.get("deliveryPersonId") or "").strip())
         if not (has("reassign") if already else has("assign")):
             return False
-    if "deliveryStatus" in keys:
-        target = str(updates.get("deliveryStatus") or "")
-        needed = {"In Progress": "accept", "Delivered": "complete"}.get(target)
-        if needed:
-            if not has(needed):
+        target_driver = str(updates.get("deliveryPersonId") or "").strip()
+        if target_driver and not _active_delivery_user(target_driver):
+            return False
+
+    if target_status:
+        if target_status == "Delivered":
+            # Completion is handled only by the assigned-driver branch, which
+            # verifies final receipt number, photo and collected amounts.
+            return False
+        if target_status != current_status:
+            if target_status not in _DELIVERY_TRANSITIONS.get(current_status, set()):
                 return False
-        elif not (has("assign") or has("reassign")):
+            if target_status == "In Progress":
+                if not has("accept"):
+                    return False
+            elif not (has("assign") or has("reassign")):
+                return False
+
+    if "acceptedDate" in keys and not (target_status == "In Progress" and has("accept")):
+        return False
+
+    cancel_fields = {"deliveryCancelReason", "deliveryCancelledAt", "deliveryCancelledBy"}
+    if keys & cancel_fields:
+        if current_status in {"Delivered", "Canceled"}:
             return False
-    if keys & {"isReceivedInOffice", "receivedInOfficeAt"}:
-        if not has("markCollected"):
+        if target_status != "Canceled" or not (has("assign") or has("reassign")):
             return False
-    return has("accept") or has("complete") or has("assign") or has("reassign") or has("markCollected")
+        if not str(updates.get("deliveryCancelReason") or "").strip():
+            return False
+
+    office_fields = {"isReceivedInOffice", "receivedInOfficeAt", "officeHandover", "officeHandoverAt"}
+    if keys & office_fields:
+        if not has("markCollected") or current_status != "Delivered":
+            return False
+        if "receivedInOfficeAt" in keys and "isReceivedInOffice" not in keys:
+            return False
+        if "officeHandoverAt" in keys and "officeHandover" not in keys:
+            return False
+
+    if "deliveredAt" in keys:
+        return False
+    if "deliveryNotes" in keys and not (has("accept") or has("assign") or has("reassign")):
+        return False
+    return has("accept") or has("assign") or has("reassign") or has("markCollected")
+
+
+SYNC_WATERMARK_COLLECTIONS = (
+    "ads",
+    "receipts",
+    "customers",
+    "pages",
+    "exchangeRateHistory",
+    "clothesProducts",
+    "clothesShipments",
+    "clothesOrders",
+    "clothesSettings",
+    "walletTransactions",
+    "serviceSubscriptions",
+)
+
+
+def _sync_watermark_max(
+    conn: Any,
+    collection: str,
+    *,
+    created_by: str | None = None,
+    assigned_to: str | None = None,
+    personal_user_id: str | None = None,
+    referenced_customer_by: str | None = None,
+) -> int:
+    dialect = str(get_engine().dialect.name or "")
+
+    def json_value(alias: str, key: str) -> str:
+        if dialect == "postgresql":
+            return f"({alias}.data_json::jsonb ->> '{key}')"
+        return f"json_extract({alias}.data_json, '$.{key}')"
+
+    where = ["e.type=:type"]
+    params: dict[str, Any] = {"type": collection}
+    if created_by:
+        where.append("e.created_by=:created_by")
+        params["created_by"] = created_by
+    if assigned_to:
+        where.append(f"{json_value('e', 'deliveryPersonId')}=:assigned_to")
+        params["assigned_to"] = assigned_to
+    if personal_user_id:
+        if collection == "walletTransactions":
+            where.append(
+                f"({json_value('e', 'fromUserId')}=:personal_uid OR "
+                f"{json_value('e', 'toUserId')}=:personal_uid)"
+            )
+        else:
+            where.append(f"{json_value('e', 'userId')}=:personal_uid")
+        params["personal_uid"] = personal_user_id
+    if referenced_customer_by:
+        where.append(
+            "EXISTS (SELECT 1 FROM entities d "
+            "WHERE d.type IN ('ads','receipts') AND d.deleted=false "
+            f"AND {json_value('d', 'customerId')}=e.id "
+            f"AND {json_value('d', 'deliveryPersonId')}=:delivery_uid)"
+        )
+        params["delivery_uid"] = referenced_customer_by
+    value = conn.execute(
+        text(f"SELECT COALESCE(MAX(e.last_modified),0) FROM entities e WHERE {' AND '.join(where)}"),
+        params,
+    ).scalar()
+    return max(0, int(value or 0))
+
+
+@app.get("/api/sync/watermarks")
+def get_sync_watermarks(user: dict[str, Any] = Depends(current_user)):
+    """Capture visibility-scoped collection cursors before a keyset full load."""
+    role_lower = str(user.get("role") or "").lower()
+    uid = sanitize_str(str(user.get("id") or ""))[:80]
+    clothes_entitled = _has_active_clothes_subscription(user)
+    watermarks: dict[str, int] = {}
+    with db_conn() as conn:
+        if str(get_engine().dialect.name or "") == "postgresql":
+            # All MAX reads below must describe one instant, not a sequence of
+            # independently advancing READ COMMITTED snapshots.
+            conn.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+        for collection in SYNC_WATERMARK_COLLECTIONS:
+            if collection in CLOTHES_BUSINESS_COLLECTIONS and not clothes_entitled:
+                continue
+            if collection in PERSONAL_SCOPED_COLLECTIONS and role_lower != "admin":
+                if uid:
+                    watermarks[collection] = _sync_watermark_max(
+                        conn, collection, personal_user_id=uid
+                    )
+                continue
+            if role_lower == "delivery":
+                if collection in {"ads", "receipts"}:
+                    watermarks[collection] = _sync_watermark_max(
+                        conn, collection, assigned_to=uid
+                    )
+                elif collection == "customers":
+                    watermarks[collection] = _sync_watermark_max(
+                        conn, collection, referenced_customer_by=uid
+                    )
+                elif collection == "exchangeRateHistory":
+                    watermarks[collection] = _sync_watermark_max(conn, collection)
+                continue
+
+            module = _module_for_collection(collection)
+            action = _action_for_collection(collection, "view")
+            can_view_all = collection == "exchangeRateHistory" or user_has_permission(
+                user, module, action
+            )
+            if can_view_all:
+                watermarks[collection] = _sync_watermark_max(conn, collection)
+            elif uid and user_has_permission(
+                user, module, action, record_creator_id=uid
+            ):
+                watermarks[collection] = _sync_watermark_max(
+                    conn, collection, created_by=uid
+                )
+    return {"watermarks": watermarks}
 
 
 @app.get("/api/collections/{collection}", response_model=list[EntityResponse])
@@ -2587,9 +6367,30 @@ def get_collection(
     limit: int = 500,
     offset: int = 0,
     include_deleted: bool = False,
+    before_created_at: Optional[int] = None,
+    before_id: Optional[str] = None,
+    after_last_modified: Optional[int] = None,
+    after_id: Optional[str] = None,
     user: dict[str, Any] = Depends(current_user),
 ):
     role_lower = str(user.get("role") or "").lower()
+    if collection in CLOTHES_BUSINESS_COLLECTIONS:
+        _require_clothes_subscription(user)
+
+    full_pair = before_created_at is not None or before_id is not None
+    delta_pair = after_last_modified is not None or after_id is not None
+    if (before_created_at is None) != (before_id is None):
+        raise HTTPException(status_code=400, detail="before_created_at and before_id are required together")
+    if (after_last_modified is None) != (after_id is None):
+        raise HTTPException(status_code=400, detail="after_last_modified and after_id are required together")
+    if full_pair and (updated_since is not None or delta_pair):
+        raise HTTPException(status_code=400, detail="Full and delta cursors cannot be mixed")
+    if delta_pair and updated_since is None:
+        raise HTTPException(status_code=400, detail="updated_since is required with a delta cursor")
+    if before_created_at is not None and before_created_at < 0:
+        raise HTTPException(status_code=400, detail="Invalid full cursor")
+    if after_last_modified is not None and after_last_modified < 0:
+        raise HTTPException(status_code=400, detail="Invalid delta cursor")
 
     # Personal money records (wallet ledger, subscriptions): every non-admin —
     # regardless of role or granted permissions — receives ONLY their own rows.
@@ -2600,9 +6401,19 @@ def get_collection(
         uid = sanitize_str(str(user.get("id") or ""))[:80]
         if not uid:
             raise HTTPException(status_code=403, detail="Forbidden")
-        rows = _page_all(collection, updated_since=updated_since, include_deleted=False)
-        own = [i for i in rows if _owns_personal_record(collection, i.get("data"), uid)]
-        return [EntityResponse(**i) for i in own[offset : offset + max(1, int(limit))]]
+        rows = list_entities(
+            collection,
+            updated_since=updated_since,
+            include_deleted=False,
+            limit=limit,
+            offset=offset,
+            personal_user_id=uid,
+            before_created_at=before_created_at,
+            before_id=before_id,
+            after_last_modified=after_last_modified,
+            after_id=after_id,
+        )
+        return [EntityResponse(**i) for i in rows]
 
     # Delivery users should only see records assigned to them (deliveryPersonId == user.id).
     # This avoids leaking the full Ads/Receipts/Customers database to drivers.
@@ -2619,36 +6430,25 @@ def get_collection(
                 offset=offset,
                 include_deleted=False,
                 assigned_to=uid,
+                before_created_at=before_created_at,
+                before_id=before_id,
+                after_last_modified=after_last_modified,
+                after_id=after_id,
             )
             return [EntityResponse(**i) for i in items]
 
         if collection == "customers":
-            # Only customers referenced by the delivery user's assigned deliveries.
-            customer_ids: set[str] = set()
-            for c in ("ads", "receipts"):
-                items = list_entities(
-                    c,
-                    updated_since=None,
-                    limit=5000,
-                    offset=0,
-                    include_deleted=False,
-                    assigned_to=uid,
-                )
-                for it in items:
-                    cid = (it.get("data") or {}).get("customerId")
-                    if cid:
-                        customer_ids.add(sanitize_str(str(cid))[:80])
-
-            if not customer_ids:
-                return []
-
             items = list_entities(
                 "customers",
                 updated_since=updated_since,
                 limit=limit,
                 offset=offset,
                 include_deleted=False,
-                id_in=sorted(customer_ids),
+                referenced_customer_by=uid,
+                before_created_at=before_created_at,
+                before_id=before_id,
+                after_last_modified=after_last_modified,
+                after_id=after_id,
             )
             return [EntityResponse(**i) for i in items]
 
@@ -2677,8 +6477,57 @@ def get_collection(
         offset=offset,
         include_deleted=include_deleted if can_view_all else False,
         created_by=created_by_filter,
+        before_created_at=before_created_at,
+        before_id=before_id,
+        after_last_modified=after_last_modified,
+        after_id=after_id,
     )
     return [EntityResponse(**i) for i in items]
+
+
+def _delivery_customer_is_referenced(customer_id: str, delivery_user_id: str) -> bool:
+    """Whether an active assigned ad/receipt references this customer."""
+    customer_id = validate_entity_id(customer_id)
+    delivery_user_id = validate_entity_id(delivery_user_id)
+    dialect = str(get_engine().dialect.name or "")
+    with db_conn() as conn:
+        try:
+            if dialect == "postgresql":
+                sql = (
+                    "SELECT 1 FROM entities WHERE type IN ('ads','receipts') "
+                    "AND deleted=false "
+                    "AND (data_json::jsonb ->> 'customerId')=:customer_id "
+                    "AND (data_json::jsonb ->> 'deliveryPersonId')=:delivery_user_id LIMIT 1"
+                )
+            else:
+                sql = (
+                    "SELECT 1 FROM entities WHERE type IN ('ads','receipts') "
+                    "AND deleted=false "
+                    "AND json_extract(data_json, '$.customerId')=:customer_id "
+                    "AND json_extract(data_json, '$.deliveryPersonId')=:delivery_user_id LIMIT 1"
+                )
+            return conn.execute(
+                text(sql),
+                {"customer_id": customer_id, "delivery_user_id": delivery_user_id},
+            ).first() is not None
+        except Exception:
+            # JSON SQL may be unavailable on older SQLite builds. This fallback
+            # is unbounded on purpose: authorization must never become incorrect
+            # merely because the referenced row is beyond a paging cap.
+            rows = conn.execute(
+                text(
+                    "SELECT data_json FROM entities "
+                    "WHERE type IN ('ads','receipts') AND deleted=false"
+                )
+            ).mappings().all()
+            for row in rows:
+                data = json_loads(row.get("data_json") or "{}") or {}
+                if (
+                    str(data.get("customerId") or "") == customer_id
+                    and str(data.get("deliveryPersonId") or "") == delivery_user_id
+                ):
+                    return True
+            return False
 
 
 @app.get("/api/collections/{collection}/{entity_id}", response_model=EntityResponse)
@@ -2688,19 +6537,34 @@ def get_collection_item(
     user: dict[str, Any] = Depends(current_user),
 ):
     role_lower = str(user.get("role") or "").lower()
-    if role_lower == "delivery" and collection in {"ads", "receipts"}:
-        item = get_entity(collection, entity_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="Not found")
-        data = item.get("data") or {}
-        if str(data.get("deliveryPersonId") or "") != str(user.get("id") or ""):
+    if collection in CLOTHES_BUSINESS_COLLECTIONS:
+        _require_clothes_subscription(user)
+    if role_lower == "delivery":
+        if collection in {"ads", "receipts"}:
+            item = get_entity(collection, entity_id)
+            if not item or item.get("deleted"):
+                raise HTTPException(status_code=404, detail="Not found")
+            data = item.get("data") or {}
+            if str(data.get("deliveryPersonId") or "") != str(user.get("id") or ""):
+                raise HTTPException(status_code=403, detail="Forbidden")
+            return EntityResponse(**item)
+        if collection == "customers":
+            item = get_entity(collection, entity_id)
+            if not item or item.get("deleted"):
+                raise HTTPException(status_code=404, detail="Not found")
+            if not _delivery_customer_is_referenced(entity_id, str(user.get("id") or "")):
+                raise HTTPException(status_code=403, detail="Forbidden")
+            return EntityResponse(**item)
+        # Exchange-rate history is intentionally public to all authenticated
+        # roles; every other direct collection lookup is outside a driver's
+        # assigned-delivery scope.
+        if collection != "exchangeRateHistory":
             raise HTTPException(status_code=403, detail="Forbidden")
-        return EntityResponse(**item)
 
     # Personal money records: non-admins may fetch ONLY their own rows.
     if collection in PERSONAL_SCOPED_COLLECTIONS and role_lower != "admin":
         item = get_entity(collection, entity_id)
-        if not item:
+        if not item or item.get("deleted"):
             raise HTTPException(status_code=404, detail="Not found")
         if not _owns_personal_record(collection, item.get("data"), str(user.get("id") or "")):
             raise HTTPException(status_code=403, detail="Forbidden")
@@ -2716,7 +6580,7 @@ def get_collection_item(
         raise HTTPException(status_code=403, detail="Forbidden")
 
     item = get_entity(collection, entity_id)
-    if not item:
+    if not item or item.get("deleted"):
         raise HTTPException(status_code=404, detail="Not found")
 
     # If user only has viewOwn, enforce creator ownership
@@ -2739,30 +6603,108 @@ def create_collection_item(
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
+    if collection in CLOTHES_BUSINESS_COLLECTIONS:
+        _require_clothes_subscription(user)
+    validate_relationship_ids(body.data)
+    if collection in CLOTHES_ORDER_SERVER_CONTROLLED_COLLECTIONS:
+        raise HTTPException(
+            status_code=405,
+            detail="Clothes orders must be changed through the transactional clothes API",
+        )
+    if collection in FINANCIAL_MUTATION_COLLECTIONS:
+        raise HTTPException(status_code=405, detail="Financial mutation records are server-controlled")
     module = _module_for_collection(collection)
-    if collection in PERSONAL_SCOPED_COLLECTIONS and str(user.get("role") or "").lower() != "admin":
-        # Self-referential writes only: a non-admin can spend from (never mint
-        # into) their own wallet, and can create subscriptions only for
-        # themselves. Everything else on these collections is admin-only.
-        _d = sanitize_json(body.data or {}) or {}
-        _uid = str(user.get("id") or "")
-        if collection == "walletTransactions":
-            if str(_d.get("fromUserId") or "") != _uid:
-                raise HTTPException(status_code=403, detail="Forbidden")
-        else:  # serviceSubscriptions
-            if str(_d.get("userId") or "") != _uid:
-                raise HTTPException(status_code=403, detail="Forbidden")
-    elif not user_has_permission(user, module, _action_for_collection(collection, "add")):
+
+    # Compatibility bridge for existing clients: old builds still POST these
+    # collections through the generic route.  They now go through exactly the
+    # same server-authoritative atomic operations as the dedicated endpoints;
+    # arbitrary ledger/subscription rows are never accepted.
+    if collection == "walletTransactions":
+        data = sanitize_json(body.data or {}) or {}
+        tx_type = sanitize_str(str(data.get("type") or "")).lower()[:40]
+        if tx_type == "credit":
+            saved, created = _wallet_top_up_atomic(
+                user,
+                user_id=str(data.get("toUserId") or ""),
+                amount_minor=data.get("amountMinor"),
+                currency=data.get("currency"),
+                idempotency_key=data.get("idempotencyKey"),
+                memo=data.get("memo"),
+                requested_id=body.id,
+            )
+        elif tx_type == "transfer":
+            if str(data.get("fromUserId") or "") != str(user.get("id") or ""):
+                raise HTTPException(status_code=403, detail="A transfer can only debit the authenticated user")
+            saved, created = _wallet_transfer_atomic(
+                user,
+                to_user_id=str(data.get("toUserId") or ""),
+                amount_minor=data.get("amountMinor"),
+                currency=data.get("currency"),
+                idempotency_key=data.get("idempotencyKey"),
+                memo=data.get("memo"),
+                requested_id=body.id,
+            )
+        elif tx_type == "reversal":
+            saved, created = _wallet_reversal_atomic(
+                user, str(data.get("referenceId") or ""), data.get("memo")
+            )
+        else:
+            raise HTTPException(
+                status_code=403,
+                detail="Wallet ledger rows must be created through a supported server operation",
+            )
+        if created:
+            audit(str(user.get("id")), "create", collection, saved["id"], f"Created wallet {tx_type}", {})
+        return EntityResponse(**saved)
+
+    if collection == "serviceSubscriptions":
+        data = sanitize_json(body.data or {}) or {}
+        saved, created, payment = _subscription_purchase_atomic(
+            user,
+            service_id=str(data.get("serviceId") or ""),
+            idempotency_key=str(data.get("idempotencyKey") or ""),
+            user_id=str(data.get("userId") or "") or None,
+            requested_id=body.id,
+        )
+        if created:
+            audit(
+                str(user.get("id")),
+                "create",
+                collection,
+                saved["id"],
+                f"Purchased subscription {data.get('serviceId') or ''}",
+                {"paymentTxId": payment.get("id") if payment else None},
+            )
+        return EntityResponse(**saved)
+
+    if not user_has_permission(user, module, _action_for_collection(collection, "add")):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    entity_id = sanitize_str(body.id or "")[:80] or new_id(collection[:10] or "id")
+    generic_data = sanitize_json(body.data or {}) or {}
+    if collection == "ads" and (
+        set(generic_data) & AD_FUNDING_FIELDS
+        or str(generic_data.get("status") or "") == "Stopped"
+    ):
+        raise HTTPException(status_code=405, detail="Ad funding must use /api/ads/mutate")
+    if collection == "receipts" and (
+        str(generic_data.get("receiptType") or "") == "TRANSFER_IN"
+        or set(generic_data) & (RECEIPT_TRANSFER_FIELDS - {"receiptType"})
+    ):
+        raise HTTPException(status_code=405, detail="Transferred receipts must use /api/receipts/transfers")
+
+    entity_id = validate_entity_id(body.id or new_id(collection[:10] or "id"))
 
     # Create must not overwrite existing records
     if get_entity_meta(collection, entity_id):
         raise HTTPException(status_code=409, detail="ID already exists")
 
     # Normalize/validate certain flows server-side (multi-user safe).
-    if collection == "ads":
+    if collection == "clothesProducts":
+        body_data = sanitize_json(body.data or {}) or {}
+        body_data["variants"] = _clothes_validate_variants(
+            body_data.get("variants", [])
+        )
+    elif collection == "ads":
         data_in = sanitize_json(body.data or {}) or {}
         payment_status = sanitize_str(str(data_in.get("paymentStatus") or ""))[:40]
         collection_method = sanitize_str(str(data_in.get("collectionMethod") or ""))[:40]
@@ -2832,10 +6774,21 @@ def create_collection_item(
 
         # Persist server-generated/normalized fields
         body_data = data_in
+    elif collection == "clothesShipments":
+        body_data = sanitize_json(body.data or {}) or {}
+        # Receiving is inventory-affecting and must use the transactional API.
+        body_data["status"] = "Ordered"
+        body_data["stockApplied"] = False
+        body_data["receivedAt"] = None
     else:
         body_data = body.data
 
-    saved = upsert_entity(collection, entity_id, body_data, str(user.get("id") or "system"), create_if_missing=True)
+    if collection in {"clothesProducts", "clothesShipments"}:
+        saved = _clothes_create_inventory_entity_atomic(
+            user, collection, entity_id, body_data
+        )
+    else:
+        saved = upsert_entity(collection, entity_id, body_data, str(user.get("id") or "system"), create_if_missing=True)
     audit(str(user.get("id")), "create", collection, entity_id, f"Created {collection} {entity_id}", {})
     return EntityResponse(**saved)
 
@@ -2849,11 +6802,61 @@ def update_collection_item(
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
+    if collection in CLOTHES_BUSINESS_COLLECTIONS:
+        _require_clothes_subscription(user)
+    validate_relationship_ids(body.data)
+    if collection in CLOTHES_ORDER_SERVER_CONTROLLED_COLLECTIONS:
+        raise HTTPException(
+            status_code=405,
+            detail="Clothes orders must be changed through the transactional clothes API",
+        )
+    if collection in FINANCIAL_MUTATION_COLLECTIONS:
+        raise HTTPException(status_code=405, detail="Financial mutation records are server-controlled")
     module = _module_for_collection(collection)
 
     existing = get_entity(collection, entity_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Not found")
+
+    financial_updates = sanitize_json(body.data or {}) or {}
+    if collection == "ads":
+        existing_status = str((existing.get("data") or {}).get("status") or "")
+        requested_status = str(financial_updates.get("status") or "")
+        collection_completion = (
+            set(financial_updates).issubset({"isPaid", "status", "collectionDate", "deliveryStatus", "_lastModified"})
+            and financial_updates.get("isPaid") is True
+            and requested_status == "Completed"
+            and existing_status not in {"Stopped", "Canceled", "Completed", "Lost"}
+        )
+        if (set(financial_updates) & AD_FUNDING_FIELDS and not collection_completion) or requested_status == "Stopped" or (
+            existing_status == "Stopped" and requested_status and requested_status != "Stopped"
+        ):
+            raise HTTPException(status_code=405, detail="Ad funding and stopping require the transactional ad API")
+    if collection == "receipts":
+        old_receipt_type = str((existing.get("data") or {}).get("receiptType") or "")
+        if set(financial_updates) & (RECEIPT_TRANSFER_FIELDS - {"receiptType"}):
+            raise HTTPException(status_code=405, detail="Receipt transfer fields are server-controlled")
+        if "receiptType" in financial_updates and (
+            old_receipt_type == "TRANSFER_IN"
+            or str(financial_updates.get("receiptType") or "") != old_receipt_type
+        ):
+            raise HTTPException(status_code=405, detail="Receipt type is server-controlled")
+
+    if collection == "clothesShipments":
+        shipment_updates = sanitize_json(body.data or {}) or {}
+        if set(shipment_updates) & {"status", "stockApplied", "receivedAt"}:
+            raise HTTPException(
+                status_code=405,
+                detail="Shipment status must be changed through the transactional clothes API",
+            )
+        shipment_data = existing.get("data") or {}
+        if str(shipment_data.get("status") or "") == "Received" or shipment_data.get("stockApplied") is True:
+            raise HTTPException(status_code=409, detail="A received shipment cannot be edited")
+
+    # The wallet is an append-only ledger.  Admins correct mistakes with the
+    # reversal endpoint; nobody may rewrite a posted historical row.
+    if collection == "walletTransactions":
+        raise HTTPException(status_code=405, detail="Wallet transactions are immutable; create a reversal")
 
     role_lower = str(user.get("role") or "").lower()
     # Delivery users can update ONLY their assigned deliveries.
@@ -2863,18 +6866,20 @@ def update_collection_item(
             raise HTTPException(status_code=403, detail="Forbidden")
 
         updates = sanitize_json(body.data or {}) or {}
+        submitted_keys = set(updates.keys())
         # Remove protected keys + disallow reassignment
         for k in ["id", "_created", "createdBy", "createdAt", "creatorId", "deliveryPersonId"]:
             updates.pop(k, None)
 
         if collection == "ads":
+            if submitted_keys & (_DELIVERY_PAYMENT_FIELDS | {"isReceivedInOffice", "receivedInOfficeAt"}):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Delivery users cannot change payment or office-handover fields",
+                )
             allowed_fields = {
                 "deliveryStatus",
                 "acceptedDate",
-                "isPaid",
-                "collectionDate",
-                "status",
-                "isReceivedInOffice",
                 # cancellation
                 "deliveryCancelReason",
                 "deliveryCancelledAt",
@@ -2888,6 +6893,12 @@ def update_collection_item(
 
             desired = str(updates.get("deliveryStatus") or "").strip()
             now = now_ms()
+            if "acceptedDate" in submitted_keys and desired != "In Progress":
+                raise HTTPException(status_code=403, detail="acceptedDate is server-controlled")
+            if submitted_keys & {"deliveryCancelReason", "deliveryCancelledAt", "deliveryCancelledBy"} and desired != "Canceled":
+                raise HTTPException(status_code=403, detail="Cancellation metadata requires a Canceled transition")
+            if desired == "In Progress":
+                updates["acceptedDate"] = _iso_utc()
 
             # SECURITY: ad deliveries are intentionally proof-less (the driver
             # legitimately sets isPaid/status via the collection flow, so those
@@ -2903,6 +6914,21 @@ def update_collection_item(
                     detail=f"Cannot change delivery status from '{current_status}' - this is a terminal state",
                 )
 
+            valid_ad_transitions = {
+                "": {"Needs Delivery", "In Progress"},
+                "Needs Delivery": {"In Progress", "Canceled"},
+                "In Progress": {"Delivered", "Canceled"},
+                "Delivered": set(),
+                "Canceled": set(),
+            }
+            if desired and desired != current_status and desired not in valid_ad_transitions.get(current_status, set()):
+                raise HTTPException(status_code=400, detail="Invalid ad delivery status transition")
+            if desired == "Delivered" and data.get("isPaid") is not True:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Ad payment must be confirmed by an authorized office workflow before delivery completion",
+                )
+
             if desired == "Canceled":
                 reason = sanitize_str(str(updates.get("deliveryCancelReason") or ""))[:500]
                 if not reason:
@@ -2914,6 +6940,14 @@ def update_collection_item(
                 )[:80]
 
         if collection == "receipts":
+            if submitted_keys & {"isReceivedInOffice", "receivedInOfficeAt", "officeHandover", "officeHandoverAt"}:
+                raise HTTPException(status_code=403, detail="Drivers cannot mark office handover")
+            submitted_status = str(updates.get("deliveryStatus") or "").strip()
+            if submitted_status != "Delivered" and submitted_keys & _DELIVERY_PAYMENT_FIELDS:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Settlement fields are only accepted during verified delivery completion",
+                )
             # Delivery receipts: strict confirmation flow on DELIVERED.
             allowed_fields = {
                 # existing delivery fields
@@ -2973,6 +7007,12 @@ def update_collection_item(
             desired = str(updates.get("deliveryStatus") or "").strip()
             now = now_ms()
             current_status = str(data.get("deliveryStatus") or "").strip()
+            if "acceptedDate" in submitted_keys and desired != "In Progress":
+                raise HTTPException(status_code=403, detail="acceptedDate is server-controlled")
+            if submitted_keys & {"deliveryCancelReason", "deliveryCancelledAt", "deliveryCancelledBy"} and desired != "Canceled":
+                raise HTTPException(status_code=403, detail="Cancellation metadata requires a Canceled transition")
+            if desired == "In Progress":
+                updates["acceptedDate"] = _iso_utc()
 
             # SECURITY: payment/settlement and server-computed fields may ONLY
             # be written by the server's Delivered-confirmation computation
@@ -3161,51 +7201,72 @@ def update_collection_item(
                     str(user.get("id") or "")
                 )[:80]
 
-        # Optimistic concurrency: if client provides expectedLastModified, enforce it
-        if body.expectedLastModified is not None:
-            meta = get_entity_meta(collection, entity_id)
-            if meta and int(meta.get("last_modified") or 0) != int(body.expectedLastModified):
-                raise HTTPException(status_code=409, detail="Conflict: record has changed")
-
-        saved = patch_entity(collection, entity_id, updates, str(user.get("id") or "system"))
+        if collection == "receipts":
+            saved = _financial_patch_receipt_atomic(
+                user, entity_id, updates, body.expectedLastModified
+            )
+        else:
+            saved = patch_entity(
+                collection,
+                entity_id,
+                updates,
+                str(user.get("id") or "system"),
+                expected_last_modified=body.expectedLastModified,
+            )
         audit(str(user.get("id")), "update", collection, entity_id, f"Updated {collection} {entity_id} (delivery)", {})
         return EntityResponse(**saved)
 
-    # Personal money records: a non-admin may only CANCEL their own
-    # subscription (wallet ledger rows are immutable — corrections are new
-    # transactions). Cancellation may only set status/canceledAt/expiresAt.
-    if collection in PERSONAL_SCOPED_COLLECTIONS and role_lower != "admin":
-        if collection != "serviceSubscriptions":
-            raise HTTPException(status_code=403, detail="Forbidden")
-        _d0 = existing.get("data") or {}
+    # Subscription history is server-controlled.  Every role, including
+    # Admin, may only perform an active -> canceled transition; identity,
+    # service, price, payment and expiry history cannot be rewritten.
+    if collection == "serviceSubscriptions":
         _uid = str(user.get("id") or "")
-        if str(_d0.get("userId") or "") != _uid:
-            raise HTTPException(status_code=403, detail="Forbidden")
         _updates = sanitize_json(body.data or {}) or {}
         _allowed_keys = {"status", "canceledAt", "cancelledAt", "expiresAt", "_lastModified"}
         if (set(_updates.keys()) - _allowed_keys) or str(_updates.get("status") or "") != "canceled":
-            raise HTTPException(status_code=403, detail="Only self-cancellation is allowed")
-        if body.expectedLastModified is not None:
-            meta = get_entity_meta(collection, entity_id)
-            if meta and int(meta.get("last_modified") or 0) != int(body.expectedLastModified):
-                raise HTTPException(status_code=409, detail="Conflict: record has changed")
-        saved = patch_entity(collection, entity_id, _updates, _uid)
+            raise HTTPException(status_code=403, detail="Only subscription cancellation is allowed")
+        saved = _subscription_cancel_atomic(user, entity_id, body.expectedLastModified)
         audit(_uid, "update", collection, entity_id, f"Canceled subscription {entity_id}", {})
         return EntityResponse(**saved)
 
     creator = existing.get("createdBy") or (existing.get("data") or {}).get("createdBy") or (existing.get("data") or {}).get("creatorId")
+    delivery_grant_patch = False
     if not user_has_permission(user, module, _action_for_collection(collection, "edit"), record_creator_id=str(creator or "")):
         # Delivery-workflow PATCHes (assign/accept/complete/collect) are also
         # authorized by the deliveries.* permission group.
         _dw_updates = sanitize_json(body.data or {}) or {}
         if not (collection in {"ads", "receipts"} and _delivery_patch_allowed(user, existing, _dw_updates)):
             raise HTTPException(status_code=403, detail="Forbidden")
+        delivery_grant_patch = True
 
-    # Optimistic concurrency: if client provides expectedLastModified, enforce it
-    if body.expectedLastModified is not None:
-        meta = get_entity_meta(collection, entity_id)
-        if meta and int(meta.get("last_modified") or 0) != int(body.expectedLastModified):
-            raise HTTPException(status_code=409, detail="Conflict: record has changed")
+    if delivery_grant_patch:
+        # Client clocks/identities are not authoritative workflow evidence.
+        # Normalize action metadata after authorization and before persistence.
+        normalized_delivery_updates = sanitize_json(body.data or {}) or {}
+        normalized_delivery_updates.pop("_lastModified", None)
+        target_status = str(normalized_delivery_updates.get("deliveryStatus") or "").strip()
+        now_iso = _iso_utc()
+        if target_status == "In Progress":
+            normalized_delivery_updates["acceptedDate"] = now_iso
+        if target_status == "Canceled":
+            normalized_delivery_updates["deliveryCancelReason"] = sanitize_str(
+                str(normalized_delivery_updates.get("deliveryCancelReason") or "")
+            )[:500]
+            normalized_delivery_updates["deliveryCancelledAt"] = now_iso
+            normalized_delivery_updates["deliveryCancelledBy"] = str(user.get("id") or "")
+        if "isReceivedInOffice" in normalized_delivery_updates or "officeHandover" in normalized_delivery_updates:
+            received = bool(
+                normalized_delivery_updates.get(
+                    "isReceivedInOffice", normalized_delivery_updates.get("officeHandover")
+                )
+            )
+            normalized_delivery_updates["isReceivedInOffice"] = received
+            normalized_delivery_updates["receivedInOfficeAt"] = now_iso if received else ""
+            if "officeHandover" in normalized_delivery_updates:
+                normalized_delivery_updates["officeHandover"] = received
+                normalized_delivery_updates["officeHandoverAt"] = now_iso if received else ""
+        body.data.clear()
+        body.data.update(normalized_delivery_updates)
 
     # Strict rule: temp delivery receipts can only be marked DELIVERED by the assigned delivery user.
     if collection == "receipts":
@@ -3259,7 +7320,26 @@ def update_collection_item(
             upd["deliveryStatus"] = "Office"
             updates_to_save = upd
 
-    saved = patch_entity(collection, entity_id, updates_to_save, str(user.get("id") or "system"))
+    if collection == "clothesProducts":
+        saved = _clothes_patch_product_atomic(
+            user, entity_id, updates_to_save, body.expectedLastModified
+        )
+    elif collection == "clothesShipments":
+        saved = _clothes_patch_shipment_atomic(
+            user, entity_id, updates_to_save, body.expectedLastModified
+        )
+    elif collection == "receipts":
+        saved = _financial_patch_receipt_atomic(
+            user, entity_id, updates_to_save, body.expectedLastModified
+        )
+    else:
+        saved = patch_entity(
+            collection,
+            entity_id,
+            updates_to_save,
+            str(user.get("id") or "system"),
+            expected_last_modified=body.expectedLastModified,
+        )
     audit(str(user.get("id")), "update", collection, entity_id, f"Updated {collection} {entity_id}", {})
     return EntityResponse(**saved)
 
@@ -3289,11 +7369,22 @@ def admin_restore_collection_item(
     data until a full reload.
     """
     require_same_origin(request)
+    validate_relationship_ids(body.data)
 
     entity_type = sanitize_str(collection)[:40]
-    ent_id = sanitize_str(entity_id)[:80]
-    if not entity_type or not ent_id:
+    ent_id = validate_entity_id(entity_id)
+    if not entity_type:
         raise HTTPException(status_code=400, detail="Invalid entity type/id")
+    if entity_type in PERSONAL_SCOPED_COLLECTIONS:
+        raise HTTPException(
+            status_code=405,
+            detail="Wallet and subscription history cannot be restored through the online API",
+        )
+    if entity_type in GENERIC_RESTORE_BLOCKED_COLLECTIONS or entity_type in FINANCIAL_MUTATION_COLLECTIONS:
+        raise HTTPException(
+            status_code=405,
+            detail="This record has cross-record side effects and requires a dedicated transactional restore",
+        )
 
     # Desired metadata (optional, but recommended for perfect restores).
     # body.lastModified is accepted for backward compatibility but ignored —
@@ -3434,6 +7525,14 @@ def admin_bulk_import(
     one-request-per-record flow allowed on a mid-import error.
     """
     require_same_origin(request)
+    if not ENABLE_ONLINE_IMPORT:
+        raise HTTPException(
+            status_code=405,
+            detail=(
+                "Online backup import is disabled. Restore during a maintenance/offline window "
+                "with ALBAYAN_ENABLE_ONLINE_IMPORT=true."
+            ),
+        )
 
     raw_collections = body.collections or {}
     if not raw_collections:
@@ -3460,6 +7559,18 @@ def admin_bulk_import(
             raise HTTPException(status_code=400, detail="Invalid collection name")
         if name == "users":
             raise HTTPException(status_code=400, detail="Users are not imported through this endpoint")
+        if name in PERSONAL_SCOPED_COLLECTIONS:
+            raise HTTPException(
+                status_code=405,
+                detail="Wallet and subscription history cannot be imported through the online API",
+            )
+        if name in CLOTHES_INVENTORY_RESTORE_BLOCKED_COLLECTIONS:
+            raise HTTPException(
+                status_code=405,
+                detail="Clothes order state cannot be imported through the online API",
+            )
+        if name in FINANCIAL_MUTATION_COLLECTIONS:
+            raise HTTPException(status_code=405, detail="Financial idempotency records cannot be imported")
         records = raw_records or []
         if len(records) > 50000:
             raise HTTPException(status_code=400, detail=f"Too many records in '{name}'")
@@ -3468,9 +7579,11 @@ def admin_bulk_import(
         for rec in records:
             if not isinstance(rec, dict):
                 raise HTTPException(status_code=400, detail=f"'{name}' contains a non-object record")
-            rid = sanitize_str(str(rec.get("id") or ""))[:80]
-            if not rid:
-                raise HTTPException(status_code=400, detail=f"'{name}' contains a record without an id")
+            validate_relationship_ids(rec, f"{name} record")
+            try:
+                rid = validate_entity_id(rec.get("id"))
+            except HTTPException:
+                raise HTTPException(status_code=400, detail=f"'{name}' contains an invalid record id")
             if rid in seen_ids:
                 raise HTTPException(status_code=400, detail=f"'{name}' contains duplicate id '{rid}'")
             seen_ids.add(rid)
@@ -3607,8 +7720,24 @@ def batch_delete_entities(
         eid = sanitize_str(item.id)[:80]
         if not col or not eid:
             raise HTTPException(status_code=400, detail="Invalid collection/id in batch")
+        if col in CLOTHES_BUSINESS_COLLECTIONS:
+            _require_clothes_subscription(user)
         if col == "users":
             raise HTTPException(status_code=400, detail="Users cannot be deleted through this endpoint")
+        if col in PERSONAL_SCOPED_COLLECTIONS:
+            raise HTTPException(status_code=405, detail="Wallet and subscription history cannot be deleted")
+        if col in CLOTHES_ORDER_SERVER_CONTROLLED_COLLECTIONS:
+            raise HTTPException(
+                status_code=405,
+                detail="Clothes orders must be deleted through the transactional clothes API",
+            )
+        if col in FINANCIAL_MUTATION_COLLECTIONS:
+            raise HTTPException(status_code=405, detail="Financial mutation records are server-controlled")
+        if col == "clothesShipments":
+            raise HTTPException(
+                status_code=405,
+                detail="Clothes shipments must be deleted through the transactional clothes API",
+            )
         module = _module_for_collection(col)
         delete_action = _action_for_collection(col, "delete")
         if not user_has_permission(user, module, delete_action):
@@ -3625,24 +7754,51 @@ def batch_delete_entities(
     now = now_ms()
     deleted = 0
     skipped = 0
-    with db_conn() as conn:
-        for (col, eid) in normalized:
-            exists = (
-                conn.execute(
-                    text("SELECT id FROM entities WHERE type = :type AND id = :id LIMIT 1"),
-                    {"type": col, "id": eid},
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    financial_batch = any(col in {"receipts", "customers"} for col, _ in normalized)
+    guard = (nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK) if financial_batch else nullcontext()
+    with guard:
+        with db_conn() as conn:
+            if financial_batch:
+                receipt_ids = {eid for col, eid in normalized if col == "receipts"}
+                customer_ids = {eid for col, eid in normalized if col == "customers"}
+                if customer_ids:
+                    for receipt_row in _financial_active_rows(conn, "receipts"):
+                        receipt_data = _financial_row_data(receipt_row)
+                        if str(receipt_data.get("customerId") or "") in customer_ids:
+                            receipt_ids.add(str(receipt_row["id"]))
+                locked_receipts = _financial_lock_receipts(conn, receipt_ids, postgres=postgres)
+                for receipt_id, receipt_row in locked_receipts.items():
+                    if not receipt_row or bool(receipt_row["deleted"]):
+                        continue
+                    reason = _financial_receipt_reference_reason(
+                        conn, receipt_id, _financial_row_data(receipt_row)
+                    )
+                    if reason:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=f"Receipt {receipt_id} cannot be deleted while linked to {reason}",
+                        )
+                for customer_id in sorted(customer_ids):
+                    _clothes_lock_row(conn, "customers", customer_id, postgres=postgres)
+
+            for (col, eid) in normalized:
+                exists = (
+                    conn.execute(
+                        text("SELECT id FROM entities WHERE type = :type AND id = :id LIMIT 1"),
+                        {"type": col, "id": eid},
+                    )
+                    .mappings()
+                    .first()
                 )
-                .mappings()
-                .first()
-            )
-            if not exists:
-                skipped += 1
-                continue
-            conn.execute(
-                text("UPDATE entities SET deleted = true, last_modified = :ts WHERE type = :type AND id = :id"),
-                {"ts": now, "type": col, "id": eid},
-            )
-            deleted += 1
+                if not exists:
+                    skipped += 1
+                    continue
+                conn.execute(
+                    text("UPDATE entities SET deleted = true, last_modified = :ts WHERE type = :type AND id = :id"),
+                    {"ts": now, "type": col, "id": eid},
+                )
+                deleted += 1
 
     for (col, eid) in normalized:
         audit(str(user.get("id")), "delete", col, eid, f"Deleted {col} {eid} (atomic batch)", {})
@@ -3657,6 +7813,26 @@ def delete_collection_item(
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
+    if collection in CLOTHES_BUSINESS_COLLECTIONS:
+        _require_clothes_subscription(user)
+    if collection in PERSONAL_SCOPED_COLLECTIONS:
+        raise HTTPException(status_code=405, detail="Wallet and subscription history cannot be deleted")
+    if collection in CLOTHES_ORDER_SERVER_CONTROLLED_COLLECTIONS:
+        raise HTTPException(
+            status_code=405,
+            detail="Clothes orders must be deleted through the transactional clothes API",
+        )
+    if collection in FINANCIAL_MUTATION_COLLECTIONS:
+        raise HTTPException(status_code=405, detail="Financial mutation records are server-controlled")
+    if collection == "clothesShipments":
+        raise HTTPException(
+            status_code=405,
+            detail="Clothes shipments must be deleted through the transactional clothes API",
+        )
+    if collection == "clothesProducts":
+        deleted_product = _clothes_delete_product_atomic(user, entity_id)
+        audit(str(user.get("id")), "delete", collection, entity_id, f"Deleted {collection} {entity_id}", {})
+        return {"ok": True, "lastModified": deleted_product["lastModified"]}
     module = _module_for_collection(collection)
     delete_action = _action_for_collection(collection, "delete")
     if not user_has_permission(user, module, delete_action):
@@ -3666,6 +7842,15 @@ def delete_collection_item(
         creator = existing.get("createdBy") or (existing.get("data") or {}).get("createdBy") or (existing.get("data") or {}).get("creatorId")
         if not user_has_permission(user, module, delete_action, record_creator_id=str(creator or "")):
             raise HTTPException(status_code=403, detail="Forbidden")
+
+    if collection == "customers":
+        deleted_customer = _financial_delete_customer_atomic(entity_id)
+        audit(str(user.get("id")), "delete", collection, entity_id, f"Deleted {collection} {entity_id}", {})
+        return {"ok": True, "lastModified": deleted_customer["lastModified"]}
+    if collection == "receipts":
+        deleted_receipt = _financial_delete_receipt_atomic(entity_id)
+        audit(str(user.get("id")), "delete", collection, entity_id, f"Deleted {collection} {entity_id}", {})
+        return {"ok": True, "lastModified": deleted_receipt["lastModified"]}
 
     soft_delete_entity(collection, entity_id, str(user.get("id") or "system"))
     audit(str(user.get("id")), "delete", collection, entity_id, f"Deleted {collection} {entity_id}", {})
@@ -3965,6 +8150,120 @@ def _free_email_if_soft_deleted(email: str, now: int) -> bool:
     return True
 
 
+def _validated_role(raw_role: Any) -> str:
+    role = sanitize_str(str(raw_role or "")).strip()
+    if role not in VALID_USER_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid user role")
+    return role
+
+
+def _validated_permission_payload(raw_permissions: Any) -> dict[str, list[str]]:
+    try:
+        return normalize_permissions(raw_permissions)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+def _ensure_actor_can_grant_permissions(
+    actor: dict[str, Any], permissions: dict[str, list[str]], *, explicit: bool
+) -> None:
+    """Prevent delegated user managers from granting power they do not have."""
+    if str(actor.get("role") or "").lower() == "admin":
+        return
+    if explicit and permissions and not user_has_permission(actor, "users", "managePermissions"):
+        raise HTTPException(status_code=403, detail="users.managePermissions is required to grant permissions")
+    for module, actions in permissions.items():
+        for action in actions:
+            if not user_has_permission(actor, module, action):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Cannot grant permission you do not hold: {module}.{action}",
+                )
+
+
+ALLOWED_USER_UPDATE_FIELDS = frozenset(
+    {
+        "name",
+        "email",
+        "role",
+        "permissions_json",
+        "password_hash",
+        "password_salt",
+        "password_algo",
+        "password_iterations",
+        "deleted",
+        "last_modified",
+    }
+)
+
+
+def _apply_user_update_atomic(
+    user_id: str,
+    update_fields: dict[str, Any],
+    actor: dict[str, Any],
+) -> None:
+    """Apply a user update while atomically preserving one active Admin."""
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_ADMIN_MEMBERSHIP_LOCK
+    with guard:
+        with db_conn() as conn:
+            if postgres:
+                _lock_idempotency_key(
+                    conn,
+                    "membership",
+                    postgres=True,
+                    namespace="activeAdmin",
+                )
+            suffix = " FOR UPDATE" if postgres else ""
+            current = conn.execute(
+                text(f"SELECT * FROM users WHERE id=:id LIMIT 1{suffix}"),
+                {"id": user_id},
+            ).mappings().first()
+            if not current:
+                raise HTTPException(status_code=404, detail="Not found")
+            if (
+                str(actor.get("role") or "").lower() != "admin"
+                and str(current.get("role") or "").lower() == "admin"
+            ):
+                raise HTTPException(status_code=403, detail="Only an Admin can modify an Admin account")
+
+            current_is_admin = (
+                str(current.get("role") or "").lower() == "admin"
+                and not bool(current.get("deleted"))
+            )
+            next_role = str(update_fields.get("role", current.get("role")) or "")
+            next_deleted = bool(update_fields.get("deleted", current.get("deleted")))
+            removes_active_admin = current_is_admin and (
+                next_role.lower() != "admin" or next_deleted
+            )
+            if removes_active_admin:
+                other_count = conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM users "
+                        "WHERE lower(role)='admin' AND deleted=false AND id<>:id"
+                    ),
+                    {"id": user_id},
+                ).scalar()
+                if int(other_count or 0) < 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Cannot remove the last remaining admin. Promote another user to Admin first.",
+                    )
+
+            set_clause = ", ".join(
+                f"{key} = :{key}"
+                for key in update_fields
+                if key in ALLOWED_USER_UPDATE_FIELDS
+            )
+            params = {**update_fields, "id": user_id}
+            conn.execute(text(f"UPDATE users SET {set_clause} WHERE id=:id"), params)
+            if "password_hash" in update_fields or update_fields.get("deleted") is True:
+                conn.execute(
+                    text("DELETE FROM sessions WHERE user_id=:uid"),
+                    {"uid": user_id},
+                )
+
+
 @app.post("/api/users", response_model=UserPublic)
 def create_user(body: CreateUserRequest, request: Request, admin: dict[str, Any] = Depends(current_user)):
     require_same_origin(request)
@@ -3972,12 +8271,20 @@ def create_user(body: CreateUserRequest, request: Request, admin: dict[str, Any]
     # non-admin can never create an Admin account.
     if not user_has_permission(admin, "users", "add"):
         raise HTTPException(status_code=403, detail="Forbidden")
-    if str(admin.get("role") or "").lower() != "admin" and sanitize_str(body.role).lower() == "admin":
-        raise HTTPException(status_code=403, detail="Only an Admin can create Admin accounts")
+    requested_role = _validated_role(body.role)
+    requested_permissions = _validated_permission_payload(body.permissions or {})
+    _ensure_actor_can_grant_permissions(
+        admin, requested_permissions, explicit=body.permissions is not None
+    )
+    if str(admin.get("role") or "").lower() != "admin":
+        if requested_role == "Admin":
+            raise HTTPException(status_code=403, detail="Only an Admin can create Admin accounts")
+        if requested_role != "Employee" and not user_has_permission(admin, "users", "changeRole"):
+            raise HTTPException(status_code=403, detail="users.changeRole is required to create this role")
     now = now_ms()
     pw = hash_password(body.password, iterations=PBKDF2_ITERATIONS_DEFAULT)
 
-    permissions_json = json_dumps(body.permissions or {})
+    permissions_json = json_dumps(requested_permissions)
     user_id = new_id("user")
 
     def _insert() -> None:
@@ -4001,7 +8308,7 @@ def create_user(body: CreateUserRequest, request: Request, admin: dict[str, Any]
                     "id": user_id,
                     "name": sanitize_str(body.name),
                     "email": str(body.email).lower(),
-                    "role": sanitize_str(body.role),
+                    "role": requested_role,
                     "permissions_json": permissions_json,
                     "password_hash": pw.hash_hex,
                     "password_salt": pw.salt_hex,
@@ -4042,6 +8349,13 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
     if not existing:
         raise HTTPException(status_code=404, detail="Not found")
 
+    requested_role = _validated_role(body.role) if body.role is not None else None
+    requested_permissions = (
+        _validated_permission_payload(body.permissions) if body.permissions is not None else None
+    )
+    if requested_permissions is not None:
+        _ensure_actor_can_grant_permissions(admin, requested_permissions, explicit=True)
+
     # Permission gating. Admins pass everything (role bypass inside
     # user_has_permission); non-admins need the matching users.* permission
     # per field, may self-edit name/email, and can NEVER touch an Admin
@@ -4051,7 +8365,7 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
     if not _actor_is_admin:
         if str(existing.get("role") or "").lower() == "admin":
             raise HTTPException(status_code=403, detail="Only an Admin can modify an Admin account")
-        if body.role is not None and sanitize_str(body.role).lower() == "admin":
+        if requested_role == "Admin":
             raise HTTPException(status_code=403, detail="Only an Admin can grant the Admin role")
 
         def _need(perm: str) -> None:
@@ -4065,7 +8379,7 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
                 # Self password changes must verify the current password.
                 raise HTTPException(status_code=400, detail="Use /api/auth/password-change to change your own password")
             _need("resetPassword")
-        if body.role is not None and sanitize_str(body.role) != str(existing.get("role") or ""):
+        if requested_role is not None and requested_role != str(existing.get("role") or ""):
             _need("changeRole")
         if body.permissions is not None:
             _need("managePermissions")
@@ -4075,22 +8389,16 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
             _need("delete")
 
     # SECURITY: Whitelist allowed fields to prevent SQL injection
-    ALLOWED_USER_UPDATE_FIELDS = {
-        "name", "email", "role", "permissions_json",
-        "password_hash", "password_salt", "password_algo", "password_iterations",
-        "deleted", "last_modified"
-    }
-
     update_fields: dict[str, Any] = {}
 
     if body.name is not None:
         update_fields["name"] = sanitize_str(body.name)
     if body.email is not None:
         update_fields["email"] = str(body.email).lower()
-    if body.role is not None:
-        update_fields["role"] = sanitize_str(body.role)
-    if body.permissions is not None:
-        update_fields["permissions_json"] = json_dumps(body.permissions)
+    if requested_role is not None:
+        update_fields["role"] = requested_role
+    if requested_permissions is not None:
+        update_fields["permissions_json"] = json_dumps(requested_permissions)
     if body.password is not None:
         pw = hash_password(body.password, iterations=PBKDF2_ITERATIONS_DEFAULT)
         update_fields["password_hash"] = pw.hash_hex
@@ -4115,35 +8423,8 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
     # delete the only other admin then self-demote) and leave the platform with
     # zero admins — every admin-only endpoint (users, import, restore, audit)
     # then 403s and recovery needs direct DB access.
-    existing_role = str(existing.get("role") or "").lower()
-    removing_admin = existing_role == "admin" and (
-        (body.deleted is True)
-        or (body.role is not None and sanitize_str(body.role).lower() != "admin")
-    )
-    if removing_admin:
-        with db_conn() as conn:
-            other = conn.execute(
-                text("SELECT COUNT(*) AS n FROM users WHERE lower(role) = 'admin' AND deleted = false AND id != :id"),
-                {"id": user_id},
-            ).mappings().first()
-        if not other or int(other["n"]) < 1:
-            raise HTTPException(
-                status_code=400,
-                detail="Cannot remove the last remaining admin. Promote another user to Admin first.",
-            )
-
     def _apply_update() -> None:
-        with db_conn() as conn:
-            # SECURITY: Only use whitelisted fields in SQL construction
-            set_clause = ", ".join([f"{k} = :{k}" for k in update_fields.keys() if k in ALLOWED_USER_UPDATE_FIELDS])
-            params = {**update_fields, "id": user_id}
-            conn.execute(text(f"UPDATE users SET {set_clause} WHERE id = :id"), params)
-            # SECURITY: an admin-initiated password change (or a soft-delete)
-            # must evict the target's existing sessions in the SAME transaction,
-            # or a stolen/active session survives the reset until natural
-            # expiry (up to 8h). Mirrors self-service change_password.
-            if "password_hash" in update_fields or update_fields.get("deleted") is True:
-                conn.execute(text("DELETE FROM sessions WHERE user_id = :uid"), {"uid": user_id})
+        _apply_user_update_atomic(user_id, update_fields, admin)
 
     try:
         _apply_update()
@@ -4218,5 +8499,3 @@ def spa_catch_all(path: str, request: Request):
     
     # Return 404 for unknown paths (not a frontend route and not an API route)
     raise HTTPException(status_code=404, detail="Not found")
-
-

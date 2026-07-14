@@ -175,7 +175,7 @@ function renderModal() {
                   <input type="text" id="ad-page-search" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-3 py-2 rounded-lg text-sm" placeholder="${isArAd ? 'ابحث في الصفحات...' : 'Search pages...'}" oninput="filterAdPages()" onfocus="showAdPageDropdown()" value="${Security.escapeHtml((state.pages.find(p => p.id === adData.pageId)?.name) || '')}" autocomplete="off" />
                   <div id="ad-page-dropdown" class="absolute z-20 mt-1 w-full bg-white dark:bg-slate-800 rounded-lg shadow-xl max-h-48 overflow-y-auto hidden border border-slate-200 dark:border-slate-600">
                     ${visiblePages.map(p => `
-                      <div class="page-option px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer text-sm" data-name="${Security.escapeHtml((p.name || '').toLowerCase())}" onclick="selectAdPage('${p.id}')">
+                      <div class="page-option px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer text-sm" data-name="${Security.escapeHtml((p.name || '').toLowerCase())}" data-record-action="select-ad-page" data-record-id="${Security.escapeHtml(String(p.id || ''))}">
                         ${Security.escapeHtml(p.name || '')}
                       </div>
                     `).join('')}
@@ -607,7 +607,7 @@ function renderModal() {
                 />
                 <div id="page-customer-dropdown" class="absolute z-20 mt-1 w-full glass-panel rounded-lg shadow-xl max-h-60 overflow-y-auto hidden">
                   ${pageCustomers.map(c => `
-                    <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" onclick="selectPageCustomer('${c.id}', '${isAdminPage}')">
+                    <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" data-record-action="select-page-customer" data-record-id="${Security.escapeHtml(String(c.id || ''))}" data-admin="${isAdminPage}">
                       <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
                       <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (isArP ? 'لا يوجد هاتف' : 'No phone'))}</div>
                     </div>
@@ -619,12 +619,12 @@ function renderModal() {
                 ${existingCustomerIds.map(cid => {
                   const customer = state.customers.find(c => c.id === cid);
                   return customer ? `
-                    <div class="flex items-center justify-between p-3 bg-white dark:bg-slate-800 rounded-lg border border-indigo-200 dark:border-indigo-800 page-customer-item" data-customer-id="${cid}">
+                    <div class="flex items-center justify-between p-3 bg-white dark:bg-slate-800 rounded-lg border border-indigo-200 dark:border-indigo-800 page-customer-item" data-customer-id="${Security.escapeHtml(String(cid || ''))}">
                       <div>
                         <div class="font-medium text-sm text-slate-800 dark:text-white">${Security.escapeHtml(customer.name || '')}</div>
                         <div class="text-xs text-slate-500">${Security.escapeHtml(customer.platform || '')}</div>
                       </div>
-                      <button type="button" onclick="removePageCustomer('${cid}')" class="text-rose-500 hover:text-rose-700">
+                      <button type="button" data-record-action="remove-page-customer" data-record-id="${Security.escapeHtml(String(cid || ''))}" class="text-rose-500 hover:text-rose-700">
                         <i data-lucide="x-circle" class="w-4 h-4"></i>
                       </button>
                     </div>
@@ -1120,7 +1120,7 @@ function renderModal() {
           ` : ''}
 
           <div class="flex space-x-3 pt-2 border-t border-slate-200 dark:border-slate-700 mt-2">
-            <button type="button" onclick="saveReceiptTransfer()" class="flex-1 btn-shine bg-blue-600 text-white px-4 py-2 rounded-xl font-bold" ${transferCustomers.length === 0 ? 'disabled' : ''}>
+            <button type="button" id="receipt-transfer-submit" onclick="saveReceiptTransfer()" class="flex-1 btn-shine bg-blue-600 text-white px-4 py-2 rounded-xl font-bold disabled:opacity-50 disabled:cursor-not-allowed" ${transferCustomers.length === 0 ? 'disabled' : ''}>
               <i data-lucide="check" class="w-4 h-4 inline mr-1.5"></i>${isArT ? 'تحويل' : 'Transfer'}
               </button>
             <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2 rounded-xl font-bold">${isArT ? 'إلغاء' : 'Cancel'}</button>
@@ -1767,6 +1767,98 @@ function renderModal() {
   }
 }
 
+// Keep one request identity across response-loss retries. Volatile audit
+// timestamps are excluded from the fingerprint and the first prepared payload
+// is reused, so an identical retry cannot accidentally create a second ad.
+const _pendingAdMutationAttempts = new Map();
+
+function getAdMutationFingerprint(action, adId, expectedLastModified, data) {
+  const stable = Security.sanitizeObject(data || {});
+  delete stable.createdAt;
+  delete stable.updatedAt;
+  delete stable.collectionDate;
+  if (Array.isArray(stable.editHistory)) {
+    stable.editHistory = stable.editHistory.map(row => ({ ...row, editedAt: '' }));
+  }
+  if (Array.isArray(stable.topUps)) {
+    stable.topUps = stable.topUps.map(row => ({ ...row, date: '' }));
+  }
+  return JSON.stringify({ action, adId, expectedLastModified: expectedLastModified ?? null, data: stable });
+}
+
+function getAdMutationAttempt(action, adId, expectedLastModified, data) {
+  const act = String(action || '');
+  const existingId = String(adId || '');
+  const slot = act === 'create' ? 'create' : `${act}:${existingId}`;
+  const fingerprint = getAdMutationFingerprint(act, existingId, expectedLastModified, data);
+  const prior = _pendingAdMutationAttempts.get(slot);
+  if (prior?.fingerprint === fingerprint) return prior;
+  if (prior?.promise) return prior;
+  const attempt = {
+    slot,
+    fingerprint,
+    adId: existingId || Security.generateSecureId('ad'),
+    idempotencyKey: ensureOperationIdempotencyKey('', `ad-${act || 'mutate'}`),
+    expectedLastModified,
+    data: Security.sanitizeObject(data || {}),
+    promise: null
+  };
+  _pendingAdMutationAttempts.set(slot, attempt);
+  return attempt;
+}
+
+function completeAdMutationAttempt(attempt) {
+  if (attempt && _pendingAdMutationAttempts.get(attempt.slot) === attempt) {
+    _pendingAdMutationAttempts.delete(attempt.slot);
+  }
+}
+
+function buildServerAdMutationData(adUpdates, { create = false } = {}) {
+  const data = Security.sanitizeObject(adUpdates || {});
+  // These values are materialized from allocations/payment rows by the server.
+  // Sending them would invite a forged total that disagrees with the funding
+  // rows. The allocation requests themselves remain explicit inputs.
+  for (const field of [
+    'amountUSD', 'amountLocal', 'receiptIds', 'fundingReceiptId',
+    'dueAmountToUseUSD', 'hasMergedPaidFunds', 'isPaid', 'initialAmountUSD',
+    'spentUSD', 'canceledBy'
+  ]) delete data[field];
+  if (create) {
+    data.recordType = 'ad';
+    data.topUps = [];
+  }
+  return data;
+}
+
+async function saveAdThroughAtomicServer(action, adId, expectedLastModified, data) {
+  if (action === 'update' && (!Number.isSafeInteger(expectedLastModified) || expectedLastModified < 0)) {
+    throw new Error('This ad is missing its server version. Refresh and try again.');
+  }
+  const attempt = getAdMutationAttempt(action, adId, expectedLastModified, data);
+  if (attempt.promise) return await attempt.promise;
+  attempt.promise = (async () => {
+    const payload = {
+      action,
+      adId: attempt.adId,
+      idempotencyKey: attempt.idempotencyKey,
+      data: attempt.data
+    };
+    if (action === 'update') payload.expectedLastModified = attempt.expectedLastModified;
+    const response = await apiMutateAd(payload);
+    const [savedAd] = applyValidatedServerEntityBatch([
+      { collection: 'ads', entity: response.ad }
+    ], 'adMutation');
+    if (!savedAd) throw new Error('Invalid ad mutation response');
+    completeAdMutationAttempt(attempt);
+    return savedAd;
+  })();
+  try {
+    return await attempt.promise;
+  } finally {
+    attempt.promise = null;
+  }
+}
+
 async function handleModalSubmit() {
   const isEdit = state.modalData !== null;
   
@@ -1797,7 +1889,7 @@ async function handleModalSubmit() {
       }
       const memo = Security.sanitizeInput(String(document.getElementById('topup-memo')?.value || ''), { maxLength: 180 }).trim();
       try {
-        const tx = WALLET.credit(targetUserId, amount, {
+        const tx = await WALLET.credit(targetUserId, amount, {
           memo: memo || (isArW ? 'شحن محفظة' : 'Wallet top-up'),
           idempotencyKey: String(state.modalData?.idempotencyKey || '') || Security.generateSecureId('topup')
         });
@@ -1870,12 +1962,13 @@ async function handleModalSubmit() {
       }
 
       const hashed = await Security.hashPassword(newPw, null, { algo: 'pbkdf2-sha256' });
-      updateRecord(state.users, user.id, {
+      const passwordSaved = await updateRecord(state.users, user.id, {
         passwordHash: hashed.hash,
         salt: hashed.salt,
         passwordAlgo: hashed.algo,
         passwordIterations: hashed.iterations
       });
+      if (!passwordSaved) return;
       addSecurityLog('password_changed', user.email || user.id);
       showNotification(isArCP ? 'نجاح' : 'Success', isArCP ? 'تم تغيير كلمة المرور بنجاح' : 'Password changed successfully', 'success');
       break;
@@ -1923,13 +2016,14 @@ async function handleModalSubmit() {
       const joinDate = joinDateValue ? new Date(joinDateValue).toISOString() : new Date().toISOString();
 
       if (isEdit) {
-        updateRecord(state.customers, state.modalData.id, {
+        const customerSaved = await updateRecord(state.customers, state.modalData.id, {
           name: custName,
           phones: phones,
           platform: document.getElementById('customer-platform').value,
           joinDate: joinDate,
           profileLinks: profileLinks
         });
+        if (!customerSaved) return;
         showNotification(isAr ? 'تم التحديث' : 'Updated', isAr ? 'تم تحديث العميل بنجاح' : 'Customer updated successfully', 'success');
       } else {
         const customer = {
@@ -1940,7 +2034,8 @@ async function handleModalSubmit() {
           joinDate: joinDate,
           profileLinks: profileLinks
         };
-        addRecord(state.customers, customer);
+        const customerSaved = await addRecord(state.customers, customer);
+        if (!customerSaved) return;
         showNotification(isAr ? 'تمت الإضافة' : 'Success', isAr ? 'تمت إضافة العميل بنجاح' : 'Customer added successfully', 'success');
       }
       break;
@@ -2375,27 +2470,50 @@ async function handleModalSubmit() {
           adUpdates.editCount = oldAd.editCount || 0;
         }
         
-        updateRecord(state.ads, state.modalData.id, adUpdates);
+        if (isServerModeEnabled()) {
+          const expectedLastModified = Number(oldAd?._lastModified);
+          await saveAdThroughAtomicServer(
+            'update',
+            oldAd.id,
+            expectedLastModified,
+            buildServerAdMutationData(adUpdates)
+          );
+        } else {
+          const adSaved = await updateRecord(state.ads, state.modalData.id, adUpdates);
+          if (!adSaved) return;
+        }
         showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث الإعلان بنجاح' : 'Ad updated successfully', 'success');
         addLog('update', 'ad', state.modalData.id, `Updated ad with ${allocations.length} receipt link(s)`);
       } else {
-        const ad = {
-          id: generateId('ad'),
-          recordType: 'ad',
-          creatorId: state.currentUser?.id || '',
-          createdAt: new Date().toISOString(),
-          topUps: [],
-          ...adUpdates
-        };
-        addRecord(state.ads, ad);
+        let savedAd;
+        if (isServerModeEnabled()) {
+          savedAd = await saveAdThroughAtomicServer(
+            'create',
+            '',
+            null,
+            buildServerAdMutationData(adUpdates, { create: true })
+          );
+        } else {
+          const ad = {
+            id: generateId('ad'),
+            recordType: 'ad',
+            creatorId: state.currentUser?.id || '',
+            createdAt: new Date().toISOString(),
+            topUps: [],
+            ...adUpdates
+          };
+          const adSaved = await addRecord(state.ads, ad);
+          if (!adSaved) return;
+          savedAd = state.ads.find(row => row && String(row.id) === String(ad.id)) || ad;
+        }
         showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الإعلان بنجاح' : 'Ad created successfully', 'success');
-        addLog('create', 'ad', ad.id, `Created ad with ${allocations.length} receipt link(s)`);
+        addLog('create', 'ad', savedAd.id, `Created ad with ${allocations.length} receipt link(s)`);
         
         // Log receipt usage for each allocation
         if (isPaid && allocations.length > 0) {
           for (const alloc of allocations) {
-            addAuditLog('receipt', alloc.receiptId, 'usage', `Ad ${ad.id} allocated $${alloc.amountUSD.toFixed(2)}`, {
-              adId: ad.id,
+            addAuditLog('receipt', alloc.receiptId, 'usage', `Ad ${savedAd.id} allocated $${alloc.amountUSD.toFixed(2)}`, {
+              adId: savedAd.id,
               amountUSD: alloc.amountUSD,
               receiptId: alloc.receiptId
             });
@@ -2411,7 +2529,14 @@ async function handleModalSubmit() {
       closeModal();
       } catch (error) {
         console.error('Error saving ad:', error);
-        showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? `فشل حفظ الإعلان: ${error.message}` : `Failed to save ad: ${error.message}`, 'error');
+        const conflict = error?.status === 409;
+        showNotification(
+          conflict ? (state.language === 'ar' ? 'تعارض في التعديل' : 'Ad Changed') : (state.language === 'ar' ? 'خطأ' : 'Error'),
+          conflict
+            ? (state.language === 'ar' ? 'تم تغيير هذا الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+            : (state.language === 'ar' ? `فشل حفظ الإعلان: ${error.message}` : `Failed to save ad: ${error.message}`),
+          conflict ? 'warning' : 'error'
+        );
       }
       break;
     case 'user':
@@ -2606,7 +2731,8 @@ async function handleModalSubmit() {
           }
         }
         
-        updateRecord(state.users, state.modalData.id, updates);
+        const userSaved = await updateRecord(state.users, state.modalData.id, updates);
+        if (!userSaved) return;
         showNotification(isArSubU ? 'تم التحديث' : 'Updated', isArSubU ? 'تم تحديث المستخدم بنجاح' : 'User updated successfully', 'success');
       } else {
         if (!isAdminEditor) {
@@ -2630,7 +2756,8 @@ async function handleModalSubmit() {
           role: userRole,
           permissions: getDefaultPermissions(userRole)
         };
-        addRecord(state.users, user);
+        const userSaved = await addRecord(state.users, user);
+        if (!userSaved) return;
         showNotification(isArSubU ? 'نجاح' : 'Success', isArSubU ? 'تمت إضافة المستخدم بنجاح' : 'User added successfully', 'success');
         
         // Show permission modal for non-admin users
@@ -2698,11 +2825,12 @@ async function handleModalSubmit() {
       }
 
       if (isEdit) {
-        updateRecord(state.pages, state.modalData.id, {
+        const pageSaved = await updateRecord(state.pages, state.modalData.id, {
           name: pageName,
           category: pageCategory,
           customerIds: selectedCustomers
         });
+        if (!pageSaved) return;
         showNotification(isArPage ? 'تم التحديث' : 'Updated', isArPage ? 'تم تحديث الصفحة بنجاح' : 'Page updated successfully', 'success');
         addLog('update', 'page', state.modalData.id, `Updated page: ${pageName}`);
       } else {
@@ -2715,7 +2843,8 @@ async function handleModalSubmit() {
           _lastModified: Date.now(),
           _deleted: false
         };
-        addRecord(state.pages, page);
+        const pageSaved = await addRecord(state.pages, page);
+        if (!pageSaved) return;
         showNotification(isArPage ? 'تمت الإضافة' : 'Success', isArPage ? 'تمت إضافة الصفحة بنجاح' : 'Page added successfully', 'success');
         addLog('create', 'page', page.id, `Created page: ${page.name} linked to ${selectedCustomers.length} customer(s)`);
       }
@@ -2784,7 +2913,8 @@ async function handleModalSubmit() {
       }
       
       if (isEdit) {
-        updateRecord(state.receipts, state.modalData.id, receiptUpdates);
+        const savedOk = await updateRecord(state.receipts, state.modalData.id, receiptUpdates);
+        if (!savedOk) return;
         showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث الوصل بنجاح!' : 'Receipt updated successfully!', 'success');
       } else {
         const receipt = {
@@ -2797,7 +2927,8 @@ async function handleModalSubmit() {
           topUps: [],
           ...receiptUpdates
         };
-        addRecord(state.receipts, receipt);
+        const savedOk = await addRecord(state.receipts, receipt);
+        if (!savedOk) return;
         showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
       }
       break;
@@ -2873,66 +3004,66 @@ function closeModal() {
 
 // Remove every funding reference to `receiptId` from visible ads (allocation
 // rows, merged mirror, direct id fields). Returns how many ads were touched.
-function cleanupAdFundingLinks(receiptId) {
+async function cleanupAdFundingLinks(receiptId) {
   const linkedAds = state.ads.filter(a =>
     (a.receiptId === receiptId || a.linkedDeliveryReceiptId === receiptId || a.fundingReceiptId === receiptId ||
      (Array.isArray(a.receiptAllocations) && a.receiptAllocations.some(alloc => alloc.receiptId === receiptId)) ||
      (Array.isArray(a.dueAllocations) && a.dueAllocations.some(alloc => alloc.receiptId === receiptId)))
     && !a._deleted
   );
-  linkedAds.forEach(ad => {
-    let changed = false;
+  let touched = 0;
+  for (const ad of linkedAds) {
+    const updates = {};
     if (Array.isArray(ad.receiptAllocations)) {
-      const before = ad.receiptAllocations.length;
-      ad.receiptAllocations = ad.receiptAllocations.filter(alloc => alloc.receiptId !== receiptId);
-      if (ad.receiptAllocations.length !== before) changed = true;
+      const kept = ad.receiptAllocations.filter(alloc => alloc.receiptId !== receiptId);
+      if (kept.length !== ad.receiptAllocations.length) updates.receiptAllocations = kept;
     }
     if (Array.isArray(ad.dueAllocations)) {
-      const before = ad.dueAllocations.length;
-      ad.dueAllocations = ad.dueAllocations.filter(alloc => alloc.receiptId !== receiptId);
-      if (ad.dueAllocations.length !== before) changed = true;
+      const kept = ad.dueAllocations.filter(alloc => alloc.receiptId !== receiptId);
+      if (kept.length !== ad.dueAllocations.length) updates.dueAllocations = kept;
     }
     // The merged-funding mirror too — leaving it stale would let the next ad
     // edit reseed the merge editor from it and re-write an allocation that
     // draws money from the deleted receipt.
     if (Array.isArray(ad.mergedPaidAllocations)) {
-      const before = ad.mergedPaidAllocations.length;
-      ad.mergedPaidAllocations = ad.mergedPaidAllocations.filter(alloc => alloc.receiptId !== receiptId);
-      if (ad.mergedPaidAllocations.length !== before) {
-        changed = true;
-        ad.hasMergedPaidFunds = ad.mergedPaidAllocations.length > 0;
+      const kept = ad.mergedPaidAllocations.filter(alloc => alloc.receiptId !== receiptId);
+      if (kept.length !== ad.mergedPaidAllocations.length) {
+        updates.mergedPaidAllocations = kept;
+        updates.hasMergedPaidFunds = kept.length > 0;
       }
     }
-    if (ad.receiptId === receiptId) { ad.receiptId = ''; changed = true; }
-    if (ad.linkedDeliveryReceiptId === receiptId) { ad.linkedDeliveryReceiptId = ''; changed = true; }
-    if (ad.fundingReceiptId === receiptId) { ad.fundingReceiptId = ''; changed = true; }
+    if (ad.receiptId === receiptId) updates.receiptId = '';
+    if (ad.linkedDeliveryReceiptId === receiptId) updates.linkedDeliveryReceiptId = '';
+    if (ad.fundingReceiptId === receiptId) updates.fundingReceiptId = '';
     if (Array.isArray(ad.receiptIds)) {
-      const before = ad.receiptIds.length;
-      ad.receiptIds = ad.receiptIds.filter(rid => rid !== receiptId);
-      if (ad.receiptIds.length !== before) changed = true;
+      const kept = ad.receiptIds.filter(rid => rid !== receiptId);
+      if (kept.length !== ad.receiptIds.length) updates.receiptIds = kept;
     }
     // The stop-ad snapshot too: a later stop-amount edit recomputes the
     // surviving receipts' shares from this baseline, so a deleted receipt
     // left inside would dilute the pool and undercharge the survivors.
     if (ad.stopAllocationBaseline && typeof ad.stopAllocationBaseline === 'object') {
+      const nextBaseline = { ...ad.stopAllocationBaseline };
+      let baselineChanged = false;
       ['receipt', 'due', 'merged'].forEach(k => {
         const arr = ad.stopAllocationBaseline[k];
         if (Array.isArray(arr)) {
-          const before = arr.length;
-          ad.stopAllocationBaseline[k] = arr.filter(a => String(a?.receiptId || '') !== String(receiptId));
-          if (ad.stopAllocationBaseline[k].length !== before) changed = true;
+          const kept = arr.filter(a => String(a?.receiptId || '') !== String(receiptId));
+          if (kept.length !== arr.length) {
+            nextBaseline[k] = kept;
+            baselineChanged = true;
+          }
         }
       });
+      if (baselineChanged) updates.stopAllocationBaseline = nextBaseline;
     }
-    if (changed) {
-      ad._lastModified = getMonotonicTime();
-      markCollectionDirty('ads');
-      if (isServerModeEnabled()) {
-        apiUpdateEntity('ads', ad.id, ad).catch(() => {});
-      }
+    if (Object.keys(updates).length) {
+      const saved = await updateRecord(state.ads, ad.id, updates);
+      if (!saved) throw new Error('Failed to clean an ad funding link');
+      touched += 1;
     }
-  });
-  return linkedAds.length;
+  }
+  return touched;
 }
 
 // When a delivery is CANCELED its debt will never be collected, so ads funded
@@ -2940,13 +3071,14 @@ function cleanupAdFundingLinks(receiptId) {
 // keeps backing ad budgets forever. The ads themselves stay (no feature
 // removed); only their due-funding rows pointing at this receipt are
 // released. Returns how many ads were touched.
-function releaseCanceledDeliveryDueFunding(receiptId) {
+async function releaseCanceledDeliveryDueFunding(receiptId) {
   const rid = String(receiptId || '');
   let touched = 0;
-  state.ads.filter(a => a && !a._deleted && a.recordType !== 'receipt' && (
+  const affectedAds = state.ads.filter(a => a && !a._deleted && a.recordType !== 'receipt' && (
     (Array.isArray(a.dueAllocations) && a.dueAllocations.some(al => String(al?.receiptId || '') === rid)) ||
     (String(a.linkedDeliveryReceiptId || '') === rid && (parseFloat(a.dueAmountToUseUSD) || 0) > 0)
-  )).forEach(ad => {
+  ));
+  for (const ad of affectedAds) {
     const updates = {};
     if (Array.isArray(ad.dueAllocations)) {
       const kept = ad.dueAllocations.filter(al => String(al?.receiptId || '') !== rid);
@@ -2957,10 +3089,11 @@ function releaseCanceledDeliveryDueFunding(receiptId) {
       updates.dueAmountToUseUSD = 0;
     }
     if (Object.keys(updates).length) {
-      updateRecord(state.ads, ad.id, updates);
+      const saved = await updateRecord(state.ads, ad.id, updates);
+      if (!saved) throw new Error('Failed to release canceled-delivery funding');
       touched += 1;
     }
-  });
+  }
   return touched;
 }
 
@@ -2973,7 +3106,7 @@ function releaseCanceledDeliveryDueFunding(receiptId) {
 // IMPORTANT: callers must run this BEFORE cleanupAdFundingLinks, because the
 // spent amount is read from the allocations that cleanup strips.
 // Returns the source receipt when money was returned, else null.
-function undoTransferIntoReceipt(receipt) {
+async function undoTransferIntoReceipt(receipt) {
   if (!receipt || String(receipt.receiptType || '') !== 'TRANSFER_IN') return null;
   const source = state.receipts.find(r => r && !r._deleted && String(r.id) === String(receipt.transferFromReceiptId || ''));
   if (!source || !Array.isArray(source.transfers)) return null;
@@ -2997,7 +3130,8 @@ function undoTransferIntoReceipt(receipt) {
     }
   });
   if (!changed) return null;
-  updateRecord(state.receipts, source.id, { transfers: kept });
+  const saved = await updateRecord(state.receipts, source.id, { transfers: kept });
+  if (!saved) throw new Error('Failed to restore the source receipt transfer');
   return source;
 }
 
@@ -3007,23 +3141,25 @@ function undoTransferIntoReceipt(receipt) {
 // other customers keep spendable money that no longer exists anywhere.
 // Handles onward (chained) transfers; `seen` guards against cycles. Returns
 // how many paired receipts were deleted.
-function cascadeDeleteOutgoingTransfers(receipt, seen, deleteOpts) {
+async function cascadeDeleteOutgoingTransfers(receipt, seen, deleteOpts) {
   seen = seen || new Set();
   if (!receipt || seen.has(String(receipt.id))) return 0;
   seen.add(String(receipt.id));
   let count = 0;
-  (Array.isArray(receipt.transfers) ? receipt.transfers : []).forEach(t => {
+  for (const t of (Array.isArray(receipt.transfers) ? receipt.transfers : [])) {
     const target = state.receipts.find(r => r && !r._deleted && String(r.id) === String(t?.toReceiptId || ''));
-    if (!target) return;
-    count += cascadeDeleteOutgoingTransfers(target, seen, deleteOpts);
-    cleanupAdFundingLinks(target.id);
-    deleteRecord(state.receipts, target.id, deleteOpts);
+    if (!target) continue;
+    count += await cascadeDeleteOutgoingTransfers(target, seen, deleteOpts);
+    await cleanupAdFundingLinks(target.id);
+    if (!await deleteRecord(state.receipts, target.id, deleteOpts)) {
+      throw new Error('Failed to delete a linked transfer receipt');
+    }
     count += 1;
-  });
+  }
   return count;
 }
 
-function deleteCustomer(id) {
+async function deleteCustomer(id) {
   // Permission check
   if (!currentUserHasPermission('customers', 'delete')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف العملاء' : 'You do not have permission to delete customers', 'error');
@@ -3034,6 +3170,19 @@ function deleteCustomer(id) {
   // Check for linked receipts/ads
   const linkedReceipts = state.receipts.filter(r => r.customerId === id && !r._deleted);
   const linkedAds = state.ads.filter(a => a.customerId === id && !a._deleted);
+  // Server mode cannot safely unwind a customer's ads, receipts, transfers,
+  // and funding links through separate generic requests. Refuse before any
+  // mutation; a future dedicated cascade endpoint can make this atomic.
+  if (isServerModeEnabled() && (linkedReceipts.length > 0 || linkedAds.length > 0)) {
+    showNotification(
+      state.language === 'ar' ? 'لا يمكن الحذف' : 'Cannot Delete Customer',
+      state.language === 'ar'
+        ? 'يحتوي هذا العميل على وصولات أو إعلانات مرتبطة. أزل السجلات المرتبطة بأمان أولاً.'
+        : 'This customer has linked receipts or ads. Remove those records safely first; the server will not perform a partial financial cascade.',
+      'warning'
+    );
+    return;
+  }
   // Show the cascade-delete warning in the user's language. Previously it was
   // English-only, so an Arabic-only user could unknowingly delete every linked
   // receipt and ad.
@@ -3065,30 +3214,31 @@ function deleteCustomer(id) {
     // as ONE all-or-nothing batch — a flaky connection can no longer leave
     // the customer half-deleted with some records resurrecting later.
     const batchDeleteOps = { collectServerOps: [] };
-    linkedAds.forEach(ad => {
-      deleteRecord(state.ads, ad.id, batchDeleteOps);
-    });
-    linkedReceipts.forEach(receipt => {
+    for (const ad of linkedAds) {
+      if (!await deleteRecord(state.ads, ad.id, batchDeleteOps)) return;
+    }
+    for (const receipt of linkedReceipts) {
       // Same link cleanup deleteReceipt does. Without it, ads of OTHER
       // customers funded by these receipts kept dead allocation rows, money
       // transferred IN from another customer stayed deducted at its source,
       // and money transferred OUT lived on as spendable phantom receipts.
       // Undo BEFORE cleanup: the undo reads spent amounts from allocations.
-      undoTransferIntoReceipt(receipt);
-      cleanupAdFundingLinks(receipt.id);
-      cascadeDeleteOutgoingTransfers(receipt, undefined, batchDeleteOps);
-      deleteRecord(state.receipts, receipt.id, batchDeleteOps);
-    });
+      await undoTransferIntoReceipt(receipt);
+      await cleanupAdFundingLinks(receipt.id);
+      await cascadeDeleteOutgoingTransfers(receipt, undefined, batchDeleteOps);
+      if (!await deleteRecord(state.receipts, receipt.id, batchDeleteOps)) return;
+    }
     // Unlink the customer from pages: page.customerIds kept the ghost id, so
     // the Pages view still showed the deleted customer as owner and every
     // page save re-persisted the dangling link.
-    getVisibleRecords(state.pages).forEach(page => {
+    for (const page of getVisibleRecords(state.pages)) {
       if (Array.isArray(page.customerIds) && page.customerIds.includes(id)) {
-        updateRecord(state.pages, page.id, { customerIds: page.customerIds.filter(cid => cid !== id) });
+        const pageSaved = await updateRecord(state.pages, page.id, { customerIds: page.customerIds.filter(cid => cid !== id) });
+        if (!pageSaved) return;
       }
-    });
-    deleteRecord(state.customers, id, batchDeleteOps);
-    flushBatchDeletes(batchDeleteOps.collectServerOps);
+    }
+    if (!await deleteRecord(state.customers, id, batchDeleteOps)) return;
+    if (!await flushBatchDeletes(batchDeleteOps.collectServerOps)) return;
     const deletedCount = linkedReceipts.length + linkedAds.length;
     showNotification(
       isAr ? 'تم الحذف' : 'Deleted',
@@ -3101,7 +3251,7 @@ function deleteCustomer(id) {
   }
 }
 
-function deletePage(id) {
+async function deletePage(id) {
   // Permission check
   if (!currentUserHasPermission('pages', 'delete')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الصفحات' : 'You do not have permission to delete pages', 'error');
@@ -3119,13 +3269,13 @@ function deletePage(id) {
       : `\n\n⚠️ ${pageAdsCount} ad(s) belong to this page. The ads and their history stay, but a NEW page with the same name will not include them.`;
   }
   if (confirm(pageWarning)) {
-    deleteRecord(state.pages, id);
+    if (!await deleteRecord(state.pages, id)) return;
     showNotification(state.language === 'ar' ? 'تم الحذف' : 'Deleted', state.language === 'ar' ? 'تم حذف الصفحة' : 'Page deleted', 'success');
     render();
   }
 }
 
-function deleteReceipt(id) {
+async function deleteReceipt(id) {
   // Permission check
   const receipt = state.receipts.find(r => r.id === id);
   if (!canActOnRecord('receipts', 'delete', receipt?.createdBy)) {
@@ -3152,6 +3302,19 @@ function deleteReceipt(id) {
   const outgoingTargets = (Array.isArray(receipt?.transfers) ? receipt.transfers : [])
     .map(t => state.receipts.find(r => r && !r._deleted && String(r.id) === String(t?.toReceiptId || '')))
     .filter(Boolean);
+  // The local single-device cascade above cannot be reproduced safely as a
+  // sequence of server requests. Block linked server deletions before the
+  // source receipt or any ad allocation is changed.
+  if (isServerModeEnabled() && (linkedAds.length > 0 || transferSource || outgoingTargets.length > 0)) {
+    showNotification(
+      state.language === 'ar' ? 'لا يمكن حذف الوصل' : 'Cannot Delete Receipt',
+      state.language === 'ar'
+        ? 'هذا الوصل مرتبط بتمويل أو تحويل. حرر هذه الارتباطات أولاً لحماية الرصيد.'
+        : 'This receipt is linked to ad funding or a transfer. Release those links first; the server will not perform a partial money cleanup.',
+      'warning'
+    );
+    return;
+  }
   let warning = isArDel
     ? `هل أنت متأكد من حذف الوصل رقم ${serialNo} ($${amountUSD})؟`
     : `Are you sure you want to delete receipt #${serialNo} ($${amountUSD})?`;
@@ -3179,11 +3342,11 @@ function deleteReceipt(id) {
     // All soft-deletes are collected and pushed to the server as ONE
     // all-or-nothing batch (receipt + its chained transfer receipts).
     const batchDeleteOps = { collectServerOps: [] };
-    const returnedTo = undoTransferIntoReceipt(receipt);
-    cleanupAdFundingLinks(id);
-    const cascadeCount = cascadeDeleteOutgoingTransfers(receipt, undefined, batchDeleteOps);
-    deleteRecord(state.receipts, id, batchDeleteOps);
-    flushBatchDeletes(batchDeleteOps.collectServerOps);
+    const returnedTo = await undoTransferIntoReceipt(receipt);
+    await cleanupAdFundingLinks(id);
+    const cascadeCount = await cascadeDeleteOutgoingTransfers(receipt, undefined, batchDeleteOps);
+    if (!await deleteRecord(state.receipts, id, batchDeleteOps)) return;
+    if (!await flushBatchDeletes(batchDeleteOps.collectServerOps)) return;
     let detail = isArDel ? 'تم حذف الوصل' : 'Receipt deleted';
     if (linkedAds.length > 0) detail += isArDel ? ` (تم تنظيف ${linkedAds.length} ارتباط تمويل)` : ` (${linkedAds.length} ad allocation(s) cleaned up)`;
     if (returnedTo) detail += isArDel ? ` — عاد $${amountUSD} إلى الوصل رقم ${returnedTo.serialNumber || returnedTo.id.slice(0, 8)}` : ` — $${amountUSD} returned to receipt #${returnedTo.serialNumber || returnedTo.id.slice(0, 8)}`;
@@ -3193,7 +3356,7 @@ function deleteReceipt(id) {
   }
 }
 
-function deleteAd(id) {
+async function deleteAd(id) {
   // Permission check
   const ad = state.ads.find(a => a.id === id);
   if (!canActOnRecord('ads', 'delete', ad?.creatorId)) {
@@ -3221,7 +3384,7 @@ function deleteAd(id) {
     ? `\n\n⚠️ لا يمكن التراجع عن هذا الإجراء!`
     : `\n\n⚠️ This action cannot be undone!`;
   if (confirm(warning)) {
-    deleteRecord(state.ads, id);
+    if (!await deleteRecord(state.ads, id)) return;
     showNotification(state.language === 'ar' ? 'تم الحذف' : 'Deleted', state.language === 'ar' ? 'تم حذف الإعلان' : 'Ad deleted', 'success');
     render();
   }

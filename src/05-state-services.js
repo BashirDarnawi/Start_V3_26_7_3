@@ -280,6 +280,25 @@ function walletFindByIdempotency(idempotencyKey) {
   return txs.find(t => t && !t._deleted && String(t.idempotencyKey || '') === key) || null;
 }
 
+function upsertServerBackedRecord(collectionName, entityResponse) {
+  const saved = entityResponse?.data ? Security.sanitizeObject(entityResponse.data) : null;
+  if (!saved?.id || !Security.isValidRecordId(saved.id)) throw new Error('Invalid server response');
+  if (!Array.isArray(state[collectionName])) state[collectionName] = [];
+  const arr = state[collectionName];
+  const idx = arr.findIndex(row => row && String(row.id) === String(saved.id));
+  if (idx === -1) arr.unshift(saved);
+  else arr[idx] = saved;
+  markCollectionDirty(collectionName);
+  saveState();
+  return saved;
+}
+
+function ensureOperationIdempotencyKey(value, prefix) {
+  const supplied = Security.sanitizeInput(String(value || '').trim(), { maxLength: 120 });
+  if (supplied.length >= 8) return supplied;
+  return `${String(prefix || 'op')}:${Security.generateSecureId('idem')}`.slice(0, 120);
+}
+
 const WALLET = {
   currency: 'LYD',
   // Compute balance from immutable ledger
@@ -318,7 +337,7 @@ const WALLET = {
     return out;
   },
   // Add credit (admin/top-up)
-  credit: (toUserId, amount, meta = {}) => {
+  credit: async (toUserId, amount, meta = {}) => {
     if (!state.currentUser?.id) throw new Error('Not logged in');
     // Manual credit = the platform owner records money received OUTSIDE the
     // app (cash / bank transfer from a client). Admin-only on the client, and
@@ -330,11 +349,9 @@ const WALLET = {
     const currency = walletNormalizeCurrency(meta.currency || WALLET.currency);
     const amountMinor = Number.isFinite(Number(meta.amountMinor)) ? Math.trunc(Number(meta.amountMinor)) : walletToMinor(amount, currency);
     if (!Number.isFinite(amountMinor) || amountMinor <= 0) throw new Error('Invalid amount');
-    const idem = Security.sanitizeInput(String(meta.idempotencyKey || '').trim(), { maxLength: 120 });
-    if (idem) {
-      const existing = walletFindByIdempotency(idem);
-      if (existing) return existing;
-    }
+    const idem = ensureOperationIdempotencyKey(meta.idempotencyKey, 'topup');
+    const existing = walletFindByIdempotency(idem);
+    if (existing) return existing;
     const tx = {
       id: generateId('wtx'),
       type: 'credit',
@@ -357,12 +374,23 @@ const WALLET = {
     if (tx.toUserId === 'system') throw new Error('Invalid recipient');
     const exists = Array.isArray(state.users) && state.users.some(u => u && !u._deleted && String(u.id) === tx.toUserId);
     if (!exists) throw new Error('Recipient not found');
-    addRecord(state.walletTransactions, tx);
+    if (isServerModeEnabled()) {
+      const response = await apiWalletTopUp({
+        userId: tx.toUserId,
+        amountMinor,
+        currency,
+        idempotencyKey: idem,
+        memo: tx.memo
+      });
+      return upsertServerBackedRecord('walletTransactions', response);
+    }
+    const savedOk = await addRecord(state.walletTransactions, tx);
+    if (!savedOk) throw new Error('Failed to save wallet top-up');
     addAuditLog('wallet', tx.id, `Wallet credit ${walletFormatMinor(amountMinor, currency)}`, { resourceType: 'walletTransactions', toUserId: tx.toUserId });
     return tx;
   },
   // Transfer between users
-  transfer: (fromUserId, toUserId, amount, meta = {}) => {
+  transfer: async (fromUserId, toUserId, amount, meta = {}) => {
     if (!state.currentUser?.id) throw new Error('Not logged in');
     const currency = walletNormalizeCurrency(meta.currency || WALLET.currency);
     const amountMinor = Number.isFinite(Number(meta.amountMinor)) ? Math.trunc(Number(meta.amountMinor)) : walletToMinor(amount, currency);
@@ -379,14 +407,17 @@ const WALLET = {
       if (!toExists) throw new Error('Recipient not found');
     }
 
-    const idem = Security.sanitizeInput(String(meta.idempotencyKey || '').trim(), { maxLength: 120 });
-    if (idem) {
-      const existing = walletFindByIdempotency(idem);
-      if (existing) return existing;
-    }
+    const idem = ensureOperationIdempotencyKey(meta.idempotencyKey, 'transfer');
+    const existing = walletFindByIdempotency(idem);
+    if (existing) return existing;
 
-    const balMinor = WALLET.getBalanceMinor(fromId, currency);
-    if (balMinor + 0 < amountMinor) throw new Error('Insufficient balance');
+    // Local mode owns its ledger and must validate here. In server mode the
+    // cache may be a few seconds stale, so only the locked DB transaction may
+    // decide whether the authoritative balance is sufficient.
+    if (!isServerModeEnabled()) {
+      const balMinor = WALLET.getBalanceMinor(fromId, currency);
+      if (balMinor < amountMinor) throw new Error('Insufficient balance');
+    }
 
     const tx = {
       id: generateId('wtx'),
@@ -407,12 +438,26 @@ const WALLET = {
       _lastModified: getMonotonicTime(),
       _deleted: false
     };
-    addRecord(state.walletTransactions, tx);
+    if (isServerModeEnabled()) {
+      // The dedicated endpoint always debits the authenticated user. Admins
+      // cannot use the client to spend another user's wallet.
+      if (String(state.currentUser.id) !== fromId) throw new Error('A server transfer can only debit your own wallet');
+      const response = await apiWalletTransfer({
+        toUserId: toId,
+        amountMinor,
+        currency,
+        idempotencyKey: idem,
+        memo: tx.memo
+      });
+      return upsertServerBackedRecord('walletTransactions', response);
+    }
+    const savedOk = await addRecord(state.walletTransactions, tx);
+    if (!savedOk) throw new Error('Failed to save wallet transfer');
     addAuditLog('wallet', tx.id, `Wallet transfer ${walletFormatMinor(amountMinor, currency)}`, { resourceType: 'walletTransactions', fromUserId: tx.fromUserId, toUserId: tx.toUserId });
     return tx;
   },
   // Create a compensating transaction (Admin-only) instead of editing history
-  reverse: (transactionId, meta = {}) => {
+  reverse: async (transactionId, meta = {}) => {
     if (!state.currentUser?.id) throw new Error('Not logged in');
     if (!isAdminRole(state.currentUser.role)) throw new Error('Admin only');
     const id = String(transactionId || '').trim();
@@ -426,7 +471,14 @@ const WALLET = {
     const fromId = String(original.toUserId || 'system');
     const toId = String(original.fromUserId || 'system');
     const idem = `rev:${id}`;
-    return WALLET.transfer(fromId, toId, 0, {
+    if (isServerModeEnabled()) {
+      const response = await apiWalletReversal({
+        transactionId: id,
+        memo: Security.sanitizeInput(meta.memo || `Reversal of ${id}`, { maxLength: 180 })
+      });
+      return upsertServerBackedRecord('walletTransactions', response);
+    }
+    return await WALLET.transfer(fromId, toId, 0, {
       type: 'reversal',
       amountMinor,
       currency,
@@ -459,13 +511,20 @@ const SUBSCRIPTIONS = {
     return SUBSCRIPTIONS.getActiveServiceIds(userId).includes(sid);
   },
   // Subscribe by paying from wallet (default monthly)
-  subscribe: (userId, serviceId, opts = {}) => {
+  subscribe: async (userId, serviceId, opts = {}) => {
     if (!state.currentUser?.id) throw new Error('Not logged in');
     const uid = String(userId || '');
     const sid = String(serviceId || '');
     if (!uid || !sid) throw new Error('Missing subscription data');
     const isAdmin = isAdminRole(state.currentUser.role);
     if (!isAdmin && String(state.currentUser.id) !== uid) throw new Error('Forbidden');
+
+    const idem = ensureOperationIdempotencyKey(opts.idempotencyKey, 'subscription');
+    const subs = Array.isArray(state.serviceSubscriptions) ? state.serviceSubscriptions : [];
+    // Check the exact retry key before the broader active-service guard so a
+    // double tap/retry returns the already-committed purchase as success.
+    const existing = subs.find(s => s && !s._deleted && s.userId === uid && s.serviceId === sid && String(s.idempotencyKey || '') === idem);
+    if (existing) return existing;
     if (SUBSCRIPTIONS.isActive(uid, sid)) throw new Error('Already subscribed');
 
     const currency = walletNormalizeCurrency(opts.currency || WALLET.currency);
@@ -476,18 +535,32 @@ const SUBSCRIPTIONS = {
     if (!Number.isFinite(durationDays) || durationDays <= 0) throw new Error('Invalid duration');
     if (!Number.isFinite(priceMinor) || priceMinor < 0) throw new Error('Invalid price');
 
-    const idem = Security.sanitizeInput(String(opts.idempotencyKey || '').trim(), { maxLength: 120 });
-    // Idempotent subscribe: retry with same key must return the same subscription record
-    const subs = Array.isArray(state.serviceSubscriptions) ? state.serviceSubscriptions : [];
-    if (idem) {
-      const existing = subs.find(s => s && !s._deleted && s.userId === uid && s.serviceId === sid && String(s.idempotencyKey || '') === idem);
-      if (existing) return existing;
+    if (isServerModeEnabled()) {
+      // Price, duration, balance check, payment ledger row and subscription
+      // are all owned by the server and committed atomically in one call.
+      const response = await apiPurchaseSubscription({
+        serviceId: sid,
+        idempotencyKey: idem,
+        userId: isAdmin && uid !== String(state.currentUser.id) ? uid : undefined
+      });
+      const saved = upsertServerBackedRecord('serviceSubscriptions', response);
+      if (saved.paymentTxId) {
+        try {
+          const payment = await apiGetEntity('walletTransactions', saved.paymentTxId);
+          upsertServerBackedRecord('walletTransactions', payment);
+        } catch (e) {
+          // Subscription is already committed; live sync will fetch the ledger
+          // row. Do not retry the purchase with a new key or double-notify.
+          if (ALBAYAN_DEBUG_MODE) console.warn('[SUBSCRIPTIONS.subscribe] Payment refresh failed:', e?.message || e);
+        }
+      }
+      return saved;
     }
 
     let paymentTx = null;
     if (priceMinor > 0) {
       // charge wallet (debit) by transferring to system account
-      paymentTx = WALLET.transfer(uid, 'system', 0, {
+      paymentTx = await WALLET.transfer(uid, 'system', 0, {
         type: 'service_payment',
         amountMinor: priceMinor,
         currency,
@@ -518,11 +591,12 @@ const SUBSCRIPTIONS = {
       _lastModified: getMonotonicTime(),
       _deleted: false
     };
-    addRecord(state.serviceSubscriptions, rec);
+    const savedOk = await addRecord(state.serviceSubscriptions, rec);
+    if (!savedOk) throw new Error('Failed to save subscription');
     addAuditLog('subscription', rec.id, `Subscribed to ${sid} (${walletFormatMinor(priceMinor, currency)})`, { resourceType: 'serviceSubscriptions', serviceId: sid, userId: uid });
     return rec;
   },
-  cancel: (userId, serviceId) => {
+  cancel: async (userId, serviceId) => {
     if (!state.currentUser?.id) throw new Error('Not logged in');
     const uid = String(userId || '');
     const sid = String(serviceId || '');
@@ -542,7 +616,8 @@ const SUBSCRIPTIONS = {
     if (!active?.id) throw new Error('No active subscription');
 
     const ts = new Date().toISOString();
-    updateRecord(state.serviceSubscriptions, active.id, { status: 'canceled', canceledAt: ts, expiresAt: ts });
+    const canceledOk = await updateRecord(state.serviceSubscriptions, active.id, { status: 'canceled', canceledAt: ts, expiresAt: ts });
+    if (!canceledOk) throw new Error('Failed to cancel subscription');
     addAuditLog('subscription', active.id, `Canceled ${sid}`, { resourceType: 'serviceSubscriptions', serviceId: sid, userId: uid });
 
     // Keep legacy user.subscriptions in sync (optional compatibility)
@@ -550,7 +625,7 @@ const SUBSCRIPTIONS = {
     const legacy = Array.isArray(user?.subscriptions) ? user.subscriptions.slice() : null;
     if (legacy && legacy.includes(sid)) {
       const next = legacy.filter(x => x !== sid);
-      updateRecord(state.users, uid, { subscriptions: next });
+      await updateRecord(state.users, uid, { subscriptions: next });
     }
     return true;
   }
@@ -651,4 +726,3 @@ const state = {
   // Delivery dashboard (Delivery role)
   deliveryDashboardFilterStatus: 'all' // 'all' | 'Needs Delivery' | 'In Progress' | 'Delivered' | 'Collected'
 };
-

@@ -52,6 +52,8 @@ DELIV_MGR_EMAIL = "permflow-delivmgr@tests.albayanhub.com"
 DELIV_MGR_PASSWORD = "DelivMgrPass123!Secure"
 MINIMAL_EMAIL = "permflow-minimal@tests.albayanhub.com"
 MINIMAL_PASSWORD = "MinimalPass123!Secure"
+DRIVER_EMAIL = "permflow-driver@tests.albayanhub.com"
+DRIVER_PASSWORD = "DriverPass123!Secure"
 
 # The FULL permission map: every module key and every action from
 # src/04-permissions.js PERMISSION_MODULES (86 individual permissions after
@@ -193,6 +195,16 @@ def minimal_user(employee):
     return {"id": created["id"], "cookies": cookies}
 
 
+@pytest.fixture(scope="module")
+def delivery_driver(employee):
+    created = _create_user(
+        employee["admin"], "Delivery Driver", DRIVER_EMAIL, DRIVER_PASSWORD,
+        "Delivery", {"deliveries": ["view", "viewOwn", "accept", "complete"]},
+    )
+    cookies, _ = _login(DRIVER_EMAIL, DRIVER_PASSWORD)
+    return {"id": created["id"], "cookies": cookies}
+
+
 class TestCreateWithFullPermissions:
     def test_create_response_contains_full_permissions(self, employee):
         created = employee["created"]
@@ -239,13 +251,26 @@ class TestWalletAndSubscriptionsScoped:
         assert r.status_code == 200, f"{collection}: {r.status_code} {r.text[:200]}"
         assert isinstance(r.json(), list)
 
-    def test_self_debit_allowed_other_debit_forbidden(self, employee):
+    def test_funded_transfer_allowed_arbitrary_debit_forbidden(self, employee, minimal_user):
         uid = employee["id"]
-        ok = client.post("/api/collections/walletTransactions", json={"data": {
-            "fromUserId": uid, "toUserId": "system", "type": "service_payment",
-            "amountMinor": 100, "currency": "USD",
-        }}, cookies=employee["cookies"])
+        top_up = client.post("/api/wallet/top-ups", json={
+            "userId": uid, "amountMinor": 500, "currency": "USD",
+            "idempotencyKey": "permflow-topup-001",
+        }, cookies=employee["admin"])
+        assert top_up.status_code == 200, top_up.text[:300]
+
+        ok = client.post("/api/wallet/transfers", json={
+            "toUserId": minimal_user["id"], "amountMinor": 100, "currency": "USD",
+            "idempotencyKey": "permflow-transfer-001",
+        }, cookies=employee["cookies"])
         assert ok.status_code == 200, ok.text[:300]
+
+        # Generic fabricated service payments are never accepted.
+        forged = client.post("/api/collections/walletTransactions", json={"data": {
+            "fromUserId": uid, "toUserId": "system", "type": "service_payment",
+            "amountMinor": 100, "currency": "USD", "idempotencyKey": "forged-payment-001",
+        }}, cookies=employee["cookies"])
+        assert forged.status_code == 403
 
         # Cannot mint money into own wallet or debit someone else.
         bad = client.post("/api/collections/walletTransactions", json={"data": {
@@ -262,10 +287,10 @@ class TestWalletAndSubscriptionsScoped:
         """Another user must NOT see the employee's wallet rows."""
         r = client.get("/api/collections/walletTransactions", cookies=minimal_user["cookies"])
         assert r.status_code == 200
-        uid = employee["id"]
-        assert not any(
-            (e.get("data") or {}).get("fromUserId") == uid
-            or (e.get("data") or {}).get("toUserId") == uid
+        minimal_id = minimal_user["id"]
+        assert all(
+            (e.get("data") or {}).get("fromUserId") == minimal_id
+            or (e.get("data") or {}).get("toUserId") == minimal_id
             for e in r.json()
         ), "wallet rows leaked across users"
 
@@ -274,12 +299,15 @@ class TestWalletAndSubscriptionsScoped:
         created = client.post("/api/collections/serviceSubscriptions", json={"data": {
             "userId": uid, "serviceId": "clothes_system", "status": "active",
             "expiresAt": "2099-01-01T00:00:00.000Z",
+            "idempotencyKey": "permflow-subscribe-001",
         }}, cookies=employee["cookies"])
         assert created.status_code == 200, created.text[:300]
+        assert not created.json()["data"]["expiresAt"].startswith("2099-")
         sub_id = created.json()["id"]
 
         for_other = client.post("/api/collections/serviceSubscriptions", json={"data": {
             "userId": "someone-else", "serviceId": "clothes_system", "status": "active",
+            "idempotencyKey": "permflow-subscribe-002",
         }}, cookies=employee["cookies"])
         assert for_other.status_code == 403
 
@@ -366,7 +394,7 @@ class TestCheckStuckDeliveries:
 
 
 class TestDeliveriesPermissionsOnPatch:
-    def test_delivery_workflow_patch_with_deliveries_perms(self, employee, delivery_manager):
+    def test_delivery_workflow_patch_with_deliveries_perms(self, employee, delivery_manager, delivery_driver, minimal_user):
         admin = employee["admin"]
         created = client.post("/api/collections/receipts", json={"data": {
             "customerName": "Perm Test", "status": "Paid",
@@ -377,7 +405,7 @@ class TestDeliveriesPermissionsOnPatch:
         # deliveries.assign holder (NO receipts.edit) can assign a driver...
         assign = client.patch(
             f"/api/collections/receipts/{rid}",
-            json={"data": {"deliveryPersonId": delivery_manager["id"],
+            json={"data": {"deliveryPersonId": delivery_driver["id"],
                             "deliveryStatus": "Needs Delivery"}},
             cookies=delivery_manager["cookies"],
         )
@@ -395,10 +423,9 @@ class TestDeliveriesPermissionsOnPatch:
         deny = client.patch(
             f"/api/collections/receipts/{rid}",
             json={"data": {"deliveryStatus": "In Progress"}},
-            cookies=delivery_manager["cookies"],
+            cookies=minimal_user["cookies"],
         )
-        # delivery_manager HAS accept, so use minimal user for the negative:
-        assert deny.status_code in (200, 403)
+        assert deny.status_code == 403
 
 
 class TestUsersCrudPermissions:

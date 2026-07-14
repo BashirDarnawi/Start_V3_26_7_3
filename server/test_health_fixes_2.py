@@ -261,7 +261,10 @@ class TestAdDeliveryTerminalStateLockdown:
 
     def test_driver_can_still_progress_an_ad_forward(self):
         did = _driver_id()
-        _insert_ad("hf2_ad_progress", {"deliveryPersonId": did, "deliveryStatus": "In Progress", "amountUSD": 50})
+        _insert_ad("hf2_ad_progress", {
+            "deliveryPersonId": did, "deliveryStatus": "In Progress",
+            "amountUSD": 50, "isPaid": True,
+        })
         token = _login(DRIVER_EMAIL)
         # The normal forward flow (In Progress -> Delivered) must still work.
         resp = client.patch(

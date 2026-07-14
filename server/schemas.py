@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, Field
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 
 class LoginRequest(BaseModel):
@@ -50,6 +50,7 @@ class SetupAdminRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     email: EmailStr
     password: str = Field(min_length=8, max_length=256)
+    setupToken: Optional[str] = Field(default=None, max_length=256)
 
 
 class UpdateUserRequest(BaseModel):
@@ -69,6 +70,97 @@ class EntityCreateRequest(BaseModel):
 class EntityUpdateRequest(BaseModel):
     data: dict[str, Any]
     expectedLastModified: Optional[int] = None
+
+
+class WalletTransferRequest(BaseModel):
+    """Server-authoritative wallet transfer.
+
+    Amounts are always integer minor units.  An idempotency key is mandatory
+    so a client retry cannot charge the sender twice.
+    """
+
+    toUserId: str = Field(min_length=1, max_length=80)
+    amountMinor: int = Field(gt=0, le=1_000_000_000_000)
+    currency: Literal["LYD", "USD", "EUR"]
+    idempotencyKey: str = Field(min_length=8, max_length=120)
+    memo: Optional[str] = Field(default=None, max_length=180)
+
+
+class WalletTopUpRequest(BaseModel):
+    """Admin-only credit recorded after receiving funds outside the app."""
+
+    userId: str = Field(min_length=1, max_length=80)
+    amountMinor: int = Field(gt=0, le=1_000_000_000_000)
+    currency: Literal["LYD", "USD", "EUR"]
+    idempotencyKey: str = Field(min_length=8, max_length=120)
+    memo: Optional[str] = Field(default=None, max_length=180)
+
+
+class WalletReversalRequest(BaseModel):
+    """Admin-only compensating entry for an immutable ledger row."""
+
+    transactionId: str = Field(min_length=1, max_length=80)
+    memo: Optional[str] = Field(default=None, max_length=180)
+
+
+class SubscriptionPurchaseRequest(BaseModel):
+    """Purchase a catalog service using server-owned price and duration."""
+
+    serviceId: str = Field(min_length=1, max_length=80)
+    idempotencyKey: str = Field(min_length=8, max_length=120)
+    userId: Optional[str] = Field(default=None, min_length=1, max_length=80)
+
+
+class ClothesOrderMutationRequest(BaseModel):
+    """One idempotent, transactional order + inventory operation."""
+
+    action: Literal["create", "update", "status", "payment", "delete"]
+    idempotencyKey: str = Field(min_length=8, max_length=120)
+    orderId: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    expectedLastModified: Optional[int] = None
+    status: Optional[str] = Field(default=None, max_length=40)
+    paymentStatus: Optional[str] = Field(default=None, max_length=40)
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class ClothesShipmentMutationRequest(BaseModel):
+    """One idempotent shipment status/delete operation with inventory."""
+
+    action: Literal["status", "delete"]
+    idempotencyKey: str = Field(min_length=8, max_length=120)
+    shipmentId: str = Field(min_length=1, max_length=80)
+    expectedLastModified: int
+    status: Optional[str] = Field(default=None, max_length=40)
+
+
+class ReceiptTransferRequest(BaseModel):
+    """Move already-paid receipt credit without minting or losing money."""
+
+    sourceReceiptId: str = Field(min_length=1, max_length=80)
+    targetCustomerId: str = Field(min_length=1, max_length=80)
+    targetReceiptId: str = Field(min_length=1, max_length=80)
+    amountMinorUSD: int = Field(gt=0, le=1_000_000_000)
+    idempotencyKey: str = Field(min_length=8, max_length=120)
+    expectedSourceLastModified: int = Field(ge=0)
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+class AdMutationRequest(BaseModel):
+    """Create/update an ad and its receipt funding in one transaction."""
+
+    action: Literal["create", "update"]
+    adId: str = Field(min_length=1, max_length=80)
+    idempotencyKey: str = Field(min_length=8, max_length=120)
+    expectedLastModified: Optional[int] = Field(default=None, ge=0)
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class AdStopRequest(BaseModel):
+    """Server-authoritative ad stop/re-stop request, expressed in USD cents."""
+
+    spentMinorUSD: int = Field(ge=0, le=1_000_000_000)
+    idempotencyKey: str = Field(min_length=8, max_length=120)
+    expectedLastModified: int = Field(ge=0)
 
 
 class AdminBulkImportRequest(BaseModel):
@@ -126,6 +218,35 @@ class EntityResponse(BaseModel):
     data: dict[str, Any]
 
 
+class ClothesOrderMutationResponse(BaseModel):
+    order: EntityResponse
+    updatedProducts: list[EntityResponse] = Field(default_factory=list)
+    replayed: bool = False
+
+
+class ClothesShipmentMutationResponse(BaseModel):
+    shipment: EntityResponse
+    updatedProducts: list[EntityResponse] = Field(default_factory=list)
+    replayed: bool = False
+
+
+class ReceiptTransferResponse(BaseModel):
+    sourceReceipt: EntityResponse
+    targetReceipt: EntityResponse
+    transfer: dict[str, Any]
+    replayed: bool = False
+
+
+class AdMutationResponse(BaseModel):
+    ad: EntityResponse
+    replayed: bool = False
+
+
+class AdStopResponse(BaseModel):
+    ad: EntityResponse
+    replayed: bool = False
+
+
 class BootstrapResponse(BaseModel):
     user: UserPublic
     ads: list[dict[str, Any]] = Field(default_factory=list)
@@ -134,5 +255,3 @@ class BootstrapResponse(BaseModel):
     pages: list[dict[str, Any]] = Field(default_factory=list)
     exchangeRateHistory: list[dict[str, Any]] = Field(default_factory=list)
     logs: list[dict[str, Any]] = Field(default_factory=list)
-
-

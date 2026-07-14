@@ -381,7 +381,7 @@ function filterPageCustomers() {
   
   if (filtered.length > 0 && searchTerm) {
     dropdown.innerHTML = filtered.map(c => `
-      <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" onclick="selectPageCustomer('${c.id}', '${isAdminRole(state.currentUser?.role)}')">
+      <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" data-record-action="select-page-customer" data-record-id="${Security.escapeHtml(String(c.id || ''))}" data-admin="${isAdminRole(state.currentUser?.role)}">
         <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
         <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (state.language === 'ar' ? 'لا يوجد هاتف' : 'No phone'))}</div>
       </div>
@@ -398,7 +398,7 @@ function showPageCustomerDropdown() {
   
   if (customers.length > 0) {
     dropdown.innerHTML = customers.map(c => `
-      <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" onclick="selectPageCustomer('${c.id}', '${isAdminRole(state.currentUser?.role)}')">
+      <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" data-record-action="select-page-customer" data-record-id="${Security.escapeHtml(String(c.id || ''))}" data-admin="${isAdminRole(state.currentUser?.role)}">
         <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
         <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (state.language === 'ar' ? 'لا يوجد هاتف' : 'No phone'))}</div>
       </div>
@@ -408,6 +408,7 @@ function showPageCustomerDropdown() {
 }
 
 function selectPageCustomer(customerId, isAdmin) {
+  if (!Security.isValidRecordId(customerId)) return;
   const customer = state.customers.find(c => c.id === customerId);
   if (!customer) return;
   
@@ -417,7 +418,8 @@ function selectPageCustomer(customerId, isAdmin) {
   const searchInput = document.getElementById('page-customer-search');
   
   // Check if already selected
-  const existing = container.querySelector(`[data-customer-id="${customerId}"]`);
+  const existing = Array.from(container.querySelectorAll('[data-customer-id]'))
+    .find(el => String(el.dataset.customerId || '') === String(customerId));
   if (existing) {
     showNotification(state.language === 'ar' ? 'محدد مسبقاً' : 'Already Selected', state.language === 'ar' ? 'هذا العميل مرتبط بهذه الصفحة بالفعل' : 'This customer is already linked to this page', 'info');
     dropdown.classList.add('hidden');
@@ -441,7 +443,7 @@ function selectPageCustomer(customerId, isAdmin) {
       <div class="font-medium text-sm text-slate-800 dark:text-white">${Security.escapeHtml(customer.name || '')}</div>
       <div class="text-xs text-slate-500">${Security.escapeHtml(customer.platform || '')}</div>
     </div>
-    <button type="button" onclick="removePageCustomer('${customerId}')" class="text-rose-500 hover:text-rose-700">
+    <button type="button" data-record-action="remove-page-customer" data-record-id="${Security.escapeHtml(String(customerId))}" class="text-rose-500 hover:text-rose-700">
       <i data-lucide="x-circle" class="w-4 h-4"></i>
     </button>
   `;
@@ -471,9 +473,11 @@ function selectPageCustomer(customerId, isAdmin) {
 }
 
 function removePageCustomer(customerId) {
+  if (!Security.isValidRecordId(customerId)) return;
   const container = document.getElementById('page-selected-customers');
   const noCustomersMsg = document.getElementById('page-no-customers');
-  const item = container.querySelector(`[data-customer-id="${customerId}"]`);
+  const item = Array.from(container.querySelectorAll('[data-customer-id]'))
+    .find(el => String(el.dataset.customerId || '') === String(customerId));
   
   if (item) {
     item.remove();
@@ -492,6 +496,39 @@ function removePageCustomer(customerId) {
       warning.classList.add('hidden');
     }
   }
+}
+
+// Delegated record actions keep untrusted ids out of executable JavaScript.
+// Dynamic dropdowns can be re-rendered freely without re-binding handlers.
+if (!window.__albayanSafeRecordActionsBound) {
+  window.__albayanSafeRecordActionsBound = true;
+  document.addEventListener('click', (event) => {
+    const actionEl = event.target?.closest?.('[data-record-action]');
+    if (!actionEl) return;
+    const recordId = String(actionEl.dataset.recordId || '');
+    if (!Security.isValidRecordId(recordId)) {
+      event.preventDefault();
+      showNotification('Invalid Record', 'This record identifier is not allowed.', 'error');
+      return;
+    }
+    switch (actionEl.dataset.recordAction) {
+      case 'select-page-customer':
+        selectPageCustomer(recordId, String(actionEl.dataset.admin || 'false'));
+        break;
+      case 'remove-page-customer':
+        removePageCustomer(recordId);
+        break;
+      case 'select-ad-page':
+        selectAdPage(recordId);
+        break;
+      case 'select-ad-customer':
+        selectAdCustomer(recordId);
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+  });
 }
 
 // Close dropdowns when clicking outside
@@ -1463,36 +1500,55 @@ async function _saveReceiptFromModalInner() {
     // Pass the baseline the user actually edited (the modal snapshot) so a
     // concurrent change (e.g. a driver completing the delivery) triggers a
     // 409 conflict + reload instead of being silently overwritten.
-    updateRecord(state.receipts, receipt.id, receipt, oldReceipt?._lastModified);
+    const savedOk = await updateRecord(state.receipts, receipt.id, receipt, oldReceipt?._lastModified);
+    if (!savedOk) return; // keep the modal open; updateRecord already explained the failure
     showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث الوصل بنجاح!' : 'Receipt updated successfully!', 'success');
     addLog('update', 'receipt', receipt.id, `Updated receipt${serialNumber ? ' #' + serialNumber : ''}`);
   } else {
     // Create new
     if (isServerModeEnabled()) {
       // Server-confirmed create: do NOT show success until the server confirms.
+      let saved = null;
       try {
         const created = await apiCreateEntity('receipts', receipt);
-        const saved = created?.data ? Security.sanitizeObject(created.data) : null;
-        if (!saved || !saved.id) {
-          showNotification(isArV ? 'خطأ في الخادم' : 'Server Error', isArV ? 'فشل إنشاء الوصل: استجابة غير صالحة من الخادم' : 'Failed to create receipt: invalid server response', 'error');
-          return;
-        }
-        // Insert into local state
-        state.receipts.unshift(saved);
-        markCollectionDirty('receipts');
-        saveState();
-        showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
-        addLog('create', 'receipt', saved.id, `Created receipt${saved.tempReceiptNo ? ' #' + saved.tempReceiptNo : (serialNumber ? ' #' + serialNumber : '')} for ${customerName}`);
+        saved = created?.data ? Security.sanitizeObject(created.data) : null;
       } catch (e) {
+        // The first POST may have committed while its response was lost; its
+        // retry then receives 409. Accept only a matching server row.
+        if (e?.status === 409) {
+          try {
+            const existing = await apiGetEntity('receipts', receipt.id);
+            if (existing?.data && serverRecordMatchesCreateRetry(existing.data, receipt)) {
+              saved = Security.sanitizeObject(existing.data);
+            }
+          } catch (_) {}
+        }
+        if (saved) {
+          // Continue below as a confirmed idempotent success.
+        } else {
         const status = e?.status ? `HTTP ${e.status}` : '';
         const detail = (e?.payload && typeof e.payload === 'object' && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
         showNotification(isArV ? 'خطأ في الخادم' : 'Server Error', `${isArV ? 'فشل إنشاء الوصل' : 'Failed to create receipt'}: ${status ? status + ' - ' : ''}${detail}`, 'error');
         return; // keep modal open so user can retry
+        }
       }
+      if (!saved || !saved.id) {
+        showNotification(isArV ? 'خطأ في الخادم' : 'Server Error', isArV ? 'فشل إنشاء الوصل: استجابة غير صالحة من الخادم' : 'Failed to create receipt: invalid server response', 'error');
+        return;
+      }
+      // Insert into local state only after server confirmation.
+      const savedIdx = state.receipts.findIndex(r => r && String(r.id) === String(saved.id));
+      if (savedIdx === -1) state.receipts.unshift(saved);
+      else state.receipts[savedIdx] = saved;
+      markCollectionDirty('receipts');
+      saveState();
+      showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
+      addLog('create', 'receipt', saved.id, `Created receipt${saved.tempReceiptNo ? ' #' + saved.tempReceiptNo : (serialNumber ? ' #' + serialNumber : '')} for ${customerName}`);
     } else {
-    addRecord(state.receipts, receipt);
-    showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
-    addLog('create', 'receipt', receipt.id, `Created receipt${serialNumber ? ' #' + serialNumber : ''} for ${customerName}`);
+      const savedOk = await addRecord(state.receipts, receipt);
+      if (!savedOk) return;
+      showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
+      addLog('create', 'receipt', receipt.id, `Created receipt${serialNumber ? ' #' + serialNumber : ''} for ${customerName}`);
     }
   }
   
@@ -2060,6 +2116,7 @@ function handleAdPageChange(preserveFunding = false) {
 
 // Select a page in the Add Ad modal (Page-first workflow)
 function selectAdPage(pageId, preserveFunding = false) {
+  if (!Security.isValidRecordId(pageId)) return;
   const isArP = state.language === 'ar';
   const pageInput = document.getElementById('ad-page');
   const pageSearch = document.getElementById('ad-page-search');
@@ -2165,7 +2222,7 @@ function selectAdPage(pageId, preserveFunding = false) {
           ${linkedCustomers.map(c => {
             const isSelected = c.id === currentCustomerId;
             return `
-              <button type="button" onclick="selectAdCustomer('${c.id}')" class="ad-customer-btn group p-2 rounded-lg text-left transition-all ${isSelected ? 'bg-indigo-600 text-white' : 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-indigo-400'}" data-customer-id="${c.id}" data-customer-name="${Security.escapeHtml((c.name || '').toLowerCase())}">
+              <button type="button" data-record-action="select-ad-customer" data-record-id="${Security.escapeHtml(String(c.id || ''))}" class="ad-customer-btn group p-2 rounded-lg text-left transition-all ${isSelected ? 'bg-indigo-600 text-white' : 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-indigo-400'}" data-customer-id="${Security.escapeHtml(String(c.id || ''))}" data-customer-name="${Security.escapeHtml((c.name || '').toLowerCase())}">
                 <div class="flex items-center space-x-2">
                   <div class="w-6 h-6 rounded-full ${isSelected ? 'bg-white/20' : 'bg-slate-100 dark:bg-slate-700'} flex items-center justify-center text-[10px] font-medium ${isSelected ? 'text-white' : 'text-slate-500'}">
                     ${c.name?.charAt(0) || 'C'}
@@ -2189,6 +2246,7 @@ function selectAdPage(pageId, preserveFunding = false) {
 
 // Select customer in multi-customer scenario
 function selectAdCustomer(customerId, preserveFunding = false) {
+  if (!Security.isValidRecordId(customerId)) return;
   const customerIdInput = document.getElementById('ad-customer-id');
   const prevCustomerId = customerIdInput?.value || '';
   if (customerIdInput) customerIdInput.value = customerId;
@@ -3769,4 +3827,3 @@ function updateUserRoleInfo(role) {
   
   if (window.lucide) lucide.createIcons();
 }
-

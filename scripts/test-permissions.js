@@ -111,7 +111,7 @@ vm.runInContext(fs.readFileSync(SCRIPT, 'utf8'), sandbox, { filename: 'script.js
 // the tests need across the boundary. Function declarations are already global
 // object properties, so they are reachable as sandbox.<name>.
 const bridged = vm.runInContext(
-  '({ state, PERMISSION_MODULES })',
+  '({ state, PERMISSION_MODULES, Security, _serverLiveSync })',
   sandbox
 );
 
@@ -725,6 +725,296 @@ check('rounding UP in the customer\'s favour still happens for real fractions', 
   assert(sandbox.ceilingRound(291 / 9.7) === 30, 'float residue must not create a phantom cent');
   assert(sandbox.ceilingRound(873 / 9.7) === 90, 'float residue must not create a phantom cent (x3)');
   assert(sandbox.ceilingRound(0) === 0 && sandbox.ceilingRound(NaN) === 0, 'zero/NaN stay 0');
+});
+
+console.log('\n=== FRONTEND SAFETY: cache identity, ids, sync, idempotency ===');
+
+check('record ids cannot break out of attributes or inline handlers', () => {
+  const Security = bridged.Security;
+  for (const safe of ['receipt_123_abc', 'u-admin', 'abc.def:4']) {
+    assert(Security.isValidRecordId(safe), `safe id rejected: ${safe}`);
+  }
+  for (const unsafe of ["x');alert(1)//", 'white space', '../receipt', '<img>', '', 'a'.repeat(81)]) {
+    assert(!Security.isValidRecordId(unsafe), `unsafe id accepted: ${unsafe}`);
+  }
+  const nested = Security.validateRecordIdentifiers({ id: 'receipt_ok', customerId: "c');alert(1)//" }, 'receipt');
+  assert(!nested.valid, 'unsafe relationship id was accepted');
+});
+
+check('opaque nested ids remain compatible while explicit relationships stay strict', () => {
+  const Security = bridged.Security;
+  const credentialId = 'credential_' + 'A'.repeat(180);
+  const passkeyRecord = Security.validateRecordIdentifiers({
+    id: 'user_safe',
+    passkeys: [{ id: credentialId, publicKeyJwk: { kty: 'EC' } }]
+  }, 'user');
+  assert(passkeyRecord.valid, 'opaque WebAuthn credential id was treated as an entity id');
+  const badRelationship = Security.validateRecordIdentifiers({
+    id: 'receipt_safe',
+    metadata: { customerId: "bad');alert(1)//" }
+  }, 'receipt');
+  assert(!badRelationship.valid, 'nested explicit relationship id was accepted');
+});
+
+check('every entity response path rejects poisoned relationship ids', () => {
+  const safe = {
+    id: 'receipt_safe', type: 'receipts', deleted: false,
+    createdAt: 1, lastModified: 1,
+    data: { id: 'receipt_safe', customerId: 'customer_safe' }
+  };
+  assert(sandbox.validateServerEntityResponse('receipts', safe, 'test') === safe, 'safe entity was rejected');
+  let rejected = false;
+  try {
+    sandbox.validateServerEntityResponse('receipts', {
+      ...safe,
+      data: { id: 'receipt_safe', customerId: "bad');alert(1)//" }
+    }, 'test');
+  } catch (e) {
+    rejected = e && e.code === 'UNSAFE_RECORD_IDENTIFIER';
+  }
+  assert(rejected, 'poisoned entity response was accepted');
+});
+
+check('keyset page overlap deduplicates IDs and keeps the newest version', () => {
+  const rows = [];
+  const indexes = new Map();
+  sandbox.mergeServerEntityDataById(rows, indexes, {
+    id: 'receipt_safe', lastModified: 10,
+    data: { id: 'receipt_safe', _lastModified: 10, note: 'old' }
+  });
+  sandbox.mergeServerEntityDataById(rows, indexes, {
+    id: 'receipt_safe', lastModified: 20,
+    data: { id: 'receipt_safe', _lastModified: 20, note: 'new' }
+  });
+  assert(rows.length === 1, 'duplicate page boundary left two copies of one record');
+  assert(rows[0].note === 'new', 'dedupe kept the stale record version');
+});
+
+check('IndexedDB collection keys are isolated by server and authenticated user', () => {
+  sandbox.activateLocalCollectionStorage();
+  const localKey = sandbox.getCollectionMetaKey('receipts');
+  sandbox.activateServerCollectionStorage({ id: 'user_a' });
+  const userAKey = sandbox.getCollectionMetaKey('receipts');
+  sandbox.activateServerCollectionStorage({ id: 'user_b' });
+  const userBKey = sandbox.getCollectionMetaKey('receipts');
+  sandbox.activateAnonymousServerCollectionStorage();
+  const anonymousKey = sandbox.getCollectionMetaKey('receipts');
+  assert(localKey !== userAKey, 'server cache reused the local key');
+  assert(userAKey !== userBKey, 'two users shared one business cache key');
+  assert(userBKey !== anonymousKey, 'authenticated cache reused the anonymous key');
+});
+
+check('cookie-session startup can start/stop polling without aborting its full load identity', () => {
+  S.serverMode = true;
+  S.currentUser = ADMIN;
+  sandbox.activateServerCollectionStorage(ADMIN);
+  const beforeIdentity = sandbox.getServerSessionIdentity();
+  const beforeSessionEpoch = bridged._serverLiveSync.sessionEpoch;
+  const beforePollerEpoch = bridged._serverLiveSync.pollerEpoch;
+  sandbox.stopServerLiveSync();
+  assert(sandbox.getServerSessionIdentity() === beforeIdentity, 'poller stop changed authenticated load identity');
+  assert(bridged._serverLiveSync.sessionEpoch === beforeSessionEpoch, 'poller stop advanced auth session epoch');
+  assert(bridged._serverLiveSync.pollerEpoch > beforePollerEpoch, 'poller generation did not advance');
+  S.serverMode = false;
+});
+
+check('full-load cursors use pre-load watermarks and never snapshot maxima', () => {
+  const sync = bridged._serverLiveSync;
+  sync.cursor = 30;
+  sync.serverWatermark = 30;
+  sync.fullLoadCursorReady = false;
+  sync.collectionCursors = { customers: 30 };
+  const results = {
+    ads: { ok: true, data: [{ id: 'ad_safe', _lastModified: 500 }] },
+    receipts: { ok: true, data: [{ id: 'receipt_safe', _lastModified: 400 }] },
+    customers: { ok: false, data: null }
+  };
+  const seeded = sandbox.reseedServerCursorFromFullLoad(results, [{ collection: 'customers' }], { ads: 100, receipts: 80 });
+  assert(seeded === true, 'captured watermarks were not accepted');
+  assert(sync.collectionCursors.ads === 100, 'ads cursor used a snapshot maximum instead of its pre-load watermark');
+  assert(sync.collectionCursors.receipts === 80, 'receipts cursor used a snapshot maximum instead of its pre-load watermark');
+  assert(sync.collectionCursors.customers === 30, 'failed collection did not retain its prior cursor');
+  assert(sync.cursor === 100 && sync.serverWatermark === 100, 'debug aggregate does not reflect captured cursors');
+
+  const fallback = sandbox.reseedServerCursorFromFullLoad(results, [], null);
+  assert(fallback === false, 'missing watermark endpoint claimed an authoritative boundary');
+  assert(sync.collectionCursors.ads === 0 && sync.collectionCursors.receipts === 0, '404/failure fallback did not force a since=0 catch-up');
+  assert(sync.collectionCursors.customers === 30, 'fallback changed a failed collection cursor');
+});
+
+check('permission scope changes detect view-to-own, view-to-none, and Admin demotion', () => {
+  const full = employee({ ads: ['view'], receipts: ['view'] });
+  const own = employee({ ads: ['viewOwn'], receipts: ['view'] });
+  const none = employee({ receipts: ['view'] });
+  assert(sandbox.getServerVisibilityScopeChanges(full, own).includes('ads'), 'view -> viewOwn was not detected');
+  assert(sandbox.getServerVisibilityScopeChanges(own, none).includes('ads'), 'viewOwn -> none was not detected');
+  assert(sandbox.getServerCollectionVisibilityScope(full, 'ads') === 'all', 'view scope classified incorrectly');
+  assert(sandbox.getServerCollectionVisibilityScope(own, 'ads') === 'own', 'viewOwn scope classified incorrectly');
+  assert(sandbox.getServerCollectionVisibilityScope(none, 'ads') === 'none', 'revoked scope classified incorrectly');
+  assert(sandbox.getServerVisibilityScopeChanges(ADMIN, none).includes('pages'), 'Admin demotion was not detected from role');
+});
+
+check('server mode never grants access from the legacy subscription array', () => {
+  S.currentUser = employee({});
+  S.currentUser.subscriptions = ['clothes_system'];
+  S.serviceSubscriptions = [];
+  S.serverMode = true;
+  assert(!sandbox.hasSubscription('clothes_system'), 'legacy client field granted a server subscription');
+  S.serverMode = false;
+  assert(sandbox.hasSubscription('clothes_system'), 'local-mode legacy compatibility was removed');
+});
+
+check('delta cursor zero stays zero even when cached state has newer timestamps', () => {
+  const sync = bridged._serverLiveSync;
+  S.ads = [{ id: 'ad_cached', _lastModified: 999999 }];
+  sync.cursor = 999999;
+  sync.collectionCursors = Object.create(null);
+  assert(sandbox.getServerCollectionCursor('ads') === 0, 'missing per-collection cursor fell back to state/global max');
+  sync.collectionCursors.ads = 500;
+  sync.collectionCursors.receipts = 100;
+  assert(sandbox.getServerCollectionCursor('ads') === 500, 'ads cursor not isolated');
+  assert(sandbox.getServerCollectionCursor('receipts') === 100, 'receipts cursor not isolated');
+});
+
+check('money operations always create a backend-valid idempotency key', () => {
+  const generated = sandbox.ensureOperationIdempotencyKey('', 'transfer');
+  const replacedShort = sandbox.ensureOperationIdempotencyKey('tiny', 'topup');
+  const preserved = sandbox.ensureOperationIdempotencyKey('stable-operation-key', 'subscription');
+  assert(generated.length >= 8, 'missing generated key');
+  assert(replacedShort.length >= 8 && replacedShort !== 'tiny', 'short invalid key was kept');
+  assert(preserved === 'stable-operation-key', 'valid retry key was not preserved');
+});
+
+check('clothes order retries keep one id and idempotency key until success', () => {
+  const payload = { customerName: 'Customer', lines: [{ productId: 'product_safe', qty: 1 }] };
+  const first = sandbox.getClothesOrderMutationAttempt('create', '', null, payload);
+  const retry = sandbox.getClothesOrderMutationAttempt('create', '', null, payload);
+  assert(first === retry, 'same create retry did not reuse its pending attempt');
+  assert(first.orderId && first.idempotencyKey.length >= 8, 'create attempt lacks stable backend identifiers');
+  sandbox.completeClothesOrderMutationAttempt(first);
+  const later = sandbox.getClothesOrderMutationAttempt('create', '', null, payload);
+  assert(later !== first, 'completed create attempt was incorrectly reused');
+  sandbox.completeClothesOrderMutationAttempt(later);
+});
+
+check('receipt transfer retries keep one target receipt and key until success', () => {
+  const source = { id: 'receipt_source', _lastModified: 123 };
+  const first = sandbox.getReceiptTransferAttempt(source, 'customer_target', 2500, 'move credit');
+  const retry = sandbox.getReceiptTransferAttempt(source, 'customer_target', 2500, 'move credit');
+  assert(first === retry, 'same transfer retry did not reuse its pending attempt');
+  assert(first.targetReceiptId && first.idempotencyKey.length >= 8, 'transfer attempt lacks stable identifiers');
+  sandbox.completeReceiptTransferAttempt(first);
+  const later = sandbox.getReceiptTransferAttempt(source, 'customer_target', 2500, 'move credit');
+  assert(later !== first, 'completed transfer attempt was incorrectly reused');
+  sandbox.completeReceiptTransferAttempt(later);
+});
+
+check('ad mutation and stop retries keep stable idempotency keys', () => {
+  const dataA = { customerId: 'customer_safe', receiptAllocations: [{ receiptId: 'receipt_safe', amountUSD: 10 }], updatedAt: '2026-01-01T00:00:00Z' };
+  const dataB = { ...dataA, updatedAt: '2026-01-02T00:00:00Z' };
+  const first = sandbox.getAdMutationAttempt('create', '', null, dataA);
+  const retry = sandbox.getAdMutationAttempt('create', '', null, dataB);
+  assert(first === retry, 'volatile audit timestamp changed the ad retry identity');
+  assert(first.adId && first.idempotencyKey.length >= 8, 'ad mutation attempt lacks stable identifiers');
+  sandbox.completeAdMutationAttempt(first);
+
+  const ad = { id: 'ad_safe', _lastModified: 456 };
+  const stop = sandbox.getAdStopAttempt(ad, 1250);
+  const stopRetry = sandbox.getAdStopAttempt(ad, 1250);
+  assert(stop === stopRetry && stop.idempotencyKey.length >= 8, 'ad stop retry key was not stable');
+  sandbox.completeAdStopAttempt(stop);
+});
+
+check('multi-entity server apply validates the whole batch before changing state', () => {
+  S.receipts = [{ id: 'receipt_original', note: 'keep' }];
+  let rejected = false;
+  try {
+    sandbox.applyValidatedServerEntityBatch([
+      { collection: 'receipts', entity: { id: 'receipt_source', lastModified: 10, data: { id: 'receipt_source' } } },
+      { collection: 'receipts', entity: { id: 'bad id', lastModified: 11, data: { id: 'bad id' } } }
+    ], 'testBatch');
+  } catch (_) {
+    rejected = true;
+  }
+  assert(rejected, 'malformed second entity was accepted');
+  assert(S.receipts.length === 1 && S.receipts[0].id === 'receipt_original', 'first entity applied before the batch was fully validated');
+});
+
+check('first-run UI separates local, token-enabled, and disabled server setup', () => {
+  S.serverMode = false;
+  S.needsServerSetup = false;
+  let html = sandbox.renderFirstRunSetup();
+  assert(html.includes('Create Admin (Local)'), 'local first run lost its local admin form');
+  assert(!html.includes('first-setup-token'), 'local first run incorrectly asks for a server token');
+
+  S.serverMode = true;
+  S.needsServerSetup = true;
+  S.serverSetupEnabled = true;
+  html = sandbox.renderFirstRunSetup();
+  assert(html.includes('first-setup-token'), 'enabled server setup has no token field');
+
+  S.needsServerSetup = false;
+  S.serverHasNoUsers = true;
+  S.serverSetupEnabled = false;
+  html = sandbox.renderLogin();
+  assert(html.includes('Browser setup is disabled.'), 'disabled setup has no persistent operator guidance');
+  assert(!html.includes('onclick="startServerSetup()"'), 'disabled setup still renders a usable setup button');
+  S.serverMode = false;
+  S.serverHasNoUsers = false;
+});
+
+check('server money/subscription calls use dedicated transactional endpoints', () => {
+  const built = fs.readFileSync(SCRIPT, 'utf8');
+  for (const endpoint of ['/api/wallet/transfers', '/api/wallet/top-ups', '/api/wallet/reversals', '/api/subscriptions/purchase', '/api/clothes/orders/mutate', '/api/receipts/transfers', '/api/ads/mutate', '/stop', '/api/sync/watermarks']) {
+    assert(built.includes(endpoint), `missing dedicated endpoint ${endpoint}`);
+  }
+  assert(built.includes('expectedSourceLastModified: serverAttempt.expectedSourceLastModified'), 'receipt transfer omits optimistic version');
+  assert(built.includes("await saveAdThroughAtomicServer(\n            'update'"), 'ad edits still use generic collection PATCH');
+  assert(built.includes('const response = await apiStopAd(storedAd.id'), 'ad stop does not use the atomic endpoint');
+  const financialHelpersSource = fs.readFileSync(path.join(__dirname, '..', 'src', '13-filters-helpers.js'), 'utf8');
+  const topUpBody = financialHelpersSource.split('async function saveTopUps()')[1]?.split('// Refund management functions')[0] || '';
+  const refundBody = financialHelpersSource.split('async function saveRefund()')[1] || '';
+  assert(topUpBody.includes('await saveAdThroughAtomicServer('), 'server ad top-ups still use generic funding PATCH');
+  assert(refundBody.includes('await saveAdThroughAtomicServer('), 'server ad refunds still use generic funding PATCH');
+  assert(built.includes('const deltaCollections = getAuthorizedServerSyncCollections();'), 'live sync still polls known-forbidden collections');
+  assert(built.includes("body: { name, email, password, setupToken }"), 'first-admin API omits the setup token');
+  assert(built.includes('state.serverSetupEnabled === true'), 'browser setup UI is not gated by server capability');
+  assert(built.includes('Browser setup is disabled. The server operator must use the ALBAYAN_BOOTSTRAP_ADMIN_*'), 'disabled browser setup lacks operator guidance');
+  assert(built.includes('Forgot your password? Contact an administrator.'), 'server login still advertises unusable email reset');
+  assert(built.includes("code = incompleteError.code || 'INCOMPLETE_COLLECTION_LOAD'"), 'partial page failures are not propagated');
+  assert(built.includes('for (const name of failed) idbSync.dirty.add(name)'), 'failed IndexedDB writes are not requeued');
+  assert(built.includes('const requestKey = `${identity}|${String(collection || \'\')}|${forceRefresh ? \'fresh\' : \'cached\'}`'), 'collection requests are not session-identity/freshness scoped');
+  assert(built.includes('const loadAborted = () => ('), 'full server loads have no session-change guard');
+  assert(built.includes("error.code = 'SERVER_SESSION_CHANGED'"), 'late responses cannot signal a changed session');
+  assert(built.includes("if (isServerModeEnabled()) {\n      showNotification(\n        state.language === 'ar' ? 'غير متاح' : 'Not Available'"), 'server-mode passkey registration is not disabled');
+  assert(built.includes('const startupLoad = serverLoadAllData()'), 'cookie startup does not sequence its full load');
+  assert(built.includes('startupLoad.finally(() => {'), 'live poller is not started after the startup full load settles');
+  assert(built.includes('_serverLiveSync.fullLoadCursorReady'), 'partial startup has no cursor-zero fallback');
+  assert(built.includes('const since = getServerCollectionCursor(collection);'), 'delta requests do not use per-collection cursors');
+  assert(!built.includes('const since = _serverLiveSync.cursor || computeServerCursorFromState() || 0'), 'cursor zero is still defeated by state fallback');
+  assert(built.includes('const result = await apiLoadCollectionAll(collection, { forceRefresh: true });'), 'full load can reuse a pre-watermark stale cache');
+  assert(built.includes('&before_created_at=${encodeURIComponent(String(beforeCreatedAt))}&before_id=${encodeURIComponent(beforeId)}'), 'full collection paging does not use a stable createdAt/id keyset');
+  assert(built.includes('&after_last_modified=${encodeURIComponent(String(afterLastModified))}&after_id=${encodeURIComponent(afterId)}'), 'delta paging does not use a stable lastModified/id keyset');
+  assert(!built.includes('&offset=${offset}&include_deleted=true'), 'collection sync still uses race-prone OFFSET pagination');
+  assert(built.includes('await clearServerCollectionsForVisibility(forbiddenCollections);'), '403 deltas do not purge previously visible records');
+  assert(built.includes('const scopedReload = await serverLoadAllData();'), 'permission scope changes do not perform an authoritative reload');
+  assert(built.includes("role: String(state.currentUser.role || '').toLowerCase()"), 'auth refresh access signature omits role');
+  assert(built.includes("attempt = getClothesOrderMutationAttempt('status'"), 'clothes status changes bypass the atomic mutation API');
+  assert(built.includes("attempt = getClothesOrderMutationAttempt('payment'"), 'clothes payment changes bypass the atomic mutation API');
+  assert(built.includes("attempt = getClothesOrderMutationAttempt('delete'"), 'clothes deletes bypass the atomic mutation API');
+  assert(!built.includes('_thisPatch.finally(() => {'), 'PATCH-chain cleanup still creates an unhandled rejecting Promise');
+  assert(built.includes('if (_activeLogin && _activeLogin.generation === _loginGeneration) return _activeLogin.promise;'), 'double-submit login guard is missing');
+  assert(built.includes('if (_logoutInFlight || _serverAuthExpiryInFlight)'), 'login is not blocked while a prior session is closing');
+  assert(built.includes('if (serverMode) await apiLogout();'), 'logout renders before the server logout request settles');
+  assert(!built.includes('Promise.resolve(_flushP).then(() => apiLogout())'), 'delayed logout can still destroy a newly-created session');
+  assert(built.includes('await handleServerAuthExpired(requestSessionIdentity);'), 'authenticated 401 responses do not trigger a secure local wipe');
+  assert(built.includes('await wipeAuthenticatedServerDataFromClient();'), 'session expiry does not await the current cache-namespace wipe');
+  assert(built.includes("backupScope: serverPartialSnapshot ? 'client-cache-partial' : 'full-local'"), 'server export is still mislabeled as a full backup');
+  assert(built.includes('Users, wallet/subscription history, and audit logs were not restored.'), 'server import still claims a false full restore');
+  assert(!built.includes('Server does not support atomic import yet — importing record by record'), 'unsafe non-transactional server import fallback remains');
+  assert(built.includes("isAr ? 'استيراد الخادم معطّل' : 'Server Import Disabled'"), 'server-mode import is not explicitly disabled');
+  assert(built.includes('delete exportState.clothesOrders;'), 'server report still exports transaction-controlled clothes orders');
+  assert(built.includes("restorableCollections: serverPartialSnapshot\n      ? []"), 'server report still advertises restorable collections');
 });
 
 // ---------- report ----------

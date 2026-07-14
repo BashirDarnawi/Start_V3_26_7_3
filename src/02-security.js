@@ -2,6 +2,16 @@
 // SECURITY MODULE - XSS Protection, Sanitization, Hashing
 // ==========================================
 
+const RECORD_IDENTIFIER_FIELDS = new Set([
+  'adId', 'customerId', 'creatorId', 'deliveryPersonId', 'driverId',
+  'fromUserId', 'fundingReceiptId', 'linkedDeliveryReceiptId', 'linkedReceiptId',
+  'orderId', 'pageId', 'paymentTxId', 'productId', 'receiptId', 'referenceId',
+  'resourceId', 'serviceId', 'shipmentId', 'targetCustomerId', 'targetUserId',
+  'toCustomerId', 'toReceiptId', 'toUserId', 'transactionId',
+  'transferFromCustomerId', 'transferFromReceiptId', 'userId'
+]);
+const RECORD_IDENTIFIER_LIST_FIELDS = new Set(['adReceiptIds', 'customerIds', 'linkedCustomerIds', 'receiptIds']);
+
 const Security = {
   // XSS Protection - Escape HTML entities
   escapeHtml: (str) => {
@@ -207,6 +217,63 @@ const Security = {
     crypto.getRandomValues(array);
     const random = Array.from(array, b => b.toString(16).padStart(2, '0')).join('');
     return `${prefix}_${Date.now()}_${random.substring(0, 12)}`;
+  },
+
+  // Record identifiers are used in URLs, data-* attributes and (for legacy
+  // screens) inline handlers. Keep them deliberately boring so an imported or
+  // server-provided id can never break out of one of those contexts. This also
+  // matches the backend's 80-character id limit.
+  isValidRecordId: (value) => {
+    const id = String(value == null ? '' : value).trim();
+    return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(id);
+  },
+
+  // Validate record ids and relationship ids without rewriting them. Rewriting
+  // would silently break links between customers, receipts, ads and users, so
+  // callers must reject the whole import/server payload when this fails.
+  validateRecordIdentifiers: (value, path = 'record', depth = 0, validateOwnId = depth === 0) => {
+    if (depth > 12 || value === null || value === undefined) return { valid: true };
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) {
+        // A top-level array is a collection of records, so each direct child's
+        // `id` is a record id. Nested arrays are data inside a record (for
+        // example passkeys[].id is an opaque WebAuthn credential and can be
+        // much longer than 80 characters), so their generic `id` fields must
+        // not be treated as entity identifiers.
+        const childOwnId = depth === 0 && validateOwnId;
+        const result = Security.validateRecordIdentifiers(value[i], `${path}[${i}]`, depth + 1, childOwnId);
+        if (!result.valid) return result;
+      }
+      return { valid: true };
+    }
+    if (typeof value !== 'object') return { valid: true };
+
+    for (const [key, child] of Object.entries(value)) {
+      const isSingleId = RECORD_IDENTIFIER_FIELDS.has(key) || (key === 'id' && validateOwnId);
+      const isIdList = RECORD_IDENTIFIER_LIST_FIELDS.has(key);
+      if (isSingleId) {
+        const blank = child === null || child === undefined || String(child).trim() === '';
+        if (blank && key === 'id') {
+          return { valid: false, error: `Missing identifier at ${path}.${key}` };
+        }
+        if (!blank && (typeof child !== 'string' || !Security.isValidRecordId(child))) {
+          return { valid: false, error: `Unsafe identifier at ${path}.${key}` };
+        }
+      } else if (isIdList && child !== null && child !== undefined) {
+        if (!Array.isArray(child)) return { valid: false, error: `Invalid identifier list at ${path}.${key}` };
+        for (let i = 0; i < child.length; i++) {
+          if (typeof child[i] !== 'string' || !Security.isValidRecordId(child[i])) {
+            return { valid: false, error: `Unsafe identifier at ${path}.${key}[${i}]` };
+          }
+        }
+      }
+
+      if (child && typeof child === 'object') {
+        const result = Security.validateRecordIdentifiers(child, `${path}.${key}`, depth + 1, false);
+        if (!result.valid) return result;
+      }
+    }
+    return { valid: true };
   },
 
   // Validate email format
@@ -614,5 +681,3 @@ function strictParseNumber(value, options = {}) {
   
   return defaultValue;
 }
-
-

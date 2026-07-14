@@ -28,8 +28,19 @@ const idbSync = {
   dirty: new Set(),
   timer: null,
   flushing: false,
-  debounceMs: 800
+  scopeGeneration: 0,
+  debounceMs: 800,
+  retryDelayMs: 2000,
+  maxRetryDelayMs: 30000
 };
+
+function resetDirtyCollectionQueueForScopeChange() {
+  if (idbSync.timer) clearTimeout(idbSync.timer);
+  idbSync.timer = null;
+  idbSync.dirty.clear();
+  idbSync.retryDelayMs = 2000;
+  idbSync.scopeGeneration += 1;
+}
 
 function getCollectionNameFromArray(array) {
   if (array === state.ads) return 'ads';
@@ -74,16 +85,46 @@ async function flushDirtyCollections() {
   if (idbSync.dirty.size === 0) return;
 
   idbSync.flushing = true;
+  const flushGeneration = idbSync.scopeGeneration;
   const toFlush = Array.from(idbSync.dirty);
   idbSync.dirty.clear();
+  const failed = [];
 
   try {
     for (const name of toFlush) {
-      await saveCollectionToIndexedDB(name, state[name]);
+      if (flushGeneration !== idbSync.scopeGeneration) break;
+      try {
+        const saved = await saveCollectionToIndexedDB(name, state[name]);
+        if (saved === false) failed.push(name);
+      } catch (e) {
+        console.warn(`IndexedDB save failed for "${name}":`, e);
+        failed.push(name);
+      }
     }
   } finally {
     idbSync.flushing = false;
   }
+
+  // The authenticated cache namespace changed while a write was in flight.
+  // The completed write captured its old scope; do not continue this batch or
+  // requeue its names into the new user's namespace.
+  if (flushGeneration !== idbSync.scopeGeneration) return;
+
+  // Never lose the dirty marker when IndexedDB rejects a write (quota,
+  // transaction abort, temporary WebView failure). Requeue it with bounded
+  // backoff instead of tight-looping or waiting for an unrelated later edit.
+  if (failed.length > 0) {
+    for (const name of failed) idbSync.dirty.add(name);
+    if (idbSync.timer) clearTimeout(idbSync.timer);
+    const delay = idbSync.retryDelayMs;
+    idbSync.retryDelayMs = Math.min(idbSync.retryDelayMs * 2, idbSync.maxRetryDelayMs);
+    idbSync.timer = setTimeout(() => {
+      idbSync.timer = null;
+      flushDirtyCollections().catch((e) => console.warn('IndexedDB retry error:', e));
+    }, delay);
+    return;
+  }
+  idbSync.retryDelayMs = 2000;
   // Collections marked dirty WHILE this flush was running hit the re-entrancy
   // guard above and had their debounce swallowed — they would otherwise sit
   // unpersisted until some unrelated later edit. Flush them now. Terminates
@@ -108,7 +149,8 @@ function saveState() {
     // WebViews), keep the collections inside this localStorage snapshot.
     // Deleting them here with no IndexedDB would leave business data in
     // memory only, and it would vanish on the next reload.
-    if (db) {
+    const serverBacked = (typeof isServerModeEnabled === 'function') && isServerModeEnabled();
+    if (db || serverBacked) {
       for (const key of PERSISTED_COLLECTIONS) {
         delete toSave[key];
       }
@@ -414,12 +456,48 @@ async function sanitizeCollectionInPlace(collectionName) {
     // Yield to keep UI responsive
     await new Promise(r => setTimeout(r, 0));
   }
+
+  // Old local caches predate strict id validation. Quarantine unsafe records
+  // instead of rendering them (stored XSS) or silently discarding them. The
+  // original sanitized rows remain exportable in state for manual recovery;
+  // an IndexedDB source is marked protected so the filtered array cannot
+  // overwrite it.
+  const safe = [];
+  const quarantined = [];
+  for (let i = 0; i < arr.length; i++) {
+    const result = Security.validateRecordIdentifiers(arr[i], `${collectionName}[${i}]`);
+    if (result.valid) safe.push(arr[i]);
+    else quarantined.push({ record: arr[i], reason: result.error || 'Invalid identifier' });
+  }
+  if (quarantined.length > 0) {
+    if (!state._quarantinedUnsafeRecords || typeof state._quarantinedUnsafeRecords !== 'object') {
+      state._quarantinedUnsafeRecords = {};
+    }
+    state._quarantinedUnsafeRecords[collectionName] = quarantined;
+    state[collectionName] = safe;
+    if (db) markCollectionCorrupted(collectionName);
+    _notifyCollectionCorruption(collectionName);
+  }
 }
 
 async function sanitizeAllCollectionsForRendering() {
   for (const name of PERSISTED_COLLECTIONS) {
     await sanitizeCollectionInPlace(name);
   }
+}
+
+function assertCachedCollectionIdentifiersSafe() {
+  for (const name of PERSISTED_COLLECTIONS) {
+    const records = state[name];
+    if (!Array.isArray(records)) continue;
+    const result = Security.validateRecordIdentifiers(records, `cache.${name}`);
+    if (!result.valid) {
+      const error = new Error(`Unsafe cached business data rejected: ${result.error}`);
+      error.code = 'UNSAFE_CACHED_IDENTIFIER';
+      throw error;
+    }
+  }
+  return true;
 }
 
 // ==========================================
@@ -742,4 +820,3 @@ async function ensureUsersHavePasswordHashes() {
     await flushDirtyCollections();
   }
 }
-

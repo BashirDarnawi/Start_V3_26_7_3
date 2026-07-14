@@ -203,6 +203,9 @@ function setRateLimitCooldown(endpoint, retryAfterSeconds) {
 }
 
 async function apiJson(path, options = {}, timeout = {}) {
+  const requestSessionIdentity = (typeof getServerSessionIdentity === 'function')
+    ? getServerSessionIdentity()
+    : '';
   // Check if we're in a cooldown period for this endpoint
   const endpointKey = path.includes('/auth/login') ? 'login' : 'general';
   const cooldownCheck = isRateLimited(endpointKey);
@@ -235,6 +238,18 @@ async function apiJson(path, options = {}, timeout = {}) {
   
   if (!resp.ok) {
     const msg = (data && typeof data === 'object' && data.detail) ? data.detail : (resp.statusText || 'Request failed');
+    // A definitive 401 during an authenticated request means cached business
+    // data must not remain visible indefinitely. Login/setup failures and the
+    // user's own logout request are intentionally excluded.
+    if (
+      resp.status === 401 &&
+      state.currentUser &&
+      !['/api/auth/login', '/api/auth/setup-admin', '/api/auth/logout'].includes(path) &&
+      typeof handleServerAuthExpired === 'function' &&
+      !serverSessionIdentityChanged(requestSessionIdentity)
+    ) {
+      await handleServerAuthExpired(requestSessionIdentity);
+    }
     const err = new Error(msg);
     err.status = resp.status;
     err.payload = data;
@@ -324,17 +339,23 @@ async function apiLogin(email, password) {
 async function apiNeedsSetup() {
   try {
     const res = await apiJson('/api/auth/needs-setup', { method: 'GET' }, { timeoutMs: 8000 });
-    return !!res?.needsSetup;
+    return {
+      needsSetup: res?.needsSetup === true,
+      setupEnabled: res?.setupEnabled === true
+    };
   } catch {
-    return false;
+    return { needsSetup: false, setupEnabled: false };
   }
 }
 
 // First-run bootstrap: create the very first admin straight from the browser
 // (replaces the shell `python -m server.create_admin` step). The server only
 // honors this while zero users exist, then logs the new admin in.
-async function apiSetupAdmin(name, email, password) {
-  const res = await apiJson('/api/auth/setup-admin', { method: 'POST', body: { name, email, password } }, { timeoutMs: 15000 });
+async function apiSetupAdmin(name, email, password, setupToken) {
+  const res = await apiJson('/api/auth/setup-admin', {
+    method: 'POST',
+    body: { name, email, password, setupToken }
+  }, { timeoutMs: 15000 });
   return res?.user || null;
 }
 
@@ -347,16 +368,82 @@ async function apiLogout() {
   }
 }
 
-// Cache for users list to avoid repeated API calls
-let _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000 }; // 30 second cache
+function getServerSessionIdentity() {
+  const epoch = (typeof _serverLiveSync === 'object' && _serverLiveSync)
+    ? Number(_serverLiveSync.sessionEpoch || 0)
+    : 0;
+  const userId = String(state.currentUser?.id || '');
+  const scope = (typeof getCollectionStorageScope === 'function')
+    ? String(getCollectionStorageScope() || '')
+    : '';
+  return `${epoch}|${userId}|${scope}`;
+}
+
+function serverSessionIdentityChanged(snapshot) {
+  return String(snapshot || '') !== getServerSessionIdentity();
+}
+
+function makeSessionChangedError() {
+  const error = new Error('Authenticated session changed while data was loading');
+  error.code = 'SERVER_SESSION_CHANGED';
+  return error;
+}
+
+// Collections synchronized through the generic collection API. Keep this one
+// list shared by full loads, per-collection cursors and visibility purges so a
+// newly-added collection cannot accidentally miss one of the safety paths.
+const SERVER_SYNC_COLLECTIONS = Object.freeze([
+  'ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory',
+  'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings',
+  'walletTransactions', 'serviceSubscriptions'
+]);
+
+// Capture server-issued collection watermarks BEFORE a full load starts. A
+// full load spans several requests and is not one DB snapshot; seeding a delta
+// cursor from the rows it happened to return can skip a write that lands after
+// an early collection request. Starting the follow-up delta at these captured
+// values makes every write concurrent with the snapshot visible.
+async function apiGetSyncWatermarks() {
+  const identity = getServerSessionIdentity();
+  const payload = await apiJson('/api/sync/watermarks', { method: 'GET' }, { timeoutMs: 10000 });
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  const source = payload?.watermarks && typeof payload.watermarks === 'object'
+    ? payload.watermarks
+    : payload;
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    const error = new Error('Invalid sync watermarks response');
+    error.code = 'INVALID_SYNC_WATERMARKS';
+    throw error;
+  }
+  const watermarks = Object.create(null);
+  for (const collection of SERVER_SYNC_COLLECTIONS) {
+    const raw = source[collection];
+    // A forbidden/omitted collection deliberately stays at zero. If access is
+    // granted later, the next delta fetch must retrieve its full visible set.
+    if (raw === undefined || raw === null) continue;
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value < 0) {
+      const error = new Error(`Invalid sync watermark for ${collection}`);
+      error.code = 'INVALID_SYNC_WATERMARKS';
+      throw error;
+    }
+    watermarks[collection] = value;
+  }
+  return watermarks;
+}
+
+// Cache for users list to avoid repeated API calls. It is identity-scoped:
+// an Admin's full user list must never be reused by a later non-admin session.
+let _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000, identity: '' }; // 30 second cache
 
 // Session cache to prevent logout on rapid refresh
 let _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 }; // 10 second cache
 
 async function apiListUsersForUi() {
+  const identity = getServerSessionIdentity();
   // Return cached data if fresh (within 30 seconds)
   const now = Date.now();
-  if (_usersListCache.data && (now - _usersListCache.timestamp) < _usersListCache.cacheDurationMs) {
+  if (_usersListCache.identity === identity && _usersListCache.data && (now - _usersListCache.timestamp) < _usersListCache.cacheDurationMs) {
     return _usersListCache.data;
   }
   
@@ -368,7 +455,8 @@ async function apiListUsersForUi() {
         () => apiJson('/api/users', { method: 'GET' }, { timeoutMs: 10000 }), // Faster timeout
         2, 300 // Faster retry
       );
-      _usersListCache = { data: result, timestamp: now, cacheDurationMs: 30000 };
+      if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+      _usersListCache = { data: result, timestamp: now, cacheDurationMs: 30000, identity };
       return result;
     } catch (e) {
       if (e?.status !== 403) throw e;
@@ -376,12 +464,13 @@ async function apiListUsersForUi() {
         () => apiJson('/api/users/public', { method: 'GET' }, { timeoutMs: 10000 }),
         2, 300
       );
-      _usersListCache = { data: result, timestamp: now, cacheDurationMs: 30000 };
+      if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+      _usersListCache = { data: result, timestamp: now, cacheDurationMs: 30000, identity };
       return result;
     }
   } catch (e) {
     // On error (either endpoint), return cached data even if stale
-    if (_usersListCache.data) {
+    if (_usersListCache.identity === identity && _usersListCache.data) {
       console.warn('[apiListUsersForUi] Using stale cache due to error');
       return _usersListCache.data;
     }
@@ -393,7 +482,7 @@ async function apiListUsersForUi() {
 // live-sync tick re-serves pre-edit permissions and overwrites fresh local
 // state with stale data.
 function invalidateUsersListCache() {
-  _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000 };
+  _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000, identity: '' };
 }
 
 // The server's audit trail. GET /api/audit enforces auditLogs.view (all rows)
@@ -512,11 +601,11 @@ function flushPendingUserUpdates() {
 
 // Collection data cache for instant loading
 const _collectionCache = {
-  ads: { data: null, timestamp: 0 },
-  receipts: { data: null, timestamp: 0 },
-  customers: { data: null, timestamp: 0 },
-  pages: { data: null, timestamp: 0 },
-  exchangeRateHistory: { data: null, timestamp: 0 }
+  ads: { data: null, timestamp: 0, identity: '' },
+  receipts: { data: null, timestamp: 0, identity: '' },
+  customers: { data: null, timestamp: 0, identity: '' },
+  pages: { data: null, timestamp: 0, identity: '' },
+  exchangeRateHistory: { data: null, timestamp: 0, identity: '' }
 };
 const CACHE_TTL_MS = 5000; // 5 seconds - show cached data instantly, then refresh
 
@@ -584,29 +673,125 @@ function getCollectionTimeout(collection) {
   return timeouts[collection] || timeouts.default;
 }
 
-async function apiLoadCollectionAll(collection) {
+// Every entity endpoint returns the same envelope. Validate it at this single
+// trust boundary before any caller can merge the payload into state. This is
+// intentionally shared by list/delta/get/create/patch and the transactional
+// wallet/subscription endpoints: validating only list responses left conflict
+// recovery and payment refresh able to upsert poisoned relationship ids.
+function validateServerEntityResponse(collection, entity, context = 'response') {
+  const name = String(collection || 'entity');
+  if (!entity || typeof entity !== 'object' || Array.isArray(entity)) {
+    const error = new Error(`Invalid ${name} ${context}: missing entity envelope`);
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  if (typeof entity.id !== 'string' || !Security.isValidRecordId(entity.id)) {
+    const error = new Error(`Rejected unsafe ${name} ${context}: invalid entity id`);
+    error.code = 'UNSAFE_RECORD_IDENTIFIER';
+    throw error;
+  }
+  if (!entity.data || typeof entity.data !== 'object' || Array.isArray(entity.data)) {
+    const error = new Error(`Invalid ${name} ${context}: missing record data`);
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  const idCheck = Security.validateRecordIdentifiers(entity.data, `${name}.${context}`);
+  if (!idCheck.valid) {
+    const error = new Error(`Rejected unsafe ${name} ${context}: ${idCheck.error}`);
+    error.code = 'UNSAFE_RECORD_IDENTIFIER';
+    throw error;
+  }
+  if (typeof entity.data.id !== 'string' || entity.data.id !== entity.id) {
+    const error = new Error(`Invalid ${name} ${context}: envelope/data id mismatch`);
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  return entity;
+}
+
+async function requestValidatedServerEntity(collection, context, loader) {
+  const identity = getServerSessionIdentity();
+  const entity = await loader();
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  return validateServerEntityResponse(collection, entity, context);
+}
+
+function mergeServerEntityDataById(target, indexById, entity) {
+  const existingIndex = indexById.get(entity.id);
+  if (existingIndex === undefined) {
+    indexById.set(entity.id, target.length);
+    target.push(entity.data);
+    return true;
+  }
+  if (Number(entity.lastModified || 0) >= Number(target[existingIndex]?._lastModified || 0)) {
+    target[existingIndex] = entity.data;
+  }
+  return false;
+}
+
+// Apply a group of already-committed server entities to local state as one
+// in-memory step. Prepare and validate every item first so a malformed second
+// envelope can never leave only the first item applied locally.
+function applyValidatedServerEntityBatch(entries, reason = 'serverMutation') {
+  const prepared = (Array.isArray(entries) ? entries : []).map((entry, index) => {
+    const collection = String(entry?.collection || '');
+    if (!collection || !Array.isArray(state[collection])) {
+      const error = new Error(`Invalid server mutation collection at index ${index}`);
+      error.code = 'INVALID_ENTITY_RESPONSE';
+      throw error;
+    }
+    const entity = validateServerEntityResponse(collection, entry.entity, `${reason}[${index}]`);
+    return { collection, saved: Security.sanitizeObject(entity.data) };
+  });
+
+  for (const { collection, saved } of prepared) {
+    const target = state[collection];
+    const existingIndex = target.findIndex(row => row && String(row.id) === String(saved.id));
+    if (existingIndex === -1) target.unshift(saved);
+    else target[existingIndex] = saved;
+    if (_collectionCache[collection]) {
+      _collectionCache[collection] = { data: null, timestamp: 0, identity: '' };
+    }
+    if (typeof clearCollectionCorruption === 'function') clearCollectionCorruption(collection);
+    markCollectionDirty(collection);
+  }
+  if (prepared.length > 0) {
+    saveState();
+    RenderQueue.schedule(reason);
+  }
+  return prepared.map(item => item.saved);
+}
+
+async function apiLoadCollectionAll(collection, { forceRefresh = false } = {}) {
+  const identity = getServerSessionIdentity();
+  const requestKey = `${identity}|${String(collection || '')}|${forceRefresh ? 'fresh' : 'cached'}`;
   const now = Date.now();
 
   // Return cached data immediately if fresh (but only for non-critical refreshes)
   const cache = _collectionCache[collection];
-  if (cache && cache.data && (now - cache.timestamp) < CACHE_TTL_MS) {
+  if (!forceRefresh && cache && cache.identity === identity && cache.data && (now - cache.timestamp) < CACHE_TTL_MS) {
     return cache.data;
   }
 
   // Request deduplication: if there's already a pending request for this collection, wait for it
-  if (_pendingRequests.has(collection)) {
+  if (_pendingRequests.has(requestKey)) {
     try {
-      return await _pendingRequests.get(collection);
+      const shared = await _pendingRequests.get(requestKey);
+      if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+      return shared;
     } catch (e) {
       // If the pending request failed, we'll try again below
-      _pendingRequests.delete(collection);
+      _pendingRequests.delete(requestKey);
+      if (e?.code === 'SERVER_SESSION_CHANGED') throw e;
     }
   }
 
   // Create the actual request with timeout protection
   const requestPromise = (async () => {
     const all = [];
-    let offset = 0;
+    const indexById = new Map();
+    let beforeCreatedAt = null;
+    let beforeId = '';
     const limit = SERVER_API.pageSize || 300;
     const timeoutMs = getCollectionTimeout(collection);
     let pageCount = 0;
@@ -617,44 +802,66 @@ async function apiLoadCollectionAll(collection) {
     // the oldest from view and understating every total.
     const _maxRecords = (typeof STORAGE_CONFIG !== 'undefined' && STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION) || 100000;
     const maxPages = Math.ceil(_maxRecords / limit) + 5;
-    let partial = false;
     let lastPageFull = false;
 
     while (pageCount < maxPages) {
       pageCount++;
       try {
         // Use retry logic for resilience against transient server errors/timeouts
+        let path = `/api/collections/${encodeURIComponent(collection)}?limit=${limit}&include_deleted=true`;
+        if (beforeCreatedAt !== null && beforeId) {
+          path += `&before_created_at=${encodeURIComponent(String(beforeCreatedAt))}&before_id=${encodeURIComponent(beforeId)}`;
+        }
         const items = await withRetry(
           () => apiJson(
-            `/api/collections/${encodeURIComponent(collection)}?limit=${limit}&offset=${offset}&include_deleted=true`,
+            path,
             { method: 'GET' },
             { timeoutMs }
           ),
           2, // 2 retries (3 total attempts) - reduced for faster failure
           300 // 300ms base delay (faster retry)
         );
+        if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
 
         if (!Array.isArray(items) || items.length === 0) { lastPageFull = false; break; }
 
-        for (const entity of items) {
-          if (entity && entity.data) all.push(entity.data);
+        let lastEntity = null;
+        for (const rawEntity of items) {
+          const entity = validateServerEntityResponse(collection, rawEntity, `list[${all.length}]`);
+          lastEntity = entity;
+          // Defensive only: keyset pages should not overlap, but a record can
+          // be updated while pagination is running. Keep one ID and prefer the
+          // newest server version rather than rendering duplicates.
+          mergeServerEntityDataById(all, indexById, entity);
         }
 
         if (items.length < limit) { lastPageFull = false; break; }
         lastPageFull = true;
-        offset += limit;
-      } catch (pageError) {
-        // Partial load: only accept it if it is not WORSE than what the app
-        // already has. Otherwise let the error propagate so the caller's
-        // keep-existing-data guard preserves the more complete local copy
-        // instead of wholesale-replacing it with a truncated list.
-        const existing = Array.isArray(state[collection]) ? state[collection].length : 0;
-        if (all.length > 0 && all.length >= existing) {
-          console.warn(`[apiLoadCollectionAll] Partial load for ${collection}: got ${all.length} items before error`, pageError?.message);
-          partial = true;
-          break;
+        const nextCreatedAt = Number(lastEntity?.createdAt);
+        const nextId = String(lastEntity?.id || '');
+        if (!Number.isSafeInteger(nextCreatedAt) || nextCreatedAt < 0 || !Security.isValidRecordId(nextId)) {
+          const cursorError = new Error(`Invalid ${collection} full-page cursor`);
+          cursorError.code = 'INCOMPLETE_COLLECTION_LOAD';
+          throw cursorError;
         }
-        throw pageError;
+        if (nextCreatedAt === beforeCreatedAt && nextId === beforeId) {
+          const cursorError = new Error(`Repeated ${collection} full-page cursor`);
+          cursorError.code = 'INCOMPLETE_COLLECTION_LOAD';
+          throw cursorError;
+        }
+        beforeCreatedAt = nextCreatedAt;
+        beforeId = nextId;
+      } catch (pageError) {
+        // A failed later page is never authoritative, even if it happens to
+        // contain more rows than the current cache. Propagate an explicit
+        // incomplete result so no caller can replace/persist complete state
+        // with a prefix of the server collection.
+        const incompleteError = pageError instanceof Error ? pageError : new Error('Collection page failed');
+        incompleteError.code = incompleteError.code || 'INCOMPLETE_COLLECTION_LOAD';
+        incompleteError.collection = collection;
+        incompleteError.partialCount = all.length;
+        console.warn(`[apiLoadCollectionAll] Incomplete load for ${collection}: got ${all.length} items before error`, incompleteError.message);
+        throw incompleteError;
       }
     }
 
@@ -663,47 +870,199 @@ async function apiLoadCollectionAll(collection) {
     // an authoritative complete load (don't cache), and warn loudly.
     if (lastPageFull && pageCount >= maxPages) {
       console.warn(`[apiLoadCollectionAll] ${collection}: hit ${maxPages}-page cap (${all.length} records) with a full final page — collection exceeds the supported maximum and was truncated.`);
-      partial = true;
+      const capError = new Error(`${collection} exceeds the supported maximum; refusing truncated data`);
+      capError.code = 'INCOMPLETE_COLLECTION_LOAD';
+      capError.collection = collection;
+      capError.partialCount = all.length;
+      throw capError;
     }
 
-    // Update cache only for complete loads — never persist a truncated result.
-    if (!partial && _collectionCache[collection]) {
-      _collectionCache[collection] = { data: all, timestamp: Date.now() };
+    // Reaching here proves every page completed. Only complete arrays may enter
+    // the in-memory request cache or IndexedDB persistence path.
+    if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+    if (_collectionCache[collection]) {
+      _collectionCache[collection] = { data: all, timestamp: Date.now(), identity };
     }
 
     return all;
   })();
 
   // Store the pending request
-  _pendingRequests.set(collection, requestPromise);
+  _pendingRequests.set(requestKey, requestPromise);
 
   try {
     const result = await requestPromise;
+    if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
     return result;
   } finally {
     // Clean up pending request
-    _pendingRequests.delete(collection);
+    if (_pendingRequests.get(requestKey) === requestPromise) _pendingRequests.delete(requestKey);
   }
 }
 
 async function apiGetEntity(collection, id) {
-  return await apiJson(`/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`, { method: 'GET' }, { timeoutMs: 15000 });
+  return await requestValidatedServerEntity(collection, 'get', () =>
+    apiJson(`/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`, { method: 'GET' }, { timeoutMs: 15000 })
+  );
 }
 
 async function apiCreateEntity(collection, record) {
-  return await withRetry(() => 
-    apiJson(`/api/collections/${encodeURIComponent(collection)}`, { method: 'POST', body: { id: record.id, data: record } }, { timeoutMs: 20000 })
-  , 2, 500);
+  return await requestValidatedServerEntity(collection, 'create', () =>
+    withRetry(() =>
+      apiJson(`/api/collections/${encodeURIComponent(collection)}`, { method: 'POST', body: { id: record.id, data: record } }, { timeoutMs: 20000 })
+    , 2, 500)
+  );
+}
+
+// Server-authoritative money operations. These endpoints validate balance,
+// catalog price/duration, permissions and idempotency inside one DB
+// transaction; callers must not emulate them with generic collection writes.
+async function apiWalletTransfer({ toUserId, amountMinor, currency, idempotencyKey, memo }) {
+  return await requestValidatedServerEntity('walletTransactions', 'transfer', () =>
+    apiJson('/api/wallet/transfers', {
+      method: 'POST',
+      body: { toUserId, amountMinor, currency, idempotencyKey, memo }
+    }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS })
+  );
+}
+
+async function apiWalletTopUp({ userId, amountMinor, currency, idempotencyKey, memo }) {
+  return await requestValidatedServerEntity('walletTransactions', 'top-up', () =>
+    apiJson('/api/wallet/top-ups', {
+      method: 'POST',
+      body: { userId, amountMinor, currency, idempotencyKey, memo }
+    }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS })
+  );
+}
+
+async function apiWalletReversal({ transactionId, memo }) {
+  return await requestValidatedServerEntity('walletTransactions', 'reversal', () =>
+    apiJson('/api/wallet/reversals', {
+      method: 'POST',
+      body: { transactionId, memo }
+    }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS })
+  );
+}
+
+async function apiPurchaseSubscription({ serviceId, idempotencyKey, userId }) {
+  const body = { serviceId, idempotencyKey };
+  if (userId) body.userId = userId;
+  return await requestValidatedServerEntity('serviceSubscriptions', 'purchase', () =>
+    apiJson('/api/subscriptions/purchase', {
+      method: 'POST',
+      body
+    }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS })
+  );
+}
+
+// Atomic receipt transfer: source deduction and target TRANSFER_IN receipt are
+// committed by the server together. The caller owns the stable target id and
+// idempotency key so a response-loss retry replays the same result.
+async function apiTransferReceipt(payload) {
+  const identity = getServerSessionIdentity();
+  const response = await apiJson('/api/receipts/transfers', {
+    method: 'POST',
+    body: payload
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  if (!response || typeof response !== 'object' || Array.isArray(response)) {
+    const error = new Error('Invalid receipt transfer response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  return {
+    sourceReceipt: validateServerEntityResponse('receipts', response.sourceReceipt, 'transfer.sourceReceipt'),
+    targetReceipt: validateServerEntityResponse('receipts', response.targetReceipt, 'transfer.targetReceipt'),
+    replayed: response.replayed === true
+  };
+}
+
+// Paid/due/merged allocations change receipt availability, so ad create/edit
+// must cross one server transaction boundary rather than generic collection
+// POST/PATCH calls.
+async function apiMutateAd(payload) {
+  const action = String(payload?.action || '');
+  if (!['create', 'update'].includes(action)) throw new Error('Invalid ad mutation action');
+  const identity = getServerSessionIdentity();
+  const response = await apiJson('/api/ads/mutate', {
+    method: 'POST',
+    body: payload
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  if (!response || typeof response !== 'object' || Array.isArray(response)) {
+    const error = new Error('Invalid ad mutation response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  return {
+    ad: validateServerEntityResponse('ads', response.ad, `${action}.ad`),
+    replayed: response.replayed === true
+  };
+}
+
+// Stop/re-edit is also server-authoritative: the client submits only the spent
+// amount and optimistic version; the server derives all allocation balances.
+async function apiStopAd(adId, payload) {
+  const safeAdId = String(adId || '');
+  if (!Security.isValidRecordId(safeAdId)) throw new Error('Invalid ad id');
+  const identity = getServerSessionIdentity();
+  const response = await apiJson(`/api/ads/${encodeURIComponent(safeAdId)}/stop`, {
+    method: 'POST',
+    body: payload
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  if (!response || typeof response !== 'object' || Array.isArray(response)) {
+    const error = new Error('Invalid ad stop response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  return {
+    ad: validateServerEntityResponse('ads', response.ad, 'stop.ad'),
+    replayed: response.replayed === true
+  };
+}
+
+// Clothes orders and their stock changes must commit together. Generic
+// collection POST/PATCH/DELETE calls cannot provide that guarantee, so every
+// server-mode order action uses this one idempotent transaction boundary.
+async function apiMutateClothesOrder(payload) {
+  const action = String(payload?.action || '');
+  if (!['create', 'update', 'status', 'payment', 'delete'].includes(action)) {
+    throw new Error('Invalid clothes order action');
+  }
+  const identity = getServerSessionIdentity();
+  const response = await apiJson('/api/clothes/orders/mutate', {
+    method: 'POST',
+    body: payload
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  if (!response || typeof response !== 'object' || Array.isArray(response)) {
+    const error = new Error('Invalid clothes order mutation response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  const order = validateServerEntityResponse('clothesOrders', response.order, `${action}.order`);
+  if (!Array.isArray(response.updatedProducts)) {
+    const error = new Error('Invalid clothes order products response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  const updatedProducts = response.updatedProducts.map((entity, index) =>
+    validateServerEntityResponse('clothesProducts', entity, `${action}.updatedProducts[${index}]`)
+  );
+  return { order, updatedProducts, replayed: response.replayed === true };
 }
 
 async function apiPatchEntity(collection, id, updates, expectedLastModified) {
-  return await withRetry(() =>
-    apiJson(
-      `/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
-      { method: 'PATCH', body: { data: updates, expectedLastModified } },
-      { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
-    )
-  , 2, 500);
+  return await requestValidatedServerEntity(collection, 'patch', () =>
+    withRetry(() =>
+      apiJson(
+        `/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
+        { method: 'PATCH', body: { data: updates, expectedLastModified } },
+        { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
+      )
+    , 2, 500)
+  );
 }
 
 // Full-record update used by the delete-cascade cleanup (15-modals.js). This
@@ -726,10 +1085,12 @@ async function apiAdminRestoreEntity(collection, id, record) {
     lastModified: Number.isFinite(lastModified) ? lastModified : undefined,
     deleted: !!data._deleted
   };
-  return await apiJson(
-    `/api/admin/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}/restore`,
-    { method: 'PUT', body: payload },
-    { timeoutMs: 60000 }
+  return await requestValidatedServerEntity(collection, 'restore', () =>
+    apiJson(
+      `/api/admin/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}/restore`,
+      { method: 'PUT', body: payload },
+      { timeoutMs: 60000 }
+    )
   );
 }
 
@@ -757,7 +1118,73 @@ async function apiAdminBulkImport(collections) {
   return await apiJson('/api/admin/import', { method: 'POST', body: { collections } }, { timeoutMs: 120000 });
 }
 
+// A single global delta cursor is safe to reseed only when EVERY collection
+// in the full snapshot completed. If (for example) receipts failed while ads
+// succeeded with a newer timestamp, advancing to the ads timestamp would make
+// the next receipt delta permanently skip older unseen receipt changes.
+function reseedServerCursorFromFullLoad(results, failed, preLoadWatermarks) {
+  if (typeof _serverLiveSync !== 'object' || !_serverLiveSync) return false;
+  const loaded = results && typeof results === 'object' ? results : {};
+  const captured = preLoadWatermarks && typeof preLoadWatermarks === 'object'
+    ? preLoadWatermarks
+    : null;
+  let watermark = 0;
+  const collectionCursors = (_serverLiveSync.collectionCursors && typeof _serverLiveSync.collectionCursors === 'object')
+    ? { ..._serverLiveSync.collectionCursors }
+    : Object.create(null);
+  for (const name of SERVER_SYNC_COLLECTIONS) {
+    const entry = loaded[name];
+    // Forbidden collections stay at implicit cursor zero so a future
+    // permission grant fetches their entire newly-visible history.
+    if (entry?.status === 403) {
+      collectionCursors[name] = 0;
+      continue;
+    }
+    // A failed collection keeps its previous cursor (normally zero on a new
+    // session) so the next poll retries from the same safe position.
+    if (!entry || entry.ok === false || entry.data === null) continue;
+    // No pre-load watermark (old server/temporary endpoint failure) means zero,
+    // intentionally forcing one complete catch-up delta after the full load.
+    // Never derive this cursor from snapshot rows: those requests are not an
+    // atomic snapshot and their maxima are unsafe as a boundary.
+    const cursor = captured && Number.isSafeInteger(Number(captured[name]))
+      ? Math.max(0, Number(captured[name]))
+      : 0;
+    collectionCursors[name] = cursor;
+  }
+  for (const value of Object.values(collectionCursors)) {
+    const cursor = Number(value);
+    if (Number.isFinite(cursor)) watermark = Math.max(watermark, cursor);
+  }
+  _serverLiveSync.collectionCursors = collectionCursors;
+  _serverLiveSync.serverWatermark = watermark;
+  _serverLiveSync.cursor = watermark;
+  _serverLiveSync.fullLoadCursorReady = !!captured;
+  return !!captured;
+}
+
 async function serverLoadAllData() {
+  const loadIdentity = getServerSessionIdentity();
+  const loadUserId = String(state.currentUser?.id || '');
+  const loadAborted = () => (
+    !loadUserId ||
+    String(state.currentUser?.id || '') !== loadUserId ||
+    serverSessionIdentityChanged(loadIdentity)
+  );
+  const abortedResult = () => ({ failed: [], forbidden: [], aborted: true });
+  if (loadAborted()) return abortedResult();
+  // Capture a safe boundary before issuing any collection request. If an older
+  // server does not expose the endpoint (or it is temporarily unavailable),
+  // leave this null: successful collections will be seeded at zero and the
+  // live poller's first pass becomes a safe full catch-up.
+  let preLoadWatermarks = null;
+  try {
+    preLoadWatermarks = await apiGetSyncWatermarks();
+  } catch (e) {
+    if (e?.code === 'SERVER_SESSION_CHANGED' || loadAborted()) return abortedResult();
+    if (ALBAYAN_DEBUG_MODE) console.warn('[serverLoadAllData] Watermarks unavailable; using since=0 catch-up:', e?.message || e);
+  }
+  if (loadAborted()) return abortedResult();
   // Load collections from server.
   // IMPORTANT: Do not fail the whole app if one collection fails. We'll load what we can and show one warning.
   const forbidden = [];
@@ -784,7 +1211,8 @@ async function serverLoadAllData() {
     const _start = Date.now();
     // #endregion
     try {
-      const result = await apiLoadCollectionAll(collection);
+      const result = await apiLoadCollectionAll(collection, { forceRefresh: true });
+      if (loadAborted()) return { ok: false, collection, data: null, aborted: true };
       // #region agent log
       _timings[collection] = { durationMs: Date.now() - _start, count: Array.isArray(result) ? result.length : 0, ok: true };
       if (ALBAYAN_DEBUG_MODE && typeof window.__albayanDebugEmit === 'function') {
@@ -797,6 +1225,9 @@ async function serverLoadAllData() {
       // #endregion
       return { ok: true, collection, data: Array.isArray(result) ? result : [], status: 200 };
     } catch (e) {
+      if (e?.code === 'SERVER_SESSION_CHANGED' || loadAborted()) {
+        return { ok: false, collection, data: null, aborted: true };
+      }
       const status = e?.status;
       // #region agent log
       _timings[collection] = { durationMs: Date.now() - _start, status: status || null, error: e?.message || 'unknown', ok: false };
@@ -824,7 +1255,7 @@ async function serverLoadAllData() {
   // Load collections in parallel for faster initial load
   // Use higher concurrency for initial load, but still limit to avoid overwhelming server
   const results = {};
-  const collections = ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory', 'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings', 'walletTransactions', 'serviceSubscriptions'];
+  const collections = SERVER_SYNC_COLLECTIONS;
   const CONCURRENCY = SERVER_API.initialLoadConcurrency || 3;
 
   // Show loading progress
@@ -838,12 +1269,14 @@ async function serverLoadAllData() {
   };
 
   for (let i = 0; i < collections.length; i += CONCURRENCY) {
+    if (loadAborted()) return abortedResult();
     const batch = collections.slice(i, i + CONCURRENCY);
     const batchResults = await Promise.all(batch.map(async (c) => {
       const result = await safeLoad(c);
-      updateProgress(c);
+      if (!loadAborted()) updateProgress(c);
       return result;
     }));
+    if (loadAborted() || batchResults.some(r => r?.aborted)) return abortedResult();
     batchResults.forEach((r) => {
       if (r && r.collection) results[r.collection] = r;
     });
@@ -852,6 +1285,7 @@ async function serverLoadAllData() {
     for (const r of batchResults) {
       if (r && r.collection && r.data !== null) {
         state[r.collection] = r.data;
+        clearCollectionCorruption(r.collection); // authoritative complete server copy repairs the cache
         markCollectionDirty(r.collection);
       }
     }
@@ -879,8 +1313,10 @@ async function serverLoadAllData() {
   }
 
   // Users list for UI (delivery assignment, etc.)
+  if (loadAborted()) return abortedResult();
   try {
     const usersList = await apiListUsersForUi();
+    if (loadAborted()) return abortedResult();
     if (Array.isArray(usersList)) {
       // Ensure current user is present and retains permissions
       const byId = new Map();
@@ -891,44 +1327,41 @@ async function serverLoadAllData() {
       state.users = Array.from(byId.values());
     }
   } catch (e) {
+    if (e?.code === 'SERVER_SESSION_CHANGED' || loadAborted()) return abortedResult();
     failed.push({ collection: 'users', status: e?.status || null, message: e?.message || 'Failed to load users' });
   }
+  if (loadAborted()) return abortedResult();
   // ALWAYS keep the current user (with their login-response permissions) in
   // state.users — even when the users-list fetch failed. hasPermission and the
   // sidebar read state.users; without this, a failed fetch locks the whole UI.
   if (typeof upsertCurrentUserIntoUsers === 'function') upsertCurrentUserIntoUsers();
 
-  state.serverLastSyncAt = new Date().toISOString();
+  if (loadAborted()) return abortedResult();
+  if (failed.length === 0) {
+    state.serverLastSyncAt = new Date().toISOString();
+    state.serverLastSyncErrorAt = null;
+  } else {
+    state.serverLastSyncErrorAt = new Date().toISOString();
+  }
 
   // Authoritatively (re)seed the live-sync cursor from server-issued timestamps.
   // This is the ONLY skew-free source: the freshly-loaded arrays carry the
   // server's last_modified, so re-seeding here corrects a cursor that
   // startServerLiveSync may have estimated too high from a clock-skewed device.
   try {
-    const _wm = Math.max(
-      _maxLastModifiedFromArray(results.ads && results.ads.data),
-      _maxLastModifiedFromArray(results.receipts && results.receipts.data),
-      _maxLastModifiedFromArray(results.customers && results.customers.data),
-      _maxLastModifiedFromArray(results.pages && results.pages.data),
-      _maxLastModifiedFromArray(results.exchangeRateHistory && results.exchangeRateHistory.data),
-      _maxLastModifiedFromArray(results.clothesProducts && results.clothesProducts.data),
-      _maxLastModifiedFromArray(results.clothesShipments && results.clothesShipments.data),
-      _maxLastModifiedFromArray(results.clothesOrders && results.clothesOrders.data),
-      _maxLastModifiedFromArray(results.clothesSettings && results.clothesSettings.data)
-    );
-    if (_wm > 0 && typeof _serverLiveSync === 'object' && _serverLiveSync) {
-      _serverLiveSync.serverWatermark = _wm;
-      _serverLiveSync.cursor = _wm;
-    }
+    if (loadAborted()) return abortedResult();
+    reseedServerCursorFromFullLoad(results, failed, preLoadWatermarks);
   } catch (_) {}
 
   // Cache server data locally (IndexedDB) for performance (optional)
+  if (loadAborted()) return abortedResult();
   if (db) {
     markAllCollectionsDirty();
     await flushDirtyCollections();
   }
 
   // One clean warning (avoid spam). These are user-specific and expected sometimes.
+  if (loadAborted()) return abortedResult();
   if (forbidden.length) {
     // Do not show "limited access" details to non-admin users (avoid leaking internal permission structure).
     // Admins can still see this warning for troubleshooting.
@@ -979,6 +1412,6 @@ async function serverLoadAllData() {
   // #endregion
   // Let callers (login flow) distinguish a clean load from a partial one so
   // they don't show "All data synchronized successfully" over missing data.
+  if (loadAborted()) return abortedResult();
   return { failed, forbidden };
 }
-

@@ -17,14 +17,17 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+import server.main as main_module
 from server.main import app
 import server.db as db
+from server import rate_limiter
 
 _DB_FILE = os.path.join(tempfile.gettempdir(), "albayan_setup_admin_test.db")
 client = TestClient(app, headers={"Origin": "http://testserver"})
 
 SETUP_EMAIL = "firstadmin@tests.albayanhub.com"
 SETUP_PASSWORD = "FirstAdminPass123!"
+SETUP_TOKEN = "test-setup-token-at-least-32-characters"
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -39,7 +42,10 @@ def isolated_db():
     db._ENGINE = None
     db._ENGINE_URL = None
     db.init_db()
+    previous_token = main_module.SETUP_TOKEN
+    main_module.SETUP_TOKEN = SETUP_TOKEN
     yield
+    main_module.SETUP_TOKEN = previous_token
     if prev is not None:
         os.environ["DATABASE_URL"] = prev
     else:
@@ -61,15 +67,54 @@ class TestSetupAdmin:
     def test_starts_with_zero_users(self):
         assert _user_count() == 0
 
+    def test_browser_setup_is_disabled_without_operator_token(self, monkeypatch):
+        monkeypatch.setattr(main_module, "SETUP_TOKEN", "")
+        status = client.get("/api/auth/needs-setup")
+        assert status.status_code == 200
+        assert status.json() == {"needsSetup": False, "setupEnabled": False}
+        response = client.post(
+            "/api/auth/setup-admin",
+            json={"name": "Owner", "email": SETUP_EMAIL, "password": SETUP_PASSWORD},
+        )
+        assert response.status_code == 503
+        assert _user_count() == 0
+
     def test_needs_setup_true_when_empty(self):
         r = client.get("/api/auth/needs-setup")
         assert r.status_code == 200
         assert r.json()["needsSetup"] is True
+        assert r.json()["setupEnabled"] is True
+
+    def test_invalid_token_is_rejected_and_uses_dedicated_buckets(self, monkeypatch):
+        keys: list[str] = []
+
+        def check(key, _maximum, _window):
+            keys.append(key)
+            return True, 1, 0
+
+        monkeypatch.setattr(rate_limiter, "check_rate_limit", check)
+        response = client.post(
+            "/api/auth/setup-admin",
+            json={
+                "name": "Owner",
+                "email": SETUP_EMAIL,
+                "password": SETUP_PASSWORD,
+                "setupToken": "wrong-token",
+            },
+        )
+        assert response.status_code == 403
+        assert keys == ["setup:ip:testclient", "setup:global"]
+        assert _user_count() == 0
 
     def test_creates_first_admin_and_logs_in(self):
         r = client.post(
             "/api/auth/setup-admin",
-            json={"name": "Owner", "email": SETUP_EMAIL, "password": SETUP_PASSWORD},
+            json={
+                "name": "Owner",
+                "email": SETUP_EMAIL,
+                "password": SETUP_PASSWORD,
+                "setupToken": SETUP_TOKEN,
+            },
         )
         assert r.status_code == 200, r.text
         body = r.json()
@@ -95,7 +140,12 @@ class TestSetupAdmin:
     def test_blocked_once_a_user_exists(self):
         r = client.post(
             "/api/auth/setup-admin",
-            json={"name": "Second", "email": "second@tests.albayanhub.com", "password": "AnotherPass123!"},
+            json={
+                "name": "Second",
+                "email": "second@tests.albayanhub.com",
+                "password": "AnotherPass123!",
+                "setupToken": SETUP_TOKEN,
+            },
         )
         assert r.status_code == 409
         assert _user_count() == 1  # unchanged
