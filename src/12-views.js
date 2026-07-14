@@ -174,7 +174,7 @@ function render() {
 
 function renderFirstRunSetup() {
   const isAr = state.language === 'ar';
-  const serverSetup = isServerModeEnabled() && state.needsServerSetup;
+  const serverSetup = isServerModeEnabled() && state.needsServerSetup && state.serverSetupEnabled === true;
   const modeNote = serverSetup
     ? (isAr ? 'الخادم جديد ولا يحتوي على أي حساب بعد. أنشئ حساب المدير الأول للبدء.' : 'This server is fresh and has no account yet. Create the first admin to begin.')
     : (isAr ? 'الإعداد لأول مرة (تجربة محلية). أنشئ حساب مدير للبدء.' : 'First time setup (local testing). Create an Admin account to start.');
@@ -214,6 +214,11 @@ function renderFirstRunSetup() {
             <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
             <input type="password" id="first-password-confirm" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'أعد كتابة كلمة المرور' : 'Repeat password'}" minlength="8" />
           </div>
+          ${serverSetup ? `<div>
+            <label class="block text-sm font-medium mb-2">${isAr ? 'رمز إعداد الخادم' : 'Server Setup Token'}</label>
+            <input type="password" id="first-setup-token" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="ALBAYAN_SETUP_TOKEN" minlength="16" maxlength="256" autocomplete="off" />
+            <p class="mt-1 text-xs text-slate-500">${isAr ? 'أدخل الرمز الذي أضافه مشغل الخادم.' : 'Enter the random token configured by the server operator.'}</p>
+          </div>` : ''}
           <button type="submit" class="w-full btn-shine alb-btn-primary text-white font-bold py-3 rounded-xl transition-all">
             ${serverSetup ? (isAr ? 'إنشاء حساب المدير' : 'Create Admin') : (isAr ? 'إنشاء مدير (محلي)' : 'Create Admin (Local)')}
           </button>
@@ -228,6 +233,17 @@ function renderFirstRunSetup() {
 
 // Open the server first-run setup screen from the login page.
 function startServerSetup() {
+  if (!isServerModeEnabled() || state.serverSetupEnabled !== true) {
+    state.needsServerSetup = false;
+    showNotification(
+      state.language === 'ar' ? 'إعداد الخادم مطلوب' : 'Server Setup Required',
+      state.language === 'ar'
+        ? 'إعداد المتصفح معطّل. استخدم متغيرات ALBAYAN_BOOTSTRAP_ADMIN_* أو أمر إنشاء المدير من الطرفية.'
+        : 'Browser setup is disabled. Use the ALBAYAN_BOOTSTRAP_ADMIN_* environment variables or the create-admin CLI command.',
+      'warning'
+    );
+    return;
+  }
   state.needsServerSetup = true;
   render();
 }
@@ -249,6 +265,8 @@ function attachFirstRunHandlers() {
       const email = Security.sanitizeInput(document.getElementById('first-email').value, { maxLength: 120 }).toLowerCase();
       const password = document.getElementById('first-password').value;
       const confirm = document.getElementById('first-password-confirm').value;
+      const serverSetup = isServerModeEnabled() && state.needsServerSetup && state.serverSetupEnabled === true;
+      const setupToken = serverSetup ? String(document.getElementById('first-setup-token')?.value || '') : '';
 
       const _vErr = state.language === 'ar' ? 'خطأ في التحقق' : 'Validation Error';
       if (!name) {
@@ -267,16 +285,24 @@ function attachFirstRunHandlers() {
         showNotification(_vErr, state.language === 'ar' ? 'كلمتا المرور غير متطابقتين' : 'Passwords do not match', 'error');
         return;
       }
+      if (serverSetup && setupToken.length < 16) {
+        showNotification(_vErr, state.language === 'ar' ? 'رمز إعداد الخادم مطلوب' : 'The server setup token is required', 'error');
+        return;
+      }
 
       // Server mode first-run: create the first admin ON THE SERVER (one-time,
       // then the server rejects further setup calls) and log straight in.
-      if (isServerModeEnabled() && state.needsServerSetup) {
+      if (serverSetup) {
         try {
-          const user = await apiSetupAdmin(name, email, password);
+          const user = await apiSetupAdmin(name, email, password, setupToken);
           if (!user) throw new Error('setup failed');
           state.needsServerSetup = false;
           state.serverHasNoUsers = false;
+          cancelPendingRequests();
+          invalidateUsersListCache();
+          advanceServerSessionEpoch();
           state.currentUser = user;
+          activateServerCollectionStorage(user);
           if (!Array.isArray(state.currentUser.subscriptions)) {
             state.currentUser.subscriptions = isAdminRole(state.currentUser.role) ? Object.keys(SERVICES) : [];
           }
@@ -284,7 +310,10 @@ function attachFirstRunHandlers() {
           saveState();
           showNotification(state.language === 'ar' ? 'تم إنشاء المدير' : 'Admin Created', state.language === 'ar' ? 'تم إنشاء حساب المدير وتسجيل الدخول.' : 'Admin account created and logged in.', 'success');
           render();
-          try { await serverLoadAllData(); } catch (_) {}
+          try {
+            const loadResult = await serverLoadAllData();
+            if (loadResult?.aborted) return;
+          } catch (_) {}
           startServerLiveSync();
           render();
         } catch (err) {
@@ -298,6 +327,21 @@ function attachFirstRunHandlers() {
           );
           if (already) { state.needsServerSetup = false; render(); }
         }
+        return;
+      }
+
+      // A stale/forged setup screen must never create a device-local Admin
+      // while the app is configured for the shared server.
+      if (isServerModeEnabled()) {
+        state.needsServerSetup = false;
+        showNotification(
+          state.language === 'ar' ? 'إعداد الخادم مطلوب' : 'Server Setup Required',
+          state.language === 'ar'
+            ? 'إعداد المتصفح غير متاح. اطلب من مشغل الخادم إنشاء حساب المدير.'
+            : 'Browser setup is unavailable. Ask the server operator to create the administrator account.',
+          'warning'
+        );
+        render();
         return;
       }
 
@@ -362,7 +406,7 @@ function renderLogin() {
             <p class="text-slate-500 mt-2">${t('signInTitle')}</p>
           </div>
 
-          ${(isServerModeEnabled() && state.serverHasNoUsers) ? `
+          ${(isServerModeEnabled() && state.serverHasNoUsers && state.serverSetupEnabled === true) ? `
           <button type="button" onclick="startServerSetup()" class="w-full mb-5 text-left rounded-2xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-900/20 p-4 hover:shadow-md transition-all">
             <div class="flex items-center gap-3">
               <i data-lucide="user-plus" class="w-5 h-5 text-indigo-600 flex-shrink-0"></i>
@@ -373,6 +417,13 @@ function renderLogin() {
               <i data-lucide="${isRTL ? 'chevron-left' : 'chevron-right'}" class="w-4 h-4 text-indigo-400 ml-auto flex-shrink-0"></i>
             </div>
           </button>
+          ` : (isServerModeEnabled() && state.serverHasNoUsers) ? `
+          <div class="w-full mb-5 rounded-2xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-200">
+            <div class="font-bold mb-1">${isRTL ? 'إعداد الخادم مطلوب' : 'Server setup required'}</div>
+            <div class="text-xs">${isRTL
+              ? 'إعداد المتصفح معطّل. اطلب من مشغل الخادم استخدام متغيرات ALBAYAN_BOOTSTRAP_ADMIN_* أو أمر إنشاء المدير من الطرفية.'
+              : 'Browser setup is disabled. Ask the server operator to use ALBAYAN_BOOTSTRAP_ADMIN_* or the create-admin CLI command.'}</div>
+          </div>
           ` : ''}
 
           <form id="login-form" class="space-y-4">
@@ -392,9 +443,9 @@ function renderLogin() {
             </div>
 
             <div class="flex items-center justify-between pt-1">
-              <button type="button" onclick="showPasswordResetModal()" class="text-sm font-medium alb-link">
-                ${t('forgotPassword')}
-              </button>
+              ${isServerModeEnabled()
+                ? `<span class="text-xs text-slate-500">${isRTL ? 'نسيت كلمة المرور؟ تواصل مع المدير.' : 'Forgot your password? Contact an administrator.'}</span>`
+                : `<button type="button" onclick="showPasswordResetModal()" class="text-sm font-medium alb-link">${t('forgotPassword')}</button>`}
               <button type="button" onclick="toggleLanguage()" class="text-sm font-bold text-slate-500 alb-hover-brand">
                 ${state.language === 'en' ? 'العربية' : 'English'}
               </button>
@@ -537,9 +588,10 @@ function renderSidebar() {
     'reconciliation': 'analytics', // Part of analytics
     'users': 'users',
     'audit': 'auditLogs',
-    'settings': 'settings'
+    'settings': 'settings',
+    'clothes-system': 'clothesProducts'
   };
-  
+
   const allNavItems = [
     { id: 'analytics', icon: 'layout-dashboard', label: 'analytics' },
     { id: 'customers', icon: 'smile', label: 'customers' },
@@ -553,24 +605,33 @@ function renderSidebar() {
     { id: 'settings', icon: 'settings', label: 'settings' },
   ];
 
+  // Clothes System entry for non-admins holding clothes permissions. Admins
+  // reach it via the Services Hub; without this, a permissioned employee has
+  // no way to open it unless it happens to be their landing view.
+  if (!isAdminRole(state.currentUser?.role)) {
+    allNavItems.push({ id: 'clothes-system', icon: 'shirt', label: 'clothesSystem' });
+  }
+
   // Delivery users have a special dashboard view (not permission-gated).
   if (isDeliveryRole(state.currentUser?.role)) {
     allNavItems.unshift({ id: 'delivery-dashboard', icon: 'layout-dashboard', label: 'dashboard' });
   }
-  
+
   // Filter nav items based on permissions (Admin sees all, others based on their permissions)
   const navItems = allNavItems.filter(item => {
     // Admin sees everything
     if (isAdminRole(state.currentUser?.role)) return true;
-    
-    // Delivery role - show delivery dashboard + deliveries
+
+    // Delivery role: dashboard + deliveries always available (their permission
+    // records may be minimal); anything ELSE they were explicitly granted still
+    // shows through the permission check below (union, not replacement).
     if (isDeliveryRole(state.currentUser?.role)) {
-      return item.id === 'delivery-dashboard' || item.id === 'deliveries';
+      if (item.id === 'delivery-dashboard' || item.id === 'deliveries') return true;
     }
-    
+
     // Check if user has view permission for this module
     const permModule = navItemPermissions[item.id];
-    return currentUserHasPermission(permModule, 'view') || 
+    return currentUserHasPermission(permModule, 'view') ||
            currentUserHasPermission(permModule, 'viewOwn');
   });
   
@@ -959,7 +1020,7 @@ function findUserByEmailOrId(value) {
   return u || null;
 }
 
-function walletTransferFromUi() {
+async function walletTransferFromUi() {
   try {
     if (!state.currentUser?.id) return;
     const toValue = document.getElementById('wallet-transfer-to')?.value || '';
@@ -981,7 +1042,24 @@ function walletTransferFromUi() {
       showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
       return;
     }
-    WALLET.transfer(state.currentUser.id, toUser.id, 0, { memo: memoValue, currency, amountMinor, idempotencyKey: `p2p:${Security.generateSecureId('idem')}` });
+    const submitBtn = document.getElementById('wallet-transfer-submit');
+    if (submitBtn?.disabled) return;
+    const canReuseKey = String(submitBtn?.dataset.operationFingerprint || '') === fingerprint;
+    const operationKey = (canReuseKey ? String(submitBtn?.dataset.idempotencyKey || '') : '') || `p2p:${Security.generateSecureId('idem')}`;
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.dataset.idempotencyKey = operationKey;
+      submitBtn.dataset.operationFingerprint = fingerprint;
+    }
+    try {
+      await WALLET.transfer(state.currentUser.id, toUser.id, 0, { memo: memoValue, currency, amountMinor, idempotencyKey: operationKey });
+      if (submitBtn) {
+        delete submitBtn.dataset.idempotencyKey;
+        delete submitBtn.dataset.operationFingerprint;
+      }
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
 
     const toEl = document.getElementById('wallet-transfer-to');
     const amtEl = document.getElementById('wallet-transfer-amount');
@@ -997,7 +1075,7 @@ function walletTransferFromUi() {
   }
 }
 
-function walletTopUpFromUi() {
+async function walletTopUpFromUi() {
   try {
     if (!state.currentUser?.id) return;
     if (!isAdminRole(state.currentUser.role)) {
@@ -1023,7 +1101,24 @@ function walletTopUpFromUi() {
       showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
       return;
     }
-    WALLET.credit(toUser.id, 0, { memo: memoValue || 'Top-up', currency, amountMinor, idempotencyKey: `topup:${Security.generateSecureId('idem')}` });
+    const submitBtn = document.getElementById('wallet-topup-submit');
+    if (submitBtn?.disabled) return;
+    const canReuseKey = String(submitBtn?.dataset.operationFingerprint || '') === fingerprint;
+    const operationKey = (canReuseKey ? String(submitBtn?.dataset.idempotencyKey || '') : '') || `topup:${Security.generateSecureId('idem')}`;
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.dataset.idempotencyKey = operationKey;
+      submitBtn.dataset.operationFingerprint = fingerprint;
+    }
+    try {
+      await WALLET.credit(toUser.id, 0, { memo: memoValue || 'Top-up', currency, amountMinor, idempotencyKey: operationKey });
+      if (submitBtn) {
+        delete submitBtn.dataset.idempotencyKey;
+        delete submitBtn.dataset.operationFingerprint;
+      }
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
 
     const toEl = document.getElementById('wallet-topup-to');
     const amtEl = document.getElementById('wallet-topup-amount');
@@ -1039,7 +1134,7 @@ function walletTopUpFromUi() {
   }
 }
 
-function cancelSubscriptionFromUi(serviceId) {
+async function cancelSubscriptionFromUi(serviceId) {
   try {
     if (!state.currentUser?.id) return;
     const sid = String(serviceId || '').trim();
@@ -1047,7 +1142,7 @@ function cancelSubscriptionFromUi(serviceId) {
     const isRTL = state.language === 'ar';
     const ok = confirm(isRTL ? 'هل تريد إلغاء الاشتراك؟' : 'Cancel this subscription?');
     if (!ok) return;
-    SUBSCRIPTIONS.cancel(state.currentUser.id, sid);
+    await SUBSCRIPTIONS.cancel(state.currentUser.id, sid);
     showNotification(isRTL ? 'نجاح' : 'Success', isRTL ? 'تم إلغاء الاشتراك' : 'Subscription canceled', 'success');
     render();
   } catch (e) {
@@ -1182,7 +1277,7 @@ function renderWalletView() {
                 <input id="wallet-transfer-memo" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isRTL ? 'اختياري' : 'Optional'}" maxlength="180" />
               </div>
             </div>
-            <button onclick="walletTransferFromUi()" class="w-full btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
+            <button id="wallet-transfer-submit" onclick="walletTransferFromUi()" class="w-full btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 disabled:opacity-50" type="button">
               <i data-lucide="send" class="w-4 h-4 inline mr-2"></i>${t('send')}
             </button>
             <div class="text-[11px] text-slate-400">
@@ -1224,7 +1319,7 @@ function renderWalletView() {
                   <input id="wallet-topup-memo" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isRTL ? 'اختياري' : 'Optional'}" maxlength="180" />
                 </div>
               </div>
-              <button onclick="walletTopUpFromUi()" class="w-full btn-shine bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700">
+              <button id="wallet-topup-submit" onclick="walletTopUpFromUi()" class="w-full btn-shine bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700 disabled:opacity-50" type="button">
                 <i data-lucide="plus" class="w-4 h-4 inline mr-2"></i>${t('topUp')}
               </button>
             </div>
@@ -1317,6 +1412,12 @@ function renderAnalyticsView() {
   const users = getVisibleRecords(state.users);
   const now = Date.now();
   const last7 = now - 7 * 24 * 60 * 60 * 1000;
+
+  // analytics.viewFinancials gates every money figure on this screen;
+  // analytics.viewSensitive gates the detailed breakdowns (used/paid splits,
+  // collected-vs-outstanding amounts, per-customer spend).
+  const canViewFinancials = can('analytics', 'viewFinancials');
+  const canViewSensitive = can('analytics', 'viewSensitive');
 
   // Calculate ad revenue - separate paid vs pending/unpaid for clarity.
   // Uses the SAME status-aware spend rule as the customer cards
@@ -1439,8 +1540,14 @@ function renderAnalyticsView() {
         </div>
       </div>
 
-      <!-- KPI Grid -->
+      <!-- KPI Grid — money figures require analytics.viewFinancials -->
       <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+        ${!canViewFinancials ? `
+        ${renderStatCard(isAr ? 'الإعلانات' : 'Ads', ads.length, 'megaphone', 'from-emerald-500 to-teal-600')}
+        ${renderStatCard(isAr ? 'الوصولات' : 'Receipts', revenueReceipts.length, 'file-text', 'from-indigo-500 to-purple-600')}
+        ${renderStatCard(isAr ? 'العملاء' : 'Customers', getVisibleRecords(state.customers).length, 'users', 'from-blue-500 to-cyan-600')}
+        ${renderStatCard(isAr ? 'حالة التحصيل' : 'Collection Status', `${collectedReceipts.length}/${revenueReceipts.length}`, 'wallet', 'from-amber-500 to-orange-600')}
+        ` : `
         <!-- Show paid ad revenue separately for clarity -->
         <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform">
           <div class="absolute inset-0 bg-gradient-to-br from-emerald-500 to-teal-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
@@ -1463,14 +1570,14 @@ function renderAnalyticsView() {
             <div>
               <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">${isAr ? 'الرصيد المتاح' : 'Available Balance'}</p>
               <p class="text-2xl font-bold text-slate-800 dark:text-white">$${availableReceiptBalance.toFixed(2)}</p>
-              <p class="text-xs text-slate-500 mt-1">${isAr ? 'مستخدم' : 'Used'}: $${totalUsedFromReceipts.toFixed(2)} / ${isAr ? 'مدفوع' : 'Paid'}: $${paidUSD.toFixed(2)}</p>
+              ${canViewSensitive ? `<p class="text-xs text-slate-500 mt-1">${isAr ? 'مستخدم' : 'Used'}: $${totalUsedFromReceipts.toFixed(2)} / ${isAr ? 'مدفوع' : 'Paid'}: $${paidUSD.toFixed(2)}</p>` : ''}
             </div>
             <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center shadow-lg">
               <i data-lucide="piggy-bank" class="w-6 h-6 text-white"></i>
             </div>
           </div>
         </div>
-        
+
         <!-- Collection Status Card -->
         <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform cursor-pointer" onclick="state.receiptCollectedFilter='not-collected';navigateTo('receipts');">
           <div class="absolute inset-0 bg-gradient-to-br from-amber-500 to-orange-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
@@ -1481,10 +1588,12 @@ function renderAnalyticsView() {
                 <p class="text-2xl font-bold text-slate-800 dark:text-white">${collectedReceipts.length}/${revenueReceipts.length}</p>
                 <span class="text-sm font-medium ${collectionRate >= 80 ? 'text-emerald-600' : collectionRate >= 50 ? 'text-amber-600' : 'text-rose-600'}">${collectionRate}%</span>
               </div>
+              ${canViewSensitive ? `
               <div class="flex items-center space-x-3 mt-2 text-xs">
                 <span class="text-emerald-600 font-medium">✓ $${collectedUSD.toFixed(0)}</span>
                 <span class="text-amber-600 font-medium">○ $${notCollectedUSD.toFixed(0)}</span>
               </div>
+              ` : ''}
             </div>
             <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shadow-lg">
               <i data-lucide="wallet" class="w-6 h-6 text-white"></i>
@@ -1495,10 +1604,12 @@ function renderAnalyticsView() {
             <div class="h-full bg-gradient-to-r from-emerald-500 to-teal-500 rounded-full transition-all duration-500" style="width: ${collectionRate}%"></div>
           </div>
         </div>
+        `}
       </div>
 
       <!-- Tracking Panels -->
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        ${canViewFinancials ? `
         <div class="glass-panel rounded-2xl p-5 space-y-4">
           <div class="flex items-center justify-between">
             <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">${isAr ? 'الإيرادات والتحصيلات' : 'Revenue & Collections'}</h2>
@@ -1508,6 +1619,7 @@ function renderAnalyticsView() {
           ${renderProgress(isAr ? 'المعلّق (وصولات)' : 'Pending (Receipts)', pendingUSD, Math.max(paidUSD + pendingUSD, 1), 'bg-amber-500')}
           ${renderProgress(isAr ? 'إيراد الإعلانات (الكل)' : 'Ad Revenue (all time)', totalAdRevenue, Math.max(totalAdRevenue, 1), 'bg-indigo-500')}
         </div>
+        ` : ''}
 
         <div class="glass-panel rounded-2xl p-5 space-y-4">
           <div class="flex items-center justify-between">
@@ -1554,6 +1666,7 @@ function renderAnalyticsView() {
 
       <!-- Lists -->
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        ${canViewSensitive ? `
         <div class="glass-panel rounded-2xl p-5">
           <div class="flex items-center justify-between mb-3">
             <h3 class="font-bold text-slate-800 dark:text-white">${isAr ? 'أفضل العملاء (إنفاق)' : 'Top Customers (Spend)'}</h3>
@@ -1573,6 +1686,7 @@ function renderAnalyticsView() {
             </div>
           `}
         </div>
+        ` : ''}
 
         <div class="glass-panel rounded-2xl p-5">
           <div class="flex items-center justify-between mb-3">
@@ -1713,6 +1827,11 @@ function renderCustomersGrid(customers) {
 
   const totalCustomers = customers.length;
   const statsIndex = buildCustomerStatsIndex();
+  // customers.viewContacts / customers.viewBalance are real permissions — a
+  // user without them must not see phone numbers or money figures.
+  const canSeeContacts = can('customers', 'viewContacts');
+  const canSeeBalance = can('customers', 'viewBalance');
+  const HIDDEN = isAr ? 'محجوب' : 'Hidden';
   return customers.map((c, idx) => {
           const stats = getCustomerStats(c.id, statsIndex);
           const lastAdText = stats.lastAdDate
@@ -1751,11 +1870,13 @@ function renderCustomersGrid(customers) {
                 <div class="flex items-start space-x-2">
                   <i data-lucide="phone" class="w-4 h-4 text-slate-400 mt-0.5"></i>
                   <div class="flex-1">
-              ${phones.length > 0 ? phones.map(phone => `<div class="text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone || '')}</div>`).join('') : `<span class="text-slate-400">${isAr ? 'لا يوجد هاتف' : 'No phone'}</span>`}
+              ${!canSeeContacts
+                ? `<span class="text-slate-400">••• ${HIDDEN}</span>`
+                : (phones.length > 0 ? phones.map(phone => `<div class="text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone || '')}</div>`).join('') : `<span class="text-slate-400">${isAr ? 'لا يوجد هاتف' : 'No phone'}</span>`)}
                   </div>
                 </div>
 
-          ${profileLinks.length > 0 ? `
+          ${canSeeContacts && profileLinks.length > 0 ? `
                   <div class="flex items-start space-x-2">
                     <i data-lucide="link" class="w-4 h-4 text-slate-400 mt-0.5"></i>
                     <div class="flex-1">
@@ -1770,7 +1891,12 @@ function renderCustomersGrid(customers) {
                   <span class="text-slate-600 dark:text-slate-400">${isAr ? 'آخر إعلان' : 'Last ad'}: ${lastAdText}</span>
                 </div>
 
-                <!-- Financial Summary -->
+                <!-- Financial Summary (customers.viewBalance) -->
+                ${!canSeeBalance ? `
+                <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700 text-center text-xs text-slate-400">
+                  <i data-lucide="lock" class="w-3 h-3 inline mr-1"></i>${isAr ? 'الأرصدة محجوبة' : 'Balances hidden'}
+                </div>
+                ` : `
                 <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
                   <!-- LYD Section - TOTAL PAID -->
                   <div class="mb-2">
@@ -1809,6 +1935,7 @@ function renderCustomersGrid(customers) {
                     </div>
                   </div>
                 </div>
+                `}
               </div>
             </div>
           `;
@@ -1871,17 +1998,21 @@ function renderCustomersView() {
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('customers')}</h1>
           <p id="customers-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allFilteredCustomers.length} من ${allCustomers.length} عميل` : `${allFilteredCustomers.length} of ${allCustomers.length} customers`}</p>
         </div>
+        ${can('customers', 'add') ? `
         <button onclick="showCustomerModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
           <i data-lucide="user-plus" class="w-4 h-4"></i>
           <span>${t('addCustomer')}</span>
         </button>
+        ` : ''}
       </div>
 
-      <!-- Stats Cards -->
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <!-- Stats Cards (money figures require customers.viewBalance) -->
+      <div class="grid grid-cols-1 ${can('customers', 'viewBalance') ? 'md:grid-cols-3' : ''} gap-6">
         ${renderStatCard(isAr ? 'إجمالي العملاء' : 'Total Customers', allCustomers.length, 'users', 'from-indigo-500 to-purple-600')}
+        ${can('customers', 'viewBalance') ? `
         ${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', totalRevenue.toFixed(0) + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}
         ${renderStatCard(isAr ? 'الديون المستحقة' : 'Outstanding Debts', totalDebts.toFixed(0) + ' LYD', 'alert-circle', 'from-rose-500 to-pink-600')}
+        ` : ''}
       </div>
 
       <!-- Search and Filters -->
@@ -2828,8 +2959,12 @@ function renderDeliveriesView() {
   filteredDeliveries.sort((a, b) => new Date(b.createdAt || b.date || 0) - new Date(a.createdAt || a.date || 0));
 
   const roleLower = String(state.currentUser?.role || '').toLowerCase();
-  const canAssign = roleLower !== 'delivery' && (currentUserHasPermission('deliveries', 'assign') || isCurrentUserAdmin());
-  const canOffice = roleLower !== 'delivery' && (currentUserHasPermission('deliveries', 'markCollected') || isCurrentUserAdmin());
+  const canAssign = roleLower !== 'delivery' && can('deliveries', 'assign');
+  const canOffice = roleLower !== 'delivery' && can('deliveries', 'markCollected');
+  // deliveries.viewStats gates the aggregate money tiles and the per-driver
+  // performance panel (held cash, success rates) — it is a real permission.
+  const canViewDeliveryStats = can('deliveries', 'viewStats');
+  const canExportDeliveries = can('deliveries', 'viewStats') || can('receipts', 'export');
 
   const activeDeliveries = deliveryReceipts.filter(d => d.deliveryStatus === 'In Progress' || d.deliveryStatus === 'Needs Delivery');
 
@@ -2846,17 +2981,22 @@ function renderDeliveriesView() {
             <i data-lucide="refresh-cw" class="w-4 h-4"></i>
             <span>${isAr ? 'تحديث' : 'Refresh'}</span>
           </button>
+          ${canAssign ? `
           <button onclick="checkStuckDeliveries()" class="glass-panel px-3 py-2 rounded-xl text-sm font-medium flex items-center space-x-2 hover:bg-amber-50 dark:hover:bg-amber-900/20" title="${isAr ? 'البحث عن توصيلات عالقة قيد التنفيذ لأكثر من 3 أيام' : 'Find deliveries stuck in progress for more than 3 days'}">
             <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-600"></i>
             <span class="text-amber-700 dark:text-amber-400">${isAr ? 'فحص العالقة' : 'Check Stuck'}</span>
           </button>
+          ` : ''}
+          ${canExportDeliveries ? `
           <button onclick="exportDeliveryReport()" class="btn-shine bg-indigo-600 text-white px-3 py-2 rounded-xl text-sm font-bold flex items-center space-x-2">
             <i data-lucide="download" class="w-4 h-4"></i>
             <span>${t('export')}</span>
           </button>
+          ` : ''}
         </div>
       </div>
 
+      ${!canViewDeliveryStats ? '' : `
       <!-- Stats (compact): 4 money/count tiles + pipeline strip in one panel -->
       <div class="glass-panel rounded-2xl p-4">
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -2893,9 +3033,11 @@ function renderDeliveriesView() {
           <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>${isAr ? 'ملغي' : 'Canceled'} <b>${stats.canceled}</b></span>
         </div>
       </div>
+      `}
 
       <!-- Driver Performance & Delivery Log Grid -->
       <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+        ${!canViewDeliveryStats ? '' : `
         <!-- Driver Performance (compact rows, same numbers) -->
         <div class="glass-panel rounded-2xl p-4">
           <h2 class="text-base font-bold text-slate-800 dark:text-white mb-3">${isAr ? 'أداء السائقين' : 'Driver Performance'}</h2>
@@ -2921,9 +3063,10 @@ function renderDeliveriesView() {
             `).join('')}
           </div>
         </div>
+        `}
 
         <!-- Delivery Log -->
-        <div class="xl:col-span-2 glass-panel rounded-2xl p-4">
+        <div class="${canViewDeliveryStats ? 'xl:col-span-2' : 'xl:col-span-3'} glass-panel rounded-2xl p-4">
           <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 mb-3">
             <h2 class="text-base font-bold text-slate-800 dark:text-white">${isAr ? 'سجل التوصيل' : 'Delivery Log'}</h2>
             <div class="flex flex-wrap items-center gap-2 w-full md:w-auto">
@@ -3159,6 +3302,16 @@ function refreshDeliveries() {
 
 // Export delivery report
 function exportDeliveryReport() {
+  // The report carries customer phones + money owed — require an export-level
+  // permission, not just the ability to see the deliveries screen.
+  if (!can('deliveries', 'viewStats') && !can('receipts', 'export')) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تحتاج صلاحية تصدير/إحصاءات التوصيل' : 'Requires delivery statistics or receipt export permission',
+      'error'
+    );
+    return;
+  }
   // Delivery Operations: receipts are the source of truth (ads must not create deliveries).
   const deliveryAds = getVisibleRecords(state.receipts).filter(r => {
     const ds = String(r?.deliveryStatus || '').trim();
@@ -3324,7 +3477,7 @@ function _getOutstandingDueLocal(item) {
   return 0;
 }
 
-function setOfficeHandover(itemId, received) {
+async function setOfficeHandover(itemId, received) {
   const id = String(itemId || '');
   if (!id) return;
 
@@ -3360,8 +3513,10 @@ function setOfficeHandover(itemId, received) {
     officeHandoverAt: next ? nowIso : ''
   };
 
-  if (receipt) updateRecord(state.receipts, id, updates);
-  else updateRecord(state.ads, id, updates);
+  const saved = receipt
+    ? await updateRecord(state.receipts, id, updates)
+    : await updateRecord(state.ads, id, updates);
+  if (!saved) return;
 
   addAuditLog('update', id, next ? 'Office handover marked as received' : 'Office handover undone', { isReceipt: !!receipt });
   showNotification(isAr ? 'نجاح' : 'Success', next ? (isAr ? 'تم استلام النقد في المكتب' : 'Cash received at office') : (isAr ? 'تم التراجع عن التسليم للمكتب' : 'Office handover undone'), 'success');
@@ -3379,7 +3534,7 @@ function undoOfficeHandover(itemId) {
 }
 
 // "Delete mission" (remove from delivery tracking) without deleting the receipt itself.
-function removeDeliveryMission(itemId) {
+async function removeDeliveryMission(itemId) {
   const id = String(itemId || '');
   if (!id) return;
 
@@ -3432,7 +3587,7 @@ function removeDeliveryMission(itemId) {
     nextStatusDetail.notPaidCollection = 'office';
   }
 
-  updateRecord(state.receipts, id, {
+  const saved = await updateRecord(state.receipts, id, {
     deliveryStatus: 'Office',
     deliveryPersonId: '',
     acceptedDate: '',
@@ -3446,6 +3601,7 @@ function removeDeliveryMission(itemId) {
     deliveryHistory: nextHistory,
     statusDetail: nextStatusDetail
   });
+  if (!saved) return;
 
   showNotification(state.language === 'ar' ? 'تمت الإزالة' : 'Removed', state.language === 'ar' ? 'تمت إزالة مهمة التوصيل' : 'Delivery mission removed', 'success');
   render();
@@ -3798,8 +3954,8 @@ async function refreshDeliveryDashboard() {
 
   try {
     // Clear cache to force fresh data
-    _collectionCache.receipts = { data: null, timestamp: 0 };
-    _collectionCache.customers = { data: null, timestamp: 0 };
+    _collectionCache.receipts = { data: null, timestamp: 0, identity: '' };
+    _collectionCache.customers = { data: null, timestamp: 0, identity: '' };
 
     // Force immediate sync from server
     const [receipts, customers] = await Promise.all([
@@ -3914,7 +4070,7 @@ function openDeliveryCancelModal(itemId) {
   IconQueue.schedule(modal);
 }
 
-function submitDeliveryCancel(itemType, itemId) {
+async function submitDeliveryCancel(itemType, itemId) {
   const type = String(itemType || '');
   const id = String(itemId || '');
   const reason = String(document.getElementById('delivery-cancel-reason')?.value || '').trim();
@@ -3931,16 +4087,22 @@ function submitDeliveryCancel(itemType, itemId) {
     if (!receipt) return;
     const nextHistory = Array.isArray(receipt.deliveryHistory) ? [...receipt.deliveryHistory] : [];
     nextHistory.push({ ts: nowIso, userId: uid, action: 'CANCELLED_BY_DRIVER', reason });
-    updateRecord(state.receipts, receipt.id, {
+    const receiptSaved = await updateRecord(state.receipts, receipt.id, {
       deliveryStatus: 'Canceled',
       deliveryCancelReason: reason,
       deliveryCancelledAt: nowIso,
       deliveryCancelledBy: uid,
       deliveryHistory: nextHistory
     });
+    if (!receiptSaved) return;
     // The canceled delivery's debt will never be collected — release any ad
     // funding that was drawn from its due credit.
-    const releasedAds = releaseCanceledDeliveryDueFunding(receipt.id);
+    let releasedAds = 0;
+    try {
+      releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);
+    } catch (_) {
+      return;
+    }
     if (releasedAds > 0) {
       showNotification(
         state.language === 'ar' ? 'تنبيه' : 'Notice',
@@ -3955,13 +4117,14 @@ function submitDeliveryCancel(itemType, itemId) {
     if (!ad) return;
     const nextHistory = Array.isArray(ad.deliveryHistory) ? [...ad.deliveryHistory] : [];
     nextHistory.push({ ts: nowIso, userId: uid, action: 'CANCELLED_BY_DRIVER', reason });
-    updateRecord(state.ads, ad.id, {
+    const adSaved = await updateRecord(state.ads, ad.id, {
       deliveryStatus: 'Canceled',
       deliveryCancelReason: reason,
       deliveryCancelledAt: nowIso,
       deliveryCancelledBy: uid,
       deliveryHistory: nextHistory
     });
+    if (!adSaved) return;
   }
 
   document.getElementById('delivery-cancel-modal')?.remove();
@@ -4003,7 +4166,11 @@ function renderUsersView() {
   const isAr = state.language === 'ar';
   const visibleUsers = getVisibleRecords(state.users);
   const isAdmin = isCurrentUserAdmin();
-  
+  const canAddUsers = canManageUsersAction('add');
+  const canEditUsers = canManageUsersAction('edit');
+  const canDeleteUsers = canManageUsersAction('delete');
+  const canManagePerms = canManageUsersAction('managePermissions');
+
   return `
     <div class="space-y-6 animate-fade-in-up">
       <div class="flex justify-between items-center">
@@ -4011,7 +4178,7 @@ function renderUsersView() {
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('users')}</h1>
           <p class="text-sm text-slate-500 mt-1">${isAr ? `${visibleUsers.length} مستخدم في النظام` : `${visibleUsers.length} system users`}</p>
         </div>
-        ${isAdmin ? `
+        ${canAddUsers ? `
         <button onclick="showUserModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
           <i data-lucide="user-plus" class="w-4 h-4"></i>
           <span>${t('addUser')}</span>
@@ -4047,17 +4214,17 @@ function renderUsersView() {
                       <i data-lucide="banknote" class="w-4 h-4"></i>
                     </button>
                   ` : ''}
-                  ${isAdmin && u.id !== state.currentUser?.id && !isAdminRole(u.role) ? `
+                  ${canManagePerms && u.id !== state.currentUser?.id && !isAdminRole(u.role) ? `
                     <button onclick="showPermissionsModal('${u.id}')" class="text-purple-600 hover:text-purple-700 p-1" title="${isAr ? 'إدارة الصلاحيات' : 'Manage Permissions'}">
                       <i data-lucide="shield" class="w-4 h-4"></i>
                     </button>
                   ` : ''}
-                  ${isAdmin || u.id === state.currentUser?.id ? `
+                  ${u.id === state.currentUser?.id || (canEditUsers && (isAdmin || !isAdminRole(u.role))) ? `
                   <button onclick="editUser('${u.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${u.id === state.currentUser?.id ? (isAr ? 'تعديل ملفك الشخصي' : 'Edit Your Profile') : t('edit')}">
                     <i data-lucide="edit" class="w-4 h-4"></i>
                   </button>
                   ` : ''}
-                  ${isAdmin && u.id !== state.currentUser?.id ? `
+                  ${canDeleteUsers && u.id !== state.currentUser?.id && (isAdmin || !isAdminRole(u.role)) ? `
                     <button onclick="deleteUser('${u.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="${t('delete')}">
                       <i data-lucide="trash-2" class="w-4 h-4"></i>
                     </button>
@@ -4110,14 +4277,14 @@ function renderUsersView() {
                       <div class="w-full h-1.5 bg-purple-200 dark:bg-purple-800 rounded-full overflow-hidden">
                         <div class="h-full bg-gradient-to-r from-purple-500 to-indigo-500 rounded-full transition-all" style="width: ${permSummary.percentage}%"></div>
                       </div>
-                      ${isAdmin ? `
+                      ${canManagePerms ? `
                       <button onclick="showPermissionsModal('${u.id}')" class="mt-2 w-full text-xs text-purple-600 hover:text-purple-700 font-medium flex items-center justify-center space-x-1">
                         <i data-lucide="settings" class="w-3 h-3"></i>
                         <span>${isAr ? 'إدارة الوصول' : 'Manage Access'}</span>
                       </button>
                       ` : `
                         <div class="mt-2 text-[11px] text-slate-500 text-center">
-                          ${state.language === 'ar' ? 'التعديل للأدمن فقط' : 'Admin only'}
+                          ${state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires Manage Permissions'}
                         </div>
                       `}
                     </div>
@@ -4141,8 +4308,19 @@ function renderUsersView() {
 
 function renderAuditView() {
   const isAr = state.language === 'ar';
-  const allLogs = getVisibleRecords(state.logs);
-  
+  // PERMISSION SCOPING: auditLogs.view sees everything; auditLogs.viewOwn sees
+  // only their own entries. Every count, stat tile, filter dropdown and table
+  // row below derives from allLogs, so scoping here scopes the whole screen.
+  const canViewAllLogs = can('auditLogs', 'view');
+  const canViewOwnLogs = canViewAllLogs || currentUserHasPermission('auditLogs', 'viewOwn');
+  const canExportLogs = can('auditLogs', 'export');
+  const canClearLogs = can('auditLogs', 'clear');
+  if (!canViewOwnLogs) return renderNoAccessView();
+  // In server mode pull the authoritative, server-scoped trail (no-op when
+  // fresh; re-renders this view when it arrives).
+  refreshServerAuditLogs();
+  const allLogs = getVisibleAuditLogs();
+
   // Apply filters
   let filteredLogs = allLogs.filter(log => {
     // Search filter
@@ -4238,10 +4416,13 @@ function renderAuditView() {
           <p class="text-sm text-slate-500 mt-1">${isAr ? `${totalLogs.toLocaleString()} إجمالي السجلات` : `${totalLogs.toLocaleString()} total entries`} ${hasActiveFilters ? (isAr ? `(مصفّاة من ${allLogs.length.toLocaleString()})` : `(filtered from ${allLogs.length.toLocaleString()})`) : ''}</p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
+          ${canExportLogs ? `
           <button onclick="backupAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 border-2 border-emerald-200 dark:border-emerald-800 transition-all" title="${isAr ? 'إنشاء نسخة احتياطية كاملة من كل السجلات' : 'Create full backup of all logs'}">
             <i data-lucide="archive" class="w-4 h-4 text-emerald-600"></i>
             <span class="text-emerald-700 dark:text-emerald-400">${isAr ? 'نسخ احتياطي' : 'Backup'}</span>
           </button>
+          ` : ''}
+          ${canClearLogs ? `
           <button onclick="restoreAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-blue-50 dark:hover:bg-blue-900/20 border-2 border-blue-200 dark:border-blue-800 transition-all" title="${isAr ? 'استرجاع السجلات من ملف نسخة احتياطية' : 'Restore logs from backup file'}">
             <i data-lucide="upload" class="w-4 h-4 text-blue-600"></i>
             <span class="text-blue-700 dark:text-blue-400">${isAr ? 'استرجاع' : 'Restore'}</span>
@@ -4250,6 +4431,8 @@ function renderAuditView() {
             <i data-lucide="trash-2" class="w-4 h-4 text-rose-600"></i>
             <span class="text-rose-700 dark:text-rose-400">${isAr ? 'تنظيف' : 'Cleanup'}</span>
           </button>
+          ` : ''}
+          ${canExportLogs ? `
           <div class="w-px h-6 bg-slate-300 dark:bg-slate-600"></div>
           <button onclick="exportAuditLogs('csv')" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all">
             <i data-lucide="download" class="w-4 h-4"></i>
@@ -4259,6 +4442,7 @@ function renderAuditView() {
             <i data-lucide="file-json" class="w-4 h-4"></i>
             <span>JSON</span>
           </button>
+          ` : ''}
         </div>
       </div>
       
@@ -4559,7 +4743,13 @@ function showLogDetails(logId) {
   const isAr = state.language === 'ar';
   const log = state.logs.find(l => l.id === logId);
   if (!log) return;
-  
+  // Reachable with an arbitrary id — enforce the same scope as the table:
+  // a viewOwn-only user may only open their OWN entries.
+  if (!can('auditLogs', 'view') && String(log.userId || '') !== String(state.currentUser?.id || '')) {
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'لا يمكنك عرض سجل مستخدم آخر' : "You cannot view another user's log entry", 'error');
+    return;
+  }
+
   const user = state.users.find(u => u.id === log.userId);
   const modal = document.getElementById('app-modal') || document.createElement('div');
   modal.id = 'app-modal';
@@ -4632,8 +4822,13 @@ function showLogDetails(logId) {
 }
 
 function exportAuditLogs(format) {
-  const allLogs = getVisibleRecords(state.logs);
-  
+  if (!can('auditLogs', 'export')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية تصدير السجلات' : 'Requires the Export Logs permission', 'error');
+    return;
+  }
+  // Scoped: a viewOwn-only user exports only their own entries.
+  const allLogs = getVisibleAuditLogs();
+
   if (format === 'csv') {
     const headers = ['Date', 'Time', 'User', 'Action', 'Category', 'Severity', 'Description', 'Resource ID'];
     const rows = allLogs.map(log => {
@@ -4683,8 +4878,13 @@ function downloadFile(content, filename, mimeType) {
 
 // Backup all audit logs for permanent storage
 async function backupAuditLogs() {
-  const allLogs = getVisibleRecords(state.logs);
-  
+  if (!can('auditLogs', 'export')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية تصدير السجلات' : 'Requires the Export Logs permission', 'error');
+    return;
+  }
+  // A backup is a full export — scope it exactly like the export above.
+  const allLogs = getVisibleAuditLogs();
+
   const backup = {
     version: '1.0',
     exportDate: new Date().toISOString(),
@@ -4704,10 +4904,15 @@ async function backupAuditLogs() {
 
 // Restore audit logs from backup file
 function restoreAuditLogs() {
+  // Restore WRITES to the audit trail — same privilege as clearing it.
+  if (!can('auditLogs', 'clear')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية مسح/استرجاع السجلات' : 'Requires the Clear Logs permission', 'error');
+    return;
+  }
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = '.json';
-  
+
   input.onchange = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -4771,8 +4976,8 @@ function restoreAuditLogs() {
 // Cleanup old audit logs
 async function cleanupAuditLogs() {
   const isAr = state.language === 'ar';
-  if (!isCurrentUserAdmin()) {
-    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'للأدمن فقط' : 'Admin only', 'error');
+  if (!(isCurrentUserAdmin() || currentUserHasPermission('auditLogs', 'clear'))) {
+    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'تحتاج صلاحية مسح السجلات' : 'Requires the Clear Logs permission', 'error');
     return;
   }
 
@@ -4806,6 +5011,7 @@ async function cleanupAuditLogs() {
     // and the view never re-rendered. serverLiveSyncOnce is the real sync fn.
     if (isServerModeEnabled()) {
       await serverLiveSyncOnce();
+      await refreshServerAuditLogs({ force: true });
     }
     render();
     lucide.createIcons();
@@ -4833,8 +5039,8 @@ function renderSettingsView() {
             <i data-lucide="info" class="w-4 h-4 inline mr-1"></i>
             ${isServerModeEnabled()
               ? (state.language === 'ar'
-                ? 'في وضع السيرفر: استخدم \"نسيت كلمة المرور\" للحصول على رمز استعادة (أو البريد الإلكتروني لاحقاً).'
-                : 'Server mode: use \"Forgot password\" to get a reset code (email later).')
+                ? 'في وضع السيرفر: تواصل مع المدير لإعادة تعيين كلمة المرور.'
+                : 'Server mode: contact an administrator to reset your password.')
               : (state.language === 'ar'
                 ? 'في الوضع المحلي: أنشئ مفتاح استعادة لاسترجاع كلمة المرور عند نسيانها.'
                 : 'Local mode: create a Recovery Key to reset passwords if forgotten.')}
@@ -4929,8 +5135,13 @@ function renderSettingsView() {
         <div class="space-y-4">
           <div class="flex flex-col md:flex-row md:items-center space-y-2 md:space-y-0 md:space-x-4">
             <label class="text-sm font-medium text-slate-700 dark:text-slate-300">${isAr ? 'السعر الحالي (USD إلى LYD):' : 'Current Rate (USD to LYD):'}</label>
+            ${can('settings', 'manageExchangeRate') ? `
             <input type="text" id="default-rate-input" inputmode="decimal" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" onchange="updateExchangeRate(this.value)" class="glass-input px-4 py-2 rounded-xl w-32 font-bold text-emerald-600" />
             <button onclick="updateExchangeRate(document.getElementById('default-rate-input').value)" class="btn-shine bg-emerald-600 text-white px-4 py-2 rounded-xl text-sm">${isAr ? 'حفظ السعر' : 'Save Rate'}</button>
+            ` : `
+            <span class="px-4 py-2 rounded-xl w-32 font-bold text-emerald-600 bg-slate-100 dark:bg-slate-800">${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}</span>
+            <span class="text-xs text-slate-400">${isAr ? 'التعديل يحتاج صلاحية' : 'Editing requires permission'}</span>
+            `}
           </div>
 
           ${history.length > 0 ? `
@@ -4971,23 +5182,27 @@ function renderSettingsView() {
           ${isAr ? 'إدارة البيانات' : 'Data Management'}
         </h2>
         <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+          ${isCurrentUserAdmin() ? `
           <button onclick="exportData()" class="btn-shine bg-blue-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-blue-700">
             <i data-lucide="download" class="w-5 h-5"></i>
-            <span>${isAr ? 'تصدير نسخة احتياطية' : 'Export Backup'}</span>
+            <span>${isServerModeEnabled() ? (isAr ? 'تصدير تقرير جزئي' : 'Export Partial Report') : (isAr ? 'تصدير نسخة احتياطية' : 'Export Backup')}</span>
           </button>
           <button onclick="importData()" class="btn-shine bg-green-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-green-700">
             <i data-lucide="upload" class="w-5 h-5"></i>
-            <span>${isAr ? 'استيراد نسخة احتياطية' : 'Import Backup'}</span>
+            <span>${isServerModeEnabled() ? (isAr ? 'استيراد الخادم معطّل' : 'Server Import Disabled') : (isAr ? 'استيراد نسخة احتياطية' : 'Import Backup')}</span>
           </button>
           <button onclick="clearAllData()" class="btn-shine bg-rose-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-rose-700">
             <i data-lucide="trash-2" class="w-5 h-5"></i>
             <span>${isAr ? 'مسح كل البيانات' : 'Clear All Data'}</span>
           </button>
+          ` : ''}
         </div>
         <div class="mt-4 p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl">
           <p class="text-sm text-slate-600 dark:text-slate-400">
             <i data-lucide="info" class="w-4 h-4 inline mr-1"></i>
-            ${isAr ? 'بياناتك مخزنة محلياً في متصفحك. صدِّر بانتظام لإنشاء نسخ احتياطية.' : 'Your data is stored locally in your browser. Export regularly to create backups.'}
+            ${isServerModeEnabled()
+              ? (isAr ? 'وضع الخادم: التصدير تقرير غير معتمد وغير قابل للاستعادة، ولا يتضمن بيانات الملابس. الاستعادة تتطلب صيانة آمنة خارج التطبيق.' : 'Server mode: export is a non-authoritative, non-restorable report and omits clothes data. Restore requires a safe offline maintenance workflow.')
+              : (isAr ? 'بياناتك مخزنة محلياً في متصفحك. صدِّر بانتظام لإنشاء نسخ احتياطية.' : 'Your data is stored locally in your browser. Export regularly to create backups.')}
           </p>
         </div>
       </div>
@@ -5033,4 +5248,3 @@ function renderSettingsView() {
     </div>
   `;
 }
-

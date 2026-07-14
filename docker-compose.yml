@@ -11,7 +11,7 @@ services:
       POSTGRES_USER: albayan
       # SECURITY: POSTGRES_PASSWORD is REQUIRED via .env file (no default for security)
       # Create .env file with: POSTGRES_PASSWORD=YourSecurePassword123
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Error: POSTGRES_PASSWORD must be set in .env file}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env file}"
     volumes:
       - albayan-postgres:/var/lib/postgresql/data
     healthcheck:
@@ -29,10 +29,30 @@ services:
       - "127.0.0.1:8000:8000"
     environment:
       # SECURITY: Set ALBAYAN_COOKIE_SECURE=true in production (requires HTTPS)
-      - ALBAYAN_COOKIE_SECURE=${ALBAYAN_COOKIE_SECURE:-false}
-      - ALBAYAN_DEBUG_MODE=${ALBAYAN_DEBUG_MODE:-false}
-      # SECURITY: DATABASE_URL requires POSTGRES_PASSWORD from .env (no default for security)
-      - DATABASE_URL=postgresql+psycopg://albayan:${POSTGRES_PASSWORD:?Error: POSTGRES_PASSWORD must be set}@db:5432/albayan
+      ALBAYAN_COOKIE_SECURE: "${ALBAYAN_COOKIE_SECURE:-false}"
+      ALBAYAN_CORS_ORIGINS: "${ALBAYAN_CORS_ORIGINS:-}"
+      # Enable only when every request passes through a trusted proxy that
+      # overwrites forwarding headers (for example Cloudflare/Caddy).
+      ALBAYAN_TRUST_PROXY_HEADERS: "${ALBAYAN_TRUST_PROXY_HEADERS:-false}"
+      ALBAYAN_SESSION_MS: "${ALBAYAN_SESSION_MS:-28800000}"
+      REDIS_URL: "${REDIS_URL:-}"
+      ALBAYAN_DEBUG_MODE: "${ALBAYAN_DEBUG_MODE:-false}"
+      # Maintenance-only; keep disabled on a live multi-user deployment.
+      ALBAYAN_ENABLE_ONLINE_IMPORT: "${ALBAYAN_ENABLE_ONLINE_IMPORT:-false}"
+      ALBAYAN_CROSS_ORIGIN_ISOLATION: "${ALBAYAN_CROSS_ORIGIN_ISOLATION:-false}"
+      ALBAYAN_ORIGIN_SECRET: "${ALBAYAN_ORIGIN_SECRET:-}"
+      ALBAYAN_BOOTSTRAP_ADMIN_EMAIL: "${ALBAYAN_BOOTSTRAP_ADMIN_EMAIL:-}"
+      ALBAYAN_BOOTSTRAP_ADMIN_PASSWORD: "${ALBAYAN_BOOTSTRAP_ADMIN_PASSWORD:-}"
+      ALBAYAN_BOOTSTRAP_ADMIN_NAME: "${ALBAYAN_BOOTSTRAP_ADMIN_NAME:-Admin}"
+      # Optional one-time browser setup secret (minimum 16 characters).
+      ALBAYAN_SETUP_TOKEN: "${ALBAYAN_SETUP_TOKEN:-}"
+      # Pass credentials as discrete fields so punctuation in the raw password
+      # cannot break URL parsing. server/db.py builds a SQLAlchemy URL safely.
+      ALBAYAN_DB_HOST: "db"
+      ALBAYAN_DB_PORT: "5432"
+      ALBAYAN_DB_NAME: "albayan"
+      ALBAYAN_DB_USER: "albayan"
+      ALBAYAN_DB_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
     depends_on:
       db:
         condition: service_healthy

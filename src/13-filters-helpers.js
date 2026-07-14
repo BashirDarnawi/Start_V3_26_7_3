@@ -378,7 +378,7 @@ function editPage(id) {
 }
 
 function editUser(id) {
-  if (!isCurrentUserAdmin() && String(id) !== String(state.currentUser?.id || '')) {
+  if (!canManageUsersAction('edit') && String(id) !== String(state.currentUser?.id || '')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يمكنك تعديل مستخدمين آخرين' : 'You cannot edit other users', 'error');
     return;
   }
@@ -393,8 +393,8 @@ function editUser(id) {
 // ==========================================
 
 function showPermissionsModal(userId) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Permissions Manager is Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -408,6 +408,8 @@ function showPermissionsModal(userId) {
     showNotification(state.language === 'ar' ? 'معلومة' : 'Info', state.language === 'ar' ? 'المدراء لديهم صلاحية كاملة افتراضياً' : 'Administrators have full access by default', 'info');
     return;
   }
+
+  updateUrlParams({ modal: 'permissions', id: String(userId) }); // URL tracking
   
   const userPermissions = user.permissions || {};
   const permSummary = getPermissionSummary(userPermissions);
@@ -612,8 +614,8 @@ function refreshPermissionsModalUi(userId, moduleKey = null) {
 }
 
 function togglePermission(userId, moduleKey, permKey, enabled) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -648,8 +650,8 @@ function togglePermission(userId, moduleKey, permKey, enabled) {
 }
 
 function toggleModulePermissions(userId, moduleKey, enableAll) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -689,8 +691,8 @@ function toggleModulePermissions(userId, moduleKey, enableAll) {
 }
 
 function applyPermissionTemplate(userId, templateKey) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -726,8 +728,8 @@ function applyPermissionTemplate(userId, templateKey) {
 }
 
 function clearAllPermissions(userId) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -756,8 +758,8 @@ function clearAllPermissions(userId) {
 }
 
 function exportUserPermissions(userId) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -778,8 +780,8 @@ function exportUserPermissions(userId) {
 }
 
 function importUserPermissions(userId) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const input = document.createElement('input');
@@ -832,23 +834,58 @@ function importUserPermissions(userId) {
   input.click();
 }
 
-function assignDelivery(itemId, userId) {
+// A delivery action is allowed when the user holds the matching deliveries.*
+// permission (office staff), OR when they are the assigned driver acting on
+// their OWN delivery. The server enforces the same rule.
+function canDoDeliveryAction(action, itemId) {
+  if (can('deliveries', action)) return true;
+  if (isDeliveryRole(state.currentUser?.role)) {
+    const item = (state.receipts || []).find(r => r.id === itemId)
+      || (state.ads || []).find(a => a.id === itemId);
+    if (item && String(item.deliveryPersonId || '') === String(state.currentUser?.id || '')) return true;
+  }
+  return false;
+}
+
+function denyDeliveryAction() {
+  showNotification(
+    state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+    state.language === 'ar' ? 'لا تملك صلاحية لهذا الإجراء' : 'You do not have permission for this action',
+    'error'
+  );
+}
+
+async function assignDelivery(itemId, userId) {
   if (!userId) return;
+  const already = ((state.receipts || []).find(r => r.id === itemId) || (state.ads || []).find(a => a.id === itemId) || {}).deliveryPersonId;
+  const neededAction = String(already || '').trim() ? 'reassign' : 'assign';
+  if (!can('deliveries', neededAction) && !can('deliveries', 'assign')) {
+    denyDeliveryAction();
+    return;
+  }
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
+  let savedOk = false;
   if (isReceipt) {
-    updateRecord(state.receipts, itemId, { deliveryPersonId: userId });
+    savedOk = await updateRecord(state.receipts, itemId, { deliveryPersonId: userId });
   } else {
-    updateRecord(state.ads, itemId, { deliveryPersonId: userId });
+    savedOk = await updateRecord(state.ads, itemId, { deliveryPersonId: userId });
   }
+  if (!savedOk) return;
   showNotification(state.language === 'ar' ? 'تم التعيين' : 'Assigned', state.language === 'ar' ? 'تم تعيين مندوب التوصيل' : 'Delivery person assigned', 'success');
   render();
 }
 
-function updateDeliveryStatus(itemId, status) {
+async function updateDeliveryStatus(itemId, status) {
   const s = String(status || '').trim();
   if (!s) return;
   if (s === 'Canceled') {
+    // Cancelling is an assign-level action for office staff; the assigned
+    // driver may cancel their own delivery.
+    if (!canDoDeliveryAction('assign', itemId)) {
+      denyDeliveryAction();
+      return;
+    }
     // Require a reason (handled by modal)
     openDeliveryCancelModal(itemId);
     return;
@@ -862,20 +899,33 @@ function updateDeliveryStatus(itemId, status) {
     showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'فقط سائق التوصيل المعيَّن يمكنه تحديد التوصيل كـ"تم التوصيل".' : 'Only the assigned delivery driver can mark a delivery as Delivered.', 'warning');
     return;
   }
+  // In Progress => accept; anything else => assign-level change.
+  const neededAction = s === 'In Progress' ? 'accept' : 'assign';
+  if (!canDoDeliveryAction(neededAction, itemId)) {
+    denyDeliveryAction();
+    return;
+  }
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
+  let savedOk = false;
   if (isReceipt) {
-    updateRecord(state.receipts, itemId, { deliveryStatus: s });
+    savedOk = await updateRecord(state.receipts, itemId, { deliveryStatus: s });
   } else {
-    updateRecord(state.ads, itemId, { deliveryStatus: s });
+    savedOk = await updateRecord(state.ads, itemId, { deliveryStatus: s });
   }
+  if (!savedOk) return;
   showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? `تم تغيير الحالة إلى ${trStatus(s)}` : `Status changed to ${s}`, 'success');
   render();
 }
 
-function markAsCollected(itemId) {
+async function markAsCollected(itemId) {
+  if (!canDoDeliveryAction('markCollected', itemId)) {
+    denyDeliveryAction();
+    return;
+  }
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
+  let savedOk = false;
   if (isReceipt) {
     // Temp delivery receipts require strict completion (final receipt # + photo + amounts).
     if (isTempDeliveryReceiptNo(isReceipt.tempReceiptNo)) {
@@ -883,46 +933,61 @@ function markAsCollected(itemId) {
       openReceiptDeliveryCompletionModal(itemId);
       return;
     }
-    updateRecord(state.receipts, itemId, { 
+    savedOk = await updateRecord(state.receipts, itemId, {
       isPaid: true, 
       collectionDate: new Date().toISOString(),
       status: 'Paid',
       deliveryStatus: 'Delivered'
     });
   } else {
-    updateRecord(state.ads, itemId, { 
+    if (isServerModeEnabled()) {
+      showNotification(
+        state.language === 'ar' ? 'غير متاح' : 'Not available',
+        state.language === 'ar'
+          ? 'يجب تسجيل تحصيل مبلغ الإعلان من خلال سير الدفع المخصص للخادم.'
+          : 'Record this ad payment through the server payment workflow; the legacy delivery shortcut is disabled in shared-server mode.',
+        'warning'
+      );
+      return;
+    }
+    savedOk = await updateRecord(state.ads, itemId, {
       isPaid: true, 
       collectionDate: new Date().toISOString(),
       status: 'Completed'
     });
   }
+  if (!savedOk) return;
   // Update delivery stats if delivery user
   if (isDeliveryRole(state.currentUser?.role) && state.currentUser.stats) {
     state.currentUser.stats.collected = (state.currentUser.stats.collected || 0) + 1;
-    updateRecord(state.users, state.currentUser.id, { stats: state.currentUser.stats });
+    await updateRecord(state.users, state.currentUser.id, { stats: state.currentUser.stats });
   }
   showNotification(state.language === 'ar' ? 'تم التحصيل' : 'Collected', state.language === 'ar' ? 'تم تسجيل الدفعة كمُحصَّلة' : 'Payment marked as collected', 'success');
   render();
 }
 
-function acceptDelivery(itemId) {
+async function acceptDelivery(itemId) {
+  if (!canDoDeliveryAction('accept', itemId)) {
+    denyDeliveryAction();
+    return;
+  }
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
   const updateData = {
     deliveryStatus: 'In Progress',
     acceptedDate: new Date().toISOString()
   };
-  
+
   if (isReceipt) {
-    updateRecord(state.receipts, itemId, updateData);
+    if (!await updateRecord(state.receipts, itemId, updateData)) return;
   } else {
-    updateRecord(state.ads, itemId, updateData);
+    if (!await updateRecord(state.ads, itemId, updateData)) return;
   }
   // Update delivery stats
   if (isDeliveryRole(state.currentUser?.role) && state.currentUser.stats) {
     state.currentUser.stats.accepted = (state.currentUser.stats.accepted || 0) + 1;
     state.currentUser.stats.totalAds = (state.currentUser.stats.totalAds || 0) + 1;
-    updateRecord(state.users, state.currentUser.id, { stats: state.currentUser.stats });
+    await updateRecord(state.users, state.currentUser.id, { stats: state.currentUser.stats });
   }
   showNotification(state.language === 'ar' ? 'تم القبول' : 'Accepted', state.language === 'ar' ? 'تم قبول التوصيل' : 'Delivery accepted', 'success');
   render();
@@ -1092,7 +1157,7 @@ function updateReceiptDeliveryCompletionComputed() {
     if (debtCmp.paymentResult === 'UNDERPAID') debtEl.textContent = isArC ? `الدفع: ناقص (المتبقي ${debtCmp.remainingDue.toFixed(0)} LYD)` : `Payment: UNDERPAID (${debtCmp.remainingDue.toFixed(0)} LYD remaining)`;
   }
 
-  // Validate (allow S-prefixed auto-serials for LTT/Libyana/Madar)
+  // Validate (allow app-generated auto-serials: S/B/O/E + digits)
   const errEl = document.getElementById('delivery-final-receipt-error');
   const isAutoSerialValidation = isAutoSerialNumber(finalNo);
   let ok = true;
@@ -1101,7 +1166,7 @@ function updateReceiptDeliveryCompletionComputed() {
     if (errEl) errEl.textContent = isArC ? 'رقم الوصل النهائي مطلوب.' : 'Final receipt number is required.';
   } else if (!isAutoSerialValidation && (!/^\d+$/.test(finalNo) || finalNo.startsWith('0'))) {
     ok = false;
-    if (errEl) errEl.textContent = isArC ? 'رقم الوصل النهائي يجب أن يكون أرقاماً (بدون صفر في البداية) أو ببادئة S (S1, S2).' : 'Final receipt number must be digits (no leading 0) or S-prefixed (S1, S2).';
+    if (errEl) errEl.textContent = isArC ? 'رقم الوصل النهائي يجب أن يكون أرقاماً (بدون صفر في البداية) أو رقماً تلقائياً (S1, B1, O1, E1).' : 'Final receipt number must be digits (no leading 0) or an auto-serial (S1, B1, O1, E1).';
   } else if (_receiptFinalNoExists(finalNo, receipt.id)) {
     ok = false;
     if (errEl) errEl.textContent = isArC ? 'رقم الوصل النهائي موجود بالفعل.' : 'Final receipt number already exists.';
@@ -1256,12 +1321,12 @@ async function submitReceiptDeliveryCompletion(receiptId) {
   const isArDrv = state.language === 'ar';
   const drvValidationTitle = isArDrv ? 'خطأ في الإدخال' : 'Validation';
 
-  // Allow S-prefixed auto-serial numbers (S1, S2, etc.) for LTT/Libyana/Madar
+  // Allow app-generated auto-serial numbers (S1 / B1 / O1 / E1)
   const isAutoSerialFinal = isAutoSerialNumber(finalNo);
   if (!finalNo || (!isAutoSerialFinal && (!/^\d+$/.test(finalNo) || finalNo.startsWith('0')))) {
     showNotification(drvValidationTitle, isArDrv
-      ? 'رقم الوصل النهائي مطلوب (أرقام فقط، بدون صفر في البداية، أو بادئة S لـ LTT/ليبيانا/المدار).'
-      : 'Final receipt number is required (digits only, no leading 0, or S-prefix for LTT/Libyana/Madar).', 'error');
+      ? 'رقم الوصل النهائي مطلوب (أرقام فقط، بدون صفر في البداية، أو رقم تلقائي مثل S1 / B1 / O1 / E1).'
+      : 'Final receipt number is required (digits only, no leading 0, or an auto-serial like S1 / B1 / O1 / E1).', 'error');
     return;
   }
   if (_receiptFinalNoExists(finalNo, receipt.id)) {
@@ -1377,8 +1442,8 @@ async function submitReceiptDeliveryCompletion(receiptId) {
       return;
     }
   } else {
-    // Local mode: optimistic update
-    updateRecord(state.receipts, receipt.id, updates);
+    const saved = await updateRecord(state.receipts, receipt.id, updates);
+    if (!saved) return;
     document.getElementById('delivery-complete-modal')?.remove();
     showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم إكمال التوصيل وحفظه' : 'Delivery completed and saved', 'success');
     render();
@@ -1445,7 +1510,7 @@ function openReceiptDeliveryCancelModal(receiptId) {
   IconQueue.schedule(modal);
 }
 
-function submitReceiptDeliveryCancel(receiptId) {
+async function submitReceiptDeliveryCancel(receiptId) {
   const receipt = _findReceiptForDeliveryModal(receiptId);
   if (!receipt) return;
   const reason = String(document.getElementById('delivery-cancel-reason')?.value || '').trim();
@@ -1460,30 +1525,38 @@ function submitReceiptDeliveryCancel(receiptId) {
     action: 'CANCELLED_BY_DRIVER',
     reason
   });
-  updateRecord(state.receipts, receipt.id, {
+  const canceledOk = await updateRecord(state.receipts, receipt.id, {
     deliveryStatus: 'Canceled',
     deliveryCancelReason: reason,
     deliveryCancelledAt: new Date().toISOString(),
     deliveryCancelledBy: state.currentUser?.id || '',
     deliveryHistory: nextHistory
   });
+  if (!canceledOk) return;
   // The canceled delivery's debt will never be collected — release any ad
   // funding that was drawn from its due credit.
-  const releasedAds = releaseCanceledDeliveryDueFunding(receipt.id);
+  let releasedAds = 0;
+  if (!isServerModeEnabled()) {
+    try {
+      releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);
+    } catch (_) {
+      return;
+    }
+  }
   document.getElementById('delivery-cancel-modal')?.remove();
   document.getElementById('delivery-complete-modal')?.remove();
   showNotification(
     state.language === 'ar' ? 'تم الإلغاء' : 'Canceled',
     (state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled')
-      + (releasedAds > 0
+      + (releasedAds > 0 && !isServerModeEnabled()
         ? (state.language === 'ar' ? ` — تم تحرير تمويل ${releasedAds} إعلان(ات) كان مأخوذاً من دين هذا التوصيل` : ` — funding of ${releasedAds} ad(s) drawn from this delivery's debt was released`)
         : ''),
-    releasedAds > 0 ? 'warning' : 'success'
+    releasedAds > 0 && !isServerModeEnabled() ? 'warning' : 'success'
   );
   render();
 }
 
-function markAsDelivered(itemId) {
+async function markAsDelivered(itemId) {
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
   if (isReceipt) {
@@ -1493,11 +1566,13 @@ function markAsDelivered(itemId) {
       return;
     }
     // Delivered ≠ Office Handover. Office handover is a separate step (isReceivedInOffice).
-    updateRecord(state.receipts, itemId, { deliveryStatus: 'Delivered' });
+    const savedOk = await updateRecord(state.receipts, itemId, { deliveryStatus: 'Delivered' });
+    if (!savedOk) return;
   } else {
-    updateRecord(state.ads, itemId, {
+    const savedOk = await updateRecord(state.ads, itemId, {
       deliveryStatus: 'Delivered'
     });
+    if (!savedOk) return;
   }
   showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم التحديد كمُوصَّل' : 'Marked as delivered', 'success');
   render();
@@ -1646,6 +1721,7 @@ function openCollectReceiptModal(receiptId) {
   _collectReceiptId = receiptId;
   _collectTargetLYD = targetLYD;
   _tempCollectPayments = [];
+  updateUrlParams({ modal: 'collect-receipt', id: receiptId }); // URL tracking
 
   document.getElementById('collect-receipt-modal')?.remove();
   const html = `
@@ -1691,11 +1767,11 @@ function _collectAskView(receiptId, receipt, isAr, targetLYD, serialTxt) {
 }
 
 // "Yes" — record the collection using the receipt's own breakdown, full amount.
-function collectReceiptSame(receiptId) {
+async function collectReceiptSame(receiptId) {
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
   const breakdown = _receiptCollectionBreakdown(receipt);
-  _saveReceiptCollection(receipt, breakdown, Number(receipt.amountLocal) || 0, true);
+  await _saveReceiptCollection(receipt, breakdown, Number(receipt.amountLocal) || 0, true);
 }
 
 // "No" — switch the modal to the payment-methods editor (like the ad form).
@@ -1718,7 +1794,7 @@ function _collectEditorView(receiptId, receipt) {
       <div class="col-span-7">
         ${idx === 0 ? `<label class="block text-[10px] text-slate-400 mb-1">${isAr ? 'الطريقة' : 'Method'}</label>` : ''}
         <select onchange="updateCollectPaymentRow(${idx}, 'method', this.value)" class="w-full glass-input px-2 py-1.5 rounded-lg text-sm">
-          ${PAYMENT_METHODS.map(m => `<option value="${m}" ${p.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
+          ${paymentMethodOptions(p.method).map(m => `<option value="${m}" ${p.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
         </select>
       </div>
       <div class="col-span-4">
@@ -1783,7 +1859,7 @@ function collectReceiptCustomBack(receiptId) {
 }
 
 // "No" path save: validate + persist the custom breakdown.
-function confirmCollectReceipt(receiptId) {
+async function confirmCollectReceipt(receiptId) {
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
   const payments = _tempCollectPayments
@@ -1794,14 +1870,14 @@ function confirmCollectReceipt(receiptId) {
     return;
   }
   const total = Math.round(payments.reduce((s, p) => s + p.amount, 0) * 100) / 100;
-  _saveReceiptCollection(receipt, payments, total, false);
+  await _saveReceiptCollection(receipt, payments, total, false);
 }
 
 // Shared save for both the "Yes" and "No" paths.
-function _saveReceiptCollection(receipt, payments, totalLYD, matchesReceipt) {
+async function _saveReceiptCollection(receipt, payments, totalLYD, matchesReceipt) {
   if (!_canMarkCollected()) return;
   const targetLYD = Number(receipt.amountLocal) || 0;
-  updateRecord(state.receipts, receipt.id, {
+  const savedOk = await updateRecord(state.receipts, receipt.id, {
     collected: true,
     collectedAmount: totalLYD,
     collectedPayments: payments,
@@ -1809,6 +1885,7 @@ function _saveReceiptCollection(receipt, payments, totalLYD, matchesReceipt) {
     collectedAt: new Date().toISOString(),
     collectedBy: state.currentUser?.id || 'admin'
   });
+  if (!savedOk) return false;
   _logReceiptCollection(receipt, 'collected', totalLYD);
   saveState();
   document.getElementById('collect-receipt-modal')?.remove();
@@ -1821,13 +1898,15 @@ function _saveReceiptCollection(receipt, payments, totalLYD, matchesReceipt) {
   );
   render();
   if (window.lucide) lucide.createIcons();
+  return true;
 }
 
-function uncollectReceipt(receiptId) {
+async function uncollectReceipt(receiptId) {
   if (!_canMarkCollected()) return;
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
-  updateRecord(state.receipts, receiptId, { collected: false, collectedAmount: null, collectedAt: null, collectedBy: null });
+  const savedOk = await updateRecord(state.receipts, receiptId, { collected: false, collectedAmount: null, collectedAt: null, collectedBy: null });
+  if (!savedOk) return;
   _logReceiptCollection(receipt, 'uncollected', 0);
   saveState();
   showNotification(state.language === 'ar' ? 'تم الإلغاء' : 'Collection Removed', state.language === 'ar' ? 'تم إلغاء التحصيل' : 'Receipt marked as not collected', 'info');
@@ -1892,6 +1971,18 @@ function manageTopUps(adId) {
     );
     return;
   }
+  if (isServerModeEnabled()) {
+    const paymentStatus = String(ad.paymentStatus || '').toLowerCase();
+    if (paymentStatus !== 'paid') {
+      const isAr = state.language === 'ar';
+      showNotification(
+        isAr ? 'غير ممكن' : 'Not possible',
+        isAr ? 'التعبئة متاحة للإعلانات المدفوعة والنشطة فقط.' : 'Top-ups are available only for active paid ads in shared-server mode.',
+        'error'
+      );
+      return;
+    }
+  }
 
   // Seed the working list with a COPY of the ad's existing top-ups, so the
   // modal shows them, the X button can delete them, and newly-added ones
@@ -1901,6 +1992,7 @@ function manageTopUps(adId) {
 
   state.activeModal = 'top-ups';
   state.modalData = ad;
+  updateUrlParams({ modal: 'top-ups', id: adId }); // URL tracking
   renderModal();
 }
 
@@ -1910,6 +2002,7 @@ function manageRefund(adId) {
   
   state.activeModal = 'refund';
   state.modalData = ad;
+  updateUrlParams({ modal: 'refund', id: adId }); // URL tracking
   renderModal();
 }
 
@@ -1941,6 +2034,7 @@ function showReceiptTransferModal(receiptId) {
   }
   state.activeModal = 'receipt-transfer';
   state.modalData = receipt;
+  updateUrlParams({ modal: 'receipt-transfer', id: receiptId }); // URL tracking
   renderModal();
 }
 
@@ -1950,6 +2044,10 @@ function showReceiptTransferHistory(receiptId) {
   const transfers = receipt?.transfers || [];
   if (!receipt) return;
   const isArT = state.language === 'ar';
+  if (!can('receipts', 'viewHistory')) {
+    showNotification(isArT ? 'تم رفض الوصول' : 'Access Denied', isArT ? 'تحتاج صلاحية عرض سجل الوصل' : 'Requires the View History permission', 'error');
+    return;
+  }
   if (transfers.length === 0) {
     showNotification(isArT ? 'التحويلات' : 'Transfers', isArT ? 'لا توجد تحويلات مسجلة لهذا الوصل.' : 'No transfers recorded for this receipt.', 'info');
     return;
@@ -1968,8 +2066,12 @@ function showReceiptTransferHistory(receiptId) {
 function showReceiptEditHistory(receiptId) {
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
-  
+
   const isArH = state.language === 'ar';
+  if (!can('receipts', 'viewHistory')) {
+    showNotification(isArH ? 'تم رفض الوصول' : 'Access Denied', isArH ? 'تحتاج صلاحية عرض سجل الوصل' : 'Requires the View History permission', 'error');
+    return;
+  }
   const editHistory = receipt.editHistory || [];
   if (editHistory.length === 0) {
     showNotification(isArH ? 'سجل التعديلات' : 'Edit History', isArH ? 'لا يوجد سجل تعديلات لهذا الوصل.' : 'No edit history recorded for this receipt.', 'info');
@@ -2131,8 +2233,48 @@ function showAdEditHistory(adId) {
   lucide.createIcons();
 }
 
+// A response can be lost after the server commits. Keep the same target
+// receipt id and idempotency key for an identical retry, and clear them only
+// after both authoritative receipt envelopes have been validated and applied.
+const _pendingReceiptTransferAttempts = new Map();
+
+function getReceiptTransferAttempt(sourceReceipt, targetCustomerId, amountMinorUSD, note) {
+  const sourceReceiptId = String(sourceReceipt?.id || '');
+  const expectedSourceLastModified = Number(sourceReceipt?._lastModified);
+  if (!Number.isSafeInteger(expectedSourceLastModified) || expectedSourceLastModified < 0) {
+    throw new Error('This receipt is missing its server version. Refresh and try again.');
+  }
+  const slot = sourceReceiptId;
+  const fingerprint = JSON.stringify({
+    sourceReceiptId,
+    targetCustomerId: String(targetCustomerId || ''),
+    amountMinorUSD,
+    expectedSourceLastModified,
+    note: String(note || '')
+  });
+  const prior = _pendingReceiptTransferAttempts.get(slot);
+  if (prior?.fingerprint === fingerprint) return prior;
+  if (prior?.promise) return prior;
+  const attempt = {
+    slot,
+    fingerprint,
+    targetReceiptId: Security.generateSecureId('receipt'),
+    idempotencyKey: ensureOperationIdempotencyKey('', 'receipt-transfer'),
+    expectedSourceLastModified,
+    promise: null
+  };
+  _pendingReceiptTransferAttempts.set(slot, attempt);
+  return attempt;
+}
+
+function completeReceiptTransferAttempt(attempt) {
+  if (attempt && _pendingReceiptTransferAttempts.get(attempt.slot) === attempt) {
+    _pendingReceiptTransferAttempts.delete(attempt.slot);
+  }
+}
+
 // Persist a transfer from receipt to another customer
-function saveReceiptTransfer() {
+async function saveReceiptTransfer() {
   const receiptId = state.modalData?.id;
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
@@ -2174,6 +2316,22 @@ function saveReceiptTransfer() {
     return;
   }
 
+  const amountMinorUSD = Math.round(amountUSD * 100);
+  if (!Number.isSafeInteger(amountMinorUSD) || amountMinorUSD <= 0) {
+    showNotification(isArTr ? 'خطأ في الإدخال' : 'Validation', isArTr ? 'مبلغ التحويل غير صالح.' : 'Transfer amount is invalid.', 'error');
+    return;
+  }
+
+  let serverAttempt = null;
+  if (isServerModeEnabled()) {
+    try {
+      serverAttempt = getReceiptTransferAttempt(receipt, targetCustomerId, amountMinorUSD, note);
+    } catch (error) {
+      showNotification(isArTr ? 'تعذر التحويل' : 'Transfer Not Saved', error.message, 'error');
+      return;
+    }
+  }
+
   const rate = receipt.exchangeRate || state.defaultExchangeRate || 1;
   const nowIso = new Date().toISOString();
   const amountLocal = Math.round(amountUSD * rate * 100) / 100;
@@ -2186,7 +2344,7 @@ function saveReceiptTransfer() {
   // typed TRANSFER_IN and linked back to the source. Accounting stays balanced:
   // source remaining goes down by X, target gains a receipt worth X.
   const inReceipt = {
-    id: generateId('receipt'),
+    id: serverAttempt?.targetReceiptId || generateId('receipt'),
     recordType: 'receipt',
     customerId: targetCustomerId,
     amountUSD: Math.round(amountUSD * 100) / 100,
@@ -2223,9 +2381,69 @@ function saveReceiptTransfer() {
     note
   };
 
-  addRecord(state.receipts, inReceipt);
+  if (serverAttempt) {
+    if (serverAttempt.promise) return await serverAttempt.promise;
+    const submitButton = document.getElementById('receipt-transfer-submit');
+    if (submitButton) submitButton.disabled = true;
+    serverAttempt.promise = (async () => {
+      try {
+        const response = await apiTransferReceipt({
+          sourceReceiptId: receipt.id,
+          targetCustomerId,
+          targetReceiptId: serverAttempt.targetReceiptId,
+          amountMinorUSD,
+          idempotencyKey: serverAttempt.idempotencyKey,
+          expectedSourceLastModified: serverAttempt.expectedSourceLastModified,
+          note
+        });
+        const [savedSource, savedTarget] = applyValidatedServerEntityBatch([
+          { collection: 'receipts', entity: response.sourceReceipt },
+          { collection: 'receipts', entity: response.targetReceipt }
+        ], 'receiptTransfer');
+        if (!savedSource || !savedTarget) throw new Error('Invalid receipt transfer response');
+        completeReceiptTransferAttempt(serverAttempt);
+        addLog('transfer', 'receipt', savedSource.id, `Transferred $${amountUSD.toFixed(2)} to customer (receipt ${savedTarget.id})`, { toCustomerId: targetCustomerId, toReceiptId: savedTarget.id });
+        const targetName = state.customers.find(c => c.id === targetCustomerId)?.name || '';
+        showNotification(
+          state.language === 'ar' ? 'تم التحويل' : 'Transferred',
+          state.language === 'ar'
+            ? `تم تحويل $${amountUSD.toFixed(2)} إلى ${targetName} — أُنشئ وصل تحويل جاهز للاستخدام.`
+            : `Transferred $${amountUSD.toFixed(2)} to ${targetName} — a transfer receipt was created and is ready to use.`,
+          'success'
+        );
+        closeModal();
+        render();
+        return true;
+      } catch (error) {
+        const conflict = error?.status === 409;
+        showNotification(
+          isArTr ? 'تعذر التحويل' : 'Transfer Not Saved',
+          conflict
+            ? (isArTr ? 'تم تغيير هذا الوصل من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This receipt changed on another device. Refresh the data, then try again.')
+            : (error?.message || (isArTr ? 'فشل حفظ التحويل.' : 'The transfer could not be saved.')),
+          conflict ? 'warning' : 'error'
+        );
+        return false;
+      } finally {
+        serverAttempt.promise = null;
+        const liveButton = document.getElementById('receipt-transfer-submit');
+        if (liveButton) liveButton.disabled = false;
+      }
+    })();
+    return await serverAttempt.promise;
+  }
+
+  const targetSaved = await addRecord(state.receipts, inReceipt);
+  if (!targetSaved) return;
   const updatedTransfers = [...(receipt.transfers || []), transfer];
-  updateRecord(state.receipts, receipt.id, { transfers: updatedTransfers });
+  const sourceSaved = await updateRecord(state.receipts, receipt.id, { transfers: updatedTransfers });
+  if (!sourceSaved) {
+    // Local-device storage has no transaction API. Best-effort compensation
+    // prevents the created target receipt from minting money if source save
+    // fails. Server mode never enters this two-write path.
+    await deleteRecord(state.receipts, inReceipt.id);
+    return;
+  }
   addLog('transfer', 'receipt', receipt.id, `Transferred $${amountUSD.toFixed(2)} to customer (receipt ${inReceipt.id})`, { toCustomerId: targetCustomerId, toReceiptId: inReceipt.id });
   const targetName = state.customers.find(c => c.id === targetCustomerId)?.name || '';
   showNotification(
@@ -2295,7 +2513,7 @@ function addSplitPayment() {
   lucide.createIcons();
 }
 
-function saveSplitPayments() {
+async function saveSplitPayments() {
   // Read the target from the frozen hidden field, not the mutable global, so a
   // stray navigation can't redirect this save onto a different receipt.
   const receiptId = (document.getElementById('split-payments-receipt-id')?.value || '').trim() || state.modalData?.id;
@@ -2352,7 +2570,9 @@ function saveSplitPayments() {
   // Snap to 2 decimals first so binary float residue doesn't trip the rule.
   totalR2 = Math.round(totalR2 * 100) / 100;
   if (totalR2 % 1 !== 0) totalR2 = Math.round((totalR2 + 0.01) * 100) / 100;
-  const avgRate = (totalR2 > 0 && totalR1 > 0) ? (totalR1 / totalR2) : state.defaultExchangeRate;
+  // Same rule as the receipt form: a single payment stores the rate the user
+  // typed; a split stores the effective average.
+  const avgRate = receiptExchangeRate(payments, totalR1, totalR2);
 
   // Money already committed cannot be edited away: ads funded from this
   // receipt plus money transferred to other customers set the floor for the
@@ -2371,12 +2591,19 @@ function saveSplitPayments() {
     return;
   }
 
-  updateRecord(state.receipts, receiptId, {
+  const savedOk = await updateRecord(state.receipts, receiptId, {
     payments,
+    // The top-level method is DERIVED from the rows — without this it kept the
+    // method the receipt was created with and contradicted its own payments
+    // (breaking the receipts payment-method filter and the printed receipt).
+    paymentMethod: payments.length > 1
+      ? 'Split Payment'
+      : (payments[0]?.method || ''),
     amountLocal: totalR1,
     amountUSD: totalR2,
     exchangeRate: avgRate
   });
+  if (!savedOk) return;
   showNotification(state.language === 'ar' ? 'تم الحفظ' : 'Saved', state.language === 'ar' ? 'تم حفظ الدفعات المقسمة بنجاح' : 'Split payments saved successfully', 'success');
   closeModal();
   render();
@@ -2533,7 +2760,7 @@ function removeTopUp(index) {
   renderModal();
 }
 
-function saveTopUps() {
+async function saveTopUps() {
   const adId = state.modalData.id;
   const ad = state.ads.find(a => a.id === adId);
   if (!ad) return;
@@ -2626,7 +2853,29 @@ function saveTopUps() {
     updates.receiptAllocations = allocations;
   }
 
-  updateRecord(state.ads, adId, updates);
+  try {
+    if (isServerModeEnabled()) {
+      await saveAdThroughAtomicServer(
+        'update',
+        adId,
+        Number(ad._lastModified),
+        buildServerAdMutationData(updates)
+      );
+    } else {
+      const topUpsSaved = await updateRecord(state.ads, adId, updates);
+      if (!topUpsSaved) return;
+    }
+  } catch (error) {
+    const conflict = error?.status === 409;
+    showNotification(
+      isArTU ? 'تعذر حفظ التعبئة' : 'Top-ups Not Saved',
+      conflict
+        ? (isArTU ? 'تم تغيير الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+        : (error?.message || (isArTU ? 'فشل حفظ التعبئة.' : 'The top-ups could not be saved.')),
+      conflict ? 'warning' : 'error'
+    );
+    return;
+  }
 
   tempTopUps = [];
   showNotification(
@@ -2658,7 +2907,7 @@ function toggleRefundAmount(refundType) {
   }
 }
 
-function saveRefund() {
+async function saveRefund() {
   const adId = state.modalData.id;
   const ad = state.ads.find(a => a.id === adId) || state.modalData;
   const refundType = document.getElementById('refund-type').value;
@@ -2745,9 +2994,30 @@ function saveRefund() {
     ? Math.max(Math.round((amountUSD - refundAmount) * 100) / 100, 0)
     : undefined;
 
-  updateRecord(state.ads, adId, updates);
+  try {
+    if (isServerModeEnabled()) {
+      await saveAdThroughAtomicServer(
+        'update',
+        adId,
+        Number(ad._lastModified),
+        buildServerAdMutationData(updates)
+      );
+    } else {
+      const refundSaved = await updateRecord(state.ads, adId, updates);
+      if (!refundSaved) return;
+    }
+  } catch (error) {
+    const conflict = error?.status === 409;
+    showNotification(
+      state.language === 'ar' ? 'تعذر حفظ الاسترجاع' : 'Refund Not Saved',
+      conflict
+        ? (state.language === 'ar' ? 'تم تغيير الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+        : (error?.message || (state.language === 'ar' ? 'فشل حفظ الاسترجاع.' : 'The refund could not be saved.')),
+      conflict ? 'warning' : 'error'
+    );
+    return;
+  }
   showNotification(state.language === 'ar' ? 'تم الحفظ' : 'Saved', state.language === 'ar' ? `تم تطبيق الاسترجاع (${trStatus(refundType)})` : `Refund ${refundType} applied`, refundType !== 'None' ? 'warning' : 'success');
   closeModal();
   render();
 }
-

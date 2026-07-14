@@ -212,6 +212,16 @@ applyPerformanceMode();
 // SECURITY MODULE - XSS Protection, Sanitization, Hashing
 // ==========================================
 
+const RECORD_IDENTIFIER_FIELDS = new Set([
+  'adId', 'customerId', 'creatorId', 'deliveryPersonId', 'driverId',
+  'fromUserId', 'fundingReceiptId', 'linkedDeliveryReceiptId', 'linkedReceiptId',
+  'orderId', 'pageId', 'paymentTxId', 'productId', 'receiptId', 'referenceId',
+  'resourceId', 'serviceId', 'shipmentId', 'targetCustomerId', 'targetUserId',
+  'toCustomerId', 'toReceiptId', 'toUserId', 'transactionId',
+  'transferFromCustomerId', 'transferFromReceiptId', 'userId'
+]);
+const RECORD_IDENTIFIER_LIST_FIELDS = new Set(['adReceiptIds', 'customerIds', 'linkedCustomerIds', 'receiptIds']);
+
 const Security = {
   // XSS Protection - Escape HTML entities
   escapeHtml: (str) => {
@@ -417,6 +427,63 @@ const Security = {
     crypto.getRandomValues(array);
     const random = Array.from(array, b => b.toString(16).padStart(2, '0')).join('');
     return `${prefix}_${Date.now()}_${random.substring(0, 12)}`;
+  },
+
+  // Record identifiers are used in URLs, data-* attributes and (for legacy
+  // screens) inline handlers. Keep them deliberately boring so an imported or
+  // server-provided id can never break out of one of those contexts. This also
+  // matches the backend's 80-character id limit.
+  isValidRecordId: (value) => {
+    const id = String(value == null ? '' : value).trim();
+    return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(id);
+  },
+
+  // Validate record ids and relationship ids without rewriting them. Rewriting
+  // would silently break links between customers, receipts, ads and users, so
+  // callers must reject the whole import/server payload when this fails.
+  validateRecordIdentifiers: (value, path = 'record', depth = 0, validateOwnId = depth === 0) => {
+    if (depth > 12 || value === null || value === undefined) return { valid: true };
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) {
+        // A top-level array is a collection of records, so each direct child's
+        // `id` is a record id. Nested arrays are data inside a record (for
+        // example passkeys[].id is an opaque WebAuthn credential and can be
+        // much longer than 80 characters), so their generic `id` fields must
+        // not be treated as entity identifiers.
+        const childOwnId = depth === 0 && validateOwnId;
+        const result = Security.validateRecordIdentifiers(value[i], `${path}[${i}]`, depth + 1, childOwnId);
+        if (!result.valid) return result;
+      }
+      return { valid: true };
+    }
+    if (typeof value !== 'object') return { valid: true };
+
+    for (const [key, child] of Object.entries(value)) {
+      const isSingleId = RECORD_IDENTIFIER_FIELDS.has(key) || (key === 'id' && validateOwnId);
+      const isIdList = RECORD_IDENTIFIER_LIST_FIELDS.has(key);
+      if (isSingleId) {
+        const blank = child === null || child === undefined || String(child).trim() === '';
+        if (blank && key === 'id') {
+          return { valid: false, error: `Missing identifier at ${path}.${key}` };
+        }
+        if (!blank && (typeof child !== 'string' || !Security.isValidRecordId(child))) {
+          return { valid: false, error: `Unsafe identifier at ${path}.${key}` };
+        }
+      } else if (isIdList && child !== null && child !== undefined) {
+        if (!Array.isArray(child)) return { valid: false, error: `Invalid identifier list at ${path}.${key}` };
+        for (let i = 0; i < child.length; i++) {
+          if (typeof child[i] !== 'string' || !Security.isValidRecordId(child[i])) {
+            return { valid: false, error: `Unsafe identifier at ${path}.${key}[${i}]` };
+          }
+        }
+      }
+
+      if (child && typeof child === 'object') {
+        const result = Security.validateRecordIdentifiers(child, `${path}.${key}`, depth + 1, false);
+        if (!result.valid) return result;
+      }
+    }
+    return { valid: true };
   },
 
   // Validate email format
@@ -824,8 +891,6 @@ function strictParseNumber(value, options = {}) {
   
   return defaultValue;
 }
-
-
 // ==========================================
 // LARGE DATA STORAGE - IndexedDB for big datasets
 // ==========================================
@@ -883,6 +948,67 @@ const LIMIT_CONSTANTS = {
 };
 
 let db = null;
+
+// Business-data caches are isolated by workspace + authenticated user. Local
+// mode keeps the historical unscoped keys so existing single-device data is
+// preserved. Server mode activates a different scope only AFTER /api/auth/me
+// or login has identified the user, so pre-auth startup can never render the
+// previous user's cached customers, receipts or wallet rows.
+let _collectionStorageScope = 'local';
+
+function _hashStorageScope(value) {
+  const input = String(value || '');
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function setCollectionStorageScope(scope) {
+  const next = String(scope || 'server:anonymous');
+  if (next === _collectionStorageScope) return next;
+  _collectionStorageScope = next;
+  _corruptedCollections.clear();
+  // A debounced write created for user A must not run after user B's scope is
+  // activated. In-flight IDB writes capture their keys below and remain safe.
+  try {
+    if (typeof resetDirtyCollectionQueueForScopeChange === 'function') {
+      resetDirtyCollectionQueueForScopeChange();
+    }
+  } catch (_) {}
+  return next;
+}
+
+function activateLocalCollectionStorage() {
+  return setCollectionStorageScope('local');
+}
+
+function activateAnonymousServerCollectionStorage() {
+  return setCollectionStorageScope('server:anonymous');
+}
+
+function activateServerCollectionStorage(user) {
+  const userId = String(user?.id || '').trim();
+  if (!Security.isValidRecordId(userId)) throw new Error('Cannot activate cache: invalid authenticated user id');
+  let serverIdentity = '';
+  try {
+    serverIdentity = (typeof getServerBaseUrl === 'function' && getServerBaseUrl()) || window.location?.origin || 'server';
+  } catch (_) {
+    serverIdentity = 'server';
+  }
+  return setCollectionStorageScope(`server:${_hashStorageScope(String(serverIdentity).toLowerCase())}:${userId}`);
+}
+
+function getCollectionStorageScope() {
+  return _collectionStorageScope;
+}
+
+function _scopedCollectionStorageName(collectionName, capturedScope = _collectionStorageScope) {
+  const name = String(collectionName || '');
+  return capturedScope === 'local' ? name : `${capturedScope}:${name}`;
+}
 
 /**
  * Initialize IndexedDB for large data storage and caching.
@@ -1081,12 +1207,12 @@ function idbClear(storeName) {
   });
 }
 
-function getCollectionMetaKey(collectionName) {
-  return `collection:${collectionName}:meta`;
+function getCollectionMetaKey(collectionName, capturedScope = _collectionStorageScope) {
+  return `collection:${_scopedCollectionStorageName(collectionName, capturedScope)}:meta`;
 }
 
-function getCollectionChunkKey(collectionName, index) {
-  return `collection:${collectionName}:chunk:${index}`;
+function getCollectionChunkKey(collectionName, index, capturedScope = _collectionStorageScope) {
+  return `collection:${_scopedCollectionStorageName(collectionName, capturedScope)}:chunk:${index}`;
 }
 
 /**
@@ -1101,9 +1227,13 @@ async function saveCollectionToIndexedDB(collectionName, data) {
   if (!db) return false;
   const name = String(collectionName || '');
   if (!name) return false;
+  // Capture the scope before the first await. A logout/login during the write
+  // cannot redirect later chunks into a different user's namespace.
+  const capturedScope = _collectionStorageScope;
+  const dataKey = _scopedCollectionStorageName(name, capturedScope);
 
   try {
-    const metaKey = getCollectionMetaKey(name);
+    const metaKey = getCollectionMetaKey(name, capturedScope);
     const prevMeta = await idbGet(DATA_STORE_NAME, metaKey);
     const prevChunkCount = prevMeta?.chunkCount || 0;
 
@@ -1112,7 +1242,7 @@ async function saveCollectionToIndexedDB(collectionName, data) {
     const recordCount = isArray ? data.length : 0;
     if (!isArray || recordCount <= STORAGE_CONFIG.CHUNK_SIZE) {
       const record = {
-        key: name,
+        key: dataKey,
         type: 'collection',
         data,
         checksum: DataIntegrity.calculateChecksum(data),
@@ -1125,7 +1255,7 @@ async function saveCollectionToIndexedDB(collectionName, data) {
       // load prefer the stale chunked copy).
       const deleteKeys = [];
       if (prevChunkCount > 0) {
-        for (let i = 0; i < prevChunkCount; i++) deleteKeys.push(getCollectionChunkKey(name, i));
+        for (let i = 0; i < prevChunkCount; i++) deleteKeys.push(getCollectionChunkKey(name, i, capturedScope));
         deleteKeys.push(metaKey);
       }
       await idbAtomicWrite([record], deleteKeys);
@@ -1145,7 +1275,7 @@ async function saveCollectionToIndexedDB(collectionName, data) {
     for (let i = 0; i < chunkCount; i++) {
       const chunk = data.slice(i * chunkSize, (i + 1) * chunkSize);
       puts.push({
-        key: getCollectionChunkKey(name, i),
+        key: getCollectionChunkKey(name, i, capturedScope),
         type: 'collection_chunk',
         collection: name,
         index: i,
@@ -1167,10 +1297,10 @@ async function saveCollectionToIndexedDB(collectionName, data) {
     const deleteKeys = [];
     // Leftover old chunks beyond the new count
     if (prevChunkCount > chunkCount) {
-      for (let i = chunkCount; i < prevChunkCount; i++) deleteKeys.push(getCollectionChunkKey(name, i));
+      for (let i = chunkCount; i < prevChunkCount; i++) deleteKeys.push(getCollectionChunkKey(name, i, capturedScope));
     }
     // Legacy single-record storage, if it exists
-    deleteKeys.push(name);
+    deleteKeys.push(dataKey);
 
     await idbAtomicWrite(puts, deleteKeys);
     return true;
@@ -1193,9 +1323,11 @@ async function loadCollectionFromIndexedDB(collectionName) {
   if (!db) return null;
   const name = String(collectionName || '');
   if (!name) return null;
+  const capturedScope = _collectionStorageScope;
+  const dataKey = _scopedCollectionStorageName(name, capturedScope);
 
   try {
-    const metaKey = getCollectionMetaKey(name);
+    const metaKey = getCollectionMetaKey(name, capturedScope);
     const meta = await idbGet(DATA_STORE_NAME, metaKey);
 
     // Chunked layout
@@ -1203,7 +1335,7 @@ async function loadCollectionFromIndexedDB(collectionName) {
       const chunks = [];
       let missingChunk = false;
       for (let i = 0; i < meta.chunkCount; i++) {
-        const chunk = await idbGet(DATA_STORE_NAME, getCollectionChunkKey(name, i));
+        const chunk = await idbGet(DATA_STORE_NAME, getCollectionChunkKey(name, i, capturedScope));
         if (chunk && Array.isArray(chunk.data)) {
           chunks.push(...chunk.data);
         } else {
@@ -1242,7 +1374,7 @@ async function loadCollectionFromIndexedDB(collectionName) {
     }
 
     // Legacy single-record layout
-    const record = await idbGet(DATA_STORE_NAME, name);
+    const record = await idbGet(DATA_STORE_NAME, dataKey);
     if (record) {
       const currentChecksum = DataIntegrity.calculateChecksum(record.data);
       if (record.checksum && currentChecksum !== record.checksum) {
@@ -1411,16 +1543,28 @@ async function clearIndexedDBLogs() {
     }
   });
 }
-
 // ==========================================
 // CONSTANTS & ENUMS
 // ==========================================
 
+// The generic 'Bank Transfer' was removed — it duplicated the explicit
+// LYD/USD variants. LEGACY_PAYMENT_METHODS keeps it selectable ONLY on
+// receipts that already carry it, so old records still display/save correctly.
 const PAYMENT_METHODS = [
-  'Cash (LYD)', 'Cash (USD)', 'Libyana', 'Madar', 'LTT', 
-  'Transfer Office', 'Bank Transfer', 'Bank Transfer (LYD)', 
+  'Cash (LYD)', 'Cash (USD)', 'Libyana', 'Madar', 'LTT',
+  'Transfer Office', 'Bank Transfer (LYD)',
   'Bank Transfer (USD)', 'Sadad', 'USDT'
 ];
+const LEGACY_PAYMENT_METHODS = ['Bank Transfer'];
+
+// Payment methods for a given select: the current list, plus the record's own
+// legacy method when it is no longer offered (so editing an old receipt does
+// not silently switch its payment method).
+function paymentMethodOptions(currentMethod) {
+  const m = String(currentMethod || '').trim();
+  if (m && !PAYMENT_METHODS.includes(m)) return [...PAYMENT_METHODS, m];
+  return PAYMENT_METHODS;
+}
 
 const AD_STATUSES = ['Pending', 'Paused', 'Completed', 'Canceled', 'Lost', 'Stopped'];
 const DELIVERY_STATUSES = ['Needs Delivery', 'In Progress', 'Delivered', 'Canceled', 'Office'];
@@ -1555,13 +1699,13 @@ const PERMISSION_MODULES = {
     icon: 'settings',
     color: 'slate',
     description: 'System settings',
+    // NOTE: backup/restore/clearData were removed — those are whole-database
+    // operations the server only ever allows for the Admin ROLE, so offering
+    // them as grantable toggles was misleading (they never did anything).
     permissions: {
       view: { label: 'View Settings', description: 'View system settings' },
       edit: { label: 'Edit Settings', description: 'Edit system settings' },
-      manageExchangeRate: { label: 'Manage Exchange Rate', description: 'Change exchange rates' },
-      backup: { label: 'Backup Data', description: 'Backup system data' },
-      restore: { label: 'Restore Data', description: 'Restore from backup' },
-      clearData: { label: 'Clear Data', description: 'Clear all system data' }
+      manageExchangeRate: { label: 'Manage Exchange Rate', description: 'Change exchange rates' }
     }
   },
   auditLogs: {
@@ -1569,11 +1713,12 @@ const PERMISSION_MODULES = {
     icon: 'file-clock',
     color: 'violet',
     description: 'System audit trail',
+    // NOTE: 'backup' was removed — no code ever honored it (log backup is an
+    // Admin-role operation), so the toggle was decorative.
     permissions: {
       view: { label: 'View Audit Logs', description: 'View all audit logs' },
       viewOwn: { label: 'View Own Logs', description: 'View only own activity' },
       export: { label: 'Export Logs', description: 'Export audit logs' },
-      backup: { label: 'Backup Logs', description: 'Backup audit logs' },
       clear: { label: 'Clear Logs', description: 'Clear audit logs' }
     }
   },
@@ -1738,10 +1883,18 @@ const PERMISSION_TEMPLATES = {
 function hasPermission(userId, module, action) {
   // System/admin always has access
   if (!userId || userId === 'system') return true;
-  
-  const user = state.users.find(u => u.id === userId);
+
+  let user = (state.users || []).find(u => u && u.id === userId);
+  // FALLBACK: state.users can be empty or hold a permission-less stub (e.g. the
+  // /api/users/public list only carries {id,name,role}). The login and
+  // /api/auth/me responses always carry the caller's full permissions on
+  // state.currentUser — use that as the source of truth for the current user
+  // so the whole UI can never lock out a properly-permissioned account.
+  if ((!user || !user.permissions) && state.currentUser && String(state.currentUser.id) === String(userId)) {
+    user = state.currentUser;
+  }
   if (!user) return false;
-  
+
   // Admins have all permissions
   if (String(user.role || '').toLowerCase() === 'admin') return true;
   
@@ -1757,28 +1910,122 @@ function hasPermission(userId, module, action) {
   return modulePerms.includes(action) || modulePerms.some(p => String(p).toLowerCase() === String(action).toLowerCase());
 }
 
-// Refresh current user's permissions from server
+// Refresh current user's permissions from server.
+// Returns true when the permissions actually changed (callers use this to
+// schedule a re-render so a locked sidebar can recover without re-login).
 async function refreshCurrentUserPermissions() {
-  if (!isServerModeEnabled() || !state.currentUser?.id) return;
+  if (!isServerModeEnabled() || !state.currentUser?.id) return false;
   try {
+    const currentId = String(state.currentUser.id || '');
+    const beforeAccess = JSON.stringify({
+      role: String(state.currentUser.role || '').toLowerCase(),
+      permissions: state.currentUser.permissions || {},
+      subscriptions: Array.isArray(state.currentUser.subscriptions) ? state.currentUser.subscriptions : []
+    });
     const me = await apiAuthMe();
-    if (me && me.permissions) {
-      state.currentUser.permissions = me.permissions;
-      // Also update in users array
-      const idx = state.users.findIndex(u => u.id === me.id);
-      if (idx !== -1) {
-        state.users[idx].permissions = me.permissions;
-      }
-      console.log('[Permissions] Refreshed current user permissions');
+    if (me && String(me.id || '') === currentId) {
+      // Role is authorization state too. Copying permissions alone left a
+      // demoted Admin permanently Admin in the browser when both maps were
+      // empty, even though the server had already revoked that access.
+      state.currentUser = {
+        ...state.currentUser,
+        ...Security.sanitizeObject(me),
+        role: String(me.role || state.currentUser.role || ''),
+        permissions: (me.permissions && typeof me.permissions === 'object') ? me.permissions : {},
+        subscriptions: Array.isArray(me.subscriptions) ? me.subscriptions : (state.currentUser.subscriptions || [])
+      };
+      const afterAccess = JSON.stringify({
+        role: String(state.currentUser.role || '').toLowerCase(),
+        permissions: state.currentUser.permissions || {},
+        subscriptions: Array.isArray(state.currentUser.subscriptions) ? state.currentUser.subscriptions : []
+      });
+      const changed = beforeAccess !== afterAccess;
+      // Also update in users array — UPSERT: if the record is missing (users
+      // list fetch failed or returned permission-less stubs), insert it so the
+      // periodic refresh can repair an empty state.users.
+      upsertCurrentUserIntoUsers();
+      if (changed) console.log('[Permissions] Refreshed current user access');
+      return changed;
     }
   } catch (e) {
     console.warn('[Permissions] Failed to refresh:', e?.message || e);
+  }
+  return false;
+}
+
+// Ensure state.users contains the current user's record WITH permissions.
+// state.currentUser always carries the full permission map from the server
+// login / /api/auth/me response; the users list for non-admins does not
+// (GET /api/users/public returns only {id,name,role}).
+function upsertCurrentUserIntoUsers() {
+  const cu = state.currentUser;
+  if (!cu || !cu.id) return;
+  if (!Array.isArray(state.users)) state.users = [];
+  const idx = state.users.findIndex(u => u && String(u.id) === String(cu.id));
+  if (idx === -1) {
+    state.users.push(cu);
+  } else {
+    state.users[idx] = { ...state.users[idx], ...cu };
   }
 }
 
 // Check if current user has permission
 function currentUserHasPermission(module, action) {
   return hasPermission(state.currentUser?.id, module, action);
+}
+
+// User-management capability: Admin role OR the matching users.* permission.
+// The server enforces the same rule (plus anti-escalation guards), so these
+// buttons/actions now work for permission-granted non-admins too.
+function canManageUsersAction(action) {
+  return isCurrentUserAdmin() || currentUserHasPermission('users', action);
+}
+
+// Admin role OR the named permission. Use for every capability the
+// Permissions Manager advertises, so a granted toggle actually does something.
+function can(module, action) {
+  return isCurrentUserAdmin() || currentUserHasPermission(module, action);
+}
+
+// The audit trail the current user is allowed to SEE.
+// auditLogs.view => all entries; auditLogs.viewOwn => only their own.
+// Without either, nothing. state.logs is a DEVICE-LOCAL trail (it can hold
+// entries written while a different user was logged in on this browser), so
+// this scoping is what keeps a viewOwn user from reading someone else's
+// activity — never render or export state.logs directly.
+function getVisibleAuditLogs() {
+  // In server mode the server's trail is authoritative AND already scoped by
+  // the caller's auditLogs.view/viewOwn permission (GET /api/audit).
+  const source = isServerModeEnabled()
+    ? (Array.isArray(state.serverLogs) ? state.serverLogs : [])
+    : getVisibleRecords(state.logs);
+
+  if (can('auditLogs', 'view')) return source;
+  if (currentUserHasPermission('auditLogs', 'viewOwn')) {
+    const uid = String(state.currentUser?.id || '');
+    return source.filter(l => String(l?.userId || '') === uid);
+  }
+  return [];
+}
+
+// Refresh the server audit trail, then re-render the Audit Logs screen.
+// Cheap guard so the render loop can call it without re-entering.
+let _auditFetchInFlight = false;
+async function refreshServerAuditLogs({ force = false } = {}) {
+  if (!isServerModeEnabled() || !state.currentUser?.id) return;
+  if (_auditFetchInFlight) return;
+  const fresh = Date.now() - (state.serverLogsLoadedAt || 0) < 15000;
+  if (!force && fresh) return;
+  _auditFetchInFlight = true;
+  try {
+    state.serverLogs = await apiListAuditLogs(500);
+    state.serverLogsLoadedAt = Date.now();
+    if (state.currentView === 'audit') RenderQueue.schedule('auditLogs(server)');
+  } catch (e) {
+    console.warn('[Audit] Failed to load server logs:', e?.message || e);
+  } finally {
+    _auditFetchInFlight = false;
+  }
 }
 
 // Get permission summary for display
@@ -1823,6 +2070,10 @@ function hasSubscription(serviceId) {
   if (isAdminRole(state.currentUser.role)) return true; // Admin gets all
   const uid = String(state.currentUser.id || '');
   if (uid && SUBSCRIPTIONS.isActive(uid, serviceId)) return true;
+  // In server mode only the server-owned subscription ledger is authoritative.
+  // The legacy array can be stale after cancellation (and is mutable client
+  // state), so it must never grant server-backed access.
+  if (isServerModeEnabled()) return false;
   const subs = state.currentUser.subscriptions || [];
   return subs.includes(serviceId);
 }
@@ -1887,7 +2138,7 @@ function openServiceById(id) {
   if (SMART_SYSTEMS_CHILDREN[id]) return handleSmartSystemClick(id);
 }
 
-function handleSubscribe(subscribeToId, navigateToId = subscribeToId) {
+async function handleSubscribe(subscribeToId, navigateToId = subscribeToId) {
   if (!state.currentUser?.id) return;
   try {
     // If already active, just continue
@@ -1899,14 +2150,14 @@ function handleSubscribe(subscribeToId, navigateToId = subscribeToId) {
 
     const offer = getServiceSubscriptionOffer(subscribeToId);
     const idem = String(state.modalData?.idempotencyKey || '').trim() || Security.generateSecureId('idem');
-    SUBSCRIPTIONS.subscribe(state.currentUser.id, subscribeToId, { ...offer, idempotencyKey: idem });
+    await SUBSCRIPTIONS.subscribe(state.currentUser.id, subscribeToId, { ...offer, idempotencyKey: idem });
 
     // Optional legacy mirror (keeps older UI logic compatible)
-    if (!Array.isArray(state.currentUser.subscriptions)) state.currentUser.subscriptions = [];
-    if (!state.currentUser.subscriptions.includes(subscribeToId)) {
+    if (!isServerModeEnabled() && !Array.isArray(state.currentUser.subscriptions)) state.currentUser.subscriptions = [];
+    if (!isServerModeEnabled() && !state.currentUser.subscriptions.includes(subscribeToId)) {
       state.currentUser.subscriptions.push(subscribeToId);
       // persist into the actual user record too (not only session)
-      updateRecord(state.users, state.currentUser.id, { subscriptions: state.currentUser.subscriptions });
+      await updateRecord(state.users, state.currentUser.id, { subscriptions: state.currentUser.subscriptions });
     }
 
     closeModal();
@@ -1983,7 +2234,7 @@ function showRecoveryKeyModal(plainKey) {
 
 async function generateAndShowRecoveryKey() {
   if (isServerModeEnabled()) {
-    showNotification(state.language === 'ar' ? 'غير متاح' : 'Not Available', state.language === 'ar' ? 'مفاتيح الاستعادة للوضع المحلي فقط. استخدم إعادة التعيين عبر البريد الإلكتروني على السيرفر.' : 'Recovery keys are for local mode only. Use email reset on the server.', 'info');
+    showNotification(state.language === 'ar' ? 'غير متاح' : 'Not Available', state.language === 'ar' ? 'مفاتيح الاستعادة للوضع المحلي فقط. تواصل مع المدير لإعادة تعيين كلمة المرور.' : 'Recovery keys are for local mode only. Contact an administrator to reset a server password.', 'info');
     return;
   }
   if (!state.currentUser || !isAdminRole(state.currentUser.role)) {
@@ -1996,9 +2247,19 @@ async function generateAndShowRecoveryKey() {
 }
 
 function showPasswordResetModal() {
+  if (isServerModeEnabled()) {
+    showNotification(
+      state.language === 'ar' ? 'تواصل مع المدير' : 'Contact an Administrator',
+      state.language === 'ar'
+        ? 'إرسال رموز إعادة التعيين عبر البريد غير مفعّل على هذا الخادم. اطلب من المدير إعادة تعيين كلمة المرور.'
+        : 'Email reset codes are not configured on this server. Ask an administrator to reset your password.',
+      'info'
+    );
+    return;
+  }
   state.activeModal = 'password-reset';
   state.modalData = {
-    step: isServerModeEnabled() ? 'request' : 'local',
+    step: 'local',
     email: '',
     token: ''
   };
@@ -2113,7 +2374,8 @@ async function passwordResetConfirmLocal() {
       passwordAlgo: hashed.algo,
       passwordIterations: hashed.iterations
     };
-    updateRecord(state.users, user.id, updates);
+    const resetSaved = await updateRecord(state.users, user.id, updates);
+    if (!resetSaved) return;
     markCollectionDirty('users');
     saveState();
     flushDirtyCollections().catch(() => {});
@@ -2256,6 +2518,16 @@ function _listAllStoredPasskeys() {
 
 async function passkeyRegisterCurrentUser() {
   try {
+    if (isServerModeEnabled()) {
+      showNotification(
+        state.language === 'ar' ? 'غير متاح' : 'Not Available',
+        state.language === 'ar'
+          ? 'إضافة مفتاح مرور تتطلب دعم WebAuthn على الخادم (قريباً).'
+          : 'Adding a passkey requires server WebAuthn endpoints (coming soon).',
+        'info'
+      );
+      return;
+    }
     if (!_isPasskeySupported()) {
       showNotification(state.language === 'ar' ? 'غير مدعوم' : 'Not Supported', state.language === 'ar' ? 'مفاتيح المرور تتطلب HTTPS أو localhost.' : 'Passkeys require HTTPS or localhost.', 'error');
       return;
@@ -2339,16 +2611,17 @@ async function passkeyRegisterCurrentUser() {
       ext: true
     };
 
-    if (!Array.isArray(user.passkeys)) user.passkeys = [];
-    const exists = user.passkeys.some(k => k && k.id === credentialId);
+    const existingPasskeys = Array.isArray(user.passkeys) ? user.passkeys : [];
+    const exists = existingPasskeys.some(k => k && k.id === credentialId);
     if (!exists) {
-      user.passkeys.push({
+      const nextPasskeys = [...existingPasskeys, {
         id: credentialId,
         publicKeyJwk: jwk,
         alg: 'ES256',
         createdAt: Date.now()
-      });
-      updateRecord(state.users, user.id, { passkeys: user.passkeys });
+      }];
+      const saved = await updateRecord(state.users, user.id, { passkeys: nextPasskeys });
+      if (!saved) return;
     }
 
     showNotification(state.language === 'ar' ? 'نجاح' : 'Success', state.language === 'ar' ? 'تمت إضافة مفتاح المرور بنجاح' : 'Passkey added successfully', 'success');
@@ -2456,8 +2729,18 @@ async function passkeySignIn() {
   }
 }
 
-function removePasskey(credentialId) {
+async function removePasskey(credentialId) {
   try {
+    if (isServerModeEnabled()) {
+      showNotification(
+        state.language === 'ar' ? 'غير متاح' : 'Not Available',
+        state.language === 'ar'
+          ? 'إدارة مفاتيح المرور تتطلب دعم WebAuthn على الخادم.'
+          : 'Managing passkeys requires server WebAuthn endpoints.',
+        'info'
+      );
+      return;
+    }
     if (!state.currentUser?.id) {
       showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'غير مسجل الدخول' : 'Not logged in', 'error');
       return;
@@ -2468,7 +2751,8 @@ function removePasskey(credentialId) {
     if (!user) return;
     const keys = Array.isArray(user.passkeys) ? user.passkeys : [];
     const next = keys.filter(k => k && k.id !== id);
-    updateRecord(state.users, user.id, { passkeys: next });
+    const saved = await updateRecord(state.users, user.id, { passkeys: next });
+    if (!saved) return;
     showNotification(state.language === 'ar' ? 'تم الحذف' : 'Removed', state.language === 'ar' ? 'تم حذف مفتاح المرور' : 'Passkey removed', 'success');
     render();
   } catch (e) {
@@ -2487,7 +2771,6 @@ async function apiChangePassword(currentPassword, newPassword) {
   const payload = { currentPassword, newPassword };
   return await apiJson('/api/auth/password-change', { method: 'POST', body: payload }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
 }
-
 // ==========================================
 // APPLICATION STATE
 // ==========================================
@@ -2770,6 +3053,25 @@ function walletFindByIdempotency(idempotencyKey) {
   return txs.find(t => t && !t._deleted && String(t.idempotencyKey || '') === key) || null;
 }
 
+function upsertServerBackedRecord(collectionName, entityResponse) {
+  const saved = entityResponse?.data ? Security.sanitizeObject(entityResponse.data) : null;
+  if (!saved?.id || !Security.isValidRecordId(saved.id)) throw new Error('Invalid server response');
+  if (!Array.isArray(state[collectionName])) state[collectionName] = [];
+  const arr = state[collectionName];
+  const idx = arr.findIndex(row => row && String(row.id) === String(saved.id));
+  if (idx === -1) arr.unshift(saved);
+  else arr[idx] = saved;
+  markCollectionDirty(collectionName);
+  saveState();
+  return saved;
+}
+
+function ensureOperationIdempotencyKey(value, prefix) {
+  const supplied = Security.sanitizeInput(String(value || '').trim(), { maxLength: 120 });
+  if (supplied.length >= 8) return supplied;
+  return `${String(prefix || 'op')}:${Security.generateSecureId('idem')}`.slice(0, 120);
+}
+
 const WALLET = {
   currency: 'LYD',
   // Compute balance from immutable ledger
@@ -2808,7 +3110,7 @@ const WALLET = {
     return out;
   },
   // Add credit (admin/top-up)
-  credit: (toUserId, amount, meta = {}) => {
+  credit: async (toUserId, amount, meta = {}) => {
     if (!state.currentUser?.id) throw new Error('Not logged in');
     // Manual credit = the platform owner records money received OUTSIDE the
     // app (cash / bank transfer from a client). Admin-only on the client, and
@@ -2820,11 +3122,9 @@ const WALLET = {
     const currency = walletNormalizeCurrency(meta.currency || WALLET.currency);
     const amountMinor = Number.isFinite(Number(meta.amountMinor)) ? Math.trunc(Number(meta.amountMinor)) : walletToMinor(amount, currency);
     if (!Number.isFinite(amountMinor) || amountMinor <= 0) throw new Error('Invalid amount');
-    const idem = Security.sanitizeInput(String(meta.idempotencyKey || '').trim(), { maxLength: 120 });
-    if (idem) {
-      const existing = walletFindByIdempotency(idem);
-      if (existing) return existing;
-    }
+    const idem = ensureOperationIdempotencyKey(meta.idempotencyKey, 'topup');
+    const existing = walletFindByIdempotency(idem);
+    if (existing) return existing;
     const tx = {
       id: generateId('wtx'),
       type: 'credit',
@@ -2847,12 +3147,23 @@ const WALLET = {
     if (tx.toUserId === 'system') throw new Error('Invalid recipient');
     const exists = Array.isArray(state.users) && state.users.some(u => u && !u._deleted && String(u.id) === tx.toUserId);
     if (!exists) throw new Error('Recipient not found');
-    addRecord(state.walletTransactions, tx);
+    if (isServerModeEnabled()) {
+      const response = await apiWalletTopUp({
+        userId: tx.toUserId,
+        amountMinor,
+        currency,
+        idempotencyKey: idem,
+        memo: tx.memo
+      });
+      return upsertServerBackedRecord('walletTransactions', response);
+    }
+    const savedOk = await addRecord(state.walletTransactions, tx);
+    if (!savedOk) throw new Error('Failed to save wallet top-up');
     addAuditLog('wallet', tx.id, `Wallet credit ${walletFormatMinor(amountMinor, currency)}`, { resourceType: 'walletTransactions', toUserId: tx.toUserId });
     return tx;
   },
   // Transfer between users
-  transfer: (fromUserId, toUserId, amount, meta = {}) => {
+  transfer: async (fromUserId, toUserId, amount, meta = {}) => {
     if (!state.currentUser?.id) throw new Error('Not logged in');
     const currency = walletNormalizeCurrency(meta.currency || WALLET.currency);
     const amountMinor = Number.isFinite(Number(meta.amountMinor)) ? Math.trunc(Number(meta.amountMinor)) : walletToMinor(amount, currency);
@@ -2869,14 +3180,17 @@ const WALLET = {
       if (!toExists) throw new Error('Recipient not found');
     }
 
-    const idem = Security.sanitizeInput(String(meta.idempotencyKey || '').trim(), { maxLength: 120 });
-    if (idem) {
-      const existing = walletFindByIdempotency(idem);
-      if (existing) return existing;
-    }
+    const idem = ensureOperationIdempotencyKey(meta.idempotencyKey, 'transfer');
+    const existing = walletFindByIdempotency(idem);
+    if (existing) return existing;
 
-    const balMinor = WALLET.getBalanceMinor(fromId, currency);
-    if (balMinor + 0 < amountMinor) throw new Error('Insufficient balance');
+    // Local mode owns its ledger and must validate here. In server mode the
+    // cache may be a few seconds stale, so only the locked DB transaction may
+    // decide whether the authoritative balance is sufficient.
+    if (!isServerModeEnabled()) {
+      const balMinor = WALLET.getBalanceMinor(fromId, currency);
+      if (balMinor < amountMinor) throw new Error('Insufficient balance');
+    }
 
     const tx = {
       id: generateId('wtx'),
@@ -2897,12 +3211,26 @@ const WALLET = {
       _lastModified: getMonotonicTime(),
       _deleted: false
     };
-    addRecord(state.walletTransactions, tx);
+    if (isServerModeEnabled()) {
+      // The dedicated endpoint always debits the authenticated user. Admins
+      // cannot use the client to spend another user's wallet.
+      if (String(state.currentUser.id) !== fromId) throw new Error('A server transfer can only debit your own wallet');
+      const response = await apiWalletTransfer({
+        toUserId: toId,
+        amountMinor,
+        currency,
+        idempotencyKey: idem,
+        memo: tx.memo
+      });
+      return upsertServerBackedRecord('walletTransactions', response);
+    }
+    const savedOk = await addRecord(state.walletTransactions, tx);
+    if (!savedOk) throw new Error('Failed to save wallet transfer');
     addAuditLog('wallet', tx.id, `Wallet transfer ${walletFormatMinor(amountMinor, currency)}`, { resourceType: 'walletTransactions', fromUserId: tx.fromUserId, toUserId: tx.toUserId });
     return tx;
   },
   // Create a compensating transaction (Admin-only) instead of editing history
-  reverse: (transactionId, meta = {}) => {
+  reverse: async (transactionId, meta = {}) => {
     if (!state.currentUser?.id) throw new Error('Not logged in');
     if (!isAdminRole(state.currentUser.role)) throw new Error('Admin only');
     const id = String(transactionId || '').trim();
@@ -2916,7 +3244,14 @@ const WALLET = {
     const fromId = String(original.toUserId || 'system');
     const toId = String(original.fromUserId || 'system');
     const idem = `rev:${id}`;
-    return WALLET.transfer(fromId, toId, 0, {
+    if (isServerModeEnabled()) {
+      const response = await apiWalletReversal({
+        transactionId: id,
+        memo: Security.sanitizeInput(meta.memo || `Reversal of ${id}`, { maxLength: 180 })
+      });
+      return upsertServerBackedRecord('walletTransactions', response);
+    }
+    return await WALLET.transfer(fromId, toId, 0, {
       type: 'reversal',
       amountMinor,
       currency,
@@ -2949,13 +3284,20 @@ const SUBSCRIPTIONS = {
     return SUBSCRIPTIONS.getActiveServiceIds(userId).includes(sid);
   },
   // Subscribe by paying from wallet (default monthly)
-  subscribe: (userId, serviceId, opts = {}) => {
+  subscribe: async (userId, serviceId, opts = {}) => {
     if (!state.currentUser?.id) throw new Error('Not logged in');
     const uid = String(userId || '');
     const sid = String(serviceId || '');
     if (!uid || !sid) throw new Error('Missing subscription data');
     const isAdmin = isAdminRole(state.currentUser.role);
     if (!isAdmin && String(state.currentUser.id) !== uid) throw new Error('Forbidden');
+
+    const idem = ensureOperationIdempotencyKey(opts.idempotencyKey, 'subscription');
+    const subs = Array.isArray(state.serviceSubscriptions) ? state.serviceSubscriptions : [];
+    // Check the exact retry key before the broader active-service guard so a
+    // double tap/retry returns the already-committed purchase as success.
+    const existing = subs.find(s => s && !s._deleted && s.userId === uid && s.serviceId === sid && String(s.idempotencyKey || '') === idem);
+    if (existing) return existing;
     if (SUBSCRIPTIONS.isActive(uid, sid)) throw new Error('Already subscribed');
 
     const currency = walletNormalizeCurrency(opts.currency || WALLET.currency);
@@ -2966,18 +3308,32 @@ const SUBSCRIPTIONS = {
     if (!Number.isFinite(durationDays) || durationDays <= 0) throw new Error('Invalid duration');
     if (!Number.isFinite(priceMinor) || priceMinor < 0) throw new Error('Invalid price');
 
-    const idem = Security.sanitizeInput(String(opts.idempotencyKey || '').trim(), { maxLength: 120 });
-    // Idempotent subscribe: retry with same key must return the same subscription record
-    const subs = Array.isArray(state.serviceSubscriptions) ? state.serviceSubscriptions : [];
-    if (idem) {
-      const existing = subs.find(s => s && !s._deleted && s.userId === uid && s.serviceId === sid && String(s.idempotencyKey || '') === idem);
-      if (existing) return existing;
+    if (isServerModeEnabled()) {
+      // Price, duration, balance check, payment ledger row and subscription
+      // are all owned by the server and committed atomically in one call.
+      const response = await apiPurchaseSubscription({
+        serviceId: sid,
+        idempotencyKey: idem,
+        userId: isAdmin && uid !== String(state.currentUser.id) ? uid : undefined
+      });
+      const saved = upsertServerBackedRecord('serviceSubscriptions', response);
+      if (saved.paymentTxId) {
+        try {
+          const payment = await apiGetEntity('walletTransactions', saved.paymentTxId);
+          upsertServerBackedRecord('walletTransactions', payment);
+        } catch (e) {
+          // Subscription is already committed; live sync will fetch the ledger
+          // row. Do not retry the purchase with a new key or double-notify.
+          if (ALBAYAN_DEBUG_MODE) console.warn('[SUBSCRIPTIONS.subscribe] Payment refresh failed:', e?.message || e);
+        }
+      }
+      return saved;
     }
 
     let paymentTx = null;
     if (priceMinor > 0) {
       // charge wallet (debit) by transferring to system account
-      paymentTx = WALLET.transfer(uid, 'system', 0, {
+      paymentTx = await WALLET.transfer(uid, 'system', 0, {
         type: 'service_payment',
         amountMinor: priceMinor,
         currency,
@@ -3008,11 +3364,12 @@ const SUBSCRIPTIONS = {
       _lastModified: getMonotonicTime(),
       _deleted: false
     };
-    addRecord(state.serviceSubscriptions, rec);
+    const savedOk = await addRecord(state.serviceSubscriptions, rec);
+    if (!savedOk) throw new Error('Failed to save subscription');
     addAuditLog('subscription', rec.id, `Subscribed to ${sid} (${walletFormatMinor(priceMinor, currency)})`, { resourceType: 'serviceSubscriptions', serviceId: sid, userId: uid });
     return rec;
   },
-  cancel: (userId, serviceId) => {
+  cancel: async (userId, serviceId) => {
     if (!state.currentUser?.id) throw new Error('Not logged in');
     const uid = String(userId || '');
     const sid = String(serviceId || '');
@@ -3032,7 +3389,8 @@ const SUBSCRIPTIONS = {
     if (!active?.id) throw new Error('No active subscription');
 
     const ts = new Date().toISOString();
-    updateRecord(state.serviceSubscriptions, active.id, { status: 'canceled', canceledAt: ts, expiresAt: ts });
+    const canceledOk = await updateRecord(state.serviceSubscriptions, active.id, { status: 'canceled', canceledAt: ts, expiresAt: ts });
+    if (!canceledOk) throw new Error('Failed to cancel subscription');
     addAuditLog('subscription', active.id, `Canceled ${sid}`, { resourceType: 'serviceSubscriptions', serviceId: sid, userId: uid });
 
     // Keep legacy user.subscriptions in sync (optional compatibility)
@@ -3040,7 +3398,7 @@ const SUBSCRIPTIONS = {
     const legacy = Array.isArray(user?.subscriptions) ? user.subscriptions.slice() : null;
     if (legacy && legacy.includes(sid)) {
       const next = legacy.filter(x => x !== sid);
-      updateRecord(state.users, uid, { subscriptions: next });
+      await updateRecord(state.users, uid, { subscriptions: next });
     }
     return true;
   }
@@ -3078,6 +3436,11 @@ const state = {
   customers: [],
   pages: [],
   logs: [],
+  // Server-side audit trail (server mode only). Fetched from GET /api/audit,
+  // which scopes rows by auditLogs.view / viewOwn — this is what the Audit
+  // Logs screen renders in server mode, NOT the device-local `logs` above.
+  serverLogs: [],
+  serverLogsLoadedAt: 0,
   walletTransactions: [], // ledger entries (huge-data safe via IndexedDB)
   serviceSubscriptions: [], // structured subscriptions (huge-data safe via IndexedDB)
 
@@ -3136,7 +3499,6 @@ const state = {
   // Delivery dashboard (Delivery role)
   deliveryDashboardFilterStatus: 'all' // 'all' | 'Needs Delivery' | 'In Progress' | 'Delivered' | 'Collected'
 };
-
 // ==========================================
 // LOCALSTORAGE PERSISTENCE
 // ==========================================
@@ -3167,8 +3529,19 @@ const idbSync = {
   dirty: new Set(),
   timer: null,
   flushing: false,
-  debounceMs: 800
+  scopeGeneration: 0,
+  debounceMs: 800,
+  retryDelayMs: 2000,
+  maxRetryDelayMs: 30000
 };
+
+function resetDirtyCollectionQueueForScopeChange() {
+  if (idbSync.timer) clearTimeout(idbSync.timer);
+  idbSync.timer = null;
+  idbSync.dirty.clear();
+  idbSync.retryDelayMs = 2000;
+  idbSync.scopeGeneration += 1;
+}
 
 function getCollectionNameFromArray(array) {
   if (array === state.ads) return 'ads';
@@ -3213,16 +3586,46 @@ async function flushDirtyCollections() {
   if (idbSync.dirty.size === 0) return;
 
   idbSync.flushing = true;
+  const flushGeneration = idbSync.scopeGeneration;
   const toFlush = Array.from(idbSync.dirty);
   idbSync.dirty.clear();
+  const failed = [];
 
   try {
     for (const name of toFlush) {
-      await saveCollectionToIndexedDB(name, state[name]);
+      if (flushGeneration !== idbSync.scopeGeneration) break;
+      try {
+        const saved = await saveCollectionToIndexedDB(name, state[name]);
+        if (saved === false) failed.push(name);
+      } catch (e) {
+        console.warn(`IndexedDB save failed for "${name}":`, e);
+        failed.push(name);
+      }
     }
   } finally {
     idbSync.flushing = false;
   }
+
+  // The authenticated cache namespace changed while a write was in flight.
+  // The completed write captured its old scope; do not continue this batch or
+  // requeue its names into the new user's namespace.
+  if (flushGeneration !== idbSync.scopeGeneration) return;
+
+  // Never lose the dirty marker when IndexedDB rejects a write (quota,
+  // transaction abort, temporary WebView failure). Requeue it with bounded
+  // backoff instead of tight-looping or waiting for an unrelated later edit.
+  if (failed.length > 0) {
+    for (const name of failed) idbSync.dirty.add(name);
+    if (idbSync.timer) clearTimeout(idbSync.timer);
+    const delay = idbSync.retryDelayMs;
+    idbSync.retryDelayMs = Math.min(idbSync.retryDelayMs * 2, idbSync.maxRetryDelayMs);
+    idbSync.timer = setTimeout(() => {
+      idbSync.timer = null;
+      flushDirtyCollections().catch((e) => console.warn('IndexedDB retry error:', e));
+    }, delay);
+    return;
+  }
+  idbSync.retryDelayMs = 2000;
   // Collections marked dirty WHILE this flush was running hit the re-entrancy
   // guard above and had their debounce swallowed — they would otherwise sit
   // unpersisted until some unrelated later edit. Flush them now. Terminates
@@ -3247,7 +3650,8 @@ function saveState() {
     // WebViews), keep the collections inside this localStorage snapshot.
     // Deleting them here with no IndexedDB would leave business data in
     // memory only, and it would vanish on the next reload.
-    if (db) {
+    const serverBacked = (typeof isServerModeEnabled === 'function') && isServerModeEnabled();
+    if (db || serverBacked) {
       for (const key of PERSISTED_COLLECTIONS) {
         delete toSave[key];
       }
@@ -3553,12 +3957,48 @@ async function sanitizeCollectionInPlace(collectionName) {
     // Yield to keep UI responsive
     await new Promise(r => setTimeout(r, 0));
   }
+
+  // Old local caches predate strict id validation. Quarantine unsafe records
+  // instead of rendering them (stored XSS) or silently discarding them. The
+  // original sanitized rows remain exportable in state for manual recovery;
+  // an IndexedDB source is marked protected so the filtered array cannot
+  // overwrite it.
+  const safe = [];
+  const quarantined = [];
+  for (let i = 0; i < arr.length; i++) {
+    const result = Security.validateRecordIdentifiers(arr[i], `${collectionName}[${i}]`);
+    if (result.valid) safe.push(arr[i]);
+    else quarantined.push({ record: arr[i], reason: result.error || 'Invalid identifier' });
+  }
+  if (quarantined.length > 0) {
+    if (!state._quarantinedUnsafeRecords || typeof state._quarantinedUnsafeRecords !== 'object') {
+      state._quarantinedUnsafeRecords = {};
+    }
+    state._quarantinedUnsafeRecords[collectionName] = quarantined;
+    state[collectionName] = safe;
+    if (db) markCollectionCorrupted(collectionName);
+    _notifyCollectionCorruption(collectionName);
+  }
 }
 
 async function sanitizeAllCollectionsForRendering() {
   for (const name of PERSISTED_COLLECTIONS) {
     await sanitizeCollectionInPlace(name);
   }
+}
+
+function assertCachedCollectionIdentifiersSafe() {
+  for (const name of PERSISTED_COLLECTIONS) {
+    const records = state[name];
+    if (!Array.isArray(records)) continue;
+    const result = Security.validateRecordIdentifiers(records, `cache.${name}`);
+    if (!result.valid) {
+      const error = new Error(`Unsafe cached business data rejected: ${result.error}`);
+      error.code = 'UNSAFE_CACHED_IDENTIFIER';
+      throw error;
+    }
+  }
+  return true;
 }
 
 // ==========================================
@@ -3881,7 +4321,6 @@ async function ensureUsersHavePasswordHashes() {
     await flushDirtyCollections();
   }
 }
-
 // ==========================================
 // TRANSLATIONS
 // ==========================================
@@ -4318,6 +4757,16 @@ function getMonotonicTime() {
 // the server never stored and which always produced a false 409.
 const _patchChains = new Map();
 
+function serverRecordMatchesCreateRetry(serverRecord, requestedRecord) {
+  if (!serverRecord || !requestedRecord || String(serverRecord.id || '') !== String(requestedRecord.id || '')) return false;
+  const ignored = new Set(['_lastModified', '_created', '_deleted', 'createdAt', 'createdBy']);
+  for (const [key, value] of Object.entries(requestedRecord)) {
+    if (ignored.has(key) || value === undefined) continue;
+    if (JSON.stringify(serverRecord[key]) !== JSON.stringify(value)) return false;
+  }
+  return true;
+}
+
 /**
  * Add a new record to a collection (receipts, ads, customers, etc.).
  * 
@@ -4346,9 +4795,19 @@ const _patchChains = new Map();
  *   - Automatic rollback prevents data loss
  */
 function addRecord(array, record) {
+  if (!Array.isArray(array) || !record || typeof record !== 'object') return Promise.resolve(false);
   const collectionName = getCollectionNameFromArray(array);
   const cleanRecord = Security.sanitizeObject(record);
   if (!cleanRecord.id) cleanRecord.id = Security.generateSecureId(collectionName || 'id');
+  const idCheck = Security.validateRecordIdentifiers(cleanRecord, collectionName || 'record');
+  if (!idCheck.valid || !Security.isValidRecordId(cleanRecord.id)) {
+    showNotification('Invalid Record', idCheck.error || 'The record id is not allowed.', 'error');
+    return Promise.resolve(false);
+  }
+  if (array.some(item => item && String(item.id) === String(cleanRecord.id))) {
+    showNotification('Duplicate Record', `A record with id "${cleanRecord.id}" already exists.`, 'error');
+    return Promise.resolve(false);
+  }
 
   cleanRecord._lastModified = getMonotonicTime();
   cleanRecord._deleted = false;
@@ -4364,7 +4823,7 @@ function addRecord(array, record) {
   // Server write-through (always-online multi-user mode)
   if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
     const id = cleanRecord.id;
-    apiCreateEntity(collectionName, cleanRecord)
+    return apiCreateEntity(collectionName, cleanRecord)
       .then((entity) => {
         if (entity?.data && entity?.id) {
           const idx = array.findIndex(x => x && x.id === id);
@@ -4374,8 +4833,24 @@ function addRecord(array, record) {
             saveState();
           }
         }
+        return true;
       })
-      .catch((e) => {
+      .catch(async (e) => {
+        // A POST may commit and then lose its response. The automatic retry
+        // receives 409 even though the desired row exists. Confirm its content
+        // before accepting it; otherwise roll back as a real collision.
+        if (e?.status === 409) {
+          try {
+            const existing = await apiGetEntity(collectionName, id);
+            if (existing?.data && serverRecordMatchesCreateRetry(existing.data, cleanRecord)) {
+              const idx = array.findIndex(x => x && x.id === id);
+              if (idx !== -1) array[idx] = Security.sanitizeObject(existing.data);
+              markCollectionDirty(collectionName);
+              saveState();
+              return true;
+            }
+          } catch (_) {}
+        }
         // Rollback on failure
         const idx = array.findIndex(x => x && x.id === id);
         if (idx !== -1) array.splice(idx, 1);
@@ -4389,11 +4864,18 @@ function addRecord(array, record) {
         } else {
           showNotification('Server Error', `Failed to create ${collectionName}: ${e.message || 'Error'}`, 'error');
         }
+        return false;
       });
   } else if (isServerModeEnabled() && collectionName === 'users') {
     // Creating users requires server-side password handling; this path should not be used.
+    const idx = array.findIndex(x => x && x.id === cleanRecord.id);
+    if (idx !== -1) array.splice(idx, 1);
+    markCollectionDirty('users');
+    saveState();
     showNotification('Server Mode', 'Create users from the server-backed Users screen (Admin only).', 'warning');
+    return Promise.resolve(false);
   }
+  return Promise.resolve(true);
 }
 
 /**
@@ -4430,16 +4912,25 @@ function addRecord(array, record) {
  *   - Prevents lost updates in multi-user scenarios
  */
 function updateRecord(array, id, updates, expectedLastModified) {
+  if (!Array.isArray(array) || !Security.isValidRecordId(id)) {
+    showNotification('Invalid Record', 'The record id is not allowed.', 'error');
+    return Promise.resolve(false);
+  }
   const index = array.findIndex(item => item.id === id);
   if (index !== -1) {
     const old = { ...array[index] };
     const collectionName = getCollectionNameFromArray(array);
     if (collectionName === 'walletTransactions') {
       showNotification('Not Allowed', 'Wallet transactions are immutable. Create a new transaction to correct mistakes.', 'error');
-      return;
+      return Promise.resolve(false);
     }
 
     const sanitizedUpdates = Security.sanitizeObject(updates);
+    const updatesIdCheck = Security.validateRecordIdentifiers(sanitizedUpdates, `${collectionName || 'record'}.updates`);
+    if (!updatesIdCheck.valid) {
+      showNotification('Invalid Record', updatesIdCheck.error, 'error');
+      return Promise.resolve(false);
+    }
     // Never allow changing protected fields
     const protectedFields = ['id', '_created', 'createdBy', 'createdAt', 'creatorId'];
     for (const field of protectedFields) {
@@ -4451,7 +4942,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
       const isSelf = String(state.currentUser.id || '') === String(id || '');
       if (!isSelf) {
         showNotification('Access Denied', state.language === 'ar' ? 'لا يمكنك تعديل مستخدمين آخرين' : 'You cannot edit other users', 'error');
-        return;
+        return Promise.resolve(false);
       }
       const blocked = ['role', 'permissions', 'subscriptions'];
       for (const k of blocked) {
@@ -4505,6 +4996,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
               forceFullRender();
             }
           }
+          return true;
         })
         .catch(async (e) => {
           if (e?.status === 409) {
@@ -4518,7 +5010,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
               }
               showNotification('Conflict', 'This record was changed by another user. We loaded the latest version.', 'warning');
               render();
-              return;
+              return false;
             } catch (err) {
               // fallthrough to rollback
             }
@@ -4537,6 +5029,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
             showNotification('Server Error', `Failed to save ${collectionName}: ${e.message || 'Error'}`, 'error');
           }
           render();
+          return false;
         });
       };
       // Chain this PATCH after any in-flight PATCH for the same record (run
@@ -4545,9 +5038,14 @@ function updateRecord(array, id, updates, expectedLastModified) {
       const _prevPatch = _patchChains.get(_patchChainKey) || Promise.resolve();
       const _thisPatch = _prevPatch.then(sendPatch, sendPatch);
       _patchChains.set(_patchChainKey, _thisPatch);
-      _thisPatch.finally(() => {
+      const cleanupPatchChain = () => {
         if (_patchChains.get(_patchChainKey) === _thisPatch) _patchChains.delete(_patchChainKey);
-      });
+      };
+      // `finally()` creates a second rejecting Promise. Ignoring that derived
+      // Promise produced an unhandled rejection even when the caller correctly
+      // awaited/caught _thisPatch. Both branches here resolve after cleanup.
+      _thisPatch.then(cleanupPatchChain, cleanupPatchChain);
+      return _thisPatch;
     } else if (isServerModeEnabled() && collectionName === 'users') {
       // Map to server user update API (Admin only)
       const payload = {};
@@ -4557,7 +5055,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
       if (sanitizedUpdates.permissions !== undefined) payload.permissions = sanitizedUpdates.permissions;
       if (sanitizedUpdates._deleted !== undefined) payload.deleted = !!sanitizedUpdates._deleted;
 
-      apiUpdateUser(id, payload)
+      return apiUpdateUser(id, payload)
         .then((updatedUser) => {
           const idx = array.findIndex(x => x && x.id === id);
           if (idx !== -1 && updatedUser) {
@@ -4566,6 +5064,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
             saveState();
             render();
           }
+          return true;
         })
         .catch((e) => {
           const idx = array.findIndex(x => x && x.id === id);
@@ -4574,22 +5073,29 @@ function updateRecord(array, id, updates, expectedLastModified) {
           saveState();
           showNotification('Server Error', `Failed to update user: ${e.message || 'Error'}`, 'error');
           render();
+          return false;
         });
     }
+    return Promise.resolve(true);
   }
+  return Promise.resolve(false);
 }
 
 function deleteRecord(array, id, opts) {
+  if (!Array.isArray(array) || !Security.isValidRecordId(id)) {
+    showNotification('Invalid Record', 'The record id is not allowed.', 'error');
+    return Promise.resolve(false);
+  }
   const index = array.findIndex(item => item.id === id);
   if (index !== -1) {
     const collectionName = getCollectionNameFromArray(array);
     if (collectionName === 'walletTransactions') {
       showNotification('Not Allowed', 'Wallet transactions cannot be deleted. Use a reversal transaction.', 'error');
-      return;
+      return Promise.resolve(false);
     }
     if (collectionName === 'serviceSubscriptions') {
       showNotification('Not Allowed', 'Subscription history cannot be deleted.', 'error');
-      return;
+      return Promise.resolve(false);
     }
     const old = { ...array[index] };
     array[index]._deleted = true;
@@ -4606,15 +5112,16 @@ function deleteRecord(array, id, opts) {
       if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
         opts.collectServerOps.push({ collection: collectionName, id, old, array });
       }
-      return;
+      return Promise.resolve(true);
     }
 
     // Server write-through (always-online multi-user mode)
     if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
-      apiDeleteEntity(collectionName, id)
+      return apiDeleteEntity(collectionName, id)
         .then(() => {
           // ok
           render();
+          return true;
         })
         .catch((e) => {
           // Rollback on failure
@@ -4630,12 +5137,14 @@ function deleteRecord(array, id, opts) {
             showNotification('Server Error', `Failed to delete ${collectionName}: ${e.message || 'Error'}`, 'error');
           }
           render();
+          return false;
         });
     } else if (isServerModeEnabled() && collectionName === 'users') {
-      apiUpdateUser(id, { deleted: true })
+      return apiUpdateUser(id, { deleted: true })
         .then(() => {
           showNotification('Deleted', 'User deleted', 'success');
           render();
+          return true;
         })
         .catch((e) => {
           const idx = array.findIndex(x => x && x.id === id);
@@ -4650,9 +5159,12 @@ function deleteRecord(array, id, opts) {
             showNotification('Server Error', `Failed to delete user: ${e.message || 'Error'}`, 'error');
           }
           render();
+          return false;
         });
     }
+    return Promise.resolve(true);
   }
+  return Promise.resolve(false);
 }
 
 // Push a cascade's collected soft-deletes to the server as ONE all-or-nothing
@@ -4660,21 +5172,18 @@ function deleteRecord(array, id, opts) {
 // server or none is — a flaky connection can no longer leave a customer
 // cascade half-applied with some records resurrecting on other devices.
 // On failure the local soft-deletes are rolled back so local and server agree.
-function flushBatchDeletes(ops) {
-  if (!Array.isArray(ops) || ops.length === 0) return;
-  if (!isServerModeEnabled()) return;
-  apiBatchDeleteEntities(ops.map(o => ({ collection: o.collection, id: o.id })))
+async function flushBatchDeletes(ops) {
+  if (!Array.isArray(ops) || ops.length === 0) return true;
+  if (!isServerModeEnabled()) return true;
+  return await apiBatchDeleteEntities(ops.map(o => ({ collection: o.collection, id: o.id })))
     .then(() => {
       render();
+      return true;
     })
     .catch((e) => {
       if (e?.status === 404 || e?.status === 405) {
-        // Older server without the batch endpoint — push one by one with
-        // retry (the pre-batch behavior).
-        ops.forEach(o => {
-          apiDeleteEntity(o.collection, o.id).catch(() => {});
-        });
-        return;
+        // Never fall back to independent fire-and-forget deletes. That could
+        // commit only part of a cascade while the UI claimed full success.
       }
       // The server refused the whole batch: roll back every local soft-delete
       // so nothing is half-deleted anywhere.
@@ -4692,6 +5201,7 @@ function flushBatchDeletes(ops) {
         'error'
       );
       render();
+      return false;
     });
 }
 
@@ -4905,7 +5415,8 @@ function enforceSecretFeaturesGate() {
   }
   // Also check if user has permission for the current Albayan Manager view
   const view = String(state.currentView || '');
-  if (view && view !== 'delivery-dashboard' && view !== 'no-access' && !userCanAccessView(state.currentUser, view)) {
+  const _deliveryExempt = view === 'delivery-dashboard' && isDeliveryRole(state.currentUser?.role);
+  if (view && !_deliveryExempt && view !== 'no-access' && !userCanAccessView(state.currentUser, view)) {
     // User doesn't have permission for this view, find first allowed view
     state.currentView = getAlbayanManagerLandingViewForUser(state.currentUser);
     state.viewData = null;
@@ -5189,7 +5700,6 @@ function getEffectiveExchangeRate(ad) {
   // 7. Fall back to default
   return state.defaultExchangeRate || 1;
 }
-
 // ==========================================
 // AUTHENTICATION
 // ==========================================
@@ -5395,6 +5905,9 @@ function setRateLimitCooldown(endpoint, retryAfterSeconds) {
 }
 
 async function apiJson(path, options = {}, timeout = {}) {
+  const requestSessionIdentity = (typeof getServerSessionIdentity === 'function')
+    ? getServerSessionIdentity()
+    : '';
   // Check if we're in a cooldown period for this endpoint
   const endpointKey = path.includes('/auth/login') ? 'login' : 'general';
   const cooldownCheck = isRateLimited(endpointKey);
@@ -5427,6 +5940,18 @@ async function apiJson(path, options = {}, timeout = {}) {
   
   if (!resp.ok) {
     const msg = (data && typeof data === 'object' && data.detail) ? data.detail : (resp.statusText || 'Request failed');
+    // A definitive 401 during an authenticated request means cached business
+    // data must not remain visible indefinitely. Login/setup failures and the
+    // user's own logout request are intentionally excluded.
+    if (
+      resp.status === 401 &&
+      state.currentUser &&
+      !['/api/auth/login', '/api/auth/setup-admin', '/api/auth/logout'].includes(path) &&
+      typeof handleServerAuthExpired === 'function' &&
+      !serverSessionIdentityChanged(requestSessionIdentity)
+    ) {
+      await handleServerAuthExpired(requestSessionIdentity);
+    }
     const err = new Error(msg);
     err.status = resp.status;
     err.payload = data;
@@ -5516,17 +6041,23 @@ async function apiLogin(email, password) {
 async function apiNeedsSetup() {
   try {
     const res = await apiJson('/api/auth/needs-setup', { method: 'GET' }, { timeoutMs: 8000 });
-    return !!res?.needsSetup;
+    return {
+      needsSetup: res?.needsSetup === true,
+      setupEnabled: res?.setupEnabled === true
+    };
   } catch {
-    return false;
+    return { needsSetup: false, setupEnabled: false };
   }
 }
 
 // First-run bootstrap: create the very first admin straight from the browser
 // (replaces the shell `python -m server.create_admin` step). The server only
 // honors this while zero users exist, then logs the new admin in.
-async function apiSetupAdmin(name, email, password) {
-  const res = await apiJson('/api/auth/setup-admin', { method: 'POST', body: { name, email, password } }, { timeoutMs: 15000 });
+async function apiSetupAdmin(name, email, password, setupToken) {
+  const res = await apiJson('/api/auth/setup-admin', {
+    method: 'POST',
+    body: { name, email, password, setupToken }
+  }, { timeoutMs: 15000 });
   return res?.user || null;
 }
 
@@ -5539,38 +6070,109 @@ async function apiLogout() {
   }
 }
 
-// Cache for users list to avoid repeated API calls
-let _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000 }; // 30 second cache
+function getServerSessionIdentity() {
+  const epoch = (typeof _serverLiveSync === 'object' && _serverLiveSync)
+    ? Number(_serverLiveSync.sessionEpoch || 0)
+    : 0;
+  const userId = String(state.currentUser?.id || '');
+  const scope = (typeof getCollectionStorageScope === 'function')
+    ? String(getCollectionStorageScope() || '')
+    : '';
+  return `${epoch}|${userId}|${scope}`;
+}
+
+function serverSessionIdentityChanged(snapshot) {
+  return String(snapshot || '') !== getServerSessionIdentity();
+}
+
+function makeSessionChangedError() {
+  const error = new Error('Authenticated session changed while data was loading');
+  error.code = 'SERVER_SESSION_CHANGED';
+  return error;
+}
+
+// Collections synchronized through the generic collection API. Keep this one
+// list shared by full loads, per-collection cursors and visibility purges so a
+// newly-added collection cannot accidentally miss one of the safety paths.
+const SERVER_SYNC_COLLECTIONS = Object.freeze([
+  'ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory',
+  'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings',
+  'walletTransactions', 'serviceSubscriptions'
+]);
+
+// Capture server-issued collection watermarks BEFORE a full load starts. A
+// full load spans several requests and is not one DB snapshot; seeding a delta
+// cursor from the rows it happened to return can skip a write that lands after
+// an early collection request. Starting the follow-up delta at these captured
+// values makes every write concurrent with the snapshot visible.
+async function apiGetSyncWatermarks() {
+  const identity = getServerSessionIdentity();
+  const payload = await apiJson('/api/sync/watermarks', { method: 'GET' }, { timeoutMs: 10000 });
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  const source = payload?.watermarks && typeof payload.watermarks === 'object'
+    ? payload.watermarks
+    : payload;
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    const error = new Error('Invalid sync watermarks response');
+    error.code = 'INVALID_SYNC_WATERMARKS';
+    throw error;
+  }
+  const watermarks = Object.create(null);
+  for (const collection of SERVER_SYNC_COLLECTIONS) {
+    const raw = source[collection];
+    // A forbidden/omitted collection deliberately stays at zero. If access is
+    // granted later, the next delta fetch must retrieve its full visible set.
+    if (raw === undefined || raw === null) continue;
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value < 0) {
+      const error = new Error(`Invalid sync watermark for ${collection}`);
+      error.code = 'INVALID_SYNC_WATERMARKS';
+      throw error;
+    }
+    watermarks[collection] = value;
+  }
+  return watermarks;
+}
+
+// Cache for users list to avoid repeated API calls. It is identity-scoped:
+// an Admin's full user list must never be reused by a later non-admin session.
+let _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000, identity: '' }; // 30 second cache
 
 // Session cache to prevent logout on rapid refresh
 let _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 }; // 10 second cache
 
 async function apiListUsersForUi() {
+  const identity = getServerSessionIdentity();
   // Return cached data if fresh (within 30 seconds)
   const now = Date.now();
-  if (_usersListCache.data && (now - _usersListCache.timestamp) < _usersListCache.cacheDurationMs) {
+  if (_usersListCache.identity === identity && _usersListCache.data && (now - _usersListCache.timestamp) < _usersListCache.cacheDurationMs) {
     return _usersListCache.data;
   }
   
-  // Admins can access full list; others get minimal list
+  // Admins (and users with the users.view permission) can access the full
+  // list; others get the minimal public list.
   try {
-    const result = await withRetry(
-      () => apiJson('/api/users', { method: 'GET' }, { timeoutMs: 10000 }), // Faster timeout
-      2, 300 // Faster retry
-    );
-    _usersListCache = { data: result, timestamp: now, cacheDurationMs: 30000 };
-    return result;
-  } catch (e) {
-    if (e?.status === 403) {
+    try {
+      const result = await withRetry(
+        () => apiJson('/api/users', { method: 'GET' }, { timeoutMs: 10000 }), // Faster timeout
+        2, 300 // Faster retry
+      );
+      if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+      _usersListCache = { data: result, timestamp: now, cacheDurationMs: 30000, identity };
+      return result;
+    } catch (e) {
+      if (e?.status !== 403) throw e;
       const result = await withRetry(
         () => apiJson('/api/users/public', { method: 'GET' }, { timeoutMs: 10000 }),
         2, 300
       );
-      _usersListCache = { data: result, timestamp: now, cacheDurationMs: 30000 };
+      if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+      _usersListCache = { data: result, timestamp: now, cacheDurationMs: 30000, identity };
       return result;
     }
-    // On error, return cached data even if stale
-    if (_usersListCache.data) {
+  } catch (e) {
+    // On error (either endpoint), return cached data even if stale
+    if (_usersListCache.identity === identity && _usersListCache.data) {
       console.warn('[apiListUsersForUi] Using stale cache due to error');
       return _usersListCache.data;
     }
@@ -5578,12 +6180,47 @@ async function apiListUsersForUi() {
   }
 }
 
+// The users-list cache must never outlive a user mutation, or the next
+// live-sync tick re-serves pre-edit permissions and overwrites fresh local
+// state with stale data.
+function invalidateUsersListCache() {
+  _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000, identity: '' };
+}
+
+// The server's audit trail. GET /api/audit enforces auditLogs.view (all rows)
+// vs auditLogs.viewOwn (own rows only), so what comes back is already scoped
+// to the caller — unlike the device-local state.logs trail.
+async function apiListAuditLogs(limit = 500) {
+  const rows = await apiJson(`/api/audit?limit=${encodeURIComponent(limit)}&offset=0`, { method: 'GET' }, { timeoutMs: 15000 });
+  if (!Array.isArray(rows)) return [];
+  return rows.map((r) => {
+    const uid = String(r.user_id || '');
+    const u = (state.users || []).find(x => x && String(x.id) === uid);
+    return {
+      id: String(r.id || ''),
+      date: new Date(Number(r.ts) || 0).toISOString(),
+      userId: uid,
+      userName: u?.name || (uid ? uid : 'System'),
+      action: String(r.action || ''),
+      category: String(r.resource_type || 'general'),
+      severity: 'info',
+      description: String(r.message || ''),
+      resourceId: String(r.resource_id || ''),
+      metadata: (r.metadata && typeof r.metadata === 'object') ? r.metadata : {}
+    };
+  });
+}
+
 async function apiCreateUser(user) {
-  return await apiJson('/api/users', { method: 'POST', body: user }, { timeoutMs: 20000 });
+  const res = await apiJson('/api/users', { method: 'POST', body: user }, { timeoutMs: 20000 });
+  invalidateUsersListCache();
+  return res;
 }
 
 async function apiUpdateUser(userId, updates) {
-  return await apiJson(`/api/users/${encodeURIComponent(userId)}`, { method: 'PATCH', body: updates }, { timeoutMs: 20000 });
+  const res = await apiJson(`/api/users/${encodeURIComponent(userId)}`, { method: 'PATCH', body: updates }, { timeoutMs: 20000 });
+  invalidateUsersListCache();
+  return res;
 }
 
 // Debounced server-side persistence for user permission changes.
@@ -5600,7 +6237,9 @@ function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
   const uid = String(userId || '');
   if (!uid) return;
   if (!isServerModeEnabled()) return;
-  if (!isCurrentUserAdmin()) return;
+  // Permission edits are made by Admins or users.managePermissions holders;
+  // the server enforces the same rule.
+  if (!canManageUsersAction('managePermissions')) return;
 
   const prev = _serverUserUpdate.pending.get(uid) || {};
   _serverUserUpdate.pending.set(uid, { ...prev, ...(updates && typeof updates === 'object' ? updates : {}) });
@@ -5633,13 +6272,42 @@ function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
   _serverUserUpdate.timers.set(uid, t);
 }
 
+// Fire all debounce-pending user updates IMMEDIATELY. Called on pagehide and
+// logout: without this, closing/reloading the tab within the 700ms debounce
+// silently drops a permission grant — the admin's screen keeps showing 90/90
+// (saved locally) while the server row never received it.
+// Uses raw fetch with keepalive so the request survives page teardown, and no
+// navigation-abort signal is attached.
+function flushPendingUserUpdates() {
+  const inflight = [];
+  try {
+    for (const [uid, timer] of _serverUserUpdate.timers) {
+      clearTimeout(timer);
+      _serverUserUpdate.timers.delete(uid);
+      const payload = _serverUserUpdate.pending.get(uid);
+      _serverUserUpdate.pending.delete(uid);
+      if (!payload || Object.keys(payload).length === 0) continue;
+      try {
+        inflight.push(fetch(`${getServerBaseUrl()}/api/users/${encodeURIComponent(uid)}`, {
+          method: 'PATCH',
+          credentials: 'include',
+          keepalive: true,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }).then(() => { try { invalidateUsersListCache(); } catch (_) {} }).catch(() => {}));
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return Promise.allSettled(inflight);
+}
+
 // Collection data cache for instant loading
 const _collectionCache = {
-  ads: { data: null, timestamp: 0 },
-  receipts: { data: null, timestamp: 0 },
-  customers: { data: null, timestamp: 0 },
-  pages: { data: null, timestamp: 0 },
-  exchangeRateHistory: { data: null, timestamp: 0 }
+  ads: { data: null, timestamp: 0, identity: '' },
+  receipts: { data: null, timestamp: 0, identity: '' },
+  customers: { data: null, timestamp: 0, identity: '' },
+  pages: { data: null, timestamp: 0, identity: '' },
+  exchangeRateHistory: { data: null, timestamp: 0, identity: '' }
 };
 const CACHE_TTL_MS = 5000; // 5 seconds - show cached data instantly, then refresh
 
@@ -5684,9 +6352,14 @@ function isRefreshThrottled() {
   return false;
 }
 
-// Cancel pending requests when the page is being unloaded (refresh/back)
+// Cancel pending requests when the page is being unloaded (refresh/back).
+// FIRST flush any debounce-pending user updates (permission grants) with
+// keepalive so they are not silently lost with the page.
 try {
-  window.addEventListener('pagehide', () => cancelPendingRequests(), { passive: true });
+  window.addEventListener('pagehide', () => {
+    try { flushPendingUserUpdates(); } catch (_) {}
+    cancelPendingRequests();
+  }, { passive: true });
 } catch (_) {}
 
 // Get timeout based on collection type (larger collections need more time)
@@ -5702,29 +6375,125 @@ function getCollectionTimeout(collection) {
   return timeouts[collection] || timeouts.default;
 }
 
-async function apiLoadCollectionAll(collection) {
+// Every entity endpoint returns the same envelope. Validate it at this single
+// trust boundary before any caller can merge the payload into state. This is
+// intentionally shared by list/delta/get/create/patch and the transactional
+// wallet/subscription endpoints: validating only list responses left conflict
+// recovery and payment refresh able to upsert poisoned relationship ids.
+function validateServerEntityResponse(collection, entity, context = 'response') {
+  const name = String(collection || 'entity');
+  if (!entity || typeof entity !== 'object' || Array.isArray(entity)) {
+    const error = new Error(`Invalid ${name} ${context}: missing entity envelope`);
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  if (typeof entity.id !== 'string' || !Security.isValidRecordId(entity.id)) {
+    const error = new Error(`Rejected unsafe ${name} ${context}: invalid entity id`);
+    error.code = 'UNSAFE_RECORD_IDENTIFIER';
+    throw error;
+  }
+  if (!entity.data || typeof entity.data !== 'object' || Array.isArray(entity.data)) {
+    const error = new Error(`Invalid ${name} ${context}: missing record data`);
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  const idCheck = Security.validateRecordIdentifiers(entity.data, `${name}.${context}`);
+  if (!idCheck.valid) {
+    const error = new Error(`Rejected unsafe ${name} ${context}: ${idCheck.error}`);
+    error.code = 'UNSAFE_RECORD_IDENTIFIER';
+    throw error;
+  }
+  if (typeof entity.data.id !== 'string' || entity.data.id !== entity.id) {
+    const error = new Error(`Invalid ${name} ${context}: envelope/data id mismatch`);
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  return entity;
+}
+
+async function requestValidatedServerEntity(collection, context, loader) {
+  const identity = getServerSessionIdentity();
+  const entity = await loader();
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  return validateServerEntityResponse(collection, entity, context);
+}
+
+function mergeServerEntityDataById(target, indexById, entity) {
+  const existingIndex = indexById.get(entity.id);
+  if (existingIndex === undefined) {
+    indexById.set(entity.id, target.length);
+    target.push(entity.data);
+    return true;
+  }
+  if (Number(entity.lastModified || 0) >= Number(target[existingIndex]?._lastModified || 0)) {
+    target[existingIndex] = entity.data;
+  }
+  return false;
+}
+
+// Apply a group of already-committed server entities to local state as one
+// in-memory step. Prepare and validate every item first so a malformed second
+// envelope can never leave only the first item applied locally.
+function applyValidatedServerEntityBatch(entries, reason = 'serverMutation') {
+  const prepared = (Array.isArray(entries) ? entries : []).map((entry, index) => {
+    const collection = String(entry?.collection || '');
+    if (!collection || !Array.isArray(state[collection])) {
+      const error = new Error(`Invalid server mutation collection at index ${index}`);
+      error.code = 'INVALID_ENTITY_RESPONSE';
+      throw error;
+    }
+    const entity = validateServerEntityResponse(collection, entry.entity, `${reason}[${index}]`);
+    return { collection, saved: Security.sanitizeObject(entity.data) };
+  });
+
+  for (const { collection, saved } of prepared) {
+    const target = state[collection];
+    const existingIndex = target.findIndex(row => row && String(row.id) === String(saved.id));
+    if (existingIndex === -1) target.unshift(saved);
+    else target[existingIndex] = saved;
+    if (_collectionCache[collection]) {
+      _collectionCache[collection] = { data: null, timestamp: 0, identity: '' };
+    }
+    if (typeof clearCollectionCorruption === 'function') clearCollectionCorruption(collection);
+    markCollectionDirty(collection);
+  }
+  if (prepared.length > 0) {
+    saveState();
+    RenderQueue.schedule(reason);
+  }
+  return prepared.map(item => item.saved);
+}
+
+async function apiLoadCollectionAll(collection, { forceRefresh = false } = {}) {
+  const identity = getServerSessionIdentity();
+  const requestKey = `${identity}|${String(collection || '')}|${forceRefresh ? 'fresh' : 'cached'}`;
   const now = Date.now();
 
   // Return cached data immediately if fresh (but only for non-critical refreshes)
   const cache = _collectionCache[collection];
-  if (cache && cache.data && (now - cache.timestamp) < CACHE_TTL_MS) {
+  if (!forceRefresh && cache && cache.identity === identity && cache.data && (now - cache.timestamp) < CACHE_TTL_MS) {
     return cache.data;
   }
 
   // Request deduplication: if there's already a pending request for this collection, wait for it
-  if (_pendingRequests.has(collection)) {
+  if (_pendingRequests.has(requestKey)) {
     try {
-      return await _pendingRequests.get(collection);
+      const shared = await _pendingRequests.get(requestKey);
+      if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+      return shared;
     } catch (e) {
       // If the pending request failed, we'll try again below
-      _pendingRequests.delete(collection);
+      _pendingRequests.delete(requestKey);
+      if (e?.code === 'SERVER_SESSION_CHANGED') throw e;
     }
   }
 
   // Create the actual request with timeout protection
   const requestPromise = (async () => {
     const all = [];
-    let offset = 0;
+    const indexById = new Map();
+    let beforeCreatedAt = null;
+    let beforeId = '';
     const limit = SERVER_API.pageSize || 300;
     const timeoutMs = getCollectionTimeout(collection);
     let pageCount = 0;
@@ -5735,44 +6504,66 @@ async function apiLoadCollectionAll(collection) {
     // the oldest from view and understating every total.
     const _maxRecords = (typeof STORAGE_CONFIG !== 'undefined' && STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION) || 100000;
     const maxPages = Math.ceil(_maxRecords / limit) + 5;
-    let partial = false;
     let lastPageFull = false;
 
     while (pageCount < maxPages) {
       pageCount++;
       try {
         // Use retry logic for resilience against transient server errors/timeouts
+        let path = `/api/collections/${encodeURIComponent(collection)}?limit=${limit}&include_deleted=true`;
+        if (beforeCreatedAt !== null && beforeId) {
+          path += `&before_created_at=${encodeURIComponent(String(beforeCreatedAt))}&before_id=${encodeURIComponent(beforeId)}`;
+        }
         const items = await withRetry(
           () => apiJson(
-            `/api/collections/${encodeURIComponent(collection)}?limit=${limit}&offset=${offset}&include_deleted=true`,
+            path,
             { method: 'GET' },
             { timeoutMs }
           ),
           2, // 2 retries (3 total attempts) - reduced for faster failure
           300 // 300ms base delay (faster retry)
         );
+        if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
 
         if (!Array.isArray(items) || items.length === 0) { lastPageFull = false; break; }
 
-        for (const entity of items) {
-          if (entity && entity.data) all.push(entity.data);
+        let lastEntity = null;
+        for (const rawEntity of items) {
+          const entity = validateServerEntityResponse(collection, rawEntity, `list[${all.length}]`);
+          lastEntity = entity;
+          // Defensive only: keyset pages should not overlap, but a record can
+          // be updated while pagination is running. Keep one ID and prefer the
+          // newest server version rather than rendering duplicates.
+          mergeServerEntityDataById(all, indexById, entity);
         }
 
         if (items.length < limit) { lastPageFull = false; break; }
         lastPageFull = true;
-        offset += limit;
-      } catch (pageError) {
-        // Partial load: only accept it if it is not WORSE than what the app
-        // already has. Otherwise let the error propagate so the caller's
-        // keep-existing-data guard preserves the more complete local copy
-        // instead of wholesale-replacing it with a truncated list.
-        const existing = Array.isArray(state[collection]) ? state[collection].length : 0;
-        if (all.length > 0 && all.length >= existing) {
-          console.warn(`[apiLoadCollectionAll] Partial load for ${collection}: got ${all.length} items before error`, pageError?.message);
-          partial = true;
-          break;
+        const nextCreatedAt = Number(lastEntity?.createdAt);
+        const nextId = String(lastEntity?.id || '');
+        if (!Number.isSafeInteger(nextCreatedAt) || nextCreatedAt < 0 || !Security.isValidRecordId(nextId)) {
+          const cursorError = new Error(`Invalid ${collection} full-page cursor`);
+          cursorError.code = 'INCOMPLETE_COLLECTION_LOAD';
+          throw cursorError;
         }
-        throw pageError;
+        if (nextCreatedAt === beforeCreatedAt && nextId === beforeId) {
+          const cursorError = new Error(`Repeated ${collection} full-page cursor`);
+          cursorError.code = 'INCOMPLETE_COLLECTION_LOAD';
+          throw cursorError;
+        }
+        beforeCreatedAt = nextCreatedAt;
+        beforeId = nextId;
+      } catch (pageError) {
+        // A failed later page is never authoritative, even if it happens to
+        // contain more rows than the current cache. Propagate an explicit
+        // incomplete result so no caller can replace/persist complete state
+        // with a prefix of the server collection.
+        const incompleteError = pageError instanceof Error ? pageError : new Error('Collection page failed');
+        incompleteError.code = incompleteError.code || 'INCOMPLETE_COLLECTION_LOAD';
+        incompleteError.collection = collection;
+        incompleteError.partialCount = all.length;
+        console.warn(`[apiLoadCollectionAll] Incomplete load for ${collection}: got ${all.length} items before error`, incompleteError.message);
+        throw incompleteError;
       }
     }
 
@@ -5781,47 +6572,199 @@ async function apiLoadCollectionAll(collection) {
     // an authoritative complete load (don't cache), and warn loudly.
     if (lastPageFull && pageCount >= maxPages) {
       console.warn(`[apiLoadCollectionAll] ${collection}: hit ${maxPages}-page cap (${all.length} records) with a full final page — collection exceeds the supported maximum and was truncated.`);
-      partial = true;
+      const capError = new Error(`${collection} exceeds the supported maximum; refusing truncated data`);
+      capError.code = 'INCOMPLETE_COLLECTION_LOAD';
+      capError.collection = collection;
+      capError.partialCount = all.length;
+      throw capError;
     }
 
-    // Update cache only for complete loads — never persist a truncated result.
-    if (!partial && _collectionCache[collection]) {
-      _collectionCache[collection] = { data: all, timestamp: Date.now() };
+    // Reaching here proves every page completed. Only complete arrays may enter
+    // the in-memory request cache or IndexedDB persistence path.
+    if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+    if (_collectionCache[collection]) {
+      _collectionCache[collection] = { data: all, timestamp: Date.now(), identity };
     }
 
     return all;
   })();
 
   // Store the pending request
-  _pendingRequests.set(collection, requestPromise);
+  _pendingRequests.set(requestKey, requestPromise);
 
   try {
     const result = await requestPromise;
+    if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
     return result;
   } finally {
     // Clean up pending request
-    _pendingRequests.delete(collection);
+    if (_pendingRequests.get(requestKey) === requestPromise) _pendingRequests.delete(requestKey);
   }
 }
 
 async function apiGetEntity(collection, id) {
-  return await apiJson(`/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`, { method: 'GET' }, { timeoutMs: 15000 });
+  return await requestValidatedServerEntity(collection, 'get', () =>
+    apiJson(`/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`, { method: 'GET' }, { timeoutMs: 15000 })
+  );
 }
 
 async function apiCreateEntity(collection, record) {
-  return await withRetry(() => 
-    apiJson(`/api/collections/${encodeURIComponent(collection)}`, { method: 'POST', body: { id: record.id, data: record } }, { timeoutMs: 20000 })
-  , 2, 500);
+  return await requestValidatedServerEntity(collection, 'create', () =>
+    withRetry(() =>
+      apiJson(`/api/collections/${encodeURIComponent(collection)}`, { method: 'POST', body: { id: record.id, data: record } }, { timeoutMs: 20000 })
+    , 2, 500)
+  );
+}
+
+// Server-authoritative money operations. These endpoints validate balance,
+// catalog price/duration, permissions and idempotency inside one DB
+// transaction; callers must not emulate them with generic collection writes.
+async function apiWalletTransfer({ toUserId, amountMinor, currency, idempotencyKey, memo }) {
+  return await requestValidatedServerEntity('walletTransactions', 'transfer', () =>
+    apiJson('/api/wallet/transfers', {
+      method: 'POST',
+      body: { toUserId, amountMinor, currency, idempotencyKey, memo }
+    }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS })
+  );
+}
+
+async function apiWalletTopUp({ userId, amountMinor, currency, idempotencyKey, memo }) {
+  return await requestValidatedServerEntity('walletTransactions', 'top-up', () =>
+    apiJson('/api/wallet/top-ups', {
+      method: 'POST',
+      body: { userId, amountMinor, currency, idempotencyKey, memo }
+    }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS })
+  );
+}
+
+async function apiWalletReversal({ transactionId, memo }) {
+  return await requestValidatedServerEntity('walletTransactions', 'reversal', () =>
+    apiJson('/api/wallet/reversals', {
+      method: 'POST',
+      body: { transactionId, memo }
+    }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS })
+  );
+}
+
+async function apiPurchaseSubscription({ serviceId, idempotencyKey, userId }) {
+  const body = { serviceId, idempotencyKey };
+  if (userId) body.userId = userId;
+  return await requestValidatedServerEntity('serviceSubscriptions', 'purchase', () =>
+    apiJson('/api/subscriptions/purchase', {
+      method: 'POST',
+      body
+    }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS })
+  );
+}
+
+// Atomic receipt transfer: source deduction and target TRANSFER_IN receipt are
+// committed by the server together. The caller owns the stable target id and
+// idempotency key so a response-loss retry replays the same result.
+async function apiTransferReceipt(payload) {
+  const identity = getServerSessionIdentity();
+  const response = await apiJson('/api/receipts/transfers', {
+    method: 'POST',
+    body: payload
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  if (!response || typeof response !== 'object' || Array.isArray(response)) {
+    const error = new Error('Invalid receipt transfer response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  return {
+    sourceReceipt: validateServerEntityResponse('receipts', response.sourceReceipt, 'transfer.sourceReceipt'),
+    targetReceipt: validateServerEntityResponse('receipts', response.targetReceipt, 'transfer.targetReceipt'),
+    replayed: response.replayed === true
+  };
+}
+
+// Paid/due/merged allocations change receipt availability, so ad create/edit
+// must cross one server transaction boundary rather than generic collection
+// POST/PATCH calls.
+async function apiMutateAd(payload) {
+  const action = String(payload?.action || '');
+  if (!['create', 'update'].includes(action)) throw new Error('Invalid ad mutation action');
+  const identity = getServerSessionIdentity();
+  const response = await apiJson('/api/ads/mutate', {
+    method: 'POST',
+    body: payload
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  if (!response || typeof response !== 'object' || Array.isArray(response)) {
+    const error = new Error('Invalid ad mutation response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  return {
+    ad: validateServerEntityResponse('ads', response.ad, `${action}.ad`),
+    replayed: response.replayed === true
+  };
+}
+
+// Stop/re-edit is also server-authoritative: the client submits only the spent
+// amount and optimistic version; the server derives all allocation balances.
+async function apiStopAd(adId, payload) {
+  const safeAdId = String(adId || '');
+  if (!Security.isValidRecordId(safeAdId)) throw new Error('Invalid ad id');
+  const identity = getServerSessionIdentity();
+  const response = await apiJson(`/api/ads/${encodeURIComponent(safeAdId)}/stop`, {
+    method: 'POST',
+    body: payload
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  if (!response || typeof response !== 'object' || Array.isArray(response)) {
+    const error = new Error('Invalid ad stop response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  return {
+    ad: validateServerEntityResponse('ads', response.ad, 'stop.ad'),
+    replayed: response.replayed === true
+  };
+}
+
+// Clothes orders and their stock changes must commit together. Generic
+// collection POST/PATCH/DELETE calls cannot provide that guarantee, so every
+// server-mode order action uses this one idempotent transaction boundary.
+async function apiMutateClothesOrder(payload) {
+  const action = String(payload?.action || '');
+  if (!['create', 'update', 'status', 'payment', 'delete'].includes(action)) {
+    throw new Error('Invalid clothes order action');
+  }
+  const identity = getServerSessionIdentity();
+  const response = await apiJson('/api/clothes/orders/mutate', {
+    method: 'POST',
+    body: payload
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  if (!response || typeof response !== 'object' || Array.isArray(response)) {
+    const error = new Error('Invalid clothes order mutation response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  const order = validateServerEntityResponse('clothesOrders', response.order, `${action}.order`);
+  if (!Array.isArray(response.updatedProducts)) {
+    const error = new Error('Invalid clothes order products response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  const updatedProducts = response.updatedProducts.map((entity, index) =>
+    validateServerEntityResponse('clothesProducts', entity, `${action}.updatedProducts[${index}]`)
+  );
+  return { order, updatedProducts, replayed: response.replayed === true };
 }
 
 async function apiPatchEntity(collection, id, updates, expectedLastModified) {
-  return await withRetry(() =>
-    apiJson(
-      `/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
-      { method: 'PATCH', body: { data: updates, expectedLastModified } },
-      { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
-    )
-  , 2, 500);
+  return await requestValidatedServerEntity(collection, 'patch', () =>
+    withRetry(() =>
+      apiJson(
+        `/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
+        { method: 'PATCH', body: { data: updates, expectedLastModified } },
+        { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
+      )
+    , 2, 500)
+  );
 }
 
 // Full-record update used by the delete-cascade cleanup (15-modals.js). This
@@ -5844,10 +6787,12 @@ async function apiAdminRestoreEntity(collection, id, record) {
     lastModified: Number.isFinite(lastModified) ? lastModified : undefined,
     deleted: !!data._deleted
   };
-  return await apiJson(
-    `/api/admin/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}/restore`,
-    { method: 'PUT', body: payload },
-    { timeoutMs: 60000 }
+  return await requestValidatedServerEntity(collection, 'restore', () =>
+    apiJson(
+      `/api/admin/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}/restore`,
+      { method: 'PUT', body: payload },
+      { timeoutMs: 60000 }
+    )
   );
 }
 
@@ -5875,7 +6820,73 @@ async function apiAdminBulkImport(collections) {
   return await apiJson('/api/admin/import', { method: 'POST', body: { collections } }, { timeoutMs: 120000 });
 }
 
+// A single global delta cursor is safe to reseed only when EVERY collection
+// in the full snapshot completed. If (for example) receipts failed while ads
+// succeeded with a newer timestamp, advancing to the ads timestamp would make
+// the next receipt delta permanently skip older unseen receipt changes.
+function reseedServerCursorFromFullLoad(results, failed, preLoadWatermarks) {
+  if (typeof _serverLiveSync !== 'object' || !_serverLiveSync) return false;
+  const loaded = results && typeof results === 'object' ? results : {};
+  const captured = preLoadWatermarks && typeof preLoadWatermarks === 'object'
+    ? preLoadWatermarks
+    : null;
+  let watermark = 0;
+  const collectionCursors = (_serverLiveSync.collectionCursors && typeof _serverLiveSync.collectionCursors === 'object')
+    ? { ..._serverLiveSync.collectionCursors }
+    : Object.create(null);
+  for (const name of SERVER_SYNC_COLLECTIONS) {
+    const entry = loaded[name];
+    // Forbidden collections stay at implicit cursor zero so a future
+    // permission grant fetches their entire newly-visible history.
+    if (entry?.status === 403) {
+      collectionCursors[name] = 0;
+      continue;
+    }
+    // A failed collection keeps its previous cursor (normally zero on a new
+    // session) so the next poll retries from the same safe position.
+    if (!entry || entry.ok === false || entry.data === null) continue;
+    // No pre-load watermark (old server/temporary endpoint failure) means zero,
+    // intentionally forcing one complete catch-up delta after the full load.
+    // Never derive this cursor from snapshot rows: those requests are not an
+    // atomic snapshot and their maxima are unsafe as a boundary.
+    const cursor = captured && Number.isSafeInteger(Number(captured[name]))
+      ? Math.max(0, Number(captured[name]))
+      : 0;
+    collectionCursors[name] = cursor;
+  }
+  for (const value of Object.values(collectionCursors)) {
+    const cursor = Number(value);
+    if (Number.isFinite(cursor)) watermark = Math.max(watermark, cursor);
+  }
+  _serverLiveSync.collectionCursors = collectionCursors;
+  _serverLiveSync.serverWatermark = watermark;
+  _serverLiveSync.cursor = watermark;
+  _serverLiveSync.fullLoadCursorReady = !!captured;
+  return !!captured;
+}
+
 async function serverLoadAllData() {
+  const loadIdentity = getServerSessionIdentity();
+  const loadUserId = String(state.currentUser?.id || '');
+  const loadAborted = () => (
+    !loadUserId ||
+    String(state.currentUser?.id || '') !== loadUserId ||
+    serverSessionIdentityChanged(loadIdentity)
+  );
+  const abortedResult = () => ({ failed: [], forbidden: [], aborted: true });
+  if (loadAborted()) return abortedResult();
+  // Capture a safe boundary before issuing any collection request. If an older
+  // server does not expose the endpoint (or it is temporarily unavailable),
+  // leave this null: successful collections will be seeded at zero and the
+  // live poller's first pass becomes a safe full catch-up.
+  let preLoadWatermarks = null;
+  try {
+    preLoadWatermarks = await apiGetSyncWatermarks();
+  } catch (e) {
+    if (e?.code === 'SERVER_SESSION_CHANGED' || loadAborted()) return abortedResult();
+    if (ALBAYAN_DEBUG_MODE) console.warn('[serverLoadAllData] Watermarks unavailable; using since=0 catch-up:', e?.message || e);
+  }
+  if (loadAborted()) return abortedResult();
   // Load collections from server.
   // IMPORTANT: Do not fail the whole app if one collection fails. We'll load what we can and show one warning.
   const forbidden = [];
@@ -5902,7 +6913,8 @@ async function serverLoadAllData() {
     const _start = Date.now();
     // #endregion
     try {
-      const result = await apiLoadCollectionAll(collection);
+      const result = await apiLoadCollectionAll(collection, { forceRefresh: true });
+      if (loadAborted()) return { ok: false, collection, data: null, aborted: true };
       // #region agent log
       _timings[collection] = { durationMs: Date.now() - _start, count: Array.isArray(result) ? result.length : 0, ok: true };
       if (ALBAYAN_DEBUG_MODE && typeof window.__albayanDebugEmit === 'function') {
@@ -5915,6 +6927,9 @@ async function serverLoadAllData() {
       // #endregion
       return { ok: true, collection, data: Array.isArray(result) ? result : [], status: 200 };
     } catch (e) {
+      if (e?.code === 'SERVER_SESSION_CHANGED' || loadAborted()) {
+        return { ok: false, collection, data: null, aborted: true };
+      }
       const status = e?.status;
       // #region agent log
       _timings[collection] = { durationMs: Date.now() - _start, status: status || null, error: e?.message || 'unknown', ok: false };
@@ -5942,7 +6957,7 @@ async function serverLoadAllData() {
   // Load collections in parallel for faster initial load
   // Use higher concurrency for initial load, but still limit to avoid overwhelming server
   const results = {};
-  const collections = ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory', 'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings', 'walletTransactions', 'serviceSubscriptions'];
+  const collections = SERVER_SYNC_COLLECTIONS;
   const CONCURRENCY = SERVER_API.initialLoadConcurrency || 3;
 
   // Show loading progress
@@ -5956,12 +6971,14 @@ async function serverLoadAllData() {
   };
 
   for (let i = 0; i < collections.length; i += CONCURRENCY) {
+    if (loadAborted()) return abortedResult();
     const batch = collections.slice(i, i + CONCURRENCY);
     const batchResults = await Promise.all(batch.map(async (c) => {
       const result = await safeLoad(c);
-      updateProgress(c);
+      if (!loadAborted()) updateProgress(c);
       return result;
     }));
+    if (loadAborted() || batchResults.some(r => r?.aborted)) return abortedResult();
     batchResults.forEach((r) => {
       if (r && r.collection) results[r.collection] = r;
     });
@@ -5970,6 +6987,7 @@ async function serverLoadAllData() {
     for (const r of batchResults) {
       if (r && r.collection && r.data !== null) {
         state[r.collection] = r.data;
+        clearCollectionCorruption(r.collection); // authoritative complete server copy repairs the cache
         markCollectionDirty(r.collection);
       }
     }
@@ -5997,8 +7015,10 @@ async function serverLoadAllData() {
   }
 
   // Users list for UI (delivery assignment, etc.)
+  if (loadAborted()) return abortedResult();
   try {
     const usersList = await apiListUsersForUi();
+    if (loadAborted()) return abortedResult();
     if (Array.isArray(usersList)) {
       // Ensure current user is present and retains permissions
       const byId = new Map();
@@ -6009,40 +7029,41 @@ async function serverLoadAllData() {
       state.users = Array.from(byId.values());
     }
   } catch (e) {
+    if (e?.code === 'SERVER_SESSION_CHANGED' || loadAborted()) return abortedResult();
     failed.push({ collection: 'users', status: e?.status || null, message: e?.message || 'Failed to load users' });
   }
+  if (loadAborted()) return abortedResult();
+  // ALWAYS keep the current user (with their login-response permissions) in
+  // state.users — even when the users-list fetch failed. hasPermission and the
+  // sidebar read state.users; without this, a failed fetch locks the whole UI.
+  if (typeof upsertCurrentUserIntoUsers === 'function') upsertCurrentUserIntoUsers();
 
-  state.serverLastSyncAt = new Date().toISOString();
+  if (loadAborted()) return abortedResult();
+  if (failed.length === 0) {
+    state.serverLastSyncAt = new Date().toISOString();
+    state.serverLastSyncErrorAt = null;
+  } else {
+    state.serverLastSyncErrorAt = new Date().toISOString();
+  }
 
   // Authoritatively (re)seed the live-sync cursor from server-issued timestamps.
   // This is the ONLY skew-free source: the freshly-loaded arrays carry the
   // server's last_modified, so re-seeding here corrects a cursor that
   // startServerLiveSync may have estimated too high from a clock-skewed device.
   try {
-    const _wm = Math.max(
-      _maxLastModifiedFromArray(results.ads && results.ads.data),
-      _maxLastModifiedFromArray(results.receipts && results.receipts.data),
-      _maxLastModifiedFromArray(results.customers && results.customers.data),
-      _maxLastModifiedFromArray(results.pages && results.pages.data),
-      _maxLastModifiedFromArray(results.exchangeRateHistory && results.exchangeRateHistory.data),
-      _maxLastModifiedFromArray(results.clothesProducts && results.clothesProducts.data),
-      _maxLastModifiedFromArray(results.clothesShipments && results.clothesShipments.data),
-      _maxLastModifiedFromArray(results.clothesOrders && results.clothesOrders.data),
-      _maxLastModifiedFromArray(results.clothesSettings && results.clothesSettings.data)
-    );
-    if (_wm > 0 && typeof _serverLiveSync === 'object' && _serverLiveSync) {
-      _serverLiveSync.serverWatermark = _wm;
-      _serverLiveSync.cursor = _wm;
-    }
+    if (loadAborted()) return abortedResult();
+    reseedServerCursorFromFullLoad(results, failed, preLoadWatermarks);
   } catch (_) {}
 
   // Cache server data locally (IndexedDB) for performance (optional)
+  if (loadAborted()) return abortedResult();
   if (db) {
     markAllCollectionsDirty();
     await flushDirtyCollections();
   }
 
   // One clean warning (avoid spam). These are user-specific and expected sometimes.
+  if (loadAborted()) return abortedResult();
   if (forbidden.length) {
     // Do not show "limited access" details to non-admin users (avoid leaking internal permission structure).
     // Admins can still see this warning for troubleshooting.
@@ -6091,8 +7112,11 @@ async function serverLoadAllData() {
     });
   }
   // #endregion
+  // Let callers (login flow) distinguish a clean load from a partial one so
+  // they don't show "All data synchronized successfully" over missing data.
+  if (loadAborted()) return abortedResult();
+  return { failed, forbidden };
 }
-
 // ==========================================
 // LIVE SERVER SYNC (Always‑Online Multi‑User Mode)
 // ==========================================
@@ -6112,12 +7136,32 @@ const _serverLiveSync = {
   // minutes ahead of server time and silently skip everyone else's updates
   // (the server's updated_since window only looks back 15s).
   serverWatermark: 0,
-  // Bumped on every logout / stopServerLiveSync. A sync tick snapshots it before
-  // its awaits and bails if it changed, so an in-flight fetch that resolves
-  // AFTER the user logged out can no longer re-populate the wiped state (which
-  // would leak the previous user's data into the login screen / next session).
-  sessionEpoch: 0
+  fullLoadCursorReady: false,
+  collectionCursors: Object.create(null),
+  // Authentication identity and poller lifecycle are deliberately separate.
+  // sessionEpoch changes only when the authenticated session changes; it is
+  // part of getServerSessionIdentity(), so late full-load/cache responses are
+  // rejected. pollerEpoch changes whenever polling is stopped/restarted, so a
+  // late tick is discarded without invalidating an unrelated full load.
+  sessionEpoch: 0,
+  pollerEpoch: 0
 };
+
+function advanceServerSessionEpoch() {
+  _serverLiveSync.sessionEpoch = (_serverLiveSync.sessionEpoch || 0) + 1;
+  _serverLiveSync.serverWatermark = 0;
+  _serverLiveSync.cursor = 0;
+  _serverLiveSync.fullLoadCursorReady = false;
+  _serverLiveSync.collectionCursors = Object.create(null);
+  _serverLiveSync.lastDeliverySig = null;
+}
+
+function getServerCollectionCursor(collection) {
+  const cursors = _serverLiveSync.collectionCursors;
+  if (!cursors || typeof cursors !== 'object') return 0;
+  const value = Number(cursors[String(collection || '')]);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
 
 function _maxLastModifiedFromArray(arr) {
   if (!Array.isArray(arr)) return 0;
@@ -6145,16 +7189,89 @@ function computeServerCursorFromState() {
   );
 }
 
+function getServerCollectionVisibilityScope(user, collection) {
+  if (!user?.id) return 'none';
+  const name = String(collection || '');
+  const role = String(user.role || '').toLowerCase();
+  if (name === 'exchangeRateHistory') return 'all';
+  if (name === 'walletTransactions' || name === 'serviceSubscriptions') {
+    return role === 'admin' ? 'all' : 'own';
+  }
+  if (role === 'admin') return 'all';
+  if (role === 'delivery' && ['ads', 'receipts', 'customers'].includes(name)) return 'assigned';
+  const modulePermissions = user.permissions?.[name];
+  if (!Array.isArray(modulePermissions)) return 'none';
+  if (modulePermissions.some(action => String(action).toLowerCase() === 'view')) return 'all';
+  if (modulePermissions.some(action => String(action).toLowerCase() === 'viewown')) return 'own';
+  return 'none';
+}
+
+function getServerVisibilityScopeChanges(beforeUser, afterUser) {
+  return SERVER_SYNC_COLLECTIONS.filter(collection =>
+    getServerCollectionVisibilityScope(beforeUser, collection) !==
+    getServerCollectionVisibilityScope(afterUser, collection)
+  );
+}
+
+function getAuthorizedServerSyncCollections(user = state.currentUser) {
+  return SERVER_SYNC_COLLECTIONS.filter(collection => {
+    if (getServerCollectionVisibilityScope(user, collection) === 'none') return false;
+    if (collection.startsWith('clothes') && !isAdminRole(user?.role)) {
+      return hasSubscription('clothes_system');
+    }
+    return true;
+  });
+}
+
+// Remove data the current authorization scope may no longer expose. Clearing
+// only the in-memory array is insufficient: a reload would rehydrate the old
+// broader result from IndexedDB, and the five-second request cache could do the
+// same without a page reload.
+async function clearServerCollectionsForVisibility(collections) {
+  const identity = getServerSessionIdentity();
+  const names = Array.from(new Set((collections || []).map(String)))
+    .filter(name => SERVER_SYNC_COLLECTIONS.includes(name));
+  if (names.length === 0) return false;
+  for (const name of names) {
+    if (serverSessionIdentityChanged(identity)) return false;
+    state[name] = [];
+    if (_collectionCache[name]) {
+      _collectionCache[name] = { data: null, timestamp: 0, identity: '' };
+    }
+    if (_serverLiveSync.collectionCursors && typeof _serverLiveSync.collectionCursors === 'object') {
+      _serverLiveSync.collectionCursors[name] = 0;
+    }
+    if (typeof clearCollectionCorruption === 'function') clearCollectionCorruption(name);
+    if (db) {
+      const cleared = await saveCollectionToIndexedDB(name, []);
+      if (serverSessionIdentityChanged(identity)) return false;
+      if (cleared === false) markCollectionDirty(name);
+      else if (typeof idbSync === 'object' && idbSync?.dirty) idbSync.dirty.delete(name);
+    }
+  }
+  if (serverSessionIdentityChanged(identity)) return false;
+  _serverLiveSync.cursor = Math.max(0, ...Object.values(_serverLiveSync.collectionCursors || {}).map(Number).filter(Number.isFinite));
+  _serverLiveSync.serverWatermark = _serverLiveSync.cursor;
+  saveState();
+  return true;
+}
+
 async function apiLoadCollectionSince(collection, sinceMs) {
   const all = [];
-  let offset = 0;
+  const indexById = new Map();
+  let afterLastModified = null;
+  let afterId = '';
   const limit = Math.min(1000, SERVER_API.pageSize || 1000);
   const since = Number.isFinite(Number(sinceMs)) ? Number(sinceMs) : 0;
   while (true) {
+    let path = `/api/collections/${encodeURIComponent(collection)}?updated_since=${encodeURIComponent(String(since))}&limit=${limit}&include_deleted=true`;
+    if (afterLastModified !== null && afterId) {
+      path += `&after_last_modified=${encodeURIComponent(String(afterLastModified))}&after_id=${encodeURIComponent(afterId)}`;
+    }
     // Use retry logic for resilience against transient server errors/timeouts
     const items = await withRetry(
       () => apiJson(
-      `/api/collections/${encodeURIComponent(collection)}?updated_since=${encodeURIComponent(String(since))}&limit=${limit}&offset=${offset}&include_deleted=true`,
+      path,
       { method: 'GET' },
       { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
       ),
@@ -6162,11 +7279,27 @@ async function apiLoadCollectionSince(collection, sinceMs) {
       500 // 500ms base delay
     );
     if (!Array.isArray(items) || items.length === 0) break;
-    for (const entity of items) {
-      if (entity && entity.data) all.push(entity.data);
+    let lastEntity = null;
+    for (const rawEntity of items) {
+      const entity = validateServerEntityResponse(collection, rawEntity, `delta[${all.length}]`);
+      lastEntity = entity;
+      mergeServerEntityDataById(all, indexById, entity);
     }
     if (items.length < limit) break;
-    offset += limit;
+    const nextLastModified = Number(lastEntity?.lastModified);
+    const nextId = String(lastEntity?.id || '');
+    if (!Number.isSafeInteger(nextLastModified) || nextLastModified < 0 || !Security.isValidRecordId(nextId)) {
+      const cursorError = new Error(`Invalid ${collection} delta cursor`);
+      cursorError.code = 'INCOMPLETE_COLLECTION_LOAD';
+      throw cursorError;
+    }
+    if (nextLastModified === afterLastModified && nextId === afterId) {
+      const cursorError = new Error(`Repeated ${collection} delta cursor`);
+      cursorError.code = 'INCOMPLETE_COLLECTION_LOAD';
+      throw cursorError;
+    }
+    afterLastModified = nextLastModified;
+    afterId = nextId;
   }
   return all;
 }
@@ -6232,16 +7365,21 @@ function applyServerDelta(collectionName, records) {
 }
 
 async function serverLiveSyncOnce() {
-  if (!isServerModeEnabled()) return;
-  if (!state.currentUser) return;
-  if (!SERVER_API.liveSyncEnabled) return;
-  if (document.visibilityState === 'hidden') return;
+  if (!isServerModeEnabled()) return { ok: false, skipped: true };
+  if (!state.currentUser) return { ok: false, skipped: true };
+  if (!SERVER_API.liveSyncEnabled) return { ok: false, skipped: true };
+  if (document.visibilityState === 'hidden') return { ok: true, skipped: true };
 
   // Snapshot the session epoch. After any await we bail if the user logged out
   // (epoch bumped / currentUser cleared) so a late response can't resurrect the
   // wiped state — the "logout wipe undone by an in-flight sync" bug.
-  const _epoch = _serverLiveSync.sessionEpoch;
-  const _syncAborted = () => !state.currentUser || _serverLiveSync.sessionEpoch !== _epoch;
+  const _sessionEpoch = _serverLiveSync.sessionEpoch;
+  const _pollerEpoch = _serverLiveSync.pollerEpoch;
+  const _syncAborted = () => (
+    !state.currentUser ||
+    _serverLiveSync.sessionEpoch !== _sessionEpoch ||
+    _serverLiveSync.pollerEpoch !== _pollerEpoch
+  );
 
   const roleLower = String(state.currentUser.role || '').toLowerCase();
 
@@ -6265,7 +7403,8 @@ async function serverLiveSyncOnce() {
     ]);
 
     // Bail if the user logged out while these were in flight (see _syncAborted).
-    if (_syncAborted()) return;
+    if (_syncAborted()) return { ok: false, skipped: true };
+    const deliveryFetchFailed = !Array.isArray(ads) || !Array.isArray(receipts) || !Array.isArray(customers);
 
     // Only treat the tick as "changed" when the fetched payload actually
     // differs from the previous one. Comparing against state would always
@@ -6300,50 +7439,74 @@ async function serverLiveSyncOnce() {
 
     const nextCursor = computeServerCursorFromState();
     _serverLiveSync.cursor = Math.max(_serverLiveSync.cursor || 0, nextCursor);
-    state.serverLastSyncAt = new Date().toISOString();
+    if (deliveryFetchFailed) state.serverLastSyncErrorAt = new Date().toISOString();
+    else {
+      state.serverLastSyncAt = new Date().toISOString();
+      state.serverLastSyncErrorAt = null;
+    }
     // Always re-render when data changed (not just cursor) - ensures edits from admin show immediately
     if (changed) RenderQueue.schedule('liveSync(delivery)');
-    return;
+    return { ok: !deliveryFetchFailed };
   }
 
-  // Admin/Employee: delta sync by lastModified cursor (efficient for large datasets).
-  const since = _serverLiveSync.cursor || computeServerCursorFromState() || 0;
-
+  // Admin/Employee: each collection owns its cursor. A single shared cursor is
+  // unsafe because requests are not one database snapshot: a newer ad could
+  // otherwise advance past an older receipt update that arrived just after
+  // the receipts request finished.
+  // Do not hammer forbidden/unsubscribed endpoints every three seconds. A
+  // permission or subscription refresh changes this list on the next tick,
+  // whose zero cursor then performs a complete catch-up for the newly granted
+  // collection.
+  const deltaCollections = getAuthorizedServerSyncCollections();
+  if (!_serverLiveSync.collectionCursors || typeof _serverLiveSync.collectionCursors !== 'object') {
+    _serverLiveSync.collectionCursors = Object.create(null);
+  }
   let anyFetchFailed = false;
   const safeSince = async (collection) => {
+    const since = getServerCollectionCursor(collection);
     try {
-      return await apiLoadCollectionSince(collection, since);
+      const records = await apiLoadCollectionSince(collection, since);
+      return { collection, since, records, ok: true, forbidden: false };
     } catch (e) {
-      if (e?.status === 403) return [];
-      // A genuine fetch failure: do NOT let the cursor advance past updates we
-      // never received, or those records would be skipped forever.
+      // Keep forbidden collections at cursor zero. If permission is granted
+      // later, the next tick obtains the full newly-visible history.
+      if (e?.status === 403) {
+        _serverLiveSync.collectionCursors[collection] = 0;
+        return { collection, since, records: [], ok: true, forbidden: true };
+      }
       anyFetchFailed = true;
-      return [];
+      return { collection, since, records: [], ok: false, forbidden: false };
     }
   };
-
-  const [adsDelta, receiptsDelta, customersDelta, pagesDelta, exhDelta, clothesProductsDelta, clothesShipmentsDelta, clothesOrdersDelta, clothesSettingsDelta, walletTxDelta, subsDelta] = await Promise.all([
-    safeSince('ads'),
-    safeSince('receipts'),
-    safeSince('customers'),
-    safeSince('pages'),
-    safeSince('exchangeRateHistory'),
-    safeSince('clothesProducts'),
-    safeSince('clothesShipments'),
-    safeSince('clothesOrders'),
-    safeSince('clothesSettings'),
-    // Wallet ledger + subscriptions were written to the server but never
-    // pulled back, so balances reset after logout and never synced between
-    // devices. They are append-only, so delta sync is safe.
-    safeSince('walletTransactions'),
-    safeSince('serviceSubscriptions')
-  ]);
+  const deltaResults = await Promise.all(deltaCollections.map(safeSince));
+  const deltaByCollection = new Map(deltaResults.map(result => [result.collection, result]));
+  const recordsFor = (name) => deltaByCollection.get(name)?.records || [];
+  const adsDelta = recordsFor('ads');
+  const receiptsDelta = recordsFor('receipts');
+  const customersDelta = recordsFor('customers');
+  const pagesDelta = recordsFor('pages');
+  const exhDelta = recordsFor('exchangeRateHistory');
+  const clothesProductsDelta = recordsFor('clothesProducts');
+  const clothesShipmentsDelta = recordsFor('clothesShipments');
+  const clothesOrdersDelta = recordsFor('clothesOrders');
+  const clothesSettingsDelta = recordsFor('clothesSettings');
+  const walletTxDelta = recordsFor('walletTransactions');
+  const subsDelta = recordsFor('serviceSubscriptions');
 
   // Logged out (or a new session started) while these fetches were in flight?
   // Drop the result — applying it would re-fill the just-wiped state.
-  if (_syncAborted()) return;
+  if (_syncAborted()) return { ok: false, skipped: true };
 
-  let changed = false;
+  // A 403 is an authorization result, not merely an empty delta. Purge the old
+  // broader collection from memory, request cache and this user's IndexedDB
+  // namespace before anything can render it again.
+  const forbiddenCollections = deltaResults.filter(result => result.forbidden).map(result => result.collection);
+  if (forbiddenCollections.length > 0) {
+    await clearServerCollectionsForVisibility(forbiddenCollections);
+    if (_syncAborted()) return { ok: false, skipped: true };
+  }
+
+  let changed = forbiddenCollections.length > 0;
   changed = applyServerDelta('ads', adsDelta) || changed;
   changed = applyServerDelta('receipts', receiptsDelta) || changed;
   changed = applyServerDelta('customers', customersDelta) || changed;
@@ -6364,55 +7527,98 @@ async function serverLiveSyncOnce() {
     }, 100);
   }
 
-  // Cursor bumps to the newest record we saw.
-  const maxDelta = Math.max(
-    _maxLastModifiedFromArray(adsDelta),
-    _maxLastModifiedFromArray(receiptsDelta),
-    _maxLastModifiedFromArray(customersDelta),
-    _maxLastModifiedFromArray(pagesDelta),
-    _maxLastModifiedFromArray(exhDelta),
-    _maxLastModifiedFromArray(clothesProductsDelta),
-    _maxLastModifiedFromArray(clothesShipmentsDelta),
-    _maxLastModifiedFromArray(clothesOrdersDelta),
-    _maxLastModifiedFromArray(clothesSettingsDelta),
-    _maxLastModifiedFromArray(walletTxDelta),
-    _maxLastModifiedFromArray(subsDelta)
-  );
-  // Deltas come straight from the server, so maxDelta is a trustworthy server
-  // timestamp — record it as the watermark for future cursor seeds.
-  if (maxDelta > (_serverLiveSync.serverWatermark || 0)) _serverLiveSync.serverWatermark = maxDelta;
-  // Freeze the cursor for this tick if any collection failed to load, so the
-  // next tick re-requests the same window (idempotent — applyServerDelta
-  // upserts by id) instead of permanently skipping the missed collection.
-  _serverLiveSync.cursor = anyFetchFailed ? since : Math.max(since, maxDelta);
+  // Advance only the collection whose request completed. Failed collections
+  // retain their own prior cursor and are retried without blocking others.
+  for (const result of deltaResults) {
+    if (!result.ok || result.forbidden) continue;
+    const maxDelta = _maxLastModifiedFromArray(result.records);
+    _serverLiveSync.collectionCursors[result.collection] = Math.max(result.since, maxDelta);
+    if (maxDelta > (_serverLiveSync.serverWatermark || 0)) _serverLiveSync.serverWatermark = maxDelta;
+  }
+  // Compatibility/debug aggregate only; correctness never reads this value.
+  _serverLiveSync.cursor = Math.max(0, ...Object.values(_serverLiveSync.collectionCursors).map(Number).filter(Number.isFinite));
   if (anyFetchFailed && typeof updateSyncIndicator === 'function') {
     try { updateSyncIndicator('error'); } catch (_) {}
   }
-  state.serverLastSyncAt = new Date().toISOString();
-
   // Refresh minimal users list occasionally (for assignment dropdowns)
   const now = Date.now();
   if ((now - (_serverLiveSync.lastUsersSyncAt || 0)) > (SERVER_API.usersSyncIntervalMs || 60000)) {
     _serverLiveSync.lastUsersSyncAt = now;
     try {
+      const usersBefore = JSON.stringify(state.users || []);
       const usersList = await apiListUsersForUi();
+      if (_syncAborted()) return { ok: false, skipped: true };
       if (Array.isArray(usersList)) {
         const byId = new Map();
         for (const u of usersList) {
           if (u && u.id) byId.set(u.id, u);
         }
         if (state.currentUser?.id) byId.set(state.currentUser.id, { ...byId.get(state.currentUser.id), ...state.currentUser });
+        // Records with a debounce-pending server update (admin mid-edit in the
+        // Permissions Manager) must keep the LOCAL version — the fetched list
+        // may predate the pending PATCH and would silently revert the edits.
+        try {
+          if (typeof _serverUserUpdate === 'object' && _serverUserUpdate?.pending?.size) {
+            for (const uid of _serverUserUpdate.pending.keys()) {
+              const local = (state.users || []).find(u => u && String(u.id) === String(uid));
+              if (local) byId.set(local.id, local);
+            }
+          }
+        } catch (_) {}
         state.users = Array.from(byId.values());
       }
-      // Also refresh current user's permissions (so they don't need to re-login for new permissions)
-      await refreshCurrentUserPermissions();
+      // Also refresh current user's permissions (so they don't need to re-login
+      // for new permissions). Either change must trigger a re-render — without
+      // it, a locked sidebar stays locked even after the data recovers.
+      const accessBefore = Security.sanitizeObject(state.currentUser || {});
+      const permsChanged = await refreshCurrentUserPermissions();
+      if (_syncAborted()) return { ok: false, skipped: true };
+      const scopeChanges = permsChanged
+        ? getServerVisibilityScopeChanges(accessBefore, state.currentUser)
+        : [];
+      if (permsChanged) {
+        // Stop reusing any in-flight/broader snapshot, purge the affected
+        // collections, then perform a fresh server-scoped load. A view->viewOwn
+        // response has no tombstones for rows that became unauthorized, so
+        // merging deltas can never repair this transition safely.
+        cancelPendingRequests();
+        invalidateUsersListCache();
+        // The Admin users list is authorization-scoped too. Keep only the
+        // freshly-authenticated caller until /api/users (or /users/public)
+        // returns the new scope, and replace its persisted cache immediately.
+        state.users = [];
+        upsertCurrentUserIntoUsers();
+        if (db) {
+          const usersCleared = await saveCollectionToIndexedDB('users', state.users);
+          if (_syncAborted()) return { ok: false, skipped: true };
+          if (usersCleared === false) markCollectionDirty('users');
+          else if (typeof idbSync === 'object' && idbSync?.dirty) idbSync.dirty.delete('users');
+        }
+        await clearServerCollectionsForVisibility(scopeChanges);
+        if (_syncAborted()) return { ok: false, skipped: true };
+        const scopedReload = await serverLoadAllData();
+        if (_syncAborted() || scopedReload?.aborted) return { ok: false, skipped: true };
+        if (Array.isArray(scopedReload?.failed) && scopedReload.failed.length > 0) anyFetchFailed = true;
+        changed = true;
+      }
+      if (permsChanged || usersBefore !== JSON.stringify(state.users || [])) {
+        changed = true;
+      }
     } catch (e) {
       // User list sync failure - non-critical, just log in debug mode
+      anyFetchFailed = true;
+      state.serverLastSyncErrorAt = new Date().toISOString();
       if (ALBAYAN_DEBUG_MODE) console.warn('[serverLiveSyncOnce] Users sync failed:', e?.message || e);
     }
   }
 
+  if (anyFetchFailed) state.serverLastSyncErrorAt = new Date().toISOString();
+  else {
+    state.serverLastSyncAt = new Date().toISOString();
+    state.serverLastSyncErrorAt = null;
+  }
   if (changed) RenderQueue.schedule('liveSync(delta)');
+  return { ok: !anyFetchFailed };
 }
 
 async function serverLiveSyncTick() {
@@ -6420,8 +7626,8 @@ async function serverLiveSyncTick() {
   _serverLiveSync.inFlight = true;
   updateSyncIndicator('syncing');
   try {
-    await serverLiveSyncOnce();
-    updateSyncIndicator('synced');
+    const result = await serverLiveSyncOnce();
+    updateSyncIndicator(result?.ok === false ? 'error' : 'synced');
   } catch (e) {
     console.warn('[serverLiveSyncTick] Sync failed:', e?.message || e);
     updateSyncIndicator('error');
@@ -6474,14 +7680,20 @@ async function manualSyncData() {
   updateSyncIndicator('syncing');
   showNotification(state.language === 'ar' ? 'جارٍ المزامنة' : 'Syncing', state.language === 'ar' ? 'جارٍ تحديث البيانات من السيرفر...' : 'Refreshing data from server...', 'info');
 
+  const syncIdentity = getServerSessionIdentity();
+  stopServerLiveSync();
   try {
     // Clear cache to force fresh data
     for (const key of Object.keys(_collectionCache)) {
-      _collectionCache[key] = { data: null, timestamp: 0 };
+      _collectionCache[key] = { data: null, timestamp: 0, identity: '' };
     }
-    _pendingRequests.clear();
+    cancelPendingRequests();
 
-    await serverLoadAllData();
+    const result = await serverLoadAllData();
+    if (result?.aborted) return;
+    if (Array.isArray(result?.failed) && result.failed.length > 0) {
+      throw new Error(`Failed collections: ${result.failed.map(x => x.collection).filter(Boolean).join(', ')}`);
+    }
     updateSyncIndicator('synced');
     showNotification(state.language === 'ar' ? 'تمت المزامنة' : 'Synced', state.language === 'ar' ? 'تم تحديث البيانات بنجاح' : 'Data refreshed successfully', 'success');
     forceFullRender();
@@ -6489,6 +7701,8 @@ async function manualSyncData() {
     console.error('[manualSyncData] Failed:', e);
     updateSyncIndicator('error');
     showNotification(state.language === 'ar' ? 'فشلت المزامنة' : 'Sync Failed', state.language === 'ar' ? 'تعذر تحديث البيانات. تحقق من اتصالك.' : 'Could not refresh data. Check your connection.', 'error');
+  } finally {
+    if (!serverSessionIdentityChanged(syncIdentity)) startServerLiveSync();
   }
 }
 
@@ -6496,8 +7710,10 @@ async function manualSyncData() {
 window.manualSyncData = manualSyncData;
 
 function stopServerLiveSync() {
-  // Invalidate any in-flight sync tick so its result is discarded (see field doc).
-  _serverLiveSync.sessionEpoch = (_serverLiveSync.sessionEpoch || 0) + 1;
+  // Stop/restart invalidates only poll ticks. Authentication identity is
+  // advanced explicitly at login/logout boundaries; changing it here made
+  // startup abort its own cookie-session full load.
+  _serverLiveSync.pollerEpoch = (_serverLiveSync.pollerEpoch || 0) + 1;
   if (_serverLiveSync.timer) {
     clearInterval(_serverLiveSync.timer);
     _serverLiveSync.timer = null;
@@ -6530,7 +7746,13 @@ function startServerLiveSync() {
   // Before the first server load this session it is 0, so fall back to the state
   // estimate for a fast start; serverLoadAllData re-seeds authoritatively (and
   // can only LOWER a clock-skewed estimate) the moment it completes.
-  _serverLiveSync.cursor = _serverLiveSync.serverWatermark || computeServerCursorFromState();
+  // Only a COMPLETE full load may seed a non-zero global cursor. If startup
+  // was throttled or even one collection failed, begin at zero so a failed
+  // collection cannot permanently miss changes below another collection's
+  // newer timestamp.
+  _serverLiveSync.cursor = _serverLiveSync.fullLoadCursorReady
+    ? (_serverLiveSync.serverWatermark || 0)
+    : 0;
   _serverLiveSync.lastUsersSyncAt = 0;
 
   // Run one immediately, then poll.
@@ -6568,7 +7790,56 @@ function startServerLiveSync() {
   }
 }
 
-async function handleLogin(email, password) {
+let _loginGeneration = 0;
+let _activeLogin = null;
+let _logoutInFlight = null;
+let _serverAuthExpiryInFlight = null;
+
+function setLoginFormBusy(busy) {
+  const form = document.getElementById('login-form');
+  if (!form) return;
+  form.setAttribute('aria-busy', busy ? 'true' : 'false');
+  const button = form.querySelector('button[type="submit"]');
+  if (button) button.disabled = !!busy;
+  for (const input of form.querySelectorAll('input')) input.disabled = !!busy;
+}
+
+function loginAttemptIsCurrent(generation) {
+  return generation === _loginGeneration && !_logoutInFlight && !_serverAuthExpiryInFlight;
+}
+
+function handleLogin(email, password) {
+  if (_logoutInFlight || _serverAuthExpiryInFlight) {
+    showNotification(
+      state.language === 'ar' ? 'الرجاء الانتظار' : 'Please Wait',
+      state.language === 'ar' ? 'جارٍ إنهاء الجلسة السابقة.' : 'The previous session is still closing.',
+      'info'
+    );
+    return Promise.resolve(false);
+  }
+  if (_activeLogin && _activeLogin.generation === _loginGeneration) return _activeLogin.promise;
+
+  const generation = ++_loginGeneration;
+  setLoginFormBusy(true);
+  const promise = _handleLoginOnce(email, password, generation)
+    .catch((error) => {
+      if (loginAttemptIsCurrent(generation)) {
+        console.warn('[handleLogin] Failed:', error?.message || error);
+        showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'تعذّر تسجيل الدخول.' : 'Could not sign in.', 'error');
+      }
+      return false;
+    });
+  const entry = { generation, promise };
+  _activeLogin = entry;
+  const cleanup = () => {
+    if (_activeLogin === entry) _activeLogin = null;
+    if (loginAttemptIsCurrent(generation)) setLoginFormBusy(false);
+  };
+  promise.then(cleanup, cleanup);
+  return promise;
+}
+
+async function _handleLoginOnce(email, password, loginGeneration) {
   // #region agent log
   // Hypothesis H-LOGIN: Login failures are caused by one of:
   // (a) user not found due to stored email whitespace/case issues
@@ -6601,6 +7872,7 @@ async function handleLogin(email, password) {
       } catch (_) {}
       // #endregion
       const user = await apiLogin(email, password);
+      if (!loginAttemptIsCurrent(loginGeneration)) return false;
       if (!user) {
         // #region agent log
         try {
@@ -6613,7 +7885,31 @@ async function handleLogin(email, password) {
         return;
       }
 
+      // Abort/detach every request and response cache belonging to the prior
+      // anonymous/user identity before activating this login.
+      cancelPendingRequests();
+      invalidateUsersListCache();
+      for (const key of Object.keys(_collectionCache)) {
+        _collectionCache[key] = { data: null, timestamp: 0, identity: '' };
+      }
+      advanceServerSessionEpoch();
       state.currentUser = user;
+      // Switch from the unauthenticated namespace to this exact
+      // server+user cache before any business data is read or written.
+      activateServerCollectionStorage(user);
+      if (db) {
+        try {
+          await loadCollectionsFromStorage(null);
+          if (!loginAttemptIsCurrent(loginGeneration)) return false;
+          assertCachedCollectionIdentifiersSafe();
+        } catch (_) {
+          for (const name of PERSISTED_COLLECTIONS) state[name] = [];
+        }
+      }
+      // Seed state.users immediately: the first render happens BEFORE
+      // serverLoadAllData, and hasPermission/sidebar read state.users — on a
+      // fresh device it would otherwise be empty and show "No access granted".
+      upsertCurrentUserIntoUsers();
       // #region agent log
       try {
         if (typeof window.__albayanDebugEmit === 'function') {
@@ -6652,9 +7948,16 @@ async function handleLogin(email, password) {
       document.body.appendChild(loadingOverlay);
 
       try {
-        await serverLoadAllData();
-        showNotification(state.language === 'ar' ? 'تم تحميل البيانات' : 'Data Loaded', state.language === 'ar' ? 'تمت مزامنة جميع البيانات بنجاح' : 'All data synchronized successfully', 'success');
+        const loadResult = await serverLoadAllData();
+        if (!loginAttemptIsCurrent(loginGeneration)) return false;
+        if (loadResult?.aborted) return;
+        if (loadResult && Array.isArray(loadResult.failed) && loadResult.failed.length > 0) {
+          showNotification(state.language === 'ar' ? 'تحميل جزئي' : 'Partially Loaded', state.language === 'ar' ? 'تم تسجيل الدخول، لكن فشل تحميل بعض البيانات. جرّب التحديث.' : 'Logged in, but some data failed to load. Try Refresh.', 'warning');
+        } else {
+          showNotification(state.language === 'ar' ? 'تم تحميل البيانات' : 'Data Loaded', state.language === 'ar' ? 'تمت مزامنة جميع البيانات بنجاح' : 'All data synchronized successfully', 'success');
+        }
       } catch (e) {
+        if (!loginAttemptIsCurrent(loginGeneration)) return false;
         // serverLoadAllData should be tolerant, but keep a belt-and-suspenders guard.
         console.warn('Server data load failed after login:', e);
         showNotification(state.language === 'ar' ? 'تحذير السيرفر' : 'Server Warning', state.language === 'ar' ? 'تم تسجيل الدخول، لكن فشل تحميل بعض البيانات. جرّب التحديث.' : 'Logged in, but some data failed to load. Try Refresh.', 'warning');
@@ -6664,10 +7967,12 @@ async function handleLogin(email, password) {
       }
 
       // Start live sync so other users' changes appear without manual refresh.
+      if (!loginAttemptIsCurrent(loginGeneration)) return false;
       startServerLiveSync();
       render();
       return;
     } catch (e) {
+      if (!loginAttemptIsCurrent(loginGeneration)) return false;
       // #region agent log
       try {
         if (typeof window.__albayanDebugEmit === 'function') {
@@ -6684,13 +7989,26 @@ async function handleLogin(email, password) {
       // The server returns 503 with a "not initialized" hint in that case.
       const _msg = String(e?.message || '');
       if (e?.status === 503 && /not initialized|no users/i.test(_msg)) {
-        state.needsServerSetup = true;
+        const setupStatus = await apiNeedsSetup();
+        const browserSetupAvailable = setupStatus?.needsSetup === true && setupStatus?.setupEnabled === true;
+        state.needsServerSetup = browserSetupAvailable;
         state.serverHasNoUsers = true;
-        showNotification(
-          state.language === 'ar' ? 'إعداد أول مرة' : 'First-time setup',
-          state.language === 'ar' ? 'لا يوجد حساب بعد. أنشئ حساب المدير الأول للبدء.' : 'No account yet. Create the first admin to get started.',
-          'info'
-        );
+        state.serverSetupEnabled = setupStatus?.setupEnabled === true;
+        if (browserSetupAvailable) {
+          showNotification(
+            state.language === 'ar' ? 'إعداد أول مرة' : 'First-time setup',
+            state.language === 'ar' ? 'لا يوجد حساب بعد. أدخل رمز إعداد الخادم لإنشاء المدير الأول.' : 'No account exists yet. Enter the server setup token to create the first admin.',
+            'info'
+          );
+        } else {
+          showNotification(
+            state.language === 'ar' ? 'إعداد الخادم مطلوب' : 'Server Setup Required',
+            state.language === 'ar'
+              ? 'إعداد المتصفح معطّل. يجب على مشغل الخادم استخدام متغيرات ALBAYAN_BOOTSTRAP_ADMIN_* أو أمر إنشاء المدير من الطرفية.'
+              : 'Browser setup is disabled. The server operator must use the ALBAYAN_BOOTSTRAP_ADMIN_* environment variables or the create-admin CLI command.',
+            'warning'
+          );
+        }
         render();
         return;
       }
@@ -6770,8 +8088,8 @@ async function handleLogin(email, password) {
     showNotification(
       state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed',
       state.language === 'ar'
-        ? 'لا توجد بيانات كلمة مرور لهذا الحساب (ربما من نسخة احتياطية قديمة). استخدم "نسيت كلمة المرور؟" أو أنشئ مفتاح استعادة من الإعدادات.'
-        : 'This account has no password data (likely from an old backup). Use “Forgot password?” or generate a Recovery Key in Settings.',
+        ? 'لا توجد بيانات كلمة مرور لهذا الحساب (ربما من نسخة احتياطية قديمة). اطلب من المدير تعيين كلمة مرور جديدة.'
+        : 'This account has no password data (likely from an old backup). Ask an administrator to set a new password.',
       'error'
     );
     addSecurityLog('login_missing_password_data', sanitizedEmail);
@@ -6804,6 +8122,7 @@ async function handleLogin(email, password) {
     } catch (_) {}
     // #endregion
     passwordValid = await Security.verifyPassword(sanitizedPassword, user.passwordHash, user.salt, algo, iterations);
+    if (!loginAttemptIsCurrent(loginGeneration)) return false;
     // #region agent log
     try {
       if (typeof window.__albayanDebugEmit === 'function') {
@@ -6820,6 +8139,7 @@ async function handleLogin(email, password) {
     if (passwordValid) {
       // Migrate to PBKDF2 hashed password
       const { hash, salt, algo, iterations } = await Security.hashPassword(sanitizedPassword, null, { algo: 'pbkdf2-sha256' });
+      if (!loginAttemptIsCurrent(loginGeneration)) return false;
       user.passwordHash = hash;
       user.salt = salt;
       user.passwordAlgo = algo;
@@ -6853,6 +8173,7 @@ async function handleLogin(email, password) {
     if ((user.passwordAlgo || 'sha256') !== 'pbkdf2-sha256') {
       try {
         const upgraded = await Security.hashPassword(sanitizedPassword, null, { algo: 'pbkdf2-sha256' });
+        if (!loginAttemptIsCurrent(loginGeneration)) return false;
         user.passwordHash = upgraded.hash;
         user.salt = upgraded.salt;
         user.passwordAlgo = upgraded.algo;
@@ -6888,58 +8209,185 @@ async function handleLogin(email, password) {
   }
 }
 
-function handleLogout() {
-  if (state.currentUser) {
-    addAuditLog('Logout', state.currentUser.id, `User ${Security.escapeHtml(state.currentUser.name)} logged out`);
-  }
-  
-  if (isServerModeEnabled()) {
-    apiLogout().catch(() => {});
-  }
+function waitForPromiseBounded(promise, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, Math.max(0, Number(timeoutMs) || 0));
+    Promise.resolve(promise).then(finish, finish);
+  });
+}
 
-  stopServerLiveSync();
+function showSessionTransitionOverlay(message) {
+  document.getElementById('session-transition-overlay')?.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'session-transition-overlay';
+  overlay.className = 'fixed inset-0 bg-white/85 dark:bg-slate-900/85 backdrop-blur-sm z-[100] flex items-center justify-center';
+  overlay.innerHTML = `<div class="text-center"><div class="w-10 h-10 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mx-auto mb-3"></div><p class="font-medium text-slate-700 dark:text-slate-200">${Security.escapeHtml(message)}</p></div>`;
+  document.body.appendChild(overlay);
+  return overlay;
+}
 
-  // Destroy session
-  SessionManager.destroySession();
-
-  // Clear all caches
+function resetAuthenticatedServerCaches() {
   _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 };
-  _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000 };
-
-  // DATA ISOLATION (shared device): in SERVER mode the server is the source of
-  // truth, so wipe the previous user's business data from memory + caches so it
-  // can never be shown to — or kept by — the next user if their fresh fetch
-  // fails transiently. In LOCAL mode these collections are the ONLY copy of the
-  // data, so they must NOT be cleared.
-  if (isServerModeEnabled()) {
-    const _cols = (typeof PERSISTED_COLLECTIONS !== 'undefined' && Array.isArray(PERSISTED_COLLECTIONS))
-      ? PERSISTED_COLLECTIONS
-      : ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory'];
-    for (const name of _cols) state[name] = [];
-    try {
-      if (typeof _collectionCache === 'object' && _collectionCache) {
-        for (const k of Object.keys(_collectionCache)) _collectionCache[k] = { data: null, timestamp: 0 };
-      }
-    } catch (_) {}
-    try { if (typeof _pendingRequests !== 'undefined' && _pendingRequests && _pendingRequests.clear) _pendingRequests.clear(); } catch (_) {}
-    _serverLiveSync.serverWatermark = 0;
-    _serverLiveSync.cursor = 0;
-    // Also drop the cached copies in IndexedDB so a full page reload by a
-    // different user on this device doesn't surface them before re-auth.
-    if (db) {
-      for (const name of _cols) {
-        try { saveCollectionToIndexedDB(name, []).catch(() => {}); } catch (_) {}
-      }
-    }
+  _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000, identity: '' };
+  for (const key of Object.keys(_collectionCache)) {
+    _collectionCache[key] = { data: null, timestamp: 0, identity: '' };
   }
+  _pendingRequests.clear();
+  _serverLiveSync.serverWatermark = 0;
+  _serverLiveSync.cursor = 0;
+  _serverLiveSync.fullLoadCursorReady = false;
+  _serverLiveSync.collectionCursors = Object.create(null);
+}
 
+function discardPendingServerUserUpdates() {
+  try {
+    for (const timer of _serverUserUpdate.timers.values()) clearTimeout(timer);
+    _serverUserUpdate.timers.clear();
+    _serverUserUpdate.pending.clear();
+  } catch (_) {}
+}
+
+async function wipeAuthenticatedServerDataFromClient() {
+  const collections = Array.isArray(PERSISTED_COLLECTIONS)
+    ? PERSISTED_COLLECTIONS
+    : ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory'];
+  for (const name of collections) state[name] = [];
+  state.logs = [];
+  state.serverLogs = [];
+  state.serverLogsLoadedAt = 0;
+  if (!db) return;
+  const writes = collections.map(name => saveCollectionToIndexedDB(name, []));
+  writes.push(clearIndexedDBLogs());
+  await Promise.allSettled(writes);
+}
+
+function emergencyFinishClientSignOut(serverMode, expired) {
+  try { stopServerLiveSync(); } catch (_) {}
+  try { advanceServerSessionEpoch(); } catch (_) {}
+  try { cancelPendingRequests(); } catch (_) {}
+  try { discardPendingServerUserUpdates(); } catch (_) {}
+  try { SessionManager.destroySession(); } catch (_) {}
+  try { resetAuthenticatedServerCaches(); } catch (_) {}
+  if (serverMode) {
+    for (const name of PERSISTED_COLLECTIONS) state[name] = [];
+    state.logs = [];
+    state.serverLogs = [];
+  }
   state.currentUser = null;
+  if (serverMode) activateAnonymousServerCollectionStorage();
   state.currentView = 'analytics';
   saveState();
-  showNotification(state.language === 'ar' ? 'تم تسجيل الخروج' : 'Logged Out', state.language === 'ar' ? 'إلى اللقاء قريباً!' : 'See you soon!', 'info');
+  showNotification(
+    state.language === 'ar' ? (expired ? 'انتهت الجلسة' : 'تم تسجيل الخروج') : (expired ? 'Session Expired' : 'Logged Out'),
+    state.language === 'ar' ? 'سجّل الدخول مرة أخرى للمتابعة.' : 'Please sign in again to continue.',
+    expired ? 'warning' : 'info'
+  );
   render();
 }
 
+async function _handleLogoutOnce() {
+  const serverMode = isServerModeEnabled();
+  const overlay = showSessionTransitionOverlay(state.language === 'ar' ? 'جارٍ تسجيل الخروج...' : 'Signing out...');
+  try {
+    if (state.currentUser) {
+      addAuditLog('Logout', state.currentUser.id, `User ${Security.escapeHtml(state.currentUser.name)} logged out`);
+    }
+    // Stop new sync work immediately, but keep the authenticated identity until
+    // pending user edits and the logout request have settled. Rendering the
+    // login screen before apiLogout completed allowed that delayed request to
+    // delete a newly-created replacement session.
+    stopServerLiveSync();
+    let pendingUpdates = null;
+    try { pendingUpdates = flushPendingUserUpdates(); } catch (_) {}
+    await waitForPromiseBounded(pendingUpdates, 5000);
+    if (serverMode) await apiLogout(); // apiLogout has its own bounded timeout
+
+    advanceServerSessionEpoch();
+    cancelPendingRequests();
+    discardPendingServerUserUpdates();
+    SessionManager.destroySession();
+    resetAuthenticatedServerCaches();
+    if (serverMode) await wipeAuthenticatedServerDataFromClient();
+
+    state.currentUser = null;
+    if (serverMode) activateAnonymousServerCollectionStorage();
+    state.currentView = 'analytics';
+    saveState();
+    showNotification(state.language === 'ar' ? 'تم تسجيل الخروج' : 'Logged Out', state.language === 'ar' ? 'إلى اللقاء قريباً!' : 'See you soon!', 'info');
+    render();
+  } finally {
+    overlay.remove();
+  }
+  return true;
+}
+
+function handleLogout() {
+  if (_logoutInFlight) return _logoutInFlight;
+  _loginGeneration += 1; // invalidate any post-login load still finishing
+  const serverMode = isServerModeEnabled();
+  const promise = Promise.resolve().then(_handleLogoutOnce).catch((error) => {
+    console.error('[handleLogout] Failed; forcing local sign-out:', error);
+    emergencyFinishClientSignOut(serverMode, false);
+    return false;
+  });
+  _logoutInFlight = promise;
+  const cleanup = () => {
+    if (_logoutInFlight === promise) _logoutInFlight = null;
+  };
+  promise.then(cleanup, cleanup);
+  return promise;
+}
+
+function handleServerAuthExpired(requestIdentity) {
+  if (!state.currentUser || serverSessionIdentityChanged(requestIdentity)) return Promise.resolve(false);
+  if (_logoutInFlight) return _logoutInFlight;
+  if (_serverAuthExpiryInFlight) return _serverAuthExpiryInFlight;
+  _loginGeneration += 1;
+  const promise = Promise.resolve().then(async () => {
+    const overlay = showSessionTransitionOverlay(state.language === 'ar' ? 'انتهت الجلسة. جارٍ تأمين البيانات...' : 'Session expired. Securing local data...');
+    try {
+      stopServerLiveSync();
+      advanceServerSessionEpoch();
+      cancelPendingRequests();
+      discardPendingServerUserUpdates();
+      SessionManager.destroySession();
+      resetAuthenticatedServerCaches();
+      // Do not call /auth/logout here: the cookie is already invalid. Wipe the
+      // current user's namespace before switching to anonymous storage.
+      await wipeAuthenticatedServerDataFromClient();
+      state.currentUser = null;
+      activateAnonymousServerCollectionStorage();
+      state.currentView = 'analytics';
+      saveState();
+      showNotification(
+        state.language === 'ar' ? 'انتهت الجلسة' : 'Session Expired',
+        state.language === 'ar' ? 'سجّل الدخول مرة أخرى للمتابعة.' : 'Please sign in again to continue.',
+        'warning'
+      );
+      render();
+      return true;
+    } finally {
+      overlay.remove();
+    }
+  }).catch((error) => {
+    console.error('[handleServerAuthExpired] Failed; forcing local sign-out:', error);
+    emergencyFinishClientSignOut(true, true);
+    return false;
+  });
+  _serverAuthExpiryInFlight = promise;
+  const cleanup = () => {
+    if (_serverAuthExpiryInFlight === promise) _serverAuthExpiryInFlight = null;
+  };
+  promise.then(cleanup, cleanup);
+  return promise;
+}
 // ==========================================
 // NAVIGATION & URL ROUTING
 // ==========================================
@@ -6953,15 +8401,18 @@ const VIEW_TO_PATH = {
   'receipts': '/receipts',
   'pages': '/pages',
   'users': '/users',
-  'audit-logs': '/audit-logs',
+  'deliveries': '/deliveries',
+  'reconciliation': '/reconciliation',
+  'settings': '/settings',
+  // The Audit Logs view id is 'audit' (see renderView switch)
+  'audit': '/audit-logs',
   'delivery-dashboard': '/delivery',
-  'receipt-balance': '/receipt-balance',
   'no-access': '/no-access',
   // Platform views (admin only)
   'smart-systems': '/smart-systems',
   'clothes-system': '/clothes-system',
-  'wallet': '/wallet',
-  'account': '/account'
+  'service-placeholder': '/service',
+  'wallet': '/wallet'
 };
 
 // Reverse map: path to view
@@ -6989,8 +8440,32 @@ function getUrlParams() {
     filter: params.get('filter'),
     search: params.get('search'),
     tab: params.get('tab'),
-    page: params.get('page')
+    page: params.get('page'),
+    service: params.get('service')
   };
+}
+
+// Sub-state that belongs in the URL for a given view (so the link reopens the
+// exact same screen): the Clothes System tab, the service being viewed.
+function viewUrlParamsFor(view) {
+  if (view === 'clothes-system') {
+    return { tab: (typeof _clothesActiveTab !== 'undefined' && _clothesActiveTab) || null };
+  }
+  if (view === 'service-placeholder') {
+    return { service: state.viewData?.serviceId || null };
+  }
+  return {};
+}
+
+// Re-apply the sub-state carried in the URL when a view is opened by link.
+function restoreViewStateFromUrl(view) {
+  const params = getUrlParams();
+  if (view === 'clothes-system' && typeof restoreClothesTabFromUrl === 'function') {
+    restoreClothesTabFromUrl();
+  }
+  if (view === 'service-placeholder' && params.service) {
+    state.viewData = { serviceId: params.service };
+  }
 }
 
 // Update URL with parameters (for modals, filters, etc.)
@@ -7029,14 +8504,28 @@ function clearUrlParams(keys) {
   window.history.replaceState({ view: state.currentView }, '', newUrl);
 }
 
-// Update browser URL without reload
+// Update browser URL without reload. Carries the view's sub-state (Clothes
+// tab, service id) so the address always reproduces the screen you are on.
 function updateUrlForView(view, replace = false) {
   const path = VIEW_TO_PATH[view] || '/';
-  const newUrl = window.location.origin + path;
-  
-  // Don't update if already on this path
-  if (window.location.pathname === path) return;
-  
+  const sub = viewUrlParamsFor(view);
+  const search = new URLSearchParams();
+  for (const [k, v] of Object.entries(sub)) {
+    if (v !== null && v !== undefined && v !== '') search.set(k, String(v));
+  }
+  const qs = search.toString();
+  const newUrl = window.location.origin + path + (qs ? `?${qs}` : '');
+
+  // Already on this exact address: don't push a duplicate history entry, but
+  // still stamp {view} on the current entry — otherwise the initial entry
+  // keeps a null state and popstate falls back to services-hub/Restricted.
+  const samePlace = window.location.pathname === path
+    && (window.location.search || '') === (qs ? `?${qs}` : '');
+  if (samePlace) {
+    try { window.history.replaceState({ view }, '', newUrl); } catch (_) {}
+    return;
+  }
+
   try {
     if (replace) {
       window.history.replaceState({ view }, '', newUrl);
@@ -7053,60 +8542,61 @@ function updateUrlForView(view, replace = false) {
 function setupUrlRouting() {
   window.addEventListener('popstate', (event) => {
     const view = event.state?.view || getViewFromUrl();
+    // The address in the bar is the source of truth after back/forward:
+    // re-apply the view's sub-state (Clothes tab, service id) before rendering.
+    restoreViewStateFromUrl(view);
     // Navigate without pushing to history (already handled by popstate)
     navigateToInternal(view, false);
-    
+
     // Also restore modal state from URL params
     restoreModalFromUrl();
   });
 }
 
+// Every modal that has a shareable link: how to (re)open it from ?modal=&id=.
+// `open` re-runs the real opener so the modal's temp state (variants, split
+// lines, idempotency keys…) is initialised exactly as a click would.
+// Security note: recovery-key / password-reset / change-password are
+// deliberately NOT linkable — a URL must never resurrect a secrets dialog.
+const MODAL_URL_HANDLERS = {
+  'ad':               { newOpen: () => showAdModal(),        open: (id) => editAd(id) },
+  'receipt':          { newOpen: () => showReceiptModal(),   open: (id) => editReceipt(id) },
+  'customer':         { newOpen: () => showCustomerModal(),  open: (id) => editCustomer(id) },
+  'page':             { newOpen: () => showPageModal(),      open: (id) => editPage(id) },
+  'user':             { newOpen: () => showUserModal(),      open: (id) => editUser(id) },
+  'split-payments':   { open: (id) => manageSplitPayments(id) },
+  'top-ups':          { open: (id) => manageTopUps(id) },
+  'refund':           { open: (id) => manageRefund(id) },
+  'receipt-transfer': { open: (id) => showReceiptTransferModal(id) },
+  'collect-receipt':  { open: (id) => openCollectReceiptModal(id) },
+  'permissions':      { open: (id) => showPermissionsModal(id) },
+  'wallet-topup':     { open: (id) => showWalletTopupModal(id) },
+  'clothes-product':  { newOpen: () => showClothesProductModal(),  open: (id) => editClothesProduct(id) },
+  'clothes-shipment': { newOpen: () => showClothesShipmentModal(), open: (id) => editClothesShipment(id) },
+  'clothes-order':    { newOpen: () => showClothesOrderModal(),    open: (id) => editClothesOrder(id) }
+};
+
 // Restore modal from URL params (e.g., ?modal=ad&id=123 or ?modal=ad&id=new)
 function restoreModalFromUrl() {
   const params = getUrlParams();
-  
+
   if (params.modal) {
-    // Handle "new" modal (create new record)
-    if (params.id === 'new') {
-      setTimeout(() => {
-        state.activeModal = params.modal;
-        state.modalData = null;
-        renderModal();
-      }, 100);
-      return;
-    }
-    
-    // Find and open the modal for existing record
-    if (params.id) {
-      setTimeout(() => {
-        let record = null;
-        switch (params.modal) {
-          case 'ad':
-            record = state.ads.find(a => String(a.id) === String(params.id));
-            break;
-          case 'receipt':
-            record = state.receipts.find(r => String(r.id) === String(params.id));
-            break;
-          case 'customer':
-            record = state.customers.find(c => String(c.id) === String(params.id));
-            break;
-          case 'page':
-            record = state.pages.find(p => String(p.id) === String(params.id));
-            break;
-          case 'user':
-            record = state.users.find(u => String(u.id) === String(params.id));
-            break;
-          case 'split-payments':
-            record = state.receipts.find(r => String(r.id) === String(params.id));
-            break;
+    const handler = MODAL_URL_HANDLERS[params.modal];
+    if (!handler || !params.id) return;
+
+    // Re-open via the real opener so permissions are re-checked and the
+    // modal's temp state is seeded properly.
+    setTimeout(() => {
+      try {
+        if (params.id === 'new') {
+          if (handler.newOpen) handler.newOpen();
+          return;
         }
-        if (record) {
-          state.activeModal = params.modal;
-          state.modalData = record;
-          renderModal();
-        }
-      }, 100);
-    }
+        if (handler.open) handler.open(params.id);
+      } catch (e) {
+        console.warn('[restoreModalFromUrl] failed to open', params.modal, e?.message || e);
+      }
+    }, 100);
   } else {
     // No modal in URL, close any open modal
     if (state.activeModal) {
@@ -7143,8 +8633,11 @@ function navigateToInternal(view, pushHistory = true) {
   
   // Check permission (Admin always allowed)
   if (!isCurrentUserAdmin() && !userCanAccessView(state.currentUser, view)) {
-    // Special views that don't need permissions
-    if (view !== 'delivery-dashboard' && view !== 'no-access') {
+    // Special views that don't need permissions (delivery dashboard is for
+    // the Delivery role only — other roles must hold a real permission)
+    const isExempt = view === 'no-access' ||
+      (view === 'delivery-dashboard' && isDeliveryRole(state.currentUser?.role));
+    if (!isExempt) {
       showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية' : `You don't have permission to access this page`, 'error');
       return;
     }
@@ -7657,7 +9150,7 @@ function render() {
 
 function renderFirstRunSetup() {
   const isAr = state.language === 'ar';
-  const serverSetup = isServerModeEnabled() && state.needsServerSetup;
+  const serverSetup = isServerModeEnabled() && state.needsServerSetup && state.serverSetupEnabled === true;
   const modeNote = serverSetup
     ? (isAr ? 'الخادم جديد ولا يحتوي على أي حساب بعد. أنشئ حساب المدير الأول للبدء.' : 'This server is fresh and has no account yet. Create the first admin to begin.')
     : (isAr ? 'الإعداد لأول مرة (تجربة محلية). أنشئ حساب مدير للبدء.' : 'First time setup (local testing). Create an Admin account to start.');
@@ -7697,6 +9190,11 @@ function renderFirstRunSetup() {
             <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
             <input type="password" id="first-password-confirm" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'أعد كتابة كلمة المرور' : 'Repeat password'}" minlength="8" />
           </div>
+          ${serverSetup ? `<div>
+            <label class="block text-sm font-medium mb-2">${isAr ? 'رمز إعداد الخادم' : 'Server Setup Token'}</label>
+            <input type="password" id="first-setup-token" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="ALBAYAN_SETUP_TOKEN" minlength="16" maxlength="256" autocomplete="off" />
+            <p class="mt-1 text-xs text-slate-500">${isAr ? 'أدخل الرمز الذي أضافه مشغل الخادم.' : 'Enter the random token configured by the server operator.'}</p>
+          </div>` : ''}
           <button type="submit" class="w-full btn-shine alb-btn-primary text-white font-bold py-3 rounded-xl transition-all">
             ${serverSetup ? (isAr ? 'إنشاء حساب المدير' : 'Create Admin') : (isAr ? 'إنشاء مدير (محلي)' : 'Create Admin (Local)')}
           </button>
@@ -7711,6 +9209,17 @@ function renderFirstRunSetup() {
 
 // Open the server first-run setup screen from the login page.
 function startServerSetup() {
+  if (!isServerModeEnabled() || state.serverSetupEnabled !== true) {
+    state.needsServerSetup = false;
+    showNotification(
+      state.language === 'ar' ? 'إعداد الخادم مطلوب' : 'Server Setup Required',
+      state.language === 'ar'
+        ? 'إعداد المتصفح معطّل. استخدم متغيرات ALBAYAN_BOOTSTRAP_ADMIN_* أو أمر إنشاء المدير من الطرفية.'
+        : 'Browser setup is disabled. Use the ALBAYAN_BOOTSTRAP_ADMIN_* environment variables or the create-admin CLI command.',
+      'warning'
+    );
+    return;
+  }
   state.needsServerSetup = true;
   render();
 }
@@ -7732,6 +9241,8 @@ function attachFirstRunHandlers() {
       const email = Security.sanitizeInput(document.getElementById('first-email').value, { maxLength: 120 }).toLowerCase();
       const password = document.getElementById('first-password').value;
       const confirm = document.getElementById('first-password-confirm').value;
+      const serverSetup = isServerModeEnabled() && state.needsServerSetup && state.serverSetupEnabled === true;
+      const setupToken = serverSetup ? String(document.getElementById('first-setup-token')?.value || '') : '';
 
       const _vErr = state.language === 'ar' ? 'خطأ في التحقق' : 'Validation Error';
       if (!name) {
@@ -7750,16 +9261,24 @@ function attachFirstRunHandlers() {
         showNotification(_vErr, state.language === 'ar' ? 'كلمتا المرور غير متطابقتين' : 'Passwords do not match', 'error');
         return;
       }
+      if (serverSetup && setupToken.length < 16) {
+        showNotification(_vErr, state.language === 'ar' ? 'رمز إعداد الخادم مطلوب' : 'The server setup token is required', 'error');
+        return;
+      }
 
       // Server mode first-run: create the first admin ON THE SERVER (one-time,
       // then the server rejects further setup calls) and log straight in.
-      if (isServerModeEnabled() && state.needsServerSetup) {
+      if (serverSetup) {
         try {
-          const user = await apiSetupAdmin(name, email, password);
+          const user = await apiSetupAdmin(name, email, password, setupToken);
           if (!user) throw new Error('setup failed');
           state.needsServerSetup = false;
           state.serverHasNoUsers = false;
+          cancelPendingRequests();
+          invalidateUsersListCache();
+          advanceServerSessionEpoch();
           state.currentUser = user;
+          activateServerCollectionStorage(user);
           if (!Array.isArray(state.currentUser.subscriptions)) {
             state.currentUser.subscriptions = isAdminRole(state.currentUser.role) ? Object.keys(SERVICES) : [];
           }
@@ -7767,7 +9286,10 @@ function attachFirstRunHandlers() {
           saveState();
           showNotification(state.language === 'ar' ? 'تم إنشاء المدير' : 'Admin Created', state.language === 'ar' ? 'تم إنشاء حساب المدير وتسجيل الدخول.' : 'Admin account created and logged in.', 'success');
           render();
-          try { await serverLoadAllData(); } catch (_) {}
+          try {
+            const loadResult = await serverLoadAllData();
+            if (loadResult?.aborted) return;
+          } catch (_) {}
           startServerLiveSync();
           render();
         } catch (err) {
@@ -7781,6 +9303,21 @@ function attachFirstRunHandlers() {
           );
           if (already) { state.needsServerSetup = false; render(); }
         }
+        return;
+      }
+
+      // A stale/forged setup screen must never create a device-local Admin
+      // while the app is configured for the shared server.
+      if (isServerModeEnabled()) {
+        state.needsServerSetup = false;
+        showNotification(
+          state.language === 'ar' ? 'إعداد الخادم مطلوب' : 'Server Setup Required',
+          state.language === 'ar'
+            ? 'إعداد المتصفح غير متاح. اطلب من مشغل الخادم إنشاء حساب المدير.'
+            : 'Browser setup is unavailable. Ask the server operator to create the administrator account.',
+          'warning'
+        );
+        render();
         return;
       }
 
@@ -7845,7 +9382,7 @@ function renderLogin() {
             <p class="text-slate-500 mt-2">${t('signInTitle')}</p>
           </div>
 
-          ${(isServerModeEnabled() && state.serverHasNoUsers) ? `
+          ${(isServerModeEnabled() && state.serverHasNoUsers && state.serverSetupEnabled === true) ? `
           <button type="button" onclick="startServerSetup()" class="w-full mb-5 text-left rounded-2xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-900/20 p-4 hover:shadow-md transition-all">
             <div class="flex items-center gap-3">
               <i data-lucide="user-plus" class="w-5 h-5 text-indigo-600 flex-shrink-0"></i>
@@ -7856,6 +9393,13 @@ function renderLogin() {
               <i data-lucide="${isRTL ? 'chevron-left' : 'chevron-right'}" class="w-4 h-4 text-indigo-400 ml-auto flex-shrink-0"></i>
             </div>
           </button>
+          ` : (isServerModeEnabled() && state.serverHasNoUsers) ? `
+          <div class="w-full mb-5 rounded-2xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-200">
+            <div class="font-bold mb-1">${isRTL ? 'إعداد الخادم مطلوب' : 'Server setup required'}</div>
+            <div class="text-xs">${isRTL
+              ? 'إعداد المتصفح معطّل. اطلب من مشغل الخادم استخدام متغيرات ALBAYAN_BOOTSTRAP_ADMIN_* أو أمر إنشاء المدير من الطرفية.'
+              : 'Browser setup is disabled. Ask the server operator to use ALBAYAN_BOOTSTRAP_ADMIN_* or the create-admin CLI command.'}</div>
+          </div>
           ` : ''}
 
           <form id="login-form" class="space-y-4">
@@ -7875,9 +9419,9 @@ function renderLogin() {
             </div>
 
             <div class="flex items-center justify-between pt-1">
-              <button type="button" onclick="showPasswordResetModal()" class="text-sm font-medium alb-link">
-                ${t('forgotPassword')}
-              </button>
+              ${isServerModeEnabled()
+                ? `<span class="text-xs text-slate-500">${isRTL ? 'نسيت كلمة المرور؟ تواصل مع المدير.' : 'Forgot your password? Contact an administrator.'}</span>`
+                : `<button type="button" onclick="showPasswordResetModal()" class="text-sm font-medium alb-link">${t('forgotPassword')}</button>`}
               <button type="button" onclick="toggleLanguage()" class="text-sm font-bold text-slate-500 alb-hover-brand">
                 ${state.language === 'en' ? 'العربية' : 'English'}
               </button>
@@ -8020,9 +9564,10 @@ function renderSidebar() {
     'reconciliation': 'analytics', // Part of analytics
     'users': 'users',
     'audit': 'auditLogs',
-    'settings': 'settings'
+    'settings': 'settings',
+    'clothes-system': 'clothesProducts'
   };
-  
+
   const allNavItems = [
     { id: 'analytics', icon: 'layout-dashboard', label: 'analytics' },
     { id: 'customers', icon: 'smile', label: 'customers' },
@@ -8036,24 +9581,33 @@ function renderSidebar() {
     { id: 'settings', icon: 'settings', label: 'settings' },
   ];
 
+  // Clothes System entry for non-admins holding clothes permissions. Admins
+  // reach it via the Services Hub; without this, a permissioned employee has
+  // no way to open it unless it happens to be their landing view.
+  if (!isAdminRole(state.currentUser?.role)) {
+    allNavItems.push({ id: 'clothes-system', icon: 'shirt', label: 'clothesSystem' });
+  }
+
   // Delivery users have a special dashboard view (not permission-gated).
   if (isDeliveryRole(state.currentUser?.role)) {
     allNavItems.unshift({ id: 'delivery-dashboard', icon: 'layout-dashboard', label: 'dashboard' });
   }
-  
+
   // Filter nav items based on permissions (Admin sees all, others based on their permissions)
   const navItems = allNavItems.filter(item => {
     // Admin sees everything
     if (isAdminRole(state.currentUser?.role)) return true;
-    
-    // Delivery role - show delivery dashboard + deliveries
+
+    // Delivery role: dashboard + deliveries always available (their permission
+    // records may be minimal); anything ELSE they were explicitly granted still
+    // shows through the permission check below (union, not replacement).
     if (isDeliveryRole(state.currentUser?.role)) {
-      return item.id === 'delivery-dashboard' || item.id === 'deliveries';
+      if (item.id === 'delivery-dashboard' || item.id === 'deliveries') return true;
     }
-    
+
     // Check if user has view permission for this module
     const permModule = navItemPermissions[item.id];
-    return currentUserHasPermission(permModule, 'view') || 
+    return currentUserHasPermission(permModule, 'view') ||
            currentUserHasPermission(permModule, 'viewOwn');
   });
   
@@ -8442,7 +9996,7 @@ function findUserByEmailOrId(value) {
   return u || null;
 }
 
-function walletTransferFromUi() {
+async function walletTransferFromUi() {
   try {
     if (!state.currentUser?.id) return;
     const toValue = document.getElementById('wallet-transfer-to')?.value || '';
@@ -8464,7 +10018,24 @@ function walletTransferFromUi() {
       showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
       return;
     }
-    WALLET.transfer(state.currentUser.id, toUser.id, 0, { memo: memoValue, currency, amountMinor, idempotencyKey: `p2p:${Security.generateSecureId('idem')}` });
+    const submitBtn = document.getElementById('wallet-transfer-submit');
+    if (submitBtn?.disabled) return;
+    const canReuseKey = String(submitBtn?.dataset.operationFingerprint || '') === fingerprint;
+    const operationKey = (canReuseKey ? String(submitBtn?.dataset.idempotencyKey || '') : '') || `p2p:${Security.generateSecureId('idem')}`;
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.dataset.idempotencyKey = operationKey;
+      submitBtn.dataset.operationFingerprint = fingerprint;
+    }
+    try {
+      await WALLET.transfer(state.currentUser.id, toUser.id, 0, { memo: memoValue, currency, amountMinor, idempotencyKey: operationKey });
+      if (submitBtn) {
+        delete submitBtn.dataset.idempotencyKey;
+        delete submitBtn.dataset.operationFingerprint;
+      }
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
 
     const toEl = document.getElementById('wallet-transfer-to');
     const amtEl = document.getElementById('wallet-transfer-amount');
@@ -8480,7 +10051,7 @@ function walletTransferFromUi() {
   }
 }
 
-function walletTopUpFromUi() {
+async function walletTopUpFromUi() {
   try {
     if (!state.currentUser?.id) return;
     if (!isAdminRole(state.currentUser.role)) {
@@ -8506,7 +10077,24 @@ function walletTopUpFromUi() {
       showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
       return;
     }
-    WALLET.credit(toUser.id, 0, { memo: memoValue || 'Top-up', currency, amountMinor, idempotencyKey: `topup:${Security.generateSecureId('idem')}` });
+    const submitBtn = document.getElementById('wallet-topup-submit');
+    if (submitBtn?.disabled) return;
+    const canReuseKey = String(submitBtn?.dataset.operationFingerprint || '') === fingerprint;
+    const operationKey = (canReuseKey ? String(submitBtn?.dataset.idempotencyKey || '') : '') || `topup:${Security.generateSecureId('idem')}`;
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.dataset.idempotencyKey = operationKey;
+      submitBtn.dataset.operationFingerprint = fingerprint;
+    }
+    try {
+      await WALLET.credit(toUser.id, 0, { memo: memoValue || 'Top-up', currency, amountMinor, idempotencyKey: operationKey });
+      if (submitBtn) {
+        delete submitBtn.dataset.idempotencyKey;
+        delete submitBtn.dataset.operationFingerprint;
+      }
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
 
     const toEl = document.getElementById('wallet-topup-to');
     const amtEl = document.getElementById('wallet-topup-amount');
@@ -8522,7 +10110,7 @@ function walletTopUpFromUi() {
   }
 }
 
-function cancelSubscriptionFromUi(serviceId) {
+async function cancelSubscriptionFromUi(serviceId) {
   try {
     if (!state.currentUser?.id) return;
     const sid = String(serviceId || '').trim();
@@ -8530,7 +10118,7 @@ function cancelSubscriptionFromUi(serviceId) {
     const isRTL = state.language === 'ar';
     const ok = confirm(isRTL ? 'هل تريد إلغاء الاشتراك؟' : 'Cancel this subscription?');
     if (!ok) return;
-    SUBSCRIPTIONS.cancel(state.currentUser.id, sid);
+    await SUBSCRIPTIONS.cancel(state.currentUser.id, sid);
     showNotification(isRTL ? 'نجاح' : 'Success', isRTL ? 'تم إلغاء الاشتراك' : 'Subscription canceled', 'success');
     render();
   } catch (e) {
@@ -8665,7 +10253,7 @@ function renderWalletView() {
                 <input id="wallet-transfer-memo" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isRTL ? 'اختياري' : 'Optional'}" maxlength="180" />
               </div>
             </div>
-            <button onclick="walletTransferFromUi()" class="w-full btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
+            <button id="wallet-transfer-submit" onclick="walletTransferFromUi()" class="w-full btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 disabled:opacity-50" type="button">
               <i data-lucide="send" class="w-4 h-4 inline mr-2"></i>${t('send')}
             </button>
             <div class="text-[11px] text-slate-400">
@@ -8707,7 +10295,7 @@ function renderWalletView() {
                   <input id="wallet-topup-memo" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isRTL ? 'اختياري' : 'Optional'}" maxlength="180" />
                 </div>
               </div>
-              <button onclick="walletTopUpFromUi()" class="w-full btn-shine bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700">
+              <button id="wallet-topup-submit" onclick="walletTopUpFromUi()" class="w-full btn-shine bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700 disabled:opacity-50" type="button">
                 <i data-lucide="plus" class="w-4 h-4 inline mr-2"></i>${t('topUp')}
               </button>
             </div>
@@ -8800,6 +10388,12 @@ function renderAnalyticsView() {
   const users = getVisibleRecords(state.users);
   const now = Date.now();
   const last7 = now - 7 * 24 * 60 * 60 * 1000;
+
+  // analytics.viewFinancials gates every money figure on this screen;
+  // analytics.viewSensitive gates the detailed breakdowns (used/paid splits,
+  // collected-vs-outstanding amounts, per-customer spend).
+  const canViewFinancials = can('analytics', 'viewFinancials');
+  const canViewSensitive = can('analytics', 'viewSensitive');
 
   // Calculate ad revenue - separate paid vs pending/unpaid for clarity.
   // Uses the SAME status-aware spend rule as the customer cards
@@ -8922,8 +10516,14 @@ function renderAnalyticsView() {
         </div>
       </div>
 
-      <!-- KPI Grid -->
+      <!-- KPI Grid — money figures require analytics.viewFinancials -->
       <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+        ${!canViewFinancials ? `
+        ${renderStatCard(isAr ? 'الإعلانات' : 'Ads', ads.length, 'megaphone', 'from-emerald-500 to-teal-600')}
+        ${renderStatCard(isAr ? 'الوصولات' : 'Receipts', revenueReceipts.length, 'file-text', 'from-indigo-500 to-purple-600')}
+        ${renderStatCard(isAr ? 'العملاء' : 'Customers', getVisibleRecords(state.customers).length, 'users', 'from-blue-500 to-cyan-600')}
+        ${renderStatCard(isAr ? 'حالة التحصيل' : 'Collection Status', `${collectedReceipts.length}/${revenueReceipts.length}`, 'wallet', 'from-amber-500 to-orange-600')}
+        ` : `
         <!-- Show paid ad revenue separately for clarity -->
         <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform">
           <div class="absolute inset-0 bg-gradient-to-br from-emerald-500 to-teal-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
@@ -8946,14 +10546,14 @@ function renderAnalyticsView() {
             <div>
               <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">${isAr ? 'الرصيد المتاح' : 'Available Balance'}</p>
               <p class="text-2xl font-bold text-slate-800 dark:text-white">$${availableReceiptBalance.toFixed(2)}</p>
-              <p class="text-xs text-slate-500 mt-1">${isAr ? 'مستخدم' : 'Used'}: $${totalUsedFromReceipts.toFixed(2)} / ${isAr ? 'مدفوع' : 'Paid'}: $${paidUSD.toFixed(2)}</p>
+              ${canViewSensitive ? `<p class="text-xs text-slate-500 mt-1">${isAr ? 'مستخدم' : 'Used'}: $${totalUsedFromReceipts.toFixed(2)} / ${isAr ? 'مدفوع' : 'Paid'}: $${paidUSD.toFixed(2)}</p>` : ''}
             </div>
             <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center shadow-lg">
               <i data-lucide="piggy-bank" class="w-6 h-6 text-white"></i>
             </div>
           </div>
         </div>
-        
+
         <!-- Collection Status Card -->
         <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform cursor-pointer" onclick="state.receiptCollectedFilter='not-collected';navigateTo('receipts');">
           <div class="absolute inset-0 bg-gradient-to-br from-amber-500 to-orange-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
@@ -8964,10 +10564,12 @@ function renderAnalyticsView() {
                 <p class="text-2xl font-bold text-slate-800 dark:text-white">${collectedReceipts.length}/${revenueReceipts.length}</p>
                 <span class="text-sm font-medium ${collectionRate >= 80 ? 'text-emerald-600' : collectionRate >= 50 ? 'text-amber-600' : 'text-rose-600'}">${collectionRate}%</span>
               </div>
+              ${canViewSensitive ? `
               <div class="flex items-center space-x-3 mt-2 text-xs">
                 <span class="text-emerald-600 font-medium">✓ $${collectedUSD.toFixed(0)}</span>
                 <span class="text-amber-600 font-medium">○ $${notCollectedUSD.toFixed(0)}</span>
               </div>
+              ` : ''}
             </div>
             <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shadow-lg">
               <i data-lucide="wallet" class="w-6 h-6 text-white"></i>
@@ -8978,10 +10580,12 @@ function renderAnalyticsView() {
             <div class="h-full bg-gradient-to-r from-emerald-500 to-teal-500 rounded-full transition-all duration-500" style="width: ${collectionRate}%"></div>
           </div>
         </div>
+        `}
       </div>
 
       <!-- Tracking Panels -->
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        ${canViewFinancials ? `
         <div class="glass-panel rounded-2xl p-5 space-y-4">
           <div class="flex items-center justify-between">
             <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">${isAr ? 'الإيرادات والتحصيلات' : 'Revenue & Collections'}</h2>
@@ -8991,6 +10595,7 @@ function renderAnalyticsView() {
           ${renderProgress(isAr ? 'المعلّق (وصولات)' : 'Pending (Receipts)', pendingUSD, Math.max(paidUSD + pendingUSD, 1), 'bg-amber-500')}
           ${renderProgress(isAr ? 'إيراد الإعلانات (الكل)' : 'Ad Revenue (all time)', totalAdRevenue, Math.max(totalAdRevenue, 1), 'bg-indigo-500')}
         </div>
+        ` : ''}
 
         <div class="glass-panel rounded-2xl p-5 space-y-4">
           <div class="flex items-center justify-between">
@@ -9037,6 +10642,7 @@ function renderAnalyticsView() {
 
       <!-- Lists -->
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        ${canViewSensitive ? `
         <div class="glass-panel rounded-2xl p-5">
           <div class="flex items-center justify-between mb-3">
             <h3 class="font-bold text-slate-800 dark:text-white">${isAr ? 'أفضل العملاء (إنفاق)' : 'Top Customers (Spend)'}</h3>
@@ -9056,6 +10662,7 @@ function renderAnalyticsView() {
             </div>
           `}
         </div>
+        ` : ''}
 
         <div class="glass-panel rounded-2xl p-5">
           <div class="flex items-center justify-between mb-3">
@@ -9196,6 +10803,11 @@ function renderCustomersGrid(customers) {
 
   const totalCustomers = customers.length;
   const statsIndex = buildCustomerStatsIndex();
+  // customers.viewContacts / customers.viewBalance are real permissions — a
+  // user without them must not see phone numbers or money figures.
+  const canSeeContacts = can('customers', 'viewContacts');
+  const canSeeBalance = can('customers', 'viewBalance');
+  const HIDDEN = isAr ? 'محجوب' : 'Hidden';
   return customers.map((c, idx) => {
           const stats = getCustomerStats(c.id, statsIndex);
           const lastAdText = stats.lastAdDate
@@ -9234,11 +10846,13 @@ function renderCustomersGrid(customers) {
                 <div class="flex items-start space-x-2">
                   <i data-lucide="phone" class="w-4 h-4 text-slate-400 mt-0.5"></i>
                   <div class="flex-1">
-              ${phones.length > 0 ? phones.map(phone => `<div class="text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone || '')}</div>`).join('') : `<span class="text-slate-400">${isAr ? 'لا يوجد هاتف' : 'No phone'}</span>`}
+              ${!canSeeContacts
+                ? `<span class="text-slate-400">••• ${HIDDEN}</span>`
+                : (phones.length > 0 ? phones.map(phone => `<div class="text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone || '')}</div>`).join('') : `<span class="text-slate-400">${isAr ? 'لا يوجد هاتف' : 'No phone'}</span>`)}
                   </div>
                 </div>
 
-          ${profileLinks.length > 0 ? `
+          ${canSeeContacts && profileLinks.length > 0 ? `
                   <div class="flex items-start space-x-2">
                     <i data-lucide="link" class="w-4 h-4 text-slate-400 mt-0.5"></i>
                     <div class="flex-1">
@@ -9253,7 +10867,12 @@ function renderCustomersGrid(customers) {
                   <span class="text-slate-600 dark:text-slate-400">${isAr ? 'آخر إعلان' : 'Last ad'}: ${lastAdText}</span>
                 </div>
 
-                <!-- Financial Summary -->
+                <!-- Financial Summary (customers.viewBalance) -->
+                ${!canSeeBalance ? `
+                <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700 text-center text-xs text-slate-400">
+                  <i data-lucide="lock" class="w-3 h-3 inline mr-1"></i>${isAr ? 'الأرصدة محجوبة' : 'Balances hidden'}
+                </div>
+                ` : `
                 <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
                   <!-- LYD Section - TOTAL PAID -->
                   <div class="mb-2">
@@ -9292,6 +10911,7 @@ function renderCustomersGrid(customers) {
                     </div>
                   </div>
                 </div>
+                `}
               </div>
             </div>
           `;
@@ -9354,17 +10974,21 @@ function renderCustomersView() {
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('customers')}</h1>
           <p id="customers-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allFilteredCustomers.length} من ${allCustomers.length} عميل` : `${allFilteredCustomers.length} of ${allCustomers.length} customers`}</p>
         </div>
+        ${can('customers', 'add') ? `
         <button onclick="showCustomerModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
           <i data-lucide="user-plus" class="w-4 h-4"></i>
           <span>${t('addCustomer')}</span>
         </button>
+        ` : ''}
       </div>
 
-      <!-- Stats Cards -->
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <!-- Stats Cards (money figures require customers.viewBalance) -->
+      <div class="grid grid-cols-1 ${can('customers', 'viewBalance') ? 'md:grid-cols-3' : ''} gap-6">
         ${renderStatCard(isAr ? 'إجمالي العملاء' : 'Total Customers', allCustomers.length, 'users', 'from-indigo-500 to-purple-600')}
+        ${can('customers', 'viewBalance') ? `
         ${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', totalRevenue.toFixed(0) + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}
         ${renderStatCard(isAr ? 'الديون المستحقة' : 'Outstanding Debts', totalDebts.toFixed(0) + ' LYD', 'alert-circle', 'from-rose-500 to-pink-600')}
+        ` : ''}
       </div>
 
       <!-- Search and Filters -->
@@ -10311,8 +11935,12 @@ function renderDeliveriesView() {
   filteredDeliveries.sort((a, b) => new Date(b.createdAt || b.date || 0) - new Date(a.createdAt || a.date || 0));
 
   const roleLower = String(state.currentUser?.role || '').toLowerCase();
-  const canAssign = roleLower !== 'delivery' && (currentUserHasPermission('deliveries', 'assign') || isCurrentUserAdmin());
-  const canOffice = roleLower !== 'delivery' && (currentUserHasPermission('deliveries', 'markCollected') || isCurrentUserAdmin());
+  const canAssign = roleLower !== 'delivery' && can('deliveries', 'assign');
+  const canOffice = roleLower !== 'delivery' && can('deliveries', 'markCollected');
+  // deliveries.viewStats gates the aggregate money tiles and the per-driver
+  // performance panel (held cash, success rates) — it is a real permission.
+  const canViewDeliveryStats = can('deliveries', 'viewStats');
+  const canExportDeliveries = can('deliveries', 'viewStats') || can('receipts', 'export');
 
   const activeDeliveries = deliveryReceipts.filter(d => d.deliveryStatus === 'In Progress' || d.deliveryStatus === 'Needs Delivery');
 
@@ -10329,17 +11957,22 @@ function renderDeliveriesView() {
             <i data-lucide="refresh-cw" class="w-4 h-4"></i>
             <span>${isAr ? 'تحديث' : 'Refresh'}</span>
           </button>
+          ${canAssign ? `
           <button onclick="checkStuckDeliveries()" class="glass-panel px-3 py-2 rounded-xl text-sm font-medium flex items-center space-x-2 hover:bg-amber-50 dark:hover:bg-amber-900/20" title="${isAr ? 'البحث عن توصيلات عالقة قيد التنفيذ لأكثر من 3 أيام' : 'Find deliveries stuck in progress for more than 3 days'}">
             <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-600"></i>
             <span class="text-amber-700 dark:text-amber-400">${isAr ? 'فحص العالقة' : 'Check Stuck'}</span>
           </button>
+          ` : ''}
+          ${canExportDeliveries ? `
           <button onclick="exportDeliveryReport()" class="btn-shine bg-indigo-600 text-white px-3 py-2 rounded-xl text-sm font-bold flex items-center space-x-2">
             <i data-lucide="download" class="w-4 h-4"></i>
             <span>${t('export')}</span>
           </button>
+          ` : ''}
         </div>
       </div>
 
+      ${!canViewDeliveryStats ? '' : `
       <!-- Stats (compact): 4 money/count tiles + pipeline strip in one panel -->
       <div class="glass-panel rounded-2xl p-4">
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -10376,9 +12009,11 @@ function renderDeliveriesView() {
           <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>${isAr ? 'ملغي' : 'Canceled'} <b>${stats.canceled}</b></span>
         </div>
       </div>
+      `}
 
       <!-- Driver Performance & Delivery Log Grid -->
       <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+        ${!canViewDeliveryStats ? '' : `
         <!-- Driver Performance (compact rows, same numbers) -->
         <div class="glass-panel rounded-2xl p-4">
           <h2 class="text-base font-bold text-slate-800 dark:text-white mb-3">${isAr ? 'أداء السائقين' : 'Driver Performance'}</h2>
@@ -10404,9 +12039,10 @@ function renderDeliveriesView() {
             `).join('')}
           </div>
         </div>
+        `}
 
         <!-- Delivery Log -->
-        <div class="xl:col-span-2 glass-panel rounded-2xl p-4">
+        <div class="${canViewDeliveryStats ? 'xl:col-span-2' : 'xl:col-span-3'} glass-panel rounded-2xl p-4">
           <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 mb-3">
             <h2 class="text-base font-bold text-slate-800 dark:text-white">${isAr ? 'سجل التوصيل' : 'Delivery Log'}</h2>
             <div class="flex flex-wrap items-center gap-2 w-full md:w-auto">
@@ -10642,6 +12278,16 @@ function refreshDeliveries() {
 
 // Export delivery report
 function exportDeliveryReport() {
+  // The report carries customer phones + money owed — require an export-level
+  // permission, not just the ability to see the deliveries screen.
+  if (!can('deliveries', 'viewStats') && !can('receipts', 'export')) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تحتاج صلاحية تصدير/إحصاءات التوصيل' : 'Requires delivery statistics or receipt export permission',
+      'error'
+    );
+    return;
+  }
   // Delivery Operations: receipts are the source of truth (ads must not create deliveries).
   const deliveryAds = getVisibleRecords(state.receipts).filter(r => {
     const ds = String(r?.deliveryStatus || '').trim();
@@ -10807,7 +12453,7 @@ function _getOutstandingDueLocal(item) {
   return 0;
 }
 
-function setOfficeHandover(itemId, received) {
+async function setOfficeHandover(itemId, received) {
   const id = String(itemId || '');
   if (!id) return;
 
@@ -10843,8 +12489,10 @@ function setOfficeHandover(itemId, received) {
     officeHandoverAt: next ? nowIso : ''
   };
 
-  if (receipt) updateRecord(state.receipts, id, updates);
-  else updateRecord(state.ads, id, updates);
+  const saved = receipt
+    ? await updateRecord(state.receipts, id, updates)
+    : await updateRecord(state.ads, id, updates);
+  if (!saved) return;
 
   addAuditLog('update', id, next ? 'Office handover marked as received' : 'Office handover undone', { isReceipt: !!receipt });
   showNotification(isAr ? 'نجاح' : 'Success', next ? (isAr ? 'تم استلام النقد في المكتب' : 'Cash received at office') : (isAr ? 'تم التراجع عن التسليم للمكتب' : 'Office handover undone'), 'success');
@@ -10862,7 +12510,7 @@ function undoOfficeHandover(itemId) {
 }
 
 // "Delete mission" (remove from delivery tracking) without deleting the receipt itself.
-function removeDeliveryMission(itemId) {
+async function removeDeliveryMission(itemId) {
   const id = String(itemId || '');
   if (!id) return;
 
@@ -10915,7 +12563,7 @@ function removeDeliveryMission(itemId) {
     nextStatusDetail.notPaidCollection = 'office';
   }
 
-  updateRecord(state.receipts, id, {
+  const saved = await updateRecord(state.receipts, id, {
     deliveryStatus: 'Office',
     deliveryPersonId: '',
     acceptedDate: '',
@@ -10929,6 +12577,7 @@ function removeDeliveryMission(itemId) {
     deliveryHistory: nextHistory,
     statusDetail: nextStatusDetail
   });
+  if (!saved) return;
 
   showNotification(state.language === 'ar' ? 'تمت الإزالة' : 'Removed', state.language === 'ar' ? 'تمت إزالة مهمة التوصيل' : 'Delivery mission removed', 'success');
   render();
@@ -11281,8 +12930,8 @@ async function refreshDeliveryDashboard() {
 
   try {
     // Clear cache to force fresh data
-    _collectionCache.receipts = { data: null, timestamp: 0 };
-    _collectionCache.customers = { data: null, timestamp: 0 };
+    _collectionCache.receipts = { data: null, timestamp: 0, identity: '' };
+    _collectionCache.customers = { data: null, timestamp: 0, identity: '' };
 
     // Force immediate sync from server
     const [receipts, customers] = await Promise.all([
@@ -11397,7 +13046,7 @@ function openDeliveryCancelModal(itemId) {
   IconQueue.schedule(modal);
 }
 
-function submitDeliveryCancel(itemType, itemId) {
+async function submitDeliveryCancel(itemType, itemId) {
   const type = String(itemType || '');
   const id = String(itemId || '');
   const reason = String(document.getElementById('delivery-cancel-reason')?.value || '').trim();
@@ -11414,16 +13063,22 @@ function submitDeliveryCancel(itemType, itemId) {
     if (!receipt) return;
     const nextHistory = Array.isArray(receipt.deliveryHistory) ? [...receipt.deliveryHistory] : [];
     nextHistory.push({ ts: nowIso, userId: uid, action: 'CANCELLED_BY_DRIVER', reason });
-    updateRecord(state.receipts, receipt.id, {
+    const receiptSaved = await updateRecord(state.receipts, receipt.id, {
       deliveryStatus: 'Canceled',
       deliveryCancelReason: reason,
       deliveryCancelledAt: nowIso,
       deliveryCancelledBy: uid,
       deliveryHistory: nextHistory
     });
+    if (!receiptSaved) return;
     // The canceled delivery's debt will never be collected — release any ad
     // funding that was drawn from its due credit.
-    const releasedAds = releaseCanceledDeliveryDueFunding(receipt.id);
+    let releasedAds = 0;
+    try {
+      releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);
+    } catch (_) {
+      return;
+    }
     if (releasedAds > 0) {
       showNotification(
         state.language === 'ar' ? 'تنبيه' : 'Notice',
@@ -11438,13 +13093,14 @@ function submitDeliveryCancel(itemType, itemId) {
     if (!ad) return;
     const nextHistory = Array.isArray(ad.deliveryHistory) ? [...ad.deliveryHistory] : [];
     nextHistory.push({ ts: nowIso, userId: uid, action: 'CANCELLED_BY_DRIVER', reason });
-    updateRecord(state.ads, ad.id, {
+    const adSaved = await updateRecord(state.ads, ad.id, {
       deliveryStatus: 'Canceled',
       deliveryCancelReason: reason,
       deliveryCancelledAt: nowIso,
       deliveryCancelledBy: uid,
       deliveryHistory: nextHistory
     });
+    if (!adSaved) return;
   }
 
   document.getElementById('delivery-cancel-modal')?.remove();
@@ -11486,7 +13142,11 @@ function renderUsersView() {
   const isAr = state.language === 'ar';
   const visibleUsers = getVisibleRecords(state.users);
   const isAdmin = isCurrentUserAdmin();
-  
+  const canAddUsers = canManageUsersAction('add');
+  const canEditUsers = canManageUsersAction('edit');
+  const canDeleteUsers = canManageUsersAction('delete');
+  const canManagePerms = canManageUsersAction('managePermissions');
+
   return `
     <div class="space-y-6 animate-fade-in-up">
       <div class="flex justify-between items-center">
@@ -11494,7 +13154,7 @@ function renderUsersView() {
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('users')}</h1>
           <p class="text-sm text-slate-500 mt-1">${isAr ? `${visibleUsers.length} مستخدم في النظام` : `${visibleUsers.length} system users`}</p>
         </div>
-        ${isAdmin ? `
+        ${canAddUsers ? `
         <button onclick="showUserModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
           <i data-lucide="user-plus" class="w-4 h-4"></i>
           <span>${t('addUser')}</span>
@@ -11530,17 +13190,17 @@ function renderUsersView() {
                       <i data-lucide="banknote" class="w-4 h-4"></i>
                     </button>
                   ` : ''}
-                  ${isAdmin && u.id !== state.currentUser?.id && !isAdminRole(u.role) ? `
+                  ${canManagePerms && u.id !== state.currentUser?.id && !isAdminRole(u.role) ? `
                     <button onclick="showPermissionsModal('${u.id}')" class="text-purple-600 hover:text-purple-700 p-1" title="${isAr ? 'إدارة الصلاحيات' : 'Manage Permissions'}">
                       <i data-lucide="shield" class="w-4 h-4"></i>
                     </button>
                   ` : ''}
-                  ${isAdmin || u.id === state.currentUser?.id ? `
+                  ${u.id === state.currentUser?.id || (canEditUsers && (isAdmin || !isAdminRole(u.role))) ? `
                   <button onclick="editUser('${u.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${u.id === state.currentUser?.id ? (isAr ? 'تعديل ملفك الشخصي' : 'Edit Your Profile') : t('edit')}">
                     <i data-lucide="edit" class="w-4 h-4"></i>
                   </button>
                   ` : ''}
-                  ${isAdmin && u.id !== state.currentUser?.id ? `
+                  ${canDeleteUsers && u.id !== state.currentUser?.id && (isAdmin || !isAdminRole(u.role)) ? `
                     <button onclick="deleteUser('${u.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="${t('delete')}">
                       <i data-lucide="trash-2" class="w-4 h-4"></i>
                     </button>
@@ -11593,14 +13253,14 @@ function renderUsersView() {
                       <div class="w-full h-1.5 bg-purple-200 dark:bg-purple-800 rounded-full overflow-hidden">
                         <div class="h-full bg-gradient-to-r from-purple-500 to-indigo-500 rounded-full transition-all" style="width: ${permSummary.percentage}%"></div>
                       </div>
-                      ${isAdmin ? `
+                      ${canManagePerms ? `
                       <button onclick="showPermissionsModal('${u.id}')" class="mt-2 w-full text-xs text-purple-600 hover:text-purple-700 font-medium flex items-center justify-center space-x-1">
                         <i data-lucide="settings" class="w-3 h-3"></i>
                         <span>${isAr ? 'إدارة الوصول' : 'Manage Access'}</span>
                       </button>
                       ` : `
                         <div class="mt-2 text-[11px] text-slate-500 text-center">
-                          ${state.language === 'ar' ? 'التعديل للأدمن فقط' : 'Admin only'}
+                          ${state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires Manage Permissions'}
                         </div>
                       `}
                     </div>
@@ -11624,8 +13284,19 @@ function renderUsersView() {
 
 function renderAuditView() {
   const isAr = state.language === 'ar';
-  const allLogs = getVisibleRecords(state.logs);
-  
+  // PERMISSION SCOPING: auditLogs.view sees everything; auditLogs.viewOwn sees
+  // only their own entries. Every count, stat tile, filter dropdown and table
+  // row below derives from allLogs, so scoping here scopes the whole screen.
+  const canViewAllLogs = can('auditLogs', 'view');
+  const canViewOwnLogs = canViewAllLogs || currentUserHasPermission('auditLogs', 'viewOwn');
+  const canExportLogs = can('auditLogs', 'export');
+  const canClearLogs = can('auditLogs', 'clear');
+  if (!canViewOwnLogs) return renderNoAccessView();
+  // In server mode pull the authoritative, server-scoped trail (no-op when
+  // fresh; re-renders this view when it arrives).
+  refreshServerAuditLogs();
+  const allLogs = getVisibleAuditLogs();
+
   // Apply filters
   let filteredLogs = allLogs.filter(log => {
     // Search filter
@@ -11721,10 +13392,13 @@ function renderAuditView() {
           <p class="text-sm text-slate-500 mt-1">${isAr ? `${totalLogs.toLocaleString()} إجمالي السجلات` : `${totalLogs.toLocaleString()} total entries`} ${hasActiveFilters ? (isAr ? `(مصفّاة من ${allLogs.length.toLocaleString()})` : `(filtered from ${allLogs.length.toLocaleString()})`) : ''}</p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
+          ${canExportLogs ? `
           <button onclick="backupAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 border-2 border-emerald-200 dark:border-emerald-800 transition-all" title="${isAr ? 'إنشاء نسخة احتياطية كاملة من كل السجلات' : 'Create full backup of all logs'}">
             <i data-lucide="archive" class="w-4 h-4 text-emerald-600"></i>
             <span class="text-emerald-700 dark:text-emerald-400">${isAr ? 'نسخ احتياطي' : 'Backup'}</span>
           </button>
+          ` : ''}
+          ${canClearLogs ? `
           <button onclick="restoreAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-blue-50 dark:hover:bg-blue-900/20 border-2 border-blue-200 dark:border-blue-800 transition-all" title="${isAr ? 'استرجاع السجلات من ملف نسخة احتياطية' : 'Restore logs from backup file'}">
             <i data-lucide="upload" class="w-4 h-4 text-blue-600"></i>
             <span class="text-blue-700 dark:text-blue-400">${isAr ? 'استرجاع' : 'Restore'}</span>
@@ -11733,6 +13407,8 @@ function renderAuditView() {
             <i data-lucide="trash-2" class="w-4 h-4 text-rose-600"></i>
             <span class="text-rose-700 dark:text-rose-400">${isAr ? 'تنظيف' : 'Cleanup'}</span>
           </button>
+          ` : ''}
+          ${canExportLogs ? `
           <div class="w-px h-6 bg-slate-300 dark:bg-slate-600"></div>
           <button onclick="exportAuditLogs('csv')" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all">
             <i data-lucide="download" class="w-4 h-4"></i>
@@ -11742,6 +13418,7 @@ function renderAuditView() {
             <i data-lucide="file-json" class="w-4 h-4"></i>
             <span>JSON</span>
           </button>
+          ` : ''}
         </div>
       </div>
       
@@ -12042,7 +13719,13 @@ function showLogDetails(logId) {
   const isAr = state.language === 'ar';
   const log = state.logs.find(l => l.id === logId);
   if (!log) return;
-  
+  // Reachable with an arbitrary id — enforce the same scope as the table:
+  // a viewOwn-only user may only open their OWN entries.
+  if (!can('auditLogs', 'view') && String(log.userId || '') !== String(state.currentUser?.id || '')) {
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'لا يمكنك عرض سجل مستخدم آخر' : "You cannot view another user's log entry", 'error');
+    return;
+  }
+
   const user = state.users.find(u => u.id === log.userId);
   const modal = document.getElementById('app-modal') || document.createElement('div');
   modal.id = 'app-modal';
@@ -12115,8 +13798,13 @@ function showLogDetails(logId) {
 }
 
 function exportAuditLogs(format) {
-  const allLogs = getVisibleRecords(state.logs);
-  
+  if (!can('auditLogs', 'export')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية تصدير السجلات' : 'Requires the Export Logs permission', 'error');
+    return;
+  }
+  // Scoped: a viewOwn-only user exports only their own entries.
+  const allLogs = getVisibleAuditLogs();
+
   if (format === 'csv') {
     const headers = ['Date', 'Time', 'User', 'Action', 'Category', 'Severity', 'Description', 'Resource ID'];
     const rows = allLogs.map(log => {
@@ -12166,8 +13854,13 @@ function downloadFile(content, filename, mimeType) {
 
 // Backup all audit logs for permanent storage
 async function backupAuditLogs() {
-  const allLogs = getVisibleRecords(state.logs);
-  
+  if (!can('auditLogs', 'export')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية تصدير السجلات' : 'Requires the Export Logs permission', 'error');
+    return;
+  }
+  // A backup is a full export — scope it exactly like the export above.
+  const allLogs = getVisibleAuditLogs();
+
   const backup = {
     version: '1.0',
     exportDate: new Date().toISOString(),
@@ -12187,10 +13880,15 @@ async function backupAuditLogs() {
 
 // Restore audit logs from backup file
 function restoreAuditLogs() {
+  // Restore WRITES to the audit trail — same privilege as clearing it.
+  if (!can('auditLogs', 'clear')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية مسح/استرجاع السجلات' : 'Requires the Clear Logs permission', 'error');
+    return;
+  }
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = '.json';
-  
+
   input.onchange = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -12254,8 +13952,8 @@ function restoreAuditLogs() {
 // Cleanup old audit logs
 async function cleanupAuditLogs() {
   const isAr = state.language === 'ar';
-  if (!isCurrentUserAdmin()) {
-    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'للأدمن فقط' : 'Admin only', 'error');
+  if (!(isCurrentUserAdmin() || currentUserHasPermission('auditLogs', 'clear'))) {
+    showNotification(isAr ? 'رفض الوصول' : 'Access Denied', isAr ? 'تحتاج صلاحية مسح السجلات' : 'Requires the Clear Logs permission', 'error');
     return;
   }
 
@@ -12289,6 +13987,7 @@ async function cleanupAuditLogs() {
     // and the view never re-rendered. serverLiveSyncOnce is the real sync fn.
     if (isServerModeEnabled()) {
       await serverLiveSyncOnce();
+      await refreshServerAuditLogs({ force: true });
     }
     render();
     lucide.createIcons();
@@ -12316,8 +14015,8 @@ function renderSettingsView() {
             <i data-lucide="info" class="w-4 h-4 inline mr-1"></i>
             ${isServerModeEnabled()
               ? (state.language === 'ar'
-                ? 'في وضع السيرفر: استخدم \"نسيت كلمة المرور\" للحصول على رمز استعادة (أو البريد الإلكتروني لاحقاً).'
-                : 'Server mode: use \"Forgot password\" to get a reset code (email later).')
+                ? 'في وضع السيرفر: تواصل مع المدير لإعادة تعيين كلمة المرور.'
+                : 'Server mode: contact an administrator to reset your password.')
               : (state.language === 'ar'
                 ? 'في الوضع المحلي: أنشئ مفتاح استعادة لاسترجاع كلمة المرور عند نسيانها.'
                 : 'Local mode: create a Recovery Key to reset passwords if forgotten.')}
@@ -12412,8 +14111,13 @@ function renderSettingsView() {
         <div class="space-y-4">
           <div class="flex flex-col md:flex-row md:items-center space-y-2 md:space-y-0 md:space-x-4">
             <label class="text-sm font-medium text-slate-700 dark:text-slate-300">${isAr ? 'السعر الحالي (USD إلى LYD):' : 'Current Rate (USD to LYD):'}</label>
+            ${can('settings', 'manageExchangeRate') ? `
             <input type="text" id="default-rate-input" inputmode="decimal" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" onchange="updateExchangeRate(this.value)" class="glass-input px-4 py-2 rounded-xl w-32 font-bold text-emerald-600" />
             <button onclick="updateExchangeRate(document.getElementById('default-rate-input').value)" class="btn-shine bg-emerald-600 text-white px-4 py-2 rounded-xl text-sm">${isAr ? 'حفظ السعر' : 'Save Rate'}</button>
+            ` : `
+            <span class="px-4 py-2 rounded-xl w-32 font-bold text-emerald-600 bg-slate-100 dark:bg-slate-800">${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}</span>
+            <span class="text-xs text-slate-400">${isAr ? 'التعديل يحتاج صلاحية' : 'Editing requires permission'}</span>
+            `}
           </div>
 
           ${history.length > 0 ? `
@@ -12454,23 +14158,27 @@ function renderSettingsView() {
           ${isAr ? 'إدارة البيانات' : 'Data Management'}
         </h2>
         <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+          ${isCurrentUserAdmin() ? `
           <button onclick="exportData()" class="btn-shine bg-blue-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-blue-700">
             <i data-lucide="download" class="w-5 h-5"></i>
-            <span>${isAr ? 'تصدير نسخة احتياطية' : 'Export Backup'}</span>
+            <span>${isServerModeEnabled() ? (isAr ? 'تصدير تقرير جزئي' : 'Export Partial Report') : (isAr ? 'تصدير نسخة احتياطية' : 'Export Backup')}</span>
           </button>
           <button onclick="importData()" class="btn-shine bg-green-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-green-700">
             <i data-lucide="upload" class="w-5 h-5"></i>
-            <span>${isAr ? 'استيراد نسخة احتياطية' : 'Import Backup'}</span>
+            <span>${isServerModeEnabled() ? (isAr ? 'استيراد الخادم معطّل' : 'Server Import Disabled') : (isAr ? 'استيراد نسخة احتياطية' : 'Import Backup')}</span>
           </button>
           <button onclick="clearAllData()" class="btn-shine bg-rose-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-rose-700">
             <i data-lucide="trash-2" class="w-5 h-5"></i>
             <span>${isAr ? 'مسح كل البيانات' : 'Clear All Data'}</span>
           </button>
+          ` : ''}
         </div>
         <div class="mt-4 p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl">
           <p class="text-sm text-slate-600 dark:text-slate-400">
             <i data-lucide="info" class="w-4 h-4 inline mr-1"></i>
-            ${isAr ? 'بياناتك مخزنة محلياً في متصفحك. صدِّر بانتظام لإنشاء نسخ احتياطية.' : 'Your data is stored locally in your browser. Export regularly to create backups.'}
+            ${isServerModeEnabled()
+              ? (isAr ? 'وضع الخادم: التصدير تقرير غير معتمد وغير قابل للاستعادة، ولا يتضمن بيانات الملابس. الاستعادة تتطلب صيانة آمنة خارج التطبيق.' : 'Server mode: export is a non-authoritative, non-restorable report and omits clothes data. Restore requires a safe offline maintenance workflow.')
+              : (isAr ? 'بياناتك مخزنة محلياً في متصفحك. صدِّر بانتظام لإنشاء نسخ احتياطية.' : 'Your data is stored locally in your browser. Export regularly to create backups.')}
           </p>
         </div>
       </div>
@@ -12516,7 +14224,6 @@ function renderSettingsView() {
     </div>
   `;
 }
-
 // ==========================================
 // SEARCH & FILTER FUNCTIONS
 // ==========================================
@@ -12897,7 +14604,7 @@ function editPage(id) {
 }
 
 function editUser(id) {
-  if (!isCurrentUserAdmin() && String(id) !== String(state.currentUser?.id || '')) {
+  if (!canManageUsersAction('edit') && String(id) !== String(state.currentUser?.id || '')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يمكنك تعديل مستخدمين آخرين' : 'You cannot edit other users', 'error');
     return;
   }
@@ -12912,8 +14619,8 @@ function editUser(id) {
 // ==========================================
 
 function showPermissionsModal(userId) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Permissions Manager is Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -12927,6 +14634,8 @@ function showPermissionsModal(userId) {
     showNotification(state.language === 'ar' ? 'معلومة' : 'Info', state.language === 'ar' ? 'المدراء لديهم صلاحية كاملة افتراضياً' : 'Administrators have full access by default', 'info');
     return;
   }
+
+  updateUrlParams({ modal: 'permissions', id: String(userId) }); // URL tracking
   
   const userPermissions = user.permissions || {};
   const permSummary = getPermissionSummary(userPermissions);
@@ -13131,8 +14840,8 @@ function refreshPermissionsModalUi(userId, moduleKey = null) {
 }
 
 function togglePermission(userId, moduleKey, permKey, enabled) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -13167,8 +14876,8 @@ function togglePermission(userId, moduleKey, permKey, enabled) {
 }
 
 function toggleModulePermissions(userId, moduleKey, enableAll) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -13208,8 +14917,8 @@ function toggleModulePermissions(userId, moduleKey, enableAll) {
 }
 
 function applyPermissionTemplate(userId, templateKey) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -13245,8 +14954,8 @@ function applyPermissionTemplate(userId, templateKey) {
 }
 
 function clearAllPermissions(userId) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -13275,8 +14984,8 @@ function clearAllPermissions(userId) {
 }
 
 function exportUserPermissions(userId) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const user = state.users.find(u => u.id === userId);
@@ -13297,8 +15006,8 @@ function exportUserPermissions(userId) {
 }
 
 function importUserPermissions(userId) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'إدارة الصلاحيات للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('managePermissions')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
   const input = document.createElement('input');
@@ -13351,23 +15060,58 @@ function importUserPermissions(userId) {
   input.click();
 }
 
-function assignDelivery(itemId, userId) {
+// A delivery action is allowed when the user holds the matching deliveries.*
+// permission (office staff), OR when they are the assigned driver acting on
+// their OWN delivery. The server enforces the same rule.
+function canDoDeliveryAction(action, itemId) {
+  if (can('deliveries', action)) return true;
+  if (isDeliveryRole(state.currentUser?.role)) {
+    const item = (state.receipts || []).find(r => r.id === itemId)
+      || (state.ads || []).find(a => a.id === itemId);
+    if (item && String(item.deliveryPersonId || '') === String(state.currentUser?.id || '')) return true;
+  }
+  return false;
+}
+
+function denyDeliveryAction() {
+  showNotification(
+    state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+    state.language === 'ar' ? 'لا تملك صلاحية لهذا الإجراء' : 'You do not have permission for this action',
+    'error'
+  );
+}
+
+async function assignDelivery(itemId, userId) {
   if (!userId) return;
+  const already = ((state.receipts || []).find(r => r.id === itemId) || (state.ads || []).find(a => a.id === itemId) || {}).deliveryPersonId;
+  const neededAction = String(already || '').trim() ? 'reassign' : 'assign';
+  if (!can('deliveries', neededAction) && !can('deliveries', 'assign')) {
+    denyDeliveryAction();
+    return;
+  }
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
+  let savedOk = false;
   if (isReceipt) {
-    updateRecord(state.receipts, itemId, { deliveryPersonId: userId });
+    savedOk = await updateRecord(state.receipts, itemId, { deliveryPersonId: userId });
   } else {
-    updateRecord(state.ads, itemId, { deliveryPersonId: userId });
+    savedOk = await updateRecord(state.ads, itemId, { deliveryPersonId: userId });
   }
+  if (!savedOk) return;
   showNotification(state.language === 'ar' ? 'تم التعيين' : 'Assigned', state.language === 'ar' ? 'تم تعيين مندوب التوصيل' : 'Delivery person assigned', 'success');
   render();
 }
 
-function updateDeliveryStatus(itemId, status) {
+async function updateDeliveryStatus(itemId, status) {
   const s = String(status || '').trim();
   if (!s) return;
   if (s === 'Canceled') {
+    // Cancelling is an assign-level action for office staff; the assigned
+    // driver may cancel their own delivery.
+    if (!canDoDeliveryAction('assign', itemId)) {
+      denyDeliveryAction();
+      return;
+    }
     // Require a reason (handled by modal)
     openDeliveryCancelModal(itemId);
     return;
@@ -13381,20 +15125,33 @@ function updateDeliveryStatus(itemId, status) {
     showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'فقط سائق التوصيل المعيَّن يمكنه تحديد التوصيل كـ"تم التوصيل".' : 'Only the assigned delivery driver can mark a delivery as Delivered.', 'warning');
     return;
   }
+  // In Progress => accept; anything else => assign-level change.
+  const neededAction = s === 'In Progress' ? 'accept' : 'assign';
+  if (!canDoDeliveryAction(neededAction, itemId)) {
+    denyDeliveryAction();
+    return;
+  }
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
+  let savedOk = false;
   if (isReceipt) {
-    updateRecord(state.receipts, itemId, { deliveryStatus: s });
+    savedOk = await updateRecord(state.receipts, itemId, { deliveryStatus: s });
   } else {
-    updateRecord(state.ads, itemId, { deliveryStatus: s });
+    savedOk = await updateRecord(state.ads, itemId, { deliveryStatus: s });
   }
+  if (!savedOk) return;
   showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? `تم تغيير الحالة إلى ${trStatus(s)}` : `Status changed to ${s}`, 'success');
   render();
 }
 
-function markAsCollected(itemId) {
+async function markAsCollected(itemId) {
+  if (!canDoDeliveryAction('markCollected', itemId)) {
+    denyDeliveryAction();
+    return;
+  }
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
+  let savedOk = false;
   if (isReceipt) {
     // Temp delivery receipts require strict completion (final receipt # + photo + amounts).
     if (isTempDeliveryReceiptNo(isReceipt.tempReceiptNo)) {
@@ -13402,46 +15159,61 @@ function markAsCollected(itemId) {
       openReceiptDeliveryCompletionModal(itemId);
       return;
     }
-    updateRecord(state.receipts, itemId, { 
+    savedOk = await updateRecord(state.receipts, itemId, {
       isPaid: true, 
       collectionDate: new Date().toISOString(),
       status: 'Paid',
       deliveryStatus: 'Delivered'
     });
   } else {
-    updateRecord(state.ads, itemId, { 
+    if (isServerModeEnabled()) {
+      showNotification(
+        state.language === 'ar' ? 'غير متاح' : 'Not available',
+        state.language === 'ar'
+          ? 'يجب تسجيل تحصيل مبلغ الإعلان من خلال سير الدفع المخصص للخادم.'
+          : 'Record this ad payment through the server payment workflow; the legacy delivery shortcut is disabled in shared-server mode.',
+        'warning'
+      );
+      return;
+    }
+    savedOk = await updateRecord(state.ads, itemId, {
       isPaid: true, 
       collectionDate: new Date().toISOString(),
       status: 'Completed'
     });
   }
+  if (!savedOk) return;
   // Update delivery stats if delivery user
   if (isDeliveryRole(state.currentUser?.role) && state.currentUser.stats) {
     state.currentUser.stats.collected = (state.currentUser.stats.collected || 0) + 1;
-    updateRecord(state.users, state.currentUser.id, { stats: state.currentUser.stats });
+    await updateRecord(state.users, state.currentUser.id, { stats: state.currentUser.stats });
   }
   showNotification(state.language === 'ar' ? 'تم التحصيل' : 'Collected', state.language === 'ar' ? 'تم تسجيل الدفعة كمُحصَّلة' : 'Payment marked as collected', 'success');
   render();
 }
 
-function acceptDelivery(itemId) {
+async function acceptDelivery(itemId) {
+  if (!canDoDeliveryAction('accept', itemId)) {
+    denyDeliveryAction();
+    return;
+  }
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
   const updateData = {
     deliveryStatus: 'In Progress',
     acceptedDate: new Date().toISOString()
   };
-  
+
   if (isReceipt) {
-    updateRecord(state.receipts, itemId, updateData);
+    if (!await updateRecord(state.receipts, itemId, updateData)) return;
   } else {
-    updateRecord(state.ads, itemId, updateData);
+    if (!await updateRecord(state.ads, itemId, updateData)) return;
   }
   // Update delivery stats
   if (isDeliveryRole(state.currentUser?.role) && state.currentUser.stats) {
     state.currentUser.stats.accepted = (state.currentUser.stats.accepted || 0) + 1;
     state.currentUser.stats.totalAds = (state.currentUser.stats.totalAds || 0) + 1;
-    updateRecord(state.users, state.currentUser.id, { stats: state.currentUser.stats });
+    await updateRecord(state.users, state.currentUser.id, { stats: state.currentUser.stats });
   }
   showNotification(state.language === 'ar' ? 'تم القبول' : 'Accepted', state.language === 'ar' ? 'تم قبول التوصيل' : 'Delivery accepted', 'success');
   render();
@@ -13611,7 +15383,7 @@ function updateReceiptDeliveryCompletionComputed() {
     if (debtCmp.paymentResult === 'UNDERPAID') debtEl.textContent = isArC ? `الدفع: ناقص (المتبقي ${debtCmp.remainingDue.toFixed(0)} LYD)` : `Payment: UNDERPAID (${debtCmp.remainingDue.toFixed(0)} LYD remaining)`;
   }
 
-  // Validate (allow S-prefixed auto-serials for LTT/Libyana/Madar)
+  // Validate (allow app-generated auto-serials: S/B/O/E + digits)
   const errEl = document.getElementById('delivery-final-receipt-error');
   const isAutoSerialValidation = isAutoSerialNumber(finalNo);
   let ok = true;
@@ -13620,7 +15392,7 @@ function updateReceiptDeliveryCompletionComputed() {
     if (errEl) errEl.textContent = isArC ? 'رقم الوصل النهائي مطلوب.' : 'Final receipt number is required.';
   } else if (!isAutoSerialValidation && (!/^\d+$/.test(finalNo) || finalNo.startsWith('0'))) {
     ok = false;
-    if (errEl) errEl.textContent = isArC ? 'رقم الوصل النهائي يجب أن يكون أرقاماً (بدون صفر في البداية) أو ببادئة S (S1, S2).' : 'Final receipt number must be digits (no leading 0) or S-prefixed (S1, S2).';
+    if (errEl) errEl.textContent = isArC ? 'رقم الوصل النهائي يجب أن يكون أرقاماً (بدون صفر في البداية) أو رقماً تلقائياً (S1, B1, O1, E1).' : 'Final receipt number must be digits (no leading 0) or an auto-serial (S1, B1, O1, E1).';
   } else if (_receiptFinalNoExists(finalNo, receipt.id)) {
     ok = false;
     if (errEl) errEl.textContent = isArC ? 'رقم الوصل النهائي موجود بالفعل.' : 'Final receipt number already exists.';
@@ -13775,12 +15547,12 @@ async function submitReceiptDeliveryCompletion(receiptId) {
   const isArDrv = state.language === 'ar';
   const drvValidationTitle = isArDrv ? 'خطأ في الإدخال' : 'Validation';
 
-  // Allow S-prefixed auto-serial numbers (S1, S2, etc.) for LTT/Libyana/Madar
+  // Allow app-generated auto-serial numbers (S1 / B1 / O1 / E1)
   const isAutoSerialFinal = isAutoSerialNumber(finalNo);
   if (!finalNo || (!isAutoSerialFinal && (!/^\d+$/.test(finalNo) || finalNo.startsWith('0')))) {
     showNotification(drvValidationTitle, isArDrv
-      ? 'رقم الوصل النهائي مطلوب (أرقام فقط، بدون صفر في البداية، أو بادئة S لـ LTT/ليبيانا/المدار).'
-      : 'Final receipt number is required (digits only, no leading 0, or S-prefix for LTT/Libyana/Madar).', 'error');
+      ? 'رقم الوصل النهائي مطلوب (أرقام فقط، بدون صفر في البداية، أو رقم تلقائي مثل S1 / B1 / O1 / E1).'
+      : 'Final receipt number is required (digits only, no leading 0, or an auto-serial like S1 / B1 / O1 / E1).', 'error');
     return;
   }
   if (_receiptFinalNoExists(finalNo, receipt.id)) {
@@ -13896,8 +15668,8 @@ async function submitReceiptDeliveryCompletion(receiptId) {
       return;
     }
   } else {
-    // Local mode: optimistic update
-    updateRecord(state.receipts, receipt.id, updates);
+    const saved = await updateRecord(state.receipts, receipt.id, updates);
+    if (!saved) return;
     document.getElementById('delivery-complete-modal')?.remove();
     showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم إكمال التوصيل وحفظه' : 'Delivery completed and saved', 'success');
     render();
@@ -13964,7 +15736,7 @@ function openReceiptDeliveryCancelModal(receiptId) {
   IconQueue.schedule(modal);
 }
 
-function submitReceiptDeliveryCancel(receiptId) {
+async function submitReceiptDeliveryCancel(receiptId) {
   const receipt = _findReceiptForDeliveryModal(receiptId);
   if (!receipt) return;
   const reason = String(document.getElementById('delivery-cancel-reason')?.value || '').trim();
@@ -13979,30 +15751,38 @@ function submitReceiptDeliveryCancel(receiptId) {
     action: 'CANCELLED_BY_DRIVER',
     reason
   });
-  updateRecord(state.receipts, receipt.id, {
+  const canceledOk = await updateRecord(state.receipts, receipt.id, {
     deliveryStatus: 'Canceled',
     deliveryCancelReason: reason,
     deliveryCancelledAt: new Date().toISOString(),
     deliveryCancelledBy: state.currentUser?.id || '',
     deliveryHistory: nextHistory
   });
+  if (!canceledOk) return;
   // The canceled delivery's debt will never be collected — release any ad
   // funding that was drawn from its due credit.
-  const releasedAds = releaseCanceledDeliveryDueFunding(receipt.id);
+  let releasedAds = 0;
+  if (!isServerModeEnabled()) {
+    try {
+      releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);
+    } catch (_) {
+      return;
+    }
+  }
   document.getElementById('delivery-cancel-modal')?.remove();
   document.getElementById('delivery-complete-modal')?.remove();
   showNotification(
     state.language === 'ar' ? 'تم الإلغاء' : 'Canceled',
     (state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled')
-      + (releasedAds > 0
+      + (releasedAds > 0 && !isServerModeEnabled()
         ? (state.language === 'ar' ? ` — تم تحرير تمويل ${releasedAds} إعلان(ات) كان مأخوذاً من دين هذا التوصيل` : ` — funding of ${releasedAds} ad(s) drawn from this delivery's debt was released`)
         : ''),
-    releasedAds > 0 ? 'warning' : 'success'
+    releasedAds > 0 && !isServerModeEnabled() ? 'warning' : 'success'
   );
   render();
 }
 
-function markAsDelivered(itemId) {
+async function markAsDelivered(itemId) {
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
   if (isReceipt) {
@@ -14012,11 +15792,13 @@ function markAsDelivered(itemId) {
       return;
     }
     // Delivered ≠ Office Handover. Office handover is a separate step (isReceivedInOffice).
-    updateRecord(state.receipts, itemId, { deliveryStatus: 'Delivered' });
+    const savedOk = await updateRecord(state.receipts, itemId, { deliveryStatus: 'Delivered' });
+    if (!savedOk) return;
   } else {
-    updateRecord(state.ads, itemId, {
+    const savedOk = await updateRecord(state.ads, itemId, {
       deliveryStatus: 'Delivered'
     });
+    if (!savedOk) return;
   }
   showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم التحديد كمُوصَّل' : 'Marked as delivered', 'success');
   render();
@@ -14165,6 +15947,7 @@ function openCollectReceiptModal(receiptId) {
   _collectReceiptId = receiptId;
   _collectTargetLYD = targetLYD;
   _tempCollectPayments = [];
+  updateUrlParams({ modal: 'collect-receipt', id: receiptId }); // URL tracking
 
   document.getElementById('collect-receipt-modal')?.remove();
   const html = `
@@ -14210,11 +15993,11 @@ function _collectAskView(receiptId, receipt, isAr, targetLYD, serialTxt) {
 }
 
 // "Yes" — record the collection using the receipt's own breakdown, full amount.
-function collectReceiptSame(receiptId) {
+async function collectReceiptSame(receiptId) {
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
   const breakdown = _receiptCollectionBreakdown(receipt);
-  _saveReceiptCollection(receipt, breakdown, Number(receipt.amountLocal) || 0, true);
+  await _saveReceiptCollection(receipt, breakdown, Number(receipt.amountLocal) || 0, true);
 }
 
 // "No" — switch the modal to the payment-methods editor (like the ad form).
@@ -14237,7 +16020,7 @@ function _collectEditorView(receiptId, receipt) {
       <div class="col-span-7">
         ${idx === 0 ? `<label class="block text-[10px] text-slate-400 mb-1">${isAr ? 'الطريقة' : 'Method'}</label>` : ''}
         <select onchange="updateCollectPaymentRow(${idx}, 'method', this.value)" class="w-full glass-input px-2 py-1.5 rounded-lg text-sm">
-          ${PAYMENT_METHODS.map(m => `<option value="${m}" ${p.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
+          ${paymentMethodOptions(p.method).map(m => `<option value="${m}" ${p.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
         </select>
       </div>
       <div class="col-span-4">
@@ -14302,7 +16085,7 @@ function collectReceiptCustomBack(receiptId) {
 }
 
 // "No" path save: validate + persist the custom breakdown.
-function confirmCollectReceipt(receiptId) {
+async function confirmCollectReceipt(receiptId) {
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
   const payments = _tempCollectPayments
@@ -14313,14 +16096,14 @@ function confirmCollectReceipt(receiptId) {
     return;
   }
   const total = Math.round(payments.reduce((s, p) => s + p.amount, 0) * 100) / 100;
-  _saveReceiptCollection(receipt, payments, total, false);
+  await _saveReceiptCollection(receipt, payments, total, false);
 }
 
 // Shared save for both the "Yes" and "No" paths.
-function _saveReceiptCollection(receipt, payments, totalLYD, matchesReceipt) {
+async function _saveReceiptCollection(receipt, payments, totalLYD, matchesReceipt) {
   if (!_canMarkCollected()) return;
   const targetLYD = Number(receipt.amountLocal) || 0;
-  updateRecord(state.receipts, receipt.id, {
+  const savedOk = await updateRecord(state.receipts, receipt.id, {
     collected: true,
     collectedAmount: totalLYD,
     collectedPayments: payments,
@@ -14328,6 +16111,7 @@ function _saveReceiptCollection(receipt, payments, totalLYD, matchesReceipt) {
     collectedAt: new Date().toISOString(),
     collectedBy: state.currentUser?.id || 'admin'
   });
+  if (!savedOk) return false;
   _logReceiptCollection(receipt, 'collected', totalLYD);
   saveState();
   document.getElementById('collect-receipt-modal')?.remove();
@@ -14340,13 +16124,15 @@ function _saveReceiptCollection(receipt, payments, totalLYD, matchesReceipt) {
   );
   render();
   if (window.lucide) lucide.createIcons();
+  return true;
 }
 
-function uncollectReceipt(receiptId) {
+async function uncollectReceipt(receiptId) {
   if (!_canMarkCollected()) return;
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
-  updateRecord(state.receipts, receiptId, { collected: false, collectedAmount: null, collectedAt: null, collectedBy: null });
+  const savedOk = await updateRecord(state.receipts, receiptId, { collected: false, collectedAmount: null, collectedAt: null, collectedBy: null });
+  if (!savedOk) return;
   _logReceiptCollection(receipt, 'uncollected', 0);
   saveState();
   showNotification(state.language === 'ar' ? 'تم الإلغاء' : 'Collection Removed', state.language === 'ar' ? 'تم إلغاء التحصيل' : 'Receipt marked as not collected', 'info');
@@ -14411,6 +16197,18 @@ function manageTopUps(adId) {
     );
     return;
   }
+  if (isServerModeEnabled()) {
+    const paymentStatus = String(ad.paymentStatus || '').toLowerCase();
+    if (paymentStatus !== 'paid') {
+      const isAr = state.language === 'ar';
+      showNotification(
+        isAr ? 'غير ممكن' : 'Not possible',
+        isAr ? 'التعبئة متاحة للإعلانات المدفوعة والنشطة فقط.' : 'Top-ups are available only for active paid ads in shared-server mode.',
+        'error'
+      );
+      return;
+    }
+  }
 
   // Seed the working list with a COPY of the ad's existing top-ups, so the
   // modal shows them, the X button can delete them, and newly-added ones
@@ -14420,6 +16218,7 @@ function manageTopUps(adId) {
 
   state.activeModal = 'top-ups';
   state.modalData = ad;
+  updateUrlParams({ modal: 'top-ups', id: adId }); // URL tracking
   renderModal();
 }
 
@@ -14429,6 +16228,7 @@ function manageRefund(adId) {
   
   state.activeModal = 'refund';
   state.modalData = ad;
+  updateUrlParams({ modal: 'refund', id: adId }); // URL tracking
   renderModal();
 }
 
@@ -14460,6 +16260,7 @@ function showReceiptTransferModal(receiptId) {
   }
   state.activeModal = 'receipt-transfer';
   state.modalData = receipt;
+  updateUrlParams({ modal: 'receipt-transfer', id: receiptId }); // URL tracking
   renderModal();
 }
 
@@ -14469,6 +16270,10 @@ function showReceiptTransferHistory(receiptId) {
   const transfers = receipt?.transfers || [];
   if (!receipt) return;
   const isArT = state.language === 'ar';
+  if (!can('receipts', 'viewHistory')) {
+    showNotification(isArT ? 'تم رفض الوصول' : 'Access Denied', isArT ? 'تحتاج صلاحية عرض سجل الوصل' : 'Requires the View History permission', 'error');
+    return;
+  }
   if (transfers.length === 0) {
     showNotification(isArT ? 'التحويلات' : 'Transfers', isArT ? 'لا توجد تحويلات مسجلة لهذا الوصل.' : 'No transfers recorded for this receipt.', 'info');
     return;
@@ -14487,8 +16292,12 @@ function showReceiptTransferHistory(receiptId) {
 function showReceiptEditHistory(receiptId) {
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
-  
+
   const isArH = state.language === 'ar';
+  if (!can('receipts', 'viewHistory')) {
+    showNotification(isArH ? 'تم رفض الوصول' : 'Access Denied', isArH ? 'تحتاج صلاحية عرض سجل الوصل' : 'Requires the View History permission', 'error');
+    return;
+  }
   const editHistory = receipt.editHistory || [];
   if (editHistory.length === 0) {
     showNotification(isArH ? 'سجل التعديلات' : 'Edit History', isArH ? 'لا يوجد سجل تعديلات لهذا الوصل.' : 'No edit history recorded for this receipt.', 'info');
@@ -14650,8 +16459,48 @@ function showAdEditHistory(adId) {
   lucide.createIcons();
 }
 
+// A response can be lost after the server commits. Keep the same target
+// receipt id and idempotency key for an identical retry, and clear them only
+// after both authoritative receipt envelopes have been validated and applied.
+const _pendingReceiptTransferAttempts = new Map();
+
+function getReceiptTransferAttempt(sourceReceipt, targetCustomerId, amountMinorUSD, note) {
+  const sourceReceiptId = String(sourceReceipt?.id || '');
+  const expectedSourceLastModified = Number(sourceReceipt?._lastModified);
+  if (!Number.isSafeInteger(expectedSourceLastModified) || expectedSourceLastModified < 0) {
+    throw new Error('This receipt is missing its server version. Refresh and try again.');
+  }
+  const slot = sourceReceiptId;
+  const fingerprint = JSON.stringify({
+    sourceReceiptId,
+    targetCustomerId: String(targetCustomerId || ''),
+    amountMinorUSD,
+    expectedSourceLastModified,
+    note: String(note || '')
+  });
+  const prior = _pendingReceiptTransferAttempts.get(slot);
+  if (prior?.fingerprint === fingerprint) return prior;
+  if (prior?.promise) return prior;
+  const attempt = {
+    slot,
+    fingerprint,
+    targetReceiptId: Security.generateSecureId('receipt'),
+    idempotencyKey: ensureOperationIdempotencyKey('', 'receipt-transfer'),
+    expectedSourceLastModified,
+    promise: null
+  };
+  _pendingReceiptTransferAttempts.set(slot, attempt);
+  return attempt;
+}
+
+function completeReceiptTransferAttempt(attempt) {
+  if (attempt && _pendingReceiptTransferAttempts.get(attempt.slot) === attempt) {
+    _pendingReceiptTransferAttempts.delete(attempt.slot);
+  }
+}
+
 // Persist a transfer from receipt to another customer
-function saveReceiptTransfer() {
+async function saveReceiptTransfer() {
   const receiptId = state.modalData?.id;
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
@@ -14693,6 +16542,22 @@ function saveReceiptTransfer() {
     return;
   }
 
+  const amountMinorUSD = Math.round(amountUSD * 100);
+  if (!Number.isSafeInteger(amountMinorUSD) || amountMinorUSD <= 0) {
+    showNotification(isArTr ? 'خطأ في الإدخال' : 'Validation', isArTr ? 'مبلغ التحويل غير صالح.' : 'Transfer amount is invalid.', 'error');
+    return;
+  }
+
+  let serverAttempt = null;
+  if (isServerModeEnabled()) {
+    try {
+      serverAttempt = getReceiptTransferAttempt(receipt, targetCustomerId, amountMinorUSD, note);
+    } catch (error) {
+      showNotification(isArTr ? 'تعذر التحويل' : 'Transfer Not Saved', error.message, 'error');
+      return;
+    }
+  }
+
   const rate = receipt.exchangeRate || state.defaultExchangeRate || 1;
   const nowIso = new Date().toISOString();
   const amountLocal = Math.round(amountUSD * rate * 100) / 100;
@@ -14705,7 +16570,7 @@ function saveReceiptTransfer() {
   // typed TRANSFER_IN and linked back to the source. Accounting stays balanced:
   // source remaining goes down by X, target gains a receipt worth X.
   const inReceipt = {
-    id: generateId('receipt'),
+    id: serverAttempt?.targetReceiptId || generateId('receipt'),
     recordType: 'receipt',
     customerId: targetCustomerId,
     amountUSD: Math.round(amountUSD * 100) / 100,
@@ -14742,9 +16607,69 @@ function saveReceiptTransfer() {
     note
   };
 
-  addRecord(state.receipts, inReceipt);
+  if (serverAttempt) {
+    if (serverAttempt.promise) return await serverAttempt.promise;
+    const submitButton = document.getElementById('receipt-transfer-submit');
+    if (submitButton) submitButton.disabled = true;
+    serverAttempt.promise = (async () => {
+      try {
+        const response = await apiTransferReceipt({
+          sourceReceiptId: receipt.id,
+          targetCustomerId,
+          targetReceiptId: serverAttempt.targetReceiptId,
+          amountMinorUSD,
+          idempotencyKey: serverAttempt.idempotencyKey,
+          expectedSourceLastModified: serverAttempt.expectedSourceLastModified,
+          note
+        });
+        const [savedSource, savedTarget] = applyValidatedServerEntityBatch([
+          { collection: 'receipts', entity: response.sourceReceipt },
+          { collection: 'receipts', entity: response.targetReceipt }
+        ], 'receiptTransfer');
+        if (!savedSource || !savedTarget) throw new Error('Invalid receipt transfer response');
+        completeReceiptTransferAttempt(serverAttempt);
+        addLog('transfer', 'receipt', savedSource.id, `Transferred $${amountUSD.toFixed(2)} to customer (receipt ${savedTarget.id})`, { toCustomerId: targetCustomerId, toReceiptId: savedTarget.id });
+        const targetName = state.customers.find(c => c.id === targetCustomerId)?.name || '';
+        showNotification(
+          state.language === 'ar' ? 'تم التحويل' : 'Transferred',
+          state.language === 'ar'
+            ? `تم تحويل $${amountUSD.toFixed(2)} إلى ${targetName} — أُنشئ وصل تحويل جاهز للاستخدام.`
+            : `Transferred $${amountUSD.toFixed(2)} to ${targetName} — a transfer receipt was created and is ready to use.`,
+          'success'
+        );
+        closeModal();
+        render();
+        return true;
+      } catch (error) {
+        const conflict = error?.status === 409;
+        showNotification(
+          isArTr ? 'تعذر التحويل' : 'Transfer Not Saved',
+          conflict
+            ? (isArTr ? 'تم تغيير هذا الوصل من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This receipt changed on another device. Refresh the data, then try again.')
+            : (error?.message || (isArTr ? 'فشل حفظ التحويل.' : 'The transfer could not be saved.')),
+          conflict ? 'warning' : 'error'
+        );
+        return false;
+      } finally {
+        serverAttempt.promise = null;
+        const liveButton = document.getElementById('receipt-transfer-submit');
+        if (liveButton) liveButton.disabled = false;
+      }
+    })();
+    return await serverAttempt.promise;
+  }
+
+  const targetSaved = await addRecord(state.receipts, inReceipt);
+  if (!targetSaved) return;
   const updatedTransfers = [...(receipt.transfers || []), transfer];
-  updateRecord(state.receipts, receipt.id, { transfers: updatedTransfers });
+  const sourceSaved = await updateRecord(state.receipts, receipt.id, { transfers: updatedTransfers });
+  if (!sourceSaved) {
+    // Local-device storage has no transaction API. Best-effort compensation
+    // prevents the created target receipt from minting money if source save
+    // fails. Server mode never enters this two-write path.
+    await deleteRecord(state.receipts, inReceipt.id);
+    return;
+  }
   addLog('transfer', 'receipt', receipt.id, `Transferred $${amountUSD.toFixed(2)} to customer (receipt ${inReceipt.id})`, { toCustomerId: targetCustomerId, toReceiptId: inReceipt.id });
   const targetName = state.customers.find(c => c.id === targetCustomerId)?.name || '';
   showNotification(
@@ -14814,7 +16739,7 @@ function addSplitPayment() {
   lucide.createIcons();
 }
 
-function saveSplitPayments() {
+async function saveSplitPayments() {
   // Read the target from the frozen hidden field, not the mutable global, so a
   // stray navigation can't redirect this save onto a different receipt.
   const receiptId = (document.getElementById('split-payments-receipt-id')?.value || '').trim() || state.modalData?.id;
@@ -14871,7 +16796,9 @@ function saveSplitPayments() {
   // Snap to 2 decimals first so binary float residue doesn't trip the rule.
   totalR2 = Math.round(totalR2 * 100) / 100;
   if (totalR2 % 1 !== 0) totalR2 = Math.round((totalR2 + 0.01) * 100) / 100;
-  const avgRate = (totalR2 > 0 && totalR1 > 0) ? (totalR1 / totalR2) : state.defaultExchangeRate;
+  // Same rule as the receipt form: a single payment stores the rate the user
+  // typed; a split stores the effective average.
+  const avgRate = receiptExchangeRate(payments, totalR1, totalR2);
 
   // Money already committed cannot be edited away: ads funded from this
   // receipt plus money transferred to other customers set the floor for the
@@ -14890,12 +16817,19 @@ function saveSplitPayments() {
     return;
   }
 
-  updateRecord(state.receipts, receiptId, {
+  const savedOk = await updateRecord(state.receipts, receiptId, {
     payments,
+    // The top-level method is DERIVED from the rows — without this it kept the
+    // method the receipt was created with and contradicted its own payments
+    // (breaking the receipts payment-method filter and the printed receipt).
+    paymentMethod: payments.length > 1
+      ? 'Split Payment'
+      : (payments[0]?.method || ''),
     amountLocal: totalR1,
     amountUSD: totalR2,
     exchangeRate: avgRate
   });
+  if (!savedOk) return;
   showNotification(state.language === 'ar' ? 'تم الحفظ' : 'Saved', state.language === 'ar' ? 'تم حفظ الدفعات المقسمة بنجاح' : 'Split payments saved successfully', 'success');
   closeModal();
   render();
@@ -15052,7 +16986,7 @@ function removeTopUp(index) {
   renderModal();
 }
 
-function saveTopUps() {
+async function saveTopUps() {
   const adId = state.modalData.id;
   const ad = state.ads.find(a => a.id === adId);
   if (!ad) return;
@@ -15145,7 +17079,29 @@ function saveTopUps() {
     updates.receiptAllocations = allocations;
   }
 
-  updateRecord(state.ads, adId, updates);
+  try {
+    if (isServerModeEnabled()) {
+      await saveAdThroughAtomicServer(
+        'update',
+        adId,
+        Number(ad._lastModified),
+        buildServerAdMutationData(updates)
+      );
+    } else {
+      const topUpsSaved = await updateRecord(state.ads, adId, updates);
+      if (!topUpsSaved) return;
+    }
+  } catch (error) {
+    const conflict = error?.status === 409;
+    showNotification(
+      isArTU ? 'تعذر حفظ التعبئة' : 'Top-ups Not Saved',
+      conflict
+        ? (isArTU ? 'تم تغيير الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+        : (error?.message || (isArTU ? 'فشل حفظ التعبئة.' : 'The top-ups could not be saved.')),
+      conflict ? 'warning' : 'error'
+    );
+    return;
+  }
 
   tempTopUps = [];
   showNotification(
@@ -15177,7 +17133,7 @@ function toggleRefundAmount(refundType) {
   }
 }
 
-function saveRefund() {
+async function saveRefund() {
   const adId = state.modalData.id;
   const ad = state.ads.find(a => a.id === adId) || state.modalData;
   const refundType = document.getElementById('refund-type').value;
@@ -15264,12 +17220,33 @@ function saveRefund() {
     ? Math.max(Math.round((amountUSD - refundAmount) * 100) / 100, 0)
     : undefined;
 
-  updateRecord(state.ads, adId, updates);
+  try {
+    if (isServerModeEnabled()) {
+      await saveAdThroughAtomicServer(
+        'update',
+        adId,
+        Number(ad._lastModified),
+        buildServerAdMutationData(updates)
+      );
+    } else {
+      const refundSaved = await updateRecord(state.ads, adId, updates);
+      if (!refundSaved) return;
+    }
+  } catch (error) {
+    const conflict = error?.status === 409;
+    showNotification(
+      state.language === 'ar' ? 'تعذر حفظ الاسترجاع' : 'Refund Not Saved',
+      conflict
+        ? (state.language === 'ar' ? 'تم تغيير الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+        : (error?.message || (state.language === 'ar' ? 'فشل حفظ الاسترجاع.' : 'The refund could not be saved.')),
+      conflict ? 'warning' : 'error'
+    );
+    return;
+  }
   showNotification(state.language === 'ar' ? 'تم الحفظ' : 'Saved', state.language === 'ar' ? `تم تطبيق الاسترجاع (${trStatus(refundType)})` : `Refund ${refundType} applied`, refundType !== 'None' ? 'warning' : 'success');
   closeModal();
   render();
 }
-
 // ==========================================
 // CUSTOMER SEARCH / DROPDOWN UTILITIES
 // ==========================================
@@ -15354,7 +17331,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
               <div>
                 <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1.5">${isArF ? 'طريقة الدفع' : 'Payment Method'}</label>
                 <select class="payment-method w-full glass-input px-3 py-2 rounded-lg text-sm font-medium border border-slate-200 dark:border-slate-600 focus:ring-2 focus:ring-indigo-500/20" onchange="onPaymentMethodChange(this)">
-                  ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
+                  ${paymentMethodOptions(payment.method).map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
                 </select>
               </div>
               <div>
@@ -15367,7 +17344,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             <div class="grid grid-cols-2 gap-4">
               <div class="bg-slate-50 dark:bg-slate-900/50 p-3 rounded-lg border border-slate-200 dark:border-slate-700">
                 <label class="text-[10px] font-bold text-slate-500 uppercase mb-1.5 block">${isArF ? 'السعر 1' : 'RATE 1'}</label>
-                <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${payment.rate || state.defaultExchangeRate}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
+                <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${paymentRate1Value(payment)}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
                 <div class="text-center pt-2 border-t border-slate-200 dark:border-slate-700">
                   <div class="text-[10px] font-bold text-slate-400 mb-0.5">R1:</div>
                   <span class="payment-r1-display text-sm font-bold text-indigo-600">0.00 LYD</span>
@@ -15444,7 +17421,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             <div>
               <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">${isArF ? 'طريقة الدفع' : 'Payment Method'}</label>
               <select class="payment-method w-full glass-input px-3 py-2 rounded-lg text-sm font-medium border border-slate-200 dark:border-slate-600" onchange="onPaymentMethodChange(this)">
-                ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
+                ${paymentMethodOptions(payment.method).map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
               </select>
             </div>
             <div>
@@ -15456,7 +17433,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
           <div class="grid grid-cols-2 gap-3">
             <div class="bg-slate-50 dark:bg-slate-900/50 p-2 rounded-lg border border-slate-200 dark:border-slate-700">
               <label class="text-[10px] font-bold text-slate-500 uppercase mb-1 block">${isArF ? 'السعر 1' : 'RATE 1'}</label>
-              <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${payment.rate || state.defaultExchangeRate}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
+              <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${paymentRate1Value(payment)}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
               <div class="text-center pt-1 border-t border-slate-200 dark:border-slate-700">
                 <span class="text-[9px] font-bold text-slate-400">R1: </span>
                 <span class="payment-r1-display text-xs font-bold text-indigo-600">0.00 LYD</span>
@@ -15653,7 +17630,7 @@ function filterPageCustomers() {
   
   if (filtered.length > 0 && searchTerm) {
     dropdown.innerHTML = filtered.map(c => `
-      <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" onclick="selectPageCustomer('${c.id}', '${isAdminRole(state.currentUser?.role)}')">
+      <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" data-record-action="select-page-customer" data-record-id="${Security.escapeHtml(String(c.id || ''))}" data-admin="${isAdminRole(state.currentUser?.role)}">
         <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
         <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (state.language === 'ar' ? 'لا يوجد هاتف' : 'No phone'))}</div>
       </div>
@@ -15670,7 +17647,7 @@ function showPageCustomerDropdown() {
   
   if (customers.length > 0) {
     dropdown.innerHTML = customers.map(c => `
-      <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" onclick="selectPageCustomer('${c.id}', '${isAdminRole(state.currentUser?.role)}')">
+      <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" data-record-action="select-page-customer" data-record-id="${Security.escapeHtml(String(c.id || ''))}" data-admin="${isAdminRole(state.currentUser?.role)}">
         <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
         <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (state.language === 'ar' ? 'لا يوجد هاتف' : 'No phone'))}</div>
       </div>
@@ -15680,6 +17657,7 @@ function showPageCustomerDropdown() {
 }
 
 function selectPageCustomer(customerId, isAdmin) {
+  if (!Security.isValidRecordId(customerId)) return;
   const customer = state.customers.find(c => c.id === customerId);
   if (!customer) return;
   
@@ -15689,7 +17667,8 @@ function selectPageCustomer(customerId, isAdmin) {
   const searchInput = document.getElementById('page-customer-search');
   
   // Check if already selected
-  const existing = container.querySelector(`[data-customer-id="${customerId}"]`);
+  const existing = Array.from(container.querySelectorAll('[data-customer-id]'))
+    .find(el => String(el.dataset.customerId || '') === String(customerId));
   if (existing) {
     showNotification(state.language === 'ar' ? 'محدد مسبقاً' : 'Already Selected', state.language === 'ar' ? 'هذا العميل مرتبط بهذه الصفحة بالفعل' : 'This customer is already linked to this page', 'info');
     dropdown.classList.add('hidden');
@@ -15713,7 +17692,7 @@ function selectPageCustomer(customerId, isAdmin) {
       <div class="font-medium text-sm text-slate-800 dark:text-white">${Security.escapeHtml(customer.name || '')}</div>
       <div class="text-xs text-slate-500">${Security.escapeHtml(customer.platform || '')}</div>
     </div>
-    <button type="button" onclick="removePageCustomer('${customerId}')" class="text-rose-500 hover:text-rose-700">
+    <button type="button" data-record-action="remove-page-customer" data-record-id="${Security.escapeHtml(String(customerId))}" class="text-rose-500 hover:text-rose-700">
       <i data-lucide="x-circle" class="w-4 h-4"></i>
     </button>
   `;
@@ -15743,9 +17722,11 @@ function selectPageCustomer(customerId, isAdmin) {
 }
 
 function removePageCustomer(customerId) {
+  if (!Security.isValidRecordId(customerId)) return;
   const container = document.getElementById('page-selected-customers');
   const noCustomersMsg = document.getElementById('page-no-customers');
-  const item = container.querySelector(`[data-customer-id="${customerId}"]`);
+  const item = Array.from(container.querySelectorAll('[data-customer-id]'))
+    .find(el => String(el.dataset.customerId || '') === String(customerId));
   
   if (item) {
     item.remove();
@@ -15766,6 +17747,39 @@ function removePageCustomer(customerId) {
   }
 }
 
+// Delegated record actions keep untrusted ids out of executable JavaScript.
+// Dynamic dropdowns can be re-rendered freely without re-binding handlers.
+if (!window.__albayanSafeRecordActionsBound) {
+  window.__albayanSafeRecordActionsBound = true;
+  document.addEventListener('click', (event) => {
+    const actionEl = event.target?.closest?.('[data-record-action]');
+    if (!actionEl) return;
+    const recordId = String(actionEl.dataset.recordId || '');
+    if (!Security.isValidRecordId(recordId)) {
+      event.preventDefault();
+      showNotification('Invalid Record', 'This record identifier is not allowed.', 'error');
+      return;
+    }
+    switch (actionEl.dataset.recordAction) {
+      case 'select-page-customer':
+        selectPageCustomer(recordId, String(actionEl.dataset.admin || 'false'));
+        break;
+      case 'remove-page-customer':
+        removePageCustomer(recordId);
+        break;
+      case 'select-ad-page':
+        selectAdPage(recordId);
+        break;
+      case 'select-ad-customer':
+        selectAdCustomer(recordId);
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+  });
+}
+
 // Close dropdowns when clicking outside
 document.addEventListener('click', (e) => {
   const pageDropdown = document.getElementById('page-customer-dropdown');
@@ -15777,6 +17791,24 @@ document.addEventListener('click', (e) => {
     pageDropdown.classList.add('hidden');
   }
 });
+
+// Rate 1 to SHOW for a stored payment row.
+// MONEY-MATH: 0 is a REAL rate — the app itself fills Rate 1 with 0.00 for
+// every zero-rate method (Bank Transfer LYD/USD, Sadad, USDT, LTT, Cash (USD)).
+// The old `payment.rate || state.defaultExchangeRate` treated that 0 as
+// "missing" and re-rendered the market rate, so simply reopening such a receipt
+// (or adding/removing a split row) showed an inflated LYD total — and saving it
+// again REWROTE amountLocal/exchangeRate with money the customer never paid.
+// Only a genuinely absent rate falls back to the default.
+function paymentRate1Value(payment) {
+  const r = payment ? payment.rate : undefined;
+  if (r === undefined || r === null || r === '') {
+    return payment && payment.method !== undefined
+      ? getDefaultRate1(payment.method)
+      : state.defaultExchangeRate;
+  }
+  return r;
+}
 
 // Get default Rate 1 based on payment method
 function getDefaultRate1(paymentMethod) {
@@ -15791,51 +17823,101 @@ function getDefaultRate1(paymentMethod) {
   return state.defaultExchangeRate; // Default for others
 }
 
-// Payment methods that get auto-serial numbers (S-prefix: S1, S2, S3...)
-const AUTO_SERIAL_PAYMENT_METHODS = ['LTT', 'Libyana', 'Madar'];
-const AUTO_SERIAL_PREFIX = 'S'; // Prefix for auto-generated serial numbers
+// AUTO-SERIAL GROUPS
+// Some payment methods have no paper receipt from the provider, so the app
+// issues its own sequential number. Each group owns an INDEPENDENT counter:
+//   S — LTT / Libyana / Madar          (S1, S2, …)
+//   B — Bank Transfer (LYD) / (USD)    (B1, B2, …)
+//   O — Transfer Office                (O1, O2, …)
+//   E — Sadad / USDT                   (E1, E2, …)
+// The serial field is READ-ONLY for these methods (see updateSerialLockState).
+const AUTO_SERIAL_GROUPS = {
+  S: ['LTT', 'Libyana', 'Madar'],
+  B: ['Bank Transfer (LYD)', 'Bank Transfer (USD)', 'Bank Transfer'],
+  O: ['Transfer Office'],
+  E: ['Sadad', 'USDT']
+};
+const AUTO_SERIAL_PREFIXES = Object.keys(AUTO_SERIAL_GROUPS);
+const AUTO_SERIAL_PAYMENT_METHODS = Object.values(AUTO_SERIAL_GROUPS).flat();
 
-// Get the next serial number for auto-serial payment methods (returns S1, S2, S3...)
-function getNextAutoSerialNumber(paymentMethod) {
-  if (!AUTO_SERIAL_PAYMENT_METHODS.includes(paymentMethod)) return null;
-  
-  // Find all receipts that use ANY of the auto-serial payment methods (LTT, Libyana, Madar share the same sequence)
-  const receipts = getVisibleRecords(state.receipts);
-  let maxSerialNumber = 0;
-  
-  receipts.forEach(receipt => {
-    // Check if this receipt uses ANY of the auto-serial payment methods
-    const receiptPaymentMethod = receipt.paymentMethod || '';
-    const payments = receipt.payments || [];
-    const usesAutoSerialMethod = AUTO_SERIAL_PAYMENT_METHODS.includes(receiptPaymentMethod) || 
-                                  payments.some(p => AUTO_SERIAL_PAYMENT_METHODS.includes(p.method));
-    
-    if (usesAutoSerialMethod && receipt.serialNumber) {
-      const serial = String(receipt.serialNumber).trim();
-      // Extract number from S-prefixed serial (S1, S2, etc.) or plain number (legacy: 1, 2, etc.)
-      let serialNum = 0;
-      if (serial.toUpperCase().startsWith(AUTO_SERIAL_PREFIX)) {
-        // New format: S1, S2, S3...
-        serialNum = parseInt(serial.substring(AUTO_SERIAL_PREFIX.length), 10);
-      } else {
-        // Legacy format: plain number (1, 2, 3...)
-        serialNum = parseInt(serial, 10);
-      }
-      if (!isNaN(serialNum) && serialNum > maxSerialNumber) {
-        maxSerialNumber = serialNum;
-      }
-    }
-  });
-  
-  // Return with S prefix: S1, S2, S3...
-  return `${AUTO_SERIAL_PREFIX}${maxSerialNumber + 1}`;
+// Which counter does this payment method draw from? null = manual serial.
+function getAutoSerialPrefix(paymentMethod) {
+  const m = String(paymentMethod || '').trim();
+  for (const [prefix, methods] of Object.entries(AUTO_SERIAL_GROUPS)) {
+    if (methods.includes(m)) return prefix;
+  }
+  return null;
 }
 
-// Check if a serial number is an auto-generated S-serial (S1, S2, etc.)
+// Next serial for the group a payment method belongs to (e.g. 'B3').
+function getNextAutoSerialNumber(paymentMethod) {
+  const prefix = getAutoSerialPrefix(paymentMethod);
+  if (!prefix) return null;
+  const groupMethods = AUTO_SERIAL_GROUPS[prefix];
+
+  const receipts = getVisibleRecords(state.receipts);
+  let maxSerialNumber = 0;
+
+  receipts.forEach(receipt => {
+    // A receipt belongs to the group if its method — or any of its split
+    // payments — is in the group.
+    const receiptPaymentMethod = receipt.paymentMethod || '';
+    const payments = Array.isArray(receipt.payments) ? receipt.payments : [];
+    const usesGroupMethod = groupMethods.includes(receiptPaymentMethod)
+      || payments.some(p => groupMethods.includes(p && p.method));
+
+    if (!usesGroupMethod || !receipt.serialNumber) return;
+    const serial = String(receipt.serialNumber).trim().toUpperCase();
+
+    let serialNum = 0;
+    if (serial.startsWith(prefix)) {
+      serialNum = parseInt(serial.substring(prefix.length), 10);
+    } else if (prefix === 'S' && /^\d+$/.test(serial)) {
+      // Legacy: the S group used bare numbers before the prefix existed.
+      serialNum = parseInt(serial, 10);
+    } else {
+      return; // a serial from a different group never advances this counter
+    }
+    if (!isNaN(serialNum) && serialNum > maxSerialNumber) maxSerialNumber = serialNum;
+  });
+
+  return `${prefix}${maxSerialNumber + 1}`;
+}
+
+// Is this an app-generated serial (S1 / B2 / O3 / E4)?
 function isAutoSerialNumber(serial) {
   if (!serial) return false;
   const s = String(serial).trim().toUpperCase();
-  return s.startsWith(AUTO_SERIAL_PREFIX) && /^S\d+$/.test(s);
+  return new RegExp(`^[${AUTO_SERIAL_PREFIXES.join('')}]\\d+$`).test(s);
+}
+
+// The payment methods currently selected in the receipt form, in row order.
+function getSelectedPaymentMethods() {
+  return Array.from(document.querySelectorAll('.payment-split-item'))
+    .map(item => item.querySelector('.payment-method'))
+    .filter(Boolean)
+    .map(sel => String(sel.value || '').trim())
+    .filter(Boolean);
+}
+
+// The auto-serial method to number this receipt by — but ONLY when EVERY
+// payment row is auto-numbered. If any row is a manual method (Cash), the
+// customer got a real paper receipt, so its number must be typed by hand and
+// the field stays editable. Returns null in that case (and when there are no
+// payment rows at all).
+function getSelectedAutoSerialMethod() {
+  const paymentItems = document.querySelectorAll('.payment-split-item');
+  let firstAuto = null;
+  let rows = 0;
+  for (const item of paymentItems) {
+    const methodSelect = item.querySelector('.payment-method');
+    if (!methodSelect) continue;
+    rows++;
+    const prefix = getAutoSerialPrefix(methodSelect.value);
+    if (!prefix) return null; // a manual method is present -> manual number
+    if (!firstAuto) firstAuto = methodSelect.value;
+  }
+  return rows > 0 ? firstAuto : null;
 }
 
 // Handle payment method change
@@ -15862,102 +17944,128 @@ function onPaymentMethodChange(selectElement) {
     rate2Input.value = state.defaultExchangeRate.toFixed(2);
   }
   
-  // Auto-set serial number for LTT, Libyana, Madar payment methods
-  const serialInput = document.getElementById('receipt-serial');
-  if (AUTO_SERIAL_PAYMENT_METHODS.includes(paymentMethod)) {
-    if (serialInput && !serialInput.value) {
-      const nextSerial = getNextAutoSerialNumber(paymentMethod);
-      if (nextSerial) {
-        serialInput.value = nextSerial;
-        // Make field read-only and style it
-        serialInput.readOnly = true;
-        serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-        serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${paymentMethod}` : `Auto-generated for ${paymentMethod}`;
-        // Show notification about auto-generated serial
-        showNotification(state.language === 'ar' ? 'رقم تلقائي' : 'Auto Serial', state.language === 'ar' ? `تم تعيين رقم الوصل تلقائياً إلى ${nextSerial} لـ ${paymentMethod}` : `Receipt number auto-set to ${nextSerial} for ${paymentMethod}`, 'info');
-      }
-    } else if (serialInput) {
-      // If already has value and is auto-serial method, keep it locked
-      serialInput.readOnly = true;
-      serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-      serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${paymentMethod}` : `Auto-generated for ${paymentMethod}`;
-    }
-  }
-  
-  // Check if we need to update the serial lock state based on all payment methods
-  updateSerialLockState();
-  
+  // The payment method drives the receipt number — re-sync it.
+  syncReceiptSerialWithPaymentMethods({ reissue: true });
+
   // Update totals
   updateReceiptTotals();
 }
 
-// Helper function to always round UP to 2 decimal places
-// This ensures any value with decimals beyond 2 places rounds up
-// Example: 90.100143062 becomes 90.11, not 90.10
-function ceilingRound(value) {
-  if (value === 0 || !value || isNaN(value)) return 0;
-  // Always round up: multiply by 100, use Math.ceil, then divide by 100
-  // This ensures 90.10000001 becomes 90.11
-  const result = Math.ceil(value * 100) / 100;
-  return result;
-}
-
-// Auto-update serial number for receipts with LTT, Libyana, or Madar payment methods
-function updateAutoSerialForReceipt() {
+// Keep the Receipt Number field consistent with the selected payment methods.
+//
+// reissue=true  — the user just CHANGED the payment methods (picked another
+//                 method, added/removed a split row). The number must follow
+//                 the new methods, even on a saved receipt: switching a cash
+//                 receipt (paper number 12851) to Bank Transfer means there is
+//                 no paper receipt any more, so it takes a B number.
+// reissue=false — the form merely opened; never renumber an existing receipt,
+//                 only fill a blank field.
+function syncReceiptSerialWithPaymentMethods({ reissue = false } = {}) {
   const serialInput = document.getElementById('receipt-serial');
   if (!serialInput) return;
-  
-  const paymentItems = document.querySelectorAll('.payment-split-item');
-  let autoSerialMethod = null;
-  
-  // Check if any payment method requires auto-serial
-  paymentItems.forEach((item) => {
-    const methodSelect = item.querySelector('.payment-method');
-    if (methodSelect && AUTO_SERIAL_PAYMENT_METHODS.includes(methodSelect.value)) {
-      autoSerialMethod = methodSelect.value;
+
+  const autoMethod = getSelectedAutoSerialMethod();
+  const current = String(serialInput.value || '').trim();
+  const currentUpper = current.toUpperCase();
+  const isEditingSaved = !!state.modalData?.id;
+
+  if (autoMethod) {
+    const prefix = getAutoSerialPrefix(autoMethod);
+    // The number already belongs to this method's counter — keep it.
+    const inThisGroup = isAutoSerialNumber(currentUpper) && currentUpper.startsWith(prefix);
+    // Legacy S receipts were numbered with bare digits before the prefix
+    // existed; a saved one keeps its number rather than being renumbered.
+    const legacySInGroup = prefix === 'S' && isEditingSaved && /^\d+$/.test(current);
+
+    if (!current || (reissue && !inThisGroup && !legacySInGroup)) {
+      const nextSerial = getNextAutoSerialNumber(autoMethod);
+      if (nextSerial && nextSerial !== current) {
+        serialInput.value = nextSerial;
+        showNotification(
+          state.language === 'ar' ? 'رقم تلقائي' : 'Auto Serial',
+          state.language === 'ar'
+            ? `تم تعيين رقم الوصل تلقائياً إلى ${nextSerial} لـ ${trMethod(autoMethod)}`
+            : `Receipt number auto-set to ${nextSerial} for ${autoMethod}`,
+          'info'
+        );
+      }
     }
-  });
-  
-  if (autoSerialMethod && !serialInput.value) {
-    const nextSerial = getNextAutoSerialNumber(autoSerialMethod);
-    if (nextSerial) {
-      serialInput.value = nextSerial;
-      // Make field read-only
-      serialInput.readOnly = true;
-      serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-      serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${autoSerialMethod}` : `Auto-generated for ${autoSerialMethod}`;
-    }
+  } else if (reissue && isAutoSerialNumber(currentUpper)) {
+    // A manual (paper-receipt) method joined the split: drop the app-issued
+    // number so the real receipt number is entered.
+    serialInput.value = '';
+    showNotification(
+      state.language === 'ar' ? 'رقم الوصل مطلوب' : 'Receipt Number Required',
+      state.language === 'ar'
+        ? 'الدفع يشمل طريقة بإيصال ورقي — أدخل رقم الوصل يدوياً.'
+        : 'This payment includes a method with a paper receipt — enter the receipt number manually.',
+      'info'
+    );
   }
-  
-  // Update lock state
+
   updateSerialLockState();
 }
 
-// Update serial field lock state based on payment methods
+// Round UP to 2 decimal places (credit is granted in the customer's favour).
+// Example: 90.100143062 -> 90.11.
+//
+// MONEY-MATH: it must NOT round up on binary floating-point residue. 291 / 9.7
+// is 30.000000000000004 in JS, so the old Math.ceil(v * 100) turned an exact
+// $30.00 into $30.01 — and the "+0.01 when it has decimals" rule below then
+// made it $30.02, which in turn made the stored exchange rate 291/30.02 = 9.69
+// instead of the 9.70 the user typed. Treat a value that is within a
+// hair of a cent boundary as being ON it, then ceil.
+const MONEY_EPSILON = 1e-6;
+
+// The rate to STORE on a receipt.
+// Single payment  -> exactly the rate the user typed (Rate 2).
+// Split payments  -> the effective average (rows can carry different rates).
+function receiptExchangeRate(payments, totalLYD, totalUSD) {
+  const rows = Array.isArray(payments) ? payments : [];
+  if (rows.length === 1) {
+    const r = Number(rows[0]?.rate2);
+    if (Number.isFinite(r) && r > 0) return r;
+  }
+  if (totalUSD > 0 && totalLYD > 0) return totalLYD / totalUSD;
+  return state.defaultExchangeRate;
+}
+
+function ceilingRound(value) {
+  const v = Number(value);
+  if (!Number.isFinite(v) || v === 0) return 0;
+  const cents = v * 100;
+  const nearest = Math.round(cents);
+  if (Math.abs(cents - nearest) < MONEY_EPSILON) return nearest / 100;
+  return Math.ceil(cents) / 100;
+}
+
+// Called when a payment row is ADDED or REMOVED — the set of methods changed,
+// so the receipt number must follow it (reissue), same as a method change.
+function updateAutoSerialForReceipt() {
+  syncReceiptSerialWithPaymentMethods({ reissue: true });
+}
+
+// Called when the receipt form OPENS: fill a blank number, lock the field for
+// auto-numbered methods, but never renumber an existing receipt.
+function initReceiptSerialOnOpen() {
+  syncReceiptSerialWithPaymentMethods({ reissue: false });
+}
+
+// The serial field is read-only whenever an auto-serial method is selected —
+// these receipts are numbered by the app, never by hand.
 function updateSerialLockState() {
   const serialInput = document.getElementById('receipt-serial');
   if (!serialInput) return;
-  
-  const paymentItems = document.querySelectorAll('.payment-split-item');
-  let hasAutoSerialMethod = false;
-  let autoSerialMethod = null;
-  
-  // Check if any payment method requires auto-serial
-  paymentItems.forEach((item) => {
-    const methodSelect = item.querySelector('.payment-method');
-    if (methodSelect && AUTO_SERIAL_PAYMENT_METHODS.includes(methodSelect.value)) {
-      hasAutoSerialMethod = true;
-      autoSerialMethod = methodSelect.value;
-    }
-  });
-  
-  if (hasAutoSerialMethod) {
-    // Lock the serial field
+
+  const autoSerialMethod = getSelectedAutoSerialMethod();
+
+  if (autoSerialMethod) {
     serialInput.readOnly = true;
     serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-    serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${autoSerialMethod}` : `Auto-generated for ${autoSerialMethod}`;
+    serialInput.title = state.language === 'ar'
+      ? `مولّد تلقائياً لـ ${trMethod(autoSerialMethod)} (لا يمكن تعديله)`
+      : `Auto-generated for ${autoSerialMethod} (not editable)`;
   } else {
-    // Unlock the serial field if no auto-serial methods are present
     serialInput.readOnly = false;
     serialInput.classList.remove('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
     serialInput.title = '';
@@ -16251,7 +18359,7 @@ async function _saveReceiptFromModalInner() {
     totalR1 += r1;
     totalR2 += r2;
   });
-  
+
   // Add 0.01 to TOTAL ADS CREDIT (USD) only if it has decimals
   // Snap to 2 decimals first so binary float residue (e.g. a sum landing on
   // 100.00000000000001) doesn't trip the "has decimals" rule on a whole total.
@@ -16263,10 +18371,28 @@ async function _saveReceiptFromModalInner() {
   const totalLYD = totalR1;
   const totalUSD = totalR2;
   // BUG FIX: Prevent division by zero (defense in depth, already checked totalUSD > 0)
-  const avgRate = (totalUSD > 0 && totalLYD > 0) ? (totalLYD / totalUSD) : state.defaultExchangeRate;
+  // The receipt's exchange rate. With a SINGLE payment, store exactly the rate
+  // the user typed — deriving it as LYD/USD made the card show 9.69 for a rate
+  // of 9.70, because the credit total is rounded up in the customer's favour.
+  // With a split (different rates per row) the effective average is the only
+  // meaningful figure, so keep deriving it there.
+  const avgRate = receiptExchangeRate(payments, totalLYD, totalUSD);
   const status = document.getElementById('receipt-status').value || 'Paid';
   const photos = state.tempReceiptPhotos || [];
-  
+
+  // A receipt records money that was RECEIVED. Rows with amount 0 are dropped
+  // from payments[] above, so an all-zero form used to save a receipt with NO
+  // payments at all — which then invented a payment method nobody picked. Only
+  // a "Not Paid" receipt may legitimately carry no payment yet.
+  if (payments.length === 0 && status !== 'Not Paid') {
+    showNotification(
+      isArV ? 'تحقق' : 'Validation',
+      isArV ? 'أدخل مبلغ الدفع (لا يمكن حفظ وصل بدون مبلغ).' : 'Enter a payment amount (a receipt cannot be saved with no money).',
+      'error'
+    );
+    return;
+  }
+
   // Collect status detail fields
   const statusDetail = {
     paidCollection: document.getElementById('paid-collection-value')?.value || 'office',
@@ -16316,9 +18442,22 @@ async function _saveReceiptFromModalInner() {
   }
   
   // Validate receipt number
-  const serialNumber = document.getElementById('receipt-serial').value.trim();
   const serialInputEl = document.getElementById('receipt-serial');
   const serialErrEl = document.getElementById('receipt-serial-error');
+  // Safety net: an auto-numbered payment method must never save without its
+  // serial (e.g. the field was left empty because the method was pre-selected).
+  // It must NOT fire for a temp-delivery receipt (those carry a D-number) nor
+  // for a "Not Paid" receipt, whose number the form deliberately hides — issuing
+  // one there would burn a number on a receipt that shows none.
+  {
+    const autoMethod = getSelectedAutoSerialMethod();
+    const serialApplies = !isTempDelivery && status !== 'Not Paid';
+    if (serialApplies && autoMethod && serialInputEl && !String(serialInputEl.value || '').trim()) {
+      const next = getNextAutoSerialNumber(autoMethod);
+      if (next) serialInputEl.value = next;
+    }
+  }
+  const serialNumber = document.getElementById('receipt-serial').value.trim();
 
   // Temp delivery receipts must have a D{n} temporary number.
   if (isTempDelivery) {
@@ -16401,13 +18540,25 @@ async function _saveReceiptFromModalInner() {
   // Determine delivery status and delivery person based on status and collection method
   let receiptDeliveryStatus = 'Office';
   let receiptDeliveryPersonId = '';
+  // MONEY-MATH: isPaid must be DERIVED from the status, not defaulted to true.
+  // 'Canceled'/'Lost' used to inherit the true default, so switching a NEVER-PAID
+  // receipt to Canceled/Lost flipped it to paid and minted spendable ad credit
+  // from money the business never received. A canceled/lost receipt only counts
+  // as paid if it really held money before (or a Lost one is resolved as paid).
   let receiptIsPaid = true;
   let receiptIsReceivedInOffice = true;
-  
+
+  if (status === 'Canceled' || status === 'Lost') {
+    const heldMoneyBefore = !!(editTarget && (editTarget.isPaid === true || String(editTarget.status || '') === 'Paid'));
+    const lostPaid = status === 'Lost' && String(statusDetail.lostResolution || '') === 'paid';
+    receiptIsPaid = heldMoneyBefore || lostPaid;
+    receiptIsReceivedInOffice = receiptIsPaid;
+  }
+
   if (status === 'Not Paid') {
     receiptIsPaid = false;
     receiptIsReceivedInOffice = false;
-    
+
     if (statusDetail.notPaidCollection === 'delivery') {
       receiptDeliveryStatus = 'Needs Delivery';
       // Get delivery person from the first payment with a delivery person, or from a dedicated field
@@ -16459,7 +18610,13 @@ async function _saveReceiptFromModalInner() {
   // Normal receipts: send serialNumber only.
   const tempReceiptNo = isTempDelivery ? serialNumber : (editTarget?.tempReceiptNo || '');
   const serialFinal = isTempDelivery ? (editTarget?.serialNumber || editTarget?.finalReceiptNo || '') : serialNumber;
-  const finalReceiptNo = (editTarget?.finalReceiptNo || '') || (serialFinal || '');
+  // finalReceiptNo must FOLLOW the number the user just entered. It used to
+  // prefer the stored value, so editing a receipt's number changed only
+  // serialNumber while the lists/cards (which show finalReceiptNo first) kept
+  // displaying the OLD number — the edit looked like it never happened.
+  const finalReceiptNo = isTempDelivery
+    ? (editTarget?.finalReceiptNo || '')
+    : (serialFinal || '');
 
   const receipt = {
     id: editTarget ? editTarget.id : generateId('receipt'),
@@ -16470,7 +18627,15 @@ async function _saveReceiptFromModalInner() {
     amountUSD: totalUSD,
     exchangeRate: avgRate,
     amountLocal: totalLYD,
-    paymentMethod: (Array.isArray(payments) && payments.length > 1) ? 'Split Payment' : (Array.isArray(payments) && payments.length > 0 ? payments[0]?.method : 'Cash (USD)'),
+    // Derived from the rows the user actually chose. When every amount is 0 the
+    // rows are dropped from payments[], and this used to invent 'Cash (USD)' —
+    // a method nobody picked, contradicting the auto-serial that was issued for
+    // the real method. Fall back to the SELECTED method instead.
+    paymentMethod: (Array.isArray(payments) && payments.length > 1)
+      ? 'Split Payment'
+      : (Array.isArray(payments) && payments.length > 0
+          ? payments[0]?.method
+          : (getSelectedPaymentMethods()[0] || editTarget?.paymentMethod || '')),
     status,
     statusDetail,
     isPaid: receiptIsPaid,
@@ -16584,36 +18749,55 @@ async function _saveReceiptFromModalInner() {
     // Pass the baseline the user actually edited (the modal snapshot) so a
     // concurrent change (e.g. a driver completing the delivery) triggers a
     // 409 conflict + reload instead of being silently overwritten.
-    updateRecord(state.receipts, receipt.id, receipt, oldReceipt?._lastModified);
+    const savedOk = await updateRecord(state.receipts, receipt.id, receipt, oldReceipt?._lastModified);
+    if (!savedOk) return; // keep the modal open; updateRecord already explained the failure
     showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث الوصل بنجاح!' : 'Receipt updated successfully!', 'success');
     addLog('update', 'receipt', receipt.id, `Updated receipt${serialNumber ? ' #' + serialNumber : ''}`);
   } else {
     // Create new
     if (isServerModeEnabled()) {
       // Server-confirmed create: do NOT show success until the server confirms.
+      let saved = null;
       try {
         const created = await apiCreateEntity('receipts', receipt);
-        const saved = created?.data ? Security.sanitizeObject(created.data) : null;
-        if (!saved || !saved.id) {
-          showNotification(isArV ? 'خطأ في الخادم' : 'Server Error', isArV ? 'فشل إنشاء الوصل: استجابة غير صالحة من الخادم' : 'Failed to create receipt: invalid server response', 'error');
-          return;
-        }
-        // Insert into local state
-        state.receipts.unshift(saved);
-        markCollectionDirty('receipts');
-        saveState();
-        showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
-        addLog('create', 'receipt', saved.id, `Created receipt${saved.tempReceiptNo ? ' #' + saved.tempReceiptNo : (serialNumber ? ' #' + serialNumber : '')} for ${customerName}`);
+        saved = created?.data ? Security.sanitizeObject(created.data) : null;
       } catch (e) {
+        // The first POST may have committed while its response was lost; its
+        // retry then receives 409. Accept only a matching server row.
+        if (e?.status === 409) {
+          try {
+            const existing = await apiGetEntity('receipts', receipt.id);
+            if (existing?.data && serverRecordMatchesCreateRetry(existing.data, receipt)) {
+              saved = Security.sanitizeObject(existing.data);
+            }
+          } catch (_) {}
+        }
+        if (saved) {
+          // Continue below as a confirmed idempotent success.
+        } else {
         const status = e?.status ? `HTTP ${e.status}` : '';
         const detail = (e?.payload && typeof e.payload === 'object' && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
         showNotification(isArV ? 'خطأ في الخادم' : 'Server Error', `${isArV ? 'فشل إنشاء الوصل' : 'Failed to create receipt'}: ${status ? status + ' - ' : ''}${detail}`, 'error');
         return; // keep modal open so user can retry
+        }
       }
+      if (!saved || !saved.id) {
+        showNotification(isArV ? 'خطأ في الخادم' : 'Server Error', isArV ? 'فشل إنشاء الوصل: استجابة غير صالحة من الخادم' : 'Failed to create receipt: invalid server response', 'error');
+        return;
+      }
+      // Insert into local state only after server confirmation.
+      const savedIdx = state.receipts.findIndex(r => r && String(r.id) === String(saved.id));
+      if (savedIdx === -1) state.receipts.unshift(saved);
+      else state.receipts[savedIdx] = saved;
+      markCollectionDirty('receipts');
+      saveState();
+      showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
+      addLog('create', 'receipt', saved.id, `Created receipt${saved.tempReceiptNo ? ' #' + saved.tempReceiptNo : (serialNumber ? ' #' + serialNumber : '')} for ${customerName}`);
     } else {
-    addRecord(state.receipts, receipt);
-    showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
-    addLog('create', 'receipt', receipt.id, `Created receipt${serialNumber ? ' #' + serialNumber : ''} for ${customerName}`);
+      const savedOk = await addRecord(state.receipts, receipt);
+      if (!savedOk) return;
+      showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
+      addLog('create', 'receipt', receipt.id, `Created receipt${serialNumber ? ' #' + serialNumber : ''} for ${customerName}`);
     }
   }
   
@@ -16673,10 +18857,18 @@ async function _saveReceiptFromModalInner() {
 function validateReceiptNumberInput(input) {
   const errorDiv = document.getElementById('receipt-serial-error');
   const originalValue = input.value;
-  
+
+  // App-generated serials (S1 / B2 / O3 / E4) are valid as-is — never strip
+  // their prefix. The field is read-only for those methods anyway.
+  if (isAutoSerialNumber(originalValue)) {
+    if (errorDiv) errorDiv.classList.add('hidden');
+    input.classList.remove('border-rose-500', 'focus:ring-rose-500/20');
+    return;
+  }
+
   // Remove any non-digit characters
   let value = input.value.replace(/[^0-9]/g, '');
-  
+
   // Check if user tried to enter non-digit characters
   if (originalValue !== value && originalValue.length > 0) {
     input.classList.add('animate-shake');
@@ -16955,7 +19147,15 @@ function updateReceiptStatusUI(status) {
       serialInput.placeholder = allow
         ? (isArS ? 'الأدمن يدخل رقم الوصل' : 'Admin entering receipt number')
         : (isArS ? 'مقفل حتى الدفع' : 'Locked until paid');
-      if (!allow) serialInput.value = '';
+      // Stash the number instead of destroying it: the user may be only
+      // glancing at "Not Paid" and switch back — the receipt's real number
+      // used to be wiped from the form and then saved as empty.
+      if (!allow) {
+        if (String(serialInput.value || '').trim()) {
+          serialInput.dataset.stashedSerial = serialInput.value;
+        }
+        serialInput.value = '';
+      }
       if (tempHint) tempHint.classList.add('hidden');
       const overrideLabel = adminOverride?.closest('label');
       if (overrideLabel) overrideLabel.classList.toggle('hidden', !isAdmin);
@@ -16964,10 +19164,18 @@ function updateReceiptStatusUI(status) {
       serialInput.disabled = false;
       serialInput.readOnly = false;
       serialInput.placeholder = isArS ? 'مثال: 12345' : 'e.g., 12345';
+      // Switching back out of "Not Paid": restore the number we stashed above.
+      if (!String(serialInput.value || '').trim() && serialInput.dataset.stashedSerial) {
+        serialInput.value = serialInput.dataset.stashedSerial;
+        delete serialInput.dataset.stashedSerial;
+      }
       if (tempHint) tempHint.classList.add('hidden');
       const overrideLabel = adminOverride?.closest('label');
       if (overrideLabel) overrideLabel.classList.toggle('hidden', !isAdmin);
       show(deliveryInfo, false);
+      // This branch just cleared readOnly — re-apply the auto-serial rules so a
+      // Paid receipt on an auto-numbered method keeps its number and its lock.
+      syncReceiptSerialWithPaymentMethods({ reissue: false });
     }
   }
 
@@ -17129,9 +19337,20 @@ function handleAdCustomerChange(customerId, preserveFunding = false) {
   state.tempAdFunding = state.tempAdFunding || { allocations: [] };
   if (!preserveFunding) {
     state.tempAdFunding.allocations = [];
+    // MERGED funding is customer-scoped too. It used to survive a customer
+    // change, so an ad could be funded from ANOTHER customer's receipt.
+    clearAdMergeFunding();
   }
-  
+
   renderAdFundingList();
+}
+
+// Receipts belong to a customer: whenever the ad's customer/page changes, the
+// merged-funds allocations from the previous customer must go with it.
+function clearAdMergeFunding() {
+  state.tempMergeFunding = { allocations: [], enabled: false };
+  try { if (typeof renderAdMergedFundingList === 'function') renderAdMergedFundingList(); } catch (_) {}
+  try { if (typeof reflectMergeFundingUI === 'function') reflectMergeFundingUI(); } catch (_) {}
 }
 
 function handleAdPageChange(preserveFunding = false) {
@@ -17139,12 +19358,14 @@ function handleAdPageChange(preserveFunding = false) {
   state.tempAdFunding = state.tempAdFunding || { allocations: [] };
   if (!preserveFunding) {
   state.tempAdFunding.allocations = [];
+  clearAdMergeFunding();
   }
   renderAdFundingList();
 }
 
 // Select a page in the Add Ad modal (Page-first workflow)
 function selectAdPage(pageId, preserveFunding = false) {
+  if (!Security.isValidRecordId(pageId)) return;
   const isArP = state.language === 'ar';
   const pageInput = document.getElementById('ad-page');
   const pageSearch = document.getElementById('ad-page-search');
@@ -17250,7 +19471,7 @@ function selectAdPage(pageId, preserveFunding = false) {
           ${linkedCustomers.map(c => {
             const isSelected = c.id === currentCustomerId;
             return `
-              <button type="button" onclick="selectAdCustomer('${c.id}')" class="ad-customer-btn group p-2 rounded-lg text-left transition-all ${isSelected ? 'bg-indigo-600 text-white' : 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-indigo-400'}" data-customer-id="${c.id}" data-customer-name="${Security.escapeHtml((c.name || '').toLowerCase())}">
+              <button type="button" data-record-action="select-ad-customer" data-record-id="${Security.escapeHtml(String(c.id || ''))}" class="ad-customer-btn group p-2 rounded-lg text-left transition-all ${isSelected ? 'bg-indigo-600 text-white' : 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-indigo-400'}" data-customer-id="${Security.escapeHtml(String(c.id || ''))}" data-customer-name="${Security.escapeHtml((c.name || '').toLowerCase())}">
                 <div class="flex items-center space-x-2">
                   <div class="w-6 h-6 rounded-full ${isSelected ? 'bg-white/20' : 'bg-slate-100 dark:bg-slate-700'} flex items-center justify-center text-[10px] font-medium ${isSelected ? 'text-white' : 'text-slate-500'}">
                     ${c.name?.charAt(0) || 'C'}
@@ -17274,6 +19495,7 @@ function selectAdPage(pageId, preserveFunding = false) {
 
 // Select customer in multi-customer scenario
 function selectAdCustomer(customerId, preserveFunding = false) {
+  if (!Security.isValidRecordId(customerId)) return;
   const customerIdInput = document.getElementById('ad-customer-id');
   const prevCustomerId = customerIdInput?.value || '';
   if (customerIdInput) customerIdInput.value = customerId;
@@ -17303,6 +19525,7 @@ function selectAdCustomer(customerId, preserveFunding = false) {
   if (!preserveFunding && changedCustomer) {
     state.tempAdFunding = state.tempAdFunding || { allocations: [] };
     state.tempAdFunding.allocations = [];
+    clearAdMergeFunding();
   }
   // Refresh Receipt Funding UI after choosing customer (critical for multi-customer pages)
   renderAdFundingList();
@@ -17348,9 +19571,29 @@ function refreshAdTempReceiptOptions() {
 
   const receipts = getPendingTempDeliveryReceiptsForCustomer(customerId);
   const current = String(hidden.value || '').trim() || String(state.modalData?.receiptId || '').trim();
+  const isEditingSavedAd = !!state.modalData?.id;
+
+  // The list only holds PENDING delivery receipts. A saved ad whose receipt has
+  // since been delivered would therefore find its own link missing from the
+  // options — and the auto-suggest below would silently RE-LINK the ad to a
+  // different receipt (spending another receipt's money). Keep the ad's own
+  // receipt in the list, marked as no longer pending.
+  const linkedReceipt = current
+    ? getVisibleRecords(state.receipts).find(r => String(r.id) === current)
+    : null;
+  const linkedIsListed = !!linkedReceipt && receipts.some(r => String(r.id) === current);
+  const extraOption = (linkedReceipt && !linkedIsListed)
+    ? (() => {
+        const place = String(linkedReceipt.deliveryPlaceName || '').trim();
+        const note = isArT ? 'غير معلق' : 'no longer pending';
+        const label = `${linkedReceipt.tempReceiptNo || linkedReceipt.serialNumber || linkedReceipt.id.slice(0, 8)}${place ? ' • ' + place : ''} • (${note})`;
+        return `<option value="${linkedReceipt.id}" selected>${Security.escapeHtml(label)}</option>`;
+      })()
+    : '';
 
   select.innerHTML = [
     `<option value="">${isArT ? 'اختر وصلاً معلقاً...' : 'Select pending receipt...'}</option>`,
+    extraOption,
     ...receipts.map(r => {
       // Calculate available credit in USD
       const dueUsage = getDeliveryReceiptDueUsage(r);
@@ -17362,9 +19605,10 @@ function refreshAdTempReceiptOptions() {
     })
   ].join('');
 
-  // Auto-suggest: if nothing selected yet and there is a pending receipt, pick the newest.
+  // Auto-suggest the newest pending receipt — but ONLY for a NEW ad. Never
+  // pick a receipt on the user's behalf for an ad that is already saved.
   let selectedId = String(select.value || '').trim();
-  if (!selectedId && receipts.length > 0) {
+  if (!selectedId && !isEditingSavedAd && receipts.length > 0) {
     selectedId = String(receipts[0].id);
     select.value = selectedId;
   }
@@ -17460,12 +19704,18 @@ function onAdTempReceiptChange(receiptId) {
           }
         }
         
-        // Default to existing value, or full available amount for new ads
+        // Default to existing value, or full available amount for new ads.
+        // The field is stamped with the receipt it belongs to: switching the
+        // linked receipt used to KEEP the previous receipt's amount (the
+        // "Available" label updated, the amount did not), so the ad could be
+        // saved spending more than the new receipt actually holds.
+        const belongsToThisReceipt = dueInput.dataset.receiptId === rid;
         if (prefillValue !== null) {
           dueInput.value = prefillValue.toFixed(2);
-        } else if (!dueInput.value) {
+        } else if (!dueInput.value || !belongsToThisReceipt) {
           dueInput.value = availableUSD.toFixed(2);
         }
+        dueInput.dataset.receiptId = rid;
       }
       // Show merge toggle to allow combining with paid receipts
       if (mergeToggle) mergeToggle.classList.remove('hidden');
@@ -18092,6 +20342,14 @@ function updateAdEndDateFromDays() {
 // Upload and preview ad photos
 function uploadAdPhotos(fileList) {
   if (!fileList || !fileList.length) return;
+  if (!can('ads', 'uploadPhotos')) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تحتاج صلاحية رفع صور الإعلانات' : 'Requires the Upload Photos permission',
+      'error'
+    );
+    return;
+  }
   state.tempAdPhotos = state.tempAdPhotos || [];
   Array.from(fileList).forEach(file => {
     compressImageToDataUrl(file).then((dataUrl) => {
@@ -18818,7 +21076,6 @@ function updateUserRoleInfo(role) {
   
   if (window.lucide) lucide.createIcons();
 }
-
 function renderModal() {
   const existingModal = document.getElementById('app-modal');
   if (existingModal) existingModal.remove();
@@ -18921,7 +21178,10 @@ function renderModal() {
       const visiblePages = getVisibleRecords(state.pages);
       const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
       const adData = state.modalData || {};
-      state.tempAdPhotos = adData.adPhotos || adData.photos || state.tempAdPhotos || [];
+      // Copy (not alias) the live record's photos — the receipt modal already
+      // does this (see state.tempReceiptPhotos below). Aliasing meant adding or
+      // removing a photo mutated the SAVED ad immediately, even on Cancel.
+      state.tempAdPhotos = (adData.adPhotos || adData.photos || []).slice();
       const durationDaysDefault = (adData.days !== undefined ? adData.days : (adData.startDate && adData.endDate ? Math.max(0, Math.round((new Date(adData.endDate) - new Date(adData.startDate)) / (1000 * 60 * 60 * 24))) : ''));
       const isAdminUser = isCurrentUserAdmin();
       const adCreator = isEdit && adData.creatorId ? state.users.find(u => u.id === adData.creatorId) : state.currentUser;
@@ -18993,7 +21253,7 @@ function renderModal() {
                   <input type="text" id="ad-page-search" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-3 py-2 rounded-lg text-sm" placeholder="${isArAd ? 'ابحث في الصفحات...' : 'Search pages...'}" oninput="filterAdPages()" onfocus="showAdPageDropdown()" value="${Security.escapeHtml((state.pages.find(p => p.id === adData.pageId)?.name) || '')}" autocomplete="off" />
                   <div id="ad-page-dropdown" class="absolute z-20 mt-1 w-full bg-white dark:bg-slate-800 rounded-lg shadow-xl max-h-48 overflow-y-auto hidden border border-slate-200 dark:border-slate-600">
                     ${visiblePages.map(p => `
-                      <div class="page-option px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer text-sm" data-name="${Security.escapeHtml((p.name || '').toLowerCase())}" onclick="selectAdPage('${p.id}')">
+                      <div class="page-option px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer text-sm" data-name="${Security.escapeHtml((p.name || '').toLowerCase())}" data-record-action="select-ad-page" data-record-id="${Security.escapeHtml(String(p.id || ''))}">
                         ${Security.escapeHtml(p.name || '')}
                       </div>
                     `).join('')}
@@ -19425,7 +21685,7 @@ function renderModal() {
                 />
                 <div id="page-customer-dropdown" class="absolute z-20 mt-1 w-full glass-panel rounded-lg shadow-xl max-h-60 overflow-y-auto hidden">
                   ${pageCustomers.map(c => `
-                    <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" onclick="selectPageCustomer('${c.id}', '${isAdminPage}')">
+                    <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" data-record-action="select-page-customer" data-record-id="${Security.escapeHtml(String(c.id || ''))}" data-admin="${isAdminPage}">
                       <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
                       <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (isArP ? 'لا يوجد هاتف' : 'No phone'))}</div>
                     </div>
@@ -19437,12 +21697,12 @@ function renderModal() {
                 ${existingCustomerIds.map(cid => {
                   const customer = state.customers.find(c => c.id === cid);
                   return customer ? `
-                    <div class="flex items-center justify-between p-3 bg-white dark:bg-slate-800 rounded-lg border border-indigo-200 dark:border-indigo-800 page-customer-item" data-customer-id="${cid}">
+                    <div class="flex items-center justify-between p-3 bg-white dark:bg-slate-800 rounded-lg border border-indigo-200 dark:border-indigo-800 page-customer-item" data-customer-id="${Security.escapeHtml(String(cid || ''))}">
                       <div>
                         <div class="font-medium text-sm text-slate-800 dark:text-white">${Security.escapeHtml(customer.name || '')}</div>
                         <div class="text-xs text-slate-500">${Security.escapeHtml(customer.platform || '')}</div>
                       </div>
-                      <button type="button" onclick="removePageCustomer('${cid}')" class="text-rose-500 hover:text-rose-700">
+                      <button type="button" data-record-action="remove-page-customer" data-record-id="${Security.escapeHtml(String(cid || ''))}" class="text-rose-500 hover:text-rose-700">
                         <i data-lucide="x-circle" class="w-4 h-4"></i>
                       </button>
                     </div>
@@ -19938,7 +22198,7 @@ function renderModal() {
           ` : ''}
 
           <div class="flex space-x-3 pt-2 border-t border-slate-200 dark:border-slate-700 mt-2">
-            <button type="button" onclick="saveReceiptTransfer()" class="flex-1 btn-shine bg-blue-600 text-white px-4 py-2 rounded-xl font-bold" ${transferCustomers.length === 0 ? 'disabled' : ''}>
+            <button type="button" id="receipt-transfer-submit" onclick="saveReceiptTransfer()" class="flex-1 btn-shine bg-blue-600 text-white px-4 py-2 rounded-xl font-bold disabled:opacity-50 disabled:cursor-not-allowed" ${transferCustomers.length === 0 ? 'disabled' : ''}>
               <i data-lucide="check" class="w-4 h-4 inline mr-1.5"></i>${isArT ? 'تحويل' : 'Transfer'}
               </button>
             <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2 rounded-xl font-bold">${isArT ? 'إلغاء' : 'Cancel'}</button>
@@ -19983,11 +22243,11 @@ function renderModal() {
                   </div>
                   <div>
                     <label class="block text-xs font-medium mb-1">${isArS ? 'سعر الصرف' : 'Exchange Rate'}</label>
-                    <input type="text" inputmode="decimal" class="split-rate w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate || state.defaultExchangeRate}" oninput="sanitizeMoneyInput(this, 4)" />
+                    <input type="text" inputmode="decimal" class="split-rate w-full glass-input px-3 py-2 rounded-lg text-sm" value="${paymentRate1Value(payment)}" oninput="sanitizeMoneyInput(this, 4)" />
                   </div>
                   <div>
                     <label class="block text-xs font-medium mb-1">${isArS ? 'سعر الدولار (سعر 2)' : 'USD Rate (Rate 2)'}</label>
-                    <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate2 !== undefined ? payment.rate2 : (payment.rate || state.defaultExchangeRate)}" oninput="sanitizeMoneyInput(this, 4)" />
+                    <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate2 !== undefined && payment.rate2 !== null && payment.rate2 !== '' ? payment.rate2 : paymentRate1Value(payment)}" oninput="sanitizeMoneyInput(this, 4)" />
                   </div>
                   <div>
                     <label class="block text-xs font-medium mb-1">${isArS ? 'نوع التحصيل' : 'Collection Type'}</label>
@@ -20492,12 +22752,21 @@ function renderModal() {
   if (state.activeModal === 'receipt') {
     setTimeout(() => {
       updateReceiptTotals();
+      // Auto-serial: fill the number for a NEW receipt whose payment method is
+      // auto-numbered, and lock the field whenever such a method is selected
+      // (including when EDITING a receipt that already uses one). Opening the
+      // form never renumbers an existing receipt.
+      initReceiptSerialOnOpen();
       updateReceiptStatusUI(document.getElementById('receipt-status')?.value || 'Paid');
-      // Pre-populate customer if editing
+      // Pre-populate customer if editing. Use the RECEIPT's own stored phone —
+      // seeding the customer's first phone rewrote receipt.phoneNumber on save
+      // for any receipt taken on a second number.
       if (state.modalData && state.modalData.customerId) {
         const customer = state.customers.find(c => c.id === state.modalData.customerId);
         if (customer && Array.isArray(customer.phones) && customer.phones.length > 0) {
-          selectReceiptPhone(customer.phones[0], customer.id);
+          const stored = String(state.modalData.phoneNumber || '').trim();
+          const phone = (stored && customer.phones.includes(stored)) ? stored : customer.phones[0];
+          selectReceiptPhone(phone, customer.id);
         }
       }
       renderReceiptPhotoPreviews();
@@ -20560,12 +22829,111 @@ function renderModal() {
         await handleModalSubmit();
       } catch (err) {
         console.error('Modal submit error:', err);
-        showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'فشل حفظ التغييرات' : 'Failed to save changes', 'error');
+        // Surface the server's actual reason (e.g. "A user with this email
+        // already exists") instead of a generic message that hides it.
+        const detail = String(err?.message || '').trim();
+        showNotification(
+          state.language === 'ar' ? 'خطأ' : 'Error',
+          detail || (state.language === 'ar' ? 'فشل حفظ التغييرات' : 'Failed to save changes'),
+          'error'
+        );
       } finally {
         submitting = false;
         if (submitBtn) submitBtn.disabled = false;
       }
     });
+  }
+}
+
+// Keep one request identity across response-loss retries. Volatile audit
+// timestamps are excluded from the fingerprint and the first prepared payload
+// is reused, so an identical retry cannot accidentally create a second ad.
+const _pendingAdMutationAttempts = new Map();
+
+function getAdMutationFingerprint(action, adId, expectedLastModified, data) {
+  const stable = Security.sanitizeObject(data || {});
+  delete stable.createdAt;
+  delete stable.updatedAt;
+  delete stable.collectionDate;
+  if (Array.isArray(stable.editHistory)) {
+    stable.editHistory = stable.editHistory.map(row => ({ ...row, editedAt: '' }));
+  }
+  if (Array.isArray(stable.topUps)) {
+    stable.topUps = stable.topUps.map(row => ({ ...row, date: '' }));
+  }
+  return JSON.stringify({ action, adId, expectedLastModified: expectedLastModified ?? null, data: stable });
+}
+
+function getAdMutationAttempt(action, adId, expectedLastModified, data) {
+  const act = String(action || '');
+  const existingId = String(adId || '');
+  const slot = act === 'create' ? 'create' : `${act}:${existingId}`;
+  const fingerprint = getAdMutationFingerprint(act, existingId, expectedLastModified, data);
+  const prior = _pendingAdMutationAttempts.get(slot);
+  if (prior?.fingerprint === fingerprint) return prior;
+  if (prior?.promise) return prior;
+  const attempt = {
+    slot,
+    fingerprint,
+    adId: existingId || Security.generateSecureId('ad'),
+    idempotencyKey: ensureOperationIdempotencyKey('', `ad-${act || 'mutate'}`),
+    expectedLastModified,
+    data: Security.sanitizeObject(data || {}),
+    promise: null
+  };
+  _pendingAdMutationAttempts.set(slot, attempt);
+  return attempt;
+}
+
+function completeAdMutationAttempt(attempt) {
+  if (attempt && _pendingAdMutationAttempts.get(attempt.slot) === attempt) {
+    _pendingAdMutationAttempts.delete(attempt.slot);
+  }
+}
+
+function buildServerAdMutationData(adUpdates, { create = false } = {}) {
+  const data = Security.sanitizeObject(adUpdates || {});
+  // These values are materialized from allocations/payment rows by the server.
+  // Sending them would invite a forged total that disagrees with the funding
+  // rows. The allocation requests themselves remain explicit inputs.
+  for (const field of [
+    'amountUSD', 'amountLocal', 'receiptIds', 'fundingReceiptId',
+    'dueAmountToUseUSD', 'hasMergedPaidFunds', 'isPaid', 'initialAmountUSD',
+    'spentUSD', 'canceledBy'
+  ]) delete data[field];
+  if (create) {
+    data.recordType = 'ad';
+    data.topUps = [];
+  }
+  return data;
+}
+
+async function saveAdThroughAtomicServer(action, adId, expectedLastModified, data) {
+  if (action === 'update' && (!Number.isSafeInteger(expectedLastModified) || expectedLastModified < 0)) {
+    throw new Error('This ad is missing its server version. Refresh and try again.');
+  }
+  const attempt = getAdMutationAttempt(action, adId, expectedLastModified, data);
+  if (attempt.promise) return await attempt.promise;
+  attempt.promise = (async () => {
+    const payload = {
+      action,
+      adId: attempt.adId,
+      idempotencyKey: attempt.idempotencyKey,
+      data: attempt.data
+    };
+    if (action === 'update') payload.expectedLastModified = attempt.expectedLastModified;
+    const response = await apiMutateAd(payload);
+    const [savedAd] = applyValidatedServerEntityBatch([
+      { collection: 'ads', entity: response.ad }
+    ], 'adMutation');
+    if (!savedAd) throw new Error('Invalid ad mutation response');
+    completeAdMutationAttempt(attempt);
+    return savedAd;
+  })();
+  try {
+    return await attempt.promise;
+  } finally {
+    attempt.promise = null;
   }
 }
 
@@ -20599,7 +22967,7 @@ async function handleModalSubmit() {
       }
       const memo = Security.sanitizeInput(String(document.getElementById('topup-memo')?.value || ''), { maxLength: 180 }).trim();
       try {
-        const tx = WALLET.credit(targetUserId, amount, {
+        const tx = await WALLET.credit(targetUserId, amount, {
           memo: memo || (isArW ? 'شحن محفظة' : 'Wallet top-up'),
           idempotencyKey: String(state.modalData?.idempotencyKey || '') || Security.generateSecureId('topup')
         });
@@ -20672,12 +23040,13 @@ async function handleModalSubmit() {
       }
 
       const hashed = await Security.hashPassword(newPw, null, { algo: 'pbkdf2-sha256' });
-      updateRecord(state.users, user.id, {
+      const passwordSaved = await updateRecord(state.users, user.id, {
         passwordHash: hashed.hash,
         salt: hashed.salt,
         passwordAlgo: hashed.algo,
         passwordIterations: hashed.iterations
       });
+      if (!passwordSaved) return;
       addSecurityLog('password_changed', user.email || user.id);
       showNotification(isArCP ? 'نجاح' : 'Success', isArCP ? 'تم تغيير كلمة المرور بنجاح' : 'Password changed successfully', 'success');
       break;
@@ -20725,13 +23094,14 @@ async function handleModalSubmit() {
       const joinDate = joinDateValue ? new Date(joinDateValue).toISOString() : new Date().toISOString();
 
       if (isEdit) {
-        updateRecord(state.customers, state.modalData.id, {
+        const customerSaved = await updateRecord(state.customers, state.modalData.id, {
           name: custName,
           phones: phones,
           platform: document.getElementById('customer-platform').value,
           joinDate: joinDate,
           profileLinks: profileLinks
         });
+        if (!customerSaved) return;
         showNotification(isAr ? 'تم التحديث' : 'Updated', isAr ? 'تم تحديث العميل بنجاح' : 'Customer updated successfully', 'success');
       } else {
         const customer = {
@@ -20742,7 +23112,8 @@ async function handleModalSubmit() {
           joinDate: joinDate,
           profileLinks: profileLinks
         };
-        addRecord(state.customers, customer);
+        const customerSaved = await addRecord(state.customers, customer);
+        if (!customerSaved) return;
         showNotification(isAr ? 'تمت الإضافة' : 'Success', isAr ? 'تمت إضافة العميل بنجاح' : 'Customer added successfully', 'success');
       }
       break;
@@ -20768,7 +23139,16 @@ async function handleModalSubmit() {
         amountUSD = totals.totalR2;
       }
       
-      let exchangeRate = parseFloat(document.getElementById('ad-rate')?.value || state.defaultExchangeRate);
+      // #ad-rate does NOT exist in the ad modal template — reading it always
+      // fell through to the CURRENT global default, so every save silently
+      // rewrote a saved ad's exchangeRate (and any LYD figure derived from it)
+      // with today's market rate instead of the rate the ad was created at.
+      // Keep the ad's own stored rate on edit; use the default only for a new ad.
+      let exchangeRate = parseFloat(
+        (isEdit && Number.isFinite(Number(state.modalData?.exchangeRate)) && Number(state.modalData.exchangeRate) > 0)
+          ? state.modalData.exchangeRate
+          : state.defaultExchangeRate
+      );
       const isPaid = paymentStatus === 'paid';
       // These three inputs do NOT exist in the ad modal template. Reading them
       // always yielded false/undefined, which on EDIT erased spentUSD /
@@ -20993,6 +23373,18 @@ async function handleModalSubmit() {
             showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'أحد الوصولات المدمجة مفقود أو تم حذفه.' : 'One of the merged receipts is missing or was deleted.', 'error');
             return;
           }
+          // A receipt belongs to ONE customer — an ad may never be funded from
+          // another customer's money (the merged rows survived a customer change).
+          if (String(receipt.customerId || '') !== String(customerId || '')) {
+            showNotification(
+              isArSubAd ? 'تنبيه' : 'Validation',
+              isArSubAd
+                ? 'لا يمكن تمويل الإعلان من وصل عميل آخر. أزل الوصولات المدمجة غير المطابقة.'
+                : "An ad cannot be funded from another customer's receipt. Remove the mismatched merged receipts.",
+              'error'
+            );
+            return;
+          }
           const usageStats = getReceiptUsageStats(receipt);
           let remaining = usageStats.remainingUSD || 0;
           // If editing, add back what this ad already merged from this receipt
@@ -21067,7 +23459,22 @@ async function handleModalSubmit() {
         hasMergedPaidFunds: mergedAllocations.length > 0,
         mergedPaidAllocations: mergedAllocations
       };
-      
+
+      // Re-baseline the top-up arithmetic. saveTopUps derives the ad's amount
+      // and end date from initialAmountUSD/initialEndDate + the top-ups. Those
+      // baselines are written ONLY by saveTopUps, so an amount/end-date edited
+      // here was silently REVERTED by the next top-up save (and the funding
+      // receipt re-charged). Rebase them off what we are saving now.
+      if (isEdit && Array.isArray(state.modalData?.topUps) && state.modalData.topUps.length > 0) {
+        const topUpUSD = state.modalData.topUps.reduce((s, t) => s + (parseFloat(t.amount) || 0), 0);
+        const topUpDays = state.modalData.topUps.reduce((s, t) => s + (parseInt(t.extendDays, 10) || 0), 0);
+        adUpdates.initialAmountUSD = Math.max(0, Math.round((amountUSD - topUpUSD) * 100) / 100);
+        const endMs = new Date(adUpdates.endDate).getTime();
+        if (!Number.isNaN(endMs)) {
+          adUpdates.initialEndDate = new Date(endMs - topUpDays * 86400000).toISOString();
+        }
+      }
+
       if (isPaid && (!state.modalData || !state.modalData.collectionDate)) {
         adUpdates.collectionDate = new Date().toISOString();
       }
@@ -21141,27 +23548,50 @@ async function handleModalSubmit() {
           adUpdates.editCount = oldAd.editCount || 0;
         }
         
-        updateRecord(state.ads, state.modalData.id, adUpdates);
+        if (isServerModeEnabled()) {
+          const expectedLastModified = Number(oldAd?._lastModified);
+          await saveAdThroughAtomicServer(
+            'update',
+            oldAd.id,
+            expectedLastModified,
+            buildServerAdMutationData(adUpdates)
+          );
+        } else {
+          const adSaved = await updateRecord(state.ads, state.modalData.id, adUpdates);
+          if (!adSaved) return;
+        }
         showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث الإعلان بنجاح' : 'Ad updated successfully', 'success');
         addLog('update', 'ad', state.modalData.id, `Updated ad with ${allocations.length} receipt link(s)`);
       } else {
-        const ad = {
-          id: generateId('ad'),
-          recordType: 'ad',
-          creatorId: state.currentUser?.id || '',
-          createdAt: new Date().toISOString(),
-          topUps: [],
-          ...adUpdates
-        };
-        addRecord(state.ads, ad);
+        let savedAd;
+        if (isServerModeEnabled()) {
+          savedAd = await saveAdThroughAtomicServer(
+            'create',
+            '',
+            null,
+            buildServerAdMutationData(adUpdates, { create: true })
+          );
+        } else {
+          const ad = {
+            id: generateId('ad'),
+            recordType: 'ad',
+            creatorId: state.currentUser?.id || '',
+            createdAt: new Date().toISOString(),
+            topUps: [],
+            ...adUpdates
+          };
+          const adSaved = await addRecord(state.ads, ad);
+          if (!adSaved) return;
+          savedAd = state.ads.find(row => row && String(row.id) === String(ad.id)) || ad;
+        }
         showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الإعلان بنجاح' : 'Ad created successfully', 'success');
-        addLog('create', 'ad', ad.id, `Created ad with ${allocations.length} receipt link(s)`);
+        addLog('create', 'ad', savedAd.id, `Created ad with ${allocations.length} receipt link(s)`);
         
         // Log receipt usage for each allocation
         if (isPaid && allocations.length > 0) {
           for (const alloc of allocations) {
-            addAuditLog('receipt', alloc.receiptId, 'usage', `Ad ${ad.id} allocated $${alloc.amountUSD.toFixed(2)}`, {
-              adId: ad.id,
+            addAuditLog('receipt', alloc.receiptId, 'usage', `Ad ${savedAd.id} allocated $${alloc.amountUSD.toFixed(2)}`, {
+              adId: savedAd.id,
               amountUSD: alloc.amountUSD,
               receiptId: alloc.receiptId
             });
@@ -21177,7 +23607,14 @@ async function handleModalSubmit() {
       closeModal();
       } catch (error) {
         console.error('Error saving ad:', error);
-        showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? `فشل حفظ الإعلان: ${error.message}` : `Failed to save ad: ${error.message}`, 'error');
+        const conflict = error?.status === 409;
+        showNotification(
+          conflict ? (state.language === 'ar' ? 'تعارض في التعديل' : 'Ad Changed') : (state.language === 'ar' ? 'خطأ' : 'Error'),
+          conflict
+            ? (state.language === 'ar' ? 'تم تغيير هذا الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+            : (state.language === 'ar' ? `فشل حفظ الإعلان: ${error.message}` : `Failed to save ad: ${error.message}`),
+          conflict ? 'warning' : 'error'
+        );
       }
       break;
     case 'user':
@@ -21185,14 +23622,26 @@ async function handleModalSubmit() {
       const isAdminEditor = isCurrentUserAdmin();
       const editingId = state.modalData?.id;
       const isSelfEdit = !!(isEdit && editingId && String(state.currentUser?.id || '') === String(editingId));
-      if (!isAdminEditor && !isSelfEdit) {
-        showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'إدارة المستخدمين للأدمن فقط' : 'Admin only', 'error');
+      const canDoUserOp = isEdit ? (isSelfEdit || canManageUsersAction('edit')) : canManageUsersAction('add');
+      if (!canDoUserOp) {
+        showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'لا تملك صلاحية إدارة المستخدمين' : 'You lack the required Users permission', 'error');
         return;
       }
 
       const roleEl = document.getElementById('user-role');
       let userRole = Security.sanitizeInput((roleEl ? roleEl.value : (state.modalData?.role || '')), { maxLength: 20 });
-      if (!isAdminEditor && isEdit) userRole = state.modalData?.role || userRole;
+      // Only Admins / changeRole holders may alter roles; everyone else keeps the stored role.
+      if (isEdit && !canManageUsersAction('changeRole')) userRole = state.modalData?.role || userRole;
+      // Anti-escalation: only a real Admin can create or promote to Admin.
+      if (!isAdminEditor && isAdminRole(userRole)) {
+        showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'فقط المدير يمكنه منح دور المدير' : 'Only an Admin can grant the Admin role', 'error');
+        return;
+      }
+      // Non-admins can never edit an Admin account.
+      if (isEdit && !isSelfEdit && !isAdminEditor && isAdminRole(state.modalData?.role)) {
+        showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'فقط المدير يمكنه تعديل حساب مدير' : 'Only an Admin can modify an Admin account', 'error');
+        return;
+      }
       const userName = Security.sanitizeInput(document.getElementById('user-name').value, { maxLength: 100 });
       const userEmail = Security.sanitizeInput(document.getElementById('user-email').value, { maxLength: 120 }).toLowerCase();
 
@@ -21252,12 +23701,8 @@ async function handleModalSubmit() {
         }
       };
       
-      // SERVER MODE: users are managed by backend (Admin only)
+      // SERVER MODE: users are managed by backend (permission-gated there too)
       if (isServerModeEnabled()) {
-        if (!isAdminEditor) {
-          showNotification(isArSubU ? 'تم رفض الوصول' : 'Access Denied', isArSubU ? 'هذه العملية للأدمن فقط' : 'Admin only', 'error');
-          return;
-        }
       if (isEdit) {
           const payload = {
             name: userName,
@@ -21270,7 +23715,12 @@ async function handleModalSubmit() {
               showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
               return;
             }
-            payload.password = newPassword;
+            if (isSelfEdit && !isAdminEditor) {
+              // Server requires the current password for self-changes.
+              showNotification(isArSubU ? 'غير مدعوم هنا' : 'Not Supported Here', isArSubU ? 'لتغيير كلمة مرورك استخدم الإعدادات ← تغيير كلمة المرور' : 'To change your own password use Settings → Change Password', 'info');
+            } else {
+              payload.password = newPassword;
+            }
           }
 
           // Role-based permissions defaults
@@ -21359,7 +23809,8 @@ async function handleModalSubmit() {
           }
         }
         
-        updateRecord(state.users, state.modalData.id, updates);
+        const userSaved = await updateRecord(state.users, state.modalData.id, updates);
+        if (!userSaved) return;
         showNotification(isArSubU ? 'تم التحديث' : 'Updated', isArSubU ? 'تم تحديث المستخدم بنجاح' : 'User updated successfully', 'success');
       } else {
         if (!isAdminEditor) {
@@ -21383,7 +23834,8 @@ async function handleModalSubmit() {
           role: userRole,
           permissions: getDefaultPermissions(userRole)
         };
-        addRecord(state.users, user);
+        const userSaved = await addRecord(state.users, user);
+        if (!userSaved) return;
         showNotification(isArSubU ? 'نجاح' : 'Success', isArSubU ? 'تمت إضافة المستخدم بنجاح' : 'User added successfully', 'success');
         
         // Show permission modal for non-admin users
@@ -21451,11 +23903,12 @@ async function handleModalSubmit() {
       }
 
       if (isEdit) {
-        updateRecord(state.pages, state.modalData.id, {
+        const pageSaved = await updateRecord(state.pages, state.modalData.id, {
           name: pageName,
           category: pageCategory,
           customerIds: selectedCustomers
         });
+        if (!pageSaved) return;
         showNotification(isArPage ? 'تم التحديث' : 'Updated', isArPage ? 'تم تحديث الصفحة بنجاح' : 'Page updated successfully', 'success');
         addLog('update', 'page', state.modalData.id, `Updated page: ${pageName}`);
       } else {
@@ -21468,7 +23921,8 @@ async function handleModalSubmit() {
           _lastModified: Date.now(),
           _deleted: false
         };
-        addRecord(state.pages, page);
+        const pageSaved = await addRecord(state.pages, page);
+        if (!pageSaved) return;
         showNotification(isArPage ? 'تمت الإضافة' : 'Success', isArPage ? 'تمت إضافة الصفحة بنجاح' : 'Page added successfully', 'success');
         addLog('create', 'page', page.id, `Created page: ${page.name} linked to ${selectedCustomers.length} customer(s)`);
       }
@@ -21537,7 +23991,8 @@ async function handleModalSubmit() {
       }
       
       if (isEdit) {
-        updateRecord(state.receipts, state.modalData.id, receiptUpdates);
+        const savedOk = await updateRecord(state.receipts, state.modalData.id, receiptUpdates);
+        if (!savedOk) return;
         showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث الوصل بنجاح!' : 'Receipt updated successfully!', 'success');
       } else {
         const receipt = {
@@ -21550,7 +24005,8 @@ async function handleModalSubmit() {
           topUps: [],
           ...receiptUpdates
         };
-        addRecord(state.receipts, receipt);
+        const savedOk = await addRecord(state.receipts, receipt);
+        if (!savedOk) return;
         showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
       }
       break;
@@ -21567,6 +24023,7 @@ function showWalletTopupModal(userId) {
   // Idempotency key fixed at open time: even a double submit of this same
   // form can only ever create ONE credit transaction.
   state.modalData = { userId: String(userId), idempotencyKey: Security.generateSecureId('topup') };
+  updateUrlParams({ modal: 'wallet-topup', id: String(userId) }); // URL tracking
   renderModal();
 }
 
@@ -21625,66 +24082,66 @@ function closeModal() {
 
 // Remove every funding reference to `receiptId` from visible ads (allocation
 // rows, merged mirror, direct id fields). Returns how many ads were touched.
-function cleanupAdFundingLinks(receiptId) {
+async function cleanupAdFundingLinks(receiptId) {
   const linkedAds = state.ads.filter(a =>
     (a.receiptId === receiptId || a.linkedDeliveryReceiptId === receiptId || a.fundingReceiptId === receiptId ||
      (Array.isArray(a.receiptAllocations) && a.receiptAllocations.some(alloc => alloc.receiptId === receiptId)) ||
      (Array.isArray(a.dueAllocations) && a.dueAllocations.some(alloc => alloc.receiptId === receiptId)))
     && !a._deleted
   );
-  linkedAds.forEach(ad => {
-    let changed = false;
+  let touched = 0;
+  for (const ad of linkedAds) {
+    const updates = {};
     if (Array.isArray(ad.receiptAllocations)) {
-      const before = ad.receiptAllocations.length;
-      ad.receiptAllocations = ad.receiptAllocations.filter(alloc => alloc.receiptId !== receiptId);
-      if (ad.receiptAllocations.length !== before) changed = true;
+      const kept = ad.receiptAllocations.filter(alloc => alloc.receiptId !== receiptId);
+      if (kept.length !== ad.receiptAllocations.length) updates.receiptAllocations = kept;
     }
     if (Array.isArray(ad.dueAllocations)) {
-      const before = ad.dueAllocations.length;
-      ad.dueAllocations = ad.dueAllocations.filter(alloc => alloc.receiptId !== receiptId);
-      if (ad.dueAllocations.length !== before) changed = true;
+      const kept = ad.dueAllocations.filter(alloc => alloc.receiptId !== receiptId);
+      if (kept.length !== ad.dueAllocations.length) updates.dueAllocations = kept;
     }
     // The merged-funding mirror too — leaving it stale would let the next ad
     // edit reseed the merge editor from it and re-write an allocation that
     // draws money from the deleted receipt.
     if (Array.isArray(ad.mergedPaidAllocations)) {
-      const before = ad.mergedPaidAllocations.length;
-      ad.mergedPaidAllocations = ad.mergedPaidAllocations.filter(alloc => alloc.receiptId !== receiptId);
-      if (ad.mergedPaidAllocations.length !== before) {
-        changed = true;
-        ad.hasMergedPaidFunds = ad.mergedPaidAllocations.length > 0;
+      const kept = ad.mergedPaidAllocations.filter(alloc => alloc.receiptId !== receiptId);
+      if (kept.length !== ad.mergedPaidAllocations.length) {
+        updates.mergedPaidAllocations = kept;
+        updates.hasMergedPaidFunds = kept.length > 0;
       }
     }
-    if (ad.receiptId === receiptId) { ad.receiptId = ''; changed = true; }
-    if (ad.linkedDeliveryReceiptId === receiptId) { ad.linkedDeliveryReceiptId = ''; changed = true; }
-    if (ad.fundingReceiptId === receiptId) { ad.fundingReceiptId = ''; changed = true; }
+    if (ad.receiptId === receiptId) updates.receiptId = '';
+    if (ad.linkedDeliveryReceiptId === receiptId) updates.linkedDeliveryReceiptId = '';
+    if (ad.fundingReceiptId === receiptId) updates.fundingReceiptId = '';
     if (Array.isArray(ad.receiptIds)) {
-      const before = ad.receiptIds.length;
-      ad.receiptIds = ad.receiptIds.filter(rid => rid !== receiptId);
-      if (ad.receiptIds.length !== before) changed = true;
+      const kept = ad.receiptIds.filter(rid => rid !== receiptId);
+      if (kept.length !== ad.receiptIds.length) updates.receiptIds = kept;
     }
     // The stop-ad snapshot too: a later stop-amount edit recomputes the
     // surviving receipts' shares from this baseline, so a deleted receipt
     // left inside would dilute the pool and undercharge the survivors.
     if (ad.stopAllocationBaseline && typeof ad.stopAllocationBaseline === 'object') {
+      const nextBaseline = { ...ad.stopAllocationBaseline };
+      let baselineChanged = false;
       ['receipt', 'due', 'merged'].forEach(k => {
         const arr = ad.stopAllocationBaseline[k];
         if (Array.isArray(arr)) {
-          const before = arr.length;
-          ad.stopAllocationBaseline[k] = arr.filter(a => String(a?.receiptId || '') !== String(receiptId));
-          if (ad.stopAllocationBaseline[k].length !== before) changed = true;
+          const kept = arr.filter(a => String(a?.receiptId || '') !== String(receiptId));
+          if (kept.length !== arr.length) {
+            nextBaseline[k] = kept;
+            baselineChanged = true;
+          }
         }
       });
+      if (baselineChanged) updates.stopAllocationBaseline = nextBaseline;
     }
-    if (changed) {
-      ad._lastModified = getMonotonicTime();
-      markCollectionDirty('ads');
-      if (isServerModeEnabled()) {
-        apiUpdateEntity('ads', ad.id, ad).catch(() => {});
-      }
+    if (Object.keys(updates).length) {
+      const saved = await updateRecord(state.ads, ad.id, updates);
+      if (!saved) throw new Error('Failed to clean an ad funding link');
+      touched += 1;
     }
-  });
-  return linkedAds.length;
+  }
+  return touched;
 }
 
 // When a delivery is CANCELED its debt will never be collected, so ads funded
@@ -21692,13 +24149,14 @@ function cleanupAdFundingLinks(receiptId) {
 // keeps backing ad budgets forever. The ads themselves stay (no feature
 // removed); only their due-funding rows pointing at this receipt are
 // released. Returns how many ads were touched.
-function releaseCanceledDeliveryDueFunding(receiptId) {
+async function releaseCanceledDeliveryDueFunding(receiptId) {
   const rid = String(receiptId || '');
   let touched = 0;
-  state.ads.filter(a => a && !a._deleted && a.recordType !== 'receipt' && (
+  const affectedAds = state.ads.filter(a => a && !a._deleted && a.recordType !== 'receipt' && (
     (Array.isArray(a.dueAllocations) && a.dueAllocations.some(al => String(al?.receiptId || '') === rid)) ||
     (String(a.linkedDeliveryReceiptId || '') === rid && (parseFloat(a.dueAmountToUseUSD) || 0) > 0)
-  )).forEach(ad => {
+  ));
+  for (const ad of affectedAds) {
     const updates = {};
     if (Array.isArray(ad.dueAllocations)) {
       const kept = ad.dueAllocations.filter(al => String(al?.receiptId || '') !== rid);
@@ -21709,10 +24167,11 @@ function releaseCanceledDeliveryDueFunding(receiptId) {
       updates.dueAmountToUseUSD = 0;
     }
     if (Object.keys(updates).length) {
-      updateRecord(state.ads, ad.id, updates);
+      const saved = await updateRecord(state.ads, ad.id, updates);
+      if (!saved) throw new Error('Failed to release canceled-delivery funding');
       touched += 1;
     }
-  });
+  }
   return touched;
 }
 
@@ -21725,7 +24184,7 @@ function releaseCanceledDeliveryDueFunding(receiptId) {
 // IMPORTANT: callers must run this BEFORE cleanupAdFundingLinks, because the
 // spent amount is read from the allocations that cleanup strips.
 // Returns the source receipt when money was returned, else null.
-function undoTransferIntoReceipt(receipt) {
+async function undoTransferIntoReceipt(receipt) {
   if (!receipt || String(receipt.receiptType || '') !== 'TRANSFER_IN') return null;
   const source = state.receipts.find(r => r && !r._deleted && String(r.id) === String(receipt.transferFromReceiptId || ''));
   if (!source || !Array.isArray(source.transfers)) return null;
@@ -21749,7 +24208,8 @@ function undoTransferIntoReceipt(receipt) {
     }
   });
   if (!changed) return null;
-  updateRecord(state.receipts, source.id, { transfers: kept });
+  const saved = await updateRecord(state.receipts, source.id, { transfers: kept });
+  if (!saved) throw new Error('Failed to restore the source receipt transfer');
   return source;
 }
 
@@ -21759,23 +24219,25 @@ function undoTransferIntoReceipt(receipt) {
 // other customers keep spendable money that no longer exists anywhere.
 // Handles onward (chained) transfers; `seen` guards against cycles. Returns
 // how many paired receipts were deleted.
-function cascadeDeleteOutgoingTransfers(receipt, seen, deleteOpts) {
+async function cascadeDeleteOutgoingTransfers(receipt, seen, deleteOpts) {
   seen = seen || new Set();
   if (!receipt || seen.has(String(receipt.id))) return 0;
   seen.add(String(receipt.id));
   let count = 0;
-  (Array.isArray(receipt.transfers) ? receipt.transfers : []).forEach(t => {
+  for (const t of (Array.isArray(receipt.transfers) ? receipt.transfers : [])) {
     const target = state.receipts.find(r => r && !r._deleted && String(r.id) === String(t?.toReceiptId || ''));
-    if (!target) return;
-    count += cascadeDeleteOutgoingTransfers(target, seen, deleteOpts);
-    cleanupAdFundingLinks(target.id);
-    deleteRecord(state.receipts, target.id, deleteOpts);
+    if (!target) continue;
+    count += await cascadeDeleteOutgoingTransfers(target, seen, deleteOpts);
+    await cleanupAdFundingLinks(target.id);
+    if (!await deleteRecord(state.receipts, target.id, deleteOpts)) {
+      throw new Error('Failed to delete a linked transfer receipt');
+    }
     count += 1;
-  });
+  }
   return count;
 }
 
-function deleteCustomer(id) {
+async function deleteCustomer(id) {
   // Permission check
   if (!currentUserHasPermission('customers', 'delete')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف العملاء' : 'You do not have permission to delete customers', 'error');
@@ -21786,6 +24248,19 @@ function deleteCustomer(id) {
   // Check for linked receipts/ads
   const linkedReceipts = state.receipts.filter(r => r.customerId === id && !r._deleted);
   const linkedAds = state.ads.filter(a => a.customerId === id && !a._deleted);
+  // Server mode cannot safely unwind a customer's ads, receipts, transfers,
+  // and funding links through separate generic requests. Refuse before any
+  // mutation; a future dedicated cascade endpoint can make this atomic.
+  if (isServerModeEnabled() && (linkedReceipts.length > 0 || linkedAds.length > 0)) {
+    showNotification(
+      state.language === 'ar' ? 'لا يمكن الحذف' : 'Cannot Delete Customer',
+      state.language === 'ar'
+        ? 'يحتوي هذا العميل على وصولات أو إعلانات مرتبطة. أزل السجلات المرتبطة بأمان أولاً.'
+        : 'This customer has linked receipts or ads. Remove those records safely first; the server will not perform a partial financial cascade.',
+      'warning'
+    );
+    return;
+  }
   // Show the cascade-delete warning in the user's language. Previously it was
   // English-only, so an Arabic-only user could unknowingly delete every linked
   // receipt and ad.
@@ -21817,30 +24292,31 @@ function deleteCustomer(id) {
     // as ONE all-or-nothing batch — a flaky connection can no longer leave
     // the customer half-deleted with some records resurrecting later.
     const batchDeleteOps = { collectServerOps: [] };
-    linkedAds.forEach(ad => {
-      deleteRecord(state.ads, ad.id, batchDeleteOps);
-    });
-    linkedReceipts.forEach(receipt => {
+    for (const ad of linkedAds) {
+      if (!await deleteRecord(state.ads, ad.id, batchDeleteOps)) return;
+    }
+    for (const receipt of linkedReceipts) {
       // Same link cleanup deleteReceipt does. Without it, ads of OTHER
       // customers funded by these receipts kept dead allocation rows, money
       // transferred IN from another customer stayed deducted at its source,
       // and money transferred OUT lived on as spendable phantom receipts.
       // Undo BEFORE cleanup: the undo reads spent amounts from allocations.
-      undoTransferIntoReceipt(receipt);
-      cleanupAdFundingLinks(receipt.id);
-      cascadeDeleteOutgoingTransfers(receipt, undefined, batchDeleteOps);
-      deleteRecord(state.receipts, receipt.id, batchDeleteOps);
-    });
+      await undoTransferIntoReceipt(receipt);
+      await cleanupAdFundingLinks(receipt.id);
+      await cascadeDeleteOutgoingTransfers(receipt, undefined, batchDeleteOps);
+      if (!await deleteRecord(state.receipts, receipt.id, batchDeleteOps)) return;
+    }
     // Unlink the customer from pages: page.customerIds kept the ghost id, so
     // the Pages view still showed the deleted customer as owner and every
     // page save re-persisted the dangling link.
-    getVisibleRecords(state.pages).forEach(page => {
+    for (const page of getVisibleRecords(state.pages)) {
       if (Array.isArray(page.customerIds) && page.customerIds.includes(id)) {
-        updateRecord(state.pages, page.id, { customerIds: page.customerIds.filter(cid => cid !== id) });
+        const pageSaved = await updateRecord(state.pages, page.id, { customerIds: page.customerIds.filter(cid => cid !== id) });
+        if (!pageSaved) return;
       }
-    });
-    deleteRecord(state.customers, id, batchDeleteOps);
-    flushBatchDeletes(batchDeleteOps.collectServerOps);
+    }
+    if (!await deleteRecord(state.customers, id, batchDeleteOps)) return;
+    if (!await flushBatchDeletes(batchDeleteOps.collectServerOps)) return;
     const deletedCount = linkedReceipts.length + linkedAds.length;
     showNotification(
       isAr ? 'تم الحذف' : 'Deleted',
@@ -21853,7 +24329,7 @@ function deleteCustomer(id) {
   }
 }
 
-function deletePage(id) {
+async function deletePage(id) {
   // Permission check
   if (!currentUserHasPermission('pages', 'delete')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الصفحات' : 'You do not have permission to delete pages', 'error');
@@ -21871,13 +24347,13 @@ function deletePage(id) {
       : `\n\n⚠️ ${pageAdsCount} ad(s) belong to this page. The ads and their history stay, but a NEW page with the same name will not include them.`;
   }
   if (confirm(pageWarning)) {
-    deleteRecord(state.pages, id);
+    if (!await deleteRecord(state.pages, id)) return;
     showNotification(state.language === 'ar' ? 'تم الحذف' : 'Deleted', state.language === 'ar' ? 'تم حذف الصفحة' : 'Page deleted', 'success');
     render();
   }
 }
 
-function deleteReceipt(id) {
+async function deleteReceipt(id) {
   // Permission check
   const receipt = state.receipts.find(r => r.id === id);
   if (!canActOnRecord('receipts', 'delete', receipt?.createdBy)) {
@@ -21904,6 +24380,19 @@ function deleteReceipt(id) {
   const outgoingTargets = (Array.isArray(receipt?.transfers) ? receipt.transfers : [])
     .map(t => state.receipts.find(r => r && !r._deleted && String(r.id) === String(t?.toReceiptId || '')))
     .filter(Boolean);
+  // The local single-device cascade above cannot be reproduced safely as a
+  // sequence of server requests. Block linked server deletions before the
+  // source receipt or any ad allocation is changed.
+  if (isServerModeEnabled() && (linkedAds.length > 0 || transferSource || outgoingTargets.length > 0)) {
+    showNotification(
+      state.language === 'ar' ? 'لا يمكن حذف الوصل' : 'Cannot Delete Receipt',
+      state.language === 'ar'
+        ? 'هذا الوصل مرتبط بتمويل أو تحويل. حرر هذه الارتباطات أولاً لحماية الرصيد.'
+        : 'This receipt is linked to ad funding or a transfer. Release those links first; the server will not perform a partial money cleanup.',
+      'warning'
+    );
+    return;
+  }
   let warning = isArDel
     ? `هل أنت متأكد من حذف الوصل رقم ${serialNo} ($${amountUSD})؟`
     : `Are you sure you want to delete receipt #${serialNo} ($${amountUSD})?`;
@@ -21931,11 +24420,11 @@ function deleteReceipt(id) {
     // All soft-deletes are collected and pushed to the server as ONE
     // all-or-nothing batch (receipt + its chained transfer receipts).
     const batchDeleteOps = { collectServerOps: [] };
-    const returnedTo = undoTransferIntoReceipt(receipt);
-    cleanupAdFundingLinks(id);
-    const cascadeCount = cascadeDeleteOutgoingTransfers(receipt, undefined, batchDeleteOps);
-    deleteRecord(state.receipts, id, batchDeleteOps);
-    flushBatchDeletes(batchDeleteOps.collectServerOps);
+    const returnedTo = await undoTransferIntoReceipt(receipt);
+    await cleanupAdFundingLinks(id);
+    const cascadeCount = await cascadeDeleteOutgoingTransfers(receipt, undefined, batchDeleteOps);
+    if (!await deleteRecord(state.receipts, id, batchDeleteOps)) return;
+    if (!await flushBatchDeletes(batchDeleteOps.collectServerOps)) return;
     let detail = isArDel ? 'تم حذف الوصل' : 'Receipt deleted';
     if (linkedAds.length > 0) detail += isArDel ? ` (تم تنظيف ${linkedAds.length} ارتباط تمويل)` : ` (${linkedAds.length} ad allocation(s) cleaned up)`;
     if (returnedTo) detail += isArDel ? ` — عاد $${amountUSD} إلى الوصل رقم ${returnedTo.serialNumber || returnedTo.id.slice(0, 8)}` : ` — $${amountUSD} returned to receipt #${returnedTo.serialNumber || returnedTo.id.slice(0, 8)}`;
@@ -21945,7 +24434,7 @@ function deleteReceipt(id) {
   }
 }
 
-function deleteAd(id) {
+async function deleteAd(id) {
   // Permission check
   const ad = state.ads.find(a => a.id === id);
   if (!canActOnRecord('ads', 'delete', ad?.creatorId)) {
@@ -21973,7 +24462,7 @@ function deleteAd(id) {
     ? `\n\n⚠️ لا يمكن التراجع عن هذا الإجراء!`
     : `\n\n⚠️ This action cannot be undone!`;
   if (confirm(warning)) {
-    deleteRecord(state.ads, id);
+    if (!await deleteRecord(state.ads, id)) return;
     showNotification(state.language === 'ar' ? 'تم الحذف' : 'Deleted', state.language === 'ar' ? 'تم حذف الإعلان' : 'Ad deleted', 'success');
     render();
   }
@@ -22002,10 +24491,88 @@ const CLOTHES_TABS = [
 const CLOTHES_LOW_STOCK_THRESHOLD = 2;
 const CLOTHES_PRODUCTS_PAGE_SIZE = 30;
 
+// Keep a failed/response-lost mutation's key stable. If the server committed
+// but the phone lost the response, retrying with a new key can report a false
+// conflict (or duplicate a create); replaying the same key returns the original
+// atomic result instead.
+const _clothesPendingOrderMutations = new Map();
+
+function getClothesOrderMutationAttempt(action, orderId, expectedLastModified, operationData) {
+  const act = String(action || '');
+  const id = String(orderId || '');
+  const slot = act === 'create' ? 'create' : `${act}:${id}`;
+  const fingerprint = JSON.stringify({ act, id, expectedLastModified: expectedLastModified ?? null, operationData });
+  const prior = _clothesPendingOrderMutations.get(slot);
+  if (prior?.fingerprint === fingerprint) return prior;
+  const attempt = {
+    slot,
+    fingerprint,
+    orderId: id || Security.generateSecureId('clothes_order'),
+    idempotencyKey: ensureOperationIdempotencyKey('', `clothes-${act || 'order'}`)
+  };
+  _clothesPendingOrderMutations.set(slot, attempt);
+  return attempt;
+}
+
+function completeClothesOrderMutationAttempt(attempt) {
+  if (attempt && _clothesPendingOrderMutations.get(attempt.slot) === attempt) {
+    _clothesPendingOrderMutations.delete(attempt.slot);
+  }
+}
+
+function getClothesOrderExpectedLastModified(order) {
+  const value = Number(order?._lastModified);
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error('This order is missing its server version. Refresh and try again.');
+  return value;
+}
+
+function applyClothesOrderMutationResponse(response) {
+  const orderEntity = response?.order;
+  const productEntities = Array.isArray(response?.updatedProducts) ? response.updatedProducts : [];
+  if (!orderEntity?.data) throw new Error('Invalid clothes order response');
+  const upsert = (collectionName, entity) => {
+    const saved = Security.sanitizeObject(entity?.data || {});
+    if (!saved.id || !Security.isValidRecordId(saved.id)) throw new Error('Invalid clothes order response');
+    if (!Array.isArray(state[collectionName])) state[collectionName] = [];
+    const array = state[collectionName];
+    const index = array.findIndex(row => row && String(row.id) === String(saved.id));
+    if (index === -1) array.unshift(saved);
+    else array[index] = saved;
+    clearCollectionCorruption(collectionName);
+    markCollectionDirty(collectionName);
+    return saved;
+  };
+  for (const product of productEntities) upsert('clothesProducts', product);
+  const savedOrder = upsert('clothesOrders', orderEntity);
+  saveState();
+  RenderQueue.schedule('clothesOrderMutation');
+  return savedOrder;
+}
+
+function showClothesOrderMutationError(error) {
+  const isAr = clothesIsAr();
+  const detail = Security.sanitizeInput(String(error?.message || ''), { maxLength: 240 });
+  showNotification(
+    isAr ? 'تعذّر حفظ الطلب' : 'Order Not Saved',
+    detail || (isAr ? 'تحقق من الاتصال والمخزون ثم حاول مرة أخرى.' : 'Check your connection and stock, then try again.'),
+    'error'
+  );
+}
+
 function setClothesTab(tabId) {
   if (!CLOTHES_TABS.some(tab => tab.id === tabId)) return;
   _clothesActiveTab = tabId;
+  // Each tab is its own address: /clothes-system?tab=orders
+  try { updateUrlParams({ tab: tabId }, true); } catch (_) {}
   render();
+}
+
+// Restore the active tab from ?tab= when the Clothes System is opened by URL.
+function restoreClothesTabFromUrl() {
+  try {
+    const tab = getUrlParams().tab;
+    if (tab && CLOTHES_TABS.some(t => t.id === tab)) _clothesActiveTab = tab;
+  } catch (_) {}
 }
 
 // ------------------------------------------
@@ -22077,7 +24644,7 @@ function getClothesExchangeRate() {
   return isCurrentUserAdmin() ? (Number(state.defaultExchangeRate) || 0) : 0;
 }
 
-function saveClothesExchangeRate() {
+async function saveClothesExchangeRate() {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   const value = clothesParseMoney(document.getElementById('clothes-rate-input')?.value);
@@ -22086,11 +24653,13 @@ function saveClothesExchangeRate() {
     return;
   }
   const existing = getClothesSettingsRecord();
+  let saved = false;
   if (existing) {
-    updateRecord(state.clothesSettings, existing.id, { rateLYDperUSD: value });
+    saved = await updateRecord(state.clothesSettings, existing.id, { rateLYDperUSD: value });
   } else {
-    addRecord(state.clothesSettings, { rateLYDperUSD: value, createdAt: new Date().toISOString() });
+    saved = await addRecord(state.clothesSettings, { rateLYDperUSD: value, createdAt: new Date().toISOString() });
   }
+  if (!saved) return;
   showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? `سعر الصرف الآن: ${value}` : `Exchange rate is now: ${value}`, 'success');
   render();
 }
@@ -22716,7 +25285,7 @@ function renderClothesProductCard(p) {
   `;
 }
 
-function adjustClothesVariantQty(productId, variantIndex, delta) {
+async function adjustClothesVariantQty(productId, variantIndex, delta) {
   if (!clothesCanUse()) return;
   const product = getVisibleClothesProducts().find(p => p.id === productId);
   if (!product) return;
@@ -22724,11 +25293,12 @@ function adjustClothesVariantQty(productId, variantIndex, delta) {
   const v = variants[variantIndex];
   if (!v) return;
   v.qty = Math.max(0, Math.floor(Number(v.qty) || 0) + (Number(delta) || 0));
-  updateRecord(state.clothesProducts, productId, { variants });
+  const saved = await updateRecord(state.clothesProducts, productId, { variants });
+  if (!saved) return;
   updateClothesProductsFiltered();
 }
 
-function deleteClothesProduct(id) {
+async function deleteClothesProduct(id) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   const product = getVisibleClothesProducts().find(p => p.id === id);
@@ -22759,7 +25329,8 @@ function deleteClothesProduct(id) {
   }
   const ok = confirm(msg);
   if (!ok) return;
-  deleteRecord(state.clothesProducts, id);
+  const deleted = await deleteRecord(state.clothesProducts, id);
+  if (!deleted) return;
   showNotification(
     isAr ? 'تم الحذف' : 'Deleted',
     isAr ? 'تم حذف المنتج.' : 'Product deleted.',
@@ -22786,6 +25357,7 @@ function showClothesProductModal() {
   _clothesTempVariants = [{ color: '', size: '', qty: 0 }];
   _clothesTempPhoto = null;
   _clothesPhotoToken++; // invalidate any pending photo-compression callback
+  updateUrlParams({ modal: 'clothes-product', id: 'new' }); // URL tracking
   renderModal();
 }
 
@@ -22801,6 +25373,7 @@ function editClothesProduct(id) {
     : [{ color: '', size: '', qty: 0 }];
   _clothesTempPhoto = product.photo || null;
   _clothesPhotoToken++; // invalidate any pending photo callback from a prior modal
+  updateUrlParams({ modal: 'clothes-product', id }); // URL tracking
   renderModal();
 }
 
@@ -23008,10 +25581,12 @@ async function saveClothesProductFromModal() {
   const payload = { name, category, note, photo: _clothesTempPhoto, costUSD, priceLYD, variants };
 
   if (editTarget) {
-    updateRecord(state.clothesProducts, editTarget.id, payload);
+    const saved = await updateRecord(state.clothesProducts, editTarget.id, payload);
+    if (!saved) return false;
     showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? 'تم تحديث المنتج بنجاح.' : 'Product updated successfully.', 'success');
   } else {
-    addRecord(state.clothesProducts, { ...payload, createdAt: new Date().toISOString() });
+    const saved = await addRecord(state.clothesProducts, { ...payload, createdAt: new Date().toISOString() });
+    if (!saved) return false;
     showNotification(isAr ? 'تمت الإضافة' : 'Added', isAr ? 'تمت إضافة المنتج بنجاح.' : 'Product added successfully.', 'success');
   }
   return true;
@@ -23072,7 +25647,7 @@ function getClothesShipmentTotals(s) {
 
 // Add (sign=+1) or remove (sign=-1) a shipment's quantities in product stock.
 // One updateRecord per product so every change syncs like any other edit.
-function applyClothesShipmentStockDelta(shipment, sign) {
+async function applyClothesShipmentStockDelta(shipment, sign) {
   const lines = Array.isArray(shipment?.lines) ? shipment.lines : [];
   const byProduct = new Map();
   for (const line of lines) {
@@ -23100,8 +25675,10 @@ function applyClothesShipmentStockDelta(shipment, sign) {
         variants.push({ color, size, qty });
       }
     }
-    updateRecord(state.clothesProducts, pid, { variants });
+    const saved = await updateRecord(state.clothesProducts, pid, { variants });
+    if (!saved) return false;
   }
+  return true;
 }
 
 // Which of a shipment's lines can NOT be fully removed from stock because the
@@ -23136,7 +25713,7 @@ function _clothesShipmentUnreceiveShortfall(shipment) {
   return out;
 }
 
-function setClothesShipmentStatus(shipmentId, newStatus) {
+async function setClothesShipmentStatus(shipmentId, newStatus) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   if (!CLOTHES_SHIPMENT_STATUSES.some(s => s.id === newStatus)) return;
@@ -23149,7 +25726,7 @@ function setClothesShipmentStatus(shipmentId, newStatus) {
       ? 'تأكيد استلام الشحنة؟ سيتم إضافة الكميات إلى المخزون.'
       : 'Confirm receiving this shipment? Quantities will be ADDED to stock.');
     if (!ok) { updateClothesShipmentsFiltered(); return; }
-    applyClothesShipmentStockDelta(shipment, 1);
+    if (!await applyClothesShipmentStockDelta(shipment, 1)) return;
     updates.stockApplied = true;
     updates.receivedAt = new Date().toISOString();
   } else if (shipment.status === 'Received' && newStatus !== 'Received' && shipment.stockApplied) {
@@ -23174,12 +25751,13 @@ function setClothesShipmentStatus(shipmentId, newStatus) {
       ? 'إرجاع الشحنة إلى حالة سابقة؟ سيتم خصم كمياتها من المخزون مرة أخرى.'
       : 'Move this shipment back? Its quantities will be REMOVED from stock again.');
     if (!ok) { updateClothesShipmentsFiltered(); return; }
-    applyClothesShipmentStockDelta(shipment, -1);
+    if (!await applyClothesShipmentStockDelta(shipment, -1)) return;
     updates.stockApplied = false;
     updates.receivedAt = null;
   }
 
-  updateRecord(state.clothesShipments, shipmentId, updates);
+  const saved = await updateRecord(state.clothesShipments, shipmentId, updates);
+  if (!saved) return;
   const meta = clothesShipmentStatusMeta(newStatus);
   showNotification(
     isAr ? 'تم التحديث' : 'Updated',
@@ -23189,7 +25767,7 @@ function setClothesShipmentStatus(shipmentId, newStatus) {
   updateClothesShipmentsFiltered();
 }
 
-function deleteClothesShipment(id) {
+async function deleteClothesShipment(id) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   const shipment = getVisibleClothesShipments().find(s => s.id === id);
@@ -23204,7 +25782,8 @@ function deleteClothesShipment(id) {
   }
   const ok = confirm(isAr ? 'هل تريد حذف هذه الشحنة؟' : 'Delete this shipment?');
   if (!ok) return;
-  deleteRecord(state.clothesShipments, id);
+  const deleted = await deleteRecord(state.clothesShipments, id);
+  if (!deleted) return;
   showNotification(isAr ? 'تم الحذف' : 'Deleted', isAr ? 'تم حذف الشحنة.' : 'Shipment deleted.', 'success');
   updateClothesShipmentsFiltered();
 }
@@ -23472,6 +26051,7 @@ function showClothesShipmentModal() {
   state.activeModal = 'clothes-shipment';
   state.modalData = null;
   _clothesTempShipLines = [{ productId: '', color: '', size: '', qty: 0, unitCostUSD: '' }];
+  updateUrlParams({ modal: 'clothes-shipment', id: 'new' }); // URL tracking
   renderModal();
 }
 
@@ -23489,6 +26069,7 @@ function editClothesShipment(id) {
   }
   state.activeModal = 'clothes-shipment';
   state.modalData = shipment;
+  updateUrlParams({ modal: 'clothes-shipment', id }); // URL tracking
   const lines = Array.isArray(shipment.lines) ? shipment.lines : [];
   _clothesTempShipLines = lines.length
     ? lines.map(l => ({
@@ -23721,16 +26302,18 @@ async function saveClothesShipmentFromModal() {
   const payload = { ref, supplier, orderedAt, shippingCostUSD, note, lines };
 
   if (editTarget) {
-    updateRecord(state.clothesShipments, editTarget.id, payload);
+    const saved = await updateRecord(state.clothesShipments, editTarget.id, payload);
+    if (!saved) return false;
     showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? 'تم تحديث الشحنة.' : 'Shipment updated.', 'success');
   } else {
-    addRecord(state.clothesShipments, {
+    const saved = await addRecord(state.clothesShipments, {
       ...payload,
       status: 'Ordered',
       stockApplied: false,
       receivedAt: null,
       createdAt: new Date().toISOString()
     });
+    if (!saved) return false;
     showNotification(isAr ? 'تمت الإضافة' : 'Added', isAr ? 'تمت إضافة الشحنة.' : 'Shipment added.', 'success');
   }
   return true;
@@ -23822,7 +26405,7 @@ function getClothesOrderProfitLYD(order) {
 }
 
 // Add (sign=+1, restore) or remove (sign=-1, sell) an order's pieces in stock.
-function applyClothesOrderStockDelta(order, sign) {
+async function applyClothesOrderStockDelta(order, sign) {
   const lines = Array.isArray(order?.lines) ? order.lines : [];
   const byProduct = new Map();
   for (const line of lines) {
@@ -23869,16 +26452,19 @@ function applyClothesOrderStockDelta(order, sign) {
         // the variant set on purpose, so the restored pieces are dropped.
       }
     }
-    updateRecord(state.clothesProducts, pid, { variants });
+    const productSaved = await updateRecord(state.clothesProducts, pid, { variants });
+    if (!productSaved) return false;
   }
   // Persist the per-line deducted amounts when the order already lives in
   // state (new orders save their lines right after this call anyway).
   if (order && order.id && (state.clothesOrders || []).some(o => o && o.id === order.id)) {
-    updateRecord(state.clothesOrders, order.id, { lines });
+    const orderSaved = await updateRecord(state.clothesOrders, order.id, { lines });
+    if (!orderSaved) return false;
   }
+  return true;
 }
 
-function setClothesOrderStatus(orderId, newStatus) {
+async function setClothesOrderStatus(orderId, newStatus) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   if (!CLOTHES_ORDER_STATUSES.some(s => s.id === newStatus)) return;
@@ -23894,14 +26480,14 @@ function setClothesOrderStatus(orderId, newStatus) {
       ? 'سيتم إرجاع قطع هذا الطلب إلى المخزون. متابعة؟'
       : 'This order\'s pieces will be RETURNED to stock. Continue?');
     if (!ok) { updateClothesOrdersFiltered(); return; }
-    applyClothesOrderStockDelta(order, 1);
+    if (!isServerModeEnabled() && !await applyClothesOrderStockDelta(order, 1)) return;
     updates.stockDeducted = false;
   } else if (!wasActive && willBeActive && !order.stockDeducted) {
     const ok = confirm(isAr
       ? 'سيتم خصم قطع هذا الطلب من المخزون مرة أخرى. متابعة؟'
       : 'This order\'s pieces will be TAKEN from stock again. Continue?');
     if (!ok) { updateClothesOrdersFiltered(); return; }
-    applyClothesOrderStockDelta(order, -1);
+    if (!isServerModeEnabled() && !await applyClothesOrderStockDelta(order, -1)) return;
     updates.stockDeducted = true;
   }
 
@@ -23909,7 +26495,29 @@ function setClothesOrderStatus(orderId, newStatus) {
     updates.deliveredAt = new Date().toISOString();
   }
 
-  updateRecord(state.clothesOrders, orderId, updates);
+  if (isServerModeEnabled()) {
+    let attempt = null;
+    try {
+      const expectedLastModified = getClothesOrderExpectedLastModified(order);
+      attempt = getClothesOrderMutationAttempt('status', orderId, expectedLastModified, { status: newStatus });
+      const response = await apiMutateClothesOrder({
+        action: 'status',
+        orderId,
+        expectedLastModified,
+        status: newStatus,
+        idempotencyKey: attempt.idempotencyKey
+      });
+      applyClothesOrderMutationResponse(response);
+      completeClothesOrderMutationAttempt(attempt);
+    } catch (e) {
+      showClothesOrderMutationError(e);
+      updateClothesOrdersFiltered();
+      return;
+    }
+  } else {
+    const saved = await updateRecord(state.clothesOrders, orderId, updates);
+    if (!saved) return;
+  }
   const meta = clothesOrderStatusMeta(newStatus);
   showNotification(
     isAr ? 'تم التحديث' : 'Updated',
@@ -23919,7 +26527,7 @@ function setClothesOrderStatus(orderId, newStatus) {
   updateClothesOrdersFiltered();
 }
 
-function setClothesOrderPayment(orderId, newPaymentStatus) {
+async function setClothesOrderPayment(orderId, newPaymentStatus) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   if (!CLOTHES_PAYMENT_STATUSES.some(s => s.id === newPaymentStatus)) return;
@@ -23936,7 +26544,29 @@ function setClothesOrderPayment(orderId, newPaymentStatus) {
   }
   // 'Partially Paid' keeps the recorded amount — edit it in the order form.
 
-  updateRecord(state.clothesOrders, orderId, updates);
+  if (isServerModeEnabled()) {
+    let attempt = null;
+    try {
+      const expectedLastModified = getClothesOrderExpectedLastModified(order);
+      attempt = getClothesOrderMutationAttempt('payment', orderId, expectedLastModified, { paymentStatus: newPaymentStatus });
+      const response = await apiMutateClothesOrder({
+        action: 'payment',
+        orderId,
+        expectedLastModified,
+        paymentStatus: newPaymentStatus,
+        idempotencyKey: attempt.idempotencyKey
+      });
+      applyClothesOrderMutationResponse(response);
+      completeClothesOrderMutationAttempt(attempt);
+    } catch (e) {
+      showClothesOrderMutationError(e);
+      updateClothesOrdersFiltered();
+      return;
+    }
+  } else {
+    const saved = await updateRecord(state.clothesOrders, orderId, updates);
+    if (!saved) return;
+  }
   const meta = clothesPaymentStatusMeta(newPaymentStatus);
   showNotification(
     isAr ? 'تم التحديث' : 'Updated',
@@ -23946,7 +26576,7 @@ function setClothesOrderPayment(orderId, newPaymentStatus) {
   updateClothesOrdersFiltered();
 }
 
-function deleteClothesOrder(id) {
+async function deleteClothesOrder(id) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   const order = getVisibleClothesOrders().find(o => o.id === id);
@@ -23956,11 +26586,32 @@ function deleteClothesOrder(id) {
     ? (willRestore ? 'هل تريد حذف هذا الطلب؟ ستعود قطعه إلى المخزون.' : 'هل تريد حذف هذا الطلب؟')
     : (willRestore ? 'Delete this order? Its pieces will return to stock.' : 'Delete this order?'));
   if (!ok) return;
-  if (willRestore) {
-    applyClothesOrderStockDelta(order, 1);
-    updateRecord(state.clothesOrders, id, { stockDeducted: false });
+  if (isServerModeEnabled()) {
+    let attempt = null;
+    try {
+      const expectedLastModified = getClothesOrderExpectedLastModified(order);
+      attempt = getClothesOrderMutationAttempt('delete', id, expectedLastModified, { delete: true });
+      const response = await apiMutateClothesOrder({
+        action: 'delete',
+        orderId: id,
+        expectedLastModified,
+        idempotencyKey: attempt.idempotencyKey
+      });
+      applyClothesOrderMutationResponse(response);
+      completeClothesOrderMutationAttempt(attempt);
+      showNotification(isAr ? 'تم الحذف' : 'Deleted', isAr ? 'تم حذف الطلب.' : 'Order deleted.', 'success');
+      updateClothesOrdersFiltered();
+    } catch (e) {
+      showClothesOrderMutationError(e);
+      updateClothesOrdersFiltered();
+    }
+    return;
   }
-  deleteRecord(state.clothesOrders, id);
+  if (willRestore) {
+    if (!await applyClothesOrderStockDelta(order, 1)) return;
+    if (!await updateRecord(state.clothesOrders, id, { stockDeducted: false })) return;
+  }
+  if (!await deleteRecord(state.clothesOrders, id)) return;
   showNotification(isAr ? 'تم الحذف' : 'Deleted', isAr ? 'تم حذف الطلب.' : 'Order deleted.', 'success');
   updateClothesOrdersFiltered();
 }
@@ -24240,6 +26891,7 @@ function showClothesOrderModal() {
   state.activeModal = 'clothes-order';
   state.modalData = null;
   _clothesTempOrderLines = [{ productId: '', color: '', size: '', qty: 1, priceLYD: '' }];
+  updateUrlParams({ modal: 'clothes-order', id: 'new' }); // URL tracking
   renderModal();
 }
 
@@ -24257,6 +26909,7 @@ function editClothesOrder(id) {
   }
   state.activeModal = 'clothes-order';
   state.modalData = order;
+  updateUrlParams({ modal: 'clothes-order', id }); // URL tracking
   const lines = Array.isArray(order.lines) ? order.lines : [];
   _clothesTempOrderLines = lines.length
     ? lines.map(l => ({
@@ -24653,10 +27306,50 @@ async function saveClothesOrderFromModal() {
     return false;
   }
 
+  const totalsProbe = { lines, deliveryFeeLYD };
+  const total = getClothesOrderTotals(totalsProbe).totalLYD;
+  if (paymentStatus === 'Paid') amountPaidLYD = total;
+  if (paymentStatus === 'Not Paid') amountPaidLYD = 0;
+
+  const payload = { customerName, customerPhone, note, lines, deliveryFeeLYD, paymentStatus, amountPaidLYD, paymentMethod };
+
+  if (isServerModeEnabled()) {
+    let attempt = null;
+    try {
+      const action = editTarget ? 'update' : 'create';
+      const expectedLastModified = editTarget ? getClothesOrderExpectedLastModified(editTarget) : null;
+      attempt = getClothesOrderMutationAttempt(action, editTarget?.id || '', expectedLastModified, payload);
+      const request = {
+        action,
+        orderId: attempt.orderId,
+        idempotencyKey: attempt.idempotencyKey,
+        data: payload
+      };
+      if (editTarget) request.expectedLastModified = expectedLastModified;
+      const response = await apiMutateClothesOrder(request);
+      applyClothesOrderMutationResponse(response);
+      completeClothesOrderMutationAttempt(attempt);
+      showNotification(
+        editTarget ? (isAr ? 'تم الحفظ' : 'Saved') : (isAr ? 'تم الإنشاء' : 'Created'),
+        editTarget
+          ? (isAr ? 'تم تحديث الطلب والمخزون معاً.' : 'Order and stock updated together.')
+          : (isAr ? 'تم إنشاء الطلب وخصم القطع من المخزون.' : 'Order created and pieces taken from stock.'),
+        'success'
+      );
+      return true;
+    } catch (e) {
+      // Do not mutate local stock on failure. In particular, a 409 means the
+      // authoritative server rejected insufficient stock or a stale edit.
+      // Keeping the attempt lets a response-loss retry replay safely.
+      showClothesOrderMutationError(e);
+      return false;
+    }
+  }
+
   // For stock checking on edit: the old pieces come back first, so check
   // against stock as it would be AFTER restoring them.
   if (editTarget && editTarget.stockDeducted) {
-    applyClothesOrderStockDelta(editTarget, 1); // restore old pieces
+    if (!await applyClothesOrderStockDelta(editTarget, 1)) return false; // restore old pieces
   }
   const shortages = getClothesOrderStockShortages(lines);
   if (shortages.length) {
@@ -24667,28 +27360,22 @@ async function saveClothesOrderFromModal() {
       : '\n\nContinue anyway? (stock will floor at zero)'));
     if (!ok) {
       // Put the old pieces back the way they were and abort
-      if (editTarget && editTarget.stockDeducted) applyClothesOrderStockDelta(editTarget, -1);
+      if (editTarget && editTarget.stockDeducted) await applyClothesOrderStockDelta(editTarget, -1);
       return false;
     }
   }
 
-  const totalsProbe = { lines, deliveryFeeLYD };
-  const total = getClothesOrderTotals(totalsProbe).totalLYD;
-  if (paymentStatus === 'Paid') amountPaidLYD = total;
-  if (paymentStatus === 'Not Paid') amountPaidLYD = 0;
-
-  const payload = { customerName, customerPhone, note, lines, deliveryFeeLYD, paymentStatus, amountPaidLYD, paymentMethod };
-
   if (editTarget) {
-    applyClothesOrderStockDelta({ lines }, -1); // deduct the new pieces
-    updateRecord(state.clothesOrders, editTarget.id, { ...payload, stockDeducted: true });
+    if (!await applyClothesOrderStockDelta({ lines }, -1)) return false; // deduct the new pieces
+    const saved = await updateRecord(state.clothesOrders, editTarget.id, { ...payload, stockDeducted: true });
+    if (!saved) return false;
     showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? 'تم تحديث الطلب.' : 'Order updated.', 'success');
   } else {
-    applyClothesOrderStockDelta({ lines }, -1); // pieces leave the warehouse
+    if (!await applyClothesOrderStockDelta({ lines }, -1)) return false; // pieces leave the warehouse
     // Sequential order number; max over ALL records (deleted included) so a
     // number is never reused after a delete.
     const nextNo = 1 + (state.clothesOrders || []).reduce((m, x) => Math.max(m, Math.floor(Number(x?.orderNo) || 0)), 0);
-    addRecord(state.clothesOrders, {
+    const saved = await addRecord(state.clothesOrders, {
       ...payload,
       orderNo: nextNo,
       status: 'New',
@@ -24697,6 +27384,7 @@ async function saveClothesOrderFromModal() {
       paidAt: paymentStatus === 'Paid' ? new Date().toISOString() : null,
       createdAt: new Date().toISOString()
     });
+    if (!saved) return false;
     showNotification(isAr ? 'تم الإنشاء' : 'Created', isAr ? 'تم إنشاء الطلب وخصم القطع من المخزون.' : 'Order created and pieces taken from stock.', 'success');
   }
   return true;
@@ -24798,9 +27486,10 @@ function stopAd(id) {
             >
               ${isAr ? 'إلغاء' : 'Cancel'}
             </button>
-            <button 
+            <button
+              id="stop-ad-submit"
               onclick="confirmStopAd('${id}')" 
-              class="flex-1 px-4 py-3 bg-orange-600 text-white rounded-xl font-bold hover:bg-orange-700 transition-colors"
+              class="flex-1 px-4 py-3 bg-orange-600 text-white rounded-xl font-bold hover:bg-orange-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               ${isAlreadyStopped ? (isAr ? 'تحديث' : 'Update') : (isAr ? 'إيقاف الإعلان' : 'Stop Ad')}
             </button>
@@ -24837,10 +27526,51 @@ function stopAd(id) {
   }
 }
 
-function confirmStopAd(id) {
+const _pendingAdStopAttempts = new Map();
+
+function getAdStopAttempt(ad, spentMinorUSD) {
+  const adId = String(ad?.id || '');
+  const expectedLastModified = Number(ad?._lastModified);
+  if (!Number.isSafeInteger(expectedLastModified) || expectedLastModified < 0) {
+    throw new Error('This ad is missing its server version. Refresh and try again.');
+  }
+  const fingerprint = JSON.stringify({ adId, spentMinorUSD, expectedLastModified });
+  const prior = _pendingAdStopAttempts.get(adId);
+  if (prior?.fingerprint === fingerprint) return prior;
+  if (prior?.promise) return prior;
+  const attempt = {
+    slot: adId,
+    fingerprint,
+    expectedLastModified,
+    idempotencyKey: ensureOperationIdempotencyKey('', 'ad-stop'),
+    promise: null
+  };
+  _pendingAdStopAttempts.set(adId, attempt);
+  return attempt;
+}
+
+function completeAdStopAttempt(attempt) {
+  if (attempt && _pendingAdStopAttempts.get(attempt.slot) === attempt) {
+    _pendingAdStopAttempts.delete(attempt.slot);
+  }
+}
+
+async function confirmStopAd(id) {
   const isAr = state.language === 'ar';
-  const ad = state.ads.find(a => a.id === id);
-  if (!ad) return;
+  const storedAd = state.ads.find(a => a.id === id);
+  if (!storedAd) return;
+  // Work on a detached copy. Mutating the live record before updateRecord()
+  // captured its rollback snapshot made a failed server PATCH impossible to
+  // undo and still allowed the success path to continue.
+  const ad = {
+    ...storedAd,
+    receiptAllocations: Array.isArray(storedAd.receiptAllocations) ? storedAd.receiptAllocations.map(a => ({ ...a })) : storedAd.receiptAllocations,
+    dueAllocations: Array.isArray(storedAd.dueAllocations) ? storedAd.dueAllocations.map(a => ({ ...a })) : storedAd.dueAllocations,
+    mergedPaidAllocations: Array.isArray(storedAd.mergedPaidAllocations) ? storedAd.mergedPaidAllocations.map(a => ({ ...a })) : storedAd.mergedPaidAllocations,
+    stopAllocationBaseline: storedAd.stopAllocationBaseline
+      ? JSON.parse(JSON.stringify(storedAd.stopAllocationBaseline))
+      : storedAd.stopAllocationBaseline
+  };
   
   const spentInput = document.getElementById('stop-ad-spent');
   if (!spentInput) return;
@@ -24851,6 +27581,66 @@ function confirmStopAd(id) {
   if (spentUSD < 0 || spentUSD > adAmountUSD) {
     showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'يجب أن يكون المبلغ المصروف بين صفر ومبلغ الإعلان' : 'Spent amount must be between 0 and ad amount', 'error');
     return;
+  }
+
+  if (isServerModeEnabled()) {
+    const spentMinorUSD = Math.round(spentUSD * 100);
+    if (!Number.isSafeInteger(spentMinorUSD) || spentMinorUSD < 0) {
+      showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'المبلغ المصروف غير صالح.' : 'Spent amount is invalid.', 'error');
+      return;
+    }
+    let attempt;
+    try {
+      attempt = getAdStopAttempt(storedAd, spentMinorUSD);
+    } catch (error) {
+      showNotification(isAr ? 'تعذر الحفظ' : 'Ad Not Saved', error.message, 'error');
+      return;
+    }
+    if (attempt.promise) return await attempt.promise;
+    const submitButton = document.getElementById('stop-ad-submit');
+    if (submitButton) submitButton.disabled = true;
+    attempt.promise = (async () => {
+      try {
+        const response = await apiStopAd(storedAd.id, {
+          spentMinorUSD,
+          idempotencyKey: attempt.idempotencyKey,
+          expectedLastModified: attempt.expectedLastModified
+        });
+        const [savedAd] = applyValidatedServerEntityBatch([
+          { collection: 'ads', entity: response.ad }
+        ], 'adStop');
+        if (!savedAd) throw new Error('Invalid ad stop response');
+        completeAdStopAttempt(attempt);
+        document.getElementById('stop-ad-modal')?.remove();
+        showNotification(
+          savedAd.status === 'Stopped' && storedAd.status === 'Stopped'
+            ? (isAr ? 'تم تحديث الإعلان' : 'Ad Updated')
+            : (isAr ? 'تم إيقاف الإعلان' : 'Ad Stopped'),
+          isAr
+            ? 'تم حفظ المبلغ المصروف وتحديث أرصدة التمويل معاً.'
+            : 'The spent amount and funding balances were updated together.',
+          'success'
+        );
+        render();
+        if (window.lucide) lucide.createIcons();
+        return true;
+      } catch (error) {
+        const conflict = error?.status === 409;
+        showNotification(
+          isAr ? 'تعذر الحفظ' : 'Ad Not Saved',
+          conflict
+            ? (isAr ? 'تم تغيير هذا الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+            : (error?.message || (isAr ? 'فشل حفظ إيقاف الإعلان.' : 'The ad stop could not be saved.')),
+          conflict ? 'warning' : 'error'
+        );
+        return false;
+      } finally {
+        attempt.promise = null;
+        const liveButton = document.getElementById('stop-ad-submit');
+        if (liveButton) liveButton.disabled = false;
+      }
+    })();
+    return await attempt.promise;
   }
   
   const isEditing = ad.status === 'Stopped';
@@ -25051,22 +27841,25 @@ function confirmStopAd(id) {
     if (isEditing && remainingDifference !== 0) {
       // Adjust customer balance by the difference (snapped to 2 decimals)
       if (customer.balance !== undefined) {
-        customer.balance = Math.round(((customer.balance || 0) + remainingDifference) * 100) / 100;
-        updateRecord(state.customers, customer.id, customer);
+        const nextBalance = Math.round(((customer.balance || 0) + remainingDifference) * 100) / 100;
+        const customerSaved = await updateRecord(state.customers, customer.id, { balance: nextBalance }, customer._lastModified);
+        if (!customerSaved) return;
       }
       addLog('update', 'customer', customer.id, `Ad stop updated - ${remainingDifference > 0 ? 'returned' : 'used'} $${Math.abs(remainingDifference).toFixed(2)} ${remainingDifference > 0 ? 'to' : 'from'} customer balance`);
     } else if (!isEditing && newRemainingUSD > 0) {
       // First time stopping: add remaining to customer balance (snapped to 2dp)
       if (customer.balance !== undefined) {
-        customer.balance = Math.round(((customer.balance || 0) + newRemainingUSD) * 100) / 100;
-        updateRecord(state.customers, customer.id, customer);
+        const nextBalance = Math.round(((customer.balance || 0) + newRemainingUSD) * 100) / 100;
+        const customerSaved = await updateRecord(state.customers, customer.id, { balance: nextBalance }, customer._lastModified);
+        if (!customerSaved) return;
       }
       addLog('update', 'customer', customer.id, `Ad stopped - returned $${newRemainingUSD.toFixed(2)} to customer balance`);
     }
   }
   
   // Save ad
-  updateRecord(state.ads, ad.id, ad);
+  const adSaved = await updateRecord(state.ads, ad.id, ad, storedAd._lastModified);
+  if (!adSaved) return;
   
   // Close modal
   document.getElementById('stop-ad-modal')?.remove();
@@ -25090,10 +27883,18 @@ function confirmStopAd(id) {
   lucide.createIcons();
 }
 
-function deleteUser(id) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'حذف المستخدمين للأدمن فقط' : 'Admin only', 'error');
+async function deleteUser(id) {
+  if (!canManageUsersAction('delete')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية حذف المستخدمين' : 'Requires the Delete Users permission', 'error');
     return;
+  }
+  // Non-admins can never remove an Admin account (server enforces this too).
+  {
+    const _target = (state.users || []).find(u => u && String(u.id) === String(id));
+    if (!isCurrentUserAdmin() && _target && isAdminRole(_target.role)) {
+      showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'فقط المدير يمكنه حذف حساب مدير' : 'Only an Admin can delete an Admin account', 'error');
+      return;
+    }
   }
   const isArDU = state.language === 'ar';
 
@@ -25142,15 +27943,26 @@ function deleteUser(id) {
   if (confirm(warning)) {
     // Return in-flight missions to the pool so they don't stay assigned to a
     // ghost driver. Delivered history keeps the id for the audit trail.
-    activeMissions.forEach(r => {
-      updateRecord(state.receipts, r.id, { deliveryPersonId: '' });
-    });
-    deleteRecord(state.users, id);
+    for (const r of activeMissions) {
+      if (!await updateRecord(state.receipts, r.id, { deliveryPersonId: '' })) return;
+    }
+    if (!await deleteRecord(state.users, id)) return;
     render();
   }
 }
 
-function updateExchangeRate(value) {
+async function updateExchangeRate(value) {
+  // The rate drives every money conversion in the app — it is gated on
+  // settings.manageExchangeRate (the server rejects the write too).
+  if (!can('settings', 'manageExchangeRate')) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تحتاج صلاحية إدارة سعر الصرف' : 'Requires the Manage Exchange Rate permission',
+      'error'
+    );
+    render();
+    return;
+  }
   // MONEY-MATH: an empty/invalid field parseFloats to NaN; storing it poisons
   // every later save (amountLocal = amountUSD * NaN) while showing a green
   // success toast. Validate first, keep the previous rate on bad input.
@@ -25164,6 +27976,7 @@ function updateExchangeRate(value) {
     render();
     return;
   }
+  const previousRate = state.defaultExchangeRate;
   state.defaultExchangeRate = rate;
   const record = {
     id: generateId('rate'),
@@ -25171,7 +27984,12 @@ function updateExchangeRate(value) {
     date: new Date().toISOString(),
     userId: state.currentUser?.id || 'system'
   };
-  addRecord(state.exchangeRateHistory, record);
+  const rateSaved = await addRecord(state.exchangeRateHistory, record);
+  if (!rateSaved) {
+    state.defaultExchangeRate = previousRate;
+    render();
+    return;
+  }
   showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث سعر الصرف' : 'Exchange rate updated', 'success');
 }
 
@@ -25199,9 +28017,30 @@ function printReceiptCard(btn) {
 }
 
 function exportData() {
+  // Local mode can export its complete local workspace. Server mode can only
+  // export the records currently loaded in this browser; that snapshot may be
+  // stale/permission-scoped and the online restore intentionally cannot write
+  // users, wallet ledger, subscriptions or audit history.
+  if (!isCurrentUserAdmin()) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تصدير النسخة الاحتياطية الكاملة للمدير فقط' : 'Full backup export is Admin only',
+      'error'
+    );
+    return;
+  }
+  const serverPartialSnapshot = isServerModeEnabled();
+  if (serverPartialSnapshot) {
+    const proceed = confirm(
+      state.language === 'ar'
+        ? 'هذا تقرير جزئي من البيانات المحمّلة حالياً، وليس نسخة خادم قابلة للاستعادة. قد يكون قديماً أو ناقصاً، وتم حذف بيانات نظام الملابس للحفاظ على سلامة المخزون. استيراد ملفات الخادم معطّل ويتطلب صيانة خارج التطبيق. هل تريد المتابعة؟'
+        : 'This is a PARTIAL report of data currently loaded on this device, not a restorable full-server backup. It may be stale or incomplete. The clothes domain is omitted to protect inventory integrity. Server-file import is disabled and requires an offline maintenance workflow. Continue?'
+    );
+    if (!proceed) return;
+  }
   // Create secure export (no plaintext secrets)
   const exportState = JSON.parse(JSON.stringify(state));
-  
+
   // Remove sensitive data from export
   if (exportState.users) {
     exportState.users = exportState.users.map(u => {
@@ -25256,6 +28095,16 @@ function exportData() {
   exportState.clothesShipments = filterVisible(exportState.clothesShipments);
   exportState.clothesOrders = filterVisible(exportState.clothesOrders);
   exportState.clothesSettings = filterVisible(exportState.clothesSettings);
+  if (serverPartialSnapshot) {
+    // Orders, shipments and products are one inventory domain. Exporting only
+    // some of it invites an unsafe partial restore, while clothesOrders itself
+    // is server-transaction controlled. Omit the entire domain from server
+    // reports; local-mode full backups remain unchanged.
+    delete exportState.clothesProducts;
+    delete exportState.clothesShipments;
+    delete exportState.clothesOrders;
+    delete exportState.clothesSettings;
+  }
   
   // Add export metadata
   const checksum = DataIntegrity.calculateChecksum(exportState);
@@ -25263,6 +28112,14 @@ function exportData() {
     exportedAt: new Date().toISOString(),
     version: '3.0.1',
     source: isServerModeEnabled() ? 'server' : 'local',
+    backupScope: serverPartialSnapshot ? 'client-cache-partial' : 'full-local',
+    authoritative: !serverPartialSnapshot,
+    restorableCollections: serverPartialSnapshot
+      ? []
+      : ['customers', 'pages', 'ads', 'receipts', 'exchangeRateHistory', 'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings'],
+    nonRestorableCollections: serverPartialSnapshot
+      ? ['customers', 'pages', 'ads', 'receipts', 'exchangeRateHistory', 'users', 'walletTransactions', 'serviceSubscriptions', 'logs', 'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings']
+      : [],
     visibleOnly: true,
     counts,
     checksum
@@ -25273,19 +28130,35 @@ function exportData() {
   const url = URL.createObjectURL(dataBlob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = `albayan-backup-${getTodayDateString()}.json`;
+  link.download = `${serverPartialSnapshot ? 'albayan-server-partial-snapshot' : 'albayan-backup'}-${getTodayDateString()}.json`;
   link.click();
   URL.revokeObjectURL(url);
   
   // Create auto backup
   createAutoBackup();
   
-  addAuditLog('Export', 'system', 'Data exported successfully');
-  showNotification(state.language === 'ar' ? 'تم التصدير' : 'Exported', state.language === 'ar' ? 'تم تصدير البيانات بنجاح' : 'Data exported successfully', 'success');
+  addAuditLog('Export', 'system', serverPartialSnapshot ? 'Partial client snapshot exported' : 'Local backup exported successfully');
+  showNotification(
+    state.language === 'ar' ? 'تم التصدير' : 'Exported',
+    serverPartialSnapshot
+      ? (state.language === 'ar' ? 'تم تصدير تقرير جزئي غير قابل للاستعادة. تم حذف بيانات الملابس، واستيراد الخادم يتطلب صيانة خارج التطبيق.' : 'Non-restorable partial report exported. Clothes data is omitted; server restore requires an offline maintenance workflow.')
+      : (state.language === 'ar' ? 'تم تصدير النسخة المحلية بنجاح' : 'Local backup exported successfully'),
+    serverPartialSnapshot ? 'warning' : 'success'
+  );
 }
 
 function importData() {
   const isAr = state.language === 'ar';
+  if (isServerModeEnabled()) {
+    showNotification(
+      isAr ? 'استيراد الخادم معطّل' : 'Server Import Disabled',
+      isAr
+        ? 'تقارير الخادم الجزئية ليست نسخاً احتياطية قابلة للاستعادة. الاستعادة تتطلب إجراء صيانة خارج التطبيق مع تحقق كامل من العلاقات والمخزون.'
+        : 'Partial server reports are not restorable backups. Restore requires an offline maintenance workflow with full relationship and inventory validation.',
+      'warning'
+    );
+    return;
+  }
   // In server mode, import must go through the backend (Admin only) to keep the server as source of truth.
   async function importDataToServer(sanitizedImport) {
     const role = String(state.currentUser?.role || '').toLowerCase();
@@ -25343,8 +28216,8 @@ function importData() {
 
     const ok1 = confirm(
       isAr
-        ? `استيراد إلى الخادم (أدمن)\n\nسيتم استبدال/الكتابة فوق بيانات الخادم لجميع المستخدمين.\n\nتحتوي النسخة الاحتياطية على (ظاهر / محذوف):\n- العملاء: ${counts.customers.visible} / ${counts.customers.deleted}\n- الصفحات: ${counts.pages.visible} / ${counts.pages.deleted}\n- الإعلانات: ${counts.ads.visible} / ${counts.ads.deleted}\n- الوصولات: ${counts.receipts.visible} / ${counts.receipts.deleted}\n- أسعار الصرف: ${counts.exchangeRateHistory.visible} / ${counts.exchangeRateHistory.deleted}\n\nهل تريد المتابعة؟`
-        : `SERVER IMPORT (Admin)\n\nThis will overwrite/replace server data for ALL users.\n\nBackup contains (visible / deleted):\n- Customers: ${counts.customers.visible} / ${counts.customers.deleted}\n- Pages: ${counts.pages.visible} / ${counts.pages.deleted}\n- Ads: ${counts.ads.visible} / ${counts.ads.deleted}\n- Receipts: ${counts.receipts.visible} / ${counts.receipts.deleted}\n- Exchange Rates: ${counts.exchangeRateHistory.visible} / ${counts.exchangeRateHistory.deleted}\n\nContinue?`
+        ? `استيراد جزئي لبيانات العمل إلى الخادم (أدمن)\n\nسيتم استبدال المجموعات المذكورة لجميع المستخدمين. لن تتم استعادة المستخدمين أو معاملات المحفظة أو الاشتراكات أو سجلات التدقيق، وسيتم تجاهل هذه المصفوفات إن وجدت في الملف.\n\nيحتوي الملف على (ظاهر / محذوف):\n- العملاء: ${counts.customers.visible} / ${counts.customers.deleted}\n- الصفحات: ${counts.pages.visible} / ${counts.pages.deleted}\n- الإعلانات: ${counts.ads.visible} / ${counts.ads.deleted}\n- الوصولات: ${counts.receipts.visible} / ${counts.receipts.deleted}\n- أسعار الصرف: ${counts.exchangeRateHistory.visible} / ${counts.exchangeRateHistory.deleted}\n\nهل تريد متابعة الاستعادة الجزئية؟`
+        : `PARTIAL SERVER BUSINESS-DATA IMPORT (Admin)\n\nThis replaces the listed business collections for all users. It does NOT restore users, wallet transactions, subscriptions, or audit logs; any such arrays in the file are ignored.\n\nFile contains (visible / deleted):\n- Customers: ${counts.customers.visible} / ${counts.customers.deleted}\n- Pages: ${counts.pages.visible} / ${counts.pages.deleted}\n- Ads: ${counts.ads.visible} / ${counts.ads.deleted}\n- Receipts: ${counts.receipts.visible} / ${counts.receipts.deleted}\n- Exchange Rates: ${counts.exchangeRateHistory.visible} / ${counts.exchangeRateHistory.deleted}\n\nContinue with this partial restore?`
     );
     if (!ok1) return;
     const phrase = String(prompt(isAr ? 'اكتب IMPORT للتأكيد (حساس لحالة الأحرف):' : 'Type IMPORT to confirm (case-sensitive):') || '');
@@ -25396,6 +28269,10 @@ function importData() {
         const id = String(r?.id || '').trim();
         if (!id) {
           throw new Error(`Invalid backup: "${collection}" contains a record without an id`);
+        }
+        const idCheck = Security.validateRecordIdentifiers(r, `${collection}[${idsAll.size}]`);
+        if (!idCheck.valid) {
+          throw new Error(`Invalid backup: ${idCheck.error}`);
         }
         if (idsAll.has(id)) {
           throw new Error(`Invalid backup: "${collection}" contains duplicate id "${id}"`);
@@ -25500,6 +28377,8 @@ function importData() {
       await verifyCollectionMatchesBackup(collection, activeList, activeIds);
     };
 
+    const importIdentity = getServerSessionIdentity();
+    stopServerLiveSync();
     try {
       showNotification(isAr ? 'استيراد' : 'Import', isAr ? 'جارٍ بدء الاستيراد إلى الخادم...' : 'Starting server import...', 'info');
       // Core collections always; Clothes System collections only when present
@@ -25531,16 +28410,10 @@ function importData() {
         await apiAdminBulkImport(collectionsMap);
         bulkImported = true;
       } catch (e) {
-        // Older servers don't have the transactional endpoint yet (404/405):
-        // fall back to the legacy one-request-per-record flow below.
-        // Anything else is a real failure — the transaction rolled back and
-        // the server is untouched.
-        if (e?.status !== 404 && e?.status !== 405) throw e;
-        showNotification(
-          isAr ? 'استيراد' : 'Import',
-          isAr ? 'الخادم لا يدعم الاستيراد الذري بعد — جارٍ الاستيراد سجلاً بسجل...' : 'Server does not support atomic import yet — importing record by record...',
-          'warning'
-        );
+        if (e?.status === 404 || e?.status === 405) {
+          throw new Error(isAr ? 'هذا الخادم لا يدعم الاستيراد الذري الآمن. حدّث الخادم أولاً.' : 'This server does not support safe transactional import. Update the server first.');
+        }
+        throw e;
       }
 
       if (bulkImported) {
@@ -25548,20 +28421,25 @@ function importData() {
         for (const [name, prepared] of preparedByCollection.entries()) {
           await verifyCollectionMatchesBackup(name, prepared.activeList, prepared.activeIds);
         }
-      } else {
-        for (const [name, records] of Object.entries(collectionsMap)) {
-          await applyCollectionReplace(name, records);
-        }
       }
 
       // Reload fresh server state
-      await serverLoadAllData();
+      const loadResult = await serverLoadAllData();
+      if (loadResult?.aborted) return;
       saveState();
-      showNotification(isAr ? 'تم الاستيراد' : 'Imported', isAr ? 'اكتمل الاستيراد إلى الخادم بنجاح.' : 'Server import completed successfully.', 'success');
+      showNotification(
+        isAr ? 'تم الاستيراد الجزئي' : 'Partial Import Complete',
+        isAr
+          ? 'تمت استعادة بيانات العمل المحددة. لم تتم استعادة المستخدمين أو سجل المحفظة أو الاشتراكات أو سجل التدقيق.'
+          : 'Selected business data was restored. Users, wallet/subscription history, and audit logs were not restored.',
+        'warning'
+      );
       render();
     } catch (e) {
       console.error('Server import failed:', e);
       showNotification(isAr ? 'فشل الاستيراد' : 'Import Failed', e?.message || (isAr ? 'فشل الاستيراد إلى الخادم' : 'Server import failed'), 'error');
+    } finally {
+      if (!serverSessionIdentityChanged(importIdentity)) startServerLiveSync();
     }
   }
 
@@ -25603,6 +28481,16 @@ function importData() {
             );
             return;
           }
+        }
+
+        // Reject identifiers that could escape a URL/attribute/legacy inline
+        // handler. Do not rewrite them: that would break cross-record links in
+        // a backup while appearing to import successfully.
+        for (const collectionName of PERSISTED_COLLECTIONS) {
+          const records = sanitizedImport[collectionName];
+          if (!Array.isArray(records)) continue;
+          const idCheck = Security.validateRecordIdentifiers(records, collectionName);
+          if (!idCheck.valid) throw new Error(`Invalid backup: ${idCheck.error}`);
         }
 
         // Server-mode import: Admin-only and writes to backend collections
@@ -25665,6 +28553,8 @@ function importData() {
         await ensureUsersHavePasswordHashes();
 
         // Persist all collections to IndexedDB
+        for (const name of PERSISTED_COLLECTIONS) clearCollectionCorruption(name);
+        delete state._quarantinedUnsafeRecords;
         if (db) {
           await clearIndexedDBLogs();
         }
@@ -25805,30 +28695,55 @@ async function init() {
   } else if (override === 'server') {
     state.serverMode = true;
   } else {
-    state.serverMode = state.serverDetected;
+    // Once this installation has used the team server, a temporary health
+    // check failure must not silently open an unrelated local workspace. The
+    // packaged mobile app is always server-backed unless the user explicitly
+    // chose the local override.
+    const packagedMobile = !!(typeof Platform !== 'undefined' && Platform.isCapacitor);
+    const previouslyServerBacked = state.serverWorkspaceKnown === true || state.serverMode === true;
+    state.serverMode = state.serverDetected || packagedMobile || previouslyServerBacked;
   }
+  if (state.serverDetected) state.serverWorkspaceKnown = true;
 
   if (state.serverMode) {
     // Disable legacy cloud sync in server mode (backend is the source of truth)
     if (state.cloudConfig) state.cloudConfig.enabled = false;
 
-    // INSTANT LOAD: First load cached data from IndexedDB (shows data instantly)
-    setLoadingStatus(state.language === 'ar' ? 'جارٍ تحميل البيانات المخزنة...' : 'Loading cached data...');
-    const cachedCollections = loadState(); // This already loads from localStorage
-    if (db) {
-      try {
-        // Load from IndexedDB (faster than server)
-        await loadCollectionsFromStorage(cachedCollections);
-      } catch (e) {
-        // IndexedDB error - continue with empty state
-      }
-    }
+    // loadState() runs before backend detection so preferences can be applied
+    // immediately. In no-IDB/legacy installations it may also have contained
+    // business arrays; clear them before auth so no previous-user data can be
+    // rendered or used if /auth/me fails.
+    for (const name of PERSISTED_COLLECTIONS) state[name] = [];
+    activateAnonymousServerCollectionStorage();
+    saveState(); // persist serverWorkspaceKnown without persisting business arrays
 
     // Restore login from backend cookie session
     setLoadingStatus(state.language === 'ar' ? 'جارٍ التحقق من الجلسة...' : 'Checking session...');
     const me = await apiAuthMe().catch(() => null);
     if (me) {
+      cancelPendingRequests();
+      invalidateUsersListCache();
+      for (const key of Object.keys(_collectionCache)) {
+        _collectionCache[key] = { data: null, timestamp: 0, identity: '' };
+      }
+      advanceServerSessionEpoch();
       state.currentUser = me;
+      // Only now is it safe to open this user's cache namespace.
+      activateServerCollectionStorage(me);
+      setLoadingStatus(state.language === 'ar' ? 'جارٍ تحميل البيانات المخزنة...' : 'Loading cached data...');
+      if (db) {
+        try {
+          await loadCollectionsFromStorage(null);
+          assertCachedCollectionIdentifiersSafe();
+        } catch (e) {
+          // IndexedDB error - continue with empty state and load from server.
+          for (const name of PERSISTED_COLLECTIONS) state[name] = [];
+        }
+      }
+      // Merge the fresh session user (with permissions) into state.users BEFORE
+      // the first render — the cached users list can be empty (wiped by logout,
+      // private browsing) or stale, and hasPermission reads state.users.
+      upsertCurrentUserIntoUsers();
       // Restore last page for Admin. Non-admins always land inside Albayan Manager (secret ideas hidden).
       if (String(me.role || '').toLowerCase() === 'admin') {
         state.currentView = String(state.currentView || '').trim() || 'services-hub';
@@ -25847,9 +28762,16 @@ async function init() {
         console.log('[init] Refresh throttled - using cached data');
         // Still restore modal from URL
         restoreModalFromUrl();
+        // No authoritative full snapshot is running in this branch, so start
+        // the catch-up poller now (it will use cursor 0 when needed).
+        startServerLiveSync();
       } else {
-        // Load fresh data from server in background
-        serverLoadAllData().then(() => {
+        // Complete the authoritative snapshot before starting delta polling.
+        // Running both concurrently allowed a newer delta to be applied and
+        // then overwritten by an older full-list response.
+        const startupIdentity = getServerSessionIdentity();
+        const startupLoad = serverLoadAllData().then((loadResult) => {
+          if (loadResult?.aborted) return;
           // Migrate old data formats to work with new features
           migrateOldDataFormats();
           // Re-render with fresh data
@@ -25863,21 +28785,24 @@ async function init() {
             showNotification(state.language === 'ar' ? 'تحذير السيرفر' : 'Server Warning', state.language === 'ar' ? 'فشل تحميل بعض البيانات. جرّب التحديث.' : 'Some data failed to load. Try Refresh.', 'warning');
           }
         });
+        startupLoad.finally(() => {
+          if (!serverSessionIdentityChanged(startupIdentity)) startServerLiveSync();
+        });
       }
-
-      // Live sync for multi-user updates (no manual refresh)
-      startServerLiveSync();
     } else {
+      advanceServerSessionEpoch();
       state.currentUser = null;
       stopServerLiveSync();
       // Fresh server with no admin yet? Surface the first-run setup option on
       // the login page directly, so the operator doesn't have to fail a login
       // first to discover it.
       const fresh = await apiNeedsSetup();
-      state.serverHasNoUsers = fresh;
-      state.needsServerSetup = fresh;
+      state.serverHasNoUsers = fresh?.needsSetup === true;
+      state.serverSetupEnabled = fresh?.setupEnabled === true;
+      state.needsServerSetup = fresh?.needsSetup === true;
     }
   } else {
+    activateLocalCollectionStorage();
     // Offline/local mode (single-device)
     setLoadingStatus(state.language === 'ar' ? 'جارٍ تحميل البيانات المحلية...' : 'Loading local data...');
     // Load huge data collections (IndexedDB-first), migrate legacy localStorage if needed
@@ -25944,11 +28869,19 @@ async function init() {
   // URL Routing: If user is logged in, check URL for initial view
   if (state.currentUser) {
     const urlView = getViewFromUrl();
-    // Only use URL view if it's valid and user has access
+    // Only use URL view if it's valid and the user may open it. Platform views
+    // (services hub, wallet, smart systems, service pages) are Admin-only, but
+    // an Admin MUST be able to deep-link into them.
     if (urlView && urlView !== 'services-hub') {
-      const canAccess = isCurrentUserAdmin() || userCanAccessView(state.currentUser, urlView) || urlView === 'delivery-dashboard';
-      if (canAccess && !PLATFORM_ADMIN_ONLY_VIEWS.has(urlView)) {
+      const isPlatformView = PLATFORM_ADMIN_ONLY_VIEWS.has(urlView);
+      const canAccess = isPlatformView
+        ? isCurrentUserAdmin()
+        : (isCurrentUserAdmin() || userCanAccessView(state.currentUser, urlView) ||
+           (urlView === 'delivery-dashboard' && isDeliveryRole(state.currentUser?.role)));
+      if (canAccess) {
         state.currentView = urlView;
+        // Re-apply what the link carries (Clothes tab, service id)
+        restoreViewStateFromUrl(urlView);
       }
     }
     // Update URL to match current view (in case we changed it)
@@ -26037,8 +28970,3 @@ if (document.readyState === 'loading') {
 } else {
   init();
 }
-
-
-
-
-

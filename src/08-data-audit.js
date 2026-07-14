@@ -17,6 +17,16 @@ function getMonotonicTime() {
 // the server never stored and which always produced a false 409.
 const _patchChains = new Map();
 
+function serverRecordMatchesCreateRetry(serverRecord, requestedRecord) {
+  if (!serverRecord || !requestedRecord || String(serverRecord.id || '') !== String(requestedRecord.id || '')) return false;
+  const ignored = new Set(['_lastModified', '_created', '_deleted', 'createdAt', 'createdBy']);
+  for (const [key, value] of Object.entries(requestedRecord)) {
+    if (ignored.has(key) || value === undefined) continue;
+    if (JSON.stringify(serverRecord[key]) !== JSON.stringify(value)) return false;
+  }
+  return true;
+}
+
 /**
  * Add a new record to a collection (receipts, ads, customers, etc.).
  * 
@@ -45,9 +55,19 @@ const _patchChains = new Map();
  *   - Automatic rollback prevents data loss
  */
 function addRecord(array, record) {
+  if (!Array.isArray(array) || !record || typeof record !== 'object') return Promise.resolve(false);
   const collectionName = getCollectionNameFromArray(array);
   const cleanRecord = Security.sanitizeObject(record);
   if (!cleanRecord.id) cleanRecord.id = Security.generateSecureId(collectionName || 'id');
+  const idCheck = Security.validateRecordIdentifiers(cleanRecord, collectionName || 'record');
+  if (!idCheck.valid || !Security.isValidRecordId(cleanRecord.id)) {
+    showNotification('Invalid Record', idCheck.error || 'The record id is not allowed.', 'error');
+    return Promise.resolve(false);
+  }
+  if (array.some(item => item && String(item.id) === String(cleanRecord.id))) {
+    showNotification('Duplicate Record', `A record with id "${cleanRecord.id}" already exists.`, 'error');
+    return Promise.resolve(false);
+  }
 
   cleanRecord._lastModified = getMonotonicTime();
   cleanRecord._deleted = false;
@@ -63,7 +83,7 @@ function addRecord(array, record) {
   // Server write-through (always-online multi-user mode)
   if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
     const id = cleanRecord.id;
-    apiCreateEntity(collectionName, cleanRecord)
+    return apiCreateEntity(collectionName, cleanRecord)
       .then((entity) => {
         if (entity?.data && entity?.id) {
           const idx = array.findIndex(x => x && x.id === id);
@@ -73,8 +93,24 @@ function addRecord(array, record) {
             saveState();
           }
         }
+        return true;
       })
-      .catch((e) => {
+      .catch(async (e) => {
+        // A POST may commit and then lose its response. The automatic retry
+        // receives 409 even though the desired row exists. Confirm its content
+        // before accepting it; otherwise roll back as a real collision.
+        if (e?.status === 409) {
+          try {
+            const existing = await apiGetEntity(collectionName, id);
+            if (existing?.data && serverRecordMatchesCreateRetry(existing.data, cleanRecord)) {
+              const idx = array.findIndex(x => x && x.id === id);
+              if (idx !== -1) array[idx] = Security.sanitizeObject(existing.data);
+              markCollectionDirty(collectionName);
+              saveState();
+              return true;
+            }
+          } catch (_) {}
+        }
         // Rollback on failure
         const idx = array.findIndex(x => x && x.id === id);
         if (idx !== -1) array.splice(idx, 1);
@@ -88,11 +124,18 @@ function addRecord(array, record) {
         } else {
           showNotification('Server Error', `Failed to create ${collectionName}: ${e.message || 'Error'}`, 'error');
         }
+        return false;
       });
   } else if (isServerModeEnabled() && collectionName === 'users') {
     // Creating users requires server-side password handling; this path should not be used.
+    const idx = array.findIndex(x => x && x.id === cleanRecord.id);
+    if (idx !== -1) array.splice(idx, 1);
+    markCollectionDirty('users');
+    saveState();
     showNotification('Server Mode', 'Create users from the server-backed Users screen (Admin only).', 'warning');
+    return Promise.resolve(false);
   }
+  return Promise.resolve(true);
 }
 
 /**
@@ -129,16 +172,25 @@ function addRecord(array, record) {
  *   - Prevents lost updates in multi-user scenarios
  */
 function updateRecord(array, id, updates, expectedLastModified) {
+  if (!Array.isArray(array) || !Security.isValidRecordId(id)) {
+    showNotification('Invalid Record', 'The record id is not allowed.', 'error');
+    return Promise.resolve(false);
+  }
   const index = array.findIndex(item => item.id === id);
   if (index !== -1) {
     const old = { ...array[index] };
     const collectionName = getCollectionNameFromArray(array);
     if (collectionName === 'walletTransactions') {
       showNotification('Not Allowed', 'Wallet transactions are immutable. Create a new transaction to correct mistakes.', 'error');
-      return;
+      return Promise.resolve(false);
     }
 
     const sanitizedUpdates = Security.sanitizeObject(updates);
+    const updatesIdCheck = Security.validateRecordIdentifiers(sanitizedUpdates, `${collectionName || 'record'}.updates`);
+    if (!updatesIdCheck.valid) {
+      showNotification('Invalid Record', updatesIdCheck.error, 'error');
+      return Promise.resolve(false);
+    }
     // Never allow changing protected fields
     const protectedFields = ['id', '_created', 'createdBy', 'createdAt', 'creatorId'];
     for (const field of protectedFields) {
@@ -150,7 +202,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
       const isSelf = String(state.currentUser.id || '') === String(id || '');
       if (!isSelf) {
         showNotification('Access Denied', state.language === 'ar' ? 'لا يمكنك تعديل مستخدمين آخرين' : 'You cannot edit other users', 'error');
-        return;
+        return Promise.resolve(false);
       }
       const blocked = ['role', 'permissions', 'subscriptions'];
       for (const k of blocked) {
@@ -204,6 +256,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
               forceFullRender();
             }
           }
+          return true;
         })
         .catch(async (e) => {
           if (e?.status === 409) {
@@ -217,7 +270,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
               }
               showNotification('Conflict', 'This record was changed by another user. We loaded the latest version.', 'warning');
               render();
-              return;
+              return false;
             } catch (err) {
               // fallthrough to rollback
             }
@@ -236,6 +289,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
             showNotification('Server Error', `Failed to save ${collectionName}: ${e.message || 'Error'}`, 'error');
           }
           render();
+          return false;
         });
       };
       // Chain this PATCH after any in-flight PATCH for the same record (run
@@ -244,9 +298,14 @@ function updateRecord(array, id, updates, expectedLastModified) {
       const _prevPatch = _patchChains.get(_patchChainKey) || Promise.resolve();
       const _thisPatch = _prevPatch.then(sendPatch, sendPatch);
       _patchChains.set(_patchChainKey, _thisPatch);
-      _thisPatch.finally(() => {
+      const cleanupPatchChain = () => {
         if (_patchChains.get(_patchChainKey) === _thisPatch) _patchChains.delete(_patchChainKey);
-      });
+      };
+      // `finally()` creates a second rejecting Promise. Ignoring that derived
+      // Promise produced an unhandled rejection even when the caller correctly
+      // awaited/caught _thisPatch. Both branches here resolve after cleanup.
+      _thisPatch.then(cleanupPatchChain, cleanupPatchChain);
+      return _thisPatch;
     } else if (isServerModeEnabled() && collectionName === 'users') {
       // Map to server user update API (Admin only)
       const payload = {};
@@ -256,7 +315,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
       if (sanitizedUpdates.permissions !== undefined) payload.permissions = sanitizedUpdates.permissions;
       if (sanitizedUpdates._deleted !== undefined) payload.deleted = !!sanitizedUpdates._deleted;
 
-      apiUpdateUser(id, payload)
+      return apiUpdateUser(id, payload)
         .then((updatedUser) => {
           const idx = array.findIndex(x => x && x.id === id);
           if (idx !== -1 && updatedUser) {
@@ -265,6 +324,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
             saveState();
             render();
           }
+          return true;
         })
         .catch((e) => {
           const idx = array.findIndex(x => x && x.id === id);
@@ -273,22 +333,29 @@ function updateRecord(array, id, updates, expectedLastModified) {
           saveState();
           showNotification('Server Error', `Failed to update user: ${e.message || 'Error'}`, 'error');
           render();
+          return false;
         });
     }
+    return Promise.resolve(true);
   }
+  return Promise.resolve(false);
 }
 
 function deleteRecord(array, id, opts) {
+  if (!Array.isArray(array) || !Security.isValidRecordId(id)) {
+    showNotification('Invalid Record', 'The record id is not allowed.', 'error');
+    return Promise.resolve(false);
+  }
   const index = array.findIndex(item => item.id === id);
   if (index !== -1) {
     const collectionName = getCollectionNameFromArray(array);
     if (collectionName === 'walletTransactions') {
       showNotification('Not Allowed', 'Wallet transactions cannot be deleted. Use a reversal transaction.', 'error');
-      return;
+      return Promise.resolve(false);
     }
     if (collectionName === 'serviceSubscriptions') {
       showNotification('Not Allowed', 'Subscription history cannot be deleted.', 'error');
-      return;
+      return Promise.resolve(false);
     }
     const old = { ...array[index] };
     array[index]._deleted = true;
@@ -305,15 +372,16 @@ function deleteRecord(array, id, opts) {
       if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
         opts.collectServerOps.push({ collection: collectionName, id, old, array });
       }
-      return;
+      return Promise.resolve(true);
     }
 
     // Server write-through (always-online multi-user mode)
     if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
-      apiDeleteEntity(collectionName, id)
+      return apiDeleteEntity(collectionName, id)
         .then(() => {
           // ok
           render();
+          return true;
         })
         .catch((e) => {
           // Rollback on failure
@@ -329,12 +397,14 @@ function deleteRecord(array, id, opts) {
             showNotification('Server Error', `Failed to delete ${collectionName}: ${e.message || 'Error'}`, 'error');
           }
           render();
+          return false;
         });
     } else if (isServerModeEnabled() && collectionName === 'users') {
-      apiUpdateUser(id, { deleted: true })
+      return apiUpdateUser(id, { deleted: true })
         .then(() => {
           showNotification('Deleted', 'User deleted', 'success');
           render();
+          return true;
         })
         .catch((e) => {
           const idx = array.findIndex(x => x && x.id === id);
@@ -349,9 +419,12 @@ function deleteRecord(array, id, opts) {
             showNotification('Server Error', `Failed to delete user: ${e.message || 'Error'}`, 'error');
           }
           render();
+          return false;
         });
     }
+    return Promise.resolve(true);
   }
+  return Promise.resolve(false);
 }
 
 // Push a cascade's collected soft-deletes to the server as ONE all-or-nothing
@@ -359,21 +432,18 @@ function deleteRecord(array, id, opts) {
 // server or none is — a flaky connection can no longer leave a customer
 // cascade half-applied with some records resurrecting on other devices.
 // On failure the local soft-deletes are rolled back so local and server agree.
-function flushBatchDeletes(ops) {
-  if (!Array.isArray(ops) || ops.length === 0) return;
-  if (!isServerModeEnabled()) return;
-  apiBatchDeleteEntities(ops.map(o => ({ collection: o.collection, id: o.id })))
+async function flushBatchDeletes(ops) {
+  if (!Array.isArray(ops) || ops.length === 0) return true;
+  if (!isServerModeEnabled()) return true;
+  return await apiBatchDeleteEntities(ops.map(o => ({ collection: o.collection, id: o.id })))
     .then(() => {
       render();
+      return true;
     })
     .catch((e) => {
       if (e?.status === 404 || e?.status === 405) {
-        // Older server without the batch endpoint — push one by one with
-        // retry (the pre-batch behavior).
-        ops.forEach(o => {
-          apiDeleteEntity(o.collection, o.id).catch(() => {});
-        });
-        return;
+        // Never fall back to independent fire-and-forget deletes. That could
+        // commit only part of a cascade while the UI claimed full success.
       }
       // The server refused the whole batch: roll back every local soft-delete
       // so nothing is half-deleted anywhere.
@@ -391,6 +461,7 @@ function flushBatchDeletes(ops) {
         'error'
       );
       render();
+      return false;
     });
 }
 
@@ -604,7 +675,8 @@ function enforceSecretFeaturesGate() {
   }
   // Also check if user has permission for the current Albayan Manager view
   const view = String(state.currentView || '');
-  if (view && view !== 'delivery-dashboard' && view !== 'no-access' && !userCanAccessView(state.currentUser, view)) {
+  const _deliveryExempt = view === 'delivery-dashboard' && isDeliveryRole(state.currentUser?.role);
+  if (view && !_deliveryExempt && view !== 'no-access' && !userCanAccessView(state.currentUser, view)) {
     // User doesn't have permission for this view, find first allowed view
     state.currentView = getAlbayanManagerLandingViewForUser(state.currentUser);
     state.viewData = null;
@@ -888,4 +960,3 @@ function getEffectiveExchangeRate(ad) {
   // 7. Fall back to default
   return state.defaultExchangeRate || 1;
 }
-

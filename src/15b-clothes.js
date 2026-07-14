@@ -20,10 +20,88 @@ const CLOTHES_TABS = [
 const CLOTHES_LOW_STOCK_THRESHOLD = 2;
 const CLOTHES_PRODUCTS_PAGE_SIZE = 30;
 
+// Keep a failed/response-lost mutation's key stable. If the server committed
+// but the phone lost the response, retrying with a new key can report a false
+// conflict (or duplicate a create); replaying the same key returns the original
+// atomic result instead.
+const _clothesPendingOrderMutations = new Map();
+
+function getClothesOrderMutationAttempt(action, orderId, expectedLastModified, operationData) {
+  const act = String(action || '');
+  const id = String(orderId || '');
+  const slot = act === 'create' ? 'create' : `${act}:${id}`;
+  const fingerprint = JSON.stringify({ act, id, expectedLastModified: expectedLastModified ?? null, operationData });
+  const prior = _clothesPendingOrderMutations.get(slot);
+  if (prior?.fingerprint === fingerprint) return prior;
+  const attempt = {
+    slot,
+    fingerprint,
+    orderId: id || Security.generateSecureId('clothes_order'),
+    idempotencyKey: ensureOperationIdempotencyKey('', `clothes-${act || 'order'}`)
+  };
+  _clothesPendingOrderMutations.set(slot, attempt);
+  return attempt;
+}
+
+function completeClothesOrderMutationAttempt(attempt) {
+  if (attempt && _clothesPendingOrderMutations.get(attempt.slot) === attempt) {
+    _clothesPendingOrderMutations.delete(attempt.slot);
+  }
+}
+
+function getClothesOrderExpectedLastModified(order) {
+  const value = Number(order?._lastModified);
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error('This order is missing its server version. Refresh and try again.');
+  return value;
+}
+
+function applyClothesOrderMutationResponse(response) {
+  const orderEntity = response?.order;
+  const productEntities = Array.isArray(response?.updatedProducts) ? response.updatedProducts : [];
+  if (!orderEntity?.data) throw new Error('Invalid clothes order response');
+  const upsert = (collectionName, entity) => {
+    const saved = Security.sanitizeObject(entity?.data || {});
+    if (!saved.id || !Security.isValidRecordId(saved.id)) throw new Error('Invalid clothes order response');
+    if (!Array.isArray(state[collectionName])) state[collectionName] = [];
+    const array = state[collectionName];
+    const index = array.findIndex(row => row && String(row.id) === String(saved.id));
+    if (index === -1) array.unshift(saved);
+    else array[index] = saved;
+    clearCollectionCorruption(collectionName);
+    markCollectionDirty(collectionName);
+    return saved;
+  };
+  for (const product of productEntities) upsert('clothesProducts', product);
+  const savedOrder = upsert('clothesOrders', orderEntity);
+  saveState();
+  RenderQueue.schedule('clothesOrderMutation');
+  return savedOrder;
+}
+
+function showClothesOrderMutationError(error) {
+  const isAr = clothesIsAr();
+  const detail = Security.sanitizeInput(String(error?.message || ''), { maxLength: 240 });
+  showNotification(
+    isAr ? 'تعذّر حفظ الطلب' : 'Order Not Saved',
+    detail || (isAr ? 'تحقق من الاتصال والمخزون ثم حاول مرة أخرى.' : 'Check your connection and stock, then try again.'),
+    'error'
+  );
+}
+
 function setClothesTab(tabId) {
   if (!CLOTHES_TABS.some(tab => tab.id === tabId)) return;
   _clothesActiveTab = tabId;
+  // Each tab is its own address: /clothes-system?tab=orders
+  try { updateUrlParams({ tab: tabId }, true); } catch (_) {}
   render();
+}
+
+// Restore the active tab from ?tab= when the Clothes System is opened by URL.
+function restoreClothesTabFromUrl() {
+  try {
+    const tab = getUrlParams().tab;
+    if (tab && CLOTHES_TABS.some(t => t.id === tab)) _clothesActiveTab = tab;
+  } catch (_) {}
 }
 
 // ------------------------------------------
@@ -95,7 +173,7 @@ function getClothesExchangeRate() {
   return isCurrentUserAdmin() ? (Number(state.defaultExchangeRate) || 0) : 0;
 }
 
-function saveClothesExchangeRate() {
+async function saveClothesExchangeRate() {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   const value = clothesParseMoney(document.getElementById('clothes-rate-input')?.value);
@@ -104,11 +182,13 @@ function saveClothesExchangeRate() {
     return;
   }
   const existing = getClothesSettingsRecord();
+  let saved = false;
   if (existing) {
-    updateRecord(state.clothesSettings, existing.id, { rateLYDperUSD: value });
+    saved = await updateRecord(state.clothesSettings, existing.id, { rateLYDperUSD: value });
   } else {
-    addRecord(state.clothesSettings, { rateLYDperUSD: value, createdAt: new Date().toISOString() });
+    saved = await addRecord(state.clothesSettings, { rateLYDperUSD: value, createdAt: new Date().toISOString() });
   }
+  if (!saved) return;
   showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? `سعر الصرف الآن: ${value}` : `Exchange rate is now: ${value}`, 'success');
   render();
 }
@@ -734,7 +814,7 @@ function renderClothesProductCard(p) {
   `;
 }
 
-function adjustClothesVariantQty(productId, variantIndex, delta) {
+async function adjustClothesVariantQty(productId, variantIndex, delta) {
   if (!clothesCanUse()) return;
   const product = getVisibleClothesProducts().find(p => p.id === productId);
   if (!product) return;
@@ -742,11 +822,12 @@ function adjustClothesVariantQty(productId, variantIndex, delta) {
   const v = variants[variantIndex];
   if (!v) return;
   v.qty = Math.max(0, Math.floor(Number(v.qty) || 0) + (Number(delta) || 0));
-  updateRecord(state.clothesProducts, productId, { variants });
+  const saved = await updateRecord(state.clothesProducts, productId, { variants });
+  if (!saved) return;
   updateClothesProductsFiltered();
 }
 
-function deleteClothesProduct(id) {
+async function deleteClothesProduct(id) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   const product = getVisibleClothesProducts().find(p => p.id === id);
@@ -777,7 +858,8 @@ function deleteClothesProduct(id) {
   }
   const ok = confirm(msg);
   if (!ok) return;
-  deleteRecord(state.clothesProducts, id);
+  const deleted = await deleteRecord(state.clothesProducts, id);
+  if (!deleted) return;
   showNotification(
     isAr ? 'تم الحذف' : 'Deleted',
     isAr ? 'تم حذف المنتج.' : 'Product deleted.',
@@ -804,6 +886,7 @@ function showClothesProductModal() {
   _clothesTempVariants = [{ color: '', size: '', qty: 0 }];
   _clothesTempPhoto = null;
   _clothesPhotoToken++; // invalidate any pending photo-compression callback
+  updateUrlParams({ modal: 'clothes-product', id: 'new' }); // URL tracking
   renderModal();
 }
 
@@ -819,6 +902,7 @@ function editClothesProduct(id) {
     : [{ color: '', size: '', qty: 0 }];
   _clothesTempPhoto = product.photo || null;
   _clothesPhotoToken++; // invalidate any pending photo callback from a prior modal
+  updateUrlParams({ modal: 'clothes-product', id }); // URL tracking
   renderModal();
 }
 
@@ -1026,10 +1110,12 @@ async function saveClothesProductFromModal() {
   const payload = { name, category, note, photo: _clothesTempPhoto, costUSD, priceLYD, variants };
 
   if (editTarget) {
-    updateRecord(state.clothesProducts, editTarget.id, payload);
+    const saved = await updateRecord(state.clothesProducts, editTarget.id, payload);
+    if (!saved) return false;
     showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? 'تم تحديث المنتج بنجاح.' : 'Product updated successfully.', 'success');
   } else {
-    addRecord(state.clothesProducts, { ...payload, createdAt: new Date().toISOString() });
+    const saved = await addRecord(state.clothesProducts, { ...payload, createdAt: new Date().toISOString() });
+    if (!saved) return false;
     showNotification(isAr ? 'تمت الإضافة' : 'Added', isAr ? 'تمت إضافة المنتج بنجاح.' : 'Product added successfully.', 'success');
   }
   return true;
@@ -1090,7 +1176,7 @@ function getClothesShipmentTotals(s) {
 
 // Add (sign=+1) or remove (sign=-1) a shipment's quantities in product stock.
 // One updateRecord per product so every change syncs like any other edit.
-function applyClothesShipmentStockDelta(shipment, sign) {
+async function applyClothesShipmentStockDelta(shipment, sign) {
   const lines = Array.isArray(shipment?.lines) ? shipment.lines : [];
   const byProduct = new Map();
   for (const line of lines) {
@@ -1118,8 +1204,10 @@ function applyClothesShipmentStockDelta(shipment, sign) {
         variants.push({ color, size, qty });
       }
     }
-    updateRecord(state.clothesProducts, pid, { variants });
+    const saved = await updateRecord(state.clothesProducts, pid, { variants });
+    if (!saved) return false;
   }
+  return true;
 }
 
 // Which of a shipment's lines can NOT be fully removed from stock because the
@@ -1154,7 +1242,7 @@ function _clothesShipmentUnreceiveShortfall(shipment) {
   return out;
 }
 
-function setClothesShipmentStatus(shipmentId, newStatus) {
+async function setClothesShipmentStatus(shipmentId, newStatus) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   if (!CLOTHES_SHIPMENT_STATUSES.some(s => s.id === newStatus)) return;
@@ -1167,7 +1255,7 @@ function setClothesShipmentStatus(shipmentId, newStatus) {
       ? 'تأكيد استلام الشحنة؟ سيتم إضافة الكميات إلى المخزون.'
       : 'Confirm receiving this shipment? Quantities will be ADDED to stock.');
     if (!ok) { updateClothesShipmentsFiltered(); return; }
-    applyClothesShipmentStockDelta(shipment, 1);
+    if (!await applyClothesShipmentStockDelta(shipment, 1)) return;
     updates.stockApplied = true;
     updates.receivedAt = new Date().toISOString();
   } else if (shipment.status === 'Received' && newStatus !== 'Received' && shipment.stockApplied) {
@@ -1192,12 +1280,13 @@ function setClothesShipmentStatus(shipmentId, newStatus) {
       ? 'إرجاع الشحنة إلى حالة سابقة؟ سيتم خصم كمياتها من المخزون مرة أخرى.'
       : 'Move this shipment back? Its quantities will be REMOVED from stock again.');
     if (!ok) { updateClothesShipmentsFiltered(); return; }
-    applyClothesShipmentStockDelta(shipment, -1);
+    if (!await applyClothesShipmentStockDelta(shipment, -1)) return;
     updates.stockApplied = false;
     updates.receivedAt = null;
   }
 
-  updateRecord(state.clothesShipments, shipmentId, updates);
+  const saved = await updateRecord(state.clothesShipments, shipmentId, updates);
+  if (!saved) return;
   const meta = clothesShipmentStatusMeta(newStatus);
   showNotification(
     isAr ? 'تم التحديث' : 'Updated',
@@ -1207,7 +1296,7 @@ function setClothesShipmentStatus(shipmentId, newStatus) {
   updateClothesShipmentsFiltered();
 }
 
-function deleteClothesShipment(id) {
+async function deleteClothesShipment(id) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   const shipment = getVisibleClothesShipments().find(s => s.id === id);
@@ -1222,7 +1311,8 @@ function deleteClothesShipment(id) {
   }
   const ok = confirm(isAr ? 'هل تريد حذف هذه الشحنة؟' : 'Delete this shipment?');
   if (!ok) return;
-  deleteRecord(state.clothesShipments, id);
+  const deleted = await deleteRecord(state.clothesShipments, id);
+  if (!deleted) return;
   showNotification(isAr ? 'تم الحذف' : 'Deleted', isAr ? 'تم حذف الشحنة.' : 'Shipment deleted.', 'success');
   updateClothesShipmentsFiltered();
 }
@@ -1490,6 +1580,7 @@ function showClothesShipmentModal() {
   state.activeModal = 'clothes-shipment';
   state.modalData = null;
   _clothesTempShipLines = [{ productId: '', color: '', size: '', qty: 0, unitCostUSD: '' }];
+  updateUrlParams({ modal: 'clothes-shipment', id: 'new' }); // URL tracking
   renderModal();
 }
 
@@ -1507,6 +1598,7 @@ function editClothesShipment(id) {
   }
   state.activeModal = 'clothes-shipment';
   state.modalData = shipment;
+  updateUrlParams({ modal: 'clothes-shipment', id }); // URL tracking
   const lines = Array.isArray(shipment.lines) ? shipment.lines : [];
   _clothesTempShipLines = lines.length
     ? lines.map(l => ({
@@ -1739,16 +1831,18 @@ async function saveClothesShipmentFromModal() {
   const payload = { ref, supplier, orderedAt, shippingCostUSD, note, lines };
 
   if (editTarget) {
-    updateRecord(state.clothesShipments, editTarget.id, payload);
+    const saved = await updateRecord(state.clothesShipments, editTarget.id, payload);
+    if (!saved) return false;
     showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? 'تم تحديث الشحنة.' : 'Shipment updated.', 'success');
   } else {
-    addRecord(state.clothesShipments, {
+    const saved = await addRecord(state.clothesShipments, {
       ...payload,
       status: 'Ordered',
       stockApplied: false,
       receivedAt: null,
       createdAt: new Date().toISOString()
     });
+    if (!saved) return false;
     showNotification(isAr ? 'تمت الإضافة' : 'Added', isAr ? 'تمت إضافة الشحنة.' : 'Shipment added.', 'success');
   }
   return true;
@@ -1840,7 +1934,7 @@ function getClothesOrderProfitLYD(order) {
 }
 
 // Add (sign=+1, restore) or remove (sign=-1, sell) an order's pieces in stock.
-function applyClothesOrderStockDelta(order, sign) {
+async function applyClothesOrderStockDelta(order, sign) {
   const lines = Array.isArray(order?.lines) ? order.lines : [];
   const byProduct = new Map();
   for (const line of lines) {
@@ -1887,16 +1981,19 @@ function applyClothesOrderStockDelta(order, sign) {
         // the variant set on purpose, so the restored pieces are dropped.
       }
     }
-    updateRecord(state.clothesProducts, pid, { variants });
+    const productSaved = await updateRecord(state.clothesProducts, pid, { variants });
+    if (!productSaved) return false;
   }
   // Persist the per-line deducted amounts when the order already lives in
   // state (new orders save their lines right after this call anyway).
   if (order && order.id && (state.clothesOrders || []).some(o => o && o.id === order.id)) {
-    updateRecord(state.clothesOrders, order.id, { lines });
+    const orderSaved = await updateRecord(state.clothesOrders, order.id, { lines });
+    if (!orderSaved) return false;
   }
+  return true;
 }
 
-function setClothesOrderStatus(orderId, newStatus) {
+async function setClothesOrderStatus(orderId, newStatus) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   if (!CLOTHES_ORDER_STATUSES.some(s => s.id === newStatus)) return;
@@ -1912,14 +2009,14 @@ function setClothesOrderStatus(orderId, newStatus) {
       ? 'سيتم إرجاع قطع هذا الطلب إلى المخزون. متابعة؟'
       : 'This order\'s pieces will be RETURNED to stock. Continue?');
     if (!ok) { updateClothesOrdersFiltered(); return; }
-    applyClothesOrderStockDelta(order, 1);
+    if (!isServerModeEnabled() && !await applyClothesOrderStockDelta(order, 1)) return;
     updates.stockDeducted = false;
   } else if (!wasActive && willBeActive && !order.stockDeducted) {
     const ok = confirm(isAr
       ? 'سيتم خصم قطع هذا الطلب من المخزون مرة أخرى. متابعة؟'
       : 'This order\'s pieces will be TAKEN from stock again. Continue?');
     if (!ok) { updateClothesOrdersFiltered(); return; }
-    applyClothesOrderStockDelta(order, -1);
+    if (!isServerModeEnabled() && !await applyClothesOrderStockDelta(order, -1)) return;
     updates.stockDeducted = true;
   }
 
@@ -1927,7 +2024,29 @@ function setClothesOrderStatus(orderId, newStatus) {
     updates.deliveredAt = new Date().toISOString();
   }
 
-  updateRecord(state.clothesOrders, orderId, updates);
+  if (isServerModeEnabled()) {
+    let attempt = null;
+    try {
+      const expectedLastModified = getClothesOrderExpectedLastModified(order);
+      attempt = getClothesOrderMutationAttempt('status', orderId, expectedLastModified, { status: newStatus });
+      const response = await apiMutateClothesOrder({
+        action: 'status',
+        orderId,
+        expectedLastModified,
+        status: newStatus,
+        idempotencyKey: attempt.idempotencyKey
+      });
+      applyClothesOrderMutationResponse(response);
+      completeClothesOrderMutationAttempt(attempt);
+    } catch (e) {
+      showClothesOrderMutationError(e);
+      updateClothesOrdersFiltered();
+      return;
+    }
+  } else {
+    const saved = await updateRecord(state.clothesOrders, orderId, updates);
+    if (!saved) return;
+  }
   const meta = clothesOrderStatusMeta(newStatus);
   showNotification(
     isAr ? 'تم التحديث' : 'Updated',
@@ -1937,7 +2056,7 @@ function setClothesOrderStatus(orderId, newStatus) {
   updateClothesOrdersFiltered();
 }
 
-function setClothesOrderPayment(orderId, newPaymentStatus) {
+async function setClothesOrderPayment(orderId, newPaymentStatus) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   if (!CLOTHES_PAYMENT_STATUSES.some(s => s.id === newPaymentStatus)) return;
@@ -1954,7 +2073,29 @@ function setClothesOrderPayment(orderId, newPaymentStatus) {
   }
   // 'Partially Paid' keeps the recorded amount — edit it in the order form.
 
-  updateRecord(state.clothesOrders, orderId, updates);
+  if (isServerModeEnabled()) {
+    let attempt = null;
+    try {
+      const expectedLastModified = getClothesOrderExpectedLastModified(order);
+      attempt = getClothesOrderMutationAttempt('payment', orderId, expectedLastModified, { paymentStatus: newPaymentStatus });
+      const response = await apiMutateClothesOrder({
+        action: 'payment',
+        orderId,
+        expectedLastModified,
+        paymentStatus: newPaymentStatus,
+        idempotencyKey: attempt.idempotencyKey
+      });
+      applyClothesOrderMutationResponse(response);
+      completeClothesOrderMutationAttempt(attempt);
+    } catch (e) {
+      showClothesOrderMutationError(e);
+      updateClothesOrdersFiltered();
+      return;
+    }
+  } else {
+    const saved = await updateRecord(state.clothesOrders, orderId, updates);
+    if (!saved) return;
+  }
   const meta = clothesPaymentStatusMeta(newPaymentStatus);
   showNotification(
     isAr ? 'تم التحديث' : 'Updated',
@@ -1964,7 +2105,7 @@ function setClothesOrderPayment(orderId, newPaymentStatus) {
   updateClothesOrdersFiltered();
 }
 
-function deleteClothesOrder(id) {
+async function deleteClothesOrder(id) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   const order = getVisibleClothesOrders().find(o => o.id === id);
@@ -1974,11 +2115,32 @@ function deleteClothesOrder(id) {
     ? (willRestore ? 'هل تريد حذف هذا الطلب؟ ستعود قطعه إلى المخزون.' : 'هل تريد حذف هذا الطلب؟')
     : (willRestore ? 'Delete this order? Its pieces will return to stock.' : 'Delete this order?'));
   if (!ok) return;
-  if (willRestore) {
-    applyClothesOrderStockDelta(order, 1);
-    updateRecord(state.clothesOrders, id, { stockDeducted: false });
+  if (isServerModeEnabled()) {
+    let attempt = null;
+    try {
+      const expectedLastModified = getClothesOrderExpectedLastModified(order);
+      attempt = getClothesOrderMutationAttempt('delete', id, expectedLastModified, { delete: true });
+      const response = await apiMutateClothesOrder({
+        action: 'delete',
+        orderId: id,
+        expectedLastModified,
+        idempotencyKey: attempt.idempotencyKey
+      });
+      applyClothesOrderMutationResponse(response);
+      completeClothesOrderMutationAttempt(attempt);
+      showNotification(isAr ? 'تم الحذف' : 'Deleted', isAr ? 'تم حذف الطلب.' : 'Order deleted.', 'success');
+      updateClothesOrdersFiltered();
+    } catch (e) {
+      showClothesOrderMutationError(e);
+      updateClothesOrdersFiltered();
+    }
+    return;
   }
-  deleteRecord(state.clothesOrders, id);
+  if (willRestore) {
+    if (!await applyClothesOrderStockDelta(order, 1)) return;
+    if (!await updateRecord(state.clothesOrders, id, { stockDeducted: false })) return;
+  }
+  if (!await deleteRecord(state.clothesOrders, id)) return;
   showNotification(isAr ? 'تم الحذف' : 'Deleted', isAr ? 'تم حذف الطلب.' : 'Order deleted.', 'success');
   updateClothesOrdersFiltered();
 }
@@ -2258,6 +2420,7 @@ function showClothesOrderModal() {
   state.activeModal = 'clothes-order';
   state.modalData = null;
   _clothesTempOrderLines = [{ productId: '', color: '', size: '', qty: 1, priceLYD: '' }];
+  updateUrlParams({ modal: 'clothes-order', id: 'new' }); // URL tracking
   renderModal();
 }
 
@@ -2275,6 +2438,7 @@ function editClothesOrder(id) {
   }
   state.activeModal = 'clothes-order';
   state.modalData = order;
+  updateUrlParams({ modal: 'clothes-order', id }); // URL tracking
   const lines = Array.isArray(order.lines) ? order.lines : [];
   _clothesTempOrderLines = lines.length
     ? lines.map(l => ({
@@ -2671,10 +2835,50 @@ async function saveClothesOrderFromModal() {
     return false;
   }
 
+  const totalsProbe = { lines, deliveryFeeLYD };
+  const total = getClothesOrderTotals(totalsProbe).totalLYD;
+  if (paymentStatus === 'Paid') amountPaidLYD = total;
+  if (paymentStatus === 'Not Paid') amountPaidLYD = 0;
+
+  const payload = { customerName, customerPhone, note, lines, deliveryFeeLYD, paymentStatus, amountPaidLYD, paymentMethod };
+
+  if (isServerModeEnabled()) {
+    let attempt = null;
+    try {
+      const action = editTarget ? 'update' : 'create';
+      const expectedLastModified = editTarget ? getClothesOrderExpectedLastModified(editTarget) : null;
+      attempt = getClothesOrderMutationAttempt(action, editTarget?.id || '', expectedLastModified, payload);
+      const request = {
+        action,
+        orderId: attempt.orderId,
+        idempotencyKey: attempt.idempotencyKey,
+        data: payload
+      };
+      if (editTarget) request.expectedLastModified = expectedLastModified;
+      const response = await apiMutateClothesOrder(request);
+      applyClothesOrderMutationResponse(response);
+      completeClothesOrderMutationAttempt(attempt);
+      showNotification(
+        editTarget ? (isAr ? 'تم الحفظ' : 'Saved') : (isAr ? 'تم الإنشاء' : 'Created'),
+        editTarget
+          ? (isAr ? 'تم تحديث الطلب والمخزون معاً.' : 'Order and stock updated together.')
+          : (isAr ? 'تم إنشاء الطلب وخصم القطع من المخزون.' : 'Order created and pieces taken from stock.'),
+        'success'
+      );
+      return true;
+    } catch (e) {
+      // Do not mutate local stock on failure. In particular, a 409 means the
+      // authoritative server rejected insufficient stock or a stale edit.
+      // Keeping the attempt lets a response-loss retry replay safely.
+      showClothesOrderMutationError(e);
+      return false;
+    }
+  }
+
   // For stock checking on edit: the old pieces come back first, so check
   // against stock as it would be AFTER restoring them.
   if (editTarget && editTarget.stockDeducted) {
-    applyClothesOrderStockDelta(editTarget, 1); // restore old pieces
+    if (!await applyClothesOrderStockDelta(editTarget, 1)) return false; // restore old pieces
   }
   const shortages = getClothesOrderStockShortages(lines);
   if (shortages.length) {
@@ -2685,28 +2889,22 @@ async function saveClothesOrderFromModal() {
       : '\n\nContinue anyway? (stock will floor at zero)'));
     if (!ok) {
       // Put the old pieces back the way they were and abort
-      if (editTarget && editTarget.stockDeducted) applyClothesOrderStockDelta(editTarget, -1);
+      if (editTarget && editTarget.stockDeducted) await applyClothesOrderStockDelta(editTarget, -1);
       return false;
     }
   }
 
-  const totalsProbe = { lines, deliveryFeeLYD };
-  const total = getClothesOrderTotals(totalsProbe).totalLYD;
-  if (paymentStatus === 'Paid') amountPaidLYD = total;
-  if (paymentStatus === 'Not Paid') amountPaidLYD = 0;
-
-  const payload = { customerName, customerPhone, note, lines, deliveryFeeLYD, paymentStatus, amountPaidLYD, paymentMethod };
-
   if (editTarget) {
-    applyClothesOrderStockDelta({ lines }, -1); // deduct the new pieces
-    updateRecord(state.clothesOrders, editTarget.id, { ...payload, stockDeducted: true });
+    if (!await applyClothesOrderStockDelta({ lines }, -1)) return false; // deduct the new pieces
+    const saved = await updateRecord(state.clothesOrders, editTarget.id, { ...payload, stockDeducted: true });
+    if (!saved) return false;
     showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? 'تم تحديث الطلب.' : 'Order updated.', 'success');
   } else {
-    applyClothesOrderStockDelta({ lines }, -1); // pieces leave the warehouse
+    if (!await applyClothesOrderStockDelta({ lines }, -1)) return false; // pieces leave the warehouse
     // Sequential order number; max over ALL records (deleted included) so a
     // number is never reused after a delete.
     const nextNo = 1 + (state.clothesOrders || []).reduce((m, x) => Math.max(m, Math.floor(Number(x?.orderNo) || 0)), 0);
-    addRecord(state.clothesOrders, {
+    const saved = await addRecord(state.clothesOrders, {
       ...payload,
       orderNo: nextNo,
       status: 'New',
@@ -2715,6 +2913,7 @@ async function saveClothesOrderFromModal() {
       paidAt: paymentStatus === 'Paid' ? new Date().toISOString() : null,
       createdAt: new Date().toISOString()
     });
+    if (!saved) return false;
     showNotification(isAr ? 'تم الإنشاء' : 'Created', isAr ? 'تم إنشاء الطلب وخصم القطع من المخزون.' : 'Order created and pieces taken from stock.', 'success');
   }
   return true;

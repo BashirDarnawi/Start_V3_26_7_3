@@ -1,5 +1,12 @@
 # Secrets — never commit credentials
 .env
+.env.local
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
 
 # Dependencies
 node_modules/

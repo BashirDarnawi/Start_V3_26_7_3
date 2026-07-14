@@ -17,6 +17,7 @@ from sqlalchemy import text
 
 os.environ["DATABASE_URL"] = "sqlite+pysqlite:///:memory:"
 
+import server.main as main_module
 from server.main import app
 from server.db import db_conn, init_db, json_dumps, now_ms
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
@@ -120,8 +121,26 @@ class TestAdminBulkImport:
         r = client.post("/api/admin/import", json={"collections": {"customers": []}})
         assert r.status_code in (401, 403)
 
+    def test_online_import_is_disabled_by_default(self, admin_cookies, monkeypatch):
+        monkeypatch.setattr(main_module, "ENABLE_ONLINE_IMPORT", False)
+        response = client.post(
+            "/api/admin/import",
+            json={"collections": {"customers": []}},
+            cookies=admin_cookies,
+        )
+        assert response.status_code == 405
+
+    @pytest.fixture(autouse=True)
+    def _enable_maintenance_import_for_legacy_contract_tests(self, monkeypatch, request):
+        if request.node.name != "test_online_import_is_disabled_by_default":
+            monkeypatch.setattr(main_module, "ENABLE_ONLINE_IMPORT", True)
+
     def test_import_replaces_prunes_and_stamps_now(self, admin_cookies):
         t0 = now_ms()
+        # This test exercises whole-collection replacement and may run after
+        # suites that seeded their own customers into the shared test engine.
+        with db_conn() as conn:
+            conn.execute(text("DELETE FROM entities WHERE type='customers'"))
         # Server currently holds: keep-me (will be updated), prune-me (absent
         # from backup -> must become deleted), backup also adds new-one.
         _seed_entity("customers", "cust_keep", {"name": "Old Name"}, last_modified=1111)

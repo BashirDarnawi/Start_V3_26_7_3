@@ -95,9 +95,10 @@ function stopAd(id) {
             >
               ${isAr ? 'إلغاء' : 'Cancel'}
             </button>
-            <button 
+            <button
+              id="stop-ad-submit"
               onclick="confirmStopAd('${id}')" 
-              class="flex-1 px-4 py-3 bg-orange-600 text-white rounded-xl font-bold hover:bg-orange-700 transition-colors"
+              class="flex-1 px-4 py-3 bg-orange-600 text-white rounded-xl font-bold hover:bg-orange-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               ${isAlreadyStopped ? (isAr ? 'تحديث' : 'Update') : (isAr ? 'إيقاف الإعلان' : 'Stop Ad')}
             </button>
@@ -134,10 +135,51 @@ function stopAd(id) {
   }
 }
 
-function confirmStopAd(id) {
+const _pendingAdStopAttempts = new Map();
+
+function getAdStopAttempt(ad, spentMinorUSD) {
+  const adId = String(ad?.id || '');
+  const expectedLastModified = Number(ad?._lastModified);
+  if (!Number.isSafeInteger(expectedLastModified) || expectedLastModified < 0) {
+    throw new Error('This ad is missing its server version. Refresh and try again.');
+  }
+  const fingerprint = JSON.stringify({ adId, spentMinorUSD, expectedLastModified });
+  const prior = _pendingAdStopAttempts.get(adId);
+  if (prior?.fingerprint === fingerprint) return prior;
+  if (prior?.promise) return prior;
+  const attempt = {
+    slot: adId,
+    fingerprint,
+    expectedLastModified,
+    idempotencyKey: ensureOperationIdempotencyKey('', 'ad-stop'),
+    promise: null
+  };
+  _pendingAdStopAttempts.set(adId, attempt);
+  return attempt;
+}
+
+function completeAdStopAttempt(attempt) {
+  if (attempt && _pendingAdStopAttempts.get(attempt.slot) === attempt) {
+    _pendingAdStopAttempts.delete(attempt.slot);
+  }
+}
+
+async function confirmStopAd(id) {
   const isAr = state.language === 'ar';
-  const ad = state.ads.find(a => a.id === id);
-  if (!ad) return;
+  const storedAd = state.ads.find(a => a.id === id);
+  if (!storedAd) return;
+  // Work on a detached copy. Mutating the live record before updateRecord()
+  // captured its rollback snapshot made a failed server PATCH impossible to
+  // undo and still allowed the success path to continue.
+  const ad = {
+    ...storedAd,
+    receiptAllocations: Array.isArray(storedAd.receiptAllocations) ? storedAd.receiptAllocations.map(a => ({ ...a })) : storedAd.receiptAllocations,
+    dueAllocations: Array.isArray(storedAd.dueAllocations) ? storedAd.dueAllocations.map(a => ({ ...a })) : storedAd.dueAllocations,
+    mergedPaidAllocations: Array.isArray(storedAd.mergedPaidAllocations) ? storedAd.mergedPaidAllocations.map(a => ({ ...a })) : storedAd.mergedPaidAllocations,
+    stopAllocationBaseline: storedAd.stopAllocationBaseline
+      ? JSON.parse(JSON.stringify(storedAd.stopAllocationBaseline))
+      : storedAd.stopAllocationBaseline
+  };
   
   const spentInput = document.getElementById('stop-ad-spent');
   if (!spentInput) return;
@@ -148,6 +190,66 @@ function confirmStopAd(id) {
   if (spentUSD < 0 || spentUSD > adAmountUSD) {
     showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'يجب أن يكون المبلغ المصروف بين صفر ومبلغ الإعلان' : 'Spent amount must be between 0 and ad amount', 'error');
     return;
+  }
+
+  if (isServerModeEnabled()) {
+    const spentMinorUSD = Math.round(spentUSD * 100);
+    if (!Number.isSafeInteger(spentMinorUSD) || spentMinorUSD < 0) {
+      showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'المبلغ المصروف غير صالح.' : 'Spent amount is invalid.', 'error');
+      return;
+    }
+    let attempt;
+    try {
+      attempt = getAdStopAttempt(storedAd, spentMinorUSD);
+    } catch (error) {
+      showNotification(isAr ? 'تعذر الحفظ' : 'Ad Not Saved', error.message, 'error');
+      return;
+    }
+    if (attempt.promise) return await attempt.promise;
+    const submitButton = document.getElementById('stop-ad-submit');
+    if (submitButton) submitButton.disabled = true;
+    attempt.promise = (async () => {
+      try {
+        const response = await apiStopAd(storedAd.id, {
+          spentMinorUSD,
+          idempotencyKey: attempt.idempotencyKey,
+          expectedLastModified: attempt.expectedLastModified
+        });
+        const [savedAd] = applyValidatedServerEntityBatch([
+          { collection: 'ads', entity: response.ad }
+        ], 'adStop');
+        if (!savedAd) throw new Error('Invalid ad stop response');
+        completeAdStopAttempt(attempt);
+        document.getElementById('stop-ad-modal')?.remove();
+        showNotification(
+          savedAd.status === 'Stopped' && storedAd.status === 'Stopped'
+            ? (isAr ? 'تم تحديث الإعلان' : 'Ad Updated')
+            : (isAr ? 'تم إيقاف الإعلان' : 'Ad Stopped'),
+          isAr
+            ? 'تم حفظ المبلغ المصروف وتحديث أرصدة التمويل معاً.'
+            : 'The spent amount and funding balances were updated together.',
+          'success'
+        );
+        render();
+        if (window.lucide) lucide.createIcons();
+        return true;
+      } catch (error) {
+        const conflict = error?.status === 409;
+        showNotification(
+          isAr ? 'تعذر الحفظ' : 'Ad Not Saved',
+          conflict
+            ? (isAr ? 'تم تغيير هذا الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+            : (error?.message || (isAr ? 'فشل حفظ إيقاف الإعلان.' : 'The ad stop could not be saved.')),
+          conflict ? 'warning' : 'error'
+        );
+        return false;
+      } finally {
+        attempt.promise = null;
+        const liveButton = document.getElementById('stop-ad-submit');
+        if (liveButton) liveButton.disabled = false;
+      }
+    })();
+    return await attempt.promise;
   }
   
   const isEditing = ad.status === 'Stopped';
@@ -348,22 +450,25 @@ function confirmStopAd(id) {
     if (isEditing && remainingDifference !== 0) {
       // Adjust customer balance by the difference (snapped to 2 decimals)
       if (customer.balance !== undefined) {
-        customer.balance = Math.round(((customer.balance || 0) + remainingDifference) * 100) / 100;
-        updateRecord(state.customers, customer.id, customer);
+        const nextBalance = Math.round(((customer.balance || 0) + remainingDifference) * 100) / 100;
+        const customerSaved = await updateRecord(state.customers, customer.id, { balance: nextBalance }, customer._lastModified);
+        if (!customerSaved) return;
       }
       addLog('update', 'customer', customer.id, `Ad stop updated - ${remainingDifference > 0 ? 'returned' : 'used'} $${Math.abs(remainingDifference).toFixed(2)} ${remainingDifference > 0 ? 'to' : 'from'} customer balance`);
     } else if (!isEditing && newRemainingUSD > 0) {
       // First time stopping: add remaining to customer balance (snapped to 2dp)
       if (customer.balance !== undefined) {
-        customer.balance = Math.round(((customer.balance || 0) + newRemainingUSD) * 100) / 100;
-        updateRecord(state.customers, customer.id, customer);
+        const nextBalance = Math.round(((customer.balance || 0) + newRemainingUSD) * 100) / 100;
+        const customerSaved = await updateRecord(state.customers, customer.id, { balance: nextBalance }, customer._lastModified);
+        if (!customerSaved) return;
       }
       addLog('update', 'customer', customer.id, `Ad stopped - returned $${newRemainingUSD.toFixed(2)} to customer balance`);
     }
   }
   
   // Save ad
-  updateRecord(state.ads, ad.id, ad);
+  const adSaved = await updateRecord(state.ads, ad.id, ad, storedAd._lastModified);
+  if (!adSaved) return;
   
   // Close modal
   document.getElementById('stop-ad-modal')?.remove();
@@ -387,10 +492,18 @@ function confirmStopAd(id) {
   lucide.createIcons();
 }
 
-function deleteUser(id) {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'حذف المستخدمين للأدمن فقط' : 'Admin only', 'error');
+async function deleteUser(id) {
+  if (!canManageUsersAction('delete')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية حذف المستخدمين' : 'Requires the Delete Users permission', 'error');
     return;
+  }
+  // Non-admins can never remove an Admin account (server enforces this too).
+  {
+    const _target = (state.users || []).find(u => u && String(u.id) === String(id));
+    if (!isCurrentUserAdmin() && _target && isAdminRole(_target.role)) {
+      showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'فقط المدير يمكنه حذف حساب مدير' : 'Only an Admin can delete an Admin account', 'error');
+      return;
+    }
   }
   const isArDU = state.language === 'ar';
 
@@ -439,15 +552,26 @@ function deleteUser(id) {
   if (confirm(warning)) {
     // Return in-flight missions to the pool so they don't stay assigned to a
     // ghost driver. Delivered history keeps the id for the audit trail.
-    activeMissions.forEach(r => {
-      updateRecord(state.receipts, r.id, { deliveryPersonId: '' });
-    });
-    deleteRecord(state.users, id);
+    for (const r of activeMissions) {
+      if (!await updateRecord(state.receipts, r.id, { deliveryPersonId: '' })) return;
+    }
+    if (!await deleteRecord(state.users, id)) return;
     render();
   }
 }
 
-function updateExchangeRate(value) {
+async function updateExchangeRate(value) {
+  // The rate drives every money conversion in the app — it is gated on
+  // settings.manageExchangeRate (the server rejects the write too).
+  if (!can('settings', 'manageExchangeRate')) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تحتاج صلاحية إدارة سعر الصرف' : 'Requires the Manage Exchange Rate permission',
+      'error'
+    );
+    render();
+    return;
+  }
   // MONEY-MATH: an empty/invalid field parseFloats to NaN; storing it poisons
   // every later save (amountLocal = amountUSD * NaN) while showing a green
   // success toast. Validate first, keep the previous rate on bad input.
@@ -461,6 +585,7 @@ function updateExchangeRate(value) {
     render();
     return;
   }
+  const previousRate = state.defaultExchangeRate;
   state.defaultExchangeRate = rate;
   const record = {
     id: generateId('rate'),
@@ -468,7 +593,12 @@ function updateExchangeRate(value) {
     date: new Date().toISOString(),
     userId: state.currentUser?.id || 'system'
   };
-  addRecord(state.exchangeRateHistory, record);
+  const rateSaved = await addRecord(state.exchangeRateHistory, record);
+  if (!rateSaved) {
+    state.defaultExchangeRate = previousRate;
+    render();
+    return;
+  }
   showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث سعر الصرف' : 'Exchange rate updated', 'success');
 }
 
@@ -496,9 +626,30 @@ function printReceiptCard(btn) {
 }
 
 function exportData() {
+  // Local mode can export its complete local workspace. Server mode can only
+  // export the records currently loaded in this browser; that snapshot may be
+  // stale/permission-scoped and the online restore intentionally cannot write
+  // users, wallet ledger, subscriptions or audit history.
+  if (!isCurrentUserAdmin()) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تصدير النسخة الاحتياطية الكاملة للمدير فقط' : 'Full backup export is Admin only',
+      'error'
+    );
+    return;
+  }
+  const serverPartialSnapshot = isServerModeEnabled();
+  if (serverPartialSnapshot) {
+    const proceed = confirm(
+      state.language === 'ar'
+        ? 'هذا تقرير جزئي من البيانات المحمّلة حالياً، وليس نسخة خادم قابلة للاستعادة. قد يكون قديماً أو ناقصاً، وتم حذف بيانات نظام الملابس للحفاظ على سلامة المخزون. استيراد ملفات الخادم معطّل ويتطلب صيانة خارج التطبيق. هل تريد المتابعة؟'
+        : 'This is a PARTIAL report of data currently loaded on this device, not a restorable full-server backup. It may be stale or incomplete. The clothes domain is omitted to protect inventory integrity. Server-file import is disabled and requires an offline maintenance workflow. Continue?'
+    );
+    if (!proceed) return;
+  }
   // Create secure export (no plaintext secrets)
   const exportState = JSON.parse(JSON.stringify(state));
-  
+
   // Remove sensitive data from export
   if (exportState.users) {
     exportState.users = exportState.users.map(u => {
@@ -553,6 +704,16 @@ function exportData() {
   exportState.clothesShipments = filterVisible(exportState.clothesShipments);
   exportState.clothesOrders = filterVisible(exportState.clothesOrders);
   exportState.clothesSettings = filterVisible(exportState.clothesSettings);
+  if (serverPartialSnapshot) {
+    // Orders, shipments and products are one inventory domain. Exporting only
+    // some of it invites an unsafe partial restore, while clothesOrders itself
+    // is server-transaction controlled. Omit the entire domain from server
+    // reports; local-mode full backups remain unchanged.
+    delete exportState.clothesProducts;
+    delete exportState.clothesShipments;
+    delete exportState.clothesOrders;
+    delete exportState.clothesSettings;
+  }
   
   // Add export metadata
   const checksum = DataIntegrity.calculateChecksum(exportState);
@@ -560,6 +721,14 @@ function exportData() {
     exportedAt: new Date().toISOString(),
     version: '3.0.1',
     source: isServerModeEnabled() ? 'server' : 'local',
+    backupScope: serverPartialSnapshot ? 'client-cache-partial' : 'full-local',
+    authoritative: !serverPartialSnapshot,
+    restorableCollections: serverPartialSnapshot
+      ? []
+      : ['customers', 'pages', 'ads', 'receipts', 'exchangeRateHistory', 'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings'],
+    nonRestorableCollections: serverPartialSnapshot
+      ? ['customers', 'pages', 'ads', 'receipts', 'exchangeRateHistory', 'users', 'walletTransactions', 'serviceSubscriptions', 'logs', 'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings']
+      : [],
     visibleOnly: true,
     counts,
     checksum
@@ -570,19 +739,35 @@ function exportData() {
   const url = URL.createObjectURL(dataBlob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = `albayan-backup-${getTodayDateString()}.json`;
+  link.download = `${serverPartialSnapshot ? 'albayan-server-partial-snapshot' : 'albayan-backup'}-${getTodayDateString()}.json`;
   link.click();
   URL.revokeObjectURL(url);
   
   // Create auto backup
   createAutoBackup();
   
-  addAuditLog('Export', 'system', 'Data exported successfully');
-  showNotification(state.language === 'ar' ? 'تم التصدير' : 'Exported', state.language === 'ar' ? 'تم تصدير البيانات بنجاح' : 'Data exported successfully', 'success');
+  addAuditLog('Export', 'system', serverPartialSnapshot ? 'Partial client snapshot exported' : 'Local backup exported successfully');
+  showNotification(
+    state.language === 'ar' ? 'تم التصدير' : 'Exported',
+    serverPartialSnapshot
+      ? (state.language === 'ar' ? 'تم تصدير تقرير جزئي غير قابل للاستعادة. تم حذف بيانات الملابس، واستيراد الخادم يتطلب صيانة خارج التطبيق.' : 'Non-restorable partial report exported. Clothes data is omitted; server restore requires an offline maintenance workflow.')
+      : (state.language === 'ar' ? 'تم تصدير النسخة المحلية بنجاح' : 'Local backup exported successfully'),
+    serverPartialSnapshot ? 'warning' : 'success'
+  );
 }
 
 function importData() {
   const isAr = state.language === 'ar';
+  if (isServerModeEnabled()) {
+    showNotification(
+      isAr ? 'استيراد الخادم معطّل' : 'Server Import Disabled',
+      isAr
+        ? 'تقارير الخادم الجزئية ليست نسخاً احتياطية قابلة للاستعادة. الاستعادة تتطلب إجراء صيانة خارج التطبيق مع تحقق كامل من العلاقات والمخزون.'
+        : 'Partial server reports are not restorable backups. Restore requires an offline maintenance workflow with full relationship and inventory validation.',
+      'warning'
+    );
+    return;
+  }
   // In server mode, import must go through the backend (Admin only) to keep the server as source of truth.
   async function importDataToServer(sanitizedImport) {
     const role = String(state.currentUser?.role || '').toLowerCase();
@@ -640,8 +825,8 @@ function importData() {
 
     const ok1 = confirm(
       isAr
-        ? `استيراد إلى الخادم (أدمن)\n\nسيتم استبدال/الكتابة فوق بيانات الخادم لجميع المستخدمين.\n\nتحتوي النسخة الاحتياطية على (ظاهر / محذوف):\n- العملاء: ${counts.customers.visible} / ${counts.customers.deleted}\n- الصفحات: ${counts.pages.visible} / ${counts.pages.deleted}\n- الإعلانات: ${counts.ads.visible} / ${counts.ads.deleted}\n- الوصولات: ${counts.receipts.visible} / ${counts.receipts.deleted}\n- أسعار الصرف: ${counts.exchangeRateHistory.visible} / ${counts.exchangeRateHistory.deleted}\n\nهل تريد المتابعة؟`
-        : `SERVER IMPORT (Admin)\n\nThis will overwrite/replace server data for ALL users.\n\nBackup contains (visible / deleted):\n- Customers: ${counts.customers.visible} / ${counts.customers.deleted}\n- Pages: ${counts.pages.visible} / ${counts.pages.deleted}\n- Ads: ${counts.ads.visible} / ${counts.ads.deleted}\n- Receipts: ${counts.receipts.visible} / ${counts.receipts.deleted}\n- Exchange Rates: ${counts.exchangeRateHistory.visible} / ${counts.exchangeRateHistory.deleted}\n\nContinue?`
+        ? `استيراد جزئي لبيانات العمل إلى الخادم (أدمن)\n\nسيتم استبدال المجموعات المذكورة لجميع المستخدمين. لن تتم استعادة المستخدمين أو معاملات المحفظة أو الاشتراكات أو سجلات التدقيق، وسيتم تجاهل هذه المصفوفات إن وجدت في الملف.\n\nيحتوي الملف على (ظاهر / محذوف):\n- العملاء: ${counts.customers.visible} / ${counts.customers.deleted}\n- الصفحات: ${counts.pages.visible} / ${counts.pages.deleted}\n- الإعلانات: ${counts.ads.visible} / ${counts.ads.deleted}\n- الوصولات: ${counts.receipts.visible} / ${counts.receipts.deleted}\n- أسعار الصرف: ${counts.exchangeRateHistory.visible} / ${counts.exchangeRateHistory.deleted}\n\nهل تريد متابعة الاستعادة الجزئية؟`
+        : `PARTIAL SERVER BUSINESS-DATA IMPORT (Admin)\n\nThis replaces the listed business collections for all users. It does NOT restore users, wallet transactions, subscriptions, or audit logs; any such arrays in the file are ignored.\n\nFile contains (visible / deleted):\n- Customers: ${counts.customers.visible} / ${counts.customers.deleted}\n- Pages: ${counts.pages.visible} / ${counts.pages.deleted}\n- Ads: ${counts.ads.visible} / ${counts.ads.deleted}\n- Receipts: ${counts.receipts.visible} / ${counts.receipts.deleted}\n- Exchange Rates: ${counts.exchangeRateHistory.visible} / ${counts.exchangeRateHistory.deleted}\n\nContinue with this partial restore?`
     );
     if (!ok1) return;
     const phrase = String(prompt(isAr ? 'اكتب IMPORT للتأكيد (حساس لحالة الأحرف):' : 'Type IMPORT to confirm (case-sensitive):') || '');
@@ -693,6 +878,10 @@ function importData() {
         const id = String(r?.id || '').trim();
         if (!id) {
           throw new Error(`Invalid backup: "${collection}" contains a record without an id`);
+        }
+        const idCheck = Security.validateRecordIdentifiers(r, `${collection}[${idsAll.size}]`);
+        if (!idCheck.valid) {
+          throw new Error(`Invalid backup: ${idCheck.error}`);
         }
         if (idsAll.has(id)) {
           throw new Error(`Invalid backup: "${collection}" contains duplicate id "${id}"`);
@@ -797,6 +986,8 @@ function importData() {
       await verifyCollectionMatchesBackup(collection, activeList, activeIds);
     };
 
+    const importIdentity = getServerSessionIdentity();
+    stopServerLiveSync();
     try {
       showNotification(isAr ? 'استيراد' : 'Import', isAr ? 'جارٍ بدء الاستيراد إلى الخادم...' : 'Starting server import...', 'info');
       // Core collections always; Clothes System collections only when present
@@ -828,16 +1019,10 @@ function importData() {
         await apiAdminBulkImport(collectionsMap);
         bulkImported = true;
       } catch (e) {
-        // Older servers don't have the transactional endpoint yet (404/405):
-        // fall back to the legacy one-request-per-record flow below.
-        // Anything else is a real failure — the transaction rolled back and
-        // the server is untouched.
-        if (e?.status !== 404 && e?.status !== 405) throw e;
-        showNotification(
-          isAr ? 'استيراد' : 'Import',
-          isAr ? 'الخادم لا يدعم الاستيراد الذري بعد — جارٍ الاستيراد سجلاً بسجل...' : 'Server does not support atomic import yet — importing record by record...',
-          'warning'
-        );
+        if (e?.status === 404 || e?.status === 405) {
+          throw new Error(isAr ? 'هذا الخادم لا يدعم الاستيراد الذري الآمن. حدّث الخادم أولاً.' : 'This server does not support safe transactional import. Update the server first.');
+        }
+        throw e;
       }
 
       if (bulkImported) {
@@ -845,20 +1030,25 @@ function importData() {
         for (const [name, prepared] of preparedByCollection.entries()) {
           await verifyCollectionMatchesBackup(name, prepared.activeList, prepared.activeIds);
         }
-      } else {
-        for (const [name, records] of Object.entries(collectionsMap)) {
-          await applyCollectionReplace(name, records);
-        }
       }
 
       // Reload fresh server state
-      await serverLoadAllData();
+      const loadResult = await serverLoadAllData();
+      if (loadResult?.aborted) return;
       saveState();
-      showNotification(isAr ? 'تم الاستيراد' : 'Imported', isAr ? 'اكتمل الاستيراد إلى الخادم بنجاح.' : 'Server import completed successfully.', 'success');
+      showNotification(
+        isAr ? 'تم الاستيراد الجزئي' : 'Partial Import Complete',
+        isAr
+          ? 'تمت استعادة بيانات العمل المحددة. لم تتم استعادة المستخدمين أو سجل المحفظة أو الاشتراكات أو سجل التدقيق.'
+          : 'Selected business data was restored. Users, wallet/subscription history, and audit logs were not restored.',
+        'warning'
+      );
       render();
     } catch (e) {
       console.error('Server import failed:', e);
       showNotification(isAr ? 'فشل الاستيراد' : 'Import Failed', e?.message || (isAr ? 'فشل الاستيراد إلى الخادم' : 'Server import failed'), 'error');
+    } finally {
+      if (!serverSessionIdentityChanged(importIdentity)) startServerLiveSync();
     }
   }
 
@@ -900,6 +1090,16 @@ function importData() {
             );
             return;
           }
+        }
+
+        // Reject identifiers that could escape a URL/attribute/legacy inline
+        // handler. Do not rewrite them: that would break cross-record links in
+        // a backup while appearing to import successfully.
+        for (const collectionName of PERSISTED_COLLECTIONS) {
+          const records = sanitizedImport[collectionName];
+          if (!Array.isArray(records)) continue;
+          const idCheck = Security.validateRecordIdentifiers(records, collectionName);
+          if (!idCheck.valid) throw new Error(`Invalid backup: ${idCheck.error}`);
         }
 
         // Server-mode import: Admin-only and writes to backend collections
@@ -962,6 +1162,8 @@ function importData() {
         await ensureUsersHavePasswordHashes();
 
         // Persist all collections to IndexedDB
+        for (const name of PERSISTED_COLLECTIONS) clearCollectionCorruption(name);
+        delete state._quarantinedUnsafeRecords;
         if (db) {
           await clearIndexedDBLogs();
         }

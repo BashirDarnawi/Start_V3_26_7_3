@@ -4,24 +4,34 @@
   "description": "Albayan platform — vanilla JS web app + FastAPI backend + Capacitor iOS/Android shells. See PLATFORM_FOUNDATION.md for platform rules.",
   "main": "script.js",
   "scripts": {
+    "build": "npm run build:js && npm run build:css",
     "build:js": "node scripts/build-js.js",
     "build:css": "tailwindcss -c tailwind.config.js -i tailwind-input.css -o assets/tailwind.css --minify",
     "sync:www": "node scripts/sync-www.js",
-    "sync:mobile": "node scripts/sync-www.js && npx cap copy",
-    "test": "echo \"Backend tests: run 'python -m pytest' (see START_HERE.md)\" && exit 0"
+    "sync:mobile": "npm run sync:www && npx cap sync",
+    "test:js": "node scripts/test-permissions.js",
+    "test:backend": "node scripts/test-backend.js",
+    "test": "npm run test:js && npm run test:backend",
+    "verify:generated": "node scripts/verify-artifacts.js",
+    "verify:mobile": "node scripts/verify-artifacts.js --include-native",
+    "release:prepare": "npm run build && npm test && npm run sync:mobile && npm run verify:mobile",
+    "release:check": "npm test && npm run verify:mobile"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
-    "@capacitor/android": "^8.0.0",
-    "@capacitor/cli": "^8.0.0",
-    "@capacitor/core": "^8.0.0",
-    "@capacitor/ios": "^8.0.0"
+    "@capacitor/android": "^8.4.1",
+    "@capacitor/core": "^8.4.1",
+    "@capacitor/ios": "^8.4.1"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.4.1",
     "sharp": "^0.35.3",
-    "tailwindcss": "^3.4.17"
+    "tailwindcss": "^3.4.19"
   }
 }

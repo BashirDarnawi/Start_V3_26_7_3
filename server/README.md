@@ -85,8 +85,20 @@ This protects your logins and data traffic **even without a domain/HTTPS**.
 
 - **ALBAYAN_COOKIE_SECURE**: set to `true` behind HTTPS
 - **DATABASE_URL**: PostgreSQL connection string (recommended)
+- **ALBAYAN_DB_HOST/PORT/NAME/USER/PASSWORD**: safer alternative to
+  `DATABASE_URL` when credentials contain URL punctuation; the Docker Compose
+  setup uses these fields automatically
 - **ALBAYAN_DB_PATH**: SQLite path (only used if DATABASE_URL is not set)
 - **ALBAYAN_SESSION_MS**: session duration in milliseconds
+- **ALBAYAN_TRUST_PROXY_HEADERS**: leave `false` unless the API is reachable only
+  through a trusted reverse proxy that overwrites `CF-Connecting-IP` and
+  `X-Forwarded-For`; otherwise clients can spoof rate-limit identities
+- **ALBAYAN_ENABLE_ONLINE_IMPORT**: maintenance-only whole-backup replacement;
+  defaults to `false` and should never be enabled while users are writing data
+- **ALBAYAN_SETUP_TOKEN**: optional random secret (minimum 16 characters) that
+  enables the one-time browser form for creating the first Admin. Generate one
+  with `openssl rand -hex 32`, enter it in the setup form, then remove it after
+  the first Admin exists. Without it, initialize with `python -m server.create_admin`
 
 Example:
 
@@ -143,5 +155,3 @@ Collections used by the frontend:
 - `customers`
 - `pages`
 - `exchangeRateHistory`
-
-

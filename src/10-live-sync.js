@@ -17,12 +17,32 @@ const _serverLiveSync = {
   // minutes ahead of server time and silently skip everyone else's updates
   // (the server's updated_since window only looks back 15s).
   serverWatermark: 0,
-  // Bumped on every logout / stopServerLiveSync. A sync tick snapshots it before
-  // its awaits and bails if it changed, so an in-flight fetch that resolves
-  // AFTER the user logged out can no longer re-populate the wiped state (which
-  // would leak the previous user's data into the login screen / next session).
-  sessionEpoch: 0
+  fullLoadCursorReady: false,
+  collectionCursors: Object.create(null),
+  // Authentication identity and poller lifecycle are deliberately separate.
+  // sessionEpoch changes only when the authenticated session changes; it is
+  // part of getServerSessionIdentity(), so late full-load/cache responses are
+  // rejected. pollerEpoch changes whenever polling is stopped/restarted, so a
+  // late tick is discarded without invalidating an unrelated full load.
+  sessionEpoch: 0,
+  pollerEpoch: 0
 };
+
+function advanceServerSessionEpoch() {
+  _serverLiveSync.sessionEpoch = (_serverLiveSync.sessionEpoch || 0) + 1;
+  _serverLiveSync.serverWatermark = 0;
+  _serverLiveSync.cursor = 0;
+  _serverLiveSync.fullLoadCursorReady = false;
+  _serverLiveSync.collectionCursors = Object.create(null);
+  _serverLiveSync.lastDeliverySig = null;
+}
+
+function getServerCollectionCursor(collection) {
+  const cursors = _serverLiveSync.collectionCursors;
+  if (!cursors || typeof cursors !== 'object') return 0;
+  const value = Number(cursors[String(collection || '')]);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
 
 function _maxLastModifiedFromArray(arr) {
   if (!Array.isArray(arr)) return 0;
@@ -50,16 +70,89 @@ function computeServerCursorFromState() {
   );
 }
 
+function getServerCollectionVisibilityScope(user, collection) {
+  if (!user?.id) return 'none';
+  const name = String(collection || '');
+  const role = String(user.role || '').toLowerCase();
+  if (name === 'exchangeRateHistory') return 'all';
+  if (name === 'walletTransactions' || name === 'serviceSubscriptions') {
+    return role === 'admin' ? 'all' : 'own';
+  }
+  if (role === 'admin') return 'all';
+  if (role === 'delivery' && ['ads', 'receipts', 'customers'].includes(name)) return 'assigned';
+  const modulePermissions = user.permissions?.[name];
+  if (!Array.isArray(modulePermissions)) return 'none';
+  if (modulePermissions.some(action => String(action).toLowerCase() === 'view')) return 'all';
+  if (modulePermissions.some(action => String(action).toLowerCase() === 'viewown')) return 'own';
+  return 'none';
+}
+
+function getServerVisibilityScopeChanges(beforeUser, afterUser) {
+  return SERVER_SYNC_COLLECTIONS.filter(collection =>
+    getServerCollectionVisibilityScope(beforeUser, collection) !==
+    getServerCollectionVisibilityScope(afterUser, collection)
+  );
+}
+
+function getAuthorizedServerSyncCollections(user = state.currentUser) {
+  return SERVER_SYNC_COLLECTIONS.filter(collection => {
+    if (getServerCollectionVisibilityScope(user, collection) === 'none') return false;
+    if (collection.startsWith('clothes') && !isAdminRole(user?.role)) {
+      return hasSubscription('clothes_system');
+    }
+    return true;
+  });
+}
+
+// Remove data the current authorization scope may no longer expose. Clearing
+// only the in-memory array is insufficient: a reload would rehydrate the old
+// broader result from IndexedDB, and the five-second request cache could do the
+// same without a page reload.
+async function clearServerCollectionsForVisibility(collections) {
+  const identity = getServerSessionIdentity();
+  const names = Array.from(new Set((collections || []).map(String)))
+    .filter(name => SERVER_SYNC_COLLECTIONS.includes(name));
+  if (names.length === 0) return false;
+  for (const name of names) {
+    if (serverSessionIdentityChanged(identity)) return false;
+    state[name] = [];
+    if (_collectionCache[name]) {
+      _collectionCache[name] = { data: null, timestamp: 0, identity: '' };
+    }
+    if (_serverLiveSync.collectionCursors && typeof _serverLiveSync.collectionCursors === 'object') {
+      _serverLiveSync.collectionCursors[name] = 0;
+    }
+    if (typeof clearCollectionCorruption === 'function') clearCollectionCorruption(name);
+    if (db) {
+      const cleared = await saveCollectionToIndexedDB(name, []);
+      if (serverSessionIdentityChanged(identity)) return false;
+      if (cleared === false) markCollectionDirty(name);
+      else if (typeof idbSync === 'object' && idbSync?.dirty) idbSync.dirty.delete(name);
+    }
+  }
+  if (serverSessionIdentityChanged(identity)) return false;
+  _serverLiveSync.cursor = Math.max(0, ...Object.values(_serverLiveSync.collectionCursors || {}).map(Number).filter(Number.isFinite));
+  _serverLiveSync.serverWatermark = _serverLiveSync.cursor;
+  saveState();
+  return true;
+}
+
 async function apiLoadCollectionSince(collection, sinceMs) {
   const all = [];
-  let offset = 0;
+  const indexById = new Map();
+  let afterLastModified = null;
+  let afterId = '';
   const limit = Math.min(1000, SERVER_API.pageSize || 1000);
   const since = Number.isFinite(Number(sinceMs)) ? Number(sinceMs) : 0;
   while (true) {
+    let path = `/api/collections/${encodeURIComponent(collection)}?updated_since=${encodeURIComponent(String(since))}&limit=${limit}&include_deleted=true`;
+    if (afterLastModified !== null && afterId) {
+      path += `&after_last_modified=${encodeURIComponent(String(afterLastModified))}&after_id=${encodeURIComponent(afterId)}`;
+    }
     // Use retry logic for resilience against transient server errors/timeouts
     const items = await withRetry(
       () => apiJson(
-      `/api/collections/${encodeURIComponent(collection)}?updated_since=${encodeURIComponent(String(since))}&limit=${limit}&offset=${offset}&include_deleted=true`,
+      path,
       { method: 'GET' },
       { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
       ),
@@ -67,11 +160,27 @@ async function apiLoadCollectionSince(collection, sinceMs) {
       500 // 500ms base delay
     );
     if (!Array.isArray(items) || items.length === 0) break;
-    for (const entity of items) {
-      if (entity && entity.data) all.push(entity.data);
+    let lastEntity = null;
+    for (const rawEntity of items) {
+      const entity = validateServerEntityResponse(collection, rawEntity, `delta[${all.length}]`);
+      lastEntity = entity;
+      mergeServerEntityDataById(all, indexById, entity);
     }
     if (items.length < limit) break;
-    offset += limit;
+    const nextLastModified = Number(lastEntity?.lastModified);
+    const nextId = String(lastEntity?.id || '');
+    if (!Number.isSafeInteger(nextLastModified) || nextLastModified < 0 || !Security.isValidRecordId(nextId)) {
+      const cursorError = new Error(`Invalid ${collection} delta cursor`);
+      cursorError.code = 'INCOMPLETE_COLLECTION_LOAD';
+      throw cursorError;
+    }
+    if (nextLastModified === afterLastModified && nextId === afterId) {
+      const cursorError = new Error(`Repeated ${collection} delta cursor`);
+      cursorError.code = 'INCOMPLETE_COLLECTION_LOAD';
+      throw cursorError;
+    }
+    afterLastModified = nextLastModified;
+    afterId = nextId;
   }
   return all;
 }
@@ -137,16 +246,21 @@ function applyServerDelta(collectionName, records) {
 }
 
 async function serverLiveSyncOnce() {
-  if (!isServerModeEnabled()) return;
-  if (!state.currentUser) return;
-  if (!SERVER_API.liveSyncEnabled) return;
-  if (document.visibilityState === 'hidden') return;
+  if (!isServerModeEnabled()) return { ok: false, skipped: true };
+  if (!state.currentUser) return { ok: false, skipped: true };
+  if (!SERVER_API.liveSyncEnabled) return { ok: false, skipped: true };
+  if (document.visibilityState === 'hidden') return { ok: true, skipped: true };
 
   // Snapshot the session epoch. After any await we bail if the user logged out
   // (epoch bumped / currentUser cleared) so a late response can't resurrect the
   // wiped state — the "logout wipe undone by an in-flight sync" bug.
-  const _epoch = _serverLiveSync.sessionEpoch;
-  const _syncAborted = () => !state.currentUser || _serverLiveSync.sessionEpoch !== _epoch;
+  const _sessionEpoch = _serverLiveSync.sessionEpoch;
+  const _pollerEpoch = _serverLiveSync.pollerEpoch;
+  const _syncAborted = () => (
+    !state.currentUser ||
+    _serverLiveSync.sessionEpoch !== _sessionEpoch ||
+    _serverLiveSync.pollerEpoch !== _pollerEpoch
+  );
 
   const roleLower = String(state.currentUser.role || '').toLowerCase();
 
@@ -170,7 +284,8 @@ async function serverLiveSyncOnce() {
     ]);
 
     // Bail if the user logged out while these were in flight (see _syncAborted).
-    if (_syncAborted()) return;
+    if (_syncAborted()) return { ok: false, skipped: true };
+    const deliveryFetchFailed = !Array.isArray(ads) || !Array.isArray(receipts) || !Array.isArray(customers);
 
     // Only treat the tick as "changed" when the fetched payload actually
     // differs from the previous one. Comparing against state would always
@@ -205,50 +320,74 @@ async function serverLiveSyncOnce() {
 
     const nextCursor = computeServerCursorFromState();
     _serverLiveSync.cursor = Math.max(_serverLiveSync.cursor || 0, nextCursor);
-    state.serverLastSyncAt = new Date().toISOString();
+    if (deliveryFetchFailed) state.serverLastSyncErrorAt = new Date().toISOString();
+    else {
+      state.serverLastSyncAt = new Date().toISOString();
+      state.serverLastSyncErrorAt = null;
+    }
     // Always re-render when data changed (not just cursor) - ensures edits from admin show immediately
     if (changed) RenderQueue.schedule('liveSync(delivery)');
-    return;
+    return { ok: !deliveryFetchFailed };
   }
 
-  // Admin/Employee: delta sync by lastModified cursor (efficient for large datasets).
-  const since = _serverLiveSync.cursor || computeServerCursorFromState() || 0;
-
+  // Admin/Employee: each collection owns its cursor. A single shared cursor is
+  // unsafe because requests are not one database snapshot: a newer ad could
+  // otherwise advance past an older receipt update that arrived just after
+  // the receipts request finished.
+  // Do not hammer forbidden/unsubscribed endpoints every three seconds. A
+  // permission or subscription refresh changes this list on the next tick,
+  // whose zero cursor then performs a complete catch-up for the newly granted
+  // collection.
+  const deltaCollections = getAuthorizedServerSyncCollections();
+  if (!_serverLiveSync.collectionCursors || typeof _serverLiveSync.collectionCursors !== 'object') {
+    _serverLiveSync.collectionCursors = Object.create(null);
+  }
   let anyFetchFailed = false;
   const safeSince = async (collection) => {
+    const since = getServerCollectionCursor(collection);
     try {
-      return await apiLoadCollectionSince(collection, since);
+      const records = await apiLoadCollectionSince(collection, since);
+      return { collection, since, records, ok: true, forbidden: false };
     } catch (e) {
-      if (e?.status === 403) return [];
-      // A genuine fetch failure: do NOT let the cursor advance past updates we
-      // never received, or those records would be skipped forever.
+      // Keep forbidden collections at cursor zero. If permission is granted
+      // later, the next tick obtains the full newly-visible history.
+      if (e?.status === 403) {
+        _serverLiveSync.collectionCursors[collection] = 0;
+        return { collection, since, records: [], ok: true, forbidden: true };
+      }
       anyFetchFailed = true;
-      return [];
+      return { collection, since, records: [], ok: false, forbidden: false };
     }
   };
-
-  const [adsDelta, receiptsDelta, customersDelta, pagesDelta, exhDelta, clothesProductsDelta, clothesShipmentsDelta, clothesOrdersDelta, clothesSettingsDelta, walletTxDelta, subsDelta] = await Promise.all([
-    safeSince('ads'),
-    safeSince('receipts'),
-    safeSince('customers'),
-    safeSince('pages'),
-    safeSince('exchangeRateHistory'),
-    safeSince('clothesProducts'),
-    safeSince('clothesShipments'),
-    safeSince('clothesOrders'),
-    safeSince('clothesSettings'),
-    // Wallet ledger + subscriptions were written to the server but never
-    // pulled back, so balances reset after logout and never synced between
-    // devices. They are append-only, so delta sync is safe.
-    safeSince('walletTransactions'),
-    safeSince('serviceSubscriptions')
-  ]);
+  const deltaResults = await Promise.all(deltaCollections.map(safeSince));
+  const deltaByCollection = new Map(deltaResults.map(result => [result.collection, result]));
+  const recordsFor = (name) => deltaByCollection.get(name)?.records || [];
+  const adsDelta = recordsFor('ads');
+  const receiptsDelta = recordsFor('receipts');
+  const customersDelta = recordsFor('customers');
+  const pagesDelta = recordsFor('pages');
+  const exhDelta = recordsFor('exchangeRateHistory');
+  const clothesProductsDelta = recordsFor('clothesProducts');
+  const clothesShipmentsDelta = recordsFor('clothesShipments');
+  const clothesOrdersDelta = recordsFor('clothesOrders');
+  const clothesSettingsDelta = recordsFor('clothesSettings');
+  const walletTxDelta = recordsFor('walletTransactions');
+  const subsDelta = recordsFor('serviceSubscriptions');
 
   // Logged out (or a new session started) while these fetches were in flight?
   // Drop the result — applying it would re-fill the just-wiped state.
-  if (_syncAborted()) return;
+  if (_syncAborted()) return { ok: false, skipped: true };
 
-  let changed = false;
+  // A 403 is an authorization result, not merely an empty delta. Purge the old
+  // broader collection from memory, request cache and this user's IndexedDB
+  // namespace before anything can render it again.
+  const forbiddenCollections = deltaResults.filter(result => result.forbidden).map(result => result.collection);
+  if (forbiddenCollections.length > 0) {
+    await clearServerCollectionsForVisibility(forbiddenCollections);
+    if (_syncAborted()) return { ok: false, skipped: true };
+  }
+
+  let changed = forbiddenCollections.length > 0;
   changed = applyServerDelta('ads', adsDelta) || changed;
   changed = applyServerDelta('receipts', receiptsDelta) || changed;
   changed = applyServerDelta('customers', customersDelta) || changed;
@@ -269,55 +408,98 @@ async function serverLiveSyncOnce() {
     }, 100);
   }
 
-  // Cursor bumps to the newest record we saw.
-  const maxDelta = Math.max(
-    _maxLastModifiedFromArray(adsDelta),
-    _maxLastModifiedFromArray(receiptsDelta),
-    _maxLastModifiedFromArray(customersDelta),
-    _maxLastModifiedFromArray(pagesDelta),
-    _maxLastModifiedFromArray(exhDelta),
-    _maxLastModifiedFromArray(clothesProductsDelta),
-    _maxLastModifiedFromArray(clothesShipmentsDelta),
-    _maxLastModifiedFromArray(clothesOrdersDelta),
-    _maxLastModifiedFromArray(clothesSettingsDelta),
-    _maxLastModifiedFromArray(walletTxDelta),
-    _maxLastModifiedFromArray(subsDelta)
-  );
-  // Deltas come straight from the server, so maxDelta is a trustworthy server
-  // timestamp — record it as the watermark for future cursor seeds.
-  if (maxDelta > (_serverLiveSync.serverWatermark || 0)) _serverLiveSync.serverWatermark = maxDelta;
-  // Freeze the cursor for this tick if any collection failed to load, so the
-  // next tick re-requests the same window (idempotent — applyServerDelta
-  // upserts by id) instead of permanently skipping the missed collection.
-  _serverLiveSync.cursor = anyFetchFailed ? since : Math.max(since, maxDelta);
+  // Advance only the collection whose request completed. Failed collections
+  // retain their own prior cursor and are retried without blocking others.
+  for (const result of deltaResults) {
+    if (!result.ok || result.forbidden) continue;
+    const maxDelta = _maxLastModifiedFromArray(result.records);
+    _serverLiveSync.collectionCursors[result.collection] = Math.max(result.since, maxDelta);
+    if (maxDelta > (_serverLiveSync.serverWatermark || 0)) _serverLiveSync.serverWatermark = maxDelta;
+  }
+  // Compatibility/debug aggregate only; correctness never reads this value.
+  _serverLiveSync.cursor = Math.max(0, ...Object.values(_serverLiveSync.collectionCursors).map(Number).filter(Number.isFinite));
   if (anyFetchFailed && typeof updateSyncIndicator === 'function') {
     try { updateSyncIndicator('error'); } catch (_) {}
   }
-  state.serverLastSyncAt = new Date().toISOString();
-
   // Refresh minimal users list occasionally (for assignment dropdowns)
   const now = Date.now();
   if ((now - (_serverLiveSync.lastUsersSyncAt || 0)) > (SERVER_API.usersSyncIntervalMs || 60000)) {
     _serverLiveSync.lastUsersSyncAt = now;
     try {
+      const usersBefore = JSON.stringify(state.users || []);
       const usersList = await apiListUsersForUi();
+      if (_syncAborted()) return { ok: false, skipped: true };
       if (Array.isArray(usersList)) {
         const byId = new Map();
         for (const u of usersList) {
           if (u && u.id) byId.set(u.id, u);
         }
         if (state.currentUser?.id) byId.set(state.currentUser.id, { ...byId.get(state.currentUser.id), ...state.currentUser });
+        // Records with a debounce-pending server update (admin mid-edit in the
+        // Permissions Manager) must keep the LOCAL version — the fetched list
+        // may predate the pending PATCH and would silently revert the edits.
+        try {
+          if (typeof _serverUserUpdate === 'object' && _serverUserUpdate?.pending?.size) {
+            for (const uid of _serverUserUpdate.pending.keys()) {
+              const local = (state.users || []).find(u => u && String(u.id) === String(uid));
+              if (local) byId.set(local.id, local);
+            }
+          }
+        } catch (_) {}
         state.users = Array.from(byId.values());
       }
-      // Also refresh current user's permissions (so they don't need to re-login for new permissions)
-      await refreshCurrentUserPermissions();
+      // Also refresh current user's permissions (so they don't need to re-login
+      // for new permissions). Either change must trigger a re-render — without
+      // it, a locked sidebar stays locked even after the data recovers.
+      const accessBefore = Security.sanitizeObject(state.currentUser || {});
+      const permsChanged = await refreshCurrentUserPermissions();
+      if (_syncAborted()) return { ok: false, skipped: true };
+      const scopeChanges = permsChanged
+        ? getServerVisibilityScopeChanges(accessBefore, state.currentUser)
+        : [];
+      if (permsChanged) {
+        // Stop reusing any in-flight/broader snapshot, purge the affected
+        // collections, then perform a fresh server-scoped load. A view->viewOwn
+        // response has no tombstones for rows that became unauthorized, so
+        // merging deltas can never repair this transition safely.
+        cancelPendingRequests();
+        invalidateUsersListCache();
+        // The Admin users list is authorization-scoped too. Keep only the
+        // freshly-authenticated caller until /api/users (or /users/public)
+        // returns the new scope, and replace its persisted cache immediately.
+        state.users = [];
+        upsertCurrentUserIntoUsers();
+        if (db) {
+          const usersCleared = await saveCollectionToIndexedDB('users', state.users);
+          if (_syncAborted()) return { ok: false, skipped: true };
+          if (usersCleared === false) markCollectionDirty('users');
+          else if (typeof idbSync === 'object' && idbSync?.dirty) idbSync.dirty.delete('users');
+        }
+        await clearServerCollectionsForVisibility(scopeChanges);
+        if (_syncAborted()) return { ok: false, skipped: true };
+        const scopedReload = await serverLoadAllData();
+        if (_syncAborted() || scopedReload?.aborted) return { ok: false, skipped: true };
+        if (Array.isArray(scopedReload?.failed) && scopedReload.failed.length > 0) anyFetchFailed = true;
+        changed = true;
+      }
+      if (permsChanged || usersBefore !== JSON.stringify(state.users || [])) {
+        changed = true;
+      }
     } catch (e) {
       // User list sync failure - non-critical, just log in debug mode
+      anyFetchFailed = true;
+      state.serverLastSyncErrorAt = new Date().toISOString();
       if (ALBAYAN_DEBUG_MODE) console.warn('[serverLiveSyncOnce] Users sync failed:', e?.message || e);
     }
   }
 
+  if (anyFetchFailed) state.serverLastSyncErrorAt = new Date().toISOString();
+  else {
+    state.serverLastSyncAt = new Date().toISOString();
+    state.serverLastSyncErrorAt = null;
+  }
   if (changed) RenderQueue.schedule('liveSync(delta)');
+  return { ok: !anyFetchFailed };
 }
 
 async function serverLiveSyncTick() {
@@ -325,8 +507,8 @@ async function serverLiveSyncTick() {
   _serverLiveSync.inFlight = true;
   updateSyncIndicator('syncing');
   try {
-    await serverLiveSyncOnce();
-    updateSyncIndicator('synced');
+    const result = await serverLiveSyncOnce();
+    updateSyncIndicator(result?.ok === false ? 'error' : 'synced');
   } catch (e) {
     console.warn('[serverLiveSyncTick] Sync failed:', e?.message || e);
     updateSyncIndicator('error');
@@ -379,14 +561,20 @@ async function manualSyncData() {
   updateSyncIndicator('syncing');
   showNotification(state.language === 'ar' ? 'جارٍ المزامنة' : 'Syncing', state.language === 'ar' ? 'جارٍ تحديث البيانات من السيرفر...' : 'Refreshing data from server...', 'info');
 
+  const syncIdentity = getServerSessionIdentity();
+  stopServerLiveSync();
   try {
     // Clear cache to force fresh data
     for (const key of Object.keys(_collectionCache)) {
-      _collectionCache[key] = { data: null, timestamp: 0 };
+      _collectionCache[key] = { data: null, timestamp: 0, identity: '' };
     }
-    _pendingRequests.clear();
+    cancelPendingRequests();
 
-    await serverLoadAllData();
+    const result = await serverLoadAllData();
+    if (result?.aborted) return;
+    if (Array.isArray(result?.failed) && result.failed.length > 0) {
+      throw new Error(`Failed collections: ${result.failed.map(x => x.collection).filter(Boolean).join(', ')}`);
+    }
     updateSyncIndicator('synced');
     showNotification(state.language === 'ar' ? 'تمت المزامنة' : 'Synced', state.language === 'ar' ? 'تم تحديث البيانات بنجاح' : 'Data refreshed successfully', 'success');
     forceFullRender();
@@ -394,6 +582,8 @@ async function manualSyncData() {
     console.error('[manualSyncData] Failed:', e);
     updateSyncIndicator('error');
     showNotification(state.language === 'ar' ? 'فشلت المزامنة' : 'Sync Failed', state.language === 'ar' ? 'تعذر تحديث البيانات. تحقق من اتصالك.' : 'Could not refresh data. Check your connection.', 'error');
+  } finally {
+    if (!serverSessionIdentityChanged(syncIdentity)) startServerLiveSync();
   }
 }
 
@@ -401,8 +591,10 @@ async function manualSyncData() {
 window.manualSyncData = manualSyncData;
 
 function stopServerLiveSync() {
-  // Invalidate any in-flight sync tick so its result is discarded (see field doc).
-  _serverLiveSync.sessionEpoch = (_serverLiveSync.sessionEpoch || 0) + 1;
+  // Stop/restart invalidates only poll ticks. Authentication identity is
+  // advanced explicitly at login/logout boundaries; changing it here made
+  // startup abort its own cookie-session full load.
+  _serverLiveSync.pollerEpoch = (_serverLiveSync.pollerEpoch || 0) + 1;
   if (_serverLiveSync.timer) {
     clearInterval(_serverLiveSync.timer);
     _serverLiveSync.timer = null;
@@ -435,7 +627,13 @@ function startServerLiveSync() {
   // Before the first server load this session it is 0, so fall back to the state
   // estimate for a fast start; serverLoadAllData re-seeds authoritatively (and
   // can only LOWER a clock-skewed estimate) the moment it completes.
-  _serverLiveSync.cursor = _serverLiveSync.serverWatermark || computeServerCursorFromState();
+  // Only a COMPLETE full load may seed a non-zero global cursor. If startup
+  // was throttled or even one collection failed, begin at zero so a failed
+  // collection cannot permanently miss changes below another collection's
+  // newer timestamp.
+  _serverLiveSync.cursor = _serverLiveSync.fullLoadCursorReady
+    ? (_serverLiveSync.serverWatermark || 0)
+    : 0;
   _serverLiveSync.lastUsersSyncAt = 0;
 
   // Run one immediately, then poll.
@@ -473,7 +671,56 @@ function startServerLiveSync() {
   }
 }
 
-async function handleLogin(email, password) {
+let _loginGeneration = 0;
+let _activeLogin = null;
+let _logoutInFlight = null;
+let _serverAuthExpiryInFlight = null;
+
+function setLoginFormBusy(busy) {
+  const form = document.getElementById('login-form');
+  if (!form) return;
+  form.setAttribute('aria-busy', busy ? 'true' : 'false');
+  const button = form.querySelector('button[type="submit"]');
+  if (button) button.disabled = !!busy;
+  for (const input of form.querySelectorAll('input')) input.disabled = !!busy;
+}
+
+function loginAttemptIsCurrent(generation) {
+  return generation === _loginGeneration && !_logoutInFlight && !_serverAuthExpiryInFlight;
+}
+
+function handleLogin(email, password) {
+  if (_logoutInFlight || _serverAuthExpiryInFlight) {
+    showNotification(
+      state.language === 'ar' ? 'الرجاء الانتظار' : 'Please Wait',
+      state.language === 'ar' ? 'جارٍ إنهاء الجلسة السابقة.' : 'The previous session is still closing.',
+      'info'
+    );
+    return Promise.resolve(false);
+  }
+  if (_activeLogin && _activeLogin.generation === _loginGeneration) return _activeLogin.promise;
+
+  const generation = ++_loginGeneration;
+  setLoginFormBusy(true);
+  const promise = _handleLoginOnce(email, password, generation)
+    .catch((error) => {
+      if (loginAttemptIsCurrent(generation)) {
+        console.warn('[handleLogin] Failed:', error?.message || error);
+        showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'تعذّر تسجيل الدخول.' : 'Could not sign in.', 'error');
+      }
+      return false;
+    });
+  const entry = { generation, promise };
+  _activeLogin = entry;
+  const cleanup = () => {
+    if (_activeLogin === entry) _activeLogin = null;
+    if (loginAttemptIsCurrent(generation)) setLoginFormBusy(false);
+  };
+  promise.then(cleanup, cleanup);
+  return promise;
+}
+
+async function _handleLoginOnce(email, password, loginGeneration) {
   // #region agent log
   // Hypothesis H-LOGIN: Login failures are caused by one of:
   // (a) user not found due to stored email whitespace/case issues
@@ -506,6 +753,7 @@ async function handleLogin(email, password) {
       } catch (_) {}
       // #endregion
       const user = await apiLogin(email, password);
+      if (!loginAttemptIsCurrent(loginGeneration)) return false;
       if (!user) {
         // #region agent log
         try {
@@ -518,7 +766,31 @@ async function handleLogin(email, password) {
         return;
       }
 
+      // Abort/detach every request and response cache belonging to the prior
+      // anonymous/user identity before activating this login.
+      cancelPendingRequests();
+      invalidateUsersListCache();
+      for (const key of Object.keys(_collectionCache)) {
+        _collectionCache[key] = { data: null, timestamp: 0, identity: '' };
+      }
+      advanceServerSessionEpoch();
       state.currentUser = user;
+      // Switch from the unauthenticated namespace to this exact
+      // server+user cache before any business data is read or written.
+      activateServerCollectionStorage(user);
+      if (db) {
+        try {
+          await loadCollectionsFromStorage(null);
+          if (!loginAttemptIsCurrent(loginGeneration)) return false;
+          assertCachedCollectionIdentifiersSafe();
+        } catch (_) {
+          for (const name of PERSISTED_COLLECTIONS) state[name] = [];
+        }
+      }
+      // Seed state.users immediately: the first render happens BEFORE
+      // serverLoadAllData, and hasPermission/sidebar read state.users — on a
+      // fresh device it would otherwise be empty and show "No access granted".
+      upsertCurrentUserIntoUsers();
       // #region agent log
       try {
         if (typeof window.__albayanDebugEmit === 'function') {
@@ -557,9 +829,16 @@ async function handleLogin(email, password) {
       document.body.appendChild(loadingOverlay);
 
       try {
-        await serverLoadAllData();
-        showNotification(state.language === 'ar' ? 'تم تحميل البيانات' : 'Data Loaded', state.language === 'ar' ? 'تمت مزامنة جميع البيانات بنجاح' : 'All data synchronized successfully', 'success');
+        const loadResult = await serverLoadAllData();
+        if (!loginAttemptIsCurrent(loginGeneration)) return false;
+        if (loadResult?.aborted) return;
+        if (loadResult && Array.isArray(loadResult.failed) && loadResult.failed.length > 0) {
+          showNotification(state.language === 'ar' ? 'تحميل جزئي' : 'Partially Loaded', state.language === 'ar' ? 'تم تسجيل الدخول، لكن فشل تحميل بعض البيانات. جرّب التحديث.' : 'Logged in, but some data failed to load. Try Refresh.', 'warning');
+        } else {
+          showNotification(state.language === 'ar' ? 'تم تحميل البيانات' : 'Data Loaded', state.language === 'ar' ? 'تمت مزامنة جميع البيانات بنجاح' : 'All data synchronized successfully', 'success');
+        }
       } catch (e) {
+        if (!loginAttemptIsCurrent(loginGeneration)) return false;
         // serverLoadAllData should be tolerant, but keep a belt-and-suspenders guard.
         console.warn('Server data load failed after login:', e);
         showNotification(state.language === 'ar' ? 'تحذير السيرفر' : 'Server Warning', state.language === 'ar' ? 'تم تسجيل الدخول، لكن فشل تحميل بعض البيانات. جرّب التحديث.' : 'Logged in, but some data failed to load. Try Refresh.', 'warning');
@@ -569,10 +848,12 @@ async function handleLogin(email, password) {
       }
 
       // Start live sync so other users' changes appear without manual refresh.
+      if (!loginAttemptIsCurrent(loginGeneration)) return false;
       startServerLiveSync();
       render();
       return;
     } catch (e) {
+      if (!loginAttemptIsCurrent(loginGeneration)) return false;
       // #region agent log
       try {
         if (typeof window.__albayanDebugEmit === 'function') {
@@ -589,13 +870,26 @@ async function handleLogin(email, password) {
       // The server returns 503 with a "not initialized" hint in that case.
       const _msg = String(e?.message || '');
       if (e?.status === 503 && /not initialized|no users/i.test(_msg)) {
-        state.needsServerSetup = true;
+        const setupStatus = await apiNeedsSetup();
+        const browserSetupAvailable = setupStatus?.needsSetup === true && setupStatus?.setupEnabled === true;
+        state.needsServerSetup = browserSetupAvailable;
         state.serverHasNoUsers = true;
-        showNotification(
-          state.language === 'ar' ? 'إعداد أول مرة' : 'First-time setup',
-          state.language === 'ar' ? 'لا يوجد حساب بعد. أنشئ حساب المدير الأول للبدء.' : 'No account yet. Create the first admin to get started.',
-          'info'
-        );
+        state.serverSetupEnabled = setupStatus?.setupEnabled === true;
+        if (browserSetupAvailable) {
+          showNotification(
+            state.language === 'ar' ? 'إعداد أول مرة' : 'First-time setup',
+            state.language === 'ar' ? 'لا يوجد حساب بعد. أدخل رمز إعداد الخادم لإنشاء المدير الأول.' : 'No account exists yet. Enter the server setup token to create the first admin.',
+            'info'
+          );
+        } else {
+          showNotification(
+            state.language === 'ar' ? 'إعداد الخادم مطلوب' : 'Server Setup Required',
+            state.language === 'ar'
+              ? 'إعداد المتصفح معطّل. يجب على مشغل الخادم استخدام متغيرات ALBAYAN_BOOTSTRAP_ADMIN_* أو أمر إنشاء المدير من الطرفية.'
+              : 'Browser setup is disabled. The server operator must use the ALBAYAN_BOOTSTRAP_ADMIN_* environment variables or the create-admin CLI command.',
+            'warning'
+          );
+        }
         render();
         return;
       }
@@ -675,8 +969,8 @@ async function handleLogin(email, password) {
     showNotification(
       state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed',
       state.language === 'ar'
-        ? 'لا توجد بيانات كلمة مرور لهذا الحساب (ربما من نسخة احتياطية قديمة). استخدم "نسيت كلمة المرور؟" أو أنشئ مفتاح استعادة من الإعدادات.'
-        : 'This account has no password data (likely from an old backup). Use “Forgot password?” or generate a Recovery Key in Settings.',
+        ? 'لا توجد بيانات كلمة مرور لهذا الحساب (ربما من نسخة احتياطية قديمة). اطلب من المدير تعيين كلمة مرور جديدة.'
+        : 'This account has no password data (likely from an old backup). Ask an administrator to set a new password.',
       'error'
     );
     addSecurityLog('login_missing_password_data', sanitizedEmail);
@@ -709,6 +1003,7 @@ async function handleLogin(email, password) {
     } catch (_) {}
     // #endregion
     passwordValid = await Security.verifyPassword(sanitizedPassword, user.passwordHash, user.salt, algo, iterations);
+    if (!loginAttemptIsCurrent(loginGeneration)) return false;
     // #region agent log
     try {
       if (typeof window.__albayanDebugEmit === 'function') {
@@ -725,6 +1020,7 @@ async function handleLogin(email, password) {
     if (passwordValid) {
       // Migrate to PBKDF2 hashed password
       const { hash, salt, algo, iterations } = await Security.hashPassword(sanitizedPassword, null, { algo: 'pbkdf2-sha256' });
+      if (!loginAttemptIsCurrent(loginGeneration)) return false;
       user.passwordHash = hash;
       user.salt = salt;
       user.passwordAlgo = algo;
@@ -758,6 +1054,7 @@ async function handleLogin(email, password) {
     if ((user.passwordAlgo || 'sha256') !== 'pbkdf2-sha256') {
       try {
         const upgraded = await Security.hashPassword(sanitizedPassword, null, { algo: 'pbkdf2-sha256' });
+        if (!loginAttemptIsCurrent(loginGeneration)) return false;
         user.passwordHash = upgraded.hash;
         user.salt = upgraded.salt;
         user.passwordAlgo = upgraded.algo;
@@ -793,55 +1090,182 @@ async function handleLogin(email, password) {
   }
 }
 
-function handleLogout() {
-  if (state.currentUser) {
-    addAuditLog('Logout', state.currentUser.id, `User ${Security.escapeHtml(state.currentUser.name)} logged out`);
-  }
-  
-  if (isServerModeEnabled()) {
-    apiLogout().catch(() => {});
-  }
+function waitForPromiseBounded(promise, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, Math.max(0, Number(timeoutMs) || 0));
+    Promise.resolve(promise).then(finish, finish);
+  });
+}
 
-  stopServerLiveSync();
+function showSessionTransitionOverlay(message) {
+  document.getElementById('session-transition-overlay')?.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'session-transition-overlay';
+  overlay.className = 'fixed inset-0 bg-white/85 dark:bg-slate-900/85 backdrop-blur-sm z-[100] flex items-center justify-center';
+  overlay.innerHTML = `<div class="text-center"><div class="w-10 h-10 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mx-auto mb-3"></div><p class="font-medium text-slate-700 dark:text-slate-200">${Security.escapeHtml(message)}</p></div>`;
+  document.body.appendChild(overlay);
+  return overlay;
+}
 
-  // Destroy session
-  SessionManager.destroySession();
-
-  // Clear all caches
+function resetAuthenticatedServerCaches() {
   _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 };
-  _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000 };
-
-  // DATA ISOLATION (shared device): in SERVER mode the server is the source of
-  // truth, so wipe the previous user's business data from memory + caches so it
-  // can never be shown to — or kept by — the next user if their fresh fetch
-  // fails transiently. In LOCAL mode these collections are the ONLY copy of the
-  // data, so they must NOT be cleared.
-  if (isServerModeEnabled()) {
-    const _cols = (typeof PERSISTED_COLLECTIONS !== 'undefined' && Array.isArray(PERSISTED_COLLECTIONS))
-      ? PERSISTED_COLLECTIONS
-      : ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory'];
-    for (const name of _cols) state[name] = [];
-    try {
-      if (typeof _collectionCache === 'object' && _collectionCache) {
-        for (const k of Object.keys(_collectionCache)) _collectionCache[k] = { data: null, timestamp: 0 };
-      }
-    } catch (_) {}
-    try { if (typeof _pendingRequests !== 'undefined' && _pendingRequests && _pendingRequests.clear) _pendingRequests.clear(); } catch (_) {}
-    _serverLiveSync.serverWatermark = 0;
-    _serverLiveSync.cursor = 0;
-    // Also drop the cached copies in IndexedDB so a full page reload by a
-    // different user on this device doesn't surface them before re-auth.
-    if (db) {
-      for (const name of _cols) {
-        try { saveCollectionToIndexedDB(name, []).catch(() => {}); } catch (_) {}
-      }
-    }
+  _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000, identity: '' };
+  for (const key of Object.keys(_collectionCache)) {
+    _collectionCache[key] = { data: null, timestamp: 0, identity: '' };
   }
+  _pendingRequests.clear();
+  _serverLiveSync.serverWatermark = 0;
+  _serverLiveSync.cursor = 0;
+  _serverLiveSync.fullLoadCursorReady = false;
+  _serverLiveSync.collectionCursors = Object.create(null);
+}
 
+function discardPendingServerUserUpdates() {
+  try {
+    for (const timer of _serverUserUpdate.timers.values()) clearTimeout(timer);
+    _serverUserUpdate.timers.clear();
+    _serverUserUpdate.pending.clear();
+  } catch (_) {}
+}
+
+async function wipeAuthenticatedServerDataFromClient() {
+  const collections = Array.isArray(PERSISTED_COLLECTIONS)
+    ? PERSISTED_COLLECTIONS
+    : ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory'];
+  for (const name of collections) state[name] = [];
+  state.logs = [];
+  state.serverLogs = [];
+  state.serverLogsLoadedAt = 0;
+  if (!db) return;
+  const writes = collections.map(name => saveCollectionToIndexedDB(name, []));
+  writes.push(clearIndexedDBLogs());
+  await Promise.allSettled(writes);
+}
+
+function emergencyFinishClientSignOut(serverMode, expired) {
+  try { stopServerLiveSync(); } catch (_) {}
+  try { advanceServerSessionEpoch(); } catch (_) {}
+  try { cancelPendingRequests(); } catch (_) {}
+  try { discardPendingServerUserUpdates(); } catch (_) {}
+  try { SessionManager.destroySession(); } catch (_) {}
+  try { resetAuthenticatedServerCaches(); } catch (_) {}
+  if (serverMode) {
+    for (const name of PERSISTED_COLLECTIONS) state[name] = [];
+    state.logs = [];
+    state.serverLogs = [];
+  }
   state.currentUser = null;
+  if (serverMode) activateAnonymousServerCollectionStorage();
   state.currentView = 'analytics';
   saveState();
-  showNotification(state.language === 'ar' ? 'تم تسجيل الخروج' : 'Logged Out', state.language === 'ar' ? 'إلى اللقاء قريباً!' : 'See you soon!', 'info');
+  showNotification(
+    state.language === 'ar' ? (expired ? 'انتهت الجلسة' : 'تم تسجيل الخروج') : (expired ? 'Session Expired' : 'Logged Out'),
+    state.language === 'ar' ? 'سجّل الدخول مرة أخرى للمتابعة.' : 'Please sign in again to continue.',
+    expired ? 'warning' : 'info'
+  );
   render();
 }
 
+async function _handleLogoutOnce() {
+  const serverMode = isServerModeEnabled();
+  const overlay = showSessionTransitionOverlay(state.language === 'ar' ? 'جارٍ تسجيل الخروج...' : 'Signing out...');
+  try {
+    if (state.currentUser) {
+      addAuditLog('Logout', state.currentUser.id, `User ${Security.escapeHtml(state.currentUser.name)} logged out`);
+    }
+    // Stop new sync work immediately, but keep the authenticated identity until
+    // pending user edits and the logout request have settled. Rendering the
+    // login screen before apiLogout completed allowed that delayed request to
+    // delete a newly-created replacement session.
+    stopServerLiveSync();
+    let pendingUpdates = null;
+    try { pendingUpdates = flushPendingUserUpdates(); } catch (_) {}
+    await waitForPromiseBounded(pendingUpdates, 5000);
+    if (serverMode) await apiLogout(); // apiLogout has its own bounded timeout
+
+    advanceServerSessionEpoch();
+    cancelPendingRequests();
+    discardPendingServerUserUpdates();
+    SessionManager.destroySession();
+    resetAuthenticatedServerCaches();
+    if (serverMode) await wipeAuthenticatedServerDataFromClient();
+
+    state.currentUser = null;
+    if (serverMode) activateAnonymousServerCollectionStorage();
+    state.currentView = 'analytics';
+    saveState();
+    showNotification(state.language === 'ar' ? 'تم تسجيل الخروج' : 'Logged Out', state.language === 'ar' ? 'إلى اللقاء قريباً!' : 'See you soon!', 'info');
+    render();
+  } finally {
+    overlay.remove();
+  }
+  return true;
+}
+
+function handleLogout() {
+  if (_logoutInFlight) return _logoutInFlight;
+  _loginGeneration += 1; // invalidate any post-login load still finishing
+  const serverMode = isServerModeEnabled();
+  const promise = Promise.resolve().then(_handleLogoutOnce).catch((error) => {
+    console.error('[handleLogout] Failed; forcing local sign-out:', error);
+    emergencyFinishClientSignOut(serverMode, false);
+    return false;
+  });
+  _logoutInFlight = promise;
+  const cleanup = () => {
+    if (_logoutInFlight === promise) _logoutInFlight = null;
+  };
+  promise.then(cleanup, cleanup);
+  return promise;
+}
+
+function handleServerAuthExpired(requestIdentity) {
+  if (!state.currentUser || serverSessionIdentityChanged(requestIdentity)) return Promise.resolve(false);
+  if (_logoutInFlight) return _logoutInFlight;
+  if (_serverAuthExpiryInFlight) return _serverAuthExpiryInFlight;
+  _loginGeneration += 1;
+  const promise = Promise.resolve().then(async () => {
+    const overlay = showSessionTransitionOverlay(state.language === 'ar' ? 'انتهت الجلسة. جارٍ تأمين البيانات...' : 'Session expired. Securing local data...');
+    try {
+      stopServerLiveSync();
+      advanceServerSessionEpoch();
+      cancelPendingRequests();
+      discardPendingServerUserUpdates();
+      SessionManager.destroySession();
+      resetAuthenticatedServerCaches();
+      // Do not call /auth/logout here: the cookie is already invalid. Wipe the
+      // current user's namespace before switching to anonymous storage.
+      await wipeAuthenticatedServerDataFromClient();
+      state.currentUser = null;
+      activateAnonymousServerCollectionStorage();
+      state.currentView = 'analytics';
+      saveState();
+      showNotification(
+        state.language === 'ar' ? 'انتهت الجلسة' : 'Session Expired',
+        state.language === 'ar' ? 'سجّل الدخول مرة أخرى للمتابعة.' : 'Please sign in again to continue.',
+        'warning'
+      );
+      render();
+      return true;
+    } finally {
+      overlay.remove();
+    }
+  }).catch((error) => {
+    console.error('[handleServerAuthExpired] Failed; forcing local sign-out:', error);
+    emergencyFinishClientSignOut(true, true);
+    return false;
+  });
+  _serverAuthExpiryInFlight = promise;
+  const cleanup = () => {
+    if (_serverAuthExpiryInFlight === promise) _serverAuthExpiryInFlight = null;
+  };
+  promise.then(cleanup, cleanup);
+  return promise;
+}

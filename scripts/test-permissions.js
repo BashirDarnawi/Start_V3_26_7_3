@@ -1,0 +1,1027 @@
+/**
+ * Permission enforcement tests for the built bundle (script.js).
+ *
+ * Loads script.js in a stubbed browser sandbox (init() never runs because
+ * document.readyState is 'loading') and drives the real render/handler
+ * functions with different permission sets, asserting that a user only ever
+ * sees and does what their permissions allow.
+ *
+ * Run: node scripts/test-permissions.js
+ */
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+
+const SCRIPT = path.join(__dirname, '..', 'script.js');
+
+// ---------- minimal browser stubs ----------
+function makeElement() {
+  const el = {
+    id: '', className: '', value: '', style: {},
+    dataset: {}, checked: false, files: [], classList: { add() {}, remove() {}, toggle() {} },
+    appendChild() {}, removeChild() {}, remove() {}, setAttribute() {}, getAttribute() { return null; },
+    addEventListener() {}, removeEventListener() {}, click() {}, focus() {}, select() {},
+    querySelector() { return null; }, querySelectorAll() { return []; },
+    closest() { return null; }, insertAdjacentHTML() {}, scrollTop: 0
+  };
+  // Security.escapeHtml() sets textContent and reads back innerHTML, relying on
+  // the browser to escape &, < and >. Emulate that faithfully — without it every
+  // escaped string would render EMPTY and the leak assertions would pass falsely.
+  let _text = '';
+  let _html = '';
+  Object.defineProperty(el, 'textContent', {
+    get: () => _text,
+    set: (v) => {
+      _text = String(v);
+      _html = _text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+  });
+  Object.defineProperty(el, 'innerHTML', {
+    get: () => _html,
+    set: (v) => { _html = String(v); _text = _html.replace(/<[^>]*>/g, ''); }
+  });
+  return el;
+}
+
+function makeSandbox() {
+  const doc = {
+    readyState: 'loading', // keeps init() from auto-running
+    body: makeElement(),
+    documentElement: makeElement(),
+    head: makeElement(),
+    createElement: () => makeElement(),
+    createTextNode: () => makeElement(),
+    getElementById: () => null,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    addEventListener() {}, removeEventListener() {},
+    execCommand() {}, cookie: ''
+  };
+  const store = () => {
+    const m = new Map();
+    return {
+      getItem: k => (m.has(k) ? m.get(k) : null),
+      setItem: (k, v) => m.set(k, String(v)),
+      removeItem: k => m.delete(k),
+      clear: () => m.clear(),
+      key: () => null, length: 0
+    };
+  };
+  const win = {
+    location: { hostname: 'localhost', origin: 'http://localhost', pathname: '/', search: '', href: 'http://localhost/', protocol: 'http:', reload() {} },
+    history: { pushState() {}, replaceState() {} },
+    addEventListener() {}, removeEventListener() {},
+    matchMedia: () => ({ matches: false, addEventListener() {}, addListener() {} }),
+    requestAnimationFrame: cb => setTimeout(cb, 0),
+    cancelAnimationFrame: () => {},
+    localStorage: store(), sessionStorage: store(),
+    navigator: { userAgent: 'node-test', onLine: true, clipboard: { writeText: async () => {} }, credentials: {} },
+    isSecureContext: true,
+    print() {}, alert() {}, confirm: () => true, prompt: () => null,
+    scrollTo() {}, innerWidth: 1280, innerHeight: 900,
+    fetch: async () => ({ ok: true, status: 200, text: async () => '[]', headers: { get: () => null } }),
+    URL: { createObjectURL: () => 'blob:x', revokeObjectURL() {} },
+    Blob: function () {},
+    crypto: { getRandomValues: a => { for (let i = 0; i < a.length; i++) a[i] = (i * 7 + 3) % 256; return a; }, randomUUID: () => 'uuid-test', subtle: {} }
+  };
+  const sandbox = {
+    window: win, document: doc, navigator: win.navigator, location: win.location, history: win.history,
+    localStorage: win.localStorage, sessionStorage: win.sessionStorage, crypto: win.crypto,
+    fetch: win.fetch, Blob: win.Blob, URL: win.URL, isSecureContext: true,
+    setTimeout, clearTimeout, setInterval, clearInterval, console,
+    indexedDB: undefined,
+    lucide: { createIcons() {} },
+    IntersectionObserver: function () { return { observe() {}, disconnect() {}, unobserve() {} }; },
+    MutationObserver: function () { return { observe() {}, disconnect() {} }; },
+    alert: win.alert, confirm: win.confirm, prompt: win.prompt,
+    requestAnimationFrame: win.requestAnimationFrame, cancelAnimationFrame: win.cancelAnimationFrame,
+    matchMedia: win.matchMedia, addEventListener() {}, removeEventListener() {}
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+  return sandbox;
+}
+
+const sandbox = makeSandbox();
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(SCRIPT, 'utf8'), sandbox, { filename: 'script.js' });
+
+// `const`/`let` top-level declarations (state, PERMISSION_MODULES, …) live in
+// the context's global LEXICAL scope, not on the global object — pull the ones
+// the tests need across the boundary. Function declarations are already global
+// object properties, so they are reachable as sandbox.<name>.
+const bridged = vm.runInContext(
+  '({ state, PERMISSION_MODULES, Security, _serverLiveSync })',
+  sandbox
+);
+
+// ---------- test scaffolding ----------
+let passed = 0;
+const failures = [];
+function check(name, fn) {
+  try {
+    fn();
+    passed++;
+    console.log(`  PASS  ${name}`);
+  } catch (e) {
+    failures.push(`${name}: ${e.message}`);
+    console.log(`  FAIL  ${name}\n        ${e.message}`);
+  }
+}
+function assert(cond, msg) { if (!cond) throw new Error(msg || 'assertion failed'); }
+
+// Strip HTML comments before asserting: section comments like
+// "<!-- Driver Performance & Delivery Log Grid -->" are not visible content and
+// would otherwise make a leak assertion fail (or pass) for the wrong reason.
+function visible(html) { return String(html).replace(/<!--[\s\S]*?-->/g, ''); }
+
+// Stub the receipt form's payment rows so the real DOM-reading helpers
+// (getSelectedAutoSerialMethod, syncReceiptSerialWithPaymentMethods) can run.
+function setPaymentRows(methods) {
+  const rows = methods.map(m => ({
+    querySelector: (sel) => (sel === '.payment-method' ? { value: m } : null)
+  }));
+  sandbox.document.querySelectorAll = (sel) =>
+    (sel === '.payment-split-item' ? rows : []);
+}
+
+const S = bridged.state;
+
+const ADMIN = { id: 'u-admin', name: 'Bashir', role: 'Admin', permissions: {} };
+const OTHER = { id: 'u-other', name: 'Abdu', role: 'Employee', permissions: {} };
+
+// Build an employee with an explicit permission map.
+function employee(permissions) {
+  return { id: 'u-emp', name: 'Albayan', role: 'Employee', permissions };
+}
+
+function loginAs(user) {
+  S.currentUser = user;
+  S.users = [ADMIN, OTHER, user].filter((v, i, a) => a.findIndex(x => x.id === v.id) === i);
+  S.serverMode = false; // exercise the local-log path (server path is covered by pytest)
+}
+
+// A device-local audit trail holding entries from THREE different users —
+// exactly the shared-browser situation from the production report.
+function seedLogs() {
+  S.logs = [
+    { id: 'log-1', userId: 'u-admin', userName: 'Bashir', action: 'Logout', category: 'auth', severity: 'info', description: 'User Bashir logged out', date: new Date().toISOString() },
+    { id: 'log-2', userId: 'u-other', userName: 'Abdu', action: 'Logout', category: 'auth', severity: 'info', description: 'User Abdu logged out', date: new Date().toISOString() },
+    { id: 'log-3', userId: 'u-emp', userName: 'Albayan', action: 'Update', category: 'general', severity: 'info', description: 'Updated Receipt', date: new Date().toISOString() }
+  ];
+}
+
+function seedBusinessData() {
+  S.customers = [{ id: 'c1', name: 'Cust One', platform: 'Facebook', phones: ['0911234567'], profileLinks: [], createdBy: 'u-admin' }];
+  S.receipts = [{ id: 'r1', customerId: 'c1', amountUSD: 100, status: 'Paid', isPaid: true, deliveryStatus: 'Needs Delivery', deliveryPersonId: '', createdBy: 'u-admin', editHistory: [{ date: new Date().toISOString(), userName: 'Bashir', changes: [] }], transfers: [] }];
+  S.ads = [{ id: 'a1', customerId: 'c1', amountUSD: 50, isPaid: true, paymentStatus: 'paid', createdBy: 'u-admin' }];
+  S.pages = [];
+  S.exchangeRateHistory = [];
+  S.logs = S.logs || [];
+}
+
+const notes = [];
+sandbox.showNotification = (t, m, k) => notes.push({ t, m, k });
+sandbox.render = () => {};
+sandbox.renderModal = () => {};
+sandbox.RenderQueue = { schedule() {} };
+sandbox.IconQueue = { schedule() {} };
+function lastNote() { return notes[notes.length - 1]; }
+function clearNotes() { notes.length = 0; }
+
+console.log('\n=== AUDIT LOGS: viewOwn must never reveal another user\'s activity ===');
+seedLogs(); seedBusinessData();
+
+check('viewOwn-only employee sees ONLY their own log entries', () => {
+  loginAs(employee({ auditLogs: ['viewOwn'] }));
+  const visible = sandbox.getVisibleAuditLogs();
+  assert(visible.length === 1, `expected 1 own log, got ${visible.length}`);
+  assert(visible[0].id === 'log-3', 'wrong log returned');
+});
+
+check('viewOwn-only employee: rendered Audit screen contains no other user\'s entry', () => {
+  loginAs(employee({ auditLogs: ['viewOwn'] }));
+  const html = visible(sandbox.renderAuditView());
+  assert(!html.includes('Bashir logged out'), "admin's log leaked into the page");
+  assert(!html.includes('Abdu logged out'), "another user's log leaked into the page");
+  assert(html.includes('Updated Receipt'), 'own log entry is missing');
+});
+
+check('viewOwn-only employee: user-filter dropdown does not enumerate other users', () => {
+  loginAs(employee({ auditLogs: ['viewOwn'] }));
+  const html = visible(sandbox.renderAuditView());
+  const optionArea = html.split('All Users')[1] || '';
+  assert(!optionArea.includes('u-admin'), 'admin id exposed in the users filter');
+  assert(!optionArea.includes('u-other'), 'other user id exposed in the users filter');
+});
+
+check('auditLogs.view (full) DOES see every entry', () => {
+  loginAs(employee({ auditLogs: ['view'] }));
+  const visible = sandbox.getVisibleAuditLogs();
+  assert(visible.length === 3, `expected all 3 logs, got ${visible.length}`);
+});
+
+check('no auditLogs permission => no logs at all + no-access screen', () => {
+  loginAs(employee({ analytics: ['view'] }));
+  assert(sandbox.getVisibleAuditLogs().length === 0, 'logs returned without permission');
+  const html = visible(sandbox.renderAuditView());
+  assert(!html.includes('Updated Receipt') && !html.includes('Bashir logged out'), 'logs rendered without permission');
+});
+
+check('Admin sees everything (role bypass)', () => {
+  loginAs(ADMIN);
+  assert(sandbox.getVisibleAuditLogs().length === 3, 'admin should see all logs');
+});
+
+console.log('\n=== AUDIT LOGS: action buttons + handlers are permission-gated ===');
+
+check('viewOwn-only employee: Backup/Restore/Cleanup/CSV/JSON buttons are NOT rendered', () => {
+  loginAs(employee({ auditLogs: ['viewOwn'] }));
+  const html = visible(sandbox.renderAuditView());
+  assert(!html.includes('backupAuditLogs()'), 'Backup button rendered');
+  assert(!html.includes('restoreAuditLogs()'), 'Restore button rendered');
+  assert(!html.includes('cleanupAuditLogs()'), 'Cleanup button rendered');
+  assert(!html.includes("exportAuditLogs('csv')"), 'CSV button rendered');
+});
+
+check('auditLogs.export grants the CSV/JSON/Backup buttons only', () => {
+  loginAs(employee({ auditLogs: ['view', 'export'] }));
+  const html = visible(sandbox.renderAuditView());
+  assert(html.includes("exportAuditLogs('csv')"), 'CSV button missing for export holder');
+  assert(html.includes('backupAuditLogs()'), 'Backup button missing for export holder');
+  assert(!html.includes('cleanupAuditLogs()'), 'Cleanup button must need the clear permission');
+});
+
+check('exportAuditLogs handler refuses without auditLogs.export', () => {
+  loginAs(employee({ auditLogs: ['viewOwn'] }));
+  clearNotes();
+  sandbox.exportAuditLogs('csv');
+  assert(lastNote() && /Access Denied/i.test(lastNote().t), 'export was not blocked');
+});
+
+check('restoreAuditLogs handler refuses without auditLogs.clear', () => {
+  loginAs(employee({ auditLogs: ['view', 'export'] }));
+  clearNotes();
+  sandbox.restoreAuditLogs();
+  assert(lastNote() && /Access Denied/i.test(lastNote().t), 'restore was not blocked');
+});
+
+check('showLogDetails refuses another user\'s entry for a viewOwn user', () => {
+  loginAs(employee({ auditLogs: ['viewOwn'] }));
+  clearNotes();
+  sandbox.showLogDetails('log-1'); // the admin's entry
+  assert(lastNote() && /Access Denied/i.test(lastNote().t), "another user's log detail was opened");
+});
+
+console.log('\n=== CUSTOMERS: viewContacts / viewBalance ===');
+
+check('without viewContacts, phone numbers are masked', () => {
+  loginAs(employee({ customers: ['view'] }));
+  const html = visible(sandbox.renderCustomersGrid(S.customers));
+  assert(!html.includes('0911234567'), 'phone number leaked');
+});
+
+check('with viewContacts, phone numbers are shown', () => {
+  loginAs(employee({ customers: ['view', 'viewContacts'] }));
+  const html = visible(sandbox.renderCustomersGrid(S.customers));
+  assert(html.includes('0911234567'), 'phone number missing for permitted user');
+});
+
+check('without viewBalance, balances are hidden', () => {
+  loginAs(employee({ customers: ['view', 'viewContacts'] }));
+  const html = visible(sandbox.renderCustomersGrid(S.customers));
+  assert(/Balances hidden|الأرصدة محجوبة/.test(html), 'balances not hidden');
+  assert(!html.includes('Ads Credit (USD)'), 'financial grid rendered without viewBalance');
+});
+
+check('with viewBalance, balances are shown', () => {
+  loginAs(employee({ customers: ['view', 'viewBalance'] }));
+  const html = visible(sandbox.renderCustomersGrid(S.customers));
+  assert(html.includes('Ads Credit (USD)'), 'financial grid missing for permitted user');
+});
+
+console.log('\n=== ANALYTICS: viewFinancials / viewSensitive ===');
+
+check('without viewFinancials, money KPIs are not rendered', () => {
+  loginAs(employee({ analytics: ['view'] }));
+  const html = visible(sandbox.renderAnalyticsView());
+  assert(!html.includes('Ad Revenue (Paid)'), 'revenue KPI leaked');
+  assert(!html.includes('Available Balance'), 'balance KPI leaked');
+  assert(!html.includes('Revenue & Collections'), 'cashflow panel leaked');
+});
+
+check('with viewFinancials, money KPIs render', () => {
+  loginAs(employee({ analytics: ['view', 'viewFinancials'] }));
+  const html = visible(sandbox.renderAnalyticsView());
+  assert(html.includes('Ad Revenue (Paid)'), 'revenue KPI missing for permitted user');
+});
+
+check('viewSensitive gates the detailed breakdowns (Top Customers spend)', () => {
+  loginAs(employee({ analytics: ['view', 'viewFinancials'] }));
+  assert(!visible(sandbox.renderAnalyticsView()).includes('Top Customers (Spend)'), 'sensitive panel leaked');
+  loginAs(employee({ analytics: ['view', 'viewFinancials', 'viewSensitive'] }));
+  assert(visible(sandbox.renderAnalyticsView()).includes('Top Customers (Spend)'), 'sensitive panel missing for permitted user');
+});
+
+console.log('\n=== DELIVERIES: viewStats + action gating ===');
+
+check('without viewStats, driver performance + money tiles are hidden', () => {
+  loginAs(employee({ deliveries: ['view'] }));
+  const html = visible(sandbox.renderDeliveriesView());
+  assert(!html.includes('Driver Performance'), 'driver performance leaked');
+  assert(!html.includes('Uncollected Value'), 'money tile leaked');
+});
+
+check('with viewStats, they are shown', () => {
+  loginAs(employee({ deliveries: ['view', 'viewStats'] }));
+  const html = visible(sandbox.renderDeliveriesView());
+  assert(html.includes('Driver Performance'), 'driver performance missing for permitted user');
+});
+
+check('acceptDelivery refuses without deliveries.accept', () => {
+  loginAs(employee({ deliveries: ['view'] }));
+  clearNotes();
+  sandbox.acceptDelivery('r1');
+  assert(lastNote() && /Access Denied/i.test(lastNote().t), 'accept was not blocked');
+  assert(S.receipts[0].deliveryStatus === 'Needs Delivery', 'record was mutated despite denial');
+});
+
+check('markAsCollected refuses without deliveries.markCollected', () => {
+  loginAs(employee({ deliveries: ['view'] }));
+  clearNotes();
+  sandbox.markAsCollected('r1');
+  assert(lastNote() && /Access Denied/i.test(lastNote().t), 'markCollected was not blocked');
+});
+
+check('assigned driver CAN accept their own delivery (role path still works)', () => {
+  const driver = { id: 'u-driver', name: 'Driver', role: 'Delivery', permissions: {} };
+  S.receipts[0].deliveryPersonId = 'u-driver';
+  loginAs(driver);
+  assert(sandbox.canDoDeliveryAction('accept', 'r1') === true, 'assigned driver was blocked from their own delivery');
+  S.receipts[0].deliveryPersonId = '';
+});
+
+console.log('\n=== RECEIPTS / ADS / SETTINGS ===');
+
+check('receipt edit history refuses without receipts.viewHistory', () => {
+  loginAs(employee({ receipts: ['view'] }));
+  clearNotes();
+  sandbox.showReceiptEditHistory('r1');
+  assert(lastNote() && /Access Denied/i.test(lastNote().t), 'history was not blocked');
+});
+
+check('uploadAdPhotos refuses without ads.uploadPhotos', () => {
+  loginAs(employee({ ads: ['view', 'add'] }));
+  clearNotes();
+  sandbox.uploadAdPhotos([{ name: 'x.png' }]);
+  assert(lastNote() && /Access Denied/i.test(lastNote().t), 'photo upload was not blocked');
+});
+
+check('updateExchangeRate refuses without settings.manageExchangeRate', () => {
+  loginAs(employee({ settings: ['view', 'edit'] }));
+  clearNotes();
+  const before = S.defaultExchangeRate;
+  sandbox.updateExchangeRate('9.99');
+  assert(lastNote() && /Access Denied/i.test(lastNote().t), 'rate change was not blocked');
+  assert(S.defaultExchangeRate === before, 'exchange rate was mutated despite denial');
+});
+
+check('updateExchangeRate works WITH settings.manageExchangeRate', () => {
+  loginAs(employee({ settings: ['view', 'manageExchangeRate'] }));
+  clearNotes();
+  sandbox.updateExchangeRate('7.25');
+  assert(S.defaultExchangeRate === 7.25, 'permitted rate change did not apply');
+});
+
+check('exportData (full backup) is Admin only', () => {
+  loginAs(employee({ settings: ['view', 'edit'], auditLogs: ['view', 'export'] }));
+  clearNotes();
+  sandbox.exportData();
+  assert(lastNote() && /Access Denied/i.test(lastNote().t), 'full backup export was not blocked');
+});
+
+check('settings screen hides the exchange-rate editor without the permission', () => {
+  loginAs(employee({ settings: ['view'] }));
+  const html = visible(sandbox.renderSettingsView());
+  assert(!html.includes('updateExchangeRate('), 'rate editor rendered without permission');
+  assert(!html.includes('exportData()'), 'backup export button rendered for non-admin');
+});
+
+console.log('\n=== SIDEBAR: the original lockout must stay fixed ===');
+
+check('employee with full permissions sees the full sidebar', () => {
+  const all = {};
+  for (const [mod, cfg] of Object.entries(bridged.PERMISSION_MODULES)) all[mod] = Object.keys(cfg.permissions);
+  loginAs(employee(all));
+  const html = visible(sandbox.renderSidebar());
+  assert(!html.includes('No access granted'), 'fully-permissioned employee is locked out');
+  for (const label of ['analytics', 'customers', 'receipts', 'pages', 'ads', 'deliveries', 'users', 'audit', 'settings']) {
+    assert(html.includes(`navigateTo('${label}')`), `sidebar is missing the ${label} link`);
+  }
+});
+
+check('permissions survive even when state.users lacks the record (login-response fallback)', () => {
+  const emp = employee({ analytics: ['view'], receipts: ['view'] });
+  S.currentUser = emp;
+  S.users = []; // the users-list fetch failed — this used to lock the whole UI
+  assert(sandbox.currentUserHasPermission('analytics', 'view') === true, 'permission lost when users list is empty');
+  assert(!visible(sandbox.renderSidebar()).includes('No access granted'), 'sidebar locked despite valid permissions');
+});
+
+console.log('\n=== RECEIPT AUTO-SERIALS: B / O / E / S groups ===');
+
+check('generic "Bank Transfer" is gone; the LYD/USD variants remain', () => {
+  const methods = vm.runInContext('PAYMENT_METHODS', sandbox);
+  assert(!methods.includes('Bank Transfer'), 'the duplicate generic Bank Transfer is still offered');
+  assert(methods.includes('Bank Transfer (LYD)') && methods.includes('Bank Transfer (USD)'), 'the LYD/USD variants must remain');
+});
+
+check('an old receipt using the removed "Bank Transfer" keeps it in its dropdown', () => {
+  const opts = sandbox.paymentMethodOptions('Bank Transfer');
+  assert(opts.includes('Bank Transfer'), 'legacy method dropped from an existing receipt');
+  assert(!sandbox.paymentMethodOptions('Cash (LYD)').includes('Bank Transfer'), 'legacy method offered on a new receipt');
+});
+
+check('each payment method maps to the right counter prefix', () => {
+  const cases = {
+    'Bank Transfer (LYD)': 'B', 'Bank Transfer (USD)': 'B', 'Bank Transfer': 'B',
+    'Transfer Office': 'O',
+    'Sadad': 'E', 'USDT': 'E',
+    'LTT': 'S', 'Libyana': 'S', 'Madar': 'S'
+  };
+  for (const [method, prefix] of Object.entries(cases)) {
+    assert(sandbox.getAutoSerialPrefix(method) === prefix, `${method} should map to ${prefix}, got ${sandbox.getAutoSerialPrefix(method)}`);
+  }
+  // Cash keeps a manual, hand-typed receipt number
+  assert(sandbox.getAutoSerialPrefix('Cash (LYD)') === null, 'Cash (LYD) must stay manual');
+  assert(sandbox.getAutoSerialPrefix('Cash (USD)') === null, 'Cash (USD) must stay manual');
+});
+
+check('first receipt of each group starts at 1 (B1 / O1 / E1 / S1)', () => {
+  S.receipts = [];
+  assert(sandbox.getNextAutoSerialNumber('Bank Transfer (LYD)') === 'B1', 'bank transfer must start at B1');
+  assert(sandbox.getNextAutoSerialNumber('Transfer Office') === 'O1', 'transfer office must start at O1');
+  assert(sandbox.getNextAutoSerialNumber('Sadad') === 'E1', 'Sadad must start at E1');
+  assert(sandbox.getNextAutoSerialNumber('USDT') === 'E1', 'USDT shares the E counter');
+  assert(sandbox.getNextAutoSerialNumber('LTT') === 'S1', 'LTT must start at S1');
+});
+
+check('counters are independent and increment per group', () => {
+  S.receipts = [
+    { id: 'x1', paymentMethod: 'Bank Transfer (LYD)', serialNumber: 'B1' },
+    { id: 'x2', paymentMethod: 'Bank Transfer (USD)', serialNumber: 'B2' },
+    { id: 'x3', paymentMethod: 'Transfer Office', serialNumber: 'O1' },
+    { id: 'x4', paymentMethod: 'Sadad', serialNumber: 'E1' },
+    { id: 'x5', paymentMethod: 'Cash (LYD)', serialNumber: '12629' }
+  ];
+  assert(sandbox.getNextAutoSerialNumber('Bank Transfer (USD)') === 'B3', 'B counter should be at B3');
+  assert(sandbox.getNextAutoSerialNumber('Transfer Office') === 'O2', 'O counter should be at O2');
+  assert(sandbox.getNextAutoSerialNumber('USDT') === 'E2', 'E counter should be at E2 (shared with Sadad)');
+  assert(sandbox.getNextAutoSerialNumber('LTT') === 'S1', 'S counter must not be advanced by other groups');
+});
+
+check('split payments feed their group counter', () => {
+  S.receipts = [
+    { id: 'y1', paymentMethod: '', payments: [{ method: 'Cash (LYD)' }, { method: 'Transfer Office' }], serialNumber: 'O7' }
+  ];
+  assert(sandbox.getNextAutoSerialNumber('Transfer Office') === 'O8', 'split payment did not advance the O counter');
+});
+
+check('legacy bare numbers still advance the S counter only', () => {
+  S.receipts = [
+    { id: 'z1', paymentMethod: 'Libyana', serialNumber: '4' }, // pre-prefix legacy
+    { id: 'z2', paymentMethod: 'Bank Transfer (LYD)', serialNumber: 'B9' }
+  ];
+  assert(sandbox.getNextAutoSerialNumber('Madar') === 'S5', 'legacy numeric serial should continue the S sequence');
+  assert(sandbox.getNextAutoSerialNumber('Bank Transfer (USD)') === 'B10', 'B counter must be independent');
+});
+
+check('isAutoSerialNumber recognises S/B/O/E and rejects plain numbers', () => {
+  for (const s of ['S1', 'B2', 'O33', 'E7', 'b4', 'o1']) {
+    assert(sandbox.isAutoSerialNumber(s) === true, `${s} should be recognised as an auto-serial`);
+  }
+  for (const s of ['12629', '', 'D3', 'X1', 'B', 'BB1']) {
+    assert(sandbox.isAutoSerialNumber(s) === false, `${s} must NOT be treated as an auto-serial`);
+  }
+});
+
+check('typing cannot corrupt an auto-serial (validator preserves the prefix)', () => {
+  const input = { value: 'B12', classList: { add() {}, remove() {} } };
+  sandbox.validateReceiptNumberInput(input);
+  assert(input.value === 'B12', `auto-serial was mangled to "${input.value}"`);
+  const manual = { value: '0123', classList: { add() {}, remove() {} } };
+  sandbox.validateReceiptNumberInput(manual);
+  assert(manual.value === '123', 'manual serials must still strip a leading zero');
+});
+
+console.log('\n=== MIXED PAYMENTS: cash in the split => manual receipt number ===');
+
+check('all-auto split (Libyana + Sadad) still auto-numbers', () => {
+  setPaymentRows(['Libyana', 'Sadad']);
+  assert(sandbox.getSelectedAutoSerialMethod() === 'Libyana', 'an all-auto split must auto-number from the first row');
+});
+
+check('Cash + Libyana => NO auto number (user types the paper receipt number)', () => {
+  setPaymentRows(['Cash (LYD)', 'Libyana']);
+  assert(sandbox.getSelectedAutoSerialMethod() === null, 'a split containing Cash must require a manual number');
+});
+
+check('Libyana + Cash (any position) => still manual', () => {
+  setPaymentRows(['Libyana', 'Cash (USD)']);
+  assert(sandbox.getSelectedAutoSerialMethod() === null, 'Cash anywhere in the split forces a manual number');
+});
+
+check('single Bank Transfer row => auto B number', () => {
+  setPaymentRows(['Bank Transfer (LYD)']);
+  assert(sandbox.getSelectedAutoSerialMethod() === 'Bank Transfer (LYD)', 'a lone bank transfer must auto-number');
+});
+
+check('single Cash row => manual', () => {
+  setPaymentRows(['Cash (LYD)']);
+  assert(sandbox.getSelectedAutoSerialMethod() === null, 'cash-only must stay manual');
+});
+
+check('no payment rows => manual (nothing to number from)', () => {
+  setPaymentRows([]);
+  assert(sandbox.getSelectedAutoSerialMethod() === null, 'empty form must not auto-number');
+});
+
+console.log('\n=== SERIAL RE-SYNC when the payment method changes (the reported bug) ===');
+
+// Drive the real sync function against a stubbed Receipt Number field.
+function serialField(initial) {
+  const el = { value: initial, readOnly: false, title: '', classList: { add() {}, remove() {} } };
+  sandbox.document.getElementById = (id) => (id === 'receipt-serial' ? el : null);
+  return el;
+}
+
+check('cash receipt (manual number) switched to Bank Transfer => gets a B number', () => {
+  S.receipts = [{ id: 'r-old', paymentMethod: 'Bank Transfer (LYD)', serialNumber: 'B4' }];
+  S.modalData = { id: 'r-saved' };            // EDITING a saved receipt
+  const el = serialField('12851');            // its old paper number from cash
+  setPaymentRows(['Bank Transfer (LYD)']);    // user switches the method
+  sandbox.syncReceiptSerialWithPaymentMethods({ reissue: true });
+  assert(el.value === 'B5', `expected B5, got "${el.value}" (the stale paper number was kept)`);
+  assert(el.readOnly === true, 'the field must lock once it is app-numbered');
+  S.modalData = null;
+});
+
+check('new receipt: typed number then switched to Transfer Office => gets an O number', () => {
+  S.receipts = [];
+  const el = serialField('999');
+  setPaymentRows(['Transfer Office']);
+  sandbox.syncReceiptSerialWithPaymentMethods({ reissue: true });
+  assert(el.value === 'O1', `expected O1, got "${el.value}"`);
+});
+
+check('switching between auto groups re-issues from the new counter', () => {
+  S.receipts = [{ id: 'a', paymentMethod: 'Sadad', serialNumber: 'E2' }];
+  const el = serialField('B7');
+  setPaymentRows(['USDT']);
+  sandbox.syncReceiptSerialWithPaymentMethods({ reissue: true });
+  assert(el.value === 'E3', `expected E3, got "${el.value}"`);
+});
+
+check('a number already in the right group is KEPT (no pointless renumbering)', () => {
+  S.receipts = [{ id: 'a', paymentMethod: 'Bank Transfer (LYD)', serialNumber: 'B9' }];
+  S.modalData = { id: 'a' };
+  const el = serialField('B9');
+  setPaymentRows(['Bank Transfer (USD)']); // same B group
+  sandbox.syncReceiptSerialWithPaymentMethods({ reissue: true });
+  assert(el.value === 'B9', `B9 should have been kept, got "${el.value}"`);
+  S.modalData = null;
+});
+
+check('adding a Cash row to an auto-numbered receipt clears the app number', () => {
+  S.receipts = [];
+  const el = serialField('B3');
+  setPaymentRows(['Bank Transfer (LYD)', 'Cash (LYD)']);
+  sandbox.syncReceiptSerialWithPaymentMethods({ reissue: true });
+  assert(el.value === '', `app number must be cleared, got "${el.value}"`);
+  assert(el.readOnly === false, 'the field must unlock so a paper number can be typed');
+});
+
+check('merely OPENING a saved receipt never renumbers it', () => {
+  S.receipts = [{ id: 'r1', paymentMethod: 'Libyana', serialNumber: '4' }]; // legacy bare number
+  S.modalData = { id: 'r1' };
+  const el = serialField('4');
+  setPaymentRows(['Libyana']);
+  sandbox.syncReceiptSerialWithPaymentMethods({ reissue: false });
+  assert(el.value === '4', `open must not renumber; got "${el.value}"`);
+  S.modalData = null;
+});
+
+check('a saved legacy S receipt keeps its bare number when switching within the S group', () => {
+  S.receipts = [{ id: 'r1', paymentMethod: 'Libyana', serialNumber: '4' }];
+  S.modalData = { id: 'r1' };
+  const el = serialField('4');
+  setPaymentRows(['Madar']); // same S group
+  sandbox.syncReceiptSerialWithPaymentMethods({ reissue: true });
+  assert(el.value === '4', `legacy S number should be kept, got "${el.value}"`);
+  S.modalData = null;
+});
+
+console.log('\n=== URLs: every view and modal is addressable ===');
+
+check('every renderView case has a URL path', () => {
+  const map = vm.runInContext('VIEW_TO_PATH', sandbox);
+  const views = ['services-hub', 'smart-systems', 'clothes-system', 'service-placeholder', 'wallet',
+    'analytics', 'customers', 'receipts', 'pages', 'ads', 'deliveries', 'reconciliation',
+    'users', 'audit', 'settings', 'delivery-dashboard', 'no-access'];
+  const missing = views.filter(v => !map[v]);
+  assert(missing.length === 0, `views without a URL: ${missing.join(', ')}`);
+});
+
+check('paths are unique and round-trip back to their view', () => {
+  const map = vm.runInContext('VIEW_TO_PATH', sandbox);
+  const back = vm.runInContext('PATH_TO_VIEW', sandbox);
+  const paths = Object.values(map);
+  assert(new Set(paths).size === paths.length, 'two views share the same path');
+  for (const [view, path] of Object.entries(map)) {
+    assert(back[path] === view, `${path} does not map back to ${view}`);
+  }
+});
+
+check('every record modal has a URL handler with a real opener', () => {
+  const handlers = vm.runInContext('MODAL_URL_HANDLERS', sandbox);
+  const expected = ['ad', 'receipt', 'customer', 'page', 'user', 'split-payments', 'top-ups',
+    'refund', 'receipt-transfer', 'collect-receipt', 'permissions', 'wallet-topup',
+    'clothes-product', 'clothes-shipment', 'clothes-order'];
+  const missing = expected.filter(m => !handlers[m]);
+  assert(missing.length === 0, `modals without a URL handler: ${missing.join(', ')}`);
+  for (const [name, h] of Object.entries(handlers)) {
+    assert(typeof h.open === 'function', `${name}: open() is not wired`);
+  }
+});
+
+check('secret dialogs are NOT addressable by URL', () => {
+  const handlers = vm.runInContext('MODAL_URL_HANDLERS', sandbox);
+  for (const secret of ['recovery-key', 'password-reset', 'change-password']) {
+    assert(!handlers[secret], `${secret} must never be reachable from a link`);
+  }
+});
+
+check('server serves index.html for every client path (no 404 on refresh)', () => {
+  const map = vm.runInContext('VIEW_TO_PATH', sandbox);
+  const py = fs.readFileSync(path.join(__dirname, '..', 'server', 'main.py'), 'utf8');
+  const block = py.split('FRONTEND_ROUTES = {')[1].split('}')[0];
+  const missing = Object.values(map)
+    .filter(p => p !== '/')
+    .filter(p => !block.includes(`"${p}"`));
+  assert(missing.length === 0, `paths missing from the server's FRONTEND_ROUTES: ${missing.join(', ')}`);
+});
+
+console.log('\n=== MONEY SAFETY: stale-state bugs found by the audit ===');
+
+check('a stored rate of 0 is NOT re-rendered as the market rate (was: receipt money rewritten on re-save)', () => {
+  S.defaultExchangeRate = 5.5;
+  // Bank transfers / Sadad / USDT / LTT legitimately store rate 0.
+  assert(sandbox.paymentRate1Value({ method: 'Sadad', rate: 0 }) === 0,
+    'a stored 0 rate was replaced by the market rate — reopening the receipt would inflate its LYD total');
+  assert(sandbox.paymentRate1Value({ method: 'Cash (LYD)', rate: 9.5 }) === 9.5, 'a real rate must be shown as-is');
+  // Only a genuinely absent rate falls back — to the method's own default.
+  assert(sandbox.paymentRate1Value({ method: 'Sadad' }) === 0, 'missing rate should fall back to the method default (0)');
+  assert(sandbox.paymentRate1Value({ method: 'Cash (LYD)' }) === 1, 'Cash (LYD) default rate is 1');
+});
+
+check('every zero-rate method really does default to 0', () => {
+  for (const m of ['Bank Transfer (LYD)', 'Bank Transfer (USD)', 'Sadad', 'USDT', 'LTT', 'Cash (USD)']) {
+    assert(sandbox.getDefaultRate1(m) === 0, `${m} should default Rate 1 to 0`);
+  }
+});
+
+check('getSelectedPaymentMethods reads the live rows (no invented "Cash (USD)")', () => {
+  setPaymentRows(['Bank Transfer (LYD)', 'Cash (LYD)']);
+  const methods = sandbox.getSelectedPaymentMethods();
+  assert(methods.length === 2 && methods[0] === 'Bank Transfer (LYD)', `got ${JSON.stringify(methods)}`);
+});
+
+console.log('\n=== MONEY MATH: no phantom cents from floating-point residue ===');
+
+check('291 LYD at rate 9.70 gives exactly $30.00 (was $30.02)', () => {
+  const r2 = sandbox.ceilingRound(291 / 9.7);
+  assert(r2 === 30, `291/9.7 should credit $30.00, got $${r2}`);
+  // the "+0.01 when it has decimals" rule must not fire on a whole number
+  assert(r2 % 1 === 0, 'a whole-dollar credit must not gain a cent');
+});
+
+check('the receipt stores the rate the user typed (was 9.69 for 9.70)', () => {
+  const rate = sandbox.receiptExchangeRate([{ method: 'Cash (LYD)', rate2: 9.7 }], 291, 30);
+  assert(rate === 9.7, `expected the typed rate 9.7, got ${rate}`);
+});
+
+check('a split still stores the effective average rate', () => {
+  const rate = sandbox.receiptExchangeRate(
+    [{ method: 'Cash (LYD)', rate2: 9.7 }, { method: 'Libyana', rate2: 9.0 }], 300, 31.5);
+  assert(Math.abs(rate - (300 / 31.5)) < 1e-9, `split should average, got ${rate}`);
+});
+
+check('rounding UP in the customer\'s favour still happens for real fractions', () => {
+  assert(sandbox.ceilingRound(90.100143062) === 90.11, 'must round up to 90.11');
+  assert(sandbox.ceilingRound(100 / 9.5) === 10.53, '100/9.5 must round up to 10.53');
+  // A genuine fraction of a cent still rounds up (the business rule)...
+  assert(sandbox.ceilingRound(30.0001) === 30.01, 'a real fraction must still round up');
+  // ...but binary residue from a division must NOT invent one.
+  assert(sandbox.ceilingRound(291 / 9.7) === 30, 'float residue must not create a phantom cent');
+  assert(sandbox.ceilingRound(873 / 9.7) === 90, 'float residue must not create a phantom cent (x3)');
+  assert(sandbox.ceilingRound(0) === 0 && sandbox.ceilingRound(NaN) === 0, 'zero/NaN stay 0');
+});
+
+console.log('\n=== FRONTEND SAFETY: cache identity, ids, sync, idempotency ===');
+
+check('record ids cannot break out of attributes or inline handlers', () => {
+  const Security = bridged.Security;
+  for (const safe of ['receipt_123_abc', 'u-admin', 'abc.def:4']) {
+    assert(Security.isValidRecordId(safe), `safe id rejected: ${safe}`);
+  }
+  for (const unsafe of ["x');alert(1)//", 'white space', '../receipt', '<img>', '', 'a'.repeat(81)]) {
+    assert(!Security.isValidRecordId(unsafe), `unsafe id accepted: ${unsafe}`);
+  }
+  const nested = Security.validateRecordIdentifiers({ id: 'receipt_ok', customerId: "c');alert(1)//" }, 'receipt');
+  assert(!nested.valid, 'unsafe relationship id was accepted');
+});
+
+check('opaque nested ids remain compatible while explicit relationships stay strict', () => {
+  const Security = bridged.Security;
+  const credentialId = 'credential_' + 'A'.repeat(180);
+  const passkeyRecord = Security.validateRecordIdentifiers({
+    id: 'user_safe',
+    passkeys: [{ id: credentialId, publicKeyJwk: { kty: 'EC' } }]
+  }, 'user');
+  assert(passkeyRecord.valid, 'opaque WebAuthn credential id was treated as an entity id');
+  const badRelationship = Security.validateRecordIdentifiers({
+    id: 'receipt_safe',
+    metadata: { customerId: "bad');alert(1)//" }
+  }, 'receipt');
+  assert(!badRelationship.valid, 'nested explicit relationship id was accepted');
+});
+
+check('every entity response path rejects poisoned relationship ids', () => {
+  const safe = {
+    id: 'receipt_safe', type: 'receipts', deleted: false,
+    createdAt: 1, lastModified: 1,
+    data: { id: 'receipt_safe', customerId: 'customer_safe' }
+  };
+  assert(sandbox.validateServerEntityResponse('receipts', safe, 'test') === safe, 'safe entity was rejected');
+  let rejected = false;
+  try {
+    sandbox.validateServerEntityResponse('receipts', {
+      ...safe,
+      data: { id: 'receipt_safe', customerId: "bad');alert(1)//" }
+    }, 'test');
+  } catch (e) {
+    rejected = e && e.code === 'UNSAFE_RECORD_IDENTIFIER';
+  }
+  assert(rejected, 'poisoned entity response was accepted');
+});
+
+check('keyset page overlap deduplicates IDs and keeps the newest version', () => {
+  const rows = [];
+  const indexes = new Map();
+  sandbox.mergeServerEntityDataById(rows, indexes, {
+    id: 'receipt_safe', lastModified: 10,
+    data: { id: 'receipt_safe', _lastModified: 10, note: 'old' }
+  });
+  sandbox.mergeServerEntityDataById(rows, indexes, {
+    id: 'receipt_safe', lastModified: 20,
+    data: { id: 'receipt_safe', _lastModified: 20, note: 'new' }
+  });
+  assert(rows.length === 1, 'duplicate page boundary left two copies of one record');
+  assert(rows[0].note === 'new', 'dedupe kept the stale record version');
+});
+
+check('IndexedDB collection keys are isolated by server and authenticated user', () => {
+  sandbox.activateLocalCollectionStorage();
+  const localKey = sandbox.getCollectionMetaKey('receipts');
+  sandbox.activateServerCollectionStorage({ id: 'user_a' });
+  const userAKey = sandbox.getCollectionMetaKey('receipts');
+  sandbox.activateServerCollectionStorage({ id: 'user_b' });
+  const userBKey = sandbox.getCollectionMetaKey('receipts');
+  sandbox.activateAnonymousServerCollectionStorage();
+  const anonymousKey = sandbox.getCollectionMetaKey('receipts');
+  assert(localKey !== userAKey, 'server cache reused the local key');
+  assert(userAKey !== userBKey, 'two users shared one business cache key');
+  assert(userBKey !== anonymousKey, 'authenticated cache reused the anonymous key');
+});
+
+check('cookie-session startup can start/stop polling without aborting its full load identity', () => {
+  S.serverMode = true;
+  S.currentUser = ADMIN;
+  sandbox.activateServerCollectionStorage(ADMIN);
+  const beforeIdentity = sandbox.getServerSessionIdentity();
+  const beforeSessionEpoch = bridged._serverLiveSync.sessionEpoch;
+  const beforePollerEpoch = bridged._serverLiveSync.pollerEpoch;
+  sandbox.stopServerLiveSync();
+  assert(sandbox.getServerSessionIdentity() === beforeIdentity, 'poller stop changed authenticated load identity');
+  assert(bridged._serverLiveSync.sessionEpoch === beforeSessionEpoch, 'poller stop advanced auth session epoch');
+  assert(bridged._serverLiveSync.pollerEpoch > beforePollerEpoch, 'poller generation did not advance');
+  S.serverMode = false;
+});
+
+check('full-load cursors use pre-load watermarks and never snapshot maxima', () => {
+  const sync = bridged._serverLiveSync;
+  sync.cursor = 30;
+  sync.serverWatermark = 30;
+  sync.fullLoadCursorReady = false;
+  sync.collectionCursors = { customers: 30 };
+  const results = {
+    ads: { ok: true, data: [{ id: 'ad_safe', _lastModified: 500 }] },
+    receipts: { ok: true, data: [{ id: 'receipt_safe', _lastModified: 400 }] },
+    customers: { ok: false, data: null }
+  };
+  const seeded = sandbox.reseedServerCursorFromFullLoad(results, [{ collection: 'customers' }], { ads: 100, receipts: 80 });
+  assert(seeded === true, 'captured watermarks were not accepted');
+  assert(sync.collectionCursors.ads === 100, 'ads cursor used a snapshot maximum instead of its pre-load watermark');
+  assert(sync.collectionCursors.receipts === 80, 'receipts cursor used a snapshot maximum instead of its pre-load watermark');
+  assert(sync.collectionCursors.customers === 30, 'failed collection did not retain its prior cursor');
+  assert(sync.cursor === 100 && sync.serverWatermark === 100, 'debug aggregate does not reflect captured cursors');
+
+  const fallback = sandbox.reseedServerCursorFromFullLoad(results, [], null);
+  assert(fallback === false, 'missing watermark endpoint claimed an authoritative boundary');
+  assert(sync.collectionCursors.ads === 0 && sync.collectionCursors.receipts === 0, '404/failure fallback did not force a since=0 catch-up');
+  assert(sync.collectionCursors.customers === 30, 'fallback changed a failed collection cursor');
+});
+
+check('permission scope changes detect view-to-own, view-to-none, and Admin demotion', () => {
+  const full = employee({ ads: ['view'], receipts: ['view'] });
+  const own = employee({ ads: ['viewOwn'], receipts: ['view'] });
+  const none = employee({ receipts: ['view'] });
+  assert(sandbox.getServerVisibilityScopeChanges(full, own).includes('ads'), 'view -> viewOwn was not detected');
+  assert(sandbox.getServerVisibilityScopeChanges(own, none).includes('ads'), 'viewOwn -> none was not detected');
+  assert(sandbox.getServerCollectionVisibilityScope(full, 'ads') === 'all', 'view scope classified incorrectly');
+  assert(sandbox.getServerCollectionVisibilityScope(own, 'ads') === 'own', 'viewOwn scope classified incorrectly');
+  assert(sandbox.getServerCollectionVisibilityScope(none, 'ads') === 'none', 'revoked scope classified incorrectly');
+  assert(sandbox.getServerVisibilityScopeChanges(ADMIN, none).includes('pages'), 'Admin demotion was not detected from role');
+});
+
+check('server mode never grants access from the legacy subscription array', () => {
+  S.currentUser = employee({});
+  S.currentUser.subscriptions = ['clothes_system'];
+  S.serviceSubscriptions = [];
+  S.serverMode = true;
+  assert(!sandbox.hasSubscription('clothes_system'), 'legacy client field granted a server subscription');
+  S.serverMode = false;
+  assert(sandbox.hasSubscription('clothes_system'), 'local-mode legacy compatibility was removed');
+});
+
+check('delta cursor zero stays zero even when cached state has newer timestamps', () => {
+  const sync = bridged._serverLiveSync;
+  S.ads = [{ id: 'ad_cached', _lastModified: 999999 }];
+  sync.cursor = 999999;
+  sync.collectionCursors = Object.create(null);
+  assert(sandbox.getServerCollectionCursor('ads') === 0, 'missing per-collection cursor fell back to state/global max');
+  sync.collectionCursors.ads = 500;
+  sync.collectionCursors.receipts = 100;
+  assert(sandbox.getServerCollectionCursor('ads') === 500, 'ads cursor not isolated');
+  assert(sandbox.getServerCollectionCursor('receipts') === 100, 'receipts cursor not isolated');
+});
+
+check('money operations always create a backend-valid idempotency key', () => {
+  const generated = sandbox.ensureOperationIdempotencyKey('', 'transfer');
+  const replacedShort = sandbox.ensureOperationIdempotencyKey('tiny', 'topup');
+  const preserved = sandbox.ensureOperationIdempotencyKey('stable-operation-key', 'subscription');
+  assert(generated.length >= 8, 'missing generated key');
+  assert(replacedShort.length >= 8 && replacedShort !== 'tiny', 'short invalid key was kept');
+  assert(preserved === 'stable-operation-key', 'valid retry key was not preserved');
+});
+
+check('clothes order retries keep one id and idempotency key until success', () => {
+  const payload = { customerName: 'Customer', lines: [{ productId: 'product_safe', qty: 1 }] };
+  const first = sandbox.getClothesOrderMutationAttempt('create', '', null, payload);
+  const retry = sandbox.getClothesOrderMutationAttempt('create', '', null, payload);
+  assert(first === retry, 'same create retry did not reuse its pending attempt');
+  assert(first.orderId && first.idempotencyKey.length >= 8, 'create attempt lacks stable backend identifiers');
+  sandbox.completeClothesOrderMutationAttempt(first);
+  const later = sandbox.getClothesOrderMutationAttempt('create', '', null, payload);
+  assert(later !== first, 'completed create attempt was incorrectly reused');
+  sandbox.completeClothesOrderMutationAttempt(later);
+});
+
+check('receipt transfer retries keep one target receipt and key until success', () => {
+  const source = { id: 'receipt_source', _lastModified: 123 };
+  const first = sandbox.getReceiptTransferAttempt(source, 'customer_target', 2500, 'move credit');
+  const retry = sandbox.getReceiptTransferAttempt(source, 'customer_target', 2500, 'move credit');
+  assert(first === retry, 'same transfer retry did not reuse its pending attempt');
+  assert(first.targetReceiptId && first.idempotencyKey.length >= 8, 'transfer attempt lacks stable identifiers');
+  sandbox.completeReceiptTransferAttempt(first);
+  const later = sandbox.getReceiptTransferAttempt(source, 'customer_target', 2500, 'move credit');
+  assert(later !== first, 'completed transfer attempt was incorrectly reused');
+  sandbox.completeReceiptTransferAttempt(later);
+});
+
+check('ad mutation and stop retries keep stable idempotency keys', () => {
+  const dataA = { customerId: 'customer_safe', receiptAllocations: [{ receiptId: 'receipt_safe', amountUSD: 10 }], updatedAt: '2026-01-01T00:00:00Z' };
+  const dataB = { ...dataA, updatedAt: '2026-01-02T00:00:00Z' };
+  const first = sandbox.getAdMutationAttempt('create', '', null, dataA);
+  const retry = sandbox.getAdMutationAttempt('create', '', null, dataB);
+  assert(first === retry, 'volatile audit timestamp changed the ad retry identity');
+  assert(first.adId && first.idempotencyKey.length >= 8, 'ad mutation attempt lacks stable identifiers');
+  sandbox.completeAdMutationAttempt(first);
+
+  const ad = { id: 'ad_safe', _lastModified: 456 };
+  const stop = sandbox.getAdStopAttempt(ad, 1250);
+  const stopRetry = sandbox.getAdStopAttempt(ad, 1250);
+  assert(stop === stopRetry && stop.idempotencyKey.length >= 8, 'ad stop retry key was not stable');
+  sandbox.completeAdStopAttempt(stop);
+});
+
+check('multi-entity server apply validates the whole batch before changing state', () => {
+  S.receipts = [{ id: 'receipt_original', note: 'keep' }];
+  let rejected = false;
+  try {
+    sandbox.applyValidatedServerEntityBatch([
+      { collection: 'receipts', entity: { id: 'receipt_source', lastModified: 10, data: { id: 'receipt_source' } } },
+      { collection: 'receipts', entity: { id: 'bad id', lastModified: 11, data: { id: 'bad id' } } }
+    ], 'testBatch');
+  } catch (_) {
+    rejected = true;
+  }
+  assert(rejected, 'malformed second entity was accepted');
+  assert(S.receipts.length === 1 && S.receipts[0].id === 'receipt_original', 'first entity applied before the batch was fully validated');
+});
+
+check('first-run UI separates local, token-enabled, and disabled server setup', () => {
+  S.serverMode = false;
+  S.needsServerSetup = false;
+  let html = sandbox.renderFirstRunSetup();
+  assert(html.includes('Create Admin (Local)'), 'local first run lost its local admin form');
+  assert(!html.includes('first-setup-token'), 'local first run incorrectly asks for a server token');
+
+  S.serverMode = true;
+  S.needsServerSetup = true;
+  S.serverSetupEnabled = true;
+  html = sandbox.renderFirstRunSetup();
+  assert(html.includes('first-setup-token'), 'enabled server setup has no token field');
+
+  S.needsServerSetup = false;
+  S.serverHasNoUsers = true;
+  S.serverSetupEnabled = false;
+  html = sandbox.renderLogin();
+  assert(html.includes('Browser setup is disabled.'), 'disabled setup has no persistent operator guidance');
+  assert(!html.includes('onclick="startServerSetup()"'), 'disabled setup still renders a usable setup button');
+  S.serverMode = false;
+  S.serverHasNoUsers = false;
+});
+
+check('server money/subscription calls use dedicated transactional endpoints', () => {
+  const built = fs.readFileSync(SCRIPT, 'utf8');
+  for (const endpoint of ['/api/wallet/transfers', '/api/wallet/top-ups', '/api/wallet/reversals', '/api/subscriptions/purchase', '/api/clothes/orders/mutate', '/api/receipts/transfers', '/api/ads/mutate', '/stop', '/api/sync/watermarks']) {
+    assert(built.includes(endpoint), `missing dedicated endpoint ${endpoint}`);
+  }
+  assert(built.includes('expectedSourceLastModified: serverAttempt.expectedSourceLastModified'), 'receipt transfer omits optimistic version');
+  assert(built.includes("await saveAdThroughAtomicServer(\n            'update'"), 'ad edits still use generic collection PATCH');
+  assert(built.includes('const response = await apiStopAd(storedAd.id'), 'ad stop does not use the atomic endpoint');
+  const financialHelpersSource = fs.readFileSync(path.join(__dirname, '..', 'src', '13-filters-helpers.js'), 'utf8');
+  const topUpBody = financialHelpersSource.split('async function saveTopUps()')[1]?.split('// Refund management functions')[0] || '';
+  const refundBody = financialHelpersSource.split('async function saveRefund()')[1] || '';
+  assert(topUpBody.includes('await saveAdThroughAtomicServer('), 'server ad top-ups still use generic funding PATCH');
+  assert(refundBody.includes('await saveAdThroughAtomicServer('), 'server ad refunds still use generic funding PATCH');
+  assert(built.includes('const deltaCollections = getAuthorizedServerSyncCollections();'), 'live sync still polls known-forbidden collections');
+  assert(built.includes("body: { name, email, password, setupToken }"), 'first-admin API omits the setup token');
+  assert(built.includes('state.serverSetupEnabled === true'), 'browser setup UI is not gated by server capability');
+  assert(built.includes('Browser setup is disabled. The server operator must use the ALBAYAN_BOOTSTRAP_ADMIN_*'), 'disabled browser setup lacks operator guidance');
+  assert(built.includes('Forgot your password? Contact an administrator.'), 'server login still advertises unusable email reset');
+  assert(built.includes("code = incompleteError.code || 'INCOMPLETE_COLLECTION_LOAD'"), 'partial page failures are not propagated');
+  assert(built.includes('for (const name of failed) idbSync.dirty.add(name)'), 'failed IndexedDB writes are not requeued');
+  assert(built.includes('const requestKey = `${identity}|${String(collection || \'\')}|${forceRefresh ? \'fresh\' : \'cached\'}`'), 'collection requests are not session-identity/freshness scoped');
+  assert(built.includes('const loadAborted = () => ('), 'full server loads have no session-change guard');
+  assert(built.includes("error.code = 'SERVER_SESSION_CHANGED'"), 'late responses cannot signal a changed session');
+  assert(built.includes("if (isServerModeEnabled()) {\n      showNotification(\n        state.language === 'ar' ? 'غير متاح' : 'Not Available'"), 'server-mode passkey registration is not disabled');
+  assert(built.includes('const startupLoad = serverLoadAllData()'), 'cookie startup does not sequence its full load');
+  assert(built.includes('startupLoad.finally(() => {'), 'live poller is not started after the startup full load settles');
+  assert(built.includes('_serverLiveSync.fullLoadCursorReady'), 'partial startup has no cursor-zero fallback');
+  assert(built.includes('const since = getServerCollectionCursor(collection);'), 'delta requests do not use per-collection cursors');
+  assert(!built.includes('const since = _serverLiveSync.cursor || computeServerCursorFromState() || 0'), 'cursor zero is still defeated by state fallback');
+  assert(built.includes('const result = await apiLoadCollectionAll(collection, { forceRefresh: true });'), 'full load can reuse a pre-watermark stale cache');
+  assert(built.includes('&before_created_at=${encodeURIComponent(String(beforeCreatedAt))}&before_id=${encodeURIComponent(beforeId)}'), 'full collection paging does not use a stable createdAt/id keyset');
+  assert(built.includes('&after_last_modified=${encodeURIComponent(String(afterLastModified))}&after_id=${encodeURIComponent(afterId)}'), 'delta paging does not use a stable lastModified/id keyset');
+  assert(!built.includes('&offset=${offset}&include_deleted=true'), 'collection sync still uses race-prone OFFSET pagination');
+  assert(built.includes('await clearServerCollectionsForVisibility(forbiddenCollections);'), '403 deltas do not purge previously visible records');
+  assert(built.includes('const scopedReload = await serverLoadAllData();'), 'permission scope changes do not perform an authoritative reload');
+  assert(built.includes("role: String(state.currentUser.role || '').toLowerCase()"), 'auth refresh access signature omits role');
+  assert(built.includes("attempt = getClothesOrderMutationAttempt('status'"), 'clothes status changes bypass the atomic mutation API');
+  assert(built.includes("attempt = getClothesOrderMutationAttempt('payment'"), 'clothes payment changes bypass the atomic mutation API');
+  assert(built.includes("attempt = getClothesOrderMutationAttempt('delete'"), 'clothes deletes bypass the atomic mutation API');
+  assert(!built.includes('_thisPatch.finally(() => {'), 'PATCH-chain cleanup still creates an unhandled rejecting Promise');
+  assert(built.includes('if (_activeLogin && _activeLogin.generation === _loginGeneration) return _activeLogin.promise;'), 'double-submit login guard is missing');
+  assert(built.includes('if (_logoutInFlight || _serverAuthExpiryInFlight)'), 'login is not blocked while a prior session is closing');
+  assert(built.includes('if (serverMode) await apiLogout();'), 'logout renders before the server logout request settles');
+  assert(!built.includes('Promise.resolve(_flushP).then(() => apiLogout())'), 'delayed logout can still destroy a newly-created session');
+  assert(built.includes('await handleServerAuthExpired(requestSessionIdentity);'), 'authenticated 401 responses do not trigger a secure local wipe');
+  assert(built.includes('await wipeAuthenticatedServerDataFromClient();'), 'session expiry does not await the current cache-namespace wipe');
+  assert(built.includes("backupScope: serverPartialSnapshot ? 'client-cache-partial' : 'full-local'"), 'server export is still mislabeled as a full backup');
+  assert(built.includes('Users, wallet/subscription history, and audit logs were not restored.'), 'server import still claims a false full restore');
+  assert(!built.includes('Server does not support atomic import yet — importing record by record'), 'unsafe non-transactional server import fallback remains');
+  assert(built.includes("isAr ? 'استيراد الخادم معطّل' : 'Server Import Disabled'"), 'server-mode import is not explicitly disabled');
+  assert(built.includes('delete exportState.clothesOrders;'), 'server report still exports transaction-controlled clothes orders');
+  assert(built.includes("restorableCollections: serverPartialSnapshot\n      ? []"), 'server report still advertises restorable collections');
+});
+
+// ---------- report ----------
+console.log(`\n${'='.repeat(60)}`);
+if (failures.length) {
+  console.log(`FAILED: ${failures.length} of ${passed + failures.length}`);
+  failures.forEach(f => console.log(`  - ${f}`));
+  process.exit(1);
+}
+console.log(`ALL ${passed} PERMISSION TESTS PASSED`);

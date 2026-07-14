@@ -11,15 +11,18 @@ const VIEW_TO_PATH = {
   'receipts': '/receipts',
   'pages': '/pages',
   'users': '/users',
-  'audit-logs': '/audit-logs',
+  'deliveries': '/deliveries',
+  'reconciliation': '/reconciliation',
+  'settings': '/settings',
+  // The Audit Logs view id is 'audit' (see renderView switch)
+  'audit': '/audit-logs',
   'delivery-dashboard': '/delivery',
-  'receipt-balance': '/receipt-balance',
   'no-access': '/no-access',
   // Platform views (admin only)
   'smart-systems': '/smart-systems',
   'clothes-system': '/clothes-system',
-  'wallet': '/wallet',
-  'account': '/account'
+  'service-placeholder': '/service',
+  'wallet': '/wallet'
 };
 
 // Reverse map: path to view
@@ -47,8 +50,32 @@ function getUrlParams() {
     filter: params.get('filter'),
     search: params.get('search'),
     tab: params.get('tab'),
-    page: params.get('page')
+    page: params.get('page'),
+    service: params.get('service')
   };
+}
+
+// Sub-state that belongs in the URL for a given view (so the link reopens the
+// exact same screen): the Clothes System tab, the service being viewed.
+function viewUrlParamsFor(view) {
+  if (view === 'clothes-system') {
+    return { tab: (typeof _clothesActiveTab !== 'undefined' && _clothesActiveTab) || null };
+  }
+  if (view === 'service-placeholder') {
+    return { service: state.viewData?.serviceId || null };
+  }
+  return {};
+}
+
+// Re-apply the sub-state carried in the URL when a view is opened by link.
+function restoreViewStateFromUrl(view) {
+  const params = getUrlParams();
+  if (view === 'clothes-system' && typeof restoreClothesTabFromUrl === 'function') {
+    restoreClothesTabFromUrl();
+  }
+  if (view === 'service-placeholder' && params.service) {
+    state.viewData = { serviceId: params.service };
+  }
 }
 
 // Update URL with parameters (for modals, filters, etc.)
@@ -87,14 +114,28 @@ function clearUrlParams(keys) {
   window.history.replaceState({ view: state.currentView }, '', newUrl);
 }
 
-// Update browser URL without reload
+// Update browser URL without reload. Carries the view's sub-state (Clothes
+// tab, service id) so the address always reproduces the screen you are on.
 function updateUrlForView(view, replace = false) {
   const path = VIEW_TO_PATH[view] || '/';
-  const newUrl = window.location.origin + path;
-  
-  // Don't update if already on this path
-  if (window.location.pathname === path) return;
-  
+  const sub = viewUrlParamsFor(view);
+  const search = new URLSearchParams();
+  for (const [k, v] of Object.entries(sub)) {
+    if (v !== null && v !== undefined && v !== '') search.set(k, String(v));
+  }
+  const qs = search.toString();
+  const newUrl = window.location.origin + path + (qs ? `?${qs}` : '');
+
+  // Already on this exact address: don't push a duplicate history entry, but
+  // still stamp {view} on the current entry — otherwise the initial entry
+  // keeps a null state and popstate falls back to services-hub/Restricted.
+  const samePlace = window.location.pathname === path
+    && (window.location.search || '') === (qs ? `?${qs}` : '');
+  if (samePlace) {
+    try { window.history.replaceState({ view }, '', newUrl); } catch (_) {}
+    return;
+  }
+
   try {
     if (replace) {
       window.history.replaceState({ view }, '', newUrl);
@@ -111,60 +152,61 @@ function updateUrlForView(view, replace = false) {
 function setupUrlRouting() {
   window.addEventListener('popstate', (event) => {
     const view = event.state?.view || getViewFromUrl();
+    // The address in the bar is the source of truth after back/forward:
+    // re-apply the view's sub-state (Clothes tab, service id) before rendering.
+    restoreViewStateFromUrl(view);
     // Navigate without pushing to history (already handled by popstate)
     navigateToInternal(view, false);
-    
+
     // Also restore modal state from URL params
     restoreModalFromUrl();
   });
 }
 
+// Every modal that has a shareable link: how to (re)open it from ?modal=&id=.
+// `open` re-runs the real opener so the modal's temp state (variants, split
+// lines, idempotency keys…) is initialised exactly as a click would.
+// Security note: recovery-key / password-reset / change-password are
+// deliberately NOT linkable — a URL must never resurrect a secrets dialog.
+const MODAL_URL_HANDLERS = {
+  'ad':               { newOpen: () => showAdModal(),        open: (id) => editAd(id) },
+  'receipt':          { newOpen: () => showReceiptModal(),   open: (id) => editReceipt(id) },
+  'customer':         { newOpen: () => showCustomerModal(),  open: (id) => editCustomer(id) },
+  'page':             { newOpen: () => showPageModal(),      open: (id) => editPage(id) },
+  'user':             { newOpen: () => showUserModal(),      open: (id) => editUser(id) },
+  'split-payments':   { open: (id) => manageSplitPayments(id) },
+  'top-ups':          { open: (id) => manageTopUps(id) },
+  'refund':           { open: (id) => manageRefund(id) },
+  'receipt-transfer': { open: (id) => showReceiptTransferModal(id) },
+  'collect-receipt':  { open: (id) => openCollectReceiptModal(id) },
+  'permissions':      { open: (id) => showPermissionsModal(id) },
+  'wallet-topup':     { open: (id) => showWalletTopupModal(id) },
+  'clothes-product':  { newOpen: () => showClothesProductModal(),  open: (id) => editClothesProduct(id) },
+  'clothes-shipment': { newOpen: () => showClothesShipmentModal(), open: (id) => editClothesShipment(id) },
+  'clothes-order':    { newOpen: () => showClothesOrderModal(),    open: (id) => editClothesOrder(id) }
+};
+
 // Restore modal from URL params (e.g., ?modal=ad&id=123 or ?modal=ad&id=new)
 function restoreModalFromUrl() {
   const params = getUrlParams();
-  
+
   if (params.modal) {
-    // Handle "new" modal (create new record)
-    if (params.id === 'new') {
-      setTimeout(() => {
-        state.activeModal = params.modal;
-        state.modalData = null;
-        renderModal();
-      }, 100);
-      return;
-    }
-    
-    // Find and open the modal for existing record
-    if (params.id) {
-      setTimeout(() => {
-        let record = null;
-        switch (params.modal) {
-          case 'ad':
-            record = state.ads.find(a => String(a.id) === String(params.id));
-            break;
-          case 'receipt':
-            record = state.receipts.find(r => String(r.id) === String(params.id));
-            break;
-          case 'customer':
-            record = state.customers.find(c => String(c.id) === String(params.id));
-            break;
-          case 'page':
-            record = state.pages.find(p => String(p.id) === String(params.id));
-            break;
-          case 'user':
-            record = state.users.find(u => String(u.id) === String(params.id));
-            break;
-          case 'split-payments':
-            record = state.receipts.find(r => String(r.id) === String(params.id));
-            break;
+    const handler = MODAL_URL_HANDLERS[params.modal];
+    if (!handler || !params.id) return;
+
+    // Re-open via the real opener so permissions are re-checked and the
+    // modal's temp state is seeded properly.
+    setTimeout(() => {
+      try {
+        if (params.id === 'new') {
+          if (handler.newOpen) handler.newOpen();
+          return;
         }
-        if (record) {
-          state.activeModal = params.modal;
-          state.modalData = record;
-          renderModal();
-        }
-      }, 100);
-    }
+        if (handler.open) handler.open(params.id);
+      } catch (e) {
+        console.warn('[restoreModalFromUrl] failed to open', params.modal, e?.message || e);
+      }
+    }, 100);
   } else {
     // No modal in URL, close any open modal
     if (state.activeModal) {
@@ -201,8 +243,11 @@ function navigateToInternal(view, pushHistory = true) {
   
   // Check permission (Admin always allowed)
   if (!isCurrentUserAdmin() && !userCanAccessView(state.currentUser, view)) {
-    // Special views that don't need permissions
-    if (view !== 'delivery-dashboard' && view !== 'no-access') {
+    // Special views that don't need permissions (delivery dashboard is for
+    // the Delivery role only — other roles must hold a real permission)
+    const isExempt = view === 'no-access' ||
+      (view === 'delivery-dashboard' && isDeliveryRole(state.currentUser?.role));
+    if (!isExempt) {
       showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية' : `You don't have permission to access this page`, 'error');
       return;
     }

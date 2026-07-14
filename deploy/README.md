@@ -1,10 +1,9 @@
-# Deploy (VPS + Domain + PostgreSQL)
+# Deploy (Libyan Spider + PostgreSQL)
 
-> **Which deployment is real?** There are three deployment descriptions in this
-> repo: `docker-compose.yml` (local/simple), this folder's VPS + systemd + Caddy
-> examples, and `INFRA_RECOMMENDATIONS_AWS.md` (AWS ECS + ALB + Cloudflare,
-> domain `albayanhub.com`) — the AWS document describes the actual production
-> setup. The others are alternatives/examples.
+> **Which deployment is real?** Production is hosted with **Libyan Spider**, not
+> AWS. The exact release method depends on whether the active Libyan Spider
+> service is JPaaS Git, Docker Compose, or cPanel. Confirm the service in the
+> hosting dashboard before deploying. The AWS document is historical guidance.
 
 This folder contains **example** deployment files for running Albayan as an always‑online multi‑user app.
 

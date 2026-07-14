@@ -19,6 +19,7 @@ from sqlalchemy import text
 
 os.environ["DATABASE_URL"] = "sqlite+pysqlite:///:memory:"
 
+import server.main as main_module
 from server.main import app, _client_ip
 from server.db import db_conn, init_db, json_dumps, now_ms
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
@@ -74,7 +75,7 @@ def _admin_cookies():
 def _make_driver(admin_cookies, email):
     client.post("/api/users", json={
         "name": "Driver 49", "email": email, "role": "Delivery",
-        "password": "DriverPass123!", "permissions": {"deliveries": ["view", "update"]},
+        "password": "DriverPass123!", "permissions": {"deliveries": ["view", "accept", "complete"]},
     }, cookies=admin_cookies)
     users = client.get("/api/users", cookies=admin_cookies).json()
     driver = next(u for u in users if u["email"] == email)
@@ -128,7 +129,7 @@ class TestDriverCannotReSettle:
         got = client.get("/api/collections/receipts/s49_receipt", cookies=admin).json()["data"]
         assert float(got.get("amountCollectedFromCustomer")) == 500.0
 
-    def test_driver_office_handover_still_allowed_after_delivered(self):
+    def test_driver_office_handover_is_rejected_after_delivered(self):
         admin = _admin_cookies()
         driver_id, driver = _make_driver(admin, "driver49-handover@tests.albayanhub.com")
         client.post("/api/collections/receipts", json={
@@ -146,11 +147,11 @@ class TestDriverCannotReSettle:
             "amountCollectedFromCustomer": 100.0, "actualDeliveryFeeCollected": 0.0,
         }}, cookies=driver)
         assert r1.status_code == 200, r1.text
-        # Office-handover update (no deliveryStatus change) must still work.
+        # Office handover is an office/admin action, not a driver action.
         r2 = client.patch("/api/collections/receipts/s49_handover", json={
             "data": {"isReceivedInOffice": True},
         }, cookies=driver)
-        assert r2.status_code == 200, r2.text
+        assert r2.status_code == 403, r2.text
 
 
 class TestAdminPasswordChangeKillsSessions:
@@ -158,7 +159,7 @@ class TestAdminPasswordChangeKillsSessions:
         admin = _admin_cookies()
         email = "s49-victim@tests.albayanhub.com"
         client.post("/api/users", json={
-            "name": "Victim", "email": email, "role": "Staff",
+            "name": "Victim", "email": email, "role": "Employee",
             "password": "OldPassword123!", "permissions": {},
         }, cookies=admin)
         users = client.get("/api/users", cookies=admin).json()
@@ -204,7 +205,7 @@ class TestLastAdminGuard:
             for oid in others:
                 conn.execute(text("UPDATE users SET deleted=true WHERE id=:id"), {"id": oid})
         try:
-            demote = client.patch(f"/api/users/{solo_id}", json={"role": "Staff"}, cookies=solo)
+            demote = client.patch(f"/api/users/{solo_id}", json={"role": "Employee"}, cookies=solo)
             assert demote.status_code == 400, demote.text
             assert "admin" in demote.json().get("detail", "").lower()
 
@@ -220,7 +221,7 @@ class TestLastAdminGuard:
         # A second admin can be demoted while the primary admin remains.
         second_email = "s49-second-admin@tests.albayanhub.com"
         second_id = _ensure_admin(second_email, "SecondPass123!Secure", name="Second")
-        r = client.patch(f"/api/users/{second_id}", json={"role": "Staff"}, cookies=admin)
+        r = client.patch(f"/api/users/{second_id}", json={"role": "Employee"}, cookies=admin)
         assert r.status_code == 200, r.text
 
 
@@ -235,11 +236,13 @@ class TestClientIpNotSpoofable:
         r.client = type("C", (), {"host": host})()
         return r
 
-    def test_cf_connecting_ip_preferred(self):
+    def test_cf_connecting_ip_preferred(self, monkeypatch):
+        monkeypatch.setattr(main_module, "TRUST_PROXY_HEADERS", True)
         req = self._req({"cf-connecting-ip": "203.0.113.9", "x-forwarded-for": "1.2.3.4, 5.6.7.8"})
         assert _client_ip(req) == "203.0.113.9"
 
-    def test_xff_uses_rightmost_not_spoofable_leftmost(self):
+    def test_xff_uses_rightmost_not_spoofable_leftmost(self, monkeypatch):
+        monkeypatch.setattr(main_module, "TRUST_PROXY_HEADERS", True)
         # A client-forged leftmost entry must NOT be returned.
         req = self._req({"x-forwarded-for": "66.66.66.66, 5.6.7.8"})
         assert _client_ip(req) == "5.6.7.8"

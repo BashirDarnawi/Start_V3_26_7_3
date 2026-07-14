@@ -82,7 +82,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
               <div>
                 <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1.5">${isArF ? 'طريقة الدفع' : 'Payment Method'}</label>
                 <select class="payment-method w-full glass-input px-3 py-2 rounded-lg text-sm font-medium border border-slate-200 dark:border-slate-600 focus:ring-2 focus:ring-indigo-500/20" onchange="onPaymentMethodChange(this)">
-                  ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
+                  ${paymentMethodOptions(payment.method).map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
                 </select>
               </div>
               <div>
@@ -95,7 +95,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             <div class="grid grid-cols-2 gap-4">
               <div class="bg-slate-50 dark:bg-slate-900/50 p-3 rounded-lg border border-slate-200 dark:border-slate-700">
                 <label class="text-[10px] font-bold text-slate-500 uppercase mb-1.5 block">${isArF ? 'السعر 1' : 'RATE 1'}</label>
-                <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${payment.rate || state.defaultExchangeRate}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
+                <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${paymentRate1Value(payment)}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
                 <div class="text-center pt-2 border-t border-slate-200 dark:border-slate-700">
                   <div class="text-[10px] font-bold text-slate-400 mb-0.5">R1:</div>
                   <span class="payment-r1-display text-sm font-bold text-indigo-600">0.00 LYD</span>
@@ -172,7 +172,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             <div>
               <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">${isArF ? 'طريقة الدفع' : 'Payment Method'}</label>
               <select class="payment-method w-full glass-input px-3 py-2 rounded-lg text-sm font-medium border border-slate-200 dark:border-slate-600" onchange="onPaymentMethodChange(this)">
-                ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
+                ${paymentMethodOptions(payment.method).map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
               </select>
             </div>
             <div>
@@ -184,7 +184,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
           <div class="grid grid-cols-2 gap-3">
             <div class="bg-slate-50 dark:bg-slate-900/50 p-2 rounded-lg border border-slate-200 dark:border-slate-700">
               <label class="text-[10px] font-bold text-slate-500 uppercase mb-1 block">${isArF ? 'السعر 1' : 'RATE 1'}</label>
-              <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${payment.rate || state.defaultExchangeRate}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
+              <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${paymentRate1Value(payment)}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
               <div class="text-center pt-1 border-t border-slate-200 dark:border-slate-700">
                 <span class="text-[9px] font-bold text-slate-400">R1: </span>
                 <span class="payment-r1-display text-xs font-bold text-indigo-600">0.00 LYD</span>
@@ -381,7 +381,7 @@ function filterPageCustomers() {
   
   if (filtered.length > 0 && searchTerm) {
     dropdown.innerHTML = filtered.map(c => `
-      <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" onclick="selectPageCustomer('${c.id}', '${isAdminRole(state.currentUser?.role)}')">
+      <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" data-record-action="select-page-customer" data-record-id="${Security.escapeHtml(String(c.id || ''))}" data-admin="${isAdminRole(state.currentUser?.role)}">
         <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
         <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (state.language === 'ar' ? 'لا يوجد هاتف' : 'No phone'))}</div>
       </div>
@@ -398,7 +398,7 @@ function showPageCustomerDropdown() {
   
   if (customers.length > 0) {
     dropdown.innerHTML = customers.map(c => `
-      <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" onclick="selectPageCustomer('${c.id}', '${isAdminRole(state.currentUser?.role)}')">
+      <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" data-record-action="select-page-customer" data-record-id="${Security.escapeHtml(String(c.id || ''))}" data-admin="${isAdminRole(state.currentUser?.role)}">
         <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
         <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (state.language === 'ar' ? 'لا يوجد هاتف' : 'No phone'))}</div>
       </div>
@@ -408,6 +408,7 @@ function showPageCustomerDropdown() {
 }
 
 function selectPageCustomer(customerId, isAdmin) {
+  if (!Security.isValidRecordId(customerId)) return;
   const customer = state.customers.find(c => c.id === customerId);
   if (!customer) return;
   
@@ -417,7 +418,8 @@ function selectPageCustomer(customerId, isAdmin) {
   const searchInput = document.getElementById('page-customer-search');
   
   // Check if already selected
-  const existing = container.querySelector(`[data-customer-id="${customerId}"]`);
+  const existing = Array.from(container.querySelectorAll('[data-customer-id]'))
+    .find(el => String(el.dataset.customerId || '') === String(customerId));
   if (existing) {
     showNotification(state.language === 'ar' ? 'محدد مسبقاً' : 'Already Selected', state.language === 'ar' ? 'هذا العميل مرتبط بهذه الصفحة بالفعل' : 'This customer is already linked to this page', 'info');
     dropdown.classList.add('hidden');
@@ -441,7 +443,7 @@ function selectPageCustomer(customerId, isAdmin) {
       <div class="font-medium text-sm text-slate-800 dark:text-white">${Security.escapeHtml(customer.name || '')}</div>
       <div class="text-xs text-slate-500">${Security.escapeHtml(customer.platform || '')}</div>
     </div>
-    <button type="button" onclick="removePageCustomer('${customerId}')" class="text-rose-500 hover:text-rose-700">
+    <button type="button" data-record-action="remove-page-customer" data-record-id="${Security.escapeHtml(String(customerId))}" class="text-rose-500 hover:text-rose-700">
       <i data-lucide="x-circle" class="w-4 h-4"></i>
     </button>
   `;
@@ -471,9 +473,11 @@ function selectPageCustomer(customerId, isAdmin) {
 }
 
 function removePageCustomer(customerId) {
+  if (!Security.isValidRecordId(customerId)) return;
   const container = document.getElementById('page-selected-customers');
   const noCustomersMsg = document.getElementById('page-no-customers');
-  const item = container.querySelector(`[data-customer-id="${customerId}"]`);
+  const item = Array.from(container.querySelectorAll('[data-customer-id]'))
+    .find(el => String(el.dataset.customerId || '') === String(customerId));
   
   if (item) {
     item.remove();
@@ -494,6 +498,39 @@ function removePageCustomer(customerId) {
   }
 }
 
+// Delegated record actions keep untrusted ids out of executable JavaScript.
+// Dynamic dropdowns can be re-rendered freely without re-binding handlers.
+if (!window.__albayanSafeRecordActionsBound) {
+  window.__albayanSafeRecordActionsBound = true;
+  document.addEventListener('click', (event) => {
+    const actionEl = event.target?.closest?.('[data-record-action]');
+    if (!actionEl) return;
+    const recordId = String(actionEl.dataset.recordId || '');
+    if (!Security.isValidRecordId(recordId)) {
+      event.preventDefault();
+      showNotification('Invalid Record', 'This record identifier is not allowed.', 'error');
+      return;
+    }
+    switch (actionEl.dataset.recordAction) {
+      case 'select-page-customer':
+        selectPageCustomer(recordId, String(actionEl.dataset.admin || 'false'));
+        break;
+      case 'remove-page-customer':
+        removePageCustomer(recordId);
+        break;
+      case 'select-ad-page':
+        selectAdPage(recordId);
+        break;
+      case 'select-ad-customer':
+        selectAdCustomer(recordId);
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+  });
+}
+
 // Close dropdowns when clicking outside
 document.addEventListener('click', (e) => {
   const pageDropdown = document.getElementById('page-customer-dropdown');
@@ -505,6 +542,24 @@ document.addEventListener('click', (e) => {
     pageDropdown.classList.add('hidden');
   }
 });
+
+// Rate 1 to SHOW for a stored payment row.
+// MONEY-MATH: 0 is a REAL rate — the app itself fills Rate 1 with 0.00 for
+// every zero-rate method (Bank Transfer LYD/USD, Sadad, USDT, LTT, Cash (USD)).
+// The old `payment.rate || state.defaultExchangeRate` treated that 0 as
+// "missing" and re-rendered the market rate, so simply reopening such a receipt
+// (or adding/removing a split row) showed an inflated LYD total — and saving it
+// again REWROTE amountLocal/exchangeRate with money the customer never paid.
+// Only a genuinely absent rate falls back to the default.
+function paymentRate1Value(payment) {
+  const r = payment ? payment.rate : undefined;
+  if (r === undefined || r === null || r === '') {
+    return payment && payment.method !== undefined
+      ? getDefaultRate1(payment.method)
+      : state.defaultExchangeRate;
+  }
+  return r;
+}
 
 // Get default Rate 1 based on payment method
 function getDefaultRate1(paymentMethod) {
@@ -519,51 +574,101 @@ function getDefaultRate1(paymentMethod) {
   return state.defaultExchangeRate; // Default for others
 }
 
-// Payment methods that get auto-serial numbers (S-prefix: S1, S2, S3...)
-const AUTO_SERIAL_PAYMENT_METHODS = ['LTT', 'Libyana', 'Madar'];
-const AUTO_SERIAL_PREFIX = 'S'; // Prefix for auto-generated serial numbers
+// AUTO-SERIAL GROUPS
+// Some payment methods have no paper receipt from the provider, so the app
+// issues its own sequential number. Each group owns an INDEPENDENT counter:
+//   S — LTT / Libyana / Madar          (S1, S2, …)
+//   B — Bank Transfer (LYD) / (USD)    (B1, B2, …)
+//   O — Transfer Office                (O1, O2, …)
+//   E — Sadad / USDT                   (E1, E2, …)
+// The serial field is READ-ONLY for these methods (see updateSerialLockState).
+const AUTO_SERIAL_GROUPS = {
+  S: ['LTT', 'Libyana', 'Madar'],
+  B: ['Bank Transfer (LYD)', 'Bank Transfer (USD)', 'Bank Transfer'],
+  O: ['Transfer Office'],
+  E: ['Sadad', 'USDT']
+};
+const AUTO_SERIAL_PREFIXES = Object.keys(AUTO_SERIAL_GROUPS);
+const AUTO_SERIAL_PAYMENT_METHODS = Object.values(AUTO_SERIAL_GROUPS).flat();
 
-// Get the next serial number for auto-serial payment methods (returns S1, S2, S3...)
-function getNextAutoSerialNumber(paymentMethod) {
-  if (!AUTO_SERIAL_PAYMENT_METHODS.includes(paymentMethod)) return null;
-  
-  // Find all receipts that use ANY of the auto-serial payment methods (LTT, Libyana, Madar share the same sequence)
-  const receipts = getVisibleRecords(state.receipts);
-  let maxSerialNumber = 0;
-  
-  receipts.forEach(receipt => {
-    // Check if this receipt uses ANY of the auto-serial payment methods
-    const receiptPaymentMethod = receipt.paymentMethod || '';
-    const payments = receipt.payments || [];
-    const usesAutoSerialMethod = AUTO_SERIAL_PAYMENT_METHODS.includes(receiptPaymentMethod) || 
-                                  payments.some(p => AUTO_SERIAL_PAYMENT_METHODS.includes(p.method));
-    
-    if (usesAutoSerialMethod && receipt.serialNumber) {
-      const serial = String(receipt.serialNumber).trim();
-      // Extract number from S-prefixed serial (S1, S2, etc.) or plain number (legacy: 1, 2, etc.)
-      let serialNum = 0;
-      if (serial.toUpperCase().startsWith(AUTO_SERIAL_PREFIX)) {
-        // New format: S1, S2, S3...
-        serialNum = parseInt(serial.substring(AUTO_SERIAL_PREFIX.length), 10);
-      } else {
-        // Legacy format: plain number (1, 2, 3...)
-        serialNum = parseInt(serial, 10);
-      }
-      if (!isNaN(serialNum) && serialNum > maxSerialNumber) {
-        maxSerialNumber = serialNum;
-      }
-    }
-  });
-  
-  // Return with S prefix: S1, S2, S3...
-  return `${AUTO_SERIAL_PREFIX}${maxSerialNumber + 1}`;
+// Which counter does this payment method draw from? null = manual serial.
+function getAutoSerialPrefix(paymentMethod) {
+  const m = String(paymentMethod || '').trim();
+  for (const [prefix, methods] of Object.entries(AUTO_SERIAL_GROUPS)) {
+    if (methods.includes(m)) return prefix;
+  }
+  return null;
 }
 
-// Check if a serial number is an auto-generated S-serial (S1, S2, etc.)
+// Next serial for the group a payment method belongs to (e.g. 'B3').
+function getNextAutoSerialNumber(paymentMethod) {
+  const prefix = getAutoSerialPrefix(paymentMethod);
+  if (!prefix) return null;
+  const groupMethods = AUTO_SERIAL_GROUPS[prefix];
+
+  const receipts = getVisibleRecords(state.receipts);
+  let maxSerialNumber = 0;
+
+  receipts.forEach(receipt => {
+    // A receipt belongs to the group if its method — or any of its split
+    // payments — is in the group.
+    const receiptPaymentMethod = receipt.paymentMethod || '';
+    const payments = Array.isArray(receipt.payments) ? receipt.payments : [];
+    const usesGroupMethod = groupMethods.includes(receiptPaymentMethod)
+      || payments.some(p => groupMethods.includes(p && p.method));
+
+    if (!usesGroupMethod || !receipt.serialNumber) return;
+    const serial = String(receipt.serialNumber).trim().toUpperCase();
+
+    let serialNum = 0;
+    if (serial.startsWith(prefix)) {
+      serialNum = parseInt(serial.substring(prefix.length), 10);
+    } else if (prefix === 'S' && /^\d+$/.test(serial)) {
+      // Legacy: the S group used bare numbers before the prefix existed.
+      serialNum = parseInt(serial, 10);
+    } else {
+      return; // a serial from a different group never advances this counter
+    }
+    if (!isNaN(serialNum) && serialNum > maxSerialNumber) maxSerialNumber = serialNum;
+  });
+
+  return `${prefix}${maxSerialNumber + 1}`;
+}
+
+// Is this an app-generated serial (S1 / B2 / O3 / E4)?
 function isAutoSerialNumber(serial) {
   if (!serial) return false;
   const s = String(serial).trim().toUpperCase();
-  return s.startsWith(AUTO_SERIAL_PREFIX) && /^S\d+$/.test(s);
+  return new RegExp(`^[${AUTO_SERIAL_PREFIXES.join('')}]\\d+$`).test(s);
+}
+
+// The payment methods currently selected in the receipt form, in row order.
+function getSelectedPaymentMethods() {
+  return Array.from(document.querySelectorAll('.payment-split-item'))
+    .map(item => item.querySelector('.payment-method'))
+    .filter(Boolean)
+    .map(sel => String(sel.value || '').trim())
+    .filter(Boolean);
+}
+
+// The auto-serial method to number this receipt by — but ONLY when EVERY
+// payment row is auto-numbered. If any row is a manual method (Cash), the
+// customer got a real paper receipt, so its number must be typed by hand and
+// the field stays editable. Returns null in that case (and when there are no
+// payment rows at all).
+function getSelectedAutoSerialMethod() {
+  const paymentItems = document.querySelectorAll('.payment-split-item');
+  let firstAuto = null;
+  let rows = 0;
+  for (const item of paymentItems) {
+    const methodSelect = item.querySelector('.payment-method');
+    if (!methodSelect) continue;
+    rows++;
+    const prefix = getAutoSerialPrefix(methodSelect.value);
+    if (!prefix) return null; // a manual method is present -> manual number
+    if (!firstAuto) firstAuto = methodSelect.value;
+  }
+  return rows > 0 ? firstAuto : null;
 }
 
 // Handle payment method change
@@ -590,102 +695,128 @@ function onPaymentMethodChange(selectElement) {
     rate2Input.value = state.defaultExchangeRate.toFixed(2);
   }
   
-  // Auto-set serial number for LTT, Libyana, Madar payment methods
-  const serialInput = document.getElementById('receipt-serial');
-  if (AUTO_SERIAL_PAYMENT_METHODS.includes(paymentMethod)) {
-    if (serialInput && !serialInput.value) {
-      const nextSerial = getNextAutoSerialNumber(paymentMethod);
-      if (nextSerial) {
-        serialInput.value = nextSerial;
-        // Make field read-only and style it
-        serialInput.readOnly = true;
-        serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-        serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${paymentMethod}` : `Auto-generated for ${paymentMethod}`;
-        // Show notification about auto-generated serial
-        showNotification(state.language === 'ar' ? 'رقم تلقائي' : 'Auto Serial', state.language === 'ar' ? `تم تعيين رقم الوصل تلقائياً إلى ${nextSerial} لـ ${paymentMethod}` : `Receipt number auto-set to ${nextSerial} for ${paymentMethod}`, 'info');
-      }
-    } else if (serialInput) {
-      // If already has value and is auto-serial method, keep it locked
-      serialInput.readOnly = true;
-      serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-      serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${paymentMethod}` : `Auto-generated for ${paymentMethod}`;
-    }
-  }
-  
-  // Check if we need to update the serial lock state based on all payment methods
-  updateSerialLockState();
-  
+  // The payment method drives the receipt number — re-sync it.
+  syncReceiptSerialWithPaymentMethods({ reissue: true });
+
   // Update totals
   updateReceiptTotals();
 }
 
-// Helper function to always round UP to 2 decimal places
-// This ensures any value with decimals beyond 2 places rounds up
-// Example: 90.100143062 becomes 90.11, not 90.10
-function ceilingRound(value) {
-  if (value === 0 || !value || isNaN(value)) return 0;
-  // Always round up: multiply by 100, use Math.ceil, then divide by 100
-  // This ensures 90.10000001 becomes 90.11
-  const result = Math.ceil(value * 100) / 100;
-  return result;
-}
-
-// Auto-update serial number for receipts with LTT, Libyana, or Madar payment methods
-function updateAutoSerialForReceipt() {
+// Keep the Receipt Number field consistent with the selected payment methods.
+//
+// reissue=true  — the user just CHANGED the payment methods (picked another
+//                 method, added/removed a split row). The number must follow
+//                 the new methods, even on a saved receipt: switching a cash
+//                 receipt (paper number 12851) to Bank Transfer means there is
+//                 no paper receipt any more, so it takes a B number.
+// reissue=false — the form merely opened; never renumber an existing receipt,
+//                 only fill a blank field.
+function syncReceiptSerialWithPaymentMethods({ reissue = false } = {}) {
   const serialInput = document.getElementById('receipt-serial');
   if (!serialInput) return;
-  
-  const paymentItems = document.querySelectorAll('.payment-split-item');
-  let autoSerialMethod = null;
-  
-  // Check if any payment method requires auto-serial
-  paymentItems.forEach((item) => {
-    const methodSelect = item.querySelector('.payment-method');
-    if (methodSelect && AUTO_SERIAL_PAYMENT_METHODS.includes(methodSelect.value)) {
-      autoSerialMethod = methodSelect.value;
+
+  const autoMethod = getSelectedAutoSerialMethod();
+  const current = String(serialInput.value || '').trim();
+  const currentUpper = current.toUpperCase();
+  const isEditingSaved = !!state.modalData?.id;
+
+  if (autoMethod) {
+    const prefix = getAutoSerialPrefix(autoMethod);
+    // The number already belongs to this method's counter — keep it.
+    const inThisGroup = isAutoSerialNumber(currentUpper) && currentUpper.startsWith(prefix);
+    // Legacy S receipts were numbered with bare digits before the prefix
+    // existed; a saved one keeps its number rather than being renumbered.
+    const legacySInGroup = prefix === 'S' && isEditingSaved && /^\d+$/.test(current);
+
+    if (!current || (reissue && !inThisGroup && !legacySInGroup)) {
+      const nextSerial = getNextAutoSerialNumber(autoMethod);
+      if (nextSerial && nextSerial !== current) {
+        serialInput.value = nextSerial;
+        showNotification(
+          state.language === 'ar' ? 'رقم تلقائي' : 'Auto Serial',
+          state.language === 'ar'
+            ? `تم تعيين رقم الوصل تلقائياً إلى ${nextSerial} لـ ${trMethod(autoMethod)}`
+            : `Receipt number auto-set to ${nextSerial} for ${autoMethod}`,
+          'info'
+        );
+      }
     }
-  });
-  
-  if (autoSerialMethod && !serialInput.value) {
-    const nextSerial = getNextAutoSerialNumber(autoSerialMethod);
-    if (nextSerial) {
-      serialInput.value = nextSerial;
-      // Make field read-only
-      serialInput.readOnly = true;
-      serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-      serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${autoSerialMethod}` : `Auto-generated for ${autoSerialMethod}`;
-    }
+  } else if (reissue && isAutoSerialNumber(currentUpper)) {
+    // A manual (paper-receipt) method joined the split: drop the app-issued
+    // number so the real receipt number is entered.
+    serialInput.value = '';
+    showNotification(
+      state.language === 'ar' ? 'رقم الوصل مطلوب' : 'Receipt Number Required',
+      state.language === 'ar'
+        ? 'الدفع يشمل طريقة بإيصال ورقي — أدخل رقم الوصل يدوياً.'
+        : 'This payment includes a method with a paper receipt — enter the receipt number manually.',
+      'info'
+    );
   }
-  
-  // Update lock state
+
   updateSerialLockState();
 }
 
-// Update serial field lock state based on payment methods
+// Round UP to 2 decimal places (credit is granted in the customer's favour).
+// Example: 90.100143062 -> 90.11.
+//
+// MONEY-MATH: it must NOT round up on binary floating-point residue. 291 / 9.7
+// is 30.000000000000004 in JS, so the old Math.ceil(v * 100) turned an exact
+// $30.00 into $30.01 — and the "+0.01 when it has decimals" rule below then
+// made it $30.02, which in turn made the stored exchange rate 291/30.02 = 9.69
+// instead of the 9.70 the user typed. Treat a value that is within a
+// hair of a cent boundary as being ON it, then ceil.
+const MONEY_EPSILON = 1e-6;
+
+// The rate to STORE on a receipt.
+// Single payment  -> exactly the rate the user typed (Rate 2).
+// Split payments  -> the effective average (rows can carry different rates).
+function receiptExchangeRate(payments, totalLYD, totalUSD) {
+  const rows = Array.isArray(payments) ? payments : [];
+  if (rows.length === 1) {
+    const r = Number(rows[0]?.rate2);
+    if (Number.isFinite(r) && r > 0) return r;
+  }
+  if (totalUSD > 0 && totalLYD > 0) return totalLYD / totalUSD;
+  return state.defaultExchangeRate;
+}
+
+function ceilingRound(value) {
+  const v = Number(value);
+  if (!Number.isFinite(v) || v === 0) return 0;
+  const cents = v * 100;
+  const nearest = Math.round(cents);
+  if (Math.abs(cents - nearest) < MONEY_EPSILON) return nearest / 100;
+  return Math.ceil(cents) / 100;
+}
+
+// Called when a payment row is ADDED or REMOVED — the set of methods changed,
+// so the receipt number must follow it (reissue), same as a method change.
+function updateAutoSerialForReceipt() {
+  syncReceiptSerialWithPaymentMethods({ reissue: true });
+}
+
+// Called when the receipt form OPENS: fill a blank number, lock the field for
+// auto-numbered methods, but never renumber an existing receipt.
+function initReceiptSerialOnOpen() {
+  syncReceiptSerialWithPaymentMethods({ reissue: false });
+}
+
+// The serial field is read-only whenever an auto-serial method is selected —
+// these receipts are numbered by the app, never by hand.
 function updateSerialLockState() {
   const serialInput = document.getElementById('receipt-serial');
   if (!serialInput) return;
-  
-  const paymentItems = document.querySelectorAll('.payment-split-item');
-  let hasAutoSerialMethod = false;
-  let autoSerialMethod = null;
-  
-  // Check if any payment method requires auto-serial
-  paymentItems.forEach((item) => {
-    const methodSelect = item.querySelector('.payment-method');
-    if (methodSelect && AUTO_SERIAL_PAYMENT_METHODS.includes(methodSelect.value)) {
-      hasAutoSerialMethod = true;
-      autoSerialMethod = methodSelect.value;
-    }
-  });
-  
-  if (hasAutoSerialMethod) {
-    // Lock the serial field
+
+  const autoSerialMethod = getSelectedAutoSerialMethod();
+
+  if (autoSerialMethod) {
     serialInput.readOnly = true;
     serialInput.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
-    serialInput.title = state.language === 'ar' ? `مولّد تلقائياً لـ ${autoSerialMethod}` : `Auto-generated for ${autoSerialMethod}`;
+    serialInput.title = state.language === 'ar'
+      ? `مولّد تلقائياً لـ ${trMethod(autoSerialMethod)} (لا يمكن تعديله)`
+      : `Auto-generated for ${autoSerialMethod} (not editable)`;
   } else {
-    // Unlock the serial field if no auto-serial methods are present
     serialInput.readOnly = false;
     serialInput.classList.remove('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
     serialInput.title = '';
@@ -979,7 +1110,7 @@ async function _saveReceiptFromModalInner() {
     totalR1 += r1;
     totalR2 += r2;
   });
-  
+
   // Add 0.01 to TOTAL ADS CREDIT (USD) only if it has decimals
   // Snap to 2 decimals first so binary float residue (e.g. a sum landing on
   // 100.00000000000001) doesn't trip the "has decimals" rule on a whole total.
@@ -991,10 +1122,28 @@ async function _saveReceiptFromModalInner() {
   const totalLYD = totalR1;
   const totalUSD = totalR2;
   // BUG FIX: Prevent division by zero (defense in depth, already checked totalUSD > 0)
-  const avgRate = (totalUSD > 0 && totalLYD > 0) ? (totalLYD / totalUSD) : state.defaultExchangeRate;
+  // The receipt's exchange rate. With a SINGLE payment, store exactly the rate
+  // the user typed — deriving it as LYD/USD made the card show 9.69 for a rate
+  // of 9.70, because the credit total is rounded up in the customer's favour.
+  // With a split (different rates per row) the effective average is the only
+  // meaningful figure, so keep deriving it there.
+  const avgRate = receiptExchangeRate(payments, totalLYD, totalUSD);
   const status = document.getElementById('receipt-status').value || 'Paid';
   const photos = state.tempReceiptPhotos || [];
-  
+
+  // A receipt records money that was RECEIVED. Rows with amount 0 are dropped
+  // from payments[] above, so an all-zero form used to save a receipt with NO
+  // payments at all — which then invented a payment method nobody picked. Only
+  // a "Not Paid" receipt may legitimately carry no payment yet.
+  if (payments.length === 0 && status !== 'Not Paid') {
+    showNotification(
+      isArV ? 'تحقق' : 'Validation',
+      isArV ? 'أدخل مبلغ الدفع (لا يمكن حفظ وصل بدون مبلغ).' : 'Enter a payment amount (a receipt cannot be saved with no money).',
+      'error'
+    );
+    return;
+  }
+
   // Collect status detail fields
   const statusDetail = {
     paidCollection: document.getElementById('paid-collection-value')?.value || 'office',
@@ -1044,9 +1193,22 @@ async function _saveReceiptFromModalInner() {
   }
   
   // Validate receipt number
-  const serialNumber = document.getElementById('receipt-serial').value.trim();
   const serialInputEl = document.getElementById('receipt-serial');
   const serialErrEl = document.getElementById('receipt-serial-error');
+  // Safety net: an auto-numbered payment method must never save without its
+  // serial (e.g. the field was left empty because the method was pre-selected).
+  // It must NOT fire for a temp-delivery receipt (those carry a D-number) nor
+  // for a "Not Paid" receipt, whose number the form deliberately hides — issuing
+  // one there would burn a number on a receipt that shows none.
+  {
+    const autoMethod = getSelectedAutoSerialMethod();
+    const serialApplies = !isTempDelivery && status !== 'Not Paid';
+    if (serialApplies && autoMethod && serialInputEl && !String(serialInputEl.value || '').trim()) {
+      const next = getNextAutoSerialNumber(autoMethod);
+      if (next) serialInputEl.value = next;
+    }
+  }
+  const serialNumber = document.getElementById('receipt-serial').value.trim();
 
   // Temp delivery receipts must have a D{n} temporary number.
   if (isTempDelivery) {
@@ -1129,13 +1291,25 @@ async function _saveReceiptFromModalInner() {
   // Determine delivery status and delivery person based on status and collection method
   let receiptDeliveryStatus = 'Office';
   let receiptDeliveryPersonId = '';
+  // MONEY-MATH: isPaid must be DERIVED from the status, not defaulted to true.
+  // 'Canceled'/'Lost' used to inherit the true default, so switching a NEVER-PAID
+  // receipt to Canceled/Lost flipped it to paid and minted spendable ad credit
+  // from money the business never received. A canceled/lost receipt only counts
+  // as paid if it really held money before (or a Lost one is resolved as paid).
   let receiptIsPaid = true;
   let receiptIsReceivedInOffice = true;
-  
+
+  if (status === 'Canceled' || status === 'Lost') {
+    const heldMoneyBefore = !!(editTarget && (editTarget.isPaid === true || String(editTarget.status || '') === 'Paid'));
+    const lostPaid = status === 'Lost' && String(statusDetail.lostResolution || '') === 'paid';
+    receiptIsPaid = heldMoneyBefore || lostPaid;
+    receiptIsReceivedInOffice = receiptIsPaid;
+  }
+
   if (status === 'Not Paid') {
     receiptIsPaid = false;
     receiptIsReceivedInOffice = false;
-    
+
     if (statusDetail.notPaidCollection === 'delivery') {
       receiptDeliveryStatus = 'Needs Delivery';
       // Get delivery person from the first payment with a delivery person, or from a dedicated field
@@ -1187,7 +1361,13 @@ async function _saveReceiptFromModalInner() {
   // Normal receipts: send serialNumber only.
   const tempReceiptNo = isTempDelivery ? serialNumber : (editTarget?.tempReceiptNo || '');
   const serialFinal = isTempDelivery ? (editTarget?.serialNumber || editTarget?.finalReceiptNo || '') : serialNumber;
-  const finalReceiptNo = (editTarget?.finalReceiptNo || '') || (serialFinal || '');
+  // finalReceiptNo must FOLLOW the number the user just entered. It used to
+  // prefer the stored value, so editing a receipt's number changed only
+  // serialNumber while the lists/cards (which show finalReceiptNo first) kept
+  // displaying the OLD number — the edit looked like it never happened.
+  const finalReceiptNo = isTempDelivery
+    ? (editTarget?.finalReceiptNo || '')
+    : (serialFinal || '');
 
   const receipt = {
     id: editTarget ? editTarget.id : generateId('receipt'),
@@ -1198,7 +1378,15 @@ async function _saveReceiptFromModalInner() {
     amountUSD: totalUSD,
     exchangeRate: avgRate,
     amountLocal: totalLYD,
-    paymentMethod: (Array.isArray(payments) && payments.length > 1) ? 'Split Payment' : (Array.isArray(payments) && payments.length > 0 ? payments[0]?.method : 'Cash (USD)'),
+    // Derived from the rows the user actually chose. When every amount is 0 the
+    // rows are dropped from payments[], and this used to invent 'Cash (USD)' —
+    // a method nobody picked, contradicting the auto-serial that was issued for
+    // the real method. Fall back to the SELECTED method instead.
+    paymentMethod: (Array.isArray(payments) && payments.length > 1)
+      ? 'Split Payment'
+      : (Array.isArray(payments) && payments.length > 0
+          ? payments[0]?.method
+          : (getSelectedPaymentMethods()[0] || editTarget?.paymentMethod || '')),
     status,
     statusDetail,
     isPaid: receiptIsPaid,
@@ -1312,36 +1500,55 @@ async function _saveReceiptFromModalInner() {
     // Pass the baseline the user actually edited (the modal snapshot) so a
     // concurrent change (e.g. a driver completing the delivery) triggers a
     // 409 conflict + reload instead of being silently overwritten.
-    updateRecord(state.receipts, receipt.id, receipt, oldReceipt?._lastModified);
+    const savedOk = await updateRecord(state.receipts, receipt.id, receipt, oldReceipt?._lastModified);
+    if (!savedOk) return; // keep the modal open; updateRecord already explained the failure
     showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث الوصل بنجاح!' : 'Receipt updated successfully!', 'success');
     addLog('update', 'receipt', receipt.id, `Updated receipt${serialNumber ? ' #' + serialNumber : ''}`);
   } else {
     // Create new
     if (isServerModeEnabled()) {
       // Server-confirmed create: do NOT show success until the server confirms.
+      let saved = null;
       try {
         const created = await apiCreateEntity('receipts', receipt);
-        const saved = created?.data ? Security.sanitizeObject(created.data) : null;
-        if (!saved || !saved.id) {
-          showNotification(isArV ? 'خطأ في الخادم' : 'Server Error', isArV ? 'فشل إنشاء الوصل: استجابة غير صالحة من الخادم' : 'Failed to create receipt: invalid server response', 'error');
-          return;
-        }
-        // Insert into local state
-        state.receipts.unshift(saved);
-        markCollectionDirty('receipts');
-        saveState();
-        showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
-        addLog('create', 'receipt', saved.id, `Created receipt${saved.tempReceiptNo ? ' #' + saved.tempReceiptNo : (serialNumber ? ' #' + serialNumber : '')} for ${customerName}`);
+        saved = created?.data ? Security.sanitizeObject(created.data) : null;
       } catch (e) {
+        // The first POST may have committed while its response was lost; its
+        // retry then receives 409. Accept only a matching server row.
+        if (e?.status === 409) {
+          try {
+            const existing = await apiGetEntity('receipts', receipt.id);
+            if (existing?.data && serverRecordMatchesCreateRetry(existing.data, receipt)) {
+              saved = Security.sanitizeObject(existing.data);
+            }
+          } catch (_) {}
+        }
+        if (saved) {
+          // Continue below as a confirmed idempotent success.
+        } else {
         const status = e?.status ? `HTTP ${e.status}` : '';
         const detail = (e?.payload && typeof e.payload === 'object' && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
         showNotification(isArV ? 'خطأ في الخادم' : 'Server Error', `${isArV ? 'فشل إنشاء الوصل' : 'Failed to create receipt'}: ${status ? status + ' - ' : ''}${detail}`, 'error');
         return; // keep modal open so user can retry
+        }
       }
+      if (!saved || !saved.id) {
+        showNotification(isArV ? 'خطأ في الخادم' : 'Server Error', isArV ? 'فشل إنشاء الوصل: استجابة غير صالحة من الخادم' : 'Failed to create receipt: invalid server response', 'error');
+        return;
+      }
+      // Insert into local state only after server confirmation.
+      const savedIdx = state.receipts.findIndex(r => r && String(r.id) === String(saved.id));
+      if (savedIdx === -1) state.receipts.unshift(saved);
+      else state.receipts[savedIdx] = saved;
+      markCollectionDirty('receipts');
+      saveState();
+      showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
+      addLog('create', 'receipt', saved.id, `Created receipt${saved.tempReceiptNo ? ' #' + saved.tempReceiptNo : (serialNumber ? ' #' + serialNumber : '')} for ${customerName}`);
     } else {
-    addRecord(state.receipts, receipt);
-    showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
-    addLog('create', 'receipt', receipt.id, `Created receipt${serialNumber ? ' #' + serialNumber : ''} for ${customerName}`);
+      const savedOk = await addRecord(state.receipts, receipt);
+      if (!savedOk) return;
+      showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
+      addLog('create', 'receipt', receipt.id, `Created receipt${serialNumber ? ' #' + serialNumber : ''} for ${customerName}`);
     }
   }
   
@@ -1401,10 +1608,18 @@ async function _saveReceiptFromModalInner() {
 function validateReceiptNumberInput(input) {
   const errorDiv = document.getElementById('receipt-serial-error');
   const originalValue = input.value;
-  
+
+  // App-generated serials (S1 / B2 / O3 / E4) are valid as-is — never strip
+  // their prefix. The field is read-only for those methods anyway.
+  if (isAutoSerialNumber(originalValue)) {
+    if (errorDiv) errorDiv.classList.add('hidden');
+    input.classList.remove('border-rose-500', 'focus:ring-rose-500/20');
+    return;
+  }
+
   // Remove any non-digit characters
   let value = input.value.replace(/[^0-9]/g, '');
-  
+
   // Check if user tried to enter non-digit characters
   if (originalValue !== value && originalValue.length > 0) {
     input.classList.add('animate-shake');
@@ -1683,7 +1898,15 @@ function updateReceiptStatusUI(status) {
       serialInput.placeholder = allow
         ? (isArS ? 'الأدمن يدخل رقم الوصل' : 'Admin entering receipt number')
         : (isArS ? 'مقفل حتى الدفع' : 'Locked until paid');
-      if (!allow) serialInput.value = '';
+      // Stash the number instead of destroying it: the user may be only
+      // glancing at "Not Paid" and switch back — the receipt's real number
+      // used to be wiped from the form and then saved as empty.
+      if (!allow) {
+        if (String(serialInput.value || '').trim()) {
+          serialInput.dataset.stashedSerial = serialInput.value;
+        }
+        serialInput.value = '';
+      }
       if (tempHint) tempHint.classList.add('hidden');
       const overrideLabel = adminOverride?.closest('label');
       if (overrideLabel) overrideLabel.classList.toggle('hidden', !isAdmin);
@@ -1692,10 +1915,18 @@ function updateReceiptStatusUI(status) {
       serialInput.disabled = false;
       serialInput.readOnly = false;
       serialInput.placeholder = isArS ? 'مثال: 12345' : 'e.g., 12345';
+      // Switching back out of "Not Paid": restore the number we stashed above.
+      if (!String(serialInput.value || '').trim() && serialInput.dataset.stashedSerial) {
+        serialInput.value = serialInput.dataset.stashedSerial;
+        delete serialInput.dataset.stashedSerial;
+      }
       if (tempHint) tempHint.classList.add('hidden');
       const overrideLabel = adminOverride?.closest('label');
       if (overrideLabel) overrideLabel.classList.toggle('hidden', !isAdmin);
       show(deliveryInfo, false);
+      // This branch just cleared readOnly — re-apply the auto-serial rules so a
+      // Paid receipt on an auto-numbered method keeps its number and its lock.
+      syncReceiptSerialWithPaymentMethods({ reissue: false });
     }
   }
 
@@ -1857,9 +2088,20 @@ function handleAdCustomerChange(customerId, preserveFunding = false) {
   state.tempAdFunding = state.tempAdFunding || { allocations: [] };
   if (!preserveFunding) {
     state.tempAdFunding.allocations = [];
+    // MERGED funding is customer-scoped too. It used to survive a customer
+    // change, so an ad could be funded from ANOTHER customer's receipt.
+    clearAdMergeFunding();
   }
-  
+
   renderAdFundingList();
+}
+
+// Receipts belong to a customer: whenever the ad's customer/page changes, the
+// merged-funds allocations from the previous customer must go with it.
+function clearAdMergeFunding() {
+  state.tempMergeFunding = { allocations: [], enabled: false };
+  try { if (typeof renderAdMergedFundingList === 'function') renderAdMergedFundingList(); } catch (_) {}
+  try { if (typeof reflectMergeFundingUI === 'function') reflectMergeFundingUI(); } catch (_) {}
 }
 
 function handleAdPageChange(preserveFunding = false) {
@@ -1867,12 +2109,14 @@ function handleAdPageChange(preserveFunding = false) {
   state.tempAdFunding = state.tempAdFunding || { allocations: [] };
   if (!preserveFunding) {
   state.tempAdFunding.allocations = [];
+  clearAdMergeFunding();
   }
   renderAdFundingList();
 }
 
 // Select a page in the Add Ad modal (Page-first workflow)
 function selectAdPage(pageId, preserveFunding = false) {
+  if (!Security.isValidRecordId(pageId)) return;
   const isArP = state.language === 'ar';
   const pageInput = document.getElementById('ad-page');
   const pageSearch = document.getElementById('ad-page-search');
@@ -1978,7 +2222,7 @@ function selectAdPage(pageId, preserveFunding = false) {
           ${linkedCustomers.map(c => {
             const isSelected = c.id === currentCustomerId;
             return `
-              <button type="button" onclick="selectAdCustomer('${c.id}')" class="ad-customer-btn group p-2 rounded-lg text-left transition-all ${isSelected ? 'bg-indigo-600 text-white' : 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-indigo-400'}" data-customer-id="${c.id}" data-customer-name="${Security.escapeHtml((c.name || '').toLowerCase())}">
+              <button type="button" data-record-action="select-ad-customer" data-record-id="${Security.escapeHtml(String(c.id || ''))}" class="ad-customer-btn group p-2 rounded-lg text-left transition-all ${isSelected ? 'bg-indigo-600 text-white' : 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-indigo-400'}" data-customer-id="${Security.escapeHtml(String(c.id || ''))}" data-customer-name="${Security.escapeHtml((c.name || '').toLowerCase())}">
                 <div class="flex items-center space-x-2">
                   <div class="w-6 h-6 rounded-full ${isSelected ? 'bg-white/20' : 'bg-slate-100 dark:bg-slate-700'} flex items-center justify-center text-[10px] font-medium ${isSelected ? 'text-white' : 'text-slate-500'}">
                     ${c.name?.charAt(0) || 'C'}
@@ -2002,6 +2246,7 @@ function selectAdPage(pageId, preserveFunding = false) {
 
 // Select customer in multi-customer scenario
 function selectAdCustomer(customerId, preserveFunding = false) {
+  if (!Security.isValidRecordId(customerId)) return;
   const customerIdInput = document.getElementById('ad-customer-id');
   const prevCustomerId = customerIdInput?.value || '';
   if (customerIdInput) customerIdInput.value = customerId;
@@ -2031,6 +2276,7 @@ function selectAdCustomer(customerId, preserveFunding = false) {
   if (!preserveFunding && changedCustomer) {
     state.tempAdFunding = state.tempAdFunding || { allocations: [] };
     state.tempAdFunding.allocations = [];
+    clearAdMergeFunding();
   }
   // Refresh Receipt Funding UI after choosing customer (critical for multi-customer pages)
   renderAdFundingList();
@@ -2076,9 +2322,29 @@ function refreshAdTempReceiptOptions() {
 
   const receipts = getPendingTempDeliveryReceiptsForCustomer(customerId);
   const current = String(hidden.value || '').trim() || String(state.modalData?.receiptId || '').trim();
+  const isEditingSavedAd = !!state.modalData?.id;
+
+  // The list only holds PENDING delivery receipts. A saved ad whose receipt has
+  // since been delivered would therefore find its own link missing from the
+  // options — and the auto-suggest below would silently RE-LINK the ad to a
+  // different receipt (spending another receipt's money). Keep the ad's own
+  // receipt in the list, marked as no longer pending.
+  const linkedReceipt = current
+    ? getVisibleRecords(state.receipts).find(r => String(r.id) === current)
+    : null;
+  const linkedIsListed = !!linkedReceipt && receipts.some(r => String(r.id) === current);
+  const extraOption = (linkedReceipt && !linkedIsListed)
+    ? (() => {
+        const place = String(linkedReceipt.deliveryPlaceName || '').trim();
+        const note = isArT ? 'غير معلق' : 'no longer pending';
+        const label = `${linkedReceipt.tempReceiptNo || linkedReceipt.serialNumber || linkedReceipt.id.slice(0, 8)}${place ? ' • ' + place : ''} • (${note})`;
+        return `<option value="${linkedReceipt.id}" selected>${Security.escapeHtml(label)}</option>`;
+      })()
+    : '';
 
   select.innerHTML = [
     `<option value="">${isArT ? 'اختر وصلاً معلقاً...' : 'Select pending receipt...'}</option>`,
+    extraOption,
     ...receipts.map(r => {
       // Calculate available credit in USD
       const dueUsage = getDeliveryReceiptDueUsage(r);
@@ -2090,9 +2356,10 @@ function refreshAdTempReceiptOptions() {
     })
   ].join('');
 
-  // Auto-suggest: if nothing selected yet and there is a pending receipt, pick the newest.
+  // Auto-suggest the newest pending receipt — but ONLY for a NEW ad. Never
+  // pick a receipt on the user's behalf for an ad that is already saved.
   let selectedId = String(select.value || '').trim();
-  if (!selectedId && receipts.length > 0) {
+  if (!selectedId && !isEditingSavedAd && receipts.length > 0) {
     selectedId = String(receipts[0].id);
     select.value = selectedId;
   }
@@ -2188,12 +2455,18 @@ function onAdTempReceiptChange(receiptId) {
           }
         }
         
-        // Default to existing value, or full available amount for new ads
+        // Default to existing value, or full available amount for new ads.
+        // The field is stamped with the receipt it belongs to: switching the
+        // linked receipt used to KEEP the previous receipt's amount (the
+        // "Available" label updated, the amount did not), so the ad could be
+        // saved spending more than the new receipt actually holds.
+        const belongsToThisReceipt = dueInput.dataset.receiptId === rid;
         if (prefillValue !== null) {
           dueInput.value = prefillValue.toFixed(2);
-        } else if (!dueInput.value) {
+        } else if (!dueInput.value || !belongsToThisReceipt) {
           dueInput.value = availableUSD.toFixed(2);
         }
+        dueInput.dataset.receiptId = rid;
       }
       // Show merge toggle to allow combining with paid receipts
       if (mergeToggle) mergeToggle.classList.remove('hidden');
@@ -2820,6 +3093,14 @@ function updateAdEndDateFromDays() {
 // Upload and preview ad photos
 function uploadAdPhotos(fileList) {
   if (!fileList || !fileList.length) return;
+  if (!can('ads', 'uploadPhotos')) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تحتاج صلاحية رفع صور الإعلانات' : 'Requires the Upload Photos permission',
+      'error'
+    );
+    return;
+  }
   state.tempAdPhotos = state.tempAdPhotos || [];
   Array.from(fileList).forEach(file => {
     compressImageToDataUrl(file).then((dataUrl) => {
@@ -3546,4 +3827,3 @@ function updateUserRoleInfo(role) {
   
   if (window.lucide) lucide.createIcons();
 }
-

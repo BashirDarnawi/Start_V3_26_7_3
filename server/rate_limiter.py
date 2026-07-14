@@ -10,6 +10,7 @@ Security notes:
 - In-memory store is cleaned up periodically to prevent memory leaks
 """
 import os
+import secrets
 import threading
 import time
 from typing import Any, Optional
@@ -25,11 +26,52 @@ _MAX_MEMORY_STORE_KEYS = 10000  # Maximum keys to prevent memory exhaustion
 _REDIS_CLIENT: Optional[Any] = None
 _REDIS_ENABLED = False
 
+# One Redis command performs cleanup, admission, insertion, and expiry. Redis
+# executes Lua scripts atomically, so parallel application instances cannot all
+# observe the same pre-insert count and exceed the configured limit.
+_REDIS_SLIDING_WINDOW_LUA = """
+local key = KEYS[1]
+local cutoff = tonumber(ARGV[1])
+local now = tonumber(ARGV[2])
+local max_attempts = tonumber(ARGV[3])
+local member = ARGV[4]
+local window_ms = tonumber(ARGV[5])
+
+redis.call('ZREMRANGEBYSCORE', key, '-inf', cutoff)
+local current_count = redis.call('ZCARD', key)
+
+if current_count >= max_attempts then
+    local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+    local retry_after_ms = window_ms
+    if oldest[2] then
+        retry_after_ms = math.max(0, (tonumber(oldest[2]) + window_ms) - now)
+    end
+    return {0, 0, retry_after_ms}
+end
+
+redis.call('ZADD', key, now, member)
+redis.call('PEXPIRE', key, window_ms + 60000)
+local new_count = current_count + 1
+return {1, math.max(0, max_attempts - new_count), 0}
+"""
+
+
+def _warn_in_memory_fallback(operation: str, error: BaseException) -> None:
+    """Warn without rendering exception text, which may contain credentials."""
+    print(
+        f"[rate_limiter] WARNING: Redis {operation} failed "
+        f"({type(error).__name__}); using single-process in-memory fallback."
+    )
+
 
 def _init_redis():
     """Initialize Redis client if REDIS_URL is configured."""
     global _REDIS_CLIENT, _REDIS_ENABLED
-    
+
+    # Make explicit re-initialization deterministic.
+    _REDIS_CLIENT = None
+    _REDIS_ENABLED = False
+
     redis_url = os.getenv("REDIS_URL", "").strip()
     if not redis_url:
         return
@@ -45,11 +87,13 @@ def _init_redis():
         # Test connection
         _REDIS_CLIENT.ping()
         _REDIS_ENABLED = True
-        print(f"✅ Redis rate limiting enabled: {redis_url.split('@')[0]}...")
-    except ImportError:
-        print("⚠️  Redis library not installed (pip install redis). Using in-memory rate limiting.")
+        # REDIS_URL and connection exceptions can contain credentials or access
+        # tokens. Neither is safe to include in application logs.
+        print("[rate_limiter] Redis rate limiting enabled.")
+    except ImportError as error:
+        _warn_in_memory_fallback("initialization", error)
     except Exception as e:
-        print(f"⚠️  Redis connection failed: {e}. Using in-memory rate limiting.")
+        _warn_in_memory_fallback("connection", e)
 
 
 def now_ms() -> int:
@@ -139,35 +183,26 @@ def check_rate_limit(key: str, max_attempts: int, window_ms: int) -> tuple[bool,
     
     if _REDIS_ENABLED and _REDIS_CLIENT:
         try:
-            # Redis implementation (multi-instance safe)
-            # 1) Cleanup + count + oldest (without recording yet)
-            pipe = _REDIS_CLIENT.pipeline()
-            pipe.zremrangebyscore(key, 0, cutoff)
-            pipe.zcard(key)
-            pipe.zrange(key, 0, 0, withscores=True)  # oldest attempt (if any)
-            results = pipe.execute()
-
-            current_count = int(results[1] or 0)
-            oldest = results[2]
-            oldest_ts = int(oldest[0][1]) if oldest else 0
-
-            # If already at/above limit, block WITHOUT recording this attempt.
-            if current_count >= max_attempts:
-                retry_after_ms = max(0, (oldest_ts + window_ms) - now) if oldest_ts else window_ms
-                return False, 0, int(retry_after_ms)
-
-            # 2) Record this allowed attempt and set expiry (auto-cleanup)
-            pipe2 = _REDIS_CLIENT.pipeline()
-            pipe2.zadd(key, {str(now): now})
-            pipe2.expire(key, int(window_ms / 1000) + 60)
-            pipe2.execute()
-
-            new_count = current_count + 1
-            attempts_left = max(0, max_attempts - new_count)
-            return True, attempts_left, 0
-            
+            # A timestamp alone is not a unique sorted-set member: simultaneous
+            # requests in the same millisecond would overwrite one another and
+            # evade the limit. The random suffix preserves every attempt.
+            member = f"{now}:{secrets.token_hex(12)}"
+            result = _REDIS_CLIENT.eval(
+                _REDIS_SLIDING_WINDOW_LUA,
+                1,
+                key,
+                cutoff,
+                now,
+                max_attempts,
+                member,
+                window_ms,
+            )
+            is_allowed = bool(int(result[0]))
+            attempts_left = max(0, int(result[1]))
+            retry_after_ms = max(0, int(result[2]))
+            return is_allowed, attempts_left, retry_after_ms
         except Exception as e:
-            print(f"⚠️  Redis rate limit check failed: {e}. Falling back to in-memory.")
+            _warn_in_memory_fallback("rate-limit check", e)
             # Fall through to in-memory
     
     # In-memory implementation (single-instance only)
@@ -210,11 +245,11 @@ def reset_rate_limit(key: str):
     if _REDIS_ENABLED and _REDIS_CLIENT:
         try:
             _REDIS_CLIENT.delete(key)
-            return
-        except Exception:
-            pass
+        except Exception as error:
+            _warn_in_memory_fallback("reset", error)
     
-    # In-memory
+    # Always clear fallback state too. It may contain attempts recorded during a
+    # prior Redis outage even when Redis has recovered by the time reset runs.
     with _MEMORY_LOCK:
         if key in _MEMORY_STORE:
             del _MEMORY_STORE[key]
@@ -242,8 +277,8 @@ def get_rate_limit_status(key: str, window_ms: int) -> int:
             _REDIS_CLIENT.zremrangebyscore(key, 0, cutoff)
             # Count remaining
             return _REDIS_CLIENT.zcard(key)
-        except Exception:
-            pass
+        except Exception as error:
+            _warn_in_memory_fallback("status check", error)
     
     # In-memory
     with _MEMORY_LOCK:

@@ -362,7 +362,7 @@ class TestDeliverySettlementLockdown:
         email = "driver-lockdown@tests.albayanhub.com"
         client.post("/api/users", json={
             "name": "Driver Lock", "email": email, "role": "Delivery",
-            "password": "DriverPass123!", "permissions": {"deliveries": ["view", "update"]},
+            "password": "DriverPass123!", "permissions": {"deliveries": ["view", "accept", "complete"]},
         }, cookies=cookies)
         # find the driver id
         users = client.get("/api/users", cookies=cookies).json()
@@ -394,7 +394,7 @@ class TestDeliverySettlementLockdown:
         resp = client.patch("/api/collections/receipts/test_lockdown_1", json={
             "data": {"driverNotes": "hi", "status": "Paid", "isPaid": True, "amountUSD": 999999},
         }, cookies={"albayan_session": driver_token})
-        assert resp.status_code == 200
+        assert resp.status_code == 403
 
         # Verify via admin read that settlement fields were NOT changed
         got = client.get("/api/collections/receipts/test_lockdown_1",
@@ -402,7 +402,7 @@ class TestDeliverySettlementLockdown:
         assert got["status"] == "Not Paid"
         assert got["isPaid"] is False
         assert got["amountUSD"] == 20.0
-        assert got.get("driverNotes") == "hi"  # the legitimate field did apply
+        assert got.get("driverNotes") != "hi"  # the mixed malicious request is atomic/rejected
 
 
 class TestImageNotTruncated:
@@ -428,7 +428,7 @@ class TestDuplicateUserEmail:
         body = {
             "name": "Dup One",
             "email": "dup-user@tests.albayanhub.com",
-            "role": "Staff",
+            "role": "Employee",
             "password": "SomePassword123!",
             "permissions": {},
         }
@@ -569,4 +569,3 @@ class TestMobileAppOrigins:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-

@@ -86,30 +86,55 @@ async function init() {
   } else if (override === 'server') {
     state.serverMode = true;
   } else {
-    state.serverMode = state.serverDetected;
+    // Once this installation has used the team server, a temporary health
+    // check failure must not silently open an unrelated local workspace. The
+    // packaged mobile app is always server-backed unless the user explicitly
+    // chose the local override.
+    const packagedMobile = !!(typeof Platform !== 'undefined' && Platform.isCapacitor);
+    const previouslyServerBacked = state.serverWorkspaceKnown === true || state.serverMode === true;
+    state.serverMode = state.serverDetected || packagedMobile || previouslyServerBacked;
   }
+  if (state.serverDetected) state.serverWorkspaceKnown = true;
 
   if (state.serverMode) {
     // Disable legacy cloud sync in server mode (backend is the source of truth)
     if (state.cloudConfig) state.cloudConfig.enabled = false;
 
-    // INSTANT LOAD: First load cached data from IndexedDB (shows data instantly)
-    setLoadingStatus(state.language === 'ar' ? 'جارٍ تحميل البيانات المخزنة...' : 'Loading cached data...');
-    const cachedCollections = loadState(); // This already loads from localStorage
-    if (db) {
-      try {
-        // Load from IndexedDB (faster than server)
-        await loadCollectionsFromStorage(cachedCollections);
-      } catch (e) {
-        // IndexedDB error - continue with empty state
-      }
-    }
+    // loadState() runs before backend detection so preferences can be applied
+    // immediately. In no-IDB/legacy installations it may also have contained
+    // business arrays; clear them before auth so no previous-user data can be
+    // rendered or used if /auth/me fails.
+    for (const name of PERSISTED_COLLECTIONS) state[name] = [];
+    activateAnonymousServerCollectionStorage();
+    saveState(); // persist serverWorkspaceKnown without persisting business arrays
 
     // Restore login from backend cookie session
     setLoadingStatus(state.language === 'ar' ? 'جارٍ التحقق من الجلسة...' : 'Checking session...');
     const me = await apiAuthMe().catch(() => null);
     if (me) {
+      cancelPendingRequests();
+      invalidateUsersListCache();
+      for (const key of Object.keys(_collectionCache)) {
+        _collectionCache[key] = { data: null, timestamp: 0, identity: '' };
+      }
+      advanceServerSessionEpoch();
       state.currentUser = me;
+      // Only now is it safe to open this user's cache namespace.
+      activateServerCollectionStorage(me);
+      setLoadingStatus(state.language === 'ar' ? 'جارٍ تحميل البيانات المخزنة...' : 'Loading cached data...');
+      if (db) {
+        try {
+          await loadCollectionsFromStorage(null);
+          assertCachedCollectionIdentifiersSafe();
+        } catch (e) {
+          // IndexedDB error - continue with empty state and load from server.
+          for (const name of PERSISTED_COLLECTIONS) state[name] = [];
+        }
+      }
+      // Merge the fresh session user (with permissions) into state.users BEFORE
+      // the first render — the cached users list can be empty (wiped by logout,
+      // private browsing) or stale, and hasPermission reads state.users.
+      upsertCurrentUserIntoUsers();
       // Restore last page for Admin. Non-admins always land inside Albayan Manager (secret ideas hidden).
       if (String(me.role || '').toLowerCase() === 'admin') {
         state.currentView = String(state.currentView || '').trim() || 'services-hub';
@@ -128,9 +153,16 @@ async function init() {
         console.log('[init] Refresh throttled - using cached data');
         // Still restore modal from URL
         restoreModalFromUrl();
+        // No authoritative full snapshot is running in this branch, so start
+        // the catch-up poller now (it will use cursor 0 when needed).
+        startServerLiveSync();
       } else {
-        // Load fresh data from server in background
-        serverLoadAllData().then(() => {
+        // Complete the authoritative snapshot before starting delta polling.
+        // Running both concurrently allowed a newer delta to be applied and
+        // then overwritten by an older full-list response.
+        const startupIdentity = getServerSessionIdentity();
+        const startupLoad = serverLoadAllData().then((loadResult) => {
+          if (loadResult?.aborted) return;
           // Migrate old data formats to work with new features
           migrateOldDataFormats();
           // Re-render with fresh data
@@ -144,21 +176,24 @@ async function init() {
             showNotification(state.language === 'ar' ? 'تحذير السيرفر' : 'Server Warning', state.language === 'ar' ? 'فشل تحميل بعض البيانات. جرّب التحديث.' : 'Some data failed to load. Try Refresh.', 'warning');
           }
         });
+        startupLoad.finally(() => {
+          if (!serverSessionIdentityChanged(startupIdentity)) startServerLiveSync();
+        });
       }
-
-      // Live sync for multi-user updates (no manual refresh)
-      startServerLiveSync();
     } else {
+      advanceServerSessionEpoch();
       state.currentUser = null;
       stopServerLiveSync();
       // Fresh server with no admin yet? Surface the first-run setup option on
       // the login page directly, so the operator doesn't have to fail a login
       // first to discover it.
       const fresh = await apiNeedsSetup();
-      state.serverHasNoUsers = fresh;
-      state.needsServerSetup = fresh;
+      state.serverHasNoUsers = fresh?.needsSetup === true;
+      state.serverSetupEnabled = fresh?.setupEnabled === true;
+      state.needsServerSetup = fresh?.needsSetup === true;
     }
   } else {
+    activateLocalCollectionStorage();
     // Offline/local mode (single-device)
     setLoadingStatus(state.language === 'ar' ? 'جارٍ تحميل البيانات المحلية...' : 'Loading local data...');
     // Load huge data collections (IndexedDB-first), migrate legacy localStorage if needed
@@ -225,11 +260,19 @@ async function init() {
   // URL Routing: If user is logged in, check URL for initial view
   if (state.currentUser) {
     const urlView = getViewFromUrl();
-    // Only use URL view if it's valid and user has access
+    // Only use URL view if it's valid and the user may open it. Platform views
+    // (services hub, wallet, smart systems, service pages) are Admin-only, but
+    // an Admin MUST be able to deep-link into them.
     if (urlView && urlView !== 'services-hub') {
-      const canAccess = isCurrentUserAdmin() || userCanAccessView(state.currentUser, urlView) || urlView === 'delivery-dashboard';
-      if (canAccess && !PLATFORM_ADMIN_ONLY_VIEWS.has(urlView)) {
+      const isPlatformView = PLATFORM_ADMIN_ONLY_VIEWS.has(urlView);
+      const canAccess = isPlatformView
+        ? isCurrentUserAdmin()
+        : (isCurrentUserAdmin() || userCanAccessView(state.currentUser, urlView) ||
+           (urlView === 'delivery-dashboard' && isDeliveryRole(state.currentUser?.role)));
+      if (canAccess) {
         state.currentView = urlView;
+        // Re-apply what the link carries (Clothes tab, service id)
+        restoreViewStateFromUrl(urlView);
       }
     }
     // Update URL to match current view (in case we changed it)
@@ -318,8 +361,3 @@ if (document.readyState === 'loading') {
 } else {
   init();
 }
-
-
-
-
-

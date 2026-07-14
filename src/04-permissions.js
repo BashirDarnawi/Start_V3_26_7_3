@@ -2,11 +2,24 @@
 // CONSTANTS & ENUMS
 // ==========================================
 
+// The generic 'Bank Transfer' was removed — it duplicated the explicit
+// LYD/USD variants. LEGACY_PAYMENT_METHODS keeps it selectable ONLY on
+// receipts that already carry it, so old records still display/save correctly.
 const PAYMENT_METHODS = [
-  'Cash (LYD)', 'Cash (USD)', 'Libyana', 'Madar', 'LTT', 
-  'Transfer Office', 'Bank Transfer', 'Bank Transfer (LYD)', 
+  'Cash (LYD)', 'Cash (USD)', 'Libyana', 'Madar', 'LTT',
+  'Transfer Office', 'Bank Transfer (LYD)',
   'Bank Transfer (USD)', 'Sadad', 'USDT'
 ];
+const LEGACY_PAYMENT_METHODS = ['Bank Transfer'];
+
+// Payment methods for a given select: the current list, plus the record's own
+// legacy method when it is no longer offered (so editing an old receipt does
+// not silently switch its payment method).
+function paymentMethodOptions(currentMethod) {
+  const m = String(currentMethod || '').trim();
+  if (m && !PAYMENT_METHODS.includes(m)) return [...PAYMENT_METHODS, m];
+  return PAYMENT_METHODS;
+}
 
 const AD_STATUSES = ['Pending', 'Paused', 'Completed', 'Canceled', 'Lost', 'Stopped'];
 const DELIVERY_STATUSES = ['Needs Delivery', 'In Progress', 'Delivered', 'Canceled', 'Office'];
@@ -141,13 +154,13 @@ const PERMISSION_MODULES = {
     icon: 'settings',
     color: 'slate',
     description: 'System settings',
+    // NOTE: backup/restore/clearData were removed — those are whole-database
+    // operations the server only ever allows for the Admin ROLE, so offering
+    // them as grantable toggles was misleading (they never did anything).
     permissions: {
       view: { label: 'View Settings', description: 'View system settings' },
       edit: { label: 'Edit Settings', description: 'Edit system settings' },
-      manageExchangeRate: { label: 'Manage Exchange Rate', description: 'Change exchange rates' },
-      backup: { label: 'Backup Data', description: 'Backup system data' },
-      restore: { label: 'Restore Data', description: 'Restore from backup' },
-      clearData: { label: 'Clear Data', description: 'Clear all system data' }
+      manageExchangeRate: { label: 'Manage Exchange Rate', description: 'Change exchange rates' }
     }
   },
   auditLogs: {
@@ -155,11 +168,12 @@ const PERMISSION_MODULES = {
     icon: 'file-clock',
     color: 'violet',
     description: 'System audit trail',
+    // NOTE: 'backup' was removed — no code ever honored it (log backup is an
+    // Admin-role operation), so the toggle was decorative.
     permissions: {
       view: { label: 'View Audit Logs', description: 'View all audit logs' },
       viewOwn: { label: 'View Own Logs', description: 'View only own activity' },
       export: { label: 'Export Logs', description: 'Export audit logs' },
-      backup: { label: 'Backup Logs', description: 'Backup audit logs' },
       clear: { label: 'Clear Logs', description: 'Clear audit logs' }
     }
   },
@@ -324,10 +338,18 @@ const PERMISSION_TEMPLATES = {
 function hasPermission(userId, module, action) {
   // System/admin always has access
   if (!userId || userId === 'system') return true;
-  
-  const user = state.users.find(u => u.id === userId);
+
+  let user = (state.users || []).find(u => u && u.id === userId);
+  // FALLBACK: state.users can be empty or hold a permission-less stub (e.g. the
+  // /api/users/public list only carries {id,name,role}). The login and
+  // /api/auth/me responses always carry the caller's full permissions on
+  // state.currentUser — use that as the source of truth for the current user
+  // so the whole UI can never lock out a properly-permissioned account.
+  if ((!user || !user.permissions) && state.currentUser && String(state.currentUser.id) === String(userId)) {
+    user = state.currentUser;
+  }
   if (!user) return false;
-  
+
   // Admins have all permissions
   if (String(user.role || '').toLowerCase() === 'admin') return true;
   
@@ -343,28 +365,122 @@ function hasPermission(userId, module, action) {
   return modulePerms.includes(action) || modulePerms.some(p => String(p).toLowerCase() === String(action).toLowerCase());
 }
 
-// Refresh current user's permissions from server
+// Refresh current user's permissions from server.
+// Returns true when the permissions actually changed (callers use this to
+// schedule a re-render so a locked sidebar can recover without re-login).
 async function refreshCurrentUserPermissions() {
-  if (!isServerModeEnabled() || !state.currentUser?.id) return;
+  if (!isServerModeEnabled() || !state.currentUser?.id) return false;
   try {
+    const currentId = String(state.currentUser.id || '');
+    const beforeAccess = JSON.stringify({
+      role: String(state.currentUser.role || '').toLowerCase(),
+      permissions: state.currentUser.permissions || {},
+      subscriptions: Array.isArray(state.currentUser.subscriptions) ? state.currentUser.subscriptions : []
+    });
     const me = await apiAuthMe();
-    if (me && me.permissions) {
-      state.currentUser.permissions = me.permissions;
-      // Also update in users array
-      const idx = state.users.findIndex(u => u.id === me.id);
-      if (idx !== -1) {
-        state.users[idx].permissions = me.permissions;
-      }
-      console.log('[Permissions] Refreshed current user permissions');
+    if (me && String(me.id || '') === currentId) {
+      // Role is authorization state too. Copying permissions alone left a
+      // demoted Admin permanently Admin in the browser when both maps were
+      // empty, even though the server had already revoked that access.
+      state.currentUser = {
+        ...state.currentUser,
+        ...Security.sanitizeObject(me),
+        role: String(me.role || state.currentUser.role || ''),
+        permissions: (me.permissions && typeof me.permissions === 'object') ? me.permissions : {},
+        subscriptions: Array.isArray(me.subscriptions) ? me.subscriptions : (state.currentUser.subscriptions || [])
+      };
+      const afterAccess = JSON.stringify({
+        role: String(state.currentUser.role || '').toLowerCase(),
+        permissions: state.currentUser.permissions || {},
+        subscriptions: Array.isArray(state.currentUser.subscriptions) ? state.currentUser.subscriptions : []
+      });
+      const changed = beforeAccess !== afterAccess;
+      // Also update in users array — UPSERT: if the record is missing (users
+      // list fetch failed or returned permission-less stubs), insert it so the
+      // periodic refresh can repair an empty state.users.
+      upsertCurrentUserIntoUsers();
+      if (changed) console.log('[Permissions] Refreshed current user access');
+      return changed;
     }
   } catch (e) {
     console.warn('[Permissions] Failed to refresh:', e?.message || e);
+  }
+  return false;
+}
+
+// Ensure state.users contains the current user's record WITH permissions.
+// state.currentUser always carries the full permission map from the server
+// login / /api/auth/me response; the users list for non-admins does not
+// (GET /api/users/public returns only {id,name,role}).
+function upsertCurrentUserIntoUsers() {
+  const cu = state.currentUser;
+  if (!cu || !cu.id) return;
+  if (!Array.isArray(state.users)) state.users = [];
+  const idx = state.users.findIndex(u => u && String(u.id) === String(cu.id));
+  if (idx === -1) {
+    state.users.push(cu);
+  } else {
+    state.users[idx] = { ...state.users[idx], ...cu };
   }
 }
 
 // Check if current user has permission
 function currentUserHasPermission(module, action) {
   return hasPermission(state.currentUser?.id, module, action);
+}
+
+// User-management capability: Admin role OR the matching users.* permission.
+// The server enforces the same rule (plus anti-escalation guards), so these
+// buttons/actions now work for permission-granted non-admins too.
+function canManageUsersAction(action) {
+  return isCurrentUserAdmin() || currentUserHasPermission('users', action);
+}
+
+// Admin role OR the named permission. Use for every capability the
+// Permissions Manager advertises, so a granted toggle actually does something.
+function can(module, action) {
+  return isCurrentUserAdmin() || currentUserHasPermission(module, action);
+}
+
+// The audit trail the current user is allowed to SEE.
+// auditLogs.view => all entries; auditLogs.viewOwn => only their own.
+// Without either, nothing. state.logs is a DEVICE-LOCAL trail (it can hold
+// entries written while a different user was logged in on this browser), so
+// this scoping is what keeps a viewOwn user from reading someone else's
+// activity — never render or export state.logs directly.
+function getVisibleAuditLogs() {
+  // In server mode the server's trail is authoritative AND already scoped by
+  // the caller's auditLogs.view/viewOwn permission (GET /api/audit).
+  const source = isServerModeEnabled()
+    ? (Array.isArray(state.serverLogs) ? state.serverLogs : [])
+    : getVisibleRecords(state.logs);
+
+  if (can('auditLogs', 'view')) return source;
+  if (currentUserHasPermission('auditLogs', 'viewOwn')) {
+    const uid = String(state.currentUser?.id || '');
+    return source.filter(l => String(l?.userId || '') === uid);
+  }
+  return [];
+}
+
+// Refresh the server audit trail, then re-render the Audit Logs screen.
+// Cheap guard so the render loop can call it without re-entering.
+let _auditFetchInFlight = false;
+async function refreshServerAuditLogs({ force = false } = {}) {
+  if (!isServerModeEnabled() || !state.currentUser?.id) return;
+  if (_auditFetchInFlight) return;
+  const fresh = Date.now() - (state.serverLogsLoadedAt || 0) < 15000;
+  if (!force && fresh) return;
+  _auditFetchInFlight = true;
+  try {
+    state.serverLogs = await apiListAuditLogs(500);
+    state.serverLogsLoadedAt = Date.now();
+    if (state.currentView === 'audit') RenderQueue.schedule('auditLogs(server)');
+  } catch (e) {
+    console.warn('[Audit] Failed to load server logs:', e?.message || e);
+  } finally {
+    _auditFetchInFlight = false;
+  }
 }
 
 // Get permission summary for display
@@ -409,6 +525,10 @@ function hasSubscription(serviceId) {
   if (isAdminRole(state.currentUser.role)) return true; // Admin gets all
   const uid = String(state.currentUser.id || '');
   if (uid && SUBSCRIPTIONS.isActive(uid, serviceId)) return true;
+  // In server mode only the server-owned subscription ledger is authoritative.
+  // The legacy array can be stale after cancellation (and is mutable client
+  // state), so it must never grant server-backed access.
+  if (isServerModeEnabled()) return false;
   const subs = state.currentUser.subscriptions || [];
   return subs.includes(serviceId);
 }
@@ -473,7 +593,7 @@ function openServiceById(id) {
   if (SMART_SYSTEMS_CHILDREN[id]) return handleSmartSystemClick(id);
 }
 
-function handleSubscribe(subscribeToId, navigateToId = subscribeToId) {
+async function handleSubscribe(subscribeToId, navigateToId = subscribeToId) {
   if (!state.currentUser?.id) return;
   try {
     // If already active, just continue
@@ -485,14 +605,14 @@ function handleSubscribe(subscribeToId, navigateToId = subscribeToId) {
 
     const offer = getServiceSubscriptionOffer(subscribeToId);
     const idem = String(state.modalData?.idempotencyKey || '').trim() || Security.generateSecureId('idem');
-    SUBSCRIPTIONS.subscribe(state.currentUser.id, subscribeToId, { ...offer, idempotencyKey: idem });
+    await SUBSCRIPTIONS.subscribe(state.currentUser.id, subscribeToId, { ...offer, idempotencyKey: idem });
 
     // Optional legacy mirror (keeps older UI logic compatible)
-    if (!Array.isArray(state.currentUser.subscriptions)) state.currentUser.subscriptions = [];
-    if (!state.currentUser.subscriptions.includes(subscribeToId)) {
+    if (!isServerModeEnabled() && !Array.isArray(state.currentUser.subscriptions)) state.currentUser.subscriptions = [];
+    if (!isServerModeEnabled() && !state.currentUser.subscriptions.includes(subscribeToId)) {
       state.currentUser.subscriptions.push(subscribeToId);
       // persist into the actual user record too (not only session)
-      updateRecord(state.users, state.currentUser.id, { subscriptions: state.currentUser.subscriptions });
+      await updateRecord(state.users, state.currentUser.id, { subscriptions: state.currentUser.subscriptions });
     }
 
     closeModal();
@@ -569,7 +689,7 @@ function showRecoveryKeyModal(plainKey) {
 
 async function generateAndShowRecoveryKey() {
   if (isServerModeEnabled()) {
-    showNotification(state.language === 'ar' ? 'غير متاح' : 'Not Available', state.language === 'ar' ? 'مفاتيح الاستعادة للوضع المحلي فقط. استخدم إعادة التعيين عبر البريد الإلكتروني على السيرفر.' : 'Recovery keys are for local mode only. Use email reset on the server.', 'info');
+    showNotification(state.language === 'ar' ? 'غير متاح' : 'Not Available', state.language === 'ar' ? 'مفاتيح الاستعادة للوضع المحلي فقط. تواصل مع المدير لإعادة تعيين كلمة المرور.' : 'Recovery keys are for local mode only. Contact an administrator to reset a server password.', 'info');
     return;
   }
   if (!state.currentUser || !isAdminRole(state.currentUser.role)) {
@@ -582,9 +702,19 @@ async function generateAndShowRecoveryKey() {
 }
 
 function showPasswordResetModal() {
+  if (isServerModeEnabled()) {
+    showNotification(
+      state.language === 'ar' ? 'تواصل مع المدير' : 'Contact an Administrator',
+      state.language === 'ar'
+        ? 'إرسال رموز إعادة التعيين عبر البريد غير مفعّل على هذا الخادم. اطلب من المدير إعادة تعيين كلمة المرور.'
+        : 'Email reset codes are not configured on this server. Ask an administrator to reset your password.',
+      'info'
+    );
+    return;
+  }
   state.activeModal = 'password-reset';
   state.modalData = {
-    step: isServerModeEnabled() ? 'request' : 'local',
+    step: 'local',
     email: '',
     token: ''
   };
@@ -699,7 +829,8 @@ async function passwordResetConfirmLocal() {
       passwordAlgo: hashed.algo,
       passwordIterations: hashed.iterations
     };
-    updateRecord(state.users, user.id, updates);
+    const resetSaved = await updateRecord(state.users, user.id, updates);
+    if (!resetSaved) return;
     markCollectionDirty('users');
     saveState();
     flushDirtyCollections().catch(() => {});
@@ -842,6 +973,16 @@ function _listAllStoredPasskeys() {
 
 async function passkeyRegisterCurrentUser() {
   try {
+    if (isServerModeEnabled()) {
+      showNotification(
+        state.language === 'ar' ? 'غير متاح' : 'Not Available',
+        state.language === 'ar'
+          ? 'إضافة مفتاح مرور تتطلب دعم WebAuthn على الخادم (قريباً).'
+          : 'Adding a passkey requires server WebAuthn endpoints (coming soon).',
+        'info'
+      );
+      return;
+    }
     if (!_isPasskeySupported()) {
       showNotification(state.language === 'ar' ? 'غير مدعوم' : 'Not Supported', state.language === 'ar' ? 'مفاتيح المرور تتطلب HTTPS أو localhost.' : 'Passkeys require HTTPS or localhost.', 'error');
       return;
@@ -925,16 +1066,17 @@ async function passkeyRegisterCurrentUser() {
       ext: true
     };
 
-    if (!Array.isArray(user.passkeys)) user.passkeys = [];
-    const exists = user.passkeys.some(k => k && k.id === credentialId);
+    const existingPasskeys = Array.isArray(user.passkeys) ? user.passkeys : [];
+    const exists = existingPasskeys.some(k => k && k.id === credentialId);
     if (!exists) {
-      user.passkeys.push({
+      const nextPasskeys = [...existingPasskeys, {
         id: credentialId,
         publicKeyJwk: jwk,
         alg: 'ES256',
         createdAt: Date.now()
-      });
-      updateRecord(state.users, user.id, { passkeys: user.passkeys });
+      }];
+      const saved = await updateRecord(state.users, user.id, { passkeys: nextPasskeys });
+      if (!saved) return;
     }
 
     showNotification(state.language === 'ar' ? 'نجاح' : 'Success', state.language === 'ar' ? 'تمت إضافة مفتاح المرور بنجاح' : 'Passkey added successfully', 'success');
@@ -1042,8 +1184,18 @@ async function passkeySignIn() {
   }
 }
 
-function removePasskey(credentialId) {
+async function removePasskey(credentialId) {
   try {
+    if (isServerModeEnabled()) {
+      showNotification(
+        state.language === 'ar' ? 'غير متاح' : 'Not Available',
+        state.language === 'ar'
+          ? 'إدارة مفاتيح المرور تتطلب دعم WebAuthn على الخادم.'
+          : 'Managing passkeys requires server WebAuthn endpoints.',
+        'info'
+      );
+      return;
+    }
     if (!state.currentUser?.id) {
       showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'غير مسجل الدخول' : 'Not logged in', 'error');
       return;
@@ -1054,7 +1206,8 @@ function removePasskey(credentialId) {
     if (!user) return;
     const keys = Array.isArray(user.passkeys) ? user.passkeys : [];
     const next = keys.filter(k => k && k.id !== id);
-    updateRecord(state.users, user.id, { passkeys: next });
+    const saved = await updateRecord(state.users, user.id, { passkeys: next });
+    if (!saved) return;
     showNotification(state.language === 'ar' ? 'تم الحذف' : 'Removed', state.language === 'ar' ? 'تم حذف مفتاح المرور' : 'Passkey removed', 'success');
     render();
   } catch (e) {
@@ -1073,4 +1226,3 @@ async function apiChangePassword(currentPassword, newPassword) {
   const payload = { currentPassword, newPassword };
   return await apiJson('/api/auth/password-change', { method: 'POST', body: payload }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
 }
-
