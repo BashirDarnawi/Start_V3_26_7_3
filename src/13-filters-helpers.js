@@ -3239,6 +3239,21 @@ async function saveRefund() {
       updates.dueAllocations = arr;
     }
   }
+  // Keep the legacy dueAmountToUse* mirror in step with the rows we just wrote.
+  // saveAd always writes dueAmountToUseUSD, and the usage readers fall back to it the
+  // moment an ad's due rows sum to zero. Leaving it at its pre-refund value is exactly
+  // why a FULL refund never returned the credit while a partial one did: the bug bites
+  // only at the zero boundary. The rows are the truth; the mirror must follow them.
+  if (Array.isArray(updates.dueAllocations)) {
+    const dueUSD = updates.dueAllocations
+      .reduce((sum, a) => sum + (parseFloat(a.amountUSD) || 0), 0);
+    updates.dueAmountToUseUSD = Math.round(dueUSD * 100) / 100;
+    // The LYD half is read only when the USD half is zero, and nothing else in the app
+    // keeps it current. migrateOldDataFormats has already folded any legacy LYD value
+    // into a real row, so clearing it here cannot lose information — while leaving a
+    // stale value would silently re-lock the credit we are returning.
+    updates.dueAmountToUseLYD = 0;
+  }
   // Derived from the ad amount (not compounding). Undoing (None) restores the
   // full spend by clearing spentUSD.
   updates.spentUSD = refundType !== 'None'

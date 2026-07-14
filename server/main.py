@@ -4825,6 +4825,17 @@ def _financial_outgoing(data: dict[str, Any]) -> int:
 
 
 def _financial_due_total(data: dict[str, Any]) -> int:
+    """The receipt's capacity — ONE number, whichever pool is asking.
+
+    Before collection a delivery receipt is worth the debt the driver will collect.
+    Once collected it is worth what was ACTUALLY collected (amountUSD); the debt fields
+    survive only as history. Reading the frozen debt as a capacity of its own after
+    collection is what let one receipt advertise its money twice — once as due credit and
+    once as paid balance — so two ads could each spend the same note. Over-collecting
+    legitimately adds real balance; re-reading the stale debt invents it.
+    """
+    if bool(data.get("isPaid")) or str(data.get("status") or "") == "Paid":
+        return _financial_minor(data.get("amountUSD"), "receipt due amount")
     local_value = data.get("debtAmountLocal")
     if local_value is None:
         local_value = data.get("amountLocal")
@@ -5166,9 +5177,14 @@ def _financial_validate_due_receipt(
     requested = sum(
         _financial_minor(entry.get("amountUSD"), "due allocation") for entry in due_allocations
     )
+    # ONE POT: count every commitment against this receipt, from EITHER pool, exactly as
+    # _financial_validate_paid_receipts does. Counting only due rows meant that once a
+    # delivery receipt was collected, ads funded from its PAID balance were invisible here
+    # — so the same money could be handed out again as due credit. Transfers out leave the
+    # receipt too, so they are committed money as well.
     committed = _financial_usage(
-        ad_rows, linked_receipt_id, due=True, exclude_ad_id=current_ad_id
-    )
+        ad_rows, linked_receipt_id, exclude_ad_id=current_ad_id
+    ) + _financial_outgoing(data)
     if committed + requested > _financial_due_total(data):
         raise HTTPException(status_code=409, detail="Insufficient delivery due credit")
 

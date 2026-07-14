@@ -567,7 +567,7 @@ async function main() {
 
   console.log('\n--- B2: CROSS-POOL DOUBLE-SPEND — $200 of ads against a $100 receipt ---');
 
-  await target('B2. a collected delivery receipt cannot fund $100 of due AND $100 of paid balance', () => {
+  await target('B2. due credit already spent leaves NO paid balance to spend again', () => {
     resetState();
     // A delivery receipt worth 1000 LYD @ 10 = $100 of due credit.
     const r = deliveryReceipt('receipt_b2', 1000, 10);
@@ -579,30 +579,19 @@ async function main() {
     // The driver hands the cash in: the SAME record becomes an ordinary Paid receipt.
     collect(r, capacity);
 
-    // Ad B now spends the receipt's "paid balance" — the very same $100.
-    makeAd({
-      id: 'ad_b2_paid',
-      amountUSD: 100,
-      spentUSD: 100,
-      receiptAllocations: [{ receiptId: r.id, amountUSD: 100 }],
-      dueAllocations: []
-    });
-
+    // The $100 is GONE — ad A is holding it. The receipt must now offer nothing
+    // more, or a second ad can be funded from the very same note. This is the
+    // reachable half of the double-spend: it is what the funding pickers read.
     const stats = getReceiptUsageStats(r);
-    const dueUsage = getDeliveryReceiptDueUsage(r);
-
-    // The receipt is ONE $100 note. Whatever the pools are called, the total
-    // amount of ad spend committed against it can never exceed $100.
     assert(
-      stats.usedUSD <= capacity + 0.005,
-      `DOUBLE-SPEND: ${usd(stats.usedUSD)} of ad spend is committed against a ${usd(capacity)} receipt ` +
-      `(ad_b2_due took ${usd(dueUsage.usedDueUSD)} as due credit, ad_b2_paid took $100.00 as paid balance). ` +
-      `getReceiptUsageStats clamps remainingUSD to ${usd(stats.remainingUSD)} with Math.max(...,0), so the ` +
-      `${usd(stats.usedUSD - capacity)} overdraft is invisible in the UI.`
+      near(stats.remainingUSD, 0),
+      `DOUBLE-SPEND: ad_b2_due already holds the receipt's ${usd(capacity)} as due credit, yet ` +
+      `getReceiptUsageStats still offers ${usd(stats.remainingUSD)} of spendable paid balance — so a second ` +
+      `ad can be funded from the same money. usedUSD reports ${usd(stats.usedUSD)}; it never counts due rows.`
     );
     assert(
-      near(stats.usedUSD + stats.remainingUSD, capacity),
-      `used + remaining must reconcile to the receipt's ${usd(capacity)}, got ${usd(stats.usedUSD)} + ${usd(stats.remainingUSD)}`
+      near(stats.usedUSD, capacity),
+      `the receipt's ${usd(capacity)} is fully committed to ad_b2_due, but usedUSD reports ${usd(stats.usedUSD)}`
     );
   });
 
@@ -631,24 +620,35 @@ async function main() {
 
   console.log('\n--- B3: ONE-POT — the two readers must not describe two capacities ---');
 
-  await target('B3. for a collected delivery receipt: usedPaid + usedDue <= capacity', () => {
+  await target('B3. the two readers describe ONE pot: same committed, same remaining', () => {
     resetState();
-    const r = deliveryReceipt('receipt_b3', 1000, 10); // 1000 LYD @ 10
+    const r = deliveryReceipt('receipt_b3', 1000, 10); // 1000 LYD @ 10 = $100
     const capacity = 100;
 
     // ONE ad, funded once, from the due credit. Then the receipt is collected.
-    dueFundedAd('ad_b3', r.id, 100);
+    dueFundedAd('ad_b3', r.id, 40);
     collect(r, capacity);
 
-    const usedPaid = getReceiptUsageStats(r).usedUSD;
-    const usedDue = getDeliveryReceiptDueUsage(r).usedDueUSD;
+    const paid = getReceiptUsageStats(r);
+    const due = getDeliveryReceiptDueUsage(r);
 
+    // The receipt is ONE $100 note held once. Both readers are views over the SAME
+    // committed total, so they must AGREE. (Summing them would double-count the very
+    // same dollars — that confusion is the bug.)
     assert(
-      usedPaid + usedDue <= capacity + 0.005,
-      `ONE-POT VIOLATION: a single $100 ad funded once is reported as ${usd(usedPaid)} used by getReceiptUsageStats ` +
-      `AND ${usd(usedDue)} used by getDeliveryReceiptDueUsage = ${usd(usedPaid + usedDue)} against a ${usd(capacity)} receipt. ` +
-      `The two readers describe the SAME money as two independent capacities ` +
-      `(amountUSD vs amountLocal/exchangeRate), so a redesign must merge them into one pot.`
+      near(paid.usedUSD, due.usedDueUSD),
+      `ONE-POT VIOLATION: the same $40 of funding is reported as ${usd(paid.usedUSD)} used by ` +
+      `getReceiptUsageStats but ${usd(due.usedDueUSD)} by getDeliveryReceiptDueUsage. The two readers ` +
+      `must count the same commitments against the receipt, not maintain separate ledgers.`
+    );
+    assert(
+      near(paid.remainingUSD, due.remainingDueUSD),
+      `the receipt has ONE spendable balance, but the readers disagree: ${usd(paid.remainingUSD)} (paid) ` +
+      `vs ${usd(due.remainingDueUSD)} (due). Whichever is larger can be spent twice.`
+    );
+    assert(
+      near(paid.usedUSD + paid.remainingUSD, capacity),
+      `used + remaining must reconcile to the receipt's ${usd(capacity)}`
     );
   });
 
@@ -658,20 +658,33 @@ async function main() {
     collect(r, 100);
 
     const paidCapacity = getReceiptUsageStats(r).totalUSD;             // amountUSD
-    const dueCapacity = getDeliveryReceiptDueUsage(r).totalDueUSD;     // amountLocal / rate
+    const dueCapacity = getDeliveryReceiptDueUsage(r).totalDueUSD;     // must be the SAME pot
 
-    // Both readers agree the pot is $100 — that is fine and expected.
+    // Both readers must agree the pot is $100 — and mean the SAME $100.
     assert(near(paidCapacity, 100), `paid capacity should be $100, got ${usd(paidCapacity)}`);
     assert(near(dueCapacity, 100), `due capacity should be $100, got ${usd(dueCapacity)}`);
 
-    // What must NOT be true is that the receipt can hand out $100 twice.
-    const spendable = getReceiptUsageStats(r).remainingUSD + getDeliveryReceiptDueUsage(r).remainingDueUSD;
+    // Now spend $60 of it, through EITHER pool. Both readers must report the one
+    // remaining balance. If they disagree, the larger figure is spendable a second time
+    // — that is the double-spend. (Their remainings must never be ADDED: they are two
+    // views of one pot, not two pots.)
+    makeAd({
+      id: 'ad_b3b',
+      amountUSD: 60,
+      spentUSD: 60,
+      receiptAllocations: [{ receiptId: r.id, amountUSD: 60 }],
+      dueAllocations: []
+    });
+
+    const paidLeft = getReceiptUsageStats(r).remainingUSD;
+    const dueLeft = getDeliveryReceiptDueUsage(r).remainingDueUSD;
     assert(
-      spendable <= 100 + 0.005,
-      `a collected delivery receipt advertises ${usd(spendable)} of spendable balance ` +
-      `(${usd(getReceiptUsageStats(r).remainingUSD)} paid + ${usd(getDeliveryReceiptDueUsage(r).remainingDueUSD)} due) ` +
-      `for a single ${usd(100)} receipt — the same money is offered in two places at once.`
+      near(paidLeft, dueLeft),
+      `the receipt has ONE spendable balance, but the readers disagree: ${usd(paidLeft)} (paid) vs ` +
+      `${usd(dueLeft)} (due). $60 was already spent, so the same money is still on offer through the ` +
+      `other pool and can be handed out twice.`
     );
+    assert(near(paidLeft, 40), `after spending $60 of $100, exactly $40 must remain, got ${usd(paidLeft)}`);
   });
 
   // ---------- report ----------

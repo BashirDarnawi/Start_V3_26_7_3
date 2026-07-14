@@ -819,51 +819,36 @@ function getDeliveryReceiptDueUsage(receipt) {
     return { totalDueUSD: 0, usedDueUSD: 0, remainingDueUSD: 0, fundedAds: [] };
   }
 
-  const receiptId = String(receiptObj.id || '');
-
-  // Total due amount in USD (convert from LYD using receipt's exchange rate)
+  // ONE POT. A receipt is a single sum of money; "delivery due" and "paid balance" are
+  // two NAMES for it at two moments in time, not two pots. This function used to keep a
+  // second, independent ledger: it counted ONLY dueAllocations and read the frozen debt
+  // as a capacity of its own. So once a driver collected a receipt, the same money was
+  // advertised twice — once as due credit here, once as paid balance by
+  // getReceiptUsageStats — and two ads could each spend it.
+  //
+  // Both readers are now views over the SAME committed total. getReceiptUsageStats
+  // already sums every commitment against a receipt (receiptAllocations + dueAllocations
+  // + the legacy mirror), so defer to it rather than maintaining a rival count.
   const exchangeRate = receiptObj.exchangeRate || state.defaultExchangeRate || 1;
   const dueAmountLocal = Number(receiptObj.debtAmountLocal ?? receiptObj.amountLocal ?? 0) || 0;
-  const totalDueUSD = exchangeRate > 0 ? dueAmountLocal / exchangeRate : 0;
+  const debtUSD = exchangeRate > 0 ? dueAmountLocal / exchangeRate : 0;
 
-  // Find all ads that use this delivery receipt's due amount
-  const fundedAds = getVisibleRecords(state.ads || []).filter(ad => {
-    if (ad._deleted || ad.recordType === 'receipt') return false;
-    // Check if ad has dueAllocations pointing to this receipt
-    if (Array.isArray(ad.dueAllocations)) {
-      return ad.dueAllocations.some(a => String(a.receiptId || '') === receiptId);
-    }
-    // Legacy: check linkedDeliveryReceiptId
-    return String(ad.linkedDeliveryReceiptId || '') === receiptId && (ad.dueAmountToUseUSD > 0 || ad.dueAmountToUseLYD > 0);
-  });
-  
-  // Calculate total used from due
-  const usedDueUSD = fundedAds.reduce((sum, ad) => {
-    // First check dueAllocations (new system)
-    if (Array.isArray(ad.dueAllocations)) {
-      const allocSum = ad.dueAllocations
-        .filter(a => String(a.receiptId || '') === receiptId)
-        .reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0);
-      if (allocSum > 0) return sum + allocSum;
-    }
-    // Legacy: check dueAmountToUseUSD or convert from LYD
-    if (String(ad.linkedDeliveryReceiptId || '') === receiptId) {
-      if (ad.dueAmountToUseUSD > 0) return sum + ad.dueAmountToUseUSD;
-      if (ad.dueAmountToUseLYD > 0) {
-        const adExRate = ad.exchangeRate || exchangeRate || 1;
-        return sum + (ad.dueAmountToUseLYD / adExRate);
-      }
-    }
-    return sum;
-  }, 0);
-  
-  const remainingDueUSD = Math.max(totalDueUSD - usedDueUSD, 0);
-  
+  // Capacity: before collection the receipt is worth the debt the driver will collect.
+  // Once collected it is worth what was ACTUALLY collected (amountUSD) — the debt fields
+  // survive as history and must never be read as a second capacity. Over-collecting
+  // legitimately adds real balance; re-reading the stale debt invents it.
+  const collected = receiptObj.isPaid === true || String(receiptObj.status || '') === 'Paid';
+  const totalDueUSD = collected ? (Number(receiptObj.amountUSD) || 0) : debtUSD;
+
+  const stats = getReceiptUsageStats(receiptObj);
+  const usedDueUSD = stats.usedUSD;
+  const remainingDueUSD = Math.max(totalDueUSD - usedDueUSD - (stats.transferredUSD || 0), 0);
+
   return {
     totalDueUSD,
     usedDueUSD,
     remainingDueUSD,
-    fundedAds,
+    fundedAds: stats.fundedAds,
     exchangeRate
   };
 }
