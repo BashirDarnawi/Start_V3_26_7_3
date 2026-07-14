@@ -200,12 +200,23 @@ function restoreModalFromUrl() {
   let params = getUrlParams();
   // On first load the boot URL was already rewritten by updateUrlForView, so
   // fall back to the captured boot params (one-shot).
-  if ((!params || !params.modal) && _bootModalParams) params = _bootModalParams;
+  const fromBoot = (!params || !params.modal) && !!_bootModalParams;
+  if (fromBoot) params = _bootModalParams;
   _bootModalParams = null;
 
   if (params.modal) {
     const handler = MODAL_URL_HANDLERS[params.modal];
     if (!handler || !params.id) return;
+
+    // A blank create form must never be resurrected from the boot URL. Every
+    // showXModal() stamps ?modal=X&id=new, so that param survives a refresh and
+    // would reopen an empty dialog on EVERY load — a full-screen overlay that
+    // swallows all clicks (sidebar included) until it is closed by hand.
+    // Back/forward within the session still reopens it; only boot is skipped.
+    if (fromBoot && params.id === 'new') {
+      updateUrlForView(state.currentView, true);
+      return;
+    }
 
     // Re-open via the real opener so permissions are re-checked and the
     // modal's temp state is seeded properly.
@@ -216,8 +227,14 @@ function restoreModalFromUrl() {
           return;
         }
         if (handler.open) handler.open(params.id);
+        // The record is gone (deleted after the link was made): the edit modals
+        // still mark themselves active and paint an all-but-empty overlay that
+        // blocks the whole app. Every opener that finds its record populates
+        // modalData, so active-without-data means "not found" — tear it down.
+        if (state.activeModal && !state.modalData) closeModal();
       } catch (e) {
         console.warn('[restoreModalFromUrl] failed to open', params.modal, e?.message || e);
+        closeModal(); // never leave a half-built overlay blocking every click
       }
     }, 100);
   } else {
