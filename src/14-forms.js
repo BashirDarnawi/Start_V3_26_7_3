@@ -620,10 +620,19 @@ function getNextAutoSerialNumber(paymentMethod) {
     if (!usesGroupMethod || !receipt.serialNumber) return;
     const serial = String(receipt.serialNumber).trim().toUpperCase();
 
+    // A receipt that has a MANUAL method (Cash) got a hand-typed PAPER receipt
+    // number, so its bare digits are NOT a legacy S serial and must not advance
+    // the S counter (a 5-digit paper number would otherwise hijack the whole
+    // series). Only PURE auto-serial receipts count via the legacy branch.
+    const methodsUsed = payments.length
+      ? payments.map(p => p && p.method).filter(Boolean)
+      : (receiptPaymentMethod && receiptPaymentMethod !== 'Split Payment' ? [receiptPaymentMethod] : []);
+    const hasManualMethod = methodsUsed.some(m => !getAutoSerialPrefix(m));
+
     let serialNum = 0;
     if (serial.startsWith(prefix)) {
       serialNum = parseInt(serial.substring(prefix.length), 10);
-    } else if (prefix === 'S' && /^\d+$/.test(serial)) {
+    } else if (prefix === 'S' && /^\d+$/.test(serial) && !hasManualMethod) {
       // Legacy: the S group used bare numbers before the prefix existed.
       serialNum = parseInt(serial, 10);
     } else {
@@ -725,8 +734,18 @@ function syncReceiptSerialWithPaymentMethods({ reissue = false } = {}) {
     // The number already belongs to this method's counter — keep it.
     const inThisGroup = isAutoSerialNumber(currentUpper) && currentUpper.startsWith(prefix);
     // Legacy S receipts were numbered with bare digits before the prefix
-    // existed; a saved one keeps its number rather than being renumbered.
-    const legacySInGroup = prefix === 'S' && isEditingSaved && /^\d+$/.test(current);
+    // existed; a saved one keeps its number rather than being renumbered. But
+    // this exception must ONLY apply when the STORED receipt was already a pure
+    // S-group receipt — a manual paper number (e.g. Cash #500) switched to LTT
+    // must be REISSUED to an S-serial, not kept as "500".
+    const _stored = state.modalData || {};
+    const _storedMethods = Array.isArray(_stored.payments) && _stored.payments.length
+      ? _stored.payments.map(p => p && p.method).filter(Boolean)
+      : (_stored.paymentMethod && _stored.paymentMethod !== 'Split Payment' ? [_stored.paymentMethod] : []);
+    const _storedWasPureSGroup = _storedMethods.length
+      && _storedMethods.some(m => getAutoSerialPrefix(m) === 'S')
+      && !_storedMethods.some(m => !getAutoSerialPrefix(m));
+    const legacySInGroup = prefix === 'S' && isEditingSaved && /^\d+$/.test(current) && _storedWasPureSGroup;
 
     if (!current || (reissue && !inThisGroup && !legacySInGroup)) {
       const nextSerial = getNextAutoSerialNumber(autoMethod);
@@ -1497,10 +1516,16 @@ async function _saveReceiptFromModalInner() {
     }
     
     receipt.updatedAt = new Date().toISOString();
-    // Pass the baseline the user actually edited (the modal snapshot) so a
-    // concurrent change (e.g. a driver completing the delivery) triggers a
-    // 409 conflict + reload instead of being silently overwritten.
-    const savedOk = await updateRecord(state.receipts, receipt.id, receipt, oldReceipt?._lastModified);
+    // Pass the baseline the user actually edited (the MODAL-OPEN snapshot) so a
+    // concurrent change (e.g. a driver completing the delivery) triggers a 409
+    // conflict + reload instead of being silently overwritten. editTarget is
+    // re-resolved fresh at save time, and live-sync REPLACES the array slot
+    // (applyServerDelta arr[idx]=clean), so editTarget._lastModified is the
+    // NEW value while state.modalData still holds the frozen open-time object.
+    const _openLastMod = (state.modalData && String(state.modalData.id) === String(receipt.id))
+      ? state.modalData._lastModified
+      : oldReceipt?._lastModified;
+    const savedOk = await updateRecord(state.receipts, receipt.id, receipt, _openLastMod);
     if (!savedOk) return; // keep the modal open; updateRecord already explained the failure
     showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث الوصل بنجاح!' : 'Receipt updated successfully!', 'success');
     addLog('update', 'receipt', receipt.id, `Updated receipt${serialNumber ? ' #' + serialNumber : ''}`);

@@ -187,8 +187,21 @@ const MODAL_URL_HANDLERS = {
 };
 
 // Restore modal from URL params (e.g., ?modal=ad&id=123 or ?modal=ad&id=new)
+// The modal/id present in the URL when the app FIRST loaded — captured now,
+// during module evaluation, BEFORE init() calls updateUrlForView() which
+// rebuilds the query from viewUrlParamsFor() and drops ?modal&id. Without this,
+// refreshing or sharing a dialog deep-link never reopened the dialog.
+let _bootModalParams = (() => {
+  try { const p = getUrlParams(); return (p && p.modal && p.id) ? { modal: p.modal, id: p.id } : null; }
+  catch (_) { return null; }
+})();
+
 function restoreModalFromUrl() {
-  const params = getUrlParams();
+  let params = getUrlParams();
+  // On first load the boot URL was already rewritten by updateUrlForView, so
+  // fall back to the captured boot params (one-shot).
+  if ((!params || !params.modal) && _bootModalParams) params = _bootModalParams;
+  _bootModalParams = null;
 
   if (params.modal) {
     const handler = MODAL_URL_HANDLERS[params.modal];

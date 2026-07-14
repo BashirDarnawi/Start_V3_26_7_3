@@ -8577,8 +8577,21 @@ const MODAL_URL_HANDLERS = {
 };
 
 // Restore modal from URL params (e.g., ?modal=ad&id=123 or ?modal=ad&id=new)
+// The modal/id present in the URL when the app FIRST loaded — captured now,
+// during module evaluation, BEFORE init() calls updateUrlForView() which
+// rebuilds the query from viewUrlParamsFor() and drops ?modal&id. Without this,
+// refreshing or sharing a dialog deep-link never reopened the dialog.
+let _bootModalParams = (() => {
+  try { const p = getUrlParams(); return (p && p.modal && p.id) ? { modal: p.modal, id: p.id } : null; }
+  catch (_) { return null; }
+})();
+
 function restoreModalFromUrl() {
-  const params = getUrlParams();
+  let params = getUrlParams();
+  // On first load the boot URL was already rewritten by updateUrlForView, so
+  // fall back to the captured boot params (one-shot).
+  if ((!params || !params.modal) && _bootModalParams) params = _bootModalParams;
+  _bootModalParams = null;
 
   if (params.modal) {
     const handler = MODAL_URL_HANDLERS[params.modal];
@@ -15411,6 +15424,11 @@ function updateReceiptDeliveryCompletionComputed() {
   void notes;
 }
 
+// Snapshot of {id, lastMod} captured when the delivery-completion modal opens,
+// used as the conflict baseline on submit (the receipt object is re-resolved
+// fresh at save time so its live _lastModified can't be trusted).
+let _deliveryCompletionOpen = null;
+
 function openReceiptDeliveryCompletionModal(receiptId) {
   const isArD = state.language === 'ar';
   const receipt = _findReceiptForDeliveryModal(receiptId);
@@ -15426,6 +15444,12 @@ function openReceiptDeliveryCompletionModal(receiptId) {
     showNotification(isArD ? 'تم رفض الوصول' : 'Access Denied', isArD ? 'هذا الوصل غير معيَّن لك' : 'This receipt is not assigned to you', 'error');
     return;
   }
+
+  // Freeze the receipt's _lastModified at modal-open time. submitReceipt-
+  // DeliveryCompletion re-resolves the receipt fresh at save, and live-sync
+  // replaces the array slot, so without this snapshot a concurrent admin edit
+  // would be silently clobbered instead of producing a 409 + reload.
+  _deliveryCompletionOpen = { id: String(receipt.id), lastMod: receipt._lastModified || 0 };
 
   const customer = state.customers.find(c => c && !c._deleted && String(c.id) === String(receipt.customerId));
   const phone = String(receipt.phoneNumber || customer?.phones?.[0] || '').trim();
@@ -15625,7 +15649,12 @@ async function submitReceiptDeliveryCompletion(receiptId) {
     const btn = document.getElementById('delivery-complete-submit');
     if (btn) btn.disabled = true;
     try {
-      const expected = receipt._lastModified || 0;
+      // Use the modal-open snapshot as the conflict baseline (not the fresh,
+      // possibly live-synced receipt._lastModified) so a concurrent admin edit
+      // 409s instead of being silently overwritten.
+      const expected = (_deliveryCompletionOpen && _deliveryCompletionOpen.id === String(receipt.id))
+        ? _deliveryCompletionOpen.lastMod
+        : (receipt._lastModified || 0);
       const res = await apiPatchEntity('receipts', receipt.id, updates, expected);
       const saved = res?.data ? Security.sanitizeObject(res.data) : null;
       if (!saved || !saved.id) {
@@ -16817,6 +16846,44 @@ async function saveSplitPayments() {
     return;
   }
 
+  // Keep the receipt NUMBER consistent with the new method mix — the main
+  // receipt form enforces this (syncReceiptSerialWithPaymentMethods), but this
+  // editor bypassed it, orphaning auto-serials and colliding the next number.
+  const _existing = state.receipts.find(r => r.id === receiptId);
+  const _curSerial = String(_existing?.serialNumber || '').trim().toUpperCase();
+  const _methods = payments.map(p => p.method).filter(Boolean);
+  const _anyManual = _methods.some(m => !getAutoSerialPrefix(m));
+  const _autoMethod = _anyManual ? null : _methods.find(m => getAutoSerialPrefix(m));
+  const _serialUpdate = {};
+  if (_autoMethod) {
+    const _prefix = getAutoSerialPrefix(_autoMethod);
+    const _inThisGroup = isAutoSerialNumber(_curSerial) && _curSerial.startsWith(_prefix);
+    const _legacyS = _prefix === 'S' && /^\d+$/.test(_curSerial);
+    if (!_inThisGroup && !_legacyS) {
+      const _next = getNextAutoSerialNumber(_autoMethod);
+      if (_next) { _serialUpdate.serialNumber = _next; _serialUpdate.finalReceiptNo = _next; }
+    }
+  } else if (isAutoSerialNumber(_curSerial)) {
+    // Now includes a manual (Cash) method but the stored number is an app-issued
+    // auto-serial. A paper number can't be entered here — send the user to the
+    // full Edit Receipt form instead of leaving a mismatched number.
+    showNotification(
+      state.language === 'ar' ? 'غير ممكن هنا' : 'Not here',
+      state.language === 'ar'
+        ? 'تغيير الطريقة إلى نقدي يحتاج رقم وصل ورقي — غيّر طرق الدفع من نموذج تعديل الوصل الكامل.'
+        : 'Switching to a cash method needs a paper receipt number — change payment methods from the full Edit Receipt form.',
+      'error'
+    );
+    return;
+  }
+
+  // Pass the modal-open snapshot as the conflict baseline so a concurrent edit
+  // (another user, or a driver completing the delivery) 409s + reloads instead
+  // of being silently overwritten. state.modalData is the frozen open-time
+  // object (live-sync replaces the array slot, not state.modalData).
+  const _splitOpenLastMod = (state.modalData && String(state.modalData.id) === String(receiptId))
+    ? state.modalData._lastModified
+    : _existing?._lastModified;
   const savedOk = await updateRecord(state.receipts, receiptId, {
     payments,
     // The top-level method is DERIVED from the rows — without this it kept the
@@ -16827,8 +16894,9 @@ async function saveSplitPayments() {
       : (payments[0]?.method || ''),
     amountLocal: totalR1,
     amountUSD: totalR2,
-    exchangeRate: avgRate
-  });
+    exchangeRate: avgRate,
+    ..._serialUpdate
+  }, _splitOpenLastMod);
   if (!savedOk) return;
   showNotification(state.language === 'ar' ? 'تم الحفظ' : 'Saved', state.language === 'ar' ? 'تم حفظ الدفعات المقسمة بنجاح' : 'Split payments saved successfully', 'success');
   closeModal();
@@ -17869,10 +17937,19 @@ function getNextAutoSerialNumber(paymentMethod) {
     if (!usesGroupMethod || !receipt.serialNumber) return;
     const serial = String(receipt.serialNumber).trim().toUpperCase();
 
+    // A receipt that has a MANUAL method (Cash) got a hand-typed PAPER receipt
+    // number, so its bare digits are NOT a legacy S serial and must not advance
+    // the S counter (a 5-digit paper number would otherwise hijack the whole
+    // series). Only PURE auto-serial receipts count via the legacy branch.
+    const methodsUsed = payments.length
+      ? payments.map(p => p && p.method).filter(Boolean)
+      : (receiptPaymentMethod && receiptPaymentMethod !== 'Split Payment' ? [receiptPaymentMethod] : []);
+    const hasManualMethod = methodsUsed.some(m => !getAutoSerialPrefix(m));
+
     let serialNum = 0;
     if (serial.startsWith(prefix)) {
       serialNum = parseInt(serial.substring(prefix.length), 10);
-    } else if (prefix === 'S' && /^\d+$/.test(serial)) {
+    } else if (prefix === 'S' && /^\d+$/.test(serial) && !hasManualMethod) {
       // Legacy: the S group used bare numbers before the prefix existed.
       serialNum = parseInt(serial, 10);
     } else {
@@ -17974,8 +18051,18 @@ function syncReceiptSerialWithPaymentMethods({ reissue = false } = {}) {
     // The number already belongs to this method's counter — keep it.
     const inThisGroup = isAutoSerialNumber(currentUpper) && currentUpper.startsWith(prefix);
     // Legacy S receipts were numbered with bare digits before the prefix
-    // existed; a saved one keeps its number rather than being renumbered.
-    const legacySInGroup = prefix === 'S' && isEditingSaved && /^\d+$/.test(current);
+    // existed; a saved one keeps its number rather than being renumbered. But
+    // this exception must ONLY apply when the STORED receipt was already a pure
+    // S-group receipt — a manual paper number (e.g. Cash #500) switched to LTT
+    // must be REISSUED to an S-serial, not kept as "500".
+    const _stored = state.modalData || {};
+    const _storedMethods = Array.isArray(_stored.payments) && _stored.payments.length
+      ? _stored.payments.map(p => p && p.method).filter(Boolean)
+      : (_stored.paymentMethod && _stored.paymentMethod !== 'Split Payment' ? [_stored.paymentMethod] : []);
+    const _storedWasPureSGroup = _storedMethods.length
+      && _storedMethods.some(m => getAutoSerialPrefix(m) === 'S')
+      && !_storedMethods.some(m => !getAutoSerialPrefix(m));
+    const legacySInGroup = prefix === 'S' && isEditingSaved && /^\d+$/.test(current) && _storedWasPureSGroup;
 
     if (!current || (reissue && !inThisGroup && !legacySInGroup)) {
       const nextSerial = getNextAutoSerialNumber(autoMethod);
@@ -18746,10 +18833,16 @@ async function _saveReceiptFromModalInner() {
     }
     
     receipt.updatedAt = new Date().toISOString();
-    // Pass the baseline the user actually edited (the modal snapshot) so a
-    // concurrent change (e.g. a driver completing the delivery) triggers a
-    // 409 conflict + reload instead of being silently overwritten.
-    const savedOk = await updateRecord(state.receipts, receipt.id, receipt, oldReceipt?._lastModified);
+    // Pass the baseline the user actually edited (the MODAL-OPEN snapshot) so a
+    // concurrent change (e.g. a driver completing the delivery) triggers a 409
+    // conflict + reload instead of being silently overwritten. editTarget is
+    // re-resolved fresh at save time, and live-sync REPLACES the array slot
+    // (applyServerDelta arr[idx]=clean), so editTarget._lastModified is the
+    // NEW value while state.modalData still holds the frozen open-time object.
+    const _openLastMod = (state.modalData && String(state.modalData.id) === String(receipt.id))
+      ? state.modalData._lastModified
+      : oldReceipt?._lastModified;
+    const savedOk = await updateRecord(state.receipts, receipt.id, receipt, _openLastMod);
     if (!savedOk) return; // keep the modal open; updateRecord already explained the failure
     showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث الوصل بنجاح!' : 'Receipt updated successfully!', 'success');
     addLog('update', 'receipt', receipt.id, `Updated receipt${serialNumber ? ' #' + serialNumber : ''}`);
@@ -21380,18 +21473,32 @@ function renderModal() {
                 <div id="receipt-financial-section">
                   ${renderReceiptFinancials(
                     adData.collectionPayments && adData.collectionPayments.length ? adData.collectionPayments : [{
+                      // Reconstruct a row that round-trips to the SAME USD credit
+                      // as the paid ad. amount = the LYD figure, rate1 = 1,
+                      // rate2 = the ad's own rate — so both USD-based and
+                      // LYD-based methods recompute amountUSD correctly.
+                      // Previously amount=amountUSD with rate2=defaultRate made a
+                      // LYD method divide the USD figure by the rate again,
+                      // gutting the recorded amount ~10x (audit recheck HIGH #3).
                       method: adData.paymentMethod || PAYMENT_METHODS[0],
-                      amount: adData.amountUSD || 0,
-                      rate: adData.exchangeRate || getDefaultRate1(adData.paymentMethod || PAYMENT_METHODS[0]),
-                      rate2: state.defaultExchangeRate,
+                      amount: adData.amountLocal || ((adData.amountUSD || 0) * (adData.exchangeRate || state.defaultExchangeRate || 1)),
+                      rate: 1,
+                      rate2: adData.exchangeRate || state.defaultExchangeRate,
                       collectionType: 'office',
                       deliveryPersonId: adData.deliveryPersonId || ''
                     }],
                     adData.collectionPayments && adData.collectionPayments.length ? adData.collectionPayments : [{
+                      // Reconstruct a row that round-trips to the SAME USD credit
+                      // as the paid ad. amount = the LYD figure, rate1 = 1,
+                      // rate2 = the ad's own rate — so both USD-based and
+                      // LYD-based methods recompute amountUSD correctly.
+                      // Previously amount=amountUSD with rate2=defaultRate made a
+                      // LYD method divide the USD figure by the rate again,
+                      // gutting the recorded amount ~10x (audit recheck HIGH #3).
                       method: adData.paymentMethod || PAYMENT_METHODS[0],
-                      amount: adData.amountUSD || 0,
-                      rate: adData.exchangeRate || getDefaultRate1(adData.paymentMethod || PAYMENT_METHODS[0]),
-                      rate2: state.defaultExchangeRate,
+                      amount: adData.amountLocal || ((adData.amountUSD || 0) * (adData.exchangeRate || state.defaultExchangeRate || 1)),
+                      rate: 1,
+                      rate2: adData.exchangeRate || state.defaultExchangeRate,
                       collectionType: 'office',
                       deliveryPersonId: adData.deliveryPersonId || ''
                     }],

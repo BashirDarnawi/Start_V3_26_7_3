@@ -302,18 +302,32 @@ function renderModal() {
                 <div id="receipt-financial-section">
                   ${renderReceiptFinancials(
                     adData.collectionPayments && adData.collectionPayments.length ? adData.collectionPayments : [{
+                      // Reconstruct a row that round-trips to the SAME USD credit
+                      // as the paid ad. amount = the LYD figure, rate1 = 1,
+                      // rate2 = the ad's own rate — so both USD-based and
+                      // LYD-based methods recompute amountUSD correctly.
+                      // Previously amount=amountUSD with rate2=defaultRate made a
+                      // LYD method divide the USD figure by the rate again,
+                      // gutting the recorded amount ~10x (audit recheck HIGH #3).
                       method: adData.paymentMethod || PAYMENT_METHODS[0],
-                      amount: adData.amountUSD || 0,
-                      rate: adData.exchangeRate || getDefaultRate1(adData.paymentMethod || PAYMENT_METHODS[0]),
-                      rate2: state.defaultExchangeRate,
+                      amount: adData.amountLocal || ((adData.amountUSD || 0) * (adData.exchangeRate || state.defaultExchangeRate || 1)),
+                      rate: 1,
+                      rate2: adData.exchangeRate || state.defaultExchangeRate,
                       collectionType: 'office',
                       deliveryPersonId: adData.deliveryPersonId || ''
                     }],
                     adData.collectionPayments && adData.collectionPayments.length ? adData.collectionPayments : [{
+                      // Reconstruct a row that round-trips to the SAME USD credit
+                      // as the paid ad. amount = the LYD figure, rate1 = 1,
+                      // rate2 = the ad's own rate — so both USD-based and
+                      // LYD-based methods recompute amountUSD correctly.
+                      // Previously amount=amountUSD with rate2=defaultRate made a
+                      // LYD method divide the USD figure by the rate again,
+                      // gutting the recorded amount ~10x (audit recheck HIGH #3).
                       method: adData.paymentMethod || PAYMENT_METHODS[0],
-                      amount: adData.amountUSD || 0,
-                      rate: adData.exchangeRate || getDefaultRate1(adData.paymentMethod || PAYMENT_METHODS[0]),
-                      rate2: state.defaultExchangeRate,
+                      amount: adData.amountLocal || ((adData.amountUSD || 0) * (adData.exchangeRate || state.defaultExchangeRate || 1)),
+                      rate: 1,
+                      rate2: adData.exchangeRate || state.defaultExchangeRate,
                       collectionType: 'office',
                       deliveryPersonId: adData.deliveryPersonId || ''
                     }],

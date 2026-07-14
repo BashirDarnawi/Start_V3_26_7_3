@@ -1185,6 +1185,11 @@ function updateReceiptDeliveryCompletionComputed() {
   void notes;
 }
 
+// Snapshot of {id, lastMod} captured when the delivery-completion modal opens,
+// used as the conflict baseline on submit (the receipt object is re-resolved
+// fresh at save time so its live _lastModified can't be trusted).
+let _deliveryCompletionOpen = null;
+
 function openReceiptDeliveryCompletionModal(receiptId) {
   const isArD = state.language === 'ar';
   const receipt = _findReceiptForDeliveryModal(receiptId);
@@ -1200,6 +1205,12 @@ function openReceiptDeliveryCompletionModal(receiptId) {
     showNotification(isArD ? 'تم رفض الوصول' : 'Access Denied', isArD ? 'هذا الوصل غير معيَّن لك' : 'This receipt is not assigned to you', 'error');
     return;
   }
+
+  // Freeze the receipt's _lastModified at modal-open time. submitReceipt-
+  // DeliveryCompletion re-resolves the receipt fresh at save, and live-sync
+  // replaces the array slot, so without this snapshot a concurrent admin edit
+  // would be silently clobbered instead of producing a 409 + reload.
+  _deliveryCompletionOpen = { id: String(receipt.id), lastMod: receipt._lastModified || 0 };
 
   const customer = state.customers.find(c => c && !c._deleted && String(c.id) === String(receipt.customerId));
   const phone = String(receipt.phoneNumber || customer?.phones?.[0] || '').trim();
@@ -1399,7 +1410,12 @@ async function submitReceiptDeliveryCompletion(receiptId) {
     const btn = document.getElementById('delivery-complete-submit');
     if (btn) btn.disabled = true;
     try {
-      const expected = receipt._lastModified || 0;
+      // Use the modal-open snapshot as the conflict baseline (not the fresh,
+      // possibly live-synced receipt._lastModified) so a concurrent admin edit
+      // 409s instead of being silently overwritten.
+      const expected = (_deliveryCompletionOpen && _deliveryCompletionOpen.id === String(receipt.id))
+        ? _deliveryCompletionOpen.lastMod
+        : (receipt._lastModified || 0);
       const res = await apiPatchEntity('receipts', receipt.id, updates, expected);
       const saved = res?.data ? Security.sanitizeObject(res.data) : null;
       if (!saved || !saved.id) {
@@ -2591,6 +2607,44 @@ async function saveSplitPayments() {
     return;
   }
 
+  // Keep the receipt NUMBER consistent with the new method mix — the main
+  // receipt form enforces this (syncReceiptSerialWithPaymentMethods), but this
+  // editor bypassed it, orphaning auto-serials and colliding the next number.
+  const _existing = state.receipts.find(r => r.id === receiptId);
+  const _curSerial = String(_existing?.serialNumber || '').trim().toUpperCase();
+  const _methods = payments.map(p => p.method).filter(Boolean);
+  const _anyManual = _methods.some(m => !getAutoSerialPrefix(m));
+  const _autoMethod = _anyManual ? null : _methods.find(m => getAutoSerialPrefix(m));
+  const _serialUpdate = {};
+  if (_autoMethod) {
+    const _prefix = getAutoSerialPrefix(_autoMethod);
+    const _inThisGroup = isAutoSerialNumber(_curSerial) && _curSerial.startsWith(_prefix);
+    const _legacyS = _prefix === 'S' && /^\d+$/.test(_curSerial);
+    if (!_inThisGroup && !_legacyS) {
+      const _next = getNextAutoSerialNumber(_autoMethod);
+      if (_next) { _serialUpdate.serialNumber = _next; _serialUpdate.finalReceiptNo = _next; }
+    }
+  } else if (isAutoSerialNumber(_curSerial)) {
+    // Now includes a manual (Cash) method but the stored number is an app-issued
+    // auto-serial. A paper number can't be entered here — send the user to the
+    // full Edit Receipt form instead of leaving a mismatched number.
+    showNotification(
+      state.language === 'ar' ? 'غير ممكن هنا' : 'Not here',
+      state.language === 'ar'
+        ? 'تغيير الطريقة إلى نقدي يحتاج رقم وصل ورقي — غيّر طرق الدفع من نموذج تعديل الوصل الكامل.'
+        : 'Switching to a cash method needs a paper receipt number — change payment methods from the full Edit Receipt form.',
+      'error'
+    );
+    return;
+  }
+
+  // Pass the modal-open snapshot as the conflict baseline so a concurrent edit
+  // (another user, or a driver completing the delivery) 409s + reloads instead
+  // of being silently overwritten. state.modalData is the frozen open-time
+  // object (live-sync replaces the array slot, not state.modalData).
+  const _splitOpenLastMod = (state.modalData && String(state.modalData.id) === String(receiptId))
+    ? state.modalData._lastModified
+    : _existing?._lastModified;
   const savedOk = await updateRecord(state.receipts, receiptId, {
     payments,
     // The top-level method is DERIVED from the rows — without this it kept the
@@ -2601,8 +2655,9 @@ async function saveSplitPayments() {
       : (payments[0]?.method || ''),
     amountLocal: totalR1,
     amountUSD: totalR2,
-    exchangeRate: avgRate
-  });
+    exchangeRate: avgRate,
+    ..._serialUpdate
+  }, _splitOpenLastMod);
   if (!savedOk) return;
   showNotification(state.language === 'ar' ? 'تم الحفظ' : 'Saved', state.language === 'ar' ? 'تم حفظ الدفعات المقسمة بنجاح' : 'Split payments saved successfully', 'success');
   closeModal();
