@@ -1465,13 +1465,25 @@ function renderAnalyticsView() {
   const notCollectedUSD = notCollectedReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
   const collectionRate = revenueReceipts.length > 0 ? ((collectedReceipts.length / revenueReceipts.length) * 100).toFixed(1) : 0;
 
-  // Delivery tracking. The terminal "done" status is 'Delivered' (there is no
-  // 'completed' status in DELIVERY_STATUSES), so the old check counted 0
-  // completed forever and lumped Delivered + Canceled into "active". Active =
-  // still in the pipeline; Completed = Delivered.
-  const deliveryAds = ads.filter(a => a.deliveryStatus && a.deliveryStatus !== 'Office');
-  const activeDeliveries = deliveryAds.filter(a => a.deliveryStatus === 'Needs Delivery' || a.deliveryStatus === 'In Progress').length;
-  const completedDeliveries = deliveryAds.filter(a => a.deliveryStatus === 'Delivered').length;
+  // Delivery tracking. Deliveries are tracked ONLY on receipts (ads are pinned to
+  // 'Office' when created, so sourcing this panel from ads showed 0 forever while
+  // renderDeliveriesView listed real deliveries). Same filter/normalisation as
+  // renderDeliveriesView so the two screens cannot contradict each other.
+  // The terminal "done" status is 'Delivered' (there is no 'completed' status in
+  // DELIVERY_STATUSES); Canceled is neither active nor completed.
+  const deliveryStatuses = receipts
+    .filter(r => {
+      if (!r) return false;
+      const ds = String(r.deliveryStatus || '').trim();
+      if (ds && ds !== 'Office') return true;
+      const sd = (r && typeof r.statusDetail === 'object' && r.statusDetail) ? r.statusDetail : {};
+      const npc = String(sd.notPaidCollection || '').trim();
+      return String(r.status || '').trim() === 'Not Paid' && npc === 'delivery';
+    })
+    .map(r => String(r.deliveryStatus || '').trim() || 'Needs Delivery');
+  const activeDeliveries = deliveryStatuses.filter(s => s === 'Needs Delivery' || s === 'In Progress').length;
+  const completedDeliveries = deliveryStatuses.filter(s => s === 'Delivered').length;
+  const totalDeliveries = deliveryStatuses.length;
 
   const adsLast7 = ads.filter(a => new Date(a.createdAt || 0).getTime() >= last7).length;
   const receiptsLast7 = revenueReceipts.filter(r => new Date(r.createdAt || 0).getTime() >= last7).length;
@@ -1500,11 +1512,23 @@ function renderAnalyticsView() {
     adsByPage[ad.pageId] = (adsByPage[ad.pageId] || 0) + 1;
   });
   const topPages = Object.entries(adsByPage)
-    .map(([pageId, count]) => ({
-      pageId,
-      name: state.pages.find(p => p.id === pageId)?.name || (isAr ? 'غير معروف' : 'Unknown'),
-      count
-    }))
+    .map(([pageId, count]) => {
+      // Deleting a page keeps its ads (history) but leaves them pointing at the
+      // deleted page's id, and the name can be reused by a NEW page. Resolve the
+      // name among live pages ONLY and tag the orphaned row, otherwise two
+      // different page ids render as one indistinguishable name here while the
+      // Pages card counts ads against the new id.
+      const livePage = state.pages.find(p => p && !p._deleted && String(p.id) === String(pageId));
+      const deletedPage = livePage ? null : state.pages.find(p => p && p._deleted && String(p.id) === String(pageId));
+      const deletedName = deletedPage?.name || '';
+      return {
+        pageId,
+        isDeleted: !livePage,
+        name: livePage?.name
+          || (deletedName ? `${deletedName} ${isAr ? '(محذوفة)' : '(deleted)'}` : (isAr ? 'غير معروف' : 'Unknown')),
+        count
+      };
+    })
     .sort((a, b) => b.count - a.count)
     .slice(0, 5);
 
@@ -1657,10 +1681,10 @@ function renderAnalyticsView() {
             </div>
             <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg text-center">
               <p class="text-slate-500 text-xs">${isAr ? 'الإجمالي' : 'Total'}</p>
-              <p class="text-xl font-bold text-slate-800 dark:text-white">${deliveryAds.length}</p>
+              <p class="text-xl font-bold text-slate-800 dark:text-white">${totalDeliveries}</p>
             </div>
           </div>
-          ${renderProgress(isAr ? 'اكتمال التوصيل' : 'Delivery completion', completedDeliveries, Math.max(deliveryAds.length, 1), 'bg-emerald-500')}
+          ${renderProgress(isAr ? 'اكتمال التوصيل' : 'Delivery completion', completedDeliveries, Math.max(totalDeliveries, 1), 'bg-emerald-500')}
         </div>
       </div>
 
@@ -1701,7 +1725,7 @@ function renderAnalyticsView() {
                     <p class="font-medium">${Security.escapeHtml(p.name || '')}</p>
                     <p class="text-[11px] text-slate-500">${isAr ? `${p.count} إعلان` : `${p.count} ads`}</p>
                   </div>
-                  <span class="text-xs px-2 py-1 rounded-full bg-sky-50 text-sky-700 dark:bg-sky-900/40">${isAr ? 'نشطة' : 'Active'}</span>
+                  <span class="text-xs px-2 py-1 rounded-full ${p.isDeleted ? 'bg-slate-100 text-slate-600 dark:bg-slate-800/60' : 'bg-sky-50 text-sky-700 dark:bg-sky-900/40'}">${p.isDeleted ? (isAr ? 'محذوفة' : 'Deleted') : (isAr ? 'نشطة' : 'Active')}</span>
                 </div>
               `).join('')}
             </div>
@@ -2735,6 +2759,13 @@ function renderAdsView() {
             <tbody>
               ${allAds.map((ad, idx) => {
                 const customer = customersById.get(ad.customerId);
+                // Deleting a page keeps its ads (history) but leaves their pageId
+                // pointing at the deleted page, whose name a NEW page may reuse.
+                // Keep resolving the name (the ad really did run on it) but mark
+                // the row, otherwise these ads read as if they belong to the live
+                // page of the same name while its Pages card counts 0 of them.
+                const adPage = ad.pageId ? pagesById.get(ad.pageId) : null;
+                const adPageDeleted = !!(adPage && adPage._deleted);
                 // For ads linked to delivery receipts, get delivery status from the receipt (source of truth)
                 const linkedReceipt = ad.linkedDeliveryReceiptId ? receiptsById.get(ad.linkedDeliveryReceiptId) : null;
                 const effectiveDeliveryStatus = linkedReceipt ? (linkedReceipt.deliveryStatus || 'Needs Delivery') : (ad.deliveryStatus || 'Office');
@@ -2792,9 +2823,10 @@ function renderAdsView() {
                       ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
                     </td>
                     <td class="py-3 px-2" data-label="Page">
-                      ${ad.pageId && pagesById.get(ad.pageId) ? `
-                        <div class="text-sm font-medium text-indigo-700 dark:text-indigo-300">${Security.escapeHtml(pagesById.get(ad.pageId).name || '')}</div>
-                        ${pagesById.get(ad.pageId).category ? `<div class="text-xs text-slate-500">${Security.escapeHtml(pagesById.get(ad.pageId).category)}</div>` : ''}
+                      ${adPage ? `
+                        <div class="text-sm font-medium ${adPageDeleted ? 'text-slate-500 dark:text-slate-400' : 'text-indigo-700 dark:text-indigo-300'}">${Security.escapeHtml(adPage.name || '')}</div>
+                        ${adPageDeleted ? `<div class="text-[10px] mt-0.5 inline-block px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">${isAr ? 'محذوفة' : 'Deleted'}</div>` : ''}
+                        ${adPage.category ? `<div class="text-xs text-slate-500">${Security.escapeHtml(adPage.category)}</div>` : ''}
                       ` : '<span class="text-xs text-slate-400">-</span>'}
                     </td>
                     <td class="py-3 px-2 font-bold text-emerald-600" data-label="Amount">$${ad.amountUSD?.toFixed(2) || '0.00'}</td>

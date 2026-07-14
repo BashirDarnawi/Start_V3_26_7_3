@@ -738,7 +738,12 @@ function syncReceiptSerialWithPaymentMethods({ reissue = false } = {}) {
     // this exception must ONLY apply when the STORED receipt was already a pure
     // S-group receipt — a manual paper number (e.g. Cash #500) switched to LTT
     // must be REISSUED to an S-serial, not kept as "500".
-    const _stored = state.modalData || {};
+    // The SAVED record is the source of truth here — state.modalData may only
+    // carry the id, so read the stored methods off state.receipts by that id.
+    const _storedId = state.modalData?.id;
+    const _stored = (_storedId && Array.isArray(state.receipts)
+      ? state.receipts.find(r => r && r.id === _storedId)
+      : null) || state.modalData || {};
     const _storedMethods = Array.isArray(_stored.payments) && _stored.payments.length
       ? _stored.payments.map(p => p && p.method).filter(Boolean)
       : (_stored.paymentMethod && _stored.paymentMethod !== 'Split Payment' ? [_stored.paymentMethod] : []);
