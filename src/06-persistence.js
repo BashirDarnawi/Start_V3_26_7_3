@@ -601,11 +601,24 @@ function migrateOldDataFormats() {
       // Ensure dueAllocations array exists
       if (!Array.isArray(ad.dueAllocations)) {
         ad.dueAllocations = [];
-        // Migrate from linkedDeliveryReceiptId if present
-        if (ad.linkedDeliveryReceiptId && !ad.isPaid) {
+        // Materialize the row from the legacy dueAmountToUse* mirror — the amount the
+        // usage helpers already credit this ad with. It is NOT ad.amountUSD: an ad can
+        // draw only part of its budget from delivery due credit and the rest from a paid
+        // receipt, and writing the whole ad amount here invented due usage that never
+        // happened, over-locking the delivery receipt and disagreeing with the server
+        // (which derives the same number from the mirror). This runs on every live-sync
+        // tick, so the error compounded across devices.
+        const legacyDueUSD = (() => {
+          const usd = parseFloat(ad.dueAmountToUseUSD) || 0;
+          if (usd > 0) return usd;
+          const lyd = parseFloat(ad.dueAmountToUseLYD) || 0;
+          const rate = ad.exchangeRate || state.defaultExchangeRate || 1;
+          return lyd > 0 && rate > 0 ? lyd / rate : 0;
+        })();
+        if (ad.linkedDeliveryReceiptId && !ad.isPaid && legacyDueUSD > 0) {
           ad.dueAllocations.push({
             receiptId: String(ad.linkedDeliveryReceiptId),
-            amountUSD: ad.amountUSD || 0
+            amountUSD: Math.round(legacyDueUSD * 100) / 100
           });
           changed = true;
         }
