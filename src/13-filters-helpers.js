@@ -2120,11 +2120,9 @@ async function saveCarriedBalanceReceipt() {
     finalReceiptNo: '',
     payments: [],
     phoneNumber: '',
-    // The money was received in the past — nothing pending to collect.
-    collected: true,
-    collectedAmount: Math.round(amountUSD * rate * 100) / 100,
-    collectedAt: nowIso,
-    collectedBy: state.currentUser?.id || '',
+    // Starts NOT collected — it shows in the collection list so the admin can
+    // record the physical cash handover explicitly (same as a normal receipt).
+    collected: false,
     deliveryStatus: 'Office',
     isReceivedInOffice: true,
     startDate: nowIso,
