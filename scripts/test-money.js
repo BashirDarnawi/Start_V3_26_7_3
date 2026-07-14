@@ -499,6 +499,42 @@ async function main() {
     assert(near(twice, once), `re-saving the same refund must not return the money again: ${usd(once)} -> ${usd(twice)}`);
   });
 
+  await must('A7. a driver-collected ad that spent NO due credit does not consume any', () => {
+    resetState();
+    // Pending delivery receipt: 1000 LYD @ 5 = $200 of due credit, none of it spent.
+    const r = deliveryReceipt('receipt_a7', 1000, 5);
+
+    // A not_paid + driver ad: the customer pays the driver in cash, so this ad is funded by
+    // NOTHING. It merely REFERENCES the delivery receipt (receiptId + linkedDeliveryReceiptId
+    // are set by the server). It predates allocations, so it carries no arrays at all.
+    // getReceiptUsageStats has a whole-ad fallback that charges such an ad's ENTIRE spend
+    // against any receipt it references — so the due reader must NOT be built on that
+    // fallback, or this ad silently eats $100 of credit the customer really holds.
+    makeAd({
+      id: 'ad_a7_driver',
+      amountUSD: 100,
+      spentUSD: 100,
+      paymentStatus: 'not_paid',
+      collectionMethod: 'driver',
+      isPaid: false,
+      receiptId: r.id,
+      linkedDeliveryReceiptId: r.id,
+      dueAmountToUseUSD: 0
+      // no receiptAllocations, no dueAllocations — the pre-allocation shape
+    });
+
+    const due = getDeliveryReceiptDueUsage(r);
+    assert(
+      near(due.usedDueUSD, 0),
+      `a cash-collected driver ad consumed ${usd(due.usedDueUSD)} of due credit it never spent`
+    );
+    assert(
+      near(due.remainingDueUSD, 200),
+      `the customer's full $200 of due credit must still be available, got ${usd(due.remainingDueUSD)} ` +
+      `— this ad is funded by the customer's cash, not by the receipt's credit`
+    );
+  });
+
   console.log('\n\n############################################################');
   console.log('# GROUP B — TARGET BEHAVIOUR (known broken today)');
   console.log('#   Each test asserts the CORRECT behaviour. It fails today.');

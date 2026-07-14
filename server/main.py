@@ -4792,6 +4792,41 @@ def _financial_ad_due_usage(ad: dict[str, Any], receipt_id: str) -> int:
     )
 
 
+def _financial_ad_explicit_usage(ad: dict[str, Any], receipt_id: str) -> int:
+    """Money this ad EXPLICITLY commits against a receipt, from either pool.
+
+    Allocation rows (paid + due) plus the legacy due mirror, which only speaks for an ad
+    that has no due row for this receipt. Unlike _financial_ad_general_usage there is NO
+    whole-ad fallback: that fallback charges a pre-allocation ad's entire spend against any
+    receipt it merely REFERENCES, and a driver-collected ad references its delivery receipt
+    while being funded by the customer's cash, not by the receipt's credit.
+    """
+    paid_rows = _financial_allocation_map(ad.get("receiptAllocations")).get(receipt_id, 0)
+    due_rows = _financial_allocation_map(ad.get("dueAllocations")).get(receipt_id, 0)
+    legacy_due = 0
+    if str(ad.get("linkedDeliveryReceiptId") or "") == receipt_id and due_rows == 0:
+        legacy_due = _financial_minor(ad.get("dueAmountToUseUSD"), "stored due allocation")
+        if legacy_due == 0 and ad.get("dueAmountToUseLYD"):
+            local_minor = _financial_minor(ad.get("dueAmountToUseLYD"), "stored due allocation")
+            rate = _financial_rate(ad.get("exchangeRate"))
+            legacy_due = int((Decimal(local_minor) / rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return paid_rows + due_rows + legacy_due
+
+
+def _financial_explicit_usage(
+    ad_rows: list[Any], receipt_id: str, *, exclude_ad_id: str | None = None
+) -> int:
+    total = 0
+    for row in ad_rows:
+        if exclude_ad_id and str(row.get("id") or "") == exclude_ad_id:
+            continue
+        ad = _financial_row_data(row)
+        if str(ad.get("recordType") or "") == "receipt":
+            continue
+        total += _financial_ad_explicit_usage(ad, receipt_id)
+    return total
+
+
 def _financial_usage(
     ad_rows: list[Any], receipt_id: str, *, due: bool = False, exclude_ad_id: str | None = None
 ) -> int:
@@ -5177,12 +5212,17 @@ def _financial_validate_due_receipt(
     requested = sum(
         _financial_minor(entry.get("amountUSD"), "due allocation") for entry in due_allocations
     )
-    # ONE POT: count every commitment against this receipt, from EITHER pool, exactly as
-    # _financial_validate_paid_receipts does. Counting only due rows meant that once a
-    # delivery receipt was collected, ads funded from its PAID balance were invisible here
-    # — so the same money could be handed out again as due credit. Transfers out leave the
-    # receipt too, so they are committed money as well.
-    committed = _financial_usage(
+    # ONE POT: count every EXPLICIT commitment against this receipt, from EITHER pool.
+    # Counting only due rows meant that once a delivery receipt was collected, ads funded
+    # from its PAID balance were invisible here — so the same money could be handed out
+    # again as due credit. Transfers out leave the receipt too, so they are committed money.
+    #
+    # Deliberately NOT _financial_ad_general_usage: that has a whole-ad fallback for
+    # pre-allocation records which charges an ad's ENTIRE spend against any receipt it
+    # merely REFERENCES. A driver-collected ad references its delivery receipt but is
+    # funded by the customer's cash, not by the receipt's credit — charging it here would
+    # 409 the customer's next legitimate ad against credit they really hold.
+    committed = _financial_explicit_usage(
         ad_rows, linked_receipt_id, exclude_ad_id=current_ad_id
     ) + _financial_outgoing(data)
     if committed + requested > _financial_due_total(data):

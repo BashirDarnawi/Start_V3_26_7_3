@@ -840,15 +840,52 @@ function getDeliveryReceiptDueUsage(receipt) {
   const collected = receiptObj.isPaid === true || String(receiptObj.status || '') === 'Paid';
   const totalDueUSD = collected ? (Number(receiptObj.amountUSD) || 0) : debtUSD;
 
-  const stats = getReceiptUsageStats(receiptObj);
-  const usedDueUSD = stats.usedUSD;
-  const remainingDueUSD = Math.max(totalDueUSD - usedDueUSD - (stats.transferredUSD || 0), 0);
+  // Count only EXPLICIT commitments — an allocation row in either pool, or the legacy due
+  // mirror. Deliberately NOT getReceiptUsageStats.usedUSD: that function also carries a
+  // whole-ad fallback for pre-allocation records, charging an ad's ENTIRE spend against any
+  // receipt it merely REFERENCES. A driver-collected ad references its delivery receipt but
+  // is funded by the customer's cash, not by the receipt's credit — charging it here would
+  // destroy credit the customer genuinely holds and make the server 409 their next ad.
+  const receiptId = String(receiptObj.id || '');
+  const fundedAds = [];
+  let usedDueUSD = 0;
+  for (const ad of getVisibleRecords(state.ads || [])) {
+    if (!ad || ad._deleted || ad.recordType === 'receipt') continue;
+    const sumFor = (rows) => (Array.isArray(rows) ? rows : [])
+      .filter(a => String(a.receiptId || '') === receiptId)
+      .reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0);
+
+    const paidRows = sumFor(ad.receiptAllocations);
+    const dueRows = sumFor(ad.dueAllocations);
+
+    // The legacy mirror only speaks for an ad that has no due row for this receipt.
+    let legacyDue = 0;
+    const hasDueRow = Array.isArray(ad.dueAllocations)
+      && ad.dueAllocations.some(a => String(a.receiptId || '') === receiptId);
+    if (!hasDueRow && String(ad.linkedDeliveryReceiptId || '') === receiptId) {
+      legacyDue = parseFloat(ad.dueAmountToUseUSD) || 0;
+      if (!legacyDue) {
+        const lyd = parseFloat(ad.dueAmountToUseLYD) || 0;
+        const adRate = ad.exchangeRate || exchangeRate || 1;
+        legacyDue = lyd > 0 && adRate > 0 ? lyd / adRate : 0;
+      }
+    }
+
+    const committed = paidRows + dueRows + legacyDue;
+    if (committed > 0) {
+      usedDueUSD += committed;
+      fundedAds.push(ad);
+    }
+  }
+
+  const transferredUSD = getReceiptUsageStats(receiptObj).transferredUSD || 0;
+  const remainingDueUSD = Math.max(totalDueUSD - usedDueUSD - transferredUSD, 0);
 
   return {
     totalDueUSD,
     usedDueUSD,
     remainingDueUSD,
-    fundedAds: stats.fundedAds,
+    fundedAds,
     exchangeRate
   };
 }
