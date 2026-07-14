@@ -2173,7 +2173,7 @@ function renderReceiptsView() {
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('receipts')}</h1>
           <p id="receipts-count" class="text-sm text-slate-500 mt-1">${filteredReceipts.length}${hasActiveFilters ? (isArV ? ` من ${allReceipts.length}` : ` of ${allReceipts.length}`) : ''} ${isArV ? 'وصل' : 'receipts'}</p>
         </div>
-        <button onclick="showReceiptModal()" class="btn-shine bg-purple-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
+        <button onclick="showNewReceiptChooser()" class="btn-shine bg-purple-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
           <i data-lucide="receipt" class="w-4 h-4"></i>
           <span>${isArV ? 'وصل جديد' : 'New Receipt'}</span>
         </button>
@@ -2328,6 +2328,11 @@ function renderReceiptsView() {
                         <span>${isArV ? 'محوّل من' : 'Transferred in from'}: ${Security.escapeHtml(from || (isArV ? 'وصل آخر' : 'another receipt'))}</span>
                       </span>`;
                     })() : ''}
+                    ${receipt.receiptType === 'CARRIED_BALANCE' ? `
+                      <span class="inline-flex items-center gap-1 font-medium" style="color:#b45309" title="${isArV ? 'رصيد سابق: العميل استهلك جزءاً من رصيده — سُجِّل المتبقي فقط' : 'Existing balance: the customer already used part — only the remainder was recorded'}">
+                        <i data-lucide="history" class="w-3 h-3"></i>
+                        <span>${isArV ? 'رصيد سابق (المتبقي)' : 'Existing balance (remaining)'}</span>
+                      </span>` : ''}
                   </div>
                   ${receipt.updatedAt ? `
                     <div class="flex items-center mt-0.5 space-x-2">
