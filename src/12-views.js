@@ -2291,8 +2291,13 @@ function renderReceiptsView() {
             : (isArV ? 'غير معروف' : 'Unknown');
           const creatorName = Security.escapeHtml(String(creatorNameRaw || (isArV ? 'غير معروف' : 'Unknown')));
           
+          // Colour the card by kind so "existing balance" receipts stand out
+          // from normal "new" ones at a glance (matches the New-Receipt chooser
+          // colours). border-inline-start keeps the stripe on the leading edge
+          // in both LTR and RTL.
+          const _typeAccent = receipt.receiptType === 'CARRIED_BALANCE' ? '#d97706' : '#7c3aed';
           return `
-            <div class="glass-panel rounded-2xl p-6 hover:scale-[1.01] transition-transform">
+            <div class="glass-panel rounded-2xl p-6 hover:scale-[1.01] transition-transform" style="border-inline-start:5px solid ${_typeAccent}">
               <div class="flex justify-between items-start mb-4">
                 <div>
                   <div class="flex items-center gap-2">
