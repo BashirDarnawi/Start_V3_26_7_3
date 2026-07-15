@@ -13,11 +13,18 @@ let _lastRenderedView = null;
 let _lastRenderedUserId = null;
 let _renderInProgress = false;
 let _savedScrollPosition = { top: 0, left: 0 };
+// The exact HTML last written into the view container. A background live-sync tick
+// calls render() whenever ANY data changed anywhere; if this view's HTML is byte-for-byte
+// what is already on screen, we skip the DOM swap entirely — no icon flash, no re-played
+// entry animation, no scroll/focus disturbance ("plink"/shake). renderView() is
+// deterministic for a given state, so equal strings mean nothing visible changed.
+let _lastViewHTML = null;
 
 // Force a full re-render (bypasses partial update optimization)
 function forceFullRender() {
   _lastRenderedView = null;
   _lastRenderedUserId = null;
+  _lastViewHTML = null;
   render();
 }
 
@@ -118,6 +125,7 @@ function render() {
       }
       _lastRenderedView = null;
       _lastRenderedUserId = null;
+      _lastViewHTML = null;
     } else {
       // Enforce "secret ideas" gating for non-admin users
       enforceSecretFeaturesGate();
@@ -132,21 +140,34 @@ function render() {
         // Only update the view content, not the entire app
         const viewContainer = app.querySelector('.p-4.md\\:p-8');
         if (viewContainer) {
-          viewContainer.innerHTML = renderView();
-          // Same-view re-render (a background live-sync tick, or a save that stays on
-          // this view): strip the view's entry animation so the whole page does not
-          // visibly re-play its fade/slide-in ("plink") every few seconds. The animation
-          // is meant for navigating TO a view, which goes through renderMainApp below.
-          // Removed synchronously, before paint, so the animation never starts.
-          // Open modals live on document.body, not in here, so their animations are safe.
-          viewContainer
-            .querySelectorAll('.animate-fade-in-up, .animate-fade-in, .animate-slide-up')
-            .forEach(el => el.classList.remove('animate-fade-in-up', 'animate-fade-in', 'animate-slide-up'));
+          const newViewHTML = renderView();
+          // Skip the DOM swap when this view's HTML is exactly what is already on
+          // screen. A background live-sync tick re-renders on ANY data change anywhere,
+          // so most ticks produce identical HTML for the current view; re-inserting it
+          // would tear down and rebuild the whole view — flashing every icon and
+          // re-playing the entry animation ("plink"/shake) for nothing. Only swap on a
+          // real change.
+          if (newViewHTML !== _lastViewHTML) {
+            _lastViewHTML = newViewHTML;
+            viewContainer.innerHTML = newViewHTML;
+            // A same-view content change is an UPDATE, not navigation, so it must not
+            // re-play the view's entry animation. Strip it synchronously (before paint,
+            // so it never starts). Open modals live on document.body and are untouched.
+            viewContainer
+              .querySelectorAll('.animate-fade-in-up, .animate-fade-in, .animate-slide-up')
+              .forEach(el => el.classList.remove('animate-fade-in-up', 'animate-fade-in', 'animate-slide-up'));
+          }
+          // else: identical — leave the DOM alone (no swap, no flash, no shake, and the
+          // user's scroll/caret/focus are never disturbed).
         } else {
           app.innerHTML = renderMainApp();
+          _lastViewHTML = renderView();
         }
       } else {
+        // Navigation (or first render after login): full render WITH the entry animation.
         app.innerHTML = renderMainApp();
+        // Cache the freshly-navigated view so the next same-view tick can skip.
+        _lastViewHTML = renderView();
       }
 
       _restoreFocusState(_focusBefore);
