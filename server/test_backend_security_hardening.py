@@ -1511,6 +1511,260 @@ class TestReceiptAndAdTransactions:
         )
         assert blocked_delete.status_code == 409
 
+    def test_unfunded_driver_budget_is_debt_until_exact_paid_settlement(self, actors):
+        self._customer("fin_driver_debt_customer", actors)
+        self._receipt(
+            "fin_driver_debt_delivery",
+            "fin_driver_debt_customer",
+            200,
+            actors,
+            status="Not Paid",
+            isPaid=False,
+            amountLocal=1000,
+            debtAmountLocal=1000,
+            debtAmountUSD=200,
+            tempReceiptNo="D71001",
+            deliveryStatus="Needs Delivery",
+            deliveryPersonId=actors["driver"]["id"],
+        )
+        self._receipt(
+            "fin_driver_debt_paid", "fin_driver_debt_customer", 100, actors
+        )
+
+        # Allocations are optional funding sources for a Driver ad; they can
+        # never be larger than the independently entered ad budget.
+        over_budget = self._mutate_ad(
+            "fin_driver_debt_over_budget",
+            "fin-driver-debt-over-budget-001",
+            {
+                "customerId": "fin_driver_debt_customer",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "driver",
+                "exchangeRate": 5,
+                "driverBudgetUSD": 50,
+                "linkedDeliveryReceiptId": "fin_driver_debt_delivery",
+                "receiptId": "fin_driver_debt_delivery",
+                "receiptAllocations": [],
+                "mergedPaidAllocations": [],
+                "dueAllocations": [
+                    {
+                        "receiptId": "fin_driver_debt_delivery",
+                        "amountUSD": 60,
+                    }
+                ],
+            },
+            actors,
+        )
+        assert over_budget.status_code == 400, over_budget.text
+
+        # This is a real $100 ad even though no receipt balance funds it yet.
+        created = self._mutate_ad(
+            "fin_driver_debt_ad",
+            "fin-driver-debt-create-001",
+            {
+                "customerId": "fin_driver_debt_customer",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "driver",
+                "exchangeRate": 5,
+                "driverBudgetUSD": 100,
+                "linkedDeliveryReceiptId": "fin_driver_debt_delivery",
+                "receiptId": "fin_driver_debt_delivery",
+                "receiptAllocations": [],
+                "mergedPaidAllocations": [],
+                "dueAllocations": [],
+            },
+            actors,
+        )
+        assert created.status_code == 200, created.text
+        created_data = created.json()["ad"]["data"]
+        assert created_data["amountUSD"] == 100
+        assert created_data["amountLocal"] == 500
+        assert created_data["paymentStatus"] == "not_paid"
+        assert created_data["isPaid"] is False
+        assert created_data["receiptAllocations"] == []
+        assert created_data["dueAllocations"] == []
+        assert created_data["linkedDeliveryReceiptId"] == "fin_driver_debt_delivery"
+        assert "driverBudgetUSD" not in created_data
+
+        # Older clients do not echo the transient budget on unrelated edits;
+        # the server must preserve the stored debt amount.
+        preserved = client.post(
+            "/api/ads/mutate",
+            json={
+                "action": "update",
+                "adId": "fin_driver_debt_ad",
+                "idempotencyKey": "fin-driver-debt-preserve-001",
+                "expectedLastModified": created.json()["ad"]["lastModified"],
+                "data": {"note": "budget stays independent"},
+            },
+            cookies=actors["admin"],
+        )
+        assert preserved.status_code == 200, preserved.text
+        preserved_data = preserved.json()["ad"]["data"]
+        assert preserved_data["amountUSD"] == 100
+        assert "driverBudgetUSD" not in preserved_data
+        version = preserved.json()["ad"]["lastModified"]
+
+        # Marking the debt Paid with only $60 would otherwise erase the unpaid
+        # $40 by shrinking the ad amount to the allocation total.
+        underpaid = client.post(
+            "/api/ads/mutate",
+            json={
+                "action": "update",
+                "adId": "fin_driver_debt_ad",
+                "idempotencyKey": "fin-driver-debt-underpay-001",
+                "expectedLastModified": version,
+                "data": {
+                    "paymentStatus": "paid",
+                    "receiptAllocations": [
+                        {"receiptId": "fin_driver_debt_paid", "amountUSD": 60}
+                    ],
+                },
+            },
+            cookies=actors["admin"],
+        )
+        assert underpaid.status_code == 400, underpaid.text
+        still_debt = client.get(
+            "/api/collections/ads/fin_driver_debt_ad", cookies=actors["admin"]
+        )
+        assert still_debt.status_code == 200
+        assert still_debt.json()["data"]["amountUSD"] == 100
+        assert still_debt.json()["data"]["paymentStatus"] == "not_paid"
+
+        settled = client.post(
+            "/api/ads/mutate",
+            json={
+                "action": "update",
+                "adId": "fin_driver_debt_ad",
+                "idempotencyKey": "fin-driver-debt-settle-001",
+                "expectedLastModified": version,
+                "data": {
+                    "paymentStatus": "paid",
+                    "receiptAllocations": [
+                        {"receiptId": "fin_driver_debt_paid", "amountUSD": 100}
+                    ],
+                },
+            },
+            cookies=actors["admin"],
+        )
+        assert settled.status_code == 200, settled.text
+        settled_data = settled.json()["ad"]["data"]
+        assert settled_data["amountUSD"] == 100
+        assert settled_data["amountLocal"] == 500
+        assert settled_data["paymentStatus"] == "paid"
+        assert settled_data["isPaid"] is True
+        assert settled_data["collectionMethod"] == ""
+        assert settled_data["linkedDeliveryReceiptId"] == ""
+        assert settled_data["receiptAllocations"] == [
+            {"receiptId": "fin_driver_debt_paid", "amountUSD": 100.0}
+        ]
+        assert "driverBudgetUSD" not in settled_data
+
+    def test_driver_due_ad_can_settle_from_same_receipt_after_delivery(self, actors):
+        self._customer("fin_driver_same_receipt_customer", actors)
+        self._receipt(
+            "fin_driver_same_receipt",
+            "fin_driver_same_receipt_customer",
+            100,
+            actors,
+            status="Not Paid",
+            isPaid=False,
+            amountLocal=500,
+            debtAmountLocal=500,
+            debtAmountUSD=100,
+            tempReceiptNo="D72001",
+            deliveryStatus="Needs Delivery",
+            deliveryPersonId=actors["driver"]["id"],
+        )
+        created = self._mutate_ad(
+            "fin_driver_same_receipt_ad",
+            "fin-driver-same-receipt-create-001",
+            {
+                "customerId": "fin_driver_same_receipt_customer",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "driver",
+                "exchangeRate": 5,
+                "driverBudgetUSD": 100,
+                "linkedDeliveryReceiptId": "fin_driver_same_receipt",
+                "receiptId": "fin_driver_same_receipt",
+                "receiptAllocations": [],
+                "mergedPaidAllocations": [],
+                "dueAllocations": [
+                    {"receiptId": "fin_driver_same_receipt", "amountUSD": 100}
+                ],
+            },
+            actors,
+        )
+        assert created.status_code == 200, created.text
+
+        accepted = client.patch(
+            "/api/collections/receipts/fin_driver_same_receipt",
+            json={"data": {"deliveryStatus": "In Progress", "acceptedDate": "x"}},
+            cookies=actors["driver_cookies"],
+        )
+        assert accepted.status_code == 200, accepted.text
+        completed = client.patch(
+            "/api/collections/receipts/fin_driver_same_receipt",
+            json={
+                "data": {
+                    "deliveryStatus": "Delivered",
+                    "finalReceiptNo": "772001",
+                    "receiptImage": "data:image/png;base64,AAAA",
+                    "amountCollectedFromCustomer": 500,
+                    "actualDeliveryFeeCollected": 0,
+                }
+            },
+            cookies=actors["driver_cookies"],
+        )
+        assert completed.status_code == 200, completed.text
+        completed_data = completed.json()["data"]
+        assert completed_data["deliveryStatus"] == "Delivered"
+        assert completed_data["status"] == "Paid"
+        assert completed_data["isPaid"] is True
+        assert completed_data["paymentResult"] == "PAID_EXACT"
+        assert completed_data["finalReceiptNo"] == "772001"
+        assert completed_data["amountUSD"] == 100
+
+        # The due row still points at this receipt until the ad transaction
+        # replaces it. Self-exclusion must allow the same now-paid receipt to
+        # become the ad's paid funding source without appearing double-spent.
+        current = client.get(
+            "/api/collections/ads/fin_driver_same_receipt_ad",
+            cookies=actors["admin"],
+        )
+        assert current.status_code == 200, current.text
+        assert current.json()["data"]["dueAllocations"] == [
+            {"receiptId": "fin_driver_same_receipt", "amountUSD": 100.0}
+        ]
+        settled = client.post(
+            "/api/ads/mutate",
+            json={
+                "action": "update",
+                "adId": "fin_driver_same_receipt_ad",
+                "idempotencyKey": "fin-driver-same-receipt-settle-001",
+                "expectedLastModified": current.json()["lastModified"],
+                "data": {
+                    "paymentStatus": "paid",
+                    "receiptAllocations": [
+                        {"receiptId": "fin_driver_same_receipt", "amountUSD": 100}
+                    ],
+                },
+            },
+            cookies=actors["admin"],
+        )
+        assert settled.status_code == 200, settled.text
+        settled_data = settled.json()["ad"]["data"]
+        assert settled_data["paymentStatus"] == "paid"
+        assert settled_data["isPaid"] is True
+        assert settled_data["receiptAllocations"] == [
+            {"receiptId": "fin_driver_same_receipt", "amountUSD": 100.0}
+        ]
+        assert settled_data["dueAllocations"] == []
+        assert settled_data["mergedPaidAllocations"] == []
+        assert settled_data["dueAmountToUseUSD"] == 0
+        assert settled_data["linkedDeliveryReceiptId"] == ""
+        assert settled_data["receiptId"] == "fin_driver_same_receipt"
+
     def test_edit_own_is_enforced_and_stop_needs_stop_permission(self, actors):
         self._customer("fin_own_customer", actors)
         self._receipt("fin_own_receipt", "fin_own_customer", 100, actors)

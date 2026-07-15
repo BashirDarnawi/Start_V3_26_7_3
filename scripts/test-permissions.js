@@ -1017,6 +1017,221 @@ check('server money/subscription calls use dedicated transactional endpoints', (
   assert(built.includes("restorableCollections: serverPartialSnapshot\n      ? []"), 'server report still advertises restorable collections');
 });
 
+console.log('\n=== UNPAID DRIVER ADS: manual budget remains customer debt until paid ===');
+
+check('driver budget normalization accepts positive money and rejects invalid debt values', () => {
+  assert(sandbox.normalizeAdDriverBudgetUSD('42.345') === 42.35, 'driver budget was not rounded to cents');
+  assert(sandbox.normalizeAdDriverBudgetUSD('0.01') === 0.01, 'smallest positive cent was rejected');
+  for (const invalid of ['', 0, -1, 'not-a-number', NaN, Infinity, -Infinity]) {
+    assert(sandbox.normalizeAdDriverBudgetUSD(invalid) === 0, `invalid driver budget was accepted: ${String(invalid)}`);
+  }
+});
+
+check('server ad payload sends only the scoped Not Paid + Driver budget request', () => {
+  const driver = sandbox.buildServerAdMutationData({
+    customerId: 'customer_driver_budget',
+    paymentStatus: 'not_paid',
+    collectionMethod: 'driver',
+    amountUSD: 42.345,
+    amountLocal: 402.2775,
+    driverBudgetUSD: 999,
+    receiptAllocations: [],
+    dueAllocations: []
+  });
+  assert(driver.driverBudgetUSD === 42.35, `driverBudgetUSD should be 42.35, got ${driver.driverBudgetUSD}`);
+  assert(!Object.prototype.hasOwnProperty.call(driver, 'amountUSD'), 'derived amountUSD leaked into the server request');
+  assert(!Object.prototype.hasOwnProperty.call(driver, 'amountLocal'), 'derived amountLocal leaked into the server request');
+
+  const paid = sandbox.buildServerAdMutationData({
+    customerId: 'customer_driver_budget',
+    paymentStatus: 'paid',
+    collectionMethod: '',
+    amountUSD: 42.35,
+    driverBudgetUSD: 42.35,
+    receiptAllocations: [{ receiptId: 'receipt_paid_budget', amountUSD: 42.35 }]
+  });
+  assert(!Object.prototype.hasOwnProperty.call(paid, 'driverBudgetUSD'), 'paid ad can forge a manual driver budget');
+  assert(!Object.prototype.hasOwnProperty.call(paid, 'amountUSD'), 'paid ad can forge its server-derived amount');
+
+  const inShop = sandbox.buildServerAdMutationData({
+    paymentStatus: 'not_paid',
+    collectionMethod: 'in_shop',
+    amountUSD: 42.35,
+    driverBudgetUSD: 42.35
+  });
+  assert(!Object.prototype.hasOwnProperty.call(inShop, 'driverBudgetUSD'), 'non-driver unpaid ad received the driver-only budget field');
+});
+
+check('positive unpaid driver budget appears as negative customer balance without paid receipts', () => {
+  S.language = 'en';
+  S.defaultExchangeRate = 9.5;
+  S.customers = [{ id: 'customer_debt', name: 'Debt Customer' }];
+  S.pages = [];
+  S.receipts = [{
+    id: 'delivery_reference', recordType: 'receipt', customerId: 'customer_debt',
+    amountUSD: 100, amountLocal: 950, exchangeRate: 9.5,
+    status: 'Not Paid', isPaid: false, tempReceiptNo: 'D1',
+    deliveryStatus: 'Needs Delivery', deliveryPersonId: 'driver_1', transfers: []
+  }];
+  S.ads = [{
+    id: 'ad_driver_debt', recordType: 'ad', customerId: 'customer_debt',
+    amountUSD: 40, amountLocal: 380, exchangeRate: 9.5,
+    status: 'Active', paymentStatus: 'not_paid', collectionMethod: 'driver', isPaid: false,
+    receiptId: 'delivery_reference', linkedDeliveryReceiptId: 'delivery_reference',
+    receiptAllocations: [], dueAllocations: [], mergedPaidAllocations: [], dueAmountToUseUSD: 0
+  }];
+
+  const stats = sandbox.getCustomerStats('customer_debt');
+  assert(stats.totalPaidUSD === 0, `unpaid delivery reference counted as paid: $${stats.totalPaidUSD}`);
+  assert(stats.totalSpentUSD === 40, `positive ad budget should count as $40 spent, got $${stats.totalSpentUSD}`);
+  assert(stats.balanceUSD === -40, `customer debt should be -$40, got $${stats.balanceUSD}`);
+  assert(stats.balanceLYD === -380, `customer debt should be -380 LYD, got ${stats.balanceLYD}`);
+
+  const due = sandbox.getDeliveryReceiptDueUsage('delivery_reference');
+  assert(due.usedDueUSD === 0, `link-only driver ad consumed $${due.usedDueUSD} of receipt credit`);
+  assert(due.remainingDueUSD === 100, `link-only driver ad left only $${due.remainingDueUSD} of $100 receipt credit`);
+});
+
+check('Not Paid + Driver toggle shows the budget field and Paid hides it without erasing input', () => {
+  const withTrackedClasses = (hidden = false) => {
+    const element = makeElement();
+    const tokens = new Set(hidden ? ['hidden'] : []);
+    element.classList = {
+      add: (...names) => names.forEach(name => tokens.add(name)),
+      remove: (...names) => names.forEach(name => tokens.delete(name)),
+      toggle: (name, force) => {
+        if (force === true) tokens.add(name);
+        else if (force === false) tokens.delete(name);
+        else if (tokens.has(name)) tokens.delete(name);
+        else tokens.add(name);
+      },
+      contains: name => tokens.has(name)
+    };
+    return element;
+  };
+
+  const elements = new Map();
+  for (const id of [
+    'ad-pay-status-paid', 'ad-pay-status-not-paid', 'ad-pay-status-wont',
+    'ad-collect-shop', 'ad-collect-driver'
+  ]) elements.set(id, makeElement());
+  elements.set('ad-payment-status', makeElement());
+  elements.set('ad-collection-method', makeElement());
+  elements.set('ad-not-paid-options', withTrackedClasses(true));
+  elements.set('ad-receipt-funding-section', withTrackedClasses(false));
+  elements.set('ad-unpaid-financial', withTrackedClasses(true));
+  elements.set('ad-wont-pay-section', withTrackedClasses(true));
+  elements.set('ad-collection-details', withTrackedClasses(true));
+  elements.set('ad-driver-select', withTrackedClasses(true));
+  elements.set('ad-driver-budget-section', withTrackedClasses(true));
+  const budgetInput = makeElement();
+  budgetInput.value = '40.00';
+  elements.set('ad-driver-budget-usd', budgetInput);
+
+  const originalGetElementById = sandbox.document.getElementById;
+  const originalModalData = S.modalData;
+  sandbox.document.getElementById = id => elements.get(id) || null;
+  S.modalData = { id: 'ad_driver_debt', paymentStatus: 'not_paid', collectionMethod: 'driver', amountUSD: 40 };
+  try {
+    sandbox.setAdPaymentStatus('not_paid');
+    sandbox.setAdCollectionMethod('driver');
+    assert(elements.get('ad-payment-status').value === 'not_paid', 'Not Paid status was not stored');
+    assert(elements.get('ad-collection-method').value === 'driver', 'Driver method was not stored');
+    assert(!elements.get('ad-driver-budget-section').classList.contains('hidden'), 'driver budget field stayed hidden');
+
+    sandbox.setAdPaymentStatus('paid');
+    assert(elements.get('ad-driver-budget-section').classList.contains('hidden'), 'driver budget field stayed visible in Paid mode');
+    assert(elements.get('ad-collection-method').value === '', 'Paid mode did not clear the driver collection method');
+    assert(budgetInput.value === '40.00', 'switching status erased the typed budget before save');
+  } finally {
+    sandbox.document.getElementById = originalGetElementById;
+    S.modalData = originalModalData;
+  }
+});
+
+check('same delivered D receipt is available when its due-funded driver ad is settled', () => {
+  const originalAds = S.ads;
+  const originalReceipts = S.receipts;
+  const originalModalData = S.modalData;
+  const originalTempAdFunding = S.tempAdFunding;
+  const originalGetElementById = sandbox.document.getElementById;
+  const deliveryReceipt = {
+    id: 'delivery_settlement_receipt', recordType: 'receipt', customerId: 'customer_debt',
+    amountUSD: 40, amountLocal: 380, exchangeRate: 9.5,
+    status: 'Paid', isPaid: true, tempReceiptNo: 'D2', finalReceiptNo: '13001',
+    deliveryStatus: 'Delivered', deliveryPersonId: 'driver_1', transfers: []
+  };
+  const driverAd = {
+    id: 'driver_due_settlement_ad', recordType: 'ad', customerId: 'customer_debt',
+    amountUSD: 40, paymentStatus: 'not_paid', collectionMethod: 'driver',
+    receiptAllocations: [],
+    dueAllocations: [{ receiptId: deliveryReceipt.id, amountUSD: 40 }],
+    linkedDeliveryReceiptId: deliveryReceipt.id
+  };
+  S.ads = [driverAd];
+  S.receipts = [deliveryReceipt];
+  S.modalData = { ...driverAd };
+  S.tempAdFunding = { allocations: [] };
+  try {
+    const usage = sandbox.getReceiptUsageStats(deliveryReceipt);
+    assert(usage.remainingUSD === 0, `saved due allocation should currently consume the receipt, got $${usage.remainingUSD} remaining`);
+    const restored = sandbox.getEditingAdExistingAllocationUSD(deliveryReceipt.id);
+    assert(restored === 40, `edit settlement did not add back its own $40 due allocation: $${restored}`);
+    assert(usage.remainingUSD + restored === 40, 'same receipt is still unavailable for atomic Paid conversion');
+
+    const elements = new Map();
+    const fundingList = makeElement();
+    elements.set('ad-funding-list', fundingList);
+    const customerInput = makeElement();
+    customerInput.value = 'customer_debt';
+    elements.set('ad-customer-id', customerInput);
+    elements.set('ad-page', makeElement());
+    const paymentStatus = makeElement();
+    paymentStatus.value = 'paid';
+    elements.set('ad-payment-status', paymentStatus);
+    elements.set('ad-funding-summary', makeElement());
+    sandbox.document.getElementById = id => elements.get(id) || null;
+
+    sandbox.renderAdFundingList();
+    assert(
+      fundingList.innerHTML.includes(`value="${deliveryReceipt.id}"`),
+      'same delivered D receipt is missing from the Paid funding picker'
+    );
+  } finally {
+    S.ads = originalAds;
+    S.receipts = originalReceipts;
+    S.modalData = originalModalData;
+    S.tempAdFunding = originalTempAdFunding;
+    sandbox.document.getElementById = originalGetElementById;
+  }
+});
+
+check('local Paid conversion replaces the old D link with its paid funding receipt', () => {
+  assert(sandbox.resolveAdPrimaryReceiptId({
+    paymentStatus: 'not_paid', collectionMethod: 'driver',
+    linkedDeliveryReceiptId: 'delivery_old', allocations: []
+  }) === 'delivery_old', 'unpaid driver ad lost its delivery reference');
+  assert(sandbox.resolveAdPrimaryReceiptId({
+    paymentStatus: 'paid', collectionMethod: 'driver',
+    linkedDeliveryReceiptId: 'delivery_old',
+    allocations: [{ receiptId: 'paid_new', amountUSD: 40 }]
+  }) === 'paid_new', 'Paid conversion kept the stale delivery receipt link');
+  assert(sandbox.resolveAdPrimaryReceiptId({
+    paymentStatus: 'not_paid', collectionMethod: 'in_shop',
+    linkedDeliveryReceiptId: 'delivery_old', allocations: []
+  }) === '', 'non-driver unpaid ad kept a phantom receipt link');
+});
+
+check('ad modal contains the beginner-facing manual budget control', () => {
+  const modalSource = fs.readFileSync(path.join(__dirname, '..', 'src', '15-modals.js'), 'utf8');
+  const persistenceSource = fs.readFileSync(path.join(__dirname, '..', 'src', '06-persistence.js'), 'utf8');
+  assert(modalSource.includes('id="ad-driver-budget-usd"'), 'Not Paid + Driver has no budget input');
+  assert(modalSource.includes('This amount appears as customer debt until payment is recorded.'), 'budget field does not explain the resulting debt');
+  assert(modalSource.includes('remaining += getEditingAdExistingAllocationUSD(receiptId);'), 'Paid conversion still blocks the ad\'s own due-funded receipt');
+  assert(modalSource.includes('receiptId: resolveAdPrimaryReceiptId({'), 'local ad saves still keep a stale delivery receipt link');
+  assert(persistenceSource.includes("ad.fundingReceiptId || (!isDriverDebt ? ad.receiptId : '')"), 'legacy delivery links can still be migrated into false receipt funding');
+});
+
 console.log('\n=== RECEIPT PHOTOS: visible and safely clickable inside/outside the form ===');
 
 const SAFE_RECEIPT_PNG = 'data:image/png;base64,iVBORw0KGgo=';

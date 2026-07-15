@@ -2105,15 +2105,27 @@ function initAdFunding(adData = {}) {
 // kind: 'receipt' (paid funding rows) | 'merged' (merged paid-funds rows).
 function getEditingAdExistingAllocationUSD(receiptId, kind = 'receipt') {
   if (!state.modalData?.id) return 0;
-  const existingAd = state.ads.find(a => a.id === state.modalData.id);
+  const existingAd = state.ads.find(a => a.id === state.modalData.id) || state.modalData;
   if (!existingAd) return 0;
-  const src = kind === 'merged'
-    ? (existingAd.mergedPaidAllocations || existingAd.receiptAllocations)
-    : existingAd.receiptAllocations;
-  if (!Array.isArray(src)) return 0;
   const rid = String(receiptId || '');
-  const total = src.filter(a => a && String(a.receiptId) === rid)
-    .reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0);
+  const sources = kind === 'merged'
+    ? [existingAd.mergedPaidAllocations || existingAd.receiptAllocations]
+    : [existingAd.receiptAllocations];
+  const isDriverDebt = String(existingAd.paymentStatus || '').toLowerCase() === 'not_paid'
+    && String(existingAd.collectionMethod || '').toLowerCase() === 'driver';
+  if (kind === 'receipt' && isDriverDebt) sources.push(existingAd.dueAllocations);
+
+  let total = sources.reduce((sum, src) => {
+    if (!Array.isArray(src)) return sum;
+    return sum + src.filter(a => a && String(a.receiptId) === rid)
+      .reduce((rowSum, a) => rowSum + (parseFloat(a.amountUSD) || 0), 0);
+  }, 0);
+  if (kind === 'receipt' && isDriverDebt && !Array.isArray(existingAd.dueAllocations)
+      && String(existingAd.linkedDeliveryReceiptId || existingAd.receiptId || '') === rid) {
+    const rate = Number(existingAd.exchangeRate) || Number(state.defaultExchangeRate) || 1;
+    total += parseFloat(existingAd.dueAmountToUseUSD)
+      || ((parseFloat(existingAd.dueAmountToUseLYD) || 0) / rate);
+  }
   return Math.round(total * 100) / 100;
 }
 
@@ -2430,6 +2442,11 @@ function onAdTempReceiptChange(receiptId) {
     if (driverSelect) driverSelect.disabled = false;
     if (dueSection) dueSection.classList.add('hidden');
     if (mergeToggle) mergeToggle.classList.add('hidden');
+    if (dueInput) {
+      dueInput.value = '';
+      dueInput.dataset.maxDue = '0';
+      dueInput.dataset.receiptId = '';
+    }
     return;
   }
 
@@ -2439,6 +2456,11 @@ function onAdTempReceiptChange(receiptId) {
     if (driverSelect) driverSelect.disabled = false;
     if (dueSection) dueSection.classList.add('hidden');
     if (mergeToggle) mergeToggle.classList.add('hidden');
+    if (dueInput) {
+      dueInput.value = '';
+      dueInput.dataset.maxDue = '0';
+      dueInput.dataset.receiptId = '';
+    }
     return;
   }
 
@@ -2447,6 +2469,11 @@ function onAdTempReceiptChange(receiptId) {
     if (hint) hint.textContent = isArC ? 'عميل الوصل غير مطابق. الرجاء اختيار العميل الصحيح.' : 'Receipt customer mismatch. Please select the correct customer.';
     if (dueSection) dueSection.classList.add('hidden');
     if (mergeToggle) mergeToggle.classList.add('hidden');
+    if (dueInput) {
+      dueInput.value = '';
+      dueInput.dataset.maxDue = '0';
+      dueInput.dataset.receiptId = '';
+    }
   } else {
     const place = String(r.deliveryPlaceName || '').trim();
     const fee = Number(r.quotedDeliveryFee ?? 0) || 0;
@@ -2473,6 +2500,9 @@ function onAdTempReceiptChange(receiptId) {
       }
     }
     const exchangeRate = dueUsage.exchangeRate || state.defaultExchangeRate || 1;
+    const budgetRate = document.getElementById('ad-driver-budget-rate');
+    if (budgetRate) budgetRate.value = String(exchangeRate);
+    updateAdDriverBudgetSummary();
     
     const txt = `${r.tempReceiptNo}${r.finalReceiptNo || r.serialNumber ? ` → ${r.finalReceiptNo || r.serialNumber}` : ''}${place ? ` • ${place}` : ''} • ${isArC ? 'الرسوم المتفق عليها' : 'Quoted fee'} ${fee.toFixed(0)} LYD`;
     if (hint) hint.textContent = txt;
@@ -2500,16 +2530,21 @@ function onAdTempReceiptChange(receiptId) {
           }
         }
         
-        // Default to existing value, or full available amount for new ads.
+        // Preserve an existing saved value, but never spend delivery receipt
+        // credit just because the receipt was selected. The user can explicitly
+        // enter an amount or press "Use Full Credit" when that is intended.
         // The field is stamped with the receipt it belongs to: switching the
         // linked receipt used to KEEP the previous receipt's amount (the
         // "Available" label updated, the amount did not), so the ad could be
         // saved spending more than the new receipt actually holds.
         const belongsToThisReceipt = dueInput.dataset.receiptId === rid;
         if (prefillValue !== null) {
-          dueInput.value = prefillValue.toFixed(2);
-        } else if (!dueInput.value || !belongsToThisReceipt) {
-          dueInput.value = availableUSD.toFixed(2);
+          const parsedPrefill = Number(prefillValue);
+          dueInput.value = Number.isFinite(parsedPrefill) && parsedPrefill > 0
+            ? parsedPrefill.toFixed(2)
+            : '';
+        } else if (!belongsToThisReceipt) {
+          dueInput.value = '';
         }
         dueInput.dataset.receiptId = rid;
       }
@@ -2521,6 +2556,12 @@ function onAdTempReceiptChange(receiptId) {
     } else {
       // No credit available - all used up
       if (dueSection) dueSection.classList.add('hidden');
+      if (dueInput) {
+        dueInput.value = '';
+        dueInput.dataset.maxDue = '0';
+        dueInput.dataset.exchangeRate = exchangeRate.toString();
+        dueInput.dataset.receiptId = rid;
+      }
       if (mergeToggle) mergeToggle.classList.remove('hidden'); // Still allow merging paid receipts
       initMergeFunding();
       reflectMergeFundingUI();
@@ -2590,7 +2631,12 @@ function useAllDueAmount() {
   if (!dueInput) return;
   
   const maxDue = parseFloat(dueInput.dataset.maxDue) || 0;
-  dueInput.value = maxDue.toFixed(2);
+  const budget = normalizeAdDriverBudgetUSD(document.getElementById('ad-driver-budget-usd')?.value);
+  const mergedTotal = state.tempMergeFunding?.enabled
+    ? (state.tempMergeFunding.allocations || []).reduce((sum, row) => sum + (parseFloat(row?.amountUSD) || 0), 0)
+    : 0;
+  const budgetRemaining = budget > 0 ? Math.max(budget - mergedTotal, 0) : maxDue;
+  dueInput.value = Math.min(maxDue, budgetRemaining).toFixed(2);
   updateAdDueSummary();
 }
 
@@ -2891,6 +2937,39 @@ function addAdLinkInput(value = '') {
   lucide.createIcons();
 }
 
+function normalizeAdDriverBudgetUSD(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount <= 0) return 0;
+  return Math.round(amount * 100) / 100;
+}
+
+function getOriginalUnpaidDriverBudgetUSD() {
+  const ad = state.modalData;
+  if (!ad) return 0;
+  const isDriverDebt = String(ad.paymentStatus || '').toLowerCase() === 'not_paid'
+    && String(ad.collectionMethod || '').toLowerCase() === 'driver';
+  return isDriverDebt ? normalizeAdDriverBudgetUSD(ad.amountUSD) : 0;
+}
+
+function updateAdDriverBudgetSummary() {
+  const input = document.getElementById('ad-driver-budget-usd');
+  const summary = document.getElementById('ad-driver-budget-summary');
+  if (!input || !summary) return;
+
+  const budget = normalizeAdDriverBudgetUSD(input.value);
+  const rate = Number(document.getElementById('ad-driver-budget-rate')?.value)
+    || Number(state.defaultExchangeRate)
+    || 1;
+  const isAr = state.language === 'ar';
+  if (budget <= 0) {
+    summary.textContent = isAr ? 'أدخل ميزانية الإعلان الموجبة.' : 'Enter the positive ad budget.';
+    return;
+  }
+  summary.textContent = isAr
+    ? `الميزانية: $${budget.toFixed(2)} ≈ ${(budget * rate).toFixed(2)} LYD`
+    : `Budget: $${budget.toFixed(2)} ≈ ${(budget * rate).toFixed(2)} LYD`;
+}
+
 // Set Ad Payment Status (Paid / Not Paid)
 function setAdPaymentStatus(status) {
   const paidBtn = document.getElementById('ad-pay-status-paid');
@@ -2900,6 +2979,8 @@ function setAdPaymentStatus(status) {
   const notPaidOptions = document.getElementById('ad-not-paid-options');
   const receiptFunding = document.getElementById('ad-receipt-funding-section');
   const unpaidFinancial = document.getElementById('ad-unpaid-financial');
+  const driverBudgetSection = document.getElementById('ad-driver-budget-section');
+  const driverSettlementHint = document.getElementById('ad-driver-settlement-hint');
   
   if (!paidBtn || !notPaidBtn || !wontPayBtn || !hiddenInput) {
     // Expected while the New Ad wizard hasn't rendered the payment section yet
@@ -2963,6 +3044,10 @@ function setAdPaymentStatus(status) {
     if (notPaidOptions) notPaidOptions.classList.add('hidden');
     if (receiptFunding) receiptFunding.classList.remove('hidden');
     if (unpaidFinancial) unpaidFinancial.classList.add('hidden');
+    if (driverBudgetSection) driverBudgetSection.classList.add('hidden');
+    if (driverSettlementHint) {
+      driverSettlementHint.classList.toggle('hidden', getOriginalUnpaidDriverBudgetUSD() <= 0);
+    }
     if (wontPaySection) wontPaySection.classList.add('hidden');
     setAdCollectionMethod('');
     // Ensure Receipt Funding list renders immediately (prevents "blank" feeling)
@@ -2987,11 +3072,14 @@ function setAdPaymentStatus(status) {
   } else if (status === 'not_paid') {
     if (notPaidOptions) notPaidOptions.classList.remove('hidden');
     if (receiptFunding) receiptFunding.classList.add('hidden');
+    if (driverSettlementHint) driverSettlementHint.classList.add('hidden');
     // Hide financial details if driver (receipt already has them)
     if (collectionMethod === 'driver') {
       if (unpaidFinancial) unpaidFinancial.classList.add('hidden');
+      if (driverBudgetSection) driverBudgetSection.classList.remove('hidden');
     } else {
-    if (unpaidFinancial) unpaidFinancial.classList.remove('hidden');
+      if (unpaidFinancial) unpaidFinancial.classList.remove('hidden');
+      if (driverBudgetSection) driverBudgetSection.classList.add('hidden');
     }
     if (wontPaySection) wontPaySection.classList.add('hidden');
   } else {
@@ -2999,6 +3087,8 @@ function setAdPaymentStatus(status) {
     if (notPaidOptions) notPaidOptions.classList.add('hidden');
     if (receiptFunding) receiptFunding.classList.add('hidden');
     if (unpaidFinancial) unpaidFinancial.classList.remove('hidden');
+    if (driverBudgetSection) driverBudgetSection.classList.add('hidden');
+    if (driverSettlementHint) driverSettlementHint.classList.add('hidden');
     if (wontPaySection) wontPaySection.classList.remove('hidden');
     setAdCollectionMethod('');
   }
@@ -3014,6 +3104,7 @@ function setAdCollectionMethod(method) {
   const hiddenInput = document.getElementById('ad-collection-method');
   const collectionDetails = document.getElementById('ad-collection-details');
   const driverSelect = document.getElementById('ad-driver-select');
+  const driverBudgetSection = document.getElementById('ad-driver-budget-section');
   
   if (!shopBtn || !driverBtn || !hiddenInput) return;
   
@@ -3037,6 +3128,7 @@ function setAdCollectionMethod(method) {
   if (!method) {
     if (collectionDetails) collectionDetails.classList.add('hidden');
     if (driverSelect) driverSelect.classList.add('hidden');
+    if (driverBudgetSection) driverBudgetSection.classList.add('hidden');
     lucide.createIcons();
     refreshAdTempReceiptOptions();
     return;
@@ -3055,6 +3147,7 @@ function setAdCollectionMethod(method) {
     if (shopSpan) shopSpan.className = 'text-[10px] font-medium text-blue-700 dark:text-blue-400';
     // Hide driver select for in shop
     if (driverSelect) driverSelect.classList.add('hidden');
+    if (driverBudgetSection) driverBudgetSection.classList.add('hidden');
     // Show financial details for in shop
     if (unpaidFinancial) unpaidFinancial.classList.remove('hidden');
   } else if (method === 'driver') {
@@ -3065,6 +3158,8 @@ function setAdCollectionMethod(method) {
     if (driverSpan) driverSpan.className = 'text-[10px] font-medium text-violet-700 dark:text-violet-400';
     // Driver select is HIDDEN (driver is assigned in the receipt)
     if (driverSelect) driverSelect.classList.add('hidden');
+    if (driverBudgetSection) driverBudgetSection.classList.remove('hidden');
+    updateAdDriverBudgetSummary();
     // Hide financial details for driver (receipt already has them)
     if (unpaidFinancial) unpaidFinancial.classList.add('hidden');
   }
@@ -3302,7 +3397,7 @@ function updateAdFundingReceipt(idx, receiptId) {
   // Default to 0, but cap existing values at remaining if receipt is selected
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (receipt) {
-    const remaining = getReceiptRemainingUSD(receipt);
+    const remaining = Math.round((getReceiptRemainingUSD(receipt) + getEditingAdExistingAllocationUSD(receipt.id)) * 100) / 100;
     // If user already entered a value, cap it at remaining; otherwise default to 0
     if (allocation.amountUSD && parseFloat(allocation.amountUSD) > 0) {
       allocation.amountUSD = Math.min(remaining, parseFloat(allocation.amountUSD) || 0);
@@ -3429,7 +3524,7 @@ function renderAdFundingList() {
         if (!r) return false;
         if (selectedReceiptIds.has(String(r.id))) return true;
         const usage = getReceiptUsageStats(r);
-        const remaining = usage?.remainingUSD ?? 0;
+        const remaining = (usage?.remainingUSD ?? 0) + getEditingAdExistingAllocationUSD(r.id);
         return remaining > 0.0001;
       });
     } catch (filterErr) {
@@ -3465,7 +3560,11 @@ function renderAdFundingList() {
     // so the user can immediately choose a receipt and amount without extra clicks.
     if (String(paymentStatus || '').toLowerCase() === 'paid') {
       state.tempAdFunding = state.tempAdFunding || { allocations: [] };
-      state.tempAdFunding.allocations = [{ receiptId: '', amountUSD: '' }];
+      const originalDriverBudget = getOriginalUnpaidDriverBudgetUSD();
+      state.tempAdFunding.allocations = [{
+        receiptId: '',
+        amountUSD: originalDriverBudget > 0 ? originalDriverBudget.toFixed(2) : ''
+      }];
       renderAdFundingList();
       return;
     }

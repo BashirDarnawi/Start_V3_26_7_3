@@ -577,9 +577,15 @@ function migrateOldDataFormats() {
       // Ensure ad has receiptAllocations array
       if (!Array.isArray(ad.receiptAllocations)) {
         ad.receiptAllocations = [];
+        changed = true;
 
         // Migrate old single-receipt linking to receiptAllocations
-        const linkedReceiptId = ad.fundingReceiptId || ad.receiptId;
+        // For Not Paid + Driver ads, receiptId is only the delivery reference.
+        // Turning that link into funding would falsely consume the receipt and
+        // erase the customer's unfunded debt.
+        const isDriverDebt = String(ad.paymentStatus || '').toLowerCase() === 'not_paid'
+          && String(ad.collectionMethod || '').toLowerCase() === 'driver';
+        const linkedReceiptId = ad.fundingReceiptId || (!isDriverDebt ? ad.receiptId : '');
         if (linkedReceiptId && (ad.amountUSD || ad.spentUSD)) {
           ad.receiptAllocations.push({
             receiptId: String(linkedReceiptId),

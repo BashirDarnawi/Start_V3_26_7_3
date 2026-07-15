@@ -5324,6 +5324,13 @@ def _financial_derive_ad(
     """Merge ordinary ad edits, then replace every funding mirror."""
     base = dict(existing or {})
     clean = sanitize_json(requested or {}) or {}
+    # ``driverBudgetUSD`` is a request-only source value for a Not Paid +
+    # Driver ad. Unlike a paid receipt allocation, this budget may be only
+    # partially funded (or completely unfunded) and therefore represents real
+    # customer debt. Keep accepting the established allocation-derived shape
+    # for older clients, but never persist this transient request field.
+    driver_budget_supplied = "driverBudgetUSD" in clean
+    driver_budget_raw = clean.pop("driverBudgetUSD", None)
     for key in (
         "id",
         "_created",
@@ -5353,6 +5360,7 @@ def _financial_derive_ad(
     if existing and requested_status and requested_status != old_status:
         raise HTTPException(status_code=405, detail="Ad status changes require their dedicated workflow")
     base.update(clean)
+    base.pop("driverBudgetUSD", None)
     base["status"] = old_status or "Active"
     base["recordType"] = "ad"
     base["creatorId"] = str((existing or {}).get("creatorId") or actor.get("id") or "")
@@ -5386,6 +5394,26 @@ def _financial_derive_ad(
             _financial_minor(row["amountUSD"], "receipt allocation")
             for row in paid_allocations
         )
+        # Converting an existing unpaid Driver debt to Paid must settle the
+        # original ad budget exactly. Without this check, linking (for example)
+        # a $60 receipt to a $100 debt silently shrank the ad to $60 and erased
+        # the remaining $40 from the customer's balance.
+        existing_was_driver_debt = bool(existing) and (
+            str(existing.get("paymentStatus") or "").lower() == "not_paid"
+            and str(existing.get("collectionMethod") or "") == "driver"
+        )
+        if existing_was_driver_debt:
+            original_budget_minor = _financial_minor(
+                existing.get("amountUSD"), "existing driver ad budget"
+            )
+            # Old production rows could be saved with a zero amount because the
+            # UI had no independent budget field. Do not trap those rows: their
+            # first Paid conversion is also their repair path.
+            if original_budget_minor > 0 and amount_minor != original_budget_minor:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Paid receipt funding must exactly settle the original driver ad budget",
+                )
         linked_id = ""
         collection_method = ""
     elif payment_status == "not_paid" and collection_method == "driver":
@@ -5424,10 +5452,42 @@ def _financial_derive_ad(
             ad_rows=ad_rows,
             current_ad_id=current_ad_id,
         )
-        amount_minor = sum(
+        allocated_minor = sum(
             _financial_minor(row["amountUSD"], "ad allocation")
             for row in [*paid_allocations, *due_allocations]
         )
+        if driver_budget_supplied:
+            amount_minor = _financial_minor(
+                driver_budget_raw, "driverBudgetUSD", allow_zero=False
+            )
+        elif existing and (
+            str(existing.get("paymentStatus") or "").lower() == "not_paid"
+            and str(existing.get("collectionMethod") or "") == "driver"
+        ):
+            # An unrelated edit from an older client may omit the new transient
+            # input. Preserve the already-saved independent budget instead of
+            # collapsing it back to the allocation total. A legacy broken $0
+            # row can still be repaired by supplying allocation rows.
+            existing_budget_minor = _financial_minor(
+                existing.get("amountUSD"), "existing driver ad budget"
+            )
+            amount_minor = (
+                existing_budget_minor if existing_budget_minor > 0 else allocated_minor
+            )
+        else:
+            # Backward compatibility for allocation-only create requests made
+            # by clients predating driverBudgetUSD.
+            amount_minor = allocated_minor
+        if amount_minor <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="driverBudgetUSD must be greater than zero",
+            )
+        if allocated_minor > amount_minor:
+            raise HTTPException(
+                status_code=400,
+                detail="Driver ad allocations cannot exceed the ad budget",
+            )
         base["deliveryPersonId"] = ""
         base["deliveryStatus"] = "Office"
     else:

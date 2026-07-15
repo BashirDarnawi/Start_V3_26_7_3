@@ -236,6 +236,26 @@ function renderModal() {
                 </div>
                 <input type="hidden" id="ad-collection-method" value="${adData.collectionMethod || ''}" />
                 <div id="ad-collection-details" class="${adData.collectionMethod ? '' : 'hidden'} pt-2 border-t border-amber-200">
+                  <div id="ad-driver-budget-section" class="${adData.collectionMethod === 'driver' ? '' : 'hidden'} mb-3 p-3 bg-violet-50 dark:bg-violet-900/20 rounded-lg border border-violet-200 dark:border-violet-800 space-y-2">
+                    <label for="ad-driver-budget-usd" class="block text-xs font-bold text-violet-700 dark:text-violet-300">${isArAd ? 'ميزانية الإعلان (USD) *' : 'Ad Budget (USD) *'}</label>
+                    <input
+                      type="text"
+                      inputmode="decimal"
+                      id="ad-driver-budget-usd"
+                      value="${Security.escapeHtml(Number(adData.amountUSD || 0) > 0 ? Number(adData.amountUSD).toFixed(2) : '')}"
+                      class="w-full border border-violet-300 dark:border-violet-700 bg-white dark:bg-slate-900 px-3 py-2 rounded-lg text-sm font-bold"
+                      placeholder="0.00"
+                      oninput="sanitizeMoneyInput(this); updateAdDriverBudgetSummary()"
+                      onfocus="this.select()"
+                    />
+                    <input type="hidden" id="ad-driver-budget-rate" value="${Security.escapeHtml(String(adData.exchangeRate || state.defaultExchangeRate || 1))}" />
+                    <div id="ad-driver-budget-summary" class="text-[11px] text-violet-600 dark:text-violet-300"></div>
+                    <div class="text-[11px] text-amber-700 dark:text-amber-300">
+                      ${isArAd
+                        ? 'سيظهر هذا المبلغ كدين على العميل حتى تسجيل الدفع. لاحقاً عدّل الإعلان إلى «مدفوع» واربط وصل العميل.'
+                        : 'This amount appears as customer debt until payment is recorded. Later edit the ad to Paid and link the customer receipt.'}
+                    </div>
+                  </div>
                   <div id="ad-driver-select" class="hidden"></div>
                   <div id="ad-temp-receipt-link" class="hidden mt-2 p-3 bg-white rounded-lg border border-violet-200 space-y-3">
                     <label class="block text-xs font-bold text-violet-700">${isArAd ? 'ربط وصل توصيل (D#)' : 'Link Delivery Receipt (D#)'}</label>
@@ -347,6 +367,11 @@ function renderModal() {
                 <button type="button" onclick="addAdFundingAllocation()" class="text-xs bg-blue-600 text-white px-2 py-1 rounded-lg font-medium hover:bg-blue-700">
                   ${isArAd ? '+ إضافة وصل' : '+ Add Receipt'}
                 </button>
+              </div>
+              <div id="ad-driver-settlement-hint" class="hidden p-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 text-xs text-amber-700 dark:text-amber-300">
+                ${isArAd
+                  ? `المبلغ المطلوب تسويته: <strong>$${Number(adData.amountUSD || 0).toFixed(2)}</strong>. يجب أن يساوي مجموع الوصولات المدفوعة هذا المبلغ.`
+                  : `Amount to settle: <strong>$${Number(adData.amountUSD || 0).toFixed(2)}</strong>. Paid receipt funding must total this amount.`}
               </div>
               <div id="ad-funding-list" class="space-y-2 bg-white dark:bg-slate-900 rounded-lg p-2 min-h-[60px]">
                 <div class="text-xs text-slate-400 text-center py-2">${isArAd ? 'اختر صفحة وعميلاً أولاً' : 'Select a page & customer first'}</div>
@@ -1738,6 +1763,7 @@ function renderModal() {
       // Initialize payment status UI (default to 'paid' for new ads)
       const initialPaymentStatus = adData.paymentStatus || 'paid';
       setAdPaymentStatus(initialPaymentStatus);
+      updateAdDriverBudgetSummary();
       // Render funding list right away so the user always sees guidance / first allocation row
       renderAdFundingList();
       updateAdLocalAmount();
@@ -1842,8 +1868,28 @@ function completeAdMutationAttempt(attempt) {
   }
 }
 
+function resolveAdPrimaryReceiptId({ paymentStatus, collectionMethod, linkedDeliveryReceiptId, allocations } = {}) {
+  const normalizedStatus = String(paymentStatus || '').toLowerCase();
+  const normalizedCollection = String(collectionMethod || '').toLowerCase();
+  if (normalizedStatus === 'not_paid' && normalizedCollection === 'driver') {
+    return String(linkedDeliveryReceiptId || '');
+  }
+  if (normalizedStatus === 'paid') {
+    return String(Array.isArray(allocations) ? (allocations[0]?.receiptId || '') : '');
+  }
+  return '';
+}
+
 function buildServerAdMutationData(adUpdates, { create = false } = {}) {
   const data = Security.sanitizeObject(adUpdates || {});
+  // Paid ads remain server-derived from receipt allocations. Not Paid + Driver
+  // is different: its positive budget is real customer debt even when no
+  // receipt credit funds it yet, so send one narrowly-scoped request value.
+  if (String(adUpdates?.paymentStatus || '') === 'not_paid' && String(adUpdates?.collectionMethod || '') === 'driver') {
+    data.driverBudgetUSD = normalizeAdDriverBudgetUSD(adUpdates?.amountUSD);
+  } else {
+    delete data.driverBudgetUSD;
+  }
   // These values are materialized from allocations/payment rows by the server.
   // Sending them would invite a forged total that disagrees with the funding
   // rows. The allocation requests themselves remain explicit inputs.
@@ -2074,6 +2120,7 @@ async function handleModalSubmit() {
       const isArSubAd = state.language === 'ar';
       const paymentStatus = document.getElementById('ad-payment-status')?.value || 'paid';
       const collectionMethod = document.getElementById('ad-collection-method')?.value || '';
+      const isUnpaidDriver = paymentStatus === 'not_paid' && collectionMethod === 'driver';
       const adLinkInputs = Array.from(document.querySelectorAll('.ad-link-input')).map(i => (i.value || '').trim()).filter(Boolean);
       
       // Get amount based on payment status
@@ -2083,6 +2130,10 @@ async function handleModalSubmit() {
         // For paid ads, calculate amount from receipt allocations planned spend
         const allocations = (state.tempAdFunding?.allocations || []).filter(a => a.receiptId && parseFloat(a.amountUSD) > 0);
         amountUSD = allocations.reduce((sum, a) => sum + parseFloat(a.amountUSD), 0);
+      } else if (isUnpaidDriver) {
+        // A driver-collected ad can be pure debt before any receipt money is
+        // available. Its budget is independent from optional receipt funding.
+        amountUSD = normalizeAdDriverBudgetUSD(document.getElementById('ad-driver-budget-usd')?.value);
       } else {
         // Use financial details (R2 totals) for Not Paid / Won't Pay
         collectionPayments = getReceiptPaymentData();
@@ -2132,6 +2183,15 @@ async function handleModalSubmit() {
         amountUSD = 0;
       }
 
+      if (isUnpaidDriver && amountUSD <= 0) {
+        showNotification(
+          isArSubAd ? 'تنبيه' : 'Validation',
+          isArSubAd ? 'أدخل ميزانية إعلان أكبر من صفر.' : 'Enter an ad budget greater than zero.',
+          'error'
+        );
+        return;
+      }
+
       // Validate funding allocations (only required when paid)
       let allocations = (state.tempAdFunding?.allocations || []).filter(a => a.receiptId && parseFloat(a.amountUSD) > 0)
         .map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) }));
@@ -2161,6 +2221,20 @@ async function handleModalSubmit() {
         }
 
         // Set amountUSD from allocations total for paid ads (ensures consistency)
+        const settlingDriverDebt = isEdit
+          && String(state.modalData?.paymentStatus || '') === 'not_paid'
+          && String(state.modalData?.collectionMethod || '') === 'driver';
+        const originalDriverBudget = normalizeAdDriverBudgetUSD(state.modalData?.amountUSD);
+        if (settlingDriverDebt && originalDriverBudget > 0 && Math.abs(totalAllocated - originalDriverBudget) > 0.005) {
+          showNotification(
+            isArSubAd ? 'تنبيه' : 'Validation',
+            isArSubAd
+              ? `يجب أن يساوي مجموع تمويل الوصولات ($${totalAllocated.toFixed(2)}) ميزانية الإعلان غير المدفوعة ($${originalDriverBudget.toFixed(2)}).`
+              : `Receipt funding ($${totalAllocated.toFixed(2)}) must equal the unpaid ad budget ($${originalDriverBudget.toFixed(2)}).`,
+            'error'
+          );
+          return;
+        }
         amountUSD = totalAllocated;
 
         for (const [receiptId, plannedTotal] of totalsByReceipt.entries()) {
@@ -2178,13 +2252,10 @@ async function handleModalSubmit() {
 
           // If editing, add back what this ad already allocated from this receipt
           if (isEdit && state.modalData?.id) {
-            const existingAd = state.ads.find(a => a.id === state.modalData.id);
-            if (existingAd?.receiptAllocations) {
-              const existingAlloc = existingAd.receiptAllocations
-                .filter(a => String(a.receiptId) === String(receiptId))
-                .reduce((sum, a) => sum + (parseFloat(a.amountUSD) || 0), 0);
-              remaining += existingAlloc;
-            }
+            // This includes the ad's current due allocation when converting a
+            // Driver debt to Paid. The server replaces those rows atomically,
+            // so the current ad must not block its own settlement receipt.
+            remaining += getEditingAdExistingAllocationUSD(receiptId);
           }
 
           if (plannedTotal > remaining + 0.0001) {
@@ -2236,10 +2307,8 @@ async function handleModalSubmit() {
             return;
           }
 
-          // Receipt is the source of truth for money details in this flow.
-          // Do NOT use Ad financial splits; derive totals from the linked receipt.
-          const debtUsd = Number(linkedReceipt.debtAmountUSD ?? linkedReceipt.amountUSD ?? 0) || 0;
-          amountUSD = Number.isFinite(debtUsd) ? debtUsd : 0;
+          // The receipt is the source of truth for driver assignment and rate.
+          // The ad budget remains independent so an unfunded ad can be debt.
           const rRate = Number(linkedReceipt.exchangeRate || 0) || 0;
           if (rRate > 0) exchangeRate = rRate;
           collectionPayments = [];
@@ -2367,11 +2436,21 @@ async function handleModalSubmit() {
       // For paid mode, use regular allocations
       const finalAllocations = isPaid ? allocations : mergedAllocations;
       
-      // For Not Paid + Driver mode, update amountUSD to reflect total from due + merged allocations
-      // This ensures the ad credit shows the correct amount, not the full receipt amount
-      if (paymentStatus === 'not_paid' && collectionMethod === 'driver') {
+      // Receipt funding can cover some/all of the budget, but can never redefine
+      // or exceed it. Any unfunded remainder is customer debt until payment.
+      if (isUnpaidDriver) {
         const mergedTotal = mergedAllocations.reduce((sum, a) => sum + (parseFloat(a.amountUSD) || 0), 0);
-        amountUSD = dueAmountToUseUSD + mergedTotal;
+        const fundedTotal = dueAmountToUseUSD + mergedTotal;
+        if (fundedTotal > amountUSD + 0.005) {
+          showNotification(
+            isArSubAd ? 'تنبيه' : 'Validation',
+            isArSubAd
+              ? `إجمالي التمويل ($${fundedTotal.toFixed(2)}) أكبر من ميزانية الإعلان ($${amountUSD.toFixed(2)}).`
+              : `Receipt funding ($${fundedTotal.toFixed(2)}) exceeds the ad budget ($${amountUSD.toFixed(2)}).`,
+            'error'
+          );
+          return;
+        }
       }
       
       const adUpdates = {
@@ -2386,7 +2465,12 @@ async function handleModalSubmit() {
         // so we keep the ad out of the Delivery dashboard to avoid duplicates.
         deliveryStatus: (paymentStatus === 'not_paid' && collectionMethod === 'driver') ? 'Office' : (state.modalData?.deliveryStatus || 'Office'),
         deliveryPersonId: (paymentStatus === 'not_paid' && collectionMethod === 'driver') ? '' : (state.modalData?.deliveryPersonId || ''),
-        receiptId: (paymentStatus === 'not_paid' && collectionMethod === 'driver') ? linkedDeliveryReceiptId : (state.modalData?.receiptId || ''),
+        receiptId: resolveAdPrimaryReceiptId({
+          paymentStatus,
+          collectionMethod,
+          linkedDeliveryReceiptId,
+          allocations: finalAllocations
+        }),
         paymentStatus,
         collectionMethod,
         adLinks: adLinkInputs,
