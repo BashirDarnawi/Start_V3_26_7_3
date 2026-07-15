@@ -3204,9 +3204,32 @@ function updateAdUnpaidTotals() {
 function uploadReceiptPhotos(fileList) {
   if (!fileList || !fileList.length) return;
   state.tempReceiptPhotos = state.tempReceiptPhotos || [];
-  Array.from(fileList).forEach(file => {
+  const uploadGeneration = _receiptPhotoUploadGeneration;
+  const room = Math.max(6 - state.tempReceiptPhotos.length, 0);
+  const files = Array.from(fileList).slice(0, room);
+  if (!files.length) {
+    showNotification(
+      state.language === 'ar' ? 'الحد الأقصى للصور' : 'Photo limit reached',
+      state.language === 'ar' ? 'يمكن إرفاق 6 صور كحد أقصى لكل وصل.' : 'You can attach up to 6 photos to each receipt.',
+      'warning'
+    );
+    return;
+  }
+  files.forEach(file => {
     compressImageToDataUrl(file).then((dataUrl) => {
-      if (!dataUrl) return;
+      // Ignore a result from a receipt form that was cancelled/reopened while
+      // compression was still running, and recheck the cap after async work.
+      if (uploadGeneration !== _receiptPhotoUploadGeneration || state.activeModal !== 'receipt') return;
+      state.tempReceiptPhotos = state.tempReceiptPhotos || [];
+      if (state.tempReceiptPhotos.length >= 6) return;
+      if (!isSafeReceiptPhotoSource(dataUrl)) {
+        showNotification(
+          state.language === 'ar' ? 'صيغة صورة غير مدعومة' : 'Unsupported photo',
+          state.language === 'ar' ? 'استخدم صورة PNG أو JPG أو WEBP أو GIF.' : 'Use a PNG, JPG, WEBP, or GIF image.',
+          'error'
+        );
+        return;
+      }
       state.tempReceiptPhotos.push(dataUrl);
       renderReceiptPhotoPreviews();
     }).catch(() => {});
@@ -3223,8 +3246,13 @@ function renderReceiptPhotoPreviews() {
   }
   container.innerHTML = photos.map((src, idx) => `
     <div class="relative group rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700">
-      <img src="${Security.escapeHtml(src)}" class="w-full h-20 object-cover" />
-      <button type="button" onclick="removeReceiptPhoto(${idx})" class="absolute top-1 right-1 bg-white/80 dark:bg-slate-900/80 rounded-full p-1 shadow hover:bg-rose-100">
+      <button type="button" onclick="openPendingReceiptPhotoViewer(${idx})" class="group/photo block w-full relative focus:outline-none focus:ring-2 focus:ring-indigo-500" title="${state.language === 'ar' ? 'اضغط لعرض الصورة بالحجم الكامل' : 'Click to view full size'}" aria-label="${state.language === 'ar' ? `عرض صورة الوصل ${idx + 1}` : `View receipt photo ${idx + 1}`}">
+        <img src="${Security.escapeHtml(src)}" alt="${state.language === 'ar' ? `صورة الوصل ${idx + 1}` : `Receipt photo ${idx + 1}`}" class="w-full h-20 object-cover" />
+        <span class="absolute inset-0 bg-black/0 group-hover/photo:bg-black/25 group-focus/photo:bg-black/25 transition-colors flex items-center justify-center">
+          <i data-lucide="maximize-2" class="w-5 h-5 text-white opacity-0 group-hover/photo:opacity-100 group-focus/photo:opacity-100 drop-shadow"></i>
+        </span>
+      </button>
+      <button type="button" onclick="removeReceiptPhoto(${idx})" class="absolute top-1 right-1 bg-white/90 dark:bg-slate-900/90 rounded-full p-1 shadow hover:bg-rose-100 z-10" aria-label="${state.language === 'ar' ? `حذف صورة الوصل ${idx + 1}` : `Remove receipt photo ${idx + 1}`}">
         <i data-lucide="x" class="w-3 h-3 text-rose-600"></i>
       </button>
     </div>

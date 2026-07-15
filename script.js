@@ -11366,6 +11366,7 @@ function renderReceiptsView() {
           // Normalize payments
           const payments = Array.isArray(receipt.payments) ? receipt.payments : [];
           const hasMultiplePayments = payments.length > 1;
+          const receiptPhotos = getReceiptPhotoSources(receipt);
 
           // Calculate total paid as sum of R1 values (amount × rate)
           const totalPaid = payments.reduce((sum, p) => sum + ((p.amount || 0) * (p.rate || 1)), 0) || receipt.amountLocal;
@@ -11533,7 +11534,15 @@ function renderReceiptsView() {
                 </div>
               `}
 
-              ${receipt.receiptImage ? `<div class="mb-4"><img src="${Security.escapeHtml(receipt.receiptImage)}" alt="Receipt" class="w-full h-32 object-cover rounded-lg border border-slate-200 dark:border-slate-700" /></div>` : ''}
+              ${receiptPhotos.length ? `
+                <button type="button" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" onclick="openReceiptPhotoViewer(this.dataset.receiptId, 0)" class="group relative block w-full mb-4 rounded-xl overflow-hidden border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500" title="${isArV ? 'اضغط لعرض الصورة بالحجم الكامل' : 'Click to view full size'}" aria-label="${isArV ? `عرض صور الوصل (${receiptPhotos.length})` : `View receipt photos (${receiptPhotos.length})`}">
+                  <img src="${Security.escapeHtml(receiptPhotos[0])}" alt="${isArV ? 'صورة الوصل' : 'Receipt photo'}" loading="lazy" decoding="async" class="w-full h-32 object-cover" />
+                  <span class="absolute inset-0 bg-black/0 group-hover:bg-black/30 group-focus:bg-black/30 transition-colors flex items-center justify-center">
+                    <span class="opacity-0 group-hover:opacity-100 group-focus:opacity-100 transition-opacity px-3 py-1.5 rounded-full bg-black/65 text-white text-xs font-bold flex items-center gap-1.5"><i data-lucide="maximize-2" class="w-4 h-4"></i>${isArV ? 'عرض الصورة' : 'View photo'}</span>
+                  </span>
+                  ${receiptPhotos.length > 1 ? `<span class="absolute top-2 right-2 px-2 py-1 rounded-full bg-black/70 text-white text-xs font-bold flex items-center gap-1"><i data-lucide="images" class="w-3.5 h-3.5"></i>${receiptPhotos.length}</span>` : ''}
+                </button>
+              ` : ''}
 
               <!-- Collection (with amount) -->
               ${(() => {
@@ -15469,15 +15478,186 @@ async function compressImageToDataUrl(file) {
   }
 }
 
+// ==========================================
+// RECEIPT PHOTO VIEWER
+// ==========================================
+// Normal receipt uploads are stored in photos[], while completed delivery
+// receipts also keep a legacy receiptImage field. Read both so the same viewer
+// works everywhere and older receipt photos do not disappear from the UI.
+function isSafeReceiptPhotoSource(value) {
+  const source = String(value || '').trim();
+  // Keep this aligned with the server's MAX_DATA_URL_LENGTH. Matching the
+  // complete value prevents an image prefix from hiding HTML/script content.
+  if (!source || source.length > 8 * 1024 * 1024) return false;
+  if (/^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i.test(source)) return true;
+  // Stored remote/relative image paths are supported, but quotes, whitespace,
+  // angle brackets and backticks are forbidden so the value is attribute-safe.
+  if (/^https:\/\/[^\s"'<>`]+$/i.test(source)) return true;
+  return /^(?:\/|\.\/|\.\.\/)[^\s"'<>`]+$/.test(source);
+}
+
+function getReceiptPhotoSources(receipt) {
+  if (!receipt || typeof receipt !== 'object') return [];
+  const raw = [
+    ...(Array.isArray(receipt.photos) ? receipt.photos : []),
+    receipt.receiptImage
+  ];
+  const seen = new Set();
+  return raw.reduce((photos, value) => {
+    const source = String(value || '').trim();
+    if (!isSafeReceiptPhotoSource(source) || seen.has(source)) return photos;
+    seen.add(source);
+    photos.push(source);
+    return photos;
+  }, []);
+}
+
+// In delivery completion, receiptImage is the driver's proof photo and must
+// win over older/general attachments in photos[]. Otherwise simply re-saving
+// a delivery could replace the proof with photos[0].
+function getDeliveryReceiptPhotoSource(receipt) {
+  const proofPhoto = String(receipt?.receiptImage || '').trim();
+  if (isSafeReceiptPhotoSource(proofPhoto)) return proofPhoto;
+  return getReceiptPhotoSources(receipt)[0] || '';
+}
+
+let _receiptPhotoViewerSources = [];
+let _receiptPhotoViewerIndex = 0;
+let _receiptPhotoViewerLabel = '';
+let _receiptPhotoViewerReturnFocus = null;
+let _receiptPhotoUploadGeneration = 0;
+
+function openReceiptPhotoViewer(receiptId, index = 0) {
+  const receipt = (state.receipts || []).find(item => item && !item._deleted && String(item.id) === String(receiptId));
+  if (!receipt) return;
+  const number = receipt.finalReceiptNo || receipt.serialNumber || receipt.tempReceiptNo || '';
+  openReceiptPhotoViewerSources(
+    getReceiptPhotoSources(receipt),
+    index,
+    number ? `${state.language === 'ar' ? 'صورة الوصل' : 'Receipt photo'} #${number}` : (state.language === 'ar' ? 'صورة الوصل' : 'Receipt photo')
+  );
+}
+
+function openPendingReceiptPhotoViewer(index = 0) {
+  openReceiptPhotoViewerSources(
+    (state.tempReceiptPhotos || []).filter(isSafeReceiptPhotoSource),
+    index,
+    state.language === 'ar' ? 'معاينة صورة الوصل' : 'Receipt photo preview'
+  );
+}
+
+function openDeliveryReceiptPhotoViewer() {
+  const source = document.getElementById('delivery-receipt-image-data')?.dataset?.imageData || '';
+  openReceiptPhotoViewerSources(
+    [source].filter(isSafeReceiptPhotoSource),
+    0,
+    state.language === 'ar' ? 'صورة وصل التوصيل' : 'Delivery receipt photo'
+  );
+}
+
+function openReceiptPhotoViewerSources(sources, index = 0, label = '') {
+  const safeSources = (Array.isArray(sources) ? sources : []).filter(isSafeReceiptPhotoSource);
+  if (!safeSources.length) return;
+  document.getElementById('receipt-photo-viewer')?.remove();
+  _receiptPhotoViewerSources = [...new Set(safeSources)];
+  _receiptPhotoViewerIndex = Math.min(Math.max(Number(index) || 0, 0), _receiptPhotoViewerSources.length - 1);
+  _receiptPhotoViewerLabel = String(label || (state.language === 'ar' ? 'صورة الوصل' : 'Receipt photo'));
+  _receiptPhotoViewerReturnFocus = document.activeElement;
+
+  const viewer = document.createElement('div');
+  viewer.id = 'receipt-photo-viewer';
+  viewer.className = 'fixed inset-0 z-[100] bg-slate-950/95 flex flex-col p-3 sm:p-5';
+  viewer.setAttribute('role', 'dialog');
+  viewer.setAttribute('aria-modal', 'true');
+  viewer.setAttribute('aria-label', _receiptPhotoViewerLabel);
+  viewer.tabIndex = -1;
+  viewer.innerHTML = `
+    <div class="flex items-center justify-between gap-3 text-white pb-3">
+      <div class="min-w-0">
+        <div id="receipt-photo-viewer-title" class="font-bold truncate"></div>
+        <div id="receipt-photo-viewer-counter" class="text-xs text-slate-300 mt-0.5"></div>
+      </div>
+      <button type="button" onclick="closeReceiptPhotoViewer()" class="w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center flex-shrink-0" aria-label="${state.language === 'ar' ? 'إغلاق الصورة' : 'Close photo'}">
+        <i data-lucide="x" class="w-6 h-6"></i>
+      </button>
+    </div>
+    <div class="relative flex-1 min-h-0 flex items-center justify-center" data-receipt-photo-backdrop="true">
+      <button id="receipt-photo-viewer-prev" type="button" onclick="changeReceiptPhotoViewer(-1)" class="absolute z-10 left-1 sm:left-4 w-11 h-11 rounded-full bg-black/55 hover:bg-black/75 text-white flex items-center justify-center" aria-label="${state.language === 'ar' ? 'الصورة السابقة' : 'Previous photo'}">
+        <i data-lucide="chevron-left" class="w-7 h-7"></i>
+      </button>
+      <img id="receipt-photo-viewer-image" class="max-w-full max-h-full object-contain rounded-lg shadow-2xl" />
+      <button id="receipt-photo-viewer-next" type="button" onclick="changeReceiptPhotoViewer(1)" class="absolute z-10 right-1 sm:right-4 w-11 h-11 rounded-full bg-black/55 hover:bg-black/75 text-white flex items-center justify-center" aria-label="${state.language === 'ar' ? 'الصورة التالية' : 'Next photo'}">
+        <i data-lucide="chevron-right" class="w-7 h-7"></i>
+      </button>
+    </div>
+    <div class="text-center text-xs text-slate-300 pt-3">${state.language === 'ar' ? 'اضغط خارج الصورة أو زر الإغلاق للعودة' : 'Click outside the photo or use Close to return'}</div>
+  `;
+  viewer.addEventListener('click', event => {
+    if (event.target === viewer || event.target?.dataset?.receiptPhotoBackdrop === 'true') closeReceiptPhotoViewer();
+  });
+  viewer.addEventListener('keydown', event => {
+    if (event.key === 'Escape') closeReceiptPhotoViewer();
+    if (event.key === 'ArrowLeft') changeReceiptPhotoViewer(-1);
+    if (event.key === 'ArrowRight') changeReceiptPhotoViewer(1);
+  });
+  document.body.appendChild(viewer);
+  renderReceiptPhotoViewer();
+  IconQueue.schedule(viewer);
+  viewer.focus();
+}
+
+function renderReceiptPhotoViewer() {
+  const viewer = document.getElementById('receipt-photo-viewer');
+  if (!viewer || !_receiptPhotoViewerSources.length) return;
+  const image = document.getElementById('receipt-photo-viewer-image');
+  const title = document.getElementById('receipt-photo-viewer-title');
+  const counter = document.getElementById('receipt-photo-viewer-counter');
+  const previous = document.getElementById('receipt-photo-viewer-prev');
+  const next = document.getElementById('receipt-photo-viewer-next');
+  if (image) {
+    image.src = _receiptPhotoViewerSources[_receiptPhotoViewerIndex];
+    image.alt = `${_receiptPhotoViewerLabel} ${_receiptPhotoViewerIndex + 1}`;
+  }
+  if (title) title.textContent = _receiptPhotoViewerLabel;
+  if (counter) counter.textContent = `${_receiptPhotoViewerIndex + 1} / ${_receiptPhotoViewerSources.length}`;
+  if (previous) previous.hidden = _receiptPhotoViewerSources.length < 2;
+  if (next) next.hidden = _receiptPhotoViewerSources.length < 2;
+}
+
+function changeReceiptPhotoViewer(direction) {
+  if (_receiptPhotoViewerSources.length < 2) return;
+  const delta = Number(direction) < 0 ? -1 : 1;
+  _receiptPhotoViewerIndex = (_receiptPhotoViewerIndex + delta + _receiptPhotoViewerSources.length) % _receiptPhotoViewerSources.length;
+  renderReceiptPhotoViewer();
+}
+
+function closeReceiptPhotoViewer() {
+  document.getElementById('receipt-photo-viewer')?.remove();
+  _receiptPhotoViewerSources = [];
+  _receiptPhotoViewerIndex = 0;
+  _receiptPhotoViewerLabel = '';
+  if (_receiptPhotoViewerReturnFocus?.focus) _receiptPhotoViewerReturnFocus.focus();
+  _receiptPhotoViewerReturnFocus = null;
+}
+
 function handleDeliveryReceiptPhotoUpload(fileList) {
   const file = fileList && fileList.length ? fileList[0] : null;
   if (!file) return;
   compressImageToDataUrl(file).then((dataUrl) => {
-    if (!dataUrl) return;
+    if (!isSafeReceiptPhotoSource(dataUrl)) {
+      showNotification(
+        state.language === 'ar' ? 'صيغة صورة غير مدعومة' : 'Unsupported photo',
+        state.language === 'ar' ? 'استخدم صورة PNG أو JPG أو WEBP أو GIF.' : 'Use a PNG, JPG, WEBP, or GIF image.',
+        'error'
+      );
+      return;
+    }
     const hidden = document.getElementById('delivery-receipt-image-data');
     if (hidden) hidden.dataset.imageData = dataUrl;
     const img = document.getElementById('delivery-receipt-image-preview');
     if (img) img.src = dataUrl;
+    document.getElementById('delivery-receipt-image-button')?.classList.remove('hidden');
+    document.getElementById('delivery-receipt-image-empty')?.classList.add('hidden');
     updateReceiptDeliveryCompletionComputed();
   }).catch(() => {});
 }
@@ -15683,6 +15863,7 @@ function openReceiptDeliveryCompletionModal(receiptId) {
   const tempNo = String(receipt.tempReceiptNo || '').trim();
   const finalNo = String(receipt.finalReceiptNo || receipt.serialNumber || '').trim();
   const place = String(receipt.deliveryPlaceName || '').trim();
+  const deliveryReceiptPhoto = getDeliveryReceiptPhotoSource(receipt);
 
   // Initial rows. Re-completing an already-delivered receipt reloads its stored payment
   // rows; a fresh completion seeds one Cash (LYD) row for the collected amount (empty, so
@@ -15763,9 +15944,14 @@ function openReceiptDeliveryCompletionModal(receiptId) {
               <input type="file" accept="image/*" class="hidden" onchange="handleDeliveryReceiptPhotoUpload(this.files)" />
             </label>
           </div>
-          <input type="hidden" id="delivery-receipt-image-data" data-image-data="${Security.escapeHtml(String(receipt.receiptImage || receipt.photos?.[0] || ''))}" />
-          <img id="delivery-receipt-image-preview" src="${Security.escapeHtml(String(receipt.receiptImage || receipt.photos?.[0] || ''))}" class="${(receipt.receiptImage || receipt.photos?.[0]) ? '' : 'hidden'} w-full h-36 object-cover rounded-lg border border-slate-200 dark:border-slate-700" />
-          ${(receipt.receiptImage || receipt.photos?.[0]) ? '' : `<div class="text-xs text-slate-400">${isArD ? 'لا توجد صورة بعد.' : 'No photo yet.'}</div>`}
+          <input type="hidden" id="delivery-receipt-image-data" data-image-data="${Security.escapeHtml(deliveryReceiptPhoto)}" />
+          <button id="delivery-receipt-image-button" type="button" onclick="openDeliveryReceiptPhotoViewer()" class="${deliveryReceiptPhoto ? '' : 'hidden'} group relative w-full rounded-lg overflow-hidden" title="${isArD ? 'اضغط لعرض الصورة بالحجم الكامل' : 'Click to view full size'}">
+            <img id="delivery-receipt-image-preview" src="${Security.escapeHtml(deliveryReceiptPhoto)}" alt="${isArD ? 'صورة وصل التوصيل' : 'Delivery receipt photo'}" class="w-full h-36 object-cover border border-slate-200 dark:border-slate-700 rounded-lg" />
+            <span class="absolute inset-0 bg-black/0 group-hover:bg-black/25 group-focus:bg-black/25 transition-colors flex items-center justify-center">
+              <span class="opacity-0 group-hover:opacity-100 group-focus:opacity-100 transition-opacity px-3 py-1.5 rounded-full bg-black/65 text-white text-xs font-bold flex items-center gap-1.5"><i data-lucide="maximize-2" class="w-4 h-4"></i>${isArD ? 'عرض' : 'View'}</span>
+            </span>
+          </button>
+          <div id="delivery-receipt-image-empty" class="${deliveryReceiptPhoto ? 'hidden' : ''} text-xs text-slate-400">${isArD ? 'لا توجد صورة بعد.' : 'No photo yet.'}</div>
         </div>
 
         <div>
@@ -20859,9 +21045,32 @@ function updateAdUnpaidTotals() {
 function uploadReceiptPhotos(fileList) {
   if (!fileList || !fileList.length) return;
   state.tempReceiptPhotos = state.tempReceiptPhotos || [];
-  Array.from(fileList).forEach(file => {
+  const uploadGeneration = _receiptPhotoUploadGeneration;
+  const room = Math.max(6 - state.tempReceiptPhotos.length, 0);
+  const files = Array.from(fileList).slice(0, room);
+  if (!files.length) {
+    showNotification(
+      state.language === 'ar' ? 'الحد الأقصى للصور' : 'Photo limit reached',
+      state.language === 'ar' ? 'يمكن إرفاق 6 صور كحد أقصى لكل وصل.' : 'You can attach up to 6 photos to each receipt.',
+      'warning'
+    );
+    return;
+  }
+  files.forEach(file => {
     compressImageToDataUrl(file).then((dataUrl) => {
-      if (!dataUrl) return;
+      // Ignore a result from a receipt form that was cancelled/reopened while
+      // compression was still running, and recheck the cap after async work.
+      if (uploadGeneration !== _receiptPhotoUploadGeneration || state.activeModal !== 'receipt') return;
+      state.tempReceiptPhotos = state.tempReceiptPhotos || [];
+      if (state.tempReceiptPhotos.length >= 6) return;
+      if (!isSafeReceiptPhotoSource(dataUrl)) {
+        showNotification(
+          state.language === 'ar' ? 'صيغة صورة غير مدعومة' : 'Unsupported photo',
+          state.language === 'ar' ? 'استخدم صورة PNG أو JPG أو WEBP أو GIF.' : 'Use a PNG, JPG, WEBP, or GIF image.',
+          'error'
+        );
+        return;
+      }
       state.tempReceiptPhotos.push(dataUrl);
       renderReceiptPhotoPreviews();
     }).catch(() => {});
@@ -20878,8 +21087,13 @@ function renderReceiptPhotoPreviews() {
   }
   container.innerHTML = photos.map((src, idx) => `
     <div class="relative group rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700">
-      <img src="${Security.escapeHtml(src)}" class="w-full h-20 object-cover" />
-      <button type="button" onclick="removeReceiptPhoto(${idx})" class="absolute top-1 right-1 bg-white/80 dark:bg-slate-900/80 rounded-full p-1 shadow hover:bg-rose-100">
+      <button type="button" onclick="openPendingReceiptPhotoViewer(${idx})" class="group/photo block w-full relative focus:outline-none focus:ring-2 focus:ring-indigo-500" title="${state.language === 'ar' ? 'اضغط لعرض الصورة بالحجم الكامل' : 'Click to view full size'}" aria-label="${state.language === 'ar' ? `عرض صورة الوصل ${idx + 1}` : `View receipt photo ${idx + 1}`}">
+        <img src="${Security.escapeHtml(src)}" alt="${state.language === 'ar' ? `صورة الوصل ${idx + 1}` : `Receipt photo ${idx + 1}`}" class="w-full h-20 object-cover" />
+        <span class="absolute inset-0 bg-black/0 group-hover/photo:bg-black/25 group-focus/photo:bg-black/25 transition-colors flex items-center justify-center">
+          <i data-lucide="maximize-2" class="w-5 h-5 text-white opacity-0 group-hover/photo:opacity-100 group-focus/photo:opacity-100 drop-shadow"></i>
+        </span>
+      </button>
+      <button type="button" onclick="removeReceiptPhoto(${idx})" class="absolute top-1 right-1 bg-white/90 dark:bg-slate-900/90 rounded-full p-1 shadow hover:bg-rose-100 z-10" aria-label="${state.language === 'ar' ? `حذف صورة الوصل ${idx + 1}` : `Remove receipt photo ${idx + 1}`}">
         <i data-lucide="x" class="w-3 h-3 text-rose-600"></i>
       </button>
     </div>
@@ -22209,7 +22423,8 @@ function renderModal() {
       const isArR = state.language === 'ar';
       // Copy (not alias) the live record's photos so add/remove in the modal
       // does not mutate the saved receipt when the user cancels.
-      state.tempReceiptPhotos = (receiptData.photos || []).slice();
+      _receiptPhotoUploadGeneration++;
+      state.tempReceiptPhotos = getReceiptPhotoSources(receiptData);
       
       if (receiptCustomers.length === 0) {
         modalContent = `
@@ -24519,6 +24734,9 @@ function closeModal() {
   // Discard any pending (unsaved) photos so a cancelled upload cannot leak
   // into the next ad/receipt created in this session.
   state.tempAdPhotos = [];
+  state.tempReceiptPhotos = [];
+  _receiptPhotoUploadGeneration++;
+  closeReceiptPhotoViewer();
   // Discard any pending (unsaved) top-up edits so they cannot leak into the
   // next ad's top-up session.
   tempTopUps = [];

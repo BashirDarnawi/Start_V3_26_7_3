@@ -2325,6 +2325,7 @@ function renderReceiptsView() {
           // Normalize payments
           const payments = Array.isArray(receipt.payments) ? receipt.payments : [];
           const hasMultiplePayments = payments.length > 1;
+          const receiptPhotos = getReceiptPhotoSources(receipt);
 
           // Calculate total paid as sum of R1 values (amount × rate)
           const totalPaid = payments.reduce((sum, p) => sum + ((p.amount || 0) * (p.rate || 1)), 0) || receipt.amountLocal;
@@ -2492,7 +2493,15 @@ function renderReceiptsView() {
                 </div>
               `}
 
-              ${receipt.receiptImage ? `<div class="mb-4"><img src="${Security.escapeHtml(receipt.receiptImage)}" alt="Receipt" class="w-full h-32 object-cover rounded-lg border border-slate-200 dark:border-slate-700" /></div>` : ''}
+              ${receiptPhotos.length ? `
+                <button type="button" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" onclick="openReceiptPhotoViewer(this.dataset.receiptId, 0)" class="group relative block w-full mb-4 rounded-xl overflow-hidden border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500" title="${isArV ? 'اضغط لعرض الصورة بالحجم الكامل' : 'Click to view full size'}" aria-label="${isArV ? `عرض صور الوصل (${receiptPhotos.length})` : `View receipt photos (${receiptPhotos.length})`}">
+                  <img src="${Security.escapeHtml(receiptPhotos[0])}" alt="${isArV ? 'صورة الوصل' : 'Receipt photo'}" loading="lazy" decoding="async" class="w-full h-32 object-cover" />
+                  <span class="absolute inset-0 bg-black/0 group-hover:bg-black/30 group-focus:bg-black/30 transition-colors flex items-center justify-center">
+                    <span class="opacity-0 group-hover:opacity-100 group-focus:opacity-100 transition-opacity px-3 py-1.5 rounded-full bg-black/65 text-white text-xs font-bold flex items-center gap-1.5"><i data-lucide="maximize-2" class="w-4 h-4"></i>${isArV ? 'عرض الصورة' : 'View photo'}</span>
+                  </span>
+                  ${receiptPhotos.length > 1 ? `<span class="absolute top-2 right-2 px-2 py-1 rounded-full bg-black/70 text-white text-xs font-bold flex items-center gap-1"><i data-lucide="images" class="w-3.5 h-3.5"></i>${receiptPhotos.length}</span>` : ''}
+                </button>
+              ` : ''}
 
               <!-- Collection (with amount) -->
               ${(() => {

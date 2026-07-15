@@ -1017,6 +1017,110 @@ check('server money/subscription calls use dedicated transactional endpoints', (
   assert(built.includes("restorableCollections: serverPartialSnapshot\n      ? []"), 'server report still advertises restorable collections');
 });
 
+console.log('\n=== RECEIPT PHOTOS: visible and safely clickable inside/outside the form ===');
+
+const SAFE_RECEIPT_PNG = 'data:image/png;base64,iVBORw0KGgo=';
+const SAFE_RECEIPT_JPEG = 'data:image/jpeg;base64,/9j/2Q==';
+
+check('receipt photo normalization supports current and legacy records without duplicates', () => {
+  const sources = sandbox.getReceiptPhotoSources({
+    photos: [SAFE_RECEIPT_PNG, SAFE_RECEIPT_PNG, 'https://cdn.example.com/receipt.webp'],
+    receiptImage: SAFE_RECEIPT_JPEG
+  });
+  assert(sources.length === 3, `expected 3 unique safe photos, got ${sources.length}`);
+  assert(sources[0] === SAFE_RECEIPT_PNG, 'photos[] is not the preferred current format');
+  assert(sources[2] === SAFE_RECEIPT_JPEG, 'legacy receiptImage fallback is missing');
+  assert(sandbox.getReceiptPhotoSources({ receiptImage: SAFE_RECEIPT_PNG })[0] === SAFE_RECEIPT_PNG, 'legacy-only photo disappeared');
+  assert(sandbox.isSafeReceiptPhotoSource('/assets/receipt.png'), 'safe relative image path was rejected');
+});
+
+check('delivery completion preserves its proof photo when general attachments also exist', () => {
+  const receipt = { photos: [SAFE_RECEIPT_PNG], receiptImage: SAFE_RECEIPT_JPEG };
+  assert(sandbox.getDeliveryReceiptPhotoSource(receipt) === SAFE_RECEIPT_JPEG, 'delivery proof lost precedence over photos[0]');
+  assert(sandbox.getDeliveryReceiptPhotoSource({ photos: [SAFE_RECEIPT_PNG] }) === SAFE_RECEIPT_PNG, 'delivery photo fallback to photos[] is missing');
+});
+
+check('receipt photo sources reject executable or attribute-injection values', () => {
+  const unsafe = [
+    'javascript:alert(1)',
+    'vbscript:msgbox(1)',
+    'data:text/html;base64,PHNjcmlwdD4=',
+    'data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+',
+    'data:image/png;base64,AAAA\" onerror=\"alert(1)',
+    'https://example.com/photo.png\" onerror=\"alert(1)',
+    'http://example.com/photo.png',
+    'blob:https://example.com/temporary'
+  ];
+  unsafe.forEach(source => assert(!sandbox.isSafeReceiptPhotoSource(source), `unsafe source accepted: ${source}`));
+  assert(sandbox.getReceiptPhotoSources({ photos: unsafe, receiptImage: '' }).length === 0, 'unsafe photo reached the normalized list');
+});
+
+function setReceiptPhotoRenderState(photoFields) {
+  loginAs(ADMIN);
+  seedBusinessData();
+  Object.assign(S, {
+    language: 'en', defaultExchangeRate: 9.5,
+    receiptSearch: '', receiptStatusFilter: 'all', receiptPaymentFilter: 'all',
+    receiptDateFilter: 'all', receiptCollectedFilter: 'all', receiptSortBy: 'newest'
+  });
+  Object.assign(S.receipts[0], {
+    amountLocal: 950, exchangeRate: 9.5, serialNumber: '12791',
+    createdAt: '2026-07-15T16:44:50.000Z', payments: [], collected: false,
+    ...photoFields
+  });
+  return visible(sandbox.renderReceiptsView());
+}
+
+check('receipt card displays photos[] and opens by a safe data id', () => {
+  const html = setReceiptPhotoRenderState({ photos: [SAFE_RECEIPT_PNG], receiptImage: '' });
+  assert(html.includes(`src="${SAFE_RECEIPT_PNG}"`), 'current photos[] image is missing from the receipt card');
+  assert(html.includes('data-receipt-id="r1"'), 'receipt id is not stored in a data attribute');
+  assert(html.includes('openReceiptPhotoViewer(this.dataset.receiptId, 0)'), 'receipt card has no photo viewer action');
+  assert(!html.includes("openReceiptPhotoViewer('r1'"), 'receipt id is still embedded in JavaScript source');
+});
+
+check('receipt card still displays a legacy receiptImage', () => {
+  const html = setReceiptPhotoRenderState({ photos: [], receiptImage: SAFE_RECEIPT_JPEG });
+  assert(html.includes(`src="${SAFE_RECEIPT_JPEG}"`), 'legacy receiptImage is missing from the receipt card');
+  assert(html.includes('View receipt photos (1)'), 'legacy image is not clickable');
+});
+
+check('receipt form thumbnails can be viewed full-size and still removed', () => {
+  const originalGetElementById = sandbox.document.getElementById;
+  const previews = makeElement();
+  sandbox.document.getElementById = id => (id === 'receipt-photo-previews' ? previews : null);
+  S.language = 'en';
+  S.tempReceiptPhotos = [SAFE_RECEIPT_PNG];
+  sandbox.renderReceiptPhotoPreviews();
+  sandbox.document.getElementById = originalGetElementById;
+  assert(previews.innerHTML.includes('openPendingReceiptPhotoViewer(0)'), 'form thumbnail has no full-size action');
+  assert(previews.innerHTML.includes('removeReceiptPhoto(0)'), 'form thumbnail lost its remove action');
+});
+
+check('closing the full-size viewer preserves the open receipt and unsaved photos', () => {
+  const originalAppendChild = sandbox.document.body.appendChild;
+  let appendedViewer = null;
+  sandbox.document.body.appendChild = element => { appendedViewer = element; };
+  S.activeModal = 'receipt';
+  S.tempReceiptPhotos = [SAFE_RECEIPT_PNG];
+  sandbox.openPendingReceiptPhotoViewer(0);
+  assert(appendedViewer?.id === 'receipt-photo-viewer', 'full-size viewer was not created');
+  assert(appendedViewer.innerHTML.includes('object-contain'), 'viewer does not preserve the whole image');
+  sandbox.closeReceiptPhotoViewer();
+  sandbox.document.body.appendChild = originalAppendChild;
+  assert(S.activeModal === 'receipt', 'closing a photo closed the receipt form');
+  assert(S.tempReceiptPhotos.length === 1 && S.tempReceiptPhotos[0] === SAFE_RECEIPT_PNG, 'closing a photo erased unsaved receipt photos');
+});
+
+check('cancelled receipt forms invalidate pending photo compression and clear temporary photos', () => {
+  const formsSource = fs.readFileSync(path.join(__dirname, '..', 'src', '14-forms.js'), 'utf8');
+  const modalSource = fs.readFileSync(path.join(__dirname, '..', 'src', '15-modals.js'), 'utf8');
+  assert(formsSource.includes('uploadGeneration !== _receiptPhotoUploadGeneration'), 'late upload callback is not invalidated');
+  assert(formsSource.includes('state.tempReceiptPhotos.length >= 6'), 'async upload can exceed the six-photo cap');
+  assert(modalSource.includes('state.tempReceiptPhotos = [];'), 'cancel does not clear temporary receipt photos');
+  assert(modalSource.includes('_receiptPhotoUploadGeneration++;'), 'cancel/open does not advance the receipt upload generation');
+});
+
 // ---------- report ----------
 console.log(`\n${'='.repeat(60)}`);
 if (failures.length) {

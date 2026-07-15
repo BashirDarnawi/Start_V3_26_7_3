@@ -680,7 +680,8 @@ function renderModal() {
       const isArR = state.language === 'ar';
       // Copy (not alias) the live record's photos so add/remove in the modal
       // does not mutate the saved receipt when the user cancels.
-      state.tempReceiptPhotos = (receiptData.photos || []).slice();
+      _receiptPhotoUploadGeneration++;
+      state.tempReceiptPhotos = getReceiptPhotoSources(receiptData);
       
       if (receiptCustomers.length === 0) {
         modalContent = `
@@ -2990,6 +2991,9 @@ function closeModal() {
   // Discard any pending (unsaved) photos so a cancelled upload cannot leak
   // into the next ad/receipt created in this session.
   state.tempAdPhotos = [];
+  state.tempReceiptPhotos = [];
+  _receiptPhotoUploadGeneration++;
+  closeReceiptPhotoViewer();
   // Discard any pending (unsaved) top-up edits so they cannot leak into the
   // next ad's top-up session.
   tempTopUps = [];
