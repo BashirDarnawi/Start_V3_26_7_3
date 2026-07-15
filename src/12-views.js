@@ -133,6 +133,15 @@ function render() {
         const viewContainer = app.querySelector('.p-4.md\\:p-8');
         if (viewContainer) {
           viewContainer.innerHTML = renderView();
+          // Same-view re-render (a background live-sync tick, or a save that stays on
+          // this view): strip the view's entry animation so the whole page does not
+          // visibly re-play its fade/slide-in ("plink") every few seconds. The animation
+          // is meant for navigating TO a view, which goes through renderMainApp below.
+          // Removed synchronously, before paint, so the animation never starts.
+          // Open modals live on document.body, not in here, so their animations are safe.
+          viewContainer
+            .querySelectorAll('.animate-fade-in-up, .animate-fade-in, .animate-slide-up')
+            .forEach(el => el.classList.remove('animate-fade-in-up', 'animate-fade-in', 'animate-slide-up'));
         } else {
           app.innerHTML = renderMainApp();
         }
