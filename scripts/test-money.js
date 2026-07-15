@@ -131,6 +131,8 @@ const S = bridged.state;
 // Real app functions under test — no re-implementation of the math anywhere.
 const getReceiptUsageStats = sandbox.getReceiptUsageStats;
 const getDeliveryReceiptDueUsage = sandbox.getDeliveryReceiptDueUsage;
+const _deliveryDefaultRate1 = sandbox._deliveryDefaultRate1;
+const PAYMENT_METHODS = vm.runInContext('PAYMENT_METHODS', sandbox);
 
 // ---------- test scaffolding ----------
 let passedA = 0;
@@ -533,6 +535,22 @@ async function main() {
       `the customer's full $200 of due credit must still be available, got ${usd(due.remainingDueUSD)} ` +
       `— this ad is funded by the customer's cash, not by the receipt's credit`
     );
+  });
+
+  await must('A8. delivery collection Rate 1 is never 0 for any payment method', () => {
+    // The Mark-Delivered form records collected money as split-payment rows and compares
+    // the LYD total (sum of amount x Rate1) to the debt. If Rate1 defaults to 0 for a
+    // method, a fully-collected delivery records 0 LYD -> falsely UNDERPAID. getDefaultRate1
+    // returns 0 for several methods (a receipt expects a hand-entered rate); the delivery
+    // must substitute a real conversion so no method silently zeroes the collection.
+    S.defaultExchangeRate = 9.5;
+    for (const method of PAYMENT_METHODS) {
+      const r1 = _deliveryDefaultRate1(method);
+      assert(
+        Number.isFinite(r1) && r1 > 0,
+        `delivery Rate 1 for "${method}" is ${r1} — a 0 rate records 0 LYD collected on a real payment`
+      );
+    }
   });
 
   console.log('\n\n############################################################');

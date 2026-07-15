@@ -1201,17 +1201,29 @@ let _deliveryCompletionOpen = null;
 // .payment-method / .payment-amount / .payment-rate1 / .payment-rate2 classes so the
 // receipt's own getPaymentTotalsFromDom(root) computes LYD (R1) and USD (R2) totals —
 // one call scoped to the collected container, one to the fee container.
-const _DELIVERY_ZERO_R2_METHODS = ['USDT', 'Bank Transfer (USD)', 'Cash (USD)'];
+const _DELIVERY_USD_METHODS = ['USDT', 'Bank Transfer (USD)', 'Cash (USD)'];
+
+// Rate 1 turns the entered amount into LYD (R1 = amount x rate1), and the debt
+// comparison is done in LYD. getDefaultRate1 returns 0 for methods where a RECEIPT
+// expects a hand-entered negotiated rate — but a delivery is plain cash collection, so a
+// 0 default would silently record 0 LYD collected. Give a correct LYD conversion instead:
+// USD-denominated methods convert at the exchange rate, LYD-denominated ones are 1:1.
+function _deliveryDefaultRate1(method) {
+  const r = getDefaultRate1(method);
+  if (r > 0) return r;
+  return _DELIVERY_USD_METHODS.includes(method) ? (Number(state.defaultExchangeRate) || 1) : 1;
+}
 
 function _deliveryPaymentRowHtml(payment, opts = {}) {
   const isAr = state.language === 'ar';
   const p = payment || {};
   const method = p.method || PAYMENT_METHODS[0];
   const amount = (p.amount === undefined || p.amount === null) ? '' : p.amount;
-  const zeroR2 = _DELIVERY_ZERO_R2_METHODS.includes(method);
-  const rate1 = (p.rate1 === undefined || p.rate1 === null || p.rate1 === '') ? getDefaultRate1(method) : p.rate1;
+  const rate1 = (p.rate1 === undefined || p.rate1 === null || p.rate1 === '') ? _deliveryDefaultRate1(method) : p.rate1;
+  // Rate 2 turns the amount into USD. Always seed it with the exchange rate (never 0) so
+  // the USD value is computed for every method — a delivery always has a USD equivalent.
   const rate2 = (p.rate2 === undefined || p.rate2 === null || p.rate2 === '')
-    ? (zeroR2 ? 0 : (Number(state.defaultExchangeRate) || 0))
+    ? (Number(state.defaultExchangeRate) || 0)
     : p.rate2;
   return `
     <div class="payment-split-item p-2.5 rounded-lg bg-white/70 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-700">
@@ -1243,11 +1255,9 @@ function onDeliveryPaymentMethodChange(sel) {
   const method = sel.value;
   const r1 = item.querySelector('.payment-rate1');
   const r2 = item.querySelector('.payment-rate2');
-  if (r1) r1.value = getDefaultRate1(method).toFixed(2);
-  if (r2) {
-    if (_DELIVERY_ZERO_R2_METHODS.includes(method)) r2.value = '0';
-    else if (parseFloat(r2.value) === 0 || !r2.value) r2.value = (Number(state.defaultExchangeRate) || 0).toFixed(2);
-  }
+  // Never leave a rate at 0 — that would record 0 LYD / 0 USD for the collection.
+  if (r1) r1.value = _deliveryDefaultRate1(method).toFixed(2);
+  if (r2 && (parseFloat(r2.value) === 0 || !r2.value)) r2.value = (Number(state.defaultExchangeRate) || 0).toFixed(2);
   updateReceiptDeliveryCompletionComputed();
 }
 
