@@ -18131,6 +18131,12 @@ function removePageCustomer(customerId) {
 
 // Delegated record actions keep untrusted ids out of executable JavaScript.
 // Dynamic dropdowns can be re-rendered freely without re-binding handlers.
+// CAPTURE phase (the `true` below) is essential: modal panels carry
+// onclick="event.stopPropagation()" to stop inside-clicks from closing the modal,
+// which also stops the click ever bubbling to document. A capture-phase listener on
+// document fires on the way DOWN to the target, before that bubble-phase
+// stopPropagation runs — so page/customer dropdown selections work inside modals
+// again. (Bubble phase silently broke every in-modal selection.)
 if (!window.__albayanSafeRecordActionsBound) {
   window.__albayanSafeRecordActionsBound = true;
   document.addEventListener('click', (event) => {
@@ -18159,7 +18165,7 @@ if (!window.__albayanSafeRecordActionsBound) {
         return;
     }
     event.preventDefault();
-  });
+  }, true);
 }
 
 // Close dropdowns when clicking outside
