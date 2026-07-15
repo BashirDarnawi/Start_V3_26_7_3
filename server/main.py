@@ -7159,6 +7159,13 @@ def update_collection_item(
                 "actualDeliveryFeeCollected",
                 "deliveryFeeCollected",
                 "driverNotes",
+                # How the collected money + fee were paid (split-payment rows, same shape
+                # a receipt stores). Descriptive only: the authoritative amount is still
+                # computed server-side from amountCollectedFromCustomer, so these cannot
+                # forge money. Gated to the Delivered transition via SETTLEMENT_FIELDS.
+                "payments",
+                "deliveryFeePayments",
+                "paymentMethod",
                 # cancellation
                 "deliveryCancelReason",
                 "deliveryCancelledAt",
@@ -7235,6 +7242,10 @@ def update_collection_item(
                 "deliveryFeeCollected",
                 "receiptImage",
                 "photos",
+                # The payment-method breakdown is settlement evidence too.
+                "payments",
+                "deliveryFeePayments",
+                "paymentMethod",
             }
             if desired != "Delivered":
                 for _f in SETTLEMENT_FIELDS:

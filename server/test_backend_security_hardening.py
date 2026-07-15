@@ -1945,3 +1945,57 @@ class TestReceiptAndAdTransactions:
             actors,
         )
         assert double.status_code == 409, double.text
+
+    def test_delivery_completion_stores_split_payment_rows(self, actors):
+        # The driver now records collected money + fee as split-payment rows (same shape
+        # a receipt stores). The server must persist payments + deliveryFeePayments, and
+        # still compute the money authoritatively from amountCollectedFromCustomer.
+        self._customer("fin_split_customer", actors)
+        self._receipt(
+            "fin_split_receipt",
+            "fin_split_customer",
+            100,
+            actors,
+            status="Not Paid",
+            isPaid=False,
+            amountLocal=950,
+            debtAmountLocal=950,
+            debtAmountUSD=100,
+            exchangeRate=9.5,
+            quotedDeliveryFee=10,
+            tempReceiptNo="D60001",
+            deliveryStatus="Needs Delivery",
+            deliveryPersonId=actors["driver"]["id"],
+        )
+        assert client.patch(
+            "/api/collections/receipts/fin_split_receipt",
+            json={"data": {"deliveryStatus": "In Progress", "acceptedDate": "x"}},
+            cookies=actors["driver_cookies"],
+        ).status_code == 200
+        # Collect 150 LYD (underpaid on a 950 debt), recorded as one Cash (LYD) row,
+        # fee 10 LYD as its own method row.
+        done = client.patch(
+            "/api/collections/receipts/fin_split_receipt",
+            json={"data": {
+                "deliveryStatus": "Delivered",
+                "finalReceiptNo": "660001",
+                "receiptImage": "data:image/png;base64,AAAA",
+                "amountCollectedFromCustomer": 150,
+                "actualDeliveryFeeCollected": 10,
+                "payments": [{"method": "Cash (LYD)", "amount": 150, "rate": 1, "rate2": 9.5, "collectionType": "delivery"}],
+                "deliveryFeePayments": [{"method": "Cash (LYD)", "amount": 10, "rate": 1, "rate2": 9.5, "collectionType": "delivery"}],
+                "paymentMethod": "Cash (LYD)",
+            }},
+            cookies=actors["driver_cookies"],
+        )
+        assert done.status_code == 200, done.text
+        body = done.json()["data"]
+        # Money is server-authoritative from amountCollectedFromCustomer.
+        assert str(body.get("deliveryStatus")) == "Delivered"
+        assert body.get("paymentResult") == "UNDERPAID"
+        assert abs(float(body.get("amountLocal") or 0) - 150) < 0.01
+        # The split-payment record persisted.
+        assert isinstance(body.get("payments"), list) and len(body["payments"]) == 1
+        assert body["payments"][0]["method"] == "Cash (LYD)"
+        assert isinstance(body.get("deliveryFeePayments"), list) and len(body["deliveryFeePayments"]) == 1
+        assert body["deliveryFeePayments"][0]["method"] == "Cash (LYD)"

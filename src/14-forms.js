@@ -980,8 +980,11 @@ function updateReceiptTotals() {
 }
 
 // Helper: compute totals from current payment rows (shared use)
-function getPaymentTotalsFromDom() {
-  const paymentItems = document.querySelectorAll('.payment-split-item');
+// `root` scopes which .payment-split-item rows are summed. The receipt modal has one
+// set (default = whole document); the delivery-completion form has TWO independent sets
+// (collected amount + delivery fee), so it passes each container to get its own totals.
+function getPaymentTotalsFromDom(root) {
+  const paymentItems = (root || document).querySelectorAll('.payment-split-item');
   let totalR1 = 0;
   let totalR2 = 0;
   paymentItems.forEach((item) => {

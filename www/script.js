@@ -15493,8 +15493,13 @@ function updateReceiptDeliveryCompletionComputed() {
   const quoted = Number(receipt.quotedDeliveryFee ?? 0) || 0;
 
   const finalNo = String(document.getElementById('delivery-final-receipt-no')?.value || '').trim();
-  const collected = parseFloat(String(document.getElementById('delivery-collected-amount')?.value || '').trim()) || 0;
-  const actualFee = parseFloat(String(document.getElementById('delivery-actual-fee')?.value || '').trim()) || 0;
+  // Collected + fee are now split-payment rows (same math as a receipt): R1 = LYD total.
+  const collectedTotals = getPaymentTotalsFromDom(document.getElementById('delivery-collected-payments'));
+  const feeTotals = getPaymentTotalsFromDom(document.getElementById('delivery-fee-payment'));
+  const collected = collectedTotals.totalR1;   // LYD — compared against the debt
+  const actualFee = feeTotals.totalR1;          // LYD — compared against the quoted fee
+  const totalEl = document.getElementById('delivery-collected-total');
+  if (totalEl) totalEl.textContent = `${collected.toFixed(0)} LYD` + (collectedTotals.totalR2 ? ` ($${collectedTotals.totalR2.toFixed(2)})` : '');
   const notes = String(document.getElementById('delivery-driver-notes')?.value || '').trim();
 
   const imgData = String(document.getElementById('delivery-receipt-image-data')?.dataset?.imageData || '').trim();
@@ -15553,6 +15558,92 @@ function updateReceiptDeliveryCompletionComputed() {
 // fresh at save time so its live _lastModified can't be trusted).
 let _deliveryCompletionOpen = null;
 
+// ---- Delivery completion: split-payment rows (same mechanism as a receipt) --------
+// The driver records what they collected (and the delivery fee) using the exact same
+// method/amount/Rate1/Rate2 rows as a receipt. Rows carry the .payment-split-item /
+// .payment-method / .payment-amount / .payment-rate1 / .payment-rate2 classes so the
+// receipt's own getPaymentTotalsFromDom(root) computes LYD (R1) and USD (R2) totals —
+// one call scoped to the collected container, one to the fee container.
+const _DELIVERY_ZERO_R2_METHODS = ['USDT', 'Bank Transfer (USD)', 'Cash (USD)'];
+
+function _deliveryPaymentRowHtml(payment, opts = {}) {
+  const isAr = state.language === 'ar';
+  const p = payment || {};
+  const method = p.method || PAYMENT_METHODS[0];
+  const amount = (p.amount === undefined || p.amount === null) ? '' : p.amount;
+  const zeroR2 = _DELIVERY_ZERO_R2_METHODS.includes(method);
+  const rate1 = (p.rate1 === undefined || p.rate1 === null || p.rate1 === '') ? getDefaultRate1(method) : p.rate1;
+  const rate2 = (p.rate2 === undefined || p.rate2 === null || p.rate2 === '')
+    ? (zeroR2 ? 0 : (Number(state.defaultExchangeRate) || 0))
+    : p.rate2;
+  return `
+    <div class="payment-split-item p-2.5 rounded-lg bg-white/70 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-700">
+      <div class="grid grid-cols-2 gap-2">
+        <select class="payment-method w-full glass-input px-2 py-1.5 rounded text-xs font-medium" onchange="onDeliveryPaymentMethodChange(this)">
+          ${paymentMethodOptions(method).map(m => `<option value="${Security.escapeHtml(m)}" ${m === method ? 'selected' : ''}>${Security.escapeHtml(trMethod(m))}</option>`).join('')}
+        </select>
+        <input type="text" inputmode="decimal" class="payment-amount w-full glass-input px-2 py-1.5 rounded text-xs font-bold" value="${Security.escapeHtml(String(amount))}" placeholder="0" oninput="sanitizeMoneyInput(this); updateReceiptDeliveryCompletionComputed()" />
+      </div>
+      <div class="grid grid-cols-2 gap-2 mt-2">
+        <div>
+          <div class="text-[9px] font-bold text-slate-400 uppercase mb-0.5">${isAr ? 'السعر 1' : 'Rate 1'}</div>
+          <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1 rounded text-xs text-center" value="${Security.escapeHtml(String(rate1))}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptDeliveryCompletionComputed()" />
+        </div>
+        <div>
+          <div class="text-[9px] font-bold text-slate-400 uppercase mb-0.5">${isAr ? 'السعر 2' : 'Rate 2'}</div>
+          <input type="text" inputmode="decimal" class="payment-rate2 w-full glass-input px-2 py-1 rounded text-xs text-center" value="${Security.escapeHtml(String(rate2))}" placeholder="0" oninput="sanitizeMoneyInput(this, 4); updateReceiptDeliveryCompletionComputed()" />
+        </div>
+      </div>
+      ${opts.removable ? `<button type="button" onclick="removeDeliveryPaymentRow(this)" class="mt-2 text-[11px] font-bold text-rose-600">${isAr ? '× حذف' : '× Remove'}</button>` : ''}
+    </div>`;
+}
+
+// Mirror the receipt's onPaymentMethodChange (auto-fill the rates for the method), but
+// without the receipt-serial resync, and recompute the delivery totals instead.
+function onDeliveryPaymentMethodChange(sel) {
+  const item = sel.closest('.payment-split-item');
+  if (!item) return;
+  const method = sel.value;
+  const r1 = item.querySelector('.payment-rate1');
+  const r2 = item.querySelector('.payment-rate2');
+  if (r1) r1.value = getDefaultRate1(method).toFixed(2);
+  if (r2) {
+    if (_DELIVERY_ZERO_R2_METHODS.includes(method)) r2.value = '0';
+    else if (parseFloat(r2.value) === 0 || !r2.value) r2.value = (Number(state.defaultExchangeRate) || 0).toFixed(2);
+  }
+  updateReceiptDeliveryCompletionComputed();
+}
+
+function addDeliveryCollectedRow() {
+  const c = document.getElementById('delivery-collected-payments');
+  if (!c) return;
+  c.insertAdjacentHTML('beforeend', _deliveryPaymentRowHtml({ method: PAYMENT_METHODS[0] }, { removable: true }));
+  if (window.lucide) lucide.createIcons();
+  updateReceiptDeliveryCompletionComputed();
+}
+
+function removeDeliveryPaymentRow(btn) {
+  const c = document.getElementById('delivery-collected-payments');
+  const item = btn.closest('.payment-split-item');
+  if (c && item && c.querySelectorAll('.payment-split-item').length > 1) {
+    item.remove();
+    updateReceiptDeliveryCompletionComputed();
+  }
+}
+
+// Read the collected rows into a payments[] array (same shape a receipt stores).
+function _readDeliveryPaymentRows(containerId) {
+  const c = document.getElementById(containerId);
+  if (!c) return [];
+  return Array.from(c.querySelectorAll('.payment-split-item')).map(item => ({
+    method: item.querySelector('.payment-method')?.value || PAYMENT_METHODS[0],
+    amount: parseFloat(item.querySelector('.payment-amount')?.value) || 0,
+    rate: parseFloat(item.querySelector('.payment-rate1')?.value) || 0,
+    rate2: parseFloat(item.querySelector('.payment-rate2')?.value) || 0,
+    collectionType: 'delivery'
+  })).filter(p => p.amount > 0);
+}
+
 function openReceiptDeliveryCompletionModal(receiptId) {
   const isArD = state.language === 'ar';
   const receipt = _findReceiptForDeliveryModal(receiptId);
@@ -15582,6 +15673,22 @@ function openReceiptDeliveryCompletionModal(receiptId) {
   const tempNo = String(receipt.tempReceiptNo || '').trim();
   const finalNo = String(receipt.finalReceiptNo || receipt.serialNumber || '').trim();
   const place = String(receipt.deliveryPlaceName || '').trim();
+
+  // Initial rows. Re-completing an already-delivered receipt reloads its stored payment
+  // rows; a fresh completion seeds one Cash (LYD) row for the collected amount (empty, so
+  // the driver types what they actually collected) and one for the fee (pre-filled with
+  // the quoted fee). Cash (LYD) => Rate1 1, Rate2 the default exchange rate.
+  const _dRate = Number(state.defaultExchangeRate) || 0;
+  const _cashLyd = PAYMENT_METHODS.includes('Cash (LYD)') ? 'Cash (LYD)' : PAYMENT_METHODS[0];
+  const _storedCollected = Array.isArray(receipt.payments) && receipt.payments.length
+    ? receipt.payments.map(p => ({ method: p.method, amount: p.amount, rate1: p.rate, rate2: p.rate2 }))
+    : [{ method: _cashLyd, amount: (receipt.amountCollectedFromCustomer ?? ''), rate1: 1, rate2: _dRate }];
+  const collectedRowsHtml = _storedCollected
+    .map((p, i) => _deliveryPaymentRowHtml(p, { removable: i > 0 })).join('');
+  const _storedFee = (Array.isArray(receipt.deliveryFeePayments) && receipt.deliveryFeePayments.length)
+    ? { method: receipt.deliveryFeePayments[0].method, amount: receipt.deliveryFeePayments[0].amount, rate1: receipt.deliveryFeePayments[0].rate, rate2: receipt.deliveryFeePayments[0].rate2 }
+    : { method: _cashLyd, amount: (receipt.actualDeliveryFeeCollected ?? receipt.deliveryFeeCollected ?? (quoted || '')), rate1: 1, rate2: _dRate };
+  const feeRowHtml = _deliveryPaymentRowHtml(_storedFee, { removable: false });
 
   // Remove any existing modal
   document.getElementById('delivery-complete-modal')?.remove();
@@ -15624,15 +15731,18 @@ function openReceiptDeliveryCompletionModal(receiptId) {
           <div id="delivery-final-receipt-error" class="mt-1 text-[11px] text-rose-600"></div>
         </div>
 
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'المبلغ المُحصَّل (LYD) *' : 'Amount collected (LYD) *'}</label>
-            <input id="delivery-collected-amount" type="text" inputmode="decimal" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="0.00" value="${Security.escapeHtml(String(receipt.amountCollectedFromCustomer ?? ''))}" oninput="sanitizeMoneyInput(this); updateReceiptDeliveryCompletionComputed()" />
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <label class="block text-xs font-bold text-slate-600 dark:text-slate-400">${isArD ? 'المبلغ المُحصَّل *' : 'Amount collected *'}</label>
+            <button type="button" onclick="addDeliveryCollectedRow()" class="text-[11px] font-bold text-indigo-600 hover:text-indigo-700">${isArD ? '+ طريقة أخرى' : '+ Add method'}</button>
           </div>
-          <div>
-            <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'قيمة التوصيل الفعلية المُحصَّلة (LYD) *' : 'Actual delivery fee collected (LYD) *'}</label>
-            <input id="delivery-actual-fee" type="text" inputmode="decimal" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="0.00" value="${Security.escapeHtml(String(receipt.actualDeliveryFeeCollected ?? receipt.deliveryFeeCollected ?? ''))}" oninput="sanitizeMoneyInput(this); updateReceiptDeliveryCompletionComputed()" />
-          </div>
+          <div id="delivery-collected-payments" class="space-y-2">${collectedRowsHtml}</div>
+          <div class="text-[11px] text-slate-500 mt-1">${isArD ? 'إجمالي المُحصَّل' : 'Total collected'}: <span id="delivery-collected-total" class="font-bold text-slate-700 dark:text-slate-200">0 LYD</span></div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'قيمة التوصيل المُحصَّلة *' : 'Delivery fee collected *'}</label>
+          <div id="delivery-fee-payment">${feeRowHtml}</div>
         </div>
 
         <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
@@ -15686,8 +15796,14 @@ async function submitReceiptDeliveryCompletion(receiptId) {
   }
 
   const finalNo = String(document.getElementById('delivery-final-receipt-no')?.value || '').trim();
-  const collected = parseFloat(String(document.getElementById('delivery-collected-amount')?.value || '').trim()) || 0;
-  const actualFee = parseFloat(String(document.getElementById('delivery-actual-fee')?.value || '').trim()) || 0;
+  // Collected + fee are split-payment rows (same math as a receipt): R1 = LYD, R2 = USD.
+  const collectedTotals = getPaymentTotalsFromDom(document.getElementById('delivery-collected-payments'));
+  const feeTotals = getPaymentTotalsFromDom(document.getElementById('delivery-fee-payment'));
+  const collected = collectedTotals.totalR1;                 // LYD collected (vs debt)
+  const collectedUSDFromRows = collectedTotals.totalR2;      // USD value of what was collected
+  const actualFee = feeTotals.totalR1;                        // LYD fee (vs quoted)
+  const collectedPayments = _readDeliveryPaymentRows('delivery-collected-payments');
+  const feePayments = _readDeliveryPaymentRows('delivery-fee-payment');
   const notes = String(document.getElementById('delivery-driver-notes')?.value || '').trim();
   const imgData = String(document.getElementById('delivery-receipt-image-data')?.dataset?.imageData || '').trim();
 
@@ -15726,7 +15842,11 @@ async function submitReceiptDeliveryCompletion(receiptId) {
   const feeCmp = compareFees(quoted, actualFee);
 
   const rate = Number(receipt.exchangeRate || state.defaultExchangeRate || 1) || 1;
-  const collectedUSD = rate > 0 ? (collected / rate) : 0;
+  // USD value comes from the payment rows (each method's Rate2). Fall back to the
+  // single-rate conversion only if the rows produced no USD (e.g. all rates left blank).
+  const collectedUSD = collectedUSDFromRows > 0
+    ? collectedUSDFromRows
+    : (rate > 0 ? (collected / rate) : 0);
 
   const nextHistory = Array.isArray(receipt.deliveryHistory) ? [...receipt.deliveryHistory] : [];
   nextHistory.push({
@@ -15765,6 +15885,15 @@ async function submitReceiptDeliveryCompletion(receiptId) {
     isPaid: newIsPaid,
     amountLocal: collected,
     amountUSD: collectedUSD,
+    // The collected money as split-payment rows (same shape a receipt stores), so the
+    // delivery becomes a proper receipt recording HOW it was paid; the fee keeps its own
+    // method row. amountCollectedFromCustomer (the single LYD total) still drives the
+    // server's debt comparison, so a server that ignores these arrays still works.
+    payments: collectedPayments,
+    deliveryFeePayments: feePayments,
+    paymentMethod: collectedPayments.length > 1
+      ? 'Split Payment'
+      : (collectedPayments[0]?.method || 'Cash (LYD)'),
     deliveryHistory: nextHistory
   };
 
@@ -18496,8 +18625,11 @@ function updateReceiptTotals() {
 }
 
 // Helper: compute totals from current payment rows (shared use)
-function getPaymentTotalsFromDom() {
-  const paymentItems = document.querySelectorAll('.payment-split-item');
+// `root` scopes which .payment-split-item rows are summed. The receipt modal has one
+// set (default = whole document); the delivery-completion form has TWO independent sets
+// (collected amount + delivery fee), so it passes each container to get its own totals.
+function getPaymentTotalsFromDom(root) {
+  const paymentItems = (root || document).querySelectorAll('.payment-split-item');
   let totalR1 = 0;
   let totalR2 = 0;
   paymentItems.forEach((item) => {
