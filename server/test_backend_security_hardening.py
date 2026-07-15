@@ -1694,3 +1694,126 @@ class TestReceiptAndAdTransactions:
         assert stored.status_code == 200
         assert stored.json()["data"]["amountUSD"] == 100
         assert stored.json()["data"]["status"] == "Paid"
+
+    def test_underpaid_delivery_completes_and_leaves_no_spendable_credit(self, actors):
+        # A driver who collects LESS than the debt must still be able to CLOSE the
+        # delivery (never stranded at the customer's door), and the shortfall must
+        # not become spendable credit. debt 1000 LYD @ 5 = $200 committed to an ad.
+        self._customer("fin_under_customer", actors)
+        self._receipt(
+            "fin_under_receipt",
+            "fin_under_customer",
+            200,
+            actors,
+            status="Not Paid",
+            isPaid=False,
+            amountLocal=1000,
+            debtAmountLocal=1000,
+            debtAmountUSD=200,
+            tempReceiptNo="D70001",
+            deliveryStatus="Needs Delivery",
+            deliveryPersonId=actors["driver"]["id"],
+        )
+        ad = self._mutate_ad(
+            "fin_under_ad",
+            "fin-under-ad-001",
+            {
+                "customerId": "fin_under_customer",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "driver",
+                "exchangeRate": 5,
+                "linkedDeliveryReceiptId": "fin_under_receipt",
+                "receiptId": "fin_under_receipt",
+                "receiptAllocations": [],
+                "mergedPaidAllocations": [],
+                "dueAllocations": [{"receiptId": "fin_under_receipt", "amountUSD": 200}],
+            },
+            actors,
+        )
+        assert ad.status_code == 200, ad.text
+
+        accepted = client.patch(
+            "/api/collections/receipts/fin_under_receipt",
+            json={"data": {"deliveryStatus": "In Progress", "acceptedDate": "x"}},
+            cookies=actors["driver_cookies"],
+        )
+        assert accepted.status_code == 200, accepted.text
+
+        # Collect only 900 of the 1000 owed -> UNDERPAID, amountUSD becomes $180 < $200.
+        completed = client.patch(
+            "/api/collections/receipts/fin_under_receipt",
+            json={
+                "data": {
+                    "deliveryStatus": "Delivered",
+                    "finalReceiptNo": "770001",
+                    "receiptImage": "data:image/png;base64,AAAA",
+                    "amountCollectedFromCustomer": 900,
+                    "actualDeliveryFeeCollected": 0,
+                }
+            },
+            cookies=actors["driver_cookies"],
+        )
+        # Must NOT 409 - the physical collection cannot be blocked.
+        assert completed.status_code == 200, completed.text
+        body = completed.json()["data"]
+        assert str(body.get("deliveryStatus")) == "Delivered"
+        assert body.get("paymentResult") == "UNDERPAID"
+
+        # A Delivered + underpaid receipt is eligible for NEITHER pool, so no new ad
+        # can be funded from it - the shortfall never becomes spendable credit.
+        new_due = self._mutate_ad(
+            "fin_under_ad2",
+            "fin-under-ad2-001",
+            {
+                "customerId": "fin_under_customer",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "driver",
+                "exchangeRate": 5,
+                "linkedDeliveryReceiptId": "fin_under_receipt",
+                "receiptId": "fin_under_receipt",
+                "receiptAllocations": [],
+                "mergedPaidAllocations": [],
+                "dueAllocations": [{"receiptId": "fin_under_receipt", "amountUSD": 1}],
+            },
+            actors,
+        )
+        assert new_due.status_code in (400, 409), new_due.text
+
+    def test_one_ad_cannot_double_draw_paid_and_due_from_same_receipt(self, actors):
+        # Self-exclusion hole: each pool validator excludes the current ad and checks
+        # only its own request, so one ad could take $150 paid AND $150 due from the
+        # same $200 receipt. Reachable when a receipt is BOTH Paid and a pending D#
+        # delivery (an admin edit produces this).
+        self._customer("fin_dd_customer", actors)
+        self._receipt(
+            "fin_dd_receipt",
+            "fin_dd_customer",
+            200,
+            actors,
+            status="Paid",
+            isPaid=True,
+            amountLocal=1000,
+            debtAmountLocal=1000,
+            debtAmountUSD=200,
+            tempReceiptNo="D80001",
+            deliveryStatus="Needs Delivery",
+            deliveryPersonId=actors["driver"]["id"],
+        )
+        double = self._mutate_ad(
+            "fin_dd_ad",
+            "fin-dd-ad-001",
+            {
+                "customerId": "fin_dd_customer",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "driver",
+                "exchangeRate": 5,
+                "linkedDeliveryReceiptId": "fin_dd_receipt",
+                "receiptId": "fin_dd_receipt",
+                "receiptAllocations": [{"receiptId": "fin_dd_receipt", "amountUSD": 150}],
+                "mergedPaidAllocations": [{"receiptId": "fin_dd_receipt", "amountUSD": 150}],
+                "dueAllocations": [{"receiptId": "fin_dd_receipt", "amountUSD": 150}],
+            },
+            actors,
+        )
+        # $300 drawn from a $200 receipt must be rejected.
+        assert double.status_code == 409, double.text

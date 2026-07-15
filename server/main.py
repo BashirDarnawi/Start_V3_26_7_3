@@ -4845,6 +4845,45 @@ def _financial_usage(
     return total
 
 
+def _financial_validate_combined_capacity(
+    paid_allocations: list[dict[str, Any]],
+    due_allocations: list[dict[str, Any]],
+    *,
+    locked_receipts: dict[str, Any],
+    ad_rows: list[Any],
+    current_ad_id: str | None,
+) -> None:
+    """ONE POT across BOTH pools for THIS ad.
+
+    The per-pool validators each exclude the current ad and check only their own pool's
+    request, so an ad drawing $150 paid AND $150 due from the same $200 receipt passed
+    both (the same money, promised twice). Sum this ad's TOTAL request per receipt and
+    check it against the capacity left by every OTHER ad plus outgoing transfers. Uses the
+    unified capacity (_financial_due_total: amountUSD once collected, else the debt) and
+    explicit usage (no whole-ad fallback), so it agrees with the client's readers.
+    """
+    requested: dict[str, int] = {}
+    for alloc in list(paid_allocations) + list(due_allocations):
+        rid = str(alloc.get("receiptId") or "")
+        if rid:
+            requested[rid] = requested.get(rid, 0) + _financial_minor(
+                alloc.get("amountUSD"), "receipt allocation"
+            )
+    for rid, amount in requested.items():
+        row = locked_receipts.get(rid)
+        if not row or bool(row["deleted"]):
+            continue  # existence/eligibility already enforced by the per-pool validators
+        data = _financial_row_data(row)
+        capacity = _financial_due_total(data)
+        committed = _financial_explicit_usage(
+            ad_rows, rid, exclude_ad_id=current_ad_id
+        ) + _financial_outgoing(data)
+        if committed + amount > capacity:
+            raise HTTPException(
+                status_code=409, detail=f"Insufficient balance on receipt {rid}"
+            )
+
+
 def _financial_outgoing(data: dict[str, Any]) -> int:
     transfers = data.get("transfers")
     if transfers is None:
@@ -5332,6 +5371,15 @@ def _financial_derive_ad(
             ad_rows=ad_rows,
             current_ad_id=current_ad_id,
         )
+        # Both pools can point at the same receipt here (merged paid + linked due);
+        # cap the ad's TOTAL draw per receipt so it cannot spend the same money twice.
+        _financial_validate_combined_capacity(
+            paid_allocations,
+            due_allocations,
+            locked_receipts=locked_receipts,
+            ad_rows=ad_rows,
+            current_ad_id=current_ad_id,
+        )
         amount_minor = sum(
             _financial_minor(row["amountUSD"], "ad allocation")
             for row in [*paid_allocations, *due_allocations]
@@ -5535,6 +5583,15 @@ def _financial_validate_ad_plan(
             current_ad_id=current_ad_id,
             require_pending=False,
         )
+    # Cap the ad's TOTAL draw per receipt across both pools (refund-undo / stop rebuild
+    # allocations, so this re-take must fit what the receipt has left).
+    _financial_validate_combined_capacity(
+        paid,
+        due,
+        locked_receipts=locked_receipts,
+        ad_rows=ad_rows,
+        current_ad_id=current_ad_id,
+    )
 
 
 def _ad_mutation_atomic(
@@ -5972,7 +6029,18 @@ def _financial_patch_receipt_atomic(
             primary_used = max(general_used - due_used, 0)
             outgoing = _financial_outgoing(old)
             new_total = _financial_minor(merged.get("amountUSD"), "receipt amount")
-            if new_total < general_used + outgoing:
+            # Completing a delivery is a PHYSICAL event: the driver collected whatever cash
+            # the customer actually handed over. If that is less than what the receipt's
+            # credit is already committed to, we must NOT reject it — that would strand the
+            # driver at the customer's door. Let it through; the shortfall is recorded on the
+            # receipt (paymentResult=UNDERPAID / remainingDue) and no NEW spending is possible
+            # because a Delivered receipt is eligible for neither funding pool. Arbitrary
+            # admin edits still hit the guard: they carry no pending->Delivered transition.
+            completing_delivery = (
+                str(merged.get("deliveryStatus") or "") == "Delivered"
+                and str(old.get("deliveryStatus") or "") != "Delivered"
+            )
+            if new_total < general_used + outgoing and not completing_delivery:
                 raise HTTPException(status_code=409, detail="Receipt amount is below committed ads and transfers")
             if _financial_due_total(merged) < due_used:
                 raise HTTPException(status_code=409, detail="Receipt due amount is below committed ads")
