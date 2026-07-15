@@ -708,6 +708,20 @@ function renderModal() {
                  state.modalData can never redirect this save onto the wrong
                  record. Empty value = create a brand-new receipt. -->
             <input type="hidden" id="receipt-editing-id" value="${Security.escapeHtml(String(receiptData.id || ''))}" />
+            ${(_newReceiptCarried && !receiptData.id) ? `
+            <!-- Existing-balance mode: same full form, only tagged on save. -->
+            <div class="p-3 rounded-lg" style="background:#fffbeb;border:1px solid #fcd34d">
+              <div class="flex items-center gap-2 text-sm font-extrabold" style="color:#b45309">
+                <i data-lucide="history" class="w-4 h-4"></i>
+                ${isArR ? 'رصيد سابق' : 'Existing Balance'}
+              </div>
+              <div class="text-xs mt-1" style="color:#92400e">
+                ${isArR
+                  ? 'أدخل المبلغ المتبقّي لعميلٍ استهلك جزءاً من رصيده سابقاً. يُحتسب كإيراد ويمكنه تمويل الإعلانات.'
+                  : "Enter the customer's REMAINING amount (they already used part of their balance elsewhere). It counts as revenue and can fund ads."}
+              </div>
+            </div>
+            ` : ''}
             <!-- Phone Search Section -->
             <div class="grid grid-cols-2 gap-3 p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
               <div>
@@ -2966,6 +2980,9 @@ function showWalletTopupModal(userId) {
 function closeModal() {
   state.activeModal = null;
   state.modalData = null;
+  // Existing-balance mode never leaks to the next receipt (showReceiptModal also
+  // resets it on open, but clear it here too so a cancelled carried receipt is clean).
+  _newReceiptCarried = false;
 
   // Clear temp funding states
   state.tempAdFunding = null;

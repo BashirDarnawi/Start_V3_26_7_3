@@ -1939,12 +1939,20 @@ function toggleReceiptCollected(receiptId) {
   else openCollectReceiptModal(receiptId);
 }
 
-function showReceiptModal() {
+// "Existing balance" mode for the NEXT new receipt. It uses the exact same receipt
+// form as a normal receipt (all payment methods, serial, collection, delivery, phone,
+// photos); the only difference is the saved receipt is tagged CARRIED_BALANCE (its own
+// colour + badge) and the amount entered is understood as the customer's REMAINING
+// balance. Reset every time the modal opens so a normal receipt is never tagged.
+let _newReceiptCarried = false;
+
+function showReceiptModal(carried = false) {
   // Permission check for creating receipts
   if (!currentUserHasPermission('receipts', 'add')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإنشاء وصولات' : 'You do not have permission to create receipts', 'error');
     return;
   }
+  _newReceiptCarried = !!carried;
   state.activeModal = 'receipt';
   state.modalData = null;
   updateUrlParams({ modal: 'receipt', id: 'new' }); // URL tracking for new receipt
@@ -1998,154 +2006,10 @@ function showNewReceiptChooser() {
 
 function _pickNewReceipt(kind) {
   document.getElementById('new-receipt-chooser')?.remove();
-  if (kind === 'carried') showCarriedBalanceModal();
-  else showReceiptModal();
+  // Both open the SAME full receipt form; the carried one is tagged on save.
+  showReceiptModal(kind === 'carried');
 }
 
-// "Existing balance" receipt: a customer already spent part of his money (we
-// don't know when or on what), so we record ONLY the remaining amount. It is a
-// normal Paid receipt (counts as revenue, funds ads) tagged CARRIED_BALANCE so
-// it can be told apart on the card. Modeled on the TRANSFER_IN receipt shape
-// (no paper serial, empty payments) which the server already accepts.
-function showCarriedBalanceModal() {
-  if (!currentUserHasPermission('receipts', 'add')) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإنشاء وصولات' : 'You do not have permission to create receipts', 'error');
-    return;
-  }
-  const isAr = state.language === 'ar';
-  const rate = Number(state.defaultExchangeRate) || 0;
-  const customers = getVisibleRecords(state.customers)
-    .slice()
-    .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
-  const options = customers
-    .map(c => `<option value="${Security.escapeHtml(c.id)}">${Security.escapeHtml(c.name || (isAr ? 'بدون اسم' : 'Unnamed'))}</option>`)
-    .join('');
-
-  document.getElementById('carried-balance-modal')?.remove();
-  const wrap = document.createElement('div');
-  wrap.id = 'carried-balance-modal';
-  wrap.className = 'fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
-  wrap.onclick = (e) => { if (e.target === wrap) wrap.remove(); };
-  wrap.innerHTML = `
-    <div class="glass-panel w-full max-w-md p-6 rounded-3xl" onclick="event.stopPropagation()">
-      <div class="flex justify-between items-start mb-3">
-        <h2 class="text-lg font-bold flex items-center gap-2" style="color:#92400e"><i data-lucide="history" class="w-5 h-5"></i>${isAr ? 'رصيد سابق' : 'Existing Balance'}</h2>
-        <button onclick="document.getElementById('carried-balance-modal')?.remove()" class="text-slate-400 hover:text-slate-600 p-1"><i data-lucide="x" class="w-5 h-5"></i></button>
-      </div>
-      <div class="p-3 rounded-xl mb-4 text-xs" style="background:#fffbeb;border:1px solid #fcd34d;color:#92400e">
-        ${isAr
-          ? 'سجّل المبلغ <b>المتبقي</b> لعميل استهلك جزءاً من رصيده سابقاً. يُحسب إيراداً ومتاح لتمويل الإعلانات.'
-          : 'Record the <b>remaining</b> amount for a customer who already used part of his balance. It counts as revenue and can fund ads.'}
-      </div>
-      <div class="space-y-3">
-        <div>
-          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isAr ? 'العميل' : 'Customer'}</label>
-          <select id="cb-customer" class="w-full glass-input px-3 py-2 rounded-lg">
-            <option value="">${isAr ? '— اختر العميل —' : '— select customer —'}</option>
-            ${options}
-          </select>
-        </div>
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isAr ? 'المتبقي (USD)' : 'Remaining (USD)'}</label>
-            <input type="text" inputmode="decimal" id="cb-amount" oninput="_cbUpdateLocal()" placeholder="0.00" class="w-full glass-input px-3 py-2 rounded-lg" />
-          </div>
-          <div>
-            <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isAr ? 'سعر الصرف' : 'Exchange rate'}</label>
-            <input type="text" inputmode="decimal" id="cb-rate" value="${rate ? rate : ''}" oninput="_cbUpdateLocal()" class="w-full glass-input px-3 py-2 rounded-lg" />
-          </div>
-        </div>
-        <div class="text-xs text-slate-500">${isAr ? 'يعادل بالدينار:' : 'Local equivalent:'} <span id="cb-local" class="font-bold text-slate-700 dark:text-slate-300">0.00</span> LYD</div>
-        <div>
-          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isAr ? 'ملاحظة (اختياري)' : 'Note (optional)'}</label>
-          <input type="text" id="cb-note" maxlength="200" placeholder="${isAr ? 'سبب/تفاصيل...' : 'Reason/details...'}" class="w-full glass-input px-3 py-2 rounded-lg" />
-        </div>
-        <div class="flex gap-3 pt-2">
-          <button id="cb-save" onclick="saveCarriedBalanceReceipt()" class="flex-1 btn-shine text-white font-bold py-3 rounded-xl" style="background:#d97706">
-            <i data-lucide="check" class="w-4 h-4 inline mr-1"></i>${isAr ? 'حفظ' : 'Save'}
-          </button>
-          <button onclick="document.getElementById('carried-balance-modal')?.remove()" class="flex-1 bg-slate-200 dark:bg-slate-700 font-bold py-3 rounded-xl">${isAr ? 'إلغاء' : 'Cancel'}</button>
-        </div>
-      </div>
-    </div>`;
-  document.body.appendChild(wrap);
-  if (window.lucide) lucide.createIcons();
-}
-
-function _cbUpdateLocal() {
-  const amount = parseFloat(document.getElementById('cb-amount')?.value) || 0;
-  const rate = parseFloat(document.getElementById('cb-rate')?.value) || 0;
-  const el = document.getElementById('cb-local');
-  if (el) el.textContent = (Math.round(amount * rate * 100) / 100).toFixed(2);
-}
-
-async function saveCarriedBalanceReceipt() {
-  const isAr = state.language === 'ar';
-  if (!currentUserHasPermission('receipts', 'add')) {
-    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'لا يوجد صلاحية لإنشاء وصولات' : 'You do not have permission to create receipts', 'error');
-    return;
-  }
-  const customerId = String(document.getElementById('cb-customer')?.value || '');
-  const amount = parseFloat(document.getElementById('cb-amount')?.value) || 0;
-  const rate = parseFloat(document.getElementById('cb-rate')?.value) || Number(state.defaultExchangeRate) || 0;
-  const note = String(document.getElementById('cb-note')?.value || '').trim();
-
-  if (!customerId || !state.customers.some(c => c && !c._deleted && String(c.id) === customerId)) {
-    showNotification(isAr ? 'خطأ في الإدخال' : 'Validation', isAr ? 'اختر عميلاً.' : 'Please choose a customer.', 'error');
-    return;
-  }
-  if (amount <= 0) {
-    showNotification(isAr ? 'خطأ في الإدخال' : 'Validation', isAr ? 'أدخل مبلغاً متبقياً أكبر من صفر.' : 'Enter a remaining amount greater than zero.', 'error');
-    return;
-  }
-  if (rate <= 0) {
-    showNotification(isAr ? 'خطأ في الإدخال' : 'Validation', isAr ? 'أدخل سعر صرف صحيحاً.' : 'Enter a valid exchange rate.', 'error');
-    return;
-  }
-
-  const amountUSD = Math.round(amount * 100) / 100;
-  const nowIso = new Date().toISOString();
-  const receipt = {
-    id: generateId('receipt'),
-    recordType: 'receipt',
-    customerId,
-    amountUSD,
-    exchangeRate: rate,
-    amountLocal: Math.round(amountUSD * rate * 100) / 100,
-    status: 'Paid',
-    isPaid: true,
-    paymentMethod: 'Carried Balance',
-    receiptType: 'CARRIED_BALANCE',
-    serialNumber: '',
-    finalReceiptNo: '',
-    payments: [],
-    phoneNumber: '',
-    // Starts NOT collected — it shows in the collection list so the admin can
-    // record the physical cash handover explicitly (same as a normal receipt).
-    collected: false,
-    deliveryStatus: 'Office',
-    isReceivedInOffice: true,
-    startDate: nowIso,
-    endDate: nowIso,
-    collectionDate: nowIso,
-    createdAt: nowIso,
-    note: note || (isAr ? 'رصيد سابق مستهلك جزئياً — سُجِّل المتبقي فقط' : 'Carried-over balance (partially used earlier) — remaining only')
-  };
-
-  const btn = document.getElementById('cb-save');
-  if (btn) btn.disabled = true;
-  const savedOk = await addRecord(state.receipts, receipt);
-  if (!savedOk) { if (btn) btn.disabled = false; return; }
-
-  document.getElementById('carried-balance-modal')?.remove();
-  const cName = state.customers.find(c => String(c.id) === customerId)?.name || '';
-  showNotification(
-    isAr ? 'تم الحفظ' : 'Saved',
-    isAr ? `تم تسجيل رصيد سابق $${amountUSD.toFixed(2)} لـ ${cName}` : `Existing balance $${amountUSD.toFixed(2)} recorded for ${cName}`,
-    'success'
-  );
-  render();
-}
 
 function manageSplitPayments(receiptId) {
   const receipt = state.receipts.find(a => a.id === receiptId);
