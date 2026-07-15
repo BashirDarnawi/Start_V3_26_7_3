@@ -4827,6 +4827,50 @@ def _financial_explicit_usage(
     return total
 
 
+def _financial_ad_committed(ad: dict[str, Any], receipt_id: str) -> int:
+    """The money this ad TRULY commits against a receipt — the number the capacity
+    check must count for every OTHER ad.
+
+    Explicit rows + due mirror first (that already covers modern and legacy-due ads).
+    Only a ROWLESS, genuinely receipt-funded ad falls back to its whole spend. A
+    not_paid/driver ad is excluded from that fallback: its receiptId points at the
+    delivery receipt for linkage, but it is funded by the customer's CASH, so charging
+    its amountUSD here would be the same phantom commitment the due reader had to drop.
+    Sits between _financial_ad_explicit_usage (misses legacy PAID ads -> lets a self-draw
+    through) and _financial_ad_general_usage (charges cash-driver ads -> false-blocks).
+    """
+    explicit = _financial_ad_explicit_usage(ad, receipt_id)
+    if explicit > 0:
+        return explicit
+    if isinstance(ad.get("receiptAllocations"), list) or isinstance(ad.get("dueAllocations"), list):
+        return 0
+    if str(ad.get("paymentStatus") or "") == "not_paid" and str(ad.get("collectionMethod") or "") == "driver":
+        return 0
+    references = {
+        str(ad.get("fundingReceiptId") or ""),
+        str(ad.get("receiptId") or ""),
+        str(ad.get("linkedDeliveryReceiptId") or ""),
+    }
+    if receipt_id not in references:
+        return 0
+    fallback = ad.get("spentUSD") if ad.get("spentUSD") is not None else ad.get("amountUSD")
+    return _financial_minor(fallback, "stored legacy ad amount")
+
+
+def _financial_committed_usage(
+    ad_rows: list[Any], receipt_id: str, *, exclude_ad_id: str | None = None
+) -> int:
+    total = 0
+    for row in ad_rows:
+        if exclude_ad_id and str(row.get("id") or "") == exclude_ad_id:
+            continue
+        ad = _financial_row_data(row)
+        if str(ad.get("recordType") or "") == "receipt":
+            continue
+        total += _financial_ad_committed(ad, receipt_id)
+    return total
+
+
 def _financial_usage(
     ad_rows: list[Any], receipt_id: str, *, due: bool = False, exclude_ad_id: str | None = None
 ) -> int:
@@ -4875,7 +4919,7 @@ def _financial_validate_combined_capacity(
             continue  # existence/eligibility already enforced by the per-pool validators
         data = _financial_row_data(row)
         capacity = _financial_due_total(data)
-        committed = _financial_explicit_usage(
+        committed = _financial_committed_usage(
             ad_rows, rid, exclude_ad_id=current_ad_id
         ) + _financial_outgoing(data)
         if committed + amount > capacity:
@@ -6028,21 +6072,18 @@ def _financial_patch_receipt_atomic(
             due_used = _financial_usage(ad_rows, receipt_id, due=True)
             primary_used = max(general_used - due_used, 0)
             outgoing = _financial_outgoing(old)
-            new_total = _financial_minor(merged.get("amountUSD"), "receipt amount")
-            # Completing a delivery is a PHYSICAL event: the driver collected whatever cash
-            # the customer actually handed over. If that is less than what the receipt's
-            # credit is already committed to, we must NOT reject it — that would strand the
-            # driver at the customer's door. Let it through; the shortfall is recorded on the
-            # receipt (paymentResult=UNDERPAID / remainingDue) and no NEW spending is possible
-            # because a Delivered receipt is eligible for neither funding pool. Arbitrary
-            # admin edits still hit the guard: they carry no pending->Delivered transition.
-            completing_delivery = (
-                str(merged.get("deliveryStatus") or "") == "Delivered"
-                and str(old.get("deliveryStatus") or "") != "Delivered"
-            )
-            if new_total < general_used + outgoing and not completing_delivery:
+            # ONE capacity, same function the readers use: amountUSD once collected, else the
+            # debt the driver will collect (_financial_due_total). Measuring commitments
+            # against the raw amountUSD instead used the *collected cash* as the cap on a
+            # still-uncollected delivery receipt — so an underpaid completion (amountUSD drops
+            # to the low collected amount while the debt-backed due credit is still fully
+            # committed) and every later benign PATCH on it (office handover, corrections)
+            # 409'd, stranding the receipt. The debt basis keeps the committed credit backed;
+            # the shortfall lives only as remainingDue and is never spendable.
+            capacity = _financial_due_total(merged)
+            if capacity < general_used + outgoing:
                 raise HTTPException(status_code=409, detail="Receipt amount is below committed ads and transfers")
-            if _financial_due_total(merged) < due_used:
+            if capacity < due_used:
                 raise HTTPException(status_code=409, detail="Receipt due amount is below committed ads")
             if (primary_used > 0 or outgoing > 0) and not _financial_receipt_transferable(merged):
                 raise HTTPException(status_code=409, detail="A funded or transferred receipt must remain paid")

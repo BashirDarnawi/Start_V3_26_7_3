@@ -1817,3 +1817,131 @@ class TestReceiptAndAdTransactions:
         )
         # $300 drawn from a $200 receipt must be rejected.
         assert double.status_code == 409, double.text
+
+    def test_office_handover_after_underpaid_delivery_is_not_blocked(self, actors):
+        # Regression: FIX-1 must not merely unblock the completion and then trap the
+        # receipt. An underpaid delivered receipt still needs its office-handover PATCH,
+        # and every guard must measure commitments against the receipt's CAPACITY (the
+        # debt while Not Paid), not the freshly-lowered collected amountUSD.
+        self._customer("fin_oh_customer", actors)
+        self._receipt(
+            "fin_oh_receipt",
+            "fin_oh_customer",
+            100,
+            actors,
+            status="Not Paid",
+            isPaid=False,
+            amountLocal=500,
+            debtAmountLocal=500,
+            debtAmountUSD=100,
+            tempReceiptNo="D90001",
+            deliveryStatus="Needs Delivery",
+            deliveryPersonId=actors["driver"]["id"],
+        )
+        ad = self._mutate_ad(
+            "fin_oh_ad",
+            "fin-oh-ad-001",
+            {
+                "customerId": "fin_oh_customer",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "driver",
+                "exchangeRate": 5,
+                "linkedDeliveryReceiptId": "fin_oh_receipt",
+                "receiptId": "fin_oh_receipt",
+                "receiptAllocations": [],
+                "mergedPaidAllocations": [],
+                "dueAllocations": [{"receiptId": "fin_oh_receipt", "amountUSD": 100}],
+            },
+            actors,
+        )
+        assert ad.status_code == 200, ad.text
+        assert client.patch(
+            "/api/collections/receipts/fin_oh_receipt",
+            json={"data": {"deliveryStatus": "In Progress", "acceptedDate": "x"}},
+            cookies=actors["driver_cookies"],
+        ).status_code == 200
+        # Collect only 300 of 500 owed -> UNDERPAID, amountUSD becomes $60 < committed $100.
+        assert client.patch(
+            "/api/collections/receipts/fin_oh_receipt",
+            json={"data": {
+                "deliveryStatus": "Delivered",
+                "finalReceiptNo": "990001",
+                "receiptImage": "data:image/png;base64,AAAA",
+                "amountCollectedFromCustomer": 300,
+                "actualDeliveryFeeCollected": 0,
+            }},
+            cookies=actors["driver_cookies"],
+        ).status_code == 200
+        # The office-handover step must succeed - the driver-held receipt cannot be trapped.
+        handover = client.patch(
+            "/api/collections/receipts/fin_oh_receipt",
+            json={"data": {"isReceivedInOffice": True, "receivedInOfficeAt": "now"}},
+            cookies=actors["delivery_manager_cookies"],
+        )
+        assert handover.status_code == 200, handover.text
+
+    def test_combined_capacity_counts_legacy_rowless_paid_ads(self, actors):
+        # Regression: the combined cross-pool check must count a legacy PAID ad that
+        # holds its funding in the whole-ad fallback (no allocation arrays), or the
+        # same money is spent twice. Seed such an ad directly (only old prod data / a
+        # raw import can produce the rowless shape).
+        self._customer("fin_leg_customer", actors)
+        self._receipt(
+            "fin_leg_receipt",
+            "fin_leg_customer",
+            200,
+            actors,
+            status="Paid",
+            isPaid=True,
+            amountLocal=1000,
+            debtAmountLocal=1000,
+            debtAmountUSD=200,
+            tempReceiptNo="D95001",
+            deliveryStatus="Needs Delivery",
+            deliveryPersonId=actors["driver"]["id"],
+        )
+        # Legacy paid ad L: $100 funded from R, no allocation arrays at all.
+        with db_conn() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO entities "
+                    "(type,id,data_json,deleted,created_at,created_by,last_modified) "
+                    "VALUES ('ads',:id,:data,false,:ts,:by,:ts)"
+                ),
+                {
+                    "id": "fin_leg_legacy_ad",
+                    "data": json_dumps({
+                        "id": "fin_leg_legacy_ad",
+                        "recordType": "ad",
+                        "customerId": "fin_leg_customer",
+                        "paymentStatus": "paid",
+                        "fundingReceiptId": "fin_leg_receipt",
+                        "receiptId": "fin_leg_receipt",
+                        "amountUSD": 100,
+                        "spentUSD": 100,
+                        "exchangeRate": 5,
+                        "status": "Active",
+                    }),
+                    "ts": now_ms(),
+                    "by": actors["admin_user"]["id"],
+                },
+            )
+        # New ad drawing $100 paid + $100 due from the same $200 receipt. With L already
+        # holding $100, only $100 is left, so this $200 draw must be rejected.
+        double = self._mutate_ad(
+            "fin_leg_new_ad",
+            "fin-leg-new-001",
+            {
+                "customerId": "fin_leg_customer",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "driver",
+                "exchangeRate": 5,
+                "linkedDeliveryReceiptId": "fin_leg_receipt",
+                "receiptId": "fin_leg_receipt",
+                "receiptAllocations": [{"receiptId": "fin_leg_receipt", "amountUSD": 100}],
+                "mergedPaidAllocations": [{"receiptId": "fin_leg_receipt", "amountUSD": 100}],
+                "dueAllocations": [{"receiptId": "fin_leg_receipt", "amountUSD": 100}],
+            },
+            actors,
+        )
+        assert double.status_code == 409, double.text
