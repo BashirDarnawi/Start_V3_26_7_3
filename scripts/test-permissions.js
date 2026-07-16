@@ -1562,7 +1562,84 @@ check('ad modal contains the beginner-facing manual budget control', () => {
   assert(modalSource.includes('This amount appears as customer debt until payment is recorded.'), 'budget field does not explain the resulting debt');
   assert(modalSource.includes('remaining += getEditingAdExistingAllocationUSD(receiptId);'), 'Paid conversion still blocks the ad\'s own due-funded receipt');
   assert(modalSource.includes('receiptId: resolveAdPrimaryReceiptId({'), 'local ad saves still keep a stale delivery receipt link');
-  assert(persistenceSource.includes("ad.fundingReceiptId || (!isDriverDebt ? ad.receiptId : '')"), 'legacy delivery links can still be migrated into false receipt funding');
+  assert(persistenceSource.includes("ad.fundingReceiptId || (!isLinkedUnpaidDebt ? ad.receiptId : '')"), 'linked unpaid receipts can still be migrated into false paid funding');
+});
+
+console.log('\n=== UNPAID IN-SHOP RECEIPTS: reserve debt now and settle later ===');
+
+check('In Shop picker accepts only same-customer unpaid office receipts', () => {
+  const base = {
+    id: 'shop_due', customerId: 'shop_customer', status: 'Not Paid', isPaid: false,
+    amountUSD: 30, amountLocal: 291, exchangeRate: 9.7,
+    deliveryStatus: 'Office', statusDetail: { notPaidCollection: 'office' }
+  };
+  assert(sandbox.isUnpaidShopReceipt(base, 'shop_customer') === true, 'valid unpaid office receipt was rejected');
+  assert(sandbox.isUnpaidShopReceipt({ ...base, customerId: 'other' }, 'shop_customer') === false, 'other customer receipt was accepted');
+  assert(sandbox.isUnpaidShopReceipt({ ...base, status: 'Paid', isPaid: true }, 'shop_customer') === false, 'paid receipt was accepted');
+  assert(sandbox.isUnpaidShopReceipt({ ...base, tempReceiptNo: 'D9', deliveryStatus: 'Needs Delivery', statusDetail: { notPaidCollection: 'delivery' } }, 'shop_customer') === false, 'delivery receipt was accepted as In Shop');
+  assert(sandbox.isUnpaidShopReceipt({ ...base, _deleted: true }, 'shop_customer') === false, 'deleted receipt was accepted');
+});
+
+check('unpaid shop receipt + linked ad is minus until receipt becomes Paid', () => {
+  const original = {
+    customers: S.customers, receipts: S.receipts, ads: S.ads,
+    modalData: S.modalData, defaultExchangeRate: S.defaultExchangeRate
+  };
+  const receipt = {
+    id: 'shop_debt_receipt', recordType: 'receipt', customerId: 'shop_debt_customer',
+    amountUSD: 30, amountLocal: 291, exchangeRate: 9.7,
+    status: 'Not Paid', isPaid: false, deliveryStatus: 'Office',
+    statusDetail: { notPaidCollection: 'office' }, transfers: []
+  };
+  const ad = {
+    id: 'shop_debt_ad', recordType: 'ad', customerId: 'shop_debt_customer',
+    amountUSD: 30, amountLocal: 291, exchangeRate: 9.7, status: 'Active',
+    paymentStatus: 'not_paid', collectionMethod: 'in_shop', isPaid: false,
+    receiptId: receipt.id, receiptAllocations: [],
+    dueAllocations: [{ receiptId: receipt.id, amountUSD: 30 }], dueAmountToUseUSD: 30
+  };
+  S.customers = [{ id: 'shop_debt_customer', name: 'Shop Debt Customer' }];
+  S.receipts = [receipt];
+  S.ads = [ad];
+  S.defaultExchangeRate = 9.7;
+  try {
+    const before = sandbox.getCustomerStats('shop_debt_customer');
+    assert(before.totalPaidUSD === 0, `unpaid receipt counted as paid: $${before.totalPaidUSD}`);
+    assert(before.totalSpentUSD === 30, `shop ad spend should be $30, got $${before.totalSpentUSD}`);
+    assert(before.balanceUSD === -30, `shop debt should be -$30, got $${before.balanceUSD}`);
+    assert(before.balanceLYD === -291, `shop debt should be -291 LYD, got ${before.balanceLYD}`);
+    const dueBefore = sandbox.getDeliveryReceiptDueUsage(receipt);
+    assert(dueBefore.usedDueUSD === 30 && dueBefore.remainingDueUSD === 0, 'unpaid shop receipt capacity was not reserved exactly once');
+
+    receipt.status = 'Paid';
+    receipt.isPaid = true;
+    const afterReceiptPaid = sandbox.getCustomerStats('shop_debt_customer');
+    assert(afterReceiptPaid.balanceUSD === 0, `paid receipt should clear customer debt, got $${afterReceiptPaid.balanceUSD}`);
+    const dueAfter = sandbox.getDeliveryReceiptDueUsage(receipt);
+    assert(dueAfter.usedDueUSD === 30 && dueAfter.remainingDueUSD === 0, 'changing receipt Paid duplicated or released its committed $30');
+
+    S.modalData = { ...ad };
+    const addBack = sandbox.getEditingAdExistingAllocationUSD(receipt.id);
+    assert(addBack === 30, `Paid conversion did not add back its own shop due row: $${addBack}`);
+  } finally {
+    S.customers = original.customers;
+    S.receipts = original.receipts;
+    S.ads = original.ads;
+    S.modalData = original.modalData;
+    S.defaultExchangeRate = original.defaultExchangeRate;
+  }
+});
+
+check('local In Shop debt links its due receipt and Paid conversion replaces it', () => {
+  assert(sandbox.resolveAdPrimaryReceiptId({
+    paymentStatus: 'not_paid', collectionMethod: 'in_shop', allocations: [],
+    dueAllocations: [{ receiptId: 'shop_unpaid_receipt', amountUSD: 30 }]
+  }) === 'shop_unpaid_receipt', 'unpaid shop ad lost its receipt link');
+  assert(sandbox.resolveAdPrimaryReceiptId({
+    paymentStatus: 'paid', collectionMethod: 'in_shop',
+    allocations: [{ receiptId: 'shop_paid_receipt', amountUSD: 30 }],
+    dueAllocations: [{ receiptId: 'shop_unpaid_receipt', amountUSD: 30 }]
+  }) === 'shop_paid_receipt', 'Paid conversion kept the stale unpaid shop link');
 });
 
 console.log('\n=== RECEIPT PHOTOS: visible and safely clickable inside/outside the form ===');

@@ -131,6 +131,7 @@ const S = bridged.state;
 // Real app functions under test — no re-implementation of the math anywhere.
 const getReceiptUsageStats = sandbox.getReceiptUsageStats;
 const getDeliveryReceiptDueUsage = sandbox.getDeliveryReceiptDueUsage;
+const getCustomerStats = sandbox.getCustomerStats;
 const _deliveryDefaultRate1 = sandbox._deliveryDefaultRate1;
 const PAYMENT_METHODS = vm.runInContext('PAYMENT_METHODS', sandbox);
 
@@ -299,6 +300,40 @@ async function main() {
   console.log('############################################################\n');
 
   console.log('--- PAID BALANCE POOL: getReceiptUsageStats ---');
+
+  await must('A0. unpaid In Shop receipt makes a -$30 debt, then Paid clears it without double-use', () => {
+    resetState();
+    S.defaultExchangeRate = 9.7;
+    const r = {
+      id: 'receipt_shop_a0', recordType: 'receipt', customerId: 'c1',
+      amountUSD: 30, amountLocal: 291, exchangeRate: 9.7,
+      status: 'Not Paid', isPaid: false, deliveryStatus: 'Office',
+      statusDetail: { notPaidCollection: 'office' }, payments: [], transfers: []
+    };
+    S.receipts.push(r);
+    makeAd({
+      id: 'ad_shop_a0', amountUSD: 30, amountLocal: 291, spentUSD: 30,
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'in_shop',
+      receiptId: r.id, receiptAllocations: [],
+      dueAllocations: [{ receiptId: r.id, amountUSD: 30 }], dueAmountToUseUSD: 30
+    });
+
+    const before = getCustomerStats('c1');
+    assert(near(before.totalPaidUSD, 0), `unpaid receipt counted as paid: ${usd(before.totalPaidUSD)}`);
+    assert(near(before.balanceUSD, -30), `customer debt should be -$30, got ${usd(before.balanceUSD)}`);
+    assert(near(before.balanceLYD, -291), `customer debt should be -291 LYD, got ${before.balanceLYD}`);
+    const dueBefore = getDeliveryReceiptDueUsage(r);
+    assert(near(dueBefore.usedDueUSD, 30) && near(dueBefore.remainingDueUSD, 0), 'the unpaid receipt was not reserved exactly once');
+
+    collect(r, 30);
+    const after = getCustomerStats('c1');
+    assert(near(after.balanceUSD, 0), `receipt payment should clear the debt, got ${usd(after.balanceUSD)}`);
+    const paidUsage = getReceiptUsageStats(r);
+    const dueUsage = getDeliveryReceiptDueUsage(r);
+    assert(near(paidUsage.usedUSD, 30), `paid usage should stay $30, got ${usd(paidUsage.usedUSD)}`);
+    assert(near(dueUsage.usedDueUSD, 30), `due view should stay $30, got ${usd(dueUsage.usedDueUSD)}`);
+    assert(near(paidUsage.usedUSD, dueUsage.usedDueUSD), 'changing Paid exposed a second receipt balance');
+  });
 
   await must('A1. an ad funded $30 from a $100 paid receipt consumes exactly $30', () => {
     resetState();

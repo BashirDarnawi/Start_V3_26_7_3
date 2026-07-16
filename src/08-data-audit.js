@@ -817,8 +817,8 @@ function getReceiptUsageStats(receipt) {
   };
 }
 
-// Compute usage stats for a DELIVERY receipt's due amount (Not Paid receipts)
-// This tracks how much of the debt/due amount has been used by ads linking to this receipt
+// Compute usage stats for a receipt's promised/due amount (Not Paid receipts).
+// This covers both delivery debt and unpaid In Shop receipt budgets.
 function getDeliveryReceiptDueUsage(receipt) {
   const receiptObj = typeof receipt === 'string'
     ? (state.receipts || []).find(r => r.id === receipt)
@@ -841,13 +841,20 @@ function getDeliveryReceiptDueUsage(receipt) {
   const exchangeRate = receiptObj.exchangeRate || state.defaultExchangeRate || 1;
   const dueAmountLocal = Number(receiptObj.debtAmountLocal ?? receiptObj.amountLocal ?? 0) || 0;
   const debtUSD = exchangeRate > 0 ? dueAmountLocal / exchangeRate : 0;
+  const statusDetail = receiptObj.statusDetail && typeof receiptObj.statusDetail === 'object'
+    ? receiptObj.statusDetail
+    : {};
+  const notPaidCollection = String(statusDetail.notPaidCollection || '').trim().toLowerCase();
 
   // Capacity: before collection the receipt is worth the debt the driver will collect.
   // Once collected it is worth what was ACTUALLY collected (amountUSD) — the debt fields
   // survive as history and must never be read as a second capacity. Over-collecting
   // legitimately adds real balance; re-reading the stale debt invents it.
   const collected = receiptObj.isPaid === true || String(receiptObj.status || '') === 'Paid';
-  const totalDueUSD = collected ? (Number(receiptObj.amountUSD) || 0) : debtUSD;
+  const isShopReceipt = ['office', 'in_shop', 'shop'].includes(notPaidCollection);
+  const totalDueUSD = (collected || isShopReceipt)
+    ? (Number(receiptObj.amountUSD) || 0)
+    : debtUSD;
 
   // Count only EXPLICIT commitments — an allocation row in either pool, or the legacy due
   // mirror. Deliberately NOT getReceiptUsageStats.usedUSD: that function also carries a

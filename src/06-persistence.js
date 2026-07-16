@@ -583,12 +583,12 @@ function migrateOldDataFormats() {
         changed = true;
 
         // Migrate old single-receipt linking to receiptAllocations
-        // For Not Paid + Driver ads, receiptId is only the delivery reference.
-        // Turning that link into funding would falsely consume the receipt and
-        // erase the customer's unfunded debt.
-        const isDriverDebt = String(ad.paymentStatus || '').toLowerCase() === 'not_paid'
-          && String(ad.collectionMethod || '').toLowerCase() === 'driver';
-        const linkedReceiptId = ad.fundingReceiptId || (!isDriverDebt ? ad.receiptId : '');
+        // For receipt-linked unpaid ads, receiptId is the debt source reference,
+        // not proof that money was already paid. Turning it into paid funding
+        // would consume the receipt twice and erase the customer's debt.
+        const isLinkedUnpaidDebt = String(ad.paymentStatus || '').toLowerCase() === 'not_paid'
+          && ['driver', 'in_shop'].includes(String(ad.collectionMethod || '').toLowerCase());
+        const linkedReceiptId = ad.fundingReceiptId || (!isLinkedUnpaidDebt ? ad.receiptId : '');
         if (linkedReceiptId && (ad.amountUSD || ad.spentUSD)) {
           ad.receiptAllocations.push({
             receiptId: String(linkedReceiptId),

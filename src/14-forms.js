@@ -2102,9 +2102,14 @@ function initAdFunding(adData = {}) {
   // saved ad until Save) and snap the amount to 2 decimals for display:
   // stored values can carry float residue from proportional stop-ad math
   // (e.g. 50.000000000000001), which otherwise shows raw in the input.
+  const isUnpaidShopDebt = String(adData.paymentStatus || '').toLowerCase() === 'not_paid'
+    && String(adData.collectionMethod || '').toLowerCase() === 'in_shop';
+  const sourceAllocations = isUnpaidShopDebt && Array.isArray(adData.dueAllocations)
+    ? adData.dueAllocations
+    : adData.receiptAllocations;
   state.tempAdFunding = {
-    allocations: Array.isArray(adData.receiptAllocations)
-      ? adData.receiptAllocations.map(a => ({
+    allocations: Array.isArray(sourceAllocations)
+      ? sourceAllocations.map(a => ({
           ...a,
           amountUSD: (a && a.amountUSD !== '' && a.amountUSD !== null && isFinite(parseFloat(a.amountUSD)))
             ? Math.round(parseFloat(a.amountUSD) * 100) / 100
@@ -2129,16 +2134,17 @@ function getEditingAdExistingAllocationUSD(receiptId, kind = 'receipt') {
   const sources = kind === 'merged'
     ? [existingAd.mergedPaidAllocations || existingAd.receiptAllocations]
     : [existingAd.receiptAllocations];
-  const isDriverDebt = String(existingAd.paymentStatus || '').toLowerCase() === 'not_paid'
-    && String(existingAd.collectionMethod || '').toLowerCase() === 'driver';
-  if (kind === 'receipt' && isDriverDebt) sources.push(existingAd.dueAllocations);
+  const collectionMethod = String(existingAd.collectionMethod || '').toLowerCase();
+  const isUnpaidReceiptDebt = String(existingAd.paymentStatus || '').toLowerCase() === 'not_paid'
+    && (collectionMethod === 'driver' || collectionMethod === 'in_shop');
+  if (kind === 'receipt' && isUnpaidReceiptDebt) sources.push(existingAd.dueAllocations);
 
   let total = sources.reduce((sum, src) => {
     if (!Array.isArray(src)) return sum;
     return sum + src.filter(a => a && String(a.receiptId) === rid)
       .reduce((rowSum, a) => rowSum + (parseFloat(a.amountUSD) || 0), 0);
   }, 0);
-  if (kind === 'receipt' && isDriverDebt && !Array.isArray(existingAd.dueAllocations)
+  if (kind === 'receipt' && isUnpaidReceiptDebt && !Array.isArray(existingAd.dueAllocations)
       && String(existingAd.linkedDeliveryReceiptId || existingAd.receiptId || '') === rid) {
     const rate = Number(existingAd.exchangeRate) || Number(state.defaultExchangeRate) || 1;
     total += parseFloat(existingAd.dueAmountToUseUSD)
@@ -2375,6 +2381,33 @@ function getPendingTempDeliveryReceiptsForCustomer(customerId) {
     .sort((a, b) => new Date(b.createdAt || b.startDate || 0) - new Date(a.createdAt || a.startDate || 0));
 }
 
+function isUnpaidShopReceipt(receipt, customerId = '') {
+  if (!receipt || receipt._deleted) return false;
+  if (customerId && String(receipt.customerId || '') !== String(customerId)) return false;
+  const status = String(receipt.status || '');
+  if (status !== 'Not Paid' || receipt.isPaid === true) return false;
+  const detail = receipt.statusDetail && typeof receipt.statusDetail === 'object'
+    ? receipt.statusDetail
+    : {};
+  const collection = String(detail.notPaidCollection || '').trim().toLowerCase();
+  const tempNo = String(receipt.tempReceiptNo || '').trim();
+  const receiptType = String(receipt.receiptType || '').trim().toUpperCase();
+  const deliveryStatus = String(receipt.deliveryStatus || '').trim();
+  if (collection && !['office', 'in_shop', 'shop'].includes(collection)) return false;
+  if ((tempNo.startsWith('D') && /^D\d+$/.test(tempNo)) || receiptType === 'DELIVERY_TEMP') return false;
+  if (deliveryStatus && deliveryStatus !== 'Office') return false;
+  return status !== 'Canceled' && status !== 'Lost';
+}
+
+function getUnpaidShopReceiptsForCustomer(customerId) {
+  const cid = String(customerId || '');
+  if (!cid) return [];
+  return getVisibleRecords(state.receipts)
+    .filter(receipt => isUnpaidShopReceipt(receipt, cid))
+    .filter(receipt => getDeliveryReceiptDueUsage(receipt).remainingDueUSD > 0.009)
+    .sort((a, b) => new Date(b.createdAt || b.startDate || 0) - new Date(a.createdAt || a.startDate || 0));
+}
+
 function refreshAdTempReceiptOptions() {
   const isArT = state.language === 'ar';
   const paymentStatus = document.getElementById('ad-payment-status')?.value || '';
@@ -2384,9 +2417,15 @@ function refreshAdTempReceiptOptions() {
   const select = document.getElementById('ad-temp-receipt-id');
   const hidden = document.getElementById('ad-linked-receipt-id');
   const hint = document.getElementById('ad-temp-receipt-hint');
+  const label = document.getElementById('ad-linked-receipt-label');
+  const help = document.getElementById('ad-linked-receipt-help');
+  const dueTitle = document.getElementById('ad-due-title');
+  const dueAmountLabel = document.getElementById('ad-due-amount-label');
   if (!section || !select || !hidden) return;
 
-  const shouldShow = paymentStatus === 'not_paid' && collectionMethod === 'driver' && !!customerId;
+  const isShop = collectionMethod === 'in_shop';
+  const isDriver = collectionMethod === 'driver';
+  const shouldShow = paymentStatus === 'not_paid' && (isDriver || isShop) && !!customerId;
   section.classList.toggle('hidden', !shouldShow);
   if (!shouldShow) {
     hidden.value = '';
@@ -2395,46 +2434,73 @@ function refreshAdTempReceiptOptions() {
     return;
   }
 
-  const receipts = getPendingTempDeliveryReceiptsForCustomer(customerId);
-  const current = String(hidden.value || '').trim() || String(state.modalData?.receiptId || '').trim();
+  if (label) label.textContent = isShop
+    ? (isArT ? 'ربط وصل غير مدفوع في المحل' : 'Link Unpaid In-Shop Receipt')
+    : (isArT ? 'ربط وصل توصيل (D#)' : 'Link Delivery Receipt (D#)');
+  if (help) {
+    help.classList.toggle('hidden', !isShop);
+    help.textContent = isShop
+      ? (isArT
+          ? 'اختر الوصل الذي لم يدفعه العميل. سيظهر مبلغ الإعلان كدين (ناقص) حتى تغيّر الوصل والإعلان إلى «مدفوع» بعد استلام المال.'
+          : 'Choose the receipt the customer has not paid. The ad amount counts as debt (minus) until you change the receipt and ad to Paid after receiving the money.')
+      : '';
+  }
+  if (dueTitle) dueTitle.textContent = isShop
+    ? (isArT ? 'ميزانية الإعلان من الوصل غير المدفوع' : 'Ad Budget from Unpaid Receipt')
+    : (isArT ? 'استخدام رصيد من الوصل المستحق' : 'Use Credit from Due Receipt');
+  if (dueAmountLabel) dueAmountLabel.textContent = isShop
+    ? (isArT ? 'ميزانية الإعلان (USD)' : 'Ad Budget (USD)')
+    : (isArT ? 'الصرف المخطط (USD)' : 'Planned Spend (USD)');
+
+  const receipts = isShop
+    ? getUnpaidShopReceiptsForCustomer(customerId)
+    : getPendingTempDeliveryReceiptsForCustomer(customerId);
+  let current = String(hidden.value || '').trim()
+    || String(state.modalData?.linkedDeliveryReceiptId || state.modalData?.receiptId || '').trim();
   const isEditingSavedAd = !!state.modalData?.id;
+  const editingSameMode = isEditingSavedAd
+    && String(state.modalData?.collectionMethod || '') === collectionMethod;
+  if (!receipts.some(r => String(r.id) === current) && !editingSameMode) current = '';
 
   // The list only holds PENDING delivery receipts. A saved ad whose receipt has
   // since been delivered would therefore find its own link missing from the
   // options — and the auto-suggest below would silently RE-LINK the ad to a
   // different receipt (spending another receipt's money). Keep the ad's own
   // receipt in the list, marked as no longer pending.
-  const linkedReceipt = current
+  const linkedReceipt = current && editingSameMode
     ? getVisibleRecords(state.receipts).find(r => String(r.id) === current)
     : null;
   const linkedIsListed = !!linkedReceipt && receipts.some(r => String(r.id) === current);
   const extraOption = (linkedReceipt && !linkedIsListed)
     ? (() => {
         const place = String(linkedReceipt.deliveryPlaceName || '').trim();
-        const note = isArT ? 'غير معلق' : 'no longer pending';
-        const label = `${linkedReceipt.tempReceiptNo || linkedReceipt.serialNumber || linkedReceipt.id.slice(0, 8)}${place ? ' • ' + place : ''} • (${note})`;
-        return `<option value="${linkedReceipt.id}" selected>${Security.escapeHtml(label)}</option>`;
+        const note = isShop
+          ? (isArT ? 'لم يعد غير مدفوع' : 'no longer unpaid')
+          : (isArT ? 'غير معلق' : 'no longer pending');
+        const optionLabel = `${linkedReceipt.tempReceiptNo || linkedReceipt.serialNumber || linkedReceipt.id.slice(0, 8)}${place ? ' • ' + place : ''} • (${note})`;
+        return `<option value="${linkedReceipt.id}" selected>${Security.escapeHtml(optionLabel)}</option>`;
       })()
     : '';
 
   select.innerHTML = [
-    `<option value="">${isArT ? 'اختر وصلاً معلقاً...' : 'Select pending receipt...'}</option>`,
+    `<option value="">${isShop ? (isArT ? 'اختر وصلاً غير مدفوع...' : 'Select an unpaid receipt...') : (isArT ? 'اختر وصلاً معلقاً...' : 'Select pending receipt...')}</option>`,
     extraOption,
     ...receipts.map(r => {
       // Calculate available credit in USD
       const dueUsage = getDeliveryReceiptDueUsage(r);
       const availableUSD = dueUsage.remainingDueUSD;
       const place = String(r.deliveryPlaceName || '').trim();
-      const label = `${r.tempReceiptNo}${place ? ' • ' + place : ''} • $${availableUSD.toFixed(2)} ${isArT ? 'متاح' : 'available'}`;
+      const receiptNumber = r.tempReceiptNo || r.serialNumber || r.finalReceiptNo || (isArT ? 'وصل بدون رقم' : 'Unnumbered receipt');
+      const optionLabel = `${receiptNumber}${place ? ' • ' + place : ''} • $${availableUSD.toFixed(2)} ${isArT ? 'متاح' : 'available'}`;
       const selected = String(r.id) === current ? 'selected' : '';
-      return `<option value="${r.id}" ${selected}>${Security.escapeHtml(label)}</option>`;
+      return `<option value="${r.id}" ${selected}>${Security.escapeHtml(optionLabel)}</option>`;
     })
   ].join('');
 
   // Auto-suggest the newest pending receipt — but ONLY for a NEW ad. Never
   // pick a receipt on the user's behalf for an ad that is already saved.
   let selectedId = String(select.value || '').trim();
-  if (!selectedId && !isEditingSavedAd && receipts.length > 0) {
+  if (!selectedId && !isEditingSavedAd && isDriver && receipts.length > 0) {
     selectedId = String(receipts[0].id);
     select.value = selectedId;
   }
@@ -2443,6 +2509,8 @@ function refreshAdTempReceiptOptions() {
 
 function onAdTempReceiptChange(receiptId) {
   const isArC = state.language === 'ar';
+  const collectionMethod = document.getElementById('ad-collection-method')?.value || '';
+  const isShop = collectionMethod === 'in_shop';
   const hidden = document.getElementById('ad-linked-receipt-id');
   const hint = document.getElementById('ad-temp-receipt-hint');
   const driverSelect = document.getElementById('ad-delivery-person');
@@ -2450,6 +2518,7 @@ function onAdTempReceiptChange(receiptId) {
   const mergeToggle = document.getElementById('ad-merge-funds-toggle');
   const dueAvailable = document.getElementById('ad-due-available');
   const dueInput = document.getElementById('ad-due-amount-to-use');
+  const unpaidFinancial = document.getElementById('ad-unpaid-financial');
   
   if (!hidden) return;
   hidden.value = String(receiptId || '');
@@ -2465,6 +2534,8 @@ function onAdTempReceiptChange(receiptId) {
       dueInput.dataset.maxDue = '0';
       dueInput.dataset.receiptId = '';
     }
+    if (isShop && unpaidFinancial) unpaidFinancial.classList.remove('hidden');
+    if (isShop) state.tempAdFunding = { allocations: [] };
     return;
   }
 
@@ -2522,7 +2593,10 @@ function onAdTempReceiptChange(receiptId) {
     if (budgetRate) budgetRate.value = String(exchangeRate);
     updateAdDriverBudgetSummary();
     
-    const txt = `${r.tempReceiptNo}${r.finalReceiptNo || r.serialNumber ? ` → ${r.finalReceiptNo || r.serialNumber}` : ''}${place ? ` • ${place}` : ''} • ${isArC ? 'الرسوم المتفق عليها' : 'Quoted fee'} ${fee.toFixed(0)} LYD`;
+    const receiptNumber = r.tempReceiptNo || r.serialNumber || r.finalReceiptNo || (isArC ? 'وصل بدون رقم' : 'Unnumbered receipt');
+    const txt = isShop
+      ? `${receiptNumber} • ${isArC ? 'وصل غير مدفوع في المحل' : 'Unpaid In-Shop receipt'} • $${availableUSD.toFixed(2)}`
+      : `${receiptNumber}${r.finalReceiptNo || r.serialNumber ? ` → ${r.finalReceiptNo || r.serialNumber}` : ''}${place ? ` • ${place}` : ''} • ${isArC ? 'الرسوم المتفق عليها' : 'Quoted fee'} ${fee.toFixed(0)} LYD`;
     if (hint) hint.textContent = txt;
     
     // Show due amount section if there's available credit
@@ -2536,7 +2610,7 @@ function onAdTempReceiptChange(receiptId) {
         
         // Check if editing - load existing dueAmountToUseUSD from modalData
         let prefillValue = null;
-        if (state.modalData?.linkedDeliveryReceiptId === rid) {
+        if (String(state.modalData?.linkedDeliveryReceiptId || state.modalData?.receiptId || '') === rid) {
           // Check dueAllocations first (new format)
           if (Array.isArray(state.modalData.dueAllocations)) {
             const existingAlloc = state.modalData.dueAllocations.find(a => String(a.receiptId) === rid);
@@ -2562,15 +2636,19 @@ function onAdTempReceiptChange(receiptId) {
             ? parsedPrefill.toFixed(2)
             : '';
         } else if (!belongsToThisReceipt) {
-          dueInput.value = '';
+          // Selecting an office receipt is an explicit choice to use it, so
+          // start with its full remaining amount. The user can still type a
+          // smaller ad budget. Delivery receipts keep the safer blank default.
+          dueInput.value = isShop ? availableUSD.toFixed(2) : '';
         }
         dueInput.dataset.receiptId = rid;
       }
-      // Show merge toggle to allow combining with paid receipts
-      if (mergeToggle) mergeToggle.classList.remove('hidden');
-      // Initialize merge funding state
-      initMergeFunding();
-      reflectMergeFundingUI();
+      if (mergeToggle) mergeToggle.classList.toggle('hidden', isShop);
+      if (!isShop) {
+        // Driver debt may optionally combine this due amount with paid funds.
+        initMergeFunding();
+        reflectMergeFundingUI();
+      }
     } else {
       // No credit available - all used up
       if (dueSection) dueSection.classList.add('hidden');
@@ -2580,14 +2658,20 @@ function onAdTempReceiptChange(receiptId) {
         dueInput.dataset.exchangeRate = exchangeRate.toString();
         dueInput.dataset.receiptId = rid;
       }
-      if (mergeToggle) mergeToggle.classList.remove('hidden'); // Still allow merging paid receipts
-      initMergeFunding();
-      reflectMergeFundingUI();
+      if (mergeToggle) mergeToggle.classList.toggle('hidden', isShop);
+      if (!isShop) {
+        initMergeFunding();
+        reflectMergeFundingUI();
+      }
       // Update hint to show that credit is fully used
       if (hint) hint.textContent += isArC ? ' • ⚠️ الرصيد مستخدم بالكامل' : ' • ⚠️ Credit fully used';
     }
 
     updateAdDueSummary();
+    if (isShop) {
+      if (unpaidFinancial) unpaidFinancial.classList.add('hidden');
+      syncShopDueAllocationToFunding();
+    }
   }
 
   // Keep driver selection consistent with the receipt assignment.
@@ -2600,6 +2684,17 @@ function onAdTempReceiptChange(receiptId) {
       driverSelect.disabled = false;
     }
   }
+}
+
+function syncShopDueAllocationToFunding() {
+  const paymentStatus = document.getElementById('ad-payment-status')?.value || '';
+  const collectionMethod = document.getElementById('ad-collection-method')?.value || '';
+  if (paymentStatus !== 'not_paid' || collectionMethod !== 'in_shop') return;
+  const receiptId = String(document.getElementById('ad-linked-receipt-id')?.value || '').trim();
+  const amountUSD = parseFloat(document.getElementById('ad-due-amount-to-use')?.value) || 0;
+  state.tempAdFunding = {
+    allocations: receiptId && amountUSD > 0 ? [{ receiptId, amountUSD }] : []
+  };
 }
 
 // Initialize merge funding state.
@@ -2641,6 +2736,7 @@ function onAdDueAmountChange() {
   }
   
   updateAdDueSummary();
+  syncShopDueAllocationToFunding();
 }
 
 // Use all available due amount (USD)
@@ -2656,6 +2752,7 @@ function useAllDueAmount() {
   const budgetRemaining = budget > 0 ? Math.max(budget - mergedTotal, 0) : maxDue;
   dueInput.value = Math.min(maxDue, budgetRemaining).toFixed(2);
   updateAdDueSummary();
+  syncShopDueAllocationToFunding();
 }
 
 // Update the due amount summary (USD)
@@ -2672,10 +2769,17 @@ function updateAdDueSummary() {
   const remainingLYD = remainingUSD * exchangeRate;
   
   const isArD = state.language === 'ar';
+  const isShopDebt = document.getElementById('ad-collection-method')?.value === 'in_shop';
   if (usingUSD > 0) {
-    summary.innerHTML = isArD
+    if (isShopDebt) {
+      summary.innerHTML = isArD
+        ? `دين الإعلان: <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> (${usingLYD.toFixed(0)} LYD). <span class="text-amber-700">سيبقى بالسالب حتى يدفع العميل.</span>`
+        : `Ad debt: <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> (${usingLYD.toFixed(0)} LYD). <span class="text-amber-700">It stays minus until the customer pays.</span>`;
+    } else {
+      summary.innerHTML = isArD
       ? `سيتم استخدام <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> (${usingLYD.toFixed(0)} LYD) من المستحق. ${remainingUSD > 0 ? `<span class="text-slate-400">سيتبقى $${remainingUSD.toFixed(2)} (${remainingLYD.toFixed(0)} LYD).</span>` : '<span class="text-emerald-600">سيتم استخدام الرصيد بالكامل.</span>'}`
       : `Using <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> (${usingLYD.toFixed(0)} LYD) from due. ${remainingUSD > 0 ? `<span class="text-slate-400">$${remainingUSD.toFixed(2)} (${remainingLYD.toFixed(0)} LYD) will remain.</span>` : '<span class="text-emerald-600">Full credit will be used.</span>'}`;
+    }
   } else {
     summary.innerHTML = `<span class="text-amber-600">${isArD ? 'أدخل المبلغ المراد استخدامه من الوصل المستحق.' : 'Enter amount to use from due receipt.'}</span>`;
   }
@@ -2969,6 +3073,12 @@ function getOriginalUnpaidDriverBudgetUSD() {
   return isDriverDebt ? normalizeAdDriverBudgetUSD(ad.amountUSD) : 0;
 }
 
+function getOriginalUnpaidAdBudgetUSD() {
+  const ad = state.modalData;
+  if (!ad || String(ad.paymentStatus || '').toLowerCase() !== 'not_paid') return 0;
+  return normalizeAdDriverBudgetUSD(ad.amountUSD);
+}
+
 function updateAdDriverBudgetSummary() {
   const input = document.getElementById('ad-driver-budget-usd');
   const summary = document.getElementById('ad-driver-budget-summary');
@@ -3064,7 +3174,7 @@ function setAdPaymentStatus(status) {
     if (unpaidFinancial) unpaidFinancial.classList.add('hidden');
     if (driverBudgetSection) driverBudgetSection.classList.add('hidden');
     if (driverSettlementHint) {
-      driverSettlementHint.classList.toggle('hidden', getOriginalUnpaidDriverBudgetUSD() <= 0);
+      driverSettlementHint.classList.toggle('hidden', getOriginalUnpaidAdBudgetUSD() <= 0);
     }
     if (wontPaySection) wontPaySection.classList.add('hidden');
     setAdCollectionMethod('');
@@ -3667,7 +3777,7 @@ function renderAdFundingList() {
     // so the user can immediately choose a receipt and amount without extra clicks.
     if (String(paymentStatus || '').toLowerCase() === 'paid') {
       state.tempAdFunding = state.tempAdFunding || { allocations: [] };
-      const originalDriverBudget = getOriginalUnpaidDriverBudgetUSD();
+      const originalDriverBudget = getOriginalUnpaidAdBudgetUSD();
       state.tempAdFunding.allocations = [{
         receiptId: '',
         amountUSD: originalDriverBudget > 0 ? originalDriverBudget.toFixed(2) : ''

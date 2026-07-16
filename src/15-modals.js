@@ -111,6 +111,10 @@ function renderModal() {
       const isAdminUser = isCurrentUserAdmin();
       const adCreator = isEdit && adData.creatorId ? state.users.find(u => u.id === adData.creatorId) : state.currentUser;
       const isArAd = state.language === 'ar';
+      const hasLinkedShopReceipt = adData.paymentStatus === 'not_paid'
+        && adData.collectionMethod === 'in_shop'
+        && Array.isArray(adData.dueAllocations)
+        && adData.dueAllocations.some(row => row && row.receiptId && Number(row.amountUSD) > 0);
 
       if (visiblePages.length === 0) {
         modalContent = `
@@ -260,23 +264,24 @@ function renderModal() {
                     </div>
                   </div>
                   <div id="ad-driver-select" class="hidden"></div>
-                  <div id="ad-temp-receipt-link" class="hidden mt-2 p-3 bg-white rounded-lg border border-violet-200 space-y-3">
-                    <label class="block text-xs font-bold text-violet-700">${isArAd ? 'ربط وصل توصيل (D#)' : 'Link Delivery Receipt (D#)'}</label>
+                  <div id="ad-temp-receipt-link" class="hidden mt-2 p-3 bg-white dark:bg-slate-900 rounded-lg border border-violet-200 dark:border-violet-800 space-y-3">
+                    <label id="ad-linked-receipt-label" class="block text-xs font-bold text-violet-700 dark:text-violet-300">${adData.collectionMethod === 'in_shop' ? (isArAd ? 'ربط وصل غير مدفوع في المحل' : 'Link Unpaid In-Shop Receipt') : (isArAd ? 'ربط وصل توصيل (D#)' : 'Link Delivery Receipt (D#)')}</label>
                     <select id="ad-temp-receipt-id" class="w-full border border-slate-200 px-3 py-2 rounded-lg text-sm" onchange="onAdTempReceiptChange(this.value)">
                       <option value="">${isArAd ? 'اختر وصلاً معلقاً...' : 'Select pending receipt...'}</option>
                     </select>
                     <div id="ad-temp-receipt-hint" class="text-xs text-slate-500"></div>
-                    <input type="hidden" id="ad-linked-receipt-id" value="${adData.receiptId || ''}" />
+                    <div id="ad-linked-receipt-help" class="hidden text-[11px] text-amber-700 dark:text-amber-300"></div>
+                    <input type="hidden" id="ad-linked-receipt-id" value="${adData.linkedDeliveryReceiptId || adData.receiptId || ''}" />
                     
                     <!-- Due Amount Usage Section -->
                     <div id="ad-due-amount-section" class="hidden p-3 bg-violet-50 rounded-lg border border-violet-200 space-y-2">
                       <div class="flex items-center justify-between">
-                        <span class="text-xs font-semibold text-violet-700">${isArAd ? 'استخدام رصيد من الوصل المستحق' : 'Use Credit from Due Receipt'}</span>
+                        <span id="ad-due-title" class="text-xs font-semibold text-violet-700">${isArAd ? 'استخدام رصيد من الوصل المستحق' : 'Use Credit from Due Receipt'}</span>
                         <span id="ad-due-available" class="text-xs text-violet-600 font-medium">${isArAd ? 'المتاح: $0.00' : 'Available: $0.00'}</span>
                   </div>
                       <div class="grid grid-cols-2 gap-2">
                         <div>
-                          <label class="block text-[10px] text-slate-500 mb-1">${isArAd ? 'الصرف المخطط (USD)' : 'Planned Spend (USD)'}</label>
+                          <label id="ad-due-amount-label" class="block text-[10px] text-slate-500 mb-1">${isArAd ? 'الصرف المخطط (USD)' : 'Planned Spend (USD)'}</label>
                           <input type="text" id="ad-due-amount-to-use" inputmode="decimal" class="w-full border border-violet-300 px-3 py-2 rounded-lg text-sm bg-white" placeholder="0.00" oninput="sanitizeMoneyInput(this); onAdDueAmountChange()" onfocus="this.select()" />
                 </div>
                         <div>
@@ -316,7 +321,7 @@ function renderModal() {
             </div>
 
             <!-- UNPAID FINANCIAL -->
-            <div id="ad-unpaid-financial" class="${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'hidden' : (adData.paymentStatus === 'not_paid' && adData.collectionMethod === 'driver' ? 'hidden' : '')}">
+            <div id="ad-unpaid-financial" class="${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'hidden' : (adData.paymentStatus === 'not_paid' && (adData.collectionMethod === 'driver' || hasLinkedShopReceipt) ? 'hidden' : '')}">
               <div class="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 space-y-2">
                 <div class="flex justify-between items-center">
                   <span class="text-xs font-bold text-slate-600">${isArAd ? 'التفاصيل المالية' : 'Financial Details'}</span>
@@ -1873,11 +1878,14 @@ function completeAdMutationAttempt(attempt) {
   }
 }
 
-function resolveAdPrimaryReceiptId({ paymentStatus, collectionMethod, linkedDeliveryReceiptId, allocations } = {}) {
+function resolveAdPrimaryReceiptId({ paymentStatus, collectionMethod, linkedDeliveryReceiptId, allocations, dueAllocations } = {}) {
   const normalizedStatus = String(paymentStatus || '').toLowerCase();
   const normalizedCollection = String(collectionMethod || '').toLowerCase();
   if (normalizedStatus === 'not_paid' && normalizedCollection === 'driver') {
     return String(linkedDeliveryReceiptId || '');
+  }
+  if (normalizedStatus === 'not_paid' && normalizedCollection === 'in_shop') {
+    return String((Array.isArray(dueAllocations) ? dueAllocations[0]?.receiptId : '') || '');
   }
   if (normalizedStatus === 'paid') {
     return String(Array.isArray(allocations) ? (allocations[0]?.receiptId || '') : '');
@@ -2142,6 +2150,8 @@ async function handleModalSubmit() {
       const paymentStatus = document.getElementById('ad-payment-status')?.value || 'paid';
       const collectionMethod = document.getElementById('ad-collection-method')?.value || '';
       const isUnpaidDriver = paymentStatus === 'not_paid' && collectionMethod === 'driver';
+      const isUnpaidShop = paymentStatus === 'not_paid' && collectionMethod === 'in_shop';
+      const selectedUnpaidReceiptId = String(document.getElementById('ad-linked-receipt-id')?.value || '').trim();
       const adLinkInputs = Array.from(document.querySelectorAll('.ad-link-input')).map(i => (i.value || '').trim()).filter(Boolean);
       
       // Get amount based on payment status
@@ -2155,6 +2165,10 @@ async function handleModalSubmit() {
         // A driver-collected ad can be pure debt before any receipt money is
         // available. Its budget is independent from optional receipt funding.
         amountUSD = normalizeAdDriverBudgetUSD(document.getElementById('ad-driver-budget-usd')?.value);
+      } else if (isUnpaidShop && selectedUnpaidReceiptId) {
+        // The linked unpaid receipt is the source of this ad's promised budget.
+        // It is reserved below as due credit and counts as customer debt now.
+        amountUSD = normalizeAdDriverBudgetUSD(document.getElementById('ad-due-amount-to-use')?.value);
       } else {
         // Use financial details (R2 totals) for Not Paid / Won't Pay
         collectionPayments = getReceiptPaymentData();
@@ -2212,6 +2226,14 @@ async function handleModalSubmit() {
         );
         return;
       }
+      if (isUnpaidShop && selectedUnpaidReceiptId && amountUSD <= 0) {
+        showNotification(
+          isArSubAd ? 'تنبيه' : 'Validation',
+          isArSubAd ? 'أدخل ميزانية الإعلان من الوصل غير المدفوع.' : 'Enter the ad budget from the unpaid receipt.',
+          'error'
+        );
+        return;
+      }
 
       // Validate funding allocations (only required when paid)
       let allocations = (state.tempAdFunding?.allocations || []).filter(a => a.receiptId && parseFloat(a.amountUSD) > 0)
@@ -2242,16 +2264,15 @@ async function handleModalSubmit() {
         }
 
         // Set amountUSD from allocations total for paid ads (ensures consistency)
-        const settlingDriverDebt = isEdit
-          && String(state.modalData?.paymentStatus || '') === 'not_paid'
-          && String(state.modalData?.collectionMethod || '') === 'driver';
-        const originalDriverBudget = normalizeAdDriverBudgetUSD(state.modalData?.amountUSD);
-        if (settlingDriverDebt && originalDriverBudget > 0 && Math.abs(totalAllocated - originalDriverBudget) > 0.005) {
+        const settlingUnpaidDebt = isEdit
+          && String(state.modalData?.paymentStatus || '') === 'not_paid';
+        const originalUnpaidBudget = normalizeAdDriverBudgetUSD(state.modalData?.amountUSD);
+        if (settlingUnpaidDebt && originalUnpaidBudget > 0 && Math.abs(totalAllocated - originalUnpaidBudget) > 0.005) {
           showNotification(
             isArSubAd ? 'تنبيه' : 'Validation',
             isArSubAd
-              ? `يجب أن يساوي مجموع تمويل الوصولات ($${totalAllocated.toFixed(2)}) ميزانية الإعلان غير المدفوعة ($${originalDriverBudget.toFixed(2)}).`
-              : `Receipt funding ($${totalAllocated.toFixed(2)}) must equal the unpaid ad budget ($${originalDriverBudget.toFixed(2)}).`,
+              ? `يجب أن يساوي مجموع تمويل الوصولات ($${totalAllocated.toFixed(2)}) مبلغ الإعلان غير المدفوع ($${originalUnpaidBudget.toFixed(2)}).`
+              : `Receipt funding ($${totalAllocated.toFixed(2)}) must equal the unpaid ad amount ($${originalUnpaidBudget.toFixed(2)}).`,
             'error'
           );
           return;
@@ -2333,21 +2354,48 @@ async function handleModalSubmit() {
           const rRate = Number(linkedReceipt.exchangeRate || 0) || 0;
           if (rRate > 0) exchangeRate = rRate;
           collectionPayments = [];
+        } else if (collectionMethod === 'in_shop' && selectedUnpaidReceiptId) {
+          const linkedReceipt = state.receipts.find(r => r && !r._deleted && String(r.id) === selectedUnpaidReceiptId);
+          if (!linkedReceipt) {
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'الوصل غير المدفوع المحدد غير موجود.' : 'The selected unpaid receipt was not found.', 'error');
+            return;
+          }
+          if (String(linkedReceipt.customerId || '') !== String(customerId || '')) {
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'الوصل المحدد يخص عميلاً آخر.' : 'Selected receipt belongs to a different customer.', 'error');
+            return;
+          }
+          if (!isUnpaidShopReceipt(linkedReceipt, customerId)) {
+            const becamePaid = linkedReceipt.isPaid === true || String(linkedReceipt.status || '') === 'Paid';
+            showNotification(
+              isArSubAd ? 'تنبيه' : 'Validation',
+              becamePaid
+                ? (isArSubAd ? 'تم دفع هذا الوصل الآن. غيّر حالة الإعلان إلى «مدفوع» لإكمال التسوية.' : 'This receipt is now Paid. Change the ad to Paid to complete settlement.')
+                : (isArSubAd ? 'الوصل المحدد ليس وصلاً صالحاً غير مدفوع في المحل.' : 'Selected receipt is not a valid unpaid In-Shop receipt.'),
+              'error'
+            );
+            return;
+          }
+          const rRate = Number(linkedReceipt.exchangeRate || 0) || 0;
+          if (rRate > 0) exchangeRate = rRate;
+          collectionPayments = [];
         }
       }
       
-      // Capture due amount to use from delivery receipt (Not Paid + Driver mode)
+      // Capture the promised amount from a linked unpaid receipt. Delivery uses
+      // linkedDeliveryReceiptId; In Shop uses receiptId while sharing the same
+      // due-allocation ledger so neither can spend receipt money twice.
       let dueAmountToUseUSD = 0;
       let linkedDeliveryReceiptId = '';
       let dueAllocations = [];
-      if (paymentStatus === 'not_paid' && collectionMethod === 'driver') {
-        linkedDeliveryReceiptId = document.getElementById('ad-linked-receipt-id')?.value || '';
+      if (paymentStatus === 'not_paid' && (collectionMethod === 'driver' || (collectionMethod === 'in_shop' && selectedUnpaidReceiptId))) {
+        const linkedReceiptId = selectedUnpaidReceiptId;
+        linkedDeliveryReceiptId = collectionMethod === 'driver' ? linkedReceiptId : '';
         const dueInput = document.getElementById('ad-due-amount-to-use');
-        if (dueInput && linkedDeliveryReceiptId) {
+        if (dueInput && linkedReceiptId) {
           dueAmountToUseUSD = parseFloat(dueInput.value) || 0;
           
           // Validate: check if the amount exceeds available credit
-          const dueUsage = getDeliveryReceiptDueUsage(linkedDeliveryReceiptId);
+          const dueUsage = getDeliveryReceiptDueUsage(linkedReceiptId);
           const availableUSD = dueUsage.remainingDueUSD;
           
           // If editing an existing ad, add back what this ad already used
@@ -2357,9 +2405,9 @@ async function handleModalSubmit() {
             if (existingAd) {
               if (Array.isArray(existingAd.dueAllocations)) {
                 currentAdUsage = existingAd.dueAllocations
-                  .filter(a => String(a.receiptId) === String(linkedDeliveryReceiptId))
+                  .filter(a => String(a.receiptId) === String(linkedReceiptId))
                   .reduce((sum, a) => sum + (parseFloat(a.amountUSD) || 0), 0);
-              } else if (existingAd.dueAmountToUseUSD > 0 && String(existingAd.linkedDeliveryReceiptId) === String(linkedDeliveryReceiptId)) {
+              } else if (existingAd.dueAmountToUseUSD > 0 && String(existingAd.linkedDeliveryReceiptId || existingAd.receiptId) === String(linkedReceiptId)) {
                 currentAdUsage = existingAd.dueAmountToUseUSD;
               }
             }
@@ -2381,7 +2429,7 @@ async function handleModalSubmit() {
           // Create due allocation
           if (dueAmountToUseUSD > 0) {
             dueAllocations.push({
-              receiptId: linkedDeliveryReceiptId,
+              receiptId: linkedReceiptId,
               amountUSD: dueAmountToUseUSD
             });
           }
@@ -2490,7 +2538,8 @@ async function handleModalSubmit() {
           paymentStatus,
           collectionMethod,
           linkedDeliveryReceiptId,
-          allocations: finalAllocations
+          allocations: finalAllocations,
+          dueAllocations
         }),
         paymentStatus,
         collectionMethod,
@@ -2508,7 +2557,8 @@ async function handleModalSubmit() {
         receiptAllocations: finalAllocations,
         receiptIds: finalAllocations.map(a => a.receiptId),
         fundingReceiptId: finalAllocations[0]?.receiptId || '',
-        // Due amount fields for Not Paid + Driver mode (stored in USD like paid allocations)
+        // Due rows reserve promised money from either a delivery receipt or an
+        // unpaid In Shop receipt without pretending it has already been paid.
         dueAmountToUseUSD: dueAmountToUseUSD,
         dueAllocations: dueAllocations,
         linkedDeliveryReceiptId: linkedDeliveryReceiptId,

@@ -1765,6 +1765,226 @@ class TestReceiptAndAdTransactions:
         assert settled_data["linkedDeliveryReceiptId"] == ""
         assert settled_data["receiptId"] == "fin_driver_same_receipt"
 
+    def test_unpaid_in_shop_receipt_is_debt_until_exact_paid_settlement(self, actors):
+        self._customer("fin_shop_debt_customer", actors)
+        receipt = self._receipt(
+            "fin_shop_debt_receipt",
+            "fin_shop_debt_customer",
+            30,
+            actors,
+            status="Not Paid",
+            isPaid=False,
+            amountLocal=291,
+            exchangeRate=9.7,
+            deliveryStatus="Office",
+            statusDetail={"notPaidCollection": "office"},
+        )
+
+        overdrawn = self._mutate_ad(
+            "fin_shop_debt_overdrawn",
+            "fin-shop-debt-overdrawn-001",
+            {
+                "customerId": "fin_shop_debt_customer",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "in_shop",
+                "exchangeRate": 1,
+                "receiptId": "fin_shop_debt_receipt",
+                "receiptAllocations": [],
+                "dueAllocations": [
+                    {"receiptId": "fin_shop_debt_receipt", "amountUSD": 30.01}
+                ],
+            },
+            actors,
+        )
+        assert overdrawn.status_code == 409, overdrawn.text
+
+        created = self._mutate_ad(
+            "fin_shop_debt_ad",
+            "fin-shop-debt-create-001",
+            {
+                "customerId": "fin_shop_debt_customer",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "in_shop",
+                # The server must use the linked receipt's rate, not this value.
+                "exchangeRate": 1,
+                "receiptId": "fin_shop_debt_receipt",
+                "receiptAllocations": [],
+                "mergedPaidAllocations": [],
+                "dueAllocations": [
+                    {"receiptId": "fin_shop_debt_receipt", "amountUSD": 30}
+                ],
+            },
+            actors,
+        )
+        assert created.status_code == 200, created.text
+        created_data = created.json()["ad"]["data"]
+        assert created_data["amountUSD"] == 30
+        assert created_data["exchangeRate"] == 9.7
+        assert created_data["amountLocal"] == 291
+        assert created_data["paymentStatus"] == "not_paid"
+        assert created_data["collectionMethod"] == "in_shop"
+        assert created_data["isPaid"] is False
+        assert created_data["receiptId"] == "fin_shop_debt_receipt"
+        assert created_data["linkedDeliveryReceiptId"] == ""
+        assert created_data["receiptAllocations"] == []
+        assert created_data["dueAllocations"] == [
+            {"receiptId": "fin_shop_debt_receipt", "amountUSD": 30.0}
+        ]
+        assert created_data["dueAmountToUseUSD"] == 30
+
+        second_draw = self._mutate_ad(
+            "fin_shop_debt_second_ad",
+            "fin-shop-debt-second-001",
+            {
+                "customerId": "fin_shop_debt_customer",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "in_shop",
+                "receiptId": "fin_shop_debt_receipt",
+                "dueAllocations": [
+                    {"receiptId": "fin_shop_debt_receipt", "amountUSD": 0.01}
+                ],
+            },
+            actors,
+        )
+        assert second_draw.status_code == 409, second_draw.text
+
+        paid_receipt = client.patch(
+            "/api/collections/receipts/fin_shop_debt_receipt",
+            json={
+                "expectedLastModified": receipt["lastModified"],
+                "data": {"status": "Paid", "isPaid": True},
+            },
+            cookies=actors["admin"],
+        )
+        assert paid_receipt.status_code == 200, paid_receipt.text
+        assert paid_receipt.json()["data"]["status"] == "Paid"
+        assert paid_receipt.json()["data"]["isPaid"] is True
+
+        version = created.json()["ad"]["lastModified"]
+        underpaid = client.post(
+            "/api/ads/mutate",
+            json={
+                "action": "update",
+                "adId": "fin_shop_debt_ad",
+                "idempotencyKey": "fin-shop-debt-underpay-001",
+                "expectedLastModified": version,
+                "data": {
+                    "paymentStatus": "paid",
+                    "receiptAllocations": [
+                        {"receiptId": "fin_shop_debt_receipt", "amountUSD": 20}
+                    ],
+                },
+            },
+            cookies=actors["admin"],
+        )
+        assert underpaid.status_code == 400, underpaid.text
+
+        settled = client.post(
+            "/api/ads/mutate",
+            json={
+                "action": "update",
+                "adId": "fin_shop_debt_ad",
+                "idempotencyKey": "fin-shop-debt-settle-001",
+                "expectedLastModified": version,
+                "data": {
+                    "paymentStatus": "paid",
+                    "receiptAllocations": [
+                        {"receiptId": "fin_shop_debt_receipt", "amountUSD": 30}
+                    ],
+                },
+            },
+            cookies=actors["admin"],
+        )
+        assert settled.status_code == 200, settled.text
+        settled_data = settled.json()["ad"]["data"]
+        assert settled_data["amountUSD"] == 30
+        assert settled_data["amountLocal"] == 291
+        assert settled_data["paymentStatus"] == "paid"
+        assert settled_data["isPaid"] is True
+        assert settled_data["collectionMethod"] == ""
+        assert settled_data["receiptId"] == "fin_shop_debt_receipt"
+        assert settled_data["linkedDeliveryReceiptId"] == ""
+        assert settled_data["dueAllocations"] == []
+        assert settled_data["dueAmountToUseUSD"] == 0
+        assert settled_data["receiptAllocations"] == [
+            {"receiptId": "fin_shop_debt_receipt", "amountUSD": 30.0}
+        ]
+
+    def test_canceling_shop_receipt_preserves_ad_debt_on_later_edit(self, actors):
+        self._customer("fin_shop_cancel_customer", actors)
+        receipt = self._receipt(
+            "fin_shop_cancel_receipt",
+            "fin_shop_cancel_customer",
+            30,
+            actors,
+            status="Not Paid",
+            isPaid=False,
+            amountLocal=291,
+            exchangeRate=9.7,
+            deliveryStatus="Office",
+            statusDetail={"notPaidCollection": "office"},
+        )
+        created = self._mutate_ad(
+            "fin_shop_cancel_ad",
+            "fin-shop-cancel-create-001",
+            {
+                "customerId": "fin_shop_cancel_customer",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "in_shop",
+                "receiptId": "fin_shop_cancel_receipt",
+                "dueAllocations": [
+                    {"receiptId": "fin_shop_cancel_receipt", "amountUSD": 30}
+                ],
+            },
+            actors,
+        )
+        assert created.status_code == 200, created.text
+
+        canceled = client.patch(
+            "/api/collections/receipts/fin_shop_cancel_receipt",
+            json={
+                "expectedLastModified": receipt["lastModified"],
+                "data": {"status": "Canceled"},
+            },
+            cookies=actors["admin"],
+        )
+        assert canceled.status_code == 200, canceled.text
+
+        released = client.get(
+            "/api/collections/ads/fin_shop_cancel_ad", cookies=actors["admin"]
+        )
+        assert released.status_code == 200, released.text
+        released_data = released.json()["data"]
+        assert released_data["amountUSD"] == 30
+        assert released_data["amountLocal"] == 291
+        assert released_data["receiptId"] == ""
+        assert released_data["dueAllocations"] == []
+
+        # A normal form save echoes an empty manual-payment list after the
+        # canceled receipt link disappears. That must not erase the $30 debt.
+        preserved = client.post(
+            "/api/ads/mutate",
+            json={
+                "action": "update",
+                "adId": "fin_shop_cancel_ad",
+                "idempotencyKey": "fin-shop-cancel-preserve-001",
+                "expectedLastModified": released.json()["lastModified"],
+                "data": {
+                    "note": "receipt canceled; debt remains",
+                    "collectionPayments": [],
+                },
+            },
+            cookies=actors["admin"],
+        )
+        assert preserved.status_code == 200, preserved.text
+        preserved_data = preserved.json()["ad"]["data"]
+        assert preserved_data["amountUSD"] == 30
+        assert preserved_data["amountLocal"] == 291
+        assert preserved_data["paymentStatus"] == "not_paid"
+        assert preserved_data["collectionMethod"] == "in_shop"
+        assert preserved_data["receiptId"] == ""
+        assert preserved_data["dueAllocations"] == []
+
     def test_edit_own_is_enforced_and_stop_needs_stop_permission(self, actors):
         self._customer("fin_own_customer", actors)
         self._receipt("fin_own_receipt", "fin_own_customer", 100, actors)

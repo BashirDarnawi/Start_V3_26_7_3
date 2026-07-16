@@ -4921,7 +4921,7 @@ def _financial_ad_committed(ad: dict[str, Any], receipt_id: str) -> int:
         return explicit
     if isinstance(ad.get("receiptAllocations"), list) or isinstance(ad.get("dueAllocations"), list):
         return 0
-    if str(ad.get("paymentStatus") or "") == "not_paid" and str(ad.get("collectionMethod") or "") == "driver":
+    if str(ad.get("paymentStatus") or "") == "not_paid" and str(ad.get("collectionMethod") or "") in {"driver", "in_shop"}:
         return 0
     references = {
         str(ad.get("fundingReceiptId") or ""),
@@ -5030,6 +5030,13 @@ def _financial_due_total(data: dict[str, Any]) -> int:
     legitimately adds real balance; re-reading the stale debt invents it.
     """
     if bool(data.get("isPaid")) or str(data.get("status") or "") == "Paid":
+        return _financial_minor(data.get("amountUSD"), "receipt due amount")
+    status_detail = data.get("statusDetail") if isinstance(data.get("statusDetail"), dict) else {}
+    not_paid_collection = str(status_detail.get("notPaidCollection") or "").strip().lower()
+    # An office receipt already records its promised credit directly in USD.
+    # Re-deriving it through LYD can introduce a one-cent rounding difference
+    # between the receipt card and the amount the server lets an ad reserve.
+    if not_paid_collection in {"office", "in_shop", "shop"}:
         return _financial_minor(data.get("amountUSD"), "receipt due amount")
     local_value = data.get("debtAmountLocal")
     if local_value is None:
@@ -5389,6 +5396,59 @@ def _financial_validate_due_receipt(
         raise HTTPException(status_code=409, detail="Insufficient delivery due credit")
 
 
+def _financial_validate_shop_due_receipt(
+    due_allocations: list[dict[str, Any]],
+    *,
+    linked_receipt_id: str,
+    customer_id: str,
+    locked_receipts: dict[str, Any],
+    ad_rows: list[Any],
+    current_ad_id: str | None,
+    require_unpaid: bool = True,
+) -> None:
+    """Validate one unpaid office receipt used as an In Shop ad budget."""
+    if len(due_allocations) != 1 or str(due_allocations[0].get("receiptId") or "") != linked_receipt_id:
+        raise HTTPException(status_code=400, detail="In Shop debt must use one linked unpaid receipt")
+    row = locked_receipts.get(linked_receipt_id)
+    if not row or bool(row["deleted"]):
+        raise HTTPException(status_code=404, detail="Linked In Shop receipt not found")
+    data = _financial_row_data(row)
+    if str(data.get("customerId") or "") != customer_id:
+        raise HTTPException(status_code=400, detail="Linked In Shop receipt belongs to another customer")
+
+    status = str(data.get("status") or "")
+    status_detail = data.get("statusDetail") if isinstance(data.get("statusDetail"), dict) else {}
+    not_paid_collection = str(status_detail.get("notPaidCollection") or "").strip().lower()
+    temp_number = str(data.get("tempReceiptNo") or "").strip()
+    receipt_type = str(data.get("receiptType") or "").strip().upper()
+    delivery_status = str(data.get("deliveryStatus") or "").strip()
+    is_delivery_receipt = (
+        (temp_number.startswith("D") and temp_number[1:].isdigit())
+        or receipt_type == "DELIVERY_TEMP"
+        or not_paid_collection == "delivery"
+        or delivery_status not in {"", "Office"}
+    )
+    if (
+        status in {"Canceled", "Lost"}
+        or receipt_type == "TRANSFER_IN"
+        or is_delivery_receipt
+        or not_paid_collection not in {"", "office", "in_shop", "shop"}
+    ):
+        raise HTTPException(status_code=400, detail="Linked receipt is not an In Shop receipt")
+    if require_unpaid and (status != "Not Paid" or data.get("isPaid") is True):
+        raise HTTPException(status_code=400, detail="In Shop ad requires an unpaid receipt")
+
+    requested = sum(
+        _financial_minor(entry.get("amountUSD"), "shop due allocation")
+        for entry in due_allocations
+    )
+    committed = _financial_explicit_usage(
+        ad_rows, linked_receipt_id, exclude_ad_id=current_ad_id
+    ) + _financial_outgoing(data)
+    if committed + requested > _financial_due_total(data):
+        raise HTTPException(status_code=409, detail="Insufficient In Shop receipt balance")
+
+
 def _financial_derive_ad(
     actor: dict[str, Any],
     requested: dict[str, Any],
@@ -5471,17 +5531,15 @@ def _financial_derive_ad(
             _financial_minor(row["amountUSD"], "receipt allocation")
             for row in paid_allocations
         )
-        # Converting an existing unpaid Driver debt to Paid must settle the
-        # original ad budget exactly. Without this check, linking (for example)
-        # a $60 receipt to a $100 debt silently shrank the ad to $60 and erased
-        # the remaining $40 from the customer's balance.
-        existing_was_driver_debt = bool(existing) and (
+        # Converting any existing unpaid debt to Paid must settle the original
+        # ad amount exactly. Otherwise a partial receipt allocation could shrink
+        # the saved ad and silently erase the customer's remaining debt.
+        existing_was_unpaid_debt = bool(existing) and (
             str(existing.get("paymentStatus") or "").lower() == "not_paid"
-            and str(existing.get("collectionMethod") or "") == "driver"
         )
-        if existing_was_driver_debt:
+        if existing_was_unpaid_debt:
             original_budget_minor = _financial_minor(
-                existing.get("amountUSD"), "existing driver ad budget"
+                existing.get("amountUSD"), "existing unpaid ad budget"
             )
             # Old production rows could be saved with a zero amount because the
             # UI had no independent budget field. Do not trap those rows: their
@@ -5489,7 +5547,7 @@ def _financial_derive_ad(
             if original_budget_minor > 0 and amount_minor != original_budget_minor:
                 raise HTTPException(
                     status_code=400,
-                    detail="Paid receipt funding must exactly settle the original driver ad budget",
+                    detail="Paid receipt funding must exactly settle the original unpaid ad amount",
                 )
         linked_id = ""
         collection_method = ""
@@ -5567,6 +5625,47 @@ def _financial_derive_ad(
             )
         base["deliveryPersonId"] = ""
         base["deliveryStatus"] = "Office"
+    elif payment_status == "not_paid" and collection_method == "in_shop" and due_request:
+        # A receipt created as Not Paid + In Shop is a promise to pay, not cash.
+        # Reserve the chosen portion through dueAllocations so the ad is real
+        # customer debt now, then the same receipt can become paid later.
+        if any(
+            _financial_allocations(value, name)
+            for name, value in (
+                ("receiptAllocations", paid_request),
+                ("mergedPaidAllocations", merged_request),
+            )
+        ):
+            raise HTTPException(status_code=400, detail="An unpaid In Shop ad cannot use paid receipt funds")
+        due_allocations = _financial_allocations(
+            due_request, "dueAllocations", allow_empty=False
+        )
+        linked_id = validate_entity_id(base.get("receiptId") or due_allocations[0]["receiptId"])
+        _financial_validate_shop_due_receipt(
+            due_allocations,
+            linked_receipt_id=linked_id,
+            customer_id=customer_id,
+            locked_receipts=locked_receipts,
+            ad_rows=ad_rows,
+            current_ad_id=current_ad_id,
+        )
+        _financial_validate_combined_capacity(
+            [],
+            due_allocations,
+            locked_receipts=locked_receipts,
+            ad_rows=ad_rows,
+            current_ad_id=current_ad_id,
+        )
+        amount_minor = sum(
+            _financial_minor(row["amountUSD"], "shop due allocation")
+            for row in due_allocations
+        )
+        linked_row = locked_receipts.get(linked_id)
+        linked_data = _financial_row_data(linked_row) if linked_row else {}
+        base["exchangeRate"] = linked_data.get("exchangeRate") or base.get("exchangeRate")
+        base["deliveryPersonId"] = ""
+        base["deliveryStatus"] = "Office"
+        payments = []
     else:
         if any(
             _financial_allocations(value, name)
@@ -5578,6 +5677,21 @@ def _financial_derive_ad(
         ):
             raise HTTPException(status_code=400, detail="This unpaid ad cannot use receipt funding")
         payments, amount_minor = _financial_collection_payments(base.get("collectionPayments"))
+        # Canceling or losing a linked In Shop receipt releases its due row,
+        # but the ad is still real customer debt. A later ordinary edit may
+        # legitimately carry no manual collection rows; never collapse that
+        # saved debt to zero merely because its former receipt link is gone.
+        if (
+            amount_minor == 0
+            and existing
+            and str(existing.get("paymentStatus") or "").lower() == "not_paid"
+            and str(existing.get("collectionMethod") or "") == "in_shop"
+        ):
+            existing_amount_minor = _financial_minor(
+                existing.get("amountUSD"), "existing In Shop ad amount"
+            )
+            if existing_amount_minor > 0:
+                amount_minor = existing_amount_minor
         linked_id = ""
 
     rate = _financial_rate(base.get("exchangeRate"))
@@ -5605,7 +5719,9 @@ def _financial_derive_ad(
             "dueAllocations": due_allocations,
             "receiptIds": paid_ids,
             "fundingReceiptId": paid_ids[0] if paid_ids else "",
-            "linkedDeliveryReceiptId": linked_id,
+            "linkedDeliveryReceiptId": linked_id
+            if payment_status == "not_paid" and collection_method == "driver"
+            else "",
             "receiptId": linked_id if linked_id else (paid_ids[0] if paid_ids else ""),
             "dueAmountToUseUSD": _financial_usd(due_minor),
             "hasMergedPaidFunds": bool(paid_allocations)
@@ -5753,17 +5869,38 @@ def _financial_validate_ad_plan(
         current_ad_id=current_ad_id,
     )
     due = _financial_allocations(ad.get("dueAllocations"), "dueAllocations")
-    linked = str(ad.get("linkedDeliveryReceiptId") or "")
-    if due:
-        _financial_validate_due_receipt(
-            due,
-            linked_receipt_id=validate_entity_id(linked),
-            customer_id=customer_id,
-            locked_receipts=locked_receipts,
-            ad_rows=ad_rows,
-            current_ad_id=current_ad_id,
-            require_pending=False,
+    collection_method = str(ad.get("collectionMethod") or "")
+    linked = str(
+        (
+            ad.get("linkedDeliveryReceiptId")
+            if collection_method == "driver"
+            else ad.get("receiptId")
         )
+        or ""
+    )
+    if due:
+        if collection_method == "driver":
+            _financial_validate_due_receipt(
+                due,
+                linked_receipt_id=validate_entity_id(linked),
+                customer_id=customer_id,
+                locked_receipts=locked_receipts,
+                ad_rows=ad_rows,
+                current_ad_id=current_ad_id,
+                require_pending=False,
+            )
+        elif collection_method == "in_shop":
+            _financial_validate_shop_due_receipt(
+                due,
+                linked_receipt_id=validate_entity_id(linked),
+                customer_id=customer_id,
+                locked_receipts=locked_receipts,
+                ad_rows=ad_rows,
+                current_ad_id=current_ad_id,
+                require_unpaid=False,
+            )
+        else:
+            raise HTTPException(status_code=400, detail="This ad cannot use due receipt funding")
     # Cap the ad's TOTAL draw per receipt across both pools (refund-undo / stop rebuild
     # allocations, so this re-take must fit what the receipt has left).
     _financial_validate_combined_capacity(
@@ -6137,15 +6274,22 @@ def _financial_release_canceled_due(
         if not ad_row or bool(ad_row["deleted"]):
             continue
         ad = _financial_row_data(ad_row)
+        is_shop_link = (
+            str(ad.get("paymentStatus") or "") == "not_paid"
+            and str(ad.get("collectionMethod") or "") == "in_shop"
+            and str(ad.get("receiptId") or "") == receipt_id
+        )
         due = [
             dict(entry)
             for entry in (ad.get("dueAllocations") or [])
             if isinstance(entry, dict) and str(entry.get("receiptId") or "") != receipt_id
         ]
         ad["dueAllocations"] = due
-        if str(ad.get("linkedDeliveryReceiptId") or "") == receipt_id:
+        if str(ad.get("linkedDeliveryReceiptId") or "") == receipt_id or is_shop_link:
             ad["dueAmountToUseUSD"] = 0.0
             ad["dueAmountToUseLYD"] = 0.0
+        if is_shop_link:
+            ad["receiptId"] = ""
         baseline = ad.get("stopAllocationBaseline")
         if isinstance(baseline, dict):
             next_baseline = dict(baseline)
@@ -6154,7 +6298,7 @@ def _financial_release_canceled_due(
                 for entry in (baseline.get("due") or [])
                 if isinstance(entry, dict) and str(entry.get("receiptId") or "") != receipt_id
             ]
-            if str(ad.get("linkedDeliveryReceiptId") or "") == receipt_id:
+            if str(ad.get("linkedDeliveryReceiptId") or "") == receipt_id or is_shop_link:
                 next_baseline["dueLegacy"] = 0.0
             ad["stopAllocationBaseline"] = next_baseline
         if isinstance(ad.get("refundDueBaseline"), list):
@@ -6200,7 +6344,17 @@ def _financial_patch_receipt_atomic(
                 clean.pop(key, None)
             merged.update(clean)
             ad_rows = _financial_active_rows(conn, "ads")
-            if str(merged.get("deliveryStatus") or "") == "Canceled" and str(old.get("deliveryStatus") or "") != "Canceled":
+            canceled_due_source = (
+                (
+                    str(merged.get("deliveryStatus") or "") == "Canceled"
+                    and str(old.get("deliveryStatus") or "") != "Canceled"
+                )
+                or (
+                    str(merged.get("status") or "") in {"Canceled", "Lost"}
+                    and str(old.get("status") or "") not in {"Canceled", "Lost"}
+                )
+            )
+            if canceled_due_source:
                 _financial_release_canceled_due(
                     conn, receipt_id, ad_rows, postgres=postgres
                 )
