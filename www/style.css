@@ -49,8 +49,6 @@ html.is-rendering {
 #app.is-rendering {
   /* Lock current height during update */
   min-height: var(--app-height, 100vh);
-  /* Prevent any animations during render */
-  pointer-events: none;
 }
 
 /* DISABLE the fadeIn animation - it causes blinking */

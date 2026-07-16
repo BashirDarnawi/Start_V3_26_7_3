@@ -202,6 +202,44 @@ function _cheapSyncSig(arr) {
   return arr.length + ':' + maxLM + ':' + (h >>> 0);
 }
 
+function _deltaRecordVersion(record) {
+  if (!record || record._lastModified == null || record._lastModified === '') return null;
+  const version = Number(record._lastModified);
+  return Number.isFinite(version) ? version : null;
+}
+
+// The server deliberately overlaps each delta window so an update cannot be
+// missed at a cursor boundary. Most records in a poll are therefore exact
+// replays of records already in memory. Replace an existing object only for a
+// newer server revision (or the equal-revision deletion tie handled below);
+// preserving object identity for normal equal/stale replays also prevents a
+// needless whole-view render every 3s.
+function _shouldApplyDeltaRecord(incoming, current) {
+  const incomingVersion = _deltaRecordVersion(incoming);
+  const currentVersion = _deltaRecordVersion(current);
+
+  if (incomingVersion !== null && currentVersion !== null) {
+    if (incomingVersion > currentVersion) return true;
+    if (incomingVersion < currentVersion) return false;
+
+    // A generic server delete can land in the same millisecond as the write it
+    // deletes. In that tie, deletion must win or the active row can survive on
+    // this client forever. Replayed tombstones remain no-ops, and an equal-
+    // version active record can never resurrect a tombstone.
+    return incoming._deleted === true && current?._deleted !== true;
+  }
+  if (incomingVersion !== null) return true;
+  if (currentVersion !== null) return false;
+
+  // Legacy/offline records may predate server revision stamps. Keep supporting
+  // them without reporting an identical replay as a change.
+  try {
+    return JSON.stringify(incoming) !== JSON.stringify(current);
+  } catch (_) {
+    return true;
+  }
+}
+
 function applyServerDelta(collectionName, records) {
   if (!Array.isArray(records) || records.length === 0) return false;
   if (!Array.isArray(state[collectionName])) state[collectionName] = [];
@@ -226,14 +264,19 @@ function applyServerDelta(collectionName, records) {
     const clean = Security.sanitizeObject(rec);
     const idx = byId.get(clean.id);
     if (idx !== undefined) {
+      if (!_shouldApplyDeltaRecord(clean, arr[idx])) continue;
       arr[idx] = clean;                       // update existing in place
+      changed = true;
     } else if (newById.has(clean.id)) {
-      newOnes[newById.get(clean.id)] = clean; // dup id within this delta -> keep last
+      const stagedIndex = newById.get(clean.id);
+      if (!_shouldApplyDeltaRecord(clean, newOnes[stagedIndex])) continue;
+      newOnes[stagedIndex] = clean;           // duplicate id -> keep newest revision
+      changed = true;
     } else {
       newById.set(clean.id, newOnes.length);
       newOnes.push(clean);
+      changed = true;
     }
-    changed = true;
   }
 
   // Prepend new records once. Reverse to preserve the previous behavior where

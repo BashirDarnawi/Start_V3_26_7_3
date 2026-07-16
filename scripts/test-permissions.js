@@ -38,7 +38,8 @@ function makeElement() {
   });
   Object.defineProperty(el, 'innerHTML', {
     get: () => _html,
-    set: (v) => { _html = String(v); _text = _html.replace(/<[^>]*>/g, ''); }
+    set: (v) => { _html = String(v); _text = _html.replace(/<[^>]*>/g, ''); },
+    configurable: true
   });
   return el;
 }
@@ -111,7 +112,7 @@ vm.runInContext(fs.readFileSync(SCRIPT, 'utf8'), sandbox, { filename: 'script.js
 // the tests need across the boundary. Function declarations are already global
 // object properties, so they are reachable as sandbox.<name>.
 const bridged = vm.runInContext(
-  '({ state, PERMISSION_MODULES, Security, _serverLiveSync })',
+  '({ state, PERMISSION_MODULES, Security, _serverLiveSync, IconQueue })',
   sandbox
 );
 
@@ -146,6 +147,10 @@ function setPaymentRows(methods) {
 }
 
 const S = bridged.state;
+// Most tests replace render() with a no-op below because they only exercise
+// HTML-producing helpers. Keep the real function for the focused render-
+// stability regressions, where DOM write/layout/scroll activity is measured.
+const realRender = sandbox.render;
 
 const ADMIN = { id: 'u-admin', name: 'Bashir', role: 'Admin', permissions: {} };
 const OTHER = { id: 'u-other', name: 'Abdu', role: 'Employee', permissions: {} };
@@ -178,6 +183,193 @@ function seedBusinessData() {
   S.pages = [];
   S.exchangeRateHistory = [];
   S.logs = S.logs || [];
+}
+
+// Run the real render() against a deliberately small, tracked DOM. The normal
+// VM element stub does not parse innerHTML, so this helper supplies the main
+// view container explicitly and records every operation that could make a
+// background live-sync tick flash, shake, or move the visible page.
+function withTrackedPagesRender(run) {
+  const originalGetElementById = sandbox.document.getElementById;
+  const originalDocumentElement = sandbox.document.documentElement;
+  const hadActiveElement = Object.prototype.hasOwnProperty.call(sandbox.document, 'activeElement');
+  const originalActiveElement = sandbox.document.activeElement;
+  const originalGlobalRaf = sandbox.requestAnimationFrame;
+  const originalWindowRaf = sandbox.window.requestAnimationFrame;
+  const originalScrollTo = sandbox.window.scrollTo;
+  const originalPageYOffset = sandbox.window.pageYOffset;
+  const originalPageXOffset = sandbox.window.pageXOffset;
+  const originalScrollY = sandbox.window.scrollY;
+  const originalScrollX = sandbox.window.scrollX;
+  const originalIconSchedule = bridged.IconQueue.schedule;
+  const stateBefore = {
+    currentUser: S.currentUser,
+    users: S.users,
+    customers: S.customers,
+    receipts: S.receipts,
+    ads: S.ads,
+    pages: S.pages,
+    currentView: S.currentView,
+    language: S.language,
+    serverMode: S.serverMode,
+    isMobileMenuOpen: S.isMobileMenuOpen
+  };
+
+  const metrics = {
+    appWrites: 0,
+    viewWrites: 0,
+    layoutClassOps: 0,
+    appHeightOps: 0,
+    scrollCalls: 0,
+    iconSchedules: 0,
+    rafCalls: 0,
+    animationRemovals: [],
+    reset() {
+      this.appWrites = 0;
+      this.viewWrites = 0;
+      this.layoutClassOps = 0;
+      this.appHeightOps = 0;
+      this.scrollCalls = 0;
+      this.iconSchedules = 0;
+      this.rafCalls = 0;
+      this.animationRemovals = [];
+    }
+  };
+
+  const trackedClassList = () => {
+    const values = new Set();
+    return {
+      add(...names) {
+        for (const name of names) {
+          values.add(name);
+          if (name === 'is-rendering') metrics.layoutClassOps++;
+        }
+      },
+      remove(...names) {
+        for (const name of names) {
+          values.delete(name);
+          if (name === 'is-rendering') metrics.layoutClassOps++;
+        }
+      },
+      toggle(name, force) {
+        const shouldAdd = force === undefined ? !values.has(name) : !!force;
+        if (shouldAdd) this.add(name);
+        else this.remove(name);
+        return shouldAdd;
+      },
+      contains(name) { return values.has(name); }
+    };
+  };
+
+  const animationNode = {
+    classList: {
+      remove(...names) { metrics.animationRemovals.push(...names); }
+    }
+  };
+  let viewHTML = '';
+  const viewContainer = makeElement();
+  Object.defineProperty(viewContainer, 'innerHTML', {
+    get: () => viewHTML,
+    set: value => {
+      metrics.viewWrites++;
+      viewHTML = String(value);
+    },
+    configurable: true
+  });
+  viewContainer.seedHTML = value => { viewHTML = String(value); };
+  viewContainer.querySelectorAll = selector => (
+    String(selector).includes('animate-fade-in-up') ? [animationNode] : []
+  );
+
+  let appHTML = '';
+  const app = makeElement();
+  app.offsetHeight = 1200;
+  app.classList = trackedClassList();
+  app.style = {
+    setProperty(name) { if (name === '--app-height') metrics.appHeightOps++; },
+    removeProperty(name) { if (name === '--app-height') metrics.appHeightOps++; }
+  };
+  app.querySelector = selector => (
+    selector === '.p-4.md\\:p-8' ? viewContainer : null
+  );
+  Object.defineProperty(app, 'innerHTML', {
+    get: () => appHTML,
+    set: value => {
+      metrics.appWrites++;
+      appHTML = String(value);
+    },
+    configurable: true
+  });
+
+  const htmlElement = makeElement();
+  htmlElement.classList = trackedClassList();
+  htmlElement.scrollTop = 240;
+  const immediateRaf = callback => {
+    metrics.rafCalls++;
+    callback();
+    return metrics.rafCalls;
+  };
+
+  try {
+    loginAs(ADMIN);
+    Object.assign(S, {
+      currentView: 'pages',
+      language: 'en',
+      serverMode: false,
+      isMobileMenuOpen: false,
+      customers: [],
+      receipts: [],
+      ads: [],
+      pages: [{
+        id: 'page_render_stable',
+        name: 'Stable Page',
+        category: 'Testing',
+        customerIds: [],
+        _lastModified: 100
+      }]
+    });
+    sandbox.document.documentElement = htmlElement;
+    sandbox.document.activeElement = null;
+    sandbox.document.getElementById = id => (id === 'app' ? app : null);
+    sandbox.window.pageYOffset = 240;
+    sandbox.window.pageXOffset = 0;
+    sandbox.window.scrollY = 240;
+    sandbox.window.scrollX = 0;
+    sandbox.window.scrollTo = () => { metrics.scrollCalls++; };
+    sandbox.requestAnimationFrame = immediateRaf;
+    sandbox.window.requestAnimationFrame = immediateRaf;
+    bridged.IconQueue.schedule = () => { metrics.iconSchedules++; };
+
+    // Establish the first-render cache exactly as the browser does on navigation.
+    vm.runInContext(
+      '_lastRenderedView = null; _lastRenderedUserId = null; _lastViewHTML = null; _renderInProgress = false;',
+      sandbox
+    );
+    realRender();
+    // The fake app does not parse its full innerHTML into children; seed the
+    // supplied child with the same HTML a real browser received.
+    viewContainer.seedHTML(sandbox.renderView());
+    metrics.reset();
+    run({ metrics, viewContainer });
+  } finally {
+    sandbox.document.getElementById = originalGetElementById;
+    sandbox.document.documentElement = originalDocumentElement;
+    if (hadActiveElement) sandbox.document.activeElement = originalActiveElement;
+    else delete sandbox.document.activeElement;
+    sandbox.requestAnimationFrame = originalGlobalRaf;
+    sandbox.window.requestAnimationFrame = originalWindowRaf;
+    sandbox.window.scrollTo = originalScrollTo;
+    sandbox.window.pageYOffset = originalPageYOffset;
+    sandbox.window.pageXOffset = originalPageXOffset;
+    sandbox.window.scrollY = originalScrollY;
+    sandbox.window.scrollX = originalScrollX;
+    bridged.IconQueue.schedule = originalIconSchedule;
+    Object.assign(S, stateBefore);
+    vm.runInContext(
+      '_lastRenderedView = null; _lastRenderedUserId = null; _lastViewHTML = null; _renderInProgress = false;',
+      sandbox
+    );
+  }
 }
 
 const notes = [];
@@ -788,6 +980,147 @@ check('keyset page overlap deduplicates IDs and keeps the newest version', () =>
   });
   assert(rows.length === 1, 'duplicate page boundary left two copies of one record');
   assert(rows[0].note === 'new', 'dedupe kept the stale record version');
+});
+
+check('live-sync replay and stale rows are no-ops and preserve object identity', () => {
+  const current = {
+    id: 'page_delta_stable',
+    name: 'Current Page',
+    _lastModified: 100
+  };
+  S.pages = [current];
+
+  const replayChanged = sandbox.applyServerDelta('pages', [{ ...current }]);
+  assert(replayChanged === false, 'same-version overlap was reported as a real change');
+  assert(S.pages.length === 1, 'same-version overlap duplicated the row');
+  assert(S.pages[0] === current, 'same-version overlap replaced the existing object');
+
+  const staleChanged = sandbox.applyServerDelta('pages', [{
+    id: current.id,
+    name: 'Stale Page',
+    _lastModified: 99
+  }]);
+  assert(staleChanged === false, 'stale overlap was reported as a real change');
+  assert(S.pages[0] === current, 'stale overlap replaced the existing object');
+  assert(S.pages[0].name === 'Current Page', 'stale overlap rolled visible data backward');
+});
+
+check('live-sync newer rows report a real change and replace the visible record', () => {
+  const current = {
+    id: 'page_delta_newer',
+    name: 'Before Sync',
+    _lastModified: 100
+  };
+  S.pages = [current];
+
+  const changed = sandbox.applyServerDelta('pages', [{
+    id: current.id,
+    name: 'After Sync',
+    _lastModified: 101
+  }]);
+  assert(changed === true, 'newer server row was not reported as a real change');
+  assert(S.pages.length === 1, 'newer server row duplicated the record');
+  assert(S.pages[0] !== current, 'newer server row did not replace the old object');
+  assert(S.pages[0].name === 'After Sync', 'newer server value did not reach state');
+  assert(S.pages[0]._lastModified === 101, 'newer server version was not preserved');
+});
+
+check('equal-version tombstone deletes an active row and its replay is a no-op', () => {
+  const active = {
+    id: 'page_delta_equal_delete',
+    name: 'Delete Me',
+    _lastModified: 200
+  };
+  S.pages = [active];
+
+  const tombstone = {
+    id: active.id,
+    name: active.name,
+    _lastModified: 200,
+    _deleted: true
+  };
+  const deleted = sandbox.applyServerDelta('pages', [tombstone]);
+  assert(deleted === true, 'equal-version tombstone was ignored');
+  assert(S.pages.length === 1, 'equal-version tombstone duplicated the row');
+  assert(S.pages[0] !== active, 'equal-version tombstone did not replace the active object');
+  assert(S.pages[0]._deleted === true, 'equal-version tombstone did not mark the row deleted');
+
+  const appliedTombstone = S.pages[0];
+  const replayed = sandbox.applyServerDelta('pages', [{ ...tombstone }]);
+  assert(replayed === false, 'replayed equal-version tombstone reported another change');
+  assert(S.pages[0] === appliedTombstone, 'replayed tombstone replaced the stored object');
+});
+
+check('same-version duplicate delta always keeps the tombstone regardless of order', () => {
+  const active = {
+    id: 'page_delta_order_tie',
+    name: 'Boundary Write',
+    _lastModified: 300
+  };
+  const tombstone = {
+    ...active,
+    _deleted: true
+  };
+
+  for (const records of [
+    [{ ...active }, { ...tombstone }],
+    [{ ...tombstone }, { ...active }]
+  ]) {
+    S.pages = [];
+    const changed = sandbox.applyServerDelta('pages', records);
+    assert(changed === true, 'new duplicate-id delta was not applied');
+    assert(S.pages.length === 1, 'duplicate-id delta produced more than one row');
+    assert(S.pages[0]._deleted === true, 'active record won an equal-version tombstone tie');
+  }
+});
+
+check('legacy no-version replay is stable but changed data still replaces the row', () => {
+  const legacy = {
+    id: 'page_delta_legacy',
+    name: 'Legacy Page',
+    category: 'Old Data'
+  };
+  S.pages = [legacy];
+
+  const replayed = sandbox.applyServerDelta('pages', [{ ...legacy }]);
+  assert(replayed === false, 'identical legacy row was reported as changed');
+  assert(S.pages[0] === legacy, 'identical legacy row lost object identity');
+
+  const changed = sandbox.applyServerDelta('pages', [{ ...legacy, name: 'Legacy Page Updated' }]);
+  assert(changed === true, 'changed legacy row was ignored without a revision stamp');
+  assert(S.pages[0] !== legacy, 'changed legacy row did not replace the old object');
+  assert(S.pages[0].name === 'Legacy Page Updated', 'changed legacy value did not reach state');
+});
+
+check('unchanged Pages HTML performs no DOM, layout, icon, RAF, or scroll work', () => {
+  withTrackedPagesRender(({ metrics }) => {
+    realRender();
+    assert(metrics.appWrites === 0, 'unchanged render replaced the full app');
+    assert(metrics.viewWrites === 0, 'unchanged render replaced the current view');
+    assert(metrics.layoutClassOps === 0, 'unchanged render toggled the layout lock class');
+    assert(metrics.appHeightOps === 0, 'unchanged render wrote the app height lock');
+    assert(metrics.iconSchedules === 0, 'unchanged render rescanned/recreated icons');
+    assert(metrics.rafCalls === 0, 'unchanged render scheduled paint work');
+    assert(metrics.scrollCalls === 0, 'unchanged render forced a scroll restoration');
+  });
+});
+
+check('a visible Pages change updates only the view and strips entry animation', () => {
+  withTrackedPagesRender(({ metrics, viewContainer }) => {
+    S.pages[0] = {
+      ...S.pages[0],
+      name: 'Changed by Live Sync',
+      _lastModified: 101
+    };
+    realRender();
+    assert(metrics.appWrites === 0, 'same-view data change replaced the full app/sidebar');
+    assert(metrics.viewWrites === 1, `visible data change wrote the view ${metrics.viewWrites} times`);
+    assert(viewContainer.innerHTML.includes('Changed by Live Sync'), 'updated page name was not rendered');
+    assert(
+      metrics.animationRemovals.includes('animate-fade-in-up'),
+      'same-view update kept the entry animation that makes cards jump'
+    );
+  });
 });
 
 check('IndexedDB collection keys are isolated by server and authenticated user', () => {

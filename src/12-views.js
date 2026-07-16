@@ -79,38 +79,52 @@ function render() {
   // Prevent re-entrant rendering
   if (_renderInProgress) return;
   _renderInProgress = true;
-
-  // IMPORTANT: Save scroll position BEFORE any DOM changes
-  // Use multiple methods for reliability across browsers
-  _savedScrollPosition = {
-    top: window.pageYOffset || window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0,
-    left: window.pageXOffset || window.scrollX || document.documentElement.scrollLeft || document.body.scrollLeft || 0
-  };
-
-  const app = document.getElementById('app');
+  let app = null;
+  let layoutLocked = false;
 
   try {
-    if (!app) {
-      _renderInProgress = false;
-      return;
-    }
-
-    // Lock layout to prevent jumps during render
-    lockLayoutForRender(app);
-
-    // Hide loading screen on first render
-    const loadingScreen = document.getElementById('app-loading-screen');
-    if (loadingScreen) loadingScreen.style.display = 'none';
+    app = document.getElementById('app');
+    if (!app) return;
 
     // Determine what we're rendering
+    const isLoggedIn = !!state.currentUser;
+    if (isLoggedIn) {
+      // The gate may redirect away from a view the current user cannot open.
+      enforceSecretFeaturesGate();
+    }
     const currentView = state.currentView;
     const currentUserId = state.currentUser?.id;
-    const isLoggedIn = !!state.currentUser;
 
     // Check if we can do a partial update (same view, same user)
     const canPartialUpdate = _lastRenderedView === currentView &&
                              _lastRenderedUserId === currentUserId &&
                              isLoggedIn;
+
+    // Preflight a same-view update before taking a layout lock or touching the
+    // DOM. Overlapping live-sync polls normally produce identical view HTML;
+    // in that case rendering must be a true no-op so hover, icons, focus, and
+    // scroll remain completely undisturbed.
+    let viewContainer = null;
+    let nextViewHTML = null;
+    if (canPartialUpdate) {
+      viewContainer = app.querySelector('.p-4.md\\:p-8');
+      if (viewContainer) {
+        nextViewHTML = renderView();
+        if (nextViewHTML === _lastViewHTML) return;
+      }
+    }
+
+    // Save scroll and lock layout only when a DOM write will actually happen.
+    _savedScrollPosition = {
+      top: window.pageYOffset || window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0,
+      left: window.pageXOffset || window.scrollX || document.documentElement.scrollLeft || document.body.scrollLeft || 0
+    };
+    lockLayoutForRender(app);
+    layoutLocked = true;
+
+    // Hide loading screen on first render
+    const loadingScreen = document.getElementById('app-loading-screen');
+    if (loadingScreen) loadingScreen.style.display = 'none';
 
     if (!state.currentUser) {
       const localFirstRun = !isServerModeEnabled() && (!Array.isArray(state.users) || state.users.length === 0);
@@ -127,9 +141,6 @@ function render() {
       _lastRenderedUserId = null;
       _lastViewHTML = null;
     } else {
-      // Enforce "secret ideas" gating for non-admin users
-      enforceSecretFeaturesGate();
-
       // Preserve keyboard focus + caret across the innerHTML swap. Without
       // this, a background live-sync render() (every 3s) recreates the DOM and
       // steals focus while the user is typing in e.g. the receipts search box.
@@ -138,9 +149,8 @@ function render() {
       // For main app, try to update only the content area if possible
       if (canPartialUpdate) {
         // Only update the view content, not the entire app
-        const viewContainer = app.querySelector('.p-4.md\\:p-8');
         if (viewContainer) {
-          const newViewHTML = renderView();
+          const newViewHTML = nextViewHTML;
           // Skip the DOM swap when this view's HTML is exactly what is already on
           // screen. A background live-sync tick re-renders on ANY data change anywhere,
           // so most ticks produce identical HTML for the current view; re-inserting it
@@ -192,11 +202,12 @@ function render() {
         });
         // Unlock layout after scroll is restored
         unlockLayoutAfterRender(app);
+        layoutLocked = false;
       });
     });
   } catch (e) {
     console.error('[render] Error:', e);
-    unlockLayoutAfterRender(app);
+    if (layoutLocked) unlockLayoutAfterRender(app);
   } finally {
     _renderInProgress = false;
   }
