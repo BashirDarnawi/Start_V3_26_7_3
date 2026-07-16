@@ -398,6 +398,82 @@ const SERVER_SYNC_COLLECTIONS = Object.freeze([
   'walletTransactions', 'serviceSubscriptions'
 ]);
 
+// Receipt/ad photos are large base64 strings. Normal lists and live deltas
+// request lightweight records and fetch the full item only when a user opens
+// Photos or Edit. Old servers safely ignore the query parameter, while old
+// clients keep receiving full records because the backend default is true.
+const LIGHTWEIGHT_MEDIA_COLLECTIONS = new Set(['ads', 'receipts']);
+const INLINE_MEDIA_FIELDS_BY_COLLECTION = Object.freeze({
+  ads: Object.freeze(['adPhotos', 'photos']),
+  receipts: Object.freeze(['photos', 'receiptImage'])
+});
+
+function _inlineMediaFields(collection) {
+  return INLINE_MEDIA_FIELDS_BY_COLLECTION[String(collection || '')] || [];
+}
+
+function getEntityPhotoCountHint(collection, record) {
+  if (!record || typeof record !== 'object') return 0;
+  const seen = new Set();
+  for (const field of _inlineMediaFields(collection)) {
+    const value = record[field];
+    const values = Array.isArray(value) ? value : [value];
+    for (const source of values) {
+      if (typeof source === 'string' && source.trim()) seen.add(source.trim());
+    }
+  }
+  if (seen.size > 0 || record._mediaOmitted !== true) return seen.size;
+  const hinted = Number(record._photoCount);
+  return Number.isSafeInteger(hinted) && hinted > 0 ? hinted : 0;
+}
+
+function isEntityMediaHydrated(collection, record) {
+  if (!LIGHTWEIGHT_MEDIA_COLLECTIONS.has(String(collection || ''))) return true;
+  if (!record || typeof record !== 'object') return false;
+  if (record._mediaOmitted !== true) return true;
+  if (getEntityPhotoCountHint(collection, record) === 0) return true;
+  return _inlineMediaFields(collection).some(field => Object.prototype.hasOwnProperty.call(record, field));
+}
+
+// A same-version IndexedDB/state record may safely donate its already-loaded
+// photo bodies to a lightweight response. Never do this across revisions: an
+// equally-sized replacement photo would otherwise show stale bytes.
+function mergeMatchingVersionInlineMedia(collection, incoming, current) {
+  if (!incoming || typeof incoming !== 'object' || incoming._mediaOmitted !== true) return incoming;
+  if (!current || typeof current !== 'object' || !isEntityMediaHydrated(collection, current)) return incoming;
+  const incomingVersion = Number(incoming._lastModified);
+  const currentVersion = Number(current._lastModified);
+  if (!Number.isFinite(incomingVersion) || incomingVersion !== currentVersion) return incoming;
+  const merged = { ...incoming };
+  let copied = false;
+  for (const field of _inlineMediaFields(collection)) {
+    if (!Object.prototype.hasOwnProperty.call(current, field)) continue;
+    const value = current[field];
+    merged[field] = Array.isArray(value) ? value.slice() : value;
+    copied = true;
+  }
+  if (copied) merged._mediaOmitted = false;
+  return merged;
+}
+
+// A successful mutation tells us exactly which media fields changed. Reattach
+// those known bytes to the lightweight response so the server does not need to
+// echo the same base64 payload back over the network.
+function mergeMutationInlineMedia(collection, incoming, knownRecord) {
+  if (!incoming || typeof incoming !== 'object' || incoming._mediaOmitted !== true) return incoming;
+  if (!knownRecord || typeof knownRecord !== 'object') return incoming;
+  const merged = { ...incoming };
+  let copied = false;
+  for (const field of _inlineMediaFields(collection)) {
+    if (!Object.prototype.hasOwnProperty.call(knownRecord, field)) continue;
+    const value = knownRecord[field];
+    merged[field] = Array.isArray(value) ? value.slice() : value;
+    copied = true;
+  }
+  if (copied) merged._mediaOmitted = false;
+  return merged;
+}
+
 // Capture server-issued collection watermarks BEFORE a full load starts. A
 // full load spans several requests and is not one DB snapshot; seeding a delta
 // cursor from the rows it happened to return can skip a write that lands after
@@ -762,14 +838,16 @@ function applyValidatedServerEntityBatch(entries, reason = 'serverMutation') {
   return prepared.map(item => item.saved);
 }
 
-async function apiLoadCollectionAll(collection, { forceRefresh = false } = {}) {
+async function apiLoadCollectionAll(collection, { forceRefresh = false, includeMedia = false } = {}) {
   const identity = getServerSessionIdentity();
-  const requestKey = `${identity}|${String(collection || '')}|${forceRefresh ? 'fresh' : 'cached'}`;
+  const omitMedia = LIGHTWEIGHT_MEDIA_COLLECTIONS.has(String(collection || '')) && includeMedia !== true;
+  const mediaMode = omitMedia ? 'thin' : 'full';
+  const requestKey = `${identity}|${String(collection || '')}|${forceRefresh ? 'fresh' : 'cached'}|${mediaMode}`;
   const now = Date.now();
 
   // Return cached data immediately if fresh (but only for non-critical refreshes)
   const cache = _collectionCache[collection];
-  if (!forceRefresh && cache && cache.identity === identity && cache.data && (now - cache.timestamp) < CACHE_TTL_MS) {
+  if (!forceRefresh && cache && cache.identity === identity && cache.mediaMode === mediaMode && cache.data && (now - cache.timestamp) < CACHE_TTL_MS) {
     return cache.data;
   }
 
@@ -795,6 +873,11 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false } = {}) {
     const limit = SERVER_API.pageSize || 300;
     const timeoutMs = getCollectionTimeout(collection);
     let pageCount = 0;
+    const currentById = new Map(
+      (Array.isArray(state[collection]) ? state[collection] : [])
+        .filter(record => record && record.id != null)
+        .map(record => [String(record.id), record])
+    );
     // Safety cap against infinite loops. Must be high enough to load the
     // designed maximum collection size (STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION,
     // 100k) — the old flat 50 pages capped every collection at 50×300 = 15,000
@@ -809,6 +892,7 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false } = {}) {
       try {
         // Use retry logic for resilience against transient server errors/timeouts
         let path = `/api/collections/${encodeURIComponent(collection)}?limit=${limit}&include_deleted=true`;
+        if (omitMedia) path += '&include_media=false';
         if (beforeCreatedAt !== null && beforeId) {
           path += `&before_created_at=${encodeURIComponent(String(beforeCreatedAt))}&before_id=${encodeURIComponent(beforeId)}`;
         }
@@ -828,6 +912,7 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false } = {}) {
         let lastEntity = null;
         for (const rawEntity of items) {
           const entity = validateServerEntityResponse(collection, rawEntity, `list[${all.length}]`);
+          entity.data = mergeMatchingVersionInlineMedia(collection, entity.data, currentById.get(String(entity.id)));
           lastEntity = entity;
           // Defensive only: keyset pages should not overlap, but a record can
           // be updated while pagination is running. Keep one ID and prefer the
@@ -881,7 +966,7 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false } = {}) {
     // the in-memory request cache or IndexedDB persistence path.
     if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
     if (_collectionCache[collection]) {
-      _collectionCache[collection] = { data: all, timestamp: Date.now(), identity };
+      _collectionCache[collection] = { data: all, timestamp: Date.now(), identity, mediaMode };
     }
 
     return all;
@@ -906,12 +991,66 @@ async function apiGetEntity(collection, id) {
   );
 }
 
+const _pendingEntityMediaLoads = new Map();
+
+async function ensureEntityMediaLoaded(collection, id) {
+  const name = String(collection || '');
+  const safeId = String(id || '');
+  const findCurrent = () => (Array.isArray(state[name]) ? state[name] : [])
+    .find(record => record && !record._deleted && String(record.id) === safeId) || null;
+  let current = findCurrent();
+  if (!current || !LIGHTWEIGHT_MEDIA_COLLECTIONS.has(name) || isEntityMediaHydrated(name, current)) return current;
+  if (!isServerModeEnabled()) return current;
+
+  const identity = getServerSessionIdentity();
+  const key = `${identity}|${name}|${safeId}`;
+  if (_pendingEntityMediaLoads.has(key)) return await _pendingEntityMediaLoads.get(key);
+
+  const request = (async () => {
+    // A live delta can win while the item GET is in flight. Retry once instead
+    // of replacing that newer summary with an older full response.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const entity = await apiGetEntity(name, safeId);
+      if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+      const full = entity?.data ? Security.sanitizeObject(entity.data) : null;
+      const latest = findCurrent();
+      if (!full || !latest || latest._deleted) return latest;
+      const responseVersion = Number(full._lastModified);
+      const latestVersion = Number(latest._lastModified);
+      if (Number.isFinite(responseVersion) && Number.isFinite(latestVersion) && responseVersion < latestVersion) continue;
+
+      const target = state[name];
+      const index = target.findIndex(record => record && String(record.id) === safeId);
+      if (index === -1) return null;
+      target[index] = full;
+      if (_collectionCache[name]?.identity === identity && Array.isArray(_collectionCache[name].data)) {
+        const cachedIndex = _collectionCache[name].data.findIndex(record => record && String(record.id) === safeId);
+        if (cachedIndex !== -1) _collectionCache[name].data[cachedIndex] = full;
+      }
+      markCollectionDirty(name);
+      saveState();
+      return full;
+    }
+    return findCurrent();
+  })();
+  _pendingEntityMediaLoads.set(key, request);
+  try {
+    return await request;
+  } finally {
+    if (_pendingEntityMediaLoads.get(key) === request) _pendingEntityMediaLoads.delete(key);
+  }
+}
+
 async function apiCreateEntity(collection, record) {
-  return await requestValidatedServerEntity(collection, 'create', () =>
+  const omitMedia = LIGHTWEIGHT_MEDIA_COLLECTIONS.has(String(collection || ''));
+  const path = `/api/collections/${encodeURIComponent(collection)}${omitMedia ? '?include_media=false' : ''}`;
+  const entity = await requestValidatedServerEntity(collection, 'create', () =>
     withRetry(() =>
-      apiJson(`/api/collections/${encodeURIComponent(collection)}`, { method: 'POST', body: { id: record.id, data: record } }, { timeoutMs: 20000 })
+      apiJson(path, { method: 'POST', body: { id: record.id, data: record } }, { timeoutMs: 20000 })
     , 2, 500)
   );
+  entity.data = mergeMutationInlineMedia(collection, entity.data, record);
+  return entity;
 }
 
 // Server-authoritative money operations. These endpoints validate balance,
@@ -960,7 +1099,7 @@ async function apiPurchaseSubscription({ serviceId, idempotencyKey, userId }) {
 // idempotency key so a response-loss retry replays the same result.
 async function apiTransferReceipt(payload) {
   const identity = getServerSessionIdentity();
-  const response = await apiJson('/api/receipts/transfers', {
+  const response = await apiJson('/api/receipts/transfers?include_media=false', {
     method: 'POST',
     body: payload
   }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
@@ -970,9 +1109,15 @@ async function apiTransferReceipt(payload) {
     error.code = 'INVALID_ENTITY_RESPONSE';
     throw error;
   }
+  const sourceReceipt = validateServerEntityResponse('receipts', response.sourceReceipt, 'transfer.sourceReceipt');
+  const targetReceipt = validateServerEntityResponse('receipts', response.targetReceipt, 'transfer.targetReceipt');
+  const localSource = (state.receipts || []).find(row => row && String(row.id) === String(payload?.sourceReceiptId || ''));
+  const localTarget = (state.receipts || []).find(row => row && String(row.id) === String(payload?.targetReceiptId || ''));
+  sourceReceipt.data = mergeMutationInlineMedia('receipts', sourceReceipt.data, localSource);
+  targetReceipt.data = mergeMutationInlineMedia('receipts', targetReceipt.data, localTarget);
   return {
-    sourceReceipt: validateServerEntityResponse('receipts', response.sourceReceipt, 'transfer.sourceReceipt'),
-    targetReceipt: validateServerEntityResponse('receipts', response.targetReceipt, 'transfer.targetReceipt'),
+    sourceReceipt,
+    targetReceipt,
     replayed: response.replayed === true
   };
 }
@@ -984,7 +1129,7 @@ async function apiMutateAd(payload) {
   const action = String(payload?.action || '');
   if (!['create', 'update'].includes(action)) throw new Error('Invalid ad mutation action');
   const identity = getServerSessionIdentity();
-  const response = await apiJson('/api/ads/mutate', {
+  const response = await apiJson('/api/ads/mutate?include_media=false', {
     method: 'POST',
     body: payload
   }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
@@ -994,8 +1139,11 @@ async function apiMutateAd(payload) {
     error.code = 'INVALID_ENTITY_RESPONSE';
     throw error;
   }
+  const ad = validateServerEntityResponse('ads', response.ad, `${action}.ad`);
+  const localAd = (state.ads || []).find(row => row && String(row.id) === String(payload?.adId || ''));
+  ad.data = mergeMutationInlineMedia('ads', ad.data, { ...(localAd || {}), ...(payload?.data || {}) });
   return {
-    ad: validateServerEntityResponse('ads', response.ad, `${action}.ad`),
+    ad,
     replayed: response.replayed === true
   };
 }
@@ -1006,7 +1154,7 @@ async function apiStopAd(adId, payload) {
   const safeAdId = String(adId || '');
   if (!Security.isValidRecordId(safeAdId)) throw new Error('Invalid ad id');
   const identity = getServerSessionIdentity();
-  const response = await apiJson(`/api/ads/${encodeURIComponent(safeAdId)}/stop`, {
+  const response = await apiJson(`/api/ads/${encodeURIComponent(safeAdId)}/stop?include_media=false`, {
     method: 'POST',
     body: payload
   }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
@@ -1016,8 +1164,11 @@ async function apiStopAd(adId, payload) {
     error.code = 'INVALID_ENTITY_RESPONSE';
     throw error;
   }
+  const ad = validateServerEntityResponse('ads', response.ad, 'stop.ad');
+  const localAd = (state.ads || []).find(row => row && String(row.id) === safeAdId);
+  ad.data = mergeMutationInlineMedia('ads', ad.data, localAd);
   return {
-    ad: validateServerEntityResponse('ads', response.ad, 'stop.ad'),
+    ad,
     replayed: response.replayed === true
   };
 }
@@ -1054,15 +1205,21 @@ async function apiMutateClothesOrder(payload) {
 }
 
 async function apiPatchEntity(collection, id, updates, expectedLastModified) {
-  return await requestValidatedServerEntity(collection, 'patch', () =>
+  const omitMedia = LIGHTWEIGHT_MEDIA_COLLECTIONS.has(String(collection || ''));
+  const local = (Array.isArray(state[collection]) ? state[collection] : [])
+    .find(row => row && String(row.id) === String(id));
+  const path = `/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}${omitMedia ? '?include_media=false' : ''}`;
+  const entity = await requestValidatedServerEntity(collection, 'patch', () =>
     withRetry(() =>
       apiJson(
-        `/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
+        path,
         { method: 'PATCH', body: { data: updates, expectedLastModified } },
         { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
       )
     , 2, 500)
   );
+  entity.data = mergeMutationInlineMedia(collection, entity.data, { ...(local || {}), ...(updates || {}) });
+  return entity;
 }
 
 // Full-record update used by the delete-cascade cleanup (15-modals.js). This

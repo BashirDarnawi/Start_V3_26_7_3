@@ -146,6 +146,7 @@ async function apiLoadCollectionSince(collection, sinceMs) {
   const since = Number.isFinite(Number(sinceMs)) ? Number(sinceMs) : 0;
   while (true) {
     let path = `/api/collections/${encodeURIComponent(collection)}?updated_since=${encodeURIComponent(String(since))}&limit=${limit}&include_deleted=true`;
+    if (LIGHTWEIGHT_MEDIA_COLLECTIONS.has(String(collection || ''))) path += '&include_media=false';
     if (afterLastModified !== null && afterId) {
       path += `&after_last_modified=${encodeURIComponent(String(afterLastModified))}&after_id=${encodeURIComponent(afterId)}`;
     }
@@ -261,7 +262,10 @@ function applyServerDelta(collectionName, records) {
 
   for (const rec of records) {
     if (!rec || !rec.id) continue;
-    const clean = Security.sanitizeObject(rec);
+    const existingIndex = byId.get(rec.id);
+    const existing = existingIndex !== undefined ? arr[existingIndex] : null;
+    const prepared = mergeMatchingVersionInlineMedia(collectionName, rec, existing);
+    const clean = Security.sanitizeObject(prepared);
     const idx = byId.get(clean.id);
     if (idx !== undefined) {
       if (!_shouldApplyDeltaRecord(clean, arr[idx])) continue;

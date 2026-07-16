@@ -2336,7 +2336,7 @@ function renderReceiptsView() {
           // Normalize payments
           const payments = Array.isArray(receipt.payments) ? receipt.payments : [];
           const hasMultiplePayments = payments.length > 1;
-          const receiptPhotos = getReceiptPhotoSources(receipt);
+          const receiptPhotoCount = getReceiptPhotoCount(receipt);
 
           // Calculate total paid as sum of R1 values (amount × rate)
           const totalPaid = payments.reduce((sum, p) => sum + ((p.amount || 0) * (p.rate || 1)), 0) || receipt.amountLocal;
@@ -2504,16 +2504,6 @@ function renderReceiptsView() {
                 </div>
               `}
 
-              ${receiptPhotos.length ? `
-                <button type="button" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" onclick="openReceiptPhotoViewer(this.dataset.receiptId, 0)" class="group relative block w-full mb-4 rounded-xl overflow-hidden border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500" title="${isArV ? 'اضغط لعرض الصورة بالحجم الكامل' : 'Click to view full size'}" aria-label="${isArV ? `عرض صور الوصل (${receiptPhotos.length})` : `View receipt photos (${receiptPhotos.length})`}">
-                  <img src="${Security.escapeHtml(receiptPhotos[0])}" alt="${isArV ? 'صورة الوصل' : 'Receipt photo'}" loading="lazy" decoding="async" class="w-full h-32 object-cover" />
-                  <span class="absolute inset-0 bg-black/0 group-hover:bg-black/30 group-focus:bg-black/30 transition-colors flex items-center justify-center">
-                    <span class="opacity-0 group-hover:opacity-100 group-focus:opacity-100 transition-opacity px-3 py-1.5 rounded-full bg-black/65 text-white text-xs font-bold flex items-center gap-1.5"><i data-lucide="maximize-2" class="w-4 h-4"></i>${isArV ? 'عرض الصورة' : 'View photo'}</span>
-                  </span>
-                  ${receiptPhotos.length > 1 ? `<span class="absolute top-2 right-2 px-2 py-1 rounded-full bg-black/70 text-white text-xs font-bold flex items-center gap-1"><i data-lucide="images" class="w-3.5 h-3.5"></i>${receiptPhotos.length}</span>` : ''}
-                </button>
-              ` : ''}
-
               <!-- Collection (with amount) -->
               ${(() => {
                 const targetLYD = Number(receipt.amountLocal) || 0;
@@ -2562,6 +2552,9 @@ function renderReceiptsView() {
                 <div class="flex justify-between items-center">
                   <span class="status-badge status-${(receipt.status || '').toLowerCase()}">${trStatus(receipt.status || 'Unknown')}</span>
                   <div class="flex space-x-2">
+                    ${receiptPhotoCount > 0 ? `<button type="button" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" onclick="openReceiptPhotoViewer(this.dataset.receiptId, 0)" class="inline-flex items-center gap-1 text-cyan-600 hover:text-cyan-700 font-bold" title="${isArV ? `عرض صور الوصل (${receiptPhotoCount})` : `View receipt photos (${receiptPhotoCount})`}" aria-label="${isArV ? `عرض صور الوصل (${receiptPhotoCount})` : `View receipt photos (${receiptPhotoCount})`}">
+                      <i data-lucide="images" class="w-4 h-4"></i><span class="text-xs">${isArV ? 'الصور' : 'Photos'} ${receiptPhotoCount}</span>
+                    </button>` : ''}
                     ${_isTransferableReceipt(receipt) ? `<button onclick="showReceiptTransferModal('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="${isArV ? 'تحويل الرصيد' : 'Transfer balance'}">
                       <i data-lucide="swap" class="w-4 h-4"></i>
                     </button>` : ''}
@@ -2809,6 +2802,7 @@ function renderAdsView() {
             <tbody>
               ${allAds.map((ad, idx) => {
                 const customer = customersById.get(ad.customerId);
+                const adPhotoCount = getAdPhotoCount(ad);
                 // Deleting a page keeps its ads (history) but leaves their pageId
                 // pointing at the deleted page, whose name a NEW page may reuse.
                 // Keep resolving the name (the ad really did run on it) but mark
@@ -2947,6 +2941,10 @@ function renderAdsView() {
                     </td>
                     <td class="py-3 px-2" data-label="Actions">
                       <div class="flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
+                        ${can('ads', 'viewPhotos') && adPhotoCount > 0 ? `
+                        <button type="button" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openAdPhotoViewer(this.dataset.adId, 0)" class="inline-flex items-center gap-1 text-cyan-600 hover:text-cyan-700 p-2 md:p-0 font-bold" title="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}" aria-label="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}">
+                          <i data-lucide="images" class="w-5 h-5 md:w-4 md:h-4"></i><span class="text-xs">${isAr ? 'الصور' : 'Photos'} ${adPhotoCount}</span>
+                        </button>` : ''}
                         ${_isAdToppable(ad) ? `
                         <button onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="${isAr ? 'عمليات الشحن' : 'Top-ups'}">
                           <i data-lucide="trending-up" class="w-5 h-5 md:w-4 md:h-4"></i>

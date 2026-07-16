@@ -497,6 +497,10 @@ function getRecordType(record) {
 function redactSensitive(obj, depth = 0) {
   if (depth > 12) return null;
   if (obj === null || obj === undefined) return obj;
+  // Audit metadata must never duplicate inline image bodies. A single update
+  // previously copied every photo in both {old,new}, then persisted that copy
+  // in the local log, causing multi-megabyte saves and storage exhaustion.
+  if (typeof obj === 'string' && /^data:image\//i.test(obj.trim())) return '[media omitted]';
   if (typeof obj !== 'object') return obj;
   if (Array.isArray(obj)) return obj.map(x => redactSensitive(x, depth + 1));
 
@@ -515,6 +519,11 @@ function redactSensitive(obj, depth = 0) {
   const out = {};
   for (const [k, v] of Object.entries(obj)) {
     if (SENSITIVE_KEYS.has(k)) continue;
+    if (/^(?:photo|photos|adPhotos|receiptImage|image|images|screenshot|screenshots)$/i.test(k)) {
+      const count = Array.isArray(v) ? v.filter(Boolean).length : (v ? 1 : 0);
+      out[k] = count ? `[media omitted: ${count}]` : '[no media]';
+      continue;
+    }
     out[k] = redactSensitive(v, depth + 1);
   }
   return out;

@@ -30,11 +30,14 @@ function available(command, args) {
 
 function findPython() {
   const configured = process.env.PYTHON;
+  const projectVenvPython = process.platform === 'win32'
+    ? path.join(ROOT, '.venv', 'Scripts', 'python.exe')
+    : path.join(ROOT, '.venv', 'bin', 'python');
   const candidates = configured
     ? [[configured, []]]
     : process.platform === 'win32'
-      ? [['py', ['-3']], ['python', []], ['python3', []]]
-      : [['python3', []], ['python', []]];
+      ? [[projectVenvPython, []], ['py', ['-3']], ['python', []], ['python3', []]]
+      : [[projectVenvPython, []], ['python3', []], ['python', []]];
 
   for (const [command, prefix] of candidates) {
     if (!available(command, [...prefix, '--version'])) continue;
@@ -81,7 +84,7 @@ if (status === null && requested !== 'python') status = testWithDocker();
 
 if (status === null) {
   console.error(
-    'Backend tests could not start. Install Python 3.12 plus server/requirements.txt, ' +
+    'Backend tests could not start. Create .venv and install server/requirements.txt, ' +
     'or start Docker Desktop, then run npm run test:backend again.'
   );
   process.exit(1);

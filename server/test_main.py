@@ -24,7 +24,7 @@ os.environ["DATABASE_URL"] = "sqlite+pysqlite:///:memory:"
 
 # Import after env/path are set
 from sqlalchemy import text
-from server.main import app
+from server.main import app, _without_inline_media
 from server.db import db_conn, init_db, json_dumps, now_ms
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
 
@@ -255,6 +255,144 @@ class TestReceipts:
             cookies={"albayan_session": admin_session}
         )
         assert response.status_code == 400
+
+    def test_lightweight_collection_omits_media_but_direct_get_keeps_it(self, admin_session):
+        """Normal sync can skip photo bodies without changing stored records."""
+        png = "data:image/png;base64,AAAA"
+        jpeg = "data:image/jpeg;base64,/9j/2Q=="
+        receipt_id = "test_receipt_media_projection"
+        created = client.post(
+            "/api/collections/receipts",
+            json={
+                "id": receipt_id,
+                "data": {
+                    "amountLocal": 10,
+                    "photos": [png, jpeg, png],
+                    "receiptImage": png,
+                    "_photoCount": 999,
+                    "_mediaOmitted": True,
+                },
+            },
+            cookies={"albayan_session": admin_session},
+        )
+        assert created.status_code == 200
+
+        full_list = client.get(
+            "/api/collections/receipts",
+            cookies={"albayan_session": admin_session},
+        )
+        assert full_list.status_code == 200
+        full = next(row["data"] for row in full_list.json() if row["id"] == receipt_id)
+        assert full["photos"] == [png, jpeg, png]
+        assert full["receiptImage"] == png
+        assert "_photoCount" not in full and "_mediaOmitted" not in full
+
+        lean_list = client.get(
+            "/api/collections/receipts",
+            params={"include_media": "false"},
+            cookies={"albayan_session": admin_session},
+        )
+        assert lean_list.status_code == 200
+        lean = next(row["data"] for row in lean_list.json() if row["id"] == receipt_id)
+        assert "photos" not in lean and "receiptImage" not in lean
+        assert lean["_mediaOmitted"] is True
+        assert lean["_photoCount"] == 2
+
+        direct = client.get(
+            f"/api/collections/receipts/{receipt_id}",
+            cookies={"albayan_session": admin_session},
+        )
+        assert direct.status_code == 200
+        assert direct.json()["data"]["photos"] == [png, jpeg, png]
+        assert direct.json()["data"]["receiptImage"] == png
+
+        patched = client.patch(
+            f"/api/collections/receipts/{receipt_id}",
+            params={"include_media": "false"},
+            json={
+                "data": {"phoneNumber": "0910000000"},
+                "expectedLastModified": direct.json()["lastModified"],
+            },
+            cookies={"albayan_session": admin_session},
+        )
+        assert patched.status_code == 200
+        assert patched.json()["data"]["_mediaOmitted"] is True
+        assert patched.json()["data"]["_photoCount"] == 2
+        assert "photos" not in patched.json()["data"]
+        after_patch = client.get(
+            f"/api/collections/receipts/{receipt_id}",
+            cookies={"albayan_session": admin_session},
+        )
+        assert after_patch.json()["data"]["photos"] == [png, jpeg, png]
+        assert after_patch.json()["data"]["receiptImage"] == png
+
+    def test_ad_media_projection_counts_current_and_legacy_sources(self):
+        """The shared projection also supports adPhotos plus legacy photos."""
+        original = {
+            "id": "ad_media_projection",
+            "adPhotos": ["data:image/png;base64,AAAA"],
+            "photos": ["data:image/png;base64,AAAA", "https://cdn.example/ad.jpg"],
+            "status": "Active",
+        }
+        lean = _without_inline_media("ads", original)
+        assert lean["_photoCount"] == 2
+        assert lean["_mediaOmitted"] is True
+        assert "adPhotos" not in lean and "photos" not in lean
+        assert "adPhotos" in original and "photos" in original
+
+    def test_ad_media_requires_view_photos_permission(self, admin_session):
+        """Ad view permission alone must not expose inline photo bodies."""
+        png = "data:image/png;base64,ADPHOTO"
+        ad_id = "test_ad_media_permission"
+        created = client.post(
+            "/api/collections/ads",
+            json={"id": ad_id, "data": {"status": "Active", "adPhotos": [png]}},
+            cookies={"albayan_session": admin_session},
+        )
+        assert created.status_code == 200
+        assert created.json()["data"]["adPhotos"] == [png]
+
+        email = "media-view-only@tests.albayanhub.com"
+        password = "MediaPermission123!"
+        employee = client.post(
+            "/api/users",
+            json={
+                "name": "Media View Only",
+                "email": email,
+                "role": "Employee",
+                "password": password,
+                "permissions": {"ads": ["view"]},
+            },
+            cookies={"albayan_session": admin_session},
+        )
+        assert employee.status_code == 200
+        login = client.post("/api/auth/login", json={"email": email, "password": password})
+        assert login.status_code == 200
+        employee_session = login.cookies.get("albayan_session")
+        client.cookies.clear()
+        cookies = {"albayan_session": employee_session}
+
+        listed = client.get(
+            "/api/collections/ads",
+            params={"include_media": "true"},
+            cookies=cookies,
+        )
+        assert listed.status_code == 200
+        listed_ad = next(row["data"] for row in listed.json() if row["id"] == ad_id)
+        assert "adPhotos" not in listed_ad
+        assert listed_ad["_mediaOmitted"] is True
+        assert listed_ad["_photoCount"] == 1
+
+        direct = client.get(f"/api/collections/ads/{ad_id}", cookies=cookies)
+        assert direct.status_code == 200
+        assert "adPhotos" not in direct.json()["data"]
+        assert direct.json()["data"]["_photoCount"] == 1
+
+        bootstrap = client.get("/api/bootstrap", cookies=cookies)
+        assert bootstrap.status_code == 200
+        bootstrap_ad = next(row for row in bootstrap.json()["ads"] if row["id"] == ad_id)
+        assert "adPhotos" not in bootstrap_ad
+        assert bootstrap_ad["_photoCount"] == 1
 
 
 class TestDeliveryOperations:

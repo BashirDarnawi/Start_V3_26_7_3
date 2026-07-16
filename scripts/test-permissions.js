@@ -1316,7 +1316,7 @@ check('server money/subscription calls use dedicated transactional endpoints', (
   assert(built.includes('Forgot your password? Contact an administrator.'), 'server login still advertises unusable email reset');
   assert(built.includes("code = incompleteError.code || 'INCOMPLETE_COLLECTION_LOAD'"), 'partial page failures are not propagated');
   assert(built.includes('for (const name of failed) idbSync.dirty.add(name)'), 'failed IndexedDB writes are not requeued');
-  assert(built.includes('const requestKey = `${identity}|${String(collection || \'\')}|${forceRefresh ? \'fresh\' : \'cached\'}`'), 'collection requests are not session-identity/freshness scoped');
+  assert(built.includes('const requestKey = `${identity}|${String(collection || \'\')}|${forceRefresh ? \'fresh\' : \'cached\'}|${mediaMode}`'), 'collection requests are not session-identity/freshness/media scoped');
   assert(built.includes('const loadAborted = () => ('), 'full server loads have no session-change guard');
   assert(built.includes("error.code = 'SERVER_SESSION_CHANGED'"), 'late responses cannot signal a changed session');
   assert(built.includes("if (isServerModeEnabled()) {\n      showNotification(\n        state.language === 'ar' ? 'غير متاح' : 'Not Available'"), 'server-mode passkey registration is not disabled');
@@ -1619,18 +1619,106 @@ function setReceiptPhotoRenderState(photoFields) {
   return visible(sandbox.renderReceiptsView());
 }
 
-check('receipt card displays photos[] and opens by a safe data id', () => {
+check('receipt card shows an outside photo button without embedding the image', () => {
   const html = setReceiptPhotoRenderState({ photos: [SAFE_RECEIPT_PNG], receiptImage: '' });
-  assert(html.includes(`src="${SAFE_RECEIPT_PNG}"`), 'current photos[] image is missing from the receipt card');
+  assert(!html.includes(`src="${SAFE_RECEIPT_PNG}"`), 'receipt card still embeds and decodes the full photo');
   assert(html.includes('data-receipt-id="r1"'), 'receipt id is not stored in a data attribute');
   assert(html.includes('openReceiptPhotoViewer(this.dataset.receiptId, 0)'), 'receipt card has no photo viewer action');
+  assert(html.includes('Photos 1'), 'outside photo button does not show its count');
   assert(!html.includes("openReceiptPhotoViewer('r1'"), 'receipt id is still embedded in JavaScript source');
 });
 
-check('receipt card still displays a legacy receiptImage', () => {
+check('receipt card exposes a legacy receiptImage through the same outside button', () => {
   const html = setReceiptPhotoRenderState({ photos: [], receiptImage: SAFE_RECEIPT_JPEG });
-  assert(html.includes(`src="${SAFE_RECEIPT_JPEG}"`), 'legacy receiptImage is missing from the receipt card');
+  assert(!html.includes(`src="${SAFE_RECEIPT_JPEG}"`), 'legacy image is still embedded in the receipt list');
   assert(html.includes('View receipt photos (1)'), 'legacy image is not clickable');
+  assert(html.includes('Photos 1'), 'legacy image count is missing from the outside button');
+});
+
+check('lightweight media summaries keep counts and never reuse stale photo bytes', () => {
+  const full = { id: 'r1', _lastModified: 10, photos: [SAFE_RECEIPT_PNG] };
+  const same = { id: 'r1', _lastModified: 10, _mediaOmitted: true, _photoCount: 1 };
+  const newer = { id: 'r1', _lastModified: 11, _mediaOmitted: true, _photoCount: 1 };
+  const reused = sandbox.mergeMatchingVersionInlineMedia('receipts', same, full);
+  assert(reused.photos?.[0] === SAFE_RECEIPT_PNG, 'matching cached media was not reused');
+  assert(sandbox.isEntityMediaHydrated('receipts', reused), 'matching media still looks unhydrated');
+  const invalidated = sandbox.mergeMatchingVersionInlineMedia('receipts', newer, full);
+  assert(!Object.prototype.hasOwnProperty.call(invalidated, 'photos'), 'newer summary reused stale media');
+  assert(!sandbox.isEntityMediaHydrated('receipts', invalidated), 'newer summary incorrectly looks hydrated');
+  assert(sandbox.getReceiptPhotoCount(invalidated) === 1, 'photo-count hint disappeared');
+  const mutationEcho = sandbox.mergeMutationInlineMedia('receipts', newer, { photos: [SAFE_RECEIPT_JPEG] });
+  assert(mutationEcho.photos?.[0] === SAFE_RECEIPT_JPEG, 'lightweight mutation response lost known local media');
+  assert(sandbox.isEntityMediaHydrated('receipts', mutationEcho), 'reattached mutation media still looks omitted');
+});
+
+check('ad photo normalization and outside button support current and legacy fields', () => {
+  const adSources = sandbox.getAdPhotoSources({
+    adPhotos: [SAFE_RECEIPT_PNG, SAFE_RECEIPT_PNG],
+    photos: [SAFE_RECEIPT_JPEG, 'javascript:alert(1)']
+  });
+  assert(adSources.length === 2, `expected two safe unique ad photos, got ${adSources.length}`);
+  loginAs(ADMIN);
+  seedBusinessData();
+  S.language = 'en';
+  S.adSearch = '';
+  S.adFilters = {};
+  S.pages = [{ id: 'p1', name: 'Page One', category: '', customerIds: ['c1'] }];
+  Object.assign(S.ads[0], {
+    pageId: 'p1', recordType: 'ad', status: 'Active', startDate: '2026-07-15T00:00:00Z',
+    endDate: '2026-07-20T00:00:00Z', exchangeRate: 9.5, amountLocal: 475,
+    adPhotos: [SAFE_RECEIPT_PNG]
+  });
+  const html = visible(sandbox.renderAdsView());
+  assert(html.includes('data-ad-id="a1"'), 'ad photo button does not use a safe data id');
+  assert(html.includes('openAdPhotoViewer(this.dataset.adId, 0)'), 'ad has no outside photo viewer action');
+  assert(html.includes('Photos 1'), 'ad outside photo count is missing');
+  assert(!html.includes(`src="${SAFE_RECEIPT_PNG}"`), 'ads list embeds the full photo body');
+
+  loginAs(employee({ ads: ['view'] }));
+  const deniedHtml = visible(sandbox.renderAdsView());
+  assert(!deniedHtml.includes('openAdPhotoViewer('), 'ads.viewPhotos permission is not gating the outside button');
+});
+
+check('saved ad photos cannot be replaced without permission to view them', () => {
+  S.activeModal = 'ad';
+  S.modalData = { id: 'a1', _mediaOmitted: true, _photoCount: 2 };
+  loginAs(employee({ ads: ['view', 'edit', 'uploadPhotos'] }));
+  assert(!sandbox.canModifyAdPhotosInCurrentModal(), 'upload-only editor can replace unseen saved photos');
+
+  loginAs(employee({ ads: ['view', 'edit', 'viewPhotos', 'uploadPhotos'] }));
+  assert(sandbox.canModifyAdPhotosInCurrentModal(), 'fully authorized editor cannot manage photos');
+
+  S.modalData = {};
+  loginAs(employee({ ads: ['view', 'add', 'uploadPhotos'] }));
+  assert(sandbox.canModifyAdPhotosInCurrentModal(), 'new ad upload is incorrectly blocked when no saved photos exist');
+  S.activeModal = null;
+  S.modalData = null;
+});
+
+check('audit logs omit all inline photo bodies', () => {
+  const redacted = sandbox.redactSensitive({
+    old: { photos: [SAFE_RECEIPT_PNG], nested: ['data:image/png;base64,BBBB'] },
+    new: { adPhotos: [SAFE_RECEIPT_JPEG], receiptImage: SAFE_RECEIPT_PNG }
+  });
+  const encoded = JSON.stringify(redacted);
+  assert(!encoded.includes('data:image'), 'audit metadata still contains an inline image');
+  assert(encoded.includes('media omitted'), 'audit metadata gives no media-redaction marker');
+  assert(encoded.length < 500, `redacted audit metadata is unexpectedly large (${encoded.length})`);
+});
+
+check('unchanged edits omit photo payloads and ad uploads have receipt-grade safety', () => {
+  const formsSource = fs.readFileSync(path.join(__dirname, '..', 'src', '14-forms.js'), 'utf8');
+  const modalSource = fs.readFileSync(path.join(__dirname, '..', 'src', '15-modals.js'), 'utf8');
+  assert(formsSource.includes('delete receipt.photos;'), 'unchanged receipt edits still upload photos');
+  assert(modalSource.includes('delete adUpdates.adPhotos;'), 'unchanged ad edits still upload photos');
+  assert(formsSource.includes('uploadGeneration !== _adPhotoUploadGeneration'), 'late ad upload callback can leak into another modal');
+  assert(formsSource.includes('Math.max(6 - state.tempAdPhotos.length, 0)'), 'ads have no six-photo cap');
+  assert(formsSource.includes('openPendingAdPhotoViewer(${idx})'), 'pending ad thumbnails cannot open full-size');
+  assert(formsSource.includes('MAX_ENTITY_PHOTO_PAYLOAD_CHARS'), 'photo uploads do not enforce a total request-size budget');
+  assert(formsSource.includes('_compressPhotosForUpload(files, concurrency = 2)'), 'large photo batches are not concurrency-bounded');
+  assert(modalSource.includes('state.tempReceiptPhotosDirty = false;'), 'receipt photo dirty tracking is not initialized');
+  const persistenceSource = fs.readFileSync(path.join(__dirname, '..', 'src', '06-persistence.js'), 'utf8');
+  assert(persistenceSource.includes('delete toSave.tempReceiptPhotos;'), 'unsaved receipt photos are copied into localStorage');
 });
 
 check('receipt form thumbnails can be viewed full-size and still removed', () => {

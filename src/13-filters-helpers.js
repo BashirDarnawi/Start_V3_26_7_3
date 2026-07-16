@@ -306,12 +306,25 @@ function getFilteredCustomers() {
 // HELPER FUNCTIONS FOR VIEWS
 // ==========================================
 
-function editAd(id) {
+async function editAd(id) {
   // Permission check for editing ads
-  const ad = state.ads.find(a => a.id === id);
+  let ad = state.ads.find(a => a.id === id);
   if (!canActOnRecord('ads', 'edit', ad?.creatorId)) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الإعلانات' : 'You do not have permission to edit this ad', 'error');
     return;
+  }
+  if (can('ads', 'viewPhotos') && getAdPhotoCount(ad) > 0 && !isEntityMediaHydrated('ads', ad)) {
+    try {
+      ad = await ensureEntityMediaLoaded('ads', id);
+    } catch (_) {
+      showNotification(
+        state.language === 'ar' ? 'تعذر تحميل الصور' : 'Photos unavailable',
+        state.language === 'ar' ? 'تعذر تحميل صور الإعلان. تحقق من الاتصال ثم حاول مرة أخرى.' : 'Could not load this ad\'s photos. Check the connection and try again.',
+        'error'
+      );
+      return;
+    }
+    if (!ad) return;
   }
   state.activeModal = 'ad';
   state.modalData = ad;
@@ -338,14 +351,27 @@ function _blockTransferInEdit(receipt) {
   return true;
 }
 
-function editReceipt(id) {
+async function editReceipt(id) {
   // Permission check for editing receipts
-  const receipt = state.receipts.find(r => r.id === id);
+  let receipt = state.receipts.find(r => r.id === id);
   if (!canActOnRecord('receipts', 'edit', receipt?.createdBy)) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
     return;
   }
   if (_blockTransferInEdit(receipt)) return;
+  if (getReceiptPhotoCount(receipt) > 0 && !isEntityMediaHydrated('receipts', receipt)) {
+    try {
+      receipt = await ensureEntityMediaLoaded('receipts', id);
+    } catch (_) {
+      showNotification(
+        state.language === 'ar' ? 'تعذر تحميل الصور' : 'Photos unavailable',
+        state.language === 'ar' ? 'تعذر تحميل صور الوصل. تحقق من الاتصال ثم حاول مرة أخرى.' : 'Could not load this receipt\'s photos. Check the connection and try again.',
+        'error'
+      );
+      return;
+    }
+    if (!receipt) return;
+  }
   state.activeModal = 'receipt';
   state.modalData = receipt;
   updateUrlParams({ modal: 'receipt', id }); // URL tracking
@@ -1140,6 +1166,32 @@ function getReceiptPhotoSources(receipt) {
   }, []);
 }
 
+function getReceiptPhotoCount(receipt) {
+  const loaded = getReceiptPhotoSources(receipt).length;
+  return loaded || getEntityPhotoCountHint('receipts', receipt);
+}
+
+function getAdPhotoSources(ad) {
+  if (!ad || typeof ad !== 'object') return [];
+  const raw = [
+    ...(Array.isArray(ad.adPhotos) ? ad.adPhotos : []),
+    ...(Array.isArray(ad.photos) ? ad.photos : [])
+  ];
+  const seen = new Set();
+  return raw.reduce((photos, value) => {
+    const source = String(value || '').trim();
+    if (!isSafeReceiptPhotoSource(source) || seen.has(source)) return photos;
+    seen.add(source);
+    photos.push(source);
+    return photos;
+  }, []);
+}
+
+function getAdPhotoCount(ad) {
+  const loaded = getAdPhotoSources(ad).length;
+  return loaded || getEntityPhotoCountHint('ads', ad);
+}
+
 // In delivery completion, receiptImage is the driver's proof photo and must
 // win over older/general attachments in photos[]. Otherwise simply re-saving
 // a delivery could replace the proof with photos[0].
@@ -1154,9 +1206,23 @@ let _receiptPhotoViewerIndex = 0;
 let _receiptPhotoViewerLabel = '';
 let _receiptPhotoViewerReturnFocus = null;
 let _receiptPhotoUploadGeneration = 0;
+let _adPhotoUploadGeneration = 0;
+let _receiptPhotoUploadsInFlight = 0;
+let _adPhotoUploadsInFlight = 0;
 
-function openReceiptPhotoViewer(receiptId, index = 0) {
-  const receipt = (state.receipts || []).find(item => item && !item._deleted && String(item.id) === String(receiptId));
+async function openReceiptPhotoViewer(receiptId, index = 0) {
+  let receipt = (state.receipts || []).find(item => item && !item._deleted && String(item.id) === String(receiptId));
+  if (!receipt) return;
+  try {
+    receipt = await ensureEntityMediaLoaded('receipts', receiptId);
+  } catch (_) {
+    showNotification(
+      state.language === 'ar' ? 'تعذر تحميل الصور' : 'Photos unavailable',
+      state.language === 'ar' ? 'تحقق من الاتصال ثم حاول مرة أخرى.' : 'Check the connection and try again.',
+      'error'
+    );
+    return;
+  }
   if (!receipt) return;
   const number = receipt.finalReceiptNo || receipt.serialNumber || receipt.tempReceiptNo || '';
   openReceiptPhotoViewerSources(
@@ -1166,11 +1232,49 @@ function openReceiptPhotoViewer(receiptId, index = 0) {
   );
 }
 
+async function openAdPhotoViewer(adId, index = 0) {
+  if (!can('ads', 'viewPhotos')) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تحتاج صلاحية عرض صور الإعلانات' : 'Requires the View Photos permission',
+      'error'
+    );
+    return;
+  }
+  let ad = (state.ads || []).find(item => item && !item._deleted && String(item.id) === String(adId));
+  if (!ad) return;
+  try {
+    ad = await ensureEntityMediaLoaded('ads', adId);
+  } catch (_) {
+    showNotification(
+      state.language === 'ar' ? 'تعذر تحميل الصور' : 'Photos unavailable',
+      state.language === 'ar' ? 'تحقق من الاتصال ثم حاول مرة أخرى.' : 'Check the connection and try again.',
+      'error'
+    );
+    return;
+  }
+  if (!ad) return;
+  openReceiptPhotoViewerSources(
+    getAdPhotoSources(ad),
+    index,
+    state.language === 'ar' ? 'صور الإعلان' : 'Ad photos'
+  );
+}
+
 function openPendingReceiptPhotoViewer(index = 0) {
   openReceiptPhotoViewerSources(
     (state.tempReceiptPhotos || []).filter(isSafeReceiptPhotoSource),
     index,
     state.language === 'ar' ? 'معاينة صورة الوصل' : 'Receipt photo preview'
+  );
+}
+
+function openPendingAdPhotoViewer(index = 0) {
+  if (!can('ads', 'viewPhotos')) return;
+  openReceiptPhotoViewerSources(
+    (state.tempAdPhotos || []).filter(isSafeReceiptPhotoSource),
+    index,
+    state.language === 'ar' ? 'معاينة صورة الإعلان' : 'Ad photo preview'
   );
 }
 
@@ -1462,9 +1566,9 @@ function _readDeliveryPaymentRows(containerId) {
   })).filter(p => p.amount > 0);
 }
 
-function openReceiptDeliveryCompletionModal(receiptId) {
+async function openReceiptDeliveryCompletionModal(receiptId) {
   const isArD = state.language === 'ar';
-  const receipt = _findReceiptForDeliveryModal(receiptId);
+  let receipt = _findReceiptForDeliveryModal(receiptId);
   if (!receipt) {
     showNotification(isArD ? 'خطأ' : 'Error', isArD ? 'الوصل غير موجود' : 'Receipt not found', 'error');
     return;
@@ -1476,6 +1580,23 @@ function openReceiptDeliveryCompletionModal(receiptId) {
   if (String(receipt.deliveryPersonId || '') !== String(state.currentUser?.id || '')) {
     showNotification(isArD ? 'تم رفض الوصول' : 'Access Denied', isArD ? 'هذا الوصل غير معيَّن لك' : 'This receipt is not assigned to you', 'error');
     return;
+  }
+
+  // A lightweight sync record carries only the photo count. Hydrate before a
+  // driver completes delivery so prepending the new proof cannot overwrite
+  // older attachments that were intentionally omitted from the list payload.
+  if (getReceiptPhotoCount(receipt) > 0 && !isEntityMediaHydrated('receipts', receipt)) {
+    try {
+      receipt = await ensureEntityMediaLoaded('receipts', receiptId);
+    } catch (_) {
+      showNotification(
+        isArD ? 'تعذر تحميل الصور' : 'Photos unavailable',
+        isArD ? 'تعذر تحميل صور الوصل. تحقق من الاتصال ثم حاول مرة أخرى.' : 'Could not load the existing receipt photos. Check the connection and try again.',
+        'error'
+      );
+      return;
+    }
+    if (!receipt || String(receipt.deliveryPersonId || '') !== String(state.currentUser?.id || '')) return;
   }
 
   // Freeze the receipt's _lastModified at modal-open time. submitReceipt-

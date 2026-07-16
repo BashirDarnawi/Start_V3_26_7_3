@@ -165,6 +165,9 @@ function saveState() {
     delete toSave.modalData;
     delete toSave.tempAdFunding;
     delete toSave.tempAdPhotos;
+    delete toSave.tempReceiptPhotos;
+    delete toSave.tempAdPhotosDirty;
+    delete toSave.tempReceiptPhotosDirty;
     
     // Sanitize before persistence (defense-in-depth)
     const sanitizedToSave = Security.sanitizeObject(toSave);

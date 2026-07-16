@@ -103,7 +103,10 @@ function renderModal() {
       // Copy (not alias) the live record's photos — the receipt modal already
       // does this (see state.tempReceiptPhotos below). Aliasing meant adding or
       // removing a photo mutated the SAVED ad immediately, even on Cancel.
-      state.tempAdPhotos = (adData.adPhotos || adData.photos || []).slice();
+      _adPhotoUploadGeneration++;
+      _adPhotoUploadsInFlight = 0;
+      state.tempAdPhotos = (!isEdit || can('ads', 'viewPhotos')) ? getAdPhotoSources(adData) : [];
+      state.tempAdPhotosDirty = false;
       const durationDaysDefault = (adData.days !== undefined ? adData.days : (adData.startDate && adData.endDate ? Math.max(0, Math.round((new Date(adData.endDate) - new Date(adData.startDate)) / (1000 * 60 * 60 * 24))) : ''));
       const isAdminUser = isCurrentUserAdmin();
       const adCreator = isEdit && adData.creatorId ? state.users.find(u => u.id === adData.creatorId) : state.currentUser;
@@ -408,10 +411,10 @@ function renderModal() {
                   <span class="w-5 h-5 rounded-full bg-orange-600 text-white flex items-center justify-center text-[10px]">5</span>
                   ${isArAd ? 'الصور' : 'Photos'}
                 </div>
-                <label class="text-xs bg-orange-600 text-white px-2 py-1 rounded-lg font-medium cursor-pointer hover:bg-orange-700">
+                ${canModifyAdPhotosInCurrentModal() ? `<label class="text-xs bg-orange-600 text-white px-2 py-1 rounded-lg font-medium cursor-pointer hover:bg-orange-700">
                   ${isArAd ? '+ رفع' : '+ Upload'}
                   <input type="file" accept="image/*" multiple class="hidden" onchange="uploadAdPhotos(this.files)" />
-                </label>
+                </label>` : ''}
               </div>
               <div id="ad-photo-previews" class="grid grid-cols-4 gap-2 min-h-[40px] bg-white dark:bg-slate-900 rounded-lg p-2">
                 <div class="text-xs text-slate-400 col-span-4 text-center py-2">${isArAd ? 'لا توجد صور بعد' : 'No photos yet'}</div>
@@ -706,7 +709,9 @@ function renderModal() {
       // Copy (not alias) the live record's photos so add/remove in the modal
       // does not mutate the saved receipt when the user cancels.
       _receiptPhotoUploadGeneration++;
+      _receiptPhotoUploadsInFlight = 0;
       state.tempReceiptPhotos = getReceiptPhotoSources(receiptData);
+      state.tempReceiptPhotosDirty = false;
       
       if (receiptCustomers.length === 0) {
         modalContent = `
@@ -2118,6 +2123,22 @@ async function handleModalSubmit() {
     case 'ad':
       try {
       const isArSubAd = state.language === 'ar';
+      if (_adPhotoUploadsInFlight > 0) {
+        showNotification(
+          isArSubAd ? 'جاري تجهيز الصور' : 'Preparing photos',
+          isArSubAd ? 'انتظر لحظة حتى ينتهي تجهيز الصور، ثم احفظ الإعلان.' : 'Please wait for the photos to finish preparing, then save the ad.',
+          'info'
+        );
+        return;
+      }
+      if (state.tempAdPhotosDirty && !canModifyAdPhotosInCurrentModal()) {
+        showNotification(
+          isArSubAd ? 'تم رفض الوصول' : 'Access Denied',
+          isArSubAd ? 'لا يمكن تغيير صور إعلان محفوظ دون صلاحية عرض الصور ورفعها.' : 'Saved ad photos cannot be changed without both View Photos and Upload Photos permissions.',
+          'error'
+        );
+        return;
+      }
       const paymentStatus = document.getElementById('ad-payment-status')?.value || 'paid';
       const collectionMethod = document.getElementById('ad-collection-method')?.value || '';
       const isUnpaidDriver = paymentStatus === 'not_paid' && collectionMethod === 'driver';
@@ -2494,6 +2515,15 @@ async function handleModalSubmit() {
         hasMergedPaidFunds: mergedAllocations.length > 0,
         mergedPaidAllocations: mergedAllocations
       };
+
+      // Ordinary edits do not need to re-upload unchanged base64 images. Both
+      // the generic local update and the atomic server mutation merge omitted
+      // fields over the stored record. Sending [] remains an intentional clear.
+      if (isEdit && !state.tempAdPhotosDirty) {
+        delete adUpdates.adPhotos;
+      } else if (isEdit) {
+        adUpdates.photos = []; // clear the legacy field after an intentional edit
+      }
 
       // Re-baseline the top-up arithmetic. saveTopUps derives the ad's amount
       // and end date from initialAmountUSD/initialEndDate + the top-ups. Those
@@ -3076,7 +3106,12 @@ function closeModal() {
   // into the next ad/receipt created in this session.
   state.tempAdPhotos = [];
   state.tempReceiptPhotos = [];
+  state.tempAdPhotosDirty = false;
+  state.tempReceiptPhotosDirty = false;
+  _adPhotoUploadGeneration++;
   _receiptPhotoUploadGeneration++;
+  _adPhotoUploadsInFlight = 0;
+  _receiptPhotoUploadsInFlight = 0;
   closeReceiptPhotoViewer();
   // Discard any pending (unsaved) top-up edits so they cannot leak into the
   // next ad's top-up session.

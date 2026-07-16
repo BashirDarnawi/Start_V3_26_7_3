@@ -3666,6 +3666,9 @@ function saveState() {
     delete toSave.modalData;
     delete toSave.tempAdFunding;
     delete toSave.tempAdPhotos;
+    delete toSave.tempReceiptPhotos;
+    delete toSave.tempAdPhotosDirty;
+    delete toSave.tempReceiptPhotosDirty;
     
     // Sanitize before persistence (defense-in-depth)
     const sanitizedToSave = Security.sanitizeObject(toSave);
@@ -5256,6 +5259,10 @@ function getRecordType(record) {
 function redactSensitive(obj, depth = 0) {
   if (depth > 12) return null;
   if (obj === null || obj === undefined) return obj;
+  // Audit metadata must never duplicate inline image bodies. A single update
+  // previously copied every photo in both {old,new}, then persisted that copy
+  // in the local log, causing multi-megabyte saves and storage exhaustion.
+  if (typeof obj === 'string' && /^data:image\//i.test(obj.trim())) return '[media omitted]';
   if (typeof obj !== 'object') return obj;
   if (Array.isArray(obj)) return obj.map(x => redactSensitive(x, depth + 1));
 
@@ -5274,6 +5281,11 @@ function redactSensitive(obj, depth = 0) {
   const out = {};
   for (const [k, v] of Object.entries(obj)) {
     if (SENSITIVE_KEYS.has(k)) continue;
+    if (/^(?:photo|photos|adPhotos|receiptImage|image|images|screenshot|screenshots)$/i.test(k)) {
+      const count = Array.isArray(v) ? v.filter(Boolean).length : (v ? 1 : 0);
+      out[k] = count ? `[media omitted: ${count}]` : '[no media]';
+      continue;
+    }
     out[k] = redactSensitive(v, depth + 1);
   }
   return out;
@@ -6141,6 +6153,82 @@ const SERVER_SYNC_COLLECTIONS = Object.freeze([
   'walletTransactions', 'serviceSubscriptions'
 ]);
 
+// Receipt/ad photos are large base64 strings. Normal lists and live deltas
+// request lightweight records and fetch the full item only when a user opens
+// Photos or Edit. Old servers safely ignore the query parameter, while old
+// clients keep receiving full records because the backend default is true.
+const LIGHTWEIGHT_MEDIA_COLLECTIONS = new Set(['ads', 'receipts']);
+const INLINE_MEDIA_FIELDS_BY_COLLECTION = Object.freeze({
+  ads: Object.freeze(['adPhotos', 'photos']),
+  receipts: Object.freeze(['photos', 'receiptImage'])
+});
+
+function _inlineMediaFields(collection) {
+  return INLINE_MEDIA_FIELDS_BY_COLLECTION[String(collection || '')] || [];
+}
+
+function getEntityPhotoCountHint(collection, record) {
+  if (!record || typeof record !== 'object') return 0;
+  const seen = new Set();
+  for (const field of _inlineMediaFields(collection)) {
+    const value = record[field];
+    const values = Array.isArray(value) ? value : [value];
+    for (const source of values) {
+      if (typeof source === 'string' && source.trim()) seen.add(source.trim());
+    }
+  }
+  if (seen.size > 0 || record._mediaOmitted !== true) return seen.size;
+  const hinted = Number(record._photoCount);
+  return Number.isSafeInteger(hinted) && hinted > 0 ? hinted : 0;
+}
+
+function isEntityMediaHydrated(collection, record) {
+  if (!LIGHTWEIGHT_MEDIA_COLLECTIONS.has(String(collection || ''))) return true;
+  if (!record || typeof record !== 'object') return false;
+  if (record._mediaOmitted !== true) return true;
+  if (getEntityPhotoCountHint(collection, record) === 0) return true;
+  return _inlineMediaFields(collection).some(field => Object.prototype.hasOwnProperty.call(record, field));
+}
+
+// A same-version IndexedDB/state record may safely donate its already-loaded
+// photo bodies to a lightweight response. Never do this across revisions: an
+// equally-sized replacement photo would otherwise show stale bytes.
+function mergeMatchingVersionInlineMedia(collection, incoming, current) {
+  if (!incoming || typeof incoming !== 'object' || incoming._mediaOmitted !== true) return incoming;
+  if (!current || typeof current !== 'object' || !isEntityMediaHydrated(collection, current)) return incoming;
+  const incomingVersion = Number(incoming._lastModified);
+  const currentVersion = Number(current._lastModified);
+  if (!Number.isFinite(incomingVersion) || incomingVersion !== currentVersion) return incoming;
+  const merged = { ...incoming };
+  let copied = false;
+  for (const field of _inlineMediaFields(collection)) {
+    if (!Object.prototype.hasOwnProperty.call(current, field)) continue;
+    const value = current[field];
+    merged[field] = Array.isArray(value) ? value.slice() : value;
+    copied = true;
+  }
+  if (copied) merged._mediaOmitted = false;
+  return merged;
+}
+
+// A successful mutation tells us exactly which media fields changed. Reattach
+// those known bytes to the lightweight response so the server does not need to
+// echo the same base64 payload back over the network.
+function mergeMutationInlineMedia(collection, incoming, knownRecord) {
+  if (!incoming || typeof incoming !== 'object' || incoming._mediaOmitted !== true) return incoming;
+  if (!knownRecord || typeof knownRecord !== 'object') return incoming;
+  const merged = { ...incoming };
+  let copied = false;
+  for (const field of _inlineMediaFields(collection)) {
+    if (!Object.prototype.hasOwnProperty.call(knownRecord, field)) continue;
+    const value = knownRecord[field];
+    merged[field] = Array.isArray(value) ? value.slice() : value;
+    copied = true;
+  }
+  if (copied) merged._mediaOmitted = false;
+  return merged;
+}
+
 // Capture server-issued collection watermarks BEFORE a full load starts. A
 // full load spans several requests and is not one DB snapshot; seeding a delta
 // cursor from the rows it happened to return can skip a write that lands after
@@ -6505,14 +6593,16 @@ function applyValidatedServerEntityBatch(entries, reason = 'serverMutation') {
   return prepared.map(item => item.saved);
 }
 
-async function apiLoadCollectionAll(collection, { forceRefresh = false } = {}) {
+async function apiLoadCollectionAll(collection, { forceRefresh = false, includeMedia = false } = {}) {
   const identity = getServerSessionIdentity();
-  const requestKey = `${identity}|${String(collection || '')}|${forceRefresh ? 'fresh' : 'cached'}`;
+  const omitMedia = LIGHTWEIGHT_MEDIA_COLLECTIONS.has(String(collection || '')) && includeMedia !== true;
+  const mediaMode = omitMedia ? 'thin' : 'full';
+  const requestKey = `${identity}|${String(collection || '')}|${forceRefresh ? 'fresh' : 'cached'}|${mediaMode}`;
   const now = Date.now();
 
   // Return cached data immediately if fresh (but only for non-critical refreshes)
   const cache = _collectionCache[collection];
-  if (!forceRefresh && cache && cache.identity === identity && cache.data && (now - cache.timestamp) < CACHE_TTL_MS) {
+  if (!forceRefresh && cache && cache.identity === identity && cache.mediaMode === mediaMode && cache.data && (now - cache.timestamp) < CACHE_TTL_MS) {
     return cache.data;
   }
 
@@ -6538,6 +6628,11 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false } = {}) {
     const limit = SERVER_API.pageSize || 300;
     const timeoutMs = getCollectionTimeout(collection);
     let pageCount = 0;
+    const currentById = new Map(
+      (Array.isArray(state[collection]) ? state[collection] : [])
+        .filter(record => record && record.id != null)
+        .map(record => [String(record.id), record])
+    );
     // Safety cap against infinite loops. Must be high enough to load the
     // designed maximum collection size (STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION,
     // 100k) — the old flat 50 pages capped every collection at 50×300 = 15,000
@@ -6552,6 +6647,7 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false } = {}) {
       try {
         // Use retry logic for resilience against transient server errors/timeouts
         let path = `/api/collections/${encodeURIComponent(collection)}?limit=${limit}&include_deleted=true`;
+        if (omitMedia) path += '&include_media=false';
         if (beforeCreatedAt !== null && beforeId) {
           path += `&before_created_at=${encodeURIComponent(String(beforeCreatedAt))}&before_id=${encodeURIComponent(beforeId)}`;
         }
@@ -6571,6 +6667,7 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false } = {}) {
         let lastEntity = null;
         for (const rawEntity of items) {
           const entity = validateServerEntityResponse(collection, rawEntity, `list[${all.length}]`);
+          entity.data = mergeMatchingVersionInlineMedia(collection, entity.data, currentById.get(String(entity.id)));
           lastEntity = entity;
           // Defensive only: keyset pages should not overlap, but a record can
           // be updated while pagination is running. Keep one ID and prefer the
@@ -6624,7 +6721,7 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false } = {}) {
     // the in-memory request cache or IndexedDB persistence path.
     if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
     if (_collectionCache[collection]) {
-      _collectionCache[collection] = { data: all, timestamp: Date.now(), identity };
+      _collectionCache[collection] = { data: all, timestamp: Date.now(), identity, mediaMode };
     }
 
     return all;
@@ -6649,12 +6746,66 @@ async function apiGetEntity(collection, id) {
   );
 }
 
+const _pendingEntityMediaLoads = new Map();
+
+async function ensureEntityMediaLoaded(collection, id) {
+  const name = String(collection || '');
+  const safeId = String(id || '');
+  const findCurrent = () => (Array.isArray(state[name]) ? state[name] : [])
+    .find(record => record && !record._deleted && String(record.id) === safeId) || null;
+  let current = findCurrent();
+  if (!current || !LIGHTWEIGHT_MEDIA_COLLECTIONS.has(name) || isEntityMediaHydrated(name, current)) return current;
+  if (!isServerModeEnabled()) return current;
+
+  const identity = getServerSessionIdentity();
+  const key = `${identity}|${name}|${safeId}`;
+  if (_pendingEntityMediaLoads.has(key)) return await _pendingEntityMediaLoads.get(key);
+
+  const request = (async () => {
+    // A live delta can win while the item GET is in flight. Retry once instead
+    // of replacing that newer summary with an older full response.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const entity = await apiGetEntity(name, safeId);
+      if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+      const full = entity?.data ? Security.sanitizeObject(entity.data) : null;
+      const latest = findCurrent();
+      if (!full || !latest || latest._deleted) return latest;
+      const responseVersion = Number(full._lastModified);
+      const latestVersion = Number(latest._lastModified);
+      if (Number.isFinite(responseVersion) && Number.isFinite(latestVersion) && responseVersion < latestVersion) continue;
+
+      const target = state[name];
+      const index = target.findIndex(record => record && String(record.id) === safeId);
+      if (index === -1) return null;
+      target[index] = full;
+      if (_collectionCache[name]?.identity === identity && Array.isArray(_collectionCache[name].data)) {
+        const cachedIndex = _collectionCache[name].data.findIndex(record => record && String(record.id) === safeId);
+        if (cachedIndex !== -1) _collectionCache[name].data[cachedIndex] = full;
+      }
+      markCollectionDirty(name);
+      saveState();
+      return full;
+    }
+    return findCurrent();
+  })();
+  _pendingEntityMediaLoads.set(key, request);
+  try {
+    return await request;
+  } finally {
+    if (_pendingEntityMediaLoads.get(key) === request) _pendingEntityMediaLoads.delete(key);
+  }
+}
+
 async function apiCreateEntity(collection, record) {
-  return await requestValidatedServerEntity(collection, 'create', () =>
+  const omitMedia = LIGHTWEIGHT_MEDIA_COLLECTIONS.has(String(collection || ''));
+  const path = `/api/collections/${encodeURIComponent(collection)}${omitMedia ? '?include_media=false' : ''}`;
+  const entity = await requestValidatedServerEntity(collection, 'create', () =>
     withRetry(() =>
-      apiJson(`/api/collections/${encodeURIComponent(collection)}`, { method: 'POST', body: { id: record.id, data: record } }, { timeoutMs: 20000 })
+      apiJson(path, { method: 'POST', body: { id: record.id, data: record } }, { timeoutMs: 20000 })
     , 2, 500)
   );
+  entity.data = mergeMutationInlineMedia(collection, entity.data, record);
+  return entity;
 }
 
 // Server-authoritative money operations. These endpoints validate balance,
@@ -6703,7 +6854,7 @@ async function apiPurchaseSubscription({ serviceId, idempotencyKey, userId }) {
 // idempotency key so a response-loss retry replays the same result.
 async function apiTransferReceipt(payload) {
   const identity = getServerSessionIdentity();
-  const response = await apiJson('/api/receipts/transfers', {
+  const response = await apiJson('/api/receipts/transfers?include_media=false', {
     method: 'POST',
     body: payload
   }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
@@ -6713,9 +6864,15 @@ async function apiTransferReceipt(payload) {
     error.code = 'INVALID_ENTITY_RESPONSE';
     throw error;
   }
+  const sourceReceipt = validateServerEntityResponse('receipts', response.sourceReceipt, 'transfer.sourceReceipt');
+  const targetReceipt = validateServerEntityResponse('receipts', response.targetReceipt, 'transfer.targetReceipt');
+  const localSource = (state.receipts || []).find(row => row && String(row.id) === String(payload?.sourceReceiptId || ''));
+  const localTarget = (state.receipts || []).find(row => row && String(row.id) === String(payload?.targetReceiptId || ''));
+  sourceReceipt.data = mergeMutationInlineMedia('receipts', sourceReceipt.data, localSource);
+  targetReceipt.data = mergeMutationInlineMedia('receipts', targetReceipt.data, localTarget);
   return {
-    sourceReceipt: validateServerEntityResponse('receipts', response.sourceReceipt, 'transfer.sourceReceipt'),
-    targetReceipt: validateServerEntityResponse('receipts', response.targetReceipt, 'transfer.targetReceipt'),
+    sourceReceipt,
+    targetReceipt,
     replayed: response.replayed === true
   };
 }
@@ -6727,7 +6884,7 @@ async function apiMutateAd(payload) {
   const action = String(payload?.action || '');
   if (!['create', 'update'].includes(action)) throw new Error('Invalid ad mutation action');
   const identity = getServerSessionIdentity();
-  const response = await apiJson('/api/ads/mutate', {
+  const response = await apiJson('/api/ads/mutate?include_media=false', {
     method: 'POST',
     body: payload
   }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
@@ -6737,8 +6894,11 @@ async function apiMutateAd(payload) {
     error.code = 'INVALID_ENTITY_RESPONSE';
     throw error;
   }
+  const ad = validateServerEntityResponse('ads', response.ad, `${action}.ad`);
+  const localAd = (state.ads || []).find(row => row && String(row.id) === String(payload?.adId || ''));
+  ad.data = mergeMutationInlineMedia('ads', ad.data, { ...(localAd || {}), ...(payload?.data || {}) });
   return {
-    ad: validateServerEntityResponse('ads', response.ad, `${action}.ad`),
+    ad,
     replayed: response.replayed === true
   };
 }
@@ -6749,7 +6909,7 @@ async function apiStopAd(adId, payload) {
   const safeAdId = String(adId || '');
   if (!Security.isValidRecordId(safeAdId)) throw new Error('Invalid ad id');
   const identity = getServerSessionIdentity();
-  const response = await apiJson(`/api/ads/${encodeURIComponent(safeAdId)}/stop`, {
+  const response = await apiJson(`/api/ads/${encodeURIComponent(safeAdId)}/stop?include_media=false`, {
     method: 'POST',
     body: payload
   }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
@@ -6759,8 +6919,11 @@ async function apiStopAd(adId, payload) {
     error.code = 'INVALID_ENTITY_RESPONSE';
     throw error;
   }
+  const ad = validateServerEntityResponse('ads', response.ad, 'stop.ad');
+  const localAd = (state.ads || []).find(row => row && String(row.id) === safeAdId);
+  ad.data = mergeMutationInlineMedia('ads', ad.data, localAd);
   return {
-    ad: validateServerEntityResponse('ads', response.ad, 'stop.ad'),
+    ad,
     replayed: response.replayed === true
   };
 }
@@ -6797,15 +6960,21 @@ async function apiMutateClothesOrder(payload) {
 }
 
 async function apiPatchEntity(collection, id, updates, expectedLastModified) {
-  return await requestValidatedServerEntity(collection, 'patch', () =>
+  const omitMedia = LIGHTWEIGHT_MEDIA_COLLECTIONS.has(String(collection || ''));
+  const local = (Array.isArray(state[collection]) ? state[collection] : [])
+    .find(row => row && String(row.id) === String(id));
+  const path = `/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}${omitMedia ? '?include_media=false' : ''}`;
+  const entity = await requestValidatedServerEntity(collection, 'patch', () =>
     withRetry(() =>
       apiJson(
-        `/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
+        path,
         { method: 'PATCH', body: { data: updates, expectedLastModified } },
         { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
       )
     , 2, 500)
   );
+  entity.data = mergeMutationInlineMedia(collection, entity.data, { ...(local || {}), ...(updates || {}) });
+  return entity;
 }
 
 // Full-record update used by the delete-cascade cleanup (15-modals.js). This
@@ -7306,6 +7475,7 @@ async function apiLoadCollectionSince(collection, sinceMs) {
   const since = Number.isFinite(Number(sinceMs)) ? Number(sinceMs) : 0;
   while (true) {
     let path = `/api/collections/${encodeURIComponent(collection)}?updated_since=${encodeURIComponent(String(since))}&limit=${limit}&include_deleted=true`;
+    if (LIGHTWEIGHT_MEDIA_COLLECTIONS.has(String(collection || ''))) path += '&include_media=false';
     if (afterLastModified !== null && afterId) {
       path += `&after_last_modified=${encodeURIComponent(String(afterLastModified))}&after_id=${encodeURIComponent(afterId)}`;
     }
@@ -7421,7 +7591,10 @@ function applyServerDelta(collectionName, records) {
 
   for (const rec of records) {
     if (!rec || !rec.id) continue;
-    const clean = Security.sanitizeObject(rec);
+    const existingIndex = byId.get(rec.id);
+    const existing = existingIndex !== undefined ? arr[existingIndex] : null;
+    const prepared = mergeMatchingVersionInlineMedia(collectionName, rec, existing);
+    const clean = Security.sanitizeObject(prepared);
     const idx = byId.get(clean.id);
     if (idx !== undefined) {
       if (!_shouldApplyDeltaRecord(clean, arr[idx])) continue;
@@ -8723,6 +8896,12 @@ function restoreModalFromUrl() {
       state.tempMergeFunding = null;
       state.tempAdPhotos = [];
       state.tempReceiptPhotos = [];
+      state.tempAdPhotosDirty = false;
+      state.tempReceiptPhotosDirty = false;
+      _adPhotoUploadGeneration++;
+      _receiptPhotoUploadGeneration++;
+      _adPhotoUploadsInFlight = 0;
+      _receiptPhotoUploadsInFlight = 0;
       tempTopUps = [];
       document.querySelectorAll('#app-modal').forEach(el => el.remove());
     }
@@ -9087,7 +9266,6 @@ function renderSyncStatus() {
   
   lucide.createIcons();
 }
-
 // ==========================================
 // VIEW RENDERING FUNCTIONS  
 // ==========================================
@@ -11426,7 +11604,7 @@ function renderReceiptsView() {
           // Normalize payments
           const payments = Array.isArray(receipt.payments) ? receipt.payments : [];
           const hasMultiplePayments = payments.length > 1;
-          const receiptPhotos = getReceiptPhotoSources(receipt);
+          const receiptPhotoCount = getReceiptPhotoCount(receipt);
 
           // Calculate total paid as sum of R1 values (amount × rate)
           const totalPaid = payments.reduce((sum, p) => sum + ((p.amount || 0) * (p.rate || 1)), 0) || receipt.amountLocal;
@@ -11594,16 +11772,6 @@ function renderReceiptsView() {
                 </div>
               `}
 
-              ${receiptPhotos.length ? `
-                <button type="button" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" onclick="openReceiptPhotoViewer(this.dataset.receiptId, 0)" class="group relative block w-full mb-4 rounded-xl overflow-hidden border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500" title="${isArV ? 'اضغط لعرض الصورة بالحجم الكامل' : 'Click to view full size'}" aria-label="${isArV ? `عرض صور الوصل (${receiptPhotos.length})` : `View receipt photos (${receiptPhotos.length})`}">
-                  <img src="${Security.escapeHtml(receiptPhotos[0])}" alt="${isArV ? 'صورة الوصل' : 'Receipt photo'}" loading="lazy" decoding="async" class="w-full h-32 object-cover" />
-                  <span class="absolute inset-0 bg-black/0 group-hover:bg-black/30 group-focus:bg-black/30 transition-colors flex items-center justify-center">
-                    <span class="opacity-0 group-hover:opacity-100 group-focus:opacity-100 transition-opacity px-3 py-1.5 rounded-full bg-black/65 text-white text-xs font-bold flex items-center gap-1.5"><i data-lucide="maximize-2" class="w-4 h-4"></i>${isArV ? 'عرض الصورة' : 'View photo'}</span>
-                  </span>
-                  ${receiptPhotos.length > 1 ? `<span class="absolute top-2 right-2 px-2 py-1 rounded-full bg-black/70 text-white text-xs font-bold flex items-center gap-1"><i data-lucide="images" class="w-3.5 h-3.5"></i>${receiptPhotos.length}</span>` : ''}
-                </button>
-              ` : ''}
-
               <!-- Collection (with amount) -->
               ${(() => {
                 const targetLYD = Number(receipt.amountLocal) || 0;
@@ -11652,6 +11820,9 @@ function renderReceiptsView() {
                 <div class="flex justify-between items-center">
                   <span class="status-badge status-${(receipt.status || '').toLowerCase()}">${trStatus(receipt.status || 'Unknown')}</span>
                   <div class="flex space-x-2">
+                    ${receiptPhotoCount > 0 ? `<button type="button" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" onclick="openReceiptPhotoViewer(this.dataset.receiptId, 0)" class="inline-flex items-center gap-1 text-cyan-600 hover:text-cyan-700 font-bold" title="${isArV ? `عرض صور الوصل (${receiptPhotoCount})` : `View receipt photos (${receiptPhotoCount})`}" aria-label="${isArV ? `عرض صور الوصل (${receiptPhotoCount})` : `View receipt photos (${receiptPhotoCount})`}">
+                      <i data-lucide="images" class="w-4 h-4"></i><span class="text-xs">${isArV ? 'الصور' : 'Photos'} ${receiptPhotoCount}</span>
+                    </button>` : ''}
                     ${_isTransferableReceipt(receipt) ? `<button onclick="showReceiptTransferModal('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="${isArV ? 'تحويل الرصيد' : 'Transfer balance'}">
                       <i data-lucide="swap" class="w-4 h-4"></i>
                     </button>` : ''}
@@ -11899,6 +12070,7 @@ function renderAdsView() {
             <tbody>
               ${allAds.map((ad, idx) => {
                 const customer = customersById.get(ad.customerId);
+                const adPhotoCount = getAdPhotoCount(ad);
                 // Deleting a page keeps its ads (history) but leaves their pageId
                 // pointing at the deleted page, whose name a NEW page may reuse.
                 // Keep resolving the name (the ad really did run on it) but mark
@@ -12037,6 +12209,10 @@ function renderAdsView() {
                     </td>
                     <td class="py-3 px-2" data-label="Actions">
                       <div class="flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
+                        ${can('ads', 'viewPhotos') && adPhotoCount > 0 ? `
+                        <button type="button" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openAdPhotoViewer(this.dataset.adId, 0)" class="inline-flex items-center gap-1 text-cyan-600 hover:text-cyan-700 p-2 md:p-0 font-bold" title="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}" aria-label="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}">
+                          <i data-lucide="images" class="w-5 h-5 md:w-4 md:h-4"></i><span class="text-xs">${isAr ? 'الصور' : 'Photos'} ${adPhotoCount}</span>
+                        </button>` : ''}
                         ${_isAdToppable(ad) ? `
                         <button onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="${isAr ? 'عمليات الشحن' : 'Top-ups'}">
                           <i data-lucide="trending-up" class="w-5 h-5 md:w-4 md:h-4"></i>
@@ -14738,12 +14914,25 @@ function getFilteredCustomers() {
 // HELPER FUNCTIONS FOR VIEWS
 // ==========================================
 
-function editAd(id) {
+async function editAd(id) {
   // Permission check for editing ads
-  const ad = state.ads.find(a => a.id === id);
+  let ad = state.ads.find(a => a.id === id);
   if (!canActOnRecord('ads', 'edit', ad?.creatorId)) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الإعلانات' : 'You do not have permission to edit this ad', 'error');
     return;
+  }
+  if (can('ads', 'viewPhotos') && getAdPhotoCount(ad) > 0 && !isEntityMediaHydrated('ads', ad)) {
+    try {
+      ad = await ensureEntityMediaLoaded('ads', id);
+    } catch (_) {
+      showNotification(
+        state.language === 'ar' ? 'تعذر تحميل الصور' : 'Photos unavailable',
+        state.language === 'ar' ? 'تعذر تحميل صور الإعلان. تحقق من الاتصال ثم حاول مرة أخرى.' : 'Could not load this ad\'s photos. Check the connection and try again.',
+        'error'
+      );
+      return;
+    }
+    if (!ad) return;
   }
   state.activeModal = 'ad';
   state.modalData = ad;
@@ -14770,14 +14959,27 @@ function _blockTransferInEdit(receipt) {
   return true;
 }
 
-function editReceipt(id) {
+async function editReceipt(id) {
   // Permission check for editing receipts
-  const receipt = state.receipts.find(r => r.id === id);
+  let receipt = state.receipts.find(r => r.id === id);
   if (!canActOnRecord('receipts', 'edit', receipt?.createdBy)) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
     return;
   }
   if (_blockTransferInEdit(receipt)) return;
+  if (getReceiptPhotoCount(receipt) > 0 && !isEntityMediaHydrated('receipts', receipt)) {
+    try {
+      receipt = await ensureEntityMediaLoaded('receipts', id);
+    } catch (_) {
+      showNotification(
+        state.language === 'ar' ? 'تعذر تحميل الصور' : 'Photos unavailable',
+        state.language === 'ar' ? 'تعذر تحميل صور الوصل. تحقق من الاتصال ثم حاول مرة أخرى.' : 'Could not load this receipt\'s photos. Check the connection and try again.',
+        'error'
+      );
+      return;
+    }
+    if (!receipt) return;
+  }
   state.activeModal = 'receipt';
   state.modalData = receipt;
   updateUrlParams({ modal: 'receipt', id }); // URL tracking
@@ -15572,6 +15774,32 @@ function getReceiptPhotoSources(receipt) {
   }, []);
 }
 
+function getReceiptPhotoCount(receipt) {
+  const loaded = getReceiptPhotoSources(receipt).length;
+  return loaded || getEntityPhotoCountHint('receipts', receipt);
+}
+
+function getAdPhotoSources(ad) {
+  if (!ad || typeof ad !== 'object') return [];
+  const raw = [
+    ...(Array.isArray(ad.adPhotos) ? ad.adPhotos : []),
+    ...(Array.isArray(ad.photos) ? ad.photos : [])
+  ];
+  const seen = new Set();
+  return raw.reduce((photos, value) => {
+    const source = String(value || '').trim();
+    if (!isSafeReceiptPhotoSource(source) || seen.has(source)) return photos;
+    seen.add(source);
+    photos.push(source);
+    return photos;
+  }, []);
+}
+
+function getAdPhotoCount(ad) {
+  const loaded = getAdPhotoSources(ad).length;
+  return loaded || getEntityPhotoCountHint('ads', ad);
+}
+
 // In delivery completion, receiptImage is the driver's proof photo and must
 // win over older/general attachments in photos[]. Otherwise simply re-saving
 // a delivery could replace the proof with photos[0].
@@ -15586,9 +15814,23 @@ let _receiptPhotoViewerIndex = 0;
 let _receiptPhotoViewerLabel = '';
 let _receiptPhotoViewerReturnFocus = null;
 let _receiptPhotoUploadGeneration = 0;
+let _adPhotoUploadGeneration = 0;
+let _receiptPhotoUploadsInFlight = 0;
+let _adPhotoUploadsInFlight = 0;
 
-function openReceiptPhotoViewer(receiptId, index = 0) {
-  const receipt = (state.receipts || []).find(item => item && !item._deleted && String(item.id) === String(receiptId));
+async function openReceiptPhotoViewer(receiptId, index = 0) {
+  let receipt = (state.receipts || []).find(item => item && !item._deleted && String(item.id) === String(receiptId));
+  if (!receipt) return;
+  try {
+    receipt = await ensureEntityMediaLoaded('receipts', receiptId);
+  } catch (_) {
+    showNotification(
+      state.language === 'ar' ? 'تعذر تحميل الصور' : 'Photos unavailable',
+      state.language === 'ar' ? 'تحقق من الاتصال ثم حاول مرة أخرى.' : 'Check the connection and try again.',
+      'error'
+    );
+    return;
+  }
   if (!receipt) return;
   const number = receipt.finalReceiptNo || receipt.serialNumber || receipt.tempReceiptNo || '';
   openReceiptPhotoViewerSources(
@@ -15598,11 +15840,49 @@ function openReceiptPhotoViewer(receiptId, index = 0) {
   );
 }
 
+async function openAdPhotoViewer(adId, index = 0) {
+  if (!can('ads', 'viewPhotos')) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تحتاج صلاحية عرض صور الإعلانات' : 'Requires the View Photos permission',
+      'error'
+    );
+    return;
+  }
+  let ad = (state.ads || []).find(item => item && !item._deleted && String(item.id) === String(adId));
+  if (!ad) return;
+  try {
+    ad = await ensureEntityMediaLoaded('ads', adId);
+  } catch (_) {
+    showNotification(
+      state.language === 'ar' ? 'تعذر تحميل الصور' : 'Photos unavailable',
+      state.language === 'ar' ? 'تحقق من الاتصال ثم حاول مرة أخرى.' : 'Check the connection and try again.',
+      'error'
+    );
+    return;
+  }
+  if (!ad) return;
+  openReceiptPhotoViewerSources(
+    getAdPhotoSources(ad),
+    index,
+    state.language === 'ar' ? 'صور الإعلان' : 'Ad photos'
+  );
+}
+
 function openPendingReceiptPhotoViewer(index = 0) {
   openReceiptPhotoViewerSources(
     (state.tempReceiptPhotos || []).filter(isSafeReceiptPhotoSource),
     index,
     state.language === 'ar' ? 'معاينة صورة الوصل' : 'Receipt photo preview'
+  );
+}
+
+function openPendingAdPhotoViewer(index = 0) {
+  if (!can('ads', 'viewPhotos')) return;
+  openReceiptPhotoViewerSources(
+    (state.tempAdPhotos || []).filter(isSafeReceiptPhotoSource),
+    index,
+    state.language === 'ar' ? 'معاينة صورة الإعلان' : 'Ad photo preview'
   );
 }
 
@@ -15894,9 +16174,9 @@ function _readDeliveryPaymentRows(containerId) {
   })).filter(p => p.amount > 0);
 }
 
-function openReceiptDeliveryCompletionModal(receiptId) {
+async function openReceiptDeliveryCompletionModal(receiptId) {
   const isArD = state.language === 'ar';
-  const receipt = _findReceiptForDeliveryModal(receiptId);
+  let receipt = _findReceiptForDeliveryModal(receiptId);
   if (!receipt) {
     showNotification(isArD ? 'خطأ' : 'Error', isArD ? 'الوصل غير موجود' : 'Receipt not found', 'error');
     return;
@@ -15908,6 +16188,23 @@ function openReceiptDeliveryCompletionModal(receiptId) {
   if (String(receipt.deliveryPersonId || '') !== String(state.currentUser?.id || '')) {
     showNotification(isArD ? 'تم رفض الوصول' : 'Access Denied', isArD ? 'هذا الوصل غير معيَّن لك' : 'This receipt is not assigned to you', 'error');
     return;
+  }
+
+  // A lightweight sync record carries only the photo count. Hydrate before a
+  // driver completes delivery so prepending the new proof cannot overwrite
+  // older attachments that were intentionally omitted from the list payload.
+  if (getReceiptPhotoCount(receipt) > 0 && !isEntityMediaHydrated('receipts', receipt)) {
+    try {
+      receipt = await ensureEntityMediaLoaded('receipts', receiptId);
+    } catch (_) {
+      showNotification(
+        isArD ? 'تعذر تحميل الصور' : 'Photos unavailable',
+        isArD ? 'تعذر تحميل صور الوصل. تحقق من الاتصال ثم حاول مرة أخرى.' : 'Could not load the existing receipt photos. Check the connection and try again.',
+        'error'
+      );
+      return;
+    }
+    if (!receipt || String(receipt.deliveryPersonId || '') !== String(state.currentUser?.id || '')) return;
   }
 
   // Freeze the receipt's _lastModified at modal-open time. submitReceipt-
@@ -18970,6 +19267,14 @@ async function saveReceiptFromModal() {
 async function _saveReceiptFromModalInner() {
   const isArV = state.language === 'ar';
   try {
+  if (_receiptPhotoUploadsInFlight > 0) {
+    showNotification(
+      isArV ? 'جاري تجهيز الصور' : 'Preparing photos',
+      isArV ? 'انتظر لحظة حتى ينتهي تجهيز الصور، ثم احفظ الوصل.' : 'Please wait for the photos to finish preparing, then save the receipt.',
+      'info'
+    );
+    return;
+  }
   // Resolve the edit target from the FROZEN hidden field written when this form
   // was rendered — NOT from the mutable global state.modalData, which a stray
   // browser-back / refresh / URL-restore can silently repoint at a different
@@ -19360,6 +19665,16 @@ async function _saveReceiptFromModalInner() {
     payments: payments,
     photos
   };
+
+  // PATCH has merge semantics, so unchanged photos can stay on the server
+  // without being uploaded again. If the user intentionally removes the
+  // legacy delivery proof from the photo list, clear that field explicitly.
+  if (editTarget && !state.tempReceiptPhotosDirty) {
+    delete receipt.photos;
+  } else if (editTarget) {
+    const legacyProof = String(editTarget.receiptImage || '').trim();
+    if (legacyProof && !photos.includes(legacyProof)) receipt.receiptImage = '';
+  }
   
   // Get customer name for logging
   const linkedCustomer = state.customers.find(c => c.id === customerId);
@@ -21131,24 +21446,96 @@ function updateAdEndDateFromDays() {
   endInput.value = formatUTCDateForInput(end);
 }
 
+// Keep each record below the server's 10 MB request limit after JSON overhead.
+// Data-URL character length closely approximates the JSON request byte size.
+const MAX_ENTITY_PHOTO_PAYLOAD_CHARS = 7 * 1024 * 1024;
+
+function _preparedPhotoFits(existing, source) {
+  const used = (Array.isArray(existing) ? existing : [])
+    .reduce((sum, value) => sum + String(value || '').length, 0);
+  return used + String(source || '').length <= MAX_ENTITY_PHOTO_PAYLOAD_CHARS;
+}
+
+function _showPhotoPayloadLimit() {
+  showNotification(
+    state.language === 'ar' ? 'حجم الصور كبير' : 'Photos are too large',
+    state.language === 'ar' ? 'وصلت الصور إلى حد الرفع الآمن. احذف صورة أو استخدم صوراً أصغر.' : 'The safe upload limit was reached. Remove a photo or use smaller images.',
+    'warning'
+  );
+}
+
+async function _compressPhotosForUpload(files, concurrency = 2) {
+  const input = Array.isArray(files) ? files : [];
+  const results = new Array(input.length).fill('');
+  let next = 0;
+  const worker = async () => {
+    while (next < input.length) {
+      const index = next++;
+      try { results[index] = await compressImageToDataUrl(input[index]); } catch (_) {}
+    }
+  };
+  const workers = Math.min(Math.max(Number(concurrency) || 1, 1), input.length);
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  return results;
+}
+
+function canModifyAdPhotosInCurrentModal() {
+  if (!can('ads', 'uploadPhotos')) return false;
+  const editingSavedAd = state.activeModal === 'ad' && Boolean(state.modalData?.id);
+  // A partial photo array must never replace saved photos the user cannot see.
+  // A new ad is safe because there are no older photos to erase.
+  return !editingSavedAd || can('ads', 'viewPhotos');
+}
+
 // Upload and preview ad photos
 function uploadAdPhotos(fileList) {
   if (!fileList || !fileList.length) return;
-  if (!can('ads', 'uploadPhotos')) {
+  if (!canModifyAdPhotosInCurrentModal()) {
     showNotification(
       state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
-      state.language === 'ar' ? 'تحتاج صلاحية رفع صور الإعلانات' : 'Requires the Upload Photos permission',
+      state.language === 'ar'
+        ? 'تحتاج صلاحية عرض ورفع الصور لتغيير صور إعلان محفوظ.'
+        : 'Viewing and Upload Photos permissions are required to change a saved ad\'s photos.',
       'error'
     );
     return;
   }
   state.tempAdPhotos = state.tempAdPhotos || [];
-  Array.from(fileList).forEach(file => {
-    compressImageToDataUrl(file).then((dataUrl) => {
-      if (!dataUrl) return;
+  const uploadGeneration = _adPhotoUploadGeneration;
+  const room = Math.max(6 - state.tempAdPhotos.length, 0);
+  const files = Array.from(fileList).slice(0, room);
+  if (!files.length) {
+    showNotification(
+      state.language === 'ar' ? 'الحد الأقصى للصور' : 'Photo limit reached',
+      state.language === 'ar' ? 'يمكن إرفاق 6 صور كحد أقصى لكل إعلان.' : 'You can attach up to 6 photos to each ad.',
+      'warning'
+    );
+    return;
+  }
+  _adPhotoUploadsInFlight += files.length;
+  _compressPhotosForUpload(files).then(results => {
+    if (uploadGeneration !== _adPhotoUploadGeneration || state.activeModal !== 'ad') return;
+    state.tempAdPhotos = state.tempAdPhotos || [];
+    let changed = false;
+    let tooLarge = false;
+    results.forEach(dataUrl => {
+      if (!dataUrl || state.tempAdPhotos.length >= 6 || !isSafeReceiptPhotoSource(dataUrl)) return;
+      if (!_preparedPhotoFits(state.tempAdPhotos, dataUrl)) {
+        tooLarge = true;
+        return;
+      }
       state.tempAdPhotos.push(dataUrl);
+      changed = true;
+    });
+    if (changed) {
+      state.tempAdPhotosDirty = true;
       renderAdPhotoPreviews();
-    }).catch(() => {});
+    }
+    if (tooLarge) _showPhotoPayloadLimit();
+  }).finally(() => {
+    if (uploadGeneration === _adPhotoUploadGeneration) {
+      _adPhotoUploadsInFlight = Math.max(0, _adPhotoUploadsInFlight - files.length);
+    }
   });
 }
 
@@ -21157,23 +21544,31 @@ function renderAdPhotoPreviews() {
   if (!container) return;
   const photos = state.tempAdPhotos || [];
   if (!photos.length) {
-    container.innerHTML = `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. اضغط "إضافة صورة" للرفع.' : 'No photos yet. Click "Add Photo" to upload.'}</div>`;
+    const hiddenCount = getAdPhotoCount(state.modalData);
+    const hiddenSavedPhotos = Boolean(state.modalData?.id) && hiddenCount > 0 && !can('ads', 'viewPhotos');
+    container.innerHTML = hiddenSavedPhotos
+      ? `<div class="text-xs text-amber-600 dark:text-amber-400 col-span-4 text-center py-2">${state.language === 'ar' ? `تم حفظ ${hiddenCount} صورة. تحتاج صلاحية عرض الصور لرؤيتها أو تغييرها.` : `${hiddenCount} saved photo${hiddenCount === 1 ? '' : 's'}. View Photos permission is required to see or change them.`}</div>`
+      : `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. اضغط "إضافة صورة" للرفع.' : 'No photos yet. Click "Add Photo" to upload.'}</div>`;
     return;
   }
   container.innerHTML = photos.map((src, idx) => `
     <div class="relative group rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700">
-      <img src="${Security.escapeHtml(src)}" class="w-full h-20 object-cover" />
-      <button type="button" onclick="removeAdPhoto(${idx})" class="absolute top-1 right-1 bg-white/80 dark:bg-slate-900/80 rounded-full p-1 shadow hover:bg-rose-100">
-        <i data-lucide="x" class="w-3 h-3 text-rose-600"></i>
+      <button type="button" onclick="openPendingAdPhotoViewer(${idx})" class="group/photo block w-full relative focus:outline-none focus:ring-2 focus:ring-indigo-500" title="${state.language === 'ar' ? 'اضغط لعرض الصورة بالحجم الكامل' : 'Click to view full size'}" aria-label="${state.language === 'ar' ? `عرض صورة الإعلان ${idx + 1}` : `View ad photo ${idx + 1}`}">
+        <img src="${Security.escapeHtml(src)}" alt="${state.language === 'ar' ? `صورة الإعلان ${idx + 1}` : `Ad photo ${idx + 1}`}" class="w-full h-20 object-cover" />
+        <span class="absolute inset-0 bg-black/0 group-hover/photo:bg-black/25 group-focus/photo:bg-black/25 transition-colors flex items-center justify-center"><i data-lucide="maximize-2" class="w-5 h-5 text-white opacity-0 group-hover/photo:opacity-100 group-focus/photo:opacity-100 drop-shadow"></i></span>
       </button>
+      ${canModifyAdPhotosInCurrentModal() ? `<button type="button" onclick="removeAdPhoto(${idx})" class="absolute top-1 right-1 bg-white/90 dark:bg-slate-900/90 rounded-full p-1 shadow hover:bg-rose-100 z-10" aria-label="${state.language === 'ar' ? `حذف صورة الإعلان ${idx + 1}` : `Remove ad photo ${idx + 1}`}">
+        <i data-lucide="x" class="w-3 h-3 text-rose-600"></i>
+      </button>` : ''}
     </div>
   `).join('');
   if (window.lucide) lucide.createIcons();
 }
 
 function removeAdPhoto(idx) {
-  if (!state.tempAdPhotos) return;
+  if (!canModifyAdPhotosInCurrentModal() || !state.tempAdPhotos) return;
   state.tempAdPhotos.splice(idx, 1);
+  state.tempAdPhotosDirty = true;
   renderAdPhotoPreviews();
 }
 
@@ -21211,24 +21606,32 @@ function uploadReceiptPhotos(fileList) {
     );
     return;
   }
-  files.forEach(file => {
-    compressImageToDataUrl(file).then((dataUrl) => {
-      // Ignore a result from a receipt form that was cancelled/reopened while
-      // compression was still running, and recheck the cap after async work.
-      if (uploadGeneration !== _receiptPhotoUploadGeneration || state.activeModal !== 'receipt') return;
-      state.tempReceiptPhotos = state.tempReceiptPhotos || [];
-      if (state.tempReceiptPhotos.length >= 6) return;
-      if (!isSafeReceiptPhotoSource(dataUrl)) {
-        showNotification(
-          state.language === 'ar' ? 'صيغة صورة غير مدعومة' : 'Unsupported photo',
-          state.language === 'ar' ? 'استخدم صورة PNG أو JPG أو WEBP أو GIF.' : 'Use a PNG, JPG, WEBP, or GIF image.',
-          'error'
-        );
+  _receiptPhotoUploadsInFlight += files.length;
+  _compressPhotosForUpload(files).then(results => {
+    // Ignore results from a cancelled/reopened form, preserve selection order,
+    // and recheck both limits after asynchronous compression.
+    if (uploadGeneration !== _receiptPhotoUploadGeneration || state.activeModal !== 'receipt') return;
+    state.tempReceiptPhotos = state.tempReceiptPhotos || [];
+    let changed = false;
+    let tooLarge = false;
+    results.forEach(dataUrl => {
+      if (!dataUrl || state.tempReceiptPhotos.length >= 6 || !isSafeReceiptPhotoSource(dataUrl)) return;
+      if (!_preparedPhotoFits(state.tempReceiptPhotos, dataUrl)) {
+        tooLarge = true;
         return;
       }
       state.tempReceiptPhotos.push(dataUrl);
+      changed = true;
+    });
+    if (changed) {
+      state.tempReceiptPhotosDirty = true;
       renderReceiptPhotoPreviews();
-    }).catch(() => {});
+    }
+    if (tooLarge) _showPhotoPayloadLimit();
+  }).finally(() => {
+    if (uploadGeneration === _receiptPhotoUploadGeneration) {
+      _receiptPhotoUploadsInFlight = Math.max(0, _receiptPhotoUploadsInFlight - files.length);
+    }
   });
 }
 
@@ -21259,6 +21662,7 @@ function renderReceiptPhotoPreviews() {
 function removeReceiptPhoto(idx) {
   if (!state.tempReceiptPhotos) return;
   state.tempReceiptPhotos.splice(idx, 1);
+  state.tempReceiptPhotosDirty = true;
   renderReceiptPhotoPreviews();
 }
 
@@ -22005,7 +22409,10 @@ function renderModal() {
       // Copy (not alias) the live record's photos — the receipt modal already
       // does this (see state.tempReceiptPhotos below). Aliasing meant adding or
       // removing a photo mutated the SAVED ad immediately, even on Cancel.
-      state.tempAdPhotos = (adData.adPhotos || adData.photos || []).slice();
+      _adPhotoUploadGeneration++;
+      _adPhotoUploadsInFlight = 0;
+      state.tempAdPhotos = (!isEdit || can('ads', 'viewPhotos')) ? getAdPhotoSources(adData) : [];
+      state.tempAdPhotosDirty = false;
       const durationDaysDefault = (adData.days !== undefined ? adData.days : (adData.startDate && adData.endDate ? Math.max(0, Math.round((new Date(adData.endDate) - new Date(adData.startDate)) / (1000 * 60 * 60 * 24))) : ''));
       const isAdminUser = isCurrentUserAdmin();
       const adCreator = isEdit && adData.creatorId ? state.users.find(u => u.id === adData.creatorId) : state.currentUser;
@@ -22310,10 +22717,10 @@ function renderModal() {
                   <span class="w-5 h-5 rounded-full bg-orange-600 text-white flex items-center justify-center text-[10px]">5</span>
                   ${isArAd ? 'الصور' : 'Photos'}
                 </div>
-                <label class="text-xs bg-orange-600 text-white px-2 py-1 rounded-lg font-medium cursor-pointer hover:bg-orange-700">
+                ${canModifyAdPhotosInCurrentModal() ? `<label class="text-xs bg-orange-600 text-white px-2 py-1 rounded-lg font-medium cursor-pointer hover:bg-orange-700">
                   ${isArAd ? '+ رفع' : '+ Upload'}
                   <input type="file" accept="image/*" multiple class="hidden" onchange="uploadAdPhotos(this.files)" />
-                </label>
+                </label>` : ''}
               </div>
               <div id="ad-photo-previews" class="grid grid-cols-4 gap-2 min-h-[40px] bg-white dark:bg-slate-900 rounded-lg p-2">
                 <div class="text-xs text-slate-400 col-span-4 text-center py-2">${isArAd ? 'لا توجد صور بعد' : 'No photos yet'}</div>
@@ -22608,7 +23015,9 @@ function renderModal() {
       // Copy (not alias) the live record's photos so add/remove in the modal
       // does not mutate the saved receipt when the user cancels.
       _receiptPhotoUploadGeneration++;
+      _receiptPhotoUploadsInFlight = 0;
       state.tempReceiptPhotos = getReceiptPhotoSources(receiptData);
+      state.tempReceiptPhotosDirty = false;
       
       if (receiptCustomers.length === 0) {
         modalContent = `
@@ -24020,6 +24429,22 @@ async function handleModalSubmit() {
     case 'ad':
       try {
       const isArSubAd = state.language === 'ar';
+      if (_adPhotoUploadsInFlight > 0) {
+        showNotification(
+          isArSubAd ? 'جاري تجهيز الصور' : 'Preparing photos',
+          isArSubAd ? 'انتظر لحظة حتى ينتهي تجهيز الصور، ثم احفظ الإعلان.' : 'Please wait for the photos to finish preparing, then save the ad.',
+          'info'
+        );
+        return;
+      }
+      if (state.tempAdPhotosDirty && !canModifyAdPhotosInCurrentModal()) {
+        showNotification(
+          isArSubAd ? 'تم رفض الوصول' : 'Access Denied',
+          isArSubAd ? 'لا يمكن تغيير صور إعلان محفوظ دون صلاحية عرض الصور ورفعها.' : 'Saved ad photos cannot be changed without both View Photos and Upload Photos permissions.',
+          'error'
+        );
+        return;
+      }
       const paymentStatus = document.getElementById('ad-payment-status')?.value || 'paid';
       const collectionMethod = document.getElementById('ad-collection-method')?.value || '';
       const isUnpaidDriver = paymentStatus === 'not_paid' && collectionMethod === 'driver';
@@ -24396,6 +24821,15 @@ async function handleModalSubmit() {
         hasMergedPaidFunds: mergedAllocations.length > 0,
         mergedPaidAllocations: mergedAllocations
       };
+
+      // Ordinary edits do not need to re-upload unchanged base64 images. Both
+      // the generic local update and the atomic server mutation merge omitted
+      // fields over the stored record. Sending [] remains an intentional clear.
+      if (isEdit && !state.tempAdPhotosDirty) {
+        delete adUpdates.adPhotos;
+      } else if (isEdit) {
+        adUpdates.photos = []; // clear the legacy field after an intentional edit
+      }
 
       // Re-baseline the top-up arithmetic. saveTopUps derives the ad's amount
       // and end date from initialAmountUSD/initialEndDate + the top-ups. Those
@@ -24978,7 +25412,12 @@ function closeModal() {
   // into the next ad/receipt created in this session.
   state.tempAdPhotos = [];
   state.tempReceiptPhotos = [];
+  state.tempAdPhotosDirty = false;
+  state.tempReceiptPhotosDirty = false;
+  _adPhotoUploadGeneration++;
   _receiptPhotoUploadGeneration++;
+  _adPhotoUploadsInFlight = 0;
+  _receiptPhotoUploadsInFlight = 0;
   closeReceiptPhotoViewer();
   // Discard any pending (unsaved) top-up edits so they cannot leak into the
   // next ad's top-up session.

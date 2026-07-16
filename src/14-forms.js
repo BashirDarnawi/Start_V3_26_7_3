@@ -1069,6 +1069,14 @@ async function saveReceiptFromModal() {
 async function _saveReceiptFromModalInner() {
   const isArV = state.language === 'ar';
   try {
+  if (_receiptPhotoUploadsInFlight > 0) {
+    showNotification(
+      isArV ? 'جاري تجهيز الصور' : 'Preparing photos',
+      isArV ? 'انتظر لحظة حتى ينتهي تجهيز الصور، ثم احفظ الوصل.' : 'Please wait for the photos to finish preparing, then save the receipt.',
+      'info'
+    );
+    return;
+  }
   // Resolve the edit target from the FROZEN hidden field written when this form
   // was rendered — NOT from the mutable global state.modalData, which a stray
   // browser-back / refresh / URL-restore can silently repoint at a different
@@ -1459,6 +1467,16 @@ async function _saveReceiptFromModalInner() {
     payments: payments,
     photos
   };
+
+  // PATCH has merge semantics, so unchanged photos can stay on the server
+  // without being uploaded again. If the user intentionally removes the
+  // legacy delivery proof from the photo list, clear that field explicitly.
+  if (editTarget && !state.tempReceiptPhotosDirty) {
+    delete receipt.photos;
+  } else if (editTarget) {
+    const legacyProof = String(editTarget.receiptImage || '').trim();
+    if (legacyProof && !photos.includes(legacyProof)) receipt.receiptImage = '';
+  }
   
   // Get customer name for logging
   const linkedCustomer = state.customers.find(c => c.id === customerId);
@@ -3230,24 +3248,96 @@ function updateAdEndDateFromDays() {
   endInput.value = formatUTCDateForInput(end);
 }
 
+// Keep each record below the server's 10 MB request limit after JSON overhead.
+// Data-URL character length closely approximates the JSON request byte size.
+const MAX_ENTITY_PHOTO_PAYLOAD_CHARS = 7 * 1024 * 1024;
+
+function _preparedPhotoFits(existing, source) {
+  const used = (Array.isArray(existing) ? existing : [])
+    .reduce((sum, value) => sum + String(value || '').length, 0);
+  return used + String(source || '').length <= MAX_ENTITY_PHOTO_PAYLOAD_CHARS;
+}
+
+function _showPhotoPayloadLimit() {
+  showNotification(
+    state.language === 'ar' ? 'حجم الصور كبير' : 'Photos are too large',
+    state.language === 'ar' ? 'وصلت الصور إلى حد الرفع الآمن. احذف صورة أو استخدم صوراً أصغر.' : 'The safe upload limit was reached. Remove a photo or use smaller images.',
+    'warning'
+  );
+}
+
+async function _compressPhotosForUpload(files, concurrency = 2) {
+  const input = Array.isArray(files) ? files : [];
+  const results = new Array(input.length).fill('');
+  let next = 0;
+  const worker = async () => {
+    while (next < input.length) {
+      const index = next++;
+      try { results[index] = await compressImageToDataUrl(input[index]); } catch (_) {}
+    }
+  };
+  const workers = Math.min(Math.max(Number(concurrency) || 1, 1), input.length);
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  return results;
+}
+
+function canModifyAdPhotosInCurrentModal() {
+  if (!can('ads', 'uploadPhotos')) return false;
+  const editingSavedAd = state.activeModal === 'ad' && Boolean(state.modalData?.id);
+  // A partial photo array must never replace saved photos the user cannot see.
+  // A new ad is safe because there are no older photos to erase.
+  return !editingSavedAd || can('ads', 'viewPhotos');
+}
+
 // Upload and preview ad photos
 function uploadAdPhotos(fileList) {
   if (!fileList || !fileList.length) return;
-  if (!can('ads', 'uploadPhotos')) {
+  if (!canModifyAdPhotosInCurrentModal()) {
     showNotification(
       state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
-      state.language === 'ar' ? 'تحتاج صلاحية رفع صور الإعلانات' : 'Requires the Upload Photos permission',
+      state.language === 'ar'
+        ? 'تحتاج صلاحية عرض ورفع الصور لتغيير صور إعلان محفوظ.'
+        : 'Viewing and Upload Photos permissions are required to change a saved ad\'s photos.',
       'error'
     );
     return;
   }
   state.tempAdPhotos = state.tempAdPhotos || [];
-  Array.from(fileList).forEach(file => {
-    compressImageToDataUrl(file).then((dataUrl) => {
-      if (!dataUrl) return;
+  const uploadGeneration = _adPhotoUploadGeneration;
+  const room = Math.max(6 - state.tempAdPhotos.length, 0);
+  const files = Array.from(fileList).slice(0, room);
+  if (!files.length) {
+    showNotification(
+      state.language === 'ar' ? 'الحد الأقصى للصور' : 'Photo limit reached',
+      state.language === 'ar' ? 'يمكن إرفاق 6 صور كحد أقصى لكل إعلان.' : 'You can attach up to 6 photos to each ad.',
+      'warning'
+    );
+    return;
+  }
+  _adPhotoUploadsInFlight += files.length;
+  _compressPhotosForUpload(files).then(results => {
+    if (uploadGeneration !== _adPhotoUploadGeneration || state.activeModal !== 'ad') return;
+    state.tempAdPhotos = state.tempAdPhotos || [];
+    let changed = false;
+    let tooLarge = false;
+    results.forEach(dataUrl => {
+      if (!dataUrl || state.tempAdPhotos.length >= 6 || !isSafeReceiptPhotoSource(dataUrl)) return;
+      if (!_preparedPhotoFits(state.tempAdPhotos, dataUrl)) {
+        tooLarge = true;
+        return;
+      }
       state.tempAdPhotos.push(dataUrl);
+      changed = true;
+    });
+    if (changed) {
+      state.tempAdPhotosDirty = true;
       renderAdPhotoPreviews();
-    }).catch(() => {});
+    }
+    if (tooLarge) _showPhotoPayloadLimit();
+  }).finally(() => {
+    if (uploadGeneration === _adPhotoUploadGeneration) {
+      _adPhotoUploadsInFlight = Math.max(0, _adPhotoUploadsInFlight - files.length);
+    }
   });
 }
 
@@ -3256,23 +3346,31 @@ function renderAdPhotoPreviews() {
   if (!container) return;
   const photos = state.tempAdPhotos || [];
   if (!photos.length) {
-    container.innerHTML = `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. اضغط "إضافة صورة" للرفع.' : 'No photos yet. Click "Add Photo" to upload.'}</div>`;
+    const hiddenCount = getAdPhotoCount(state.modalData);
+    const hiddenSavedPhotos = Boolean(state.modalData?.id) && hiddenCount > 0 && !can('ads', 'viewPhotos');
+    container.innerHTML = hiddenSavedPhotos
+      ? `<div class="text-xs text-amber-600 dark:text-amber-400 col-span-4 text-center py-2">${state.language === 'ar' ? `تم حفظ ${hiddenCount} صورة. تحتاج صلاحية عرض الصور لرؤيتها أو تغييرها.` : `${hiddenCount} saved photo${hiddenCount === 1 ? '' : 's'}. View Photos permission is required to see or change them.`}</div>`
+      : `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. اضغط "إضافة صورة" للرفع.' : 'No photos yet. Click "Add Photo" to upload.'}</div>`;
     return;
   }
   container.innerHTML = photos.map((src, idx) => `
     <div class="relative group rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700">
-      <img src="${Security.escapeHtml(src)}" class="w-full h-20 object-cover" />
-      <button type="button" onclick="removeAdPhoto(${idx})" class="absolute top-1 right-1 bg-white/80 dark:bg-slate-900/80 rounded-full p-1 shadow hover:bg-rose-100">
-        <i data-lucide="x" class="w-3 h-3 text-rose-600"></i>
+      <button type="button" onclick="openPendingAdPhotoViewer(${idx})" class="group/photo block w-full relative focus:outline-none focus:ring-2 focus:ring-indigo-500" title="${state.language === 'ar' ? 'اضغط لعرض الصورة بالحجم الكامل' : 'Click to view full size'}" aria-label="${state.language === 'ar' ? `عرض صورة الإعلان ${idx + 1}` : `View ad photo ${idx + 1}`}">
+        <img src="${Security.escapeHtml(src)}" alt="${state.language === 'ar' ? `صورة الإعلان ${idx + 1}` : `Ad photo ${idx + 1}`}" class="w-full h-20 object-cover" />
+        <span class="absolute inset-0 bg-black/0 group-hover/photo:bg-black/25 group-focus/photo:bg-black/25 transition-colors flex items-center justify-center"><i data-lucide="maximize-2" class="w-5 h-5 text-white opacity-0 group-hover/photo:opacity-100 group-focus/photo:opacity-100 drop-shadow"></i></span>
       </button>
+      ${canModifyAdPhotosInCurrentModal() ? `<button type="button" onclick="removeAdPhoto(${idx})" class="absolute top-1 right-1 bg-white/90 dark:bg-slate-900/90 rounded-full p-1 shadow hover:bg-rose-100 z-10" aria-label="${state.language === 'ar' ? `حذف صورة الإعلان ${idx + 1}` : `Remove ad photo ${idx + 1}`}">
+        <i data-lucide="x" class="w-3 h-3 text-rose-600"></i>
+      </button>` : ''}
     </div>
   `).join('');
   if (window.lucide) lucide.createIcons();
 }
 
 function removeAdPhoto(idx) {
-  if (!state.tempAdPhotos) return;
+  if (!canModifyAdPhotosInCurrentModal() || !state.tempAdPhotos) return;
   state.tempAdPhotos.splice(idx, 1);
+  state.tempAdPhotosDirty = true;
   renderAdPhotoPreviews();
 }
 
@@ -3310,24 +3408,32 @@ function uploadReceiptPhotos(fileList) {
     );
     return;
   }
-  files.forEach(file => {
-    compressImageToDataUrl(file).then((dataUrl) => {
-      // Ignore a result from a receipt form that was cancelled/reopened while
-      // compression was still running, and recheck the cap after async work.
-      if (uploadGeneration !== _receiptPhotoUploadGeneration || state.activeModal !== 'receipt') return;
-      state.tempReceiptPhotos = state.tempReceiptPhotos || [];
-      if (state.tempReceiptPhotos.length >= 6) return;
-      if (!isSafeReceiptPhotoSource(dataUrl)) {
-        showNotification(
-          state.language === 'ar' ? 'صيغة صورة غير مدعومة' : 'Unsupported photo',
-          state.language === 'ar' ? 'استخدم صورة PNG أو JPG أو WEBP أو GIF.' : 'Use a PNG, JPG, WEBP, or GIF image.',
-          'error'
-        );
+  _receiptPhotoUploadsInFlight += files.length;
+  _compressPhotosForUpload(files).then(results => {
+    // Ignore results from a cancelled/reopened form, preserve selection order,
+    // and recheck both limits after asynchronous compression.
+    if (uploadGeneration !== _receiptPhotoUploadGeneration || state.activeModal !== 'receipt') return;
+    state.tempReceiptPhotos = state.tempReceiptPhotos || [];
+    let changed = false;
+    let tooLarge = false;
+    results.forEach(dataUrl => {
+      if (!dataUrl || state.tempReceiptPhotos.length >= 6 || !isSafeReceiptPhotoSource(dataUrl)) return;
+      if (!_preparedPhotoFits(state.tempReceiptPhotos, dataUrl)) {
+        tooLarge = true;
         return;
       }
       state.tempReceiptPhotos.push(dataUrl);
+      changed = true;
+    });
+    if (changed) {
+      state.tempReceiptPhotosDirty = true;
       renderReceiptPhotoPreviews();
-    }).catch(() => {});
+    }
+    if (tooLarge) _showPhotoPayloadLimit();
+  }).finally(() => {
+    if (uploadGeneration === _receiptPhotoUploadGeneration) {
+      _receiptPhotoUploadsInFlight = Math.max(0, _receiptPhotoUploadsInFlight - files.length);
+    }
   });
 }
 
@@ -3358,6 +3464,7 @@ function renderReceiptPhotoPreviews() {
 function removeReceiptPhoto(idx) {
   if (!state.tempReceiptPhotos) return;
   state.tempReceiptPhotos.splice(idx, 1);
+  state.tempReceiptPhotosDirty = true;
   renderReceiptPhotoPreviews();
 }
 

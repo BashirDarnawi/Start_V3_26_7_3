@@ -249,6 +249,12 @@ function restoreModalFromUrl() {
       state.tempMergeFunding = null;
       state.tempAdPhotos = [];
       state.tempReceiptPhotos = [];
+      state.tempAdPhotosDirty = false;
+      state.tempReceiptPhotosDirty = false;
+      _adPhotoUploadGeneration++;
+      _receiptPhotoUploadGeneration++;
+      _adPhotoUploadsInFlight = 0;
+      _receiptPhotoUploadsInFlight = 0;
       tempTopUps = [];
       document.querySelectorAll('#app-modal').forEach(el => el.remove());
     }
@@ -613,4 +619,3 @@ function renderSyncStatus() {
   
   lucide.createIcons();
 }
-

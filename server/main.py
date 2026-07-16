@@ -538,6 +538,10 @@ def _setup_rate_check(request: Request) -> tuple[bool, int]:
 
 
 BLOCKED_KEYS = {"__proto__", "prototype", "constructor"}
+# Response-only hints used by lightweight collection sync. Never accept these
+# from a client or persist them in data_json; the server always recomputes them
+# from the authoritative inline media fields.
+TRANSPORT_ONLY_KEYS = {"_mediaOmitted", "_photoCount"}
 
 # BEST PRACTICE: Maximum input length limits to prevent DoS
 MAX_INPUT_LENGTH = 10000  # Maximum length for text inputs
@@ -740,10 +744,10 @@ def sanitize_json(obj: Any, depth: int = 0, parent_key: str = "") -> Any:
         for k, v in obj.items():
             if not isinstance(k, str):
                 continue
-            if k in BLOCKED_KEYS:
+            if k in BLOCKED_KEYS or k in TRANSPORT_ONLY_KEYS:
                 continue
             sk = sanitize_str(k)[:100]
-            if not sk or sk in BLOCKED_KEYS:
+            if not sk or sk in BLOCKED_KEYS or sk in TRANSPORT_ONLY_KEYS:
                 continue
             # Pass field name to child for validation context
             out[sk] = sanitize_json(v, depth + 1, sk)
@@ -1097,6 +1101,60 @@ def cleanup_old_audit_logs():
             print(f"[albayan] Audit log cleanup: deleted {deleted_by_age} by age, {deleted_by_limit} by limit")
 
 
+INLINE_MEDIA_FIELDS: dict[str, tuple[str, ...]] = {
+    "receipts": ("photos", "receiptImage"),
+    "ads": ("adPhotos", "photos"),
+}
+
+
+def _without_inline_media(entity_type: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Return a lightweight response copy plus a trustworthy photo count."""
+    fields = INLINE_MEDIA_FIELDS.get(entity_type)
+    if not fields:
+        return data
+    lean = dict(data)
+    seen: set[str] = set()
+    for field in fields:
+        value = lean.pop(field, None)
+        values = value if isinstance(value, list) else [value]
+        for source in values:
+            if isinstance(source, str) and source.strip():
+                seen.add(source.strip())
+    lean["_mediaOmitted"] = True
+    lean["_photoCount"] = len(seen)
+    return lean
+
+
+def _project_entity_media(entity: dict[str, Any], include_media: bool) -> dict[str, Any]:
+    if include_media:
+        return entity
+    projected = dict(entity)
+    data = projected.get("data")
+    if isinstance(data, dict):
+        projected["data"] = _without_inline_media(str(projected.get("type") or ""), data)
+    return projected
+
+
+def _can_include_entity_media(
+    user: dict[str, Any], entity_type: str, requested: bool = True
+) -> bool:
+    """Apply media-specific authorization in addition to record visibility."""
+    if not requested:
+        return False
+    if entity_type == "ads":
+        return user_has_permission(user, "ads", "viewPhotos")
+    return True
+
+
+def _project_entity_media_for_user(
+    entity: dict[str, Any], user: dict[str, Any], requested: bool = True
+) -> dict[str, Any]:
+    entity_type = str(entity.get("type") or "")
+    return _project_entity_media(
+        entity, _can_include_entity_media(user, entity_type, requested)
+    )
+
+
 def list_entities(
     entity_type: str,
     *,
@@ -1113,6 +1171,7 @@ def list_entities(
     before_id: str | None = None,
     after_last_modified: int | None = None,
     after_id: str | None = None,
+    include_media: bool = True,
 ) -> list[dict[str, Any]]:
     entity_type = sanitize_str(entity_type)[:40]
     if not entity_type:
@@ -1252,6 +1311,11 @@ def list_entities(
                     data["createdBy"] = d.get("created_by")
                 if delivery_person_id is not None:
                     data["deliveryPersonId"] = delivery_person_id
+            elif not include_media:
+                # Photos remain authoritative inside data_json, but normal
+                # lists/live-sync only need a count. The full item endpoint is
+                # the on-demand hydration path used by View Photos and Edit.
+                data = _without_inline_media(entity_type, data)
             out.append(
                 {
                     "id": d["id"],
@@ -2775,6 +2839,7 @@ def _bootstrap_fetch_scoped(collection: str, user: dict[str, Any]) -> list[dict[
     get_collection's delivery scoping and view/viewOwn permission checks.
     """
     role_lower = str(user.get("role") or "").lower()
+    include_media = _can_include_entity_media(user, collection, True)
 
     # Delivery users: only records assigned to them (mirror get_collection).
     if role_lower == "delivery" and collection in {"ads", "receipts", "customers"}:
@@ -2782,11 +2847,18 @@ def _bootstrap_fetch_scoped(collection: str, user: dict[str, Any]) -> list[dict[
         if not uid:
             return []
         if collection in {"ads", "receipts"}:
-            return _page_all(collection, include_deleted=False, assigned_to=uid)
+            return _page_all(
+                collection,
+                include_deleted=False,
+                assigned_to=uid,
+                include_media=include_media,
+            )
         # customers: only those referenced by the driver's assigned deliveries.
         customer_ids: set[str] = set()
         for c in ("ads", "receipts"):
-            for it in _page_all(c, include_deleted=False, assigned_to=uid):
+            for it in _page_all(
+                c, include_deleted=False, assigned_to=uid, include_media=False
+            ):
                 cid = (it.get("data") or {}).get("customerId")
                 if cid:
                     customer_ids.add(sanitize_str(str(cid))[:80])
@@ -2805,7 +2877,12 @@ def _bootstrap_fetch_scoped(collection: str, user: dict[str, Any]) -> list[dict[
         user, module, _action_for_collection(collection, "delete")
     )
     created_by_filter = None if can_view_all else str(user.get("id") or "")
-    return _page_all(collection, include_deleted=include_deleted, created_by=created_by_filter)
+    return _page_all(
+        collection,
+        include_deleted=include_deleted,
+        created_by=created_by_filter,
+        include_media=include_media,
+    )
 
 
 @app.get("/api/bootstrap", response_model=BootstrapResponse)
@@ -6225,6 +6302,7 @@ def _financial_delete_customer_atomic(customer_id_raw: str) -> dict[str, Any]:
 def transfer_receipt_balance(
     body: ReceiptTransferRequest,
     request: Request,
+    include_media: bool = True,
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
@@ -6239,8 +6317,8 @@ def transfer_receipt_balance(
             {"targetReceiptId": target["id"], "amountUSD": transfer.get("amountUSD")},
         )
     return ReceiptTransferResponse(
-        sourceReceipt=EntityResponse(**source),
-        targetReceipt=EntityResponse(**target),
+        sourceReceipt=EntityResponse(**_project_entity_media_for_user(source, user, include_media)),
+        targetReceipt=EntityResponse(**_project_entity_media_for_user(target, user, include_media)),
         transfer=transfer,
         replayed=replayed,
     )
@@ -6250,6 +6328,7 @@ def transfer_receipt_balance(
 def mutate_ad_funding(
     body: AdMutationRequest,
     request: Request,
+    include_media: bool = True,
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
@@ -6258,7 +6337,9 @@ def mutate_ad_funding(
         audit(
             str(user.get("id")), body.action, "ads", ad["id"], f"Ad {body.action}", {}
         )
-    return AdMutationResponse(ad=EntityResponse(**ad), replayed=replayed)
+    return AdMutationResponse(
+        ad=EntityResponse(**_project_entity_media_for_user(ad, user, include_media)), replayed=replayed
+    )
 
 
 @app.post("/api/ads/{ad_id}/stop", response_model=AdStopResponse)
@@ -6266,13 +6347,16 @@ def stop_ad_atomic(
     ad_id: str,
     body: AdStopRequest,
     request: Request,
+    include_media: bool = True,
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
     ad, replayed = _ad_stop_atomic(user, ad_id, body)
     if not replayed:
         audit(str(user.get("id")), "stop", "ads", ad["id"], "Stopped ad", {})
-    return AdStopResponse(ad=EntityResponse(**ad), replayed=replayed)
+    return AdStopResponse(
+        ad=EntityResponse(**_project_entity_media_for_user(ad, user, include_media)), replayed=replayed
+    )
 
 
 @app.post(
@@ -6623,6 +6707,7 @@ def get_collection(
     limit: int = 500,
     offset: int = 0,
     include_deleted: bool = False,
+    include_media: bool = True,
     before_created_at: Optional[int] = None,
     before_id: Optional[str] = None,
     after_last_modified: Optional[int] = None,
@@ -6630,6 +6715,7 @@ def get_collection(
     user: dict[str, Any] = Depends(current_user),
 ):
     role_lower = str(user.get("role") or "").lower()
+    include_media = _can_include_entity_media(user, collection, include_media)
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
         _require_clothes_subscription(user)
 
@@ -6668,6 +6754,7 @@ def get_collection(
             before_id=before_id,
             after_last_modified=after_last_modified,
             after_id=after_id,
+            include_media=include_media,
         )
         return [EntityResponse(**i) for i in rows]
 
@@ -6690,6 +6777,7 @@ def get_collection(
                 before_id=before_id,
                 after_last_modified=after_last_modified,
                 after_id=after_id,
+                include_media=include_media,
             )
             return [EntityResponse(**i) for i in items]
 
@@ -6705,6 +6793,7 @@ def get_collection(
                 before_id=before_id,
                 after_last_modified=after_last_modified,
                 after_id=after_id,
+                include_media=include_media,
             )
             return [EntityResponse(**i) for i in items]
 
@@ -6737,6 +6826,7 @@ def get_collection(
         before_id=before_id,
         after_last_modified=after_last_modified,
         after_id=after_id,
+        include_media=include_media,
     )
     return [EntityResponse(**i) for i in items]
 
@@ -6803,14 +6893,14 @@ def get_collection_item(
             data = item.get("data") or {}
             if str(data.get("deliveryPersonId") or "") != str(user.get("id") or ""):
                 raise HTTPException(status_code=403, detail="Forbidden")
-            return EntityResponse(**item)
+            return EntityResponse(**_project_entity_media_for_user(item, user))
         if collection == "customers":
             item = get_entity(collection, entity_id)
             if not item or item.get("deleted"):
                 raise HTTPException(status_code=404, detail="Not found")
             if not _delivery_customer_is_referenced(entity_id, str(user.get("id") or "")):
                 raise HTTPException(status_code=403, detail="Forbidden")
-            return EntityResponse(**item)
+            return EntityResponse(**_project_entity_media_for_user(item, user))
         # Exchange-rate history is intentionally public to all authenticated
         # roles; every other direct collection lookup is outside a driver's
         # assigned-delivery scope.
@@ -6824,7 +6914,7 @@ def get_collection_item(
             raise HTTPException(status_code=404, detail="Not found")
         if not _owns_personal_record(collection, item.get("data"), str(user.get("id") or "")):
             raise HTTPException(status_code=403, detail="Forbidden")
-        return EntityResponse(**item)
+        return EntityResponse(**_project_entity_media_for_user(item, user))
 
     module = _module_for_collection(collection)
     action = _action_for_collection(collection, "view")
@@ -6842,11 +6932,11 @@ def get_collection_item(
     # If user only has viewOwn, enforce creator ownership
     creator = item.get("createdBy") or (item.get("data") or {}).get("createdBy") or (item.get("data") or {}).get("creatorId")
     if collection == "exchangeRateHistory":
-        return EntityResponse(**item)
+        return EntityResponse(**_project_entity_media_for_user(item, user))
     if user_has_permission(user, module, action):
-        return EntityResponse(**item)
+        return EntityResponse(**_project_entity_media_for_user(item, user))
     if user_has_permission(user, module, action, record_creator_id=str(creator or "")):
-        return EntityResponse(**item)
+        return EntityResponse(**_project_entity_media_for_user(item, user))
 
     raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -6856,6 +6946,7 @@ def create_collection_item(
     collection: str,
     body: EntityCreateRequest,
     request: Request,
+    include_media: bool = True,
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
@@ -7046,7 +7137,7 @@ def create_collection_item(
     else:
         saved = upsert_entity(collection, entity_id, body_data, str(user.get("id") or "system"), create_if_missing=True)
     audit(str(user.get("id")), "create", collection, entity_id, f"Created {collection} {entity_id}", {})
-    return EntityResponse(**saved)
+    return EntityResponse(**_project_entity_media_for_user(saved, user, include_media))
 
 
 @app.patch("/api/collections/{collection}/{entity_id}", response_model=EntityResponse)
@@ -7055,6 +7146,7 @@ def update_collection_item(
     entity_id: str,
     body: EntityUpdateRequest,
     request: Request,
+    include_media: bool = True,
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
@@ -7481,7 +7573,7 @@ def update_collection_item(
                 expected_last_modified=body.expectedLastModified,
             )
         audit(str(user.get("id")), "update", collection, entity_id, f"Updated {collection} {entity_id} (delivery)", {})
-        return EntityResponse(**saved)
+        return EntityResponse(**_project_entity_media_for_user(saved, user, include_media))
 
     # Subscription history is server-controlled.  Every role, including
     # Admin, may only perform an active -> canceled transition; identity,
@@ -7608,7 +7700,7 @@ def update_collection_item(
             expected_last_modified=body.expectedLastModified,
         )
     audit(str(user.get("id")), "update", collection, entity_id, f"Updated {collection} {entity_id}", {})
-    return EntityResponse(**saved)
+    return EntityResponse(**_project_entity_media_for_user(saved, user, include_media))
 
 
 @app.put("/api/admin/collections/{collection}/{entity_id}/restore", response_model=EntityResponse)
