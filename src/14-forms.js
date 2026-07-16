@@ -1769,7 +1769,7 @@ function checkReceiptNumberDuplicate(input) {
 function showDuplicateReceiptWarning(receiptNumber, customerName, customerId) {
   const isArDup = state.language === 'ar';
   const warningModal = document.createElement('div');
-  warningModal.className = 'fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm';
+  warningModal.className = 'mobile-dialog-overlay fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm';
   warningModal.id = 'duplicate-receipt-warning';
   
   warningModal.innerHTML = `

@@ -273,6 +273,7 @@ function navigateToInternal(view, pushHistory = true) {
     state.isMobileMenuOpen = false;
     if (pushHistory) updateUrlForView(state.currentView);
     debouncedSaveState();
+    requestViewScrollReset();
     render();
     return;
   }
@@ -290,6 +291,7 @@ function navigateToInternal(view, pushHistory = true) {
   }
   
   // PERFORMANCE: Update state and render immediately (don't wait for save)
+  const wasMobileMenuOpen = state.isMobileMenuOpen;
   state.currentView = view;
   state.isMobileMenuOpen = false;
   
@@ -299,8 +301,13 @@ function navigateToInternal(view, pushHistory = true) {
   }
   
   // Render immediately for instant feedback
-  render();
-  window.scrollTo(0, 0);
+  requestViewScrollReset();
+  // The drawer belongs to the outer shell. When the user taps the already
+  // active page, the inner view HTML is unchanged, so a partial render is a
+  // deliberate no-op and cannot close the drawer. Rebuild the shell only for
+  // this navigation case.
+  if (wasMobileMenuOpen) forceFullRender();
+  else render();
   
   // Save in background (debounced - doesn't block UI)
   debouncedSaveState();
@@ -312,7 +319,10 @@ function navigateTo(view) {
 
 function toggleMobileMenu() {
   state.isMobileMenuOpen = !state.isMobileMenuOpen;
-  render();
+  // The drawer/backdrop live outside the partial view container. A normal
+  // same-view render can intentionally be a no-op when the page HTML did not
+  // change, which used to make the hamburger appear completely unresponsive.
+  forceFullRender();
 }
 
 // ==========================================
@@ -357,7 +367,7 @@ function renderCommandPalette() {
   
   const modal = document.createElement('div');
   modal.id = 'command-palette-modal';
-  modal.className = 'fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-start justify-center pt-32 p-4';
+  modal.className = 'mobile-dialog-overlay fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-start justify-center pt-32 p-4';
   modal.onclick = toggleCommandPalette;
   modal.innerHTML = `
     <div class="glass-panel rounded-2xl p-4 w-full max-w-2xl" onclick="event.stopPropagation()">

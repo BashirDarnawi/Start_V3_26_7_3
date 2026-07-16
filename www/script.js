@@ -8920,6 +8920,7 @@ function navigateToInternal(view, pushHistory = true) {
     state.isMobileMenuOpen = false;
     if (pushHistory) updateUrlForView(state.currentView);
     debouncedSaveState();
+    requestViewScrollReset();
     render();
     return;
   }
@@ -8937,6 +8938,7 @@ function navigateToInternal(view, pushHistory = true) {
   }
   
   // PERFORMANCE: Update state and render immediately (don't wait for save)
+  const wasMobileMenuOpen = state.isMobileMenuOpen;
   state.currentView = view;
   state.isMobileMenuOpen = false;
   
@@ -8946,8 +8948,13 @@ function navigateToInternal(view, pushHistory = true) {
   }
   
   // Render immediately for instant feedback
-  render();
-  window.scrollTo(0, 0);
+  requestViewScrollReset();
+  // The drawer belongs to the outer shell. When the user taps the already
+  // active page, the inner view HTML is unchanged, so a partial render is a
+  // deliberate no-op and cannot close the drawer. Rebuild the shell only for
+  // this navigation case.
+  if (wasMobileMenuOpen) forceFullRender();
+  else render();
   
   // Save in background (debounced - doesn't block UI)
   debouncedSaveState();
@@ -8959,7 +8966,10 @@ function navigateTo(view) {
 
 function toggleMobileMenu() {
   state.isMobileMenuOpen = !state.isMobileMenuOpen;
-  render();
+  // The drawer/backdrop live outside the partial view container. A normal
+  // same-view render can intentionally be a no-op when the page HTML did not
+  // change, which used to make the hamburger appear completely unresponsive.
+  forceFullRender();
 }
 
 // ==========================================
@@ -9004,7 +9014,7 @@ function renderCommandPalette() {
   
   const modal = document.createElement('div');
   modal.id = 'command-palette-modal';
-  modal.className = 'fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-start justify-center pt-32 p-4';
+  modal.className = 'mobile-dialog-overlay fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-start justify-center pt-32 p-4';
   modal.onclick = toggleCommandPalette;
   modal.innerHTML = `
     <div class="glass-panel rounded-2xl p-4 w-full max-w-2xl" onclick="event.stopPropagation()">
@@ -9281,6 +9291,7 @@ let _lastRenderedView = null;
 let _lastRenderedUserId = null;
 let _renderInProgress = false;
 let _savedScrollPosition = { top: 0, left: 0 };
+let _resetScrollOnNextRender = false;
 // The exact HTML last written into the view container. A background live-sync tick
 // calls render() whenever ANY data changed anywhere; if this view's HTML is byte-for-byte
 // what is already on screen, we skip the DOM swap entirely — no icon flash, no re-played
@@ -9294,6 +9305,10 @@ function forceFullRender() {
   _lastRenderedUserId = null;
   _lastViewHTML = null;
   render();
+}
+
+function requestViewScrollReset() {
+  _resetScrollOnNextRender = true;
 }
 
 // Helper: Lock layout during render to prevent jumps
@@ -9378,12 +9393,23 @@ function render() {
       viewContainer = app.querySelector('.p-4.md\\:p-8');
       if (viewContainer) {
         nextViewHTML = renderView();
-        if (nextViewHTML === _lastViewHTML) return;
+        if (nextViewHTML === _lastViewHTML) {
+          // Clicking the already-active desktop navigation item is still real
+          // navigation: consume its pending reset now. Leaving the flag set
+          // would make an unrelated later sync jump the page to the top.
+          if (_resetScrollOnNextRender) {
+            _resetScrollOnNextRender = false;
+            window.scrollTo({ left: 0, top: 0, behavior: 'instant' });
+          }
+          return;
+        }
       }
     }
 
     // Save scroll and lock layout only when a DOM write will actually happen.
-    _savedScrollPosition = {
+    const resetScroll = _resetScrollOnNextRender;
+    _resetScrollOnNextRender = false;
+    _savedScrollPosition = resetScroll ? { top: 0, left: 0 } : {
       top: window.pageYOffset || window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0,
       left: window.pageXOffset || window.scrollX || document.documentElement.scrollLeft || document.body.scrollLeft || 0
     };
@@ -9869,17 +9895,17 @@ function renderMainApp() {
   const showSidebar = !['services-hub', 'smart-systems', 'service-placeholder', 'wallet', 'clothes-system'].includes(state.currentView);
   
   return `
-    <div class="flex min-h-screen" dir="${dir}">
+    <div class="app-shell flex min-h-screen" dir="${dir}">
       ${showSidebar ? renderSidebar() : ''}
       <!-- Sidebar is fixed on desktop (md), so main content must offset by sidebar width for ALL roles -->
-      <main class="flex-1 ${showSidebar ? (dir === 'rtl' ? 'md:mr-72' : 'md:ml-72') : ''}">
+      <main class="app-main min-w-0 flex-1 ${showSidebar ? (dir === 'rtl' ? 'md:mr-72' : 'md:ml-72') : ''}">
         ${showSidebar ? `
-        <header class="sticky top-0 z-20 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-6 py-4 md:hidden flex justify-between items-center">
-          <div class="font-bold">${t('adManager')}</div>
-          <button onclick="toggleMobileMenu()" class="text-slate-600 dark:text-slate-300"><i data-lucide="menu" class="w-6 h-6"></i></button>
+        <header class="mobile-app-header sticky top-0 z-20 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-3 sm:px-6 py-3 md:hidden flex justify-between items-center">
+          <div class="min-w-0 truncate font-bold">${t('adManager')}</div>
+          <button type="button" onclick="toggleMobileMenu()" class="mobile-menu-button touch-target flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'فتح القائمة' : 'Open menu'}" aria-controls="app-sidebar" aria-expanded="${state.isMobileMenuOpen ? 'true' : 'false'}"><i data-lucide="menu" class="w-6 h-6"></i></button>
         </header>
         ` : ''}
-        <div class="p-4 md:p-8 max-w-7xl mx-auto">${renderView()}</div>
+        <div class="app-content min-w-0 p-4 md:p-8 max-w-7xl mx-auto">${renderView()}</div>
       </main>
     </div>
   `;
@@ -9947,12 +9973,14 @@ function renderSidebar() {
   // If no nav items visible, show minimal sidebar
   if (navItems.length === 0) {
     return `
-      <aside class="fixed inset-y-0 left-0 z-50 w-72 bg-white/70 dark:bg-slate-900/70 backdrop-blur-2xl border-r border-white/20 shadow-lg transform transition-transform duration-500 ${state.isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 flex flex-col">
-        <div class="p-6 border-b border-white/10">
+      ${state.isMobileMenuOpen ? '<div class="mobile-menu-backdrop fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-40 md:hidden" onclick="toggleMobileMenu()" aria-hidden="true"></div>' : ''}
+      <aside id="app-sidebar" class="app-sidebar fixed inset-y-0 left-0 z-50 w-72 bg-white/90 dark:bg-slate-900/90 backdrop-blur-2xl border-r border-white/20 shadow-lg transform transition-transform duration-300 ${state.isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 flex flex-col" aria-label="${state.language === 'ar' ? 'القائمة الرئيسية' : 'Main navigation'}">
+        <div class="p-4 sm:p-6 border-b border-white/10 flex items-center justify-between gap-3">
           <div class="flex items-center space-x-3">
             <div class="w-10 h-10 alb-mark rounded-xl flex items-center justify-center text-white font-bold">A</div>
             <span class="font-bold text-slate-800 dark:text-white">${t('adManager')}</span>
           </div>
+          <button type="button" onclick="toggleMobileMenu()" class="mobile-sidebar-close touch-target md:hidden flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'إغلاق القائمة' : 'Close menu'}"><i data-lucide="x" class="w-5 h-5"></i></button>
         </div>
         <div class="flex-1 flex items-center justify-center p-6">
           <div class="text-center">
@@ -9973,14 +10001,14 @@ function renderSidebar() {
   
   const showServicesHubLink = isCurrentUserAdmin();
   return `
-    ${state.isMobileMenuOpen ? '<div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-40 md:hidden" onclick="toggleMobileMenu()"></div>' : ''}
-    <aside class="fixed inset-y-0 left-0 z-50 w-72 bg-white/70 dark:bg-slate-900/70 backdrop-blur-2xl border-r border-white/20 shadow-lg transform transition-transform duration-500 ${state.isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 flex flex-col">
-      <div class="p-6 border-b border-white/10 flex items-center justify-between">
+    ${state.isMobileMenuOpen ? '<div class="mobile-menu-backdrop fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-40 md:hidden" onclick="toggleMobileMenu()" aria-hidden="true"></div>' : ''}
+    <aside id="app-sidebar" class="app-sidebar fixed inset-y-0 left-0 z-50 w-72 bg-white/90 dark:bg-slate-900/90 backdrop-blur-2xl border-r border-white/20 shadow-lg transform transition-transform duration-300 ${state.isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 flex flex-col" aria-label="${state.language === 'ar' ? 'القائمة الرئيسية' : 'Main navigation'}">
+      <div class="p-4 sm:p-6 border-b border-white/10 flex items-center justify-between gap-3">
         <button type="button" onclick="navigateTo(getPostLoginLandingViewForUser(state.currentUser))" class="flex items-center space-x-3 text-left">
           <div class="w-10 h-10 alb-mark rounded-xl flex items-center justify-center text-white font-bold">A</div>
           <span class="font-bold text-slate-800 dark:text-white">${t('adManager')}</span>
         </button>
-        <button onclick="toggleMobileMenu()" class="md:hidden"><i data-lucide="x" class="w-5 h-5"></i></button>
+        <button type="button" onclick="toggleMobileMenu()" class="mobile-sidebar-close touch-target md:hidden flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'إغلاق القائمة' : 'Close menu'}"><i data-lucide="x" class="w-5 h-5"></i></button>
       </div>
       <nav class="flex-1 p-4 space-y-2 overflow-y-auto">
         ${showServicesHubLink ? `
@@ -10867,7 +10895,7 @@ function renderAnalyticsView() {
           <h1 class="text-3xl font-bold text-slate-900 dark:text-white">${t('analytics')}</h1>
           <p class="text-sm text-slate-500">${isAr ? 'تتبّع متقدّم للإيرادات والوصولات والتوصيل والنشاط' : 'Advanced tracking across revenue, receipts, delivery, and activity'}</p>
         </div>
-        <div class="flex items-center gap-3">
+        <div class="flex flex-wrap items-center gap-2 sm:gap-3">
           <div class="px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-semibold text-slate-600 dark:text-slate-200">${isAr ? `آخر 7 أيام: ${adsLast7} إعلان • ${receiptsLast7} وصل` : `Last 7 days: ${adsLast7} ads • ${receiptsLast7} receipts`}</div>
           <div class="px-3 py-2 rounded-xl bg-emerald-50 dark:bg-emerald-900/30 text-xs font-semibold text-emerald-700 dark:text-emerald-300">${isAr ? 'المستخدمون' : 'Users'}: ${users.length}</div>
         </div>
@@ -11326,13 +11354,13 @@ function renderCustomersView() {
 
   return `
     <div class="space-y-6 animate-fade-in-up">
-      <div class="flex justify-between items-center">
+      <div class="page-header flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('customers')}</h1>
           <p id="customers-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allFilteredCustomers.length} من ${allCustomers.length} عميل` : `${allFilteredCustomers.length} of ${allCustomers.length} customers`}</p>
         </div>
         ${can('customers', 'add') ? `
-        <button onclick="showCustomerModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
+        <button onclick="showCustomerModal()" class="btn-shine w-full sm:w-auto bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
           <i data-lucide="user-plus" class="w-4 h-4"></i>
           <span>${t('addCustomer')}</span>
         </button>
@@ -11353,10 +11381,10 @@ function renderCustomersView() {
         <div class="flex flex-col md:flex-row gap-4">
           <input type="text" id="customer-search" placeholder="${isAr ? 'بحث عن عملاء...' : 'Search customers...'}" value="${Security.escapeHtml(state.customerSearch || '')}" class="flex-1 glass-input px-4 py-2 rounded-lg" oninput="onCustomerSearchInput(this.value)" autocomplete="off" />
           
-          <div class="flex gap-2">
+          <div class="customer-filter-controls grid grid-cols-1 sm:grid-cols-2 gap-2">
             <!-- Sort Dropdown -->
-            <div class="relative">
-              <select id="customer-sort" onchange="state.customerSort = this.value; render();" class="glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
+            <div class="relative min-w-0">
+              <select id="customer-sort" onchange="state.customerSort = this.value; render();" class="w-full min-w-0 glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
                 <option value="newest" ${state.customerSort === 'newest' ? 'selected' : ''}>${isAr ? 'الأحدث أولاً' : 'Newest First'}</option>
                 <option value="oldest" ${state.customerSort === 'oldest' ? 'selected' : ''}>${isAr ? 'الأقدم أولاً' : 'Oldest First'}</option>
                 <option value="lastActive" ${state.customerSort === 'lastActive' ? 'selected' : ''}>${isAr ? 'آخر نشاط (حديثاً)' : 'Last Active (Recently)'}</option>
@@ -11371,8 +11399,8 @@ function renderCustomersView() {
             </div>
             
             <!-- Financial Filter -->
-            <div class="relative">
-              <select id="customer-financial-filter" onchange="state.customerFinancialFilter = this.value; render();" class="glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
+            <div class="relative min-w-0">
+              <select id="customer-financial-filter" onchange="state.customerFinancialFilter = this.value; render();" class="w-full min-w-0 glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
                 <option value="all" ${state.customerFinancialFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات المالية' : 'All Financials'}</option>
                 <option value="hasCredit" ${state.customerFinancialFilter === 'hasCredit' ? 'selected' : ''}>${isAr ? 'لديه رصيد دائن' : 'Has Credit'}</option>
                 <option value="hasDebt" ${state.customerFinancialFilter === 'hasDebt' ? 'selected' : ''}>${isAr ? 'عليه دين' : 'Has Debt'}</option>
@@ -11501,12 +11529,12 @@ function renderReceiptsView() {
 
   return `
     <div class="space-y-6 animate-fade-in-up">
-      <div class="flex justify-between items-center">
+      <div class="page-header flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('receipts')}</h1>
           <p id="receipts-count" class="text-sm text-slate-500 mt-1">${filteredReceipts.length}${hasActiveFilters ? (isArV ? ` من ${allReceipts.length}` : ` of ${allReceipts.length}`) : ''} ${isArV ? 'وصل' : 'receipts'}</p>
         </div>
-        <button onclick="showNewReceiptChooser()" class="btn-shine bg-purple-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
+        <button onclick="showNewReceiptChooser()" class="btn-shine w-full sm:w-auto bg-purple-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
           <i data-lucide="receipt" class="w-4 h-4"></i>
           <span>${isArV ? 'وصل جديد' : 'New Receipt'}</span>
         </button>
@@ -11530,7 +11558,7 @@ function renderReceiptsView() {
           </div>
           
           <!-- Filter Dropdowns -->
-          <div class="flex flex-wrap gap-2">
+          <div class="receipt-filter-controls flex flex-wrap gap-2">
             <!-- Status Filter -->
             <select onchange="updateReceiptFilter('status', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptStatusFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all" ${state.receiptStatusFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل الحالات' : 'All Status'}</option>
@@ -11564,7 +11592,7 @@ function renderReceiptsView() {
             </select>
             
             <!-- Sort By -->
-            <select onchange="updateReceiptFilter('sort', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer">
+            <select onchange="updateReceiptFilter('sort', this.value)" class="receipt-sort-control px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer">
               <option value="newest" ${state.receiptSortBy === 'newest' ? 'selected' : ''}>🕐 ${isArV ? 'الأحدث أولاً' : 'Newest First'}</option>
               <option value="oldest" ${state.receiptSortBy === 'oldest' ? 'selected' : ''}>🕐 ${isArV ? 'الأقدم أولاً' : 'Oldest First'}</option>
               <option value="amount-high" ${state.receiptSortBy === 'amount-high' ? 'selected' : ''}>💰 ${isArV ? 'الأعلى مبلغاً' : 'Highest Amount'}</option>
@@ -11855,12 +11883,12 @@ function renderPagesView() {
   
   return `
     <div class="space-y-6 animate-fade-in-up">
-      <div class="flex justify-between items-center">
+      <div class="page-header flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('pages')}</h1>
           <p class="text-sm text-slate-500 mt-1">${isAr ? `${visiblePages.length} صفحة فيسبوك` : `${visiblePages.length} Facebook pages`}</p>
         </div>
-        <button onclick="showPageModal()" class="btn-shine bg-blue-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
+        <button onclick="showPageModal()" class="btn-shine w-full sm:w-auto bg-blue-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
           <i data-lucide="file-plus" class="w-4 h-4"></i>
           <span>${t('addPage')}</span>
         </button>
@@ -12029,7 +12057,7 @@ function renderAdsView() {
       </div>
 
       <div class="glass-panel rounded-xl p-4">
-        <div class="flex flex-col md:flex-row gap-2">
+        <div class="ad-filter-controls flex flex-col md:flex-row gap-2">
           <input type="text" id="ad-search" placeholder="${isAr ? 'بحث بالعميل أو الهاتف أو الرقم التسلسلي أو الصفحة...' : 'Search by customer, phone, serial or page...'}" value="${Security.escapeHtml(state.adSearch || '')}" class="flex-1 glass-input px-4 py-2 rounded-lg" oninput="onAdSearchInput(this.value)" autocomplete="off" />
           <select onchange="updateAdFilter('status', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
             <option value="all" ${(adF.status || 'all') === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All Status'}</option>
@@ -12050,7 +12078,7 @@ function renderAdsView() {
 
       <div id="ads-table-container" class="glass-panel rounded-2xl p-6 overflow-x-auto">
         ${allAds.length === 0 ? `<div class="text-center py-12"><i data-lucide="inbox" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${isAr ? 'لا توجد إعلانات بعد' : 'No ads yet'}</p></div>` : `
-          <table class="w-full text-sm">
+          <table class="mobile-card-table w-full text-sm">
             <thead>
               <tr class="border-b-2 border-indigo-200 dark:border-indigo-800">
                 <th class="text-left py-3 px-2 w-12">#</th>
@@ -12743,7 +12771,7 @@ async function checkStuckDeliveries() {
     // Show stuck deliveries in a modal
     const modal = document.getElementById('app-modal') || document.createElement('div');
     modal.id = 'app-modal';
-    modal.className = 'fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+    modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
     modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
     
     const stuckList = result.stuck_deliveries.map(d => {
@@ -12984,7 +13012,7 @@ function showDeliveryDetails(itemId) {
   
   const modal = document.getElementById('app-modal') || document.createElement('div');
   modal.id = 'app-modal';
-  modal.className = 'fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
   modal.onclick = (e) => { if (e.target === modal) { modal.remove(); } };
   
   modal.innerHTML = `
@@ -13385,7 +13413,7 @@ function openDeliveryCancelModal(itemId) {
   document.getElementById('delivery-cancel-modal')?.remove();
   const modal = document.createElement('div');
   modal.id = 'delivery-cancel-modal';
-  modal.className = 'fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
 
   modal.innerHTML = `
@@ -13531,13 +13559,13 @@ function renderUsersView() {
 
   return `
     <div class="space-y-6 animate-fade-in-up">
-      <div class="flex justify-between items-center">
+      <div class="page-header flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('users')}</h1>
           <p class="text-sm text-slate-500 mt-1">${isAr ? `${visibleUsers.length} مستخدم في النظام` : `${visibleUsers.length} system users`}</p>
         </div>
         ${canAddUsers ? `
-        <button onclick="showUserModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
+        <button onclick="showUserModal()" class="btn-shine w-full sm:w-auto bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
           <i data-lucide="user-plus" class="w-4 h-4"></i>
           <span>${t('addUser')}</span>
         </button>
@@ -13931,7 +13959,7 @@ function renderAuditView() {
           </div>
         ` : `
           <div class="overflow-x-auto">
-            <table class="w-full text-sm">
+            <table class="mobile-card-table audit-mobile-table w-full text-sm">
               <thead class="bg-slate-50 dark:bg-slate-800/50">
                 <tr>
                   <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'الوقت' : 'Timestamp'}</th>
@@ -13950,11 +13978,11 @@ function renderAuditView() {
                   const category = log.category || 'general';
                   return `
                     <tr class="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors">
-                      <td class="px-4 py-3">
+                      <td class="px-4 py-3" data-label="${isAr ? 'الوقت' : 'Timestamp'}">
                         <div class="text-xs font-medium text-slate-700 dark:text-slate-300">${new Date(log.date).toLocaleDateString()}</div>
                         <div class="text-[10px] text-slate-500">${new Date(log.date).toLocaleTimeString()}</div>
                       </td>
-                      <td class="px-4 py-3">
+                      <td class="px-4 py-3" data-label="${isAr ? 'المستخدم' : 'User'}">
                         <div class="flex items-center space-x-2">
                           <div class="w-7 h-7 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white text-xs font-bold">
                             ${(log.userName || user?.name || 'S').charAt(0).toUpperCase()}
@@ -13962,27 +13990,27 @@ function renderAuditView() {
                           <span class="text-xs font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.userName || user?.name || (isAr ? 'النظام' : 'System'))}</span>
                         </div>
                       </td>
-                      <td class="px-4 py-3">
+                      <td class="px-4 py-3" data-label="${isAr ? 'الإجراء' : 'Action'}">
                         <span class="inline-flex px-2 py-1 rounded-lg text-xs font-bold bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300">
                           ${Security.escapeHtml(log.action)}
                         </span>
                       </td>
-                      <td class="px-4 py-3">
+                      <td class="px-4 py-3" data-label="${isAr ? 'الفئة' : 'Category'}">
                         <span class="inline-flex items-center space-x-1 text-xs text-slate-600 dark:text-slate-400">
                           <i data-lucide="${categoryIcons[category] || 'file-text'}" class="w-3 h-3"></i>
                           <span class="capitalize">${Security.escapeHtml(category)}</span>
                         </span>
                       </td>
-                      <td class="px-4 py-3 max-w-md">
+                      <td class="audit-description-cell px-4 py-3 max-w-md" data-label="${isAr ? 'الوصف' : 'Description'}">
                         <p class="text-xs text-slate-600 dark:text-slate-400 truncate" title="${Security.escapeHtml(log.description || '')}">${Security.escapeHtml(log.description || '')}</p>
                         ${log.resourceId ? `<p class="text-[10px] text-slate-400 mt-0.5">ID: ${log.resourceId.substring(0, 12)}...</p>` : ''}
                       </td>
-                      <td class="px-4 py-3 text-center">
+                      <td class="px-4 py-3 text-center" data-label="${isAr ? 'الخطورة' : 'Severity'}">
                         <span class="inline-flex px-2 py-1 rounded-full text-[10px] font-bold uppercase ${severityColors[severity] || severityColors['info']}">
                           ${isAr ? (({ info: 'معلومة', warning: 'تحذير', error: 'خطأ', critical: 'حرج' })[severity] || severity) : severity}
                         </span>
                       </td>
-                      <td class="px-4 py-3 text-center">
+                      <td class="px-4 py-3 text-center" data-label="${isAr ? 'التفاصيل' : 'Details'}">
                         <button onclick="showLogDetails('${log.id}')" class="p-1.5 rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors" title="${isAr ? 'عرض التفاصيل' : 'View Details'}">
                           <i data-lucide="eye" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
                         </button>
@@ -14099,11 +14127,20 @@ function updateAuditPageSize(size) {
 
 function showLogDetails(logId) {
   const isAr = state.language === 'ar';
-  const log = state.logs.find(l => l.id === logId);
+  // The table uses serverLogs in server mode and local logs offline. Looking
+  // only in state.logs made every View Details button silently do nothing on
+  // the hosted app even though the row was visible.
+  const source = isServerModeEnabled()
+    ? (Array.isArray(state.serverLogs) ? state.serverLogs : [])
+    : getVisibleRecords(state.logs);
+  const log = source.find(l => l.id === logId);
   if (!log) return;
   // Reachable with an arbitrary id — enforce the same scope as the table:
   // a viewOwn-only user may only open their OWN entries.
-  if (!can('auditLogs', 'view') && String(log.userId || '') !== String(state.currentUser?.id || '')) {
+  const canViewAllLogs = can('auditLogs', 'view');
+  const canViewOwnLogs = currentUserHasPermission('auditLogs', 'viewOwn');
+  const isOwnLog = String(log.userId || '') === String(state.currentUser?.id || '');
+  if (!canViewAllLogs && (!canViewOwnLogs || !isOwnLog)) {
     showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'لا يمكنك عرض سجل مستخدم آخر' : "You cannot view another user's log entry", 'error');
     return;
   }
@@ -14111,7 +14148,7 @@ function showLogDetails(logId) {
   const user = state.users.find(u => u.id === log.userId);
   const modal = document.getElementById('app-modal') || document.createElement('div');
   modal.id = 'app-modal';
-  modal.className = 'fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
   
   modal.innerHTML = `
@@ -14123,13 +14160,13 @@ function showLogDetails(logId) {
           </span>
           <span>${isAr ? 'تفاصيل السجل' : 'Log Details'}</span>
         </h2>
-        <button onclick="this.closest('#app-modal').remove()" class="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
+        <button type="button" onclick="this.closest('#app-modal').remove()" aria-label="${isAr ? 'إغلاق التفاصيل' : 'Close details'}" class="touch-target rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
           <i data-lucide="x" class="w-4 h-4 text-slate-600 dark:text-slate-300"></i>
         </button>
       </div>
       
       <div class="space-y-4">
-        <div class="grid grid-cols-2 gap-4">
+        <div class="audit-detail-grid grid grid-cols-2 gap-4">
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
             <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'معرّف السجل' : 'Log ID'}</div>
             <div class="text-xs font-mono text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.id)}</div>
@@ -14140,7 +14177,7 @@ function showLogDetails(logId) {
           </div>
         </div>
 
-        <div class="grid grid-cols-3 gap-4">
+        <div class="audit-detail-grid grid grid-cols-3 gap-4">
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
             <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'المستخدم' : 'User'}</div>
             <div class="text-xs text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.userName || user?.name || (isAr ? 'النظام' : 'System'))}</div>
@@ -15061,7 +15098,7 @@ function showPermissionsModal(userId) {
   modal.id = 'app-modal';
   modal.dataset.modalType = 'permissions';
   modal.dataset.userId = String(userId);
-  modal.className = 'fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
   
   modal.innerHTML = `
@@ -15906,7 +15943,7 @@ function openReceiptPhotoViewerSources(sources, index = 0, label = '') {
 
   const viewer = document.createElement('div');
   viewer.id = 'receipt-photo-viewer';
-  viewer.className = 'fixed inset-0 z-[100] bg-slate-950/95 flex flex-col p-3 sm:p-5';
+  viewer.className = 'receipt-photo-viewer fixed inset-0 z-[100] bg-slate-950/95 flex flex-col p-3 sm:p-5';
   viewer.setAttribute('role', 'dialog');
   viewer.setAttribute('aria-modal', 'true');
   viewer.setAttribute('aria-label', _receiptPhotoViewerLabel);
@@ -15921,11 +15958,11 @@ function openReceiptPhotoViewerSources(sources, index = 0, label = '') {
         <i data-lucide="x" class="w-6 h-6"></i>
       </button>
     </div>
-    <div class="relative flex-1 min-h-0 flex items-center justify-center" data-receipt-photo-backdrop="true">
+    <div class="receipt-photo-stage relative flex-1 min-h-0 flex items-center justify-center" data-receipt-photo-backdrop="true">
       <button id="receipt-photo-viewer-prev" type="button" onclick="changeReceiptPhotoViewer(-1)" class="absolute z-10 left-1 sm:left-4 w-11 h-11 rounded-full bg-black/55 hover:bg-black/75 text-white flex items-center justify-center" aria-label="${state.language === 'ar' ? 'الصورة السابقة' : 'Previous photo'}">
         <i data-lucide="chevron-left" class="w-7 h-7"></i>
       </button>
-      <img id="receipt-photo-viewer-image" class="max-w-full max-h-full object-contain rounded-lg shadow-2xl" />
+      <img id="receipt-photo-viewer-image" class="receipt-photo-full max-w-full max-h-full object-contain rounded-lg shadow-2xl" />
       <button id="receipt-photo-viewer-next" type="button" onclick="changeReceiptPhotoViewer(1)" class="absolute z-10 right-1 sm:right-4 w-11 h-11 rounded-full bg-black/55 hover:bg-black/75 text-white flex items-center justify-center" aria-label="${state.language === 'ar' ? 'الصورة التالية' : 'Next photo'}">
         <i data-lucide="chevron-right" class="w-7 h-7"></i>
       </button>
@@ -16244,7 +16281,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
   const modal = document.createElement('div');
   modal.id = 'delivery-complete-modal';
   modal.dataset.receiptId = String(receipt.id);
-  modal.className = 'fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
 
   modal.innerHTML = `
@@ -16534,7 +16571,7 @@ function openReceiptDeliveryCancelModal(receiptId) {
   document.getElementById('delivery-cancel-modal')?.remove();
   const modal = document.createElement('div');
   modal.id = 'delivery-cancel-modal';
-  modal.className = 'fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
   modal.innerHTML = `
     <div class="glass-panel rounded-2xl p-6 w-full max-w-md animate-slide-up" onclick="event.stopPropagation()">
@@ -16786,7 +16823,7 @@ function openCollectReceiptModal(receiptId) {
 
   document.getElementById('collect-receipt-modal')?.remove();
   const html = `
-    <div id="collect-receipt-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onclick="if(event.target===this) this.remove()">
+    <div id="collect-receipt-modal" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onclick="if(event.target===this) this.remove()">
       <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full max-h-[90vh] overflow-y-auto" onclick="event.stopPropagation()">
         <div class="p-5 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between sticky top-0 bg-white dark:bg-slate-800 z-10">
           <h2 class="text-lg font-bold text-slate-800 dark:text-white flex items-center">
@@ -17019,7 +17056,7 @@ function showNewReceiptChooser() {
   document.getElementById('new-receipt-chooser')?.remove();
   const wrap = document.createElement('div');
   wrap.id = 'new-receipt-chooser';
-  wrap.className = 'fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  wrap.className = 'mobile-dialog-overlay fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
   wrap.onclick = (e) => { if (e.target === wrap) wrap.remove(); };
   wrap.innerHTML = `
     <div class="glass-panel w-full max-w-lg p-6 rounded-3xl" onclick="event.stopPropagation()">
@@ -17202,7 +17239,7 @@ function showReceiptEditHistory(receiptId) {
   const customer = state.customers.find(c => c.id === receipt.customerId);
   
   const modalHTML = `
-    <div id="edit-history-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
+    <div id="edit-history-modal" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
       <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] overflow-hidden" onclick="event.stopPropagation()">
         <div class="p-6 border-b border-slate-200 dark:border-slate-700">
           <div class="flex items-center justify-between">
@@ -17286,7 +17323,7 @@ function showAdEditHistory(adId) {
   const page = state.pages.find(p => p.id === ad.pageId);
   
   const modalHTML = `
-    <div id="edit-history-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
+    <div id="edit-history-modal" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
       <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] overflow-hidden" onclick="event.stopPropagation()">
         <div class="p-6 border-b border-slate-200 dark:border-slate-700">
           <div class="flex items-center justify-between">
@@ -19967,7 +20004,7 @@ function checkReceiptNumberDuplicate(input) {
 function showDuplicateReceiptWarning(receiptNumber, customerName, customerId) {
   const isArDup = state.language === 'ar';
   const warningModal = document.createElement('div');
-  warningModal.className = 'fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm';
+  warningModal.className = 'mobile-dialog-overlay fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm';
   warningModal.id = 'duplicate-receipt-warning';
   
   warningModal.innerHTML = `
@@ -23060,7 +23097,7 @@ function renderModal() {
             </div>
             ` : ''}
             <!-- Phone Search Section -->
-            <div class="grid grid-cols-2 gap-3 p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
+            <div class="receipt-phone-search grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
               <div>
                 <label class="block text-xs font-medium text-slate-500 mb-2 flex items-center">
                   <i data-lucide="phone" class="w-3 h-3 mr-1"></i>
@@ -23074,9 +23111,9 @@ function renderModal() {
                   oninput="filterReceiptPhones()"
                   onfocus="showReceiptPhoneDropdown()"
                 />
-                <div id="receipt-phone-dropdown" class="absolute z-20 mt-1 w-80 glass-panel rounded-lg shadow-xl max-h-40 overflow-y-auto hidden">
+                <div id="receipt-phone-dropdown" class="absolute z-20 mt-1 w-full sm:w-80 max-w-[calc(100vw-2rem)] glass-panel rounded-lg shadow-xl max-h-40 overflow-y-auto hidden">
                   ${phoneCustomerMap.map(item => `
-                    <div class="px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer phone-option" data-phone="${Security.escapeHtml(item.phone)}" data-customer-id="${Security.escapeHtml(item.customer.id)}" onclick="selectReceiptPhone(this.dataset.phone, this.dataset.customerId)">
+                    <div class="touch-target px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer phone-option" role="button" tabindex="0" data-phone="${Security.escapeHtml(item.phone)}" data-customer-id="${Security.escapeHtml(item.customer.id)}" onclick="selectReceiptPhone(this.dataset.phone, this.dataset.customerId)" onkeydown="if(event.key === 'Enter' || event.key === ' '){ event.preventDefault(); selectReceiptPhone(this.dataset.phone, this.dataset.customerId); }">
                       <div class="text-sm font-medium">${Security.escapeHtml(item.phone)}</div>
                       <div class="text-xs text-slate-500">${Security.escapeHtml(item.customer.name)} - ${Security.escapeHtml(item.customer.platform)}</div>
                     </div>
@@ -23105,11 +23142,11 @@ function renderModal() {
             <!-- Status Tabs -->
             <div class="px-1">
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1.5">${isArR ? 'الحالة' : 'Status'}</label>
-              <div class="grid grid-cols-4 gap-1.5" id="receipt-status-tabs">
-                <button type="button" onclick="setReceiptStatus(this, 'Paid')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${!receiptData.status || receiptData.status === 'Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Paid">${trStatus('Paid')}</button>
-                <button type="button" onclick="setReceiptStatus(this, 'Not Paid')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Not Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Not Paid">${isArR ? 'غير مدفوع' : 'Not Paid'}</button>
-                <button type="button" onclick="setReceiptStatus(this, 'Canceled')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Canceled' ? 'bg-rose-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Canceled">${isArR ? 'ملغي' : 'Canceled'}</button>
-                <button type="button" onclick="setReceiptStatus(this, 'Lost')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Lost' ? 'bg-slate-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Lost">${isArR ? 'مفقود' : 'Lost'}</button>
+              <div class="grid grid-cols-2 sm:grid-cols-4 gap-1.5" id="receipt-status-tabs">
+                <button type="button" onclick="setReceiptStatus(this, 'Paid')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${!receiptData.status || receiptData.status === 'Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Paid">${trStatus('Paid')}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Not Paid')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Not Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Not Paid">${isArR ? 'غير مدفوع' : 'Not Paid'}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Canceled')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Canceled' ? 'bg-rose-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Canceled">${isArR ? 'ملغي' : 'Canceled'}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Lost')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Lost' ? 'bg-slate-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Lost">${isArR ? 'مفقود' : 'Lost'}</button>
               </div>
               <input type="hidden" id="receipt-status" value="${receiptData.status || 'Paid'}" />
 
@@ -24010,7 +24047,7 @@ function renderModal() {
 
   const modal = document.createElement('div');
   modal.id = 'app-modal';
-  modal.className = 'fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4';
+  modal.className = 'mobile-dialog-overlay fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4';
   // Smaller, more compact modal sizes
   let modalSize = 'max-w-md';
   if (state.activeModal === 'split-payments' || state.activeModal === 'top-ups' || state.activeModal === 'refund') {
@@ -26053,14 +26090,14 @@ async function saveClothesExchangeRate() {
 function renderClothesTabBar() {
   const isAr = clothesIsAr();
   return `
-    <div class="flex flex-wrap gap-2 mb-8">
+    <div class="clothes-tab-bar grid grid-cols-2 sm:flex sm:flex-wrap gap-2 mb-8">
       ${CLOTHES_TABS.map(tab => {
         const active = _clothesActiveTab === tab.id;
         return `
           <button
             type="button"
             onclick="setClothesTab('${tab.id}')"
-            class="flex items-center gap-2 px-4 py-2.5 rounded-xl font-medium transition-all ${active
+            class="flex min-w-0 items-center justify-center gap-2 px-3 sm:px-4 py-2.5 rounded-xl font-medium transition-all ${active
               ? 'bg-gradient-to-r from-rose-500 to-pink-500 text-white shadow-lg'
               : 'glass-panel text-slate-600 dark:text-slate-300 hover:text-rose-600 dark:hover:text-rose-400'}"
           >
@@ -26407,12 +26444,12 @@ function renderClothesSystemView() {
 
       <!-- Header -->
       <div class="mb-8">
-        <div class="flex items-center gap-4 mb-4">
-          <div class="w-16 h-16 rounded-2xl bg-gradient-to-br from-rose-500 to-pink-500 flex items-center justify-center shadow-2xl">
+        <div class="flex items-start sm:items-center gap-3 sm:gap-4 mb-4">
+          <div class="w-12 h-12 sm:w-16 sm:h-16 flex-shrink-0 rounded-2xl bg-gradient-to-br from-rose-500 to-pink-500 flex items-center justify-center shadow-2xl">
             <i data-lucide="shirt" class="w-8 h-8 text-white"></i>
           </div>
-          <div>
-            <h1 class="text-3xl font-bold text-slate-800 dark:text-white">
+          <div class="min-w-0">
+            <h1 class="text-2xl sm:text-3xl font-bold text-slate-800 dark:text-white break-words">
               ${isAr ? 'نظام الملابس' : 'Clothes System'}
             </h1>
             <p class="text-slate-500 dark:text-slate-400">
@@ -26836,12 +26873,10 @@ function refreshClothesVariantRows() {
   const isAr = clothesIsAr();
   const wrap = document.getElementById('clothes-variant-rows');
   if (!wrap) return;
-  // Inline grid template: width utility classes proved unreliable inside the
-  // modal in narrow webviews, so the column sizes are pinned inline.
-  const rowStyle = 'display:grid;grid-template-columns:minmax(0,1fr) 5.5rem 4.5rem 2rem;gap:0.5rem;align-items:center;';
+  const rowStyle = 'display:grid;gap:0.5rem;align-items:center;';
   const cellStyle = 'width:100%;min-width:0;';
   wrap.innerHTML = _clothesTempVariants.map((v, idx) => `
-    <div style="${rowStyle}">
+    <div style="${rowStyle}" class="clothes-variant-row">
       <input type="text" value="${Security.escapeHtml(String(v.color || ''))}" oninput="onClothesVariantField(${idx}, 'color', this.value)" placeholder="${isAr ? 'اللون' : 'Color'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
       <input type="text" value="${Security.escapeHtml(String(v.size || ''))}" oninput="onClothesVariantField(${idx}, 'size', this.value)" placeholder="${isAr ? 'المقاس' : 'Size'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
       <input type="number" min="0" step="1" value="${Math.max(0, Math.floor(Number(v.qty) || 0))}" oninput="onClothesVariantField(${idx}, 'qty', this.value)" placeholder="0" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'الكمية' : 'Quantity'}" />
@@ -27533,14 +27568,12 @@ function refreshClothesShipLines() {
   const wrap = document.getElementById('clothes-ship-lines');
   if (!wrap) return;
   const products = getVisibleClothesProducts();
-  // Inline grid template: width utility classes proved unreliable inside the
-  // modal in narrow webviews (see refreshClothesVariantRows), so the column
-  // sizes are pinned inline. Two rows per line so it stays usable on phones:
+  // Two rows per line keep these controls usable in narrow webviews:
   // row 1 = product + remove, row 2 = variant picker / qty / unit cost
   // (+ a color/size text row only when "new color/size" is chosen).
-  const rowStyle = 'display:grid;grid-template-columns:minmax(0,1fr) 2rem;gap:0.5rem;align-items:center;';
-  const subStyle = 'grid-column:1 / -1;display:grid;grid-template-columns:minmax(0,1fr) 4rem 5rem;gap:0.5rem;align-items:center;';
-  const newStyle = 'grid-column:1 / -1;display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;align-items:center;';
+  const rowStyle = 'display:grid;gap:0.5rem;align-items:center;';
+  const subStyle = 'grid-column:1 / -1;display:grid;gap:0.5rem;align-items:center;';
+  const newStyle = 'grid-column:1 / -1;display:grid;gap:0.5rem;align-items:center;';
   const cellStyle = 'width:100%;min-width:0;';
   wrap.innerHTML = _clothesTempShipLines.map((line, idx) => {
     const product = products.find(p => p.id === line.productId);
@@ -27550,7 +27583,7 @@ function refreshClothesShipLines() {
     const isNew = line._newVariant === true || (matchIdx === -1 && !!(String(line.color || '').trim() || String(line.size || '').trim()));
     const selectVal = (matchIdx >= 0 && !line._newVariant) ? `v:${matchIdx}` : (isNew ? 'new' : '');
     return `
-    <div style="${rowStyle}" class="pb-2 border-b border-slate-100 dark:border-slate-800">
+    <div style="${rowStyle}" class="clothes-line-row pb-2 border-b border-slate-100 dark:border-slate-800">
       <select oninput="onClothesShipLineField(${idx}, 'productId', this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm">
         <option value="">${isAr ? '— اختر المنتج —' : '— choose product —'}</option>
         ${products.map(p => `<option value="${p.id}" ${line.productId === p.id ? 'selected' : ''}>${Security.escapeHtml(p.name || '')}</option>`).join('')}
@@ -27558,7 +27591,7 @@ function refreshClothesShipLines() {
       <button type="button" onclick="removeClothesShipLine(${idx})" class="w-8 h-8 rounded-lg flex items-center justify-center text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20" title="${isAr ? 'إزالة' : 'Remove'}">
         <i data-lucide="x" class="w-4 h-4"></i>
       </button>
-      <div style="${subStyle}">
+      <div style="${subStyle}" class="clothes-shipment-subgrid">
         <select oninput="onClothesShipLineVariantPick(${idx}, this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" ${product ? '' : 'disabled'} title="${isAr ? 'اللون والمقاس' : 'Color & size'}">
           <option value="" ${selectVal === '' ? 'selected' : ''}>${product ? (isAr ? '— اللون والمقاس —' : '— color & size —') : (isAr ? 'اختر المنتج أولاً' : 'choose product first')}</option>
           ${variants.map((v, vi) => `<option value="v:${vi}" ${selectVal === `v:${vi}` ? 'selected' : ''}>${Security.escapeHtml(clothesVariantOptionLabel(v, false))}</option>`).join('')}
@@ -27568,7 +27601,7 @@ function refreshClothesShipLines() {
         <input type="text" inputmode="decimal" value="${Security.escapeHtml(String(line.unitCostUSD ?? ''))}" oninput="sanitizeMoneyInput(this); onClothesShipLineField(${idx}, 'unitCostUSD', this.value)" placeholder="$/1" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'تكلفة القطعة بالدولار' : 'Unit cost USD'}" />
       </div>
       ${isNew ? `
-      <div style="${newStyle}">
+      <div style="${newStyle}" class="clothes-new-variant-grid">
         <input type="text" value="${Security.escapeHtml(String(line.color || ''))}" oninput="onClothesShipLineField(${idx}, 'color', this.value)" placeholder="${isAr ? 'اللون الجديد' : 'New color'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
         <input type="text" value="${Security.escapeHtml(String(line.size || ''))}" oninput="onClothesShipLineField(${idx}, 'size', this.value)" placeholder="${isAr ? 'المقاس الجديد' : 'New size'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
       </div>` : ''}
@@ -28399,17 +28432,15 @@ function refreshClothesOrderLines() {
   const wrap = document.getElementById('clothes-order-lines');
   if (!wrap) return;
   const products = getVisibleClothesProducts();
-  // Same inline-grid pattern as the shipment modal (width utility classes are
-  // unreliable inside modals in narrow webviews).
-  const rowStyle = 'display:grid;grid-template-columns:minmax(0,1fr) 2rem;gap:0.5rem;align-items:center;';
-  const subStyle = 'grid-column:1 / -1;display:grid;grid-template-columns:minmax(0,1fr) 4rem 4rem 5rem;gap:0.5rem;align-items:center;';
+  const rowStyle = 'display:grid;gap:0.5rem;align-items:center;';
+  const subStyle = 'grid-column:1 / -1;display:grid;gap:0.5rem;align-items:center;';
   const cellStyle = 'width:100%;min-width:0;';
   wrap.innerHTML = _clothesTempOrderLines.map((line, idx) => {
     const product = products.find(p => p.id === line.productId);
     const variants = Array.isArray(product?.variants) ? product.variants : [];
     const matchIdx = product ? findClothesVariantIndex(product, line.color, line.size) : -1;
     return `
-    <div style="${rowStyle}" class="pb-2 border-b border-slate-100 dark:border-slate-800">
+    <div style="${rowStyle}" class="clothes-line-row pb-2 border-b border-slate-100 dark:border-slate-800">
       <select oninput="onClothesOrderLineField(${idx}, 'productId', this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm">
         <option value="">${isAr ? '— اختر المنتج —' : '— choose product —'}</option>
         ${products.map(p => `<option value="${p.id}" ${line.productId === p.id ? 'selected' : ''}>${Security.escapeHtml(p.name || '')}</option>`).join('')}
@@ -28417,7 +28448,7 @@ function refreshClothesOrderLines() {
       <button type="button" onclick="removeClothesOrderLine(${idx})" class="w-8 h-8 rounded-lg flex items-center justify-center text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20" title="${isAr ? 'إزالة' : 'Remove'}">
         <i data-lucide="x" class="w-4 h-4"></i>
       </button>
-      <div style="${subStyle}">
+      <div style="${subStyle}" class="clothes-order-subgrid">
         <select oninput="onClothesOrderLineVariantPick(${idx}, this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" ${product && variants.length ? '' : 'disabled'} title="${isAr ? 'اللون والمقاس' : 'Color & size'}">
           <option value="" ${matchIdx < 0 ? 'selected' : ''}>${!product
             ? (isAr ? 'اختر المنتج أولاً' : 'choose product first')
@@ -28795,7 +28826,7 @@ function stopAd(id) {
   }
   
   const modalHTML = `
-    <div id="stop-ad-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
+    <div id="stop-ad-modal" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
       <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full" onclick="event.stopPropagation()">
         <div class="p-6 border-b border-slate-200 dark:border-slate-700">
           <div class="flex items-center justify-between">

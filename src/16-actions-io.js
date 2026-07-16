@@ -22,7 +22,7 @@ function stopAd(id) {
   }
   
   const modalHTML = `
-    <div id="stop-ad-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
+    <div id="stop-ad-modal" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
       <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full" onclick="event.stopPropagation()">
         <div class="p-6 border-b border-slate-200 dark:border-slate-700">
           <div class="flex items-center justify-between">

@@ -13,6 +13,7 @@ let _lastRenderedView = null;
 let _lastRenderedUserId = null;
 let _renderInProgress = false;
 let _savedScrollPosition = { top: 0, left: 0 };
+let _resetScrollOnNextRender = false;
 // The exact HTML last written into the view container. A background live-sync tick
 // calls render() whenever ANY data changed anywhere; if this view's HTML is byte-for-byte
 // what is already on screen, we skip the DOM swap entirely — no icon flash, no re-played
@@ -26,6 +27,10 @@ function forceFullRender() {
   _lastRenderedUserId = null;
   _lastViewHTML = null;
   render();
+}
+
+function requestViewScrollReset() {
+  _resetScrollOnNextRender = true;
 }
 
 // Helper: Lock layout during render to prevent jumps
@@ -110,12 +115,23 @@ function render() {
       viewContainer = app.querySelector('.p-4.md\\:p-8');
       if (viewContainer) {
         nextViewHTML = renderView();
-        if (nextViewHTML === _lastViewHTML) return;
+        if (nextViewHTML === _lastViewHTML) {
+          // Clicking the already-active desktop navigation item is still real
+          // navigation: consume its pending reset now. Leaving the flag set
+          // would make an unrelated later sync jump the page to the top.
+          if (_resetScrollOnNextRender) {
+            _resetScrollOnNextRender = false;
+            window.scrollTo({ left: 0, top: 0, behavior: 'instant' });
+          }
+          return;
+        }
       }
     }
 
     // Save scroll and lock layout only when a DOM write will actually happen.
-    _savedScrollPosition = {
+    const resetScroll = _resetScrollOnNextRender;
+    _resetScrollOnNextRender = false;
+    _savedScrollPosition = resetScroll ? { top: 0, left: 0 } : {
       top: window.pageYOffset || window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0,
       left: window.pageXOffset || window.scrollX || document.documentElement.scrollLeft || document.body.scrollLeft || 0
     };
@@ -601,17 +617,17 @@ function renderMainApp() {
   const showSidebar = !['services-hub', 'smart-systems', 'service-placeholder', 'wallet', 'clothes-system'].includes(state.currentView);
   
   return `
-    <div class="flex min-h-screen" dir="${dir}">
+    <div class="app-shell flex min-h-screen" dir="${dir}">
       ${showSidebar ? renderSidebar() : ''}
       <!-- Sidebar is fixed on desktop (md), so main content must offset by sidebar width for ALL roles -->
-      <main class="flex-1 ${showSidebar ? (dir === 'rtl' ? 'md:mr-72' : 'md:ml-72') : ''}">
+      <main class="app-main min-w-0 flex-1 ${showSidebar ? (dir === 'rtl' ? 'md:mr-72' : 'md:ml-72') : ''}">
         ${showSidebar ? `
-        <header class="sticky top-0 z-20 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-6 py-4 md:hidden flex justify-between items-center">
-          <div class="font-bold">${t('adManager')}</div>
-          <button onclick="toggleMobileMenu()" class="text-slate-600 dark:text-slate-300"><i data-lucide="menu" class="w-6 h-6"></i></button>
+        <header class="mobile-app-header sticky top-0 z-20 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-3 sm:px-6 py-3 md:hidden flex justify-between items-center">
+          <div class="min-w-0 truncate font-bold">${t('adManager')}</div>
+          <button type="button" onclick="toggleMobileMenu()" class="mobile-menu-button touch-target flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'فتح القائمة' : 'Open menu'}" aria-controls="app-sidebar" aria-expanded="${state.isMobileMenuOpen ? 'true' : 'false'}"><i data-lucide="menu" class="w-6 h-6"></i></button>
         </header>
         ` : ''}
-        <div class="p-4 md:p-8 max-w-7xl mx-auto">${renderView()}</div>
+        <div class="app-content min-w-0 p-4 md:p-8 max-w-7xl mx-auto">${renderView()}</div>
       </main>
     </div>
   `;
@@ -679,12 +695,14 @@ function renderSidebar() {
   // If no nav items visible, show minimal sidebar
   if (navItems.length === 0) {
     return `
-      <aside class="fixed inset-y-0 left-0 z-50 w-72 bg-white/70 dark:bg-slate-900/70 backdrop-blur-2xl border-r border-white/20 shadow-lg transform transition-transform duration-500 ${state.isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 flex flex-col">
-        <div class="p-6 border-b border-white/10">
+      ${state.isMobileMenuOpen ? '<div class="mobile-menu-backdrop fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-40 md:hidden" onclick="toggleMobileMenu()" aria-hidden="true"></div>' : ''}
+      <aside id="app-sidebar" class="app-sidebar fixed inset-y-0 left-0 z-50 w-72 bg-white/90 dark:bg-slate-900/90 backdrop-blur-2xl border-r border-white/20 shadow-lg transform transition-transform duration-300 ${state.isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 flex flex-col" aria-label="${state.language === 'ar' ? 'القائمة الرئيسية' : 'Main navigation'}">
+        <div class="p-4 sm:p-6 border-b border-white/10 flex items-center justify-between gap-3">
           <div class="flex items-center space-x-3">
             <div class="w-10 h-10 alb-mark rounded-xl flex items-center justify-center text-white font-bold">A</div>
             <span class="font-bold text-slate-800 dark:text-white">${t('adManager')}</span>
           </div>
+          <button type="button" onclick="toggleMobileMenu()" class="mobile-sidebar-close touch-target md:hidden flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'إغلاق القائمة' : 'Close menu'}"><i data-lucide="x" class="w-5 h-5"></i></button>
         </div>
         <div class="flex-1 flex items-center justify-center p-6">
           <div class="text-center">
@@ -705,14 +723,14 @@ function renderSidebar() {
   
   const showServicesHubLink = isCurrentUserAdmin();
   return `
-    ${state.isMobileMenuOpen ? '<div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-40 md:hidden" onclick="toggleMobileMenu()"></div>' : ''}
-    <aside class="fixed inset-y-0 left-0 z-50 w-72 bg-white/70 dark:bg-slate-900/70 backdrop-blur-2xl border-r border-white/20 shadow-lg transform transition-transform duration-500 ${state.isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 flex flex-col">
-      <div class="p-6 border-b border-white/10 flex items-center justify-between">
+    ${state.isMobileMenuOpen ? '<div class="mobile-menu-backdrop fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-40 md:hidden" onclick="toggleMobileMenu()" aria-hidden="true"></div>' : ''}
+    <aside id="app-sidebar" class="app-sidebar fixed inset-y-0 left-0 z-50 w-72 bg-white/90 dark:bg-slate-900/90 backdrop-blur-2xl border-r border-white/20 shadow-lg transform transition-transform duration-300 ${state.isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 flex flex-col" aria-label="${state.language === 'ar' ? 'القائمة الرئيسية' : 'Main navigation'}">
+      <div class="p-4 sm:p-6 border-b border-white/10 flex items-center justify-between gap-3">
         <button type="button" onclick="navigateTo(getPostLoginLandingViewForUser(state.currentUser))" class="flex items-center space-x-3 text-left">
           <div class="w-10 h-10 alb-mark rounded-xl flex items-center justify-center text-white font-bold">A</div>
           <span class="font-bold text-slate-800 dark:text-white">${t('adManager')}</span>
         </button>
-        <button onclick="toggleMobileMenu()" class="md:hidden"><i data-lucide="x" class="w-5 h-5"></i></button>
+        <button type="button" onclick="toggleMobileMenu()" class="mobile-sidebar-close touch-target md:hidden flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'إغلاق القائمة' : 'Close menu'}"><i data-lucide="x" class="w-5 h-5"></i></button>
       </div>
       <nav class="flex-1 p-4 space-y-2 overflow-y-auto">
         ${showServicesHubLink ? `
@@ -1599,7 +1617,7 @@ function renderAnalyticsView() {
           <h1 class="text-3xl font-bold text-slate-900 dark:text-white">${t('analytics')}</h1>
           <p class="text-sm text-slate-500">${isAr ? 'تتبّع متقدّم للإيرادات والوصولات والتوصيل والنشاط' : 'Advanced tracking across revenue, receipts, delivery, and activity'}</p>
         </div>
-        <div class="flex items-center gap-3">
+        <div class="flex flex-wrap items-center gap-2 sm:gap-3">
           <div class="px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-semibold text-slate-600 dark:text-slate-200">${isAr ? `آخر 7 أيام: ${adsLast7} إعلان • ${receiptsLast7} وصل` : `Last 7 days: ${adsLast7} ads • ${receiptsLast7} receipts`}</div>
           <div class="px-3 py-2 rounded-xl bg-emerald-50 dark:bg-emerald-900/30 text-xs font-semibold text-emerald-700 dark:text-emerald-300">${isAr ? 'المستخدمون' : 'Users'}: ${users.length}</div>
         </div>
@@ -2058,13 +2076,13 @@ function renderCustomersView() {
 
   return `
     <div class="space-y-6 animate-fade-in-up">
-      <div class="flex justify-between items-center">
+      <div class="page-header flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('customers')}</h1>
           <p id="customers-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allFilteredCustomers.length} من ${allCustomers.length} عميل` : `${allFilteredCustomers.length} of ${allCustomers.length} customers`}</p>
         </div>
         ${can('customers', 'add') ? `
-        <button onclick="showCustomerModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
+        <button onclick="showCustomerModal()" class="btn-shine w-full sm:w-auto bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
           <i data-lucide="user-plus" class="w-4 h-4"></i>
           <span>${t('addCustomer')}</span>
         </button>
@@ -2085,10 +2103,10 @@ function renderCustomersView() {
         <div class="flex flex-col md:flex-row gap-4">
           <input type="text" id="customer-search" placeholder="${isAr ? 'بحث عن عملاء...' : 'Search customers...'}" value="${Security.escapeHtml(state.customerSearch || '')}" class="flex-1 glass-input px-4 py-2 rounded-lg" oninput="onCustomerSearchInput(this.value)" autocomplete="off" />
           
-          <div class="flex gap-2">
+          <div class="customer-filter-controls grid grid-cols-1 sm:grid-cols-2 gap-2">
             <!-- Sort Dropdown -->
-            <div class="relative">
-              <select id="customer-sort" onchange="state.customerSort = this.value; render();" class="glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
+            <div class="relative min-w-0">
+              <select id="customer-sort" onchange="state.customerSort = this.value; render();" class="w-full min-w-0 glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
                 <option value="newest" ${state.customerSort === 'newest' ? 'selected' : ''}>${isAr ? 'الأحدث أولاً' : 'Newest First'}</option>
                 <option value="oldest" ${state.customerSort === 'oldest' ? 'selected' : ''}>${isAr ? 'الأقدم أولاً' : 'Oldest First'}</option>
                 <option value="lastActive" ${state.customerSort === 'lastActive' ? 'selected' : ''}>${isAr ? 'آخر نشاط (حديثاً)' : 'Last Active (Recently)'}</option>
@@ -2103,8 +2121,8 @@ function renderCustomersView() {
             </div>
             
             <!-- Financial Filter -->
-            <div class="relative">
-              <select id="customer-financial-filter" onchange="state.customerFinancialFilter = this.value; render();" class="glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
+            <div class="relative min-w-0">
+              <select id="customer-financial-filter" onchange="state.customerFinancialFilter = this.value; render();" class="w-full min-w-0 glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
                 <option value="all" ${state.customerFinancialFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات المالية' : 'All Financials'}</option>
                 <option value="hasCredit" ${state.customerFinancialFilter === 'hasCredit' ? 'selected' : ''}>${isAr ? 'لديه رصيد دائن' : 'Has Credit'}</option>
                 <option value="hasDebt" ${state.customerFinancialFilter === 'hasDebt' ? 'selected' : ''}>${isAr ? 'عليه دين' : 'Has Debt'}</option>
@@ -2233,12 +2251,12 @@ function renderReceiptsView() {
 
   return `
     <div class="space-y-6 animate-fade-in-up">
-      <div class="flex justify-between items-center">
+      <div class="page-header flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('receipts')}</h1>
           <p id="receipts-count" class="text-sm text-slate-500 mt-1">${filteredReceipts.length}${hasActiveFilters ? (isArV ? ` من ${allReceipts.length}` : ` of ${allReceipts.length}`) : ''} ${isArV ? 'وصل' : 'receipts'}</p>
         </div>
-        <button onclick="showNewReceiptChooser()" class="btn-shine bg-purple-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
+        <button onclick="showNewReceiptChooser()" class="btn-shine w-full sm:w-auto bg-purple-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
           <i data-lucide="receipt" class="w-4 h-4"></i>
           <span>${isArV ? 'وصل جديد' : 'New Receipt'}</span>
         </button>
@@ -2262,7 +2280,7 @@ function renderReceiptsView() {
           </div>
           
           <!-- Filter Dropdowns -->
-          <div class="flex flex-wrap gap-2">
+          <div class="receipt-filter-controls flex flex-wrap gap-2">
             <!-- Status Filter -->
             <select onchange="updateReceiptFilter('status', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptStatusFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all" ${state.receiptStatusFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل الحالات' : 'All Status'}</option>
@@ -2296,7 +2314,7 @@ function renderReceiptsView() {
             </select>
             
             <!-- Sort By -->
-            <select onchange="updateReceiptFilter('sort', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer">
+            <select onchange="updateReceiptFilter('sort', this.value)" class="receipt-sort-control px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer">
               <option value="newest" ${state.receiptSortBy === 'newest' ? 'selected' : ''}>🕐 ${isArV ? 'الأحدث أولاً' : 'Newest First'}</option>
               <option value="oldest" ${state.receiptSortBy === 'oldest' ? 'selected' : ''}>🕐 ${isArV ? 'الأقدم أولاً' : 'Oldest First'}</option>
               <option value="amount-high" ${state.receiptSortBy === 'amount-high' ? 'selected' : ''}>💰 ${isArV ? 'الأعلى مبلغاً' : 'Highest Amount'}</option>
@@ -2587,12 +2605,12 @@ function renderPagesView() {
   
   return `
     <div class="space-y-6 animate-fade-in-up">
-      <div class="flex justify-between items-center">
+      <div class="page-header flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('pages')}</h1>
           <p class="text-sm text-slate-500 mt-1">${isAr ? `${visiblePages.length} صفحة فيسبوك` : `${visiblePages.length} Facebook pages`}</p>
         </div>
-        <button onclick="showPageModal()" class="btn-shine bg-blue-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
+        <button onclick="showPageModal()" class="btn-shine w-full sm:w-auto bg-blue-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
           <i data-lucide="file-plus" class="w-4 h-4"></i>
           <span>${t('addPage')}</span>
         </button>
@@ -2761,7 +2779,7 @@ function renderAdsView() {
       </div>
 
       <div class="glass-panel rounded-xl p-4">
-        <div class="flex flex-col md:flex-row gap-2">
+        <div class="ad-filter-controls flex flex-col md:flex-row gap-2">
           <input type="text" id="ad-search" placeholder="${isAr ? 'بحث بالعميل أو الهاتف أو الرقم التسلسلي أو الصفحة...' : 'Search by customer, phone, serial or page...'}" value="${Security.escapeHtml(state.adSearch || '')}" class="flex-1 glass-input px-4 py-2 rounded-lg" oninput="onAdSearchInput(this.value)" autocomplete="off" />
           <select onchange="updateAdFilter('status', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
             <option value="all" ${(adF.status || 'all') === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All Status'}</option>
@@ -2782,7 +2800,7 @@ function renderAdsView() {
 
       <div id="ads-table-container" class="glass-panel rounded-2xl p-6 overflow-x-auto">
         ${allAds.length === 0 ? `<div class="text-center py-12"><i data-lucide="inbox" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${isAr ? 'لا توجد إعلانات بعد' : 'No ads yet'}</p></div>` : `
-          <table class="w-full text-sm">
+          <table class="mobile-card-table w-full text-sm">
             <thead>
               <tr class="border-b-2 border-indigo-200 dark:border-indigo-800">
                 <th class="text-left py-3 px-2 w-12">#</th>
@@ -3475,7 +3493,7 @@ async function checkStuckDeliveries() {
     // Show stuck deliveries in a modal
     const modal = document.getElementById('app-modal') || document.createElement('div');
     modal.id = 'app-modal';
-    modal.className = 'fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+    modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
     modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
     
     const stuckList = result.stuck_deliveries.map(d => {
@@ -3716,7 +3734,7 @@ function showDeliveryDetails(itemId) {
   
   const modal = document.getElementById('app-modal') || document.createElement('div');
   modal.id = 'app-modal';
-  modal.className = 'fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
   modal.onclick = (e) => { if (e.target === modal) { modal.remove(); } };
   
   modal.innerHTML = `
@@ -4117,7 +4135,7 @@ function openDeliveryCancelModal(itemId) {
   document.getElementById('delivery-cancel-modal')?.remove();
   const modal = document.createElement('div');
   modal.id = 'delivery-cancel-modal';
-  modal.className = 'fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
 
   modal.innerHTML = `
@@ -4263,13 +4281,13 @@ function renderUsersView() {
 
   return `
     <div class="space-y-6 animate-fade-in-up">
-      <div class="flex justify-between items-center">
+      <div class="page-header flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('users')}</h1>
           <p class="text-sm text-slate-500 mt-1">${isAr ? `${visibleUsers.length} مستخدم في النظام` : `${visibleUsers.length} system users`}</p>
         </div>
         ${canAddUsers ? `
-        <button onclick="showUserModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
+        <button onclick="showUserModal()" class="btn-shine w-full sm:w-auto bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
           <i data-lucide="user-plus" class="w-4 h-4"></i>
           <span>${t('addUser')}</span>
         </button>
@@ -4663,7 +4681,7 @@ function renderAuditView() {
           </div>
         ` : `
           <div class="overflow-x-auto">
-            <table class="w-full text-sm">
+            <table class="mobile-card-table audit-mobile-table w-full text-sm">
               <thead class="bg-slate-50 dark:bg-slate-800/50">
                 <tr>
                   <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'الوقت' : 'Timestamp'}</th>
@@ -4682,11 +4700,11 @@ function renderAuditView() {
                   const category = log.category || 'general';
                   return `
                     <tr class="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors">
-                      <td class="px-4 py-3">
+                      <td class="px-4 py-3" data-label="${isAr ? 'الوقت' : 'Timestamp'}">
                         <div class="text-xs font-medium text-slate-700 dark:text-slate-300">${new Date(log.date).toLocaleDateString()}</div>
                         <div class="text-[10px] text-slate-500">${new Date(log.date).toLocaleTimeString()}</div>
                       </td>
-                      <td class="px-4 py-3">
+                      <td class="px-4 py-3" data-label="${isAr ? 'المستخدم' : 'User'}">
                         <div class="flex items-center space-x-2">
                           <div class="w-7 h-7 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white text-xs font-bold">
                             ${(log.userName || user?.name || 'S').charAt(0).toUpperCase()}
@@ -4694,27 +4712,27 @@ function renderAuditView() {
                           <span class="text-xs font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.userName || user?.name || (isAr ? 'النظام' : 'System'))}</span>
                         </div>
                       </td>
-                      <td class="px-4 py-3">
+                      <td class="px-4 py-3" data-label="${isAr ? 'الإجراء' : 'Action'}">
                         <span class="inline-flex px-2 py-1 rounded-lg text-xs font-bold bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300">
                           ${Security.escapeHtml(log.action)}
                         </span>
                       </td>
-                      <td class="px-4 py-3">
+                      <td class="px-4 py-3" data-label="${isAr ? 'الفئة' : 'Category'}">
                         <span class="inline-flex items-center space-x-1 text-xs text-slate-600 dark:text-slate-400">
                           <i data-lucide="${categoryIcons[category] || 'file-text'}" class="w-3 h-3"></i>
                           <span class="capitalize">${Security.escapeHtml(category)}</span>
                         </span>
                       </td>
-                      <td class="px-4 py-3 max-w-md">
+                      <td class="audit-description-cell px-4 py-3 max-w-md" data-label="${isAr ? 'الوصف' : 'Description'}">
                         <p class="text-xs text-slate-600 dark:text-slate-400 truncate" title="${Security.escapeHtml(log.description || '')}">${Security.escapeHtml(log.description || '')}</p>
                         ${log.resourceId ? `<p class="text-[10px] text-slate-400 mt-0.5">ID: ${log.resourceId.substring(0, 12)}...</p>` : ''}
                       </td>
-                      <td class="px-4 py-3 text-center">
+                      <td class="px-4 py-3 text-center" data-label="${isAr ? 'الخطورة' : 'Severity'}">
                         <span class="inline-flex px-2 py-1 rounded-full text-[10px] font-bold uppercase ${severityColors[severity] || severityColors['info']}">
                           ${isAr ? (({ info: 'معلومة', warning: 'تحذير', error: 'خطأ', critical: 'حرج' })[severity] || severity) : severity}
                         </span>
                       </td>
-                      <td class="px-4 py-3 text-center">
+                      <td class="px-4 py-3 text-center" data-label="${isAr ? 'التفاصيل' : 'Details'}">
                         <button onclick="showLogDetails('${log.id}')" class="p-1.5 rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors" title="${isAr ? 'عرض التفاصيل' : 'View Details'}">
                           <i data-lucide="eye" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
                         </button>
@@ -4831,11 +4849,20 @@ function updateAuditPageSize(size) {
 
 function showLogDetails(logId) {
   const isAr = state.language === 'ar';
-  const log = state.logs.find(l => l.id === logId);
+  // The table uses serverLogs in server mode and local logs offline. Looking
+  // only in state.logs made every View Details button silently do nothing on
+  // the hosted app even though the row was visible.
+  const source = isServerModeEnabled()
+    ? (Array.isArray(state.serverLogs) ? state.serverLogs : [])
+    : getVisibleRecords(state.logs);
+  const log = source.find(l => l.id === logId);
   if (!log) return;
   // Reachable with an arbitrary id — enforce the same scope as the table:
   // a viewOwn-only user may only open their OWN entries.
-  if (!can('auditLogs', 'view') && String(log.userId || '') !== String(state.currentUser?.id || '')) {
+  const canViewAllLogs = can('auditLogs', 'view');
+  const canViewOwnLogs = currentUserHasPermission('auditLogs', 'viewOwn');
+  const isOwnLog = String(log.userId || '') === String(state.currentUser?.id || '');
+  if (!canViewAllLogs && (!canViewOwnLogs || !isOwnLog)) {
     showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'لا يمكنك عرض سجل مستخدم آخر' : "You cannot view another user's log entry", 'error');
     return;
   }
@@ -4843,7 +4870,7 @@ function showLogDetails(logId) {
   const user = state.users.find(u => u.id === log.userId);
   const modal = document.getElementById('app-modal') || document.createElement('div');
   modal.id = 'app-modal';
-  modal.className = 'fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
   
   modal.innerHTML = `
@@ -4855,13 +4882,13 @@ function showLogDetails(logId) {
           </span>
           <span>${isAr ? 'تفاصيل السجل' : 'Log Details'}</span>
         </h2>
-        <button onclick="this.closest('#app-modal').remove()" class="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
+        <button type="button" onclick="this.closest('#app-modal').remove()" aria-label="${isAr ? 'إغلاق التفاصيل' : 'Close details'}" class="touch-target rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
           <i data-lucide="x" class="w-4 h-4 text-slate-600 dark:text-slate-300"></i>
         </button>
       </div>
       
       <div class="space-y-4">
-        <div class="grid grid-cols-2 gap-4">
+        <div class="audit-detail-grid grid grid-cols-2 gap-4">
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
             <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'معرّف السجل' : 'Log ID'}</div>
             <div class="text-xs font-mono text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.id)}</div>
@@ -4872,7 +4899,7 @@ function showLogDetails(logId) {
           </div>
         </div>
 
-        <div class="grid grid-cols-3 gap-4">
+        <div class="audit-detail-grid grid grid-cols-3 gap-4">
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
             <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'المستخدم' : 'User'}</div>
             <div class="text-xs text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.userName || user?.name || (isAr ? 'النظام' : 'System'))}</div>

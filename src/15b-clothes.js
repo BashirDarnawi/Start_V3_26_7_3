@@ -200,14 +200,14 @@ async function saveClothesExchangeRate() {
 function renderClothesTabBar() {
   const isAr = clothesIsAr();
   return `
-    <div class="flex flex-wrap gap-2 mb-8">
+    <div class="clothes-tab-bar grid grid-cols-2 sm:flex sm:flex-wrap gap-2 mb-8">
       ${CLOTHES_TABS.map(tab => {
         const active = _clothesActiveTab === tab.id;
         return `
           <button
             type="button"
             onclick="setClothesTab('${tab.id}')"
-            class="flex items-center gap-2 px-4 py-2.5 rounded-xl font-medium transition-all ${active
+            class="flex min-w-0 items-center justify-center gap-2 px-3 sm:px-4 py-2.5 rounded-xl font-medium transition-all ${active
               ? 'bg-gradient-to-r from-rose-500 to-pink-500 text-white shadow-lg'
               : 'glass-panel text-slate-600 dark:text-slate-300 hover:text-rose-600 dark:hover:text-rose-400'}"
           >
@@ -554,12 +554,12 @@ function renderClothesSystemView() {
 
       <!-- Header -->
       <div class="mb-8">
-        <div class="flex items-center gap-4 mb-4">
-          <div class="w-16 h-16 rounded-2xl bg-gradient-to-br from-rose-500 to-pink-500 flex items-center justify-center shadow-2xl">
+        <div class="flex items-start sm:items-center gap-3 sm:gap-4 mb-4">
+          <div class="w-12 h-12 sm:w-16 sm:h-16 flex-shrink-0 rounded-2xl bg-gradient-to-br from-rose-500 to-pink-500 flex items-center justify-center shadow-2xl">
             <i data-lucide="shirt" class="w-8 h-8 text-white"></i>
           </div>
-          <div>
-            <h1 class="text-3xl font-bold text-slate-800 dark:text-white">
+          <div class="min-w-0">
+            <h1 class="text-2xl sm:text-3xl font-bold text-slate-800 dark:text-white break-words">
               ${isAr ? 'نظام الملابس' : 'Clothes System'}
             </h1>
             <p class="text-slate-500 dark:text-slate-400">
@@ -983,12 +983,10 @@ function refreshClothesVariantRows() {
   const isAr = clothesIsAr();
   const wrap = document.getElementById('clothes-variant-rows');
   if (!wrap) return;
-  // Inline grid template: width utility classes proved unreliable inside the
-  // modal in narrow webviews, so the column sizes are pinned inline.
-  const rowStyle = 'display:grid;grid-template-columns:minmax(0,1fr) 5.5rem 4.5rem 2rem;gap:0.5rem;align-items:center;';
+  const rowStyle = 'display:grid;gap:0.5rem;align-items:center;';
   const cellStyle = 'width:100%;min-width:0;';
   wrap.innerHTML = _clothesTempVariants.map((v, idx) => `
-    <div style="${rowStyle}">
+    <div style="${rowStyle}" class="clothes-variant-row">
       <input type="text" value="${Security.escapeHtml(String(v.color || ''))}" oninput="onClothesVariantField(${idx}, 'color', this.value)" placeholder="${isAr ? 'اللون' : 'Color'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
       <input type="text" value="${Security.escapeHtml(String(v.size || ''))}" oninput="onClothesVariantField(${idx}, 'size', this.value)" placeholder="${isAr ? 'المقاس' : 'Size'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
       <input type="number" min="0" step="1" value="${Math.max(0, Math.floor(Number(v.qty) || 0))}" oninput="onClothesVariantField(${idx}, 'qty', this.value)" placeholder="0" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'الكمية' : 'Quantity'}" />
@@ -1680,14 +1678,12 @@ function refreshClothesShipLines() {
   const wrap = document.getElementById('clothes-ship-lines');
   if (!wrap) return;
   const products = getVisibleClothesProducts();
-  // Inline grid template: width utility classes proved unreliable inside the
-  // modal in narrow webviews (see refreshClothesVariantRows), so the column
-  // sizes are pinned inline. Two rows per line so it stays usable on phones:
+  // Two rows per line keep these controls usable in narrow webviews:
   // row 1 = product + remove, row 2 = variant picker / qty / unit cost
   // (+ a color/size text row only when "new color/size" is chosen).
-  const rowStyle = 'display:grid;grid-template-columns:minmax(0,1fr) 2rem;gap:0.5rem;align-items:center;';
-  const subStyle = 'grid-column:1 / -1;display:grid;grid-template-columns:minmax(0,1fr) 4rem 5rem;gap:0.5rem;align-items:center;';
-  const newStyle = 'grid-column:1 / -1;display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;align-items:center;';
+  const rowStyle = 'display:grid;gap:0.5rem;align-items:center;';
+  const subStyle = 'grid-column:1 / -1;display:grid;gap:0.5rem;align-items:center;';
+  const newStyle = 'grid-column:1 / -1;display:grid;gap:0.5rem;align-items:center;';
   const cellStyle = 'width:100%;min-width:0;';
   wrap.innerHTML = _clothesTempShipLines.map((line, idx) => {
     const product = products.find(p => p.id === line.productId);
@@ -1697,7 +1693,7 @@ function refreshClothesShipLines() {
     const isNew = line._newVariant === true || (matchIdx === -1 && !!(String(line.color || '').trim() || String(line.size || '').trim()));
     const selectVal = (matchIdx >= 0 && !line._newVariant) ? `v:${matchIdx}` : (isNew ? 'new' : '');
     return `
-    <div style="${rowStyle}" class="pb-2 border-b border-slate-100 dark:border-slate-800">
+    <div style="${rowStyle}" class="clothes-line-row pb-2 border-b border-slate-100 dark:border-slate-800">
       <select oninput="onClothesShipLineField(${idx}, 'productId', this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm">
         <option value="">${isAr ? '— اختر المنتج —' : '— choose product —'}</option>
         ${products.map(p => `<option value="${p.id}" ${line.productId === p.id ? 'selected' : ''}>${Security.escapeHtml(p.name || '')}</option>`).join('')}
@@ -1705,7 +1701,7 @@ function refreshClothesShipLines() {
       <button type="button" onclick="removeClothesShipLine(${idx})" class="w-8 h-8 rounded-lg flex items-center justify-center text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20" title="${isAr ? 'إزالة' : 'Remove'}">
         <i data-lucide="x" class="w-4 h-4"></i>
       </button>
-      <div style="${subStyle}">
+      <div style="${subStyle}" class="clothes-shipment-subgrid">
         <select oninput="onClothesShipLineVariantPick(${idx}, this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" ${product ? '' : 'disabled'} title="${isAr ? 'اللون والمقاس' : 'Color & size'}">
           <option value="" ${selectVal === '' ? 'selected' : ''}>${product ? (isAr ? '— اللون والمقاس —' : '— color & size —') : (isAr ? 'اختر المنتج أولاً' : 'choose product first')}</option>
           ${variants.map((v, vi) => `<option value="v:${vi}" ${selectVal === `v:${vi}` ? 'selected' : ''}>${Security.escapeHtml(clothesVariantOptionLabel(v, false))}</option>`).join('')}
@@ -1715,7 +1711,7 @@ function refreshClothesShipLines() {
         <input type="text" inputmode="decimal" value="${Security.escapeHtml(String(line.unitCostUSD ?? ''))}" oninput="sanitizeMoneyInput(this); onClothesShipLineField(${idx}, 'unitCostUSD', this.value)" placeholder="$/1" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'تكلفة القطعة بالدولار' : 'Unit cost USD'}" />
       </div>
       ${isNew ? `
-      <div style="${newStyle}">
+      <div style="${newStyle}" class="clothes-new-variant-grid">
         <input type="text" value="${Security.escapeHtml(String(line.color || ''))}" oninput="onClothesShipLineField(${idx}, 'color', this.value)" placeholder="${isAr ? 'اللون الجديد' : 'New color'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
         <input type="text" value="${Security.escapeHtml(String(line.size || ''))}" oninput="onClothesShipLineField(${idx}, 'size', this.value)" placeholder="${isAr ? 'المقاس الجديد' : 'New size'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
       </div>` : ''}
@@ -2546,17 +2542,15 @@ function refreshClothesOrderLines() {
   const wrap = document.getElementById('clothes-order-lines');
   if (!wrap) return;
   const products = getVisibleClothesProducts();
-  // Same inline-grid pattern as the shipment modal (width utility classes are
-  // unreliable inside modals in narrow webviews).
-  const rowStyle = 'display:grid;grid-template-columns:minmax(0,1fr) 2rem;gap:0.5rem;align-items:center;';
-  const subStyle = 'grid-column:1 / -1;display:grid;grid-template-columns:minmax(0,1fr) 4rem 4rem 5rem;gap:0.5rem;align-items:center;';
+  const rowStyle = 'display:grid;gap:0.5rem;align-items:center;';
+  const subStyle = 'grid-column:1 / -1;display:grid;gap:0.5rem;align-items:center;';
   const cellStyle = 'width:100%;min-width:0;';
   wrap.innerHTML = _clothesTempOrderLines.map((line, idx) => {
     const product = products.find(p => p.id === line.productId);
     const variants = Array.isArray(product?.variants) ? product.variants : [];
     const matchIdx = product ? findClothesVariantIndex(product, line.color, line.size) : -1;
     return `
-    <div style="${rowStyle}" class="pb-2 border-b border-slate-100 dark:border-slate-800">
+    <div style="${rowStyle}" class="clothes-line-row pb-2 border-b border-slate-100 dark:border-slate-800">
       <select oninput="onClothesOrderLineField(${idx}, 'productId', this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm">
         <option value="">${isAr ? '— اختر المنتج —' : '— choose product —'}</option>
         ${products.map(p => `<option value="${p.id}" ${line.productId === p.id ? 'selected' : ''}>${Security.escapeHtml(p.name || '')}</option>`).join('')}
@@ -2564,7 +2558,7 @@ function refreshClothesOrderLines() {
       <button type="button" onclick="removeClothesOrderLine(${idx})" class="w-8 h-8 rounded-lg flex items-center justify-center text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20" title="${isAr ? 'إزالة' : 'Remove'}">
         <i data-lucide="x" class="w-4 h-4"></i>
       </button>
-      <div style="${subStyle}">
+      <div style="${subStyle}" class="clothes-order-subgrid">
         <select oninput="onClothesOrderLineVariantPick(${idx}, this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" ${product && variants.length ? '' : 'disabled'} title="${isAr ? 'اللون والمقاس' : 'Color & size'}">
           <option value="" ${matchIdx < 0 ? 'selected' : ''}>${!product
             ? (isAr ? 'اختر المنتج أولاً' : 'choose product first')

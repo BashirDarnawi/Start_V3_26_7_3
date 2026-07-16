@@ -453,7 +453,7 @@ function showPermissionsModal(userId) {
   modal.id = 'app-modal';
   modal.dataset.modalType = 'permissions';
   modal.dataset.userId = String(userId);
-  modal.className = 'fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
   
   modal.innerHTML = `
@@ -1298,7 +1298,7 @@ function openReceiptPhotoViewerSources(sources, index = 0, label = '') {
 
   const viewer = document.createElement('div');
   viewer.id = 'receipt-photo-viewer';
-  viewer.className = 'fixed inset-0 z-[100] bg-slate-950/95 flex flex-col p-3 sm:p-5';
+  viewer.className = 'receipt-photo-viewer fixed inset-0 z-[100] bg-slate-950/95 flex flex-col p-3 sm:p-5';
   viewer.setAttribute('role', 'dialog');
   viewer.setAttribute('aria-modal', 'true');
   viewer.setAttribute('aria-label', _receiptPhotoViewerLabel);
@@ -1313,11 +1313,11 @@ function openReceiptPhotoViewerSources(sources, index = 0, label = '') {
         <i data-lucide="x" class="w-6 h-6"></i>
       </button>
     </div>
-    <div class="relative flex-1 min-h-0 flex items-center justify-center" data-receipt-photo-backdrop="true">
+    <div class="receipt-photo-stage relative flex-1 min-h-0 flex items-center justify-center" data-receipt-photo-backdrop="true">
       <button id="receipt-photo-viewer-prev" type="button" onclick="changeReceiptPhotoViewer(-1)" class="absolute z-10 left-1 sm:left-4 w-11 h-11 rounded-full bg-black/55 hover:bg-black/75 text-white flex items-center justify-center" aria-label="${state.language === 'ar' ? 'الصورة السابقة' : 'Previous photo'}">
         <i data-lucide="chevron-left" class="w-7 h-7"></i>
       </button>
-      <img id="receipt-photo-viewer-image" class="max-w-full max-h-full object-contain rounded-lg shadow-2xl" />
+      <img id="receipt-photo-viewer-image" class="receipt-photo-full max-w-full max-h-full object-contain rounded-lg shadow-2xl" />
       <button id="receipt-photo-viewer-next" type="button" onclick="changeReceiptPhotoViewer(1)" class="absolute z-10 right-1 sm:right-4 w-11 h-11 rounded-full bg-black/55 hover:bg-black/75 text-white flex items-center justify-center" aria-label="${state.language === 'ar' ? 'الصورة التالية' : 'Next photo'}">
         <i data-lucide="chevron-right" class="w-7 h-7"></i>
       </button>
@@ -1636,7 +1636,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
   const modal = document.createElement('div');
   modal.id = 'delivery-complete-modal';
   modal.dataset.receiptId = String(receipt.id);
-  modal.className = 'fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
 
   modal.innerHTML = `
@@ -1926,7 +1926,7 @@ function openReceiptDeliveryCancelModal(receiptId) {
   document.getElementById('delivery-cancel-modal')?.remove();
   const modal = document.createElement('div');
   modal.id = 'delivery-cancel-modal';
-  modal.className = 'fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
   modal.innerHTML = `
     <div class="glass-panel rounded-2xl p-6 w-full max-w-md animate-slide-up" onclick="event.stopPropagation()">
@@ -2178,7 +2178,7 @@ function openCollectReceiptModal(receiptId) {
 
   document.getElementById('collect-receipt-modal')?.remove();
   const html = `
-    <div id="collect-receipt-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onclick="if(event.target===this) this.remove()">
+    <div id="collect-receipt-modal" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onclick="if(event.target===this) this.remove()">
       <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full max-h-[90vh] overflow-y-auto" onclick="event.stopPropagation()">
         <div class="p-5 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between sticky top-0 bg-white dark:bg-slate-800 z-10">
           <h2 class="text-lg font-bold text-slate-800 dark:text-white flex items-center">
@@ -2411,7 +2411,7 @@ function showNewReceiptChooser() {
   document.getElementById('new-receipt-chooser')?.remove();
   const wrap = document.createElement('div');
   wrap.id = 'new-receipt-chooser';
-  wrap.className = 'fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  wrap.className = 'mobile-dialog-overlay fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
   wrap.onclick = (e) => { if (e.target === wrap) wrap.remove(); };
   wrap.innerHTML = `
     <div class="glass-panel w-full max-w-lg p-6 rounded-3xl" onclick="event.stopPropagation()">
@@ -2594,7 +2594,7 @@ function showReceiptEditHistory(receiptId) {
   const customer = state.customers.find(c => c.id === receipt.customerId);
   
   const modalHTML = `
-    <div id="edit-history-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
+    <div id="edit-history-modal" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
       <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] overflow-hidden" onclick="event.stopPropagation()">
         <div class="p-6 border-b border-slate-200 dark:border-slate-700">
           <div class="flex items-center justify-between">
@@ -2678,7 +2678,7 @@ function showAdEditHistory(adId) {
   const page = state.pages.find(p => p.id === ad.pageId);
   
   const modalHTML = `
-    <div id="edit-history-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
+    <div id="edit-history-modal" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
       <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] overflow-hidden" onclick="event.stopPropagation()">
         <div class="p-6 border-b border-slate-200 dark:border-slate-700">
           <div class="flex items-center justify-between">

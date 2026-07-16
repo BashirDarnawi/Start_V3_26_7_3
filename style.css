@@ -1398,25 +1398,33 @@ textarea:disabled {
    MOBILE-RESPONSIVE TABLES & LAYOUTS
    ========================================== */
 
-/* On mobile, make table rows display as cards */
+:root {
+  --app-safe-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
+  --app-safe-right: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
+  --app-safe-bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+  --app-safe-left: var(--safe-area-inset-left, env(safe-area-inset-left, 0px));
+}
+
+/* Only tables that provide data-label attributes opt into the card layout.
+   Other tables keep their headings and remain horizontally scrollable. */
 @media (max-width: 768px) {
-  /* Table becomes a card stack on mobile */
-  .glass-panel table {
+  .mobile-card-table {
     display: block;
+    width: 100%;
     overflow-x: visible;
   }
 
-  .glass-panel table thead {
+  .mobile-card-table thead {
     display: none; /* Hide header on mobile */
   }
 
-  .glass-panel table tbody {
+  .mobile-card-table tbody {
     display: flex;
     flex-direction: column;
     gap: 1rem;
   }
 
-  .glass-panel table tbody tr {
+  .mobile-card-table tbody tr {
     display: flex;
     flex-wrap: wrap;
     padding: 1rem;
@@ -1427,12 +1435,12 @@ textarea:disabled {
     align-items: center;
   }
 
-  .dark .glass-panel table tbody tr {
+  .dark .mobile-card-table tbody tr {
     background: rgba(15, 23, 42, 0.5);
     border-color: rgba(var(--brand-teal-rgb), 0.1);
   }
 
-  .glass-panel table tbody tr td {
+  .mobile-card-table tbody tr td {
     display: flex;
     flex-direction: column;
     padding: 0.25rem 0.5rem;
@@ -1441,8 +1449,12 @@ textarea:disabled {
     flex-shrink: 0;
   }
 
+  .mobile-card-table tbody tr td.hidden {
+    display: none !important;
+  }
+
   /* Make certain columns take full width on mobile */
-  .glass-panel table tbody tr td:first-child {
+  .mobile-card-table tbody tr td:first-child {
     flex-basis: 100%;
     font-size: 1.125rem;
     font-weight: 700;
@@ -1452,7 +1464,7 @@ textarea:disabled {
   }
 
   /* Actions column stays at the end */
-  .glass-panel table tbody tr td:last-child {
+  .mobile-card-table tbody tr td:last-child {
     flex-basis: 100%;
     margin-top: 0.5rem;
     padding-top: 0.75rem;
@@ -1460,20 +1472,20 @@ textarea:disabled {
     justify-content: center;
   }
 
-  .glass-panel table tbody tr td:last-child > div {
+  .mobile-card-table tbody tr td:last-child > div {
     justify-content: center;
     gap: 0.75rem;
   }
 
   /* Style action buttons for mobile */
-  .glass-panel table tbody tr td:last-child button {
+  .mobile-card-table tbody tr td:last-child button {
     padding: 0.5rem;
     border-radius: 0.5rem;
     background: rgba(var(--brand-blue-rgb), 0.1);
   }
 
   /* Add data labels before content on mobile (via pseudo-elements) */
-  .glass-panel table tbody tr td::before {
+  .mobile-card-table tbody tr td::before {
     content: attr(data-label);
     font-size: 0.625rem;
     font-weight: 600;
@@ -1483,35 +1495,30 @@ textarea:disabled {
     opacity: 0.7;
     margin-bottom: 0.25rem;
   }
+
+  .mobile-card-table tbody tr td:not([data-label])::before {
+    display: none;
+  }
+
+  .audit-mobile-table tbody tr td {
+    flex: 1 1 calc(50% - 0.5rem);
+  }
+
+  .audit-mobile-table tbody tr td:first-child,
+  .audit-mobile-table tbody tr td:last-child,
+  .audit-mobile-table tbody tr td.audit-description-cell {
+    flex-basis: 100%;
+  }
+
+  .audit-mobile-table .audit-description-cell p.truncate {
+    overflow: visible;
+    white-space: normal;
+    text-overflow: clip;
+  }
 }
 
 /* Mobile-responsive header sections */
 @media (max-width: 640px) {
-  /* Stack header title and buttons vertically */
-  .flex.justify-between.items-center {
-    flex-direction: column;
-    align-items: flex-start !important;
-    gap: 1rem;
-  }
-
-  /* Full-width buttons on mobile */
-  .flex.justify-between.items-center .btn-shine,
-  .flex.justify-between.items-center button {
-    width: 100%;
-    justify-content: center;
-  }
-
-  /* Stack filter dropdowns */
-  .flex.flex-wrap.gap-2 {
-    flex-direction: column;
-    width: 100%;
-  }
-
-  .flex.flex-wrap.gap-2 > select,
-  .flex.flex-wrap.gap-2 > button {
-    width: 100%;
-  }
-
   /* Reduce heading sizes on mobile */
   h1.text-3xl {
     font-size: 1.5rem;
@@ -1555,41 +1562,54 @@ textarea:disabled {
     word-wrap: break-word;
   }
 
-  /* Grid should be single column on mobile */
-  .grid.grid-cols-2,
-  .grid.grid-cols-3,
-  .grid.grid-cols-4 {
-    grid-template-columns: 1fr;
-  }
-
-  /* Exception: small stat grids can be 2 columns */
-  .grid.grid-cols-2.gap-3,
-  .grid.grid-cols-2.gap-4 {
-    grid-template-columns: repeat(2, 1fr);
-  }
 }
 
 /* Modal responsiveness */
 @media (max-width: 768px) {
-  /* Full-screen modals on mobile */
-  .fixed.inset-0 > .glass-panel,
-  .fixed.inset-0 > div > .glass-panel {
-    max-height: 95vh;
-    max-width: 95vw;
-    margin: 0.5rem;
+  /* Use the overlay as the single scrolling surface. This keeps the header,
+     form and bottom action buttons reachable when browser bars or the phone
+     keyboard reduce the visual viewport. */
+  .mobile-dialog-overlay {
+    align-items: flex-start !important;
+    justify-content: flex-start !important;
+    min-height: 100dvh;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    padding-top: max(0.75rem, var(--app-safe-top)) !important;
+    padding-right: max(0.75rem, var(--app-safe-right)) !important;
+    padding-bottom: max(0.75rem, var(--app-safe-bottom)) !important;
+    padding-left: max(0.75rem, var(--app-safe-left)) !important;
+  }
+
+  .mobile-dialog-overlay > :first-child {
+    flex-shrink: 0;
+    width: 100%;
+    max-width: 100% !important;
+    max-height: none !important;
+    margin: 0 !important;
+  }
+
+  .mobile-dialog-overlay > .glass-panel,
+  .mobile-dialog-overlay > :first-child.overflow-y-auto,
+  .mobile-dialog-overlay > :first-child.overflow-hidden {
+    overflow: visible !important;
     border-radius: 1rem;
   }
 
-  /* Modal content scrollable */
-  .fixed.inset-0 .overflow-y-auto {
-    max-height: calc(95vh - 120px);
+  .mobile-dialog-overlay .glass-panel {
+    max-width: 100%;
   }
 
-  /* Modal form inputs full width */
-  .fixed.inset-0 input,
-  .fixed.inset-0 select,
-  .fixed.inset-0 textarea {
-    width: 100%;
+  .mobile-dialog-overlay .sticky.bottom-0 {
+    padding-bottom: max(0.75rem, var(--app-safe-bottom));
+  }
+
+  .mobile-dialog-overlay input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+  .mobile-dialog-overlay select,
+  .mobile-dialog-overlay textarea {
+    max-width: 100%;
     font-size: 16px; /* Prevent iOS zoom */
   }
 }
@@ -1649,8 +1669,7 @@ textarea:disabled {
   
   /* Use active state instead of hover for touch feedback */
   .card-hover-lift:active,
-  .pipeline-stage:active,
-  .glass-panel:active {
+  .pipeline-stage:active {
     transform: scale(0.98);
     opacity: 0.9;
   }
@@ -1669,15 +1688,28 @@ body.is-touch *:hover {
   transition-delay: 0s !important;
 }
 
-/* Ensure minimum touch target sizes (44x44 as per Apple HIG) */
-body.is-mobile button,
-body.is-mobile a,
-body.is-mobile [role="button"],
-body.is-mobile input[type="checkbox"],
-body.is-mobile input[type="radio"],
-body.is-mobile select {
-  min-height: 44px;
-  min-width: 44px;
+/* Ensure controls are comfortably tappable without stretching the checkbox or
+   radio glyph itself. The label/wrapper is the touch target for those inputs. */
+@media (max-width: 768px), (pointer: coarse) {
+  button,
+  select,
+  .touch-target,
+  [role="button"] {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  label:has(> input[type="checkbox"]),
+  label:has(> input[type="radio"]),
+  label:has(input[type="file"]) {
+    min-height: 44px;
+  }
+
+  input[type="checkbox"],
+  input[type="radio"] {
+    min-height: 1rem;
+    min-width: 1rem;
+  }
 }
 
 body.is-mobile input[type="text"],
@@ -1698,10 +1730,10 @@ body.is-mobile select {
    so env() reads 0 there — read the variable first, fall back to env(). */
 body.platform-ios,
 body.platform-android {
-  padding-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
-  padding-bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
-  padding-left: var(--safe-area-inset-left, env(safe-area-inset-left, 0px));
-  padding-right: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
+  padding-top: var(--app-safe-top);
+  padding-bottom: var(--app-safe-bottom);
+  padding-left: var(--app-safe-left);
+  padding-right: var(--app-safe-right);
 }
 
 /* Fix for iOS momentum scrolling */
@@ -1724,17 +1756,6 @@ body.is-mobile * {
   -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
 }
 
-/* Fix for Android keyboard pushing content */
-body.platform-android {
-  height: 100%;
-  overflow: hidden;
-}
-
-body.platform-android #app {
-  height: 100%;
-  overflow-y: auto;
-}
-
 /* Reduce motion for users who prefer it */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -1747,21 +1768,158 @@ body.platform-android #app {
   }
 }
 
-/* Mobile sidebar fixes */
-@media (max-width: 768px) {
-  body.is-mobile .sidebar,
-  body.is-mobile nav {
-    /* Ensure sidebar is touchable and doesn't overlap content */
-    z-index: 1000;
+/* The semantic shell stays phone-sized in landscape too. Tailwind's md
+   desktop utilities start at 768px, which many phones exceed when rotated. */
+@media (max-width: 900px) {
+  .app-main {
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    width: 100%;
   }
-  
-  /* Increase tap targets on mobile */
-  body.is-mobile .nav-item,
-  body.is-mobile .menu-item {
-    padding: 12px 16px;
-    min-height: 48px;
-    display: flex;
-    align-items: center;
+
+  .mobile-app-header {
+    display: flex !important;
+    padding-top: 0.75rem;
+  }
+
+  body:not(.platform-ios):not(.platform-android) .mobile-app-header {
+    padding-top: max(0.75rem, var(--app-safe-top));
+    padding-right: max(0.75rem, var(--app-safe-right));
+    padding-left: max(0.75rem, var(--app-safe-left));
+  }
+
+  .app-sidebar {
+    width: min(18rem, calc(100vw - 3rem)) !important;
+    max-width: calc(100vw - 3rem);
+    padding-top: var(--app-safe-top);
+    padding-bottom: var(--app-safe-bottom);
+  }
+
+  .app-sidebar.-translate-x-full {
+    transform: translateX(-100%) !important;
+  }
+
+  .app-sidebar.translate-x-0 {
+    transform: translateX(0) !important;
+  }
+
+  .mobile-menu-backdrop {
+    display: block !important;
+  }
+
+  .mobile-sidebar-close {
+    display: flex !important;
+  }
+
+  .app-content {
+    padding-right: 1rem;
+    padding-bottom: 1rem;
+    padding-left: 1rem;
+  }
+
+  body:not(.platform-ios):not(.platform-android) .app-content {
+    padding-right: max(1rem, var(--app-safe-right));
+    padding-bottom: max(1rem, var(--app-safe-bottom));
+    padding-left: max(1rem, var(--app-safe-left));
+  }
+}
+
+.receipt-photo-viewer {
+  padding-top: max(0.75rem, var(--app-safe-top)) !important;
+  padding-right: max(0.75rem, var(--app-safe-right)) !important;
+  padding-bottom: max(0.75rem, var(--app-safe-bottom)) !important;
+  padding-left: max(0.75rem, var(--app-safe-left)) !important;
+}
+
+.receipt-photo-stage,
+.receipt-photo-full {
+  touch-action: pan-x pan-y pinch-zoom;
+}
+
+.receipt-photo-full {
+  width: auto;
+  height: auto;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+/* Clothes forms use named grids instead of fixed inline widths so inputs stay
+   readable on a 320-390px phone while retaining the compact desktop layout. */
+.clothes-variant-row {
+  grid-template-columns: minmax(0, 1fr) 5.5rem 4.5rem 2.75rem;
+}
+
+.clothes-line-row {
+  grid-template-columns: minmax(0, 1fr) 2.75rem;
+}
+
+.clothes-shipment-subgrid {
+  grid-template-columns: minmax(0, 1fr) 4rem 5rem;
+}
+
+.clothes-order-subgrid {
+  grid-template-columns: minmax(0, 1fr) 4rem 4rem 5rem;
+}
+
+.clothes-new-variant-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 640px) {
+  .receipt-filter-controls {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .receipt-filter-controls > select,
+  .receipt-filter-controls > button,
+  .receipt-filter-controls > .contents > button {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .receipt-filter-controls > .receipt-sort-control {
+    grid-column: 1 / -1;
+  }
+
+  .customer-filter-controls {
+    width: 100%;
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .audit-detail-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .ad-filter-controls > input,
+  .ad-filter-controls > select,
+  .ad-filter-controls > button {
+    width: 100%;
+    max-width: none !important;
+  }
+
+  .clothes-variant-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 2.75rem;
+  }
+
+  .clothes-variant-row > input:first-child {
+    grid-column: 1 / 3;
+  }
+
+  .clothes-variant-row > button:last-child {
+    grid-column: 3;
+    grid-row: 1 / 3;
+    align-self: stretch;
+  }
+
+  .clothes-shipment-subgrid,
+  .clothes-order-subgrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .clothes-shipment-subgrid > :first-child,
+  .clothes-order-subgrid > :first-child {
+    grid-column: 1 / -1;
   }
 }
 
