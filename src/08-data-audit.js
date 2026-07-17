@@ -74,7 +74,10 @@ function addRecord(array, record) {
   if (!cleanRecord._created) cleanRecord._created = getMonotonicTime();
   if (!cleanRecord.createdBy && state.currentUser?.id) cleanRecord.createdBy = state.currentUser.id;
 
-  array.unshift(cleanRecord);
+  const localRecord = isServerModeEnabled() && collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function'
+    ? makeLightweightMediaRecord(collectionName, cleanRecord)
+    : cleanRecord;
+  array.unshift(localRecord);
   if (collectionName) markCollectionDirty(collectionName);
   saveState();
   addAuditLog('Create', cleanRecord.id || 'Unknown', `Created new ${getRecordType(cleanRecord)}`);
@@ -104,7 +107,12 @@ function addRecord(array, record) {
             const existing = await apiGetEntity(collectionName, id);
             if (existing?.data && serverRecordMatchesCreateRetry(existing.data, cleanRecord)) {
               const idx = array.findIndex(x => x && x.id === id);
-              if (idx !== -1) array[idx] = Security.sanitizeObject(existing.data);
+               if (idx !== -1) {
+                 const existingData = Security.sanitizeObject(existing.data);
+                 array[idx] = collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function'
+                   ? makeLightweightMediaRecord(collectionName, existingData)
+                   : existingData;
+               }
               markCollectionDirty(collectionName);
               saveState();
               return true;
@@ -211,6 +219,9 @@ function updateRecord(array, id, updates, expectedLastModified) {
     }
 
     array[index] = { ...array[index], ...sanitizedUpdates, _lastModified: getMonotonicTime() };
+    if (isServerModeEnabled() && collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function') {
+      array[index] = makeLightweightMediaRecord(collectionName, array[index]);
+    }
     // Keep currentUser in sync when updating own user record (important for profile changes)
     if (collectionName === 'users' && state.currentUser?.id === id) {
       state.currentUser = array[index];
@@ -264,7 +275,10 @@ function updateRecord(array, id, updates, expectedLastModified) {
               const latest = await apiGetEntity(collectionName, id);
               const idx = array.findIndex(x => x && x.id === id);
               if (idx !== -1 && latest?.data) {
-                array[idx] = Security.sanitizeObject(latest.data);
+                 const latestData = Security.sanitizeObject(latest.data);
+                 array[idx] = collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function'
+                   ? makeLightweightMediaRecord(collectionName, latestData)
+                   : latestData;
                 if (collectionName) markCollectionDirty(collectionName);
                 saveState();
               }
@@ -626,7 +640,10 @@ const VIEW_PERMISSION_MODULES = {
   settings: 'settings',
   // Clothes System is open to non-admins holding clothesProducts view/viewOwn
   // (subscription checked inside renderClothesSystemView)
-  'clothes-system': 'clothesProducts'
+  'clothes-system': 'clothesProducts',
+  // Customer self-service portal. This view is deliberately not part of
+  // PLATFORM_ADMIN_ONLY_VIEWS; server ownership rules still isolate records.
+  'ads-studio': 'adCampaignRequests'
 };
 
 const ALBAYAN_MANAGER_VIEW_ORDER = [
@@ -640,7 +657,8 @@ const ALBAYAN_MANAGER_VIEW_ORDER = [
   'audit',
   'settings',
   'users',
-  'clothes-system'
+  'clothes-system',
+  'ads-studio'
 ];
 
 function userCanAccessView(user, view) {
@@ -904,6 +922,65 @@ function getDeliveryReceiptDueUsage(receipt) {
     fundedAds,
     exchangeRate
   };
+}
+
+// Canonical receipt status used by filters and debt reporting. Historical
+// records contain several spellings (Pending, Unpaid, Cancelled), while new
+// records use Not Paid and Canceled. Keep that compatibility at read time so
+// old receipts immediately benefit without rewriting financial history.
+function getReceiptPaymentState(receipt) {
+  if (!receipt || receipt._deleted) return 'unknown';
+  const status = String(receipt.status || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '');
+
+  if (status === 'canceled' || status === 'cancelled') return 'canceled';
+  if (status === 'lost') return 'lost';
+  if (status === 'paid') return 'paid';
+  if (status === 'notpaid' || status === 'unpaid' || status === 'pending') return 'not_paid';
+
+  if (receipt.isPaid === true) return 'paid';
+  if (receipt.isPaid === false) return 'not_paid';
+  return 'unknown';
+}
+
+// Delivery identity is independent of whether the customer has already paid.
+// Strong persisted markers come first; deliveryPersonId is only a fallback for
+// older records that predate statusDetail/receiptType.
+function isDeliveryReceiptRecord(receipt) {
+  if (!receipt || receipt._deleted) return false;
+  const detail = receipt.statusDetail && typeof receipt.statusDetail === 'object'
+    ? receipt.statusDetail
+    : {};
+  const unpaidCollection = String(detail.notPaidCollection || '').trim().toLowerCase();
+  const paidCollection = String(detail.paidCollection || '').trim().toLowerCase();
+  const receiptType = String(receipt.receiptType || '').trim().toUpperCase();
+  const tempNo = String(receipt.tempReceiptNo || '').trim();
+  const deliveryStatus = String(receipt.deliveryStatus || '').trim().toLowerCase();
+
+  if (unpaidCollection === 'delivery' || paidCollection === 'delivery') return true;
+  if (receiptType === 'DELIVERY_TEMP') return true;
+  if (/^D\d+$/i.test(tempNo)) return true;
+  if (deliveryStatus && deliveryStatus !== 'office') return true;
+
+  const explicitShop = ['office', 'in_shop', 'shop'].includes(unpaidCollection);
+  return !explicitShop && !!String(receipt.deliveryPersonId || detail.paidDeliveryPersonId || '').trim();
+}
+
+// Returns the CURRENT customer debt source. Collection/reconciliation is a
+// separate concept and must not decide whether the customer owes this money.
+function getReceiptDebtType(receipt) {
+  if (!receipt || receipt._deleted) return 'none';
+  const receiptType = String(receipt.receiptType || '').trim().toUpperCase();
+  if (receiptType === 'TRANSFER_IN') return 'none';
+  if (getReceiptPaymentState(receipt) !== 'not_paid') return 'none';
+  // Delivery cancellation intentionally leaves the original receipt payment
+  // label/history intact, but the debt is released and will never be collected.
+  // Do not keep that canceled mission in customer-debt totals or filters.
+  const deliveryStatus = String(receipt.deliveryStatus || '').trim().toLowerCase();
+  if (deliveryStatus === 'canceled' || deliveryStatus === 'cancelled') return 'none';
+  return isDeliveryReceiptRecord(receipt) ? 'delivery' : 'shop';
 }
 
 function formatDateShort(date) {

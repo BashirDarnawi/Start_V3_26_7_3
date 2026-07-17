@@ -115,7 +115,7 @@ jobs:
           test "$(docker exec albayan-ci id -u)" != "0"
 
   android:
-    name: Android lint and unit tests
+    name: Android lint, tests, and release bundle
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -136,6 +136,11 @@ jobs:
       - name: Run Android checks
         working-directory: android
         run: ./gradlew --no-daemon testDebugUnitTest lintDebug
+      - name: Build unsigned release bundle for CI validation only
+        working-directory: android
+        env:
+          ALBAYAN_CI_ALLOW_UNSIGNED_RELEASE_BUNDLE: 'true'
+        run: ./gradlew --no-daemon bundleRelease
 
   ios:
     name: iOS simulator build

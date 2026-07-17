@@ -234,6 +234,27 @@ const PERMISSION_MODULES = {
       add: { label: 'Create Settings', description: 'Create own settings record' },
       editOwn: { label: 'Edit Own Settings', description: 'Edit own clothes settings' }
     }
+  },
+  // Albayan Ads Studio requests are intentionally separate from the internal
+  // `ads` collection. Customers can prepare and submit only their own drafts;
+  // approval stays with an authorized reviewer.
+  adCampaignRequests: {
+    name: 'Ads Studio — Campaign Requests',
+    icon: 'rocket',
+    color: 'cyan',
+    description: 'Customer self-service campaign drafts and approvals',
+    permissions: {
+      view: { label: 'View All Requests', description: 'View every customer campaign request' },
+      viewOwn: { label: 'View Own Requests', description: 'View only self-created campaign requests' },
+      add: { label: 'Create Requests', description: 'Create campaign drafts' },
+      edit: { label: 'Edit All Requests', description: 'Edit any editable campaign request' },
+      editOwn: { label: 'Edit Own Requests', description: 'Edit own drafts and requested changes' },
+      delete: { label: 'Delete All Requests', description: 'Delete eligible campaign requests' },
+      deleteOwn: { label: 'Delete Own Requests', description: 'Delete own eligible drafts' },
+      submit: { label: 'Submit Any Request', description: 'Submit any eligible campaign for review' },
+      submitOwn: { label: 'Submit Own Requests', description: 'Submit own campaigns for staff review' },
+      review: { label: 'Review Requests', description: 'Approve, reject, or request changes' }
+    }
   }
 };
 
@@ -330,6 +351,26 @@ const PERMISSION_TEMPLATES = {
       clothesShipments: ['viewOwn', 'add', 'editOwn', 'deleteOwn'],
       clothesOrders: ['viewOwn', 'add', 'editOwn', 'deleteOwn'],
       clothesSettings: ['viewOwn', 'add', 'editOwn']
+    }
+  },
+  adsStudioCustomer: {
+    name: 'Ads Studio Customer',
+    description: 'Creates and submits only their own ad campaigns',
+    icon: 'rocket',
+    color: 'cyan',
+    permissions: {
+      adCampaignRequests: ['viewOwn', 'add', 'editOwn', 'deleteOwn', 'submitOwn']
+    }
+  },
+  adsStudioReviewer: {
+    name: 'Ads Studio Reviewer',
+    description: 'Reviews customer campaigns without access to internal money data',
+    icon: 'badge-check',
+    color: 'blue',
+    permissions: {
+      // Reviewers can inspect every submitted request and record a decision,
+      // but they must never rewrite or submit a customer's draft.
+      adCampaignRequests: ['view', 'review']
     }
   }
 };

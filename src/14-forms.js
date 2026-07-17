@@ -1068,6 +1068,10 @@ async function saveReceiptFromModal() {
 
 async function _saveReceiptFromModalInner() {
   const isArV = state.language === 'ar';
+  // Filled only after a NEW delivery receipt is confirmed saved. The share
+  // prompt must use the server-returned row because the server may assign the
+  // authoritative temporary D-number.
+  let newlyCreatedDeliveryReceiptId = '';
   try {
   if (_receiptPhotoUploadsInFlight > 0) {
     showNotification(
@@ -1605,11 +1609,18 @@ async function _saveReceiptFromModalInner() {
       else state.receipts[savedIdx] = saved;
       markCollectionDirty('receipts');
       saveState();
+      if (isTempDelivery && canShareDeliveryReceiptToWhatsApp(saved)) {
+        newlyCreatedDeliveryReceiptId = String(saved.id || '');
+      }
       showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
       addLog('create', 'receipt', saved.id, `Created receipt${saved.tempReceiptNo ? ' #' + saved.tempReceiptNo : (serialNumber ? ' #' + serialNumber : '')} for ${customerName}`);
     } else {
       const savedOk = await addRecord(state.receipts, receipt);
       if (!savedOk) return;
+      const savedLocalReceipt = state.receipts.find(item => item && !item._deleted && String(item.id) === String(receipt.id)) || receipt;
+      if (isTempDelivery && canShareDeliveryReceiptToWhatsApp(savedLocalReceipt)) {
+        newlyCreatedDeliveryReceiptId = String(savedLocalReceipt.id || '');
+      }
       showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
       addLog('create', 'receipt', receipt.id, `Created receipt${serialNumber ? ' #' + serialNumber : ''} for ${customerName}`);
     }
@@ -1646,7 +1657,10 @@ async function _saveReceiptFromModalInner() {
   
   // Render immediately (don't wait)
   render();
-    lucide.createIcons();
+  lucide.createIcons();
+  if (newlyCreatedDeliveryReceiptId) {
+    setTimeout(() => showDeliveryWhatsAppPrompt(newlyCreatedDeliveryReceiptId), 0);
+  }
   
   } catch (error) {
     console.error('Error saving receipt:', error);

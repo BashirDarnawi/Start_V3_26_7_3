@@ -88,7 +88,7 @@ function makeSandbox() {
   const sandbox = {
     window: win, document: doc, navigator: win.navigator, location: win.location, history: win.history,
     localStorage: win.localStorage, sessionStorage: win.sessionStorage, crypto: win.crypto,
-    fetch: win.fetch, Blob: win.Blob, URL: win.URL, isSecureContext: true,
+    fetch: win.fetch, Blob: win.Blob, URL: win.URL, URLSearchParams, isSecureContext: true,
     setTimeout, clearTimeout, setInterval, clearInterval, console,
     indexedDB: undefined,
     lucide: { createIcons() {} },
@@ -119,6 +119,7 @@ const bridged = vm.runInContext(
 // ---------- test scaffolding ----------
 let passed = 0;
 const failures = [];
+const asyncChecks = [];
 function check(name, fn) {
   try {
     fn();
@@ -129,6 +130,7 @@ function check(name, fn) {
     console.log(`  FAIL  ${name}\n        ${e.message}`);
   }
 }
+function checkAsync(name, fn) { asyncChecks.push({ name, fn }); }
 function assert(cond, msg) { if (!cond) throw new Error(msg || 'assertion failed'); }
 
 // Strip HTML comments before asserting: section comments like
@@ -1858,10 +1860,191 @@ check('local In Shop debt links its due receipt and Paid conversion replaces it'
   }) === 'shop_paid_receipt', 'Paid conversion kept the stale unpaid shop link');
 });
 
-console.log('\n=== RECEIPT PHOTOS: visible and safely clickable inside/outside the form ===');
-
 const SAFE_RECEIPT_PNG = 'data:image/png;base64,iVBORw0KGgo=';
 const SAFE_RECEIPT_JPEG = 'data:image/jpeg;base64,/9j/2Q==';
+
+console.log('\n=== RECEIPT DEBT FILTERS + SAFE WHATSAPP DELIVERY SHARING ===');
+
+check('new and historical receipt spellings use one debt classification', () => {
+  const cases = [
+    [{ status: 'Not Paid', isPaid: false, statusDetail: { notPaidCollection: 'delivery' }, receiptType: 'DELIVERY_TEMP', deliveryStatus: 'Needs Delivery' }, 'not_paid', 'delivery'],
+    [{ status: 'Pending', isPaid: true, tempReceiptNo: 'D17', deliveryStatus: 'In Progress' }, 'not_paid', 'delivery'],
+    [{ status: 'Not Paid', isPaid: false, statusDetail: { notPaidCollection: 'office' }, deliveryStatus: 'Office' }, 'not_paid', 'shop'],
+    [{ status: 'Unpaid', isPaid: true, deliveryStatus: 'Office' }, 'not_paid', 'shop'],
+    [{ status: 'Paid', isPaid: true, statusDetail: { paidCollection: 'delivery' }, deliveryStatus: 'Delivered', tempReceiptNo: 'D9' }, 'paid', 'none'],
+    [{ status: 'Cancelled', isPaid: false, statusDetail: { notPaidCollection: 'delivery' }, deliveryStatus: 'Canceled' }, 'canceled', 'none'],
+    [{ status: 'Not Paid', isPaid: false, statusDetail: { notPaidCollection: 'delivery' }, deliveryStatus: 'Canceled', tempReceiptNo: 'D18' }, 'not_paid', 'none'],
+    [{ status: 'Not Paid', isPaid: false, receiptType: 'TRANSFER_IN', statusDetail: { notPaidCollection: 'delivery' } }, 'not_paid', 'none'],
+    [{ status: 'Not Paid', isPaid: false, statusDetail: { notPaidCollection: 'delivery' }, _deleted: true }, 'unknown', 'none']
+  ];
+
+  cases.forEach(([receipt, paymentState, debtType], index) => {
+    assert(sandbox.getReceiptPaymentState(receipt) === paymentState, `case ${index + 1} payment state should be ${paymentState}`);
+    assert(sandbox.getReceiptDebtType(receipt) === debtType, `case ${index + 1} debt type should be ${debtType}`);
+  });
+});
+
+function seedReceiptDebtFilterState() {
+  loginAs(ADMIN);
+  S.language = 'en';
+  S.defaultExchangeRate = 9.5;
+  S.receiptSearch = '';
+  S.receiptStatusFilter = 'all';
+  S.receiptPaymentFilter = 'all';
+  S.receiptDateFilter = 'all';
+  S.receiptDebtFilter = 'all';
+  S.receiptCollectedFilter = 'all';
+  S.receiptSortBy = 'newest';
+  S.ads = [];
+  S.pages = [];
+  S.customers = [
+    { id: 'customer_new_delivery', name: 'New Delivery Debt' },
+    { id: 'customer_legacy_delivery', name: 'Legacy Delivery Debt' },
+    { id: 'customer_shop', name: 'Shop Debt' },
+    { id: 'customer_paid', name: 'Paid Customer' }
+  ];
+  S.receipts = [
+    {
+      id: 'receipt_new_delivery', customerId: 'customer_new_delivery', status: 'Not Paid', isPaid: false,
+      statusDetail: { notPaidCollection: 'delivery' }, receiptType: 'DELIVERY_TEMP', deliveryStatus: 'Needs Delivery',
+      deliveryPersonId: 'u-driver', tempReceiptNo: 'D31', amountUSD: 10, amountLocal: 95,
+      exchangeRate: 9.5, createdAt: '2026-07-17T12:00:00Z', payments: [], transfers: []
+    },
+    {
+      id: 'receipt_legacy_delivery', customerId: 'customer_legacy_delivery', status: 'Pending', isPaid: true,
+      tempReceiptNo: 'D12', deliveryStatus: 'In Progress', deliveryPersonId: 'u-driver',
+      amountUSD: 20, amountLocal: 190, exchangeRate: 9.5, createdAt: '2026-07-16T12:00:00Z', payments: [], transfers: []
+    },
+    {
+      id: 'receipt_shop', customerId: 'customer_shop', status: 'Unpaid', isPaid: true,
+      statusDetail: { notPaidCollection: 'office' }, deliveryStatus: 'Office', serialNumber: 'B8',
+      amountUSD: 30, amountLocal: 285, exchangeRate: 9.5, createdAt: '2026-07-15T12:00:00Z', payments: [], transfers: []
+    },
+    {
+      id: 'receipt_paid', customerId: 'customer_paid', status: 'Paid', isPaid: true,
+      statusDetail: { paidCollection: 'delivery' }, deliveryStatus: 'Delivered', finalReceiptNo: 'B9',
+      amountUSD: 40, amountLocal: 380, exchangeRate: 9.5, createdAt: '2026-07-14T12:00:00Z', payments: [], transfers: []
+    }
+  ];
+}
+
+check('receipt view renders every debt filter and filters old and new records', () => {
+  seedReceiptDebtFilterState();
+  const allHtml = visible(sandbox.renderReceiptsView());
+  for (const value of ['any-debt', 'delivery-debt', 'shop-debt', 'no-debt']) {
+    assert(allHtml.includes(`option value="${value}"`), `missing ${value} filter option`);
+  }
+
+  S.receiptDebtFilter = 'delivery-debt';
+  const deliveryHtml = visible(sandbox.renderReceiptsView());
+  assert(deliveryHtml.includes('New Delivery Debt'), 'new delivery debt was filtered out');
+  assert(deliveryHtml.includes('Legacy Delivery Debt'), 'historical delivery debt was filtered out');
+  assert(!deliveryHtml.includes('Shop Debt'), 'shop debt leaked into delivery debt results');
+  assert(!deliveryHtml.includes('Paid Customer'), 'paid receipt leaked into delivery debt results');
+
+  S.receiptDebtFilter = 'shop-debt';
+  const shopHtml = visible(sandbox.renderReceiptsView());
+  assert(shopHtml.includes('Shop Debt'), 'shop debt was filtered out');
+  assert(!shopHtml.includes('New Delivery Debt') && !shopHtml.includes('Legacy Delivery Debt'), 'delivery debt leaked into shop results');
+  assert(!shopHtml.includes('Paid Customer'), 'paid receipt leaked into shop debt results');
+
+  S.receiptDebtFilter = 'no-debt';
+  const noDebtHtml = visible(sandbox.renderReceiptsView());
+  assert(noDebtHtml.includes('Paid Customer'), 'paid receipt is missing from No Debt');
+  assert(!noDebtHtml.includes('New Delivery Debt') && !noDebtHtml.includes('Legacy Delivery Debt') && !noDebtHtml.includes('Shop Debt'), 'a debt receipt leaked into No Debt');
+
+  S.receiptDebtFilter = 'any-debt';
+  const anyDebtHtml = visible(sandbox.renderReceiptsView());
+  assert(anyDebtHtml.includes('New Delivery Debt') && anyDebtHtml.includes('Legacy Delivery Debt') && anyDebtHtml.includes('Shop Debt'), 'Any Debt omitted a debt source');
+  assert(!anyDebtHtml.includes('Paid Customer'), 'Any Debt included a paid receipt');
+});
+
+function seedWhatsAppDeliveryState() {
+  loginAs(ADMIN);
+  S.language = 'en';
+  S.defaultExchangeRate = 9.5;
+  S.customers = [{
+    id: 'customer_internal_secret', name: 'Amina Customer',
+    phones: [{ number: '0912345678', label: 'Mobile' }]
+  }];
+  S.users = [
+    ADMIN,
+    { id: 'driver_internal_secret', name: 'Salem Driver', role: 'Delivery', permissions: {} },
+    { id: 'creator_internal_secret', name: 'Aseel Creator', role: 'Employee', permissions: {} }
+  ];
+  const receipt = {
+    id: 'receipt_internal_uuid_secret', recordType: 'receipt', customerId: 'customer_internal_secret',
+    creatorId: 'creator_internal_secret', deliveryPersonId: 'driver_internal_secret',
+    status: 'Not Paid', isPaid: false, statusDetail: { notPaidCollection: 'delivery' },
+    receiptType: 'DELIVERY_TEMP', deliveryStatus: 'Needs Delivery', tempReceiptNo: 'D42',
+    amountUSD: 25, amountLocal: 237.5, debtAmountUSD: 25, debtAmountLocal: 237.5,
+    exchangeRate: 9.5, quotedDeliveryFee: 15, deliveryPlaceName: 'Tripoli - Hay Al Andalus',
+    deliveryInstructions: 'Call before arrival',
+    photos: [SAFE_RECEIPT_PNG], receiptImage: SAFE_RECEIPT_JPEG
+  };
+  S.receipts = [receipt];
+  return receipt;
+}
+
+check('delivery WhatsApp text includes dispatch fields but never internal ids or photos', () => {
+  const receipt = seedWhatsAppDeliveryState();
+  const message = sandbox.buildDeliveryReceiptWhatsAppMessage(receipt);
+  for (const expected of [
+    'Receipt: D42', 'Customer: Amina Customer', 'Phone: 0912345678',
+    'Delivery place: Tripoli - Hay Al Andalus', 'Assigned driver: Salem Driver',
+    'Amount to collect: 237.50 LYD ($25.00)', 'Delivery fee: 15.00 LYD',
+    'Payment status: Not Paid', 'Instructions: Call before arrival', 'Created by: Aseel Creator'
+  ]) {
+    assert(message.includes(expected), `delivery message is missing: ${expected}`);
+  }
+  for (const secret of [receipt.id, receipt.customerId, receipt.deliveryPersonId, receipt.creatorId, 'data:image', SAFE_RECEIPT_PNG, SAFE_RECEIPT_JPEG]) {
+    assert(!message.includes(secret), `delivery message leaked internal/photo data: ${secret}`);
+  }
+});
+
+check('WhatsApp share URL preserves the complete message through encoding', () => {
+  const message = 'Receipt: D42\nCustomer: Amina & Sons\nNote: 50% paid\nArabic: \u062a\u0648\u0635\u064a\u0644';
+  const url = sandbox.buildWhatsAppShareLink(message);
+  assert(url.startsWith('https://wa.me/?text='), 'share URL does not use the official wa.me text composer');
+  assert(decodeURIComponent(url.slice('https://wa.me/?text='.length)) === message, 'share URL did not round-trip its text exactly');
+  assert(sandbox.buildWhatsAppShareLink('   ') === '', 'blank messages should not create a WhatsApp URL');
+});
+
+check('only authorized viewers or the assigned driver can share customer contact data', () => {
+  const receipt = seedWhatsAppDeliveryState();
+
+  loginAs(employee({ deliveries: ['viewOwn'], customers: ['viewContacts'] }));
+  receipt.deliveryPersonId = 'u-emp';
+  assert(sandbox.canShareDeliveryReceiptToWhatsApp(receipt), 'assigned driver with contact permission cannot share their delivery');
+
+  receipt.deliveryPersonId = 'another-driver';
+  assert(!sandbox.canShareDeliveryReceiptToWhatsApp(receipt), 'unassigned driver can share another driver\'s delivery');
+
+  receipt.deliveryPersonId = 'u-emp';
+  loginAs(employee({ deliveries: ['viewOwn'] }));
+  assert(!sandbox.canShareDeliveryReceiptToWhatsApp(receipt), 'driver without customer contact permission can export the phone/address');
+
+  loginAs(employee({ receipts: ['view'], customers: ['viewContacts'] }));
+  assert(sandbox.canShareDeliveryReceiptToWhatsApp(receipt), 'receipt viewer with contact permission cannot share a pending delivery');
+
+  loginAs(employee({ receipts: ['viewOwn'], customers: ['viewContacts'] }));
+  receipt.creatorId = 'u-emp';
+  assert(sandbox.canShareDeliveryReceiptToWhatsApp(receipt), 'creator with viewOwn and contact permission cannot share their receipt');
+  receipt.creatorId = 'another-user';
+  assert(!sandbox.canShareDeliveryReceiptToWhatsApp(receipt), 'viewOwn user can share a receipt created by someone else');
+
+  loginAs(ADMIN);
+  receipt.creatorId = 'creator_internal_secret';
+  receipt.deliveryStatus = 'Delivered';
+  assert(!sandbox.canShareDeliveryReceiptToWhatsApp(receipt), 'completed delivery still exposes the pending-dispatch share action');
+  receipt.deliveryStatus = 'Office';
+  receipt.statusDetail = { notPaidCollection: 'office' };
+  receipt.receiptType = '';
+  receipt.tempReceiptNo = '';
+  assert(!sandbox.canShareDeliveryReceiptToWhatsApp(receipt), 'shop debt exposes a delivery dispatch action');
+});
+
+console.log('\n=== RECEIPT PHOTOS: visible and safely clickable inside/outside the form ===');
 
 check('receipt photo normalization supports current and legacy records without duplicates', () => {
   const sources = sandbox.getReceiptPhotoSources({
@@ -1902,7 +2085,7 @@ function setReceiptPhotoRenderState(photoFields) {
   Object.assign(S, {
     language: 'en', defaultExchangeRate: 9.5,
     receiptSearch: '', receiptStatusFilter: 'all', receiptPaymentFilter: 'all',
-    receiptDateFilter: 'all', receiptCollectedFilter: 'all', receiptSortBy: 'newest'
+    receiptDateFilter: 'all', receiptDebtFilter: 'all', receiptCollectedFilter: 'all', receiptSortBy: 'newest'
   });
   Object.assign(S.receipts[0], {
     amountLocal: 950, exchangeRate: 9.5, serialNumber: '12791',
@@ -2229,11 +2412,415 @@ check('cancelled receipt forms invalidate pending photo compression and clear te
   assert(modalSource.includes('_receiptPhotoUploadGeneration++;'), 'cancel/open does not advance the receipt upload generation');
 });
 
+check('Ads Studio customer preset is isolated from internal business data', () => {
+  const preset = vm.runInContext('PERMISSION_TEMPLATES.adsStudioCustomer.permissions', sandbox);
+  assert(Array.isArray(preset.adCampaignRequests), 'Ads Studio customer has no campaign permissions');
+  assert(preset.adCampaignRequests.includes('viewOwn') && preset.adCampaignRequests.includes('submitOwn'), 'customer cannot view and submit own campaigns');
+  for (const forbidden of ['ads', 'receipts', 'customers', 'pages', 'walletTransactions']) {
+    assert(!Object.prototype.hasOwnProperty.call(preset, forbidden), `customer preset leaks ${forbidden}`);
+  }
+});
+
+check('Ads Studio reviewers cannot edit or submit customer drafts', () => {
+  const preset = vm.runInContext('PERMISSION_TEMPLATES.adsStudioReviewer.permissions', sandbox);
+  const actions = preset.adCampaignRequests || [];
+  assert(actions.includes('view') && actions.includes('review'), 'reviewer cannot inspect and review submitted campaigns');
+  for (const forbidden of ['add', 'edit', 'editOwn', 'submit', 'submitOwn', 'delete', 'deleteOwn']) {
+    assert(!actions.includes(forbidden), `reviewer can ${forbidden} a customer campaign`);
+  }
+  const reviewer = employee({ adCampaignRequests: ['view', 'review'] });
+  reviewer.subscriptions = [];
+  loginAs(reviewer);
+  assert(sandbox.adsStudioCanUse(), 'staff reviewer was incorrectly forced to buy a customer subscription');
+  assert(sandbox.getAuthorizedServerSyncCollections(reviewer).includes('adCampaignRequests'), 'review queue was excluded from reviewer live sync');
+});
+
+check('Ads Studio session reset destroys drafts and invalidates pending photos', () => {
+  vm.runInContext(`
+    _adsStudioActiveTab = 'builder';
+    _adsStudioWizardStep = 4;
+    _adsStudioEditingId = 'campaign-secret';
+    _adsStudioDraft = { name: 'Private unfinished campaign', creativeImages: ['data:image/png;base64,secret'] };
+    _adsStudioSearch = 'private';
+    _adsStudioConfirmationChecked = true;
+    _adsStudioReviewNotes['private-campaign'] = 'Private reviewer note';
+  `, sandbox);
+  const before = vm.runInContext('_adsStudioPhotoToken', sandbox);
+  sandbox.resetAdsStudioSessionState();
+  assert(vm.runInContext('_adsStudioDraft', sandbox) === null, 'draft survived session reset');
+  assert(vm.runInContext('_adsStudioEditingId', sandbox) === '', 'editing campaign survived session reset');
+  assert(vm.runInContext('_adsStudioActiveTab', sandbox) === 'dashboard', 'private tab state survived session reset');
+  assert(vm.runInContext('_adsStudioPhotoToken', sandbox) === before + 1, 'pending photo compression was not invalidated');
+  assert(vm.runInContext('_adsStudioConfirmationChecked', sandbox) === false, 'builder confirmation survived session reset');
+  assert(vm.runInContext("Object.keys(_adsStudioReviewNotes).length", sandbox) === 0, 'review textarea text survived session reset');
+  const liveSyncSource = fs.readFileSync(path.join(__dirname, '..', 'src', '10-live-sync.js'), 'utf8');
+  const helperSource = fs.readFileSync(path.join(__dirname, '..', 'src', '13-filters-helpers.js'), 'utf8');
+  assert(liveSyncSource.includes('closeReceiptPhotoViewer(false)'), 'logout can leave a full-screen customer photo visible');
+  assert(helperSource.includes('function closeReceiptPhotoViewer(restoreFocus = true)'), 'auth reset cannot close photos without focusing an old-session element');
+});
+
+check('Ads Studio reviewer cache scope and visible records exclude unfinished customer work', () => {
+  const reviewer = employee({ adCampaignRequests: ['view', 'review'] });
+  loginAs(reviewer);
+  S.adCampaignRequests = [
+    { id: 'review-draft', status: 'Draft', createdBy: 'customer-1' },
+    { id: 'review-changes', status: 'Changes Requested', createdBy: 'customer-1' },
+    { id: 'review-submitted', status: 'Submitted', createdBy: 'customer-1' },
+    { id: 'review-approved', status: 'Approved', createdBy: 'customer-1' },
+    { id: 'review-rejected', status: 'Rejected', createdBy: 'customer-1' }
+  ];
+  const statuses = sandbox.getVisibleAdsStudioCampaigns().map(item => item.status).sort();
+  assert(JSON.stringify(statuses) === JSON.stringify(['Approved', 'Rejected', 'Submitted']), `reviewer saw wrong statuses: ${statuses.join(', ')}`);
+  assert(sandbox.getServerCollectionVisibilityScope(reviewer, 'adCampaignRequests') === 'review', 'review permission reused the broader all-data cache scope');
+  const formerFullViewer = employee({ adCampaignRequests: ['view'] });
+  assert(sandbox.getServerVisibilityScopeChanges(formerFullViewer, reviewer).includes('adCampaignRequests'), 'view-all to reviewer did not trigger a cache purge');
+});
+
+check('Ads Studio card actions require the exact edit, submit and delete permission', () => {
+  S.language = 'en';
+  const ownId = 'u-emp';
+  const base = { id: 'campaign-actions', name: 'Permissions', status: 'Draft', createdBy: ownId, platforms: ['facebook'] };
+
+  loginAs(employee({ adCampaignRequests: ['viewOwn'] }));
+  let html = visible(sandbox.renderAdsStudioCampaignCard(base));
+  assert(!html.includes('>Edit</button>') && !html.includes('>Submit</button>') && !html.includes('>Delete</button>'), 'mere ownership exposed mutation actions');
+
+  loginAs(employee({ adCampaignRequests: ['view', 'edit', 'submitOwn'] }));
+  html = visible(sandbox.renderAdsStudioCampaignCard({ ...base, createdBy: 'another-customer' }));
+  assert(html.includes('>Edit</button>'), 'edit-all permission did not expose edit');
+  assert(!html.includes('>Submit</button>'), 'submitOwn exposed submit on another customer campaign');
+
+  loginAs(employee({ adCampaignRequests: ['viewOwn', 'editOwn', 'submitOwn', 'deleteOwn'] }));
+  html = visible(sandbox.renderAdsStudioCampaignCard(base));
+  assert(html.includes('>Edit</button>') && html.includes('>Submit</button>') && html.includes('>Delete</button>'), 'owner mutation permissions did not expose their actions');
+  const terminal = visible(sandbox.renderAdsStudioCampaignCard({ ...base, status: 'Approved' }));
+  assert(terminal.includes('>Archive</button>') && !terminal.includes('>Submit</button>'), 'terminal owner campaign did not expose archive-only workflow');
+});
+
+check('Ads Studio accepts only PNG JPEG or WebP creatives and requires one before submit', () => {
+  assert(sandbox.isSafeAdsStudioCreativeSource(SAFE_RECEIPT_PNG), 'safe PNG was rejected');
+  assert(!sandbox.isSafeAdsStudioCreativeSource('data:image/gif;base64,R0lGODlh'), 'GIF creative was accepted');
+  clearNotes();
+  const input = { files: [{ type: 'image/gif', name: 'animated.gif' }], value: 'selected' };
+  sandbox.onAdsStudioCreativeSelected(input);
+  assert(input.value === '', 'unsupported file input was not reset');
+  assert(lastNote()?.k === 'warning' && /PNG|JPEG|WebP/.test(lastNote()?.m || ''), 'unsupported creative did not show a clear format warning');
+  const draft = {
+    name: 'Photo requirement', objective: 'messages', platforms: ['facebook'], pageName: 'Page',
+    primaryText: 'Copy', destination: '+218900000000', creativeImages: ['data:image/gif;base64,R0lGODlh']
+  };
+  assert(sandbox.adsStudioValidateStep(2, draft).some(message => /PNG|JPEG|WebP/.test(message)), 'creative requirement is missing from client validation');
+  draft.creativeImages = [SAFE_RECEIPT_PNG];
+  assert(!sandbox.adsStudioValidateStep(2, draft).some(message => /PNG|JPEG|WebP/.test(message)), 'safe creative did not satisfy validation');
+  assert(sandbox.adsStudioDataUrlDecodedBytes(SAFE_RECEIPT_PNG) > 0, 'decoded creative byte estimator returned zero');
+  assert(sandbox.adsStudioIsValidDestination('https://wa.me/218900000000'), 'HTTPS destination was rejected');
+  assert(sandbox.adsStudioIsValidDestination('+218 90 000 0000'), 'international phone destination was rejected');
+  assert(!sandbox.adsStudioIsValidDestination('http://unsafe.example.com'), 'insecure HTTP destination was accepted');
+});
+
+check('Ads Studio preserves live form state but escapes retained review history', () => {
+  const reviewer = employee({ adCampaignRequests: ['view', 'review'] });
+  loginAs(reviewer);
+  S.language = 'en';
+  S.adCampaignRequests = [{ id: 'campaign-note', name: 'Queued', status: 'Submitted', createdBy: 'customer-1' }];
+  sandbox.setAdsStudioReviewNote('campaign-note', 'Keep this through sync');
+  let html = visible(sandbox.renderAdsStudioReviewQueue());
+  assert(html.includes('Keep this through sync'), 'review textarea text disappeared on rerender');
+
+  vm.runInContext('_adsStudioConfirmationChecked = true; _adsStudioDraft = newAdsStudioDraft(); _adsStudioWizardStep = 5;', sandbox);
+  html = visible(sandbox.renderAdsStudioReviewStep());
+  assert(/id="ads-studio-confirm-accurate"[^>]*checked/.test(html), 'builder confirmation disappeared on rerender');
+
+  const malicious = visible(sandbox.renderAdsStudioCampaignCard({
+    id: 'campaign-history', name: 'History', status: 'Approved', createdBy: 'customer-1',
+    reviewHistory: [{ decision: 'Approved', reviewedAt: '2026-07-17T12:00:00Z', note: '<img src=x onerror=alert(1)>' }]
+  }));
+  assert(!malicious.includes('<img src=x'), 'review history rendered executable markup');
+  assert(malicious.includes('&lt;img'), 'escaped review history was not rendered');
+});
+
+check('Ads Studio media hydration is session-only and bounded', () => {
+  for (let i = 0; i < 6; i++) sandbox.cacheTransientAdCampaignMedia(`session|adCampaignRequests|${i}`, { id: String(i), creativeImages: [SAFE_RECEIPT_PNG] });
+  assert(vm.runInContext('_transientAdCampaignMedia.size', sandbox) === 3, 'transient creative cache grew beyond its bound');
+  sandbox.clearTransientEntityMediaCache('adCampaignRequests');
+  assert(vm.runInContext('_transientAdCampaignMedia.size', sandbox) === 0, 'auth/media purge retained creative bytes');
+  const lean = sandbox.makeLightweightMediaRecord('adCampaignRequests', { id: 'lean-campaign', creativeImages: [SAFE_RECEIPT_PNG] });
+  assert(!Object.prototype.hasOwnProperty.call(lean, 'creativeImages'), 'lean campaign record retained inline creative bytes');
+  assert(lean._mediaOmitted === true && lean._photoCount === 1, 'lean campaign record lost its safe photo-count hint');
+  const apiSource = fs.readFileSync(path.join(__dirname, '..', 'src', '09-api-auth.js'), 'utf8');
+  const dataSource = fs.readFileSync(path.join(__dirname, '..', 'src', '08-data-audit.js'), 'utf8');
+  assert(apiSource.includes("if (name === 'adCampaignRequests')") && apiSource.includes('cacheTransientAdCampaignMedia(key, full);'), 'campaign hydration is not routed to transient memory');
+  assert(apiSource.includes("String(collection || '') === 'adCampaignRequests') entity.data = makeLightweightMediaRecord"), 'campaign mutations still reattach inline creative bytes');
+  assert(dataSource.includes("collectionName === 'adCampaignRequests'") && dataSource.includes('makeLightweightMediaRecord(collectionName, cleanRecord)'), 'optimistic draft create still persists creative bytes');
+});
+
+check('service entitlement revocation maps to immediate protected-collection purge', () => {
+  const customer = employee({ adCampaignRequests: ['viewOwn'] });
+  const before = sandbox.getServerServiceEntitlementSnapshot(customer, [
+    { userId: customer.id, serviceId: 'ad_maker', status: 'active', expiresAt: '2099-01-01T00:00:00Z' },
+    { userId: customer.id, serviceId: 'clothes_system', status: 'active', expiresAt: '2099-01-01T00:00:00Z' }
+  ], Date.parse('2026-07-17T00:00:00Z'));
+  const after = sandbox.getServerServiceEntitlementSnapshot(customer, [
+    { userId: customer.id, serviceId: 'ad_maker', status: 'canceled' },
+    { userId: customer.id, serviceId: 'clothes_system', status: 'active', expiresAt: '2026-07-16T00:00:00Z' }
+  ], Date.parse('2026-07-17T00:00:00Z'));
+  const revoked = sandbox.getRevokedServerServiceEntitlements(before, after).sort();
+  assert(JSON.stringify(revoked) === JSON.stringify(['ad_maker', 'clothes_system']), `revocation detection failed: ${revoked.join(', ')}`);
+  const syncSource = fs.readFileSync(path.join(__dirname, '..', 'src', '10-live-sync.js'), 'utf8');
+  assert(syncSource.includes("RenderQueue.schedule('liveSync(subscription-revoked)')"), 'revocation path does not safely rerender');
+  assert(syncSource.includes('names.some(name => SERVER_MEDIA_BEARING_COLLECTIONS.has(name))'), 'visibility purge does not close media viewers');
+  assert(syncSource.includes("clearTransientEntityMediaCache('adCampaignRequests')"), 'auth reset does not release transient campaign media');
+});
+
+check('Ads Studio header returns authorized staff to another landing view only', () => {
+  const staff = employee({ customers: ['view'], adCampaignRequests: ['viewOwn'] });
+  loginAs(staff);
+  assert(sandbox.adsStudioBackTarget() === 'customers', 'authorized alternate landing view was not selected');
+  assert(sandbox.renderAdsStudioHeader().includes("navigateTo('customers')"), 'non-admin back control was hidden');
+  const portalOnly = employee({ adCampaignRequests: ['viewOwn'] });
+  loginAs(portalOnly);
+  assert(sandbox.adsStudioBackTarget() === '', 'portal-only customer received an unauthorized back target');
+});
+
+check('Ads Studio submit and review retries reuse a per-click operation id', () => {
+  const studioSource = fs.readFileSync(path.join(__dirname, '..', 'src', '15c-ads-studio.js'), 'utf8');
+  const apiSource = fs.readFileSync(path.join(__dirname, '..', 'src', '09-api-auth.js'), 'utf8');
+  assert(studioSource.includes("Security.generateSecureId('campaign-submit')") && studioSource.includes("Security.generateSecureId('campaign-review')"), 'workflow clicks do not generate operation ids');
+  assert(apiSource.includes('const body = { expectedLastModified, operationId };'), 'submit retry body omits operation id');
+  assert(apiSource.includes('const body = { expectedLastModified, decision, note, operationId };'), 'review retry body omits operation id');
+  assert(apiSource.includes('withRetry(() => apiJson(`/api/ad-studio/campaigns/'), 'workflow request is not retried with its stable body');
+  assert(studioSource.includes('_adsStudioSavePromise') && studioSource.includes('_adsStudioSubmitPromises.has(campaignId)'), 'double-tap single-flight guards are missing');
+});
+
+check('Ads Studio never edits a thin campaign after creative hydration fails', () => {
+  const studioSource = fs.readFileSync(path.join(__dirname, '..', 'src', '15c-ads-studio.js'), 'utf8');
+  assert(studioSource.includes("Your existing images are safe. Check the connection before editing this campaign."), 'creative load failure is not explained to the customer');
+  assert(studioSource.includes("!isEntityMediaHydrated('adCampaignRequests', campaign)"), 'thin draft can still open without its stored creatives');
+  assert(studioSource.includes('_adsStudioDraft === draftAtSaveStart'), 'slow save can overwrite a replacement or reset draft');
+  assert(studioSource.includes('...current,\n      ...liveDraft'), 'slow save completion overwrites newer typed fields');
+});
+
+checkAsync('Ads Studio resaves changes made during save and never submits a stale draft', async () => {
+  const originalAddRecord = sandbox.addRecord;
+  const originalUpdateRecord = sandbox.updateRecord;
+  const originalSubmit = sandbox.submitAdsStudioCampaign;
+  const customer = employee({ adCampaignRequests: ['viewOwn', 'add', 'editOwn', 'submitOwn'] });
+  customer.subscriptions = ['ad_maker'];
+  let modified = 100;
+
+  const installDraft = (name) => {
+    sandbox.__adsStudioRegressionDraft = {
+      ...sandbox.newAdsStudioDraft(),
+      name,
+      pageName: 'Regression Page',
+      primaryText: 'Regression copy',
+      destination: '+218900000000',
+      creativeImages: [SAFE_RECEIPT_PNG]
+    };
+    vm.runInContext(`
+      _adsStudioDraft = __adsStudioRegressionDraft;
+      _adsStudioEditingId = '';
+      _adsStudioConfirmationChecked = true;
+      _adsStudioSavePromise = null;
+      _adsStudioSaveAndSubmitPromise = null;
+    `, sandbox);
+  };
+
+  const commitCreate = (array, record) => {
+    array.unshift({
+      ...record,
+      createdBy: customer.id,
+      _created: ++modified,
+      _lastModified: modified,
+      _deleted: false
+    });
+    return true;
+  };
+
+  const commitUpdate = (array, id, updates) => {
+    const index = array.findIndex(item => String(item?.id || '') === String(id || ''));
+    assert(index !== -1, 'resave tried to update a missing draft');
+    array[index] = { ...array[index], ...updates, _lastModified: ++modified };
+    return true;
+  };
+
+  try {
+    loginAs(customer);
+    S.language = 'en';
+    S.adCampaignRequests = [];
+    installDraft('Original copy');
+
+    let releaseFirstSave;
+    const firstSaveGate = new Promise(resolve => { releaseFirstSave = resolve; });
+    const writes = [];
+    const submittedNames = [];
+    sandbox.addRecord = async (array, record) => {
+      writes.push(record.name);
+      await firstSaveGate;
+      return commitCreate(array, record);
+    };
+    sandbox.updateRecord = async (array, id, updates) => {
+      writes.push(updates.name);
+      return commitUpdate(array, id, updates);
+    };
+    sandbox.submitAdsStudioCampaign = async (id) => {
+      const record = S.adCampaignRequests.find(item => String(item?.id || '') === String(id || ''));
+      submittedNames.push(record?.name || '');
+      return true;
+    };
+
+    const submitAfterSave = sandbox.saveAndSubmitAdsStudioDraftOnce();
+    assert(writes.length === 1 && writes[0] === 'Original copy', 'initial save did not start with the original snapshot');
+    vm.runInContext("_adsStudioDraft.name = 'Latest customer copy';", sandbox);
+    releaseFirstSave();
+    await submitAfterSave;
+
+    assert(JSON.stringify(writes) === JSON.stringify(['Original copy', 'Latest customer copy']), `changed draft was not resaved exactly once: ${writes.join(' -> ')}`);
+    assert(JSON.stringify(submittedNames) === JSON.stringify(['Latest customer copy']), `submission used stale content: ${submittedNames.join(', ')}`);
+
+    S.adCampaignRequests = [];
+    installDraft('Rapid copy 0');
+    let rapidWrites = 0;
+    let rapidSubmits = 0;
+    sandbox.addRecord = async (array, record) => {
+      rapidWrites++;
+      commitCreate(array, record);
+      vm.runInContext(`_adsStudioDraft.name = 'Rapid copy ${rapidWrites}';`, sandbox);
+      return true;
+    };
+    sandbox.updateRecord = async (array, id, updates) => {
+      rapidWrites++;
+      commitUpdate(array, id, updates);
+      vm.runInContext(`_adsStudioDraft.name = 'Rapid copy ${rapidWrites}';`, sandbox);
+      return true;
+    };
+    sandbox.submitAdsStudioCampaign = async () => { rapidSubmits++; return true; };
+
+    await sandbox.saveAndSubmitAdsStudioDraftOnce();
+    assert(rapidWrites === 3, `continuous edits caused ${rapidWrites} writes instead of the bounded three`);
+    assert(rapidSubmits === 0, 'continuously changing draft was submitted from a stale snapshot');
+    assert(vm.runInContext('_adsStudioDraft.name', sandbox) === 'Rapid copy 3', 'latest rapid edit was discarded when submission was stopped');
+  } finally {
+    sandbox.addRecord = originalAddRecord;
+    sandbox.updateRecord = originalUpdateRecord;
+    sandbox.submitAdsStudioCampaign = originalSubmit;
+    delete sandbox.__adsStudioRegressionDraft;
+    vm.runInContext(`
+      _adsStudioDraft = null;
+      _adsStudioEditingId = '';
+      _adsStudioConfirmationChecked = false;
+      _adsStudioSavePromise = null;
+      _adsStudioSaveAndSubmitPromise = null;
+    `, sandbox);
+  }
+});
+
+check('Ads Studio renders daily and lifetime requested budgets as separate totals', () => {
+  const customer = employee({ adCampaignRequests: ['viewOwn'] });
+  customer.subscriptions = ['ad_maker'];
+  loginAs(customer);
+  S.language = 'en';
+  S.adCampaignRequests = [
+    { id: 'campaign-lifetime-budget', name: 'Lifetime campaign', status: 'Draft', createdBy: customer.id, budgetType: 'lifetime', budgetMinorUSD: 10000 },
+    { id: 'campaign-daily-budget', name: 'Daily campaign', status: 'Draft', createdBy: customer.id, budgetType: 'daily', budgetMinorUSD: 1000 }
+  ];
+  const html = visible(sandbox.renderAdsStudioDashboard());
+  assert(/Lifetime requested[\s\S]*?\$100\.00[\s\S]*?Daily requested[\s\S]*?\$10\.00[\s\S]*?\/ day/.test(html), 'dashboard did not label and render the two budget units separately');
+  assert(!html.includes('$110.00'), 'dashboard added a daily rate to a lifetime total');
+});
+
+check('Ads Studio view and records are ownership scoped for customer accounts', () => {
+  const customer = employee({ adCampaignRequests: ['viewOwn', 'add', 'editOwn', 'deleteOwn', 'submitOwn'] });
+  customer.subscriptions = ['ad_maker'];
+  loginAs(customer);
+  S.language = 'en';
+  S.adCampaignRequests = [
+    { id: 'campaign-own', name: 'My offer', status: 'Draft', createdBy: customer.id, objective: 'messages', platforms: ['facebook'], pageName: 'My Page', budgetMinorUSD: 2500, startDate: '2026-07-18', endDate: '2026-07-25', primaryText: 'Hello', destination: '+218900000000', locations: ['Libya'], ageMin: 18, ageMax: 65 },
+    { id: 'campaign-other', name: 'SECRET OTHER CAMPAIGN', status: 'Submitted', createdBy: 'u-other', objective: 'sales', platforms: ['instagram'], pageName: 'Other Page', budgetMinorUSD: 9900, startDate: '2026-07-18', endDate: '2026-07-25' }
+  ];
+  const visibleCampaigns = sandbox.getVisibleAdsStudioCampaigns();
+  assert(visibleCampaigns.length === 1 && visibleCampaigns[0].id === 'campaign-own', 'viewOwn customer can see another customer campaign');
+  assert(sandbox.userCanAccessView(customer, 'ads-studio'), 'customer cannot open the Ads Studio view');
+  const html = visible(sandbox.renderAdsStudioView());
+  assert(html.includes('Albayan Ads Studio'), 'customer portal did not render');
+  assert(!html.includes('SECRET OTHER CAMPAIGN'), 'other customer campaign leaked into portal HTML');
+  assert(!html.includes('Review Queue'), 'customer received staff review tools');
+  assert(html.includes('No money is spent by this request system') || html.includes('not actual spend'), 'portal does not explain that requested budgets are not charges');
+});
+
+check('Ads Studio campaign builder uses integer budget cents and no live-publish action', () => {
+  const customer = employee({ adCampaignRequests: ['viewOwn', 'add', 'editOwn', 'deleteOwn', 'submitOwn'] });
+  customer.subscriptions = ['ad_maker'];
+  loginAs(customer);
+  sandbox.beginAdsStudioCampaign();
+  sandbox.adsStudioSetDraftField('name', 'Launch campaign');
+  sandbox.adsStudioSetDraftField('budgetMinorUSD', '12.34');
+  const sanitized = sandbox.sanitizedAdsStudioDraft();
+  assert(sanitized.budgetMinorUSD === 1234, `budget was not stored as integer cents (${sanitized.budgetMinorUSD})`);
+  vm.runInContext('_adsStudioActiveTab = "builder"; _adsStudioWizardStep = 5;', sandbox);
+  const html = visible(sandbox.renderAdsStudioView());
+  assert(html.includes('Save &amp; submit for review') || html.includes('Save & submit for review'), 'builder has no review submission action');
+  assert(!/publish\s+(now|live)/i.test(html), 'customer UI exposes a live-publish action');
+  assert(html.includes('Special category'), 'builder review omits Special Ad Category');
+});
+
+check('Ads Studio routing restores a directly linked tab', () => {
+  sandbox.window.location.pathname = '/ads-studio';
+  sandbox.window.location.search = '?tab=connections';
+  assert(sandbox.getViewFromUrl() === 'ads-studio', 'Ads Studio URL does not resolve to its view');
+  sandbox.restoreAdsStudioTabFromUrl();
+  assert(vm.runInContext('_adsStudioActiveTab', sandbox) === 'connections', 'Ads Studio tab was not restored from URL');
+  sandbox.window.location.pathname = '/';
+  sandbox.window.location.search = '';
+});
+
+check('post-login routing preserves only authorized direct Ads Studio links', () => {
+  const customer = employee({ adCampaignRequests: ['viewOwn', 'add', 'editOwn', 'submitOwn'] });
+  customer.subscriptions = ['ad_maker'];
+  const unrelatedEmployee = employee({ customers: ['view'] });
+  assert(sandbox.getAllowedPostLoginView(ADMIN, 'ads-studio') === 'ads-studio', 'Admin direct link was discarded');
+  assert(sandbox.getAllowedPostLoginView(customer, 'ads-studio') === 'ads-studio', 'authorized customer direct link was discarded');
+  assert(sandbox.getAllowedPostLoginView(unrelatedEmployee, 'ads-studio') === null, 'unauthorized employee could restore Ads Studio');
+  assert(sandbox.getAllowedPostLoginView(customer, 'not-a-real-view') === null, 'unknown direct route was accepted');
+
+  loginAs(customer);
+  S.currentView = 'services-hub';
+  sandbox.window.location.pathname = '/ads-studio';
+  sandbox.window.location.search = '?tab=campaigns';
+  assert(sandbox.restoreRequestedViewAfterLogin('ads-studio') === true, 'authorized direct route was not restored');
+  assert(S.currentView === 'ads-studio', 'successful login still ended at Services Hub');
+
+  loginAs(unrelatedEmployee);
+  S.currentView = 'customers';
+  assert(sandbox.restoreRequestedViewAfterLogin('ads-studio') === false, 'unauthorized direct route was restored');
+  assert(S.currentView === 'customers', 'unauthorized route replaced the safe landing');
+  sandbox.window.location.pathname = '/';
+  sandbox.window.location.search = '';
+});
+
 // ---------- report ----------
-console.log(`\n${'='.repeat(60)}`);
-if (failures.length) {
-  console.log(`FAILED: ${failures.length} of ${passed + failures.length}`);
-  failures.forEach(f => console.log(`  - ${f}`));
-  process.exit(1);
+async function reportResults() {
+  for (const { name, fn } of asyncChecks) {
+    try {
+      await fn();
+      passed++;
+      console.log(`  PASS  ${name}`);
+    } catch (e) {
+      failures.push(`${name}: ${e.message}`);
+      console.log(`  FAIL  ${name}\n        ${e.message}`);
+    }
+  }
+
+  console.log(`\n${'='.repeat(60)}`);
+  if (failures.length) {
+    console.log(`FAILED: ${failures.length} of ${passed + failures.length}`);
+    failures.forEach(f => console.log(`  - ${f}`));
+    process.exit(1);
+  }
+  console.log(`ALL ${passed} PERMISSION TESTS PASSED`);
 }
-console.log(`ALL ${passed} PERMISSION TESTS PASSED`);
+
+reportResults().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

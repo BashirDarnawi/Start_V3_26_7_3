@@ -8,3 +8,4 @@ psycopg[binary]==3.2.3
 pytest==9.1.1
 httpx==0.26.0
 redis==8.0.1
+Pillow==12.3.0

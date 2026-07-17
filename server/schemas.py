@@ -163,6 +163,22 @@ class AdStopRequest(BaseModel):
     expectedLastModified: int = Field(ge=0)
 
 
+class AdCampaignSubmitRequest(BaseModel):
+    """Optimistic-concurrency guard for a customer campaign submission."""
+
+    expectedLastModified: int = Field(ge=0)
+    operationId: str = Field(min_length=8, max_length=120)
+
+
+class AdCampaignReviewRequest(BaseModel):
+    """Server-controlled review transition; it never publishes a Meta ad."""
+
+    expectedLastModified: int = Field(ge=0)
+    decision: Literal["Approved", "Changes Requested", "Rejected"]
+    note: Optional[str] = Field(default=None, max_length=2000)
+    operationId: str = Field(min_length=8, max_length=120)
+
+
 class AdminBulkImportRequest(BaseModel):
     """
     Transactional whole-backup import (admin only).

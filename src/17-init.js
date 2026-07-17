@@ -11,6 +11,9 @@ async function init() {
   // Apply theme immediately (prevents white flash in dark mode)
   applyTheme();
   document.documentElement.setAttribute('dir', getDir());
+  setupMobileRuntime().catch((error) => {
+    console.warn('[MobileRuntime] Setup failed:', error?.message || error);
+  });
   
   setLoadingStatus(state.language === 'ar' ? 'جارٍ تهيئة قاعدة البيانات...' : 'Initializing database...');
   
@@ -95,6 +98,35 @@ async function init() {
     state.serverMode = state.serverDetected || packagedMobile || previouslyServerBacked;
   }
   if (state.serverDetected) state.serverWorkspaceKnown = true;
+  if (state.serverMode) updateMobileServerReachability(!!serverOk);
+  else removeMobileConnectivityNotice();
+
+  // A packaged phone app cannot safely decide that a failed health check
+  // means "logged out". Stop before /auth/me and before rendering Login: the
+  // server session may still be valid, but it cannot be verified offline.
+  // Keep cached business rows out of the anonymous screen and offer one clear
+  // retry action; a successful retry reloads and resumes normal startup.
+  const stopForPackagedMobileConnection = () => {
+    if (state.cloudConfig) state.cloudConfig.enabled = false;
+    for (const name of PERSISTED_COLLECTIONS) state[name] = [];
+    state.logs = [];
+    state.serverLogs = [];
+    state.currentUser = null;
+    try { stopServerLiveSync(); } catch (_) {}
+    try { activateAnonymousServerCollectionStorage(); } catch (_) {}
+    try { saveState(); } catch (_) {}
+    setupUrlRouting();
+    if (loadingScreen) loadingScreen.style.display = 'none';
+    setMobileColdStartBlocked(true);
+  };
+  const blockPackagedMobileColdStart = !!(
+    isPackagedMobileApp() && state.serverMode && !serverOk && mobileRuntimeNeedsServer()
+  );
+  if (blockPackagedMobileColdStart) {
+    stopForPackagedMobileConnection();
+    return;
+  }
+  setMobileColdStartBlocked(false);
 
   if (state.serverMode) {
     // Disable legacy cloud sync in server mode (backend is the source of truth)
@@ -110,8 +142,24 @@ async function init() {
 
     // Restore login from backend cookie session
     setLoadingStatus(state.language === 'ar' ? 'جارٍ التحقق من الجلسة...' : 'Checking session...');
-    const me = await apiAuthMe().catch(() => null);
+    let me = null;
+    let authCheckUnavailable = false;
+    try {
+      me = await apiAuthMe();
+    } catch (error) {
+      authCheckUnavailable = true;
+      console.warn('[MobileRuntime] Session verification unavailable:', error?.message || error);
+    }
+    // A successful health response does not guarantee that the session check
+    // also reached the server. Treat a network/timeout failure differently
+    // from a definitive 401 (which apiAuthMe returns as null).
+    if (authCheckUnavailable && isPackagedMobileApp() && mobileRuntimeNeedsServer()) {
+      updateMobileServerReachability(false);
+      stopForPackagedMobileConnection();
+      return;
+    }
     if (me) {
+      updateMobileServerReachability(true);
       cancelPendingRequests();
       invalidateUsersListCache();
       for (const key of Object.keys(_collectionCache)) {

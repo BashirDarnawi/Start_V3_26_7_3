@@ -1,3 +1,6 @@
+import base64
+import binascii
+import io
 import json
 import hashlib
 import math
@@ -7,15 +10,17 @@ import secrets
 import threading
 import traceback
 import uuid
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from PIL import Image, UnidentifiedImageError
 
 # SQLite doesn't support row-level locking, so we use a threading lock for counter operations
 _SQLITE_COUNTER_LOCK = threading.Lock()
@@ -53,6 +58,8 @@ from sqlalchemy.exc import IntegrityError
 from .schemas import (
     AdminBulkImportRequest,
     AdminRestoreEntityRequest,
+    AdCampaignReviewRequest,
+    AdCampaignSubmitRequest,
     AdMutationRequest,
     AdMutationResponse,
     AdStopRequest,
@@ -365,6 +372,7 @@ SCRIPT_MIN_PATH = PROJECT_ROOT / "script.min.js"
 STYLE_PATH = PROJECT_ROOT / "style.css"
 ASSETS_DIR = PROJECT_ROOT / "assets"
 PRIVACY_PATH = PROJECT_ROOT / "privacy.html"
+DELETE_ACCOUNT_PATH = PROJECT_ROOT / "delete-account.html"
 
 COOKIE_NAME = "albayan_session"
 SESSION_DURATION_MS = int(os.getenv("ALBAYAN_SESSION_MS", str(8 * 60 * 60 * 1000)))
@@ -391,8 +399,10 @@ ORIGIN_SECRETS = [s.strip() for s in os.getenv("ALBAYAN_ORIGIN_SECRET", "").spli
 # us through a configured proxy that overwrites them. Direct deployments must
 # default to the socket peer address so clients cannot rotate limiter buckets.
 TRUST_PROXY_HEADERS = os.getenv("ALBAYAN_TRUST_PROXY_HEADERS", "").strip().lower() in {"1", "true", "yes"}
-# ALB health checks can't send custom headers, so this path must remain reachable.
-ORIGIN_BYPASS_PATH_PREFIXES = ("/api/health",)
+# Health checks and the two Google Play policy URLs must remain reachable
+# without the private reverse-proxy header.  Use exact paths, not prefixes:
+# a prefix check such as ``/privacy...`` could accidentally expose a future API.
+ORIGIN_BYPASS_PATHS = frozenset({"/api/health", "/privacy", "/delete-account"})
 
 # Rate limiting configuration (supports both in-memory and Redis)
 # SECURITY: Rate limit login attempts to prevent brute force attacks
@@ -1104,6 +1114,7 @@ def cleanup_old_audit_logs():
 INLINE_MEDIA_FIELDS: dict[str, tuple[str, ...]] = {
     "receipts": ("photos", "receiptImage"),
     "ads": ("adPhotos", "photos"),
+    "adCampaignRequests": ("creativeImages",),
 }
 
 
@@ -1155,6 +1166,25 @@ def _project_entity_media_for_user(
     )
 
 
+def _redacted_ad_campaign_tombstone(entity: dict[str, Any]) -> dict[str, Any]:
+    """Tell a reviewer to remove an out-of-scope campaign without leaking it."""
+    entity_id = str(entity.get("id") or "")
+    last_modified = int(entity.get("lastModified") or 0)
+    return {
+        "id": entity_id,
+        "type": AD_CAMPAIGN_COLLECTION,
+        "deleted": True,
+        "createdAt": int(entity.get("createdAt") or last_modified),
+        "createdBy": None,
+        "lastModified": last_modified,
+        "data": {
+            "id": entity_id,
+            "_lastModified": last_modified,
+            "_deleted": True,
+        },
+    }
+
+
 def list_entities(
     entity_type: str,
     *,
@@ -1172,6 +1202,7 @@ def list_entities(
     after_last_modified: int | None = None,
     after_id: str | None = None,
     include_media: bool = True,
+    ad_campaign_reviewer_scope: bool = False,
 ) -> list[dict[str, Any]]:
     entity_type = sanitize_str(entity_type)[:40]
     if not entity_type:
@@ -1193,6 +1224,25 @@ def list_entities(
 
     where = ["type = :type"]
     params: dict[str, Any] = {"type": entity_type}
+    campaign_safe_statuses = ("Submitted", "Approved", "Rejected")
+    campaign_status_expr = (
+        "COALESCE(data_json::jsonb ->> 'status', 'Draft')"
+        if dialect == "postgresql"
+        else "COALESCE(json_extract(data_json, '$.status'), 'Draft')"
+    )
+    # Reviewer accounts may inspect submitted/reviewed requests, never a
+    # customer's private Draft or in-progress Changes Requested revision.
+    # Delta reads are handled below with redacted synthetic tombstones so a
+    # status transition out of scope also removes a previously visible row.
+    if ad_campaign_reviewer_scope:
+        visible_status_sql = "'Submitted','Approved','Rejected'"
+        if updated_since is not None:
+            # Changes Requested is the only normal visible -> private-editable
+            # transition, so delta sync receives it as a redacted tombstone.
+            # Brand-new Drafts never enter the reviewer query at all (even ids
+            # and activity timestamps are private).
+            visible_status_sql += ",'Changes Requested'"
+        where.append(f"{campaign_status_expr} IN ({visible_status_sql})")
     # For delta sync (updated_since), we intentionally include deleted rows as tombstones
     # so clients can remove them without requiring a full refresh.
     if not include_deleted and updated_since is None:
@@ -1279,7 +1329,52 @@ def list_entities(
     # cause a record to be skipped or duplicated. Delta queries keep
     # last_modified ordering (they re-scan by cursor and upsert idempotently).
     order_by = "last_modified ASC, id ASC" if updated_since is not None else "created_at DESC, id DESC"
-    sql = f"SELECT * FROM entities WHERE {' AND '.join(where)} ORDER BY {order_by} LIMIT :limit OFFSET :offset"
+    # Ads Studio creatives can be several megabytes each.  Removing them only
+    # after SELECT/JSON decoding still lets a review-queue request materialize
+    # hundreds of megabytes in the API process.  Project that field out in the
+    # database and carry only its count on lightweight list/sync requests.
+    campaign_media_projected = entity_type == "adCampaignRequests" and not include_media
+    campaign_reviewer_delta = (
+        campaign_media_projected
+        and ad_campaign_reviewer_scope
+        and updated_since is not None
+    )
+    if campaign_media_projected and dialect == "postgresql":
+        campaign_json = "(data_json::jsonb - 'creativeImages')::text"
+        if campaign_reviewer_delta:
+            campaign_json = (
+                "CASE WHEN " + campaign_status_expr +
+                " IN ('Submitted','Approved','Rejected') THEN " + campaign_json +
+                " ELSE '{}' END"
+            )
+        select_clause = (
+            f"type, id, {campaign_json} AS data_json, "
+            "deleted, created_at, created_by, last_modified, "
+            "CASE WHEN jsonb_typeof(data_json::jsonb -> 'creativeImages')='array' "
+            "THEN jsonb_array_length(data_json::jsonb -> 'creativeImages') ELSE 0 END AS media_count, "
+            f"{campaign_status_expr} AS campaign_status"
+        )
+    elif campaign_media_projected:
+        campaign_json = "json_remove(data_json, '$.creativeImages')"
+        if campaign_reviewer_delta:
+            campaign_json = (
+                "CASE WHEN " + campaign_status_expr +
+                " IN ('Submitted','Approved','Rejected') THEN " + campaign_json +
+                " ELSE '{}' END"
+            )
+        select_clause = (
+            f"type, id, {campaign_json} AS data_json, "
+            "deleted, created_at, created_by, last_modified, "
+            "CASE WHEN json_type(data_json, '$.creativeImages')='array' "
+            "THEN json_array_length(data_json, '$.creativeImages') ELSE 0 END AS media_count, "
+            f"{campaign_status_expr} AS campaign_status"
+        )
+    else:
+        select_clause = "*"
+    sql = (
+        f"SELECT {select_clause} FROM entities WHERE {' AND '.join(where)} "
+        f"ORDER BY {order_by} LIMIT :limit OFFSET :offset"
+    )
     params["limit"] = limit
     params["offset"] = offset
 
@@ -1288,6 +1383,10 @@ def list_entities(
         out = []
         for r in rows:
             d = dict(r)
+            reviewer_hidden = (
+                campaign_reviewer_delta
+                and str(d.get("campaign_status") or "Draft") not in campaign_safe_statuses
+            )
             data = json_loads(d["data_json"]) or {}
             delivery_person_id = data.get("deliveryPersonId")
             # Inject server truth into record for frontend compatibility
@@ -1300,7 +1399,7 @@ def list_entities(
 
             # If caller didn't request deleted records, but we're in delta mode,
             # return a minimal tombstone payload for deleted rows (defense-in-depth).
-            if not include_deleted and bool(d["deleted"]):
+            if reviewer_hidden or (not include_deleted and bool(d["deleted"])):
                 data = {
                     "id": d["id"],
                     "_lastModified": int(d["last_modified"]),
@@ -1311,6 +1410,12 @@ def list_entities(
                     data["createdBy"] = d.get("created_by")
                 if delivery_person_id is not None:
                     data["deliveryPersonId"] = delivery_person_id
+            elif campaign_media_projected:
+                # The database projection already removed the bytes.  Preserve
+                # the same transport contract as _without_inline_media without
+                # ever loading the creativeImages array into Python memory.
+                data["_mediaOmitted"] = True
+                data["_photoCount"] = max(0, int(d.get("media_count") or 0))
             elif not include_media:
                 # Photos remain authoritative inside data_json, but normal
                 # lists/live-sync only need a count. The full item endpoint is
@@ -1320,7 +1425,7 @@ def list_entities(
                 {
                     "id": d["id"],
                     "type": d["type"],
-                    "deleted": bool(d["deleted"]),
+                    "deleted": bool(d["deleted"]) or reviewer_hidden,
                     "createdAt": int(d["created_at"]),
                     "createdBy": d.get("created_by"),
                     "lastModified": int(d["last_modified"]),
@@ -1512,6 +1617,7 @@ def patch_entity(
     user_id: str,
     *,
     expected_last_modified: int | None = None,
+    enforce_ad_campaign_quota: bool = True,
 ) -> dict[str, Any]:
     """
     Partially update an existing entity (merge semantics).
@@ -1564,6 +1670,11 @@ def patch_entity(
             ).mappings().first()
             if not row:
                 raise HTTPException(status_code=404, detail="Not found")
+            if bool(row["deleted"]):
+                # A late PATCH must never mutate a tombstone (or turn a
+                # submitted/deleted campaign into an inconsistent hidden row).
+                # Restoration has its own audited Admin endpoint.
+                raise HTTPException(status_code=409, detail="Cannot update a deleted record")
 
             baseline = int(row["last_modified"])
             if expected_last_modified is not None and baseline != int(expected_last_modified):
@@ -1581,6 +1692,17 @@ def patch_entity(
                 data["createdBy"] = str(row["created_by"])
             else:
                 data.pop("createdBy", None)
+
+            if entity_type == "adCampaignRequests" and enforce_ad_campaign_quota:
+                owner_id = str(row.get("created_by") or data.get("createdBy") or "")
+                _ad_campaign_lock_owner_conn(conn, owner_id, postgres=postgres)
+                _enforce_ad_campaign_owner_quota_conn(
+                    conn,
+                    owner_id,
+                    data,
+                    excluding_id=entity_id,
+                    creating=False,
+                )
 
             try:
                 result = conn.execute(
@@ -1874,7 +1996,7 @@ if CORS_ORIGINS:
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
-    if ORIGIN_SECRETS and not any(request.url.path.startswith(p) for p in ORIGIN_BYPASS_PATH_PREFIXES):
+    if ORIGIN_SECRETS and request.url.path not in ORIGIN_BYPASS_PATHS:
         provided = request.headers.get(ORIGIN_SECRET_HEADER)
         ok = bool(provided) and any(secrets.compare_digest(provided, s) for s in ORIGIN_SECRETS)
         if not ok:
@@ -2323,6 +2445,18 @@ def serve_privacy():
         raise HTTPException(status_code=404, detail="Not found")
     return FileResponse(
         str(PRIVACY_PATH),
+        media_type="text/html",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@app.get("/delete-account")
+def serve_delete_account():
+    """Public, sign-in-free instructions for requesting account deletion."""
+    if not DELETE_ACCOUNT_PATH.exists():
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(
+        str(DELETE_ACCOUNT_PATH),
         media_type="text/html",
         headers={"Cache-Control": "public, max-age=3600"},
     )
@@ -2957,6 +3091,7 @@ SERVICE_SUBSCRIPTION_CATALOG: dict[str, dict[str, Any]] = {
     "warehouse": {"priceMinor": 0, "currency": "LYD", "durationDays": 30},
     "smart_systems": {"priceMinor": 0, "currency": "LYD", "durationDays": 30},
     "clothes_system": {"priceMinor": 0, "currency": "LYD", "durationDays": 30},
+    "ad_maker": {"priceMinor": 0, "currency": "LYD", "durationDays": 30},
 }
 
 
@@ -3572,6 +3707,942 @@ def _has_active_clothes_subscription(user: dict[str, Any]) -> bool:
 def _require_clothes_subscription(user: dict[str, Any]) -> None:
     if not _has_active_clothes_subscription(user):
         raise HTTPException(status_code=403, detail="An active clothes_system subscription is required")
+
+
+AD_CAMPAIGN_COLLECTION = "adCampaignRequests"
+AD_CAMPAIGN_SERVICE_ID = "ad_maker"
+AD_CAMPAIGN_EDITABLE_STATUSES = frozenset({"Draft", "Changes Requested"})
+AD_CAMPAIGN_OPEN_STATUSES = frozenset({"Draft", "Submitted", "Changes Requested"})
+AD_CAMPAIGN_DELETABLE_STATUSES = frozenset(
+    {"Draft", "Changes Requested", "Approved", "Rejected"}
+)
+AD_CAMPAIGN_REVIEW_DECISIONS = frozenset({"Approved", "Changes Requested", "Rejected"})
+MAX_AD_CAMPAIGN_BUDGET_MINOR_USD = 100_000_000  # USD 1,000,000
+MAX_AD_CAMPAIGN_MEDIA_BYTES = 7 * 1024 * 1024
+MAX_AD_CAMPAIGN_DECODED_MEDIA_BYTES = 5 * 1024 * 1024
+MAX_AD_CAMPAIGN_DECODED_IMAGE_BYTES = 4 * 1024 * 1024
+MAX_AD_CAMPAIGN_IMAGE_DIMENSION = 8192
+MAX_AD_CAMPAIGN_IMAGE_PIXELS = 16_000_000
+MAX_AD_CAMPAIGN_TOTAL_IMAGE_PIXELS = 24_000_000
+MAX_AD_CAMPAIGN_ACTIVE_REQUESTS_PER_OWNER = 50
+# Customer content stays below this boundary, leaving ample headroom for
+# server-owned workflow/audit history so submit/review can never be bricked by
+# a few new timestamps or notes.
+MAX_AD_CAMPAIGN_OWNER_STORAGE_BYTES = 48 * 1024 * 1024
+MAX_AD_CAMPAIGN_REVIEW_HISTORY = 100
+# Full image decoding is intentionally bounded per API process. A customer can
+# upload from several phone tabs, but cannot make every worker allocate a large
+# pixel buffer at the same time.
+_AD_CAMPAIGN_MEDIA_VALIDATION_SLOTS = threading.BoundedSemaphore(2)
+AD_CAMPAIGN_BUDGET_TYPES = frozenset({"daily", "lifetime"})
+AD_CAMPAIGN_CALL_TO_ACTIONS = frozenset(
+    {
+        "Send Message",
+        "Learn More",
+        "Shop Now",
+        "Contact Us",
+        "Sign Up",
+        "Get Quote",
+        "Call Now",
+    }
+)
+AD_CAMPAIGN_CALL_TO_ACTION_ALIASES = {
+    "send_message": "Send Message",
+    "learn_more": "Learn More",
+    "shop_now": "Shop Now",
+    "contact_us": "Contact Us",
+    "sign_up": "Sign Up",
+    "get_quote": "Get Quote",
+    "call_now": "Call Now",
+}
+AD_CAMPAIGN_WORKFLOW_FIELDS = frozenset(
+    {
+        "status",
+        "submittedAt",
+        "submittedBy",
+        "reviewedAt",
+        "reviewedBy",
+        "reviewNote",
+        "reviewDecision",
+        "reviewHistory",
+        "lastSubmitOperationId",
+        "lastReviewOperationId",
+        "approvedAt",
+        "approvedBy",
+        "rejectedAt",
+        "rejectedBy",
+        "publishedAt",
+        "publishedBy",
+        "publishStatus",
+        "metaCampaignId",
+        "metaAdSetId",
+        "metaAdId",
+        "failureReason",
+        "spendMinorUSD",
+        "createdBy",
+        "creatorId",
+        "createdAt",
+        "_created",
+        "_lastModified",
+        "_deleted",
+        "id",
+    }
+)
+AD_CAMPAIGN_ALLOWED_FIELDS = frozenset(
+    {
+        "name",
+        "objective",
+        "platforms",
+        "pageName",
+        "connectedAssetId",
+        "primaryText",
+        "headline",
+        "description",
+        "callToAction",
+        "destination",
+        "locations",
+        "ageMin",
+        "ageMax",
+        "genders",
+        "languages",
+        "interests",
+        "startDate",
+        "endDate",
+        "budgetMinorUSD",
+        "budgetType",
+        "notes",
+        "creativeImages",
+        "creativeAssetIds",
+        "specialAdCategories",
+    }
+)
+
+
+def _has_active_ad_maker_subscription(user: dict[str, Any]) -> bool:
+    """Return whether this actor may use the customer Ads Studio service.
+
+    Staff reviewers operate the review queue on Albayan's behalf; they are not
+    customers buying the service and must not need a customer subscription.
+    """
+    if (
+        str(user.get("role") or "").lower() == "admin"
+        or user_has_permission(user, AD_CAMPAIGN_COLLECTION, "review")
+    ):
+        return True
+    uid = sanitize_str(str(user.get("id") or ""))[:80]
+    if not uid:
+        return False
+    dialect = str(get_engine().dialect.name or "")
+    with db_conn() as conn:
+        try:
+            if dialect == "postgresql":
+                sql = (
+                    "SELECT data_json FROM entities WHERE type='serviceSubscriptions' "
+                    "AND deleted=false AND (data_json::jsonb ->> 'userId')=:uid "
+                    "AND (data_json::jsonb ->> 'serviceId')=:service_id "
+                    "AND lower(data_json::jsonb ->> 'status')='active'"
+                )
+            else:
+                sql = (
+                    "SELECT data_json FROM entities WHERE type='serviceSubscriptions' "
+                    "AND deleted=false AND json_extract(data_json, '$.userId')=:uid "
+                    "AND json_extract(data_json, '$.serviceId')=:service_id "
+                    "AND lower(json_extract(data_json, '$.status'))='active'"
+                )
+            rows = conn.execute(
+                text(sql), {"uid": uid, "service_id": AD_CAMPAIGN_SERVICE_ID}
+            ).mappings().all()
+        except Exception:
+            # Older SQLite builds may lack JSON functions. Authorization stays
+            # correct by scanning the subscription ledger as a fallback.
+            rows = conn.execute(
+                text(
+                    "SELECT data_json FROM entities "
+                    "WHERE type='serviceSubscriptions' AND deleted=false"
+                )
+            ).mappings().all()
+    now_dt = datetime.now(timezone.utc)
+    for row in rows:
+        data = json_loads(row.get("data_json") or "{}") or {}
+        if (
+            str(data.get("userId") or "") != uid
+            or str(data.get("serviceId") or "") != AD_CAMPAIGN_SERVICE_ID
+            or str(data.get("status") or "").lower() != "active"
+        ):
+            continue
+        expiry = _parse_subscription_expiry(data.get("expiresAt"))
+        if expiry is None or expiry > now_dt:
+            return True
+    return False
+
+
+def _require_ad_maker_subscription(user: dict[str, Any]) -> None:
+    if not _has_active_ad_maker_subscription(user):
+        raise HTTPException(
+            status_code=403,
+            detail=f"An active {AD_CAMPAIGN_SERVICE_ID} subscription is required",
+        )
+
+
+def _enforce_ad_campaign_mutation_rate(user: dict[str, Any]) -> None:
+    """Bound campaign mutations per account to protect storage and reviewers."""
+    from .rate_limiter import check_rate_limit
+
+    actor_id = sanitize_str(str(user.get("id") or ""))[:80]
+    if not actor_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    allowed, _left, retry_after_ms = check_rate_limit(
+        f"ad-studio:mutations:{actor_id}", max_attempts=60, window_ms=60_000
+    )
+    if not allowed:
+        wait_seconds = max(1, math.ceil(int(retry_after_ms or 0) / 1000))
+        raise HTTPException(
+            status_code=429,
+            detail="Too many Ads Studio changes. Please wait and try again.",
+            headers={"Retry-After": str(wait_seconds)},
+        )
+
+
+@contextmanager
+def _ad_campaign_media_validation_slot(user: dict[str, Any]):
+    """Rate-limit and cap expensive creative verification before decoding."""
+    from .rate_limiter import check_rate_limit
+
+    actor_id = sanitize_str(str(user.get("id") or ""))[:80]
+    if not actor_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    allowed, _left, retry_after_ms = check_rate_limit(
+        f"ad-studio:media:{actor_id}", max_attempts=24, window_ms=60_000
+    )
+    if not allowed:
+        wait_seconds = max(1, math.ceil(int(retry_after_ms or 0) / 1000))
+        raise HTTPException(
+            status_code=429,
+            detail="Too many campaign image checks. Please wait and try again.",
+            headers={"Retry-After": str(wait_seconds)},
+        )
+    if not _AD_CAMPAIGN_MEDIA_VALIDATION_SLOTS.acquire(blocking=False):
+        raise HTTPException(
+            status_code=503,
+            detail="Campaign images are being checked. Please try again in a moment.",
+            headers={"Retry-After": "2"},
+        )
+    try:
+        yield
+    finally:
+        _AD_CAMPAIGN_MEDIA_VALIDATION_SLOTS.release()
+
+
+def _ad_campaign_lock_owner_conn(conn: Any, owner_id: str, *, postgres: bool) -> None:
+    owner_id = sanitize_str(str(owner_id or ""))[:80]
+    if not owner_id:
+        raise HTTPException(status_code=409, detail="Campaign owner is missing")
+    if postgres:
+        # Serializes quota checks across app processes for this owner while the
+        # surrounding transaction creates or updates the campaign.
+        conn.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+            {"lock_key": f"ad-studio-owner:{owner_id}"},
+        )
+
+
+def _enforce_ad_campaign_owner_quota_conn(
+    conn: Any,
+    owner_id: str,
+    proposed_data: dict[str, Any],
+    *,
+    excluding_id: str | None,
+    creating: bool,
+) -> None:
+    """Enforce active-record and stored-JSON quotas inside the write transaction."""
+    owner_id = sanitize_str(str(owner_id or ""))[:80]
+    params: dict[str, Any] = {
+        "type": AD_CAMPAIGN_COLLECTION,
+        "owner_id": owner_id,
+    }
+    where = "type=:type AND deleted=false AND created_by=:owner_id"
+    if excluding_id:
+        where += " AND id<>:excluding_id"
+        params["excluding_id"] = validate_entity_id(excluding_id)
+    dialect = str(get_engine().dialect.name or "")
+    size_expr = "octet_length(data_json)" if dialect == "postgresql" else "length(data_json)"
+    status_expr = (
+        "COALESCE(data_json::jsonb ->> 'status', 'Draft')"
+        if dialect == "postgresql"
+        else "COALESCE(json_extract(data_json, '$.status'), 'Draft')"
+    )
+    usage = conn.execute(
+        text(
+            f"SELECT COALESCE(SUM(CASE WHEN {status_expr} IN "
+            "('Draft','Submitted','Changes Requested') THEN 1 ELSE 0 END),0) AS active_count, "
+            f"COALESCE(SUM({size_expr}), 0) AS stored_bytes "
+            f"FROM entities WHERE {where}"
+        ),
+        params,
+    ).mappings().first()
+    active_count = int((usage or {}).get("active_count") or 0)
+    stored_bytes = int((usage or {}).get("stored_bytes") or 0)
+    if creating and active_count >= MAX_AD_CAMPAIGN_ACTIVE_REQUESTS_PER_OWNER:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Ads Studio allows at most {MAX_AD_CAMPAIGN_ACTIVE_REQUESTS_PER_OWNER} "
+                "open campaign requests per customer. Finish or delete an old request first."
+            ),
+        )
+    proposed_bytes = len(json_dumps(proposed_data).encode("utf-8"))
+    if stored_bytes + proposed_bytes > MAX_AD_CAMPAIGN_OWNER_STORAGE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Ads Studio storage quota reached. Remove images or archive an older reviewed campaign.",
+        )
+
+
+def _create_ad_campaign_atomic(
+    entity_id: str,
+    data: dict[str, Any],
+    user: dict[str, Any],
+) -> dict[str, Any]:
+    """Create one customer draft with a race-safe per-owner quota check."""
+    entity_id = validate_entity_id(entity_id)
+    actor_id = sanitize_str(str(user.get("id") or ""))[:80]
+    clean = sanitize_json(data)
+    if not isinstance(clean, dict):
+        raise HTTPException(status_code=400, detail="Campaign data must be an object")
+    requested_content = {
+        key: clean[key] for key in AD_CAMPAIGN_ALLOWED_FIELDS if key in clean
+    }
+    now = now_ms()
+    clean["id"] = entity_id
+    clean["_created"] = now
+    clean["_lastModified"] = now
+    clean["createdBy"] = actor_id
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_ENTITY_PATCH_LOCK
+    with guard:
+        with db_conn() as conn:
+            _ad_campaign_lock_owner_conn(conn, actor_id, postgres=postgres)
+            existing = conn.execute(
+                text(
+                    "SELECT data_json,deleted,created_at,created_by,last_modified "
+                    "FROM entities WHERE type=:type AND id=:id LIMIT 1"
+                ),
+                {"type": AD_CAMPAIGN_COLLECTION, "id": entity_id},
+            ).mappings().first()
+            if existing:
+                existing_data = json_loads(existing["data_json"]) or {}
+                existing_content = {
+                    key: existing_data[key]
+                    for key in AD_CAMPAIGN_ALLOWED_FIELDS
+                    if key in existing_data
+                }
+                if (
+                    not bool(existing["deleted"])
+                    and str(existing.get("created_by") or "") == actor_id
+                    and str(existing_data.get("status") or "Draft") == "Draft"
+                    and existing_content == requested_content
+                ):
+                    # POST uses a caller-stable campaign id and is retried on
+                    # response loss. Return the first committed draft instead
+                    # of creating a ghost record plus a misleading 409.
+                    return {
+                        "id": entity_id,
+                        "type": AD_CAMPAIGN_COLLECTION,
+                        "deleted": False,
+                        "createdAt": int(existing["created_at"]),
+                        "createdBy": existing.get("created_by"),
+                        "lastModified": int(existing["last_modified"]),
+                        "data": existing_data,
+                        "_replayed": True,
+                    }
+                raise HTTPException(status_code=409, detail="ID already exists")
+            _enforce_ad_campaign_mutation_rate(user)
+            _enforce_ad_campaign_owner_quota_conn(
+                conn,
+                actor_id,
+                clean,
+                excluding_id=None,
+                creating=True,
+            )
+            try:
+                conn.execute(
+                    text(
+                        "INSERT INTO entities "
+                        "(type,id,data_json,deleted,created_at,created_by,last_modified) "
+                        "VALUES (:type,:id,:data_json,false,:created_at,:created_by,:last_modified)"
+                    ),
+                    {
+                        "type": AD_CAMPAIGN_COLLECTION,
+                        "id": entity_id,
+                        "data_json": json_dumps(clean),
+                        "created_at": now,
+                        "created_by": actor_id,
+                        "last_modified": now,
+                    },
+                )
+            except IntegrityError:
+                raise HTTPException(status_code=409, detail="ID already exists")
+    return {
+        "id": entity_id,
+        "type": AD_CAMPAIGN_COLLECTION,
+        "deleted": False,
+        "createdAt": now,
+        "createdBy": actor_id,
+        "lastModified": now,
+        "data": clean,
+    }
+
+
+def _normalize_ad_campaign_destination(value: Any) -> str:
+    raw = _ad_campaign_string(value, "destination", 2048)
+    if not raw:
+        return ""
+    compact_phone = re.sub(r"[\s().-]", "", raw)
+    if re.fullmatch(r"\+?[1-9][0-9]{7,14}", compact_phone):
+        return compact_phone if compact_phone.startswith("+") else f"+{compact_phone}"
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        parsed = None
+    if (
+        parsed is None
+        or parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or any(ch.isspace() for ch in raw)
+        or not re.fullmatch(r"[A-Za-z0-9.-]+", parsed.hostname)
+        or "." not in parsed.hostname
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="destination must be an HTTPS website, WhatsApp/Messenger link, or international phone number",
+        )
+    return raw
+
+
+def _ad_campaign_review_history(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    history: list[dict[str, str]] = []
+    for raw in value[-MAX_AD_CAMPAIGN_REVIEW_HISTORY:]:
+        if not isinstance(raw, dict):
+            continue
+        decision = sanitize_str(str(raw.get("decision") or ""), 40)
+        if decision not in AD_CAMPAIGN_REVIEW_DECISIONS:
+            continue
+        history.append(
+            {
+                "decision": decision,
+                "note": sanitize_str(str(raw.get("note") or ""), 2000),
+                "reviewedAt": sanitize_str(str(raw.get("reviewedAt") or ""), 80),
+                "reviewedBy": sanitize_str(str(raw.get("reviewedBy") or ""), 80),
+            }
+        )
+    return history
+
+
+def _soft_delete_ad_campaign_atomic(
+    user: dict[str, Any], campaign_id: str
+) -> dict[str, Any]:
+    """Delete an editable request atomically with its workflow-state check.
+
+    Creative bytes are removed from the tombstone so soft deletion does not
+    become unbounded hidden blob storage.
+    """
+    campaign_id = validate_entity_id(campaign_id)
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_ENTITY_PATCH_LOCK
+    with guard:
+        with db_conn() as conn:
+            suffix = " FOR UPDATE" if postgres else ""
+            row = conn.execute(
+                text(
+                    "SELECT id,data_json,deleted,created_at,created_by,last_modified "
+                    "FROM entities WHERE type=:type AND id=:id LIMIT 1" + suffix
+                ),
+                {"type": AD_CAMPAIGN_COLLECTION, "id": campaign_id},
+            ).mappings().first()
+            if not row:
+                raise HTTPException(status_code=404, detail="Campaign request not found")
+            data = json_loads(row["data_json"]) or {}
+            creator = str(row.get("created_by") or data.get("createdBy") or "")
+            if not user_has_permission(
+                user,
+                AD_CAMPAIGN_COLLECTION,
+                "delete",
+                record_creator_id=creator,
+            ):
+                raise HTTPException(status_code=403, detail="Forbidden")
+            if bool(row["deleted"]):
+                # DELETE is retried on response loss. Returning the existing
+                # tombstone makes that replay idempotent without disclosing a
+                # row to anyone who did not pass the ownership check above.
+                return {
+                    "id": campaign_id,
+                    "lastModified": int(row["last_modified"]),
+                    "createdBy": row.get("created_by"),
+                    "replayed": True,
+                }
+            _enforce_ad_campaign_mutation_rate(user)
+            if (
+                str(user.get("role") or "").lower() != "admin"
+                and str(data.get("status") or "Draft") not in AD_CAMPAIGN_DELETABLE_STATUSES
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Submitted campaigns cannot be deleted while under review",
+                )
+            data.pop("creativeImages", None)
+            modified = max(now_ms(), int(row["last_modified"]) + 1)
+            data["id"] = campaign_id
+            data["_lastModified"] = modified
+            data["_deleted"] = True
+            result = conn.execute(
+                text(
+                    "UPDATE entities SET data_json=:data_json,deleted=true,last_modified=:modified "
+                    "WHERE type=:type AND id=:id AND last_modified=:baseline"
+                ),
+                {
+                    "data_json": json_dumps(data),
+                    "modified": modified,
+                    "type": AD_CAMPAIGN_COLLECTION,
+                    "id": campaign_id,
+                    "baseline": int(row["last_modified"]),
+                },
+            )
+            if result.rowcount != 1:
+                raise HTTPException(status_code=409, detail="Conflict: record has changed")
+            return {
+                "id": campaign_id,
+                "lastModified": modified,
+                "createdBy": row.get("created_by"),
+                "replayed": False,
+            }
+
+
+def _ad_campaign_string(value: Any, field: str, max_length: int) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise HTTPException(status_code=400, detail=f"{field} must be text")
+    return sanitize_str(value, max_length)
+
+
+def _ad_campaign_string_list(
+    value: Any,
+    field: str,
+    *,
+    max_items: int,
+    item_length: int = 120,
+    lower: bool = False,
+) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > max_items:
+        raise HTTPException(status_code=400, detail=f"{field} must be a list of at most {max_items} items")
+    result: list[str] = []
+    for raw in value:
+        if not isinstance(raw, str):
+            raise HTTPException(status_code=400, detail=f"{field} must contain only text")
+        item = sanitize_str(raw, item_length)
+        if lower:
+            item = item.lower()
+        if item and item not in result:
+            result.append(item)
+    return result
+
+
+def _ad_campaign_date(value: Any, field: str) -> tuple[str, datetime] | None:
+    raw = _ad_campaign_string(value, field, 40)
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"{field} must be a valid ISO date")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return raw, parsed
+
+
+def _ad_campaign_image_dimensions(decoded: bytes, mime: str) -> tuple[int, int] | None:
+    """Read dimensions from supported formats without decoding pixel buffers."""
+    if mime == "png":
+        if (
+            len(decoded) < 24
+            or not decoded.startswith(b"\x89PNG\r\n\x1a\n")
+            or decoded[12:16] != b"IHDR"
+        ):
+            return None
+        return (
+            int.from_bytes(decoded[16:20], "big"),
+            int.from_bytes(decoded[20:24], "big"),
+        )
+    if mime in {"jpg", "jpeg"}:
+        if len(decoded) < 4 or not decoded.startswith(b"\xff\xd8"):
+            return None
+        index = 2
+        sof_markers = {
+            0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+            0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF,
+        }
+        while index + 3 < len(decoded):
+            while index < len(decoded) and decoded[index] != 0xFF:
+                index += 1
+            while index < len(decoded) and decoded[index] == 0xFF:
+                index += 1
+            if index >= len(decoded):
+                break
+            marker = decoded[index]
+            index += 1
+            if marker in {0xD8, 0xD9}:
+                continue
+            if marker == 0xDA or index + 2 > len(decoded):
+                break
+            segment_length = int.from_bytes(decoded[index:index + 2], "big")
+            if segment_length < 2 or index + segment_length > len(decoded):
+                return None
+            if marker in sof_markers:
+                if segment_length < 7:
+                    return None
+                height = int.from_bytes(decoded[index + 3:index + 5], "big")
+                width = int.from_bytes(decoded[index + 5:index + 7], "big")
+                return width, height
+            index += segment_length
+        return None
+    if mime == "webp":
+        if (
+            len(decoded) < 30
+            or decoded[:4] != b"RIFF"
+            or decoded[8:12] != b"WEBP"
+        ):
+            return None
+        chunk = decoded[12:16]
+        if chunk == b"VP8X":
+            return (
+                1 + int.from_bytes(decoded[24:27], "little"),
+                1 + int.from_bytes(decoded[27:30], "little"),
+            )
+        if chunk == b"VP8 " and len(decoded) >= 30 and decoded[23:26] == b"\x9d\x01\x2a":
+            return (
+                int.from_bytes(decoded[26:28], "little") & 0x3FFF,
+                int.from_bytes(decoded[28:30], "little") & 0x3FFF,
+            )
+        if chunk == b"VP8L" and len(decoded) >= 25 and decoded[20] == 0x2F:
+            b1, b2, b3, b4 = decoded[21:25]
+            return (
+                1 + b1 + ((b2 & 0x3F) << 8),
+                1 + (b2 >> 6) + (b3 << 2) + ((b4 & 0x0F) << 10),
+            )
+    return None
+
+
+def _validate_ad_campaign_image_source(source: str) -> tuple[str, int, int]:
+    match = re.fullmatch(
+        r"data:image/(png|jpe?g|webp);base64,([A-Za-z0-9+/]+={0,2})",
+        source,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        raise HTTPException(
+            status_code=400,
+            detail="creativeImages supports valid PNG, JPEG, or WebP base64 data images",
+        )
+    mime = match.group(1).lower()
+    try:
+        decoded = base64.b64decode(match.group(2), validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="creativeImages contains invalid base64")
+    if not decoded or len(decoded) > MAX_AD_CAMPAIGN_DECODED_IMAGE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Each campaign image must be 4 MB or smaller after decoding",
+        )
+    dimensions = _ad_campaign_image_dimensions(decoded, mime)
+    if not dimensions:
+        raise HTTPException(
+            status_code=400,
+            detail="creativeImages contains an invalid or mismatched image file",
+        )
+    width, height = dimensions
+    if (
+        width <= 0
+        or height <= 0
+        or width > MAX_AD_CAMPAIGN_IMAGE_DIMENSION
+        or height > MAX_AD_CAMPAIGN_IMAGE_DIMENSION
+        or width * height > MAX_AD_CAMPAIGN_IMAGE_PIXELS
+    ):
+        raise HTTPException(
+            status_code=413,
+            detail="Campaign image dimensions are too large",
+        )
+
+    # Header inspection above lets us reject pixel bombs before allocating a
+    # pixel buffer. Pillow then verifies and fully decodes the file so a
+    # forged/truncated header cannot be stored as if it were a real image.
+    expected_format = "JPEG" if mime in {"jpg", "jpeg"} else mime.upper()
+    try:
+        with Image.open(io.BytesIO(decoded)) as image:
+            if (
+                str(image.format or "").upper() != expected_format
+                or image.size != (width, height)
+                or bool(getattr(image, "is_animated", False))
+            ):
+                raise ValueError("Image type, size, or animation is not supported")
+            image.verify()
+        # verify() checks structure without decoding pixels. Re-open and load
+        # one bounded image at a time to also catch truncated/corrupt payloads.
+        with Image.open(io.BytesIO(decoded)) as image:
+            if str(image.format or "").upper() != expected_format or image.size != (width, height):
+                raise ValueError("Image changed between verification and decode")
+            image.load()
+    except (
+        Image.DecompressionBombError,
+        UnidentifiedImageError,
+        OSError,
+        SyntaxError,
+        ValueError,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="creativeImages contains a corrupt, truncated, animated, or mismatched image file",
+        )
+    return source, len(decoded), width * height
+
+
+def _prepare_ad_campaign_fields(
+    raw_data: Any,
+    *,
+    strict: bool,
+    reject_unknown: bool = False,
+    trusted_media: bool = False,
+) -> dict[str, Any]:
+    """Sanitize the customer-editable campaign envelope.
+
+    This is a request/approval record only. It deliberately contains no Meta
+    access token, live campaign ID, internal ad, receipt, or wallet mutation.
+    """
+    if not isinstance(raw_data, dict):
+        raise HTTPException(status_code=400, detail="Campaign data must be an object")
+    if reject_unknown:
+        unknown = set(raw_data) - AD_CAMPAIGN_ALLOWED_FIELDS
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported campaign field: {sorted(unknown)[0]}",
+            )
+    sanitized = sanitize_json(raw_data) or {}
+    data = {key: sanitized[key] for key in AD_CAMPAIGN_ALLOWED_FIELDS if key in sanitized}
+    clean: dict[str, Any] = {}
+
+    string_limits = {
+        "name": 160,
+        "pageName": 160,
+        "connectedAssetId": 80,
+        "primaryText": 5000,
+        "headline": 255,
+        "description": 1000,
+        "callToAction": 80,
+        "destination": 2048,
+        "budgetType": 40,
+        "notes": 3000,
+    }
+    for field, limit in string_limits.items():
+        if field in data:
+            clean[field] = _ad_campaign_string(data.get(field), field, limit)
+
+    if "destination" in data:
+        clean["destination"] = _normalize_ad_campaign_destination(data.get("destination"))
+
+    if "callToAction" in data:
+        cta = _ad_campaign_string(data.get("callToAction"), "callToAction", 80)
+        cta = AD_CAMPAIGN_CALL_TO_ACTION_ALIASES.get(cta.lower(), cta)
+        if cta and cta not in AD_CAMPAIGN_CALL_TO_ACTIONS:
+            raise HTTPException(status_code=400, detail="Unsupported callToAction")
+        clean["callToAction"] = cta
+
+    if "budgetType" in data:
+        budget_type = _ad_campaign_string(data.get("budgetType"), "budgetType", 40).lower()
+        if budget_type and budget_type not in AD_CAMPAIGN_BUDGET_TYPES:
+            raise HTTPException(status_code=400, detail="budgetType must be daily or lifetime")
+        clean["budgetType"] = budget_type
+
+    if clean.get("connectedAssetId"):
+        try:
+            clean["connectedAssetId"] = validate_entity_id(clean["connectedAssetId"])
+        except HTTPException:
+            raise HTTPException(status_code=400, detail="connectedAssetId is invalid")
+
+    if "objective" in data:
+        objective = _ad_campaign_string(data.get("objective"), "objective", 40).lower().replace(" ", "_")
+        valid_objectives = {
+            "awareness", "traffic", "engagement", "leads", "app_promotion",
+            "sales", "messages",
+        }
+        if objective and objective not in valid_objectives:
+            raise HTTPException(status_code=400, detail="Unsupported campaign objective")
+        clean["objective"] = objective
+
+    if "platforms" in data:
+        platforms = _ad_campaign_string_list(
+            data.get("platforms"), "platforms", max_items=4, item_length=40, lower=True
+        )
+        if any(item not in {"facebook", "instagram", "messenger"} for item in platforms):
+            raise HTTPException(status_code=400, detail="Unsupported advertising platform")
+        clean["platforms"] = platforms
+
+    for field, maximum, item_length in (
+        ("locations", 25, 160),
+        ("languages", 20, 80),
+        ("interests", 50, 120),
+    ):
+        if field in data:
+            clean[field] = _ad_campaign_string_list(
+                data.get(field), field, max_items=maximum, item_length=item_length
+            )
+
+    if "genders" in data:
+        genders = _ad_campaign_string_list(
+            data.get("genders"), "genders", max_items=3, item_length=20, lower=True
+        )
+        if any(item not in {"all", "male", "female"} for item in genders):
+            raise HTTPException(status_code=400, detail="Unsupported gender targeting value")
+        clean["genders"] = genders
+
+    if "specialAdCategories" in data:
+        categories = _ad_campaign_string_list(
+            data.get("specialAdCategories"),
+            "specialAdCategories",
+            max_items=4,
+            item_length=60,
+            lower=True,
+        )
+        valid_categories = {
+            "none", "credit", "employment", "housing",
+            "social_issues_elections_politics",
+        }
+        if any(item not in valid_categories for item in categories):
+            raise HTTPException(status_code=400, detail="Unsupported special ad category")
+        if "none" in categories and len(categories) > 1:
+            raise HTTPException(status_code=400, detail="specialAdCategories cannot combine none with another category")
+        clean["specialAdCategories"] = categories
+
+    for field in ("ageMin", "ageMax"):
+        if field in data:
+            value = data.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 18 or value > 65:
+                raise HTTPException(status_code=400, detail=f"{field} must be an integer from 18 to 65")
+            clean[field] = value
+    if clean.get("ageMin") is not None and clean.get("ageMax") is not None:
+        if int(clean["ageMin"]) > int(clean["ageMax"]):
+            raise HTTPException(status_code=400, detail="ageMin cannot be greater than ageMax")
+
+    if "budgetMinorUSD" in data:
+        budget = data.get("budgetMinorUSD")
+        if (
+            isinstance(budget, bool)
+            or not isinstance(budget, int)
+            or budget < 0
+            or budget > MAX_AD_CAMPAIGN_BUDGET_MINOR_USD
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="budgetMinorUSD must be a non-negative integer within the campaign limit",
+            )
+        clean["budgetMinorUSD"] = budget
+
+    start = _ad_campaign_date(data.get("startDate"), "startDate") if "startDate" in data else None
+    end = _ad_campaign_date(data.get("endDate"), "endDate") if "endDate" in data else None
+    if start:
+        clean["startDate"] = start[0]
+    elif "startDate" in data:
+        clean["startDate"] = ""
+    if end:
+        clean["endDate"] = end[0]
+    elif "endDate" in data:
+        clean["endDate"] = ""
+    if start and end:
+        if end[1] < start[1]:
+            raise HTTPException(status_code=400, detail="endDate cannot be before startDate")
+        if (end[1] - start[1]).days > 366:
+            raise HTTPException(status_code=400, detail="Campaign duration cannot exceed 366 days")
+    if strict and start and start[1].date() < datetime.now(timezone.utc).date():
+        raise HTTPException(status_code=400, detail="startDate cannot be in the past")
+
+    if "creativeAssetIds" in data:
+        ids = _ad_campaign_string_list(
+            data.get("creativeAssetIds"), "creativeAssetIds", max_items=10, item_length=80
+        )
+        for asset_id in ids:
+            try:
+                validate_entity_id(asset_id)
+            except HTTPException:
+                raise HTTPException(status_code=400, detail="creativeAssetIds contains an invalid id")
+        clean["creativeAssetIds"] = ids
+
+    if "creativeImages" in data:
+        images = data.get("creativeImages")
+        if not isinstance(images, list) or len(images) > 3:
+            raise HTTPException(status_code=400, detail="creativeImages must contain at most 3 images")
+        clean_images: list[str] = []
+        total_size = 0
+        total_decoded_size = 0
+        total_pixels = 0
+        for image in images:
+            if not isinstance(image, str):
+                raise HTTPException(status_code=400, detail="creativeImages must contain data-image strings")
+            if len(image) > MAX_DATA_URL_LENGTH:
+                raise HTTPException(status_code=413, detail="A campaign image data URL is too large")
+            source = sanitize_str(image, MAX_DATA_URL_LENGTH)
+            if trusted_media:
+                # Internal merge-only path: both the stored creative and any
+                # incoming replacement were already decoder-verified earlier
+                # in this request. Never use this flag on raw client input.
+                encoded = source.partition(",")[2]
+                decoded_size = max(0, (len(encoded) * 3) // 4 - (len(encoded) - len(encoded.rstrip("="))))
+                image_pixels = 0
+            else:
+                source, decoded_size, image_pixels = _validate_ad_campaign_image_source(source)
+            total_size += len(source.encode("utf-8"))
+            if total_size > MAX_AD_CAMPAIGN_MEDIA_BYTES:
+                raise HTTPException(status_code=413, detail="creativeImages exceeds the 7 MB campaign limit")
+            total_decoded_size += decoded_size
+            if total_decoded_size > MAX_AD_CAMPAIGN_DECODED_MEDIA_BYTES:
+                raise HTTPException(status_code=413, detail="creativeImages exceeds the 5 MB decoded-image limit")
+            total_pixels += image_pixels
+            if total_pixels > MAX_AD_CAMPAIGN_TOTAL_IMAGE_PIXELS:
+                raise HTTPException(status_code=413, detail="Campaign images contain too many total pixels")
+            clean_images.append(source)
+        clean["creativeImages"] = clean_images
+
+    if strict:
+        required_text = (
+            "name", "objective", "primaryText", "destination",
+            "callToAction", "budgetType",
+        )
+        for field in required_text:
+            if not str(clean.get(field) or "").strip():
+                raise HTTPException(status_code=400, detail=f"{field} is required before submission")
+        if not clean.get("platforms"):
+            raise HTTPException(status_code=400, detail="At least one platform is required before submission")
+        if not (str(clean.get("pageName") or "").strip() or str(clean.get("connectedAssetId") or "").strip()):
+            raise HTTPException(status_code=400, detail="pageName or connectedAssetId is required before submission")
+        if not clean.get("locations"):
+            raise HTTPException(status_code=400, detail="At least one location is required before submission")
+        if not start or not end:
+            raise HTTPException(status_code=400, detail="startDate and endDate are required before submission")
+        if int(clean.get("budgetMinorUSD") or 0) <= 0:
+            raise HTTPException(status_code=400, detail="A positive budgetMinorUSD is required before submission")
+        if not clean.get("creativeImages"):
+            raise HTTPException(
+                status_code=400,
+                detail="At least one campaign image is required before submission",
+            )
+
+    return clean
 
 
 def _clothes_money(value: Any, field: str) -> float:
@@ -6799,6 +7870,222 @@ def _delivery_patch_allowed(user: dict[str, Any], existing: dict[str, Any], upda
     return has("accept") or has("assign") or has("reassign") or has("markCollected")
 
 
+@app.post(
+    "/api/ad-studio/campaigns/{campaign_id}/submit",
+    response_model=EntityResponse,
+)
+def submit_ad_campaign_request(
+    campaign_id: str,
+    body: AdCampaignSubmitRequest,
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+):
+    """Submit a complete request for human review; never publish a live ad."""
+    require_same_origin(request)
+    _require_ad_maker_subscription(user)
+    campaign = get_entity(AD_CAMPAIGN_COLLECTION, campaign_id)
+    if not campaign or campaign.get("deleted"):
+        raise HTTPException(status_code=404, detail="Campaign request not found")
+    creator = campaign.get("createdBy") or (campaign.get("data") or {}).get("createdBy")
+    if not user_has_permission(
+        user,
+        AD_CAMPAIGN_COLLECTION,
+        "submit",
+        record_creator_id=str(creator or ""),
+    ):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    current = campaign.get("data") or {}
+    operation_id = sanitize_str(str(body.operationId or ""), 120)
+    if operation_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,119}", operation_id):
+        raise HTTPException(status_code=400, detail="Invalid operationId")
+    if operation_id and str(current.get("lastSubmitOperationId") or "") == operation_id:
+        # The first response may have been lost after commit. Replaying the
+        # same operation returns authoritative current state instead of a
+        # misleading 409/failure notification.
+        return EntityResponse(
+            **_project_entity_media_for_user(campaign, user, False)
+        )
+    _enforce_ad_campaign_mutation_rate(user)
+    current_status = str(current.get("status") or "Draft")
+    if current_status not in AD_CAMPAIGN_EDITABLE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail="Only Draft or Changes Requested campaigns can be submitted",
+        )
+    with _ad_campaign_media_validation_slot(user):
+        _prepare_ad_campaign_fields(current, strict=True)
+
+    actor_id = str(user.get("id") or "system")
+    replayed_after_conflict = False
+    try:
+        saved = patch_entity(
+            AD_CAMPAIGN_COLLECTION,
+            campaign_id,
+            {
+                "status": "Submitted",
+                "submittedAt": _iso_utc(),
+                "submittedBy": actor_id,
+                "reviewedAt": None,
+                "reviewedBy": None,
+                "reviewNote": "",
+                "reviewDecision": "",
+                "lastSubmitOperationId": operation_id,
+            },
+            actor_id,
+            expected_last_modified=body.expectedLastModified,
+            enforce_ad_campaign_quota=False,
+        )
+    except HTTPException as error:
+        if error.status_code != 409:
+            raise
+        latest = get_entity(AD_CAMPAIGN_COLLECTION, campaign_id)
+        latest_data = (latest or {}).get("data") or {}
+        if (
+            not latest
+            or latest.get("deleted")
+            or str(latest_data.get("lastSubmitOperationId") or "") != operation_id
+        ):
+            raise
+        # A matching operation won the row-lock race while this identical
+        # request was waiting. Treat the optimistic conflict as the same
+        # committed success and do not duplicate its audit entry.
+        saved = latest
+        replayed_after_conflict = True
+    if not replayed_after_conflict:
+        audit(
+            actor_id,
+            "submit",
+            AD_CAMPAIGN_COLLECTION,
+            campaign_id,
+            f"Submitted campaign request {campaign_id} for review",
+            {"operationId": operation_id},
+        )
+    return EntityResponse(**_project_entity_media_for_user(saved, user, False))
+
+
+@app.post(
+    "/api/ad-studio/campaigns/{campaign_id}/review",
+    response_model=EntityResponse,
+)
+def review_ad_campaign_request(
+    campaign_id: str,
+    body: AdCampaignReviewRequest,
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+):
+    """Record a human decision without creating an internal or Meta ad."""
+    require_same_origin(request)
+    _require_ad_maker_subscription(user)
+    if not user_has_permission(user, AD_CAMPAIGN_COLLECTION, "review"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    campaign = get_entity(AD_CAMPAIGN_COLLECTION, campaign_id)
+    if not campaign or campaign.get("deleted"):
+        raise HTTPException(status_code=404, detail="Campaign request not found")
+    decision = str(body.decision)
+    if decision not in AD_CAMPAIGN_REVIEW_DECISIONS:
+        # Pydantic rejects this first; keep a defense-in-depth check if the
+        # schema is ever widened independently.
+        raise HTTPException(status_code=400, detail="Invalid review decision")
+    current = campaign.get("data") or {}
+    operation_id = sanitize_str(str(body.operationId or ""), 120)
+    if operation_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,119}", operation_id):
+        raise HTTPException(status_code=400, detail="Invalid operationId")
+    note = sanitize_str(str(body.note or ""), 2000)
+    if operation_id and str(current.get("lastReviewOperationId") or "") == operation_id:
+        if (
+            str(current.get("reviewDecision") or "") != decision
+            or str(current.get("reviewNote") or "") != note
+        ):
+            raise HTTPException(status_code=409, detail="operationId was already used for another review")
+        if str(current.get("status") or "Draft") not in {"Submitted", "Approved", "Rejected"}:
+            # A repeated review request may arrive after the customer has
+            # already edited a Changes Requested draft. Never return those
+            # newer private revisions to the reviewer through idempotency.
+            return EntityResponse(**_redacted_ad_campaign_tombstone(campaign))
+        return EntityResponse(
+            **_project_entity_media_for_user(campaign, user, False)
+        )
+    _enforce_ad_campaign_mutation_rate(user)
+    current_status = str(current.get("status") or "Draft")
+    if current_status != "Submitted":
+        raise HTTPException(status_code=409, detail="Only Submitted campaigns can be reviewed")
+    if decision == "Approved":
+        # Approval means launch-ready. Revalidate server-side so older clients
+        # and legacy drafts cannot bypass today's targeting/link rules.
+        with _ad_campaign_media_validation_slot(user):
+            _prepare_ad_campaign_fields(current, strict=True)
+    actor_id = str(user.get("id") or "system")
+    if decision in {"Changes Requested", "Rejected"} and not note:
+        raise HTTPException(
+            status_code=400,
+            detail="A review note is required when requesting changes or rejecting a campaign",
+        )
+    reviewed_at = _iso_utc()
+    history = _ad_campaign_review_history(current.get("reviewHistory"))
+    history.append(
+        {
+            "decision": decision,
+            "note": note,
+            "reviewedAt": reviewed_at,
+            "reviewedBy": actor_id,
+        }
+    )
+    history = history[-MAX_AD_CAMPAIGN_REVIEW_HISTORY:]
+    transition_fields: dict[str, Any] = {
+        "status": decision,
+        "reviewDecision": decision,
+        "reviewedAt": reviewed_at,
+        "reviewedBy": actor_id,
+        "reviewNote": note,
+        "reviewHistory": history,
+        "lastReviewOperationId": operation_id,
+    }
+    if decision == "Approved":
+        transition_fields.update({"approvedAt": reviewed_at, "approvedBy": actor_id})
+    elif decision == "Rejected":
+        transition_fields.update({"rejectedAt": reviewed_at, "rejectedBy": actor_id})
+    replayed_after_conflict = False
+    try:
+        saved = patch_entity(
+            AD_CAMPAIGN_COLLECTION,
+            campaign_id,
+            transition_fields,
+            actor_id,
+            expected_last_modified=body.expectedLastModified,
+            enforce_ad_campaign_quota=False,
+        )
+    except HTTPException as error:
+        if error.status_code != 409:
+            raise
+        latest = get_entity(AD_CAMPAIGN_COLLECTION, campaign_id)
+        latest_data = (latest or {}).get("data") or {}
+        if (
+            not latest
+            or latest.get("deleted")
+            or str(latest_data.get("lastReviewOperationId") or "") != operation_id
+            or str(latest_data.get("reviewDecision") or "") != decision
+            or str(latest_data.get("reviewNote") or "") != note
+        ):
+            raise
+        saved = latest
+        replayed_after_conflict = True
+    if not replayed_after_conflict:
+        audit(
+            actor_id,
+            "review",
+            AD_CAMPAIGN_COLLECTION,
+            campaign_id,
+            f"Reviewed campaign request {campaign_id}: {decision}",
+            {"decision": decision, "note": note, "operationId": operation_id},
+        )
+    if replayed_after_conflict and str((saved.get("data") or {}).get("status") or "Draft") not in {
+        "Submitted", "Approved", "Rejected"
+    }:
+        return EntityResponse(**_redacted_ad_campaign_tombstone(saved))
+    return EntityResponse(**_project_entity_media_for_user(saved, user, False))
+
+
 SYNC_WATERMARK_COLLECTIONS = (
     "ads",
     "receipts",
@@ -6811,6 +8098,7 @@ SYNC_WATERMARK_COLLECTIONS = (
     "clothesSettings",
     "walletTransactions",
     "serviceSubscriptions",
+    AD_CAMPAIGN_COLLECTION,
 )
 
 
@@ -6868,6 +8156,7 @@ def get_sync_watermarks(user: dict[str, Any] = Depends(current_user)):
     role_lower = str(user.get("role") or "").lower()
     uid = sanitize_str(str(user.get("id") or ""))[:80]
     clothes_entitled = _has_active_clothes_subscription(user)
+    ad_maker_entitled = _has_active_ad_maker_subscription(user)
     watermarks: dict[str, int] = {}
     with db_conn() as conn:
         if str(get_engine().dialect.name or "") == "postgresql":
@@ -6876,6 +8165,8 @@ def get_sync_watermarks(user: dict[str, Any] = Depends(current_user)):
             conn.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
         for collection in SYNC_WATERMARK_COLLECTIONS:
             if collection in CLOTHES_BUSINESS_COLLECTIONS and not clothes_entitled:
+                continue
+            if collection == AD_CAMPAIGN_COLLECTION and not ad_maker_entitled:
                 continue
             if collection in PERSONAL_SCOPED_COLLECTIONS and role_lower != "admin":
                 if uid:
@@ -6930,6 +8221,11 @@ def get_collection(
     include_media = _can_include_entity_media(user, collection, include_media)
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
         _require_clothes_subscription(user)
+    if collection == AD_CAMPAIGN_COLLECTION:
+        _require_ad_maker_subscription(user)
+        # Campaign thumbnails must not make every sync/list response carry
+        # megabytes of base64. GET-by-id remains the hydration path.
+        include_media = False
 
     full_pair = before_created_at is not None or before_id is not None
     delta_pair = after_last_modified is not None or after_id is not None
@@ -7027,6 +8323,11 @@ def get_collection(
         include_deleted = False
 
     created_by_filter = None if can_view_all else str(user.get("id") or "")
+    ad_campaign_reviewer_scope = (
+        collection == AD_CAMPAIGN_COLLECTION
+        and role_lower != "admin"
+        and user_has_permission(user, AD_CAMPAIGN_COLLECTION, "review")
+    )
     items = list_entities(
         collection,
         updated_since=updated_since,
@@ -7039,6 +8340,7 @@ def get_collection(
         after_last_modified=after_last_modified,
         after_id=after_id,
         include_media=include_media,
+        ad_campaign_reviewer_scope=ad_campaign_reviewer_scope,
     )
     return [EntityResponse(**i) for i in items]
 
@@ -7097,6 +8399,8 @@ def get_collection_item(
     role_lower = str(user.get("role") or "").lower()
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
         _require_clothes_subscription(user)
+    if collection == AD_CAMPAIGN_COLLECTION:
+        _require_ad_maker_subscription(user)
     if role_lower == "delivery":
         if collection in {"ads", "receipts"}:
             item = get_entity(collection, entity_id)
@@ -7141,6 +8445,16 @@ def get_collection_item(
     if not item or item.get("deleted"):
         raise HTTPException(status_code=404, detail="Not found")
 
+    if (
+        collection == AD_CAMPAIGN_COLLECTION
+        and role_lower != "admin"
+        and user_has_permission(user, AD_CAMPAIGN_COLLECTION, "review")
+        and str((item.get("data") or {}).get("status") or "Draft")
+        not in {"Submitted", "Approved", "Rejected"}
+    ):
+        # Do not reveal whether a customer's private editable draft exists.
+        raise HTTPException(status_code=404, detail="Not found")
+
     # If user only has viewOwn, enforce creator ownership
     creator = item.get("createdBy") or (item.get("data") or {}).get("createdBy") or (item.get("data") or {}).get("creatorId")
     if collection == "exchangeRateHistory":
@@ -7164,6 +8478,8 @@ def create_collection_item(
     require_same_origin(request)
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
         _require_clothes_subscription(user)
+    if collection == AD_CAMPAIGN_COLLECTION:
+        _require_ad_maker_subscription(user)
     validate_relationship_ids(body.data)
     if collection in CLOTHES_ORDER_SERVER_CONTROLLED_COLLECTIONS:
         raise HTTPException(
@@ -7254,7 +8570,7 @@ def create_collection_item(
     entity_id = validate_entity_id(body.id or new_id(collection[:10] or "id"))
 
     # Create must not overwrite existing records
-    if get_entity_meta(collection, entity_id):
+    if collection != AD_CAMPAIGN_COLLECTION and get_entity_meta(collection, entity_id):
         raise HTTPException(status_code=409, detail="ID already exists")
 
     # Normalize/validate certain flows server-side (multi-user safe).
@@ -7263,6 +8579,13 @@ def create_collection_item(
         body_data["variants"] = _clothes_validate_variants(
             body_data.get("variants", [])
         )
+    elif collection == AD_CAMPAIGN_COLLECTION:
+        # A generic create can only make a draft. All workflow identity,
+        # review, publishing and live-Meta fields are server-controlled.
+        with _ad_campaign_media_validation_slot(user):
+            body_data = _prepare_ad_campaign_fields(body.data or {}, strict=False)
+        body_data["schemaVersion"] = 1
+        body_data["status"] = "Draft"
     elif collection == "ads":
         data_in = sanitize_json(body.data or {}) or {}
         payment_status = sanitize_str(str(data_in.get("paymentStatus") or ""))[:40]
@@ -7342,13 +8665,17 @@ def create_collection_item(
     else:
         body_data = body.data
 
-    if collection in {"clothesProducts", "clothesShipments"}:
+    if collection == AD_CAMPAIGN_COLLECTION:
+        saved = _create_ad_campaign_atomic(entity_id, body_data, user)
+    elif collection in {"clothesProducts", "clothesShipments"}:
         saved = _clothes_create_inventory_entity_atomic(
             user, collection, entity_id, body_data
         )
     else:
         saved = upsert_entity(collection, entity_id, body_data, str(user.get("id") or "system"), create_if_missing=True)
-    audit(str(user.get("id")), "create", collection, entity_id, f"Created {collection} {entity_id}", {})
+    replayed_create = bool(saved.pop("_replayed", False))
+    if not replayed_create:
+        audit(str(user.get("id")), "create", collection, entity_id, f"Created {collection} {entity_id}", {})
     return EntityResponse(**_project_entity_media_for_user(saved, user, include_media))
 
 
@@ -7364,6 +8691,8 @@ def update_collection_item(
     require_same_origin(request)
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
         _require_clothes_subscription(user)
+    if collection == AD_CAMPAIGN_COLLECTION:
+        _require_ad_maker_subscription(user)
     validate_relationship_ids(body.data)
     if collection in CLOTHES_ORDER_SERVER_CONTROLLED_COLLECTIONS:
         raise HTTPException(
@@ -7377,6 +8706,21 @@ def update_collection_item(
     existing = get_entity(collection, entity_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Not found")
+
+    campaign_updates: dict[str, Any] | None = None
+    if collection == AD_CAMPAIGN_COLLECTION:
+        raw_campaign_keys = set((body.data or {}).keys()) if isinstance(body.data, dict) else set()
+        if raw_campaign_keys & AD_CAMPAIGN_WORKFLOW_FIELDS:
+            raise HTTPException(status_code=403, detail="Campaign workflow fields are server-controlled")
+        media_guard = (
+            _ad_campaign_media_validation_slot(user)
+            if "creativeImages" in raw_campaign_keys
+            else nullcontext()
+        )
+        with media_guard:
+            campaign_updates = _prepare_ad_campaign_fields(
+                body.data or {}, strict=False, reject_unknown=True
+            )
 
     financial_updates = sanitize_json(body.data or {}) or {}
     if collection == "ads":
@@ -7809,6 +9153,49 @@ def update_collection_item(
         if not (collection in {"ads", "receipts"} and _delivery_patch_allowed(user, existing, _dw_updates)):
             raise HTTPException(status_code=403, detail="Forbidden")
         delivery_grant_patch = True
+
+    if collection == AD_CAMPAIGN_COLLECTION:
+        # Ads Studio uses a status machine (Draft -> Submitted -> Reviewed).
+        # Requiring the version makes the later atomic patch_entity check close
+        # the race where a draft could be submitted/reviewed after this status
+        # read but before its content update was written.
+        if body.expectedLastModified is None:
+            raise HTTPException(
+                status_code=409,
+                detail="expectedLastModified is required for campaign updates",
+            )
+        current_campaign = existing.get("data") or {}
+        current_version = int(existing.get("lastModified") or current_campaign.get("_lastModified") or 0)
+        if (
+            body.expectedLastModified is not None
+            and current_version != int(body.expectedLastModified)
+            and campaign_updates
+            and all(current_campaign.get(key) == value for key, value in campaign_updates.items())
+        ):
+            # PATCH is retried after response loss. If every requested field is
+            # already authoritative, return the current row instead of telling
+            # the user that their successfully-saved draft failed.
+            return EntityResponse(
+                **_project_entity_media_for_user(existing, user, False)
+            )
+        _enforce_ad_campaign_mutation_rate(user)
+        current_status = str(current_campaign.get("status") or "Draft")
+        if current_status not in AD_CAMPAIGN_EDITABLE_STATUSES:
+            raise HTTPException(
+                status_code=409,
+                detail="Only Draft or Changes Requested campaigns can be edited",
+            )
+        merged_campaign = {
+            key: current_campaign[key]
+            for key in AD_CAMPAIGN_ALLOWED_FIELDS
+            if key in current_campaign
+        }
+        merged_campaign.update(campaign_updates or {})
+        validated_campaign = _prepare_ad_campaign_fields(
+            merged_campaign, strict=False, trusted_media=True
+        )
+        body.data.clear()
+        body.data.update(validated_campaign)
 
     if delivery_grant_patch:
         # Client clocks/identities are not authoritative workflow evidence.
@@ -8293,6 +9680,15 @@ def batch_delete_entities(
             raise HTTPException(status_code=400, detail="Invalid collection/id in batch")
         if col in CLOTHES_BUSINESS_COLLECTIONS:
             _require_clothes_subscription(user)
+        if col == AD_CAMPAIGN_COLLECTION:
+            _require_ad_maker_subscription(user)
+            # Campaign workflow status and ownership must be checked under the
+            # same row lock as deletion. Use the dedicated single-item route.
+            raise HTTPException(
+                status_code=405,
+                detail="Campaign requests must be deleted individually",
+            )
+        campaign_existing = None
         if col == "users":
             raise HTTPException(status_code=400, detail="Users cannot be deleted through this endpoint")
         if col in PERSONAL_SCOPED_COLLECTIONS:
@@ -8312,7 +9708,7 @@ def batch_delete_entities(
         module = _module_for_collection(col)
         delete_action = _action_for_collection(col, "delete")
         if not user_has_permission(user, module, delete_action):
-            existing = get_entity(col, eid)
+            existing = campaign_existing or get_entity(col, eid)
             if not existing:
                 # Missing records are skipped later; nothing to authorize.
                 normalized.append((col, eid))
@@ -8320,6 +9716,17 @@ def batch_delete_entities(
             creator = existing.get("createdBy") or (existing.get("data") or {}).get("createdBy") or (existing.get("data") or {}).get("creatorId")
             if not user_has_permission(user, module, delete_action, record_creator_id=str(creator or "")):
                 raise HTTPException(status_code=403, detail=f"Forbidden: {col}/{eid}")
+        if (
+            col == AD_CAMPAIGN_COLLECTION
+            and campaign_existing
+            and str(user.get("role") or "").lower() != "admin"
+            and str((campaign_existing.get("data") or {}).get("status") or "Draft")
+            not in AD_CAMPAIGN_DELETABLE_STATUSES
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Submitted campaigns cannot be deleted while under review",
+            )
         normalized.append((col, eid))
 
     now = now_ms()
@@ -8386,6 +9793,19 @@ def delete_collection_item(
     require_same_origin(request)
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
         _require_clothes_subscription(user)
+    if collection == AD_CAMPAIGN_COLLECTION:
+        _require_ad_maker_subscription(user)
+        deleted_campaign = _soft_delete_ad_campaign_atomic(user, entity_id)
+        if not deleted_campaign.get("replayed"):
+            audit(
+                str(user.get("id")),
+                "delete",
+                collection,
+                entity_id,
+                f"Deleted {collection} {entity_id}",
+                {},
+            )
+        return {"ok": True, "lastModified": deleted_campaign["lastModified"]}
     if collection in PERSONAL_SCOPED_COLLECTIONS:
         raise HTTPException(status_code=405, detail="Wallet and subscription history cannot be deleted")
     if collection in CLOTHES_ORDER_SERVER_CONTROLLED_COLLECTIONS:
@@ -8413,6 +9833,16 @@ def delete_collection_item(
         creator = existing.get("createdBy") or (existing.get("data") or {}).get("createdBy") or (existing.get("data") or {}).get("creatorId")
         if not user_has_permission(user, module, delete_action, record_creator_id=str(creator or "")):
             raise HTTPException(status_code=403, detail="Forbidden")
+
+    if collection == AD_CAMPAIGN_COLLECTION and str(user.get("role") or "").lower() != "admin":
+        campaign = get_entity(collection, entity_id)
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Not found")
+        if str((campaign.get("data") or {}).get("status") or "Draft") not in AD_CAMPAIGN_DELETABLE_STATUSES:
+            raise HTTPException(
+                status_code=409,
+                detail="Submitted campaigns cannot be deleted while under review",
+            )
 
     if collection == "customers":
         deleted_customer = _financial_delete_customer_atomic(entity_id)
@@ -8686,13 +10116,38 @@ def list_users(user: dict[str, Any] = Depends(current_user)):
 
 @app.get("/api/users/public")
 def list_users_public(user: dict[str, Any] = Depends(current_user)):
-    # Minimal user list for UI dropdowns (delivery assignment, etc.)
+    # This endpoint feeds internal assignee/creator dropdowns, but it is also
+    # called by narrow customer portals.  Those customers use the existing
+    # Employee role, so role alone cannot distinguish them from staff.  Grant
+    # the directory only to permissions that operate across users' records;
+    # own-only/customer accounts receive a single self row instead.
+    directory_permissions = (
+        ("users", "view"),
+        ("users", "managePermissions"),
+        ("ads", "view"),
+        ("ads", "assignDelivery"),
+        ("receipts", "view"),
+        ("deliveries", "view"),
+        ("deliveries", "assign"),
+        ("deliveries", "reassign"),
+        ("deliveries", "viewStats"),
+        ("auditLogs", "view"),
+        ("adCampaignRequests", "view"),
+        ("adCampaignRequests", "review"),
+    )
+    can_browse_directory = any(
+        user_has_permission(user, module, action)
+        for module, action in directory_permissions
+    )
+
     with db_conn() as conn:
-        rows = (
-            conn.execute(text("SELECT id, name, role FROM users WHERE deleted = false ORDER BY name ASC"))
-            .mappings()
-            .all()
-        )
+        if can_browse_directory:
+            query = "SELECT id, name, role FROM users WHERE deleted = false ORDER BY name ASC"
+            params: dict[str, Any] = {}
+        else:
+            query = "SELECT id, name, role FROM users WHERE id = :id AND deleted = false"
+            params = {"id": str(user.get("id") or "")}
+        rows = conn.execute(text(query), params).mappings().all()
         rows = [dict(r) for r in rows]
     return rows
 
@@ -8719,6 +10174,107 @@ def _free_email_if_soft_deleted(email: str, now: int) -> bool:
             {"new_e": f"deleted{now}.{e}", "now": now, "id": str(row["id"])},
         )
     return True
+
+
+def _privacy_anonymized_email(user_id: str) -> str:
+    """Stable, non-identifying address for a retained user tombstone."""
+    opaque_id = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:24]
+    # Use an application-owned domain because UserPublic validates addresses
+    # and intentionally rejects reserved ``.invalid`` domains.
+    return f"deleted-{opaque_id}@privacy.albayanhub.com"
+
+
+def _privacy_anonymize_deleted_user_atomic(user_id: str) -> dict[str, Any]:
+    """Remove eligible account PII while retaining the user's stable id.
+
+    Financial and business rows refer to ``users.id`` through ``created_by``
+    and audit references.  Deleting that row would break their history, so a
+    verified deletion request is fulfilled by retaining an inert tombstone and
+    replacing personal fields and credentials.  The account must already have
+    been soft-deleted through the normal user-management flow.
+    """
+    user_id = validate_entity_id(user_id)
+    replacement_email = _privacy_anonymized_email(user_id)
+    replacement_password = hash_password(
+        secrets.token_urlsafe(48), iterations=PBKDF2_ITERATIONS_DEFAULT
+    )
+    now = now_ms()
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    suffix = " FOR UPDATE" if postgres else ""
+
+    with db_conn() as conn:
+        existing = conn.execute(
+            text(f"SELECT * FROM users WHERE id=:id LIMIT 1{suffix}"),
+            {"id": user_id},
+        ).mappings().first()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Not found")
+        if not bool(existing.get("deleted")):
+            raise HTTPException(
+                status_code=409,
+                detail="Disable this account first, then run privacy anonymization",
+            )
+
+        conn.execute(
+            text(
+                """
+                UPDATE users
+                SET name=:name,
+                    email=:email,
+                    role='Employee',
+                    permissions_json=:permissions_json,
+                    password_hash=:password_hash,
+                    password_salt=:password_salt,
+                    password_algo=:password_algo,
+                    password_iterations=:password_iterations,
+                    deleted=true,
+                    last_modified=:last_modified
+                WHERE id=:id
+                """
+            ),
+            {
+                "id": user_id,
+                "name": "Deleted user",
+                "email": replacement_email,
+                "permissions_json": json_dumps({}),
+                "password_hash": replacement_password.hash_hex,
+                "password_salt": replacement_password.salt_hex,
+                "password_algo": replacement_password.algo,
+                "password_iterations": replacement_password.iterations,
+                "last_modified": now,
+            },
+        )
+
+        # Remove authentication artifacts that can contain device/IP details.
+        conn.execute(text("DELETE FROM sessions WHERE user_id=:id"), {"id": user_id})
+        conn.execute(text("DELETE FROM password_resets WHERE user_id=:id"), {"id": user_id})
+
+        # Keep action/resource/user identifiers for accountability and financial
+        # referential integrity, but remove free-text and metadata that may
+        # contain the person's former name, email address, IP, or user agent.
+        conn.execute(
+            text(
+                """
+                UPDATE audit_logs
+                SET message=:message, metadata_json=:metadata_json
+                WHERE user_id=:id
+                   OR (resource_type='users' AND resource_id=:id)
+                """
+            ),
+            {
+                "id": user_id,
+                "message": "Activity retained after account privacy anonymization",
+                "metadata_json": json_dumps({}),
+            },
+        )
+
+        updated = conn.execute(
+            text("SELECT * FROM users WHERE id=:id LIMIT 1"),
+            {"id": user_id},
+        ).mappings().first()
+        if not updated:
+            raise HTTPException(status_code=500, detail="Failed to anonymize account")
+        return dict(updated)
 
 
 def _validated_role(raw_role: Any) -> str:
@@ -9019,6 +10575,46 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
     return user_row_to_public(updated)
 
 
+@app.post("/api/users/{user_id}/privacy-anonymize", response_model=UserPublic)
+def privacy_anonymize_user(
+    user_id: str,
+    request: Request,
+    body: dict[str, Any] = Body(...),
+    admin: dict[str, Any] = Depends(current_user),
+):
+    """Fulfil a verified account-deletion request without breaking records.
+
+    This is intentionally separate from ordinary soft deletion.  Only an
+    Admin may use it, the target must already be disabled, and the caller must
+    type an account-specific confirmation phrase.
+    """
+    require_same_origin(request)
+    user_id = validate_entity_id(user_id)
+    if str(admin.get("role") or "").lower() != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    if str(admin.get("id") or "") == user_id:
+        raise HTTPException(status_code=400, detail="You cannot anonymize your own account")
+
+    expected_confirmation = f"ANONYMIZE {user_id}"
+    supplied_confirmation = str((body or {}).get("confirmation") or "").strip()
+    if not secrets.compare_digest(supplied_confirmation, expected_confirmation):
+        raise HTTPException(
+            status_code=400,
+            detail=f'Type "{expected_confirmation}" to confirm privacy anonymization',
+        )
+
+    updated = _privacy_anonymize_deleted_user_atomic(user_id)
+    audit(
+        str(admin.get("id")),
+        "privacy_anonymize",
+        "users",
+        user_id,
+        "Anonymized a deleted user after a verified privacy request",
+        {},
+    )
+    return user_row_to_public(updated)
+
+
 # ==========================================
 # SPA CATCH-ALL ROUTE (Must be LAST)
 # ==========================================
@@ -9042,6 +10638,7 @@ FRONTEND_ROUTES = {
     "/no-access",
     "/smart-systems",
     "/clothes-system",
+    "/ads-studio",
     "/service",
     "/wallet",
     "/account",

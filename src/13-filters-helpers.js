@@ -1428,6 +1428,223 @@ function buildWhatsAppLink(phone) {
   return `https://wa.me/${digits}`;
 }
 
+function buildWhatsAppShareLink(message) {
+  const text = String(message || '').trim();
+  return text ? `https://wa.me/?text=${encodeURIComponent(text)}` : '';
+}
+
+function _whatsAppShareField(value, maxLength = 350) {
+  return String(value ?? '')
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+}
+
+function isPendingDeliveryReceiptForShare(receipt) {
+  if (!receipt || receipt._deleted || !isDeliveryReceiptRecord(receipt)) return false;
+  if (getReceiptDebtType(receipt) !== 'delivery') return false;
+  const deliveryStatus = String(receipt.deliveryStatus || '').trim().toLowerCase();
+  return !['delivered', 'canceled', 'cancelled', 'office'].includes(deliveryStatus);
+}
+
+function canShareDeliveryReceiptToWhatsApp(receipt) {
+  if (!state.currentUser?.id || !isPendingDeliveryReceiptForShare(receipt)) return false;
+
+  const creatorId = receipt.createdBy || receipt.creatorId || '';
+  const uid = String(state.currentUser.id);
+  const canViewRecord = isCurrentUserAdmin()
+    || currentUserHasPermission('receipts', 'view')
+    || currentUserHasPermission('deliveries', 'view')
+    || (currentUserHasPermission('receipts', 'viewOwn') && String(creatorId) === uid)
+    || (currentUserHasPermission('deliveries', 'viewOwn') && String(receipt.deliveryPersonId || '') === uid);
+
+  // The dispatch text contains the customer's phone and delivery address.
+  return canViewRecord && (isCurrentUserAdmin() || currentUserHasPermission('customers', 'viewContacts'));
+}
+
+function _getDeliveryReceiptForWhatsApp(receiptId) {
+  const rid = String(receiptId || '').trim();
+  if (!rid) return null;
+  const receipt = (state.receipts || []).find(item => item && !item._deleted && String(item.id) === rid);
+  return receipt && canShareDeliveryReceiptToWhatsApp(receipt) ? receipt : null;
+}
+
+function buildDeliveryReceiptWhatsAppMessage(receipt) {
+  if (!receipt || receipt._deleted) return '';
+  const isAr = state.language === 'ar';
+  const customer = (state.customers || []).find(item => item && !item._deleted && String(item.id) === String(receipt.customerId || ''));
+  const driver = (state.users || []).find(item => item && !item._deleted && String(item.id) === String(receipt.deliveryPersonId || ''));
+  const creatorId = receipt.createdBy || receipt.creatorId || '';
+  const creator = (state.users || []).find(item => item && !item._deleted && String(item.id) === String(creatorId));
+  const customerPhoneEntry = Array.isArray(customer?.phones) ? customer.phones.find(Boolean) : '';
+  const customerPhone = (customerPhoneEntry && typeof customerPhoneEntry === 'object')
+    ? (customerPhoneEntry.number || customerPhoneEntry.phone || customerPhoneEntry.value || '')
+    : customerPhoneEntry;
+
+  const number = _whatsAppShareField(receipt.tempReceiptNo || receipt.finalReceiptNo || receipt.serialNumber || '—', 80);
+  const customerName = _whatsAppShareField(customer?.name || 'Unknown', 160);
+  const phone = _whatsAppShareField(receipt.phoneNumber || customerPhone || '—', 80);
+  const place = _whatsAppShareField(receipt.deliveryPlaceName || '—', 350);
+  const driverName = _whatsAppShareField(driver?.name || '—', 160);
+  const instructions = _whatsAppShareField(receipt.deliveryInstructions || '—', 500);
+  const creatorName = _whatsAppShareField(creator?.name || state.currentUser?.name || '—', 160);
+  const debtUSD = Number(receipt.debtAmountUSD ?? receipt.amountUSD ?? 0) || 0;
+  const fxRate = Number(receipt.exchangeRate || state.defaultExchangeRate || 0) || 0;
+  const debtLocal = Number(receipt.debtAmountLocal ?? receipt.amountLocal ?? (debtUSD * fxRate)) || 0;
+  const deliveryFee = Number(receipt.quotedDeliveryFee || 0) || 0;
+  const money = `${debtLocal.toFixed(2)} LYD${debtUSD > 0 ? ` ($${debtUSD.toFixed(2)})` : ''}`;
+
+  const lines = isAr ? [
+    '🚚 توصيل جديد - البيان',
+    `رقم الوصل: ${number}`,
+    `العميل: ${customerName}`,
+    `الهاتف: ${phone}`,
+    `مكان التوصيل: ${place}`,
+    `المندوب: ${driverName}`,
+    `المبلغ المطلوب تحصيله: ${money}`,
+    `رسوم التوصيل: ${deliveryFee.toFixed(2)} LYD`,
+    'الحالة: غير مدفوع',
+    `ملاحظات: ${instructions}`,
+    `أنشأه: ${creatorName}`
+  ] : [
+    '🚚 New Albayan delivery',
+    `Receipt: ${number}`,
+    `Customer: ${customerName}`,
+    `Phone: ${phone}`,
+    `Delivery place: ${place}`,
+    `Assigned driver: ${driverName}`,
+    `Amount to collect: ${money}`,
+    `Delivery fee: ${deliveryFee.toFixed(2)} LYD`,
+    'Payment status: Not Paid',
+    `Instructions: ${instructions}`,
+    `Created by: ${creatorName}`
+  ];
+  return lines.join('\n').slice(0, 1800);
+}
+
+let _deliveryWhatsAppReturnFocus = null;
+
+function closeDeliveryWhatsAppPrompt(restoreFocus = true) {
+  document.getElementById('delivery-whatsapp-share-dialog')?.remove();
+  if (restoreFocus && _deliveryWhatsAppReturnFocus?.focus) {
+    try { _deliveryWhatsAppReturnFocus.focus(); } catch (_) {}
+  }
+  _deliveryWhatsAppReturnFocus = null;
+}
+
+async function copyDeliveryReceiptWhatsAppMessage(receiptId) {
+  const receipt = _getDeliveryReceiptForWhatsApp(receiptId);
+  if (!receipt) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يمكنك مشاركة معلومات هذا التوصيل.' : 'You cannot share this delivery information.', 'error');
+    return;
+  }
+  const copied = await copyTextToClipboard(buildDeliveryReceiptWhatsAppMessage(receipt));
+  showNotification(
+    copied ? (state.language === 'ar' ? 'تم النسخ' : 'Copied') : (state.language === 'ar' ? 'تعذر النسخ' : 'Copy failed'),
+    copied ? (state.language === 'ar' ? 'تم نسخ معلومات التوصيل.' : 'Delivery information copied.') : (state.language === 'ar' ? 'انسخ النص من المعاينة يدوياً.' : 'Copy the text from the preview manually.'),
+    copied ? 'success' : 'error'
+  );
+}
+
+function openDeliveryReceiptWhatsAppShare(receiptId) {
+  const receipt = _getDeliveryReceiptForWhatsApp(receiptId);
+  const isAr = state.language === 'ar';
+  if (!receipt) {
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'لا يمكنك مشاركة معلومات هذا التوصيل.' : 'You cannot share this delivery information.', 'error');
+    return;
+  }
+  const url = buildWhatsAppShareLink(buildDeliveryReceiptWhatsAppMessage(receipt));
+  if (!url) return;
+
+  const link = document.createElement('a');
+  link.href = url;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.style.display = 'none';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  closeDeliveryWhatsAppPrompt(false);
+  showNotification(
+    isAr ? 'تم فتح واتساب' : 'WhatsApp opened',
+    isAr ? 'اختر مجموعة العمل ثم اضغط إرسال. لم يتم الإرسال تلقائياً.' : 'Choose your business group and press Send. Nothing was sent automatically.',
+    'info'
+  );
+}
+
+function showDeliveryWhatsAppPrompt(receiptId, triggerButton = null) {
+  const receipt = _getDeliveryReceiptForWhatsApp(receiptId);
+  const isAr = state.language === 'ar';
+  if (!receipt) {
+    showNotification(isAr ? 'غير متاح' : 'Not available', isAr ? 'هذا التوصيل غير متاح للمشاركة أو لا توجد لديك صلاحية لبيانات الاتصال.' : 'This delivery cannot be shared, or you do not have contact-data permission.', 'error');
+    return;
+  }
+
+  closeDeliveryWhatsAppPrompt(false);
+  _deliveryWhatsAppReturnFocus = triggerButton || document.activeElement;
+  const message = buildDeliveryReceiptWhatsAppMessage(receipt);
+  const receiptNo = _whatsAppShareField(receipt.tempReceiptNo || receipt.finalReceiptNo || receipt.serialNumber || '', 80);
+  const dialog = document.createElement('div');
+  dialog.id = 'delivery-whatsapp-share-dialog';
+  dialog.className = 'mobile-dialog-overlay fixed inset-0 z-[95] flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
+  dialog.setAttribute('aria-labelledby', 'delivery-whatsapp-share-title');
+  dialog.setAttribute('dir', isAr ? 'rtl' : 'ltr');
+  dialog.innerHTML = `
+    <div class="glass-panel w-full max-w-xl max-h-[92dvh] overflow-hidden rounded-2xl shadow-2xl flex flex-col animate-slide-up">
+      <div class="flex items-start justify-between gap-3 p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700">
+        <div class="min-w-0">
+          <div class="flex items-center gap-2 text-emerald-600 mb-1"><i data-lucide="message-circle" class="w-5 h-5"></i><span class="text-xs font-bold uppercase">WhatsApp</span></div>
+          <h2 id="delivery-whatsapp-share-title" class="text-xl font-bold text-slate-800 dark:text-white">${isAr ? 'مشاركة معلومات التوصيل' : 'Share delivery information'}</h2>
+          ${receiptNo ? `<p class="text-sm text-slate-500 mt-1">${isAr ? 'الوصل' : 'Receipt'}: ${Security.escapeHtml(receiptNo)}</p>` : ''}
+        </div>
+        <button type="button" onclick="closeDeliveryWhatsAppPrompt()" class="min-w-11 min-h-11 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center" aria-label="${isAr ? 'إغلاق' : 'Close'}"><span class="text-2xl leading-none" aria-hidden="true">&times;</span></button>
+      </div>
+      <div class="p-4 sm:p-5 overflow-y-auto">
+        <div class="rounded-xl border border-amber-200 bg-amber-50 dark:bg-amber-900/20 p-3 mb-4 text-sm text-amber-800 dark:text-amber-200">
+          ${isAr ? 'لم يتم إرسال أي شيء بعد. سيفتح واتساب، ثم اختر مجموعة العمل واضغط إرسال.' : 'Nothing has been sent yet. WhatsApp will open; choose your business group and press Send.'}
+        </div>
+        <div class="text-xs font-bold uppercase tracking-wide text-slate-500 mb-2">${isAr ? 'معاينة الرسالة' : 'Message preview'}</div>
+        <pre class="whitespace-pre-wrap break-words rounded-xl bg-slate-50 dark:bg-slate-800 p-3 text-sm text-slate-700 dark:text-slate-200 max-h-[42dvh] overflow-y-auto font-sans">${Security.escapeHtml(message)}</pre>
+        <p class="text-xs text-slate-500 mt-3">${isAr ? 'تحتوي الرسالة على هاتف العميل ومكان التوصيل وستتم مشاركتها خارج نظام البيان.' : 'This message contains the customer phone and delivery place and will be shared outside Albayan.'}</p>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr_auto] gap-2 p-4 sm:p-5 border-t border-slate-200 dark:border-slate-700">
+        <button type="button" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" onclick="copyDeliveryReceiptWhatsAppMessage(this.dataset.receiptId)" class="min-h-11 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 font-bold text-slate-700 dark:text-slate-200 flex items-center justify-center gap-2"><i data-lucide="copy" class="w-4 h-4"></i>${isAr ? 'نسخ' : 'Copy'}</button>
+        <button id="delivery-whatsapp-share-button" type="button" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" onclick="openDeliveryReceiptWhatsAppShare(this.dataset.receiptId)" class="min-h-11 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center justify-center gap-2"><i data-lucide="message-circle" class="w-5 h-5"></i>${isAr ? 'فتح واتساب' : 'Open WhatsApp'}</button>
+        <button type="button" onclick="closeDeliveryWhatsAppPrompt()" class="min-h-11 px-4 rounded-xl border border-slate-200 dark:border-slate-700 font-bold text-slate-600 dark:text-slate-300">${isAr ? 'لاحقاً' : 'Later'}</button>
+      </div>
+    </div>`;
+  dialog.addEventListener('click', event => {
+    if (event.target === dialog) closeDeliveryWhatsAppPrompt();
+  });
+  dialog.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      closeDeliveryWhatsAppPrompt();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = Array.from(dialog.querySelectorAll('button:not([disabled]), [tabindex]:not([tabindex="-1"])'));
+    if (!focusable.length) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  document.body.appendChild(dialog);
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => document.getElementById('delivery-whatsapp-share-button')?.focus(), 0);
+}
+
 function compareFees(quoted, actual) {
   const q = Number(quoted) || 0;
   const a = Number(actual) || 0;
@@ -1765,12 +1982,12 @@ function changeReceiptPhotoViewer(direction) {
   renderReceiptPhotoViewer();
 }
 
-function closeReceiptPhotoViewer() {
+function closeReceiptPhotoViewer(restoreFocus = true) {
   document.getElementById('receipt-photo-viewer')?.remove();
   _receiptPhotoViewerSources = [];
   _receiptPhotoViewerIndex = 0;
   _receiptPhotoViewerLabel = '';
-  if (_receiptPhotoViewerReturnFocus?.focus) _receiptPhotoViewerReturnFocus.focus();
+  if (restoreFocus && _receiptPhotoViewerReturnFocus?.focus) _receiptPhotoViewerReturnFocus.focus();
   _receiptPhotoViewerReturnFocus = null;
 }
 
@@ -2501,6 +2718,9 @@ function updateReceiptFilter(filterType, value) {
     case 'date':
       state.receiptDateFilter = value;
       break;
+    case 'debt':
+      state.receiptDebtFilter = value;
+      break;
     case 'collected':
       state.receiptCollectedFilter = value;
       break;
@@ -2517,6 +2737,7 @@ function clearAllReceiptFilters() {
   state.receiptStatusFilter = 'all';
   state.receiptPaymentFilter = 'all';
   state.receiptDateFilter = 'all';
+  state.receiptDebtFilter = 'all';
   state.receiptCollectedFilter = 'all';
   state.receiptSortBy = 'newest';
   render();

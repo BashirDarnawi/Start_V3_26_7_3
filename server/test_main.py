@@ -628,8 +628,8 @@ class TestSoftDeleteIntegrity:
             json={"data": {"name": "Ghost Updated"}},
             cookies=cookies,
         )
-        assert r.status_code == 200
-        assert r.json()["deleted"] is True  # still deleted — no resurrection
+        assert r.status_code == 409
+        assert "deleted" in str(r.json().get("detail") or "").lower()
 
         # And it must not reappear in the normal (non-deleted) listing
         r = client.get("/api/collections/customers", cookies=cookies)

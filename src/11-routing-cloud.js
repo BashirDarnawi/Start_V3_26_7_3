@@ -21,6 +21,7 @@ const VIEW_TO_PATH = {
   // Platform views (admin only)
   'smart-systems': '/smart-systems',
   'clothes-system': '/clothes-system',
+  'ads-studio': '/ads-studio',
   'service-placeholder': '/service',
   'wallet': '/wallet'
 };
@@ -61,6 +62,9 @@ function viewUrlParamsFor(view) {
   if (view === 'clothes-system') {
     return { tab: (typeof _clothesActiveTab !== 'undefined' && _clothesActiveTab) || null };
   }
+  if (view === 'ads-studio') {
+    return { tab: (typeof _adsStudioActiveTab !== 'undefined' && _adsStudioActiveTab) || null };
+  }
   if (view === 'service-placeholder') {
     return { service: state.viewData?.serviceId || null };
   }
@@ -72,6 +76,9 @@ function restoreViewStateFromUrl(view) {
   const params = getUrlParams();
   if (view === 'clothes-system' && typeof restoreClothesTabFromUrl === 'function') {
     restoreClothesTabFromUrl();
+  }
+  if (view === 'ads-studio' && typeof restoreAdsStudioTabFromUrl === 'function') {
+    restoreAdsStudioTabFromUrl();
   }
   if (view === 'service-placeholder' && params.service) {
     state.viewData = { serviceId: params.service };

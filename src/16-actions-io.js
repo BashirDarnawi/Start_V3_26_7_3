@@ -688,7 +688,8 @@ function exportData() {
     clothesProducts: { visible: countVisible(exportState.clothesProducts), deleted: countDeleted(exportState.clothesProducts) },
     clothesShipments: { visible: countVisible(exportState.clothesShipments), deleted: countDeleted(exportState.clothesShipments) },
     clothesOrders: { visible: countVisible(exportState.clothesOrders), deleted: countDeleted(exportState.clothesOrders) },
-    clothesSettings: { visible: countVisible(exportState.clothesSettings), deleted: countDeleted(exportState.clothesSettings) }
+    clothesSettings: { visible: countVisible(exportState.clothesSettings), deleted: countDeleted(exportState.clothesSettings) },
+    adCampaignRequests: { visible: countVisible(exportState.adCampaignRequests), deleted: countDeleted(exportState.adCampaignRequests) }
   };
 
   exportState.ads = filterVisible(exportState.ads);
@@ -704,6 +705,7 @@ function exportData() {
   exportState.clothesShipments = filterVisible(exportState.clothesShipments);
   exportState.clothesOrders = filterVisible(exportState.clothesOrders);
   exportState.clothesSettings = filterVisible(exportState.clothesSettings);
+  exportState.adCampaignRequests = filterVisible(exportState.adCampaignRequests);
   if (serverPartialSnapshot) {
     // Orders, shipments and products are one inventory domain. Exporting only
     // some of it invites an unsafe partial restore, while clothesOrders itself
@@ -713,6 +715,10 @@ function exportData() {
     delete exportState.clothesShipments;
     delete exportState.clothesOrders;
     delete exportState.clothesSettings;
+    // Campaign review state is also server-controlled. A browser only has the
+    // permission-scoped rows loaded for the signed-in user, so including it in
+    // a server report could be mistaken for a complete, restorable snapshot.
+    delete exportState.adCampaignRequests;
   }
   
   // Add export metadata
@@ -725,9 +731,9 @@ function exportData() {
     authoritative: !serverPartialSnapshot,
     restorableCollections: serverPartialSnapshot
       ? []
-      : ['customers', 'pages', 'ads', 'receipts', 'exchangeRateHistory', 'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings'],
+      : ['customers', 'pages', 'ads', 'receipts', 'exchangeRateHistory', 'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings', 'adCampaignRequests'],
     nonRestorableCollections: serverPartialSnapshot
-      ? ['customers', 'pages', 'ads', 'receipts', 'exchangeRateHistory', 'users', 'walletTransactions', 'serviceSubscriptions', 'logs', 'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings']
+      ? ['customers', 'pages', 'ads', 'receipts', 'exchangeRateHistory', 'users', 'walletTransactions', 'serviceSubscriptions', 'logs', 'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings', 'adCampaignRequests']
       : [],
     visibleOnly: true,
     counts,
@@ -1149,6 +1155,7 @@ function importData() {
         state.clothesShipments = Array.isArray(sanitizedImport.clothesShipments) ? sanitizedImport.clothesShipments : [];
         state.clothesOrders = Array.isArray(sanitizedImport.clothesOrders) ? sanitizedImport.clothesOrders : [];
         state.clothesSettings = Array.isArray(sanitizedImport.clothesSettings) ? sanitizedImport.clothesSettings : [];
+        state.adCampaignRequests = Array.isArray(sanitizedImport.adCampaignRequests) ? sanitizedImport.adCampaignRequests : [];
 
         if (sanitizedImport.defaultExchangeRate !== undefined) {
           const rate = parseFloat(sanitizedImport.defaultExchangeRate);

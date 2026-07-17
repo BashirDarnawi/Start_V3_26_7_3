@@ -61,7 +61,7 @@ const SERVICES = {
     subscription: { price: 0, durationDays: 30 },
     openView: 'smart-systems',
     hasChildren: true,
-    children: ['albayan_manager', 'crm', 'store_system', 'clothes_system']
+    children: ['albayan_manager', 'crm', 'store_system', 'clothes_system', 'ad_maker']
   },
   albayan_cards: {
     id: 'albayan_cards',
@@ -72,19 +72,6 @@ const SERVICES = {
     color: 'from-purple-500 to-pink-500',
     description: 'Payment cards',
     descriptionAr: 'بطاقات الدفع',
-    comingSoon: true,
-    requiresSubscription: true,
-    subscription: { price: 0, durationDays: 30 }
-  },
-  ad_maker: {
-    id: 'ad_maker',
-    order: 6,
-    name: 'Ad Maker',
-    nameAr: 'صانع الإعلانات',
-    icon: 'sparkles',
-    color: 'from-indigo-500 to-purple-500',
-    description: 'Create ads yourself',
-    descriptionAr: 'اصنع إعلاناتك',
     comingSoon: true,
     requiresSubscription: true,
     subscription: { price: 0, durationDays: 30 }
@@ -187,6 +174,21 @@ const SMART_SYSTEMS_CHILDREN = {
     requiredSubscriptions: ['clothes_system'],
     subscription: { price: 0, durationDays: 30 },
     openView: 'clothes-system'
+  },
+  ad_maker: {
+    id: 'ad_maker',
+    order: 5,
+    name: 'Albayan Ads Studio',
+    nameAr: 'استوديو إعلانات البيان',
+    icon: 'rocket',
+    color: 'from-blue-600 to-cyan-500',
+    description: 'Customer self-service campaigns',
+    descriptionAr: 'حملات إعلانية ذاتية للعملاء',
+    comingSoon: false,
+    requiresSubscription: true,
+    requiredSubscriptions: ['ad_maker'],
+    subscription: { price: 0, durationDays: 30 },
+    openView: 'ads-studio'
   }
 };
 
@@ -676,6 +678,10 @@ const state = {
   clothesShipments: [], // incoming goods from abroad (Ordered → Received)
   clothesOrders: [], // outgoing customer orders (delivery + payment tracking)
   clothesSettings: [], // one record per user: their own exchange rate etc.
+
+  // Albayan Ads Studio. Campaign requests remain separate from the internal
+  // `ads` accounting collection until an authorized manager approves them.
+  adCampaignRequests: [],
   
   // Settings
   defaultExchangeRate: 0,
@@ -709,6 +715,7 @@ const state = {
   receiptStatusFilter: 'all',
   receiptPaymentFilter: 'all',
   receiptDateFilter: 'all',
+  receiptDebtFilter: 'all',
   receiptCollectedFilter: 'all',
   receiptSortBy: 'newest',
   

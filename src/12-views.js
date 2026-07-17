@@ -531,10 +531,69 @@ function renderLogin() {
           <div class="mt-2 text-[11px] text-slate-400 text-center">
             ${passkeyHint}
           </div>
+          <div data-account-policy-links class="mt-4 flex flex-wrap items-center justify-center gap-2 text-xs">
+            <a href="https://albayanhub.com/privacy" target="_blank" rel="noopener noreferrer" class="min-h-11 inline-flex items-center px-3 font-semibold text-indigo-600 dark:text-indigo-300 hover:underline">
+              ${isRTL ? 'سياسة الخصوصية' : 'Privacy Policy'}
+            </a>
+            <a href="https://albayanhub.com/delete-account" target="_blank" rel="noopener noreferrer" class="min-h-11 inline-flex items-center px-3 font-semibold text-rose-600 dark:text-rose-300 hover:underline">
+              ${isRTL ? 'طلب حذف الحساب' : 'Request Account Deletion'}
+            </a>
+          </div>
         </div>
       </div>
     </div>
   `;
+}
+
+let _postLoginRoutePromise = null;
+
+// A direct link (for example /ads-studio) is still in the address bar while
+// the login screen is open. The login flow deliberately chooses a safe landing
+// page first, so re-apply that direct link only after authentication and only
+// when the authenticated user is allowed to open it.
+function getAllowedPostLoginView(user, requestedView) {
+  const view = String(requestedView || '');
+  if (!user || !Object.prototype.hasOwnProperty.call(VIEW_TO_PATH, view)) return null;
+  if (isAdminRole(user.role)) return view;
+  if (PLATFORM_ADMIN_ONLY_VIEWS.has(view)) return null;
+  if (view === 'delivery-dashboard' && isDeliveryRole(user.role)) return view;
+  return userCanAccessView(user, view) ? view : null;
+}
+
+function restoreRequestedViewAfterLogin(requestedView) {
+  if (!state.currentUser) return false;
+  const targetView = getAllowedPostLoginView(state.currentUser, requestedView);
+  if (targetView) {
+    restoreViewStateFromUrl(targetView);
+    // The address is normally already at the requested path. Passing true is
+    // safe because updateUrlForView replaces the matching history entry rather
+    // than pushing a duplicate.
+    navigateToInternal(targetView, true);
+    return true;
+  }
+  // Root, unknown and unauthorized links must reflect the safe landing chosen
+  // by the login flow instead of leaving a misleading/stale address in the bar.
+  updateUrlForView(state.currentView, true);
+  return false;
+}
+
+function loginFromCurrentRoute(email, password) {
+  const requestedView = getViewFromUrl();
+  const loginPromise = handleLogin(email, password);
+  if (!loginPromise || typeof loginPromise.then !== 'function') return loginPromise;
+
+  // Both click and submit can fire for the same form action. handleLogin()
+  // intentionally returns the same in-flight promise; attach one redirect only.
+  if (_postLoginRoutePromise === loginPromise) return loginPromise;
+  _postLoginRoutePromise = loginPromise;
+  const clearPendingRoute = () => {
+    if (_postLoginRoutePromise === loginPromise) _postLoginRoutePromise = null;
+  };
+  loginPromise.then(() => {
+    if (state.currentUser) restoreRequestedViewAfterLogin(requestedView);
+    clearPendingRoute();
+  }, clearPendingRoute);
+  return loginPromise;
 }
 
 function attachLoginHandlers() {
@@ -572,7 +631,7 @@ function attachLoginHandlers() {
         }
       } catch (_) {}
       // #endregion
-      handleLogin(email, password);
+      loginFromCurrentRoute(email, password);
     });
 
     // #region agent log
@@ -603,7 +662,7 @@ function attachLoginHandlers() {
           // If valid, force the login call here so we don't depend on submit firing.
           if (formOk === true) {
             e.preventDefault();
-            handleLogin(email, password);
+            loginFromCurrentRoute(email, password);
           }
         });
       }
@@ -614,7 +673,7 @@ function attachLoginHandlers() {
 
 function renderMainApp() {
   const dir = getDir();
-  const showSidebar = !['services-hub', 'smart-systems', 'service-placeholder', 'wallet', 'clothes-system'].includes(state.currentView);
+  const showSidebar = !['services-hub', 'smart-systems', 'service-placeholder', 'wallet', 'clothes-system', 'ads-studio'].includes(state.currentView);
   
   return `
     <div class="app-shell flex min-h-screen" dir="${dir}">
@@ -629,6 +688,20 @@ function renderMainApp() {
         ` : ''}
         <div class="app-content min-w-0 p-4 md:p-8 max-w-7xl mx-auto">${renderView()}</div>
       </main>
+    </div>
+  `;
+}
+
+function renderAlwaysAvailableAccountLinks() {
+  const isAr = state.language === 'ar';
+  return `
+    <div data-account-policy-links class="grid grid-cols-2 gap-2 text-[11px]">
+      <a href="https://albayanhub.com/privacy" target="_blank" rel="noopener noreferrer" class="min-h-11 rounded-lg px-2 py-2 flex items-center justify-center text-center font-semibold text-indigo-600 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-900/20">
+        ${isAr ? 'سياسة الخصوصية' : 'Privacy Policy'}
+      </a>
+      <a href="https://albayanhub.com/delete-account" target="_blank" rel="noopener noreferrer" class="min-h-11 rounded-lg px-2 py-2 flex items-center justify-center text-center font-semibold text-rose-600 dark:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-900/20">
+        ${isAr ? 'طلب حذف الحساب' : 'Delete Account'}
+      </a>
     </div>
   `;
 }
@@ -711,7 +784,8 @@ function renderSidebar() {
             <p class="text-xs text-slate-400 mt-1">${state.language === 'ar' ? 'تواصل مع المدير للحصول على الصلاحيات' : 'Contact admin for permissions'}</p>
           </div>
         </div>
-        <div class="p-4 border-t border-white/10">
+        <div class="p-4 space-y-2 border-t border-white/10">
+          ${renderAlwaysAvailableAccountLinks()}
           <button onclick="handleLogout()" class="w-full flex items-center justify-center space-x-2 px-4 py-3 rounded-xl font-medium text-rose-600 bg-rose-50 dark:bg-rose-900/20 hover:bg-rose-100">
             <i data-lucide="log-out" class="w-5 h-5"></i>
             <span>${t('logout')}</span>
@@ -762,6 +836,8 @@ function renderSidebar() {
             <i data-lucide="settings" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
           </button>
         </div>
+
+        ${renderAlwaysAvailableAccountLinks()}
         
         <div class="flex items-center justify-between bg-white/20 dark:bg-slate-800/20 rounded-xl p-2">
           <button onclick="toggleTheme()" class="flex-1 flex items-center justify-center space-x-2 py-2 rounded-lg text-xs font-bold hover:bg-white/20">
@@ -787,6 +863,7 @@ function renderView() {
     case 'services-hub': return renderServicesHub();
     case 'smart-systems': return renderSmartSystems();
     case 'clothes-system': return renderClothesSystemView();
+    case 'ads-studio': return renderAdsStudioView();
     case 'service-placeholder': return renderServicePlaceholder();
     case 'wallet': return renderWalletView();
     case 'analytics': return renderAnalyticsView();
@@ -2196,8 +2273,13 @@ function renderReceiptsView() {
     
     // Status filter
     if (state.receiptStatusFilter !== 'all') {
-      const status = (receipt.status || '').toLowerCase();
-      if (status !== state.receiptStatusFilter.toLowerCase()) return false;
+      const requestedStatus = ({
+        pending: 'not_paid',
+        unpaid: 'not_paid',
+        'not-paid': 'not_paid',
+        cancelled: 'canceled'
+      })[state.receiptStatusFilter] || state.receiptStatusFilter;
+      if (getReceiptPaymentState(receipt) !== requestedStatus) return false;
     }
     
     // Payment method filter
@@ -2217,6 +2299,17 @@ function renderReceiptsView() {
       if (state.receiptDateFilter === 'today' && receiptDate < today) return false;
       if (state.receiptDateFilter === 'week' && receiptDate < weekAgo) return false;
       if (state.receiptDateFilter === 'month' && receiptDate < monthAgo) return false;
+    }
+
+    // Customer debt source (delivery driver vs customer paying in the shop).
+    // This is deliberately independent of the internal Collected flag.
+    const debtFilter = state.receiptDebtFilter || 'all';
+    if (debtFilter !== 'all') {
+      const debtType = getReceiptDebtType(receipt);
+      if (debtFilter === 'any-debt' && debtType === 'none') return false;
+      if (debtFilter === 'delivery-debt' && debtType !== 'delivery') return false;
+      if (debtFilter === 'shop-debt' && debtType !== 'shop') return false;
+      if (debtFilter === 'no-debt' && debtType !== 'none') return false;
     }
     
     // Collected filter
@@ -2246,12 +2339,12 @@ function renderReceiptsView() {
     }
   });
   
-  const hasActiveFilters = state.receiptSearch || state.receiptStatusFilter !== 'all' || state.receiptPaymentFilter !== 'all' || state.receiptDateFilter !== 'all' || state.receiptCollectedFilter !== 'all';
+  const hasActiveFilters = state.receiptSearch || state.receiptStatusFilter !== 'all' || state.receiptPaymentFilter !== 'all' || state.receiptDateFilter !== 'all' || (state.receiptDebtFilter || 'all') !== 'all' || state.receiptCollectedFilter !== 'all';
 
   // Reset pagination whenever the filter/sort/search combination changes.
   const filterFingerprint = JSON.stringify([
     state.receiptSearch, state.receiptStatusFilter, state.receiptPaymentFilter,
-    state.receiptDateFilter, state.receiptCollectedFilter, state.receiptSortBy
+    state.receiptDateFilter, state.receiptDebtFilter || 'all', state.receiptCollectedFilter, state.receiptSortBy
   ]);
   if (filterFingerprint !== _receiptsFilterFingerprint) {
     _receiptsFilterFingerprint = filterFingerprint;
@@ -2296,8 +2389,9 @@ function renderReceiptsView() {
             <select onchange="updateReceiptFilter('status', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptStatusFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all" ${state.receiptStatusFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل الحالات' : 'All Status'}</option>
               <option value="paid" ${state.receiptStatusFilter === 'paid' ? 'selected' : ''}>✓ ${isArV ? 'مدفوع' : 'Paid'}</option>
-              <option value="pending" ${state.receiptStatusFilter === 'pending' ? 'selected' : ''}>⏳ ${isArV ? 'قيد الانتظار' : 'Pending'}</option>
-              <option value="cancelled" ${state.receiptStatusFilter === 'cancelled' ? 'selected' : ''}>✕ ${isArV ? 'ملغي' : 'Cancelled'}</option>
+              <option value="not_paid" ${['not_paid', 'pending', 'unpaid', 'not-paid'].includes(state.receiptStatusFilter) ? 'selected' : ''}>⏳ ${isArV ? 'غير مدفوع / دين' : 'Unpaid / Debt'}</option>
+              <option value="canceled" ${['canceled', 'cancelled'].includes(state.receiptStatusFilter) ? 'selected' : ''}>✕ ${isArV ? 'ملغي' : 'Canceled'}</option>
+              <option value="lost" ${state.receiptStatusFilter === 'lost' ? 'selected' : ''}>⚠ ${isArV ? 'ضائع' : 'Lost'}</option>
             </select>
             
             <!-- Payment Method Filter -->
@@ -2315,6 +2409,15 @@ function renderReceiptsView() {
               <option value="today" ${state.receiptDateFilter === 'today' ? 'selected' : ''}>📅 ${isArV ? 'اليوم' : 'Today'}</option>
               <option value="week" ${state.receiptDateFilter === 'week' ? 'selected' : ''}>📆 ${isArV ? 'هذا الأسبوع' : 'This Week'}</option>
               <option value="month" ${state.receiptDateFilter === 'month' ? 'selected' : ''}>🗓️ ${isArV ? 'هذا الشهر' : 'This Month'}</option>
+            </select>
+
+            <!-- Customer Debt Source Filter -->
+            <select onchange="updateReceiptFilter('debt', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${(state.receiptDebtFilter || 'all') !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
+              <option value="all" ${(state.receiptDebtFilter || 'all') === 'all' ? 'selected' : ''}>${isArV ? 'كل أنواع الديون' : 'All Debt Types'}</option>
+              <option value="any-debt" ${state.receiptDebtFilter === 'any-debt' ? 'selected' : ''}>${isArV ? 'أي دين' : 'Any Debt'}</option>
+              <option value="delivery-debt" ${state.receiptDebtFilter === 'delivery-debt' ? 'selected' : ''}>🚚 ${isArV ? 'دين توصيل' : 'Delivery Debt'}</option>
+              <option value="shop-debt" ${state.receiptDebtFilter === 'shop-debt' ? 'selected' : ''}>🏪 ${isArV ? 'دين داخل المحل' : 'In-shop Debt'}</option>
+              <option value="no-debt" ${state.receiptDebtFilter === 'no-debt' ? 'selected' : ''}>✓ ${isArV ? 'بدون دين' : 'No Debt'}</option>
             </select>
             
             <!-- Collected Filter -->
@@ -2347,9 +2450,10 @@ function renderReceiptsView() {
           <div class="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
             <span class="text-xs font-medium text-slate-500">${isArV ? 'الفلاتر النشطة:' : 'Active filters:'}</span>
             ${state.receiptSearch ? `<span class="px-2 py-1 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full text-xs font-medium flex items-center"><i data-lucide="search" class="w-3 h-3 mr-1"></i>"${Security.escapeHtml(state.receiptSearch)}"</span>` : ''}
-            ${state.receiptStatusFilter !== 'all' ? `<span class="px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-full text-xs font-medium">${isArV ? ({ paid: 'مدفوع', pending: 'قيد الانتظار', cancelled: 'ملغي' })[state.receiptStatusFilter] || state.receiptStatusFilter : state.receiptStatusFilter}</span>` : ''}
+            ${state.receiptStatusFilter !== 'all' ? `<span class="px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-full text-xs font-medium">${isArV ? ({ paid: 'مدفوع', not_paid: 'غير مدفوع / دين', pending: 'غير مدفوع / دين', unpaid: 'غير مدفوع / دين', canceled: 'ملغي', cancelled: 'ملغي', lost: 'ضائع' })[state.receiptStatusFilter] || state.receiptStatusFilter : ({ paid: 'Paid', not_paid: 'Unpaid / Debt', pending: 'Unpaid / Debt', unpaid: 'Unpaid / Debt', canceled: 'Canceled', cancelled: 'Canceled', lost: 'Lost' })[state.receiptStatusFilter] || state.receiptStatusFilter}</span>` : ''}
             ${state.receiptPaymentFilter !== 'all' ? `<span class="px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded-full text-xs font-medium">${isArV ? ({ cash: 'نقدي', usdt: 'USDT', bank: 'حوالة مصرفية', split: 'دفعات مقسّمة' })[state.receiptPaymentFilter] || state.receiptPaymentFilter : state.receiptPaymentFilter}</span>` : ''}
             ${state.receiptDateFilter !== 'all' ? `<span class="px-2 py-1 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-full text-xs font-medium">${isArV ? ({ today: 'اليوم', week: 'هذا الأسبوع', month: 'هذا الشهر' })[state.receiptDateFilter] || state.receiptDateFilter : state.receiptDateFilter}</span>` : ''}
+            ${(state.receiptDebtFilter || 'all') !== 'all' ? `<span class="px-2 py-1 bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 rounded-full text-xs font-medium">${isArV ? ({ 'any-debt': 'أي دين', 'delivery-debt': 'دين توصيل', 'shop-debt': 'دين داخل المحل', 'no-debt': 'بدون دين' })[state.receiptDebtFilter] : ({ 'any-debt': 'Any Debt', 'delivery-debt': 'Delivery Debt', 'shop-debt': 'In-shop Debt', 'no-debt': 'No Debt' })[state.receiptDebtFilter]}</span>` : ''}
             ${state.receiptCollectedFilter !== 'all' ? `<span class="px-2 py-1 ${state.receiptCollectedFilter === 'collected' ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300' : 'bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300'} rounded-full text-xs font-medium">${isArV ? (state.receiptCollectedFilter === 'collected' ? 'مُحصَّل' : 'غير مُحصَّل') : state.receiptCollectedFilter}</span>` : ''}
           </div>
         ` : ''}</div>
@@ -2366,6 +2470,7 @@ function renderReceiptsView() {
           const payments = Array.isArray(receipt.payments) ? receipt.payments : [];
           const hasMultiplePayments = payments.length > 1;
           const receiptPhotoCount = getReceiptPhotoCount(receipt);
+          const receiptDebtType = getReceiptDebtType(receipt);
 
           // Calculate total paid as sum of R1 values (amount × rate)
           const totalPaid = payments.reduce((sum, p) => sum + ((p.amount || 0) * (p.rate || 1)), 0) || receipt.amountLocal;
@@ -2579,10 +2684,17 @@ function renderReceiptsView() {
 
               <div class="flex flex-col space-y-2 pt-3 border-t border-slate-200 dark:border-slate-700">
                 <div class="flex justify-between items-center">
-                  <span class="status-badge status-${(receipt.status || '').toLowerCase()}">${trStatus(receipt.status || 'Unknown')}</span>
-                  <div class="flex space-x-2">
+                  <div class="flex flex-wrap items-center gap-1.5">
+                    <span class="status-badge status-${(receipt.status || '').toLowerCase()}">${trStatus(receipt.status || 'Unknown')}</span>
+                    ${receiptDebtType === 'delivery' ? `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-bold bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300"><i data-lucide="truck" class="w-3 h-3"></i>${isArV ? 'دين توصيل' : 'Delivery Debt'}</span>` : ''}
+                    ${receiptDebtType === 'shop' ? `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300"><i data-lucide="store" class="w-3 h-3"></i>${isArV ? 'دين داخل المحل' : 'In-shop Debt'}</span>` : ''}
+                  </div>
+                  <div class="flex flex-wrap justify-end gap-2">
                     ${receiptPhotoCount > 0 ? `<button type="button" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" onclick="openReceiptPhotoViewer(this.dataset.receiptId, 0)" class="inline-flex items-center gap-1 text-cyan-600 hover:text-cyan-700 font-bold" title="${isArV ? `عرض صور الوصل (${receiptPhotoCount})` : `View receipt photos (${receiptPhotoCount})`}" aria-label="${isArV ? `عرض صور الوصل (${receiptPhotoCount})` : `View receipt photos (${receiptPhotoCount})`}">
                       <i data-lucide="images" class="w-4 h-4"></i><span class="text-xs">${isArV ? 'الصور' : 'Photos'} ${receiptPhotoCount}</span>
+                    </button>` : ''}
+                    ${canShareDeliveryReceiptToWhatsApp(receipt) ? `<button type="button" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" onclick="showDeliveryWhatsAppPrompt(this.dataset.receiptId, this)" class="inline-flex min-h-11 items-center gap-1 text-emerald-600 hover:text-emerald-700 font-bold" title="${isArV ? 'مشاركة معلومات التوصيل على واتساب' : 'Share delivery information to WhatsApp'}" aria-label="${isArV ? 'مشاركة معلومات التوصيل على واتساب' : 'Share delivery information to WhatsApp'}">
+                      <i data-lucide="message-circle" class="w-4 h-4"></i><span class="text-xs">WhatsApp</span>
                     </button>` : ''}
                     ${_isTransferableReceipt(receipt) ? `<button onclick="showReceiptTransferModal('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="${isArV ? 'تحويل الرصيد' : 'Transfer balance'}">
                       <i data-lucide="swap" class="w-4 h-4"></i>
@@ -3339,6 +3451,11 @@ function renderDeliveriesView() {
                           <button onclick="showDeliveryDetails('${ad.id}')" class="p-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-300 transition-colors" title="${isAr ? 'عرض التفاصيل' : 'View Details'}">
                             <i data-lucide="eye" class="w-4 h-4"></i>
                           </button>
+                          ${canShareDeliveryReceiptToWhatsApp(ad) ? `
+                            <button type="button" data-receipt-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="showDeliveryWhatsAppPrompt(this.dataset.receiptId, this)" class="min-w-11 min-h-11 md:min-w-0 md:min-h-0 p-1.5 rounded-lg bg-emerald-100 text-emerald-700 hover:bg-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 transition-colors" title="${isAr ? 'مشاركة على واتساب' : 'Share to WhatsApp'}" aria-label="${isAr ? 'مشاركة معلومات التوصيل على واتساب' : 'Share delivery information to WhatsApp'}">
+                              <i data-lucide="message-circle" class="w-4 h-4"></i>
+                            </button>
+                          ` : ''}
                           ${canAssign && String(ad.deliveryStatus || '') !== 'Delivered' ? `
                             <button onclick="removeDeliveryMission('${ad.id}')" class="p-1.5 rounded-lg bg-rose-100 text-rose-700 hover:bg-rose-200 dark:bg-rose-900/30 dark:text-rose-300 transition-colors" title="${isAr ? 'حذف المهمة' : 'Delete Mission'}">
                               <i data-lucide="trash-2" class="w-4 h-4"></i>
@@ -3405,6 +3522,11 @@ function renderDeliveriesView() {
                 ` : `<div class="mb-2 text-xs text-slate-400">${isAr ? 'غير مُعيَّن' : 'Unassigned'}</div>`)}
 
                 <div class="flex space-x-2">
+                  ${canShareDeliveryReceiptToWhatsApp(ad) ? `
+                    <button type="button" data-receipt-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="showDeliveryWhatsAppPrompt(this.dataset.receiptId, this)" class="min-h-11 bg-emerald-600 text-white px-3 py-1.5 rounded-lg text-sm font-bold flex items-center justify-center gap-1" title="${isAr ? 'مشاركة على واتساب' : 'Share to WhatsApp'}">
+                      <i data-lucide="message-circle" class="w-4 h-4"></i><span class="sr-only">WhatsApp</span>
+                    </button>
+                  ` : ''}
                   ${String(ad.deliveryStatus || '') !== 'Delivered' && String(ad.deliveryStatus || '') !== 'Canceled' ? `
                     <button onclick="openDeliveryCancelModal('${ad.id}')" class="flex-1 bg-rose-600 text-white px-3 py-1.5 rounded-lg text-sm font-bold flex items-center justify-center space-x-1">
                       <i data-lucide="x-circle" class="w-4 h-4"></i>
@@ -4032,6 +4154,11 @@ function renderDeliveryDashboard() {
                       </div>
                     </div>
                     <div class="flex flex-row md:flex-col gap-2 w-full md:w-auto">
+                      ${canShareDeliveryReceiptToWhatsApp(ad) ? `
+                        <button type="button" data-receipt-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="showDeliveryWhatsAppPrompt(this.dataset.receiptId, this)" class="min-h-11 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center gap-1" title="${isAr ? 'مشاركة معلومات التوصيل في مجموعة واتساب' : 'Share delivery information to a WhatsApp group'}">
+                          <i data-lucide="message-circle" class="w-4 h-4"></i>${isAr ? 'مشاركة للمجموعة' : 'Share to Group'}
+                        </button>
+                      ` : ''}
                       ${ad.deliveryStatus === 'Needs Delivery' ? `
                         <button onclick="acceptDelivery('${ad.id}')" class="btn-shine bg-blue-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
                           <i data-lucide="check" class="w-4 h-4 mr-1"></i>${isAr ? 'قبول' : 'Accept'}
@@ -5260,6 +5387,29 @@ function renderSettingsView() {
                 : 'No recovery key created yet.')}
           </div>
         ` : ''}
+      </div>
+
+      <!-- Privacy and account deletion -->
+      <div class="glass-panel rounded-2xl p-6">
+        <h2 class="text-xl font-bold mb-4 flex items-center">
+          <i data-lucide="shield-check" class="w-5 h-5 mr-2 text-indigo-600"></i>
+          ${isAr ? 'الخصوصية والحساب' : 'Privacy & Account'}
+        </h2>
+        <p class="text-sm text-slate-600 dark:text-slate-300 mb-4">
+          ${isAr
+            ? 'يمكنك قراءة سياسة الخصوصية أو إرسال طلب موثّق لحذف حسابك. الطلب لا يحذف السجلات تلقائياً؛ يراجعه المدير لحماية سجلات العمل المشتركة.'
+            : 'Read the privacy policy or submit a verified account-deletion request. A request does not erase records automatically; an administrator reviews it to protect shared business records.'}
+        </p>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <a href="https://albayanhub.com/privacy" target="_blank" rel="noopener noreferrer" class="min-h-11 glass-panel rounded-xl px-4 py-3 font-bold flex items-center justify-center space-x-2 hover:shadow-xl">
+            <i data-lucide="file-lock-2" class="w-5 h-5 text-indigo-600"></i>
+            <span>${isAr ? 'سياسة الخصوصية' : 'Privacy Policy'}</span>
+          </a>
+          <a href="https://albayanhub.com/delete-account" target="_blank" rel="noopener noreferrer" class="min-h-11 rounded-xl px-4 py-3 font-bold flex items-center justify-center space-x-2 border border-rose-300 text-rose-700 dark:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-950/30">
+            <i data-lucide="user-round-x" class="w-5 h-5"></i>
+            <span>${isAr ? 'طلب حذف الحساب' : 'Request Account Deletion'}</span>
+          </a>
+        </div>
       </div>
 
       <!-- Performance mode (for slow devices) -->

@@ -516,6 +516,20 @@ function renderModal() {
             </div>
           </div>
           
+          ${!isEdit && isAdminEditor ? `
+            <div class="rounded-xl border border-cyan-200 bg-cyan-50 p-4 dark:border-cyan-800 dark:bg-cyan-900/20">
+              <label class="mb-2 block text-xs font-bold uppercase text-cyan-800 dark:text-cyan-200">${isArU ? 'نوع الوصول' : 'Access preset'}</label>
+              <select id="user-access-preset" class="glass-input min-h-12 w-full rounded-xl px-4">
+                <option value="adsStudioCustomer" ${window._newUserAccessPreset === 'adsStudioCustomer' ? 'selected' : ''}>${isArU ? 'عميل استوديو الإعلانات — يرى حملاته فقط' : 'Ads Studio customer — own campaigns only'}</option>
+                <option value="salesAgent" ${window._newUserAccessPreset !== 'adsStudioCustomer' ? 'selected' : ''}>${isArU ? 'موظف مبيعات' : 'Sales employee'}</option>
+                <option value="adsStudioReviewer">${isArU ? 'مراجع حملات العملاء' : 'Ads Studio reviewer'}</option>
+                <option value="clothesSubscriber">${isArU ? 'مشترك نظام الملابس' : 'Clothes System subscriber'}</option>
+                <option value="viewer">${isArU ? 'قراءة فقط' : 'Read only'}</option>
+              </select>
+              <p class="mt-2 text-xs text-cyan-700 dark:text-cyan-300">${isArU ? 'حساب عميل استوديو الإعلانات لا يحصل على صلاحية الإعلانات الداخلية أو الوصلات أو بيانات العملاء.' : 'An Ads Studio customer receives no access to internal Ads, Receipts, or customer records.'}</p>
+            </div>
+          ` : ''}
+
           <!-- Role Info -->
           <div id="role-info" class="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
             <div class="flex items-center space-x-3">
@@ -2813,8 +2827,11 @@ async function handleModalSubmit() {
             return {}; // Admins get all permissions automatically
           case 'Delivery':
             return PERMISSION_TEMPLATES.deliveryDriver.permissions;
-          case 'Employee':
-            return PERMISSION_TEMPLATES.salesAgent.permissions;
+          case 'Employee': {
+            const presetKey = String(document.getElementById('user-access-preset')?.value || window._newUserAccessPreset || 'salesAgent');
+            const preset = PERMISSION_TEMPLATES[presetKey] || PERMISSION_TEMPLATES.salesAgent;
+            return preset.permissions;
+          }
           default:
             return PERMISSION_TEMPLATES.viewer.permissions;
         }
@@ -3147,6 +3164,9 @@ function showWalletTopupModal(userId) {
 }
 
 function closeModal() {
+  // One-shot preset used by Ads Studio's "Customer login" shortcut. Never
+  // let it silently affect a later user created from the normal Users screen.
+  window._newUserAccessPreset = '';
   state.activeModal = null;
   state.modalData = null;
   // Existing-balance mode never leaks to the next receipt (showReceiptModal also

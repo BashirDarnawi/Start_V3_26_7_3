@@ -1,13 +1,38 @@
 apply plugin: 'com.android.application'
 
-// Release signing (required for Play Store builds).
-// Create android/key.properties from android/key.properties.example and a
-// keystore (see android/RELEASE_SIGNING.md). Without key.properties, release
-// builds are simply unsigned — debug builds are unaffected either way.
+// Release signing (required for any bundle uploaded to Google Play).
+// Create android/key.properties and a keystore as described in
+// android/RELEASE_SIGNING.md. A local release build deliberately fails when
+// signing is missing or still contains example values, so an unsigned bundle
+// cannot be mistaken for a publishable one.
 def keystoreProperties = new Properties()
 def keystorePropertiesFile = rootProject.file('key.properties')
 if (keystorePropertiesFile.exists()) {
     keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+
+def allowCiUnsignedReleaseBundle =
+    System.getenv('GITHUB_ACTIONS') == 'true' &&
+    System.getenv('ALBAYAN_CI_ALLOW_UNSIGNED_RELEASE_BUNDLE') == 'true'
+def signingErrors = []
+def releaseSigningReady = false
+
+if (keystorePropertiesFile.exists()) {
+    ['storeFile', 'storePassword', 'keyAlias', 'keyPassword'].each { propertyName ->
+        def value = keystoreProperties[propertyName]?.toString()?.trim()
+        if (!value || value == 'CHANGE_ME') {
+            signingErrors << "${propertyName} is missing or still set to CHANGE_ME"
+        }
+    }
+
+    if (signingErrors.isEmpty()) {
+        def configuredStoreFile = file(keystoreProperties['storeFile'])
+        if (!configuredStoreFile.exists()) {
+            signingErrors << "storeFile does not exist: ${configuredStoreFile}"
+        } else {
+            releaseSigningReady = true
+        }
+    }
 }
 
 android {
@@ -30,7 +55,7 @@ android {
         }
     }
     signingConfigs {
-        if (keystorePropertiesFile.exists()) {
+        if (releaseSigningReady) {
             release {
                 keyAlias keystoreProperties['keyAlias']
                 keyPassword keystoreProperties['keyPassword']
@@ -43,9 +68,48 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            if (keystorePropertiesFile.exists()) {
+            if (releaseSigningReady) {
                 signingConfig signingConfigs.release
             }
+        }
+    }
+}
+
+// Attach the guard to every release variant's pre-build lifecycle. This is
+// intentionally variant-aware instead of inspecting the command-line task
+// names: aggregate tasks such as `gradlew build` also reach preReleaseBuild and
+// therefore cannot produce an unsigned release by accident.
+android.applicationVariants.configureEach { variant ->
+    if (variant.buildType.name == 'release') {
+        def capitalizedVariantName = variant.name.capitalize()
+        def signingVerificationTask = tasks.register(
+            "verify${capitalizedVariantName}SigningConfiguration"
+        ) {
+            group = 'verification'
+            description = "Verify signing before building the ${variant.name} variant"
+            doLast {
+                if (releaseSigningReady) {
+                    return
+                }
+
+                if (allowCiUnsignedReleaseBundle && !keystorePropertiesFile.exists()) {
+                    logger.warn(
+                        'Building an UNSIGNED release bundle for CI validation only. Do not publish it.'
+                    )
+                    return
+                }
+
+                def reason = keystorePropertiesFile.exists()
+                    ? signingErrors.join('; ')
+                    : 'android/key.properties was not found'
+                throw new GradleException(
+                    "Cannot build a publishable release: ${reason}. " +
+                    'Follow android/RELEASE_SIGNING.md. Never share signing passwords.'
+                )
+            }
+        }
+        variant.preBuildProvider.configure {
+            dependsOn(signingVerificationTask)
         }
     }
 }

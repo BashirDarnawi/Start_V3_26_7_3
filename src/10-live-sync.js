@@ -19,6 +19,7 @@ const _serverLiveSync = {
   serverWatermark: 0,
   fullLoadCursorReady: false,
   collectionCursors: Object.create(null),
+  serviceEntitlements: null,
   // Authentication identity and poller lifecycle are deliberately separate.
   // sessionEpoch changes only when the authenticated session changes; it is
   // part of getServerSessionIdentity(), so late full-load/cache responses are
@@ -34,7 +35,33 @@ function advanceServerSessionEpoch() {
   _serverLiveSync.cursor = 0;
   _serverLiveSync.fullLoadCursorReady = false;
   _serverLiveSync.collectionCursors = Object.create(null);
+  _serverLiveSync.serviceEntitlements = null;
+  if (typeof clearTransientEntityMediaCache === 'function') clearTransientEntityMediaCache('adCampaignRequests');
   _serverLiveSync.lastDeliverySig = null;
+}
+
+const SERVER_SERVICE_ENTITLEMENT_COLLECTIONS = Object.freeze({
+  ad_maker: Object.freeze(['adCampaignRequests']),
+  clothes_system: Object.freeze(['clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings'])
+});
+const SERVER_MEDIA_BEARING_COLLECTIONS = new Set(['ads', 'receipts', 'adCampaignRequests', 'clothesProducts']);
+
+function getServerServiceEntitlementSnapshot(user = state.currentUser, subscriptions = state.serviceSubscriptions, nowMs = Date.now()) {
+  const uid = String(user?.id || '');
+  const rows = Array.isArray(subscriptions) ? subscriptions : [];
+  const snapshot = Object.create(null);
+  for (const serviceId of Object.keys(SERVER_SERVICE_ENTITLEMENT_COLLECTIONS)) {
+    snapshot[serviceId] = !!uid && rows.some(row => row && !row._deleted &&
+      String(row.userId || '') === uid && String(row.serviceId || '') === serviceId &&
+      String(row.status || '') === 'active' &&
+      (!row.expiresAt || new Date(row.expiresAt).getTime() > nowMs));
+  }
+  return snapshot;
+}
+
+function getRevokedServerServiceEntitlements(before, after) {
+  return Object.keys(SERVER_SERVICE_ENTITLEMENT_COLLECTIONS)
+    .filter(serviceId => before?.[serviceId] === true && after?.[serviceId] !== true);
 }
 
 function getServerCollectionCursor(collection) {
@@ -65,6 +92,7 @@ function computeServerCursorFromState() {
     _maxLastModifiedFromArray(state.clothesShipments),
     _maxLastModifiedFromArray(state.clothesOrders),
     _maxLastModifiedFromArray(state.clothesSettings),
+    _maxLastModifiedFromArray(state.adCampaignRequests),
     _maxLastModifiedFromArray(state.walletTransactions),
     _maxLastModifiedFromArray(state.serviceSubscriptions)
   );
@@ -82,6 +110,10 @@ function getServerCollectionVisibilityScope(user, collection) {
   if (role === 'delivery' && ['ads', 'receipts', 'customers'].includes(name)) return 'assigned';
   const modulePermissions = user.permissions?.[name];
   if (!Array.isArray(modulePermissions)) return 'none';
+  // Review access is deliberately narrower than ordinary view-all access: the
+  // server omits unfinished customer drafts. Keeping this scope distinct also
+  // forces cache/IndexedDB purge when an employee changes from view to review.
+  if (name === 'adCampaignRequests' && modulePermissions.some(action => String(action).toLowerCase() === 'review')) return 'review';
   if (modulePermissions.some(action => String(action).toLowerCase() === 'view')) return 'all';
   if (modulePermissions.some(action => String(action).toLowerCase() === 'viewown')) return 'own';
   return 'none';
@@ -100,6 +132,11 @@ function getAuthorizedServerSyncCollections(user = state.currentUser) {
     if (collection.startsWith('clothes') && !isAdminRole(user?.role)) {
       return hasSubscription('clothes_system');
     }
+    if (collection === 'adCampaignRequests' && !isAdminRole(user?.role)) {
+      const isReviewer = Array.isArray(user?.permissions?.adCampaignRequests) &&
+        user.permissions.adCampaignRequests.some(action => String(action).toLowerCase() === 'review');
+      return isReviewer || hasSubscription('ad_maker');
+    }
     return true;
   });
 }
@@ -113,6 +150,12 @@ async function clearServerCollectionsForVisibility(collections) {
   const names = Array.from(new Set((collections || []).map(String)))
     .filter(name => SERVER_SYNC_COLLECTIONS.includes(name));
   if (names.length === 0) return false;
+  // Body-mounted viewers outlive the view HTML. Close them synchronously before
+  // any media-bearing collection is purged or an old photo can remain visible.
+  if (names.some(name => SERVER_MEDIA_BEARING_COLLECTIONS.has(name)) && typeof closeReceiptPhotoViewer === 'function') {
+    closeReceiptPhotoViewer(false);
+  }
+  if (typeof clearTransientEntityMediaCache === 'function') clearTransientEntityMediaCache(names);
   for (const name of names) {
     if (serverSessionIdentityChanged(identity)) return false;
     state[name] = [];
@@ -164,6 +207,7 @@ async function apiLoadCollectionSince(collection, sinceMs) {
     let lastEntity = null;
     for (const rawEntity of items) {
       const entity = validateServerEntityResponse(collection, rawEntity, `delta[${all.length}]`);
+      if (String(collection || '') === 'adCampaignRequests') entity.data = makeLightweightMediaRecord(collection, entity.data);
       lastEntity = entity;
       mergeServerEntityDataById(all, indexById, entity);
     }
@@ -292,14 +336,23 @@ function applyServerDelta(collectionName, records) {
   return changed;
 }
 
-// Customer page spending is rendered in a body-mounted, read-only dialog rather
-// than inside #app. A normal view render cannot update or remove it, so any
-// authoritative state replacement must close it before stale financial data can
-// remain visible. Never restore focus here: the original card/button may already
-// have been replaced by the same sync or by a logout render.
+// Customer page spending and the delivery WhatsApp preview are body-mounted
+// dialogs rather than children of #app. A normal view render cannot update or
+// remove them, so any authoritative state replacement must close them before
+// stale financial/contact data can remain visible. Never restore focus here:
+// the original card/button may already have been replaced by sync or logout.
 function _closeCustomerPagesDialogForStateChange() {
+  let closed = false;
+  const shareDialog = document.getElementById('delivery-whatsapp-share-dialog');
+  if (shareDialog) {
+    try {
+      if (typeof closeDeliveryWhatsAppPrompt === 'function') closeDeliveryWhatsAppPrompt(false);
+      else shareDialog.remove();
+    } catch (_) { shareDialog.remove(); }
+    closed = true;
+  }
   const dialog = document.getElementById('customer-pages-dialog');
-  if (!dialog) return false;
+  if (!dialog) return closed;
   try {
     if (typeof closeCustomerPagesDialog === 'function') {
       closeCustomerPagesDialog(false);
@@ -409,6 +462,7 @@ async function serverLiveSyncOnce() {
   // whose zero cursor then performs a complete catch-up for the newly granted
   // collection.
   const deltaCollections = getAuthorizedServerSyncCollections();
+  const entitlementBefore = _serverLiveSync.serviceEntitlements || getServerServiceEntitlementSnapshot();
   if (!_serverLiveSync.collectionCursors || typeof _serverLiveSync.collectionCursors !== 'object') {
     _serverLiveSync.collectionCursors = Object.create(null);
   }
@@ -441,6 +495,7 @@ async function serverLiveSyncOnce() {
   const clothesShipmentsDelta = recordsFor('clothesShipments');
   const clothesOrdersDelta = recordsFor('clothesOrders');
   const clothesSettingsDelta = recordsFor('clothesSettings');
+  const adCampaignRequestsDelta = recordsFor('adCampaignRequests');
   const walletTxDelta = recordsFor('walletTransactions');
   const subsDelta = recordsFor('serviceSubscriptions');
 
@@ -481,8 +536,33 @@ async function serverLiveSyncOnce() {
   changed = applyServerDelta('clothesShipments', clothesShipmentsDelta) || changed;
   changed = applyServerDelta('clothesOrders', clothesOrdersDelta) || changed;
   changed = applyServerDelta('clothesSettings', clothesSettingsDelta) || changed;
+  changed = applyServerDelta('adCampaignRequests', adCampaignRequestsDelta) || changed;
   changed = applyServerDelta('walletTransactions', walletTxDelta) || changed;
   changed = applyServerDelta('serviceSubscriptions', subsDelta) || changed;
+
+  const entitlementAfter = getServerServiceEntitlementSnapshot();
+  const revokedServices = getRevokedServerServiceEntitlements(entitlementBefore, entitlementAfter);
+  _serverLiveSync.serviceEntitlements = entitlementAfter;
+  if (revokedServices.length > 0) {
+    const revokedCollections = Array.from(new Set(revokedServices.flatMap(serviceId => SERVER_SERVICE_ENTITLEMENT_COLLECTIONS[serviceId] || [])));
+    // Hide body-mounted photos and unfinished Ads Studio form state before the
+    // first await. Slow IndexedDB cleanup must never extend revoked access.
+    if (revokedServices.includes('ad_maker') && typeof resetAdsStudioSessionState === 'function') resetAdsStudioSessionState();
+    await clearServerCollectionsForVisibility(revokedCollections);
+    if (_syncAborted()) return { ok: false, skipped: true };
+    cancelPendingRequests();
+    const scopedReload = await serverLoadAllData();
+    if (_syncAborted() || scopedReload?.aborted) return { ok: false, skipped: true };
+    _serverLiveSync.serviceEntitlements = getServerServiceEntitlementSnapshot();
+    const reloadFailed = Array.isArray(scopedReload?.failed) && scopedReload.failed.length > 0;
+    if (reloadFailed) state.serverLastSyncErrorAt = new Date().toISOString();
+    else {
+      state.serverLastSyncAt = new Date().toISOString();
+      state.serverLastSyncErrorAt = null;
+    }
+    RenderQueue.schedule('liveSync(subscription-revoked)');
+    return { ok: !reloadFailed };
+  }
   
   // Ensure data migration on live sync (only if data changed, debounced to not block render)
   if (changed) {
@@ -713,6 +793,7 @@ function startServerLiveSync() {
 
   stopServerLiveSync();
   _serverLiveSync.startedForUserId = uid;
+  _serverLiveSync.serviceEntitlements = getServerServiceEntitlementSnapshot();
   // Seed from the server watermark when we have one (authoritative, skew-free).
   // Before the first server load this session it is 0, so fall back to the state
   // estimate for a fast start; serverLoadAllData re-seeds authoritatively (and
@@ -1215,6 +1296,15 @@ function resetAuthenticatedServerCaches() {
   _serverLiveSync.cursor = 0;
   _serverLiveSync.fullLoadCursorReady = false;
   _serverLiveSync.collectionCursors = Object.create(null);
+  _serverLiveSync.serviceEntitlements = null;
+  if (typeof clearTransientEntityMediaCache === 'function') clearTransientEntityMediaCache('adCampaignRequests');
+  // A body-mounted full-screen photo must never survive logout or expiry. Do
+  // not restore focus to a control that belonged to the previous user.
+  if (typeof closeReceiptPhotoViewer === 'function') closeReceiptPhotoViewer(false);
+  // Ads Studio keeps an unsaved draft and compressed photos in memory. Reset
+  // them with every auth transition so one customer can never inherit another
+  // customer's unfinished work after logout or session expiry.
+  if (typeof resetAdsStudioSessionState === 'function') resetAdsStudioSessionState();
 }
 
 function discardPendingServerUserUpdates() {

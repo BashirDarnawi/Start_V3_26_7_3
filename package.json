@@ -8,7 +8,7 @@
     "build:js": "node scripts/build-js.js",
     "build:css": "tailwindcss -c tailwind.config.js -i tailwind-input.css -o assets/tailwind.css --minify",
     "sync:www": "node scripts/sync-www.js",
-    "sync:mobile": "npm run sync:www && npx cap sync",
+    "sync:mobile": "npm run sync:www && npx cap sync && node scripts/fix-capacitor-spm-paths.js",
     "test:js": "node scripts/test-permissions.js",
     "test:mobile-ui": "node scripts/test-mobile-ui.js",
     "test:money": "node scripts/test-money.js",
@@ -28,6 +28,7 @@
   },
   "dependencies": {
     "@capacitor/android": "^8.4.1",
+    "@capacitor/app": "^8.0.0",
     "@capacitor/core": "^8.4.1",
     "@capacitor/ios": "^8.4.1"
   },

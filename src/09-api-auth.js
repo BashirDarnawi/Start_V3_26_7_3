@@ -297,13 +297,15 @@ async function apiAuthMe() {
       _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 };
       return null;
     }
-    // On timeout/network error, return cached session if available
+    // On timeout/network error, use a previously verified in-memory session
+    // when one exists. Without that cache, propagate the connectivity failure
+    // so mobile startup can show Retry instead of a misleading Login screen.
     if (e?.name === 'AbortError' || e?.message?.includes('timeout')) {
       console.warn('[apiAuthMe] Timeout - using cached session');
       if (_sessionCache.user) {
         return _sessionCache.user;
       }
-      return null;
+      throw e;
     }
     throw e;
   }
@@ -395,6 +397,7 @@ function makeSessionChangedError() {
 const SERVER_SYNC_COLLECTIONS = Object.freeze([
   'ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory',
   'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings',
+  'adCampaignRequests',
   'walletTransactions', 'serviceSubscriptions'
 ]);
 
@@ -402,10 +405,12 @@ const SERVER_SYNC_COLLECTIONS = Object.freeze([
 // request lightweight records and fetch the full item only when a user opens
 // Photos or Edit. Old servers safely ignore the query parameter, while old
 // clients keep receiving full records because the backend default is true.
-const LIGHTWEIGHT_MEDIA_COLLECTIONS = new Set(['ads', 'receipts']);
+const LIGHTWEIGHT_MEDIA_COLLECTIONS = new Set(['ads', 'receipts', 'adCampaignRequests']);
+const ADS_STUDIO_MEDIA_TIMEOUT_MS = 90000;
 const INLINE_MEDIA_FIELDS_BY_COLLECTION = Object.freeze({
   ads: Object.freeze(['adPhotos', 'photos']),
-  receipts: Object.freeze(['photos', 'receiptImage'])
+  receipts: Object.freeze(['photos', 'receiptImage']),
+  adCampaignRequests: Object.freeze(['creativeImages'])
 });
 
 function _inlineMediaFields(collection) {
@@ -427,6 +432,21 @@ function getEntityPhotoCountHint(collection, record) {
   return Number.isSafeInteger(hinted) && hinted > 0 ? hinted : 0;
 }
 
+function makeLightweightMediaRecord(collection, record) {
+  if (!record || typeof record !== 'object') return record;
+  const lightweight = { ...record };
+  const photoCount = getEntityPhotoCountHint(collection, record);
+  for (const field of _inlineMediaFields(collection)) delete lightweight[field];
+  if (photoCount > 0) {
+    lightweight._mediaOmitted = true;
+    lightweight._photoCount = photoCount;
+  } else {
+    delete lightweight._mediaOmitted;
+    delete lightweight._photoCount;
+  }
+  return lightweight;
+}
+
 function isEntityMediaHydrated(collection, record) {
   if (!LIGHTWEIGHT_MEDIA_COLLECTIONS.has(String(collection || ''))) return true;
   if (!record || typeof record !== 'object') return false;
@@ -440,6 +460,7 @@ function isEntityMediaHydrated(collection, record) {
 // equally-sized replacement photo would otherwise show stale bytes.
 function mergeMatchingVersionInlineMedia(collection, incoming, current) {
   if (!incoming || typeof incoming !== 'object' || incoming._mediaOmitted !== true) return incoming;
+  if (String(collection || '') === 'adCampaignRequests') return incoming;
   if (!current || typeof current !== 'object' || !isEntityMediaHydrated(collection, current)) return incoming;
   const incomingVersion = Number(incoming._lastModified);
   const currentVersion = Number(current._lastModified);
@@ -913,6 +934,7 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false, includeM
         for (const rawEntity of items) {
           const entity = validateServerEntityResponse(collection, rawEntity, `list[${all.length}]`);
           entity.data = mergeMatchingVersionInlineMedia(collection, entity.data, currentById.get(String(entity.id)));
+          if (String(collection || '') === 'adCampaignRequests') entity.data = makeLightweightMediaRecord(collection, entity.data);
           lastEntity = entity;
           // Defensive only: keyset pages should not overlap, but a record can
           // be updated while pagination is running. Keep one ID and prefer the
@@ -985,13 +1007,36 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false, includeM
   }
 }
 
-async function apiGetEntity(collection, id) {
+async function apiGetEntity(collection, id, { timeoutMs = 15000 } = {}) {
   return await requestValidatedServerEntity(collection, 'get', () =>
-    apiJson(`/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`, { method: 'GET' }, { timeoutMs: 15000 })
+    apiJson(`/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`, { method: 'GET' }, { timeoutMs })
   );
 }
 
 const _pendingEntityMediaLoads = new Map();
+// Ads Studio creative bodies are deliberately ephemeral. Keeping every opened
+// campaign in state would copy base64 into IndexedDB and grow without bound on
+// a reviewer device. A tiny session-scoped LRU avoids repeat downloads without
+// persisting customer media.
+const _transientAdCampaignMedia = new Map();
+const MAX_TRANSIENT_AD_CAMPAIGN_MEDIA = 3;
+
+function clearTransientEntityMediaCache(collections = null) {
+  const names = collections === null
+    ? null
+    : new Set((Array.isArray(collections) ? collections : [collections]).map(String));
+  for (const key of Array.from(_transientAdCampaignMedia.keys())) {
+    if (names === null || names.has('adCampaignRequests')) _transientAdCampaignMedia.delete(key);
+  }
+}
+
+function cacheTransientAdCampaignMedia(key, record) {
+  _transientAdCampaignMedia.delete(key);
+  _transientAdCampaignMedia.set(key, record);
+  while (_transientAdCampaignMedia.size > MAX_TRANSIENT_AD_CAMPAIGN_MEDIA) {
+    _transientAdCampaignMedia.delete(_transientAdCampaignMedia.keys().next().value);
+  }
+}
 
 async function ensureEntityMediaLoaded(collection, id) {
   const name = String(collection || '');
@@ -1004,13 +1049,22 @@ async function ensureEntityMediaLoaded(collection, id) {
 
   const identity = getServerSessionIdentity();
   const key = `${identity}|${name}|${safeId}`;
+  if (name === 'adCampaignRequests') {
+    const cached = _transientAdCampaignMedia.get(key);
+    if (cached && Number(cached._lastModified) === Number(current._lastModified)) {
+      // Refresh LRU order and return a detached object so callers cannot mutate
+      // the cached copy while editing their local draft.
+      cacheTransientAdCampaignMedia(key, cached);
+      return Security.sanitizeObject(cached);
+    }
+  }
   if (_pendingEntityMediaLoads.has(key)) return await _pendingEntityMediaLoads.get(key);
 
   const request = (async () => {
     // A live delta can win while the item GET is in flight. Retry once instead
     // of replacing that newer summary with an older full response.
     for (let attempt = 0; attempt < 2; attempt++) {
-      const entity = await apiGetEntity(name, safeId);
+      const entity = await apiGetEntity(name, safeId, { timeoutMs: name === 'adCampaignRequests' ? ADS_STUDIO_MEDIA_TIMEOUT_MS : 15000 });
       if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
       const full = entity?.data ? Security.sanitizeObject(entity.data) : null;
       const latest = findCurrent();
@@ -1018,6 +1072,11 @@ async function ensureEntityMediaLoaded(collection, id) {
       const responseVersion = Number(full._lastModified);
       const latestVersion = Number(latest._lastModified);
       if (Number.isFinite(responseVersion) && Number.isFinite(latestVersion) && responseVersion < latestVersion) continue;
+
+      if (name === 'adCampaignRequests') {
+        cacheTransientAdCampaignMedia(key, full);
+        return Security.sanitizeObject(full);
+      }
 
       const target = state[name];
       const index = target.findIndex(record => record && String(record.id) === safeId);
@@ -1044,12 +1103,16 @@ async function ensureEntityMediaLoaded(collection, id) {
 async function apiCreateEntity(collection, record) {
   const omitMedia = LIGHTWEIGHT_MEDIA_COLLECTIONS.has(String(collection || ''));
   const path = `/api/collections/${encodeURIComponent(collection)}${omitMedia ? '?include_media=false' : ''}`;
+  const timeoutMs = String(collection || '') === 'adCampaignRequests' ? ADS_STUDIO_MEDIA_TIMEOUT_MS : 20000;
   const entity = await requestValidatedServerEntity(collection, 'create', () =>
     withRetry(() =>
-      apiJson(path, { method: 'POST', body: { id: record.id, data: record } }, { timeoutMs: 20000 })
+      apiJson(path, { method: 'POST', body: { id: record.id, data: record } }, { timeoutMs })
     , 2, 500)
   );
-  entity.data = mergeMutationInlineMedia(collection, entity.data, record);
+  // Customer campaign images stay in the builder/transient LRU. Never reattach
+  // them to the collection response, which is persisted to IndexedDB.
+  if (String(collection || '') === 'adCampaignRequests') entity.data = makeLightweightMediaRecord(collection, entity.data);
+  else entity.data = mergeMutationInlineMedia(collection, entity.data, record);
   return entity;
 }
 
@@ -1204,21 +1267,50 @@ async function apiMutateClothesOrder(payload) {
   return { order, updatedProducts, replayed: response.replayed === true };
 }
 
+// Ads Studio workflow transitions are server-controlled. Customers may save
+// draft fields through the collection API, but only these endpoints can move
+// a request into review or record a staff decision.
+async function apiSubmitAdCampaignRequest(campaignId, expectedLastModified, operationId) {
+  const identity = getServerSessionIdentity();
+  const body = { expectedLastModified, operationId };
+  const entity = await requestValidatedServerEntity('adCampaignRequests', 'submit', () =>
+    withRetry(() => apiJson(`/api/ad-studio/campaigns/${encodeURIComponent(campaignId)}/submit`, {
+      method: 'POST', body
+    }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 2, 500)
+  );
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  return entity;
+}
+
+async function apiReviewAdCampaignRequest(campaignId, expectedLastModified, decision, note, operationId) {
+  const identity = getServerSessionIdentity();
+  const body = { expectedLastModified, decision, note, operationId };
+  const entity = await requestValidatedServerEntity('adCampaignRequests', 'review', () =>
+    withRetry(() => apiJson(`/api/ad-studio/campaigns/${encodeURIComponent(campaignId)}/review`, {
+      method: 'POST', body
+    }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 2, 500)
+  );
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  return entity;
+}
+
 async function apiPatchEntity(collection, id, updates, expectedLastModified) {
   const omitMedia = LIGHTWEIGHT_MEDIA_COLLECTIONS.has(String(collection || ''));
   const local = (Array.isArray(state[collection]) ? state[collection] : [])
     .find(row => row && String(row.id) === String(id));
   const path = `/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}${omitMedia ? '?include_media=false' : ''}`;
+  const timeoutMs = String(collection || '') === 'adCampaignRequests' ? ADS_STUDIO_MEDIA_TIMEOUT_MS : TIME_CONSTANTS.API_TIMEOUT_LONG_MS;
   const entity = await requestValidatedServerEntity(collection, 'patch', () =>
     withRetry(() =>
       apiJson(
         path,
         { method: 'PATCH', body: { data: updates, expectedLastModified } },
-        { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
+        { timeoutMs }
       )
     , 2, 500)
   );
-  entity.data = mergeMutationInlineMedia(collection, entity.data, { ...(local || {}), ...(updates || {}) });
+  if (String(collection || '') === 'adCampaignRequests') entity.data = makeLightweightMediaRecord(collection, entity.data);
+  else entity.data = mergeMutationInlineMedia(collection, entity.data, { ...(local || {}), ...(updates || {}) });
   return entity;
 }
 

@@ -20,7 +20,9 @@ const PERSISTED_COLLECTIONS = [
   'clothesProducts',
   'clothesShipments',
   'clothesOrders',
-  'clothesSettings'
+  'clothesSettings',
+  // Customer-facing Ads Studio requests (never the internal ads ledger)
+  'adCampaignRequests'
 ];
 
 // Debounced IndexedDB sync (avoid writing huge arrays on every keystroke)
@@ -55,6 +57,7 @@ function getCollectionNameFromArray(array) {
   if (array === state.clothesShipments) return 'clothesShipments';
   if (array === state.clothesOrders) return 'clothesOrders';
   if (array === state.clothesSettings) return 'clothesSettings';
+  if (array === state.adCampaignRequests) return 'adCampaignRequests';
   return null;
 }
 
