@@ -2,6 +2,28 @@
 // SEARCH & FILTER FUNCTIONS
 // ==========================================
 
+// Return one canonical payment state for both current and historical ads.
+// Older imports used spaces, hyphens, "unpaid", and apostrophes, while some
+// records only have the legacy isPaid boolean.  An explicit status wins over
+// isPaid so a stale boolean can never make a known customer debt look paid.
+function getAdPaymentState(ad) {
+  const rawStatus = String(ad?.paymentStatus ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\u2018\u2019']/g, '')
+    .replace(/[\s-]+/g, '_')
+    .replace(/_+/g, '_');
+
+  if (rawStatus === 'paid') return 'paid';
+  if (['not_paid', 'notpaid', 'unpaid'].includes(rawStatus)) return 'not_paid';
+  if (['wont_pay', 'wontpay'].includes(rawStatus)) return 'wont_pay';
+  if (typeof ad?.isPaid === 'boolean') return ad.isPaid ? 'paid' : 'not_paid';
+
+  // Very old records without either field were created before unpaid ads
+  // existed, so retaining the historical paid default is the safest choice.
+  return 'paid';
+}
+
 function getFilteredAds(customersById = null) {
   let filtered = getVisibleRecords(state.ads).filter(ad => ad.recordType !== 'receipt');
 
@@ -13,11 +35,10 @@ function getFilteredAds(customersById = null) {
   }
   if (f.payment && f.payment !== 'all') {
     filtered = filtered.filter(ad => {
-      const ps = String(ad.paymentStatus || '').toLowerCase();
-      const isPaid = ad.isPaid === true || ps === 'paid';
-      if (f.payment === 'paid') return isPaid;
-      if (f.payment === 'wont_pay') return ps === 'wont_pay';
-      return !isPaid && ps !== 'wont_pay'; // not_paid
+      const paymentState = getAdPaymentState(ad);
+      if (f.payment === 'paid') return paymentState === 'paid';
+      if (f.payment === 'wont_pay') return paymentState === 'wont_pay';
+      return paymentState === 'not_paid';
     });
   }
   if (f.page && f.page !== 'all') {
@@ -2498,8 +2519,7 @@ function manageTopUps(adId) {
     return;
   }
   if (isServerModeEnabled()) {
-    const paymentStatus = String(ad.paymentStatus || '').toLowerCase();
-    if (paymentStatus !== 'paid') {
+    if (getAdPaymentState(ad) !== 'paid') {
       const isAr = state.language === 'ar';
       showNotification(
         isAr ? 'غير ممكن' : 'Not possible',
@@ -3204,10 +3224,7 @@ function _readTopUpForm() {
 // balance) — their top-ups keep the old free-form behavior.
 function getAdFundingAvailability(ad) {
   if (!ad) return null;
-  const ps = String(ad.paymentStatus || '').toLowerCase();
-  // Missing paymentStatus counts as paid — same default the Ad modal uses.
-  const isPaidAd = ad.isPaid === true || ps === 'paid' || ps === '';
-  if (!isPaidAd) return null;
+  if (getAdPaymentState(ad) !== 'paid') return null;
   const ids = [];
   if (Array.isArray(ad.receiptAllocations)) {
     ad.receiptAllocations.forEach(a => { if (a && a.receiptId) ids.push(String(a.receiptId)); });

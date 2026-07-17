@@ -111,7 +111,8 @@ function renderModal() {
       const isAdminUser = isCurrentUserAdmin();
       const adCreator = isEdit && adData.creatorId ? state.users.find(u => u.id === adData.creatorId) : state.currentUser;
       const isArAd = state.language === 'ar';
-      const hasLinkedShopReceipt = adData.paymentStatus === 'not_paid'
+      const adPaymentState = getAdPaymentState(adData);
+      const hasLinkedShopReceipt = adPaymentState === 'not_paid'
         && adData.collectionMethod === 'in_shop'
         && Array.isArray(adData.dueAllocations)
         && adData.dueAllocations.some(row => row && row.receiptId && Number(row.amountUSD) > 0);
@@ -207,26 +208,26 @@ function renderModal() {
               </div>
               <div class="grid grid-cols-3 gap-2">
                 <button type="button" onclick="setAdPaymentStatus('paid')" id="ad-pay-status-paid"
-                  class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'border-emerald-500 bg-emerald-100 dark:bg-emerald-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
-                  <i data-lucide="check-circle" class="w-5 h-5 ${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'text-emerald-600' : 'text-slate-400'}"></i>
-                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'text-emerald-700' : 'text-slate-500'}">${trStatus('Paid')}</span>
+                  class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adPaymentState === 'paid' ? 'border-emerald-500 bg-emerald-100 dark:bg-emerald-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
+                  <i data-lucide="check-circle" class="w-5 h-5 ${adPaymentState === 'paid' ? 'text-emerald-600' : 'text-slate-400'}"></i>
+                  <span class="text-xs font-semibold mt-1 ${adPaymentState === 'paid' ? 'text-emerald-700' : 'text-slate-500'}">${trStatus('Paid')}</span>
                 </button>
                 <button type="button" onclick="setAdPaymentStatus('not_paid')" id="ad-pay-status-not-paid"
-                  class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adData.paymentStatus === 'not_paid' ? 'border-amber-500 bg-amber-100 dark:bg-amber-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
-                  <i data-lucide="clock" class="w-5 h-5 ${adData.paymentStatus === 'not_paid' ? 'text-amber-600' : 'text-slate-400'}"></i>
-                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'not_paid' ? 'text-amber-700' : 'text-slate-500'}">${isArAd ? 'غير مدفوع' : 'Not Paid'}</span>
+                  class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adPaymentState === 'not_paid' ? 'border-amber-500 bg-amber-100 dark:bg-amber-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
+                  <i data-lucide="clock" class="w-5 h-5 ${adPaymentState === 'not_paid' ? 'text-amber-600' : 'text-slate-400'}"></i>
+                  <span class="text-xs font-semibold mt-1 ${adPaymentState === 'not_paid' ? 'text-amber-700' : 'text-slate-500'}">${isArAd ? 'غير مدفوع' : 'Not Paid'}</span>
                 </button>
                 <button type="button" onclick="setAdPaymentStatus('wont_pay')" id="ad-pay-status-wont"
-                  class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adData.paymentStatus === 'wont_pay' ? 'border-rose-500 bg-rose-100 dark:bg-rose-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
-                  <i data-lucide="x-octagon" class="w-5 h-5 ${adData.paymentStatus === 'wont_pay' ? 'text-rose-600' : 'text-slate-400'}"></i>
-                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'wont_pay' ? 'text-rose-700' : 'text-slate-500'}">${isArAd ? 'لن يدفع' : "Won't Pay"}</span>
+                  class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adPaymentState === 'wont_pay' ? 'border-rose-500 bg-rose-100 dark:bg-rose-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
+                  <i data-lucide="x-octagon" class="w-5 h-5 ${adPaymentState === 'wont_pay' ? 'text-rose-600' : 'text-slate-400'}"></i>
+                  <span class="text-xs font-semibold mt-1 ${adPaymentState === 'wont_pay' ? 'text-rose-700' : 'text-slate-500'}">${isArAd ? 'لن يدفع' : "Won't Pay"}</span>
                 </button>
               </div>
-              <input type="hidden" id="ad-payment-status" value="${adData.paymentStatus || 'paid'}" />
+              <input type="hidden" id="ad-payment-status" value="${adPaymentState}" />
             </div>
 
             <!-- NOT PAID OPTIONS -->
-            <div id="ad-not-paid-options" class="${adData.paymentStatus === 'not_paid' ? '' : 'hidden'}">
+            <div id="ad-not-paid-options" class="${adPaymentState === 'not_paid' ? '' : 'hidden'}">
               <div class="p-4 rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 space-y-3">
                 <label class="block text-xs font-bold text-amber-700">${isArAd ? 'كيف سيتم تحصيل الدفع؟' : 'How will payment be collected?'}</label>
                 <div class="grid grid-cols-2 gap-2">
@@ -321,7 +322,7 @@ function renderModal() {
             </div>
 
             <!-- UNPAID FINANCIAL -->
-            <div id="ad-unpaid-financial" class="${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'hidden' : (adData.paymentStatus === 'not_paid' && (adData.collectionMethod === 'driver' || hasLinkedShopReceipt) ? 'hidden' : '')}">
+            <div id="ad-unpaid-financial" class="${adPaymentState === 'paid' ? 'hidden' : (adPaymentState === 'not_paid' && (adData.collectionMethod === 'driver' || hasLinkedShopReceipt) ? 'hidden' : '')}">
               <div class="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 space-y-2">
                 <div class="flex justify-between items-center">
                   <span class="text-xs font-bold text-slate-600">${isArAd ? 'التفاصيل المالية' : 'Financial Details'}</span>
@@ -366,7 +367,7 @@ function renderModal() {
             </div>
 
             <!-- SECTION 3: Receipt Funding (PAID ONLY) -->
-            <div id="ad-receipt-funding-section" class="${adData.paymentStatus === 'paid' || !adData.paymentStatus ? '' : 'hidden'} bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-xl p-4 space-y-3 border border-blue-200 dark:border-blue-800">
+            <div id="ad-receipt-funding-section" class="${adPaymentState === 'paid' ? '' : 'hidden'} bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-xl p-4 space-y-3 border border-blue-200 dark:border-blue-800">
               <div class="flex items-center justify-between">
                 <div class="text-xs font-bold text-blue-700 dark:text-blue-400 uppercase tracking-wider flex items-center gap-2">
                   <span class="w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center text-[10px]">3</span>
@@ -1771,7 +1772,7 @@ function renderModal() {
         }
       }
       // Initialize payment status UI (default to 'paid' for new ads)
-      const initialPaymentStatus = adData.paymentStatus || 'paid';
+      const initialPaymentStatus = getAdPaymentState(adData);
       setAdPaymentStatus(initialPaymentStatus);
       updateAdDriverBudgetSummary();
       // Render funding list right away so the user always sees guidance / first allocation row
@@ -1879,7 +1880,7 @@ function completeAdMutationAttempt(attempt) {
 }
 
 function resolveAdPrimaryReceiptId({ paymentStatus, collectionMethod, linkedDeliveryReceiptId, allocations, dueAllocations } = {}) {
-  const normalizedStatus = String(paymentStatus || '').toLowerCase();
+  const normalizedStatus = getAdPaymentState({ paymentStatus });
   const normalizedCollection = String(collectionMethod || '').toLowerCase();
   if (normalizedStatus === 'not_paid' && normalizedCollection === 'driver') {
     return String(linkedDeliveryReceiptId || '');
@@ -1895,10 +1896,13 @@ function resolveAdPrimaryReceiptId({ paymentStatus, collectionMethod, linkedDeli
 
 function buildServerAdMutationData(adUpdates, { create = false } = {}) {
   const data = Security.sanitizeObject(adUpdates || {});
+  const hasPaymentStatus = Object.prototype.hasOwnProperty.call(adUpdates || {}, 'paymentStatus');
+  const normalizedPaymentStatus = getAdPaymentState(adUpdates);
+  if (hasPaymentStatus) data.paymentStatus = normalizedPaymentStatus;
   // Paid ads remain server-derived from receipt allocations. Not Paid + Driver
   // is different: its positive budget is real customer debt even when no
   // receipt credit funds it yet, so send one narrowly-scoped request value.
-  if (String(adUpdates?.paymentStatus || '') === 'not_paid' && String(adUpdates?.collectionMethod || '') === 'driver') {
+  if (hasPaymentStatus && normalizedPaymentStatus === 'not_paid' && String(adUpdates?.collectionMethod || '').toLowerCase() === 'driver') {
     data.driverBudgetUSD = normalizeAdDriverBudgetUSD(adUpdates?.amountUSD);
   } else {
     delete data.driverBudgetUSD;
@@ -2265,7 +2269,7 @@ async function handleModalSubmit() {
 
         // Set amountUSD from allocations total for paid ads (ensures consistency)
         const settlingUnpaidDebt = isEdit
-          && String(state.modalData?.paymentStatus || '') === 'not_paid';
+          && getAdPaymentState(state.modalData) === 'not_paid';
         const originalUnpaidBudget = normalizeAdDriverBudgetUSD(state.modalData?.amountUSD);
         if (settlingUnpaidDebt && originalUnpaidBudget > 0 && Math.abs(totalAllocated - originalUnpaidBudget) > 0.005) {
           showNotification(

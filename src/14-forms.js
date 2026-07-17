@@ -2102,7 +2102,7 @@ function initAdFunding(adData = {}) {
   // saved ad until Save) and snap the amount to 2 decimals for display:
   // stored values can carry float residue from proportional stop-ad math
   // (e.g. 50.000000000000001), which otherwise shows raw in the input.
-  const isUnpaidShopDebt = String(adData.paymentStatus || '').toLowerCase() === 'not_paid'
+  const isUnpaidShopDebt = getAdPaymentState(adData) === 'not_paid'
     && String(adData.collectionMethod || '').toLowerCase() === 'in_shop';
   const sourceAllocations = isUnpaidShopDebt && Array.isArray(adData.dueAllocations)
     ? adData.dueAllocations
@@ -2135,7 +2135,7 @@ function getEditingAdExistingAllocationUSD(receiptId, kind = 'receipt') {
     ? [existingAd.mergedPaidAllocations || existingAd.receiptAllocations]
     : [existingAd.receiptAllocations];
   const collectionMethod = String(existingAd.collectionMethod || '').toLowerCase();
-  const isUnpaidReceiptDebt = String(existingAd.paymentStatus || '').toLowerCase() === 'not_paid'
+  const isUnpaidReceiptDebt = getAdPaymentState(existingAd) === 'not_paid'
     && (collectionMethod === 'driver' || collectionMethod === 'in_shop');
   if (kind === 'receipt' && isUnpaidReceiptDebt) sources.push(existingAd.dueAllocations);
 
@@ -3068,14 +3068,14 @@ function normalizeAdDriverBudgetUSD(value) {
 function getOriginalUnpaidDriverBudgetUSD() {
   const ad = state.modalData;
   if (!ad) return 0;
-  const isDriverDebt = String(ad.paymentStatus || '').toLowerCase() === 'not_paid'
+  const isDriverDebt = getAdPaymentState(ad) === 'not_paid'
     && String(ad.collectionMethod || '').toLowerCase() === 'driver';
   return isDriverDebt ? normalizeAdDriverBudgetUSD(ad.amountUSD) : 0;
 }
 
 function getOriginalUnpaidAdBudgetUSD() {
   const ad = state.modalData;
-  if (!ad || String(ad.paymentStatus || '').toLowerCase() !== 'not_paid') return 0;
+  if (!ad || getAdPaymentState(ad) !== 'not_paid') return 0;
   return normalizeAdDriverBudgetUSD(ad.amountUSD);
 }
 

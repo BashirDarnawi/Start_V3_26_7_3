@@ -586,7 +586,7 @@ function migrateOldDataFormats() {
         // For receipt-linked unpaid ads, receiptId is the debt source reference,
         // not proof that money was already paid. Turning it into paid funding
         // would consume the receipt twice and erase the customer's debt.
-        const isLinkedUnpaidDebt = String(ad.paymentStatus || '').toLowerCase() === 'not_paid'
+        const isLinkedUnpaidDebt = getAdPaymentState(ad) === 'not_paid'
           && ['driver', 'in_shop'].includes(String(ad.collectionMethod || '').toLowerCase());
         const linkedReceiptId = ad.fundingReceiptId || (!isLinkedUnpaidDebt ? ad.receiptId : '');
         if (linkedReceiptId && (ad.amountUSD || ad.spentUSD)) {
@@ -624,7 +624,7 @@ function migrateOldDataFormats() {
           const rate = ad.exchangeRate || state.defaultExchangeRate || 1;
           return lyd > 0 && rate > 0 ? lyd / rate : 0;
         })();
-        if (ad.linkedDeliveryReceiptId && !ad.isPaid && legacyDueUSD > 0) {
+        if (ad.linkedDeliveryReceiptId && getAdPaymentState(ad) !== 'paid' && legacyDueUSD > 0) {
           ad.dueAllocations.push({
             receiptId: String(ad.linkedDeliveryReceiptId),
             amountUSD: Math.round(legacyDueUSD * 100) / 100

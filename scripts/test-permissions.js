@@ -1562,6 +1562,9 @@ check('ad modal contains the beginner-facing manual budget control', () => {
   assert(modalSource.includes('This amount appears as customer debt until payment is recorded.'), 'budget field does not explain the resulting debt');
   assert(modalSource.includes('remaining += getEditingAdExistingAllocationUSD(receiptId);'), 'Paid conversion still blocks the ad\'s own due-funded receipt');
   assert(modalSource.includes('receiptId: resolveAdPrimaryReceiptId({'), 'local ad saves still keep a stale delivery receipt link');
+  assert(modalSource.includes('const adPaymentState = getAdPaymentState(adData);'), 'historical payment aliases are not normalized when the ad modal opens');
+  assert(modalSource.includes('id="ad-payment-status" value="${adPaymentState}"'), 'the ad modal keeps a non-canonical historical payment value');
+  assert(modalSource.includes('const initialPaymentStatus = getAdPaymentState(adData);'), 'the opened ad form does not initialize from canonical payment state');
   assert(persistenceSource.includes("ad.fundingReceiptId || (!isLinkedUnpaidDebt ? ad.receiptId : '')"), 'linked unpaid receipts can still be migrated into false paid funding');
 });
 
@@ -1788,6 +1791,14 @@ check('ad rows show their creator and color unpaid debt red', () => {
   assert(/class="[^"]*text-rose-600[^"]*" data-label="Local"/.test(unpaidHtml), 'unpaid LYD amount is not red');
   assert(unpaidHtml.includes('Unpaid debt'), 'red amount has no beginner-facing debt label');
 
+  S.ads[0].paymentStatus = 'Not Paid';
+  S.ads[0].isPaid = true;
+  S.serverMode = true;
+  const historicalDebtHtml = visible(sandbox.renderAdsView());
+  assert(historicalDebtHtml.includes('data-payment-state="unpaid"'), 'historical Not Paid alias is not red in the real table');
+  assert(!historicalDebtHtml.includes(`manageTopUps('${S.ads[0].id}')`), 'server UI offers paid-funds top-up on historical unpaid debt');
+  S.serverMode = false;
+
   delete S.ads[0].createdBy;
   const legacyCreatorHtml = visible(sandbox.renderAdsView());
   assert(legacyCreatorHtml.includes('Created by: <span class="font-semibold text-slate-700 dark:text-slate-200">Abdu'), 'legacy creatorId fallback is not displayed');
@@ -1807,6 +1818,124 @@ check('ad rows show their creator and color unpaid debt red', () => {
   const paidHtml = visible(sandbox.renderAdsView());
   assert(paidHtml.includes('data-payment-state="paid"'), 'paid ad is not marked paid in the table');
   assert(/class="[^"]*text-emerald-600[^"]*" data-label="Amount" data-payment-state="paid"/.test(paidHtml), 'paid USD amount is not green');
+
+  delete S.ads[0].paymentStatus;
+  delete S.ads[0].isPaid;
+  const oldestPaidHtml = visible(sandbox.renderAdsView());
+  assert(oldestPaidHtml.includes('data-payment-state="paid"'), 'pre-unpaid historical ad without payment fields is not kept paid');
+});
+
+check('historical ad payment spellings use one authoritative state', () => {
+  const cases = [
+    [{ paymentStatus: 'paid', isPaid: false }, 'paid'],
+    [{ paymentStatus: 'Not Paid', isPaid: true }, 'not_paid'],
+    [{ paymentStatus: 'not-paid', isPaid: true }, 'not_paid'],
+    [{ paymentStatus: 'unpaid', isPaid: true }, 'not_paid'],
+    [{ paymentStatus: "won't pay", isPaid: true }, 'wont_pay'],
+    [{ paymentStatus: 'Won\u2019t Pay', isPaid: true }, 'wont_pay'],
+    [{ paymentStatus: '', isPaid: false }, 'not_paid'],
+    [{ paymentStatus: '', isPaid: true }, 'paid'],
+    [{}, 'paid']
+  ];
+  cases.forEach(([ad, expected]) => {
+    assert(
+      sandbox.getAdPaymentState(ad) === expected,
+      `${JSON.stringify(ad)} should normalize to ${expected}`
+    );
+  });
+
+  loginAs(ADMIN);
+  seedBusinessData();
+  S.ads = [
+    { id: 'paid-ad', customerId: 'c1', recordType: 'ad', paymentStatus: 'paid', isPaid: false },
+    { id: 'debt-ad', customerId: 'c1', recordType: 'ad', paymentStatus: 'Not Paid', isPaid: true }
+  ];
+  S.adFilters = { payment: 'paid' };
+  assert(sandbox.getFilteredAds().map(ad => ad.id).join(',') === 'paid-ad', 'Paid filter disagrees with the amount color rule');
+  S.adFilters = { payment: 'not_paid' };
+  assert(sandbox.getFilteredAds().map(ad => ad.id).join(',') === 'debt-ad', 'Not Paid filter disagrees with the amount color rule');
+});
+
+check('historical unpaid aliases survive migration without becoming paid funding', () => {
+  const original = {
+    ads: S.ads,
+    receipts: S.receipts,
+    customers: S.customers,
+    pages: S.pages,
+    defaultExchangeRate: S.defaultExchangeRate
+  };
+  const originalSaveState = sandbox.saveState;
+  const legacy = {
+    id: 'legacy_unpaid_alias', recordType: 'ad', customerId: 'legacy_customer',
+    amountUSD: 30, amountLocal: 291, exchangeRate: 9.7, status: 'Active',
+    paymentStatus: 'Not Paid', isPaid: true, collectionMethod: 'driver',
+    receiptId: 'legacy_due_receipt', linkedDeliveryReceiptId: 'legacy_due_receipt',
+    dueAmountToUseUSD: 30
+  };
+  S.ads = [legacy];
+  S.receipts = [];
+  S.customers = [{ id: 'legacy_customer', name: 'Legacy Customer' }];
+  S.pages = [];
+  S.defaultExchangeRate = 9.7;
+  sandbox.saveState = () => {};
+  try {
+    sandbox.migrateOldDataFormats();
+    assert(Array.isArray(legacy.receiptAllocations) && legacy.receiptAllocations.length === 0, 'legacy debt receipt was converted into paid funding');
+    assert(legacy.dueAllocations?.length === 1, 'legacy due mirror was not materialized for the unpaid alias');
+    assert(legacy.dueAllocations[0].receiptId === 'legacy_due_receipt', 'legacy due receipt identity was lost');
+    assert(legacy.dueAllocations[0].amountUSD === 30, 'legacy due amount changed during migration');
+  } finally {
+    sandbox.saveState = originalSaveState;
+    S.ads = original.ads;
+    S.receipts = original.receipts;
+    S.customers = original.customers;
+    S.pages = original.pages;
+    S.defaultExchangeRate = original.defaultExchangeRate;
+  }
+});
+
+check('historical unpaid aliases open and save through canonical ad debt paths', () => {
+  const original = {
+    ads: S.ads,
+    modalData: S.modalData,
+    tempAdFunding: S.tempAdFunding,
+    defaultExchangeRate: S.defaultExchangeRate
+  };
+  const due = { receiptId: 'legacy_shop_due', amountUSD: 30 };
+  const paid = { receiptId: 'wrong_paid_source', amountUSD: 30 };
+  const legacyShop = {
+    id: 'legacy_shop_alias', paymentStatus: 'not-paid', isPaid: true,
+    collectionMethod: 'in_shop', amountUSD: 30,
+    receiptAllocations: [paid], dueAllocations: [due], receiptId: due.receiptId
+  };
+  S.ads = [legacyShop];
+  S.modalData = { ...legacyShop };
+  S.defaultExchangeRate = 9.7;
+  try {
+    sandbox.initAdFunding(legacyShop);
+    assert(S.tempAdFunding.allocations.length === 1, 'legacy shop debt did not open with exactly one allocation');
+    assert(S.tempAdFunding.allocations[0].receiptId === due.receiptId, 'legacy shop debt opened its paid rows instead of due rows');
+    assert(sandbox.getEditingAdExistingAllocationUSD(due.receiptId) === 30, 'legacy alias did not restore its own due allocation while editing');
+    assert(sandbox.getOriginalUnpaidAdBudgetUSD() === 30, 'legacy alias lost its saved unpaid budget');
+    assert(sandbox.resolveAdPrimaryReceiptId({
+      paymentStatus: 'Not Paid', collectionMethod: 'in_shop',
+      allocations: [paid], dueAllocations: [due]
+    }) === due.receiptId, 'legacy alias resolved to the wrong primary receipt');
+
+    const request = sandbox.buildServerAdMutationData({
+      paymentStatus: 'unpaid', collectionMethod: 'driver', amountUSD: 30,
+      receiptAllocations: [], dueAllocations: []
+    });
+    assert(request.paymentStatus === 'not_paid', 'legacy alias was not canonicalized before server save');
+    assert(request.driverBudgetUSD === 30, 'legacy unpaid driver budget was dropped before server save');
+    const partial = sandbox.buildServerAdMutationData({ topUps: [] });
+    assert(!Object.prototype.hasOwnProperty.call(partial, 'paymentStatus'), 'partial mutation invented a Paid status');
+  } finally {
+    S.ads = original.ads;
+    S.modalData = original.modalData;
+    S.tempAdFunding = original.tempAdFunding;
+    S.defaultExchangeRate = original.defaultExchangeRate;
+  }
 });
 
 check('saved ad photos cannot be replaced without permission to view them', () => {

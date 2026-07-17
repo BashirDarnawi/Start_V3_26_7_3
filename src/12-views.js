@@ -1482,8 +1482,8 @@ function renderAnalyticsView() {
   // Uses the SAME status-aware spend rule as the customer cards
   // (getAdSpendUSD) so a Stopped ad that spent $100 counts as $100, not its
   // full $500, and the two screens can't contradict each other.
-  const paidAds = ads.filter(ad => ad.isPaid === true || ad.paymentStatus === 'paid');
-  const unpaidAds = ads.filter(ad => ad.isPaid !== true && ad.paymentStatus !== 'paid');
+  const paidAds = ads.filter(ad => getAdPaymentState(ad) === 'paid');
+  const unpaidAds = ads.filter(ad => getAdPaymentState(ad) !== 'paid');
   const paidAdRevenue = paidAds.reduce((sum, ad) => sum + getAdSpendUSD(ad), 0);
   const unpaidAdRevenue = unpaidAds.reduce((sum, ad) => sum + getAdSpendUSD(ad), 0);
   const totalAdRevenue = paidAdRevenue + unpaidAdRevenue;  // Keep for backwards compatibility
@@ -2821,10 +2821,8 @@ function renderAdsView() {
               ${allAds.map((ad, idx) => {
                 const customer = customersById.get(ad.customerId);
                 const adPhotoCount = getAdPhotoCount(ad);
-                const paymentStatus = String(ad.paymentStatus || '').trim().toLowerCase();
-                // Only an explicit paid marker is received money. Blank,
-                // Not Paid, and Won't Pay records remain customer debt.
-                const isAdPaid = ad.isPaid === true || paymentStatus === 'paid';
+                const paymentState = getAdPaymentState(ad);
+                const isAdPaid = paymentState === 'paid';
                 const amountColorClass = isAdPaid
                   ? 'text-emerald-600 dark:text-emerald-400'
                   : 'text-rose-600 dark:text-rose-400';
@@ -2936,7 +2934,7 @@ function renderAdsView() {
                         'Lost': 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
                         'Stopped': 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
                       })[ad.status] || 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300'}">${Security.escapeHtml(trStatus(ad.status || 'Active'))}</span>
-                      ${ad.isPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isAr ? 'مدفوع' : 'Paid'}</div>` : ''}
+                      ${isAdPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isAr ? 'مدفوع' : 'Paid'}</div>` : ''}
                       ${ad.status === 'Stopped' && ad.spentUSD !== undefined ? `
                         <div class="text-xs mt-1 space-y-0.5">
                           <div class="text-orange-600">${isAr ? 'المصروف' : 'Spent'}: $${ad.spentUSD.toFixed(2)}</div>
@@ -2984,7 +2982,7 @@ function renderAdsView() {
                         <button type="button" data-action="view-ad-photos" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openAdPhotoViewer(this.dataset.adId, 0, this)" class="ad-photo-view-button inline-flex items-center justify-center gap-1.5 font-bold" title="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}" aria-label="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}">
                           <i data-lucide="images" class="w-4 h-4 shrink-0"></i><span class="text-xs whitespace-nowrap">${isAr ? `عرض الصور (${adPhotoCount})` : `View Photos (${adPhotoCount})`}</span>
                         </button>` : ''}
-                        ${_isAdToppable(ad) ? `
+                        ${_isAdToppable(ad) && (!isServerModeEnabled() || isAdPaid) ? `
                         <button onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="${isAr ? 'عمليات الشحن' : 'Top-ups'}">
                           <i data-lucide="trending-up" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.topUps && ad.topUps.length > 0 ? `<span class="text-xs">${ad.topUps.length}</span>` : ''}
@@ -3752,6 +3750,7 @@ function showDeliveryDetails(itemId) {
   const roleLower = String(state.currentUser?.role || '').toLowerCase();
   const canOffice = roleLower !== 'delivery' && (currentUserHasPermission('deliveries', 'markCollected') || isCurrentUserAdmin());
   const editHandler = isReceipt ? 'editReceipt' : 'editAd';
+  const isItemPaid = isReceipt ? ad.isPaid === true : getAdPaymentState(ad) === 'paid';
   
   const modal = document.getElementById('app-modal') || document.createElement('div');
   modal.id = 'app-modal';
@@ -3832,7 +3831,7 @@ function showDeliveryDetails(itemId) {
             </div>
             <div class="flex justify-between">
               <span class="text-slate-500">${isAr ? 'مُحصَّل' : 'Collected'}:</span>
-              <span class="${ad.isPaid ? 'text-emerald-600 font-bold' : 'text-amber-600'}">${ad.isPaid ? (isAr ? 'نعم' : 'Yes') : (isAr ? 'لا' : 'No')}</span>
+              <span class="${isItemPaid ? 'text-emerald-600 font-bold' : 'text-amber-600'}">${isItemPaid ? (isAr ? 'نعم' : 'Yes') : (isAr ? 'لا' : 'No')}</span>
             </div>
             <div class="flex justify-between">
               <span class="text-slate-500">${isAr ? 'التسليم للمكتب' : 'Office Handover'}:</span>
@@ -3847,7 +3846,7 @@ function showDeliveryDetails(itemId) {
         
         <!-- Actions -->
         <div class="flex space-x-3">
-          ${!ad.isPaid ? `
+          ${!isItemPaid ? `
             <button onclick="markAsCollected('${ad.id}'); this.closest('#app-modal').remove();" class="flex-1 btn-shine bg-gradient-to-r from-emerald-500 to-teal-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2">
               <i data-lucide="dollar-sign" class="w-5 h-5"></i>
               <span>${isAr ? 'تسجيل التحصيل' : 'Mark Collected'}</span>
@@ -4318,7 +4317,7 @@ function renderUsersView() {
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         ${visibleUsers.map(u => {
           const userAds = getVisibleRecords(state.ads).filter(ad => ad.creatorId === u.id);
-          const deliveredAds = getVisibleRecords(state.ads).filter(ad => ad.deliveryPersonId === u.id && ad.isPaid);
+          const deliveredAds = getVisibleRecords(state.ads).filter(ad => ad.deliveryPersonId === u.id && getAdPaymentState(ad) === 'paid');
           const deliveredReceipts = getVisibleRecords(state.receipts).filter(r => r.deliveryPersonId === u.id && r.deliveryStatus === 'Delivered');
           const deliveryFeesLYD = deliveredReceipts.reduce((sum, r) => sum + (Number(r.deliveryFeeCollected ?? r.actualDeliveryFeeCollected ?? 0) || 0), 0);
           

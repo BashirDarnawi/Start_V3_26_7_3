@@ -1358,6 +1358,12 @@ def get_entity(entity_type: str, entity_id: str) -> Optional[dict[str, Any]]:
         if not row:
             return None
         d = dict(row)
+        data = json_loads(d["data_json"]) or {}
+        # Match collection reads: the dedicated DB column is authoritative when
+        # present. Imported history may only have data.createdBy when that
+        # column is NULL, so leave the stored value intact in that case.
+        if isinstance(data, dict) and d.get("created_by") is not None:
+            data["createdBy"] = str(d["created_by"])
         return {
             "id": d["id"],
             "type": d["type"],
@@ -1365,7 +1371,7 @@ def get_entity(entity_type: str, entity_id: str) -> Optional[dict[str, Any]]:
             "createdAt": int(d["created_at"]),
             "createdBy": d.get("created_by"),
             "lastModified": int(d["last_modified"]),
-            "data": json_loads(d["data_json"]) or {},
+            "data": data,
         }
 
 
@@ -4704,6 +4710,34 @@ def _financial_rate(value: Any) -> Decimal:
     return rate
 
 
+def _financial_ad_payment_status(ad: dict[str, Any] | None) -> str:
+    """Return the canonical payment state for current and historical ads.
+
+    ``paymentStatus`` is authoritative when it contains a recognized value.
+    Older imports used spaces, hyphens, ``unpaid`` and typographic apostrophes,
+    while still older rows only have the compatibility ``isPaid`` boolean.
+    Records predating both fields were created before unpaid ads existed, so
+    their historical default remains Paid.
+    """
+    data = ad if isinstance(ad, dict) else {}
+    raw_status = str(data.get("paymentStatus") or "").strip().lower()
+    normalized = re.sub(r"[\u2018\u2019']", "", raw_status)
+    normalized = re.sub(r"[\s-]+", "_", normalized)
+    normalized = re.sub(r"_+", "_", normalized)
+
+    if normalized == "paid":
+        return "paid"
+    if normalized in {"not_paid", "notpaid", "unpaid"}:
+        return "not_paid"
+    if normalized in {"wont_pay", "wontpay"}:
+        return "wont_pay"
+
+    is_paid = data.get("isPaid")
+    if isinstance(is_paid, bool):
+        return "paid" if is_paid else "not_paid"
+    return "paid"
+
+
 def _financial_row_data(row: Any) -> dict[str, Any]:
     data = json_loads(row.get("data_json") or "{}") or {}
     if not isinstance(data, dict):
@@ -4921,7 +4955,7 @@ def _financial_ad_committed(ad: dict[str, Any], receipt_id: str) -> int:
         return explicit
     if isinstance(ad.get("receiptAllocations"), list) or isinstance(ad.get("dueAllocations"), list):
         return 0
-    if str(ad.get("paymentStatus") or "") == "not_paid" and str(ad.get("collectionMethod") or "") in {"driver", "in_shop"}:
+    if _financial_ad_payment_status(ad) == "not_paid" and str(ad.get("collectionMethod") or "") in {"driver", "in_shop"}:
         return 0
     references = {
         str(ad.get("fundingReceiptId") or ""),
@@ -5500,12 +5534,22 @@ def _financial_derive_ad(
     base.pop("driverBudgetUSD", None)
     base["status"] = old_status or "Active"
     base["recordType"] = "ad"
-    base["creatorId"] = str((existing or {}).get("creatorId") or actor.get("id") or "")
+    # Creation records the authenticated actor. For an existing row, preserve
+    # only historical ownership evidence already stored on the record. Never
+    # turn the first person who edits a creatorless legacy ad into its creator.
+    if existing is None:
+        base["creatorId"] = str(actor.get("id") or "")
+    else:
+        historical_creator = str(
+            existing.get("createdBy") or existing.get("creatorId") or ""
+        ).strip()
+        if historical_creator:
+            base["creatorId"] = historical_creator
+        else:
+            base.pop("creatorId", None)
 
     customer_id = validate_entity_id(base.get("customerId"))
-    payment_status = str(base.get("paymentStatus") or "paid").lower()
-    if payment_status not in {"paid", "not_paid", "wont_pay"}:
-        raise HTTPException(status_code=400, detail="Invalid ad paymentStatus")
+    payment_status = _financial_ad_payment_status(base)
     collection_method = str(base.get("collectionMethod") or "")
     paid_request = base.get("receiptAllocations")
     due_request = base.get("dueAllocations")
@@ -5535,7 +5579,7 @@ def _financial_derive_ad(
         # ad amount exactly. Otherwise a partial receipt allocation could shrink
         # the saved ad and silently erase the customer's remaining debt.
         existing_was_unpaid_debt = bool(existing) and (
-            str(existing.get("paymentStatus") or "").lower() == "not_paid"
+            _financial_ad_payment_status(existing) == "not_paid"
         )
         if existing_was_unpaid_debt:
             original_budget_minor = _financial_minor(
@@ -5596,7 +5640,7 @@ def _financial_derive_ad(
                 driver_budget_raw, "driverBudgetUSD", allow_zero=False
             )
         elif existing and (
-            str(existing.get("paymentStatus") or "").lower() == "not_paid"
+            _financial_ad_payment_status(existing) == "not_paid"
             and str(existing.get("collectionMethod") or "") == "driver"
         ):
             # An unrelated edit from an older client may omit the new transient
@@ -5684,7 +5728,7 @@ def _financial_derive_ad(
         if (
             amount_minor == 0
             and existing
-            and str(existing.get("paymentStatus") or "").lower() == "not_paid"
+            and _financial_ad_payment_status(existing) == "not_paid"
             and str(existing.get("collectionMethod") or "") == "in_shop"
         ):
             existing_amount_minor = _financial_minor(
@@ -5755,6 +5799,9 @@ def _financial_apply_refund(
     actor: dict[str, Any], requested: dict[str, Any], existing: dict[str, Any]
 ) -> dict[str, Any]:
     result = dict(existing)
+    payment_status = _financial_ad_payment_status(result)
+    result["paymentStatus"] = payment_status
+    result["isPaid"] = payment_status == "paid"
     refund_type = str(requested.get("refundType") or "None")
     if refund_type not in {"None", "Full", "Partial"}:
         raise HTTPException(status_code=400, detail="Invalid refundType")
@@ -5835,7 +5882,7 @@ def _financial_apply_refund(
     due = _financial_allocations(result.get("dueAllocations"), "dueAllocations")
     result["receiptAllocations"] = paid
     result["dueAllocations"] = due
-    if str(result.get("paymentStatus") or "") == "not_paid" and str(result.get("collectionMethod") or "") == "driver":
+    if payment_status == "not_paid" and str(result.get("collectionMethod") or "") == "driver":
         result["mergedPaidAllocations"] = paid
     result["receiptIds"] = [row["receiptId"] for row in paid]
     result["fundingReceiptId"] = paid[0]["receiptId"] if paid else ""
@@ -5848,7 +5895,7 @@ def _financial_apply_refund(
     # this without folding first, or an ad's true due usage is erased and the receipt reads
     # as free while the ad still holds it.
     result["dueAmountToUseLYD"] = 0.0
-    result["hasMergedPaidFunds"] = bool(paid) and str(result.get("paymentStatus")) == "not_paid"
+    result["hasMergedPaidFunds"] = bool(paid) and payment_status == "not_paid"
     return result
 
 
@@ -5943,6 +5990,12 @@ def _ad_mutation_atomic(
 
             initial_row = _clothes_lock_row(conn, "ads", ad_id, postgres=False)
             initial_data = _financial_row_data(initial_row) if initial_row else {}
+            # Some legacy data_json payloads lack creator fields even though
+            # the authoritative entities.created_by column is populated. Feed
+            # that DB ownership into the mutation merge so an ordinary edit
+            # cannot discard or replace it with the editor's identity.
+            if initial_row and initial_row.get("created_by") is not None:
+                initial_data["createdBy"] = str(initial_row["created_by"])
             if body.action == "create":
                 if not user_has_permission(actor, "ads", "add"):
                     raise HTTPException(status_code=403, detail="Forbidden")
@@ -5971,6 +6024,8 @@ def _ad_mutation_atomic(
                 if int(ad_row["last_modified"]) != int(body.expectedLastModified):
                     raise HTTPException(status_code=409, detail="Conflict: ad has changed")
                 existing = _financial_row_data(ad_row)
+                if ad_row.get("created_by") is not None:
+                    existing["createdBy"] = str(ad_row["created_by"])
                 creator = ad_row.get("created_by") or existing.get("creatorId")
                 if not user_has_permission(
                     actor, "ads", "edit", record_creator_id=str(creator or "")
@@ -6000,7 +6055,7 @@ def _ad_mutation_atomic(
                 prepared_request = dict(clean_request)
                 if is_topup:
                     assert existing is not None
-                    if str(existing.get("paymentStatus") or "") != "paid" or str(existing.get("status") or "") in {
+                    if _financial_ad_payment_status(existing) != "paid" or str(existing.get("status") or "") in {
                         "Canceled", "Completed", "Lost", "Stopped"
                     } or (existing.get("refundType") and existing.get("refundType") != "None"):
                         raise HTTPException(status_code=409, detail="Only active paid ads can be topped up")
@@ -6158,10 +6213,13 @@ def _financial_apply_stop(ad: dict[str, Any], spent_minor: int) -> dict[str, Any
         for receipt_id in sorted(due_map)
     ]
     result = dict(ad)
+    payment_status = _financial_ad_payment_status(result)
+    result["paymentStatus"] = payment_status
+    result["isPaid"] = payment_status == "paid"
     result["stopAllocationBaseline"] = baseline
     result["receiptAllocations"] = receipt_plan
     result["dueAllocations"] = due_plan
-    if str(result.get("paymentStatus") or "") == "not_paid" and str(result.get("collectionMethod") or "") == "driver":
+    if payment_status == "not_paid" and str(result.get("collectionMethod") or "") == "driver":
         result["mergedPaidAllocations"] = [dict(row) for row in receipt_plan]
     else:
         result["mergedPaidAllocations"] = []
@@ -6171,7 +6229,7 @@ def _financial_apply_stop(ad: dict[str, Any], spent_minor: int) -> dict[str, Any
     result["dueAmountToUseUSD"] = _financial_usd(due_total)
     result["receiptIds"] = [row["receiptId"] for row in receipt_plan]
     result["fundingReceiptId"] = receipt_plan[0]["receiptId"] if receipt_plan else ""
-    result["hasMergedPaidFunds"] = bool(receipt_plan) and str(result.get("paymentStatus")) == "not_paid"
+    result["hasMergedPaidFunds"] = bool(receipt_plan) and payment_status == "not_paid"
     result["status"] = "Stopped"
     result["spentUSD"] = _financial_usd(spent_minor)
     if not result.get("stoppedAt"):
@@ -6275,7 +6333,7 @@ def _financial_release_canceled_due(
             continue
         ad = _financial_row_data(ad_row)
         is_shop_link = (
-            str(ad.get("paymentStatus") or "") == "not_paid"
+            _financial_ad_payment_status(ad) == "not_paid"
             and str(ad.get("collectionMethod") or "") == "in_shop"
             and str(ad.get("receiptId") or "") == receipt_id
         )

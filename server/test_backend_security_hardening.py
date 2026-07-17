@@ -2473,3 +2473,181 @@ class TestReceiptAndAdTransactions:
         assert body["payments"][0]["method"] == "Cash (LYD)"
         assert isinstance(body.get("deliveryFeePayments"), list) and len(body["deliveryFeePayments"]) == 1
         assert body["deliveryFeePayments"][0]["method"] == "Cash (LYD)"
+
+
+class TestLegacyAdPaymentNormalization:
+    @pytest.mark.parametrize(
+        ("stored", "expected"),
+        [
+            ({"paymentStatus": " paid ", "isPaid": False}, "paid"),
+            ({"paymentStatus": "Not Paid", "isPaid": True}, "not_paid"),
+            ({"paymentStatus": "not-paid", "isPaid": True}, "not_paid"),
+            ({"paymentStatus": "unpaid", "isPaid": True}, "not_paid"),
+            ({"paymentStatus": "won't pay", "isPaid": True}, "wont_pay"),
+            ({"paymentStatus": "Won\u2019t-Pay", "isPaid": True}, "wont_pay"),
+            ({"paymentStatus": "", "isPaid": False}, "not_paid"),
+            ({"paymentStatus": "", "isPaid": True}, "paid"),
+            ({}, "paid"),
+        ],
+    )
+    def test_canonical_status_mirrors_historical_frontend_rules(
+        self, stored, expected
+    ):
+        assert main_module._financial_ad_payment_status(stored) == expected
+
+    @staticmethod
+    def _rewrite_payment_state(ad_id: str, payment_status: str, is_paid: bool) -> int:
+        with db_conn() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT data_json,last_modified FROM entities "
+                    "WHERE type='ads' AND id=:id"
+                ),
+                {"id": ad_id},
+            ).mappings().first()
+            assert row is not None
+            data = json.loads(row["data_json"])
+            modified = max(now_ms(), int(row["last_modified"]) + 1)
+            data["paymentStatus"] = payment_status
+            data["isPaid"] = is_paid
+            data["_lastModified"] = modified
+            conn.execute(
+                text(
+                    "UPDATE entities SET data_json=:data,last_modified=:modified "
+                    "WHERE type='ads' AND id=:id"
+                ),
+                {
+                    "id": ad_id,
+                    "data": json_dumps(data),
+                    "modified": modified,
+                },
+            )
+            return modified
+
+    def test_incoming_aliases_are_persisted_canonically(self, actors):
+        tx = TestReceiptAndAdTransactions
+        tx._customer("fin_legacy_status_customer", actors)
+
+        not_paid = tx._mutate_ad(
+            "fin_legacy_status_debt",
+            "fin-legacy-status-debt-001",
+            {
+                "customerId": "fin_legacy_status_customer",
+                "paymentStatus": " Not-Paid ",
+                "collectionMethod": "in_shop",
+                "exchangeRate": 5,
+                "collectionPayments": [
+                    {"method": "Cash (LYD)", "amount": 100, "rate": 1, "rate2": 5}
+                ],
+            },
+            actors,
+        )
+        assert not_paid.status_code == 200, not_paid.text
+        not_paid_data = not_paid.json()["ad"]["data"]
+        assert not_paid_data["paymentStatus"] == "not_paid"
+        assert not_paid_data["isPaid"] is False
+
+        wont_pay = tx._mutate_ad(
+            "fin_legacy_status_wont",
+            "fin-legacy-status-wont-001",
+            {
+                "customerId": "fin_legacy_status_customer",
+                "paymentStatus": " Won\u2019t Pay ",
+                "exchangeRate": 5,
+                "collectionPayments": [
+                    {"method": "Cash (LYD)", "amount": 50, "rate": 1, "rate2": 5}
+                ],
+            },
+            actors,
+        )
+        assert wont_pay.status_code == 200, wont_pay.text
+        wont_pay_data = wont_pay.json()["ad"]["data"]
+        assert wont_pay_data["paymentStatus"] == "wont_pay"
+        assert wont_pay_data["isPaid"] is False
+
+    def test_stored_alias_precedence_is_repaired_by_edit_and_topup(self, actors):
+        tx = TestReceiptAndAdTransactions
+        tx._customer("fin_legacy_status_topup_customer", actors)
+        tx._receipt(
+            "fin_legacy_status_topup_receipt",
+            "fin_legacy_status_topup_customer",
+            100,
+            actors,
+        )
+        created = tx._mutate_ad(
+            "fin_legacy_status_topup_ad",
+            "fin-legacy-status-topup-create-001",
+            {
+                "customerId": "fin_legacy_status_topup_customer",
+                "paymentStatus": " PAID ",
+                "exchangeRate": 5,
+                "receiptAllocations": [
+                    {"receiptId": "fin_legacy_status_topup_receipt", "amountUSD": 30}
+                ],
+            },
+            actors,
+        )
+        assert created.status_code == 200, created.text
+        assert created.json()["ad"]["data"]["paymentStatus"] == "paid"
+
+        modified = self._rewrite_payment_state(
+            "fin_legacy_status_topup_ad", " PAID ", False
+        )
+        topped_up = client.post(
+            "/api/ads/mutate",
+            json={
+                "action": "update",
+                "adId": "fin_legacy_status_topup_ad",
+                "idempotencyKey": "fin-legacy-status-topup-update-001",
+                "expectedLastModified": modified,
+                "data": {
+                    "topUps": [{"amount": 5, "extendDays": 0, "note": "legacy"}],
+                    "receiptAllocations": [
+                        {
+                            "receiptId": "fin_legacy_status_topup_receipt",
+                            "amountUSD": 35,
+                        }
+                    ],
+                },
+            },
+            cookies=actors["admin"],
+        )
+        assert topped_up.status_code == 200, topped_up.text
+        topped_up_data = topped_up.json()["ad"]["data"]
+        assert topped_up_data["paymentStatus"] == "paid"
+        assert topped_up_data["isPaid"] is True
+        assert topped_up_data["amountUSD"] == 35
+
+        debt_created = tx._mutate_ad(
+            "fin_legacy_status_edit_debt",
+            "fin-legacy-status-edit-debt-create-001",
+            {
+                "customerId": "fin_legacy_status_topup_customer",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "in_shop",
+                "exchangeRate": 5,
+                "collectionPayments": [
+                    {"method": "Cash (LYD)", "amount": 100, "rate": 1, "rate2": 5}
+                ],
+            },
+            actors,
+        )
+        assert debt_created.status_code == 200, debt_created.text
+        modified = self._rewrite_payment_state(
+            "fin_legacy_status_edit_debt", " Not Paid ", True
+        )
+        edited = client.post(
+            "/api/ads/mutate",
+            json={
+                "action": "update",
+                "adId": "fin_legacy_status_edit_debt",
+                "idempotencyKey": "fin-legacy-status-debt-edit-001",
+                "expectedLastModified": modified,
+                "data": {"note": "canonicalized by ordinary edit"},
+            },
+            cookies=actors["admin"],
+        )
+        assert edited.status_code == 200, edited.text
+        edited_data = edited.json()["ad"]["data"]
+        assert edited_data["paymentStatus"] == "not_paid"
+        assert edited_data["isPaid"] is False

@@ -4087,7 +4087,7 @@ function migrateOldDataFormats() {
         // For receipt-linked unpaid ads, receiptId is the debt source reference,
         // not proof that money was already paid. Turning it into paid funding
         // would consume the receipt twice and erase the customer's debt.
-        const isLinkedUnpaidDebt = String(ad.paymentStatus || '').toLowerCase() === 'not_paid'
+        const isLinkedUnpaidDebt = getAdPaymentState(ad) === 'not_paid'
           && ['driver', 'in_shop'].includes(String(ad.collectionMethod || '').toLowerCase());
         const linkedReceiptId = ad.fundingReceiptId || (!isLinkedUnpaidDebt ? ad.receiptId : '');
         if (linkedReceiptId && (ad.amountUSD || ad.spentUSD)) {
@@ -4125,7 +4125,7 @@ function migrateOldDataFormats() {
           const rate = ad.exchangeRate || state.defaultExchangeRate || 1;
           return lyd > 0 && rate > 0 ? lyd / rate : 0;
         })();
-        if (ad.linkedDeliveryReceiptId && !ad.isPaid && legacyDueUSD > 0) {
+        if (ad.linkedDeliveryReceiptId && getAdPaymentState(ad) !== 'paid' && legacyDueUSD > 0) {
           ad.dueAllocations.push({
             receiptId: String(ad.linkedDeliveryReceiptId),
             amountUSD: Math.round(legacyDueUSD * 100) / 100
@@ -10767,8 +10767,8 @@ function renderAnalyticsView() {
   // Uses the SAME status-aware spend rule as the customer cards
   // (getAdSpendUSD) so a Stopped ad that spent $100 counts as $100, not its
   // full $500, and the two screens can't contradict each other.
-  const paidAds = ads.filter(ad => ad.isPaid === true || ad.paymentStatus === 'paid');
-  const unpaidAds = ads.filter(ad => ad.isPaid !== true && ad.paymentStatus !== 'paid');
+  const paidAds = ads.filter(ad => getAdPaymentState(ad) === 'paid');
+  const unpaidAds = ads.filter(ad => getAdPaymentState(ad) !== 'paid');
   const paidAdRevenue = paidAds.reduce((sum, ad) => sum + getAdSpendUSD(ad), 0);
   const unpaidAdRevenue = unpaidAds.reduce((sum, ad) => sum + getAdSpendUSD(ad), 0);
   const totalAdRevenue = paidAdRevenue + unpaidAdRevenue;  // Keep for backwards compatibility
@@ -12106,10 +12106,8 @@ function renderAdsView() {
               ${allAds.map((ad, idx) => {
                 const customer = customersById.get(ad.customerId);
                 const adPhotoCount = getAdPhotoCount(ad);
-                const paymentStatus = String(ad.paymentStatus || '').trim().toLowerCase();
-                // Only an explicit paid marker is received money. Blank,
-                // Not Paid, and Won't Pay records remain customer debt.
-                const isAdPaid = ad.isPaid === true || paymentStatus === 'paid';
+                const paymentState = getAdPaymentState(ad);
+                const isAdPaid = paymentState === 'paid';
                 const amountColorClass = isAdPaid
                   ? 'text-emerald-600 dark:text-emerald-400'
                   : 'text-rose-600 dark:text-rose-400';
@@ -12221,7 +12219,7 @@ function renderAdsView() {
                         'Lost': 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
                         'Stopped': 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
                       })[ad.status] || 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300'}">${Security.escapeHtml(trStatus(ad.status || 'Active'))}</span>
-                      ${ad.isPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isAr ? 'مدفوع' : 'Paid'}</div>` : ''}
+                      ${isAdPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isAr ? 'مدفوع' : 'Paid'}</div>` : ''}
                       ${ad.status === 'Stopped' && ad.spentUSD !== undefined ? `
                         <div class="text-xs mt-1 space-y-0.5">
                           <div class="text-orange-600">${isAr ? 'المصروف' : 'Spent'}: $${ad.spentUSD.toFixed(2)}</div>
@@ -12269,7 +12267,7 @@ function renderAdsView() {
                         <button type="button" data-action="view-ad-photos" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openAdPhotoViewer(this.dataset.adId, 0, this)" class="ad-photo-view-button inline-flex items-center justify-center gap-1.5 font-bold" title="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}" aria-label="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}">
                           <i data-lucide="images" class="w-4 h-4 shrink-0"></i><span class="text-xs whitespace-nowrap">${isAr ? `عرض الصور (${adPhotoCount})` : `View Photos (${adPhotoCount})`}</span>
                         </button>` : ''}
-                        ${_isAdToppable(ad) ? `
+                        ${_isAdToppable(ad) && (!isServerModeEnabled() || isAdPaid) ? `
                         <button onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="${isAr ? 'عمليات الشحن' : 'Top-ups'}">
                           <i data-lucide="trending-up" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.topUps && ad.topUps.length > 0 ? `<span class="text-xs">${ad.topUps.length}</span>` : ''}
@@ -13037,6 +13035,7 @@ function showDeliveryDetails(itemId) {
   const roleLower = String(state.currentUser?.role || '').toLowerCase();
   const canOffice = roleLower !== 'delivery' && (currentUserHasPermission('deliveries', 'markCollected') || isCurrentUserAdmin());
   const editHandler = isReceipt ? 'editReceipt' : 'editAd';
+  const isItemPaid = isReceipt ? ad.isPaid === true : getAdPaymentState(ad) === 'paid';
   
   const modal = document.getElementById('app-modal') || document.createElement('div');
   modal.id = 'app-modal';
@@ -13117,7 +13116,7 @@ function showDeliveryDetails(itemId) {
             </div>
             <div class="flex justify-between">
               <span class="text-slate-500">${isAr ? 'مُحصَّل' : 'Collected'}:</span>
-              <span class="${ad.isPaid ? 'text-emerald-600 font-bold' : 'text-amber-600'}">${ad.isPaid ? (isAr ? 'نعم' : 'Yes') : (isAr ? 'لا' : 'No')}</span>
+              <span class="${isItemPaid ? 'text-emerald-600 font-bold' : 'text-amber-600'}">${isItemPaid ? (isAr ? 'نعم' : 'Yes') : (isAr ? 'لا' : 'No')}</span>
             </div>
             <div class="flex justify-between">
               <span class="text-slate-500">${isAr ? 'التسليم للمكتب' : 'Office Handover'}:</span>
@@ -13132,7 +13131,7 @@ function showDeliveryDetails(itemId) {
         
         <!-- Actions -->
         <div class="flex space-x-3">
-          ${!ad.isPaid ? `
+          ${!isItemPaid ? `
             <button onclick="markAsCollected('${ad.id}'); this.closest('#app-modal').remove();" class="flex-1 btn-shine bg-gradient-to-r from-emerald-500 to-teal-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2">
               <i data-lucide="dollar-sign" class="w-5 h-5"></i>
               <span>${isAr ? 'تسجيل التحصيل' : 'Mark Collected'}</span>
@@ -13603,7 +13602,7 @@ function renderUsersView() {
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         ${visibleUsers.map(u => {
           const userAds = getVisibleRecords(state.ads).filter(ad => ad.creatorId === u.id);
-          const deliveredAds = getVisibleRecords(state.ads).filter(ad => ad.deliveryPersonId === u.id && ad.isPaid);
+          const deliveredAds = getVisibleRecords(state.ads).filter(ad => ad.deliveryPersonId === u.id && getAdPaymentState(ad) === 'paid');
           const deliveredReceipts = getVisibleRecords(state.receipts).filter(r => r.deliveryPersonId === u.id && r.deliveryStatus === 'Delivered');
           const deliveryFeesLYD = deliveredReceipts.reduce((sum, r) => sum + (Number(r.deliveryFeeCollected ?? r.actualDeliveryFeeCollected ?? 0) || 0), 0);
           
@@ -14675,6 +14674,28 @@ function renderSettingsView() {
 // SEARCH & FILTER FUNCTIONS
 // ==========================================
 
+// Return one canonical payment state for both current and historical ads.
+// Older imports used spaces, hyphens, "unpaid", and apostrophes, while some
+// records only have the legacy isPaid boolean.  An explicit status wins over
+// isPaid so a stale boolean can never make a known customer debt look paid.
+function getAdPaymentState(ad) {
+  const rawStatus = String(ad?.paymentStatus ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\u2018\u2019']/g, '')
+    .replace(/[\s-]+/g, '_')
+    .replace(/_+/g, '_');
+
+  if (rawStatus === 'paid') return 'paid';
+  if (['not_paid', 'notpaid', 'unpaid'].includes(rawStatus)) return 'not_paid';
+  if (['wont_pay', 'wontpay'].includes(rawStatus)) return 'wont_pay';
+  if (typeof ad?.isPaid === 'boolean') return ad.isPaid ? 'paid' : 'not_paid';
+
+  // Very old records without either field were created before unpaid ads
+  // existed, so retaining the historical paid default is the safest choice.
+  return 'paid';
+}
+
 function getFilteredAds(customersById = null) {
   let filtered = getVisibleRecords(state.ads).filter(ad => ad.recordType !== 'receipt');
 
@@ -14686,11 +14707,10 @@ function getFilteredAds(customersById = null) {
   }
   if (f.payment && f.payment !== 'all') {
     filtered = filtered.filter(ad => {
-      const ps = String(ad.paymentStatus || '').toLowerCase();
-      const isPaid = ad.isPaid === true || ps === 'paid';
-      if (f.payment === 'paid') return isPaid;
-      if (f.payment === 'wont_pay') return ps === 'wont_pay';
-      return !isPaid && ps !== 'wont_pay'; // not_paid
+      const paymentState = getAdPaymentState(ad);
+      if (f.payment === 'paid') return paymentState === 'paid';
+      if (f.payment === 'wont_pay') return paymentState === 'wont_pay';
+      return paymentState === 'not_paid';
     });
   }
   if (f.page && f.page !== 'all') {
@@ -17171,8 +17191,7 @@ function manageTopUps(adId) {
     return;
   }
   if (isServerModeEnabled()) {
-    const paymentStatus = String(ad.paymentStatus || '').toLowerCase();
-    if (paymentStatus !== 'paid') {
+    if (getAdPaymentState(ad) !== 'paid') {
       const isAr = state.language === 'ar';
       showNotification(
         isAr ? 'غير ممكن' : 'Not possible',
@@ -17877,10 +17896,7 @@ function _readTopUpForm() {
 // balance) — their top-ups keep the old free-form behavior.
 function getAdFundingAvailability(ad) {
   if (!ad) return null;
-  const ps = String(ad.paymentStatus || '').toLowerCase();
-  // Missing paymentStatus counts as paid — same default the Ad modal uses.
-  const isPaidAd = ad.isPaid === true || ps === 'paid' || ps === '';
-  if (!isPaidAd) return null;
+  if (getAdPaymentState(ad) !== 'paid') return null;
   const ids = [];
   if (Array.isArray(ad.receiptAllocations)) {
     ad.receiptAllocations.forEach(a => { if (a && a.receiptId) ids.push(String(a.receiptId)); });
@@ -20378,7 +20394,7 @@ function initAdFunding(adData = {}) {
   // saved ad until Save) and snap the amount to 2 decimals for display:
   // stored values can carry float residue from proportional stop-ad math
   // (e.g. 50.000000000000001), which otherwise shows raw in the input.
-  const isUnpaidShopDebt = String(adData.paymentStatus || '').toLowerCase() === 'not_paid'
+  const isUnpaidShopDebt = getAdPaymentState(adData) === 'not_paid'
     && String(adData.collectionMethod || '').toLowerCase() === 'in_shop';
   const sourceAllocations = isUnpaidShopDebt && Array.isArray(adData.dueAllocations)
     ? adData.dueAllocations
@@ -20411,7 +20427,7 @@ function getEditingAdExistingAllocationUSD(receiptId, kind = 'receipt') {
     ? [existingAd.mergedPaidAllocations || existingAd.receiptAllocations]
     : [existingAd.receiptAllocations];
   const collectionMethod = String(existingAd.collectionMethod || '').toLowerCase();
-  const isUnpaidReceiptDebt = String(existingAd.paymentStatus || '').toLowerCase() === 'not_paid'
+  const isUnpaidReceiptDebt = getAdPaymentState(existingAd) === 'not_paid'
     && (collectionMethod === 'driver' || collectionMethod === 'in_shop');
   if (kind === 'receipt' && isUnpaidReceiptDebt) sources.push(existingAd.dueAllocations);
 
@@ -21344,14 +21360,14 @@ function normalizeAdDriverBudgetUSD(value) {
 function getOriginalUnpaidDriverBudgetUSD() {
   const ad = state.modalData;
   if (!ad) return 0;
-  const isDriverDebt = String(ad.paymentStatus || '').toLowerCase() === 'not_paid'
+  const isDriverDebt = getAdPaymentState(ad) === 'not_paid'
     && String(ad.collectionMethod || '').toLowerCase() === 'driver';
   return isDriverDebt ? normalizeAdDriverBudgetUSD(ad.amountUSD) : 0;
 }
 
 function getOriginalUnpaidAdBudgetUSD() {
   const ad = state.modalData;
-  if (!ad || String(ad.paymentStatus || '').toLowerCase() !== 'not_paid') return 0;
+  if (!ad || getAdPaymentState(ad) !== 'not_paid') return 0;
   return normalizeAdDriverBudgetUSD(ad.amountUSD);
 }
 
@@ -22605,7 +22621,8 @@ function renderModal() {
       const isAdminUser = isCurrentUserAdmin();
       const adCreator = isEdit && adData.creatorId ? state.users.find(u => u.id === adData.creatorId) : state.currentUser;
       const isArAd = state.language === 'ar';
-      const hasLinkedShopReceipt = adData.paymentStatus === 'not_paid'
+      const adPaymentState = getAdPaymentState(adData);
+      const hasLinkedShopReceipt = adPaymentState === 'not_paid'
         && adData.collectionMethod === 'in_shop'
         && Array.isArray(adData.dueAllocations)
         && adData.dueAllocations.some(row => row && row.receiptId && Number(row.amountUSD) > 0);
@@ -22701,26 +22718,26 @@ function renderModal() {
               </div>
               <div class="grid grid-cols-3 gap-2">
                 <button type="button" onclick="setAdPaymentStatus('paid')" id="ad-pay-status-paid"
-                  class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'border-emerald-500 bg-emerald-100 dark:bg-emerald-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
-                  <i data-lucide="check-circle" class="w-5 h-5 ${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'text-emerald-600' : 'text-slate-400'}"></i>
-                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'text-emerald-700' : 'text-slate-500'}">${trStatus('Paid')}</span>
+                  class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adPaymentState === 'paid' ? 'border-emerald-500 bg-emerald-100 dark:bg-emerald-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
+                  <i data-lucide="check-circle" class="w-5 h-5 ${adPaymentState === 'paid' ? 'text-emerald-600' : 'text-slate-400'}"></i>
+                  <span class="text-xs font-semibold mt-1 ${adPaymentState === 'paid' ? 'text-emerald-700' : 'text-slate-500'}">${trStatus('Paid')}</span>
                 </button>
                 <button type="button" onclick="setAdPaymentStatus('not_paid')" id="ad-pay-status-not-paid"
-                  class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adData.paymentStatus === 'not_paid' ? 'border-amber-500 bg-amber-100 dark:bg-amber-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
-                  <i data-lucide="clock" class="w-5 h-5 ${adData.paymentStatus === 'not_paid' ? 'text-amber-600' : 'text-slate-400'}"></i>
-                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'not_paid' ? 'text-amber-700' : 'text-slate-500'}">${isArAd ? 'غير مدفوع' : 'Not Paid'}</span>
+                  class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adPaymentState === 'not_paid' ? 'border-amber-500 bg-amber-100 dark:bg-amber-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
+                  <i data-lucide="clock" class="w-5 h-5 ${adPaymentState === 'not_paid' ? 'text-amber-600' : 'text-slate-400'}"></i>
+                  <span class="text-xs font-semibold mt-1 ${adPaymentState === 'not_paid' ? 'text-amber-700' : 'text-slate-500'}">${isArAd ? 'غير مدفوع' : 'Not Paid'}</span>
                 </button>
                 <button type="button" onclick="setAdPaymentStatus('wont_pay')" id="ad-pay-status-wont"
-                  class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adData.paymentStatus === 'wont_pay' ? 'border-rose-500 bg-rose-100 dark:bg-rose-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
-                  <i data-lucide="x-octagon" class="w-5 h-5 ${adData.paymentStatus === 'wont_pay' ? 'text-rose-600' : 'text-slate-400'}"></i>
-                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'wont_pay' ? 'text-rose-700' : 'text-slate-500'}">${isArAd ? 'لن يدفع' : "Won't Pay"}</span>
+                  class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adPaymentState === 'wont_pay' ? 'border-rose-500 bg-rose-100 dark:bg-rose-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
+                  <i data-lucide="x-octagon" class="w-5 h-5 ${adPaymentState === 'wont_pay' ? 'text-rose-600' : 'text-slate-400'}"></i>
+                  <span class="text-xs font-semibold mt-1 ${adPaymentState === 'wont_pay' ? 'text-rose-700' : 'text-slate-500'}">${isArAd ? 'لن يدفع' : "Won't Pay"}</span>
                 </button>
               </div>
-              <input type="hidden" id="ad-payment-status" value="${adData.paymentStatus || 'paid'}" />
+              <input type="hidden" id="ad-payment-status" value="${adPaymentState}" />
             </div>
 
             <!-- NOT PAID OPTIONS -->
-            <div id="ad-not-paid-options" class="${adData.paymentStatus === 'not_paid' ? '' : 'hidden'}">
+            <div id="ad-not-paid-options" class="${adPaymentState === 'not_paid' ? '' : 'hidden'}">
               <div class="p-4 rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 space-y-3">
                 <label class="block text-xs font-bold text-amber-700">${isArAd ? 'كيف سيتم تحصيل الدفع؟' : 'How will payment be collected?'}</label>
                 <div class="grid grid-cols-2 gap-2">
@@ -22815,7 +22832,7 @@ function renderModal() {
             </div>
 
             <!-- UNPAID FINANCIAL -->
-            <div id="ad-unpaid-financial" class="${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'hidden' : (adData.paymentStatus === 'not_paid' && (adData.collectionMethod === 'driver' || hasLinkedShopReceipt) ? 'hidden' : '')}">
+            <div id="ad-unpaid-financial" class="${adPaymentState === 'paid' ? 'hidden' : (adPaymentState === 'not_paid' && (adData.collectionMethod === 'driver' || hasLinkedShopReceipt) ? 'hidden' : '')}">
               <div class="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 space-y-2">
                 <div class="flex justify-between items-center">
                   <span class="text-xs font-bold text-slate-600">${isArAd ? 'التفاصيل المالية' : 'Financial Details'}</span>
@@ -22860,7 +22877,7 @@ function renderModal() {
             </div>
 
             <!-- SECTION 3: Receipt Funding (PAID ONLY) -->
-            <div id="ad-receipt-funding-section" class="${adData.paymentStatus === 'paid' || !adData.paymentStatus ? '' : 'hidden'} bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-xl p-4 space-y-3 border border-blue-200 dark:border-blue-800">
+            <div id="ad-receipt-funding-section" class="${adPaymentState === 'paid' ? '' : 'hidden'} bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-xl p-4 space-y-3 border border-blue-200 dark:border-blue-800">
               <div class="flex items-center justify-between">
                 <div class="text-xs font-bold text-blue-700 dark:text-blue-400 uppercase tracking-wider flex items-center gap-2">
                   <span class="w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center text-[10px]">3</span>
@@ -24265,7 +24282,7 @@ function renderModal() {
         }
       }
       // Initialize payment status UI (default to 'paid' for new ads)
-      const initialPaymentStatus = adData.paymentStatus || 'paid';
+      const initialPaymentStatus = getAdPaymentState(adData);
       setAdPaymentStatus(initialPaymentStatus);
       updateAdDriverBudgetSummary();
       // Render funding list right away so the user always sees guidance / first allocation row
@@ -24373,7 +24390,7 @@ function completeAdMutationAttempt(attempt) {
 }
 
 function resolveAdPrimaryReceiptId({ paymentStatus, collectionMethod, linkedDeliveryReceiptId, allocations, dueAllocations } = {}) {
-  const normalizedStatus = String(paymentStatus || '').toLowerCase();
+  const normalizedStatus = getAdPaymentState({ paymentStatus });
   const normalizedCollection = String(collectionMethod || '').toLowerCase();
   if (normalizedStatus === 'not_paid' && normalizedCollection === 'driver') {
     return String(linkedDeliveryReceiptId || '');
@@ -24389,10 +24406,13 @@ function resolveAdPrimaryReceiptId({ paymentStatus, collectionMethod, linkedDeli
 
 function buildServerAdMutationData(adUpdates, { create = false } = {}) {
   const data = Security.sanitizeObject(adUpdates || {});
+  const hasPaymentStatus = Object.prototype.hasOwnProperty.call(adUpdates || {}, 'paymentStatus');
+  const normalizedPaymentStatus = getAdPaymentState(adUpdates);
+  if (hasPaymentStatus) data.paymentStatus = normalizedPaymentStatus;
   // Paid ads remain server-derived from receipt allocations. Not Paid + Driver
   // is different: its positive budget is real customer debt even when no
   // receipt credit funds it yet, so send one narrowly-scoped request value.
-  if (String(adUpdates?.paymentStatus || '') === 'not_paid' && String(adUpdates?.collectionMethod || '') === 'driver') {
+  if (hasPaymentStatus && normalizedPaymentStatus === 'not_paid' && String(adUpdates?.collectionMethod || '').toLowerCase() === 'driver') {
     data.driverBudgetUSD = normalizeAdDriverBudgetUSD(adUpdates?.amountUSD);
   } else {
     delete data.driverBudgetUSD;
@@ -24759,7 +24779,7 @@ async function handleModalSubmit() {
 
         // Set amountUSD from allocations total for paid ads (ensures consistency)
         const settlingUnpaidDebt = isEdit
-          && String(state.modalData?.paymentStatus || '') === 'not_paid';
+          && getAdPaymentState(state.modalData) === 'not_paid';
         const originalUnpaidBudget = normalizeAdDriverBudgetUSD(state.modalData?.amountUSD);
         if (settlingUnpaidDebt && originalUnpaidBudget > 0 && Math.abs(totalAllocated - originalUnpaidBudget) > 0.005) {
           showNotification(
