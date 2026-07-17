@@ -12038,7 +12038,7 @@ function renderAdsView() {
   // passed into getFilteredAds so the search filter is O(1)-per-ad too.
   const customersById = new Map(state.customers.map(c => [c.id, c]));
   const receiptsById = new Map(state.receipts.map(r => [r.id, r]));
-  const usersById = new Map(state.users.map(u => [u.id, u]));
+  const usersById = new Map(state.users.map(u => [String(u.id), u]));
   const pagesById = new Map((state.pages || []).map(p => [p.id, p]));
   const allAds = getFilteredAds(customersById);
   const adF = state.adFilters || {};
@@ -12106,6 +12106,20 @@ function renderAdsView() {
               ${allAds.map((ad, idx) => {
                 const customer = customersById.get(ad.customerId);
                 const adPhotoCount = getAdPhotoCount(ad);
+                const paymentStatus = String(ad.paymentStatus || '').trim().toLowerCase();
+                // Only an explicit paid marker is received money. Blank,
+                // Not Paid, and Won't Pay records remain customer debt.
+                const isAdPaid = ad.isPaid === true || paymentStatus === 'paid';
+                const amountColorClass = isAdPaid
+                  ? 'text-emerald-600 dark:text-emerald-400'
+                  : 'text-rose-600 dark:text-rose-400';
+                // createdBy is immutable server ownership metadata; creatorId
+                // is retained as the legacy/local fallback.
+                const creatorId = String(ad.createdBy || ad.creatorId || '').trim();
+                const creatorUser = creatorId ? usersById.get(creatorId) : null;
+                const creatorNameRaw = creatorUser?.name
+                  || (creatorId === 'system' ? (isAr ? 'النظام' : 'System') : (isAr ? 'غير معروف' : 'Unknown'));
+                const creatorName = Security.escapeHtml(String(creatorNameRaw));
                 // Deleting a page keeps its ads (history) but leaves their pageId
                 // pointing at the deleted page, whose name a NEW page may reuse.
                 // Keep resolving the name (the ad really did run on it) but mark
@@ -12117,7 +12131,7 @@ function renderAdsView() {
                 const linkedReceipt = ad.linkedDeliveryReceiptId ? receiptsById.get(ad.linkedDeliveryReceiptId) : null;
                 const effectiveDeliveryStatus = linkedReceipt ? (linkedReceipt.deliveryStatus || 'Needs Delivery') : (ad.deliveryStatus || 'Office');
                 const effectiveDeliveryPersonId = linkedReceipt ? linkedReceipt.deliveryPersonId : ad.deliveryPersonId;
-                const deliveryPerson = effectiveDeliveryPersonId ? usersById.get(effectiveDeliveryPersonId) : null;
+                const deliveryPerson = effectiveDeliveryPersonId ? usersById.get(String(effectiveDeliveryPersonId)) : null;
                 const isLinkedToDeliveryReceipt = !!linkedReceipt;
                 // Use consistent exchange rate calculation
                 const receiptExchangeRate = getEffectiveExchangeRate(ad);
@@ -12164,6 +12178,10 @@ function renderAdsView() {
                     <td class="py-3 px-2" data-label="#">
                       <div class="font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</div>
                       ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
+                      <div data-role="ad-creator" class="inline-flex items-center gap-1 mt-1 text-[11px] leading-tight font-normal text-slate-500 dark:text-slate-400" title="${isAr ? 'تم الإنشاء بواسطة' : 'Created by'}">
+                        <i data-lucide="user" class="w-3 h-3 shrink-0"></i>
+                        <span>${isAr ? 'تم الإنشاء بواسطة' : 'Created by'}: <span class="font-semibold text-slate-700 dark:text-slate-200">${creatorName}</span></span>
+                      </div>
                     </td>
                     <td class="py-3 px-2 hidden md:table-cell">
                       <div class="font-medium">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</div>
@@ -12176,9 +12194,12 @@ function renderAdsView() {
                         ${adPage.category ? `<div class="text-xs text-slate-500">${Security.escapeHtml(adPage.category)}</div>` : ''}
                       ` : '<span class="text-xs text-slate-400">-</span>'}
                     </td>
-                    <td class="py-3 px-2 font-bold text-emerald-600" data-label="Amount">$${ad.amountUSD?.toFixed(2) || '0.00'}</td>
+                    <td class="py-3 px-2 font-bold ${amountColorClass}" data-label="Amount" data-payment-state="${isAdPaid ? 'paid' : 'unpaid'}" title="${isAdPaid ? (isAr ? 'مبلغ مدفوع' : 'Paid amount') : (isAr ? 'دين غير مدفوع على العميل' : 'Unpaid customer debt')}">
+                      <span>$${(Number(ad.amountUSD) || 0).toFixed(2)}</span>
+                      ${!isAdPaid ? `<span class="text-[10px] font-semibold mt-0.5">${isAr ? 'دين غير مدفوع' : 'Unpaid debt'}</span>` : ''}
+                    </td>
                     <td class="py-3 px-2" data-label="Rate">${receiptExchangeRate?.toFixed(2) || ad.exchangeRate?.toFixed(2) || '0.00'}</td>
-                    <td class="py-3 px-2" data-label="Local">${ad.amountLocal?.toFixed(2)} LYD</td>
+                    <td class="py-3 px-2 font-medium ${amountColorClass}" data-label="Local">${(Number(ad.amountLocal) || 0).toFixed(2)} LYD</td>
                     <td class="py-3 px-2" data-label="Payment">
                       ${paymentMethods.length ? `
                         <div class="flex flex-wrap gap-1">
@@ -12245,8 +12266,8 @@ function renderAdsView() {
                     <td class="py-3 px-2" data-label="Actions">
                       <div class="flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
                         ${can('ads', 'viewPhotos') && adPhotoCount > 0 ? `
-                        <button type="button" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openAdPhotoViewer(this.dataset.adId, 0)" class="inline-flex items-center gap-1 text-cyan-600 hover:text-cyan-700 p-2 md:p-0 font-bold" title="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}" aria-label="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}">
-                          <i data-lucide="images" class="w-5 h-5 md:w-4 md:h-4"></i><span class="text-xs">${isAr ? 'الصور' : 'Photos'} ${adPhotoCount}</span>
+                        <button type="button" data-action="view-ad-photos" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openAdPhotoViewer(this.dataset.adId, 0, this)" class="ad-photo-view-button inline-flex items-center justify-center gap-1.5 font-bold" title="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}" aria-label="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}">
+                          <i data-lucide="images" class="w-4 h-4 shrink-0"></i><span class="text-xs whitespace-nowrap">${isAr ? `عرض الصور (${adPhotoCount})` : `View Photos (${adPhotoCount})`}</span>
                         </button>` : ''}
                         ${_isAdToppable(ad) ? `
                         <button onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="${isAr ? 'عمليات الشحن' : 'Top-ups'}">
@@ -15884,7 +15905,7 @@ async function openReceiptPhotoViewer(receiptId, index = 0) {
   );
 }
 
-async function openAdPhotoViewer(adId, index = 0) {
+async function openAdPhotoViewer(adId, index = 0, triggerButton = null) {
   if (!can('ads', 'viewPhotos')) {
     showNotification(
       state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
@@ -15895,6 +15916,13 @@ async function openAdPhotoViewer(adId, index = 0) {
   }
   let ad = (state.ads || []).find(item => item && !item._deleted && String(item.id) === String(adId));
   if (!ad) return;
+  const busyLabel = triggerButton?.querySelector?.('span') || null;
+  const originalLabel = busyLabel?.textContent || '';
+  if (triggerButton) {
+    triggerButton.disabled = true;
+    triggerButton.setAttribute?.('aria-busy', 'true');
+    if (busyLabel) busyLabel.textContent = state.language === 'ar' ? 'جارٍ تحميل الصور...' : 'Loading photos...';
+  }
   try {
     ad = await ensureEntityMediaLoaded('ads', adId);
   } catch (_) {
@@ -15904,6 +15932,12 @@ async function openAdPhotoViewer(adId, index = 0) {
       'error'
     );
     return;
+  } finally {
+    if (triggerButton) {
+      triggerButton.disabled = false;
+      triggerButton.removeAttribute?.('aria-busy');
+      if (busyLabel) busyLabel.textContent = originalLabel;
+    }
   }
   if (!ad) return;
   openReceiptPhotoViewerSources(

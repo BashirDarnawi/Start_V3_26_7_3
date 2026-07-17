@@ -1747,13 +1747,66 @@ check('ad photo normalization and outside button support current and legacy fiel
   });
   const html = visible(sandbox.renderAdsView());
   assert(html.includes('data-ad-id="a1"'), 'ad photo button does not use a safe data id');
-  assert(html.includes('openAdPhotoViewer(this.dataset.adId, 0)'), 'ad has no outside photo viewer action');
-  assert(html.includes('Photos 1'), 'ad outside photo count is missing');
+  assert(html.includes('data-action="view-ad-photos"'), 'ad photo viewer is not exposed as a clear outside action');
+  assert(html.includes('openAdPhotoViewer(this.dataset.adId, 0, this)'), 'ad has no outside photo viewer action or loading trigger');
+  assert(html.includes('View Photos (1)'), 'ad outside photo button or count is missing');
+  assert(html.includes('ad-photo-view-button'), 'ad photo action is still an easy-to-miss icon/link');
   assert(!html.includes(`src="${SAFE_RECEIPT_PNG}"`), 'ads list embeds the full photo body');
+
+  delete S.ads[0].adPhotos;
+  delete S.ads[0].photos;
+  S.ads[0]._mediaOmitted = true;
+  S.ads[0]._photoCount = 2;
+  const leanHtml = visible(sandbox.renderAdsView());
+  assert(leanHtml.includes('data-action="view-ad-photos"'), 'lean production ad summary lost its photo button');
+  assert(leanHtml.includes('View Photos (2)'), 'lean production ad summary lost its photo count');
+  assert(!leanHtml.includes('src="data:image/'), 'lean ads list unexpectedly embeds image bytes');
 
   loginAs(employee({ ads: ['view'] }));
   const deniedHtml = visible(sandbox.renderAdsView());
   assert(!deniedHtml.includes('openAdPhotoViewer('), 'ads.viewPhotos permission is not gating the outside button');
+});
+
+check('ad rows show their creator and color unpaid debt red', () => {
+  loginAs(ADMIN);
+  seedBusinessData();
+  S.language = 'en';
+  S.adSearch = '';
+  S.adFilters = {};
+  S.pages = [{ id: 'p1', name: 'Page One', category: '', customerIds: ['c1'] }];
+  Object.assign(S.ads[0], {
+    pageId: 'p1', recordType: 'ad', status: 'Active', startDate: '2026-07-15T00:00:00Z',
+    endDate: '2026-07-20T00:00:00Z', exchangeRate: 9.5, amountLocal: 475,
+    paymentStatus: 'not_paid', isPaid: false, createdBy: 'u-admin', creatorId: 'u-other'
+  });
+
+  const unpaidHtml = visible(sandbox.renderAdsView());
+  assert(/data-role="ad-creator"[\s\S]*?Created by:[\s\S]*?>Bashir<\/span>/.test(unpaidHtml), 'creator label and name are not together in the outside ad row');
+  assert(!unpaidHtml.includes('Created by: <span class="font-semibold text-slate-700 dark:text-slate-200">Abdu'), 'legacy creatorId overrode canonical createdBy metadata');
+  assert(unpaidHtml.includes('data-payment-state="unpaid"'), 'unpaid ad is not marked as debt in the table');
+  assert(/class="[^"]*text-rose-600[^"]*" data-label="Amount" data-payment-state="unpaid"/.test(unpaidHtml), 'unpaid USD amount is not red');
+  assert(/class="[^"]*text-rose-600[^"]*" data-label="Local"/.test(unpaidHtml), 'unpaid LYD amount is not red');
+  assert(unpaidHtml.includes('Unpaid debt'), 'red amount has no beginner-facing debt label');
+
+  delete S.ads[0].createdBy;
+  const legacyCreatorHtml = visible(sandbox.renderAdsView());
+  assert(legacyCreatorHtml.includes('Created by: <span class="font-semibold text-slate-700 dark:text-slate-200">Abdu'), 'legacy creatorId fallback is not displayed');
+
+  S.ads[0].createdBy = 'u-admin';
+  S.ads[0].paymentStatus = '';
+  S.ads[0].isPaid = false;
+  const blankStatusHtml = visible(sandbox.renderAdsView());
+  assert(blankStatusHtml.includes('data-payment-state="unpaid"'), 'blank status with isPaid=false incorrectly looks paid');
+
+  S.ads[0].paymentStatus = 'wont_pay';
+  const wontPayHtml = visible(sandbox.renderAdsView());
+  assert(wontPayHtml.includes('data-payment-state="unpaid"'), "Won't Pay amount incorrectly looks paid");
+
+  S.ads[0].paymentStatus = 'paid';
+  delete S.ads[0].isPaid;
+  const paidHtml = visible(sandbox.renderAdsView());
+  assert(paidHtml.includes('data-payment-state="paid"'), 'paid ad is not marked paid in the table');
+  assert(/class="[^"]*text-emerald-600[^"]*" data-label="Amount" data-payment-state="paid"/.test(paidHtml), 'paid USD amount is not green');
 });
 
 check('saved ad photos cannot be replaced without permission to view them', () => {

@@ -83,6 +83,13 @@ check('receipt status choices become a readable phone grid',
 check('customer filters cannot overflow the phone card',
   views.includes('customer-filter-controls') &&
   css.includes('.customer-filter-controls'));
+check('ad photo viewer is a clear phone-sized action',
+  views.includes('mobile-card-table w-full') &&
+  views.includes('ad-photo-view-button') &&
+  views.includes('data-action="view-ad-photos"') &&
+  views.includes('data-role="ad-creator"') &&
+  css.includes('button.ad-photo-view-button') &&
+  css.includes('min-height: 2.75rem'));
 check('receipt photo viewer allows native pan and pinch zoom',
   helpers.includes('receipt-photo-stage') && css.includes('touch-action: pan-x pan-y pinch-zoom'));
 check('clothes line items use responsive named grids',

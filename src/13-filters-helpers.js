@@ -1232,7 +1232,7 @@ async function openReceiptPhotoViewer(receiptId, index = 0) {
   );
 }
 
-async function openAdPhotoViewer(adId, index = 0) {
+async function openAdPhotoViewer(adId, index = 0, triggerButton = null) {
   if (!can('ads', 'viewPhotos')) {
     showNotification(
       state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
@@ -1243,6 +1243,13 @@ async function openAdPhotoViewer(adId, index = 0) {
   }
   let ad = (state.ads || []).find(item => item && !item._deleted && String(item.id) === String(adId));
   if (!ad) return;
+  const busyLabel = triggerButton?.querySelector?.('span') || null;
+  const originalLabel = busyLabel?.textContent || '';
+  if (triggerButton) {
+    triggerButton.disabled = true;
+    triggerButton.setAttribute?.('aria-busy', 'true');
+    if (busyLabel) busyLabel.textContent = state.language === 'ar' ? 'جارٍ تحميل الصور...' : 'Loading photos...';
+  }
   try {
     ad = await ensureEntityMediaLoaded('ads', adId);
   } catch (_) {
@@ -1252,6 +1259,12 @@ async function openAdPhotoViewer(adId, index = 0) {
       'error'
     );
     return;
+  } finally {
+    if (triggerButton) {
+      triggerButton.disabled = false;
+      triggerButton.removeAttribute?.('aria-busy');
+      if (busyLabel) busyLabel.textContent = originalLabel;
+    }
   }
   if (!ad) return;
   openReceiptPhotoViewerSources(
