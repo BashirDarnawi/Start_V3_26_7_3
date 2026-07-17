@@ -122,19 +122,25 @@ function checkDuplicatePhone(phones, excludeCustomerId = null) {
 function buildCustomerStatsIndex() {
   const adsByCustomer = new Map();
   for (const ad of getVisibleRecords(state.ads)) {
-    if (ad.recordType !== 'ad') continue;
-    const list = adsByCustomer.get(ad.customerId);
-    if (list) list.push(ad); else adsByCustomer.set(ad.customerId, [ad]);
+    // Very old ads did not have recordType yet. Only the explicit receipt
+    // mirror is not an ad; this matches getFilteredAds() and keeps old data
+    // visible after a live refresh even before a migration has persisted it.
+    if (ad.recordType === 'receipt') continue;
+    const customerId = String(ad.customerId || ad.customer || '');
+    if (!customerId) continue;
+    const list = adsByCustomer.get(customerId);
+    if (list) list.push(ad); else adsByCustomer.set(customerId, [ad]);
   }
   const receiptsByCustomer = new Map();
   for (const r of getVisibleRecords(state.receipts)) {
-    const list = receiptsByCustomer.get(r.customerId);
-    if (list) list.push(r); else receiptsByCustomer.set(r.customerId, [r]);
+    const customerId = String(r.customerId || '');
+    if (!customerId) continue;
+    const list = receiptsByCustomer.get(customerId);
+    if (list) list.push(r); else receiptsByCustomer.set(customerId, [r]);
   }
   const pagesByCustomer = new Map();
   for (const p of getVisibleRecords(state.pages)) {
-    if (!Array.isArray(p.customerIds)) continue;
-    for (const cid of p.customerIds) {
+    for (const cid of getPageCustomerIds(p)) {
       const list = pagesByCustomer.get(cid);
       if (list) list.push(p); else pagesByCustomer.set(cid, [p]);
     }
@@ -149,24 +155,155 @@ function buildCustomerStatsIndex() {
 // and a Stopped ad that spent $100 was counted at its full $500).
 function getAdSpendUSD(ad) {
   if (!ad) return 0;
-  if (ad.status === 'Stopped' && ad.spentUSD !== undefined) return parseFloat(ad.spentUSD) || 0;
-  if (['Completed', 'Canceled', 'Lost'].includes(ad.status)) {
+  const status = String(ad.status || '').trim().toLowerCase();
+  if (status === 'stopped' && ad.spentUSD !== undefined) return parseFloat(ad.spentUSD) || 0;
+  if (['completed', 'canceled', 'lost'].includes(status)) {
     return ad.spentUSD !== undefined ? (parseFloat(ad.spentUSD) || 0) : (parseFloat(ad.amountUSD) || 0);
   }
-  if (['Pending', 'Paused'].includes(ad.status)) return 0;
+  if (['pending', 'paused'].includes(status)) return 0;
   return parseFloat(ad.amountUSD) || 0;
 }
 
+// Normalize current and historical page links. Current pages use customerIds;
+// old exports used one scalar customerId. Comparing normalized strings also
+// protects imported numeric-looking ids from silently disappearing.
+function getPageCustomerIds(page) {
+  if (!page || page._deleted) return [];
+  // Once the modern array exists it is authoritative, including when it is
+  // empty. Falling back to the old scalar only when the array is absent keeps
+  // a removed/reassigned legacy customer from being linked again forever.
+  const rawIds = Array.isArray(page.customerIds)
+    ? [...page.customerIds]
+    : (page.customerId !== undefined && page.customerId !== null && String(page.customerId).trim()
+      ? [page.customerId]
+      : []);
+  return [...new Set(rawIds.map(id => String(id || '').trim()).filter(Boolean))];
+}
+
+function getLinkedPagesForCustomer(customerId) {
+  const normalizedCustomerId = String(customerId || '').trim();
+  if (!Security.isValidRecordId(normalizedCustomerId)) return [];
+  return getVisibleRecords(state.pages || []).filter(page =>
+    getPageCustomerIds(page).includes(normalizedCustomerId)
+  );
+}
+
+// Prefer the exact historical rate recorded by amountLocal/amountUSD. This is
+// more reliable than today's default and remains correct if exchange rates are
+// changed later. The shared resolver covers receipt-funded ads and legacy data.
+function getAdSpendExchangeRate(ad) {
+  const amountUSD = Number(ad?.amountUSD);
+  const amountLocal = Number(ad?.amountLocal);
+  if (Number.isFinite(amountUSD) && amountUSD > 0 && Number.isFinite(amountLocal) && amountLocal > 0) {
+    const storedRate = amountLocal / amountUSD;
+    if (Number.isFinite(storedRate) && storedRate > 0) return storedRate;
+  }
+  const effectiveRate = typeof getEffectiveExchangeRate === 'function'
+    ? Number(getEffectiveExchangeRate(ad))
+    : Number(ad?.exchangeRate);
+  if (Number.isFinite(effectiveRate) && effectiveRate > 0) return effectiveRate;
+  const recordRate = Number(ad?.exchangeRate);
+  if (Number.isFinite(recordRate) && recordRate > 0) return recordRate;
+  const fallbackRate = Number(state.defaultExchangeRate);
+  return Number.isFinite(fallbackRate) && fallbackRate > 0 ? fallbackRate : 1;
+}
+
+function getAdSpendLYD(ad) {
+  return getAdSpendUSD(ad) * getAdSpendExchangeRate(ad);
+}
+
+// One authoritative, customer-scoped summary for the Customers drill-down.
+// Filtering by BOTH ids is essential: a Facebook page can be shared by several
+// customers, and page-only totals would charge one customer's ads to another.
+function getCustomerPageSpendSummary(customerId, pageId) {
+  const normalizedCustomerId = String(customerId || '').trim();
+  const normalizedPageId = String(pageId || '').trim();
+  if (!Security.isValidRecordId(normalizedCustomerId) || !Security.isValidRecordId(normalizedPageId)) return null;
+
+  const customer = getVisibleRecords(state.customers || []).find(item => String(item.id) === normalizedCustomerId);
+  const page = getVisibleRecords(state.pages || []).find(item => String(item.id) === normalizedPageId);
+  if (!customer || !page || !getPageCustomerIds(page).includes(normalizedCustomerId)) return null;
+
+  const ads = getVisibleRecords(state.ads || []).filter(ad => {
+    if (ad.recordType === 'receipt') return false;
+    const adCustomerId = String(ad.customerId || ad.customer || '');
+    const adPageId = String(ad.pageId || ad.page || '');
+    return adCustomerId === normalizedCustomerId && adPageId === normalizedPageId;
+  });
+
+  let totalSpendUSD = 0;
+  let totalSpendLYD = 0;
+  let paidSpendUSD = 0;
+  let paidSpendLYD = 0;
+  let unpaidSpendUSD = 0;
+  let unpaidSpendLYD = 0;
+  const adDates = [];
+
+  ads.forEach(ad => {
+    const spendUSD = getAdSpendUSD(ad);
+    const spendLYD = getAdSpendLYD(ad);
+    totalSpendUSD += spendUSD;
+    totalSpendLYD += spendLYD;
+    if (getAdPaymentState(ad) === 'paid') {
+      paidSpendUSD += spendUSD;
+      paidSpendLYD += spendLYD;
+    } else {
+      // Both Not Paid and Won't Pay belong in the red unpaid-ad spend group.
+      unpaidSpendUSD += spendUSD;
+      unpaidSpendLYD += spendLYD;
+    }
+    const time = new Date(ad.startDate || ad.date || ad.createdAt || '').getTime();
+    if (Number.isFinite(time)) adDates.push(time);
+  });
+
+  return {
+    customerId: normalizedCustomerId,
+    customerName: String(customer.name || ''),
+    pageId: normalizedPageId,
+    pageName: String(page.name || ''),
+    pageCategory: String(page.category || ''),
+    totalAds: ads.length,
+    runningAds: ads.filter(ad => String(ad.status || '').trim().toLowerCase() === 'active').length,
+    totalSpendUSD,
+    totalSpendLYD,
+    paidSpendUSD,
+    paidSpendLYD,
+    unpaidSpendUSD,
+    unpaidSpendLYD,
+    lastAdDate: adDates.length ? Math.max(...adDates) : null
+  };
+}
+
+function getPageSpendSummary(pageId) {
+  const normalizedPageId = String(pageId || '').trim();
+  if (!Security.isValidRecordId(normalizedPageId)) return null;
+  const page = getVisibleRecords(state.pages || []).find(item => String(item.id) === normalizedPageId);
+  if (!page) return null;
+  const ads = getVisibleRecords(state.ads || []).filter(ad =>
+    ad.recordType !== 'receipt' && String(ad.pageId || ad.page || '') === normalizedPageId
+  );
+  const dates = ads
+    .map(ad => new Date(ad.startDate || ad.date || ad.createdAt || '').getTime())
+    .filter(Number.isFinite);
+  return {
+    totalAds: ads.length,
+    totalSpendUSD: ads.reduce((sum, ad) => sum + getAdSpendUSD(ad), 0),
+    totalSpendLYD: ads.reduce((sum, ad) => sum + getAdSpendLYD(ad), 0),
+    lastAdDate: dates.length ? Math.max(...dates) : null
+  };
+}
+
 function getCustomerStats(customerId, statsIndex = null) {
+  const normalizedCustomerId = String(customerId || '');
   const customerAds = statsIndex
-    ? (statsIndex.adsByCustomer.get(customerId) || [])
-    : getVisibleRecords(state.ads).filter(ad => ad.customerId === customerId && ad.recordType === 'ad');
+    ? (statsIndex.adsByCustomer.get(normalizedCustomerId) || [])
+    : getVisibleRecords(state.ads).filter(ad => String(ad.customerId || ad.customer || '') === normalizedCustomerId && ad.recordType !== 'receipt');
   const customerReceipts = statsIndex
-    ? (statsIndex.receiptsByCustomer.get(customerId) || [])
-    : getVisibleRecords(state.receipts).filter(r => r.customerId === customerId);
+    ? (statsIndex.receiptsByCustomer.get(normalizedCustomerId) || [])
+    : getVisibleRecords(state.receipts).filter(r => String(r.customerId || '') === normalizedCustomerId);
   const linkedPages = statsIndex
-    ? (statsIndex.pagesByCustomer.get(customerId) || [])
-    : getVisibleRecords(state.pages).filter(p => p.customerIds?.includes(customerId));
+    ? (statsIndex.pagesByCustomer.get(normalizedCustomerId) || [])
+    : getLinkedPagesForCustomer(normalizedCustomerId);
   
   // Calculate total paid from receipts (in LYD and USD)
   // IMPORTANT: Unpaid receipts (status "Not Paid") should NOT be counted as revenue.
@@ -206,10 +343,7 @@ function getCustomerStats(customerId, statsIndex = null) {
     // from each ad's OWN exchange rate so the LYD balance reflects the debt
     // instead of showing a misleading 0 (which styled the card as positive
     // and made the "has debt" filter miss a genuine debtor).
-    totalSpentLYD = customerAds.reduce((sum, ad) => {
-      const rate = parseFloat(ad.exchangeRate) || state.defaultExchangeRate || 0;
-      return sum + getAdSpendUSD(ad) * rate;
-    }, 0);
+    totalSpentLYD = customerAds.reduce((sum, ad) => sum + getAdSpendLYD(ad), 0);
   }
   
   // Calculate balance (paid - spent)
@@ -223,9 +357,10 @@ function getCustomerStats(customerId, statsIndex = null) {
   
   // Get last ad date
   const allCustomerAds = [...customerAds, ...customerReceipts];
-  const lastAdDate = allCustomerAds.length > 0 
-    ? Math.max(...allCustomerAds.map(ad => new Date(ad.date || ad.createdAt).getTime()))
-    : null;
+  const customerActivityDates = allCustomerAds
+    .map(ad => new Date(ad.startDate || ad.date || ad.createdAt || '').getTime())
+    .filter(Number.isFinite);
+  const lastAdDate = customerActivityDates.length ? Math.max(...customerActivityDates) : null;
   
   return {
     totalSpent,
@@ -245,6 +380,230 @@ function getCustomerStats(customerId, statsIndex = null) {
     totalReceipts: customerReceipts.length,
     linkedPagesCount: linkedPages.length
   };
+}
+
+let _customerPagesReturnFocus = null;
+let _customerPagesCustomerId = null;
+
+function renderCustomerPageSpendingDetail(summary, permissions = {}) {
+  const isAr = state.language === 'ar';
+  if (!summary) {
+    return `<div class="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">${isAr ? 'هذه الصفحة غير مرتبطة بهذا العميل.' : 'This page is not linked to this customer.'}</div>`;
+  }
+
+  const canViewAds = permissions.canViewAds !== undefined ? permissions.canViewAds : can('ads', 'view');
+  const canViewBalance = permissions.canViewBalance !== undefined ? permissions.canViewBalance : can('customers', 'viewBalance');
+  const lastAdText = summary.lastAdDate
+    ? new Date(summary.lastAdDate).toLocaleDateString(isAr ? 'ar-LY' : undefined)
+    : (isAr ? 'أبداً' : 'Never');
+  const pageName = Security.escapeHtml(summary.pageName || '');
+  const category = Security.escapeHtml(summary.pageCategory || '');
+
+  if (!canViewAds) {
+    return `
+      <div class="space-y-4">
+        <div><h3 class="text-lg font-bold text-slate-800 dark:text-white break-words">${pageName}</h3>${category ? `<p class="text-sm text-slate-500 mt-1 break-words">${category}</p>` : ''}</div>
+        <div class="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 p-4 text-sm text-slate-500">
+          <i data-lucide="lock" class="w-4 h-4 inline-block align-text-bottom"></i>
+          ${isAr ? 'نشاط الإعلانات محجوب لحسابك.' : 'Ad activity is hidden for your account.'}
+        </div>
+      </div>`;
+  }
+
+  return `
+    <div class="space-y-4">
+      <div>
+        <h3 class="text-lg font-bold text-slate-800 dark:text-white break-words">${pageName}</h3>
+        ${category ? `<p class="text-sm text-slate-500 mt-1 break-words">${category}</p>` : ''}
+        <p class="text-xs text-indigo-600 dark:text-indigo-300 mt-2">${isAr ? 'إنفاق هذا العميل فقط على هذه الصفحة' : "Only this customer's activity on this page"}</p>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div class="rounded-xl bg-slate-50 dark:bg-slate-800/60 p-3">
+          <div class="text-xs text-slate-500">${isAr ? 'إجمالي الإعلانات' : 'Total ads'}</div>
+          <div class="text-xl font-bold text-slate-800 dark:text-white mt-1">${summary.totalAds}</div>
+        </div>
+        <div class="rounded-xl bg-blue-50 dark:bg-blue-900/20 p-3">
+          <div class="text-xs text-blue-600">${isAr ? 'الإعلانات النشطة' : 'Running ads'}</div>
+          <div class="text-xl font-bold text-blue-700 dark:text-blue-300 mt-1">${summary.runningAds}</div>
+        </div>
+        <div class="rounded-xl bg-slate-50 dark:bg-slate-800/60 p-3">
+          <div class="text-xs text-slate-500">${isAr ? 'آخر إعلان' : 'Last ad'}</div>
+          <div class="text-sm font-bold text-slate-800 dark:text-white mt-1">${Security.escapeHtml(lastAdText)}</div>
+        </div>
+      </div>
+      ${!canViewBalance ? `
+        <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-4 text-sm text-slate-500">
+          <i data-lucide="lock" class="w-4 h-4 inline-block align-text-bottom"></i>
+          ${isAr ? 'معلومات الإنفاق محجوبة لحسابك.' : 'Spending information is hidden for your account.'}
+        </div>
+      ` : `
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
+            <div class="text-xs font-semibold text-slate-500">${isAr ? 'إجمالي الإنفاق' : 'Total spend'}</div>
+            <div class="text-lg font-bold text-slate-800 dark:text-white mt-1">$${summary.totalSpendUSD.toFixed(2)}</div>
+            <div class="text-xs text-slate-500">${summary.totalSpendLYD.toFixed(2)} LYD</div>
+          </div>
+          <div class="rounded-xl border border-emerald-200 bg-emerald-50 dark:bg-emerald-900/20 p-3">
+            <div class="text-xs font-semibold text-emerald-600">${isAr ? 'إنفاق مدفوع' : 'Paid spend'}</div>
+            <div class="text-lg font-bold text-emerald-700 dark:text-emerald-300 mt-1">$${summary.paidSpendUSD.toFixed(2)}</div>
+            <div class="text-xs text-emerald-600">${summary.paidSpendLYD.toFixed(2)} LYD</div>
+          </div>
+          <div class="rounded-xl border border-rose-200 bg-rose-50 dark:bg-rose-900/20 p-3">
+            <div class="text-xs font-semibold text-rose-600">${isAr ? 'إنفاق الإعلانات غير المدفوعة' : 'Spend on unpaid ads'}</div>
+            <div class="text-lg font-bold text-rose-700 dark:text-rose-300 mt-1">$${summary.unpaidSpendUSD.toFixed(2)}</div>
+            <div class="text-xs text-rose-600">${summary.unpaidSpendLYD.toFixed(2)} LYD</div>
+          </div>
+        </div>
+      `}
+    </div>`;
+}
+
+function openCustomerPages(customerId, triggerButton = null) {
+  const normalizedCustomerId = String(customerId || '').trim();
+  const isAr = state.language === 'ar';
+  if (!state.currentUser?.id) return;
+  if (!Security.isValidRecordId(normalizedCustomerId)) return;
+
+  const customer = getVisibleRecords(state.customers || []).find(item => String(item.id) === normalizedCustomerId);
+  const canViewCustomer = customer && canActOnRecord(
+    'customers',
+    'view',
+    customer.createdBy || customer.creatorId
+  );
+  if (!canViewCustomer || !can('pages', 'view')) {
+    showNotification(
+      isAr ? 'تم رفض الوصول' : 'Access Denied',
+      isAr ? 'لا توجد صلاحية لعرض صفحات العميل.' : 'You do not have permission to view this customer\'s pages.',
+      'error'
+    );
+    return;
+  }
+
+  const linkedPages = getLinkedPagesForCustomer(normalizedCustomerId);
+  closeCustomerPagesDialog(false);
+  _customerPagesReturnFocus = triggerButton || document.activeElement;
+  _customerPagesCustomerId = normalizedCustomerId;
+
+  const dialog = document.createElement('div');
+  dialog.id = 'customer-pages-dialog';
+  dialog.className = 'customer-pages-dialog mobile-dialog-overlay fixed inset-0 z-[90] flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
+  dialog.setAttribute('aria-labelledby', 'customer-pages-dialog-title');
+  dialog.setAttribute('dir', isAr ? 'rtl' : 'ltr');
+  dialog.dataset.customerId = normalizedCustomerId;
+  dialog.tabIndex = -1;
+  dialog.innerHTML = `
+    <div class="glass-panel w-full max-w-4xl max-h-[90dvh] overflow-hidden rounded-2xl shadow-2xl flex flex-col animate-slide-up">
+      <div class="sticky top-0 z-10 bg-white dark:bg-slate-900 flex items-center justify-between gap-3 p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700">
+        <div class="min-w-0">
+          <h2 id="customer-pages-dialog-title" class="text-xl font-bold text-slate-800 dark:text-white truncate">${isAr ? 'صفحات العميل' : 'Customer pages'}</h2>
+          <p class="text-sm text-slate-500 truncate">${Security.escapeHtml(customer.name || '')}</p>
+        </div>
+        <button type="button" data-customer-pages-close onclick="closeCustomerPagesDialog()" class="min-w-11 min-h-11 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center flex-shrink-0" aria-label="${isAr ? 'إغلاق' : 'Close'}">
+          <span class="text-2xl leading-none" aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1.4fr)] flex-1 min-h-0 overflow-y-auto lg:overflow-hidden">
+        <div class="p-4 sm:p-5 border-b lg:border-b-0 lg:border-e border-slate-200 dark:border-slate-700 lg:overflow-y-auto">
+          <h3 class="text-xs font-bold uppercase tracking-wide text-slate-500 mb-3">${isAr ? 'الصفحات المرتبطة' : 'Linked pages'} (${linkedPages.length})</h3>
+          <div class="space-y-2">
+            ${linkedPages.length ? linkedPages.map(page => `
+              <button type="button" data-customer-page-option data-customer-id="${Security.escapeHtml(normalizedCustomerId)}" data-page-id="${Security.escapeHtml(String(page.id || ''))}" onclick="showCustomerPageSpending(this.dataset.customerId, this.dataset.pageId, this)" class="customer-page-option w-full min-h-11 text-start rounded-xl border border-slate-200 dark:border-slate-700 p-3 hover:border-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 transition-colors" aria-pressed="false">
+                <span class="font-semibold text-slate-800 dark:text-white block break-words">${Security.escapeHtml(page.name || '')}</span>
+                ${page.category ? `<span class="text-xs text-slate-500 block mt-1 break-words">${Security.escapeHtml(page.category || '')}</span>` : ''}
+              </button>
+            `).join('') : `
+              <div class="rounded-xl bg-slate-50 dark:bg-slate-800/60 p-4 text-sm text-slate-500 text-center">${isAr ? 'لا توجد صفحات مرتبطة بهذا العميل.' : 'No pages are linked to this customer.'}</div>
+            `}
+          </div>
+        </div>
+        <div id="customer-page-spending-detail" class="p-4 sm:p-5 lg:overflow-y-auto" aria-live="polite">
+          <div class="h-full min-h-36 flex flex-col items-center justify-center text-center text-slate-500">
+            <i data-lucide="mouse-pointer-click" class="w-8 h-8 mb-3 text-indigo-400"></i>
+            <p>${linkedPages.length ? (isAr ? 'اختر صفحة لرؤية معلومات الإنفاق.' : 'Choose a page to see its spending information.') : (isAr ? 'أضف صفحة لهذا العميل أولاً.' : 'Link a page to this customer first.')}</p>
+          </div>
+        </div>
+      </div>
+    </div>`;
+
+  dialog.addEventListener('click', event => {
+    if (event.target === dialog) closeCustomerPagesDialog();
+  });
+  dialog.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      closeCustomerPagesDialog();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+
+    const focusable = Array.from(dialog.querySelectorAll(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    ));
+    if (!focusable.length) {
+      event.preventDefault();
+      dialog.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  document.body.appendChild(dialog);
+  IconQueue.schedule(dialog);
+  const closeButton = dialog.querySelector('[data-customer-pages-close]');
+  if (closeButton?.focus) closeButton.focus(); else dialog.focus();
+}
+
+function showCustomerPageSpending(customerId, pageId, triggerButton = null) {
+  const normalizedCustomerId = String(customerId || '').trim();
+  const normalizedPageId = String(pageId || '').trim();
+  if (!state.currentUser?.id) return;
+  if (!Security.isValidRecordId(normalizedCustomerId) || !Security.isValidRecordId(normalizedPageId)) return;
+  const customer = getVisibleRecords(state.customers || []).find(item => String(item.id) === normalizedCustomerId);
+  const canViewCustomer = customer && canActOnRecord(
+    'customers',
+    'view',
+    customer.createdBy || customer.creatorId
+  );
+  if (!canViewCustomer || !can('pages', 'view')) return;
+  const summary = getCustomerPageSpendSummary(normalizedCustomerId, normalizedPageId);
+  const detail = document.getElementById('customer-page-spending-detail');
+  if (!summary || !detail) return;
+
+  detail.innerHTML = renderCustomerPageSpendingDetail(summary, {
+    canViewAds: can('ads', 'view'),
+    canViewBalance: can('customers', 'viewBalance')
+  });
+  const dialog = document.getElementById('customer-pages-dialog');
+  if (dialog) dialog.dataset.selectedPageId = normalizedPageId;
+  dialog?.querySelectorAll('[data-customer-page-option]').forEach(button => {
+    const selected = String(button.dataset.pageId || '') === normalizedPageId;
+    button.setAttribute('aria-pressed', selected ? 'true' : 'false');
+    button.classList.toggle('ring-2', selected);
+    button.classList.toggle('ring-indigo-500', selected);
+    button.classList.toggle('bg-indigo-50', selected);
+  });
+  IconQueue.schedule(detail);
+  if (triggerButton && window.innerWidth < 1024) detail.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
+}
+
+function closeCustomerPagesDialog(restoreFocus = true) {
+  document.getElementById('customer-pages-dialog')?.remove();
+  let focusTarget = _customerPagesReturnFocus?.isConnected === false ? null : _customerPagesReturnFocus;
+  if (!focusTarget && _customerPagesCustomerId) {
+    focusTarget = Array.from(document.querySelectorAll?.('[data-action="view-customer-pages"]') || [])
+      .find(button => String(button.dataset?.customerId || '') === _customerPagesCustomerId) || null;
+  }
+  _customerPagesReturnFocus = null;
+  _customerPagesCustomerId = null;
+  if (restoreFocus && focusTarget?.focus) focusTarget.focus();
 }
 
 function getCustomerSortValue(customer, sortType, statsIndex = null) {
@@ -281,8 +640,17 @@ function getCustomerSortValue(customer, sortType, statsIndex = null) {
   }
 }
 
+function getCustomersVisibleToCurrentUser() {
+  return getVisibleRecords(state.customers).filter(customer =>
+    canActOnRecord('customers', 'view', customer.createdBy || customer.creatorId)
+  );
+}
+
 function getFilteredCustomers() {
-  let filtered = getVisibleRecords(state.customers);
+  // Do not rely only on the server/cached collection being pre-scoped. During
+  // permission changes and in local mode, a viewOwn user may still have other
+  // creators' customers in memory. Scope before search, counts, or rendering.
+  let filtered = getCustomersVisibleToCurrentUser();
   const searchTerm = String(state.customerSearch || '').toLowerCase().trim();
   
   if (searchTerm) {

@@ -292,6 +292,24 @@ function applyServerDelta(collectionName, records) {
   return changed;
 }
 
+// Customer page spending is rendered in a body-mounted, read-only dialog rather
+// than inside #app. A normal view render cannot update or remove it, so any
+// authoritative state replacement must close it before stale financial data can
+// remain visible. Never restore focus here: the original card/button may already
+// have been replaced by the same sync or by a logout render.
+function _closeCustomerPagesDialogForStateChange() {
+  const dialog = document.getElementById('customer-pages-dialog');
+  if (!dialog) return false;
+  try {
+    if (typeof closeCustomerPagesDialog === 'function') {
+      closeCustomerPagesDialog(false);
+      return true;
+    }
+  } catch (_) {}
+  dialog.remove();
+  return true;
+}
+
 async function serverLiveSyncOnce() {
   if (!isServerModeEnabled()) return { ok: false, skipped: true };
   if (!state.currentUser) return { ok: false, skipped: true };
@@ -372,8 +390,13 @@ async function serverLiveSyncOnce() {
       state.serverLastSyncAt = new Date().toISOString();
       state.serverLastSyncErrorAt = null;
     }
-    // Always re-render when data changed (not just cursor) - ensures edits from admin show immediately
-    if (changed) RenderQueue.schedule('liveSync(delivery)');
+    // Always re-render when data changed (not just cursor) - ensures edits from admin show immediately.
+    // The delivery replacement includes ads/customers, so an open customer-page
+    // summary would otherwise keep showing the pre-sync snapshot above the new view.
+    if (changed) {
+      _closeCustomerPagesDialogForStateChange();
+      RenderQueue.schedule('liveSync(delivery)');
+    }
     return { ok: !deliveryFetchFailed };
   }
 
@@ -429,17 +452,31 @@ async function serverLiveSyncOnce() {
   // broader collection from memory, request cache and this user's IndexedDB
   // namespace before anything can render it again.
   const forbiddenCollections = deltaResults.filter(result => result.forbidden).map(result => result.collection);
+  const customerPageForbidden = forbiddenCollections.some(name =>
+    name === 'ads' || name === 'receipts' || name === 'customers' || name === 'pages' || name === 'exchangeRateHistory'
+  );
+  // A 403 means access is already revoked. Close the financial snapshot before
+  // awaiting cache/IndexedDB cleanup so slow storage cannot prolong exposure.
+  if (customerPageForbidden) _closeCustomerPagesDialogForStateChange();
   if (forbiddenCollections.length > 0) {
     await clearServerCollectionsForVisibility(forbiddenCollections);
     if (_syncAborted()) return { ok: false, skipped: true };
   }
 
   let changed = forbiddenCollections.length > 0;
-  changed = applyServerDelta('ads', adsDelta) || changed;
-  changed = applyServerDelta('receipts', receiptsDelta) || changed;
-  changed = applyServerDelta('customers', customersDelta) || changed;
-  changed = applyServerDelta('pages', pagesDelta) || changed;
-  changed = applyServerDelta('exchangeRateHistory', exhDelta) || changed;
+  let customerPagesDataChanged = customerPageForbidden;
+  const adsChanged = applyServerDelta('ads', adsDelta);
+  changed = adsChanged || changed;
+  const receiptsChanged = applyServerDelta('receipts', receiptsDelta);
+  changed = receiptsChanged || changed;
+  const customersChanged = applyServerDelta('customers', customersDelta);
+  changed = customersChanged || changed;
+  const pagesChanged = applyServerDelta('pages', pagesDelta);
+  changed = pagesChanged || changed;
+  customerPagesDataChanged = adsChanged || receiptsChanged || customersChanged || pagesChanged || customerPagesDataChanged;
+  const exchangeRatesChanged = applyServerDelta('exchangeRateHistory', exhDelta);
+  changed = exchangeRatesChanged || changed;
+  customerPagesDataChanged = exchangeRatesChanged || customerPagesDataChanged;
   changed = applyServerDelta('clothesProducts', clothesProductsDelta) || changed;
   changed = applyServerDelta('clothesShipments', clothesShipmentsDelta) || changed;
   changed = applyServerDelta('clothesOrders', clothesOrdersDelta) || changed;
@@ -505,6 +542,11 @@ async function serverLiveSyncOnce() {
         ? getServerVisibilityScopeChanges(accessBefore, state.currentUser)
         : [];
       if (permsChanged) {
+        // Access revocation can hide pages, ads, balances, or the customer itself.
+        // Close immediately, before cache writes/refetches, so its old authorized
+        // snapshot cannot outlive the newly-scoped state even on a slow network.
+        _closeCustomerPagesDialogForStateChange();
+        customerPagesDataChanged = true;
         // Stop reusing any in-flight/broader snapshot, purge the affected
         // collections, then perform a fresh server-scoped load. A view->viewOwn
         // response has no tombstones for rows that became unauthorized, so
@@ -545,6 +587,7 @@ async function serverLiveSyncOnce() {
     state.serverLastSyncAt = new Date().toISOString();
     state.serverLastSyncErrorAt = null;
   }
+  if (customerPagesDataChanged) _closeCustomerPagesDialogForStateChange();
   if (changed) RenderQueue.schedule('liveSync(delta)');
   return { ok: !anyFetchFailed };
 }
@@ -1183,6 +1226,10 @@ function discardPendingServerUserUpdates() {
 }
 
 async function wipeAuthenticatedServerDataFromClient() {
+  // This helper is also used by the session-expiry path, which does not pass
+  // through the normal logout function. Remove body-mounted financial data
+  // before clearing auth/state or awaiting IndexedDB writes.
+  _closeCustomerPagesDialogForStateChange();
   const collections = Array.isArray(PERSISTED_COLLECTIONS)
     ? PERSISTED_COLLECTIONS
     : ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory'];
@@ -1197,6 +1244,7 @@ async function wipeAuthenticatedServerDataFromClient() {
 }
 
 function emergencyFinishClientSignOut(serverMode, expired) {
+  _closeCustomerPagesDialogForStateChange();
   try { stopServerLiveSync(); } catch (_) {}
   try { advanceServerSessionEpoch(); } catch (_) {}
   try { cancelPendingRequests(); } catch (_) {}
@@ -1223,6 +1271,7 @@ function emergencyFinishClientSignOut(serverMode, expired) {
 async function _handleLogoutOnce() {
   const serverMode = isServerModeEnabled();
   const overlay = showSessionTransitionOverlay(state.language === 'ar' ? 'جارٍ تسجيل الخروج...' : 'Signing out...');
+  _closeCustomerPagesDialogForStateChange();
   try {
     if (state.currentUser) {
       addAuditLog('Logout', state.currentUser.id, `User ${Security.escapeHtml(state.currentUser.name)} logged out`);

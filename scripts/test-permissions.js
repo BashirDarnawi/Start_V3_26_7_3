@@ -492,6 +492,219 @@ check('with viewBalance, balances are shown', () => {
   assert(html.includes('Ads Credit (USD)'), 'financial grid missing for permitted user');
 });
 
+console.log('\n=== CUSTOMERS: linked pages and customer-scoped page spending ===');
+
+function seedCustomerPageDrilldown() {
+  S.language = 'en';
+  S.defaultExchangeRate = 9.5;
+  S.customers = [
+    { id: 'c1', name: 'Cust <One>', platform: 'Facebook', phones: [], profileLinks: [] },
+    { id: 'c2', name: 'Customer Two', platform: 'Facebook', phones: [], profileLinks: [] }
+  ];
+  S.receipts = [];
+  S.pages = [
+    { id: 'pshared', name: 'Shared <Page>', category: 'Retail <img src=x onerror=alert(1)>', customerIds: ['c1', 'c2'], customerId: 'c1' },
+    { id: 'plegacy', name: 'Legacy Page', category: 'Legacy', customerId: 'c1' },
+    { id: 'pclone', name: 'Shared <Page>', category: 'New page with same name', customerIds: ['c1'] },
+    { id: 'pforeign', name: 'Foreign Page', category: '', customerIds: ['c2'] },
+    { id: 'pdeleted', name: 'Deleted Page', category: '', customerIds: ['c1'], _deleted: true }
+  ];
+  S.ads = [
+    { id: 'a-paid', customerId: 'c1', pageId: 'pshared', recordType: 'ad', status: 'Active', paymentStatus: 'paid', amountUSD: 10, amountLocal: 95, startDate: '2026-07-10T00:00:00Z' },
+    { id: 'a-stopped', customerId: 'c1', pageId: 'pshared', status: ' stopped ', paymentStatus: 'Not Paid', amountUSD: 30, amountLocal: 291, spentUSD: 12, startDate: '2026-07-11T00:00:00Z' },
+    { id: 'a-wont', customerId: 'c1', pageId: 'pshared', recordType: 'ad', status: 'COMPLETED', paymentStatus: "won't pay", amountUSD: 5, amountLocal: 47.5, spentUSD: 4, startDate: '2026-07-12T00:00:00Z' },
+    { id: 'a-pending', customerId: 'c1', pageId: 'pshared', recordType: 'ad', status: ' pending ', paymentStatus: 'Not Paid', amountUSD: 20, amountLocal: 190, startDate: '2026-07-13T00:00:00Z' },
+    { id: 'a-other-customer', customerId: 'c2', pageId: 'pshared', recordType: 'ad', status: 'Active', paymentStatus: 'paid', amountUSD: 99, amountLocal: 940.5 },
+    { id: 'a-same-name-new-page', customerId: 'c1', pageId: 'pclone', recordType: 'ad', status: 'Active', paymentStatus: 'paid', amountUSD: 8, amountLocal: 76 },
+    { id: 'a-legacy', customer: 'c1', page: 'plegacy', status: 'PAUSED', paymentStatus: 'paid', amountUSD: 50, amountLocal: 475 },
+    { id: 'a-deleted', customerId: 'c1', pageId: 'pshared', recordType: 'ad', status: 'Active', paymentStatus: 'paid', amountUSD: 100, amountLocal: 950, _deleted: true },
+    { id: 'receipt-mirror', customerId: 'c1', pageId: 'pshared', recordType: 'receipt', status: 'Active', amountUSD: 77, amountLocal: 731.5 }
+  ];
+}
+
+check('linked page count is a touch-sized dialog button only with pages.view', () => {
+  seedCustomerPageDrilldown();
+  loginAs(employee({ customers: ['view'] }));
+  const denied = visible(sandbox.renderCustomersGrid([S.customers[0]]));
+  assert(!denied.includes('data-action="view-customer-pages"'), 'page button leaked without pages.view');
+  assert(!denied.includes('3 pages'), 'linked-page relationship count leaked without pages.view');
+
+  loginAs(employee({ customers: ['view'], pages: ['view'] }));
+  const allowed = visible(sandbox.renderCustomersGrid([S.customers[0]]));
+  assert(allowed.includes('data-action="view-customer-pages"'), 'linked pages are not clickable');
+  assert(allowed.includes('openCustomerPages(this.dataset.customerId, this)'), 'button does not use its safe data id');
+  assert(allowed.includes('aria-haspopup="dialog"'), 'button does not announce the dialog');
+  assert(allowed.includes('min-h-11'), 'button is too small for phone taps');
+  assert(allowed.includes('3 pages'), 'legacy, modern, and same-name pages were not counted by id');
+  seedBusinessData();
+});
+
+check('modern customerIds is authoritative over a stale legacy customerId', () => {
+  seedCustomerPageDrilldown();
+  loginAs(ADMIN);
+  try {
+    const reassigned = {
+      id: 'page-reassigned',
+      name: 'Reassigned Page',
+      customerIds: ['c2'],
+      customerId: 'c1'
+    };
+    const explicitlyUnlinked = {
+      id: 'page-unlinked',
+      name: 'Unlinked Page',
+      customerIds: [],
+      customerId: 'c1'
+    };
+    const legacyOnly = {
+      id: 'page-legacy-only',
+      name: 'Legacy Only',
+      customerId: 'c1'
+    };
+    S.pages = [reassigned, explicitlyUnlinked, legacyOnly];
+
+    assert(sandbox.getPageCustomerIds(reassigned).join(',') === 'c2', 'stale scalar owner overrode a modern reassignment');
+    assert(sandbox.getPageCustomerIds(explicitlyUnlinked).length === 0, 'stale scalar owner revived an explicitly empty link array');
+    assert(sandbox.getPageCustomerIds(legacyOnly).join(',') === 'c1', 'true legacy scalar link stopped working');
+    assert(sandbox.getLinkedPagesForCustomer('c1').map(page => page.id).join(',') === 'page-legacy-only', 'stale legacy links leaked into the customer page list');
+    assert(sandbox.getLinkedPagesForCustomer('c2').map(page => page.id).join(',') === 'page-reassigned', 'modern reassigned owner lost the page');
+  } finally {
+    seedBusinessData();
+  }
+});
+
+check('customers.viewOwn shows and opens only the current user\'s customer', () => {
+  const originalAppendChild = sandbox.document.body.appendChild;
+  let appended = null;
+  sandbox.document.body.appendChild = element => { appended = element; };
+  try {
+    S.language = 'en';
+    S.customerSearch = '';
+    S.customerSort = 'newest';
+    S.customerFinancialFilter = 'all';
+    S.customers = [
+      { id: 'customer-own', name: 'Own Customer', platform: 'Facebook', phones: [], profileLinks: [], createdBy: 'u-emp', joinDate: '2026-07-17T00:00:00Z' },
+      { id: 'customer-other', name: 'Other Customer', platform: 'Facebook', phones: [], profileLinks: [], createdBy: 'u-other', joinDate: '2026-07-16T00:00:00Z' }
+    ];
+    S.pages = [
+      { id: 'page-own-customer', name: 'Own Customer Page', category: '', customerIds: ['customer-own'] },
+      { id: 'page-other-customer', name: 'Other Customer Page', category: '', customerIds: ['customer-other'] }
+    ];
+    S.ads = [];
+    S.receipts = [];
+    loginAs(employee({ customers: ['viewOwn'], pages: ['view'] }));
+
+    const html = visible(sandbox.renderCustomersView());
+    assert(html.includes('Own Customer'), 'viewOwn user cannot see their own customer');
+    assert(!html.includes('Other Customer'), 'viewOwn user can see another creator\'s customer');
+
+    sandbox.openCustomerPages('customer-other');
+    assert(appended === null, 'viewOwn user opened another creator\'s customer pages');
+    sandbox.openCustomerPages('customer-own');
+    assert(appended?.id === 'customer-pages-dialog', 'viewOwn user could not open their own customer pages');
+    assert(appended.innerHTML.includes('Own Customer Page'), 'own customer dialog omitted its linked page');
+    assert(!appended.innerHTML.includes('Other Customer Page'), 'other customer page leaked into the own-customer dialog');
+  } finally {
+    sandbox.document.body.appendChild = originalAppendChild;
+    seedBusinessData();
+  }
+});
+
+check('customer-page spending isolates shared-page customers and uses historical spend rules', () => {
+  seedCustomerPageDrilldown();
+  loginAs(ADMIN);
+  const summary = sandbox.getCustomerPageSpendSummary('c1', 'pshared');
+  assert(summary?.totalAds === 4, `expected four selected-customer ads, got ${summary?.totalAds}`);
+  assert(summary.runningAds === 1, `expected one running ad, got ${summary.runningAds}`);
+  assert(Math.abs(summary.totalSpendUSD - 26) < 1e-9, `wrong USD spend ${summary.totalSpendUSD}`);
+  assert(Math.abs(summary.totalSpendLYD - 249.4) < 1e-9, `wrong LYD spend ${summary.totalSpendLYD}`);
+  assert(Math.abs(summary.paidSpendUSD - 10) < 1e-9, `wrong paid spend ${summary.paidSpendUSD}`);
+  assert(Math.abs(summary.unpaidSpendUSD - 16) < 1e-9, `wrong unpaid-ad spend ${summary.unpaidSpendUSD}`);
+  assert(sandbox.getAdSpendUSD(S.ads.find(ad => ad.id === 'a-stopped')) === 12, 'lowercase Stopped used its full budget');
+  assert(sandbox.getAdSpendUSD(S.ads.find(ad => ad.id === 'a-pending')) === 0, 'lowercase Pending counted as spend');
+  assert(sandbox.getAdSpendUSD(S.ads.find(ad => ad.id === 'a-legacy')) === 0, 'uppercase Paused counted as spend');
+  assert(sandbox.getLinkedPagesForCustomer('c1').length === 3, 'legacy scalar or deleted page handling is wrong');
+  const customerStats = sandbox.getCustomerStats('c1');
+  assert(Math.abs(customerStats.totalSpentLYD - 325.4) < 1e-9, `customer debt lost historical LYD rates: ${customerStats.totalSpentLYD}`);
+  assert(sandbox.getCustomerPageSpendSummary('c1', 'pforeign') === null, 'unlinked page/customer pair was accepted');
+  assert(sandbox.getCustomerPageSpendSummary('c1', 'pdeleted') === null, 'deleted page was accepted');
+  assert(sandbox.getCustomerPageSpendSummary('c1', 'pclone').totalSpendUSD === 8, 'same-name page ids were merged');
+  assert(sandbox.getCustomerPageSpendSummary('c1', 'plegacy').totalAds === 1, 'legacy ad/page aliases disappeared');
+  seedBusinessData();
+});
+
+check('page detail escapes names and never shows false or unauthorized money', () => {
+  seedCustomerPageDrilldown();
+  loginAs(ADMIN);
+  const summary = sandbox.getCustomerPageSpendSummary('c1', 'pshared');
+  const noAds = visible(sandbox.renderCustomerPageSpendingDetail(summary, { canViewAds: false, canViewBalance: true }));
+  assert(noAds.includes('Ad activity is hidden'), 'missing no-ad-access explanation');
+  assert(!noAds.includes('$26.00'), 'money rendered without ads.view');
+
+  const noBalance = visible(sandbox.renderCustomerPageSpendingDetail(summary, { canViewAds: true, canViewBalance: false }));
+  assert(noBalance.includes('Total ads'), 'nonfinancial ad count disappeared');
+  assert(noBalance.includes('Spending information is hidden'), 'missing balance permission explanation');
+  assert(!noBalance.includes('$26.00'), 'money rendered without customers.viewBalance');
+
+  const full = visible(sandbox.renderCustomerPageSpendingDetail(summary, { canViewAds: true, canViewBalance: true }));
+  assert(full.includes('$26.00') && full.includes('249.40 LYD'), 'authorized total spending is missing');
+  assert(full.includes('$16.00') && full.includes('Spend on unpaid ads'), 'unpaid-ad spend is missing or mislabeled');
+  assert(full.includes('&lt;Page&gt;') && full.includes('&lt;img src=x onerror=alert(1)&gt;'), 'page text was not escaped');
+  assert(!full.includes('<img src=x'), 'page category became executable HTML');
+  seedBusinessData();
+});
+
+check('customer pages dialog is session-gated, mobile-safe, and contains only escaped data', () => {
+  seedCustomerPageDrilldown();
+  const originalAppendChild = sandbox.document.body.appendChild;
+  let appended = null;
+  sandbox.document.body.appendChild = element => { appended = element; };
+  try {
+    S.currentUser = null;
+    sandbox.openCustomerPages('c1');
+    assert(appended === null, 'dialog opened without an authenticated session');
+
+    loginAs(ADMIN);
+    sandbox.openCustomerPages('c1');
+    assert(appended?.id === 'customer-pages-dialog', 'dialog was not created');
+    assert(appended.className.includes('mobile-dialog-overlay'), 'dialog lacks the phone-safe overlay');
+    assert(appended.innerHTML.includes('max-h-[90dvh]'), 'dialog can overflow the phone viewport');
+    assert(appended.innerHTML.includes('data-page-id="pshared"'), 'linked page identity is missing');
+    assert(appended.innerHTML.includes('this.dataset.customerId, this.dataset.pageId'), 'page action does not use safe data attributes');
+    assert(appended.innerHTML.includes('Shared &lt;Page&gt;'), 'page name was not escaped in the list');
+    assert(!appended.innerHTML.includes('<img src=x'), 'page category injected HTML into the dialog');
+  } finally {
+    sandbox.document.body.appendChild = originalAppendChild;
+    seedBusinessData();
+  }
+});
+
+check('Pages cards use canonical old-data spending and hide incomplete financial totals', () => {
+  seedCustomerPageDrilldown();
+  try {
+    loginAs(employee({ pages: ['view'] }));
+    const noAds = visible(sandbox.renderPagesView());
+    assert(noAds.includes('Ad activity hidden'), 'page card claims zero activity without ads.view');
+    assert(!noAds.includes('$125.00'), 'page money leaked without ads.view');
+
+    loginAs(employee({ pages: ['view'], ads: ['view'] }));
+    const noFinancials = visible(sandbox.renderPagesView());
+    assert(noFinancials.includes('Total Spend') && noFinancials.includes('Hidden'), 'financial permission placeholder is missing');
+    assert(!noFinancials.includes('$125.00'), 'page money leaked without analytics.viewFinancials');
+
+    loginAs(employee({ pages: ['view'], ads: ['view'], analytics: ['viewFinancials'] }));
+    const financialsOnly = visible(sandbox.renderPagesView());
+    assert(financialsOnly.includes('Total Spend') && financialsOnly.includes('Hidden'), 'aggregate page money needs analytics.viewSensitive as well as viewFinancials');
+    assert(!financialsOnly.includes('$125.00'), 'aggregate page money leaked with viewFinancials alone');
+
+    loginAs(employee({ pages: ['view'], ads: ['view'], analytics: ['viewFinancials', 'viewSensitive'] }));
+    const authorized = visible(sandbox.renderPagesView());
+    assert(authorized.includes('$125.00'), 'shared page canonical USD total is wrong');
+    assert(authorized.includes('1189.90 LYD'), 'shared page historical LYD total is wrong');
+  } finally {
+    seedBusinessData();
+  }
+});
+
 console.log('\n=== ANALYTICS: viewFinancials / viewSensitive ===');
 
 check('without viewFinancials, money KPIs are not rendered', () => {

@@ -1914,6 +1914,7 @@ function renderCustomersGrid(customers) {
   // user without them must not see phone numbers or money figures.
   const canSeeContacts = can('customers', 'viewContacts');
   const canSeeBalance = can('customers', 'viewBalance');
+  const canSeePages = can('pages', 'view');
   const HIDDEN = isAr ? 'محجوب' : 'Hidden';
   return customers.map((c, idx) => {
           const stats = getCustomerStats(c.id, statsIndex);
@@ -1925,6 +1926,16 @@ function renderCustomersGrid(customers) {
     const profileLinks = Array.isArray(c.profileLinks) ? c.profileLinks : [];
           // Display number: total - index (so first item = highest number, matching newest-first sort)
           const displayNum = totalCustomers - idx;
+          const pagesLabel = isAr
+            ? `${stats.linkedPagesCount} ${stats.linkedPagesCount === 1 ? 'صفحة' : 'صفحات'}`
+            : `${stats.linkedPagesCount} ${stats.linkedPagesCount === 1 ? 'page' : 'pages'}`;
+          const canSeeThisCustomerPages = canSeePages
+            && canActOnRecord('customers', 'view', c.createdBy || c.creatorId);
+          const linkedPagesButton = canSeeThisCustomerPages && stats.linkedPagesCount > 0
+            ? `<button type="button" data-action="view-customer-pages" data-customer-id="${Security.escapeHtml(String(c.id || ''))}" onclick="openCustomerPages(this.dataset.customerId, this)" aria-haspopup="dialog" aria-label="${Security.escapeHtml(isAr ? `عرض ${pagesLabel} المرتبطة بالعميل ${c.name || ''}` : `View ${pagesLabel} linked to ${c.name || 'this customer'}`)}" class="customer-pages-button min-h-11 px-3 py-2 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-full text-xs font-bold inline-flex items-center gap-1.5 hover:bg-blue-200 dark:hover:bg-blue-900/50 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <i data-lucide="files" class="w-4 h-4"></i><span>${pagesLabel}</span>
+              </button>`
+            : '';
           
           return `
             <div class="glass-panel rounded-xl p-5 hover:scale-[1.02] transition-transform" data-customer-id="${c.id}">
@@ -1936,7 +1947,7 @@ function renderCustomersGrid(customers) {
                   </div>
                   <div class="flex items-center space-x-2 mt-1">
                     <span class="text-xs px-2 py-1 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 rounded-full">${Security.escapeHtml(c.platform || '')}</span>
-                    ${stats.linkedPagesCount > 0 ? `<span class="text-xs px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-full">${stats.linkedPagesCount} ${isAr ? 'صفحة' : 'pages'}</span>` : ''}
+                    ${linkedPagesButton}
                   </div>
                 </div>
                 <div class="flex space-x-1">
@@ -2042,7 +2053,7 @@ function loadMoreCustomers() {
 function renderCustomersView() {
   const isAr = state.language === 'ar';
   const allFilteredCustomers = getFilteredCustomers();
-  const allCustomers = getVisibleRecords(state.customers);
+  const allCustomers = getCustomersVisibleToCurrentUser();
 
   // Reset pagination whenever the filter/sort/search combination changes.
   const filterFingerprint = JSON.stringify([
@@ -2602,6 +2613,10 @@ function renderReceiptsView() {
 function renderPagesView() {
   const isAr = state.language === 'ar';
   const visiblePages = getVisibleRecords(state.pages);
+  const canSeePageAds = can('ads', 'view');
+  const canSeePageFinancials = canSeePageAds
+    && can('analytics', 'viewFinancials')
+    && can('analytics', 'viewSensitive');
   
   return `
     <div class="space-y-6 animate-fade-in-up">
@@ -2618,16 +2633,14 @@ function renderPagesView() {
 
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         ${visiblePages.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="file-text" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${isAr ? 'لا توجد صفحات بعد' : 'No pages yet'}</p></div>` : visiblePages.map((p, idx) => {
-          const linkedCustomers = p.customerIds ? p.customerIds.map(cid => state.customers.find(c => c.id === cid)).filter(Boolean) : [];
-          const pageAds = getVisibleRecords(state.ads).filter(ad => ad.pageId === p.id && ad.recordType === 'ad');
-          
-          // Calculate page statistics
-          const totalSpent = pageAds.reduce((sum, ad) => sum + (ad.adSpent || 0), 0);
-          const lastAdDate = pageAds.length > 0 
-            ? Math.max(...pageAds.map(ad => new Date(ad.date || ad.createdAt).getTime()))
-            : null;
-          const lastAdText = lastAdDate
-            ? new Date(lastAdDate).toLocaleDateString()
+          const linkedCustomers = getPageCustomerIds(p)
+            .map(cid => state.customers.find(c => String(c.id) === String(cid)))
+            .filter(Boolean);
+          // Page activity is only authoritative for accounts that can see all
+          // ads. Money additionally needs the business financial permission.
+          const pageStats = canSeePageAds ? getPageSpendSummary(p.id) : null;
+          const lastAdText = pageStats?.lastAdDate
+            ? new Date(pageStats.lastAdDate).toLocaleDateString()
             : (isAr ? 'أبداً' : 'Never');
           // Display number: total - index (so first item = highest number)
           const pageDisplayNum = visiblePages.length - idx;
@@ -2675,24 +2688,31 @@ function renderPagesView() {
                   ` : `<div class="text-sm text-slate-400 ml-4">${isAr ? 'لا يوجد مالك' : 'No owner'}</div>`}
                   </div>
 
-                <!-- Last Ad Time -->
-                  <div class="flex items-center space-x-2 text-xs">
+                <!-- Last Ad Time (requires full ads.view) -->
+                  ${canSeePageAds ? `<div class="flex items-center space-x-2 text-xs">
                   <i data-lucide="clock" class="w-3 h-3 text-slate-400"></i>
                   <span class="text-slate-600 dark:text-slate-400">${isAr ? 'آخر إعلان' : 'Last ad'}: ${lastAdText}</span>
-                  </div>
+                  </div>` : ''}
 
                 <!-- Stats -->
                 <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
-                  <div class="grid grid-cols-2 gap-3 text-xs">
-                    <div>
-                      <div class="text-slate-500 mb-1">${t('totalAds')}</div>
-                      <div class="font-bold text-slate-700 dark:text-slate-300">${pageAds.length}</div>
+                  ${!canSeePageAds ? `
+                    <div class="text-xs text-slate-400 flex items-center gap-1.5"><i data-lucide="lock" class="w-3 h-3"></i>${isAr ? 'نشاط الإعلانات محجوب' : 'Ad activity hidden'}</div>
+                  ` : `
+                    <div class="grid grid-cols-2 gap-3 text-xs">
+                      <div>
+                        <div class="text-slate-500 mb-1">${t('totalAds')}</div>
+                        <div class="font-bold text-slate-700 dark:text-slate-300">${pageStats?.totalAds || 0}</div>
+                      </div>
+                      <div>
+                        <div class="text-slate-500 mb-1">${isAr ? 'إجمالي الإنفاق' : 'Total Spend'}</div>
+                        ${canSeePageFinancials ? `
+                          <div class="font-bold text-emerald-600 dark:text-emerald-400">$${(pageStats?.totalSpendUSD || 0).toFixed(2)}</div>
+                          <div class="text-[10px] text-emerald-600 dark:text-emerald-400">${(pageStats?.totalSpendLYD || 0).toFixed(2)} LYD</div>
+                        ` : `<div class="text-slate-400 flex items-center gap-1"><i data-lucide="lock" class="w-3 h-3"></i>${isAr ? 'محجوب' : 'Hidden'}</div>`}
+                      </div>
                     </div>
-                    <div>
-                      <div class="text-slate-500 mb-1">${isAr ? 'إجمالي الإنفاق' : 'Total Spend'}</div>
-                      <div class="font-bold text-emerald-600 dark:text-emerald-400">${totalSpent.toFixed(0)} LYD</div>
-                    </div>
-                  </div>
+                  `}
                 </div>
               </div>
             </div>

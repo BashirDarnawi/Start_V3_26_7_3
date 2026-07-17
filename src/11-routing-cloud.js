@@ -427,6 +427,23 @@ function executeCommand(commandId) {
   }
 }
 
+// The customer-pages summary is a standalone body dialog rather than an
+// `activeModal`. Handle its keys in capture phase so this runs before the
+// lower-priority command-palette/modal shortcuts. That also prevents Ctrl/Cmd+K
+// from opening a hidden palette behind the dialog.
+document.addEventListener('keydown', (e) => {
+  const dialog = document.getElementById('customer-pages-dialog');
+  if (!dialog) return;
+  const isEscape = e.key === 'Escape';
+  const isCommandPaletteShortcut = (e.ctrlKey || e.metaKey) && String(e.key || '').toLowerCase() === 'k';
+  if (!isEscape && !isCommandPaletteShortcut) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if (!isEscape) return;
+  if (typeof closeCustomerPagesDialog === 'function') closeCustomerPagesDialog();
+  else dialog.remove();
+}, true);
+
 // Keyboard shortcut handler
 document.addEventListener('keydown', (e) => {
   // Ctrl+K or Cmd+K for command palette

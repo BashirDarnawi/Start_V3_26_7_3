@@ -2061,8 +2061,7 @@ function selectCancelOption(value) {
 // ================================
 
 function getPagesForCustomer(customerId) {
-  if (!customerId) return [];
-  return getVisibleRecords(state.pages).filter(p => Array.isArray(p.customerIds) && p.customerIds.includes(customerId));
+  return getLinkedPagesForCustomer(customerId);
 }
 
 function getReceiptsForAd(customerId, pageId) {

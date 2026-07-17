@@ -10,6 +10,7 @@ const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
 const read = file => fs.readFileSync(path.join(ROOT, file), 'utf8');
+const liveSync = read('src/10-live-sync.js');
 const routing = read('src/11-routing-cloud.js');
 const views = read('src/12-views.js');
 const helpers = read('src/13-filters-helpers.js');
@@ -83,6 +84,22 @@ check('receipt status choices become a readable phone grid',
 check('customer filters cannot overflow the phone card',
   views.includes('customer-filter-controls') &&
   css.includes('.customer-filter-controls'));
+check('customer linked-pages drill-down is phone-sized and tap-friendly',
+  views.includes('customer-pages-button min-h-11') &&
+  helpers.includes('customer-pages-dialog mobile-dialog-overlay') &&
+  helpers.includes('max-h-[90dvh]') &&
+  helpers.includes('customer-page-option w-full min-h-11') &&
+  helpers.includes('grid grid-cols-1 sm:grid-cols-3'));
+check('customer pages dialog is closed on logout and relevant live updates',
+  (liveSync.match(/_closeCustomerPagesDialogForStateChange\(\)/g) || []).length >= 5 &&
+  ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory']
+    .every(name => liveSync.includes(`name === '${name}'`)));
+check('customer pages dialog traps focus and Escape closes it globally',
+  helpers.includes("event.key !== 'Tab'") &&
+  helpers.includes('document.activeElement === last') &&
+  routing.includes("document.getElementById('customer-pages-dialog')") &&
+  routing.includes('stopImmediatePropagation()') &&
+  routing.includes('isCommandPaletteShortcut'));
 check('ad photo viewer is a clear phone-sized action',
   views.includes('mobile-card-table w-full') &&
   views.includes('ad-photo-view-button') &&
