@@ -589,8 +589,11 @@ function updateRecord(array, id, updates, expectedLastModified) {
     }
     // Never allow changing protected fields (createdByName is the
     // creation-time stamp that keeps "Created by" readable after the
-    // creator's account is deleted — edits must never rewrite it)
-    const protectedFields = ['id', '_created', 'createdBy', 'createdByName', 'createdAt', 'creatorId'];
+    // creator's account is deleted, and customerName is the creation-time
+    // customer stamp that keeps a receipts/ads-only role able to read who the
+    // record is for — edits must never rewrite either; the live customer name
+    // still wins on read whenever it is available).
+    const protectedFields = ['id', '_created', 'createdBy', 'createdByName', 'customerName', 'createdAt', 'creatorId'];
     for (const field of protectedFields) {
       if (sanitizedUpdates[field] !== undefined) delete sanitizedUpdates[field];
     }

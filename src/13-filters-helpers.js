@@ -4042,6 +4042,11 @@ async function saveReceiptTransfer() {
   const rate = receipt.exchangeRate || state.defaultExchangeRate || 1;
   const nowIso = new Date().toISOString();
   const amountLocal = Math.round(amountUSD * rate * 100) / 100;
+  // Destination customer's display NAME (never phone/contact) for the local
+  // path: stamped onto the target receipt and onto the transfer row rendered on
+  // the source receipt card, so a receipts-only role can read who received the
+  // transfer. Server mode stamps both authoritatively in the transfer endpoint.
+  const _transferToName = String((state.customers || []).find(c => c && String(c.id) === String(targetCustomerId))?.name || '');
 
   // MONEY-MATH FIX: the transfer must actually ARRIVE somewhere. Previously it
   // only reduced the source receipt's remaining (via transfers[]) — the target
@@ -4054,6 +4059,7 @@ async function saveReceiptTransfer() {
     id: serverAttempt?.targetReceiptId || generateId('receipt'),
     recordType: 'receipt',
     customerId: targetCustomerId,
+    customerName: _transferToName || undefined,
     amountUSD: Math.round(amountUSD * 100) / 100,
     exchangeRate: rate,
     amountLocal,
@@ -4081,6 +4087,7 @@ async function saveReceiptTransfer() {
   const transfer = {
     id: generateId('transfer'),
     toCustomerId: targetCustomerId,
+    toCustomerName: _transferToName || undefined,
     toReceiptId: inReceipt.id,
     amountUSD,
     amountLocal,

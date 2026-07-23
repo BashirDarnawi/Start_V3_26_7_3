@@ -1731,6 +1731,40 @@ def _validate_customer_phone_change_conn(
             )
 
 
+# Entity collections that reference a single customer via `customerId` and whose
+# cards/lists surface the customer's name. `customerName` is denormalized onto
+# these at creation (mirrors `createdByName`) so a role with receipts/ads view
+# but WITHOUT the customers permission still sees who the record is for.
+CUSTOMER_NAME_STAMP_TYPES = frozenset({"receipts", "ads"})
+
+
+def _lookup_customer_display_name(conn: Any, customer_id: Any) -> str:
+    """Authoritative customer NAME for the customerName denormalization stamp.
+
+    Reads ONLY the display name from the customers table — never phone/contact
+    fields, which stay gated by the contact projection. This is what makes the
+    stamp spoof-proof in server mode: a client cannot label a record with an
+    arbitrary customer name. Returns '' when the id is blank or the customer is
+    absent so callers leave any existing value untouched (see createdByName).
+    """
+    cid = sanitize_str(str(customer_id or ""))[:80]
+    if not cid:
+        return ""
+    row = conn.execute(
+        text("SELECT data_json FROM entities WHERE type = 'customers' AND id = :id LIMIT 1"),
+        {"id": cid},
+    ).mappings().first()
+    if not row:
+        return ""
+    cdata = json_loads(row.get("data_json") or "{}") or {}
+    if not isinstance(cdata, dict):
+        return ""
+    name = cdata.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return ""
+    return sanitize_str(name)[:120]
+
+
 def upsert_entity(
     entity_type: str,
     entity_id: str,
@@ -1824,6 +1858,14 @@ def upsert_entity(
                 _prev_data = json_loads(existing.get("data_json") or "{}") or {}
                 if isinstance(_prev_data, dict) and _prev_data.get("createdByName"):
                     clean["createdByName"] = _prev_data["createdByName"]
+            # Same protection for the denormalized customer name: a full-document
+            # update that omits customerName (older client / import) must not
+            # erase the stamp that keeps the customer readable for a role without
+            # the customers permission. The live customer name still wins on read.
+            if entity_type in CUSTOMER_NAME_STAMP_TYPES and not clean.get("customerName"):
+                _prev_cust = json_loads(existing.get("data_json") or "{}") or {}
+                if isinstance(_prev_cust, dict) and _prev_cust.get("customerName"):
+                    clean["customerName"] = _prev_cust["customerName"]
             if entity_type == "customers":
                 _validate_customer_phone_change_conn(
                     conn,
@@ -1889,6 +1931,17 @@ def upsert_entity(
                     clean["createdByName"] = sanitize_str(str(_creator_row["name"]))[:120]
             if clean.get("createdByName") is not None and not isinstance(clean.get("createdByName"), str):
                 clean.pop("createdByName", None)
+            # Denormalize the customer's NAME (never phone/contact) from the
+            # authoritative customers table so a receipts/ads-only role sees who
+            # the record is for. Resolving from the table makes this spoof-proof:
+            # a client-supplied customerName is overwritten when the customerId
+            # resolves; otherwise a valid client string (legacy import) is kept.
+            if entity_type in CUSTOMER_NAME_STAMP_TYPES:
+                _cust_name = _lookup_customer_display_name(conn, clean.get("customerId"))
+                if _cust_name:
+                    clean["customerName"] = _cust_name
+                elif clean.get("customerName") is not None and not isinstance(clean.get("customerName"), str):
+                    clean.pop("customerName", None)
             if entity_type == "customers":
                 _validate_customer_phone_change_conn(
                     conn,
@@ -1968,7 +2021,7 @@ def patch_entity(
     Behavior:
         - Loads existing entity from database
         - Merges updates into existing data (dict.update semantics)
-        - Protected fields (id, _created, createdBy, createdByName, createdAt, creatorId) cannot be changed
+        - Protected fields (id, _created, createdBy, createdByName, customerName, createdAt, creatorId) cannot be changed
         - Raises HTTP 404 if entity doesn't exist
         - Updates last_modified timestamp automatically
     
@@ -1986,9 +2039,11 @@ def patch_entity(
     if not isinstance(upd, dict):
         raise HTTPException(status_code=400, detail="Invalid update data")
     # Protected keys. createdByName is the creation-time stamp that keeps
-    # "Created by" readable after the creator's account is deleted — a PATCH
-    # must never rewrite it to someone else's name.
-    for k in ["id", "_created", "_lastModified", "createdBy", "createdByName", "createdAt", "creatorId"]:
+    # "Created by" readable after the creator's account is deleted, and
+    # customerName is the creation-time customer stamp that keeps a receipts/
+    # ads-only role able to read who the record is for — a PATCH must never
+    # rewrite either to someone else's name.
+    for k in ["id", "_created", "_lastModified", "createdBy", "createdByName", "customerName", "createdAt", "creatorId"]:
         if k in upd:
             del upd[k]
 
@@ -2230,6 +2285,68 @@ def _bootstrap_first_admin_if_empty():
         print(f"[albayan] Bootstrap admin skipped/failed: {type(e).__name__}")
 
 
+def backfill_customer_names() -> int:
+    """Stamp customerName on legacy receipts/ads that predate the denormalization.
+
+    Records created before customerName existed still render as "Unknown" for a
+    role that can view receipts/ads but not load the customers collection. This
+    one-time-safe pass fills that gap from the authoritative customers table.
+
+    Idempotent — it only touches a record that (a) is a receipt/ad, (b) has a
+    customerId, (c) lacks a usable customerName, and (d) whose customer resolves
+    to a name — so it is a no-op on every startup after the first and safe to run
+    unconditionally. Only the NAME is copied; phone/contact are never read. The
+    record's last_modified/_lastModified are deliberately left untouched: the
+    client fetches every collection in full on load, so a limited-permission
+    role picks up the stamp on its next login/refresh without a resync storm.
+
+    Returns the number of records stamped.
+    """
+    stamped = 0
+    try:
+        with db_conn() as conn:
+            customer_names: dict[str, str] = {}
+            for row in conn.execute(
+                text("SELECT id, data_json FROM entities WHERE type = 'customers'")
+            ).mappings().all():
+                cdata = json_loads(row.get("data_json") or "{}") or {}
+                if isinstance(cdata, dict):
+                    nm = cdata.get("name")
+                    if isinstance(nm, str) and nm.strip():
+                        customer_names[str(row["id"])] = sanitize_str(nm)[:120]
+            if not customer_names:
+                return 0
+            for etype in ("receipts", "ads"):
+                rows = conn.execute(
+                    text("SELECT id, data_json FROM entities WHERE type = :t"),
+                    {"t": etype},
+                ).mappings().all()
+                for row in rows:
+                    data = json_loads(row.get("data_json") or "{}") or {}
+                    if not isinstance(data, dict):
+                        continue
+                    existing_name = data.get("customerName")
+                    if isinstance(existing_name, str) and existing_name.strip():
+                        continue
+                    cid = sanitize_str(str(data.get("customerId") or ""))[:80]
+                    if not cid:
+                        continue
+                    name = customer_names.get(cid)
+                    if not name:
+                        continue
+                    data["customerName"] = name
+                    conn.execute(
+                        text("UPDATE entities SET data_json = :d WHERE type = :t AND id = :id"),
+                        {"d": json_dumps(data), "t": etype, "id": str(row["id"])},
+                    )
+                    stamped += 1
+        if stamped:
+            print(f"[albayan] Backfilled customerName on {stamped} receipts/ads")
+    except Exception as e:
+        print(f"[albayan] customerName backfill skipped/failed: {type(e).__name__}: {e}")
+    return stamped
+
+
 @app.on_event("startup")
 def _startup():
     _ensure_minified_script()
@@ -2266,6 +2383,13 @@ def _startup():
         cleanup_old_audit_logs()
     except Exception as e:
         print(f"[albayan] Audit log cleanup failed: {e}")
+
+    # Denormalize customerName onto legacy receipts/ads so a receipts/ads-only
+    # role can read the customer's name. Idempotent — a no-op once complete.
+    try:
+        backfill_customer_names()
+    except Exception as e:
+        print(f"[albayan] customerName backfill failed: {e}")
 
 
 @app.on_event("shutdown")
@@ -3531,6 +3655,16 @@ def _insert_entity_in_transaction(
         ).mappings().first()
         if _creator_row and _creator_row.get("name"):
             clean["createdByName"] = sanitize_str(str(_creator_row["name"]))[:120]
+    # Same authoritative customer-name stamp as upsert_entity's create branch.
+    # This covers the atomic ad create and the receipt-transfer target receipt,
+    # which insert through this helper rather than upsert_entity. Only the NAME
+    # is copied — phone/contact stay gated by the contact projection.
+    if collection in CUSTOMER_NAME_STAMP_TYPES:
+        _cust_name = _lookup_customer_display_name(conn, clean.get("customerId"))
+        if _cust_name:
+            clean["customerName"] = _cust_name
+        elif clean.get("customerName") is not None and not isinstance(clean.get("customerName"), str):
+            clean.pop("customerName", None)
     conn.execute(
         text(
             """
@@ -6740,6 +6874,12 @@ def _receipt_transfer_atomic(
                 )
             )
             now_iso = _iso_utc()
+            # Denormalize the destination customer's NAME onto the transfer row
+            # that lives inside the source receipt's transfers[] (rendered on the
+            # receipt card). The target receipt itself gets customerName via
+            # _insert_entity_in_transaction below; this row is written straight
+            # into the source and needs its own authoritative stamp. Name only.
+            _transfer_to_name = _lookup_customer_display_name(conn, target_customer_id)
             transfer = {
                 "id": f"transfer_{hashlib.sha256(idem.encode('utf-8')).hexdigest()[:32]}",
                 "toCustomerId": target_customer_id,
@@ -6749,6 +6889,8 @@ def _receipt_transfer_atomic(
                 "date": now_iso,
                 "note": note,
             }
+            if _transfer_to_name:
+                transfer["toCustomerName"] = _transfer_to_name
             transfers = list(source.get("transfers") or [])
             transfers.append(transfer)
             source["transfers"] = transfers
@@ -8713,7 +8855,12 @@ def _financial_patch_receipt_atomic(
             if str(old.get("receiptType") or "") == "TRANSFER_IN" and set(clean) & RECEIPT_CAPACITY_FIELDS:
                 raise HTTPException(status_code=405, detail="Transferred-in receipt money fields are immutable")
             merged = dict(old)
-            for key in ("id", "_created", "_lastModified", "_deleted", "createdBy", "createdAt", "creatorId"):
+            # customerName is the creation-time customer stamp (mirrors
+            # createdByName): a receipt PATCH must never rewrite or clear it, so
+            # it stays readable for a receipts-only role. Dropping it from the
+            # incoming payload keeps the stored stamp (merged starts from old);
+            # the live customer name still wins on read whenever available.
+            for key in ("id", "_created", "_lastModified", "_deleted", "createdBy", "createdAt", "creatorId", "customerName"):
                 clean.pop(key, None)
             merged.update(clean)
             merged_status = str(merged.get("status") or "")

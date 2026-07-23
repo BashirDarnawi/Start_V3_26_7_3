@@ -2214,10 +2214,12 @@ function buildServerAdMutationData(adUpdates, { create = false } = {}) {
   // These values are materialized from allocations/payment rows by the server.
   // Sending them would invite a forged total that disagrees with the funding
   // rows. The allocation requests themselves remain explicit inputs.
+  // customerName is likewise server-authoritative: the server stamps it from
+  // the customers table by customerId, so a client value is never trusted.
   for (const field of [
     'amountUSD', 'amountLocal', 'receiptIds', 'fundingReceiptId',
     'dueAmountToUseUSD', 'hasMergedPaidFunds', 'isPaid', 'initialAmountUSD',
-    'spentUSD', 'canceledBy'
+    'spentUSD', 'canceledBy', 'customerName'
   ]) delete data[field];
   if (create) {
     data.recordType = 'ad';
@@ -3115,6 +3117,18 @@ async function handleModalSubmit() {
         hasMergedPaidFunds: collectionMethod === 'driver' && mergedAllocations.length > 0,
         mergedPaidAllocations: collectionMethod === 'driver' ? mergedAllocations : []
       };
+
+      // Denormalize the customer's display NAME (never phone/contact) so a role
+      // that can view ads but not load the customers collection still sees who
+      // the ad is for — mirrors createdByName. This client stamp serves LOCAL
+      // mode (spread into the new ad via addRecord); in server mode
+      // buildServerAdMutationData strips it and the server stamps it
+      // authoritatively from the customers table, and updateRecord protects it
+      // on edit. The live customer name always wins on read when available.
+      if (customerId) {
+        const _adCustomer = (state.customers || []).find(c => c && String(c.id) === String(customerId));
+        if (_adCustomer && _adCustomer.name) adUpdates.customerName = String(_adCustomer.name);
+      }
 
       // Ordinary edits do not need to re-upload unchanged base64 images. Both
       // the generic local update and the atomic server mutation merge omitted

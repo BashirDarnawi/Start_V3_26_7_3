@@ -6642,8 +6642,11 @@ function updateRecord(array, id, updates, expectedLastModified) {
     }
     // Never allow changing protected fields (createdByName is the
     // creation-time stamp that keeps "Created by" readable after the
-    // creator's account is deleted — edits must never rewrite it)
-    const protectedFields = ['id', '_created', 'createdBy', 'createdByName', 'createdAt', 'creatorId'];
+    // creator's account is deleted, and customerName is the creation-time
+    // customer stamp that keeps a receipts/ads-only role able to read who the
+    // record is for — edits must never rewrite either; the live customer name
+    // still wins on read whenever it is available).
+    const protectedFields = ['id', '_created', 'createdBy', 'createdByName', 'customerName', 'createdAt', 'creatorId'];
     for (const field of protectedFields) {
       if (sanitizedUpdates[field] !== undefined) delete sanitizedUpdates[field];
     }
@@ -22626,6 +22629,11 @@ async function saveReceiptTransfer() {
   const rate = receipt.exchangeRate || state.defaultExchangeRate || 1;
   const nowIso = new Date().toISOString();
   const amountLocal = Math.round(amountUSD * rate * 100) / 100;
+  // Destination customer's display NAME (never phone/contact) for the local
+  // path: stamped onto the target receipt and onto the transfer row rendered on
+  // the source receipt card, so a receipts-only role can read who received the
+  // transfer. Server mode stamps both authoritatively in the transfer endpoint.
+  const _transferToName = String((state.customers || []).find(c => c && String(c.id) === String(targetCustomerId))?.name || '');
 
   // MONEY-MATH FIX: the transfer must actually ARRIVE somewhere. Previously it
   // only reduced the source receipt's remaining (via transfers[]) — the target
@@ -22638,6 +22646,7 @@ async function saveReceiptTransfer() {
     id: serverAttempt?.targetReceiptId || generateId('receipt'),
     recordType: 'receipt',
     customerId: targetCustomerId,
+    customerName: _transferToName || undefined,
     amountUSD: Math.round(amountUSD * 100) / 100,
     exchangeRate: rate,
     amountLocal,
@@ -22665,6 +22674,7 @@ async function saveReceiptTransfer() {
   const transfer = {
     id: generateId('transfer'),
     toCustomerId: targetCustomerId,
+    toCustomerName: _transferToName || undefined,
     toReceiptId: inReceipt.id,
     amountUSD,
     amountLocal,
@@ -25261,6 +25271,17 @@ async function _saveReceiptFromModalInner() {
     payments: payments,
     photos
   };
+
+  // Denormalize the customer's display NAME (never phone/contact) so a role
+  // that can view receipts but not load the customers collection still sees who
+  // the receipt is for — mirrors createdByName. In server mode the server
+  // re-stamps this authoritatively from the customers table (so it cannot be
+  // spoofed), and updateRecord protects it on edit; the live customer name
+  // always wins on read when available. Only stamp when a customer is linked.
+  if (customerId) {
+    const _receiptCustomer = (state.customers || []).find(c => c && String(c.id) === String(customerId));
+    if (_receiptCustomer && _receiptCustomer.name) receipt.customerName = String(_receiptCustomer.name);
+  }
 
   // PATCH has merge semantics, so unchanged photos can stay on the server
   // without being uploaded again. If the user intentionally removes the
@@ -30656,10 +30677,12 @@ function buildServerAdMutationData(adUpdates, { create = false } = {}) {
   // These values are materialized from allocations/payment rows by the server.
   // Sending them would invite a forged total that disagrees with the funding
   // rows. The allocation requests themselves remain explicit inputs.
+  // customerName is likewise server-authoritative: the server stamps it from
+  // the customers table by customerId, so a client value is never trusted.
   for (const field of [
     'amountUSD', 'amountLocal', 'receiptIds', 'fundingReceiptId',
     'dueAmountToUseUSD', 'hasMergedPaidFunds', 'isPaid', 'initialAmountUSD',
-    'spentUSD', 'canceledBy'
+    'spentUSD', 'canceledBy', 'customerName'
   ]) delete data[field];
   if (create) {
     data.recordType = 'ad';
@@ -31557,6 +31580,18 @@ async function handleModalSubmit() {
         hasMergedPaidFunds: collectionMethod === 'driver' && mergedAllocations.length > 0,
         mergedPaidAllocations: collectionMethod === 'driver' ? mergedAllocations : []
       };
+
+      // Denormalize the customer's display NAME (never phone/contact) so a role
+      // that can view ads but not load the customers collection still sees who
+      // the ad is for — mirrors createdByName. This client stamp serves LOCAL
+      // mode (spread into the new ad via addRecord); in server mode
+      // buildServerAdMutationData strips it and the server stamps it
+      // authoritatively from the customers table, and updateRecord protects it
+      // on edit. The live customer name always wins on read when available.
+      if (customerId) {
+        const _adCustomer = (state.customers || []).find(c => c && String(c.id) === String(customerId));
+        if (_adCustomer && _adCustomer.name) adUpdates.customerName = String(_adCustomer.name);
+      }
 
       // Ordinary edits do not need to re-upload unchanged base64 images. Both
       // the generic local update and the atomic server mutation merge omitted

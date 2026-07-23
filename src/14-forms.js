@@ -1827,6 +1827,17 @@ async function _saveReceiptFromModalInner() {
     photos
   };
 
+  // Denormalize the customer's display NAME (never phone/contact) so a role
+  // that can view receipts but not load the customers collection still sees who
+  // the receipt is for — mirrors createdByName. In server mode the server
+  // re-stamps this authoritatively from the customers table (so it cannot be
+  // spoofed), and updateRecord protects it on edit; the live customer name
+  // always wins on read when available. Only stamp when a customer is linked.
+  if (customerId) {
+    const _receiptCustomer = (state.customers || []).find(c => c && String(c.id) === String(customerId));
+    if (_receiptCustomer && _receiptCustomer.name) receipt.customerName = String(_receiptCustomer.name);
+  }
+
   // PATCH has merge semantics, so unchanged photos can stay on the server
   // without being uploaded again. If the user intentionally removes the
   // legacy delivery proof from the photo list, clear that field explicitly.
