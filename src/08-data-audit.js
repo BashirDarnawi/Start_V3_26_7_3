@@ -19,12 +19,78 @@ const _patchChains = new Map();
 
 function serverRecordMatchesCreateRetry(serverRecord, requestedRecord) {
   if (!serverRecord || !requestedRecord || String(serverRecord.id || '') !== String(requestedRecord.id || '')) return false;
-  const ignored = new Set(['_lastModified', '_created', '_deleted', 'createdAt', 'createdBy']);
+  const ignored = new Set(['_lastModified', '_created', '_deleted', 'createdAt', 'createdBy', 'createdByName']);
   for (const [key, value] of Object.entries(requestedRecord)) {
     if (ignored.has(key) || value === undefined) continue;
     if (JSON.stringify(serverRecord[key]) !== JSON.stringify(value)) return false;
   }
   return true;
+}
+
+// ==========================================
+// CREATOR NAME RESOLUTION (survives user deletion)
+// ==========================================
+// Users are only ever soft-deleted, but deleted accounts stop syncing to
+// clients (/api/users and /api/users/public filter them out) — so records
+// they created used to render as "Created by: Unknown" forever. Resolution
+// order:
+//   1. live user in state.users (deleted users also stay here in local mode)
+//   2. server tombstone directory (id -> name of soft-deleted users)
+//   3. the createdByName stamp written onto the record at creation time
+// Privacy-anonymized accounts come back as "Deleted user" from the server and
+// have their record stamps scrubbed server-side, so a verified privacy
+// erasure is never resurrected by this chain.
+function getKnownUserNameById(userId) {
+  const uid = String(userId || '').trim();
+  if (!uid) return '';
+  const live = (state.users || []).find(u => u && String(u.id) === uid);
+  if (live && live.name) return String(live.name);
+  const tombs = state.userTombstones;
+  if (tombs && typeof tombs === 'object' && typeof tombs[uid] === 'string' && tombs[uid]) return String(tombs[uid]);
+  return '';
+}
+
+function resolveCreatorDisplayName(record, isAr) {
+  const uid = String(record?.createdBy || record?.creatorId || '').trim();
+  if (uid === 'system') return isAr ? 'النظام' : 'System';
+  const known = uid ? getKnownUserNameById(uid) : '';
+  if (known) return known;
+  const stamped = String(record?.createdByName || '').trim();
+  if (stamped) return stamped;
+  // Unresolvable creator id: ask the server for its deleted-users directory
+  // (throttled) so records created BEFORE the createdByName stamp existed
+  // regain their creator's name on the follow-up render.
+  if (uid) requestUserTombstoneRefresh();
+  return isAr ? 'غير معروف' : 'Unknown';
+}
+
+const _userTombstoneRefresh = { inFlight: false, lastAttemptAt: 0 };
+function requestUserTombstoneRefresh() {
+  if (typeof isServerModeEnabled !== 'function' || !isServerModeEnabled()) return;
+  if (typeof apiJson !== 'function') return;
+  const nowTs = Date.now();
+  if (_userTombstoneRefresh.inFlight || (nowTs - _userTombstoneRefresh.lastAttemptAt) < 60000) return;
+  _userTombstoneRefresh.inFlight = true;
+  _userTombstoneRefresh.lastAttemptAt = nowTs;
+  apiJson('/api/users/tombstones', { method: 'GET' }, { timeoutMs: 10000 })
+    .then((rows) => {
+      if (!Array.isArray(rows)) return;
+      const map = {};
+      rows.forEach((r) => {
+        if (r && r.id && typeof r.name === 'string' && r.name) map[String(r.id)] = String(r.name);
+      });
+      // REPLACE the map instead of merging: privacy anonymization renames a
+      // tombstone to "Deleted user", and a stale merged entry would
+      // resurrect the old name.
+      const next = Security.sanitizeObject(map);
+      if (JSON.stringify(state.userTombstones || {}) !== JSON.stringify(next)) {
+        state.userTombstones = next;
+        saveState();
+        RenderQueue.schedule('userTombstones');
+      }
+    })
+    .catch(() => {})
+    .finally(() => { _userTombstoneRefresh.inFlight = false; });
 }
 
 /**
@@ -73,6 +139,17 @@ function addRecord(array, record) {
   cleanRecord._deleted = false;
   if (!cleanRecord._created) cleanRecord._created = getMonotonicTime();
   if (!cleanRecord.createdBy && state.currentUser?.id) cleanRecord.createdBy = state.currentUser.id;
+  // Denormalize the creator's display name at creation time: user accounts
+  // are soft-deleted and stop syncing to clients, so this stamp is what keeps
+  // "Created by" readable forever (see resolveCreatorDisplayName). The server
+  // overrides it with the authoritative users-table name when the creator id
+  // resolves, so it cannot be spoofed in server mode.
+  if (!cleanRecord.createdByName && cleanRecord.createdBy) {
+    const _creatorName = (String(cleanRecord.createdBy) === String(state.currentUser?.id || '') && state.currentUser?.name)
+      ? String(state.currentUser.name)
+      : getKnownUserNameById(cleanRecord.createdBy);
+    if (_creatorName) cleanRecord.createdByName = _creatorName;
+  }
 
   const localRecord = isServerModeEnabled() && collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function'
     ? makeLightweightMediaRecord(collectionName, cleanRecord)
@@ -510,8 +587,10 @@ function updateRecord(array, id, updates, expectedLastModified) {
       showNotification('Invalid Record', updatesIdCheck.error, 'error');
       return Promise.resolve(false);
     }
-    // Never allow changing protected fields
-    const protectedFields = ['id', '_created', 'createdBy', 'createdAt', 'creatorId'];
+    // Never allow changing protected fields (createdByName is the
+    // creation-time stamp that keeps "Created by" readable after the
+    // creator's account is deleted — edits must never rewrite it)
+    const protectedFields = ['id', '_created', 'createdBy', 'createdByName', 'createdAt', 'creatorId'];
     for (const field of protectedFields) {
       if (sanitizedUpdates[field] !== undefined) delete sanitizedUpdates[field];
     }

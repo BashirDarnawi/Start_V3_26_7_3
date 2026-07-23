@@ -367,11 +367,11 @@ async function confirmStopAd(id, source = 'modal') {
         if (window.lucide) lucide.createIcons();
         return true;
       } catch (error) {
-        const conflict = error?.status === 409;
+        const conflict = isVersionConflict409(error);
         showNotification(
           isAr ? 'تعذر الحفظ' : 'Ad Not Saved',
-          conflict
-            ? (isAr ? 'تم تغيير هذا الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+          error?.status === 409
+            ? describe409(error, isAr ? 'تم تغيير هذا الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
             : (error?.message || (isAr ? 'فشل حفظ إيقاف الإعلان.' : 'The ad stop could not be saved.')),
           conflict ? 'warning' : 'error'
         );

@@ -1816,6 +1816,14 @@ def upsert_entity(
             clean["id"] = entity_id
             clean["_created"] = clean.get("_created") or created_at
             clean["createdBy"] = clean.get("createdBy") or created_by
+            # Denormalized creator display name: a full-document update from a
+            # client that predates the createdByName stamp must not erase it —
+            # this copy is what keeps "Created by" readable after the creator's
+            # account is soft-deleted (see GET /api/users/tombstones).
+            if not clean.get("createdByName"):
+                _prev_data = json_loads(existing.get("data_json") or "{}") or {}
+                if isinstance(_prev_data, dict) and _prev_data.get("createdByName"):
+                    clean["createdByName"] = _prev_data["createdByName"]
             if entity_type == "customers":
                 _validate_customer_phone_change_conn(
                     conn,
@@ -1865,6 +1873,22 @@ def upsert_entity(
             clean["id"] = entity_id
             clean["_created"] = clean.get("_created") or created_at
             clean["createdBy"] = clean.get("createdBy") or created_by
+            # Stamp the creator's display name so the record keeps showing who
+            # created it even after that user account is soft-deleted (deleted
+            # users stop syncing to clients). The users table is authoritative
+            # when the creator resolves to a real account — a client cannot
+            # stamp someone else's name; otherwise a client-supplied stamp
+            # (legacy import / local-mode history) is kept as-is.
+            _creator_ref = str(clean.get("createdBy") or "")
+            if _creator_ref:
+                _creator_row = conn.execute(
+                    text("SELECT name FROM users WHERE id = :id LIMIT 1"),
+                    {"id": _creator_ref},
+                ).mappings().first()
+                if _creator_row and _creator_row.get("name"):
+                    clean["createdByName"] = sanitize_str(str(_creator_row["name"]))[:120]
+            if clean.get("createdByName") is not None and not isinstance(clean.get("createdByName"), str):
+                clean.pop("createdByName", None)
             if entity_type == "customers":
                 _validate_customer_phone_change_conn(
                     conn,
@@ -1944,7 +1968,7 @@ def patch_entity(
     Behavior:
         - Loads existing entity from database
         - Merges updates into existing data (dict.update semantics)
-        - Protected fields (id, _created, createdBy, createdAt, creatorId) cannot be changed
+        - Protected fields (id, _created, createdBy, createdByName, createdAt, creatorId) cannot be changed
         - Raises HTTP 404 if entity doesn't exist
         - Updates last_modified timestamp automatically
     
@@ -1961,8 +1985,10 @@ def patch_entity(
     upd = sanitize_json(updates)
     if not isinstance(upd, dict):
         raise HTTPException(status_code=400, detail="Invalid update data")
-    # Protected keys
-    for k in ["id", "_created", "_lastModified", "createdBy", "createdAt", "creatorId"]:
+    # Protected keys. createdByName is the creation-time stamp that keeps
+    # "Created by" readable after the creator's account is deleted — a PATCH
+    # must never rewrite it to someone else's name.
+    for k in ["id", "_created", "_lastModified", "createdBy", "createdByName", "createdAt", "creatorId"]:
         if k in upd:
             del upd[k]
 
@@ -3496,6 +3522,15 @@ def _insert_entity_in_transaction(
     clean["_lastModified"] = now
     clean["_deleted"] = False
     clean["createdBy"] = created_by
+    # Same denormalized creator-name stamp as upsert_entity: keeps "Created
+    # by" readable after the creator's account is soft-deleted.
+    if created_by:
+        _creator_row = conn.execute(
+            text("SELECT name FROM users WHERE id = :id LIMIT 1"),
+            {"id": str(created_by)},
+        ).mappings().first()
+        if _creator_row and _creator_row.get("name"):
+            clean["createdByName"] = sanitize_str(str(_creator_row["name"]))[:120]
     conn.execute(
         text(
             """
@@ -9019,6 +9054,16 @@ _DELIVERY_WORKFLOW_FIELDS = {
     "deliveryNotes", "_lastModified",
 }
 
+# Descriptive fields a receipts PATCH may touch under receipts.markCollected
+# (the client offers a standalone "Mark Collected" capability). These record
+# HOW MUCH was collected; they never touch status/isPaid/amountUSD/amountLocal,
+# so this bypass cannot fabricate money — it only authorizes recording/undoing a
+# collection, mirroring how deliveries.* authorizes the delivery-workflow fields.
+_RECEIPT_COLLECTION_FIELDS = {
+    "collected", "collectedAmount", "collectedPayments",
+    "collectedMatchesReceipt", "collectedAt", "collectedBy", "_lastModified",
+}
+
 _DELIVERY_PAYMENT_FIELDS = {
     "isPaid", "status", "collectionDate", "paymentResult", "overpaidAmount",
     "remainingDue", "feeDifferenceStatus", "feeDiff", "debtAmountLocal",
@@ -10843,12 +10888,25 @@ def update_collection_item(
     creator = existing.get("createdBy") or (existing.get("data") or {}).get("createdBy") or (existing.get("data") or {}).get("creatorId")
     delivery_grant_patch = False
     if not user_has_permission(user, module, _action_for_collection(collection, "edit"), record_creator_id=str(creator or "")):
+        _dw_updates = sanitize_json(body.data or {}) or {}
+        _dw_keys = set(_dw_updates.keys())
+        # A receipts PATCH that touches ONLY the collection-tracking fields is
+        # authorized by receipts.markCollected (the client offers a standalone
+        # "Mark Collected" capability), mirroring the deliveries.* bypass. It
+        # flows through the normal receipts path (delivery_grant_patch stays
+        # False), which persists collected* the same as a full receipts.edit.
+        _mark_collected_patch = (
+            collection == "receipts"
+            and bool(_dw_keys - {"_lastModified"})
+            and _dw_keys.issubset(_RECEIPT_COLLECTION_FIELDS)
+            and user_has_permission(user, "receipts", "markCollected", record_creator_id=str(creator or ""))
+        )
         # Delivery-workflow PATCHes (assign/accept/complete/collect) are also
         # authorized by the deliveries.* permission group.
-        _dw_updates = sanitize_json(body.data or {}) or {}
-        if not (collection in {"ads", "receipts"} and _delivery_patch_allowed(user, existing, _dw_updates)):
+        _delivery_ok = collection in {"ads", "receipts"} and _delivery_patch_allowed(user, existing, _dw_updates)
+        if not _mark_collected_patch and not _delivery_ok:
             raise HTTPException(status_code=403, detail="Forbidden")
-        delivery_grant_patch = True
+        delivery_grant_patch = _delivery_ok
 
     if collection == AD_CAMPAIGN_COLLECTION:
         # Ads Studio uses a status machine (Draft -> Submitted -> Reviewed).
@@ -11907,6 +11965,25 @@ def list_users(user: dict[str, Any] = Depends(current_user)):
     return [user_row_to_public(r) for r in rows]
 
 
+# Permissions that grant the cross-user name directory (assignee/creator
+# dropdowns and creator-name resolution). Shared by /api/users/public and
+# /api/users/tombstones — own-only/customer accounts get no directory.
+USER_DIRECTORY_PERMISSIONS = (
+    ("users", "view"),
+    ("users", "managePermissions"),
+    ("ads", "view"),
+    ("ads", "assignDelivery"),
+    ("receipts", "view"),
+    ("deliveries", "view"),
+    ("deliveries", "assign"),
+    ("deliveries", "reassign"),
+    ("deliveries", "viewStats"),
+    ("auditLogs", "view"),
+    ("adCampaignRequests", "view"),
+    ("adCampaignRequests", "review"),
+)
+
+
 @app.get("/api/users/public")
 def list_users_public(user: dict[str, Any] = Depends(current_user)):
     # This endpoint feeds internal assignee/creator dropdowns, but it is also
@@ -11914,23 +11991,9 @@ def list_users_public(user: dict[str, Any] = Depends(current_user)):
     # Employee role, so role alone cannot distinguish them from staff.  Grant
     # the directory only to permissions that operate across users' records;
     # own-only/customer accounts receive a single self row instead.
-    directory_permissions = (
-        ("users", "view"),
-        ("users", "managePermissions"),
-        ("ads", "view"),
-        ("ads", "assignDelivery"),
-        ("receipts", "view"),
-        ("deliveries", "view"),
-        ("deliveries", "assign"),
-        ("deliveries", "reassign"),
-        ("deliveries", "viewStats"),
-        ("auditLogs", "view"),
-        ("adCampaignRequests", "view"),
-        ("adCampaignRequests", "review"),
-    )
     can_browse_directory = any(
         user_has_permission(user, module, action)
-        for module, action in directory_permissions
+        for module, action in USER_DIRECTORY_PERMISSIONS
     )
 
     with db_conn() as conn:
@@ -11943,6 +12006,33 @@ def list_users_public(user: dict[str, Any] = Depends(current_user)):
         rows = conn.execute(text(query), params).mappings().all()
         rows = [dict(r) for r in rows]
     return rows
+
+
+@app.get("/api/users/tombstones")
+def list_user_tombstones(user: dict[str, Any] = Depends(current_user)):
+    """id -> name directory of soft-deleted users, for display resolution.
+
+    User deletion is a soft delete (the row is retained forever for audit and
+    financial referential integrity), but /api/users and /api/users/public
+    filter deleted rows — so every record a deleted user created rendered as
+    "Created by: Unknown". Expose ONLY id + name of deleted accounts so
+    clients can keep resolving creator names on historical records.
+
+    Privacy semantics: a verified erasure request goes through
+    _privacy_anonymize_deleted_user_atomic, which replaces the stored name
+    with "Deleted user" — so this endpoint can never resurrect the identity
+    of a privacy-anonymized account.
+    """
+    if not any(
+        user_has_permission(user, module, action)
+        for module, action in USER_DIRECTORY_PERMISSIONS
+    ):
+        return []
+    with db_conn() as conn:
+        rows = conn.execute(
+            text("SELECT id, name FROM users WHERE deleted = true ORDER BY name ASC")
+        ).mappings().all()
+    return [{"id": str(r["id"]), "name": str(r["name"] or "")} for r in rows]
 
 
 def _free_email_if_soft_deleted(email: str, now: int) -> bool:
@@ -12060,6 +12150,44 @@ def _privacy_anonymize_deleted_user_atomic(user_id: str) -> dict[str, Any]:
                 "metadata_json": json_dumps({}),
             },
         )
+
+        # Records stamp the creator's display name (createdByName) at creation
+        # so ordinary deletion keeps history readable. A verified privacy
+        # request must scrub that denormalized copy too: the record ids and the
+        # created_by linkage stay for financial integrity, only the human name
+        # goes. last_modified is bumped so synced clients replace their cached
+        # copies with the scrubbed version. The LIKE branch catches imported
+        # legacy rows whose creator lives only inside data_json.
+        stamped_rows = conn.execute(
+            text(
+                "SELECT type, id, data_json, created_by FROM entities "
+                "WHERE created_by = :id "
+                "   OR (created_by IS NULL AND data_json LIKE :pat)"
+            ),
+            {"id": user_id, "pat": f"%{user_id}%"},
+        ).mappings().all()
+        for row in stamped_rows:
+            data = json_loads(row.get("data_json") or "{}") or {}
+            if not isinstance(data, dict) or not data.get("createdByName"):
+                continue
+            if row.get("created_by") is None and user_id not in (
+                str(data.get("createdBy") or ""),
+                str(data.get("creatorId") or ""),
+            ):
+                continue
+            data.pop("createdByName", None)
+            conn.execute(
+                text(
+                    "UPDATE entities SET data_json = :data_json, last_modified = :now "
+                    "WHERE type = :type AND id = :id"
+                ),
+                {
+                    "data_json": json_dumps(data),
+                    "now": now,
+                    "type": row["type"],
+                    "id": row["id"],
+                },
+            )
 
         updated = conn.execute(
             text("SELECT * FROM users WHERE id=:id LIMIT 1"),

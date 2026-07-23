@@ -6072,12 +6072,78 @@ const _patchChains = new Map();
 
 function serverRecordMatchesCreateRetry(serverRecord, requestedRecord) {
   if (!serverRecord || !requestedRecord || String(serverRecord.id || '') !== String(requestedRecord.id || '')) return false;
-  const ignored = new Set(['_lastModified', '_created', '_deleted', 'createdAt', 'createdBy']);
+  const ignored = new Set(['_lastModified', '_created', '_deleted', 'createdAt', 'createdBy', 'createdByName']);
   for (const [key, value] of Object.entries(requestedRecord)) {
     if (ignored.has(key) || value === undefined) continue;
     if (JSON.stringify(serverRecord[key]) !== JSON.stringify(value)) return false;
   }
   return true;
+}
+
+// ==========================================
+// CREATOR NAME RESOLUTION (survives user deletion)
+// ==========================================
+// Users are only ever soft-deleted, but deleted accounts stop syncing to
+// clients (/api/users and /api/users/public filter them out) — so records
+// they created used to render as "Created by: Unknown" forever. Resolution
+// order:
+//   1. live user in state.users (deleted users also stay here in local mode)
+//   2. server tombstone directory (id -> name of soft-deleted users)
+//   3. the createdByName stamp written onto the record at creation time
+// Privacy-anonymized accounts come back as "Deleted user" from the server and
+// have their record stamps scrubbed server-side, so a verified privacy
+// erasure is never resurrected by this chain.
+function getKnownUserNameById(userId) {
+  const uid = String(userId || '').trim();
+  if (!uid) return '';
+  const live = (state.users || []).find(u => u && String(u.id) === uid);
+  if (live && live.name) return String(live.name);
+  const tombs = state.userTombstones;
+  if (tombs && typeof tombs === 'object' && typeof tombs[uid] === 'string' && tombs[uid]) return String(tombs[uid]);
+  return '';
+}
+
+function resolveCreatorDisplayName(record, isAr) {
+  const uid = String(record?.createdBy || record?.creatorId || '').trim();
+  if (uid === 'system') return isAr ? 'النظام' : 'System';
+  const known = uid ? getKnownUserNameById(uid) : '';
+  if (known) return known;
+  const stamped = String(record?.createdByName || '').trim();
+  if (stamped) return stamped;
+  // Unresolvable creator id: ask the server for its deleted-users directory
+  // (throttled) so records created BEFORE the createdByName stamp existed
+  // regain their creator's name on the follow-up render.
+  if (uid) requestUserTombstoneRefresh();
+  return isAr ? 'غير معروف' : 'Unknown';
+}
+
+const _userTombstoneRefresh = { inFlight: false, lastAttemptAt: 0 };
+function requestUserTombstoneRefresh() {
+  if (typeof isServerModeEnabled !== 'function' || !isServerModeEnabled()) return;
+  if (typeof apiJson !== 'function') return;
+  const nowTs = Date.now();
+  if (_userTombstoneRefresh.inFlight || (nowTs - _userTombstoneRefresh.lastAttemptAt) < 60000) return;
+  _userTombstoneRefresh.inFlight = true;
+  _userTombstoneRefresh.lastAttemptAt = nowTs;
+  apiJson('/api/users/tombstones', { method: 'GET' }, { timeoutMs: 10000 })
+    .then((rows) => {
+      if (!Array.isArray(rows)) return;
+      const map = {};
+      rows.forEach((r) => {
+        if (r && r.id && typeof r.name === 'string' && r.name) map[String(r.id)] = String(r.name);
+      });
+      // REPLACE the map instead of merging: privacy anonymization renames a
+      // tombstone to "Deleted user", and a stale merged entry would
+      // resurrect the old name.
+      const next = Security.sanitizeObject(map);
+      if (JSON.stringify(state.userTombstones || {}) !== JSON.stringify(next)) {
+        state.userTombstones = next;
+        saveState();
+        RenderQueue.schedule('userTombstones');
+      }
+    })
+    .catch(() => {})
+    .finally(() => { _userTombstoneRefresh.inFlight = false; });
 }
 
 /**
@@ -6126,6 +6192,17 @@ function addRecord(array, record) {
   cleanRecord._deleted = false;
   if (!cleanRecord._created) cleanRecord._created = getMonotonicTime();
   if (!cleanRecord.createdBy && state.currentUser?.id) cleanRecord.createdBy = state.currentUser.id;
+  // Denormalize the creator's display name at creation time: user accounts
+  // are soft-deleted and stop syncing to clients, so this stamp is what keeps
+  // "Created by" readable forever (see resolveCreatorDisplayName). The server
+  // overrides it with the authoritative users-table name when the creator id
+  // resolves, so it cannot be spoofed in server mode.
+  if (!cleanRecord.createdByName && cleanRecord.createdBy) {
+    const _creatorName = (String(cleanRecord.createdBy) === String(state.currentUser?.id || '') && state.currentUser?.name)
+      ? String(state.currentUser.name)
+      : getKnownUserNameById(cleanRecord.createdBy);
+    if (_creatorName) cleanRecord.createdByName = _creatorName;
+  }
 
   const localRecord = isServerModeEnabled() && collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function'
     ? makeLightweightMediaRecord(collectionName, cleanRecord)
@@ -6563,8 +6640,10 @@ function updateRecord(array, id, updates, expectedLastModified) {
       showNotification('Invalid Record', updatesIdCheck.error, 'error');
       return Promise.resolve(false);
     }
-    // Never allow changing protected fields
-    const protectedFields = ['id', '_created', 'createdBy', 'createdAt', 'creatorId'];
+    // Never allow changing protected fields (createdByName is the
+    // creation-time stamp that keeps "Created by" readable after the
+    // creator's account is deleted — edits must never rewrite it)
+    const protectedFields = ['id', '_created', 'createdBy', 'createdByName', 'createdAt', 'creatorId'];
     for (const field of protectedFields) {
       if (sanitizedUpdates[field] !== undefined) delete sanitizedUpdates[field];
     }
@@ -9386,7 +9465,13 @@ const _serverLiveSync = {
   // not be hammered every 3s from a phone (battery + cell radio); the
   // visibilitychange/online handlers reset the backoff for an immediate retry.
   failStreak: 0,
-  nextAllowedAt: 0
+  nextAllowedAt: 0,
+  // Collections already purged after a per-collection 403 (permission boundary).
+  // A revoked collection keeps returning 403 every 3s until the current user's
+  // permissions refresh (every usersSyncIntervalMs). Tracking already-purged
+  // collections here stops an identical 403 from re-clearing state + writing
+  // IndexedDB + forcing a full re-render on every tick (battery/jank storm).
+  purgedForbidden: new Set()
 };
 
 function advanceServerSessionEpoch() {
@@ -9398,6 +9483,8 @@ function advanceServerSessionEpoch() {
   _serverLiveSync.serviceEntitlements = null;
   if (typeof clearTransientEntityMediaCache === 'function') clearTransientEntityMediaCache('adCampaignRequests');
   _serverLiveSync.lastDeliverySig = null;
+  if (_serverLiveSync.purgedForbidden instanceof Set) _serverLiveSync.purgedForbidden.clear();
+  else _serverLiveSync.purgedForbidden = new Set();
 }
 
 const SERVER_SERVICE_ENTITLEMENT_COLLECTIONS = Object.freeze({
@@ -9746,6 +9833,33 @@ async function serverLiveSyncOnce() {
 
   const roleLower = String(state.currentUser.role || '').toLowerCase();
 
+  // The delivery branch below early-returns before the users/permissions refresh
+  // block (~:600), which is the ONLY in-session path that re-reads /api/auth/me
+  // and rewrites state.currentUser.role/permissions. Without this, an admin
+  // promoting an active Delivery user (Delivery->Employee) or altering their
+  // permissions never reached that session until re-login, while every other
+  // role got the change within usersSyncIntervalMs. Run the SAME throttled
+  // refresh here so access changes propagate to delivery sessions too.
+  if (roleLower === 'delivery') {
+    const nowMs = Date.now();
+    if ((nowMs - (_serverLiveSync.lastUsersSyncAt || 0)) > (SERVER_API.usersSyncIntervalMs || 60000)) {
+      _serverLiveSync.lastUsersSyncAt = nowMs;
+      let accessChanged = false;
+      try { accessChanged = await refreshCurrentUserPermissions(); }
+      catch (e) { if (ALBAYAN_DEBUG_MODE) console.warn('[serverLiveSyncOnce] delivery access refresh failed:', e?.message || e); }
+      if (_syncAborted()) return { ok: false, skipped: true };
+      if (accessChanged) {
+        // roleLower is recomputed next tick and per-collection cursors default to
+        // 0, so the employee/admin branch performs a full catch-up. Reset the
+        // delivery signature and force a render now so the sidebar/landing view
+        // unlock immediately.
+        _serverLiveSync.lastDeliverySig = null;
+        if (typeof forceFullRender === 'function') forceFullRender();
+        if (String(state.currentUser.role || '').toLowerCase() !== 'delivery') return { ok: true };
+      }
+    }
+  }
+
   // Delivery users: do a small "replace" sync of only assigned deliveries + linked customers.
   // This guarantees removals (unassigned items) disappear without needing manual refresh.
   if (roleLower === 'delivery') {
@@ -9872,18 +9986,30 @@ async function serverLiveSyncOnce() {
   // broader collection from memory, request cache and this user's IndexedDB
   // namespace before anything can render it again.
   const forbiddenCollections = deltaResults.filter(result => result.forbidden).map(result => result.collection);
-  const customerPageForbidden = forbiddenCollections.some(name =>
+  if (!(_serverLiveSync.purgedForbidden instanceof Set)) _serverLiveSync.purgedForbidden = new Set();
+  // Only act on collections NOT already purged. A revoked collection keeps
+  // returning 403 every 3s until the current user's permissions refresh; without
+  // this guard each identical 403 would re-clear state, re-write IndexedDB, and
+  // force a full re-render every tick for ~30s.
+  const newlyForbidden = forbiddenCollections.filter(name => !_serverLiveSync.purgedForbidden.has(name));
+  // ROOT CAUSE: the first time a previously-authorized collection returns 403,
+  // collapse the usersSyncInterval wait so refreshCurrentUserPermissions runs
+  // this very tick (below) — it drops the collection from the authorized list,
+  // so it is never requested again and the churn ends immediately.
+  if (newlyForbidden.length > 0) _serverLiveSync.lastUsersSyncAt = 0;
+  const customerPageForbidden = newlyForbidden.some(name =>
     name === 'ads' || name === 'receipts' || name === 'customers' || name === 'pages' || name === 'exchangeRateHistory'
   );
   // A 403 means access is already revoked. Close the financial snapshot before
   // awaiting cache/IndexedDB cleanup so slow storage cannot prolong exposure.
   if (customerPageForbidden) _closeCustomerPagesDialogForStateChange();
-  if (forbiddenCollections.length > 0) {
-    await clearServerCollectionsForVisibility(forbiddenCollections);
+  if (newlyForbidden.length > 0) {
+    await clearServerCollectionsForVisibility(newlyForbidden);
     if (_syncAborted()) return { ok: false, skipped: true };
+    for (const name of newlyForbidden) _serverLiveSync.purgedForbidden.add(name);
   }
 
-  let changed = forbiddenCollections.length > 0;
+  let changed = newlyForbidden.length > 0;
   let customerPagesDataChanged = customerPageForbidden;
   const adsChanged = applyServerDelta('ads', adsDelta);
   changed = adsChanged || changed;
@@ -9942,6 +10068,10 @@ async function serverLiveSyncOnce() {
   // retain their own prior cursor and are retried without blocking others.
   for (const result of deltaResults) {
     if (!result.ok || result.forbidden) continue;
+    // A collection that now returns a clean (non-forbidden) result is authorized
+    // again, so drop it from the purged set: a later re-revoke must purge and
+    // re-render exactly once more, not be silently swallowed by the guard.
+    if (_serverLiveSync.purgedForbidden instanceof Set) _serverLiveSync.purgedForbidden.delete(result.collection);
     const maxDelta = _maxLastModifiedFromArray(result.records);
     _serverLiveSync.collectionCursors[result.collection] = Math.max(result.since, maxDelta);
     if (maxDelta > (_serverLiveSync.serverWatermark || 0)) _serverLiveSync.serverWatermark = maxDelta;
@@ -9988,6 +10118,9 @@ async function serverLiveSyncOnce() {
         ? getServerVisibilityScopeChanges(accessBefore, state.currentUser)
         : [];
       if (permsChanged) {
+        // Permissions moved, so any prior per-collection 403 purge is stale.
+        // Reset the guard so a re-grant-then-re-revoke cycle still purges once.
+        if (_serverLiveSync.purgedForbidden instanceof Set) _serverLiveSync.purgedForbidden.clear();
         // Access revocation can hide pages, ads, balances, or the customer itself.
         // Close immediately, before cache writes/refetches, so its old authorized
         // snapshot cannot outlive the newly-scoped state even on a slow network.
@@ -11275,10 +11408,14 @@ function navigateToInternal(view, pushHistory = true) {
   
   // Check permission (Admin always allowed)
   if (!isCurrentUserAdmin() && !userCanAccessView(state.currentUser, view)) {
-    // Special views that don't need permissions (delivery dashboard is for
-    // the Delivery role only — other roles must hold a real permission)
+    // Special views that don't need permissions. The Delivery role is granted
+    // both the delivery dashboard AND the deliveries tab unconditionally by the
+    // nav gates (canOpenWorkspaceView, renderSidebar, renderMobileBottomNavigation),
+    // so the router must exempt both — otherwise a driver lacking deliveries.viewOwn
+    // sees a "Delivery" tab that only pops an Access Denied toast (dead button).
+    // Other roles still need a real permission for either view.
     const isExempt = view === 'no-access' ||
-      (view === 'delivery-dashboard' && isDeliveryRole(state.currentUser?.role));
+      ((view === 'delivery-dashboard' || view === 'deliveries') && isDeliveryRole(state.currentUser?.role));
     if (!isExempt) {
       showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية' : `You don't have permission to access this page`, 'error');
       return;
@@ -14264,6 +14401,12 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
 
     const phones = getCustomerPhoneEntries(c).map(entry => entry.value);
     const profileLinks = Array.isArray(c.profileLinks) ? c.profileLinks : [];
+          // Only render Edit/Delete when the handler would actually allow it
+          // (editCustomer → canActOnRecord edit; deleteCustomer →
+          // currentUserHasPermission delete). Matches how the Add button is
+          // gated, so view-only roles don't see dead buttons.
+          const canEditThisCustomer = canActOnRecord('customers', 'edit', c.createdBy);
+          const canDeleteThisCustomer = can('customers', 'delete');
           // Display number: total - index (so first item = highest number, matching newest-first sort)
           const displayNum = totalCustomers - idx;
           const pagesLabel = isAr
@@ -14299,14 +14442,14 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                     ${duplicateCustomerIds.has(String(c.id)) ? `<button type="button" onclick="showCustomerDuplicateMerge('${Security.escapeHtml(String(c.id || ''))}')" class="min-h-11 px-3 py-2 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 text-xs font-bold inline-flex items-center gap-1.5 hover:bg-amber-200 dark:hover:bg-amber-900/50" aria-haspopup="dialog" title="${isAr ? 'دمج سجل العميل المكرر بأمان' : 'Safely merge this duplicate customer'}"><i data-lucide="copy" class="w-4 h-4"></i><span>${isAr ? 'مكرر' : 'Duplicate'}</span></button>` : ''}
                   </div>
                 </div>
-                <div class="flex space-x-1">
-                  <button onclick="editCustomer('${c.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${t('edit')}">
+                ${(canEditThisCustomer || canDeleteThisCustomer) ? `<div class="flex space-x-1">
+                  ${canEditThisCustomer ? `<button onclick="editCustomer('${c.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${t('edit')}">
                     <i data-lucide="edit" class="w-4 h-4"></i>
-                  </button>
-                  <button onclick="deleteCustomer('${c.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="${t('delete')}">
+                  </button>` : ''}
+                  ${canDeleteThisCustomer ? `<button onclick="deleteCustomer('${c.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="${t('delete')}">
                     <i data-lucide="trash-2" class="w-4 h-4"></i>
-                  </button>
-                </div>
+                  </button>` : ''}
+                </div>` : ''}
               </div>
 
               <div class="space-y-2 text-sm border-t border-slate-200 dark:border-slate-700 pt-3">
@@ -14598,7 +14741,9 @@ function renderReceiptsView() {
     const receiptCustomerId = getReceiptCustomerReferenceId(receipt);
     if (receiptCustomerFilter && receiptCustomerId !== receiptCustomerFilter) return false;
     const customer = customersById.get(receiptCustomerId);
-    const customerName = customer?.name?.toLowerCase() || '';
+    // Fall back to any denormalized name stamped on the receipt so name search
+    // still works for a role that can see receipts but not load customers.
+    const customerName = (customer?.name || receipt.customerName || '').toLowerCase();
     const finalNo = (receipt.finalReceiptNo || receipt.serialNumber || '').toLowerCase();
     const tempNo = (receipt.tempReceiptNo || '').toLowerCase();
     const phoneNumber = canSearchReceiptContacts ? (receipt.phoneNumber || '').toLowerCase() : '';
@@ -14827,6 +14972,11 @@ function renderReceiptsView() {
           const customer = customersById.get(getReceiptCustomerReferenceId(receipt));
           const displayFinalNo = receipt.finalReceiptNo || receipt.serialNumber || '';
           const displayTempNo = receipt.tempReceiptNo || '';
+          // Gate Edit/Delete to match their handlers (editReceipt/deleteReceipt
+          // both use canActOnRecord on receipt.createdBy) so view-only roles
+          // don't see dead buttons.
+          const canEditThisReceipt = canActOnRecord('receipts', 'edit', receipt.createdBy);
+          const canDeleteThisReceipt = canActOnRecord('receipts', 'delete', receipt.createdBy);
           // Display number: total - index (so first item = highest number, matching newest-first sort)
           const receiptDisplayNum = filteredReceipts.length - idx;
           // Normalize payments
@@ -14840,7 +14990,7 @@ function renderReceiptsView() {
           const usage = getReceiptUsageStats(receipt);
           const hasTransfers = (receipt.transfers && receipt.transfers.length > 0);
           const lastTransfer = hasTransfers ? receipt.transfers[receipt.transfers.length - 1] : null;
-          const lastTransferName = lastTransfer ? (customersById.get(lastTransfer.toCustomerId)?.name || (isArV ? 'غير معروف' : 'Unknown')) : '';
+          const lastTransferName = lastTransfer ? (customersById.get(lastTransfer.toCustomerId)?.name || lastTransfer.toCustomerName || (isArV ? 'غير معروف' : 'Unknown')) : '';
           const lastTransferNameSafe = Security.escapeHtml(String(lastTransferName || ''));
           // Defensive: ensure exchange rate is always positive and reasonable
           const rawFxRate = (receipt.exchangeRate || state.defaultExchangeRate || 1);
@@ -14848,11 +14998,10 @@ function renderReceiptsView() {
           const remainingLYD = (usage.remainingUSD || 0) * fxRate;
           const spentLYD = (usage.usedUSD || 0) * fxRate;
 
-          const creatorId = receipt.createdBy || receipt.creatorId || '';
-          const creatorNameRaw = creatorId
-            ? (state.users.find(u => String(u.id) === String(creatorId))?.name || (creatorId === 'system' ? (isArV ? 'النظام' : 'System') : (isArV ? 'غير معروف' : 'Unknown')))
-            : (isArV ? 'غير معروف' : 'Unknown');
-          const creatorName = Security.escapeHtml(String(creatorNameRaw || (isArV ? 'غير معروف' : 'Unknown')));
+          // Live user name → deleted-user tombstone → the record's own
+          // createdByName stamp → Unknown, so the creator's name survives
+          // account deletion (see resolveCreatorDisplayName).
+          const creatorName = Security.escapeHtml(String(resolveCreatorDisplayName(receipt, isArV)));
           
           // Colour the card by kind so "existing balance" receipts stand out
           // from normal "new" ones at a glance (matches the New-Receipt chooser
@@ -14865,7 +15014,7 @@ function renderReceiptsView() {
                 <div>
                   <div class="flex items-center gap-2">
                     <span class="px-2 py-0.5 rounded-md bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400 text-xs font-bold">#${receiptDisplayNum}</span>
-                  <h3 class="text-lg font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || (isArV ? 'غير معروف' : 'Unknown'))}</h3>
+                  <h3 class="text-lg font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || receipt.customerName || (isArV ? 'غير معروف' : 'Unknown'))}</h3>
                   </div>
                   ${(displayTempNo || displayFinalNo) ? `
                     <p class="text-sm text-indigo-600 font-medium">
@@ -15066,9 +15215,9 @@ function renderReceiptsView() {
                       <i data-lucide="swap" class="w-4 h-4"></i>
                     </button>` : ''}
                     <button onclick="manageSplitPayments('${receipt.id}')" class="text-purple-600 hover:text-purple-700" title="${state.language === 'ar' ? 'تعديل الدفعات المقسّمة' : 'Manage split payments'}"><i data-lucide="credit-card" class="w-4 h-4"></i></button>
-                    <button onclick="editReceipt('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="${t('edit')}"><i data-lucide="edit" class="w-4 h-4"></i></button>
+                    ${canEditThisReceipt ? `<button onclick="editReceipt('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="${t('edit')}"><i data-lucide="edit" class="w-4 h-4"></i></button>` : ''}
                     <button onclick="printReceiptCard(this)" class="text-slate-600 hover:text-slate-700" title="${t('print')}"><i data-lucide="printer" class="w-4 h-4"></i></button>
-                    <button onclick="deleteReceipt('${receipt.id}')" class="text-rose-600 hover:text-rose-700" title="${t('delete')}"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                    ${canDeleteThisReceipt ? `<button onclick="deleteReceipt('${receipt.id}')" class="text-rose-600 hover:text-rose-700" title="${t('delete')}"><i data-lucide="trash-2" class="w-4 h-4"></i></button>` : ''}
                   </div>
                 </div>
               </div>
@@ -15188,14 +15337,14 @@ function renderPagesView() {
                   </h3>
                   <p class="text-sm text-slate-500 mt-1">${Security.escapeHtml(p.category || '')}</p>
                 </div>
-                <div class="flex space-x-1">
-                  <button onclick="editPage('${p.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${t('edit')}">
+                ${(can('pages', 'edit') || can('pages', 'delete')) ? `<div class="flex space-x-1">
+                  ${can('pages', 'edit') ? `<button onclick="editPage('${p.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${t('edit')}">
                     <i data-lucide="edit" class="w-4 h-4"></i>
-                  </button>
-                  <button onclick="deletePage('${p.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="${t('delete')}">
+                  </button>` : ''}
+                  ${can('pages', 'delete') ? `<button onclick="deletePage('${p.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="${t('delete')}">
                     <i data-lucide="trash-2" class="w-4 h-4"></i>
-                  </button>
-                </div>
+                  </button>` : ''}
+                </div>` : ''}
               </div>
 
               <div class="space-y-2 border-t border-slate-200 dark:border-slate-700 pt-3">
@@ -15424,6 +15573,10 @@ function renderAdsView() {
             <tbody>
               ${visibleAds.map((ad, idx) => {
                 const customer = customersById.get(ad.customerId);
+                // Gate Edit/Delete to match editAd/deleteAd (canActOnRecord on
+                // ad.creatorId) so view-only roles don't see dead buttons.
+                const canEditThisAd = canActOnRecord('ads', 'edit', ad.creatorId);
+                const canDeleteThisAd = canActOnRecord('ads', 'delete', ad.creatorId);
                 const adPhotoCount = getAdPhotoCount(ad);
                 const paymentState = getAdPaymentState(ad);
                 const isAdPaid = paymentState === 'paid';
@@ -15431,12 +15584,11 @@ function renderAdsView() {
                   ? 'text-emerald-600 dark:text-emerald-400'
                   : 'text-rose-600 dark:text-rose-400';
                 // createdBy is immutable server ownership metadata; creatorId
-                // is retained as the legacy/local fallback.
-                const creatorId = String(ad.createdBy || ad.creatorId || '').trim();
-                const creatorUser = creatorId ? usersById.get(creatorId) : null;
-                const creatorNameRaw = creatorUser?.name
-                  || (creatorId === 'system' ? (isAr ? 'النظام' : 'System') : (isAr ? 'غير معروف' : 'Unknown'));
-                const creatorName = Security.escapeHtml(String(creatorNameRaw));
+                // is retained as the legacy/local fallback. Name resolution
+                // falls back to the deleted-user tombstone directory and the
+                // record's own createdByName stamp so the creator's name
+                // survives account deletion (see resolveCreatorDisplayName).
+                const creatorName = Security.escapeHtml(String(resolveCreatorDisplayName(ad, isAr)));
                 // Deleting a page keeps its ads (history) but leaves their pageId
                 // pointing at the deleted page, whose name a NEW page may reuse.
                 // Keep resolving the name (the ad really did run on it) but mark
@@ -15489,7 +15641,7 @@ function renderAdsView() {
                 return `
                   <tr class="border-b border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50">
                     <td class="py-3 px-2" data-label="#">
-                      <div class="font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</div>
+                      <div class="font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || ad.customerName || (isAr ? 'غير معروف' : 'Unknown'))}</div>
                       ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
                       <div data-role="ad-creator" class="inline-flex items-center gap-1 mt-1 text-[11px] leading-tight font-normal text-slate-500 dark:text-slate-400" title="${isAr ? 'تم الإنشاء بواسطة' : 'Created by'}">
                         <i data-lucide="user" class="w-3 h-3 shrink-0"></i>
@@ -15497,7 +15649,7 @@ function renderAdsView() {
                       </div>
                     </td>
                     <td class="py-3 px-2 hidden md:table-cell">
-                      <div class="font-medium">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</div>
+                      <div class="font-medium">${Security.escapeHtml(customer?.name || ad.customerName || (isAr ? 'غير معروف' : 'Unknown'))}</div>
                       ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
                     </td>
                     <td class="py-3 px-2" data-label="Page">
@@ -15595,8 +15747,8 @@ function renderAdsView() {
                           <i data-lucide="${ad.status === 'Stopped' ? 'edit' : 'square'}" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.status === 'Stopped' ? '<span class="text-xs">!</span>' : ''}
                         </button>
-                        <button onclick="editAd('${ad.id}')" class="text-indigo-600 hover:text-indigo-700 p-2 md:p-0" title="${t('edit')}"><i data-lucide="edit" class="w-5 h-5 md:w-4 md:h-4"></i></button>
-                        <button onclick="deleteAd('${ad.id}')" class="text-rose-600 hover:text-rose-700 p-2 md:p-0" title="${t('delete')}"><i data-lucide="trash-2" class="w-5 h-5 md:w-4 md:h-4"></i></button>
+                        ${canEditThisAd ? `<button onclick="editAd('${ad.id}')" class="text-indigo-600 hover:text-indigo-700 p-2 md:p-0" title="${t('edit')}"><i data-lucide="edit" class="w-5 h-5 md:w-4 md:h-4"></i></button>` : ''}
+                        ${canDeleteThisAd ? `<button onclick="deleteAd('${ad.id}')" class="text-rose-600 hover:text-rose-700 p-2 md:p-0" title="${t('delete')}"><i data-lucide="trash-2" class="w-5 h-5 md:w-4 md:h-4"></i></button>` : ''}
                       </div>
                     </td>
                   </tr>
@@ -15936,9 +16088,11 @@ function renderDeliveriesView() {
                       </td>
                       <td class="px-4 py-3" data-label="${isAr ? 'الإجراءات' : 'Actions'}">
                         <div class="flex items-center justify-center space-x-1">
-                          <select onchange="updateDeliveryStatus('${ad.id}', this.value)" class="glass-input px-2 py-1 rounded-lg text-xs w-24">
+                          ${roleLower === 'delivery'
+                            ? `<span class="inline-flex px-2.5 py-1 rounded-full text-xs font-bold ${statusColors[ad.deliveryStatus] || 'bg-slate-100 text-slate-700'}">${trStatus(ad.deliveryStatus)}</span>`
+                            : `<select onchange="updateDeliveryStatus('${ad.id}', this.value)" class="glass-input px-2 py-1 rounded-lg text-xs w-24">
                             ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
-                          </select>
+                          </select>`}
                           <button onclick="showDeliveryDetails('${ad.id}')" class="p-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-300 transition-colors" title="${isAr ? 'عرض التفاصيل' : 'View Details'}">
                             <i data-lucide="eye" class="w-4 h-4"></i>
                           </button>
@@ -16127,7 +16281,7 @@ function exportDeliveryReport() {
     const collected = Number(r.amountCollectedFromCustomer ?? (String(r.deliveryStatus || '') === 'Delivered' ? (r.amountLocal || 0) : 0)) || 0;
     const remaining = Number(r.remainingDue ?? Math.max(0, debt - collected)) || 0;
     const received = (typeof r.isReceivedInOffice === 'boolean') ? r.isReceivedInOffice : !!r.officeHandover;
-    csv += `${csvCell(customer?.name || 'Unknown')},${csvCell(r.phoneNumber || customer?.phones?.[0] || '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
+    csv += `${csvCell(customer?.name || r.customerName || 'Unknown')},${csvCell(r.phoneNumber || customer?.phones?.[0] || '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
   });
   
   // Prepend a UTF-8 BOM so Excel reads Arabic customer/driver names correctly
@@ -16461,16 +16615,20 @@ function showDeliveryDetails(itemId) {
         <div class="grid grid-cols-2 gap-3">
           <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
             <div class="text-xs text-slate-500 font-medium mb-2">${t('status')}</div>
-            <select onchange="updateDeliveryStatus('${ad.id}', this.value); this.closest('#app-modal').remove();" class="w-full glass-input px-3 py-2 rounded-lg text-sm font-medium">
+            ${roleLower === 'delivery'
+              ? `<div class="w-full px-3 py-2 rounded-lg text-sm font-medium text-slate-700 dark:text-slate-200">${trStatus(ad.deliveryStatus)}</div>`
+              : `<select onchange="updateDeliveryStatus('${ad.id}', this.value); this.closest('#app-modal').remove();" class="w-full glass-input px-3 py-2 rounded-lg text-sm font-medium">
               ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
-            </select>
+            </select>`}
           </div>
           <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
             <div class="text-xs text-slate-500 font-medium mb-2">${isAr ? 'السائق' : 'Driver'}</div>
-            <select onchange="assignDelivery('${ad.id}', this.value); this.closest('#app-modal').remove();" class="w-full glass-input px-3 py-2 rounded-lg text-sm font-medium">
+            ${roleLower === 'delivery'
+              ? `<div class="w-full px-3 py-2 rounded-lg text-sm font-medium text-slate-700 dark:text-slate-200">${Security.escapeHtml(deliveryPerson?.name || (isAr ? 'غير مُعيَّن' : 'Unassigned'))}</div>`
+              : `<select onchange="assignDelivery('${ad.id}', this.value); this.closest('#app-modal').remove();" class="w-full glass-input px-3 py-2 rounded-lg text-sm font-medium">
               <option value="">${isAr ? 'غير مُعيَّن' : 'Unassigned'}</option>
               ${deliveryUsers.map(u => `<option value="${u.id}" ${ad.deliveryPersonId === u.id ? 'selected' : ''}>${Security.escapeHtml(u.name || '')}</option>`).join('')}
-            </select>
+            </select>`}
           </div>
         </div>
         
@@ -16526,10 +16684,10 @@ function showDeliveryDetails(itemId) {
               <span>${isAr ? 'تم الاستلام' : 'Received'}</span>
             </div>
           `}
-          <button onclick="${editHandler}('${ad.id}'); this.closest('#app-modal').remove();" class="btn-shine bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2">
+          ${roleLower !== 'delivery' ? `<button onclick="${editHandler}('${ad.id}'); this.closest('#app-modal').remove();" class="btn-shine bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2">
             <i data-lucide="edit" class="w-5 h-5"></i>
             <span>${t('edit')}</span>
-          </button>
+          </button>` : ''}
           ${canOffice && receivedInOffice ? `
             <button onclick="undoOfficeHandover('${ad.id}'); this.closest('#app-modal').remove();" class="btn-shine bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2">
               <i data-lucide="rotate-ccw" class="w-5 h-5"></i>
@@ -20178,6 +20336,15 @@ async function updateDeliveryStatus(itemId, status) {
     showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'فقط سائق التوصيل المعيَّن يمكنه تحديد التوصيل كـ"تم التوصيل".' : 'Only the assigned delivery driver can mark a delivery as Delivered.', 'warning');
     return;
   }
+  if (s === 'Delivered') {
+    // Defense in depth (only a driver reaches here): route through the validated
+    // collection flow instead of a bare status write. For a temp D# receipt
+    // markAsCollected opens the proof modal (final receipt no. + photo +
+    // collected amount); a direct deliveryStatus write skipped that and left
+    // the delivery inconsistent / raised a raw server error.
+    await markAsCollected(itemId);
+    return;
+  }
   // In Progress => accept; anything else => assign-level change.
   const neededAction = s === 'In Progress' ? 'accept' : 'assign';
   if (!canDoDeliveryAction(neededAction, itemId)) {
@@ -20354,7 +20521,6 @@ function buildDeliveryReceiptWhatsAppMessage(receipt) {
   const customer = (state.customers || []).find(item => item && !item._deleted && String(item.id) === String(receipt.customerId || ''));
   const driver = (state.users || []).find(item => item && !item._deleted && String(item.id) === String(receipt.deliveryPersonId || ''));
   const creatorId = receipt.createdBy || receipt.creatorId || '';
-  const creator = (state.users || []).find(item => item && !item._deleted && String(item.id) === String(creatorId));
   const customerPhoneEntry = Array.isArray(customer?.phones) ? customer.phones.find(Boolean) : '';
   const customerPhone = (customerPhoneEntry && typeof customerPhoneEntry === 'object')
     ? (customerPhoneEntry.number || customerPhoneEntry.phone || customerPhoneEntry.value || '')
@@ -20366,7 +20532,7 @@ function buildDeliveryReceiptWhatsAppMessage(receipt) {
   const place = _whatsAppShareField(receipt.deliveryPlaceName || '—', 350);
   const driverName = _whatsAppShareField(driver?.name || '—', 160);
   const instructions = _whatsAppShareField(receipt.deliveryInstructions || '—', 500);
-  const creatorName = _whatsAppShareField(creator?.name || state.currentUser?.name || '—', 160);
+  const creatorName = _whatsAppShareField(getKnownUserNameById(creatorId) || String(receipt.createdByName || '').trim() || state.currentUser?.name || '—', 160);
   const debtUSD = Number(receipt.debtAmountUSD ?? receipt.amountUSD ?? 0) || 0;
   const fxRate = Number(receipt.exchangeRate || state.defaultExchangeRate || 0) || 0;
   const debtLocal = Number(receipt.debtAmountLocal ?? receipt.amountLocal ?? (debtUSD * fxRate)) || 0;
@@ -22046,6 +22212,12 @@ function _pickNewReceipt(kind) {
 function manageSplitPayments(receiptId) {
   const receipt = state.receipts.find(a => a.id === receiptId);
   if (!receipt) return;
+  // The split-payment editor rewrites receipt money (server enforces receipts.edit),
+  // so gate it the same way editReceipt does — canActOnRecord keeps editOwn semantics.
+  if (!canActOnRecord('receipts', 'edit', receipt.createdBy)) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
+    return;
+  }
   if (_blockTransferInEdit(receipt)) return;
 
   state.activeModal = 'split-payments';
@@ -22070,6 +22242,12 @@ function _isAdToppable(ad) {
 function manageTopUps(adId) {
   const ad = state.ads.find(a => a.id === adId);
   if (!ad) return;
+  // A top-up raises the ad's budget/end date (server enforces ads.edit), so it
+  // must be gated by edit permission — not by ad STATE alone. Mirrors editAd.
+  if (!canActOnRecord('ads', 'edit', ad.creatorId || ad.createdBy)) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الإعلانات' : 'You do not have permission to edit this ad', 'error');
+    return;
+  }
   if (!_isAdToppable(ad)) {
     const isAr = state.language === 'ar';
     showNotification(
@@ -22106,7 +22284,13 @@ function manageTopUps(adId) {
 function manageRefund(adId) {
   const ad = state.ads.find(a => a.id === adId);
   if (!ad) return;
-  
+  // Refund mutates the ad's money exactly like editAd (server enforces ads.edit),
+  // so gate it identically — mirrors editAd/stopAd/deleteAd's canActOnRecord guard.
+  if (!canActOnRecord('ads', 'edit', ad.creatorId)) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لاسترجاع الإعلانات' : 'You do not have permission to refund this ad', 'error');
+    return;
+  }
+
   state.activeModal = 'refund';
   state.modalData = ad;
   updateUrlParams({ modal: 'refund', id: adId }); // URL tracking
@@ -22522,11 +22706,11 @@ async function saveReceiptTransfer() {
         render();
         return true;
       } catch (error) {
-        const conflict = error?.status === 409;
+        const conflict = isVersionConflict409(error);
         showNotification(
           isArTr ? 'تعذر التحويل' : 'Transfer Not Saved',
-          conflict
-            ? (isArTr ? 'تم تغيير هذا الوصل من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This receipt changed on another device. Refresh the data, then try again.')
+          error?.status === 409
+            ? describe409(error, isArTr ? 'تم تغيير هذا الوصل من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This receipt changed on another device. Refresh the data, then try again.')
             : (error?.message || (isArTr ? 'فشل حفظ التحويل.' : 'The transfer could not be saved.')),
           conflict ? 'warning' : 'error'
         );
@@ -22626,6 +22810,13 @@ async function saveSplitPayments() {
   const receiptId = (document.getElementById('split-payments-receipt-id')?.value || '').trim() || state.modalData?.id;
   if (!receiptId || !state.receipts.some(r => r && !r._deleted && String(r.id) === String(receiptId))) {
     showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'تعذّر تحديد الوصل' : 'Could not identify the receipt', 'error');
+    return;
+  }
+  // Defense-in-depth: re-check receipts.edit before writing (the modal can be
+  // restored via updateUrlParams), mirroring editReceipt's canActOnRecord guard.
+  const _permReceipt = state.receipts.find(r => r && String(r.id) === String(receiptId));
+  if (!canActOnRecord('receipts', 'edit', _permReceipt?.createdBy)) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
     return;
   }
   const paymentItems = document.querySelectorAll('.split-payment-item');
@@ -22903,10 +23094,43 @@ function removeTopUp(index) {
   renderModal();
 }
 
+// ==========================================
+// HTTP 409 DISAMBIGUATION (atomic money endpoints)
+// ==========================================
+// The server reuses status 409 for two very different refusals:
+//   1. Optimistic-lock version conflicts — the detail always starts with
+//      "Conflict:" ("Conflict: ad has changed", "Conflict: source receipt
+//      has changed", ...). Only these mean "someone else changed it".
+//   2. Business-rule refusals ("A terminal or refunded ad cannot be
+//      edited/stopped", "Idempotency key was already used", ...).
+// The catches used to label EVERY 409 as "changed on another device", which
+// sent a single-user admin chasing a phantom concurrent editor and told them
+// to refresh — advice that can never fix a rule refusal. Keep the conflict
+// wording strictly for case 1 and surface the server's real reason
+// (localized where known) for everything else.
+function isVersionConflict409(error) {
+  return error?.status === 409 && /^conflict:/i.test(String(error?.message || '').trim());
+}
+
+function describe409(error, conflictText) {
+  if (isVersionConflict409(error)) return conflictText;
+  const detail = String(error?.message || '');
+  if (/terminal or refunded ad/i.test(detail)) {
+    return state.language === 'ar'
+      ? 'هذا الإعلان منتهٍ أو مُسترجَع، لذا لم يعد هذا التغيير ممكناً. استخدم الاسترجاع لتعديل أمواله.'
+      : 'This ad is already finished or refunded, so this change is no longer allowed. Use Refund to adjust its money.';
+  }
+  return detail || conflictText;
+}
+
 async function saveTopUps() {
   const adId = state.modalData.id;
   const ad = state.ads.find(a => a.id === adId);
   if (!ad) return;
+  // Defense-in-depth: a view-only role must never persist a budget top-up via a
+  // restored modal / direct call. Silent close mirrors the _isAdToppable defense
+  // just below; manageTopUps already surfaces the Access Denied notification.
+  if (!canActOnRecord('ads', 'edit', ad.creatorId || ad.createdBy)) { closeModal(); return; }
   // Defense-in-depth: never charge/extend a terminal or refunded ad (see
   // _isAdToppable). manageTopUps already blocks opening the modal for these.
   if (!_isAdToppable(ad)) { closeModal(); return; }
@@ -23009,11 +23233,11 @@ async function saveTopUps() {
       if (!topUpsSaved) return;
     }
   } catch (error) {
-    const conflict = error?.status === 409;
+    const conflict = isVersionConflict409(error);
     showNotification(
       isArTU ? 'تعذر حفظ التعبئة' : 'Top-ups Not Saved',
-      conflict
-        ? (isArTU ? 'تم تغيير الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+      error?.status === 409
+        ? describe409(error, isArTU ? 'تم تغيير الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
         : (error?.message || (isArTU ? 'فشل حفظ التعبئة.' : 'The top-ups could not be saved.')),
       conflict ? 'warning' : 'error'
     );
@@ -23053,6 +23277,12 @@ function toggleRefundAmount(refundType) {
 async function saveRefund() {
   const adId = state.modalData.id;
   const ad = state.ads.find(a => a.id === adId) || state.modalData;
+  // Defense-in-depth: block a view-only role from persisting a refund via a
+  // restored modal / direct call, mirroring editAd's canActOnRecord('ads','edit').
+  if (!canActOnRecord('ads', 'edit', ad?.creatorId)) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لاسترجاع الإعلانات' : 'You do not have permission to refund this ad', 'error');
+    return;
+  }
   const refundType = document.getElementById('refund-type').value;
   let refundAmount = parseFloat(document.getElementById('refund-amount').value) || 0;
   const refundStatus = document.getElementById('refund-status').value;
@@ -23181,11 +23411,11 @@ async function saveRefund() {
       if (!refundSaved) return;
     }
   } catch (error) {
-    const conflict = error?.status === 409;
+    const conflict = isVersionConflict409(error);
     showNotification(
       state.language === 'ar' ? 'تعذر حفظ الاسترجاع' : 'Refund Not Saved',
-      conflict
-        ? (state.language === 'ar' ? 'تم تغيير الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+      error?.status === 409
+        ? describe409(error, state.language === 'ar' ? 'تم تغيير الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
         : (error?.message || (state.language === 'ar' ? 'فشل حفظ الاسترجاع.' : 'The refund could not be saved.')),
       conflict ? 'warning' : 'error'
     );
@@ -28533,8 +28763,12 @@ function renderModal() {
       state.tempAdPhotos = (!isEdit || can('ads', 'viewPhotos')) ? getAdPhotoSources(adData) : [];
       state.tempAdPhotosDirty = false;
       const durationDaysDefault = (adData.days !== undefined ? adData.days : (adData.startDate && adData.endDate ? Math.max(0, Math.round((new Date(adData.endDate) - new Date(adData.startDate)) / (1000 * 60 * 60 * 24))) : ''));
-      const isAdminUser = isCurrentUserAdmin();
       const adCreator = isEdit && adData.creatorId ? state.users.find(u => u.id === adData.creatorId) : state.currentUser;
+      // Badge describes the ad's CREATOR, not the viewer. Driving it from the
+      // viewer's role mislabeled an Admin-created ad as "USER" for a non-admin
+      // editor (and vice-versa). isAdminRole() returns false for an unresolved
+      // creator, so it gracefully falls back to the "USER" badge.
+      const creatorIsAdmin = isAdminRole(adCreator?.role);
       const isArAd = state.language === 'ar';
       const adPaymentState = getAdPaymentState(adData);
       const hasLinkedShopReceipt = adPaymentState === 'not_paid'
@@ -28595,8 +28829,8 @@ function renderModal() {
                   </div>
                   <span class="text-sm text-slate-600 dark:text-slate-300">${Security.escapeHtml(adCreator?.name || (isArAd ? 'غير معروف' : 'Unknown'))}</span>
                 </div>
-                <span class="px-2 py-0.5 rounded-full text-[9px] font-bold ${isAdminUser ? 'bg-amber-100 text-amber-600' : 'bg-slate-200 text-slate-500'}">
-                  ${isAdminUser ? (isArAd ? 'أدمن' : 'ADMIN') : (isArAd ? 'مستخدم' : 'USER')}
+                <span class="px-2 py-0.5 rounded-full text-[9px] font-bold ${creatorIsAdmin ? 'bg-amber-100 text-amber-600' : 'bg-slate-200 text-slate-500'}">
+                  ${creatorIsAdmin ? (isArAd ? 'أدمن' : 'ADMIN') : (isArAd ? 'مستخدم' : 'USER')}
                 </span>
               </div>
               <input type="hidden" id="ad-creator-id" value="${adCreator?.id || state.currentUser?.id || ''}" />
@@ -30701,6 +30935,39 @@ async function handleModalSubmit() {
     case 'ad':
       try {
       const isArSubAd = state.language === 'ar';
+      // ROOT-CAUSE FIX (false "Ad Changed" toast, part 1): live-sync REPLACES
+      // objects inside state.ads, so state.modalData is a snapshot detached at
+      // modal-OPEN time. A legitimate server-side bump while the modal is open
+      // (a receipt settlement cascading into its linked ads, a customer merge,
+      // another tab) left the snapshot's _lastModified stale and made this
+      // save 409 against a version nobody was editing. Re-point modalData at
+      // the CURRENT record so the optimistic-lock baseline — and every stored
+      // value preserved through this save (spentUSD, editHistory, top-up
+      // baselines, prior amountAdjustments…) — is read at SAVE time. Real
+      // concurrent edits are still caught by the server's row lock.
+      if (isEdit && state.modalData?.id) {
+        const liveAd = state.ads.find(a => a && !a._deleted && String(a.id) === String(state.modalData.id));
+        if (liveAd) state.modalData = liveAd;
+      }
+      // ROOT-CAUSE FIX (part 2): mirror of the server rule in
+      // _ad_mutation_atomic — an ordinary edit of a terminal/refunded ad is
+      // ALWAYS refused with 409, which the old catch mislabelled as "changed
+      // on another device". Refresh could never fix that. Say the real reason
+      // up front instead of sending a doomed request.
+      if (isEdit && isServerModeEnabled()) {
+        const adStatus = String(state.modalData?.status || '');
+        const adRefundType = String(state.modalData?.refundType || '');
+        if (['Stopped', 'Canceled', 'Completed', 'Lost'].includes(adStatus) || (adRefundType && adRefundType !== 'None')) {
+          showNotification(
+            isArSubAd ? 'إعلان منتهٍ' : 'Ad Finished',
+            isArSubAd
+              ? 'هذا الإعلان منتهٍ (موقوف/ملغى/مكتمل) أو مُسترجَع، لذا لا يمكن تعديل بياناته أو تمويله بعد الآن. استخدم الاسترجاع لإعادة المال.'
+              : 'This ad is finished (stopped/canceled/completed) or refunded, so its details and funding can no longer be edited. Use Refund to return money.',
+            'warning'
+          );
+          return;
+        }
+      }
       if (_adPhotoUploadsInFlight > 0) {
         showNotification(
           isArSubAd ? 'جاري تجهيز الصور' : 'Preparing photos',
@@ -31365,11 +31632,14 @@ async function handleModalSubmit() {
       closeModal();
       } catch (error) {
         console.error('Error saving ad:', error);
-        const conflict = error?.status === 409;
+        // "Changed on another device" is reserved for real version conflicts
+        // ("Conflict: …"). Other 409s are business-rule refusals whose actual
+        // reason must reach the user (see describe409).
+        const conflict = isVersionConflict409(error);
         showNotification(
           conflict ? (state.language === 'ar' ? 'تعارض في التعديل' : 'Ad Changed') : (state.language === 'ar' ? 'خطأ' : 'Error'),
-          conflict
-            ? (state.language === 'ar' ? 'تم تغيير هذا الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+          error?.status === 409
+            ? describe409(error, state.language === 'ar' ? 'تم تغيير هذا الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
             : (state.language === 'ar' ? `فشل حفظ الإعلان: ${error.message}` : `Failed to save ad: ${error.message}`),
           conflict ? 'warning' : 'error'
         );
@@ -36705,11 +36975,11 @@ async function confirmStopAd(id, source = 'modal') {
         if (window.lucide) lucide.createIcons();
         return true;
       } catch (error) {
-        const conflict = error?.status === 409;
+        const conflict = isVersionConflict409(error);
         showNotification(
           isAr ? 'تعذر الحفظ' : 'Ad Not Saved',
-          conflict
-            ? (isAr ? 'تم تغيير هذا الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+          error?.status === 409
+            ? describe409(error, isAr ? 'تم تغيير هذا الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
             : (error?.message || (isAr ? 'فشل حفظ إيقاف الإعلان.' : 'The ad stop could not be saved.')),
           conflict ? 'warning' : 'error'
         );

@@ -1752,6 +1752,15 @@ async function updateDeliveryStatus(itemId, status) {
     showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'فقط سائق التوصيل المعيَّن يمكنه تحديد التوصيل كـ"تم التوصيل".' : 'Only the assigned delivery driver can mark a delivery as Delivered.', 'warning');
     return;
   }
+  if (s === 'Delivered') {
+    // Defense in depth (only a driver reaches here): route through the validated
+    // collection flow instead of a bare status write. For a temp D# receipt
+    // markAsCollected opens the proof modal (final receipt no. + photo +
+    // collected amount); a direct deliveryStatus write skipped that and left
+    // the delivery inconsistent / raised a raw server error.
+    await markAsCollected(itemId);
+    return;
+  }
   // In Progress => accept; anything else => assign-level change.
   const neededAction = s === 'In Progress' ? 'accept' : 'assign';
   if (!canDoDeliveryAction(neededAction, itemId)) {
@@ -1928,7 +1937,6 @@ function buildDeliveryReceiptWhatsAppMessage(receipt) {
   const customer = (state.customers || []).find(item => item && !item._deleted && String(item.id) === String(receipt.customerId || ''));
   const driver = (state.users || []).find(item => item && !item._deleted && String(item.id) === String(receipt.deliveryPersonId || ''));
   const creatorId = receipt.createdBy || receipt.creatorId || '';
-  const creator = (state.users || []).find(item => item && !item._deleted && String(item.id) === String(creatorId));
   const customerPhoneEntry = Array.isArray(customer?.phones) ? customer.phones.find(Boolean) : '';
   const customerPhone = (customerPhoneEntry && typeof customerPhoneEntry === 'object')
     ? (customerPhoneEntry.number || customerPhoneEntry.phone || customerPhoneEntry.value || '')
@@ -1940,7 +1948,7 @@ function buildDeliveryReceiptWhatsAppMessage(receipt) {
   const place = _whatsAppShareField(receipt.deliveryPlaceName || '—', 350);
   const driverName = _whatsAppShareField(driver?.name || '—', 160);
   const instructions = _whatsAppShareField(receipt.deliveryInstructions || '—', 500);
-  const creatorName = _whatsAppShareField(creator?.name || state.currentUser?.name || '—', 160);
+  const creatorName = _whatsAppShareField(getKnownUserNameById(creatorId) || String(receipt.createdByName || '').trim() || state.currentUser?.name || '—', 160);
   const debtUSD = Number(receipt.debtAmountUSD ?? receipt.amountUSD ?? 0) || 0;
   const fxRate = Number(receipt.exchangeRate || state.defaultExchangeRate || 0) || 0;
   const debtLocal = Number(receipt.debtAmountLocal ?? receipt.amountLocal ?? (debtUSD * fxRate)) || 0;
@@ -3620,6 +3628,12 @@ function _pickNewReceipt(kind) {
 function manageSplitPayments(receiptId) {
   const receipt = state.receipts.find(a => a.id === receiptId);
   if (!receipt) return;
+  // The split-payment editor rewrites receipt money (server enforces receipts.edit),
+  // so gate it the same way editReceipt does — canActOnRecord keeps editOwn semantics.
+  if (!canActOnRecord('receipts', 'edit', receipt.createdBy)) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
+    return;
+  }
   if (_blockTransferInEdit(receipt)) return;
 
   state.activeModal = 'split-payments';
@@ -3644,6 +3658,12 @@ function _isAdToppable(ad) {
 function manageTopUps(adId) {
   const ad = state.ads.find(a => a.id === adId);
   if (!ad) return;
+  // A top-up raises the ad's budget/end date (server enforces ads.edit), so it
+  // must be gated by edit permission — not by ad STATE alone. Mirrors editAd.
+  if (!canActOnRecord('ads', 'edit', ad.creatorId || ad.createdBy)) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الإعلانات' : 'You do not have permission to edit this ad', 'error');
+    return;
+  }
   if (!_isAdToppable(ad)) {
     const isAr = state.language === 'ar';
     showNotification(
@@ -3680,7 +3700,13 @@ function manageTopUps(adId) {
 function manageRefund(adId) {
   const ad = state.ads.find(a => a.id === adId);
   if (!ad) return;
-  
+  // Refund mutates the ad's money exactly like editAd (server enforces ads.edit),
+  // so gate it identically — mirrors editAd/stopAd/deleteAd's canActOnRecord guard.
+  if (!canActOnRecord('ads', 'edit', ad.creatorId)) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لاسترجاع الإعلانات' : 'You do not have permission to refund this ad', 'error');
+    return;
+  }
+
   state.activeModal = 'refund';
   state.modalData = ad;
   updateUrlParams({ modal: 'refund', id: adId }); // URL tracking
@@ -4096,11 +4122,11 @@ async function saveReceiptTransfer() {
         render();
         return true;
       } catch (error) {
-        const conflict = error?.status === 409;
+        const conflict = isVersionConflict409(error);
         showNotification(
           isArTr ? 'تعذر التحويل' : 'Transfer Not Saved',
-          conflict
-            ? (isArTr ? 'تم تغيير هذا الوصل من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This receipt changed on another device. Refresh the data, then try again.')
+          error?.status === 409
+            ? describe409(error, isArTr ? 'تم تغيير هذا الوصل من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This receipt changed on another device. Refresh the data, then try again.')
             : (error?.message || (isArTr ? 'فشل حفظ التحويل.' : 'The transfer could not be saved.')),
           conflict ? 'warning' : 'error'
         );
@@ -4200,6 +4226,13 @@ async function saveSplitPayments() {
   const receiptId = (document.getElementById('split-payments-receipt-id')?.value || '').trim() || state.modalData?.id;
   if (!receiptId || !state.receipts.some(r => r && !r._deleted && String(r.id) === String(receiptId))) {
     showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'تعذّر تحديد الوصل' : 'Could not identify the receipt', 'error');
+    return;
+  }
+  // Defense-in-depth: re-check receipts.edit before writing (the modal can be
+  // restored via updateUrlParams), mirroring editReceipt's canActOnRecord guard.
+  const _permReceipt = state.receipts.find(r => r && String(r.id) === String(receiptId));
+  if (!canActOnRecord('receipts', 'edit', _permReceipt?.createdBy)) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
     return;
   }
   const paymentItems = document.querySelectorAll('.split-payment-item');
@@ -4477,10 +4510,43 @@ function removeTopUp(index) {
   renderModal();
 }
 
+// ==========================================
+// HTTP 409 DISAMBIGUATION (atomic money endpoints)
+// ==========================================
+// The server reuses status 409 for two very different refusals:
+//   1. Optimistic-lock version conflicts — the detail always starts with
+//      "Conflict:" ("Conflict: ad has changed", "Conflict: source receipt
+//      has changed", ...). Only these mean "someone else changed it".
+//   2. Business-rule refusals ("A terminal or refunded ad cannot be
+//      edited/stopped", "Idempotency key was already used", ...).
+// The catches used to label EVERY 409 as "changed on another device", which
+// sent a single-user admin chasing a phantom concurrent editor and told them
+// to refresh — advice that can never fix a rule refusal. Keep the conflict
+// wording strictly for case 1 and surface the server's real reason
+// (localized where known) for everything else.
+function isVersionConflict409(error) {
+  return error?.status === 409 && /^conflict:/i.test(String(error?.message || '').trim());
+}
+
+function describe409(error, conflictText) {
+  if (isVersionConflict409(error)) return conflictText;
+  const detail = String(error?.message || '');
+  if (/terminal or refunded ad/i.test(detail)) {
+    return state.language === 'ar'
+      ? 'هذا الإعلان منتهٍ أو مُسترجَع، لذا لم يعد هذا التغيير ممكناً. استخدم الاسترجاع لتعديل أمواله.'
+      : 'This ad is already finished or refunded, so this change is no longer allowed. Use Refund to adjust its money.';
+  }
+  return detail || conflictText;
+}
+
 async function saveTopUps() {
   const adId = state.modalData.id;
   const ad = state.ads.find(a => a.id === adId);
   if (!ad) return;
+  // Defense-in-depth: a view-only role must never persist a budget top-up via a
+  // restored modal / direct call. Silent close mirrors the _isAdToppable defense
+  // just below; manageTopUps already surfaces the Access Denied notification.
+  if (!canActOnRecord('ads', 'edit', ad.creatorId || ad.createdBy)) { closeModal(); return; }
   // Defense-in-depth: never charge/extend a terminal or refunded ad (see
   // _isAdToppable). manageTopUps already blocks opening the modal for these.
   if (!_isAdToppable(ad)) { closeModal(); return; }
@@ -4583,11 +4649,11 @@ async function saveTopUps() {
       if (!topUpsSaved) return;
     }
   } catch (error) {
-    const conflict = error?.status === 409;
+    const conflict = isVersionConflict409(error);
     showNotification(
       isArTU ? 'تعذر حفظ التعبئة' : 'Top-ups Not Saved',
-      conflict
-        ? (isArTU ? 'تم تغيير الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+      error?.status === 409
+        ? describe409(error, isArTU ? 'تم تغيير الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
         : (error?.message || (isArTU ? 'فشل حفظ التعبئة.' : 'The top-ups could not be saved.')),
       conflict ? 'warning' : 'error'
     );
@@ -4627,6 +4693,12 @@ function toggleRefundAmount(refundType) {
 async function saveRefund() {
   const adId = state.modalData.id;
   const ad = state.ads.find(a => a.id === adId) || state.modalData;
+  // Defense-in-depth: block a view-only role from persisting a refund via a
+  // restored modal / direct call, mirroring editAd's canActOnRecord('ads','edit').
+  if (!canActOnRecord('ads', 'edit', ad?.creatorId)) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لاسترجاع الإعلانات' : 'You do not have permission to refund this ad', 'error');
+    return;
+  }
   const refundType = document.getElementById('refund-type').value;
   let refundAmount = parseFloat(document.getElementById('refund-amount').value) || 0;
   const refundStatus = document.getElementById('refund-status').value;
@@ -4755,11 +4827,11 @@ async function saveRefund() {
       if (!refundSaved) return;
     }
   } catch (error) {
-    const conflict = error?.status === 409;
+    const conflict = isVersionConflict409(error);
     showNotification(
       state.language === 'ar' ? 'تعذر حفظ الاسترجاع' : 'Refund Not Saved',
-      conflict
-        ? (state.language === 'ar' ? 'تم تغيير الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+      error?.status === 409
+        ? describe409(error, state.language === 'ar' ? 'تم تغيير الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
         : (error?.message || (state.language === 'ar' ? 'فشل حفظ الاسترجاع.' : 'The refund could not be saved.')),
       conflict ? 'warning' : 'error'
     );

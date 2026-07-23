@@ -32,7 +32,13 @@ const _serverLiveSync = {
   // not be hammered every 3s from a phone (battery + cell radio); the
   // visibilitychange/online handlers reset the backoff for an immediate retry.
   failStreak: 0,
-  nextAllowedAt: 0
+  nextAllowedAt: 0,
+  // Collections already purged after a per-collection 403 (permission boundary).
+  // A revoked collection keeps returning 403 every 3s until the current user's
+  // permissions refresh (every usersSyncIntervalMs). Tracking already-purged
+  // collections here stops an identical 403 from re-clearing state + writing
+  // IndexedDB + forcing a full re-render on every tick (battery/jank storm).
+  purgedForbidden: new Set()
 };
 
 function advanceServerSessionEpoch() {
@@ -44,6 +50,8 @@ function advanceServerSessionEpoch() {
   _serverLiveSync.serviceEntitlements = null;
   if (typeof clearTransientEntityMediaCache === 'function') clearTransientEntityMediaCache('adCampaignRequests');
   _serverLiveSync.lastDeliverySig = null;
+  if (_serverLiveSync.purgedForbidden instanceof Set) _serverLiveSync.purgedForbidden.clear();
+  else _serverLiveSync.purgedForbidden = new Set();
 }
 
 const SERVER_SERVICE_ENTITLEMENT_COLLECTIONS = Object.freeze({
@@ -392,6 +400,33 @@ async function serverLiveSyncOnce() {
 
   const roleLower = String(state.currentUser.role || '').toLowerCase();
 
+  // The delivery branch below early-returns before the users/permissions refresh
+  // block (~:600), which is the ONLY in-session path that re-reads /api/auth/me
+  // and rewrites state.currentUser.role/permissions. Without this, an admin
+  // promoting an active Delivery user (Delivery->Employee) or altering their
+  // permissions never reached that session until re-login, while every other
+  // role got the change within usersSyncIntervalMs. Run the SAME throttled
+  // refresh here so access changes propagate to delivery sessions too.
+  if (roleLower === 'delivery') {
+    const nowMs = Date.now();
+    if ((nowMs - (_serverLiveSync.lastUsersSyncAt || 0)) > (SERVER_API.usersSyncIntervalMs || 60000)) {
+      _serverLiveSync.lastUsersSyncAt = nowMs;
+      let accessChanged = false;
+      try { accessChanged = await refreshCurrentUserPermissions(); }
+      catch (e) { if (ALBAYAN_DEBUG_MODE) console.warn('[serverLiveSyncOnce] delivery access refresh failed:', e?.message || e); }
+      if (_syncAborted()) return { ok: false, skipped: true };
+      if (accessChanged) {
+        // roleLower is recomputed next tick and per-collection cursors default to
+        // 0, so the employee/admin branch performs a full catch-up. Reset the
+        // delivery signature and force a render now so the sidebar/landing view
+        // unlock immediately.
+        _serverLiveSync.lastDeliverySig = null;
+        if (typeof forceFullRender === 'function') forceFullRender();
+        if (String(state.currentUser.role || '').toLowerCase() !== 'delivery') return { ok: true };
+      }
+    }
+  }
+
   // Delivery users: do a small "replace" sync of only assigned deliveries + linked customers.
   // This guarantees removals (unassigned items) disappear without needing manual refresh.
   if (roleLower === 'delivery') {
@@ -518,18 +553,30 @@ async function serverLiveSyncOnce() {
   // broader collection from memory, request cache and this user's IndexedDB
   // namespace before anything can render it again.
   const forbiddenCollections = deltaResults.filter(result => result.forbidden).map(result => result.collection);
-  const customerPageForbidden = forbiddenCollections.some(name =>
+  if (!(_serverLiveSync.purgedForbidden instanceof Set)) _serverLiveSync.purgedForbidden = new Set();
+  // Only act on collections NOT already purged. A revoked collection keeps
+  // returning 403 every 3s until the current user's permissions refresh; without
+  // this guard each identical 403 would re-clear state, re-write IndexedDB, and
+  // force a full re-render every tick for ~30s.
+  const newlyForbidden = forbiddenCollections.filter(name => !_serverLiveSync.purgedForbidden.has(name));
+  // ROOT CAUSE: the first time a previously-authorized collection returns 403,
+  // collapse the usersSyncInterval wait so refreshCurrentUserPermissions runs
+  // this very tick (below) — it drops the collection from the authorized list,
+  // so it is never requested again and the churn ends immediately.
+  if (newlyForbidden.length > 0) _serverLiveSync.lastUsersSyncAt = 0;
+  const customerPageForbidden = newlyForbidden.some(name =>
     name === 'ads' || name === 'receipts' || name === 'customers' || name === 'pages' || name === 'exchangeRateHistory'
   );
   // A 403 means access is already revoked. Close the financial snapshot before
   // awaiting cache/IndexedDB cleanup so slow storage cannot prolong exposure.
   if (customerPageForbidden) _closeCustomerPagesDialogForStateChange();
-  if (forbiddenCollections.length > 0) {
-    await clearServerCollectionsForVisibility(forbiddenCollections);
+  if (newlyForbidden.length > 0) {
+    await clearServerCollectionsForVisibility(newlyForbidden);
     if (_syncAborted()) return { ok: false, skipped: true };
+    for (const name of newlyForbidden) _serverLiveSync.purgedForbidden.add(name);
   }
 
-  let changed = forbiddenCollections.length > 0;
+  let changed = newlyForbidden.length > 0;
   let customerPagesDataChanged = customerPageForbidden;
   const adsChanged = applyServerDelta('ads', adsDelta);
   changed = adsChanged || changed;
@@ -588,6 +635,10 @@ async function serverLiveSyncOnce() {
   // retain their own prior cursor and are retried without blocking others.
   for (const result of deltaResults) {
     if (!result.ok || result.forbidden) continue;
+    // A collection that now returns a clean (non-forbidden) result is authorized
+    // again, so drop it from the purged set: a later re-revoke must purge and
+    // re-render exactly once more, not be silently swallowed by the guard.
+    if (_serverLiveSync.purgedForbidden instanceof Set) _serverLiveSync.purgedForbidden.delete(result.collection);
     const maxDelta = _maxLastModifiedFromArray(result.records);
     _serverLiveSync.collectionCursors[result.collection] = Math.max(result.since, maxDelta);
     if (maxDelta > (_serverLiveSync.serverWatermark || 0)) _serverLiveSync.serverWatermark = maxDelta;
@@ -634,6 +685,9 @@ async function serverLiveSyncOnce() {
         ? getServerVisibilityScopeChanges(accessBefore, state.currentUser)
         : [];
       if (permsChanged) {
+        // Permissions moved, so any prior per-collection 403 purge is stale.
+        // Reset the guard so a re-grant-then-re-revoke cycle still purges once.
+        if (_serverLiveSync.purgedForbidden instanceof Set) _serverLiveSync.purgedForbidden.clear();
         // Access revocation can hide pages, ads, balances, or the customer itself.
         // Close immediately, before cache writes/refetches, so its old authorized
         // snapshot cannot outlive the newly-scoped state even on a slow network.

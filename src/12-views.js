@@ -2411,6 +2411,12 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
 
     const phones = getCustomerPhoneEntries(c).map(entry => entry.value);
     const profileLinks = Array.isArray(c.profileLinks) ? c.profileLinks : [];
+          // Only render Edit/Delete when the handler would actually allow it
+          // (editCustomer → canActOnRecord edit; deleteCustomer →
+          // currentUserHasPermission delete). Matches how the Add button is
+          // gated, so view-only roles don't see dead buttons.
+          const canEditThisCustomer = canActOnRecord('customers', 'edit', c.createdBy);
+          const canDeleteThisCustomer = can('customers', 'delete');
           // Display number: total - index (so first item = highest number, matching newest-first sort)
           const displayNum = totalCustomers - idx;
           const pagesLabel = isAr
@@ -2446,14 +2452,14 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                     ${duplicateCustomerIds.has(String(c.id)) ? `<button type="button" onclick="showCustomerDuplicateMerge('${Security.escapeHtml(String(c.id || ''))}')" class="min-h-11 px-3 py-2 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 text-xs font-bold inline-flex items-center gap-1.5 hover:bg-amber-200 dark:hover:bg-amber-900/50" aria-haspopup="dialog" title="${isAr ? 'دمج سجل العميل المكرر بأمان' : 'Safely merge this duplicate customer'}"><i data-lucide="copy" class="w-4 h-4"></i><span>${isAr ? 'مكرر' : 'Duplicate'}</span></button>` : ''}
                   </div>
                 </div>
-                <div class="flex space-x-1">
-                  <button onclick="editCustomer('${c.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${t('edit')}">
+                ${(canEditThisCustomer || canDeleteThisCustomer) ? `<div class="flex space-x-1">
+                  ${canEditThisCustomer ? `<button onclick="editCustomer('${c.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${t('edit')}">
                     <i data-lucide="edit" class="w-4 h-4"></i>
-                  </button>
-                  <button onclick="deleteCustomer('${c.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="${t('delete')}">
+                  </button>` : ''}
+                  ${canDeleteThisCustomer ? `<button onclick="deleteCustomer('${c.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="${t('delete')}">
                     <i data-lucide="trash-2" class="w-4 h-4"></i>
-                  </button>
-                </div>
+                  </button>` : ''}
+                </div>` : ''}
               </div>
 
               <div class="space-y-2 text-sm border-t border-slate-200 dark:border-slate-700 pt-3">
@@ -2745,7 +2751,9 @@ function renderReceiptsView() {
     const receiptCustomerId = getReceiptCustomerReferenceId(receipt);
     if (receiptCustomerFilter && receiptCustomerId !== receiptCustomerFilter) return false;
     const customer = customersById.get(receiptCustomerId);
-    const customerName = customer?.name?.toLowerCase() || '';
+    // Fall back to any denormalized name stamped on the receipt so name search
+    // still works for a role that can see receipts but not load customers.
+    const customerName = (customer?.name || receipt.customerName || '').toLowerCase();
     const finalNo = (receipt.finalReceiptNo || receipt.serialNumber || '').toLowerCase();
     const tempNo = (receipt.tempReceiptNo || '').toLowerCase();
     const phoneNumber = canSearchReceiptContacts ? (receipt.phoneNumber || '').toLowerCase() : '';
@@ -2974,6 +2982,11 @@ function renderReceiptsView() {
           const customer = customersById.get(getReceiptCustomerReferenceId(receipt));
           const displayFinalNo = receipt.finalReceiptNo || receipt.serialNumber || '';
           const displayTempNo = receipt.tempReceiptNo || '';
+          // Gate Edit/Delete to match their handlers (editReceipt/deleteReceipt
+          // both use canActOnRecord on receipt.createdBy) so view-only roles
+          // don't see dead buttons.
+          const canEditThisReceipt = canActOnRecord('receipts', 'edit', receipt.createdBy);
+          const canDeleteThisReceipt = canActOnRecord('receipts', 'delete', receipt.createdBy);
           // Display number: total - index (so first item = highest number, matching newest-first sort)
           const receiptDisplayNum = filteredReceipts.length - idx;
           // Normalize payments
@@ -2987,7 +3000,7 @@ function renderReceiptsView() {
           const usage = getReceiptUsageStats(receipt);
           const hasTransfers = (receipt.transfers && receipt.transfers.length > 0);
           const lastTransfer = hasTransfers ? receipt.transfers[receipt.transfers.length - 1] : null;
-          const lastTransferName = lastTransfer ? (customersById.get(lastTransfer.toCustomerId)?.name || (isArV ? 'غير معروف' : 'Unknown')) : '';
+          const lastTransferName = lastTransfer ? (customersById.get(lastTransfer.toCustomerId)?.name || lastTransfer.toCustomerName || (isArV ? 'غير معروف' : 'Unknown')) : '';
           const lastTransferNameSafe = Security.escapeHtml(String(lastTransferName || ''));
           // Defensive: ensure exchange rate is always positive and reasonable
           const rawFxRate = (receipt.exchangeRate || state.defaultExchangeRate || 1);
@@ -2995,11 +3008,10 @@ function renderReceiptsView() {
           const remainingLYD = (usage.remainingUSD || 0) * fxRate;
           const spentLYD = (usage.usedUSD || 0) * fxRate;
 
-          const creatorId = receipt.createdBy || receipt.creatorId || '';
-          const creatorNameRaw = creatorId
-            ? (state.users.find(u => String(u.id) === String(creatorId))?.name || (creatorId === 'system' ? (isArV ? 'النظام' : 'System') : (isArV ? 'غير معروف' : 'Unknown')))
-            : (isArV ? 'غير معروف' : 'Unknown');
-          const creatorName = Security.escapeHtml(String(creatorNameRaw || (isArV ? 'غير معروف' : 'Unknown')));
+          // Live user name → deleted-user tombstone → the record's own
+          // createdByName stamp → Unknown, so the creator's name survives
+          // account deletion (see resolveCreatorDisplayName).
+          const creatorName = Security.escapeHtml(String(resolveCreatorDisplayName(receipt, isArV)));
           
           // Colour the card by kind so "existing balance" receipts stand out
           // from normal "new" ones at a glance (matches the New-Receipt chooser
@@ -3012,7 +3024,7 @@ function renderReceiptsView() {
                 <div>
                   <div class="flex items-center gap-2">
                     <span class="px-2 py-0.5 rounded-md bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400 text-xs font-bold">#${receiptDisplayNum}</span>
-                  <h3 class="text-lg font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || (isArV ? 'غير معروف' : 'Unknown'))}</h3>
+                  <h3 class="text-lg font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || receipt.customerName || (isArV ? 'غير معروف' : 'Unknown'))}</h3>
                   </div>
                   ${(displayTempNo || displayFinalNo) ? `
                     <p class="text-sm text-indigo-600 font-medium">
@@ -3213,9 +3225,9 @@ function renderReceiptsView() {
                       <i data-lucide="swap" class="w-4 h-4"></i>
                     </button>` : ''}
                     <button onclick="manageSplitPayments('${receipt.id}')" class="text-purple-600 hover:text-purple-700" title="${state.language === 'ar' ? 'تعديل الدفعات المقسّمة' : 'Manage split payments'}"><i data-lucide="credit-card" class="w-4 h-4"></i></button>
-                    <button onclick="editReceipt('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="${t('edit')}"><i data-lucide="edit" class="w-4 h-4"></i></button>
+                    ${canEditThisReceipt ? `<button onclick="editReceipt('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="${t('edit')}"><i data-lucide="edit" class="w-4 h-4"></i></button>` : ''}
                     <button onclick="printReceiptCard(this)" class="text-slate-600 hover:text-slate-700" title="${t('print')}"><i data-lucide="printer" class="w-4 h-4"></i></button>
-                    <button onclick="deleteReceipt('${receipt.id}')" class="text-rose-600 hover:text-rose-700" title="${t('delete')}"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                    ${canDeleteThisReceipt ? `<button onclick="deleteReceipt('${receipt.id}')" class="text-rose-600 hover:text-rose-700" title="${t('delete')}"><i data-lucide="trash-2" class="w-4 h-4"></i></button>` : ''}
                   </div>
                 </div>
               </div>
@@ -3335,14 +3347,14 @@ function renderPagesView() {
                   </h3>
                   <p class="text-sm text-slate-500 mt-1">${Security.escapeHtml(p.category || '')}</p>
                 </div>
-                <div class="flex space-x-1">
-                  <button onclick="editPage('${p.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${t('edit')}">
+                ${(can('pages', 'edit') || can('pages', 'delete')) ? `<div class="flex space-x-1">
+                  ${can('pages', 'edit') ? `<button onclick="editPage('${p.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${t('edit')}">
                     <i data-lucide="edit" class="w-4 h-4"></i>
-                  </button>
-                  <button onclick="deletePage('${p.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="${t('delete')}">
+                  </button>` : ''}
+                  ${can('pages', 'delete') ? `<button onclick="deletePage('${p.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="${t('delete')}">
                     <i data-lucide="trash-2" class="w-4 h-4"></i>
-                  </button>
-                </div>
+                  </button>` : ''}
+                </div>` : ''}
               </div>
 
               <div class="space-y-2 border-t border-slate-200 dark:border-slate-700 pt-3">
@@ -3571,6 +3583,10 @@ function renderAdsView() {
             <tbody>
               ${visibleAds.map((ad, idx) => {
                 const customer = customersById.get(ad.customerId);
+                // Gate Edit/Delete to match editAd/deleteAd (canActOnRecord on
+                // ad.creatorId) so view-only roles don't see dead buttons.
+                const canEditThisAd = canActOnRecord('ads', 'edit', ad.creatorId);
+                const canDeleteThisAd = canActOnRecord('ads', 'delete', ad.creatorId);
                 const adPhotoCount = getAdPhotoCount(ad);
                 const paymentState = getAdPaymentState(ad);
                 const isAdPaid = paymentState === 'paid';
@@ -3578,12 +3594,11 @@ function renderAdsView() {
                   ? 'text-emerald-600 dark:text-emerald-400'
                   : 'text-rose-600 dark:text-rose-400';
                 // createdBy is immutable server ownership metadata; creatorId
-                // is retained as the legacy/local fallback.
-                const creatorId = String(ad.createdBy || ad.creatorId || '').trim();
-                const creatorUser = creatorId ? usersById.get(creatorId) : null;
-                const creatorNameRaw = creatorUser?.name
-                  || (creatorId === 'system' ? (isAr ? 'النظام' : 'System') : (isAr ? 'غير معروف' : 'Unknown'));
-                const creatorName = Security.escapeHtml(String(creatorNameRaw));
+                // is retained as the legacy/local fallback. Name resolution
+                // falls back to the deleted-user tombstone directory and the
+                // record's own createdByName stamp so the creator's name
+                // survives account deletion (see resolveCreatorDisplayName).
+                const creatorName = Security.escapeHtml(String(resolveCreatorDisplayName(ad, isAr)));
                 // Deleting a page keeps its ads (history) but leaves their pageId
                 // pointing at the deleted page, whose name a NEW page may reuse.
                 // Keep resolving the name (the ad really did run on it) but mark
@@ -3636,7 +3651,7 @@ function renderAdsView() {
                 return `
                   <tr class="border-b border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50">
                     <td class="py-3 px-2" data-label="#">
-                      <div class="font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</div>
+                      <div class="font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || ad.customerName || (isAr ? 'غير معروف' : 'Unknown'))}</div>
                       ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
                       <div data-role="ad-creator" class="inline-flex items-center gap-1 mt-1 text-[11px] leading-tight font-normal text-slate-500 dark:text-slate-400" title="${isAr ? 'تم الإنشاء بواسطة' : 'Created by'}">
                         <i data-lucide="user" class="w-3 h-3 shrink-0"></i>
@@ -3644,7 +3659,7 @@ function renderAdsView() {
                       </div>
                     </td>
                     <td class="py-3 px-2 hidden md:table-cell">
-                      <div class="font-medium">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</div>
+                      <div class="font-medium">${Security.escapeHtml(customer?.name || ad.customerName || (isAr ? 'غير معروف' : 'Unknown'))}</div>
                       ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
                     </td>
                     <td class="py-3 px-2" data-label="Page">
@@ -3742,8 +3757,8 @@ function renderAdsView() {
                           <i data-lucide="${ad.status === 'Stopped' ? 'edit' : 'square'}" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.status === 'Stopped' ? '<span class="text-xs">!</span>' : ''}
                         </button>
-                        <button onclick="editAd('${ad.id}')" class="text-indigo-600 hover:text-indigo-700 p-2 md:p-0" title="${t('edit')}"><i data-lucide="edit" class="w-5 h-5 md:w-4 md:h-4"></i></button>
-                        <button onclick="deleteAd('${ad.id}')" class="text-rose-600 hover:text-rose-700 p-2 md:p-0" title="${t('delete')}"><i data-lucide="trash-2" class="w-5 h-5 md:w-4 md:h-4"></i></button>
+                        ${canEditThisAd ? `<button onclick="editAd('${ad.id}')" class="text-indigo-600 hover:text-indigo-700 p-2 md:p-0" title="${t('edit')}"><i data-lucide="edit" class="w-5 h-5 md:w-4 md:h-4"></i></button>` : ''}
+                        ${canDeleteThisAd ? `<button onclick="deleteAd('${ad.id}')" class="text-rose-600 hover:text-rose-700 p-2 md:p-0" title="${t('delete')}"><i data-lucide="trash-2" class="w-5 h-5 md:w-4 md:h-4"></i></button>` : ''}
                       </div>
                     </td>
                   </tr>
@@ -4083,9 +4098,11 @@ function renderDeliveriesView() {
                       </td>
                       <td class="px-4 py-3" data-label="${isAr ? 'الإجراءات' : 'Actions'}">
                         <div class="flex items-center justify-center space-x-1">
-                          <select onchange="updateDeliveryStatus('${ad.id}', this.value)" class="glass-input px-2 py-1 rounded-lg text-xs w-24">
+                          ${roleLower === 'delivery'
+                            ? `<span class="inline-flex px-2.5 py-1 rounded-full text-xs font-bold ${statusColors[ad.deliveryStatus] || 'bg-slate-100 text-slate-700'}">${trStatus(ad.deliveryStatus)}</span>`
+                            : `<select onchange="updateDeliveryStatus('${ad.id}', this.value)" class="glass-input px-2 py-1 rounded-lg text-xs w-24">
                             ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
-                          </select>
+                          </select>`}
                           <button onclick="showDeliveryDetails('${ad.id}')" class="p-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-300 transition-colors" title="${isAr ? 'عرض التفاصيل' : 'View Details'}">
                             <i data-lucide="eye" class="w-4 h-4"></i>
                           </button>
@@ -4274,7 +4291,7 @@ function exportDeliveryReport() {
     const collected = Number(r.amountCollectedFromCustomer ?? (String(r.deliveryStatus || '') === 'Delivered' ? (r.amountLocal || 0) : 0)) || 0;
     const remaining = Number(r.remainingDue ?? Math.max(0, debt - collected)) || 0;
     const received = (typeof r.isReceivedInOffice === 'boolean') ? r.isReceivedInOffice : !!r.officeHandover;
-    csv += `${csvCell(customer?.name || 'Unknown')},${csvCell(r.phoneNumber || customer?.phones?.[0] || '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
+    csv += `${csvCell(customer?.name || r.customerName || 'Unknown')},${csvCell(r.phoneNumber || customer?.phones?.[0] || '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
   });
   
   // Prepend a UTF-8 BOM so Excel reads Arabic customer/driver names correctly
@@ -4608,16 +4625,20 @@ function showDeliveryDetails(itemId) {
         <div class="grid grid-cols-2 gap-3">
           <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
             <div class="text-xs text-slate-500 font-medium mb-2">${t('status')}</div>
-            <select onchange="updateDeliveryStatus('${ad.id}', this.value); this.closest('#app-modal').remove();" class="w-full glass-input px-3 py-2 rounded-lg text-sm font-medium">
+            ${roleLower === 'delivery'
+              ? `<div class="w-full px-3 py-2 rounded-lg text-sm font-medium text-slate-700 dark:text-slate-200">${trStatus(ad.deliveryStatus)}</div>`
+              : `<select onchange="updateDeliveryStatus('${ad.id}', this.value); this.closest('#app-modal').remove();" class="w-full glass-input px-3 py-2 rounded-lg text-sm font-medium">
               ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
-            </select>
+            </select>`}
           </div>
           <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
             <div class="text-xs text-slate-500 font-medium mb-2">${isAr ? 'السائق' : 'Driver'}</div>
-            <select onchange="assignDelivery('${ad.id}', this.value); this.closest('#app-modal').remove();" class="w-full glass-input px-3 py-2 rounded-lg text-sm font-medium">
+            ${roleLower === 'delivery'
+              ? `<div class="w-full px-3 py-2 rounded-lg text-sm font-medium text-slate-700 dark:text-slate-200">${Security.escapeHtml(deliveryPerson?.name || (isAr ? 'غير مُعيَّن' : 'Unassigned'))}</div>`
+              : `<select onchange="assignDelivery('${ad.id}', this.value); this.closest('#app-modal').remove();" class="w-full glass-input px-3 py-2 rounded-lg text-sm font-medium">
               <option value="">${isAr ? 'غير مُعيَّن' : 'Unassigned'}</option>
               ${deliveryUsers.map(u => `<option value="${u.id}" ${ad.deliveryPersonId === u.id ? 'selected' : ''}>${Security.escapeHtml(u.name || '')}</option>`).join('')}
-            </select>
+            </select>`}
           </div>
         </div>
         
@@ -4673,10 +4694,10 @@ function showDeliveryDetails(itemId) {
               <span>${isAr ? 'تم الاستلام' : 'Received'}</span>
             </div>
           `}
-          <button onclick="${editHandler}('${ad.id}'); this.closest('#app-modal').remove();" class="btn-shine bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2">
+          ${roleLower !== 'delivery' ? `<button onclick="${editHandler}('${ad.id}'); this.closest('#app-modal').remove();" class="btn-shine bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2">
             <i data-lucide="edit" class="w-5 h-5"></i>
             <span>${t('edit')}</span>
-          </button>
+          </button>` : ''}
           ${canOffice && receivedInOffice ? `
             <button onclick="undoOfficeHandover('${ad.id}'); this.closest('#app-modal').remove();" class="btn-shine bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2">
               <i data-lucide="rotate-ccw" class="w-5 h-5"></i>

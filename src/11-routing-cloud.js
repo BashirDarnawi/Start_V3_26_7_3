@@ -409,10 +409,14 @@ function navigateToInternal(view, pushHistory = true) {
   
   // Check permission (Admin always allowed)
   if (!isCurrentUserAdmin() && !userCanAccessView(state.currentUser, view)) {
-    // Special views that don't need permissions (delivery dashboard is for
-    // the Delivery role only — other roles must hold a real permission)
+    // Special views that don't need permissions. The Delivery role is granted
+    // both the delivery dashboard AND the deliveries tab unconditionally by the
+    // nav gates (canOpenWorkspaceView, renderSidebar, renderMobileBottomNavigation),
+    // so the router must exempt both — otherwise a driver lacking deliveries.viewOwn
+    // sees a "Delivery" tab that only pops an Access Denied toast (dead button).
+    // Other roles still need a real permission for either view.
     const isExempt = view === 'no-access' ||
-      (view === 'delivery-dashboard' && isDeliveryRole(state.currentUser?.role));
+      ((view === 'delivery-dashboard' || view === 'deliveries') && isDeliveryRole(state.currentUser?.role));
     if (!isExempt) {
       showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية' : `You don't have permission to access this page`, 'error');
       return;

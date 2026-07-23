@@ -329,8 +329,12 @@ function renderModal() {
       state.tempAdPhotos = (!isEdit || can('ads', 'viewPhotos')) ? getAdPhotoSources(adData) : [];
       state.tempAdPhotosDirty = false;
       const durationDaysDefault = (adData.days !== undefined ? adData.days : (adData.startDate && adData.endDate ? Math.max(0, Math.round((new Date(adData.endDate) - new Date(adData.startDate)) / (1000 * 60 * 60 * 24))) : ''));
-      const isAdminUser = isCurrentUserAdmin();
       const adCreator = isEdit && adData.creatorId ? state.users.find(u => u.id === adData.creatorId) : state.currentUser;
+      // Badge describes the ad's CREATOR, not the viewer. Driving it from the
+      // viewer's role mislabeled an Admin-created ad as "USER" for a non-admin
+      // editor (and vice-versa). isAdminRole() returns false for an unresolved
+      // creator, so it gracefully falls back to the "USER" badge.
+      const creatorIsAdmin = isAdminRole(adCreator?.role);
       const isArAd = state.language === 'ar';
       const adPaymentState = getAdPaymentState(adData);
       const hasLinkedShopReceipt = adPaymentState === 'not_paid'
@@ -391,8 +395,8 @@ function renderModal() {
                   </div>
                   <span class="text-sm text-slate-600 dark:text-slate-300">${Security.escapeHtml(adCreator?.name || (isArAd ? 'غير معروف' : 'Unknown'))}</span>
                 </div>
-                <span class="px-2 py-0.5 rounded-full text-[9px] font-bold ${isAdminUser ? 'bg-amber-100 text-amber-600' : 'bg-slate-200 text-slate-500'}">
-                  ${isAdminUser ? (isArAd ? 'أدمن' : 'ADMIN') : (isArAd ? 'مستخدم' : 'USER')}
+                <span class="px-2 py-0.5 rounded-full text-[9px] font-bold ${creatorIsAdmin ? 'bg-amber-100 text-amber-600' : 'bg-slate-200 text-slate-500'}">
+                  ${creatorIsAdmin ? (isArAd ? 'أدمن' : 'ADMIN') : (isArAd ? 'مستخدم' : 'USER')}
                 </span>
               </div>
               <input type="hidden" id="ad-creator-id" value="${adCreator?.id || state.currentUser?.id || ''}" />
@@ -2497,6 +2501,39 @@ async function handleModalSubmit() {
     case 'ad':
       try {
       const isArSubAd = state.language === 'ar';
+      // ROOT-CAUSE FIX (false "Ad Changed" toast, part 1): live-sync REPLACES
+      // objects inside state.ads, so state.modalData is a snapshot detached at
+      // modal-OPEN time. A legitimate server-side bump while the modal is open
+      // (a receipt settlement cascading into its linked ads, a customer merge,
+      // another tab) left the snapshot's _lastModified stale and made this
+      // save 409 against a version nobody was editing. Re-point modalData at
+      // the CURRENT record so the optimistic-lock baseline — and every stored
+      // value preserved through this save (spentUSD, editHistory, top-up
+      // baselines, prior amountAdjustments…) — is read at SAVE time. Real
+      // concurrent edits are still caught by the server's row lock.
+      if (isEdit && state.modalData?.id) {
+        const liveAd = state.ads.find(a => a && !a._deleted && String(a.id) === String(state.modalData.id));
+        if (liveAd) state.modalData = liveAd;
+      }
+      // ROOT-CAUSE FIX (part 2): mirror of the server rule in
+      // _ad_mutation_atomic — an ordinary edit of a terminal/refunded ad is
+      // ALWAYS refused with 409, which the old catch mislabelled as "changed
+      // on another device". Refresh could never fix that. Say the real reason
+      // up front instead of sending a doomed request.
+      if (isEdit && isServerModeEnabled()) {
+        const adStatus = String(state.modalData?.status || '');
+        const adRefundType = String(state.modalData?.refundType || '');
+        if (['Stopped', 'Canceled', 'Completed', 'Lost'].includes(adStatus) || (adRefundType && adRefundType !== 'None')) {
+          showNotification(
+            isArSubAd ? 'إعلان منتهٍ' : 'Ad Finished',
+            isArSubAd
+              ? 'هذا الإعلان منتهٍ (موقوف/ملغى/مكتمل) أو مُسترجَع، لذا لا يمكن تعديل بياناته أو تمويله بعد الآن. استخدم الاسترجاع لإعادة المال.'
+              : 'This ad is finished (stopped/canceled/completed) or refunded, so its details and funding can no longer be edited. Use Refund to return money.',
+            'warning'
+          );
+          return;
+        }
+      }
       if (_adPhotoUploadsInFlight > 0) {
         showNotification(
           isArSubAd ? 'جاري تجهيز الصور' : 'Preparing photos',
@@ -3161,11 +3198,14 @@ async function handleModalSubmit() {
       closeModal();
       } catch (error) {
         console.error('Error saving ad:', error);
-        const conflict = error?.status === 409;
+        // "Changed on another device" is reserved for real version conflicts
+        // ("Conflict: …"). Other 409s are business-rule refusals whose actual
+        // reason must reach the user (see describe409).
+        const conflict = isVersionConflict409(error);
         showNotification(
           conflict ? (state.language === 'ar' ? 'تعارض في التعديل' : 'Ad Changed') : (state.language === 'ar' ? 'خطأ' : 'Error'),
-          conflict
-            ? (state.language === 'ar' ? 'تم تغيير هذا الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+          error?.status === 409
+            ? describe409(error, state.language === 'ar' ? 'تم تغيير هذا الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
             : (state.language === 'ar' ? `فشل حفظ الإعلان: ${error.message}` : `Failed to save ad: ${error.message}`),
           conflict ? 'warning' : 'error'
         );

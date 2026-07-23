@@ -5317,6 +5317,108 @@ class TestSecurityAuditRegression:
         assert fixed.status_code == 200, fixed.text
         assert fixed.json()["data"]["customerId"] == "sec_correct_b"
 
+    @staticmethod
+    def _collections_clerk(actors, email):
+        # A "collections clerk": receipts.view + markCollected, but NOT edit.
+        return _create_user(
+            actors["admin"],
+            email=email,
+            permissions={"receipts": ["view", "markCollected"]},
+        )
+
+    def test_markcollected_clerk_can_record_collection_without_edit(self, actors):
+        # Finding [6]: receipts.markCollected must authorize recording a
+        # collection. Pre-fix the collection PATCH required receipts.edit, so a
+        # markCollected-only clerk always got 403 and the permission was dead.
+        self.tx._customer("sec_collect_customer", actors)
+        clerk, clerk_cookies = self._collections_clerk(
+            actors, "hardening-collect-clerk@tests.albayanhub.com"
+        )
+        receipt = self.tx._receipt(
+            "sec_collect_receipt", "sec_collect_customer", 100, actors,
+            status="Not Paid", isPaid=False,
+        )
+        recorded = client.patch(
+            "/api/collections/receipts/sec_collect_receipt",
+            json={
+                "expectedLastModified": receipt["lastModified"],
+                "data": {
+                    "collected": True,
+                    "collectedAmount": 500,
+                    "collectedPayments": [{"method": "Cash (LYD)", "amount": 500}],
+                    "collectedMatchesReceipt": True,
+                    "collectedAt": "2026-07-23T00:00:00.000Z",
+                    "collectedBy": clerk["id"],
+                },
+            },
+            cookies=clerk_cookies,
+        )
+        assert recorded.status_code == 200, recorded.text
+        stored = client.get(
+            "/api/collections/receipts/sec_collect_receipt", cookies=actors["admin"]
+        ).json()["data"]
+        assert stored["collected"] is True
+        assert stored["collectedAmount"] == 500
+        # The bypass must NOT have touched money/status fields.
+        assert stored["status"] == "Not Paid"
+        assert stored["amountUSD"] == 100
+
+    def test_markcollected_clerk_can_undo_collection(self, actors):
+        # Undo (uncollectReceipt) must work identically for the clerk.
+        self.tx._customer("sec_uncollect_customer", actors)
+        _clerk, clerk_cookies = self._collections_clerk(
+            actors, "hardening-uncollect-clerk@tests.albayanhub.com"
+        )
+        receipt = self.tx._receipt(
+            "sec_uncollect_receipt", "sec_uncollect_customer", 100, actors,
+            status="Not Paid", isPaid=False,
+            collected=True, collectedAmount=500,
+        )
+        undone = client.patch(
+            "/api/collections/receipts/sec_uncollect_receipt",
+            json={
+                "expectedLastModified": receipt["lastModified"],
+                "data": {
+                    "collected": False,
+                    "collectedAmount": None,
+                    "collectedAt": None,
+                    "collectedBy": None,
+                },
+            },
+            cookies=clerk_cookies,
+        )
+        assert undone.status_code == 200, undone.text
+        stored = client.get(
+            "/api/collections/receipts/sec_uncollect_receipt", cookies=actors["admin"]
+        ).json()["data"]
+        assert stored["collected"] is False
+
+    def test_markcollected_clerk_cannot_escalate_to_money_edit(self, actors):
+        # The bypass is confined to collection-tracking fields: smuggling a money
+        # field alongside collected* must still fall through to the edit check (403).
+        self.tx._customer("sec_collectesc_customer", actors)
+        _clerk, clerk_cookies = self._collections_clerk(
+            actors, "hardening-collect-esc@tests.albayanhub.com"
+        )
+        receipt = self.tx._receipt(
+            "sec_collectesc_receipt", "sec_collectesc_customer", 100, actors,
+            status="Not Paid", isPaid=False,
+        )
+        blocked = client.patch(
+            "/api/collections/receipts/sec_collectesc_receipt",
+            json={
+                "expectedLastModified": receipt["lastModified"],
+                "data": {"collected": True, "amountUSD": 100000},
+            },
+            cookies=clerk_cookies,
+        )
+        assert blocked.status_code == 403, blocked.text
+        stored = client.get(
+            "/api/collections/receipts/sec_collectesc_receipt", cookies=actors["admin"]
+        ).json()["data"]
+        assert stored["amountUSD"] == 100
+        assert stored.get("collected") in (False, None)
+
     def test_paid_receipt_amount_cannot_be_inflated_by_edit(self, actors):
         # MEDIUM: raising a settled receipt's amountUSD mints spendable credit.
         self.tx._customer("sec_inflate_customer", actors)
