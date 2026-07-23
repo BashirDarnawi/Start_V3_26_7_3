@@ -7568,6 +7568,129 @@ def _financial_apply_refund(
     return result
 
 
+def _financial_apply_relink(
+    existing: dict[str, Any], requested: dict[str, Any]
+) -> dict[str, Any]:
+    """Move an ad's committed funding onto a different receipt WITHOUT touching
+    its money identity.
+
+    A relink is the second — and only other — terminal-ad-capable primitive
+    beside a refund. It re-points the ad's funding allocations at the receipt(s)
+    the request supplies while preserving ``amountUSD``, ``spentUSD``,
+    ``status``, ``refundType`` and payment status exactly as stored. The OLD
+    receipt is freed purely by omission — usage is DERIVED from the allocation
+    arrays, so dropping a receipt from them returns its money. Money is
+    conserved: each funding pool's total is unchanged, only WHICH receipt backs
+    it may move. This is what makes a relink safe on a Stopped/Canceled/
+    Completed/Lost ad where every other edit is refused: it can never change how
+    much the ad spent, only where that spend is backed. walletTransactions and
+    every stop/refund baseline are left untouched (allocations are derived
+    state — there is no reversal ledger to write).
+    """
+    result = dict(existing)
+    payment_status = _financial_ad_payment_status(existing)
+    collection_method = str(existing.get("collectionMethod") or "")
+
+    # A relink may move receipts and NOTHING else. Reject any attempt to ride a
+    # money/lifecycle change in on the same request (only the funding receipt
+    # mapping is allowed to differ from the stored row).
+    for field in (
+        "amountUSD",
+        "amountLocal",
+        "spentUSD",
+        "spentLocal",
+        "initialAmountUSD",
+        "refundType",
+        "refundAmount",
+        "refundStatus",
+        "topUps",
+        "driverBudgetUSD",
+    ):
+        if field in requested:
+            raise HTTPException(
+                status_code=400,
+                detail="A receipt relink cannot change the ad amount, spend, status or refund",
+            )
+    requested_status = requested.get("status")
+    if requested_status is not None and str(requested_status) != str(
+        existing.get("status") or ""
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="A receipt relink cannot change the ad amount, spend, status or refund",
+        )
+    requested_payment = requested.get("paymentStatus")
+    if requested_payment is not None and _financial_ad_payment_status(
+        {"paymentStatus": requested_payment}
+    ) != payment_status:
+        raise HTTPException(
+            status_code=400,
+            detail="A receipt relink cannot change the ad payment status",
+        )
+
+    old_paid = _financial_allocations(existing.get("receiptAllocations"), "receiptAllocations")
+    old_due = _financial_allocations(existing.get("dueAllocations"), "dueAllocations")
+    old_paid_minor = sum(
+        _financial_minor(row["amountUSD"], "receiptAllocations") for row in old_paid
+    )
+    old_due_minor = sum(
+        _financial_minor(row["amountUSD"], "dueAllocations") for row in old_due
+    )
+
+    new_paid = _financial_allocations(requested.get("receiptAllocations"), "receiptAllocations")
+    new_due = _financial_allocations(requested.get("dueAllocations"), "dueAllocations")
+    new_paid_minor = sum(
+        _financial_minor(row["amountUSD"], "receiptAllocations") for row in new_paid
+    )
+    new_due_minor = sum(
+        _financial_minor(row["amountUSD"], "dueAllocations") for row in new_due
+    )
+
+    # Money is conserved: a relink preserves each pool's committed total to the
+    # cent. The old receipt is freed by omission, the new one takes the exact
+    # same amount — never more, never less.
+    if new_paid_minor != old_paid_minor or new_due_minor != old_due_minor:
+        raise HTTPException(
+            status_code=400,
+            detail="A receipt relink must preserve the ad's committed amount",
+        )
+    if not new_paid and not new_due:
+        raise HTTPException(
+            status_code=400,
+            detail="A receipt relink must fund the ad from a receipt",
+        )
+
+    paid_ids = [str(row["receiptId"]) for row in new_paid]
+    due_ids = [str(row["receiptId"]) for row in new_due]
+    linked_id = due_ids[0] if due_ids else ""
+
+    result["receiptAllocations"] = new_paid
+    result["dueAllocations"] = new_due
+    result["receiptIds"] = paid_ids
+    result["fundingReceiptId"] = paid_ids[0] if paid_ids else ""
+    result["dueAmountToUseUSD"] = _financial_usd(new_due_minor)
+    # The moved USD rows are authoritative now; a leftover LYD mirror would let
+    # the legacy due reader re-lock the receipt the relink just released.
+    result["dueAmountToUseLYD"] = 0.0
+    if payment_status == "not_paid" and collection_method == "driver":
+        result["mergedPaidAllocations"] = new_paid
+        result["hasMergedPaidFunds"] = bool(new_paid)
+        result["linkedDeliveryReceiptId"] = linked_id or str(
+            existing.get("linkedDeliveryReceiptId") or ""
+        )
+        result["receiptId"] = result["linkedDeliveryReceiptId"] or (
+            paid_ids[0] if paid_ids else ""
+        )
+    else:
+        result["mergedPaidAllocations"] = []
+        result["hasMergedPaidFunds"] = False
+        result["linkedDeliveryReceiptId"] = ""
+        result["receiptId"] = linked_id if linked_id else (paid_ids[0] if paid_ids else "")
+    result["isPaid"] = payment_status == "paid"
+    result["paymentStatus"] = payment_status
+    return result
+
+
 def _financial_validate_ad_plan(
     ad: dict[str, Any],
     *,
@@ -7704,16 +7827,39 @@ def _ad_mutation_atomic(
                     raise HTTPException(status_code=409, detail="Conflict: ad funding has changed")
 
             is_refund = body.action == "update" and "refundType" in clean_request
-            if existing is not None and not is_refund and (
+            # A receipt relink is the only other terminal-ad-capable edit. It
+            # moves the ad's committed funding onto a different receipt while
+            # preserving amount/spend/status, so — like a refund — it is exempt
+            # from the terminal block below. The two are mutually exclusive: a
+            # request that asks for both is rejected outright rather than
+            # silently doing one of them.
+            relink_requested = (
+                body.action == "update" and clean_request.get("relinkReceiptOnly") is True
+            )
+            if relink_requested and is_refund:
+                raise HTTPException(
+                    status_code=400, detail="A receipt relink cannot also refund the ad"
+                )
+            is_relink = relink_requested and not is_refund
+            if existing is not None and not is_refund and not is_relink and (
                 str(existing.get("status") or "") in {"Stopped", "Canceled", "Completed", "Lost"}
                 or (existing.get("refundType") and str(existing.get("refundType")) != "None")
             ):
                 raise HTTPException(status_code=409, detail="A terminal or refunded ad cannot be edited")
             ad_rows = _financial_active_rows(conn, "ads")
-            is_topup = body.action == "update" and "topUps" in clean_request and not is_refund
+            is_topup = body.action == "update" and "topUps" in clean_request and not is_refund and not is_relink
             if is_refund:
                 assert existing is not None
                 saved_data = _financial_apply_refund(actor, clean_request, existing)
+                _financial_validate_ad_plan(
+                    saved_data,
+                    locked_receipts=locked_receipts,
+                    ad_rows=ad_rows,
+                    current_ad_id=ad_id,
+                )
+            elif is_relink:
+                assert existing is not None
+                saved_data = _financial_apply_relink(existing, clean_request)
                 _financial_validate_ad_plan(
                     saved_data,
                     locked_receipts=locked_receipts,

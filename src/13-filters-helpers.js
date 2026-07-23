@@ -4536,6 +4536,14 @@ function describe409(error, conflictText) {
       ? 'هذا الإعلان منتهٍ أو مُسترجَع، لذا لم يعد هذا التغيير ممكناً. استخدم الاسترجاع لتعديل أمواله.'
       : 'This ad is already finished or refunded, so this change is no longer allowed. Use Refund to adjust its money.';
   }
+  // A receipt relink (or any ad-funding save) whose target receipt lacks the
+  // balance to back the ad's spend. Name the real reason instead of the raw
+  // server string, so the user knows to pick a receipt with enough credit.
+  if (/insufficient (balance on receipt|in shop receipt balance|delivery due credit)/i.test(detail)) {
+    return state.language === 'ar'
+      ? 'الوصل الجديد لا يملك رصيداً كافياً لتغطية المبلغ المُنفَق من هذا الإعلان. اختر وصلاً برصيد كافٍ أو أضف وصلاً آخر.'
+      : "The new receipt doesn't have enough available balance to cover this ad's spent amount. Choose a receipt with enough balance.";
+  }
   return detail || conflictText;
 }
 

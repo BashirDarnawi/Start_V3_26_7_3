@@ -1955,7 +1955,7 @@ check('server money/subscription calls use dedicated transactional endpoints', (
   assert(built.includes('&before_created_at=${encodeURIComponent(String(beforeCreatedAt))}&before_id=${encodeURIComponent(beforeId)}'), 'full collection paging does not use a stable createdAt/id keyset');
   assert(built.includes('&after_last_modified=${encodeURIComponent(String(afterLastModified))}&after_id=${encodeURIComponent(afterId)}'), 'delta paging does not use a stable lastModified/id keyset');
   assert(!built.includes('&offset=${offset}&include_deleted=true'), 'collection sync still uses race-prone OFFSET pagination');
-  assert(built.includes('await clearServerCollectionsForVisibility(forbiddenCollections);'), '403 deltas do not purge previously visible records');
+  assert(built.includes('await clearServerCollectionsForVisibility(newlyForbidden);'), '403 deltas do not purge previously visible records');
   assert(built.includes('const scopedReload = await serverLoadAllData();'), 'permission scope changes do not perform an authoritative reload');
   assert(built.includes("role: String(state.currentUser.role || '').toLowerCase()"), 'auth refresh access signature omits role');
   assert(built.includes("attempt = getClothesOrderMutationAttempt('status'"), 'clothes status changes bypass the atomic mutation API');

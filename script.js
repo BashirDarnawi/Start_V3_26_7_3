@@ -23120,6 +23120,14 @@ function describe409(error, conflictText) {
       ? 'هذا الإعلان منتهٍ أو مُسترجَع، لذا لم يعد هذا التغيير ممكناً. استخدم الاسترجاع لتعديل أمواله.'
       : 'This ad is already finished or refunded, so this change is no longer allowed. Use Refund to adjust its money.';
   }
+  // A receipt relink (or any ad-funding save) whose target receipt lacks the
+  // balance to back the ad's spend. Name the real reason instead of the raw
+  // server string, so the user knows to pick a receipt with enough credit.
+  if (/insufficient (balance on receipt|in shop receipt balance|delivery due credit)/i.test(detail)) {
+    return state.language === 'ar'
+      ? 'الوصل الجديد لا يملك رصيداً كافياً لتغطية المبلغ المُنفَق من هذا الإعلان. اختر وصلاً برصيد كافٍ أو أضف وصلاً آخر.'
+      : "The new receipt doesn't have enough available balance to cover this ad's spent amount. Choose a receipt with enough balance.";
+  }
   return detail || conflictText;
 }
 
@@ -30689,6 +30697,113 @@ async function saveAdThroughAtomicServer(action, adId, expectedLastModified, dat
   }
 }
 
+// A terminal ad (Stopped/Canceled/Completed/Lost or refunded) refuses every
+// edit EXCEPT a receipt relink — moving its committed funding onto a different
+// receipt. These helpers mirror the server's _financial_apply_relink so the
+// client can (a) decide a save is a pure relink and (b) apply it in local mode.
+function adIsTerminalForEdit(ad) {
+  const status = String((ad && ad.status) || '');
+  const refundType = String((ad && ad.refundType) || '');
+  return ['Stopped', 'Canceled', 'Completed', 'Lost'].indexOf(status) !== -1
+    || (refundType !== '' && refundType !== 'None');
+}
+
+function _relinkPoolSum(rows) {
+  return (Array.isArray(rows) ? rows : []).reduce(
+    (sum, row) => sum + (parseFloat(row && row.amountUSD) || 0),
+    0
+  );
+}
+
+function _relinkNormalizePool(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .filter(row => row && row.receiptId && (parseFloat(row.amountUSD) || 0) > 0)
+    .map(row => ({
+      receiptId: String(row.receiptId),
+      amountUSD: Math.round((parseFloat(row.amountUSD) || 0) * 100) / 100
+    }));
+}
+
+// Return the new funding pools when the save re-points the ad onto a DIFFERENT
+// receipt while conserving every pool's committed total to the cent; otherwise
+// null (not a relink). Old receipts drop out by omission — exactly what frees
+// them. The server independently re-checks conservation, so this only gates UX.
+function computeTerminalRelinkPools(liveAd, adUpdates) {
+  const oldPaid = _relinkNormalizePool(liveAd && liveAd.receiptAllocations);
+  const oldDue = _relinkNormalizePool(liveAd && liveAd.dueAllocations);
+  const newPaid = _relinkNormalizePool(adUpdates && adUpdates.receiptAllocations);
+  const newDue = _relinkNormalizePool(adUpdates && adUpdates.dueAllocations);
+  if (Math.abs(_relinkPoolSum(oldPaid) - _relinkPoolSum(newPaid)) > 0.005) return null;
+  if (Math.abs(_relinkPoolSum(oldDue) - _relinkPoolSum(newDue)) > 0.005) return null;
+  if (newPaid.length === 0 && newDue.length === 0) return null;
+  const oldIds = new Set(oldPaid.concat(oldDue).map(row => row.receiptId));
+  const newIds = new Set(newPaid.concat(newDue).map(row => row.receiptId));
+  let moved = oldIds.size !== newIds.size;
+  if (!moved) {
+    newIds.forEach(id => { if (!oldIds.has(id)) moved = true; });
+  }
+  if (!moved) return null;
+  return { paid: newPaid, due: newDue };
+}
+
+// True only when the funding receipt is the ONLY thing the save changed on a
+// terminal ad. Any other editable field keeps the "Ad Finished — use Refund"
+// block, because a relink must never silently drop an unrelated edit.
+function terminalRelinkOnlyChangesFunding(liveAd, adUpdates, photosDirty) {
+  if (photosDirty) return false;
+  const sameStr = (a, b) => String(a == null ? '' : a) === String(b == null ? '' : b);
+  const sameTime = (a, b) => {
+    const ta = new Date(a || 0).getTime();
+    const tb = new Date(b || 0).getTime();
+    if (!isFinite(ta) && !isFinite(tb)) return true;
+    return ta === tb;
+  };
+  if (!sameStr(adUpdates.customerId, liveAd.customerId)) return false;
+  if (!sameStr(adUpdates.pageId, liveAd.pageId)) return false;
+  if (getAdPaymentState(adUpdates) !== getAdPaymentState(liveAd)) return false;
+  if (!sameStr(adUpdates.collectionMethod, liveAd.collectionMethod)) return false;
+  if (!sameTime(adUpdates.startDate, liveAd.startDate)) return false;
+  if (!sameTime(adUpdates.endDate, liveAd.endDate)) return false;
+  const oldLinks = Array.isArray(liveAd.adLinks)
+    ? liveAd.adLinks
+    : (liveAd.adLink ? [liveAd.adLink] : []);
+  const newLinks = Array.isArray(adUpdates.adLinks) ? adUpdates.adLinks : [];
+  if (JSON.stringify(oldLinks) !== JSON.stringify(newLinks)) return false;
+  return true;
+}
+
+// Local-mode counterpart of the server relink primitive: re-point the funding
+// allocations and their derived mirrors WITHOUT touching amountUSD/spentUSD/
+// status (updateRecord merges, so any field left out keeps its stored value).
+async function applyLocalReceiptRelink(liveAd, pools) {
+  const paymentState = getAdPaymentState(liveAd);
+  const collectionMethod = String(liveAd.collectionMethod || '');
+  const paidIds = pools.paid.map(row => row.receiptId);
+  const dueIds = pools.due.map(row => row.receiptId);
+  const linkedId = dueIds[0] || '';
+  const dueTotal = Math.round(_relinkPoolSum(pools.due) * 100) / 100;
+  const updates = {
+    receiptAllocations: pools.paid,
+    dueAllocations: pools.due,
+    receiptIds: paidIds,
+    fundingReceiptId: paidIds[0] || '',
+    dueAmountToUseUSD: dueTotal,
+    dueAmountToUseLYD: 0
+  };
+  if (paymentState === 'not_paid' && collectionMethod === 'driver') {
+    updates.mergedPaidAllocations = pools.paid;
+    updates.hasMergedPaidFunds = pools.paid.length > 0;
+    updates.linkedDeliveryReceiptId = linkedId || String(liveAd.linkedDeliveryReceiptId || '');
+    updates.receiptId = updates.linkedDeliveryReceiptId || (paidIds[0] || '');
+  } else {
+    updates.mergedPaidAllocations = [];
+    updates.hasMergedPaidFunds = false;
+    updates.linkedDeliveryReceiptId = '';
+    updates.receiptId = linkedId || (paidIds[0] || '');
+  }
+  return await updateRecord(state.ads, liveAd.id, updates);
+}
+
 async function handleModalSubmit() {
   const isEdit = state.modalData !== null;
   
@@ -30949,25 +31064,12 @@ async function handleModalSubmit() {
         const liveAd = state.ads.find(a => a && !a._deleted && String(a.id) === String(state.modalData.id));
         if (liveAd) state.modalData = liveAd;
       }
-      // ROOT-CAUSE FIX (part 2): mirror of the server rule in
-      // _ad_mutation_atomic — an ordinary edit of a terminal/refunded ad is
-      // ALWAYS refused with 409, which the old catch mislabelled as "changed
-      // on another device". Refresh could never fix that. Say the real reason
-      // up front instead of sending a doomed request.
-      if (isEdit && isServerModeEnabled()) {
-        const adStatus = String(state.modalData?.status || '');
-        const adRefundType = String(state.modalData?.refundType || '');
-        if (['Stopped', 'Canceled', 'Completed', 'Lost'].includes(adStatus) || (adRefundType && adRefundType !== 'None')) {
-          showNotification(
-            isArSubAd ? 'إعلان منتهٍ' : 'Ad Finished',
-            isArSubAd
-              ? 'هذا الإعلان منتهٍ (موقوف/ملغى/مكتمل) أو مُسترجَع، لذا لا يمكن تعديل بياناته أو تمويله بعد الآن. استخدم الاسترجاع لإعادة المال.'
-              : 'This ad is finished (stopped/canceled/completed) or refunded, so its details and funding can no longer be edited. Use Refund to return money.',
-            'warning'
-          );
-          return;
-        }
-      }
+      // A terminal/refunded ad still accepts ONE money-safe edit: relinking its
+      // funding receipt (free the old receipt, move the spent amount to a new
+      // one). So the "terminal ads cannot be edited" decision is deferred until
+      // after the funding form is read — see the terminal-ad branch at save
+      // time, which relinks a pure funding-receipt change and blocks anything
+      // else with the "Ad Finished — use Refund" notice.
       if (_adPhotoUploadsInFlight > 0) {
         showNotification(
           isArSubAd ? 'جاري تجهيز الصور' : 'Preparing photos',
@@ -31504,6 +31606,48 @@ async function handleModalSubmit() {
         adUpdates.collectionDate = new Date().toISOString();
       }
       
+      // A terminal/refunded ad accepts exactly one edit: a receipt relink. If
+      // the only change is the funding receipt, free the old receipt and move
+      // the spent amount to the new one (amount/spend/status untouched). Any
+      // other change keeps the "Ad Finished — use Refund" block.
+      if (isEdit && adIsTerminalForEdit(state.modalData)) {
+        const liveTerminalAd = state.modalData;
+        const relinkPools = computeTerminalRelinkPools(liveTerminalAd, adUpdates);
+        const onlyFundingChanged = relinkPools
+          && terminalRelinkOnlyChangesFunding(liveTerminalAd, adUpdates, state.tempAdPhotosDirty);
+        if (!relinkPools || !onlyFundingChanged) {
+          showNotification(
+            isArSubAd ? 'إعلان منتهٍ' : 'Ad Finished',
+            isArSubAd
+              ? 'هذا الإعلان منتهٍ (موقوف/ملغى/مكتمل) أو مُسترجَع. يمكن فقط تغيير وصل تمويله؛ لإعادة المال أو تعديل مبلغه استخدم الاسترجاع.'
+              : 'This ad is finished (stopped/canceled/completed) or refunded. Only its funding receipt can be changed; to return or adjust its money, use Refund.',
+            'warning'
+          );
+          return;
+        }
+        if (isServerModeEnabled()) {
+          const expectedLastModified = Number(liveTerminalAd?._lastModified);
+          await saveAdThroughAtomicServer('update', liveTerminalAd.id, expectedLastModified, {
+            relinkReceiptOnly: true,
+            receiptAllocations: relinkPools.paid,
+            dueAllocations: relinkPools.due
+          });
+        } else {
+          const relinked = await applyLocalReceiptRelink(liveTerminalAd, relinkPools);
+          if (!relinked) return;
+        }
+        showNotification(
+          isArSubAd ? 'تم التحديث' : 'Updated',
+          isArSubAd ? 'تم تغيير وصل تمويل الإعلان وتحرير الوصل السابق.' : 'The ad funding receipt was changed and the old receipt was released.',
+          'success'
+        );
+        addLog('update', 'ad', liveTerminalAd.id, 'Relinked ad funding receipt');
+        state.tempAdFunding = { allocations: [] };
+        state.tempAdPhotos = [];
+        closeModal();
+        return;
+      }
+
       if (isEdit) {
         // Track changes for edit history
         const oldAd = state.modalData;
