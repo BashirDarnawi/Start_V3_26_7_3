@@ -22,7 +22,9 @@ const PERSISTED_COLLECTIONS = [
   'clothesOrders',
   'clothesSettings',
   // Customer-facing Ads Studio requests (never the internal ads ledger)
-  'adCampaignRequests'
+  'adCampaignRequests',
+  // Admin-only app configuration (liquidity tracking start etc.)
+  'appSettings'
 ];
 
 // Debounced IndexedDB sync (avoid writing huge arrays on every keystroke)
@@ -44,6 +46,145 @@ function resetDirtyCollectionQueueForScopeChange() {
   idbSync.scopeGeneration += 1;
 }
 
+// ==========================================
+// SINGLE-WRITER TAB LOCK (multi-tab safety)
+// ==========================================
+// saveCollectionToIndexedDB rewrites whole collections from this tab's
+// in-memory arrays, so a second tab of the same origin silently overwrites
+// the first tab's records (last writer wins). BroadcastChannel and Web Locks
+// are Safari 15.4+ (above the iOS 15.0 baseline), so coordination uses
+// localStorage only: the newest tab claims the lock and older tabs stop
+// persisting until reloaded. A superseded tab deliberately never re-claims a
+// lock on its own (not even a stale one) — the other tab may have written to
+// IndexedDB, and resuming writes from this tab's stale arrays would recreate
+// the exact overwrite bug this lock exists to prevent. Reloading re-claims
+// the lock and re-reads fresh data through the normal init path. Expiry-by-
+// heartbeat (not unload cleanup) is the liveness signal because iOS kills
+// tabs without firing unload.
+const TAB_LOCK_KEY = 'albayan_tab_lock';
+const TAB_LOCK_HEARTBEAT_MS = 5000;
+const _albayanTabLock = {
+  enabled: false,
+  id: '',
+  lost: false,
+  heartbeatTimer: null
+};
+
+function _readTabLockEntry() {
+  try {
+    const raw = localStorage.getItem(TAB_LOCK_KEY);
+    if (!raw) return null;
+    const entry = JSON.parse(raw);
+    if (!entry || typeof entry !== 'object' || typeof entry.id !== 'string') return null;
+    return entry;
+  } catch (_) {
+    return null;
+  }
+}
+
+function _writeTabLockClaim() {
+  try {
+    localStorage.setItem(TAB_LOCK_KEY, JSON.stringify({ id: _albayanTabLock.id, ts: Date.now() }));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// True when another tab has claimed the writer lock. Re-reads localStorage
+// synchronously on every call: iOS Safari suspends background tabs and can
+// deliver 'storage' events late or never, so the listener below is only for
+// showing the overlay promptly — this check is the actual safety mechanism.
+function isAnotherTabWriter() {
+  if (!_albayanTabLock.enabled) return false;
+  if (_albayanTabLock.lost) return true;
+  const entry = _readTabLockEntry();
+  if (entry && entry.id !== _albayanTabLock.id) {
+    _markTabLockLost();
+    return true;
+  }
+  return false;
+}
+
+function _markTabLockLost() {
+  if (_albayanTabLock.lost) return;
+  _albayanTabLock.lost = true;
+  if (_albayanTabLock.heartbeatTimer) {
+    clearInterval(_albayanTabLock.heartbeatTimer);
+    _albayanTabLock.heartbeatTimer = null;
+  }
+  _showTabLockOverlay();
+}
+
+// Blocking overlay for the superseded tab — LOCAL MODE ONLY. In server mode
+// the backend is the source of truth (every edit goes through the API and
+// live sync reconciles), so the losing tab keeps working and merely skips
+// its local cache writes.
+function _showTabLockOverlay() {
+  try {
+    if ((typeof isServerModeEnabled === 'function') && isServerModeEnabled()) return;
+    if (!document.body || document.getElementById('albayan-tab-lock-overlay')) return;
+    const isAr = (typeof state !== 'undefined') && state.language === 'ar';
+    const overlay = document.createElement('div');
+    overlay.id = 'albayan-tab-lock-overlay';
+    overlay.setAttribute('role', 'alertdialog');
+    overlay.setAttribute('aria-modal', 'true');
+    // Inline styles: this overlay must render even if a stylesheet failed.
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;padding:1.25rem;background:rgba(15,23,42,0.94);color:#fff;text-align:center;';
+    overlay.innerHTML = `
+      <div style="max-width:26rem;">
+        <h2 style="font-size:1.25rem;font-weight:800;margin-bottom:0.75rem;">
+          ${isAr ? 'التطبيق مفتوح في علامة تبويب أخرى' : 'App is open in another tab'}
+        </h2>
+        <p style="font-size:0.9rem;line-height:1.6;margin-bottom:1.25rem;">
+          ${isAr
+            ? 'لحماية بياناتك من الكتابة المتعارضة، تعمل علامة تبويب واحدة فقط في كل مرة. أغلق هذه النافذة أو أعد تحميلها لاستخدام التطبيق هنا.'
+            : 'To protect your data from conflicting writes, only one tab can be active at a time. Close this tab, or reload it to use the app here.'}
+        </p>
+        <button type="button" onclick="window.location.reload()" style="min-height:2.75rem;padding:0.6rem 1.5rem;border-radius:0.75rem;border:0;background:#4f46e5;color:#fff;font-weight:700;cursor:pointer;">
+          ${isAr ? 'إعادة التحميل والاستخدام هنا' : 'Reload and use here'}
+        </button>
+      </div>`;
+    document.body.appendChild(overlay);
+  } catch (_) {}
+}
+
+function initAlbayanTabWriterLock() {
+  try {
+    // The packaged Capacitor WebView is single-instance — no lock needed.
+    if (typeof Platform !== 'undefined' && Platform.isCapacitor) return;
+    if (typeof localStorage === 'undefined') return;
+    _albayanTabLock.id = Security.generateSecureId('tab');
+    // Newest tab wins: claim unconditionally. If storage is blocked entirely,
+    // fail open (no coordination possible, but persistence must keep working).
+    if (!_writeTabLockClaim()) return;
+    _albayanTabLock.enabled = true;
+    const heartbeat = setInterval(() => {
+      if (_albayanTabLock.lost) return;
+      const entry = _readTabLockEntry();
+      if (entry && entry.id !== _albayanTabLock.id) {
+        _markTabLockLost();
+        return;
+      }
+      _writeTabLockClaim();
+    }, TAB_LOCK_HEARTBEAT_MS);
+    // In the browser this is a number; in the Node test sandbox it is a
+    // Timeout object that would otherwise keep the test process alive.
+    if (heartbeat && typeof heartbeat.unref === 'function') heartbeat.unref();
+    _albayanTabLock.heartbeatTimer = heartbeat;
+    // 'storage' fires only in OTHER tabs — the moment a newer tab claims,
+    // surface the overlay here instead of waiting for the next write attempt.
+    window.addEventListener('storage', (e) => {
+      if (e && e.key !== TAB_LOCK_KEY) return;
+      if (isAnotherTabWriter()) _showTabLockOverlay();
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && isAnotherTabWriter()) _showTabLockOverlay();
+    });
+  } catch (_) {}
+}
+initAlbayanTabWriterLock();
+
 function getCollectionNameFromArray(array) {
   if (array === state.ads) return 'ads';
   if (array === state.receipts) return 'receipts';
@@ -58,6 +199,7 @@ function getCollectionNameFromArray(array) {
   if (array === state.clothesOrders) return 'clothesOrders';
   if (array === state.clothesSettings) return 'clothesSettings';
   if (array === state.adCampaignRequests) return 'adCampaignRequests';
+  if (array === state.appSettings) return 'appSettings';
   return null;
 }
 
@@ -84,6 +226,9 @@ function markAllCollectionsDirty() {
 }
 
 async function flushDirtyCollections() {
+  // Another tab owns persistence now — writing this tab's (possibly stale)
+  // arrays would overwrite its records. See the single-writer tab lock above.
+  if (isAnotherTabWriter()) return;
   if (!db || idbSync.flushing) return;
   if (idbSync.dirty.size === 0) return;
 
@@ -100,6 +245,17 @@ async function flushDirtyCollections() {
         const saved = await saveCollectionToIndexedDB(name, state[name]);
         if (saved === false) failed.push(name);
       } catch (e) {
+        // A connection iOS Safari force-closed can race past onclose: the
+        // handle is dead but still truthy and every transaction() throws
+        // InvalidStateError. Null it so saveState() immediately falls back to
+        // keeping collections inside the localStorage snapshot; the onclose
+        // reopen path re-persists to IndexedDB once a connection returns.
+        if (e && e.name === 'InvalidStateError') {
+          console.warn('IndexedDB connection lost mid-flush — falling back to localStorage');
+          db = null;
+          saveState();
+          return;
+        }
         console.warn(`IndexedDB save failed for "${name}":`, e);
         failed.push(name);
       }
@@ -137,7 +293,73 @@ async function flushDirtyCollections() {
   }
 }
 
+// ==========================================
+// STORAGE-EVICTION DETECTION (local mode)
+// ==========================================
+// iOS Safari's ITP deletes ALL script-writable storage (localStorage AND
+// IndexedDB, including the in-app backups store) for an origin after 7 days
+// of Safari use without a visit; Chrome/Android can evict non-persistent
+// origins under disk pressure. After such a wipe the app is indistinguishable
+// from a fresh install — except for this cookie, which browsers do not evict
+// with site storage (best-effort on iOS, where ITP caps JS cookies at 7 days).
+let _hadDataSentinelSet = false;
+function _maybeSetHadDataSentinel() {
+  if (_hadDataSentinelSet) return;
+  try {
+    if ((typeof isServerModeEnabled === 'function') && isServerModeEnabled()) return;
+    if (!Array.isArray(state.users) || state.users.length === 0) return;
+    document.cookie = 'albayan_had_data=1; max-age=63072000; path=/; SameSite=Lax';
+    _hadDataSentinelSet = true;
+  } catch (_) {}
+}
+
+// True when the sentinel cookie above exists — i.e. a local workspace with
+// real data lived on this device at some point, however storage looks now.
+function _albayanHadDataCookie() {
+  try {
+    return String(document.cookie || '')
+      .split(';')
+      .some(part => part.trim().indexOf('albayan_had_data=') === 0);
+  } catch (_) {
+    return false;
+  }
+}
+
+// Captured ONCE at boot by loadState(): the snapshot was missing while the
+// sentinel cookie survived. It must be a runtime flag, not a render-time
+// localStorage re-read — loadCollectionsFromStorage()'s trailing saveState()
+// re-creates the snapshot BEFORE the first render, so re-reading it later
+// could never observe the eviction.
+let _storageLossAtBoot = false;
+
+// Render-side contract: when the local first-run branch would show the
+// "create your first admin" setup screen, call this first — true means the
+// browser deleted this device's stored business data (loadState() found the
+// sentinel cookie but no snapshot at boot) and a data-loss/recovery screen
+// (restore from an exported backup) must be rendered instead of first-run
+// setup. Restoring a backup or creating an admin clears it via the
+// users.length guard; renderStorageLossRecovery's "start fresh" button opts
+// out via state._storageLossAcknowledged.
+function albayanDetectStorageLoss() {
+  try {
+    if ((typeof isServerModeEnabled === 'function') && isServerModeEnabled()) return false;
+    if (Array.isArray(state.users) && state.users.length > 0) return false;
+    return _storageLossAtBoot;
+  } catch (_) {
+    return false;
+  }
+}
+
+// The Settings export flow should call this after a successful backup export
+// so the local-mode durability reminder stays quiet for the next few days.
+function albayanNoteBackupExported() {
+  try { localStorage.setItem('albayan_last_backup_export_at', String(Date.now())); } catch (_) {}
+}
+
 function saveState() {
+  // Another tab is the single writer now (see the tab lock above) — this
+  // tab's snapshot may be stale and must not clobber the winner's.
+  if (isAnotherTabWriter()) return;
   try {
     // Create a copy of state with optimized log storage
     // Keep only recent logs in localStorage, all logs are in IndexedDB
@@ -171,7 +393,9 @@ function saveState() {
     delete toSave.tempReceiptPhotos;
     delete toSave.tempAdPhotosDirty;
     delete toSave.tempReceiptPhotosDirty;
-    
+    // Runtime-only connectivity flag (first-visit health-probe result)
+    delete toSave.serverProbeFailed;
+
     // Sanitize before persistence (defense-in-depth)
     const sanitizedToSave = Security.sanitizeObject(toSave);
     // PERFORMANCE: serialize ONCE and reuse for both the size check and the
@@ -191,6 +415,10 @@ function saveState() {
     }
 
     localStorage.setItem('albayan_complete_state', dataString);
+    // Storage-eviction sentinel: in local mode with real data, leave a cookie
+    // behind so a later browser wipe of localStorage+IndexedDB (Safari ITP,
+    // Chrome storage pressure) is distinguishable from a genuine first run.
+    _maybeSetHadDataSentinel();
   } catch (error) {
     console.error('Error saving state:', error);
     
@@ -247,6 +475,16 @@ function debouncedSaveState() {
 function loadState() {
   try {
     const saved = localStorage.getItem('albayan_complete_state');
+    if (!saved) {
+      // EVICTION SIGNAL — capture it now or never. init()'s local branch runs
+      // loadCollectionsFromStorage(), whose trailing saveState() re-creates
+      // this snapshot before the first render; a missing snapshot combined
+      // with a surviving sentinel cookie means the browser wiped this
+      // device's stored data (Safari ITP 7-day wipe, Chrome disk pressure).
+      // Only the clean not-present case counts: a corrupt-but-present
+      // snapshot throws below and must not be misreported as eviction.
+      _storageLossAtBoot = _albayanHadDataCookie();
+    }
     if (saved) {
       const parsed = JSON.parse(saved);
       
@@ -287,7 +525,8 @@ function loadState() {
       if (!Array.isArray(state.clothesShipments)) state.clothesShipments = [];
       if (!Array.isArray(state.clothesOrders)) state.clothesOrders = [];
       if (!Array.isArray(state.clothesSettings)) state.clothesSettings = [];
-      
+      if (!Array.isArray(state.appSettings)) state.appSettings = [];
+
       // Validate language (must be 'en' or 'ar')
       if (state.language !== 'en' && state.language !== 'ar') {
         state.language = 'en';
@@ -845,3 +1084,29 @@ async function ensureUsersHavePasswordHashes() {
     await flushDirtyCollections();
   }
 }
+
+// ==========================================
+// LIFECYCLE FLUSH (phone browsers)
+// ==========================================
+// Phone browsers freeze all timers the instant the page is hidden, and iOS
+// jettisons backgrounded tabs before they resume — losing whatever sat in the
+// 800ms-debounced IndexedDB flush and the 300ms-debounced saveState (in local
+// mode with IndexedDB, that debounced flush is the ONLY durable copy of the
+// business collections). visibilitychange:hidden is the last moment IndexedDB
+// transactions can still start on iOS app-switch; pagehide covers real
+// navigations/reloads. Double-firing is harmless: flushDirtyCollections is
+// re-entrancy-guarded and a no-op when nothing is dirty.
+function flushPersistenceNow() {
+  try {
+    if (_saveStateTimer) { clearTimeout(_saveStateTimer); _saveStateTimer = null; }
+    saveState();
+  } catch (_) {}
+  try {
+    if (idbSync.timer) { clearTimeout(idbSync.timer); idbSync.timer = null; }
+    flushDirtyCollections().catch(() => {});
+  } catch (_) {}
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushPersistenceNow();
+});
+window.addEventListener('pagehide', flushPersistenceNow, { passive: true });

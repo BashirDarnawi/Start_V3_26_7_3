@@ -12,6 +12,8 @@ const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
 const PYTEST_ARGS = ['-m', 'pytest', '-q', '-p', 'no:cacheprovider'];
+const LOCAL_PYTEST_BASETEMP = '.pytest_tmp_backend';
+const DOCKER_PYTEST_BASETEMP = '/tmp/albayan-pytest';
 
 function run(command, args, options = {}) {
   const { quiet = false, ...spawnOptions } = options;
@@ -51,7 +53,14 @@ function testWithPython() {
   const python = findPython();
   if (!python) return null;
   console.log(`Running backend tests with ${python.command}...`);
-  return run(python.command, [...python.prefix, ...PYTEST_ARGS]).status;
+  // Some Windows installations deny access to the shared %TEMP% pytest
+  // directory after another test process has used it. Keep pytest's scratch
+  // files inside this workspace so the release check is deterministic.
+  return run(python.command, [
+    ...python.prefix,
+    ...PYTEST_ARGS,
+    '--basetemp', LOCAL_PYTEST_BASETEMP,
+  ]).status;
 }
 
 function testWithDocker() {
@@ -68,7 +77,7 @@ function testWithDocker() {
     '--env', 'ALBAYAN_COOKIE_SECURE=false',
     '--env', 'ALBAYAN_DB_PATH=/tmp/albayan-tests.db',
     image,
-    'python', ...PYTEST_ARGS,
+    'python', ...PYTEST_ARGS, '--basetemp', DOCKER_PYTEST_BASETEMP,
   ]).status;
 }
 

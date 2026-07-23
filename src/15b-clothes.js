@@ -761,12 +761,15 @@ function renderClothesProductCard(p) {
       : (qty <= CLOTHES_LOW_STOCK_THRESHOLD
         ? 'border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400'
         : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300');
+    // touch-action: manipulation on the +/- steppers: the page is zoomable
+    // (user-scalable=yes), so without it iOS Safari can eat a rapid second
+    // tap as double-tap smart zoom instead of a second increment.
     return `
       <span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium border ${chipClass}">
         <span>${Security.escapeHtml(label)}</span>
-        <button type="button" onclick="adjustClothesVariantQty('${p.id}', ${idx}, -1)" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-rose-200 dark:hover:bg-rose-800 flex items-center justify-center leading-none" title="-1">−</button>
+        <button type="button" onclick="adjustClothesVariantQty('${p.id}', ${idx}, -1)" style="touch-action: manipulation" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-rose-200 dark:hover:bg-rose-800 flex items-center justify-center leading-none" title="-1">−</button>
         <span class="font-bold">${qty}</span>
-        <button type="button" onclick="adjustClothesVariantQty('${p.id}', ${idx}, 1)" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-emerald-200 dark:hover:bg-emerald-800 flex items-center justify-center leading-none" title="+1">+</button>
+        <button type="button" onclick="adjustClothesVariantQty('${p.id}', ${idx}, 1)" style="touch-action: manipulation" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-emerald-200 dark:hover:bg-emerald-800 flex items-center justify-center leading-none" title="+1">+</button>
       </span>
     `;
   }).join('');
@@ -2712,14 +2715,37 @@ function printClothesOrderSlip(orderId) {
   `;
   document.body.appendChild(slip);
   document.body.classList.add('print-single');
+  // Phones don't block on window.print(): the native print sheet stays open
+  // while page JS keeps running, afterprint fires during pagination (sheet
+  // still up), and WebKit/Blink re-paginate from the LIVE DOM whenever the
+  // user picks a printer or changes paper/range in that sheet. The old
+  // afterprint/3s-timer cleanup therefore tore the slip down mid-preview and
+  // a re-paginated print regressed to the full app page. Instead: re-apply
+  // the print markup on every beforeprint pass, and only tear down on the
+  // first user interaction with the page — impossible while the native sheet
+  // covers it — with a long timer as the last-resort fallback for webviews
+  // that fire no print events at all. Harmless meanwhile: every
+  // .print-single/.print-target rule lives inside @media print and the slip
+  // node is parked off-screen, so the lingering markup has zero on-screen
+  // effect.
+  const applyPrintMarkup = () => {
+    if (!slip.isConnected) document.body.appendChild(slip);
+    document.body.classList.add('print-single');
+  };
+  let cleanupTimer = 0;
   const cleanup = () => {
     document.body.classList.remove('print-single');
     slip.remove();
-    window.removeEventListener('afterprint', cleanup);
+    window.removeEventListener('beforeprint', applyPrintMarkup);
+    window.removeEventListener('pointerdown', cleanup, true);
+    window.removeEventListener('keydown', cleanup, true);
+    clearTimeout(cleanupTimer);
   };
-  window.addEventListener('afterprint', cleanup);
-  // Safety net for webviews that never fire afterprint (printReceiptCard pattern)
-  setTimeout(cleanup, 3000);
+  window.addEventListener('beforeprint', applyPrintMarkup);
+  // keydown also disarms so a follow-up Ctrl+P prints the full page again.
+  window.addEventListener('pointerdown', cleanup, { once: true, capture: true });
+  window.addEventListener('keydown', cleanup, { once: true, capture: true });
+  cleanupTimer = setTimeout(cleanup, 60000);
   window.print();
 }
 

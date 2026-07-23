@@ -19,8 +19,13 @@ COPY assets /app/assets
 # Runtime minification is retained as a fallback for local development only.
 RUN python -c "from pathlib import Path; from rjsmin import jsmin; p=Path('/app/script.js'); Path('/app/script.min.js').write_text(jsmin(p.read_text(encoding='utf-8')), encoding='utf-8')"
 
-# Production defaults (can be overridden via docker-compose or env vars)
-ENV ALBAYAN_COOKIE_SECURE=true
+# Production defaults (can be overridden via docker-compose or env vars).
+# ALBAYAN_COOKIE_SECURE is deliberately NOT set: unset means "auto" — the
+# session cookie's Secure flag follows the request scheme (https direct or
+# via x-forwarded-proto => Secure; plain-HTTP LAN => storable cookie), see
+# _cookie_secure_for in server/main.py. Forcing true here made phone logins
+# over http://<lan-ip> silently drop the cookie and loop back to the login
+# screen. Set it explicitly only to pin one behavior.
 ENV ALBAYAN_DB_PATH=/var/lib/albayan/albayan.db
 ENV ALBAYAN_DEBUG_MODE=false
 

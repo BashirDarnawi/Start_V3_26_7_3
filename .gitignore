@@ -15,6 +15,8 @@ node_modules/
 __pycache__/
 *.pyc
 .pycache_tmp/
+.pytest_cache/
+.pytest_tmp*/
 server/data/
 *.db
 

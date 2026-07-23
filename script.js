@@ -45,10 +45,13 @@ const Platform = {
     const ua = navigator.userAgent || '';
     const uaLower = ua.toLowerCase();
     
-    // Check for Capacitor (mobile app)
+    // Check for Capacitor (mobile app). document.URL is read defensively:
+    // headless test sandboxes stub document without it, and detect() is now
+    // reachable from routing paths (browser Back/overlay history model).
+    const docUrl = String((typeof document !== 'undefined' && document.URL) || '');
     const isCapacitor = typeof window.Capacitor !== 'undefined' ||
-                        document.URL.startsWith('capacitor://') ||
-                        document.URL.startsWith('ionic://');
+                        docUrl.startsWith('capacitor://') ||
+                        docUrl.startsWith('ionic://');
     
     // Detect specific platform
     let platform = 'web';
@@ -209,6 +212,69 @@ function togglePerformanceMode(on) {
 applyPerformanceMode();
 
 // ==========================================
+// WORKSPACE EXPERIENCE MODE
+// ==========================================
+// The same business system serves beginners and power users. "Simple" keeps
+// the everyday search and quick filters visible while advanced filters stay
+// one tap away. "Advanced" keeps every filter expanded. This is deliberately
+// a per-device UI preference: it never changes or migrates business data.
+const ALBAYAN_EXPERIENCE_MODE_KEY = 'albayan_experience_mode';
+
+function getWorkspaceExperienceMode() {
+  let preference = null;
+  try { preference = localStorage.getItem(ALBAYAN_EXPERIENCE_MODE_KEY); } catch (_) {}
+  return preference === 'advanced' ? 'advanced' : 'simple';
+}
+
+function isAdvancedWorkspaceMode() {
+  return getWorkspaceExperienceMode() === 'advanced';
+}
+
+function applyWorkspaceExperienceMode() {
+  const advanced = isAdvancedWorkspaceMode();
+  try {
+    if (document.body) {
+      document.body.classList.toggle('workspace-advanced', advanced);
+      document.body.classList.toggle('workspace-simple', !advanced);
+    }
+  } catch (_) {}
+  return advanced ? 'advanced' : 'simple';
+}
+
+function setWorkspaceExperienceMode(mode, options = {}) {
+  const next = mode === 'advanced' ? 'advanced' : 'simple';
+  try { localStorage.setItem(ALBAYAN_EXPERIENCE_MODE_KEY, next); } catch (_) {}
+  applyWorkspaceExperienceMode();
+
+  // A full shell render refreshes the global header, navigation and every
+  // progressive filter panel. Guard the calls because this module loads before
+  // the renderer is declared in the generated bundle.
+  if (options.render !== false) {
+    if (typeof forceFullRender === 'function') forceFullRender();
+    else if (typeof render === 'function') render();
+  }
+
+  if (options.notify !== false && typeof showNotification === 'function' && typeof state !== 'undefined') {
+    const isAr = state.language === 'ar';
+    showNotification(
+      isAr ? 'طريقة عرض مساحة العمل' : 'Workspace View',
+      next === 'advanced'
+        ? (isAr ? 'تم إظهار جميع الأدوات والفلاتر المتقدمة.' : 'All advanced tools and filters are now visible.')
+        : (isAr ? 'تم تفعيل العرض البسيط. الأدوات المتقدمة ما زالت على بُعد ضغطة واحدة.' : 'Simple view is on. Advanced tools remain one tap away.'),
+      'success'
+    );
+  }
+  return next;
+}
+
+function toggleWorkspaceExperienceMode() {
+  return setWorkspaceExperienceMode(isAdvancedWorkspaceMode() ? 'simple' : 'advanced');
+}
+
+// Apply before the first app render to avoid controls flashing open and then
+// collapsing on startup.
+applyWorkspaceExperienceMode();
+// ==========================================
 // CAPACITOR MOBILE RUNTIME
 // ==========================================
 // Native Android Back handling and a clear connectivity notice for the
@@ -229,6 +295,13 @@ function getCapacitorAppPlugin() {
 
 function isPackagedMobileApp() {
   return !!(typeof Platform !== 'undefined' && Platform.isCapacitor);
+}
+
+// Connectivity notices/gate apply to the packaged app AND phone browsers:
+// a phone-browser user whose server is unreachable must see the retryable
+// notice instead of a bare login screen (17-init.js calls this when defined).
+function connectivityUiEnabled() {
+  return isPackagedMobileApp() || (typeof Platform !== 'undefined' && Platform.isMobileBrowser === true);
 }
 
 function mobileRuntimeNeedsServer() {
@@ -253,7 +326,7 @@ function removeMobileConnectionGate() {
 }
 
 function renderMobileConnectionGate() {
-  if (!isPackagedMobileApp() || !mobileRuntimeNeedsServer()) return;
+  if (!connectivityUiEnabled() || !mobileRuntimeNeedsServer()) return;
   _mobileColdStartBlocked = true;
   removeMobileConnectivityNotice();
   const app = document.getElementById('app');
@@ -292,7 +365,7 @@ function setMobileColdStartBlocked(blocked) {
 }
 
 function showMobileConnectivityNotice({ serverReachable = _mobileServerReachable } = {}) {
-  if (!isPackagedMobileApp() || !mobileRuntimeNeedsServer()) {
+  if (!connectivityUiEnabled() || !mobileRuntimeNeedsServer()) {
     removeMobileConnectivityNotice();
     return;
   }
@@ -458,6 +531,15 @@ function closeTopMobileSurface() {
     return true;
   }
 
+  // This alert requires an explicit decision. Android Back follows the safe
+  // "choose another customer" path instead of merely deleting the overlay and
+  // leaving an unacknowledged customer selected underneath it.
+  if (topSurface.id === 'receipt-customer-risk-warning') {
+    if (typeof cancelReceiptCustomerRiskWarning === 'function') cancelReceiptCustomerRiskWarning();
+    else topSurface.remove();
+    return true;
+  }
+
   if (topSurface.id === 'app-modal') {
     if (typeof closeModal === 'function') closeModal();
     else {
@@ -517,7 +599,9 @@ async function handleAndroidBackButton(event = {}) {
 }
 
 async function setupMobileRuntime() {
-  if (_mobileRuntimeReady || !isPackagedMobileApp()) return;
+  // Phone browsers get the connectivity notice/gate too; the Android
+  // backButton listener below stays Capacitor-only (plugin guards).
+  if (_mobileRuntimeReady || !connectivityUiEnabled()) return;
   _mobileRuntimeReady = true;
 
   window.addEventListener('offline', () => showMobileConnectivityNotice({ serverReachable: false }));
@@ -539,6 +623,209 @@ async function setupMobileRuntime() {
     }
   }
 }
+
+// ==========================================
+// PHONE BROWSER BACK + OVERLAY HISTORY MODEL
+// ==========================================
+// DESIGN:
+// 1) Tracked #app-modal dialogs push a ?modal=&id= entry on open
+//    (updateUrlParams stamps it { albayanModal: true }); every OTHER
+//    standalone surface (photo viewer, confirm dialogs, command palette) gets
+//    one same-URL sentinel entry ({ overlaySentinel: true }) pushed centrally
+//    by the <body> observer below, so the ~19 creation sites need no edits.
+//    The nav drawer pushes its own sentinel in toggleMobileMenu because it
+//    renders inside #app where the body observer cannot see it.
+// 2) Hardware/gesture Back pops that entry; the popstate handler
+//    (setupUrlRouting, 11-routing-cloud.js) closes the top surface via
+//    closeTopMobileSurface() and stops — the view underneath never navigates
+//    and unsaved form state (temp photos, top-ups…) survives.
+// 3) Closing with X/Cancel/backdrop instead consumes the entry via
+//    history.back() (closeModal, toggleMobileMenu, the observer), and that
+//    popstate is flagged as bookkeeping so the router never re-renders or
+//    scroll-resets the unchanged view.
+// 4) A navigation that starts while a sentinel is on top REPLACES it
+//    (navigateToInternal), keeping Back balanced after drawer/palette navs.
+// 5) Capacitor keeps its native backButton path (isPackagedMobileApp() gates
+//    the sentinel/popstate logic off); desktop keeps today's behaviour — no
+//    sentinels, but closeModal still consumes its own ?modal entries.
+
+let _overlaySentinelDepth = 0;          // sentinels pushed and not yet consumed this session
+let _albayanLastModalUrlPushAt = 0;     // set by updateUrlParams({ modal… }) — see 11-routing-cloud.js
+let _lastOverlayPopCloseAt = 0;         // a Back press just closed a surface (entry already popped)
+let _suppressOverlayPopstateUntil = 0;  // our own balancing history.back() is in flight
+let _closingSurfaceFromPopstate = false;
+
+function isPhoneBrowserHistoryManaged() {
+  return !isPackagedMobileApp() && typeof Platform !== 'undefined' && !!Platform.isMobile;
+}
+
+function pushMobileOverlayHistoryEntry() {
+  if (!isPhoneBrowserHistoryManaged()) return;
+  try {
+    // Same-URL entry: Back pops it and the popstate handler turns the pop
+    // into "close the top overlay". albayanModal is explicitly cleared so
+    // closeModal() never mistakes a sentinel for a tracked-modal entry;
+    // underAlbayanModal remembers that the dialog's own ?modal entry sits
+    // directly beneath this sentinel (overlay opened late over a tracked
+    // modal — e.g. the duplicate-serial warning), so closeModal() can
+    // consume BOTH entries when it tears the whole stack down at once.
+    window.history.pushState(
+      Object.assign({}, window.history.state || {}, {
+        overlaySentinel: true,
+        albayanModal: false,
+        underAlbayanModal: !!(window.history.state && window.history.state.albayanModal)
+      }),
+      '', window.location.href
+    );
+    _overlaySentinelDepth++;
+  } catch (_) {}
+}
+
+function consumeOverlayHistoryEntry() {
+  // Pop the entry that open pushed. The popstate this triggers is pure
+  // bookkeeping (the surface is already closed), so flag it for the router.
+  _suppressOverlayPopstateUntil = Date.now() + 800;
+  try {
+    window.history.back();
+    return true;
+  } catch (_) {
+    _suppressOverlayPopstateUntil = 0;
+    return false;
+  }
+}
+
+function _overlayHistoryConsumePending() {
+  return Date.now() < _suppressOverlayPopstateUntil;
+}
+
+function shouldSuppressOverlayPopstate() {
+  const suppress = _overlayHistoryConsumePending();
+  _suppressOverlayPopstateUntil = 0; // one-shot: never swallow a real Back
+  return suppress;
+}
+
+function markOverlayPopClose(closed) {
+  if (closed) {
+    _lastOverlayPopCloseAt = Date.now();
+    // The popped entry was the surface's sentinel/?modal entry. Depth may
+    // under-count after a tracked-modal pop; under-counting only ever makes
+    // the observer SKIP an auto-consume (the old status quo), never over-pop.
+    if (_overlaySentinelDepth > 0) _overlaySentinelDepth--;
+  }
+  return !!closed;
+}
+
+// ==========================================
+// CENTRAL OVERLAY OBSERVER (history + iOS body scroll lock)
+// ==========================================
+// Every standalone surface is appended directly to <body> (verified across
+// src/), so one childList observer is the single hook for all creation
+// sites: it pushes/consumes the sentinel entries above and toggles a body
+// scroll lock while any dialog is open. The lock matters on iOS < 16, where
+// overscroll-behavior (style.css) is unsupported: drags inside a dialog
+// scrolled the page underneath, and at scrollTop 0 triggered pull-to-refresh
+// — reloading the SPA and discarding half-filled forms. The existing CSS
+// stays as the iOS 16+/Android fast path.
+
+let _overlayObservedCount = 0;
+let _scrollLockActive = false;
+let _scrollLockY = 0;
+
+function _overlaySurfaceCount() {
+  return document.querySelectorAll(
+    '.mobile-dialog-overlay, #receipt-photo-viewer, #command-palette-modal'
+  ).length;
+}
+
+function _lockBodyScrollForOverlay() {
+  if (_scrollLockActive) return;
+  // Same media condition as the .mobile-dialog-overlay scroll rules in
+  // style.css — phones and short landscape windows; desktop stays untouched.
+  try {
+    if (!window.matchMedia('(max-width: 900px), (max-height: 500px)').matches) return;
+  } catch (_) { return; }
+  _scrollLockY = window.scrollY || window.pageYOffset || 0;
+  const bodyStyle = document.body.style;
+  bodyStyle.position = 'fixed';
+  bodyStyle.top = (-_scrollLockY) + 'px';
+  bodyStyle.left = '0';
+  bodyStyle.right = '0';
+  bodyStyle.width = '100%';
+  _scrollLockActive = true;
+}
+
+function _unlockBodyScrollForOverlay() {
+  if (!_scrollLockActive) return;
+  _scrollLockActive = false;
+  const bodyStyle = document.body.style;
+  bodyStyle.position = '';
+  bodyStyle.top = '';
+  bodyStyle.left = '';
+  bodyStyle.right = '';
+  bodyStyle.width = '';
+  const y = _scrollLockY;
+  window.scrollTo(0, y);
+  // closeModal triggers render(), whose own scroll save/restore may read
+  // scrollY as 0 while the body was still position:fixed — restore again
+  // after that render had its chance to run.
+  requestAnimationFrame(() => window.scrollTo(0, y));
+}
+
+function _handleOverlayDomChange() {
+  const count = _overlaySurfaceCount();
+  const previous = _overlayObservedCount;
+  if (count === previous) return;
+  _overlayObservedCount = count;
+
+  if (count > previous) {
+    // Surface(s) opened. If the opener itself just pushed a ?modal history
+    // entry (all tracked #app-modal openers and the collect-receipt dialog
+    // do, via updateUrlParams), Back already has an entry to consume — a
+    // sentinel too would cost the user an extra Back press. One sentinel per
+    // transition: batch-opens of several untracked surfaces in one task are
+    // not a real flow.
+    if (Date.now() - _albayanLastModalUrlPushAt > 400) {
+      pushMobileOverlayHistoryEntry();
+    }
+  } else {
+    // Surface(s) closed by their own X/Cancel/backdrop handler. A Back-press
+    // close is excluded via _lastOverlayPopCloseAt (entry already popped),
+    // and an in-flight closeModal consume via _overlayHistoryConsumePending.
+    const backJustClosedIt = Date.now() - _lastOverlayPopCloseAt <= 300;
+    const entryState = window.history.state;
+    if (isPhoneBrowserHistoryManaged() && !backJustClosedIt && !_overlayHistoryConsumePending()) {
+      if (entryState && entryState.overlaySentinel && _overlaySentinelDepth > 0) {
+        _overlaySentinelDepth--;
+        consumeOverlayHistoryEntry();
+      } else if (entryState && entryState.albayanModal && count === 0
+                 && (typeof state === 'undefined' || !state.activeModal)) {
+        // Untracked ?modal surface (collect-receipt) closed by its inline
+        // backdrop/X remove(): its own pushed entry is on top — consume it.
+        consumeOverlayHistoryEntry();
+      }
+    }
+  }
+
+  if (count > 0 && previous === 0) _lockBodyScrollForOverlay();
+  else if (count === 0 && previous > 0) _unlockBodyScrollForOverlay();
+}
+
+let _overlayObserverInstalled = false;
+function setupOverlaySurfaceObserver() {
+  if (_overlayObserverInstalled) return;
+  if (typeof MutationObserver === 'undefined' || !document.body) return;
+  _overlayObserverInstalled = true;
+  try {
+    const observer = new MutationObserver(_handleOverlayDomChange);
+    // childList only: all overlay surfaces are direct <body> children.
+    observer.observe(document.body, { childList: true });
+    _overlayObservedCount = _overlaySurfaceCount();
+  } catch (_) {
+    _overlayObserverInstalled = false;
+  }
+}
+// script.js executes at the end of <body>, so document.body exists here.
+setupOverlaySurfaceObserver();
 // ==========================================
 // SECURITY MODULE - XSS Protection, Sanitization, Hashing
 // ==========================================
@@ -552,6 +839,133 @@ const RECORD_IDENTIFIER_FIELDS = new Set([
   'transferFromCustomerId', 'transferFromReceiptId', 'userId'
 ]);
 const RECORD_IDENTIFIER_LIST_FIELDS = new Set(['adReceiptIds', 'customerIds', 'linkedCustomerIds', 'receiptIds']);
+
+// ==========================================
+// PURE-JS CRYPTO FALLBACK (insecure contexts)
+// ==========================================
+// crypto.subtle only exists in secure contexts (https:// or localhost). On a
+// plain-HTTP LAN origin (e.g. a phone opening http://192.168.x.x:8000) it is
+// undefined in both iOS Safari and Android Chrome, which used to make every
+// local-mode password flow throw. These pure-JS SHA-256 / PBKDF2-HMAC-SHA256
+// implementations produce byte-identical output to the Web Crypto API and are
+// used only when crypto.subtle is unavailable.
+
+// New hashes created on the pure-JS path use fewer iterations (still recorded
+// in the stored `iterations` field, so they verify anywhere) because 310k
+// PBKDF2 iterations in plain JS would block the UI for many seconds.
+const _ALB_FALLBACK_PBKDF2_ITERATIONS = 60000;
+
+// SHA-256 round constants (FIPS 180-4)
+const _ALB_SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+]);
+
+// Pure-JS SHA-256. Takes a Uint8Array, returns a 32-byte Uint8Array digest
+// identical to crypto.subtle.digest('SHA-256', bytes).
+function _albFallbackSha256(bytes) {
+  const len = bytes.length;
+  // Pad to: message + 0x80 + zeros + 64-bit big-endian bit length, multiple of 64 bytes.
+  const padded = new Uint8Array(((len + 8) >> 6 << 6) + 64);
+  padded.set(bytes);
+  padded[len] = 0x80;
+  const dv = new DataView(padded.buffer);
+  dv.setUint32(padded.length - 8, Math.floor(len / 0x20000000)); // high 32 bits of len*8
+  dv.setUint32(padded.length - 4, (len << 3) >>> 0);             // low 32 bits of len*8
+
+  const h = new Uint32Array([
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+  ]);
+  const w = new Uint32Array(64);
+
+  for (let off = 0; off < padded.length; off += 64) {
+    for (let i = 0; i < 16; i++) w[i] = dv.getUint32(off + i * 4);
+    for (let i = 16; i < 64; i++) {
+      const w15 = w[i - 15];
+      const w2 = w[i - 2];
+      const s0 = (((w15 >>> 7) | (w15 << 25)) ^ ((w15 >>> 18) | (w15 << 14)) ^ (w15 >>> 3)) >>> 0;
+      const s1 = (((w2 >>> 17) | (w2 << 15)) ^ ((w2 >>> 19) | (w2 << 13)) ^ (w2 >>> 10)) >>> 0;
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+    }
+
+    let a = h[0], b = h[1], c = h[2], d = h[3];
+    let e = h[4], f = h[5], g = h[6], hh = h[7];
+    for (let i = 0; i < 64; i++) {
+      const S1 = (((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7))) >>> 0;
+      const ch = ((e & f) ^ (~e & g)) >>> 0;
+      const t1 = (hh + S1 + ch + _ALB_SHA256_K[i] + w[i]) >>> 0;
+      const S0 = (((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10))) >>> 0;
+      const maj = ((a & b) ^ (a & c) ^ (b & c)) >>> 0;
+      const t2 = (S0 + maj) >>> 0;
+      hh = g; g = f; f = e; e = (d + t1) >>> 0;
+      d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+    }
+    h[0] = (h[0] + a) >>> 0; h[1] = (h[1] + b) >>> 0;
+    h[2] = (h[2] + c) >>> 0; h[3] = (h[3] + d) >>> 0;
+    h[4] = (h[4] + e) >>> 0; h[5] = (h[5] + f) >>> 0;
+    h[6] = (h[6] + g) >>> 0; h[7] = (h[7] + hh) >>> 0;
+  }
+
+  const out = new Uint8Array(32);
+  const outDv = new DataView(out.buffer);
+  for (let i = 0; i < 8; i++) outDv.setUint32(i * 4, h[i]);
+  return out;
+}
+
+// Pure-JS PBKDF2-HMAC-SHA256. Takes Uint8Arrays, returns a byteLen-byte
+// Uint8Array identical to crypto.subtle.deriveBits({ name: 'PBKDF2', ... }).
+function _albFallbackPbkdf2Sha256(passwordBytes, saltBytes, iterations, byteLen) {
+  if (!Number.isFinite(iterations) || iterations < 1) throw new Error('Invalid PBKDF2 iterations');
+
+  // HMAC key: keys longer than the 64-byte SHA-256 block are hashed first.
+  let key = passwordBytes;
+  if (key.length > 64) key = _albFallbackSha256(key);
+  const ipad = new Uint8Array(64);
+  const opad = new Uint8Array(64);
+  for (let i = 0; i < 64; i++) {
+    const k = i < key.length ? key[i] : 0;
+    ipad[i] = k ^ 0x36;
+    opad[i] = k ^ 0x5c;
+  }
+  const hmac = (msg) => {
+    const innerBuf = new Uint8Array(64 + msg.length);
+    innerBuf.set(ipad);
+    innerBuf.set(msg, 64);
+    const inner = _albFallbackSha256(innerBuf);
+    const outerBuf = new Uint8Array(96);
+    outerBuf.set(opad);
+    outerBuf.set(inner, 64);
+    return _albFallbackSha256(outerBuf);
+  };
+
+  const out = new Uint8Array(byteLen);
+  const blocks = Math.ceil(byteLen / 32);
+  for (let block = 1; block <= blocks; block++) {
+    // U1 = HMAC(password, salt || INT_32_BE(block))
+    const msg = new Uint8Array(saltBytes.length + 4);
+    msg.set(saltBytes);
+    msg[saltBytes.length] = (block >>> 24) & 0xff;
+    msg[saltBytes.length + 1] = (block >>> 16) & 0xff;
+    msg[saltBytes.length + 2] = (block >>> 8) & 0xff;
+    msg[saltBytes.length + 3] = block & 0xff;
+    let u = hmac(msg);
+    const t = u.slice();
+    for (let iter = 1; iter < iterations; iter++) {
+      u = hmac(u);
+      for (let i = 0; i < 32; i++) t[i] ^= u[i];
+    }
+    const offset = (block - 1) * 32;
+    out.set(t.subarray(0, Math.min(32, byteLen - offset)), offset);
+  }
+  return out;
+}
 
 const Security = {
   // XSS Protection - Escape HTML entities
@@ -687,49 +1101,68 @@ const Security = {
   },
 
   // Password hashing using Web Crypto API (PBKDF2 by default; legacy SHA-256 supported)
+  // Falls back to pure-JS SHA-256/PBKDF2 when crypto.subtle is unavailable
+  // (insecure http:// origins) — output is byte-identical either way.
   // Returns: { hash, salt, algo, iterations? }
   hashPassword: async (password, salt = null, options = {}) => {
     const algo = options.algo || 'pbkdf2-sha256';
     const pwd = String(password ?? '');
     const encoder = new TextEncoder();
+    // crypto.getRandomValues still works in insecure contexts; only subtle.* is gone.
+    const subtle = (globalThis.crypto && globalThis.crypto.subtle) ? globalThis.crypto.subtle : null;
 
     if (algo === 'sha256') {
       const saltHex = salt
         ? String(salt)
         : Security._bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
       const data = encoder.encode(saltHex + pwd);
-      const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-      const hash = Security._bytesToHex(new Uint8Array(hashBuffer));
+      const digest = subtle
+        ? new Uint8Array(await subtle.digest('SHA-256', data))
+        : _albFallbackSha256(data);
+      const hash = Security._bytesToHex(digest);
       return { hash, salt: saltHex, algo: 'sha256' };
     }
 
-    // PBKDF2-SHA256 (recommended)
-    const iterations = Number.isFinite(options.iterations) ? options.iterations : 310000;
+    // PBKDF2-SHA256 (recommended). New hashes made on the pure-JS path use a
+    // lower default iteration count (recorded in `iterations`, which every
+    // call site round-trips through user.passwordIterations, so the hash
+    // verifies everywhere — including later under HTTPS with native crypto).
+    // Verification always passes the stored count explicitly, so it is never
+    // affected by this default.
+    const iterations = Number.isFinite(options.iterations)
+      ? options.iterations
+      : (subtle ? 310000 : _ALB_FALLBACK_PBKDF2_ITERATIONS);
     const saltBytes = salt
       ? Security._hexToBytes(salt)
       : crypto.getRandomValues(new Uint8Array(16));
     const saltHex = typeof salt === 'string' ? String(salt) : Security._bytesToHex(saltBytes);
 
-    const keyMaterial = await crypto.subtle.importKey(
-      'raw',
-      encoder.encode(pwd),
-      { name: 'PBKDF2' },
-      false,
-      ['deriveBits']
-    );
+    let derived;
+    if (subtle) {
+      const keyMaterial = await subtle.importKey(
+        'raw',
+        encoder.encode(pwd),
+        { name: 'PBKDF2' },
+        false,
+        ['deriveBits']
+      );
 
-    const bits = await crypto.subtle.deriveBits(
-      {
-        name: 'PBKDF2',
-        salt: saltBytes,
-        iterations,
-        hash: 'SHA-256'
-      },
-      keyMaterial,
-      256
-    );
+      const bits = await subtle.deriveBits(
+        {
+          name: 'PBKDF2',
+          salt: saltBytes,
+          iterations,
+          hash: 'SHA-256'
+        },
+        keyMaterial,
+        256
+      );
+      derived = new Uint8Array(bits);
+    } else {
+      derived = _albFallbackPbkdf2Sha256(encoder.encode(pwd), saltBytes, iterations, 32);
+    }
 
-    const hash = Security._bytesToHex(new Uint8Array(bits));
+    const hash = Security._bytesToHex(derived);
     return { hash, salt: saltHex, algo: 'pbkdf2-sha256', iterations };
   },
 
@@ -1053,10 +1486,17 @@ const DataIsolation = {
 // SESSION MANAGEMENT - Secure session handling
 // ==========================================
 
+// iOS Safari with "Block All Cookies" (and Chrome/Android with cookies
+// blocked for the site) makes ANY window.sessionStorage access throw a
+// SecurityError. Local-mode login calls createSession AFTER the password is
+// already verified, so an unguarded throw made login impossible with a
+// misleading generic error. Fall back to a page-lifetime in-memory session.
+let _memorySession = null;
+
 const SessionManager = {
   SESSION_DURATION: 8 * 60 * 60 * 1000, // 8 hours
   SESSION_KEY: 'albayan_session',
-  
+
   createSession: (userId) => {
     const session = {
       userId,
@@ -1064,26 +1504,30 @@ const SessionManager = {
       expiresAt: Date.now() + SessionManager.SESSION_DURATION,
       token: Security.generateSecureId('session')
     };
-    sessionStorage.setItem(SessionManager.SESSION_KEY, JSON.stringify(session));
+    try {
+      sessionStorage.setItem(SessionManager.SESSION_KEY, JSON.stringify(session));
+    } catch (_) {
+      _memorySession = session;
+    }
     return session;
   },
 
   getSession: () => {
     try {
       const sessionStr = sessionStorage.getItem(SessionManager.SESSION_KEY);
-      if (!sessionStr) return null;
-      
-      const session = JSON.parse(sessionStr);
-      
+      const session = sessionStr ? JSON.parse(sessionStr) : _memorySession;
+      if (!session) return null;
+
       // Check if session is expired
       if (Date.now() > session.expiresAt) {
         SessionManager.destroySession();
         return null;
       }
-      
+
       return session;
     } catch (e) {
-      return null;
+      // Storage blocked (throw-on-read): honor the in-memory fallback.
+      return _memorySession && Date.now() <= _memorySession.expiresAt ? _memorySession : null;
     }
   },
 
@@ -1091,12 +1535,17 @@ const SessionManager = {
     const session = SessionManager.getSession();
     if (session) {
       session.expiresAt = Date.now() + SessionManager.SESSION_DURATION;
-      sessionStorage.setItem(SessionManager.SESSION_KEY, JSON.stringify(session));
+      try {
+        sessionStorage.setItem(SessionManager.SESSION_KEY, JSON.stringify(session));
+      } catch (_) {
+        _memorySession = session;
+      }
     }
   },
 
   destroySession: () => {
-    sessionStorage.removeItem(SessionManager.SESSION_KEY);
+    _memorySession = null;
+    try { sessionStorage.removeItem(SessionManager.SESSION_KEY); } catch (_) {}
   },
 
   isAuthenticated: () => {
@@ -1346,28 +1795,136 @@ function _scopedCollectionStorageName(collectionName, capturedScope = _collectio
  * Creates necessary object stores and handles version upgrades.
  * Falls back gracefully if IndexedDB is not supported.
  *
+ * @param {Function} [onLateOpen] - Adoption callback for an open that succeeds
+ *   AFTER this promise already resolved null (watchdog / onblocked). Passing it
+ *   means "adopt the late connection AND recover": the callback must re-persist
+ *   the authoritative in-memory state (the onclose reopen path does this via
+ *   markAllCollectionsDirty() + saveState()). Without it a late connection is
+ *   closed and `db` stays null — required at startup, where the collections
+ *   were already loaded WITHOUT IndexedDB and flushing them would overwrite
+ *   the intact stored copies.
  * @returns {Promise<IDBDatabase|null>} Promise resolving to database instance or null if unsupported
  */
-function initIndexedDB() {
-  return new Promise((resolve, reject) => {
+function initIndexedDB(onLateOpen) {
+  return new Promise((resolve) => {
     if (!window.indexedDB) {
       console.warn('IndexedDB not supported, falling back to localStorage');
       resolve(null);
       return;
     }
-    
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    
+
+    // RESILIENCE: this promise must ALWAYS settle and can NEVER reject —
+    // init() awaits it before the first render, so a hung or failed open
+    // would strand the user on the loading screen forever. Known hangs:
+    // Safari 14.1–15.x can drop the open request without firing any event,
+    // and a DB_VERSION bump in another tab leaves this request in the
+    // (previously unhandled) "blocked" state.
+    let settled = false;
+    let timer = null;
+    const done = (val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(val);
+    };
+
+    // Watchdog: if no event ever arrives, continue without IndexedDB.
+    // This outcome is INCONCLUSIVE — the store may hold an intact workspace
+    // that simply could not be read this session — so flag it for init() /
+    // render(), which must not present the workspace as a fresh install.
+    // A connection that arrives AFTER this fires is NOT silently adopted
+    // (that used to flip saveState() into drop-collections mode and let the
+    // next flush overwrite the intact IndexedDB data): see the case split in
+    // request.onsuccess below.
+    timer = setTimeout(() => {
+      console.warn('IndexedDB open timed out, continuing without it');
+      window.__albayanIdbOpenInconclusive = true;
+      done(null);
+    }, 3000);
+
+    let request;
+    try {
+      request = indexedDB.open(DB_NAME, DB_VERSION);
+    } catch (e) {
+      // Chrome throws a synchronous SecurityError when site data is blocked.
+      console.warn('IndexedDB unavailable:', e);
+      done(null);
+      return;
+    }
+
     request.onerror = (event) => {
       console.error('IndexedDB error:', event.target.error);
-      resolve(null);
+      done(null);
     };
-    
+
+    // Another tab still holds a connection at an older schema version.
+    // Fall back to localStorage mode instead of hanging forever. Like the
+    // watchdog, this is inconclusive: the stored data itself is intact.
+    request.onblocked = () => {
+      console.warn('IndexedDB open blocked by another tab');
+      window.__albayanIdbOpenInconclusive = true;
+      done(null);
+    };
+
     request.onsuccess = (event) => {
-      db = event.target.result;
-      resolve(db);
+      const database = event.target.result;
+      // LATE OPEN (the watchdog or onblocked already resolved this promise
+      // with null): adopting the connection is only safe when the caller can
+      // recover, because `db` truthiness makes saveState() drop the business
+      // collections from the localStorage snapshot and re-enables the dirty
+      // flush — with in-memory arrays that were loaded WITHOUT IndexedDB.
+      // At startup (no onLateOpen) close the connection and stay in the
+      // db === null snapshot mode for the whole session; the intact
+      // IndexedDB dataset survives untouched until the next reload. The
+      // onclose reopen path passes a recovery callback instead: there the
+      // in-memory state IS authoritative, so adopt and re-persist it.
+      if (settled && typeof onLateOpen !== 'function') {
+        try { database.close(); } catch (_) {}
+        return;
+      }
+      db = database;
+      window.__albayanIdbOpenInconclusive = false;
+      // Let a future DB_VERSION bump in another tab proceed instead of being
+      // blocked forever. Closing mid-session degrades gracefully: every idb*
+      // helper guards `if (!db)` per call.
+      database.onversionchange = () => {
+        try { database.close(); } catch (_) {}
+        if (db === database) db = null;
+      };
+      // iOS Safari force-closes the connection when the tab is backgrounded
+      // or the device is locked ("Connection to Indexed Database server
+      // lost"). Null the handle immediately — saveState() then keeps the
+      // business collections inside the localStorage snapshot — and try to
+      // reopen; a successful reopen re-persists everything to IndexedDB via
+      // the normal dirty-flush machinery.
+      database.onclose = () => {
+        if (db !== database) return; // a newer connection already took over
+        db = null;
+        // Recovery runs whether the reopen settles in time (then branch) or
+        // arrives late after its own watchdog (onLateOpen inside onsuccess):
+        // edits made during the db === null window live only in the
+        // localStorage snapshot, so everything must be marked dirty and
+        // re-persisted the moment a connection is adopted — otherwise the
+        // next saveState() would strip the collections from the snapshot
+        // while IndexedDB still holds the pre-close data.
+        const recover = () => {
+          if (typeof markAllCollectionsDirty === 'function') {
+            markAllCollectionsDirty();
+            saveState();
+          }
+        };
+        initIndexedDB(recover).then((reopened) => {
+          if (reopened) recover();
+        }).catch(() => {});
+      };
+      if (settled) {
+        // Late adoption (onclose reopen path only): re-persist before anyone
+        // can observe the truthy `db` and skip collections in saveState().
+        try { onLateOpen(); } catch (_) {}
+      }
+      done(database);
     };
-    
+
     request.onupgradeneeded = (event) => {
       const database = event.target.result;
       
@@ -1556,6 +2113,10 @@ function getCollectionChunkKey(collectionName, index, capturedScope = _collectio
  */
 async function saveCollectionToIndexedDB(collectionName, data) {
   if (!db) return false;
+  // MULTI-TAB SAFETY: a tab that lost the single-writer lock must never
+  // rewrite a collection from its (possibly stale) in-memory array — that
+  // would silently delete records the winning tab already persisted.
+  if (typeof isAnotherTabWriter === 'function' && isAnotherTabWriter()) return false;
   const name = String(collectionName || '');
   if (!name) return false;
   // Capture the scope before the first await. A logout/login during the write
@@ -2575,10 +3136,21 @@ async function copyTextToClipboard(text) {
     ta.style.top = '-1000px';
     ta.style.left = '-1000px';
     document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    document.body.removeChild(ta);
-    return true;
+    try {
+      // iOS Safari cannot select a readonly textarea via select(); use Range + setSelectionRange.
+      // The readonly attribute stays on at creation to suppress the iOS keyboard.
+      ta.contentEditable = 'true';
+      ta.readOnly = false;
+      const range = document.createRange();
+      range.selectNodeContents(ta);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      ta.setSelectionRange(0, value.length);
+      return document.execCommand('copy');
+    } finally {
+      document.body.removeChild(ta);
+    }
   } catch {
     return false;
   }
@@ -3417,7 +3989,10 @@ function walletFormatMinor(amountMinor, currency) {
   const d = walletDecimals(c);
   const major = walletFromMinor(amountMinor, c);
   if (!Number.isFinite(major)) return `0 ${c}`;
-  return `${major.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d })} ${c}`;
+  // Pin en-US so money always renders 1,234.56-style regardless of device
+  // locale (Arabic-region phones would otherwise emit Arabic-Indic digits,
+  // and these strings are also persisted into synced audit logs).
+  return `${major.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d })} ${c}`;
 }
 
 function walletFindByIdempotency(idempotencyKey) {
@@ -3827,7 +4402,13 @@ const state = {
   // Albayan Ads Studio. Campaign requests remain separate from the internal
   // `ads` accounting collection until an authorized manager approves them.
   adCampaignRequests: [],
-  
+
+  // App-wide admin configuration records (append-only, latest-record-wins —
+  // the exchangeRateHistory pattern). Currently holds the liquidity tracking
+  // start date. Admin-only on the server: the collection maps to no permission
+  // module, so only the Admin role can read or write it.
+  appSettings: [],
+
   // Settings
   defaultExchangeRate: 0,
   exchangeRateHistory: [],
@@ -3846,17 +4427,30 @@ const state = {
   activeModal: null,
   modalData: null,
   viewData: null,
+  // Progressive-disclosure panels opened temporarily while the device remains
+  // in Simple workspace mode. Advanced mode ignores these flags and shows all.
+  expandedFilterPanels: {},
   
   // Customer Filters
   customerSearch: '',
   customerSort: 'newest',
   customerFinancialFilter: 'all',
+
+  // Page Filters
+  pageSearch: '',
   
   // Ad Filters
   adSearch: '',
+  adReceiptFilter: '',
+
+  // User Filters
+  userSearch: '',
+  userRoleFilter: 'all',
 
   // Receipt Filters
   receiptSearch: '',
+  receiptCustomerFilter: '',
+  receiptRecordFilter: '',
   receiptStatusFilter: 'all',
   receiptPaymentFilter: 'all',
   receiptDateFilter: 'all',
@@ -3902,7 +4496,9 @@ const PERSISTED_COLLECTIONS = [
   'clothesOrders',
   'clothesSettings',
   // Customer-facing Ads Studio requests (never the internal ads ledger)
-  'adCampaignRequests'
+  'adCampaignRequests',
+  // Admin-only app configuration (liquidity tracking start etc.)
+  'appSettings'
 ];
 
 // Debounced IndexedDB sync (avoid writing huge arrays on every keystroke)
@@ -3924,6 +4520,145 @@ function resetDirtyCollectionQueueForScopeChange() {
   idbSync.scopeGeneration += 1;
 }
 
+// ==========================================
+// SINGLE-WRITER TAB LOCK (multi-tab safety)
+// ==========================================
+// saveCollectionToIndexedDB rewrites whole collections from this tab's
+// in-memory arrays, so a second tab of the same origin silently overwrites
+// the first tab's records (last writer wins). BroadcastChannel and Web Locks
+// are Safari 15.4+ (above the iOS 15.0 baseline), so coordination uses
+// localStorage only: the newest tab claims the lock and older tabs stop
+// persisting until reloaded. A superseded tab deliberately never re-claims a
+// lock on its own (not even a stale one) — the other tab may have written to
+// IndexedDB, and resuming writes from this tab's stale arrays would recreate
+// the exact overwrite bug this lock exists to prevent. Reloading re-claims
+// the lock and re-reads fresh data through the normal init path. Expiry-by-
+// heartbeat (not unload cleanup) is the liveness signal because iOS kills
+// tabs without firing unload.
+const TAB_LOCK_KEY = 'albayan_tab_lock';
+const TAB_LOCK_HEARTBEAT_MS = 5000;
+const _albayanTabLock = {
+  enabled: false,
+  id: '',
+  lost: false,
+  heartbeatTimer: null
+};
+
+function _readTabLockEntry() {
+  try {
+    const raw = localStorage.getItem(TAB_LOCK_KEY);
+    if (!raw) return null;
+    const entry = JSON.parse(raw);
+    if (!entry || typeof entry !== 'object' || typeof entry.id !== 'string') return null;
+    return entry;
+  } catch (_) {
+    return null;
+  }
+}
+
+function _writeTabLockClaim() {
+  try {
+    localStorage.setItem(TAB_LOCK_KEY, JSON.stringify({ id: _albayanTabLock.id, ts: Date.now() }));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// True when another tab has claimed the writer lock. Re-reads localStorage
+// synchronously on every call: iOS Safari suspends background tabs and can
+// deliver 'storage' events late or never, so the listener below is only for
+// showing the overlay promptly — this check is the actual safety mechanism.
+function isAnotherTabWriter() {
+  if (!_albayanTabLock.enabled) return false;
+  if (_albayanTabLock.lost) return true;
+  const entry = _readTabLockEntry();
+  if (entry && entry.id !== _albayanTabLock.id) {
+    _markTabLockLost();
+    return true;
+  }
+  return false;
+}
+
+function _markTabLockLost() {
+  if (_albayanTabLock.lost) return;
+  _albayanTabLock.lost = true;
+  if (_albayanTabLock.heartbeatTimer) {
+    clearInterval(_albayanTabLock.heartbeatTimer);
+    _albayanTabLock.heartbeatTimer = null;
+  }
+  _showTabLockOverlay();
+}
+
+// Blocking overlay for the superseded tab — LOCAL MODE ONLY. In server mode
+// the backend is the source of truth (every edit goes through the API and
+// live sync reconciles), so the losing tab keeps working and merely skips
+// its local cache writes.
+function _showTabLockOverlay() {
+  try {
+    if ((typeof isServerModeEnabled === 'function') && isServerModeEnabled()) return;
+    if (!document.body || document.getElementById('albayan-tab-lock-overlay')) return;
+    const isAr = (typeof state !== 'undefined') && state.language === 'ar';
+    const overlay = document.createElement('div');
+    overlay.id = 'albayan-tab-lock-overlay';
+    overlay.setAttribute('role', 'alertdialog');
+    overlay.setAttribute('aria-modal', 'true');
+    // Inline styles: this overlay must render even if a stylesheet failed.
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;padding:1.25rem;background:rgba(15,23,42,0.94);color:#fff;text-align:center;';
+    overlay.innerHTML = `
+      <div style="max-width:26rem;">
+        <h2 style="font-size:1.25rem;font-weight:800;margin-bottom:0.75rem;">
+          ${isAr ? 'التطبيق مفتوح في علامة تبويب أخرى' : 'App is open in another tab'}
+        </h2>
+        <p style="font-size:0.9rem;line-height:1.6;margin-bottom:1.25rem;">
+          ${isAr
+            ? 'لحماية بياناتك من الكتابة المتعارضة، تعمل علامة تبويب واحدة فقط في كل مرة. أغلق هذه النافذة أو أعد تحميلها لاستخدام التطبيق هنا.'
+            : 'To protect your data from conflicting writes, only one tab can be active at a time. Close this tab, or reload it to use the app here.'}
+        </p>
+        <button type="button" onclick="window.location.reload()" style="min-height:2.75rem;padding:0.6rem 1.5rem;border-radius:0.75rem;border:0;background:#4f46e5;color:#fff;font-weight:700;cursor:pointer;">
+          ${isAr ? 'إعادة التحميل والاستخدام هنا' : 'Reload and use here'}
+        </button>
+      </div>`;
+    document.body.appendChild(overlay);
+  } catch (_) {}
+}
+
+function initAlbayanTabWriterLock() {
+  try {
+    // The packaged Capacitor WebView is single-instance — no lock needed.
+    if (typeof Platform !== 'undefined' && Platform.isCapacitor) return;
+    if (typeof localStorage === 'undefined') return;
+    _albayanTabLock.id = Security.generateSecureId('tab');
+    // Newest tab wins: claim unconditionally. If storage is blocked entirely,
+    // fail open (no coordination possible, but persistence must keep working).
+    if (!_writeTabLockClaim()) return;
+    _albayanTabLock.enabled = true;
+    const heartbeat = setInterval(() => {
+      if (_albayanTabLock.lost) return;
+      const entry = _readTabLockEntry();
+      if (entry && entry.id !== _albayanTabLock.id) {
+        _markTabLockLost();
+        return;
+      }
+      _writeTabLockClaim();
+    }, TAB_LOCK_HEARTBEAT_MS);
+    // In the browser this is a number; in the Node test sandbox it is a
+    // Timeout object that would otherwise keep the test process alive.
+    if (heartbeat && typeof heartbeat.unref === 'function') heartbeat.unref();
+    _albayanTabLock.heartbeatTimer = heartbeat;
+    // 'storage' fires only in OTHER tabs — the moment a newer tab claims,
+    // surface the overlay here instead of waiting for the next write attempt.
+    window.addEventListener('storage', (e) => {
+      if (e && e.key !== TAB_LOCK_KEY) return;
+      if (isAnotherTabWriter()) _showTabLockOverlay();
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && isAnotherTabWriter()) _showTabLockOverlay();
+    });
+  } catch (_) {}
+}
+initAlbayanTabWriterLock();
+
 function getCollectionNameFromArray(array) {
   if (array === state.ads) return 'ads';
   if (array === state.receipts) return 'receipts';
@@ -3938,6 +4673,7 @@ function getCollectionNameFromArray(array) {
   if (array === state.clothesOrders) return 'clothesOrders';
   if (array === state.clothesSettings) return 'clothesSettings';
   if (array === state.adCampaignRequests) return 'adCampaignRequests';
+  if (array === state.appSettings) return 'appSettings';
   return null;
 }
 
@@ -3964,6 +4700,9 @@ function markAllCollectionsDirty() {
 }
 
 async function flushDirtyCollections() {
+  // Another tab owns persistence now — writing this tab's (possibly stale)
+  // arrays would overwrite its records. See the single-writer tab lock above.
+  if (isAnotherTabWriter()) return;
   if (!db || idbSync.flushing) return;
   if (idbSync.dirty.size === 0) return;
 
@@ -3980,6 +4719,17 @@ async function flushDirtyCollections() {
         const saved = await saveCollectionToIndexedDB(name, state[name]);
         if (saved === false) failed.push(name);
       } catch (e) {
+        // A connection iOS Safari force-closed can race past onclose: the
+        // handle is dead but still truthy and every transaction() throws
+        // InvalidStateError. Null it so saveState() immediately falls back to
+        // keeping collections inside the localStorage snapshot; the onclose
+        // reopen path re-persists to IndexedDB once a connection returns.
+        if (e && e.name === 'InvalidStateError') {
+          console.warn('IndexedDB connection lost mid-flush — falling back to localStorage');
+          db = null;
+          saveState();
+          return;
+        }
         console.warn(`IndexedDB save failed for "${name}":`, e);
         failed.push(name);
       }
@@ -4017,7 +4767,73 @@ async function flushDirtyCollections() {
   }
 }
 
+// ==========================================
+// STORAGE-EVICTION DETECTION (local mode)
+// ==========================================
+// iOS Safari's ITP deletes ALL script-writable storage (localStorage AND
+// IndexedDB, including the in-app backups store) for an origin after 7 days
+// of Safari use without a visit; Chrome/Android can evict non-persistent
+// origins under disk pressure. After such a wipe the app is indistinguishable
+// from a fresh install — except for this cookie, which browsers do not evict
+// with site storage (best-effort on iOS, where ITP caps JS cookies at 7 days).
+let _hadDataSentinelSet = false;
+function _maybeSetHadDataSentinel() {
+  if (_hadDataSentinelSet) return;
+  try {
+    if ((typeof isServerModeEnabled === 'function') && isServerModeEnabled()) return;
+    if (!Array.isArray(state.users) || state.users.length === 0) return;
+    document.cookie = 'albayan_had_data=1; max-age=63072000; path=/; SameSite=Lax';
+    _hadDataSentinelSet = true;
+  } catch (_) {}
+}
+
+// True when the sentinel cookie above exists — i.e. a local workspace with
+// real data lived on this device at some point, however storage looks now.
+function _albayanHadDataCookie() {
+  try {
+    return String(document.cookie || '')
+      .split(';')
+      .some(part => part.trim().indexOf('albayan_had_data=') === 0);
+  } catch (_) {
+    return false;
+  }
+}
+
+// Captured ONCE at boot by loadState(): the snapshot was missing while the
+// sentinel cookie survived. It must be a runtime flag, not a render-time
+// localStorage re-read — loadCollectionsFromStorage()'s trailing saveState()
+// re-creates the snapshot BEFORE the first render, so re-reading it later
+// could never observe the eviction.
+let _storageLossAtBoot = false;
+
+// Render-side contract: when the local first-run branch would show the
+// "create your first admin" setup screen, call this first — true means the
+// browser deleted this device's stored business data (loadState() found the
+// sentinel cookie but no snapshot at boot) and a data-loss/recovery screen
+// (restore from an exported backup) must be rendered instead of first-run
+// setup. Restoring a backup or creating an admin clears it via the
+// users.length guard; renderStorageLossRecovery's "start fresh" button opts
+// out via state._storageLossAcknowledged.
+function albayanDetectStorageLoss() {
+  try {
+    if ((typeof isServerModeEnabled === 'function') && isServerModeEnabled()) return false;
+    if (Array.isArray(state.users) && state.users.length > 0) return false;
+    return _storageLossAtBoot;
+  } catch (_) {
+    return false;
+  }
+}
+
+// The Settings export flow should call this after a successful backup export
+// so the local-mode durability reminder stays quiet for the next few days.
+function albayanNoteBackupExported() {
+  try { localStorage.setItem('albayan_last_backup_export_at', String(Date.now())); } catch (_) {}
+}
+
 function saveState() {
+  // Another tab is the single writer now (see the tab lock above) — this
+  // tab's snapshot may be stale and must not clobber the winner's.
+  if (isAnotherTabWriter()) return;
   try {
     // Create a copy of state with optimized log storage
     // Keep only recent logs in localStorage, all logs are in IndexedDB
@@ -4051,7 +4867,9 @@ function saveState() {
     delete toSave.tempReceiptPhotos;
     delete toSave.tempAdPhotosDirty;
     delete toSave.tempReceiptPhotosDirty;
-    
+    // Runtime-only connectivity flag (first-visit health-probe result)
+    delete toSave.serverProbeFailed;
+
     // Sanitize before persistence (defense-in-depth)
     const sanitizedToSave = Security.sanitizeObject(toSave);
     // PERFORMANCE: serialize ONCE and reuse for both the size check and the
@@ -4071,6 +4889,10 @@ function saveState() {
     }
 
     localStorage.setItem('albayan_complete_state', dataString);
+    // Storage-eviction sentinel: in local mode with real data, leave a cookie
+    // behind so a later browser wipe of localStorage+IndexedDB (Safari ITP,
+    // Chrome storage pressure) is distinguishable from a genuine first run.
+    _maybeSetHadDataSentinel();
   } catch (error) {
     console.error('Error saving state:', error);
     
@@ -4127,6 +4949,16 @@ function debouncedSaveState() {
 function loadState() {
   try {
     const saved = localStorage.getItem('albayan_complete_state');
+    if (!saved) {
+      // EVICTION SIGNAL — capture it now or never. init()'s local branch runs
+      // loadCollectionsFromStorage(), whose trailing saveState() re-creates
+      // this snapshot before the first render; a missing snapshot combined
+      // with a surviving sentinel cookie means the browser wiped this
+      // device's stored data (Safari ITP 7-day wipe, Chrome disk pressure).
+      // Only the clean not-present case counts: a corrupt-but-present
+      // snapshot throws below and must not be misreported as eviction.
+      _storageLossAtBoot = _albayanHadDataCookie();
+    }
     if (saved) {
       const parsed = JSON.parse(saved);
       
@@ -4167,7 +4999,8 @@ function loadState() {
       if (!Array.isArray(state.clothesShipments)) state.clothesShipments = [];
       if (!Array.isArray(state.clothesOrders)) state.clothesOrders = [];
       if (!Array.isArray(state.clothesSettings)) state.clothesSettings = [];
-      
+      if (!Array.isArray(state.appSettings)) state.appSettings = [];
+
       // Validate language (must be 'en' or 'ar')
       if (state.language !== 'en' && state.language !== 'ar') {
         state.language = 'en';
@@ -4725,6 +5558,32 @@ async function ensureUsersHavePasswordHashes() {
     await flushDirtyCollections();
   }
 }
+
+// ==========================================
+// LIFECYCLE FLUSH (phone browsers)
+// ==========================================
+// Phone browsers freeze all timers the instant the page is hidden, and iOS
+// jettisons backgrounded tabs before they resume — losing whatever sat in the
+// 800ms-debounced IndexedDB flush and the 300ms-debounced saveState (in local
+// mode with IndexedDB, that debounced flush is the ONLY durable copy of the
+// business collections). visibilitychange:hidden is the last moment IndexedDB
+// transactions can still start on iOS app-switch; pagehide covers real
+// navigations/reloads. Double-firing is harmless: flushDirtyCollections is
+// re-entrancy-guarded and a no-op when nothing is dirty.
+function flushPersistenceNow() {
+  try {
+    if (_saveStateTimer) { clearTimeout(_saveStateTimer); _saveStateTimer = null; }
+    saveState();
+  } catch (_) {}
+  try {
+    if (idbSync.timer) { clearTimeout(idbSync.timer); idbSync.timer = null; }
+    flushDirtyCollections().catch(() => {});
+  } catch (_) {}
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushPersistenceNow();
+});
+window.addEventListener('pagehide', flushPersistenceNow, { passive: true });
 // ==========================================
 // TRANSLATIONS
 // ==========================================
@@ -4977,6 +5836,7 @@ function toggleTheme() {
 function toggleLanguage() {
   state.language = state.language === 'en' ? 'ar' : 'en';
   document.documentElement.setAttribute('dir', getDir());
+  document.documentElement.setAttribute('lang', state.language === 'ar' ? 'ar' : 'en');
   saveState();
   // Force a FULL re-render, not the partial (same-view) content swap: the
   // <main> wrapper's sidebar-offset margin is direction-dependent
@@ -4997,12 +5857,56 @@ function toggleLanguage() {
 // scrolling and flashed the background. Performance mode (body.perf-lite)
 // handles weak devices properly by turning effects off permanently.
 
-// Debounced icon refresh (batches multiple calls)
+// Strip data-lucide from the SVGs lucide creates: the library keeps the
+// attribute on the replacement SVG, so every later createIcons() pass
+// re-matched every already-converted icon and rebuilt it (createElement +
+// replaceChild across the whole page) — repeated full-page DOM churn on every
+// render tick and search keystroke. Stripping AFTER each pass makes all the
+// existing bare createIcons() calls cheap without touching them, and keeps
+// the icon-swap pattern working (14-forms.js re-sets data-lucide on a
+// converted SVG right before calling createIcons(), so that SVG re-matches
+// for exactly that one pass). Installed lazily because lucide.min.js is a
+// DEFERRED script now and arrives after script.js evaluates.
+function ensureLucideCreateIconsWrapped() {
+  if (!window.lucide || lucide.__iconsWrapped) return;
+  const _originalCreateIcons = lucide.createIcons.bind(lucide);
+  lucide.createIcons = function (opts) {
+    _originalCreateIcons(opts);
+    const root = (opts && opts.root) || document;
+    root.querySelectorAll('svg[data-lucide]').forEach(svg => svg.removeAttribute('data-lucide'));
+  };
+  lucide.__iconsWrapped = true;
+}
+ensureLucideCreateIconsWrapped();
+
+// Debounced icon refresh (batches multiple calls).
+// EXECUTION ORDER (why flush() must retry): lucide.min.js is a deferred
+// <head> script, while script.js is a CLASSIC end-of-body script — per the
+// HTML spec a classic script executes DURING parsing, BEFORE deferred
+// scripts run. So window.lucide may not exist yet when early code schedules
+// icons; the old `if (!window.lucide) return;` also left `timer` set, which
+// wedged the queue forever. flush() now keeps the queue and retries until
+// the library arrives (deferred scripts are guaranteed to run before
+// DOMContentLoaded, so this resolves within the load phase).
 const IconQueue = {
   pending: new Set(),
   timer: null,
+  retries: 0,
   flush() {
-    if (!window.lucide) return;
+    if (!window.lucide) {
+      // Retry every 50ms; give up after ~10s (blocked/404 library) so no
+      // timer spins forever. A later schedule() starts a fresh retry window.
+      IconQueue.retries++;
+      if (IconQueue.retries > 200) {
+        IconQueue.retries = 0;
+        IconQueue.timer = null;
+        return;
+      }
+      IconQueue.timer = setTimeout(() => IconQueue.flush(), 50);
+      return;
+    }
+    ensureLucideCreateIconsWrapped();
+    IconQueue.retries = 0;
     const containers = Array.from(IconQueue.pending);
     IconQueue.pending.clear();
     IconQueue.timer = null;
@@ -5011,10 +5915,13 @@ const IconQueue = {
         // Full scan needed
         lucide.createIcons();
       } else {
-        // Scoped scan - much faster
+        // Scoped scan — `root` is the option the bundled lucide actually
+        // supports ({icons, nameAttr, attrs, root, inTemplates}); the old
+        // `nodes:` option does not exist upstream and silently fell back to
+        // a FULL document scan once per queued container.
         for (const c of containers) {
           if (c instanceof Element) {
-            lucide.createIcons({ nodes: c.querySelectorAll('[data-lucide]') });
+            lucide.createIcons({ root: c });
           }
         }
       }
@@ -5103,6 +6010,9 @@ function showNotification(title, message, type = 'info') {
 
   const notification = document.createElement('div');
   notification.dataset.notifKey = notifKey;
+  notification.setAttribute('role', type === 'error' || type === 'warning' ? 'alert' : 'status');
+  notification.setAttribute('aria-live', type === 'error' || type === 'warning' ? 'assertive' : 'polite');
+  notification.setAttribute('aria-atomic', 'true');
   notification.className = `notification-enter glass-panel px-4 py-3 rounded-xl shadow-lg flex items-start space-x-3 mb-2 ${
     type === 'success' ? 'border-l-4 border-green-500' :
     type === 'error' ? 'border-l-4 border-red-500' :
@@ -5127,7 +6037,7 @@ function showNotification(title, message, type = 'info') {
       <div class="font-bold text-sm truncate">${safeTitle}</div>
       <div class="text-xs opacity-80 break-words">${safeMessage}</div>
     </div>
-    <button onclick="this.parentElement.remove()" class="text-slate-400 hover:text-slate-600 dark:hover:text-white transition-colors">
+    <button onclick="this.parentElement.remove()" aria-label="${state.language === 'ar' ? 'إغلاق الإشعار' : 'Close notification'}" class="text-slate-400 hover:text-slate-600 dark:hover:text-white transition-colors">
       <i data-lucide="x" class="w-4 h-4"></i>
     </button>
   `;
@@ -5141,7 +6051,6 @@ function showNotification(title, message, type = 'info') {
     setTimeout(() => notification.remove(), 300);
   }, 5000);
 }
-
 // ==========================================
 // DATA HELPERS
 // ==========================================
@@ -5290,6 +6199,317 @@ function addRecord(array, record) {
   return Promise.resolve(true);
 }
 
+function _localFundingMinor(value) {
+  if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) return 0;
+  if (typeof value === 'boolean') throw new Error('Stored funding amount is invalid');
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) throw new Error('Stored funding amount is invalid');
+  if (parsed === 0) return 0;
+  // All local settlement math uses integer cents. Add a scale-aware epsilon
+  // before half-up rounding so values such as 1.005 do not become 100 cents
+  // because of binary floating-point representation.
+  const scaled = parsed * 100;
+  return Math.floor(scaled + 0.5 + (Number.EPSILON * Math.max(1, Math.abs(scaled)) * 4));
+}
+
+function _localFundingMap(rows) {
+  const result = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const receiptId = String(row?.receiptId || '');
+    const amount = _localFundingMinor(row?.amountUSD);
+    if (!receiptId || amount <= 0) continue;
+    result.set(receiptId, (result.get(receiptId) || 0) + amount);
+  }
+  return result;
+}
+
+function _localFundingRows(values) {
+  return [...values.entries()]
+    .filter(([, amount]) => amount > 0)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([receiptId, amount]) => ({ receiptId, amountUSD: amount / 100 }));
+}
+
+function _localLegacyDueMinor(ad) {
+  const direct = _localFundingMinor(ad?.dueAmountToUseUSD);
+  if (direct > 0) return direct;
+  const rawLocal = ad?.dueAmountToUseLYD;
+  if (rawLocal === undefined || rawLocal === null || (typeof rawLocal === 'string' && rawLocal.trim() === '')) return 0;
+  if (typeof rawLocal === 'boolean') throw new Error('Stored funding amount is invalid');
+  const lyd = Number(rawLocal);
+  if (!Number.isFinite(lyd) || lyd < 0) throw new Error('Stored funding amount is invalid');
+  if (lyd === 0) return 0;
+  if (typeof ad?.exchangeRate === 'boolean') throw new Error('Stored funding exchange rate is invalid');
+  const rate = Number(ad?.exchangeRate);
+  if (!Number.isFinite(rate) || rate <= 0) throw new Error('Stored funding exchange rate is invalid');
+  return _localFundingMinor(lyd / rate);
+}
+
+// Legacy debt rows stored the promised amount in dueAmountToUseUSD/LYD instead
+// of dueAllocations. Driver ads identify that receipt via
+// linkedDeliveryReceiptId — or, for the oldest rows that predate that field,
+// via receiptId; In-Shop ads identify it via receiptId. Settlement and the ad
+// form both honor the receiptId fallback, so the balance readers must speak
+// for the same money. A zero-amount link remains provenance only and must
+// never become money.
+function isAdLegacyDueMirrorForReceipt(ad, receiptId) {
+  const rid = String(receiptId || '');
+  if (!ad || !rid) return false;
+  if (String(ad.linkedDeliveryReceiptId || '') === rid) return true;
+  const paymentState = typeof getAdPaymentState === 'function'
+    ? getAdPaymentState(ad)
+    : (ad.isPaid === true ? 'paid' : 'not_paid');
+  if (paymentState !== 'not_paid') return false;
+  const method = String(ad.collectionMethod || '');
+  if (method === 'in_shop') return String(ad.receiptId || '') === rid;
+  return method === 'driver'
+    && String(ad.linkedDeliveryReceiptId || '') === ''
+    && String(ad.receiptId || '') === rid;
+}
+
+function getAdLegacyDueMirrorUSD(ad, receiptId, fallbackRate = 0) {
+  if (!isAdLegacyDueMirrorForReceipt(ad, receiptId)) return 0;
+  const direct = Number(ad?.dueAmountToUseUSD);
+  if (Number.isFinite(direct) && direct > 0) return Math.round(direct * 100) / 100;
+  const local = Number(ad?.dueAmountToUseLYD);
+  const rate = Number(ad?.exchangeRate) || Number(fallbackRate) || Number(state.defaultExchangeRate) || 0;
+  if (!Number.isFinite(local) || local <= 0 || !Number.isFinite(rate) || rate <= 0) return 0;
+  return Math.round((local / rate) * 100) / 100;
+}
+
+function _localAdCommittedMinor(ad, receiptId) {
+  const rid = String(receiptId || '');
+  const paid = _localFundingMap(ad?.receiptAllocations).get(rid) || 0;
+  const dueMap = _localFundingMap(ad?.dueAllocations);
+  const due = dueMap.get(rid) || 0;
+  let legacyDue = 0;
+  // The scalar mirror is standalone money ONLY for rowless ads. Once due
+  // rows exist the writers keep dueAmountToUseUSD equal to their sum, so
+  // attributing it to the linked receipt again would count the same
+  // dollars on two receipts at once.
+  if (isAdLegacyDueMirrorForReceipt(ad, rid) && due === 0 && dueMap.size === 0) {
+    legacyDue = _localLegacyDueMinor(ad);
+  }
+  const explicit = paid + due + legacyDue;
+  if (explicit > 0) return explicit;
+
+  // Once either allocation ledger exists, a missing row means this receipt
+  // committed zero. Falling back to the full ad amount would charge another
+  // receipt for money it never supplied.
+  if (Array.isArray(ad?.receiptAllocations) || Array.isArray(ad?.dueAllocations)) return 0;
+  const paymentState = typeof getAdPaymentState === 'function'
+    ? getAdPaymentState(ad)
+    : (ad?.isPaid === true ? 'paid' : 'not_paid');
+  if (paymentState === 'not_paid' && ['driver', 'in_shop'].includes(String(ad?.collectionMethod || ''))) {
+    return 0;
+  }
+  const references = new Set([
+    String(ad?.fundingReceiptId || ''),
+    String(ad?.receiptId || ''),
+    String(ad?.linkedDeliveryReceiptId || '')
+  ]);
+  if (!references.has(rid)) return 0;
+  return _localFundingMinor(ad?.spentUSD !== undefined && ad?.spentUSD !== null ? ad.spentUSD : ad?.amountUSD);
+}
+
+function _localReceiptOutgoingMinor(receipt) {
+  if (receipt?.transfers === undefined || receipt?.transfers === null) return 0;
+  if (!Array.isArray(receipt.transfers)) throw new Error('Stored receipt transfers are invalid');
+  return receipt.transfers.reduce((sum, transfer) => {
+    if (!transfer || typeof transfer !== 'object' || Array.isArray(transfer)) {
+      throw new Error('Stored receipt transfer is invalid');
+    }
+    const amount = Number(transfer.amountUSD);
+    if (!Number.isFinite(amount) || amount < 0) throw new Error('Stored receipt transfer amount is invalid');
+    return sum + _localFundingMinor(amount);
+  }, 0);
+}
+
+// Local/offline parity for the server settlement transaction. It converts only
+// explicit due money (allocation row or positive legacy dueAmount mirror); a
+// link by itself is provenance and never mints credit. Every plan is validated
+// before updateRecord changes the receipt or any ad.
+function planLocalReceiptPaidAdUpdates(receiptId, nextReceipt = null) {
+  const rid = String(receiptId || '');
+  const receipt = nextReceipt || (state.receipts || []).find(row => row && String(row.id) === rid);
+  if (!receipt || receipt._deleted) throw new Error('Receipt not found');
+  const receiptCustomerId = String(receipt.customerId || '');
+  const actorId = String(state.currentUser?.id || '');
+  const now = new Date().toISOString();
+  const plans = [];
+  const plannedById = new Map();
+  for (let index = 0; index < (state.ads || []).length; index++) {
+    const ad = state.ads[index];
+    if (!ad || ad._deleted || String(ad.recordType || '') === 'receipt') continue;
+    const paymentState = typeof getAdPaymentState === 'function'
+      ? getAdPaymentState(ad)
+      : (ad.isPaid === true ? 'paid' : 'not_paid');
+    const collectionMethod = String(ad.collectionMethod || '');
+    const isDriverLink = paymentState === 'not_paid'
+      && collectionMethod === 'driver'
+      && String(ad.linkedDeliveryReceiptId || ad.receiptId || '') === rid;
+    const isShopLink = paymentState === 'not_paid'
+      && collectionMethod === 'in_shop'
+      && String(ad.receiptId || '') === rid;
+
+    const paid = _localFundingMap(ad.receiptAllocations);
+    const due = _localFundingMap(ad.dueAllocations);
+    let moved = due.get(rid) || 0;
+    due.delete(rid);
+    // The scalar mirror converts as standalone money only for rowless ads;
+    // when due rows survive for other receipts the mirror is their sum and
+    // converting it here would mint the same dollars a second time.
+    if (moved <= 0 && (isDriverLink || isShopLink) && due.size === 0) moved = _localLegacyDueMinor(ad);
+
+    const stopBaseline = ad.stopAllocationBaseline;
+    const hasStopBaseline = !!stopBaseline && typeof stopBaseline === 'object' && !Array.isArray(stopBaseline);
+    const stopPaid = _localFundingMap(hasStopBaseline ? stopBaseline.receipt : []);
+    const stopDue = _localFundingMap(hasStopBaseline ? stopBaseline.due : []);
+    const stopMoved = stopDue.get(rid) || 0;
+    stopDue.delete(rid);
+    const stopLegacy = hasStopBaseline && stopMoved <= 0 && (isDriverLink || isShopLink)
+      ? _localFundingMinor(stopBaseline.dueLegacy)
+      : 0;
+    const refundPaid = _localFundingMap(ad.refundAllocationBaseline);
+    const refundDue = _localFundingMap(ad.refundDueBaseline);
+    const refundMoved = refundDue.get(rid) || 0;
+    refundDue.delete(rid);
+    const baselineChanged = stopMoved + stopLegacy + refundMoved > 0;
+    if (moved <= 0 && !baselineChanged) continue;
+
+    if (String(ad.customerId || '') !== receiptCustomerId) {
+      throw new Error('Linked ad and receipt belong to different customers');
+    }
+
+    const next = { ...ad };
+    let fullyFunded = false;
+    if (moved > 0) {
+      paid.set(rid, (paid.get(rid) || 0) + moved);
+      const target = _localFundingMinor(ad.spentUSD !== undefined && ad.spentUSD !== null ? ad.spentUSD : ad.amountUSD);
+      const totalAfter = [...paid.values(), ...due.values()].reduce((sum, amount) => sum + amount, 0);
+      if (totalAfter > target) throw new Error('Linked ad funding exceeds its authoritative amount');
+
+      const receiptAllocations = _localFundingRows(paid);
+      const dueAllocations = _localFundingRows(due);
+      fullyFunded = totalAfter === target && due.size === 0;
+      Object.assign(next, {
+        receiptAllocations,
+        dueAllocations,
+        dueAmountToUseUSD: [...due.values()].reduce((sum, amount) => sum + amount, 0) / 100,
+        dueAmountToUseLYD: 0,
+        receiptIds: receiptAllocations.map(row => row.receiptId),
+        fundingReceiptId: receiptAllocations[0]?.receiptId || ''
+      });
+      if (fullyFunded) {
+        Object.assign(next, {
+          paymentStatus: 'paid', isPaid: true, collectionMethod: '', collectionPayments: [],
+          paymentMethod: '', linkedDeliveryReceiptId: '', mergedPaidAllocations: [],
+          hasMergedPaidFunds: false, receiptId: receiptAllocations[0]?.receiptId || ''
+        });
+      } else {
+        next.paymentStatus = 'not_paid';
+        next.isPaid = false;
+        next.mergedPaidAllocations = collectionMethod === 'driver'
+          ? receiptAllocations.map(row => ({ ...row }))
+          : [];
+        next.hasMergedPaidFunds = collectionMethod === 'driver' && receiptAllocations.length > 0;
+        if (collectionMethod === 'in_shop' && due.size === 0) next.receiptId = '';
+      }
+    }
+
+    // Frozen stop/refund baselines move even when live funding is zero. A later
+    // reconciliation/refund reversal must never resurrect paid money as debt.
+    if (hasStopBaseline && (stopMoved > 0 || stopLegacy > 0)) {
+      stopPaid.set(rid, (stopPaid.get(rid) || 0) + stopMoved + stopLegacy);
+      const baselineReceiptRows = _localFundingRows(stopPaid);
+      const nextBaseline = {
+        ...stopBaseline,
+        receipt: baselineReceiptRows,
+        due: _localFundingRows(stopDue),
+        dueLegacy: 0
+      };
+      if (stopDue.size === 0 && [...stopPaid.values()].reduce((sum, amount) => sum + amount, 0) === _localFundingMinor(ad.amountUSD)) {
+        nextBaseline.paymentStatus = 'paid';
+      }
+      nextBaseline.merged = String(nextBaseline.paymentStatus || '') !== 'paid'
+        && getAdPaymentState(next) === 'not_paid'
+        && String(next.collectionMethod || '') === 'driver'
+          ? baselineReceiptRows.map(row => ({ ...row }))
+          : [];
+      next.stopAllocationBaseline = nextBaseline;
+    }
+    if (refundMoved > 0) {
+      refundPaid.set(rid, (refundPaid.get(rid) || 0) + refundMoved);
+      next.refundAllocationBaseline = _localFundingRows(refundPaid);
+      next.refundDueBaseline = _localFundingRows(refundDue);
+      if (refundDue.size === 0 && [...refundPaid.values()].reduce((sum, amount) => sum + amount, 0) === _localFundingMinor(ad.amountUSD)) {
+        next.refundBaselinePaymentStatus = 'paid';
+      }
+    }
+
+    // A stopped-at-zero or fully-refunded ad may have no live due row: only
+    // its frozen baseline contained the promise converted above. Align the
+    // current badge/provenance immediately when its live rows now fully cover
+    // the effective spend (including a zero-dollar effective spend).
+    const livePaid = _localFundingMap(next.receiptAllocations);
+    const liveDue = _localFundingMap(next.dueAllocations);
+    const liveTarget = _localFundingMinor(next.spentUSD !== undefined && next.spentUSD !== null ? next.spentUSD : next.amountUSD);
+    if (baselineChanged && liveDue.size === 0 && [...livePaid.values()].reduce((sum, amount) => sum + amount, 0) === liveTarget) {
+      const paidRows = _localFundingRows(livePaid);
+      const paidIds = paidRows.map(row => row.receiptId);
+      Object.assign(next, {
+        paymentStatus: 'paid',
+        isPaid: true,
+        collectionMethod: '',
+        collectionPayments: [],
+        paymentMethod: '',
+        linkedDeliveryReceiptId: '',
+        mergedPaidAllocations: [],
+        hasMergedPaidFunds: false,
+        receiptAllocations: paidRows,
+        receiptIds: paidIds,
+        fundingReceiptId: paidIds[0] || '',
+        receiptId: paidIds[0] || rid,
+        dueAmountToUseUSD: 0,
+        dueAmountToUseLYD: 0
+      });
+    }
+
+    Object.assign(next, {
+      settledReceiptId: rid,
+      receiptSettledAt: now,
+      receiptSettledBy: actorId,
+      lastUpdated: now,
+      _lastModified: getMonotonicTime()
+    });
+    const plan = { index, data: next };
+    plans.push(plan);
+    plannedById.set(String(ad.id || ''), next);
+  }
+
+  // Simulate the complete batch before changing either receipt or ads. The
+  // newly Paid receipt has one capacity: its resulting amountUSD, minus money
+  // already transferred out and every surviving paid/due ad commitment.
+  const capacity = _localFundingMinor(receipt.amountUSD);
+  let committed = _localReceiptOutgoingMinor(receipt);
+  for (const ad of state.ads || []) {
+    if (!ad || ad._deleted || String(ad.recordType || '') === 'receipt') continue;
+    const simulated = plannedById.get(String(ad.id || '')) || ad;
+    committed += _localAdCommittedMinor(simulated, rid);
+  }
+  if (committed > capacity) throw new Error('Paid receipt balance is insufficient for all linked ads');
+  return plans;
+}
+
+function applyLocalReceiptPaidAdUpdates(plans) {
+  for (const plan of Array.isArray(plans) ? plans : []) {
+    if (!Number.isInteger(plan?.index) || !plan?.data) continue;
+    state.ads[plan.index] = plan.data;
+  }
+  if (Array.isArray(plans) && plans.length > 0) markCollectionDirty('ads');
+  return Array.isArray(plans) ? plans.length : 0;
+}
+
 /**
  * Update an existing record in a collection (merge semantics).
  * 
@@ -5362,18 +6582,82 @@ function updateRecord(array, id, updates, expectedLastModified) {
       }
     }
 
-    array[index] = { ...array[index], ...sanitizedUpdates, _lastModified: getMonotonicTime() };
-    if (isServerModeEnabled() && collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function') {
-      array[index] = makeLightweightMediaRecord(collectionName, array[index]);
+    // A Not Paid -> Paid receipt is not an isolated row edit. Every linked ad
+    // must move from due/debt funding to paid funding in the SAME transaction,
+    // and the browser must install the whole authoritative result together.
+    // Keep one stable key for this updateRecord attempt so a network retry can
+    // safely replay the settlement instead of charging funding twice.
+    const _oldReceiptStatus = collectionName === 'receipts'
+      ? String(old.status || '').trim().toLowerCase()
+      : '';
+    // Keep the canonical Paid/Not Paid pair consistent even for legacy callers
+    // that supplied only one side. Canceled/Lost deliberately keep their own
+    // status because they can retain historical money without being "Paid".
+    const _requestedReceiptStatus = collectionName === 'receipts' && sanitizedUpdates.status !== undefined
+      ? String(sanitizedUpdates.status || '').trim().toLowerCase()
+      : '';
+    if (_requestedReceiptStatus === 'paid') sanitizedUpdates.isPaid = true;
+    if (_requestedReceiptStatus === 'not paid' || _requestedReceiptStatus === 'not_paid') sanitizedUpdates.isPaid = false;
+    if (collectionName === 'receipts'
+        && sanitizedUpdates.status === undefined
+        && sanitizedUpdates.isPaid === true
+        && (_oldReceiptStatus === 'not paid' || _oldReceiptStatus === 'not_paid')) {
+      sanitizedUpdates.status = 'Paid';
     }
-    // Keep currentUser in sync when updating own user record (important for profile changes)
-    if (collectionName === 'users' && state.currentUser?.id === id) {
-      state.currentUser = array[index];
+    const _nextReceiptStatus = collectionName === 'receipts'
+      ? String(sanitizedUpdates.status ?? old.status ?? '').trim().toLowerCase()
+      : '';
+    // Route EVERY resulting Paid receipt through the cascade endpoint, not only
+    // a fresh transition. This repairs old Paid receipts whose ads still carry
+    // legacy due rows and returns those repaired ads immediately to the UI.
+    const _settlesReceipt = collectionName === 'receipts'
+      && _nextReceiptStatus === 'paid';
+    const _receiptSettlementKey = _settlesReceipt
+      ? Security.generateSecureId('receipt-settlement')
+      : '';
+    let _localReceiptAdPlans = [];
+    if (_settlesReceipt && !isServerModeEnabled()) {
+      try {
+        _localReceiptAdPlans = planLocalReceiptPaidAdUpdates(id, {
+          ...old,
+          ...sanitizedUpdates,
+          status: 'Paid',
+          isPaid: true
+        });
+      } catch (error) {
+        showNotification(
+          state.language === 'ar' ? 'تعذر تسوية الوصل' : 'Receipt settlement blocked',
+          error?.message || 'Linked ad funding is invalid.',
+          'error'
+        );
+        return Promise.resolve(false);
+      }
     }
-    if (collectionName) markCollectionDirty(collectionName);
-    saveState();
-    addAuditLog('Update', id, `Updated ${getRecordType(array[index])}`, { old, new: array[index] });
-    RenderQueue.schedule('updateRecord');
+
+    // Ordinary records keep the established optimistic UX. Settlement is the
+    // exception: do not paint the receipt Paid before its linked ads are also
+    // committed, because that briefly presents two contradictory money states.
+    if (!(_settlesReceipt && isServerModeEnabled())) {
+      array[index] = { ...array[index], ...sanitizedUpdates, _lastModified: getMonotonicTime() };
+      if (isServerModeEnabled() && collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function') {
+        array[index] = makeLightweightMediaRecord(collectionName, array[index]);
+      }
+      // Keep currentUser in sync when updating own user record (important for profile changes)
+      if (collectionName === 'users' && state.currentUser?.id === id) {
+        state.currentUser = array[index];
+      }
+      if (collectionName) markCollectionDirty(collectionName);
+      const locallyUpdatedAds = applyLocalReceiptPaidAdUpdates(_localReceiptAdPlans);
+      saveState();
+      addAuditLog('Update', id, `Updated ${getRecordType(array[index])}`, {
+        old,
+        new: array[index],
+        locallySettledAdIds: locallyUpdatedAds > 0
+          ? _localReceiptAdPlans.map(plan => String(plan.data?.id || '')).filter(Boolean)
+          : []
+      });
+      RenderQueue.schedule('updateRecord');
+    }
 
     // Server write-through (always-online multi-user mode)
     if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
@@ -5399,18 +6683,39 @@ function updateRecord(array, id, updates, expectedLastModified) {
         } else {
           expected = _providedExpected != null ? _providedExpected : (old._lastModified || 0);
         }
-        return apiPatchEntity(collectionName, id, sanitizedUpdates, expected)
-        .then((entity) => {
-          if (entity?.data) {
+        const mutation = _settlesReceipt
+          ? apiSettleReceipt({
+              receiptId: id,
+              expectedLastModified: expected,
+              idempotencyKey: _receiptSettlementKey,
+              data: sanitizedUpdates
+            })
+          : apiPatchEntity(collectionName, id, sanitizedUpdates, expected);
+        return mutation
+        .then((entityOrSettlement) => {
+          if (_settlesReceipt) {
+            const settlement = entityOrSettlement;
+            const [savedReceipt] = applyValidatedServerEntityBatch([
+              { collection: 'receipts', entity: settlement.receipt },
+              ...settlement.updatedAds.map(entity => ({ collection: 'ads', entity }))
+            ], 'receiptSettlement');
+            addAuditLog('Update', id, `Settled ${getRecordType(savedReceipt || old)}`, {
+              old,
+              new: savedReceipt || settlement.receipt?.data,
+              updatedAdIds: settlement.updatedAds.map(entity => entity.id),
+              replayed: settlement.replayed === true
+            });
+          } else if (entityOrSettlement?.data) {
             const idx = array.findIndex(x => x && x.id === id);
             if (idx !== -1) {
-              array[idx] = Security.sanitizeObject(entity.data);
+              array[idx] = Security.sanitizeObject(entityOrSettlement.data);
               if (collectionName) markCollectionDirty(collectionName);
               saveState();
-              // Force full render to ensure list views update
-              forceFullRender();
             }
           }
+          // Force full render to ensure receipt cards, ad rows, customer debt,
+          // analytics and reconciliation all reflect the same committed state.
+          forceFullRender();
           return true;
         })
         .catch(async (e) => {
@@ -5916,11 +7221,15 @@ function getReceiptUsageStats(receipt) {
       ? ad.dueAllocations.filter(a => String(a.receiptId || '') === receiptId).reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0)
       : 0;
 
-    // Legacy: check linkedDeliveryReceiptId with dueAmountToUseUSD
-    let legacyDueUsage = 0;
-    if (String(ad.linkedDeliveryReceiptId || '') === receiptId && dueAllocSum === 0) {
-      legacyDueUsage = parseFloat(ad.dueAmountToUseUSD) || 0;
-    }
+    // Legacy due mirrors belong to Driver links (linkedDeliveryReceiptId) or
+    // Not Paid In-Shop links (receiptId), but only for ROWLESS ads: once any
+    // positive due row exists, the writers keep the scalar mirror equal to the
+    // rows' sum, so reading it here would charge the same money twice.
+    const hasAnyPositiveDueRow = Array.isArray(ad.dueAllocations)
+      && ad.dueAllocations.some(a => (parseFloat(a?.amountUSD) || 0) > 0);
+    const legacyDueUsage = !hasAnyPositiveDueRow
+      ? getAdLegacyDueMirrorUSD(ad, receiptId, receiptObj.exchangeRate)
+      : 0;
 
     // Use explicit allocations if available, otherwise fall back to ad spend
     const explicitAllocations = receiptAllocSum + dueAllocSum + legacyDueUsage;
@@ -5946,6 +7255,16 @@ function getReceiptUsageStats(receipt) {
       Array.isArray(ad.receiptAllocations) ||
       Array.isArray(ad.dueAllocations);
     if (hasAllocationData) {
+      return sum;
+    }
+
+    // A rowless Not Paid Driver/In-Shop reference is provenance, not proof that
+    // the receipt funded the whole ad. Only the positive legacy mirror above
+    // can turn this link into a commitment.
+    const paymentState = typeof getAdPaymentState === 'function'
+      ? getAdPaymentState(ad)
+      : (ad.isPaid === true ? 'paid' : 'not_paid');
+    if (paymentState === 'not_paid' && ['driver', 'in_shop'].includes(String(ad.collectionMethod || ''))) {
       return sum;
     }
 
@@ -6036,18 +7355,13 @@ function getDeliveryReceiptDueUsage(receipt) {
     const paidRows = sumFor(ad.receiptAllocations);
     const dueRows = sumFor(ad.dueAllocations);
 
-    // The legacy mirror only speaks for an ad that has no due row for this receipt.
+    // The legacy mirror only speaks for a ROWLESS ad: once any positive due
+    // row exists (for this receipt or another), the scalar is the rows' sum,
+    // not additional money.
     let legacyDue = 0;
-    const hasDueRow = Array.isArray(ad.dueAllocations)
-      && ad.dueAllocations.some(a => String(a.receiptId || '') === receiptId);
-    if (!hasDueRow && String(ad.linkedDeliveryReceiptId || '') === receiptId) {
-      legacyDue = parseFloat(ad.dueAmountToUseUSD) || 0;
-      if (!legacyDue) {
-        const lyd = parseFloat(ad.dueAmountToUseLYD) || 0;
-        const adRate = ad.exchangeRate || exchangeRate || 1;
-        legacyDue = lyd > 0 && adRate > 0 ? lyd / adRate : 0;
-      }
-    }
+    const hasAnyPositiveDueRow = Array.isArray(ad.dueAllocations)
+      && ad.dueAllocations.some(a => (parseFloat(a?.amountUSD) || 0) > 0);
+    if (!hasAnyPositiveDueRow) legacyDue = getAdLegacyDueMirrorUSD(ad, receiptId, exchangeRate);
 
     const committed = paidRows + dueRows + legacyDue;
     if (committed > 0) {
@@ -6127,11 +7441,20 @@ function getReceiptDebtType(receipt) {
   return isDeliveryReceiptRecord(receipt) ? 'delivery' : 'shop';
 }
 
+// Locale for every user-visible date. Without an explicit locale, phones set
+// to Arabic default to ar-SA — Hijri calendar with Arabic-Indic digits — so
+// 2026-07-22 rendered as year ١٤٤٨. The -u- extension keys pin the Gregorian
+// calendar and latin digits; they are honored by every Intl implementation
+// far below the iOS 15 baseline.
+function appDateLocale() {
+  return state.language === 'ar' ? 'ar-LY-u-ca-gregory-nu-latn' : 'en-GB';
+}
+
 function formatDateShort(date) {
   const never = state.language === 'ar' ? 'أبداً' : 'Never';
   if (!date) return never;
   try {
-    return new Date(date).toLocaleString();
+    return new Date(date).toLocaleString(appDateLocale());
   } catch (e) {
     return never;
   }
@@ -6242,6 +7565,10 @@ const SERVER_API = {
   requestTimeoutMs: 15000, // 15s for better reliability on slow connections
   // Live sync: automatically refresh changes from other users in server mode (no manual refresh).
   liveSyncEnabled: true,
+  // NOTE: the poll loop in src/10-live-sync.js reads this ONCE when it creates
+  // its setInterval (and already skips ticks while the tab is hidden, with an
+  // immediate catch-up sync on visibilitychange). Failure backoff therefore
+  // has to live in that loop — a dynamic getter here would never be re-read.
   liveSyncIntervalMs: 3000, // 3 seconds for faster real-time sync between devices
   usersSyncIntervalMs: 30000, // 30 seconds for users list
   // IMPORTANT: Keep this modest to avoid huge responses that can OOM-kill small ECS tasks.
@@ -6482,12 +7809,40 @@ async function apiJson(path, options = {}, timeout = {}) {
 async function apiHealthCheck() {
   if (!SERVER_API.enabledByDefault) return false;
   try {
-    // Fast health check (3 second timeout)
+    // Fast health check (3 second timeout). init() escalates with longer
+    // timeouts on a first-ever visit — see the probe retry in src/17-init.js.
     const data = await apiJson('/api/health', { method: 'GET' }, { timeoutMs: 3000 });
     return !!data?.ok;
   } catch {
     return false;
   }
+}
+
+// Recovery path for a failed first-visit backend detection (state.serverProbeFailed).
+// The login/first-run screens can offer a Retry button that calls this: one
+// generous health check, then a reload so init() re-runs full mode detection.
+async function retryServerDetection() {
+  let ok = false;
+  try {
+    const data = await apiJson('/api/health', { method: 'GET' }, { timeoutMs: 8000 });
+    ok = !!data?.ok;
+  } catch (_) {
+    ok = false;
+  }
+  if (ok) {
+    window.location.reload();
+    return true;
+  }
+  try {
+    showNotification(
+      state.language === 'ar' ? 'الخادم غير متاح' : 'Server Unreachable',
+      state.language === 'ar'
+        ? 'ما زال تعذّر الوصول إلى الخادم. تحقق من الاتصال ثم حاول مجدداً.'
+        : 'Still unable to reach the server. Check the connection and try again.',
+      'error'
+    );
+  } catch (_) {}
+  return false;
 }
 
 async function apiAuthMe() {
@@ -6619,7 +7974,8 @@ const SERVER_SYNC_COLLECTIONS = Object.freeze([
   'ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory',
   'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings',
   'adCampaignRequests',
-  'walletTransactions', 'serviceSubscriptions'
+  'walletTransactions', 'serviceSubscriptions',
+  'appSettings'
 ]);
 
 // Receipt/ad photos are large base64 strings. Normal lists and live deltas
@@ -7406,6 +8762,63 @@ async function apiTransferReceipt(payload) {
   };
 }
 
+// Settle one unpaid receipt and every ad funded from its due/debt balance in a
+// single server transaction. A receipt becoming Paid changes the meaning of
+// those ad allocations, so accepting only a receipt envelope would leave the
+// browser showing stale "Not Paid" ads until the next full sync.
+async function apiSettleReceipt(payload) {
+  const receiptId = String(payload?.receiptId || '').trim();
+  if (!Security.isValidRecordId(receiptId)) throw new Error('Invalid receipt settlement id');
+  const expectedLastModified = Number(payload?.expectedLastModified);
+  if (!Number.isSafeInteger(expectedLastModified) || expectedLastModified < 0) {
+    throw new Error('This receipt is missing its server version. Refresh and try again.');
+  }
+  const body = {
+    expectedLastModified,
+    idempotencyKey: String(payload?.idempotencyKey || '').trim(),
+    data: payload?.data && typeof payload.data === 'object' && !Array.isArray(payload.data)
+      ? payload.data
+      : {}
+  };
+  if (!body.idempotencyKey) throw new Error('Receipt settlement idempotency key is required');
+
+  const identity = getServerSessionIdentity();
+  // A stable body/idempotency key makes a response-loss retry safe: the server
+  // replays the committed result instead of moving the same funding twice.
+  const response = await withRetry(() => apiJson(
+    `/api/receipts/${encodeURIComponent(receiptId)}/settle?include_media=false`,
+    { method: 'POST', body },
+    { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
+  ), 2, 500);
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  if (!response || typeof response !== 'object' || Array.isArray(response) || !Array.isArray(response.updatedAds)) {
+    const error = new Error('Invalid receipt settlement response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+
+  const receipt = validateServerEntityResponse('receipts', response.receipt, 'settlement.receipt');
+  const localReceipt = (state.receipts || []).find(row => row && String(row.id) === receiptId);
+  // include_media=false keeps the response small. Prefer newly edited media
+  // from this request over the old local copy so adding/removing a photo while
+  // marking Paid is reflected immediately instead of waiting for a full sync.
+  receipt.data = mergeMutationInlineMedia('receipts', receipt.data, {
+    ...(localReceipt || {}),
+    ...(body.data || {})
+  });
+  const updatedAds = response.updatedAds.map((entity, index) => {
+    const validated = validateServerEntityResponse('ads', entity, `settlement.updatedAds[${index}]`);
+    const localAd = (state.ads || []).find(row => row && String(row.id) === String(validated.id));
+    validated.data = mergeMutationInlineMedia('ads', validated.data, localAd);
+    return validated;
+  });
+  return {
+    receipt,
+    updatedAds,
+    replayed: response.replayed === true
+  };
+}
+
 // Paid/due/merged allocations change receipt availability, so ad create/edit
 // must cross one server transaction boundary rather than generic collection
 // POST/PATCH calls.
@@ -7428,6 +8841,60 @@ async function apiMutateAd(payload) {
   ad.data = mergeMutationInlineMedia('ads', ad.data, { ...(localAd || {}), ...(payload?.data || {}) });
   return {
     ad,
+    replayed: response.replayed === true
+  };
+}
+
+// Merge two duplicate customers and every relationship that points at the
+// duplicate in ONE server transaction. Generic PATCH + DELETE calls are not
+// safe here: a timeout between requests could leave pages, receipts or ads
+// split across both identities. The idempotency key makes a response-loss retry
+// return the same committed result instead of running the merge twice.
+async function apiMergeCustomers(payload) {
+  const keepCustomerId = String(payload?.keepCustomerId || '');
+  const duplicateCustomerId = String(payload?.duplicateCustomerId || '');
+  if (!Security.isValidRecordId(keepCustomerId) || !Security.isValidRecordId(duplicateCustomerId) || keepCustomerId === duplicateCustomerId) {
+    throw new Error('Choose two different valid customer records.');
+  }
+  const identity = getServerSessionIdentity();
+  const response = await withRetry(() => apiJson('/api/customers/merge?include_media=false', {
+    method: 'POST',
+    body: payload
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 2, 500);
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  if (!response || typeof response !== 'object' || Array.isArray(response)) {
+    const error = new Error('Invalid customer merge response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  if (!Array.isArray(response.updatedPages) || !Array.isArray(response.updatedReceipts) || !Array.isArray(response.updatedAds)) {
+    const error = new Error('Invalid customer merge relationship response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  const customer = validateServerEntityResponse('customers', response.customer, 'merge.customer');
+  const duplicate = validateServerEntityResponse('customers', response.duplicate, 'merge.duplicate');
+  const updatedPages = response.updatedPages.map((entity, index) =>
+    validateServerEntityResponse('pages', entity, `merge.updatedPages[${index}]`)
+  );
+  const updatedReceipts = response.updatedReceipts.map((entity, index) => {
+    const validated = validateServerEntityResponse('receipts', entity, `merge.updatedReceipts[${index}]`);
+    const local = (state.receipts || []).find(row => row && String(row.id) === String(validated.id));
+    validated.data = mergeMutationInlineMedia('receipts', validated.data, local);
+    return validated;
+  });
+  const updatedAds = response.updatedAds.map((entity, index) => {
+    const validated = validateServerEntityResponse('ads', entity, `merge.updatedAds[${index}]`);
+    const local = (state.ads || []).find(row => row && String(row.id) === String(validated.id));
+    validated.data = mergeMutationInlineMedia('ads', validated.data, local);
+    return validated;
+  });
+  return {
+    customer,
+    duplicate,
+    updatedPages,
+    updatedReceipts,
+    updatedAds,
     replayed: response.replayed === true
   };
 }
@@ -7913,7 +9380,13 @@ const _serverLiveSync = {
   // rejected. pollerEpoch changes whenever polling is stopped/restarted, so a
   // late tick is discarded without invalidating an unrelated full load.
   sessionEpoch: 0,
-  pollerEpoch: 0
+  pollerEpoch: 0,
+  // Failure backoff: after consecutive tick failures, polls are skipped until
+  // nextAllowedAt (6s/12s/24s/48s/60s at 3s base). An unreachable server must
+  // not be hammered every 3s from a phone (battery + cell radio); the
+  // visibilitychange/online handlers reset the backoff for an immediate retry.
+  failStreak: 0,
+  nextAllowedAt: 0
 };
 
 function advanceServerSessionEpoch() {
@@ -7981,7 +9454,8 @@ function computeServerCursorFromState() {
     _maxLastModifiedFromArray(state.clothesSettings),
     _maxLastModifiedFromArray(state.adCampaignRequests),
     _maxLastModifiedFromArray(state.walletTransactions),
-    _maxLastModifiedFromArray(state.serviceSubscriptions)
+    _maxLastModifiedFromArray(state.serviceSubscriptions),
+    _maxLastModifiedFromArray(state.appSettings)
   );
 }
 
@@ -7990,6 +9464,9 @@ function getServerCollectionVisibilityScope(user, collection) {
   const name = String(collection || '');
   const role = String(user.role || '').toLowerCase();
   if (name === 'exchangeRateHistory') return 'all';
+  // Admin-only configuration records: never fetched (or retained) for
+  // non-admin sessions.
+  if (name === 'appSettings') return role === 'admin' ? 'all' : 'none';
   if (name === 'walletTransactions' || name === 'serviceSubscriptions') {
     return role === 'admin' ? 'all' : 'own';
   }
@@ -8385,6 +9862,7 @@ async function serverLiveSyncOnce() {
   const adCampaignRequestsDelta = recordsFor('adCampaignRequests');
   const walletTxDelta = recordsFor('walletTransactions');
   const subsDelta = recordsFor('serviceSubscriptions');
+  const appSettingsDelta = recordsFor('appSettings');
 
   // Logged out (or a new session started) while these fetches were in flight?
   // Drop the result — applying it would re-fill the just-wiped state.
@@ -8426,6 +9904,7 @@ async function serverLiveSyncOnce() {
   changed = applyServerDelta('adCampaignRequests', adCampaignRequestsDelta) || changed;
   changed = applyServerDelta('walletTransactions', walletTxDelta) || changed;
   changed = applyServerDelta('serviceSubscriptions', subsDelta) || changed;
+  changed = applyServerDelta('appSettings', appSettingsDelta) || changed;
 
   const entitlementAfter = getServerServiceEntitlementSnapshot();
   const revokedServices = getRevokedServerServiceEntitlements(entitlementBefore, entitlementAfter);
@@ -8563,44 +10042,69 @@ async function serverLiveSyncTick() {
   if (_serverLiveSync.inFlight) return;
   _serverLiveSync.inFlight = true;
   updateSyncIndicator('syncing');
+  let ok = false;
   try {
     const result = await serverLiveSyncOnce();
-    updateSyncIndicator(result?.ok === false ? 'error' : 'synced');
+    ok = result?.ok !== false;
+    updateSyncIndicator(ok ? 'synced' : 'error');
   } catch (e) {
     console.warn('[serverLiveSyncTick] Sync failed:', e?.message || e);
     updateSyncIndicator('error');
   } finally {
     _serverLiveSync.inFlight = false;
   }
+  // Exponential failure backoff (capped at 60s); any success resets it.
+  if (ok) {
+    _serverLiveSync.failStreak = 0;
+    _serverLiveSync.nextAllowedAt = 0;
+  } else {
+    _serverLiveSync.failStreak = Math.min((_serverLiveSync.failStreak || 0) + 1, 5);
+    _serverLiveSync.nextAllowedAt = Date.now() +
+      Math.min(60000, (SERVER_API.liveSyncIntervalMs || 3000) * Math.pow(2, _serverLiveSync.failStreak));
+  }
 }
 
-// Visual sync indicator
+// Visual sync indicator. Keep one cancellable hide timer: an older "Synced"
+// timer must never hide a newer "Syncing" or error state.
+let _syncIndicatorHideTimer = null;
 function updateSyncIndicator(status) {
   let indicator = document.getElementById('sync-status-indicator');
   if (!indicator) {
     // Create indicator if it doesn't exist
     indicator = document.createElement('div');
     indicator.id = 'sync-status-indicator';
-    indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300';
+    indicator.className = 'sync-status-indicator fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300';
+    indicator.setAttribute('role', 'status');
+    indicator.setAttribute('aria-live', 'polite');
+    indicator.setAttribute('aria-atomic', 'true');
     document.body.appendChild(indicator);
   }
 
+  if (_syncIndicatorHideTimer) {
+    clearTimeout(_syncIndicatorHideTimer);
+    _syncIndicatorHideTimer = null;
+  }
+  indicator.dataset.status = String(status || '');
+  indicator.onclick = null;
+
   switch (status) {
     case 'syncing':
-      indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300';
+      indicator.className = 'sync-status-indicator fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300';
       indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-blue-500 rounded-full animate-pulse mr-2"></span>' + (state.language === 'ar' ? 'جارٍ المزامنة...' : 'Syncing...');
       indicator.style.opacity = '1';
       break;
     case 'synced':
-      indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300';
+      indicator.className = 'sync-status-indicator fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300';
       indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-emerald-500 rounded-full mr-2"></span>' + (state.language === 'ar' ? 'تمت المزامنة' : 'Synced');
+      indicator.style.opacity = '1';
       // Fade out after 2 seconds
-      setTimeout(() => {
-        if (indicator) indicator.style.opacity = '0';
+      _syncIndicatorHideTimer = setTimeout(() => {
+        _syncIndicatorHideTimer = null;
+        if (indicator?.dataset.status === 'synced') indicator.style.opacity = '0';
       }, 2000);
       break;
     case 'error':
-      indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-rose-100 text-rose-700 dark:bg-rose-900/50 dark:text-rose-300 cursor-pointer';
+      indicator.className = 'sync-status-indicator fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-rose-100 text-rose-700 dark:bg-rose-900/50 dark:text-rose-300 cursor-pointer';
       indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-rose-500 rounded-full mr-2"></span>' + (state.language === 'ar' ? 'فشلت المزامنة - اضغط لإعادة المحاولة' : 'Sync failed - Tap to retry');
       indicator.style.opacity = '1';
       indicator.onclick = () => manualSyncData();
@@ -8693,6 +10197,8 @@ function startServerLiveSync() {
     ? (_serverLiveSync.serverWatermark || 0)
     : 0;
   _serverLiveSync.lastUsersSyncAt = 0;
+  _serverLiveSync.failStreak = 0;
+  _serverLiveSync.nextAllowedAt = 0;
 
   // Run one immediately, then poll.
   serverLiveSyncTick().catch(() => {});
@@ -8701,6 +10207,11 @@ function startServerLiveSync() {
     // visibilitychange handler below fires an immediate catch-up sync the
     // moment the app becomes visible again, so no update is ever missed.
     if (document.visibilityState === 'hidden') return;
+    // Definitely offline, or backing off after repeated failures: skip. The
+    // 'online'/'visibilitychange' handlers below reset the backoff and fire
+    // an immediate catch-up tick, so recovery is never delayed by this.
+    if (navigator.onLine === false) return;
+    if (Date.now() < _serverLiveSync.nextAllowedAt) return;
     serverLiveSyncTick().catch(() => {});
   }, SERVER_API.liveSyncIntervalMs || 3000);
 
@@ -8710,6 +10221,8 @@ function startServerLiveSync() {
       if (document.visibilityState === 'visible' && state.currentUser) {
         // Tab is now visible - do an immediate sync to catch up
         console.log('[LiveSync] Tab visible - triggering immediate sync');
+        _serverLiveSync.failStreak = 0;
+        _serverLiveSync.nextAllowedAt = 0;
         serverLiveSyncTick().catch(() => {});
       }
     };
@@ -8722,6 +10235,8 @@ function startServerLiveSync() {
       if (state.currentUser) {
         console.log('[LiveSync] Network online - triggering immediate sync');
         showNotification(state.language === 'ar' ? 'عاد الاتصال' : 'Back Online', state.language === 'ar' ? 'تمت إعادة الاتصال بالسيرفر، جارٍ المزامنة...' : 'Reconnected to server, syncing...', 'info');
+        _serverLiveSync.failStreak = 0;
+        _serverLiveSync.nextAllowedAt = 0;
         serverLiveSyncTick().catch(() => {});
       }
     };
@@ -8955,8 +10470,8 @@ async function _handleLoginOnce(email, password, loginGeneration) {
         showNotification(
           state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed',
           state.language === 'ar'
-            ? 'بيانات الدخول غير صحيحة (حساب السيرفر). إذا كنت تريد حساب المتصفح المحلي، اضغط "استخدام المحلي".'
-            : 'Invalid email or password (server account). If you meant your local browser account, click “Use Local”.',
+            ? 'بيانات الدخول غير صحيحة (حساب السيرفر). تأكد من البريد وكلمة المرور المسجّلين على خادم فريقك.'
+            : 'Invalid email or password (server account). Check the credentials registered on your team server.',
           'error'
         );
         return;
@@ -9108,8 +10623,15 @@ async function _handleLoginOnce(email, password, loginGeneration) {
     }
     
     state.currentView = getPostLoginLandingViewForUser(user);
-    // Upgrade legacy hashes to PBKDF2 after successful login
-    if ((user.passwordAlgo || 'sha256') !== 'pbkdf2-sha256') {
+    // Upgrade legacy hashes to PBKDF2 after successful login. Also re-hash
+    // PBKDF2 hashes created with fewer iterations (pure-JS fallback on
+    // insecure http:// origins uses 60k) at full strength once native
+    // crypto.subtle is available.
+    const _subtleAvailable = !!(globalThis.crypto && globalThis.crypto.subtle);
+    const _needsAlgoUpgrade = (user.passwordAlgo || 'sha256') !== 'pbkdf2-sha256';
+    const _needsIterationUpgrade = !_needsAlgoUpgrade && _subtleAvailable &&
+      (Number(user.passwordIterations) || 0) < 310000;
+    if (_needsAlgoUpgrade || _needsIterationUpgrade) {
       try {
         const upgraded = await Security.hashPassword(sanitizedPassword, null, { algo: 'pbkdf2-sha256' });
         if (!loginAttemptIsCurrent(loginGeneration)) return false;
@@ -9396,7 +10918,9 @@ function getUrlParams() {
     search: params.get('search'),
     tab: params.get('tab'),
     page: params.get('page'),
-    service: params.get('service')
+    service: params.get('service'),
+    customer: params.get('customer'),
+    receipt: params.get('receipt')
   };
 }
 
@@ -9412,6 +10936,18 @@ function viewUrlParamsFor(view) {
   if (view === 'service-placeholder') {
     return { service: state.viewData?.serviceId || null };
   }
+  if (view === 'receipts') {
+    const customerId = String(state.receiptCustomerFilter || '').trim();
+    const receiptId = String(state.receiptRecordFilter || '').trim();
+    return {
+      customer: Security.isValidRecordId(customerId) ? customerId : null,
+      receipt: Security.isValidRecordId(receiptId) ? receiptId : null
+    };
+  }
+  if (view === 'ads') {
+    const receiptId = String(state.adReceiptFilter || '').trim();
+    return { receipt: Security.isValidRecordId(receiptId) ? receiptId : null };
+  }
   return {};
 }
 
@@ -9426,6 +10962,35 @@ function restoreViewStateFromUrl(view) {
   }
   if (view === 'service-placeholder' && params.service) {
     state.viewData = { serviceId: params.service };
+  }
+  if (view === 'receipts') {
+    const customerFilter = params.customer && Security.isValidRecordId(params.customer)
+      ? String(params.customer)
+      : '';
+    const receiptFilter = params.receipt && Security.isValidRecordId(params.receipt)
+      ? String(params.receipt)
+      : '';
+    if (customerFilter || receiptFilter) {
+      state.receiptSearch = '';
+      state.receiptStatusFilter = 'all';
+      state.receiptPaymentFilter = 'all';
+      state.receiptDateFilter = 'all';
+      state.receiptDebtFilter = 'all';
+      state.receiptCollectedFilter = 'all';
+      state.receiptSortBy = 'newest';
+    }
+    state.receiptCustomerFilter = customerFilter;
+    state.receiptRecordFilter = receiptFilter;
+  }
+  if (view === 'ads') {
+    const receiptFilter = params.receipt && Security.isValidRecordId(params.receipt)
+      ? String(params.receipt)
+      : '';
+    if (receiptFilter) {
+      state.adSearch = '';
+      state.adFilters = { status: 'all', payment: 'all', page: 'all' };
+    }
+    state.adReceiptFilter = receiptFilter;
   }
 }
 
@@ -9444,12 +11009,35 @@ function updateUrlParams(newParams, replace = false) {
   
   const search = params.toString();
   const newUrl = window.location.pathname + (search ? '?' + search : '');
-  
+
+  // Stamp modal-pushed entries so closeModal() can tell "the top entry was
+  // pushed for this dialog" and consume it with history.back() instead of
+  // leaving a dead same-URL entry stacked (Back then degraded into N no-op
+  // presses on phones). The timestamp lets the overlay observer
+  // (01b-mobile-runtime.js) skip its sentinel for surfaces whose opener
+  // already created a history entry (tracked modals, collect-receipt).
+  const entryState = { view: state.currentView, params: newParams, albayanModal: !!newParams.modal };
+  if (newParams.modal) _albayanLastModalUrlPushAt = Date.now();
+
   try {
-    if (replace) {
-      window.history.replaceState({ view: state.currentView, params: newParams }, '', newUrl);
+    // Same-address guard (mirror of updateUrlForView's samePlace): the URL
+    // restore path re-runs the real modal openers, whose own updateUrlParams
+    // call must not push a DUPLICATE entry for the address being restored.
+    const samePlace = newUrl === window.location.pathname + window.location.search;
+    // Consume a live overlay sentinel (a chooser/palette surface replaced by
+    // this modal in the same gesture — New Receipt chooser, command-palette
+    // quick actions) by REPLACING it instead of stacking on top: a stranded
+    // sentinel costs the user one dead Back press plus a scroll jump after
+    // the modal closes. Mirrors navigateToInternal; see the overlay history
+    // model in 01b-mobile-runtime.js.
+    const topWasOverlaySentinel = !!(window.history.state && window.history.state.overlaySentinel);
+    if (replace || samePlace || topWasOverlaySentinel) {
+      window.history.replaceState(entryState, '', newUrl);
+      if (topWasOverlaySentinel && typeof _overlaySentinelDepth === 'number' && _overlaySentinelDepth > 0) {
+        _overlaySentinelDepth--;
+      }
     } else {
-      window.history.pushState({ view: state.currentView, params: newParams }, '', newUrl);
+      window.history.pushState(entryState, '', newUrl);
     }
   } catch (e) {
     console.warn('URL params update error:', e);
@@ -9502,6 +11090,31 @@ function updateUrlForView(view, replace = false) {
 // Handle browser back/forward buttons
 function setupUrlRouting() {
   window.addEventListener('popstate', (event) => {
+    // A history.back() issued by the app itself purely to consume an
+    // overlay/modal entry (X/Cancel close — see the overlay history model in
+    // 01b-mobile-runtime.js): the UI is already correct, and running the
+    // router would only re-render and scroll-reset the unchanged view.
+    if (typeof shouldSuppressOverlayPopstate === 'function' && shouldSuppressOverlayPopstate()) return;
+
+    // Phone browsers: hardware/gesture Back closes the top-most open
+    // overlay/modal/drawer — the same order as the packaged app's native
+    // Back handler — instead of navigating the screen underneath it. The
+    // popped entry is the surface's own sentinel/?modal entry, so the
+    // address bar is already back at the pre-overlay URL and the pop is
+    // fully consumed by the close. Desktop and Capacitor behaviour are
+    // unchanged. Never call history.back()/forward() from here: the
+    // re-fired popstate would re-run restoreModalFromUrl's opener and
+    // clobber unsaved form state.
+    if (typeof closeTopMobileSurface === 'function'
+        && typeof isPhoneBrowserHistoryManaged === 'function'
+        && isPhoneBrowserHistoryManaged()) {
+      _closingSurfaceFromPopstate = true;
+      let closedSurface = false;
+      try { closedSurface = closeTopMobileSurface(); }
+      finally { _closingSurfaceFromPopstate = false; }
+      if (markOverlayPopClose(closedSurface)) return;
+    }
+
     const view = event.state?.view || getViewFromUrl();
     // The address in the bar is the source of truth after back/forward:
     // re-apply the view's sub-state (Clothes tab, service id) before rendering.
@@ -9590,6 +11203,9 @@ function restoreModalFromUrl() {
     }, 100);
   } else {
     // No modal in URL, close any open modal
+    if (typeof resetReceiptCustomerRiskWarningState === 'function') {
+      resetReceiptCustomerRiskWarningState();
+    }
     if (state.activeModal) {
       state.activeModal = null;
       state.modalData = null;
@@ -9610,6 +11226,34 @@ function restoreModalFromUrl() {
       document.querySelectorAll('#app-modal').forEach(el => el.remove());
     }
   }
+}
+
+// A closeModal() consume (history.back()/go(-2)) issued in this same task has
+// not landed yet — history traversal is async, so pushing the new view NOW
+// would stack it on top of the very entries the traversal is about to pop,
+// and the traversal would then strand the user on a stale ?modal entry that a
+// later Back resurrects (e.g. duplicate-serial warning → "View Customer").
+// Wait for the suppressed bookkeeping popstate before stamping the URL, with
+// a short fallback timeout in case the traversal is silently dropped at the
+// session-history edge. See the overlay history model in 01b-mobile-runtime.js.
+function _pushViewUrlAfterHistoryConsume(view) {
+  let done = false;
+  let fallbackTimer = null;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    window.removeEventListener('popstate', onConsumePop);
+    if (fallbackTimer) clearTimeout(fallbackTimer);
+    // A newer navigation owns the address bar by now — never stamp a stale view.
+    if (state.currentView !== view) return;
+    const consumesOverlaySentinel = !!(window.history.state && window.history.state.overlaySentinel);
+    updateUrlForView(view, consumesOverlaySentinel);
+  };
+  // Push AFTER the popstate dispatch finishes so the router's own listener
+  // (which swallows this bookkeeping pop) always sees the untouched entry.
+  const onConsumePop = () => { setTimeout(finish, 0); };
+  window.addEventListener('popstate', onConsumePop);
+  fallbackTimer = setTimeout(finish, 300);
 }
 
 // Internal navigation (doesn't push to history if skipHistory=true)
@@ -9648,7 +11292,22 @@ function navigateToInternal(view, pushHistory = true) {
   
   // Update URL
   if (pushHistory) {
-    updateUrlForView(view);
+    if (typeof _overlayHistoryConsumePending === 'function'
+        && typeof isPhoneBrowserHistoryManaged === 'function'
+        && isPhoneBrowserHistoryManaged()
+        && _overlayHistoryConsumePending()) {
+      // closeModal() in this same gesture issued an entry-consume that has
+      // not landed yet — defer the push or it stacks on doomed entries.
+      _pushViewUrlAfterHistoryConsume(view);
+    } else {
+      // If the top history entry is an overlay sentinel (the nav drawer or a
+      // command-palette style surface pushed it and this navigation closes
+      // it), REPLACE that entry instead of pushing: the sentinel is consumed
+      // and Back from the new view returns to the pre-overlay screen in one
+      // press. See the overlay history model in 01b-mobile-runtime.js.
+      const consumesOverlaySentinel = !!(window.history.state && window.history.state.overlaySentinel);
+      updateUrlForView(view, consumesOverlaySentinel);
+    }
   }
   
   // Render immediately for instant feedback
@@ -9670,6 +11329,17 @@ function navigateTo(view) {
 
 function toggleMobileMenu() {
   state.isMobileMenuOpen = !state.isMobileMenuOpen;
+  // Phone-browser Back parity: one consumable history entry per drawer open
+  // (the drawer renders inside #app, so the body overlay observer in
+  // 01b-mobile-runtime.js cannot see it — push/consume explicitly here).
+  if (typeof isPhoneBrowserHistoryManaged === 'function' && isPhoneBrowserHistoryManaged()) {
+    if (state.isMobileMenuOpen) {
+      pushMobileOverlayHistoryEntry();
+    } else if (window.history.state && window.history.state.overlaySentinel && _overlaySentinelDepth > 0) {
+      _overlaySentinelDepth--;
+      consumeOverlayHistoryEntry();
+    }
+  }
   // The drawer/backdrop live outside the partial view container. A normal
   // same-view render can intentionally be a no-op when the page HTML did not
   // change, which used to make the hamburger appear completely unresponsive.
@@ -9679,6 +11349,8 @@ function toggleMobileMenu() {
 // ==========================================
 // COMMAND PALETTE
 // ==========================================
+
+let _commandPaletteSearchTimer = null;
 
 function toggleCommandPalette() {
   state.commandPaletteOpen = !state.commandPaletteOpen;
@@ -9691,91 +11363,273 @@ function toggleCommandPalette() {
   }
 }
 
+function closeCommandPalette() {
+  if (_commandPaletteSearchTimer) {
+    clearTimeout(_commandPaletteSearchTimer);
+    _commandPaletteSearchTimer = null;
+  }
+  state.commandPaletteOpen = false;
+  renderCommandPalette();
+}
+
+function commandPaletteNavigate(view, beforeNavigate = null) {
+  closeCommandPalette();
+  if (typeof beforeNavigate === 'function') beforeNavigate();
+  navigateTo(view);
+}
+
+function getCommandPaletteBaseCommands() {
+  const isAr = state.language === 'ar';
+  const commands = [];
+  const addView = (id, view, label, icon) => {
+    if (typeof canOpenWorkspaceView === 'function' && !canOpenWorkspaceView(view)) return;
+    commands.push({ id, label, icon, section: isAr ? 'الصفحات' : 'Pages', action: () => commandPaletteNavigate(view) });
+  };
+
+  addView('analytics', 'analytics', isAr ? 'التحليلات' : 'Analytics', 'layout-dashboard');
+  addView('customers', 'customers', isAr ? 'العملاء' : 'Customers', 'users');
+  addView('receipts', 'receipts', isAr ? 'الوصولات' : 'Receipts', 'receipt');
+  addView('pages', 'pages', isAr ? 'الصفحات' : 'Pages', 'file-text');
+  addView('ads', 'ads', isAr ? 'الإعلانات' : 'Ads', 'megaphone');
+  addView('deliveries', 'deliveries', isAr ? 'التوصيلات' : 'Deliveries', 'truck');
+
+  if (isAdminRole(state.currentUser?.role) || currentUserHasPermission('analytics', 'view')) {
+    commands.push({ id: 'reconciliation', label: isAr ? 'التسوية' : 'Reconciliation', icon: 'clipboard-check', section: isAr ? 'الصفحات' : 'Pages', action: () => commandPaletteNavigate('reconciliation') });
+  }
+  if (isAdminRole(state.currentUser?.role) || currentUserHasPermission('users', 'view') || currentUserHasPermission('users', 'viewOwn')) {
+    commands.push({ id: 'users', label: isAr ? 'المستخدمون' : 'Users', icon: 'users-round', section: isAr ? 'الصفحات' : 'Pages', action: () => commandPaletteNavigate('users') });
+  }
+  if (isAdminRole(state.currentUser?.role) || currentUserHasPermission('settings', 'view') || currentUserHasPermission('settings', 'viewOwn')) {
+    commands.push({ id: 'settings', label: isAr ? 'الإعدادات' : 'Settings', icon: 'settings', section: isAr ? 'الصفحات' : 'Pages', action: () => commandPaletteNavigate('settings') });
+  }
+
+  if (can('customers', 'add')) {
+    commands.push({ id: 'add-customer', label: isAr ? 'إضافة عميل جديد' : 'Add new customer', icon: 'user-plus', section: isAr ? 'إجراءات سريعة' : 'Quick actions', action: () => { closeCommandPalette(); showCustomerModal(); } });
+  }
+  if (can('ads', 'add')) {
+    commands.push({ id: 'add-ad', label: isAr ? 'إضافة إعلان جديد' : 'Add new ad', icon: 'plus-circle', section: isAr ? 'إجراءات سريعة' : 'Quick actions', action: () => { closeCommandPalette(); showAdModal(); } });
+  }
+  if (can('receipts', 'add')) {
+    commands.push({ id: 'add-receipt', label: isAr ? 'إضافة وصل جديد' : 'Add new receipt', icon: 'receipt', section: isAr ? 'إجراءات سريعة' : 'Quick actions', action: () => { closeCommandPalette(); showNewReceiptChooser(); } });
+  }
+  if (isCurrentUserAdmin()) {
+    commands.push({ id: 'export', label: isAr ? 'تصدير تقرير البيانات' : 'Export data report', icon: 'download', section: isAr ? 'إجراءات سريعة' : 'Quick actions', action: () => { closeCommandPalette(); exportData(); } });
+  }
+
+  commands.push(
+    { id: 'workspace-mode', label: isAdvancedWorkspaceMode() ? (isAr ? 'استخدام العرض البسيط' : 'Use Simple view') : (isAr ? 'استخدام العرض المتقدم' : 'Use Advanced view'), icon: isAdvancedWorkspaceMode() ? 'sparkles' : 'sliders-horizontal', section: isAr ? 'التفضيلات' : 'Preferences', action: () => { closeCommandPalette(); toggleWorkspaceExperienceMode(); } },
+    { id: 'dark-mode', label: isAr ? 'تبديل المظهر' : 'Change appearance', icon: 'moon', section: isAr ? 'التفضيلات' : 'Preferences', action: () => { closeCommandPalette(); toggleTheme(); } },
+    { id: 'language', label: isAr ? 'التبديل إلى الإنجليزية' : 'Switch to Arabic', icon: 'globe', section: isAr ? 'التفضيلات' : 'Preferences', action: () => { closeCommandPalette(); toggleLanguage(); } },
+    { id: 'logout', label: isAr ? 'تسجيل الخروج' : 'Log out', icon: 'log-out', section: isAr ? 'الحساب' : 'Account', action: () => { closeCommandPalette(); handleLogout(); } }
+  );
+  return commands;
+}
+
+function getCommandPaletteEntityCommands(searchTerm) {
+  const rawTerm = Security.sanitizeInput(String(searchTerm || ''), { maxLength: 120 }).trim();
+  if (rawTerm.length < 2) return [];
+  const term = rawTerm.toLocaleLowerCase();
+  const isAr = state.language === 'ar';
+  const results = [];
+  const matches = (...values) => values.some(value => String(value || '').toLocaleLowerCase().includes(term));
+  const takeMatching = (records, predicate, limit = 5) => {
+    const matchesFound = [];
+    for (const record of records) {
+      if (predicate(record)) matchesFound.push(record);
+      if (matchesFound.length >= limit) break;
+    }
+    return matchesFound;
+  };
+  const canViewContacts = can('customers', 'viewContacts');
+
+  if (typeof canOpenWorkspaceView !== 'function' || canOpenWorkspaceView('customers')) {
+    const customers = typeof getCustomersVisibleToCurrentUser === 'function'
+      ? getCustomersVisibleToCurrentUser()
+      : getVisibleRecords(state.customers || []);
+    takeMatching(customers, customer => {
+      const phones = canViewContacts
+        ? [customer.phone, customer.phoneNumber, ...(Array.isArray(customer.phones) ? customer.phones : [])]
+        : [];
+      return matches(customer.name, customer.id, ...phones);
+    }).forEach((customer, index) => {
+      const label = String(customer.name || (isAr ? 'عميل بدون اسم' : 'Unnamed customer'));
+      const phone = canViewContacts
+        ? String((Array.isArray(customer.phones) ? customer.phones.find(Boolean) : '') || customer.phone || customer.phoneNumber || '')
+        : '';
+      results.push({
+        id: `entity-customer-${index}`,
+        label,
+        description: [isAr ? 'عميل' : 'Customer', phone].filter(Boolean).join(' • '),
+        icon: 'user-round',
+        section: isAr ? 'نتائج العملاء' : 'Customer results',
+        action: () => commandPaletteNavigate('customers', () => {
+          state.customerSearch = label;
+          state.customerFinancialFilter = 'all';
+        })
+      });
+    });
+  }
+
+  if (typeof canOpenWorkspaceView !== 'function' || canOpenWorkspaceView('receipts')) {
+    const customersById = new Map((state.customers || []).map(customer => [String(customer.id), customer]));
+    takeMatching(getReceiptsVisibleToCurrentUser(), receipt => {
+      const customer = customersById.get(String(receipt.customerId));
+      return matches(
+        receipt.finalReceiptNo,
+        receipt.serialNumber,
+        receipt.tempReceiptNo,
+        canViewContacts ? receipt.phoneNumber : '',
+        customer?.name
+      );
+    }).forEach((receipt, index) => {
+      const customer = customersById.get(String(receipt.customerId));
+      const serial = String(receipt.finalReceiptNo || receipt.serialNumber || receipt.tempReceiptNo || '');
+      results.push({
+        id: `entity-receipt-${index}`,
+        label: customer?.name || (isAr ? 'وصل' : 'Receipt'),
+        description: `${isAr ? 'وصل' : 'Receipt'}${serial ? ` • ${serial}` : ''}`,
+        icon: 'receipt',
+        section: isAr ? 'نتائج الوصولات' : 'Receipt results',
+        action: () => commandPaletteNavigate('receipts', () => {
+          state.receiptSearch = serial || String(customer?.name || '');
+          state.receiptStatusFilter = 'all';
+          state.receiptPaymentFilter = 'all';
+          state.receiptDateFilter = 'all';
+          state.receiptDebtFilter = 'all';
+          state.receiptCollectedFilter = 'all';
+        })
+      });
+    });
+  }
+
+  if (typeof canOpenWorkspaceView !== 'function' || canOpenWorkspaceView('pages')) {
+    takeMatching(getPagesVisibleToCurrentUser(), page => matches(page.name, page.category, page.id)).forEach((page, index) => {
+      const label = String(page.name || (isAr ? 'صفحة بدون اسم' : 'Unnamed page'));
+      results.push({
+        id: `entity-page-${index}`,
+        label,
+        description: [isAr ? 'صفحة' : 'Page', page.category].filter(Boolean).join(' • '),
+        icon: 'file-text',
+        section: isAr ? 'نتائج الصفحات' : 'Page results',
+        action: () => commandPaletteNavigate('pages', () => { state.pageSearch = label; })
+      });
+    });
+  }
+
+  if (typeof canOpenWorkspaceView !== 'function' || canOpenWorkspaceView('ads')) {
+    const customersById = new Map((state.customers || []).map(customer => [String(customer.id), customer]));
+    const pagesById = new Map((state.pages || []).map(page => [String(page.id), page]));
+    takeMatching(getAdsVisibleToCurrentUser(), ad => {
+      const customer = customersById.get(String(ad.customerId));
+      const page = pagesById.get(String(ad.pageId || ad.page));
+      return matches(ad.serialNumber, ad.id, canViewContacts ? ad.phoneNumber : '', customer?.name, page?.name);
+    }).forEach((ad, index) => {
+      const customer = customersById.get(String(ad.customerId));
+      const page = pagesById.get(String(ad.pageId || ad.page));
+      const searchValue = String(ad.serialNumber || customer?.name || page?.name || ad.id || '');
+      results.push({
+        id: `entity-ad-${index}`,
+        label: customer?.name || (isAr ? 'إعلان' : 'Ad'),
+        description: [isAr ? 'إعلان' : 'Ad', page?.name, ad.serialNumber].filter(Boolean).join(' • '),
+        icon: 'megaphone',
+        section: isAr ? 'نتائج الإعلانات' : 'Ad results',
+        action: () => commandPaletteNavigate('ads', () => {
+          state.adSearch = searchValue;
+          state.adFilters = { status: 'all', payment: 'all', page: 'all' };
+        })
+      });
+    });
+  }
+  return results.slice(0, 20);
+}
+
+function buildCommandPaletteCommands(searchTerm = '') {
+  const term = String(searchTerm || '').trim().toLocaleLowerCase();
+  const base = getCommandPaletteBaseCommands();
+  const matchingBase = term
+    ? base.filter(command => `${command.label} ${command.description || ''} ${command.section || ''}`.toLocaleLowerCase().includes(term))
+    : base;
+  return [...getCommandPaletteEntityCommands(searchTerm), ...matchingBase];
+}
+
+function renderCommandPaletteResults(commands) {
+  const isAr = state.language === 'ar';
+  if (!commands.length) {
+    return `<div class="px-4 py-10 text-center text-sm text-slate-500"><i data-lucide="search-x" class="mx-auto mb-3 h-8 w-8 text-slate-300"></i>${isAr ? 'لا توجد نتائج مطابقة' : 'No matching results'}</div>`;
+  }
+  let lastSection = '';
+  return commands.map(command => {
+    const section = String(command.section || '');
+    const heading = section && section !== lastSection
+      ? `<div class="command-section-label">${Security.escapeHtml(section)}</div>`
+      : '';
+    lastSection = section;
+    return `${heading}
+      <button type="button" onclick="executeCommand('${Security.escapeHtml(command.id)}')" class="command-item w-full flex items-center gap-3 rounded-xl px-4 py-3 text-left transition-colors hover:bg-slate-50 dark:hover:bg-slate-800">
+        <span class="command-item-icon"><i data-lucide="${Security.escapeHtml(command.icon)}" class="h-5 w-5"></i></span>
+        <span class="min-w-0 flex-1">
+          <span class="block truncate font-semibold text-slate-800 dark:text-white">${Security.escapeHtml(command.label)}</span>
+          ${command.description ? `<span class="block truncate text-xs text-slate-500">${Security.escapeHtml(command.description)}</span>` : ''}
+        </span>
+        <i data-lucide="arrow-right" class="h-4 w-4 text-slate-400 rtl:rotate-180"></i>
+      </button>`;
+  }).join('');
+}
+
 function renderCommandPalette() {
   const existing = document.getElementById('command-palette-modal');
   if (existing) existing.remove();
-  
   if (!state.commandPaletteOpen) return;
-  
+
   const isAr = state.language === 'ar';
-  const commands = [
-    { id: 'analytics', label: isAr ? 'التحليلات' : 'Analytics', icon: 'layout-dashboard', action: () => navigateTo('analytics') },
-    { id: 'customers', label: isAr ? 'العملاء' : 'Customers', icon: 'smile', action: () => navigateTo('customers') },
-    { id: 'receipts', label: isAr ? 'الوصولات' : 'Receipts', icon: 'receipt', action: () => navigateTo('receipts') },
-    { id: 'pages', label: isAr ? 'الصفحات' : 'Pages', icon: 'file-text', action: () => navigateTo('pages') },
-    { id: 'ads', label: isAr ? 'الإعلانات' : 'Ads', icon: 'megaphone', action: () => navigateTo('ads') },
-    { id: 'deliveries', label: isAr ? 'التوصيلات' : 'Deliveries', icon: 'truck', action: () => navigateTo('deliveries') },
-    { id: 'users', label: isAr ? 'المستخدمون' : 'Users', icon: 'users', action: () => navigateTo('users') },
-    { id: 'settings', label: isAr ? 'الإعدادات' : 'Settings', icon: 'settings', action: () => navigateTo('settings') },
-    { id: 'add-customer', label: isAr ? 'إضافة عميل' : 'Add Customer', icon: 'user-plus', action: () => { toggleCommandPalette(); showCustomerModal(); } },
-    { id: 'add-ad', label: isAr ? 'إضافة إعلان' : 'Add Ad', icon: 'plus-circle', action: () => { toggleCommandPalette(); showAdModal(); } },
-    { id: 'add-receipt', label: isAr ? 'إضافة وصل' : 'Add Receipt', icon: 'receipt', action: () => { toggleCommandPalette(); showReceiptModal(); } },
-    { id: 'export', label: isAr ? 'تصدير البيانات' : 'Export Data', icon: 'download', action: () => { toggleCommandPalette(); exportData(); } },
-    { id: 'dark-mode', label: isAr ? 'تبديل الوضع الداكن' : 'Toggle Dark Mode', icon: 'moon', action: () => { toggleCommandPalette(); toggleTheme(); } },
-    { id: 'language', label: isAr ? 'تبديل اللغة' : 'Toggle Language', icon: 'globe', action: () => { toggleCommandPalette(); toggleLanguage(); } },
-    { id: 'logout', label: isAr ? 'تسجيل الخروج' : 'Logout', icon: 'log-out', action: () => { toggleCommandPalette(); handleLogout(); } },
-  ];
-  
+  const commands = buildCommandPaletteCommands('');
   const modal = document.createElement('div');
   modal.id = 'command-palette-modal';
-  modal.className = 'mobile-dialog-overlay fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-start justify-center pt-32 p-4';
-  modal.onclick = toggleCommandPalette;
+  modal.className = 'mobile-dialog-overlay fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-start justify-center pt-20 sm:pt-28 p-4';
+  modal.setAttribute('role', 'dialog');
+  modal.setAttribute('aria-modal', 'true');
+  modal.setAttribute('aria-labelledby', 'command-palette-title');
+  modal.onclick = closeCommandPalette;
   modal.innerHTML = `
-    <div class="glass-panel rounded-2xl p-4 w-full max-w-2xl" onclick="event.stopPropagation()">
-      <div class="flex items-center space-x-3 mb-4 pb-3 border-b border-slate-200 dark:border-slate-700">
-        <i data-lucide="command" class="w-5 h-5 text-indigo-600"></i>
-        <input 
-          type="text" 
-          id="command-search" 
-          placeholder="${isAr ? 'اكتب أمراً أو ابحث...' : 'Type a command or search...'}"
-          class="flex-1 bg-transparent outline-none text-slate-800 dark:text-white"
-          oninput="filterCommands(this.value)"
-        />
-        <kbd class="px-2 py-1 bg-slate-100 dark:bg-slate-800 rounded text-xs">ESC</kbd>
+    <div class="command-palette-panel glass-panel rounded-2xl p-3 sm:p-4 w-full max-w-2xl" onclick="event.stopPropagation()">
+      <h2 id="command-palette-title" class="sr-only">${isAr ? 'البحث الذكي والإجراءات السريعة' : 'Smart search and quick actions'}</h2>
+      <div class="flex items-center gap-3 mb-3 pb-3 border-b border-slate-200 dark:border-slate-700">
+        <i data-lucide="search" class="w-5 h-5 text-indigo-600"></i>
+        <input type="search" id="command-search" placeholder="${isAr ? 'ابحث عن عميل أو وصل أو صفحة أو إعلان...' : 'Find a customer, receipt, page or ad...'}" class="min-w-0 flex-1 bg-transparent outline-none text-slate-800 dark:text-white" oninput="onCommandPaletteSearch(this.value)" aria-label="${isAr ? 'البحث في النظام' : 'Search the system'}" autocomplete="off" />
+        <button type="button" onclick="closeCommandPalette()" class="touch-target flex h-10 w-10 items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${isAr ? 'إغلاق' : 'Close'}"><i data-lucide="x" class="h-5 w-5"></i></button>
       </div>
-      <div id="command-results" class="space-y-1 max-h-96 overflow-y-auto custom-scrollbar">
-        ${commands.map(cmd => `
-          <button onclick="executeCommand('${cmd.id}')" class="command-item w-full flex items-center space-x-3 px-4 py-3 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors text-left">
-            <i data-lucide="${cmd.icon}" class="w-5 h-5 text-slate-400"></i>
-            <span class="flex-1 text-slate-800 dark:text-white">${cmd.label}</span>
-            <i data-lucide="arrow-right" class="w-4 h-4 text-slate-400"></i>
-          </button>
-        `).join('')}
+      <div class="mb-2 px-2 text-xs text-slate-500">${isAr ? 'اكتب حرفين على الأقل للبحث في بيانات العمل' : 'Type at least 2 characters to search business records'}</div>
+      <div id="command-results" class="space-y-1 max-h-[60dvh] overflow-y-auto custom-scrollbar">
+        ${renderCommandPaletteResults(commands)}
       </div>
     </div>
   `;
   document.body.appendChild(modal);
   IconQueue.schedule(modal);
-  
-  // Store commands globally for execution
   window.commandPaletteCommands = commands;
 }
 
 function filterCommands(searchTerm) {
   const results = document.getElementById('command-results');
-  const commands = window.commandPaletteCommands || [];
-  
-  const filtered = commands.filter(cmd => 
-    cmd.label.toLowerCase().includes(searchTerm.toLowerCase())
-  );
-  
-  // XSS-SAFE: Command palette (internal commands only, not user data)
-  results.innerHTML = filtered.map(cmd => `
-    <button onclick="executeCommand('${Security.escapeHtml(cmd.id)}')" class="command-item w-full flex items-center space-x-3 px-4 py-3 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors text-left">
-      <i data-lucide="${Security.escapeHtml(cmd.icon)}" class="w-5 h-5 text-slate-400"></i>
-      <span class="flex-1 text-slate-800 dark:text-white">${Security.escapeHtml(cmd.label)}</span>
-      <i data-lucide="arrow-right" class="w-4 h-4 text-slate-400"></i>
-    </button>
-  `).join('');
-  lucide.createIcons();
+  if (!results) return;
+  const commands = buildCommandPaletteCommands(searchTerm);
+  window.commandPaletteCommands = commands;
+  results.innerHTML = renderCommandPaletteResults(commands);
+  IconQueue.schedule(results);
+}
+
+function onCommandPaletteSearch(searchTerm) {
+  if (_commandPaletteSearchTimer) clearTimeout(_commandPaletteSearchTimer);
+  _commandPaletteSearchTimer = setTimeout(() => {
+    _commandPaletteSearchTimer = null;
+    filterCommands(searchTerm);
+  }, 80);
 }
 
 function executeCommand(commandId) {
   const commands = window.commandPaletteCommands || [];
-  const command = commands.find(c => c.id === commandId);
-  if (command && command.action) {
-    command.action();
-  }
+  const command = commands.find(item => item.id === commandId);
+  if (command && typeof command.action === 'function') command.action();
 }
 
 // The customer-pages summary is a standalone body dialog rather than an
@@ -10013,6 +11867,16 @@ let _lastRenderedUserId = null;
 let _renderInProgress = false;
 let _savedScrollPosition = { top: 0, left: 0 };
 let _resetScrollOnNextRender = false;
+
+// The value a <select> would show if the user hadn't touched it — the option
+// the rendered HTML marked selected (or the first option). SELECTs have no
+// defaultValue property, so the dirty-field snapshot in render() needs this.
+function _selectDefaultValue(sel) {
+  for (let i = 0; i < sel.options.length; i++) {
+    if (sel.options[i].defaultSelected) return sel.options[i].value;
+  }
+  return sel.options.length ? sel.options[0].value : '';
+}
 // The exact HTML last written into the view container. A background live-sync tick
 // calls render() whenever ANY data changed anywhere; if this view's HTML is byte-for-byte
 // what is already on screen, we skip the DOM swap entirely — no icon flash, no re-played
@@ -10111,7 +11975,7 @@ function render() {
     let viewContainer = null;
     let nextViewHTML = null;
     if (canPartialUpdate) {
-      viewContainer = app.querySelector('.p-4.md\\:p-8');
+      viewContainer = app.querySelector('#workspace-view-content');
       if (viewContainer) {
         nextViewHTML = renderView();
         if (nextViewHTML === _lastViewHTML) {
@@ -10128,10 +11992,16 @@ function render() {
     }
 
     // Save scroll and lock layout only when a DOM write will actually happen.
+    // While the overlay body scroll lock (01b-mobile-runtime.js) is active,
+    // body is position:fixed and window.scrollY reads 0 — sample the locked
+    // position instead, otherwise a render fired between closeModal() and the
+    // observer's unlock (every modal save on a phone) restores the list to
+    // the top.
     const resetScroll = _resetScrollOnNextRender;
     _resetScrollOnNextRender = false;
+    const _lockedScroll = (typeof _scrollLockActive !== 'undefined' && _scrollLockActive);
     _savedScrollPosition = resetScroll ? { top: 0, left: 0 } : {
-      top: window.pageYOffset || window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0,
+      top: _lockedScroll ? _scrollLockY : (window.pageYOffset || window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0),
       left: window.pageXOffset || window.scrollX || document.documentElement.scrollLeft || document.body.scrollLeft || 0
     };
     lockLayoutForRender(app);
@@ -10139,13 +12009,35 @@ function render() {
 
     // Hide loading screen on first render
     const loadingScreen = document.getElementById('app-loading-screen');
-    if (loadingScreen) loadingScreen.style.display = 'none';
+    if (loadingScreen) {
+      loadingScreen.style.display = 'none';
+      loadingScreen.setAttribute('aria-busy', 'false');
+    }
 
     if (!state.currentUser) {
       const localFirstRun = !isServerModeEnabled() && (!Array.isArray(state.users) || state.users.length === 0);
+      // An empty local workspace with the albayan_had_data sentinel cookie is
+      // NOT a first run — the browser evicted this origin's storage (iOS ITP
+      // 7-day wipe, Android storage pressure). Showing "create your first
+      // admin" would silently bury the loss; offer backup restore instead.
+      const storageLoss = localFirstRun && !state._storageLossAcknowledged &&
+        typeof albayanDetectStorageLoss === 'function' && albayanDetectStorageLoss();
+      // IndexedDB never answered this boot (open watchdog / onblocked) while
+      // the sentinel cookie proves a local workspace exists on this device:
+      // the data is almost certainly still stored, just unreadable this
+      // session (init froze the collections against overwrite). Never present
+      // that as a fresh install — offer a reload instead.
+      const storageUnavailable = !storageLoss && localFirstRun &&
+        !state._storageLossAcknowledged &&
+        window.__albayanIdbOpenInconclusive === true &&
+        typeof _albayanHadDataCookie === 'function' && _albayanHadDataCookie();
       // Server mode: only after a login attempt reveals the server has no users
       // yet (state.needsServerSetup) do we offer first-run admin creation.
-      if (localFirstRun || (isServerModeEnabled() && state.needsServerSetup)) {
+      if (storageLoss) {
+        app.innerHTML = renderStorageLossRecovery();
+      } else if (storageUnavailable) {
+        app.innerHTML = renderStorageUnavailableNotice();
+      } else if (localFirstRun || (isServerModeEnabled() && state.needsServerSetup)) {
         app.innerHTML = renderFirstRunSetup();
         attachFirstRunHandlers();
       } else {
@@ -10174,7 +12066,35 @@ function render() {
           // real change.
           if (newViewHTML !== _lastViewHTML) {
             _lastViewHTML = newViewHTML;
+            // A background live-sync tick may swap the view while the user is
+            // mid-entry in an unbound field (e.g. wallet transfer amount).
+            // Snapshot dirty fields (value differs from the HTML default) and
+            // restore them after the swap — but only when the new HTML kept
+            // the SAME default attribute, so a render that intentionally emits
+            // a new value=/checked/selected (clear buttons, programmatic
+            // filter resets) always wins and is never fought.
+            const _dirtyFields = [];
+            viewContainer.querySelectorAll('input[id], textarea[id], select[id]').forEach(el => {
+              if (el.type === 'checkbox' || el.type === 'radio') {
+                if (el.checked !== el.defaultChecked) _dirtyFields.push({ id: el.id, checked: el.checked, defChecked: el.defaultChecked, kind: 'check' });
+              } else if (el.tagName === 'SELECT') {
+                if (el.value !== _selectDefaultValue(el)) _dirtyFields.push({ id: el.id, value: el.value, kind: 'select' });
+              } else if (el.value !== el.defaultValue) {
+                _dirtyFields.push({ id: el.id, value: el.value, def: el.defaultValue, kind: 'text' });
+              }
+            });
             viewContainer.innerHTML = newViewHTML;
+            _dirtyFields.forEach(s => {
+              const el = document.getElementById(s.id);
+              if (!el) return;
+              if (s.kind === 'check') {
+                if (el.defaultChecked === s.defChecked) el.checked = s.checked;
+              } else if (s.kind === 'select') {
+                if (el.value === _selectDefaultValue(el) && Array.prototype.some.call(el.options, o => o.value === s.value)) el.value = s.value;
+              } else if (el.defaultValue === s.def) {
+                el.value = s.value;
+              }
+            });
             // A same-view content change is an UPDATE, not navigation, so it must not
             // re-play the view's entry animation. Strip it synchronously (before paint,
             // so it never starts). Open modals live on document.body and are untouched.
@@ -10185,14 +12105,18 @@ function render() {
           // else: identical — leave the DOM alone (no swap, no flash, no shake, and the
           // user's scroll/caret/focus are never disturbed).
         } else {
-          app.innerHTML = renderMainApp();
-          _lastViewHTML = renderView();
+          const viewHTML = renderView();
+          app.innerHTML = renderMainApp(viewHTML);
+          _lastViewHTML = viewHTML;
         }
       } else {
         // Navigation (or first render after login): full render WITH the entry animation.
-        app.innerHTML = renderMainApp();
+        // Generate the page once. Several views calculate large financial
+        // indexes, so rendering them twice made every navigation needlessly slow.
+        const viewHTML = renderView();
+        app.innerHTML = renderMainApp(viewHTML);
         // Cache the freshly-navigated view so the next same-view tick can skip.
-        _lastViewHTML = renderView();
+        _lastViewHTML = viewHTML;
       }
 
       _restoreFocusState(_focusBefore);
@@ -10228,6 +12152,79 @@ function render() {
   }
 }
 
+// Shown instead of first-run setup when the browser evicted this origin's
+// storage while the sentinel cookie proves a local workspace existed before
+// (see albayanDetectStorageLoss in 06-persistence.js).
+function renderStorageLossRecovery() {
+  const isAr = state.language === 'ar';
+  return `
+    <div class="min-h-screen flex items-center justify-center p-4">
+      <div class="glass-panel w-full max-w-md p-8 rounded-3xl animate-fade-in-up" role="alert">
+        <div class="text-center mb-6">
+          <div class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+            <i data-lucide="database-backup" class="h-8 w-8" aria-hidden="true"></i>
+          </div>
+          <h1 class="text-2xl font-bold text-slate-800 dark:text-white">${isAr ? 'تم حذف البيانات المحلية' : 'Local data was deleted'}</h1>
+          <p class="text-sm text-slate-500 mt-2 leading-6">${isAr
+            ? 'يبدو أن المتصفح حذف البيانات المخزّنة محلياً على هذا الجهاز (تفعل متصفحات الهواتف ذلك بعد فترة من عدم الاستخدام أو عند امتلاء التخزين). لم يُحذف أي شيء من الخادم. إذا كان لديك ملف نسخة احتياطية مُصدَّر، استعده الآن.'
+            : 'The browser appears to have deleted the data stored locally on this device (phone browsers do this after a period of no use or under storage pressure). Nothing on a server was deleted. If you have an exported backup file, restore it now.'}</p>
+        </div>
+        <div class="space-y-3">
+          <button type="button" onclick="importData()" class="btn-shine w-full min-h-12 rounded-xl bg-indigo-600 px-5 py-3 font-extrabold text-white hover:bg-indigo-700 flex items-center justify-center gap-2">
+            <i data-lucide="upload" class="w-5 h-5" aria-hidden="true"></i>
+            <span>${isAr ? 'استعادة من نسخة احتياطية' : 'Restore from backup file'}</span>
+          </button>
+          <button type="button" onclick="acknowledgeStorageLoss()" class="w-full min-h-12 rounded-xl glass-panel px-5 py-3 font-bold text-slate-600 dark:text-slate-300">
+            ${isAr ? 'البدء من جديد بدون استعادة' : 'Start fresh without restoring'}
+          </button>
+        </div>
+        <p class="mt-4 text-center text-xs text-slate-400">${isAr
+          ? 'نصيحة: صدِّر نسخة احتياطية من الإعدادات بانتظام، أو استخدم وضع الخادم لحماية بياناتك.'
+          : 'Tip: export a backup from Settings regularly, or use server mode to keep data safe.'}</p>
+      </div>
+    </div>`;
+}
+
+function acknowledgeStorageLoss() {
+  state._storageLossAcknowledged = true;
+  render();
+}
+
+// Shown instead of first-run setup when the IndexedDB open never settled this
+// boot (watchdog / onblocked) while the sentinel cookie proves a local
+// workspace exists on this device. Unlike renderStorageLossRecovery, nothing
+// was deleted — the data is still stored, this session just could not read
+// it — so the primary action is a reload, not a backup restore.
+function renderStorageUnavailableNotice() {
+  const isAr = state.language === 'ar';
+  return `
+    <div class="min-h-screen flex items-center justify-center p-4">
+      <div class="glass-panel w-full max-w-md p-8 rounded-3xl animate-fade-in-up" role="alert">
+        <div class="text-center mb-6">
+          <div class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+            <i data-lucide="database" class="h-8 w-8" aria-hidden="true"></i>
+          </div>
+          <h1 class="text-2xl font-bold text-slate-800 dark:text-white">${isAr ? 'لم تستجب ذاكرة التخزين' : 'Device storage did not respond'}</h1>
+          <p class="text-sm text-slate-500 mt-2 leading-6">${isAr
+            ? 'بياناتك ما تزال محفوظة على هذا الجهاز، لكن المتصفح لم يستجب لطلب قراءتها هذه المرة. لم يُحذف أي شيء — أعد تحميل الصفحة للمحاولة مرة أخرى.'
+            : 'Your data is still on this device, but the browser did not respond when reading it this time. Nothing was deleted — reload the page to try again.'}</p>
+        </div>
+        <div class="space-y-3">
+          <button type="button" onclick="window.location.reload()" class="btn-shine w-full min-h-12 rounded-xl bg-indigo-600 px-5 py-3 font-extrabold text-white hover:bg-indigo-700 flex items-center justify-center gap-2">
+            <i data-lucide="refresh-cw" class="w-5 h-5" aria-hidden="true"></i>
+            <span>${isAr ? 'إعادة تحميل الصفحة' : 'Reload the page'}</span>
+          </button>
+          <button type="button" onclick="acknowledgeStorageLoss()" class="w-full min-h-12 rounded-xl glass-panel px-5 py-3 font-bold text-slate-600 dark:text-slate-300">
+            ${isAr ? 'المتابعة بدون البيانات المحفوظة' : 'Continue without the saved data'}
+          </button>
+        </div>
+        <p class="mt-4 text-center text-xs text-slate-400">${isAr
+          ? 'البيانات المحفوظة محمية من الكتابة فوقها في هذه الجلسة.'
+          : 'The saved data is protected from being overwritten during this session.'}</p>
+      </div>
+    </div>`;
+}
+
 function renderFirstRunSetup() {
   const isAr = state.language === 'ar';
   const serverSetup = isServerModeEnabled() && state.needsServerSetup && state.serverSetupEnabled === true;
@@ -10243,6 +12240,18 @@ function renderFirstRunSetup() {
           <h1 class="text-2xl font-bold text-slate-800 dark:text-white">${t('appName')}</h1>
           <p class="text-slate-500 mt-1">${modeNote}</p>
         </div>
+
+        ${state.serverProbeFailed && !serverSetup ? `
+        <div class="w-full mb-6 rounded-2xl border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-900/20 p-4 text-sm text-rose-800 dark:text-rose-200" role="alert">
+          <div class="font-bold mb-1">${isAr ? 'تعذّر الوصول إلى الخادم' : 'Server unreachable'}</div>
+          <div class="text-xs mb-3">${isAr
+            ? 'إذا كان لديك حساب على خادم البيان فلا تنشئ حساباً محلياً جديداً — أعد المحاولة أولاً.'
+            : 'If you already have an account on an Albayan server, do not create a new local account — retry the connection first.'}</div>
+          <button type="button" onclick="retryServerDetection()" class="min-h-11 rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-700">
+            ${isAr ? 'إعادة محاولة الاتصال' : 'Retry connection'}
+          </button>
+        </div>
+        ` : ''}
 
         <div class="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 mb-6">
           <div class="text-xs text-slate-600 dark:text-slate-300">
@@ -10446,6 +12455,10 @@ function attachFirstRunHandlers() {
 function renderLogin() {
   const isRTL = state.language === 'ar';
   const passkeySupported = !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext);
+  // Insecure origins (plain http:// on a LAN IP) hide crypto.subtle and
+  // clipboard/passkey APIs. Login still works via the pure-JS crypto fallback
+  // (02-security.js), but tell the user why security features are degraded.
+  const webCryptoOk = !!(globalThis.crypto && globalThis.crypto.subtle);
   const passkeyHint = passkeySupported
     ? (isRTL ? 'يمكنك استخدام بصمة/Face ID (Passkey) إذا تم إعدادها مسبقاً.' : 'You can use a Passkey (Face ID / Touch ID) if you already set one up.')
     : (isRTL ? 'Passkey يتطلب HTTPS أو localhost. افتح التطبيق عبر localhost لاستخدامه.' : 'Passkeys require HTTPS or localhost. Open the app via localhost to use it.');
@@ -10479,6 +12492,27 @@ function renderLogin() {
             <div class="text-xs">${isRTL
               ? 'إعداد المتصفح معطّل. اطلب من مشغل الخادم استخدام متغيرات ALBAYAN_BOOTSTRAP_ADMIN_* أو أمر إنشاء المدير من الطرفية.'
               : 'Browser setup is disabled. Ask the server operator to use ALBAYAN_BOOTSTRAP_ADMIN_* or the create-admin CLI command.'}</div>
+          </div>
+          ` : ''}
+
+          ${webCryptoOk ? '' : `
+          <div class="w-full mb-5 rounded-2xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-200" role="note">
+            <div class="font-bold mb-1">${isRTL ? 'اتصال غير مشفّر' : 'Insecure connection'}</div>
+            <div class="text-xs">${isRTL
+              ? 'التطبيق مفتوح عبر HTTP غير الآمن. تسجيل الدخول يعمل، لكن للحماية الكاملة افتحه عبر https:// أو localhost.'
+              : 'The app is open over insecure HTTP. Sign-in still works, but for full security open it via https:// or localhost.'}</div>
+          </div>
+          `}
+
+          ${state.serverProbeFailed ? `
+          <div class="w-full mb-5 rounded-2xl border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-900/20 p-4 text-sm text-rose-800 dark:text-rose-200" role="alert">
+            <div class="font-bold mb-1">${isRTL ? 'تعذّر الوصول إلى الخادم' : 'Server unreachable'}</div>
+            <div class="text-xs mb-3">${isRTL
+              ? 'لم يستجب خادم البيان أثناء بدء التشغيل، لذا يعمل التطبيق الآن على البيانات المحلية لهذا الجهاز فقط.'
+              : 'The Albayan server did not respond during startup, so the app is currently using this device’s local data only.'}</div>
+            <button type="button" onclick="retryServerDetection()" class="min-h-11 rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-700">
+              ${isRTL ? 'إعادة محاولة الاتصال' : 'Retry connection'}
+            </button>
           </div>
           ` : ''}
 
@@ -10670,7 +12704,125 @@ function attachLoginHandlers() {
   }
 }
 
-function renderMainApp() {
+function getWorkspaceViewTitle(view = state.currentView) {
+  const keyByView = {
+    analytics: 'analytics',
+    customers: 'customers',
+    receipts: 'receipts',
+    pages: 'pages',
+    ads: 'ads',
+    deliveries: 'deliveries',
+    reconciliation: 'jobReconciliation',
+    users: 'users',
+    audit: 'auditLogs',
+    settings: 'settings',
+    'delivery-dashboard': 'dashboard',
+    'clothes-system': 'clothesSystem'
+  };
+  const key = keyByView[view];
+  return key ? t(key) : t('adManager');
+}
+
+function isWorkspaceFilterPanelExpanded(view) {
+  if (isAdvancedWorkspaceMode()) return true;
+  const panels = state.expandedFilterPanels;
+  return !!(panels && typeof panels === 'object' && panels[view]);
+}
+
+function toggleWorkspaceFilterPanel(view) {
+  if (!state.expandedFilterPanels || typeof state.expandedFilterPanels !== 'object' || Array.isArray(state.expandedFilterPanels)) {
+    state.expandedFilterPanels = {};
+  }
+  state.expandedFilterPanels[view] = !state.expandedFilterPanels[view];
+  render();
+}
+
+function renderWorkspaceFilterToggle(view, activeCount = 0) {
+  if (isAdvancedWorkspaceMode()) return '';
+  const isAr = state.language === 'ar';
+  const expanded = isWorkspaceFilterPanelExpanded(view);
+  const safeView = Security.escapeHtml(String(view || ''));
+  const count = Math.max(0, Number(activeCount) || 0);
+  return `
+    <button type="button" onclick="toggleWorkspaceFilterPanel('${safeView}')" class="workspace-filter-toggle touch-target ${expanded ? 'is-open' : ''}" aria-expanded="${expanded ? 'true' : 'false'}" aria-controls="${safeView}-advanced-filters">
+      <i data-lucide="sliders-horizontal" class="w-4 h-4"></i>
+      <span>${expanded ? (isAr ? 'إخفاء الفلاتر' : 'Hide filters') : (isAr ? 'المزيد من الفلاتر' : 'More filters')}</span>
+      ${count > 0 ? `<span class="workspace-filter-count">${count}</span>` : ''}
+      <i data-lucide="chevron-${expanded ? 'up' : 'down'}" class="w-4 h-4"></i>
+    </button>
+  `;
+}
+
+function renderWorkspaceTopbar() {
+  const isAr = state.language === 'ar';
+  const advanced = isAdvancedWorkspaceMode();
+  return `
+    <header class="workspace-topbar sticky top-0 z-30 border-b border-slate-200/80 bg-white/90 dark:border-slate-800 dark:bg-slate-950/90">
+      <div class="mx-auto flex max-w-7xl items-center gap-4 px-8 py-3">
+        <div class="min-w-0">
+          <div class="text-[11px] font-bold uppercase tracking-[0.16em] text-indigo-500">${isAr ? 'مساحة العمل' : 'Workspace'}</div>
+          <div class="truncate text-sm font-bold text-slate-800 dark:text-white">${Security.escapeHtml(getWorkspaceViewTitle())}</div>
+        </div>
+        <button type="button" onclick="toggleCommandPalette()" class="workspace-global-search ml-auto" aria-haspopup="dialog" aria-label="${isAr ? 'البحث الذكي في كل النظام' : 'Smart search across the system'}">
+          <i data-lucide="search" class="h-4 w-4 text-indigo-500"></i>
+          <span class="truncate">${isAr ? 'ابحث عن عميل أو وصل أو صفحة أو إعلان...' : 'Find a customer, receipt, page or ad...'}</span>
+          <kbd>Ctrl K</kbd>
+        </button>
+        <button type="button" onclick="toggleWorkspaceExperienceMode()" class="workspace-mode-toggle" title="${isAr ? 'التبديل بين العرض البسيط والمتقدم' : 'Switch between Simple and Advanced view'}">
+          <i data-lucide="${advanced ? 'sliders-horizontal' : 'sparkles'}" class="h-4 w-4"></i>
+          <span>${advanced ? (isAr ? 'متقدم' : 'Advanced') : (isAr ? 'بسيط' : 'Simple')}</span>
+        </button>
+      </div>
+    </header>
+  `;
+}
+
+function canOpenWorkspaceView(view) {
+  if (isAdminRole(state.currentUser?.role)) return true;
+  if (isDeliveryRole(state.currentUser?.role) && (view === 'delivery-dashboard' || view === 'deliveries')) return true;
+  const permissionByView = {
+    analytics: 'analytics',
+    customers: 'customers',
+    receipts: 'receipts',
+    pages: 'pages',
+    ads: 'ads',
+    deliveries: 'deliveries'
+  };
+  const moduleName = permissionByView[view];
+  return !!moduleName && (currentUserHasPermission(moduleName, 'view') || currentUserHasPermission(moduleName, 'viewOwn'));
+}
+
+function renderMobileBottomNavigation() {
+  const isAr = state.language === 'ar';
+  const candidates = isDeliveryRole(state.currentUser?.role)
+    ? [
+        { id: 'delivery-dashboard', icon: 'layout-dashboard', label: isAr ? 'الرئيسية' : 'Home' },
+        { id: 'deliveries', icon: 'truck', label: isAr ? 'التوصيل' : 'Delivery' }
+      ]
+    : [
+        { id: 'analytics', icon: 'layout-dashboard', label: isAr ? 'الرئيسية' : 'Home' },
+        { id: 'customers', icon: 'users', label: isAr ? 'العملاء' : 'Customers' },
+        { id: 'receipts', icon: 'receipt', label: isAr ? 'الوصولات' : 'Receipts' },
+        { id: 'ads', icon: 'megaphone', label: isAr ? 'الإعلانات' : 'Ads' }
+      ];
+  const items = candidates.filter(item => canOpenWorkspaceView(item.id));
+  return `
+    <nav class="mobile-bottom-nav" aria-label="${isAr ? 'التنقل السريع' : 'Quick navigation'}">
+      ${items.map(item => `
+        <button type="button" onclick="navigateTo('${item.id}')" class="mobile-bottom-nav-item ${state.currentView === item.id ? 'is-active' : ''}" aria-current="${state.currentView === item.id ? 'page' : 'false'}">
+          <i data-lucide="${item.icon}" class="h-5 w-5"></i>
+          <span>${item.label}</span>
+        </button>
+      `).join('')}
+      <button type="button" onclick="toggleMobileMenu()" class="mobile-bottom-nav-item" aria-label="${isAr ? 'المزيد' : 'More'}">
+        <i data-lucide="menu" class="h-5 w-5"></i>
+        <span>${isAr ? 'المزيد' : 'More'}</span>
+      </button>
+    </nav>
+  `;
+}
+
+function renderMainApp(viewHTML = null) {
   const dir = getDir();
   const showSidebar = !['services-hub', 'smart-systems', 'service-placeholder', 'wallet', 'clothes-system', 'ads-studio'].includes(state.currentView);
   
@@ -10682,11 +12834,16 @@ function renderMainApp() {
         ${showSidebar ? `
         <header class="mobile-app-header sticky top-0 z-20 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-3 sm:px-6 py-3 md:hidden flex justify-between items-center">
           <div class="min-w-0 truncate font-bold">${t('adManager')}</div>
-          <button type="button" onclick="toggleMobileMenu()" class="mobile-menu-button touch-target flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'فتح القائمة' : 'Open menu'}" aria-controls="app-sidebar" aria-expanded="${state.isMobileMenuOpen ? 'true' : 'false'}"><i data-lucide="menu" class="w-6 h-6"></i></button>
+          <div class="flex items-center gap-1">
+            <button type="button" onclick="toggleCommandPalette()" class="touch-target flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'البحث الذكي' : 'Smart search'}"><i data-lucide="search" class="w-5 h-5"></i></button>
+            <button type="button" onclick="toggleMobileMenu()" class="mobile-menu-button touch-target flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'فتح القائمة' : 'Open menu'}" aria-controls="app-sidebar" aria-expanded="${state.isMobileMenuOpen ? 'true' : 'false'}"><i data-lucide="menu" class="w-6 h-6"></i></button>
+          </div>
         </header>
+        ${renderWorkspaceTopbar()}
         ` : ''}
-        <div class="app-content min-w-0 p-4 md:p-8 max-w-7xl mx-auto">${renderView()}</div>
+        <div id="workspace-view-content" class="app-content min-w-0 p-4 md:p-8 max-w-7xl mx-auto">${viewHTML === null ? renderView() : viewHTML}</div>
       </main>
+      ${showSidebar ? renderMobileBottomNavigation() : ''}
     </div>
   `;
 }
@@ -10838,6 +12995,13 @@ function renderSidebar() {
 
         ${renderAlwaysAvailableAccountLinks()}
         
+        <button type="button" onclick="toggleWorkspaceExperienceMode()" class="workspace-sidebar-mode w-full min-h-11 flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-xs font-bold">
+          <i data-lucide="${isAdvancedWorkspaceMode() ? 'sliders-horizontal' : 'sparkles'}" class="w-4 h-4"></i>
+          <span>${isAdvancedWorkspaceMode()
+            ? (state.language === 'ar' ? 'العرض المتقدم' : 'Advanced view')
+            : (state.language === 'ar' ? 'العرض البسيط' : 'Simple view')}</span>
+        </button>
+
         <div class="flex items-center justify-between bg-white/20 dark:bg-slate-800/20 rounded-xl p-2">
           <button onclick="toggleTheme()" class="flex-1 flex items-center justify-center space-x-2 py-2 rounded-lg text-xs font-bold hover:bg-white/20">
             <i data-lucide="${state.theme === 'dark' ? 'moon' : state.theme === 'light' ? 'sun' : 'monitor'}" class="w-4 h-4"></i>
@@ -11329,7 +13493,7 @@ function renderWalletView() {
         : (userById.get(String(otherId))?.name || userById.get(String(otherId))?.email || String(otherId || ''));
 
     const amountStr = walletFormatMinor(walletTxAmountMinor(tx), walletTxCurrency(tx));
-    const when = tx.createdAt ? new Date(tx.createdAt).toLocaleString() : '';
+    const when = tx.createdAt ? new Date(tx.createdAt).toLocaleString(appDateLocale()) : '';
     const memo = Security.escapeHtml(String(tx.memo || ''));
 
     return `
@@ -11349,7 +13513,7 @@ function renderWalletView() {
   const subsRows = activeSubs.map(s => {
     const svc = SERVICES[s.serviceId];
     const name = svc ? (isRTL ? svc.nameAr : svc.name) : s.serviceId;
-    const exp = s.expiresAt ? new Date(s.expiresAt).toLocaleDateString() : '';
+    const exp = s.expiresAt ? new Date(s.expiresAt).toLocaleDateString(appDateLocale()) : '';
     return `
       <div class="flex items-center justify-between gap-4 py-2 border-b border-slate-200/60 dark:border-slate-700/60">
         <div class="font-bold text-slate-800 dark:text-white min-w-0 truncate">${Security.escapeHtml(name)}</div>
@@ -11553,6 +13717,13 @@ function renderAnalyticsView() {
   // collected-vs-outstanding amounts, per-customer spend).
   const canViewFinancials = can('analytics', 'viewFinancials');
   const canViewSensitive = can('analytics', 'viewSensitive');
+  // Liquidity coverage is the most sensitive number in the app (it admits how
+  // much customer money is uncovered) — Admin only. The appSettings config
+  // also syncs only to admins, so a wider gate would show non-admins a
+  // permanently empty panel; open it up later only together with a server
+  // read carve-out for the config collection.
+  const canViewLiquidity = isCurrentUserAdmin();
+  const liquidity = canViewLiquidity ? getLiquiditySnapshot() : null;
 
   // Calculate ad revenue - separate paid vs pending/unpaid for clarity.
   // Uses the SAME status-aware spend rule as the customer cards
@@ -11678,7 +13849,7 @@ function renderAnalyticsView() {
     return `
       <div class="flex items-center justify-between text-xs font-medium mb-1">
         <span class="text-slate-500">${label}</span>
-        <span class="text-slate-700 dark:text-slate-200">${value.toLocaleString()} / ${target.toLocaleString()}</span>
+        <span class="text-slate-700 dark:text-slate-200">${value.toLocaleString('en-US')} / ${target.toLocaleString('en-US')}</span>
       </div>
       <div class="w-full h-2 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
         <div class="h-2 ${color} rounded-full" style="width:${pct}%"></div>
@@ -11765,6 +13936,85 @@ function renderAnalyticsView() {
         </div>
         `}
       </div>
+
+      ${canViewLiquidity && liquidity ? (() => {
+        const covered = liquidity.coveragePercent >= 100;
+        const halfway = liquidity.coveragePercent >= 50;
+        // Tailwind needs complete literal class names — never build them from
+        // pieces or the styles silently vanish from the compiled CSS.
+        const statusBadgeClass = covered
+          ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/40'
+          : halfway
+            ? 'bg-amber-50 text-amber-700 dark:bg-amber-900/40'
+            : 'bg-rose-50 text-rose-700 dark:bg-rose-900/40';
+        const statusLabel = covered
+          ? (isAr ? 'آمن — النقد الجديد يغطي أموال العملاء' : 'Safe — new cash covers customer money')
+          : halfway
+            ? (isAr ? 'تغطية جزئية — واصل التحصيل' : 'Partial cover — keep collecting')
+            : (isAr ? 'خطر — النقد الجديد لا يغطي نصف المستحق' : 'Danger — new cash covers less than half');
+        const startDisplay = liquidity.tracking ? new Date(liquidity.startDate).toLocaleDateString(isAr ? 'ar-LY' : 'en-GB') : '';
+        const dateControl = isCurrentUserAdmin() ? `
+            <div class="flex items-center gap-2 flex-wrap">
+              <input type="date" id="liquidity-start-date" ${liquidity.tracking ? `value="${liquidity.startDate.slice(0, 10)}"` : ''} class="glass-input px-3 py-2 rounded-lg text-sm" />
+              <button onclick="updateLiquidityTrackingStart(document.getElementById('liquidity-start-date').value)"
+                class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold">
+                ${liquidity.tracking ? (isAr ? 'تغيير تاريخ البداية' : 'Change start date') : (isAr ? 'ابدأ التتبّع' : 'Start tracking')}
+              </button>
+            </div>` : '';
+        return `
+      <!-- Liquidity Coverage -->
+      <div class="glass-panel rounded-2xl p-5 space-y-4">
+        <div class="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">${isAr ? 'تغطية السيولة' : 'Liquidity Coverage'}</h2>
+            <p class="text-xs text-slate-500 mt-0.5">${
+              liquidity.tracking
+                ? (isAr ? `النقد الجديد منذ ${startDisplay} مقابل كل ما هو مستحق للعملاء` : `New cash since ${startDisplay} vs everything still owed to customers`)
+                : (isAr ? 'تتبّع الأموال الجديدة مقابل المستحق لكل العملاء' : 'Track fresh money against what all customers are owed')
+            }</p>
+          </div>
+          ${liquidity.tracking
+            ? `<span class="text-xs px-3 py-1 rounded-full ${statusBadgeClass} font-semibold">${statusLabel}</span>`
+            : `<span class="text-xs px-3 py-1 rounded-full bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">${isAr ? 'لم يبدأ بعد' : 'Not started yet'}</span>`}
+        </div>
+        ${liquidity.tracking ? `
+        <div class="grid grid-cols-2 xl:grid-cols-4 gap-3 text-sm">
+          <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
+            <p class="text-slate-500 text-xs">${isAr ? 'نقد جديد مُحصَّل' : 'New money collected'}</p>
+            <p class="text-xl font-bold text-emerald-600 dark:text-emerald-400">$${liquidity.collectedUSD.toFixed(2)}</p>
+          </div>
+          <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
+            <p class="text-slate-500 text-xs">${isAr ? 'صُرف على إعلانات جديدة' : 'Spent on new ads'}</p>
+            <p class="text-xl font-bold text-rose-600 dark:text-rose-400">$${liquidity.adSpendUSD.toFixed(2)}</p>
+          </div>
+          <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
+            <p class="text-slate-500 text-xs">${isAr ? 'صافي النقد الجديد' : 'Net new cash'}</p>
+            <p class="text-xl font-bold ${liquidity.netUSD >= 0 ? 'text-slate-800 dark:text-white' : 'text-rose-600 dark:text-rose-400'}">$${liquidity.netUSD.toFixed(2)}</p>
+          </div>
+          <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
+            <p class="text-slate-500 text-xs">${isAr ? 'المستحق لكل العملاء' : 'Owed to all customers'}</p>
+            <p class="text-xl font-bold text-indigo-600 dark:text-indigo-400">$${liquidity.liabilityUSD.toFixed(2)}</p>
+          </div>
+        </div>
+        <div>
+          <div class="flex items-center justify-between text-xs text-slate-500 mb-1">
+            <span>${isAr ? 'نسبة التغطية' : 'Coverage'}: ${liquidity.coveragePercent.toFixed(1)}%</span>
+            ${liquidity.shortfallUSD > 0.005 ? `<span class="font-semibold text-rose-600">${isAr ? 'العجز المتبقي' : 'Still uncovered'}: $${liquidity.shortfallUSD.toFixed(2)}</span>` : `<span class="font-semibold text-emerald-600">${isAr ? 'مُغطّى بالكامل' : 'Fully covered'}</span>`}
+          </div>
+          <div class="w-full h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
+            <div class="h-full rounded-full transition-all duration-500 ${covered ? 'bg-gradient-to-r from-emerald-500 to-teal-500' : (halfway ? 'bg-gradient-to-r from-amber-500 to-orange-500' : 'bg-gradient-to-r from-rose-500 to-red-600')}" style="width: ${Math.min(liquidity.coveragePercent, 100)}%"></div>
+          </div>
+        </div>
+        ${dateControl}
+        ` : `
+        <p class="text-sm text-slate-600 dark:text-slate-300">${isAr
+          ? 'اختر تاريخ البداية (اليوم مثلاً). من ذلك التاريخ سيحسب النظام كل نقد جديد يصلك وكل صرف جديد على الإعلانات، ويقارنه بما هو مستحق لكل العملاء.'
+          : 'Pick a start date (for example today). From that date the system counts every new payment you receive and every new ad you fund, and compares the net against everything customers are still owed.'}</p>
+        ${dateControl || `<p class="text-xs text-slate-500">${isAr ? 'يقوم المدير بتفعيل التتبّع' : 'An Admin starts the tracking'}</p>`}
+        `}
+      </div>
+        `;
+      })() : ''}
 
       <!-- Tracking Panels -->
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -11880,7 +14130,7 @@ function renderAnalyticsView() {
                     <p class="font-medium">${Security.escapeHtml(item.type || '')}: ${Security.escapeHtml(item.name || '')}</p>
                     <p class="text-[11px] text-slate-500">$${item.value.toFixed(2)} • ${Security.escapeHtml(trStatus(item.status || ''))}</p>
                   </div>
-                  <span class="text-[10px] text-slate-400">${item.at ? new Date(item.at).toLocaleDateString() : ''}</span>
+                  <span class="text-[10px] text-slate-400">${item.at ? new Date(item.at).toLocaleDateString(appDateLocale()) : ''}</span>
                 </div>
               `).join('')}
             </div>
@@ -11978,27 +14228,41 @@ function updateCustomersViewFiltered() {
   if (window.lucide) lucide.createIcons();
 }
 
-function renderCustomersGrid(customers) {
+function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
   const isAr = state.language === 'ar';
   if (!Array.isArray(customers) || customers.length === 0) {
     return `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="users" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${isAr ? 'لا يوجد عملاء' : 'No customers found'}</p></div>`;
   }
 
   const totalCustomers = customers.length;
-  const statsIndex = buildCustomerStatsIndex();
+  // renderCustomersView already builds these O(all records) indexes for its
+  // header stats; accept them as params so each search keystroke computes
+  // them once instead of twice (noticeably slow on phones).
+  statsIndex = statsIndex || buildCustomerStatsIndex();
   // customers.viewContacts / customers.viewBalance are real permissions — a
   // user without them must not see phone numbers or money figures.
   const canSeeContacts = can('customers', 'viewContacts');
   const canSeeBalance = can('customers', 'viewBalance');
   const canSeePages = can('pages', 'view');
+  const canSeeReceipts = canOpenWorkspaceView('receipts');
+  const linkedReceiptCountByCustomer = new Map();
+  if (canSeeReceipts) {
+    getReceiptsVisibleToCurrentUser().forEach(receipt => {
+      const customerId = getReceiptCustomerReferenceId(receipt);
+      if (customerId) linkedReceiptCountByCustomer.set(customerId, (linkedReceiptCountByCustomer.get(customerId) || 0) + 1);
+    });
+  }
+  duplicateCustomerIds = duplicateCustomerIds || (isCurrentUserAdmin()
+    ? new Set(findDuplicateCustomerGroups(state.customers).flatMap(group => group.customers.map(customer => String(customer.id))))
+    : new Set());
   const HIDDEN = isAr ? 'محجوب' : 'Hidden';
   return customers.map((c, idx) => {
           const stats = getCustomerStats(c.id, statsIndex);
           const lastAdText = stats.lastAdDate
-            ? new Date(stats.lastAdDate).toLocaleDateString()
+            ? new Date(stats.lastAdDate).toLocaleDateString(appDateLocale())
             : (isAr ? 'أبداً' : 'Never');
 
-    const phones = Array.isArray(c.phones) ? c.phones : [];
+    const phones = getCustomerPhoneEntries(c).map(entry => entry.value);
     const profileLinks = Array.isArray(c.profileLinks) ? c.profileLinks : [];
           // Display number: total - index (so first item = highest number, matching newest-first sort)
           const displayNum = totalCustomers - idx;
@@ -12012,6 +14276,13 @@ function renderCustomersGrid(customers) {
                 <i data-lucide="files" class="w-4 h-4"></i><span>${pagesLabel}</span>
               </button>`
             : '';
+          const linkedReceiptCount = linkedReceiptCountByCustomer.get(String(c.id || '')) || 0;
+          const receiptsLabel = isAr ? `الوصولات ${linkedReceiptCount}` : `Receipts ${linkedReceiptCount}`;
+          const linkedReceiptsButton = canSeeReceipts
+            ? `<button type="button" data-action="view-customer-receipts" data-customer-id="${Security.escapeHtml(String(c.id || ''))}" onclick="openCustomerReceipts(this.dataset.customerId)" aria-label="${Security.escapeHtml(isAr ? `عرض ${linkedReceiptCount} من وصولات العميل ${c.name || ''}` : `View ${linkedReceiptCount} receipts linked to ${c.name || 'this customer'}`)}" class="customer-receipts-button min-h-11 px-3 py-2 bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 rounded-full text-xs font-bold inline-flex items-center gap-1.5 hover:bg-violet-200 dark:hover:bg-violet-900/50 focus:outline-none focus:ring-2 focus:ring-violet-500">
+                <i data-lucide="receipt" class="w-4 h-4"></i><span>${receiptsLabel}</span>
+              </button>`
+            : '';
           
           return `
             <div class="glass-panel rounded-xl p-5 hover:scale-[1.02] transition-transform" data-customer-id="${c.id}">
@@ -12021,9 +14292,11 @@ function renderCustomersGrid(customers) {
                     <span class="px-2 py-0.5 rounded-md bg-blue-100 dark:bg-blue-900/50 text-blue-600 dark:text-blue-400 text-xs font-bold">#${displayNum}</span>
                   <h3 class="font-bold text-lg text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</h3>
                   </div>
-                  <div class="flex items-center space-x-2 mt-1">
+                  <div class="flex min-w-0 flex-wrap items-center gap-2 mt-1">
                     <span class="text-xs px-2 py-1 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 rounded-full">${Security.escapeHtml(c.platform || '')}</span>
+                    ${linkedReceiptsButton}
                     ${linkedPagesButton}
+                    ${duplicateCustomerIds.has(String(c.id)) ? `<button type="button" onclick="showCustomerDuplicateMerge('${Security.escapeHtml(String(c.id || ''))}')" class="min-h-11 px-3 py-2 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 text-xs font-bold inline-flex items-center gap-1.5 hover:bg-amber-200 dark:hover:bg-amber-900/50" aria-haspopup="dialog" title="${isAr ? 'دمج سجل العميل المكرر بأمان' : 'Safely merge this duplicate customer'}"><i data-lucide="copy" class="w-4 h-4"></i><span>${isAr ? 'مكرر' : 'Duplicate'}</span></button>` : ''}
                   </div>
                 </div>
                 <div class="flex space-x-1">
@@ -12126,10 +14399,31 @@ function loadMoreCustomers() {
   updateCustomersViewFiltered();
 }
 
+function applyCustomerQuickFilter(mode) {
+  state.customerFinancialFilter = mode === 'debt' ? 'hasDebt' : (mode === 'credit' ? 'hasCredit' : 'all');
+  render();
+}
+
 function renderCustomersView() {
   const isAr = state.language === 'ar';
+  const canSeeCustomerContacts = can('customers', 'viewContacts');
+  const canSeeCustomerBalances = can('customers', 'viewBalance');
+  const financialCustomerSorts = new Set(['highestPaid', 'lowestPaid', 'mostSpend', 'leastSpend', 'biggestCredit', 'highestDebt']);
+  // A saved filter preference must never become a side channel after an
+  // administrator removes balance access.
+  if (!canSeeCustomerBalances) {
+    state.customerFinancialFilter = 'all';
+    if (financialCustomerSorts.has(String(state.customerSort || ''))) state.customerSort = 'newest';
+  }
   const allFilteredCustomers = getFilteredCustomers();
   const allCustomers = getCustomersVisibleToCurrentUser();
+  const duplicateCustomerGroups = isCurrentUserAdmin() ? findDuplicateCustomerGroups(state.customers) : [];
+  const duplicateCustomerCount = duplicateCustomerGroups.reduce((sum, group) => sum + group.customers.length, 0);
+  const customerAdvancedFilterCount = [
+    canSeeCustomerBalances && state.customerFinancialFilter !== 'all',
+    state.customerSort !== 'newest'
+  ].filter(Boolean).length;
+  const customerAdvancedFiltersOpen = isWorkspaceFilterPanelExpanded('customers');
 
   // Reset pagination whenever the filter/sort/search combination changes.
   const filterFingerprint = JSON.stringify([
@@ -12168,60 +14462,82 @@ function renderCustomersView() {
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('customers')}</h1>
           <p id="customers-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allFilteredCustomers.length} من ${allCustomers.length} عميل` : `${allFilteredCustomers.length} of ${allCustomers.length} customers`}</p>
         </div>
-        ${can('customers', 'add') ? `
-        <button onclick="showCustomerModal()" class="btn-shine w-full sm:w-auto bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
-          <i data-lucide="user-plus" class="w-4 h-4"></i>
-          <span>${t('addCustomer')}</span>
-        </button>
-        ` : ''}
+        <div class="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+          ${isCurrentUserAdmin() ? `
+          <button type="button" onclick="showCustomerDuplicateMerge()" class="w-full sm:w-auto min-h-11 border ${duplicateCustomerCount > 0 ? 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-300' : 'border-slate-200 bg-white/60 text-slate-600 dark:border-slate-700 dark:bg-slate-900/30 dark:text-slate-300'} px-4 py-2 rounded-xl font-bold flex items-center justify-center gap-2" aria-haspopup="dialog">
+            <i data-lucide="scan-search" class="w-4 h-4"></i>
+            <span>${isAr ? 'البحث عن التكرار' : 'Find duplicates'}</span>
+            ${duplicateCustomerCount > 0 ? `<span class="min-w-6 h-6 px-1.5 rounded-full bg-amber-600 text-white text-xs inline-flex items-center justify-center">${duplicateCustomerCount}</span>` : ''}
+          </button>` : ''}
+          ${can('customers', 'add') ? `
+          <button onclick="showCustomerModal()" class="btn-shine w-full sm:w-auto min-h-11 bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
+            <i data-lucide="user-plus" class="w-4 h-4"></i>
+            <span>${t('addCustomer')}</span>
+          </button>
+          ` : ''}
+        </div>
       </div>
 
       <!-- Stats Cards (money figures require customers.viewBalance) -->
-      <div class="grid grid-cols-1 ${can('customers', 'viewBalance') ? 'md:grid-cols-3' : ''} gap-6">
+      <div class="grid grid-cols-1 ${canSeeCustomerBalances ? 'md:grid-cols-3' : ''} gap-6">
         ${renderStatCard(isAr ? 'إجمالي العملاء' : 'Total Customers', allCustomers.length, 'users', 'from-indigo-500 to-purple-600')}
-        ${can('customers', 'viewBalance') ? `
+        ${canSeeCustomerBalances ? `
         ${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', totalRevenue.toFixed(0) + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}
         ${renderStatCard(isAr ? 'الديون المستحقة' : 'Outstanding Debts', totalDebts.toFixed(0) + ' LYD', 'alert-circle', 'from-rose-500 to-pink-600')}
         ` : ''}
       </div>
 
       <!-- Search and Filters -->
-      <div class="glass-panel rounded-xl p-4">
-        <div class="flex flex-col md:flex-row gap-4">
-          <input type="text" id="customer-search" placeholder="${isAr ? 'بحث عن عملاء...' : 'Search customers...'}" value="${Security.escapeHtml(state.customerSearch || '')}" class="flex-1 glass-input px-4 py-2 rounded-lg" oninput="onCustomerSearchInput(this.value)" autocomplete="off" />
-          
-          <div class="customer-filter-controls grid grid-cols-1 sm:grid-cols-2 gap-2">
+      <div class="smart-filter-panel glass-panel rounded-2xl p-4">
+        <div class="smart-filter-primary">
+          <div class="smart-search-field">
+            <label for="customer-search" class="sr-only">${isAr ? 'بحث في العملاء' : 'Search customers'}</label>
+            <i data-lucide="search" class="h-5 w-5"></i>
+            <input type="search" id="customer-search" placeholder="${isAr ? (canSeeCustomerContacts ? 'ابحث بالاسم أو الهاتف...' : 'ابحث بالاسم أو المنصة...') : (canSeeCustomerContacts ? 'Search by name or phone...' : 'Search by name or platform...')}" value="${Security.escapeHtml(state.customerSearch || '')}" oninput="onCustomerSearchInput(this.value)" autocomplete="off" />
+          </div>
+          ${canSeeCustomerBalances ? `<div class="smart-filter-chips" aria-label="${isAr ? 'فلاتر مالية سريعة' : 'Quick financial filters'}">
+            <button type="button" onclick="applyCustomerQuickFilter('all')" class="smart-filter-chip ${state.customerFinancialFilter === 'all' ? 'is-active' : ''}">${isAr ? 'الكل' : 'All'}</button>
+            <button type="button" onclick="applyCustomerQuickFilter('debt')" class="smart-filter-chip ${state.customerFinancialFilter === 'hasDebt' ? 'is-active is-danger' : ''}"><i data-lucide="circle-minus" class="h-4 w-4"></i>${isAr ? 'عليه دين' : 'Has debt'}</button>
+            <button type="button" onclick="applyCustomerQuickFilter('credit')" class="smart-filter-chip ${state.customerFinancialFilter === 'hasCredit' ? 'is-active is-success' : ''}"><i data-lucide="circle-plus" class="h-4 w-4"></i>${isAr ? 'له رصيد' : 'Has credit'}</button>
+          </div>` : ''}
+          ${renderWorkspaceFilterToggle('customers', customerAdvancedFilterCount)}
+        </div>
+
+        <div id="customers-advanced-filters" class="workspace-advanced-panel ${customerAdvancedFiltersOpen ? '' : 'hidden'}" aria-hidden="${customerAdvancedFiltersOpen ? 'false' : 'true'}">
+          <div class="customer-filter-controls workspace-filter-grid">
             <!-- Sort Dropdown -->
             <div class="relative min-w-0">
               <select id="customer-sort" onchange="state.customerSort = this.value; render();" class="w-full min-w-0 glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
                 <option value="newest" ${state.customerSort === 'newest' ? 'selected' : ''}>${isAr ? 'الأحدث أولاً' : 'Newest First'}</option>
                 <option value="oldest" ${state.customerSort === 'oldest' ? 'selected' : ''}>${isAr ? 'الأقدم أولاً' : 'Oldest First'}</option>
                 <option value="lastActive" ${state.customerSort === 'lastActive' ? 'selected' : ''}>${isAr ? 'آخر نشاط (حديثاً)' : 'Last Active (Recently)'}</option>
+                ${canSeeCustomerBalances ? `
                 <option value="highestPaid" ${state.customerSort === 'highestPaid' ? 'selected' : ''}>${isAr ? 'الأعلى دفعاً (إيراد)' : 'Highest Paid (Revenue)'}</option>
                 <option value="lowestPaid" ${state.customerSort === 'lowestPaid' ? 'selected' : ''}>${isAr ? 'الأقل دفعاً' : 'Lowest Paid'}</option>
                 <option value="mostSpend" ${state.customerSort === 'mostSpend' ? 'selected' : ''}>${isAr ? 'الأكثر إنفاقاً (إعلانات)' : 'Most Spend (Ads)'}</option>
                 <option value="leastSpend" ${state.customerSort === 'leastSpend' ? 'selected' : ''}>${isAr ? 'الأقل إنفاقاً' : 'Least Spend'}</option>
                 <option value="biggestCredit" ${state.customerSort === 'biggestCredit' ? 'selected' : ''}>${isAr ? 'أكبر رصيد دائن' : 'Biggest Credit Balance'}</option>
                 <option value="highestDebt" ${state.customerSort === 'highestDebt' ? 'selected' : ''}>${isAr ? 'أعلى دين' : 'Highest Debt'}</option>
+                ` : ''}
               </select>
               <i data-lucide="arrow-up-down" class="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400"></i>
             </div>
             
             <!-- Financial Filter -->
-            <div class="relative min-w-0">
+            ${canSeeCustomerBalances ? `<div class="relative min-w-0">
               <select id="customer-financial-filter" onchange="state.customerFinancialFilter = this.value; render();" class="w-full min-w-0 glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
                 <option value="all" ${state.customerFinancialFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات المالية' : 'All Financials'}</option>
                 <option value="hasCredit" ${state.customerFinancialFilter === 'hasCredit' ? 'selected' : ''}>${isAr ? 'لديه رصيد دائن' : 'Has Credit'}</option>
                 <option value="hasDebt" ${state.customerFinancialFilter === 'hasDebt' ? 'selected' : ''}>${isAr ? 'عليه دين' : 'Has Debt'}</option>
               </select>
               <i data-lucide="filter" class="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400"></i>
-            </div>
+            </div>` : ''}
           </div>
         </div>
       </div>
 
       <div id="customers-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        ${renderCustomersGrid(visibleCustomers)}
+        ${renderCustomersGrid(visibleCustomers, statsIndex, isCurrentUserAdmin() ? new Set(duplicateCustomerGroups.flatMap(group => group.customers.map(customer => String(customer.id)))) : new Set())}
         ${remainingCustomers > 0 ? `
           <div class="col-span-full flex justify-center py-2">
             <button onclick="loadMoreCustomers()" class="px-6 py-3 glass-panel rounded-xl text-sm font-bold text-indigo-600 dark:text-indigo-400 hover:scale-105 transition-transform flex items-center gap-2">
@@ -12251,18 +14567,41 @@ function loadMoreReceipts() {
 
 function renderReceiptsView() {
   const isArV = state.language === 'ar';
-  const allReceipts = getVisibleRecords(state.receipts);
+  const canSearchReceiptContacts = can('customers', 'viewContacts');
+  const allReceipts = getReceiptsVisibleToCurrentUser();
   // PERFORMANCE: one Map lookup per receipt instead of scanning the whole
   // customers array for every receipt (same strict-equality semantics).
-  const customersById = new Map(state.customers.map(c => [c.id, c]));
+  const customersById = new Map(state.customers.map(c => [String(c.id), c]));
+  const receiptCustomerFilter = String(state.receiptCustomerFilter || '').trim();
+  const receiptRecordFilter = String(state.receiptRecordFilter || '').trim();
+  const filterCustomersById = new Map(getCustomersVisibleToCurrentUser().map(c => [String(c.id), c]));
+  const filteredCustomer = receiptCustomerFilter ? filterCustomersById.get(receiptCustomerFilter) : null;
+  const filteredCustomerName = Security.escapeHtml(String(filteredCustomer?.name || (isArV ? 'العميل المحدد' : 'Selected customer')));
+  const filteredReceipt = receiptRecordFilter
+    ? allReceipts.find(receipt => String(receipt?.id || '') === receiptRecordFilter)
+    : null;
+  const filteredReceiptNumber = String(filteredReceipt?.finalReceiptNo || filteredReceipt?.serialNumber || filteredReceipt?.tempReceiptNo || '').trim();
+  const filteredReceiptLabel = Security.escapeHtml(filteredReceiptNumber ? `#${filteredReceiptNumber}` : (isArV ? 'الوصل المحدد' : 'Selected receipt'));
+  const canSeeReceiptAds = canOpenWorkspaceView('ads');
+  const linkedAdCountByReceipt = new Map();
+  if (canSeeReceiptAds) {
+    getAdsVisibleToCurrentUser().forEach(ad => {
+      getAdLinkedReceiptIds(ad).forEach(receiptId => {
+        linkedAdCountByReceipt.set(receiptId, (linkedAdCountByReceipt.get(receiptId) || 0) + 1);
+      });
+    });
+  }
 
   // Apply filters
   let filteredReceipts = allReceipts.filter(receipt => {
-    const customer = customersById.get(receipt.customerId);
+    if (receiptRecordFilter && String(receipt?.id || '') !== receiptRecordFilter) return false;
+    const receiptCustomerId = getReceiptCustomerReferenceId(receipt);
+    if (receiptCustomerFilter && receiptCustomerId !== receiptCustomerFilter) return false;
+    const customer = customersById.get(receiptCustomerId);
     const customerName = customer?.name?.toLowerCase() || '';
     const finalNo = (receipt.finalReceiptNo || receipt.serialNumber || '').toLowerCase();
     const tempNo = (receipt.tempReceiptNo || '').toLowerCase();
-    const phoneNumber = (receipt.phoneNumber || '').toLowerCase();
+    const phoneNumber = canSearchReceiptContacts ? (receipt.phoneNumber || '').toLowerCase() : '';
     const searchTerm = (state.receiptSearch || '').toLowerCase();
     
     // Search filter
@@ -12338,11 +14677,23 @@ function renderReceiptsView() {
     }
   });
   
-  const hasActiveFilters = state.receiptSearch || state.receiptStatusFilter !== 'all' || state.receiptPaymentFilter !== 'all' || state.receiptDateFilter !== 'all' || (state.receiptDebtFilter || 'all') !== 'all' || state.receiptCollectedFilter !== 'all';
+  const hasActiveFilters = receiptRecordFilter || receiptCustomerFilter || state.receiptSearch || state.receiptStatusFilter !== 'all' || state.receiptPaymentFilter !== 'all' || state.receiptDateFilter !== 'all' || (state.receiptDebtFilter || 'all') !== 'all' || state.receiptCollectedFilter !== 'all';
+  const receiptAdvancedFilterCount = [
+    state.receiptStatusFilter !== 'all',
+    state.receiptPaymentFilter !== 'all',
+    state.receiptDateFilter !== 'all',
+    (state.receiptDebtFilter || 'all') !== 'all',
+    state.receiptCollectedFilter !== 'all',
+    state.receiptSortBy !== 'newest'
+  ].filter(Boolean).length;
+  const receiptAdvancedFiltersOpen = isWorkspaceFilterPanelExpanded('receipts');
+  const receiptQuickMode = ['not_paid', 'pending', 'unpaid', 'not-paid'].includes(state.receiptStatusFilter)
+    ? 'unpaid'
+    : (state.receiptDebtFilter === 'any-debt' ? 'debt' : (state.receiptCollectedFilter === 'not-collected' ? 'not-collected' : 'all'));
 
   // Reset pagination whenever the filter/sort/search combination changes.
   const filterFingerprint = JSON.stringify([
-    state.receiptSearch, state.receiptStatusFilter, state.receiptPaymentFilter,
+    receiptRecordFilter, receiptCustomerFilter, state.receiptSearch, state.receiptStatusFilter, state.receiptPaymentFilter,
     state.receiptDateFilter, state.receiptDebtFilter || 'all', state.receiptCollectedFilter, state.receiptSortBy
   ]);
   if (filterFingerprint !== _receiptsFilterFingerprint) {
@@ -12366,24 +14717,35 @@ function renderReceiptsView() {
       </div>
 
       <!-- Search & Filter Bar -->
-      <div class="glass-panel rounded-2xl p-4">
-        <div class="flex flex-col lg:flex-row gap-4">
+      <div class="smart-filter-panel glass-panel rounded-2xl p-4">
+        <div class="smart-filter-primary">
           <!-- Search Input -->
-          <div class="flex-1 relative">
+          <div class="smart-search-field flex-1 relative">
+            <label for="receipt-search-input" class="sr-only">${isArV ? 'بحث في الوصولات' : 'Search receipts'}</label>
             <i data-lucide="search" class="w-5 h-5 absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"></i>
             <input 
               type="text" 
               id="receipt-search-input"
-              placeholder="${isArV ? 'بحث بالعميل أو الرقم التسلسلي أو الهاتف...' : 'Search by customer, serial #, or phone...'}"
+              placeholder="${isArV ? (canSearchReceiptContacts ? 'بحث بالعميل أو الرقم التسلسلي أو الهاتف...' : 'بحث بالعميل أو الرقم التسلسلي...') : (canSearchReceiptContacts ? 'Search by customer, serial #, or phone...' : 'Search by customer or serial #...')}"
               value="${Security.escapeHtml(state.receiptSearch || '')}"
               oninput="updateReceiptSearch(this.value)"
               class="w-full pl-12 pr-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all placeholder:text-slate-400"
             />
             <span id="receipt-search-clear">${state.receiptSearch ? `<button onclick="clearReceiptSearch()" class="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full transition-colors"><i data-lucide="x" class="w-4 h-4 text-slate-400"></i></button>` : ''}</span>
           </div>
-          
+
+          <div id="receipt-quick-filters" class="smart-filter-chips" aria-label="${isArV ? 'فلاتر سريعة' : 'Quick filters'}">
+            <button type="button" onclick="applyReceiptQuickFilter('all')" class="smart-filter-chip ${receiptQuickMode === 'all' ? 'is-active' : ''}">${isArV ? 'الكل' : 'All'}</button>
+            <button type="button" onclick="applyReceiptQuickFilter('unpaid')" class="smart-filter-chip ${receiptQuickMode === 'unpaid' ? 'is-active is-danger' : ''}"><i data-lucide="clock-3" class="h-4 w-4"></i>${isArV ? 'غير مدفوع' : 'Unpaid'}</button>
+            <button type="button" onclick="applyReceiptQuickFilter('debt')" class="smart-filter-chip ${receiptQuickMode === 'debt' ? 'is-active is-danger' : ''}"><i data-lucide="circle-dollar-sign" class="h-4 w-4"></i>${isArV ? 'عليه دين' : 'Debt'}</button>
+            <button type="button" onclick="applyReceiptQuickFilter('not-collected')" class="smart-filter-chip ${receiptQuickMode === 'not-collected' ? 'is-active is-warning' : ''}"><i data-lucide="hand-coins" class="h-4 w-4"></i>${isArV ? 'غير مُحصّل' : 'Not collected'}</button>
+          </div>
+          ${renderWorkspaceFilterToggle('receipts', receiptAdvancedFilterCount)}
+        </div>
+
+        <div id="receipts-advanced-filters" class="workspace-advanced-panel ${receiptAdvancedFiltersOpen ? '' : 'hidden'}" aria-hidden="${receiptAdvancedFiltersOpen ? 'false' : 'true'}">
           <!-- Filter Dropdowns -->
-          <div class="receipt-filter-controls flex flex-wrap gap-2">
+          <div class="receipt-filter-controls workspace-filter-grid">
             <!-- Status Filter -->
             <select onchange="updateReceiptFilter('status', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptStatusFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all" ${state.receiptStatusFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل الحالات' : 'All Status'}</option>
@@ -12448,6 +14810,8 @@ function renderReceiptsView() {
         <div id="receipt-active-filters">${hasActiveFilters ? `
           <div class="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
             <span class="text-xs font-medium text-slate-500">${isArV ? 'الفلاتر النشطة:' : 'Active filters:'}</span>
+            ${receiptRecordFilter ? `<span class="min-h-11 px-2 py-1 bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200 rounded-full text-xs font-bold inline-flex items-center gap-1"><i data-lucide="receipt-text" class="w-3 h-3"></i>${isArV ? 'الوصل' : 'Receipt'}: ${filteredReceiptLabel}<button type="button" onclick="clearReceiptRecordFilter()" class="min-h-11 min-w-11 inline-flex items-center justify-center rounded-full hover:bg-amber-200 dark:hover:bg-amber-800 focus:outline-none focus:ring-2 focus:ring-amber-500" aria-label="${isArV ? 'إزالة فلتر الوصل' : 'Remove receipt filter'}"><i data-lucide="x" class="w-3 h-3"></i></button></span>` : ''}
+            ${receiptCustomerFilter ? `<span class="min-h-11 px-2 py-1 bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 rounded-full text-xs font-medium inline-flex items-center gap-1"><i data-lucide="user-round" class="w-3 h-3"></i>${isArV ? 'العميل' : 'Customer'}: ${filteredCustomerName}<button type="button" onclick="clearReceiptCustomerFilter()" class="min-h-11 min-w-11 inline-flex items-center justify-center rounded-full hover:bg-violet-200 dark:hover:bg-violet-800 focus:outline-none focus:ring-2 focus:ring-violet-500" aria-label="${isArV ? 'إزالة فلتر العميل' : 'Remove customer filter'}"><i data-lucide="x" class="w-3 h-3"></i></button></span>` : ''}
             ${state.receiptSearch ? `<span class="px-2 py-1 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full text-xs font-medium flex items-center"><i data-lucide="search" class="w-3 h-3 mr-1"></i>"${Security.escapeHtml(state.receiptSearch)}"</span>` : ''}
             ${state.receiptStatusFilter !== 'all' ? `<span class="px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-full text-xs font-medium">${isArV ? ({ paid: 'مدفوع', not_paid: 'غير مدفوع / دين', pending: 'غير مدفوع / دين', unpaid: 'غير مدفوع / دين', canceled: 'ملغي', cancelled: 'ملغي', lost: 'ضائع' })[state.receiptStatusFilter] || state.receiptStatusFilter : ({ paid: 'Paid', not_paid: 'Unpaid / Debt', pending: 'Unpaid / Debt', unpaid: 'Unpaid / Debt', canceled: 'Canceled', cancelled: 'Canceled', lost: 'Lost' })[state.receiptStatusFilter] || state.receiptStatusFilter}</span>` : ''}
             ${state.receiptPaymentFilter !== 'all' ? `<span class="px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded-full text-xs font-medium">${isArV ? ({ cash: 'نقدي', usdt: 'USDT', bank: 'حوالة مصرفية', split: 'دفعات مقسّمة' })[state.receiptPaymentFilter] || state.receiptPaymentFilter : state.receiptPaymentFilter}</span>` : ''}
@@ -12460,7 +14824,7 @@ function renderReceiptsView() {
 
       <div id="receipts-grid" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
         ${filteredReceipts.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${hasActiveFilters ? 'search-x' : 'receipt'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${hasActiveFilters ? (isArV ? 'لا توجد وصولات مطابقة للفلاتر' : 'No receipts match your filters') : (isArV ? 'لا توجد وصولات بعد' : 'No receipts yet')}</p>${hasActiveFilters ? `<button onclick="clearAllReceiptFilters()" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">${isArV ? 'مسح كل الفلاتر' : 'Clear all filters'}</button>` : ''}</div>` : visibleReceipts.map((receipt, idx) => {
-          const customer = customersById.get(receipt.customerId);
+          const customer = customersById.get(getReceiptCustomerReferenceId(receipt));
           const displayFinalNo = receipt.finalReceiptNo || receipt.serialNumber || '';
           const displayTempNo = receipt.tempReceiptNo || '';
           // Display number: total - index (so first item = highest number, matching newest-first sort)
@@ -12496,7 +14860,7 @@ function renderReceiptsView() {
           // in both LTR and RTL.
           const _typeAccent = receipt.receiptType === 'CARRIED_BALANCE' ? '#d97706' : '#7c3aed';
           return `
-            <div class="glass-panel rounded-2xl p-6 hover:scale-[1.01] transition-transform" style="border-inline-start:5px solid ${_typeAccent}">
+            <div data-receipt-card="true" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" class="glass-panel rounded-2xl p-6 hover:scale-[1.01] transition-transform ${receiptRecordFilter === String(receipt.id || '') ? 'ring-2 ring-amber-400 ring-offset-2 dark:ring-offset-slate-950' : ''}" style="border-inline-start:5px solid ${_typeAccent}">
               <div class="flex justify-between items-start mb-4">
                 <div>
                   <div class="flex items-center gap-2">
@@ -12508,7 +14872,7 @@ function renderReceiptsView() {
                       ${isArV ? 'الرقم التسلسلي' : 'Serial'}: ${displayTempNo && displayFinalNo ? `${displayTempNo} → ${displayFinalNo}` : (displayTempNo ? `${displayTempNo} ${isArV ? '(مؤقت)' : '(Temp)'}` : displayFinalNo)}
                     </p>
                   ` : ''}
-                  <p class="text-xs text-slate-400 mt-1">${new Date(receipt.createdAt || receipt.startDate).toLocaleString()}</p>
+                  <p class="text-xs text-slate-400 mt-1">${new Date(receipt.createdAt || receipt.startDate).toLocaleString(appDateLocale())}</p>
                   <div class="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1 text-[10px] text-slate-500">
                     <span class="inline-flex items-center gap-1" title="${isArV ? 'تم الإنشاء بواسطة' : 'Created by'}">
                       <i data-lucide="user" class="w-3 h-3"></i>
@@ -12540,7 +14904,7 @@ function renderReceiptsView() {
                   </div>
                   ${receipt.updatedAt ? `
                     <div class="flex items-center mt-0.5 space-x-2">
-                      <p class="text-[10px] text-amber-500 flex items-center"><i data-lucide="edit-3" class="w-2.5 h-2.5 mr-1"></i>${isArV ? 'عُدِّل' : 'Edited'}: ${new Date(receipt.updatedAt).toLocaleString()}</p>
+                      <p class="text-[10px] text-amber-500 flex items-center"><i data-lucide="edit-3" class="w-2.5 h-2.5 mr-1"></i>${isArV ? 'عُدِّل' : 'Edited'}: ${new Date(receipt.updatedAt).toLocaleString(appDateLocale())}</p>
                       ${receipt.editCount ? `<button onclick="showReceiptEditHistory('${receipt.id}')" class="text-[10px] px-1.5 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-full hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors font-medium">${isArV ? `${receipt.editCount} تعديل` : `${receipt.editCount} edit${receipt.editCount > 1 ? 's' : ''}`}</button>` : ''}
                     </div>
                   ` : ''}
@@ -12657,7 +15021,7 @@ function renderReceiptsView() {
                     <span class="text-sm font-medium ${!receipt.collected ? 'text-amber-700 dark:text-amber-300' : fully ? 'text-emerald-700 dark:text-emerald-300' : 'text-orange-700 dark:text-orange-300'}">
                       ${!receipt.collected ? (isAr ? 'لم يُحصَّل' : 'Not Collected') : fully ? (isAr ? 'تم التحصيل' : 'Collected') : (isAr ? 'تحصيل جزئي' : 'Partially Collected')}
                     </span>
-                    ${receipt.collectedAt ? `<span class="text-[10px] text-slate-500">${new Date(receipt.collectedAt).toLocaleDateString()}</span>` : ''}
+                    ${receipt.collectedAt ? `<span class="text-[10px] text-slate-500">${new Date(receipt.collectedAt).toLocaleDateString(appDateLocale())}</span>` : ''}
                     ${receipt.collectedBy ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">${Security.escapeHtml(state.users.find(u => u.id === receipt.collectedBy)?.name || (isArV ? 'مدير' : 'Admin'))}</span>` : ''}
                   </div>
                   <div class="flex items-center gap-2 flex-shrink-0">
@@ -12689,6 +15053,9 @@ function renderReceiptsView() {
                     ${receiptDebtType === 'shop' ? `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300"><i data-lucide="store" class="w-3 h-3"></i>${isArV ? 'دين داخل المحل' : 'In-shop Debt'}</span>` : ''}
                   </div>
                   <div class="flex flex-wrap justify-end gap-2">
+                    ${canSeeReceiptAds ? (() => { const linkedAdCount = linkedAdCountByReceipt.get(String(receipt.id || '')) || 0; return `<button type="button" data-action="view-receipt-ads" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" onclick="openReceiptAds(this.dataset.receiptId)" class="inline-flex min-h-11 items-center gap-1 px-2 text-indigo-600 hover:text-indigo-700 font-bold rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500" title="${isArV ? 'عرض الإعلانات المرتبطة بهذا الوصل' : 'View ads linked to this receipt'}" aria-label="${isArV ? `عرض ${linkedAdCount} من الإعلانات المرتبطة بهذا الوصل` : `View ${linkedAdCount} ads linked to this receipt`}">
+                      <i data-lucide="megaphone" class="w-4 h-4"></i><span class="text-xs">${isArV ? 'الإعلانات' : 'Ads'} ${linkedAdCount}</span>
+                    </button>`; })() : ''}
                     ${receiptPhotoCount > 0 ? `<button type="button" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" onclick="openReceiptPhotoViewer(this.dataset.receiptId, 0)" class="inline-flex items-center gap-1 text-cyan-600 hover:text-cyan-700 font-bold" title="${isArV ? `عرض صور الوصل (${receiptPhotoCount})` : `View receipt photos (${receiptPhotoCount})`}" aria-label="${isArV ? `عرض صور الوصل (${receiptPhotoCount})` : `View receipt photos (${receiptPhotoCount})`}">
                       <i data-lucide="images" class="w-4 h-4"></i><span class="text-xs">${isArV ? 'الصور' : 'Photos'} ${receiptPhotoCount}</span>
                     </button>` : ''}
@@ -12721,9 +15088,51 @@ function renderReceiptsView() {
   `;
 }
 
+let _pageSearchTimer = null;
+function onPageSearchInput(value) {
+  state.pageSearch = Security.sanitizeInput(String(value || ''), { maxLength: 160 });
+  if (_pageSearchTimer) clearTimeout(_pageSearchTimer);
+  _pageSearchTimer = setTimeout(() => {
+    _pageSearchTimer = null;
+    updatePagesViewFiltered();
+  }, 80);
+}
+
+function updatePagesViewFiltered() {
+  if (state.currentView !== 'pages') return;
+  const grid = document.getElementById('pages-grid');
+  const countEl = document.getElementById('pages-count');
+  if (!grid || !countEl) {
+    render();
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  // Swap only the pages grid + count so the search input keeps its caret and
+  // the phone keyboard stays open (same approach as updateCustomersViewFiltered).
+  const tpl = document.createElement('template');
+  tpl.innerHTML = renderPagesView();
+  const newGrid = tpl.content.querySelector('#pages-grid');
+  const newCount = tpl.content.querySelector('#pages-count');
+  if (newGrid) grid.innerHTML = newGrid.innerHTML;
+  if (newCount) countEl.textContent = newCount.textContent;
+  if (window.lucide) lucide.createIcons();
+}
+
 function renderPagesView() {
   const isAr = state.language === 'ar';
-  const visiblePages = getVisibleRecords(state.pages);
+  const allPages = getPagesVisibleToCurrentUser();
+  const pageDisplayNumberById = new Map(allPages.map((page, index) => [String(page.id), allPages.length - index]));
+  const pageSearch = String(state.pageSearch || '').trim().toLocaleLowerCase();
+  const customersById = new Map((state.customers || []).map(customer => [String(customer.id), customer]));
+  const visiblePages = pageSearch
+    ? allPages.filter(page => {
+        const ownerNames = getPageCustomerIds(page)
+          .map(customerId => customersById.get(String(customerId))?.name || '')
+          .join(' ');
+        return [page.name, page.category, ownerNames, page.id]
+          .some(value => String(value || '').toLocaleLowerCase().includes(pageSearch));
+      })
+    : allPages;
   const canSeePageAds = can('ads', 'view');
   const canSeePageFinancials = canSeePageAds
     && can('analytics', 'viewFinancials')
@@ -12734,7 +15143,7 @@ function renderPagesView() {
       <div class="page-header flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('pages')}</h1>
-          <p class="text-sm text-slate-500 mt-1">${isAr ? `${visiblePages.length} صفحة فيسبوك` : `${visiblePages.length} Facebook pages`}</p>
+          <p id="pages-count" class="text-sm text-slate-500 mt-1">${isAr ? `${visiblePages.length}${pageSearch ? ` من ${allPages.length}` : ''} صفحة فيسبوك` : `${visiblePages.length}${pageSearch ? ` of ${allPages.length}` : ''} Facebook pages`}</p>
         </div>
         <button onclick="showPageModal()" class="btn-shine w-full sm:w-auto bg-blue-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
           <i data-lucide="file-plus" class="w-4 h-4"></i>
@@ -12742,8 +15151,17 @@ function renderPagesView() {
         </button>
       </div>
 
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        ${visiblePages.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="file-text" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${isAr ? 'لا توجد صفحات بعد' : 'No pages yet'}</p></div>` : visiblePages.map((p, idx) => {
+      <div class="smart-filter-panel glass-panel rounded-2xl p-4">
+        <label for="page-search" class="sr-only">${isAr ? 'بحث في الصفحات' : 'Search pages'}</label>
+        <div class="smart-search-field">
+          <i data-lucide="search" class="h-5 w-5"></i>
+          <input id="page-search" type="search" value="${Security.escapeHtml(state.pageSearch || '')}" oninput="onPageSearchInput(this.value)" placeholder="${isAr ? 'ابحث باسم الصفحة أو المالك أو التصنيف...' : 'Search by page, owner or category...'}" autocomplete="off" />
+          ${state.pageSearch ? `<button type="button" onclick="state.pageSearch='';render()" aria-label="${isAr ? 'مسح البحث' : 'Clear search'}"><i data-lucide="x" class="h-4 w-4"></i></button>` : ''}
+        </div>
+      </div>
+
+      <div id="pages-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        ${visiblePages.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${pageSearch ? 'search-x' : 'file-text'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${pageSearch ? (isAr ? 'لا توجد صفحات تطابق البحث' : 'No pages match your search') : (isAr ? 'لا توجد صفحات بعد' : 'No pages yet')}</p></div>` : visiblePages.map((p) => {
           const linkedCustomers = getPageCustomerIds(p)
             .map(cid => state.customers.find(c => String(c.id) === String(cid)))
             .filter(Boolean);
@@ -12751,10 +15169,11 @@ function renderPagesView() {
           // ads. Money additionally needs the business financial permission.
           const pageStats = canSeePageAds ? getPageSpendSummary(p.id) : null;
           const lastAdText = pageStats?.lastAdDate
-            ? new Date(pageStats.lastAdDate).toLocaleDateString()
+            ? new Date(pageStats.lastAdDate).toLocaleDateString(appDateLocale())
             : (isAr ? 'أبداً' : 'Never');
-          // Display number: total - index (so first item = highest number)
-          const pageDisplayNum = visiblePages.length - idx;
+          // Keep the card number stable while searching instead of renumbering
+          // the only match as #1.
+          const pageDisplayNum = pageDisplayNumberById.get(String(p.id)) || 0;
           
           return `
             <div class="glass-panel rounded-xl p-5 hover:scale-[1.02] transition-transform">
@@ -12835,12 +15254,28 @@ function renderPagesView() {
 }
 
 let _adSearchTimer = null;
+const ADS_PAGE_SIZE = 50;
+let _adsShowLimit = ADS_PAGE_SIZE;
+let _adsFilterFingerprint = '';
+
+function loadMoreAds() {
+  _adsShowLimit += ADS_PAGE_SIZE;
+  updateAdsViewFiltered();
+}
+
+function applyAdQuickFilter(mode) {
+  state.adFilters = { status: 'all', payment: 'all', page: 'all' };
+  if (mode === 'unpaid') state.adFilters.payment = 'not_paid';
+  if (mode === 'stopped') state.adFilters.status = 'Stopped';
+  render();
+}
+
 function updateAdFilter(type, value) {
   if (!state.adFilters) state.adFilters = {};
   state.adFilters[type] = value;
-  // Same targeted swap as the search box — only the table + count re-render,
-  // so the filter dropdowns and search input keep their values and focus.
-  updateAdsViewFiltered();
+  // Dropdowns also affect quick-chip state and the active-filter badge outside
+  // the table, so refresh the view to keep every indicator truthful.
+  render();
 }
 
 function onAdSearchInput(value) {
@@ -12883,13 +15318,33 @@ function renderAdsView() {
   // (was O(ads × (customers+receipts+users)) on every keystroke). Same Map is
   // passed into getFilteredAds so the search filter is O(1)-per-ad too.
   const customersById = new Map(state.customers.map(c => [c.id, c]));
-  const receiptsById = new Map(state.receipts.map(r => [r.id, r]));
+  const receiptsById = new Map(getReceiptsVisibleToCurrentUser().map(r => [String(r.id), r]));
   const usersById = new Map(state.users.map(u => [String(u.id), u]));
-  const pagesById = new Map((state.pages || []).map(p => [p.id, p]));
+  const pagesById = new Map(getPagesVisibleToCurrentUser().map(p => [p.id, p]));
   const allAds = getFilteredAds(customersById);
   const adF = state.adFilters || {};
-  const visiblePages = getVisibleRecords(state.pages || []);
   const isAr = state.language === 'ar';
+  const adReceiptFilter = String(state.adReceiptFilter || '').trim();
+  const activeReceipt = adReceiptFilter ? receiptsById.get(adReceiptFilter) : null;
+  const activeReceiptLabel = Security.escapeHtml(String(
+    activeReceipt?.finalReceiptNo || activeReceipt?.serialNumber || activeReceipt?.tempReceiptNo || (isAr ? 'الوصل المحدد' : 'Selected receipt')
+  ));
+  const visiblePages = getPagesVisibleToCurrentUser();
+  const canSearchAdContacts = can('customers', 'viewContacts');
+  const adAdvancedFilterCount = [
+    (adF.status || 'all') !== 'all',
+    (adF.payment || 'all') !== 'all',
+    (adF.page || 'all') !== 'all'
+  ].filter(Boolean).length;
+  const adAdvancedFiltersOpen = isWorkspaceFilterPanelExpanded('ads');
+  const adQuickMode = adF.payment === 'not_paid' ? 'unpaid' : (adF.status === 'Stopped' ? 'stopped' : 'all');
+  const adFilterFingerprint = JSON.stringify([adReceiptFilter, state.adSearch, adF.status || 'all', adF.payment || 'all', adF.page || 'all']);
+  if (adFilterFingerprint !== _adsFilterFingerprint) {
+    _adsFilterFingerprint = adFilterFingerprint;
+    _adsShowLimit = ADS_PAGE_SIZE;
+  }
+  const visibleAds = allAds.slice(0, _adsShowLimit);
+  const remainingAds = allAds.length - visibleAds.length;
 
   return `
     <div class="space-y-6 animate-fade-in-up">
@@ -12909,9 +15364,26 @@ function renderAdsView() {
         </div>
       </div>
 
-      <div class="glass-panel rounded-xl p-4">
-        <div class="ad-filter-controls flex flex-col md:flex-row gap-2">
-          <input type="text" id="ad-search" placeholder="${isAr ? 'بحث بالعميل أو الهاتف أو الرقم التسلسلي أو الصفحة...' : 'Search by customer, phone, serial or page...'}" value="${Security.escapeHtml(state.adSearch || '')}" class="flex-1 glass-input px-4 py-2 rounded-lg" oninput="onAdSearchInput(this.value)" autocomplete="off" />
+      <div class="smart-filter-panel glass-panel rounded-2xl p-4">
+        <div class="smart-filter-primary">
+          <div class="smart-search-field">
+            <label for="ad-search" class="sr-only">${isAr ? 'بحث في الإعلانات' : 'Search ads'}</label>
+            <i data-lucide="search" class="h-5 w-5"></i>
+            <input type="search" id="ad-search" placeholder="${isAr ? (canSearchAdContacts ? 'ابحث بالعميل أو الهاتف أو الرقم أو الصفحة...' : 'ابحث بالعميل أو الرقم أو الصفحة...') : (canSearchAdContacts ? 'Search customer, phone, serial or page...' : 'Search customer, serial or page...')}" value="${Security.escapeHtml(state.adSearch || '')}" oninput="onAdSearchInput(this.value)" autocomplete="off" />
+          </div>
+          <div class="smart-filter-chips" aria-label="${isAr ? 'فلاتر إعلانات سريعة' : 'Quick ad filters'}">
+            <button type="button" onclick="applyAdQuickFilter('all')" class="smart-filter-chip ${adQuickMode === 'all' ? 'is-active' : ''}">${isAr ? 'الكل' : 'All'}</button>
+            <button type="button" onclick="applyAdQuickFilter('unpaid')" class="smart-filter-chip ${adQuickMode === 'unpaid' ? 'is-active is-danger' : ''}"><i data-lucide="circle-dollar-sign" class="h-4 w-4"></i>${isAr ? 'غير مدفوع' : 'Unpaid'}</button>
+            <button type="button" onclick="applyAdQuickFilter('stopped')" class="smart-filter-chip ${adQuickMode === 'stopped' ? 'is-active is-warning' : ''}"><i data-lucide="square" class="h-4 w-4"></i>${isAr ? 'متوقف' : 'Stopped'}</button>
+          </div>
+          ${renderWorkspaceFilterToggle('ads', adAdvancedFilterCount)}
+        </div>
+        ${adReceiptFilter ? `<div id="ad-receipt-link-filter" role="status" class="mt-3 flex flex-col gap-2 rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-800 dark:border-indigo-800 dark:bg-indigo-900/20 dark:text-indigo-200 sm:flex-row sm:items-center sm:justify-between">
+          <span class="inline-flex items-center gap-2 font-medium"><i data-lucide="receipt" class="h-4 w-4"></i>${isAr ? 'الإعلانات المرتبطة بالوصل' : 'Ads linked to receipt'} <strong>#${activeReceiptLabel}</strong></span>
+          <button type="button" onclick="clearAdReceiptFilter()" class="min-h-11 inline-flex items-center justify-center gap-1 rounded-lg px-3 font-bold text-indigo-700 hover:bg-indigo-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:text-indigo-200 dark:hover:bg-indigo-900/50" aria-label="${isAr ? 'إزالة فلتر الوصل' : 'Remove receipt filter'}"><i data-lucide="x" class="h-4 w-4"></i>${isAr ? 'عرض كل الإعلانات' : 'Show all ads'}</button>
+        </div>` : ''}
+        <div id="ads-advanced-filters" class="workspace-advanced-panel ${adAdvancedFiltersOpen ? '' : 'hidden'}" aria-hidden="${adAdvancedFiltersOpen ? 'false' : 'true'}">
+          <div class="ad-filter-controls workspace-filter-grid">
           <select onchange="updateAdFilter('status', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
             <option value="all" ${(adF.status || 'all') === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All Status'}</option>
             ${AD_STATUSES.map(s => `<option value="${s}" ${adF.status === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
@@ -12926,11 +15398,12 @@ function renderAdsView() {
             <option value="all" ${(adF.page || 'all') === 'all' ? 'selected' : ''}>${isAr ? 'كل الصفحات' : 'All Pages'}</option>
             ${visiblePages.map(p => `<option value="${Security.escapeHtml(p.id)}" ${adF.page === p.id ? 'selected' : ''}>${Security.escapeHtml(p.name || '')}</option>`).join('')}
           </select>
+          </div>
         </div>
       </div>
 
       <div id="ads-table-container" class="glass-panel rounded-2xl p-6 overflow-x-auto">
-        ${allAds.length === 0 ? `<div class="text-center py-12"><i data-lucide="inbox" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${isAr ? 'لا توجد إعلانات بعد' : 'No ads yet'}</p></div>` : `
+        ${allAds.length === 0 ? `<div class="text-center py-12"><i data-lucide="inbox" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${adReceiptFilter ? (isAr ? 'لا توجد إعلانات مرتبطة بهذا الوصل' : 'No ads are linked to this receipt') : (isAr ? 'لا توجد إعلانات بعد' : 'No ads yet')}</p></div>` : `
           <table class="mobile-card-table w-full text-sm">
             <thead>
               <tr class="border-b-2 border-indigo-200 dark:border-indigo-800">
@@ -12949,7 +15422,7 @@ function renderAdsView() {
               </tr>
             </thead>
             <tbody>
-              ${allAds.map((ad, idx) => {
+              ${visibleAds.map((ad, idx) => {
                 const customer = customersById.get(ad.customerId);
                 const adPhotoCount = getAdPhotoCount(ad);
                 const paymentState = getAdPaymentState(ad);
@@ -12983,11 +15456,7 @@ function renderAdsView() {
                 const adDisplayNum = allAds.length - idx;
                 // All receipts linked to this ad (delivery + funding), deduped —
                 // used for the Serial fallback AND the Payment method display.
-                const adReceiptIds = [...new Set([
-                  ad.linkedDeliveryReceiptId, ad.receiptId, ad.fundingReceiptId,
-                  ...(Array.isArray(ad.receiptIds) ? ad.receiptIds : []),
-                  ...(Array.isArray(ad.receiptAllocations) ? ad.receiptAllocations.map(a => a && a.receiptId) : [])
-                ].filter(Boolean))];
+                const adReceiptIds = getAdLinkedReceiptIds(ad);
                 // Serial: ads rarely carry their own serial number — fall back
                 // to the linked receipt number(s): the delivery receipt
                 // (D#/final no) or the funding receipts' serials.
@@ -13088,20 +15557,20 @@ function renderAdsView() {
                       ${ad.editCount ? `<button onclick="showAdEditHistory('${ad.id}')" class="block mt-1 text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium">${isAr ? `${ad.editCount} تعديل` : `${ad.editCount} edit${ad.editCount > 1 ? 's' : ''}`}</button>` : ''}
                     </td>
                     <td class="py-3 px-2 text-xs" data-label="Date">
-                      <div class="text-slate-500">${(() => { const d = new Date(ad.startDate); return isNaN(d) ? '-' : d.toLocaleDateString(); })()}</div>
+                      <div class="text-slate-500">${(() => { const d = new Date(ad.startDate); return isNaN(d) ? '-' : d.toLocaleDateString(appDateLocale()); })()}</div>
                       ${(() => {
                         // End date (+extra time) and, when topped up, the date
                         // of the latest top-up — visible without opening the ad.
                         const e = new Date(ad.endDate);
                         const endLine = !isNaN(e) && ad.endDate
-                          ? `<div class="text-slate-700 dark:text-slate-300 font-medium">${isAr ? 'الانتهاء' : 'End'}: ${e.toLocaleDateString()}${(parseFloat(ad.extraTimeMinutes) || 0) > 0 ? ` <span class="text-amber-600">+${ad.extraTimeMinutes}${isAr ? 'د' : 'm'}</span>` : ''}</div>`
+                          ? `<div class="text-slate-700 dark:text-slate-300 font-medium">${isAr ? 'الانتهاء' : 'End'}: ${e.toLocaleDateString(appDateLocale())}${(parseFloat(ad.extraTimeMinutes) || 0) > 0 ? ` <span class="text-amber-600">+${ad.extraTimeMinutes}${isAr ? 'د' : 'm'}</span>` : ''}</div>`
                           : '';
                         const ups = Array.isArray(ad.topUps) ? ad.topUps : [];
                         let upLine = '';
                         if (ups.length) {
                           const lastDate = ups.map(t => t && t.date).filter(Boolean).sort().slice(-1)[0];
                           const ld = lastDate ? new Date(lastDate) : null;
-                          const when = ld && !isNaN(ld) ? `: ${ld.toLocaleDateString()}` : '';
+                          const when = ld && !isNaN(ld) ? `: ${ld.toLocaleDateString(appDateLocale())}` : '';
                           upLine = `<div class="text-emerald-600 dark:text-emerald-400 font-medium" title="${isAr ? `${ups.length} عملية شحن، الإجمالي $` : `${ups.length} top-up(s), total $`}${ups.reduce((s, t) => s + (parseFloat(t && t.amount) || 0), 0).toFixed(2)}">&#8593; ${isAr ? 'تم الشحن' : 'Topped up'}${when}</div>`;
                         }
                         return endLine + upLine;
@@ -13135,10 +15604,25 @@ function renderAdsView() {
               }).join('')}
             </tbody>
           </table>
+          ${remainingAds > 0 ? `
+            <div class="flex justify-center border-t border-slate-200 px-3 pt-5 dark:border-slate-700">
+              <button type="button" onclick="loadMoreAds()" class="workspace-load-more"><i data-lucide="chevron-down" class="h-4 w-4"></i>${isAr ? `عرض المزيد (${remainingAds} متبقي)` : `Load more (${remainingAds} remaining)`}</button>
+            </div>
+          ` : ''}
         `}
       </div>
     </div>
   `;
+}
+
+const DELIVERIES_PAGE_SIZE = 30;
+let _deliveriesShowLimit = DELIVERIES_PAGE_SIZE;
+let _deliveriesFilterFingerprint = '';
+let _deliverySearchTimer = null;
+
+function loadMoreDeliveries() {
+  _deliveriesShowLimit += DELIVERIES_PAGE_SIZE;
+  render();
 }
 
 function renderDeliveriesView() {
@@ -13146,6 +15630,7 @@ function renderDeliveriesView() {
   // Deliveries are tracked ONLY on receipts (ads are not a delivery source of truth).
   const allReceipts = getVisibleRecords(state.receipts);
   const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
+  const deliveryCustomersById = new Map((state.customers || []).map(customer => [String(customer.id), customer]));
 
   const deliveryReceipts = allReceipts
     .filter(r => {
@@ -13207,7 +15692,7 @@ function renderDeliveriesView() {
   if (searchTerm) {
     const term = String(searchTerm).toLowerCase();
     filteredDeliveries = filteredDeliveries.filter(d => {
-      const customer = state.customers.find(c => c.id === d.customerId);
+      const customer = deliveryCustomersById.get(String(d.customerId));
       const name = String(customer?.name || '').toLowerCase();
       const phone = String(d.phoneNumber || customer?.phones?.[0] || '').toLowerCase();
       const receiptNo = String(d.tempReceiptNo || d.finalReceiptNo || d.serialNumber || '').toLowerCase();
@@ -13215,6 +15700,13 @@ function renderDeliveriesView() {
     });
   }
   filteredDeliveries.sort((a, b) => new Date(b.createdAt || b.date || 0) - new Date(a.createdAt || a.date || 0));
+  const deliveryFilterFingerprint = JSON.stringify([filterStatus, filterDriver, searchTerm]);
+  if (deliveryFilterFingerprint !== _deliveriesFilterFingerprint) {
+    _deliveriesFilterFingerprint = deliveryFilterFingerprint;
+    _deliveriesShowLimit = DELIVERIES_PAGE_SIZE;
+  }
+  const visibleDeliveryRows = filteredDeliveries.slice(0, _deliveriesShowLimit);
+  const remainingDeliveryRows = filteredDeliveries.length - visibleDeliveryRows.length;
 
   const roleLower = String(state.currentUser?.role || '').toLowerCase();
   const canAssign = roleLower !== 'delivery' && can('deliveries', 'assign');
@@ -13265,7 +15757,7 @@ function renderDeliveriesView() {
           </div>
           <div class="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-900/15 border-l-4 border-emerald-500">
             <div class="text-[11px] font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wide">${isAr ? 'قيمة غير مُحصَّلة' : 'Uncollected Value'}</div>
-            <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.uncollectedLYD.toLocaleString()} <span class="text-sm">LYD</span></div>
+            <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.uncollectedLYD.toLocaleString('en-US')} <span class="text-sm">LYD</span></div>
             <div class="text-[11px] text-slate-500">${isAr ? 'للتحصيل من العملاء' : 'To be collected from customers'}</div>
           </div>
           <div class="p-3 rounded-xl bg-purple-50 dark:bg-purple-900/15 border-l-4 border-purple-500">
@@ -13275,7 +15767,7 @@ function renderDeliveriesView() {
           </div>
           <div class="p-3 rounded-xl bg-blue-50 dark:bg-blue-900/15 border-l-4 border-blue-500">
             <div class="text-[11px] font-bold text-blue-700 dark:text-blue-400 uppercase tracking-wide">${isAr ? 'قيمة نقد السائقين' : 'Driver Cash Value'}</div>
-            <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.driverCashLYD.toLocaleString()} <span class="text-sm">LYD</span></div>
+            <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.driverCashLYD.toLocaleString('en-US')} <span class="text-sm">LYD</span></div>
             <div class="text-[11px] text-slate-500">${isAr ? 'للتحصيل من السائقين' : 'To be collected from drivers'}</div>
           </div>
         </div>
@@ -13315,7 +15807,7 @@ function renderDeliveriesView() {
                   <span>${isAr ? 'معلّقة' : 'Pending'} <b>${driver.pending}</b></span>
                   <span class="text-blue-600 dark:text-blue-400">${isAr ? 'نشطة' : 'Active'} <b>${driver.inProgress}</b></span>
                   <span class="text-emerald-600 dark:text-emerald-400">${isAr ? 'منجزة' : 'Done'} <b>${driver.completed}</b></span>
-                  <span class="text-purple-600 dark:text-purple-400">${isAr ? 'بحوزته' : 'Held'} <b>${driver.heldCash.toLocaleString()}</b> LYD</span>
+                  <span class="text-purple-600 dark:text-purple-400">${isAr ? 'بحوزته' : 'Held'} <b>${driver.heldCash.toLocaleString('en-US')}</b> LYD</span>
                 </div>
               </div>
             `).join('')}
@@ -13330,7 +15822,7 @@ function renderDeliveriesView() {
             <div class="flex flex-wrap items-center gap-2 w-full md:w-auto">
               <div class="relative flex-1 md:flex-none">
                 <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"></i>
-                <input type="text" placeholder="${isAr ? 'بحث...' : 'Search...'}" value="${Security.escapeHtml(searchTerm)}" oninput="filterDeliveries('search', this.value)" class="glass-input w-full md:w-40 pl-9 pr-3 py-2 rounded-lg text-sm">
+                <input id="delivery-search-input" type="text" placeholder="${isAr ? 'بحث...' : 'Search...'}" value="${Security.escapeHtml(searchTerm)}" oninput="filterDeliveries('search', this.value)" class="glass-input w-full md:w-40 pl-9 pr-3 py-2 rounded-lg text-sm">
               </div>
               <select onchange="filterDeliveries('status', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
                 <option value="all" ${filterStatus === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All Status'}</option>
@@ -13344,8 +15836,8 @@ function renderDeliveriesView() {
           </div>
 
           <!-- Delivery Table -->
-          <div class="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
-            <table class="w-full text-sm">
+          <div id="delivery-log-results" class="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
+            <table class="mobile-card-table delivery-mobile-table w-full text-sm">
               <thead>
                 <tr class="bg-slate-50 dark:bg-slate-800/50">
                   <th class="text-left px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'العميل' : 'Customer'}</th>
@@ -13365,8 +15857,8 @@ function renderDeliveriesView() {
                       <p class="text-slate-500">${isAr ? 'لا توجد توصيلات' : 'No deliveries found'}</p>
                     </td>
                   </tr>
-                ` : filteredDeliveries.slice(0, 20).map(ad => {
-          const customer = state.customers.find(c => c.id === ad.customerId);
+                ` : visibleDeliveryRows.map(ad => {
+          const customer = deliveryCustomersById.get(String(ad.customerId));
           const deliveryPerson = ad.deliveryPersonId ? deliveryUsers.find(u => u.id === ad.deliveryPersonId) : null;
                   const collectedCash = _getCollectedCashLocal(ad);
                   const receivedInOffice = _isReceivedInOffice(ad);
@@ -13382,7 +15874,7 @@ function renderDeliveriesView() {
                   const isReceipt = true;
                   return `
                     <tr class="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors">
-                      <td class="px-4 py-3">
+                      <td class="px-4 py-3" data-label="${isAr ? 'العميل' : 'Customer'}">
                         <div class="flex items-center space-x-3">
                           <div class="w-9 h-9 rounded-full bg-gradient-to-br ${isReceipt ? 'from-purple-500 to-pink-600' : 'from-indigo-500 to-purple-600'} flex items-center justify-center text-white font-bold text-sm shadow-md">
                             ${isReceipt ? '<i data-lucide="receipt" class="w-4 h-4"></i>' : (customer?.name?.charAt(0) || '?')}
@@ -13394,7 +15886,7 @@ function renderDeliveriesView() {
                           </div>
                         </div>
                       </td>
-                      <td class="px-4 py-3">
+                      <td class="px-4 py-3" data-label="${isAr ? 'السائق' : 'Driver'}">
                         ${deliveryPerson ? `
                           <div class="flex items-center space-x-2">
                             <div class="w-7 h-7 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-white text-xs font-bold">
@@ -13409,19 +15901,19 @@ function renderDeliveriesView() {
                           </select>
                         ` : `<span class="text-xs text-slate-400">${isAr ? 'غير مُعيَّن' : 'Unassigned'}</span>`)}
                       </td>
-                      <td class="px-4 py-3 text-right">
-                        <div class="font-bold text-emerald-600">${debtLocal.toLocaleString()} LYD</div>
+                      <td class="px-4 py-3 text-right" data-label="${isAr ? 'المبلغ' : 'Amount'}">
+                        <div class="font-bold text-emerald-600">${debtLocal.toLocaleString('en-US')} LYD</div>
                         <div class="text-xs text-slate-500">$${debtUSD.toFixed(2)}</div>
                         ${String(ad.deliveryStatus || '') === 'Delivered' ? `
-                          <div class="text-[10px] text-slate-500 mt-1">${isAr ? 'المُحصَّل' : 'Collected'}: <span class="font-bold text-slate-700 dark:text-slate-300">${collectedCash.toLocaleString()} LYD</span></div>
+                          <div class="text-[10px] text-slate-500 mt-1">${isAr ? 'المُحصَّل' : 'Collected'}: <span class="font-bold text-slate-700 dark:text-slate-300">${collectedCash.toLocaleString('en-US')} LYD</span></div>
                         ` : ''}
                       </td>
-                      <td class="px-4 py-3 text-center">
+                      <td class="px-4 py-3 text-center" data-label="${isAr ? 'الحالة' : 'Status'}">
                         <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-bold ${statusColors[ad.deliveryStatus] || 'bg-slate-100 text-slate-700'}">
                           ${trStatus(ad.deliveryStatus)}
                         </span>
                       </td>
-                      <td class="px-4 py-3 text-center">
+                      <td class="px-4 py-3 text-center" data-label="${isAr ? 'تسليم المكتب' : 'Office handover'}">
                         ${!officeEligible ? `
                           <span class="text-slate-400 text-xs">—</span>
                         ` : receivedInOffice ? `
@@ -13439,10 +15931,10 @@ function renderDeliveriesView() {
                           ` : `<span class="text-xs text-slate-500">${isAr ? 'قيد الانتظار' : 'Pending'}</span>`}
                         `}
                       </td>
-                      <td class="px-4 py-3 text-center">
+                      <td class="px-4 py-3 text-center" data-label="${isAr ? 'التاريخ' : 'Date'}">
                         <div class="text-xs text-slate-600 dark:text-slate-400">${formatDateShort(ad.createdAt || ad.date)}</div>
                       </td>
-                      <td class="px-4 py-3">
+                      <td class="px-4 py-3" data-label="${isAr ? 'الإجراءات' : 'Actions'}">
                         <div class="flex items-center justify-center space-x-1">
                           <select onchange="updateDeliveryStatus('${ad.id}', this.value)" class="glass-input px-2 py-1 rounded-lg text-xs w-24">
                             ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
@@ -13468,9 +15960,9 @@ function renderDeliveriesView() {
               </tbody>
             </table>
           </div>
-          ${filteredDeliveries.length > 20 ? `
-            <div class="mt-3 text-center text-sm text-slate-500">
-              ${isAr ? `عرض 20 من ${filteredDeliveries.length} توصيلة` : `Showing 20 of ${filteredDeliveries.length} deliveries`}
+          ${remainingDeliveryRows > 0 ? `
+            <div class="mt-4 flex justify-center">
+              <button type="button" onclick="loadMoreDeliveries()" class="workspace-load-more"><i data-lucide="chevron-down" class="h-4 w-4"></i>${isAr ? `عرض المزيد (${remainingDeliveryRows} متبقي)` : `Load more (${remainingDeliveryRows} remaining)`}</button>
             </div>
           ` : ''}
         </div>
@@ -13507,7 +15999,7 @@ function renderDeliveriesView() {
                 </div>
 
                 <div class="text-sm mb-2">
-                  <span class="font-bold text-emerald-600">${(ad.amountLocal || 0).toLocaleString()} LYD</span>
+                  <span class="font-bold text-emerald-600">${(ad.amountLocal || 0).toLocaleString('en-US')} LYD</span>
                   <span class="text-xs text-slate-500 ml-2">$${(ad.amountUSD || 0).toFixed(2)}</span>
                 </div>
 
@@ -13556,9 +16048,37 @@ function renderDeliveriesView() {
 // Filter deliveries
 function filterDeliveries(type, value) {
   if (!state.deliveryFilter) state.deliveryFilter = {};
-  state.deliveryFilter[type] = value;
+  state.deliveryFilter[type] = type === 'search'
+    ? Security.sanitizeInput(String(value || ''), { maxLength: 160 })
+    : value;
+  if (type === 'search') {
+    if (_deliverySearchTimer) clearTimeout(_deliverySearchTimer);
+    _deliverySearchTimer = setTimeout(() => {
+      _deliverySearchTimer = null;
+      updateDeliveriesViewFiltered();
+    }, 100);
+    return;
+  }
   render();
-  lucide.createIcons();
+}
+
+function updateDeliveriesViewFiltered() {
+  if (state.currentView !== 'deliveries') return;
+  const results = document.getElementById('delivery-log-results');
+  if (!results) {
+    // View structure not on screen (e.g. mid-navigation): fall back to a full render.
+    render();
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  // Build the fresh view HTML off-screen, then swap in only the results table
+  // so the search input keeps its caret and the phone keyboard stays open
+  // (same approach as updateCustomersViewFiltered).
+  const tpl = document.createElement('template');
+  tpl.innerHTML = renderDeliveriesView();
+  const newResults = tpl.content.querySelector('#delivery-log-results');
+  if (newResults) results.innerHTML = newResults.innerHTML;
+  if (window.lucide) lucide.createIcons();
 }
 
 // Refresh deliveries
@@ -13612,13 +16132,9 @@ function exportDeliveryReport() {
   
   // Prepend a UTF-8 BOM so Excel reads Arabic customer/driver names correctly
   // instead of garbling them (mojibake).
-  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `delivery-report-${getTodayDateString()}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
+  // Route through downloadFile so the blob URL outlives the click task —
+  // iOS Safari cancels the download if the URL is revoked in the same tick.
+  downloadFile('﻿' + csv, `delivery-report-${getTodayDateString()}.csv`, 'text/csv;charset=utf-8');
   showNotification(state.language === 'ar' ? 'اكتمل التصدير' : 'Export Complete', state.language === 'ar' ? 'تم تنزيل تقرير التوصيل' : 'Delivery report downloaded', 'success');
 }
 
@@ -13672,7 +16188,7 @@ async function checkStuckDeliveries() {
             </div>
           </div>
           <div class="flex justify-between text-xs">
-            <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ' : 'Amount'}: ${(d.amountLocal || 0).toLocaleString()} LYD</span>
+            <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ' : 'Amount'}: ${(d.amountLocal || 0).toLocaleString('en-US')} LYD</span>
             <button onclick="navigateTo('deliveries'); this.closest('#app-modal').remove();" class="text-indigo-600 hover:text-indigo-700 font-bold">${isAr ? 'عرض ←' : 'View →'}</button>
           </div>
         </div>
@@ -13933,7 +16449,7 @@ function showDeliveryDetails(itemId) {
         <div class="grid grid-cols-2 gap-3">
           <div class="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-100 dark:border-emerald-800">
             <div class="text-xs text-emerald-600 dark:text-emerald-400 font-medium mb-1">${isAr ? 'المبلغ (LYD)' : 'Amount (LYD)'}</div>
-            <div class="text-2xl font-black text-emerald-700 dark:text-emerald-300">${(ad.amountLocal || 0).toLocaleString()}</div>
+            <div class="text-2xl font-black text-emerald-700 dark:text-emerald-300">${(ad.amountLocal || 0).toLocaleString('en-US')}</div>
           </div>
           <div class="p-4 rounded-xl bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800">
             <div class="text-xs text-blue-600 dark:text-blue-400 font-medium mb-1">${isAr ? 'المبلغ (USD)' : 'Amount (USD)'}</div>
@@ -14355,6 +16871,7 @@ async function submitDeliveryCancel(itemType, itemId) {
 
   const nowIso = new Date().toISOString();
   const uid = state.currentUser?.id || '';
+  let receiptCascadeConsistent = true;
 
   if (type === 'receipt') {
     const receipt = _findReceiptForDeliveryModal(id);
@@ -14370,12 +16887,22 @@ async function submitDeliveryCancel(itemType, itemId) {
     });
     if (!receiptSaved) return;
     // The canceled delivery's debt will never be collected — release any ad
-    // funding that was drawn from its due credit.
+    // funding that was drawn from its due credit. In server mode the receipt
+    // PATCH already releases those rows atomically; install the authoritative
+    // ads instead of issuing stale generic ad PATCHes (which are forbidden).
     let releasedAds = 0;
-    try {
-      releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);
-    } catch (_) {
-      return;
+    let adRefresh = { consistent: true };
+    if (isServerModeEnabled()) {
+      const savedReceipt = state.receipts.find(row => row && String(row.id) === String(receipt.id)) || receipt;
+      adRefresh = await refreshAdsAfterReceiptServerCascade(savedReceipt);
+      receiptCascadeConsistent = adRefresh.consistent;
+      saveState();
+    } else {
+      try {
+        releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);
+      } catch (_) {
+        return;
+      }
     }
     if (releasedAds > 0) {
       showNotification(
@@ -14403,31 +16930,200 @@ async function submitDeliveryCancel(itemType, itemId) {
 
   document.getElementById('delivery-cancel-modal')?.remove();
   document.getElementById('delivery-complete-modal')?.remove();
+  forceFullRender();
   showNotification(state.language === 'ar' ? 'أُلغيت' : 'Canceled', state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled', 'success');
-  render();
+  if (!receiptCascadeConsistent) {
+    showNotification(
+      state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
+      state.language === 'ar' ? 'تم حفظ الإلغاء، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Cancellation was saved. Linked ads will refresh automatically when the connection returns.',
+      'warning'
+    );
+  }
+}
+
+// Reconciliation uses the earliest valid terminal day: the scheduled end day
+// or an earlier manual stop day. Facebook gets the rest of that calendar day
+// to finalize delayed spend, and the ad appears on the following local day.
+function getAdReconciliationCalendarDay(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const calendar = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (calendar) {
+    const year = Number(calendar[1]);
+    const month = Number(calendar[2]) - 1;
+    const day = Number(calendar[3]);
+    const parsed = new Date(year, month, day);
+    if (
+      parsed.getFullYear() === year &&
+      parsed.getMonth() === month &&
+      parsed.getDate() === day
+    ) return parsed;
+    return null;
+  }
+  const parsed = new Date(raw);
+  if (!Number.isFinite(parsed.getTime())) return null;
+  return new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
+}
+
+function getAdReconciliationStartDay(ad) {
+  return getAdReconciliationCalendarDay(ad?.startDate);
+}
+
+function getAdReconciliationEndDay(ad) {
+  return getAdReconciliationCalendarDay(ad?.endDate);
+}
+
+function getAdReconciliationStoppedDay(ad) {
+  const raw = String(ad?.stoppedAt || '').trim();
+  if (!raw) return null;
+  const parsed = new Date(raw);
+  if (!Number.isFinite(parsed.getTime())) return null;
+  return new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
+}
+
+function getAdReconciliationTriggerDay(ad) {
+  const status = String(ad?.status || '').trim().toLowerCase();
+  const endDay = getAdReconciliationEndDay(ad);
+  const stoppedDay = status === 'stopped' ? getAdReconciliationStoppedDay(ad) : null;
+  // Reconciliation itself changes an ended ad to Stopped and may add a new
+  // stoppedAt timestamp. Keep the earlier real terminal day so saving spend
+  // cannot hide an already-eligible ad for another day.
+  if (endDay && stoppedDay) {
+    return endDay.getTime() <= stoppedDay.getTime() ? endDay : stoppedDay;
+  }
+  return stoppedDay || endDay;
+}
+
+function getAdReconciliationAvailableDay(ad) {
+  const triggerDay = getAdReconciliationTriggerDay(ad);
+  if (!triggerDay) return null;
+  const available = new Date(triggerDay.getTime());
+  available.setDate(available.getDate() + 1);
+  return available;
+}
+
+function isAdReadyForReconciliation(ad, now = new Date()) {
+  if (!ad || ad._deleted || ad.recordType === 'receipt' || !Security.isValidRecordId(ad.id)) return false;
+  const status = String(ad.status || '').trim().toLowerCase();
+  if (status === 'canceled' || status === 'cancelled' || status === 'lost') return false;
+  const refundType = String(ad.refundType || '').trim().toLowerCase();
+  if (refundType && refundType !== 'none') return false;
+  const available = getAdReconciliationAvailableDay(ad);
+  const current = new Date(now);
+  if (!available || !Number.isFinite(current.getTime())) return false;
+  const today = new Date(current.getFullYear(), current.getMonth(), current.getDate());
+  return today.getTime() >= available.getTime();
 }
 
 function renderReconciliationView() {
   const isAr = state.language === 'ar';
-  const visibleAds = getVisibleRecords(state.ads).filter(ad => ad.spentUSD);
+  const visibleAds = getVisibleRecords(state.ads)
+    .filter(ad => isAdReadyForReconciliation(ad))
+    .sort((a, b) => {
+      const informedOrder = Number(a.remainingCustomerInformed === true) - Number(b.remainingCustomerInformed === true);
+      if (informedOrder !== 0) return informedOrder;
+      return (getAdReconciliationTriggerDay(a)?.getTime() || 0) - (getAdReconciliationTriggerDay(b)?.getTime() || 0);
+    });
   return `
-    <div class="space-y-6">
-      <h1 class="text-3xl font-bold">${t('jobReconciliation')}</h1>
-      <div class="glass-panel rounded-2xl p-6">
-        ${visibleAds.length === 0 ? `<p class="text-center text-slate-500 py-8">${isAr ? 'لا توجد بيانات تسوية' : 'No reconciliation data'}</p>` : `
-          <div class="space-y-3">
+    <div class="space-y-6 animate-fade-in-up">
+      <div>
+        <h1 class="text-3xl font-bold">${t('jobReconciliation')}</h1>
+        <p class="text-sm text-slate-500 mt-1">${isAr ? 'تظهر الإعلانات في اليوم التالي لانتهائها، أو بعد يوم من إيقافها.' : 'Ads appear the day after their scheduled end, or one day after they are stopped.'}</p>
+      </div>
+      <div class="glass-panel rounded-2xl p-3 sm:p-6">
+        ${visibleAds.length === 0 ? `<div class="text-center text-slate-500 py-10">
+          <i data-lucide="calendar-check" class="w-9 h-9 mx-auto mb-3 text-emerald-500"></i>
+          <p class="font-medium">${isAr ? 'لا توجد إعلانات منتهية تحتاج إلى تسوية الآن' : 'No finished ads need reconciliation now'}</p>
+        </div>` : `
+          <div class="space-y-4">
             ${visibleAds.map(ad => {
-              const customer = state.customers.find(c => c.id === ad.customerId);
-              const diff = (ad.spentUSD || 0) - (ad.amountUSD || 0);
-              const reconClass = diff === 0 ? 'recon-match' : diff > 0 ? 'recon-overspent' : 'recon-underspent';
-              return `<div class="${reconClass} p-4 rounded-lg">
-                <div class="flex justify-between items-center">
-                  <div>
-                    <span class="font-medium">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</span>
-                    <p class="text-sm">${isAr ? 'المُحصَّل' : 'Collected'}: $${ad.amountUSD} | ${isAr ? 'المصروف' : 'Spent'}: $${ad.spentUSD} | ${isAr ? 'الفرق' : 'Diff'}: $${diff.toFixed(2)}</p>
+              const id = String(ad.id);
+              const safeId = Security.escapeHtml(id);
+              const customer = state.customers.find(c => String(c.id) === String(ad.customerId));
+              const page = state.pages.find(p => String(p.id) === String(ad.pageId || ad.page));
+              const amountUSD = Math.max(Number(ad.amountUSD) || 0, 0);
+              const parsedSpent = Number(ad.spentUSD);
+              const hasSavedSpend = ad.spentUSD !== undefined && ad.spentUSD !== null && Number.isFinite(parsedSpent);
+              const spentUSD = hasSavedSpend ? Math.max(parsedSpent, 0) : 0;
+              const remainingUSD = hasSavedSpend ? Math.max(amountUSD - spentUSD, 0) : null;
+              const informed = ad.remainingCustomerInformed === true;
+              const canReconcile = canActOnRecord('ads', 'stopAd', ad.creatorId || ad.createdBy);
+              const adStatus = String(ad.status || '').trim().toLowerCase();
+              const startDay = getAdReconciliationStartDay(ad);
+              const endDay = getAdReconciliationEndDay(ad);
+              const stoppedDay = adStatus === 'stopped' ? getAdReconciliationStoppedDay(ad) : null;
+              const statusVisual = adStatus === 'stopped'
+                ? {
+                    card: 'border-rose-300 border-l-rose-500 bg-rose-50/50 dark:border-rose-800 dark:border-l-rose-500 dark:bg-rose-950/20',
+                    badge: 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300',
+                    label: isAr ? 'متوقف' : 'Stopped'
+                  }
+                : adStatus === 'paused'
+                  ? {
+                      card: 'border-violet-300 border-l-violet-500 bg-violet-50/50 dark:border-violet-800 dark:border-l-violet-500 dark:bg-violet-950/20',
+                      badge: 'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300',
+                      label: isAr ? 'متوقف مؤقتاً' : 'Paused'
+                    }
+                  : {
+                      card: 'border-amber-300 border-l-amber-500 bg-amber-50/50 dark:border-amber-800 dark:border-l-amber-500 dark:bg-amber-950/20',
+                      badge: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+                      label: isAr ? 'انتهى' : 'Ended'
+                    };
+              const informedBy = state.users.find(u => String(u.id) === String(ad.remainingCustomerInformedBy || ''));
+              const informedDetails = informed
+                ? [
+                    informedBy?.name || '',
+                    ad.remainingCustomerInformedAt ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale()) : ''
+                  ].filter(Boolean).join(' • ')
+                : '';
+              return `<section class="rounded-2xl border border-l-4 ${statusVisual.card} p-4 sm:p-5" data-reconciliation-card="${safeId}">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div class="min-w-0">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <span class="rounded-md bg-indigo-100 px-2 py-0.5 text-xs font-bold text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">#${Security.escapeHtml(ad.displayNumber || id)}</span>
+                      <h2 class="font-bold text-lg text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || (isAr ? 'عميل غير معروف' : 'Unknown customer'))}</h2>
+                      <span class="rounded-full px-2.5 py-1 text-xs font-bold ${statusVisual.badge}">${statusVisual.label}</span>
+                      <span class="rounded-full px-2.5 py-1 text-xs font-bold ${informed ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300' : (hasSavedSpend ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300')}">
+                        ${informed ? (isAr ? 'تم إبلاغ العميل' : 'Customer informed') : (hasSavedSpend ? (isAr ? 'تم حفظ المصروف' : 'Spend saved') : (isAr ? 'تحتاج تسوية' : 'Needs reconciliation'))}
+                      </span>
+                    </div>
+                    <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-slate-500">
+                      <span>${Security.escapeHtml(page?.name || (isAr ? 'بدون صفحة' : 'No page'))}</span>
+                      <span aria-hidden="true">•</span>
+                      <span class="rounded-md bg-sky-100 px-2 py-0.5 font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">${isAr ? 'البداية' : 'Start'}: ${startDay?.toLocaleDateString(appDateLocale()) || '-'}</span>
+                      <span aria-hidden="true">•</span>
+                      <span>${stoppedDay ? (isAr ? 'تم إيقافه' : 'Stopped') : (isAr ? 'الانتهاء' : 'End')}: ${(stoppedDay || endDay)?.toLocaleDateString(appDateLocale()) || '-'}</span>
+                    </div>
+                  </div>
+                  <div class="sm:text-right">
+                    <div class="text-xs uppercase tracking-wide text-slate-500">${isAr ? 'ميزانية الإعلان' : 'Ad budget'}</div>
+                    <div class="text-2xl font-bold text-slate-800 dark:text-white">$${amountUSD.toFixed(2)}</div>
                   </div>
                 </div>
-              </div>`;
+
+                <div class="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-end">
+                  <div>
+                    <label for="reconciliation-spent-${safeId}" class="mb-1.5 block text-sm font-bold text-slate-700 dark:text-slate-200">${isAr ? 'المصروف الفعلي على فيسبوك (USD)' : 'Actual Facebook spend (USD)'}</label>
+                    <input id="reconciliation-spent-${safeId}" type="text" inputmode="decimal" value="${hasSavedSpend ? spentUSD.toFixed(2) : ''}" placeholder="0.00" oninput="sanitizeMoneyInput(this); updateReconciliationPreview('${safeId}')" class="glass-input min-h-12 w-full rounded-xl px-4 text-lg font-bold" ${canReconcile ? '' : 'disabled'} />
+                  </div>
+                  <div class="rounded-xl bg-white/70 p-3 dark:bg-slate-900/50">
+                    <div class="text-xs text-slate-500">${isAr ? 'المتبقي الذي سيعود للعميل' : 'Remaining returned to customer'}</div>
+                    <div id="reconciliation-remaining-${safeId}" class="text-xl font-bold text-emerald-600">${remainingUSD === null ? '—' : `$${remainingUSD.toFixed(2)}`}</div>
+                  </div>
+                  <button id="reconciliation-submit-${safeId}" type="button" onclick="confirmStopAd('${safeId}', 'reconciliation')" class="min-h-12 rounded-xl bg-indigo-600 px-5 font-bold text-white shadow hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50" ${canReconcile ? '' : 'disabled'}>
+                    ${hasSavedSpend ? (isAr ? 'تحديث التسوية' : 'Update reconciliation') : (isAr ? 'حفظ وإرجاع المتبقي' : 'Save & return remaining')}
+                  </button>
+                </div>
+
+                <label class="mt-4 flex min-h-12 cursor-pointer items-start gap-3 rounded-xl border border-slate-200 bg-white/80 p-3 dark:border-slate-700 dark:bg-slate-900/50 ${informed ? 'cursor-default' : ''}">
+                  <input id="reconciliation-informed-${safeId}" type="checkbox" class="mt-0.5 h-5 w-5 shrink-0 accent-emerald-600" ${informed ? 'checked disabled' : ''} ${!informed && (remainingUSD === null || remainingUSD <= 0 || !canReconcile) ? 'disabled' : ''} />
+                  <span class="min-w-0">
+                    <span class="block text-sm font-bold text-slate-800 dark:text-slate-100">${isAr ? 'أؤكد أنني أبلغت العميل بالمبلغ المتبقي' : 'I confirm that I told the customer about the remaining amount'}</span>
+                    <span id="reconciliation-informed-help-${safeId}" class="block text-xs text-slate-500">${informedDetails ? Security.escapeHtml(informedDetails) : (isAr ? 'يمكن تحديد هذا بعد إدخال مصروف فعلي أقل من الميزانية. وإذا تغيّر المصروف يجب تأكيد المبلغ الجديد.' : 'Check this after entering spend below the budget. If the spend changes, confirm the new amount again.')}</span>
+                  </span>
+                </label>
+                ${!canReconcile ? `<p class="mt-2 text-xs text-rose-600">${isAr ? 'ليس لديك صلاحية تسوية هذا الإعلان.' : 'You do not have permission to reconcile this ad.'}</p>` : ''}
+              </section>`;
             }).join('')}
           </div>
         `}
@@ -14436,21 +17132,98 @@ function renderReconciliationView() {
   `;
 }
 
+let _userSearchTimer = null;
+function updateUserSearch(value) {
+  state.userSearch = Security.sanitizeInput(String(value || ''), { maxLength: 160 });
+  // Debounced scoped swap: a synchronous full render() per keystroke froze
+  // typing on phones and re-built the whole view for every character.
+  if (_userSearchTimer) clearTimeout(_userSearchTimer);
+  _userSearchTimer = setTimeout(() => {
+    _userSearchTimer = null;
+    updateUsersViewFiltered();
+  }, 80);
+}
+
+function updateUsersViewFiltered() {
+  if (state.currentView !== 'users') return;
+  const grid = document.getElementById('users-grid');
+  const countEl = document.getElementById('users-count');
+  if (!grid || !countEl) {
+    render();
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  const tpl = document.createElement('template');
+  tpl.innerHTML = renderUsersView();
+  const newGrid = tpl.content.querySelector('#users-grid');
+  const newCount = tpl.content.querySelector('#users-count');
+  if (newGrid) grid.innerHTML = newGrid.innerHTML;
+  if (newCount) countEl.textContent = newCount.textContent;
+  if (window.lucide) lucide.createIcons();
+}
+
+function applyUserRoleFilter(role) {
+  state.userRoleFilter = ['all', 'Admin', 'Employee', 'Delivery'].includes(role) ? role : 'all';
+  render();
+}
+
 function renderUsersView() {
   const isAr = state.language === 'ar';
-  const visibleUsers = getVisibleRecords(state.users);
+  const allVisibleUsers = getVisibleRecords(state.users);
+  const userSearch = String(state.userSearch || '').trim().toLocaleLowerCase();
+  const userRoleFilter = String(state.userRoleFilter || 'all');
+  const visibleUsers = allVisibleUsers.filter(user => {
+    if (userRoleFilter !== 'all' && String(user.role || '') !== userRoleFilter) return false;
+    if (!userSearch) return true;
+    return [user.name, user.email, user.role]
+      .some(value => String(value || '').toLocaleLowerCase().includes(userSearch));
+  });
   const isAdmin = isCurrentUserAdmin();
   const canAddUsers = canManageUsersAction('add');
   const canEditUsers = canManageUsersAction('edit');
   const canDeleteUsers = canManageUsersAction('delete');
   const canManagePerms = canManageUsersAction('managePermissions');
+  const visibleAdsForUsers = getVisibleRecords(state.ads);
+  const visibleReceiptsForUsers = getVisibleRecords(state.receipts);
+  const adsByCreator = new Map();
+  const paidDeliveriesByDriver = new Map();
+  const deliveredReceiptsByDriver = new Map();
+  const deliveryStatsByDriver = new Map();
+  const recordDerivedDeliveryStats = item => {
+    const driverId = String(item?.deliveryPersonId || '');
+    if (!driverId) return;
+    const status = String(item?.deliveryStatus || '');
+    const summary = deliveryStatsByDriver.get(driverId) || { totalAssigned: 0, accepted: 0, collected: 0 };
+    summary.totalAssigned += 1;
+    if (item?.acceptedDate || status === 'In Progress' || status === 'Delivered') summary.accepted += 1;
+    if (status === 'Delivered') summary.collected += 1;
+    deliveryStatsByDriver.set(driverId, summary);
+  };
+  visibleAdsForUsers.forEach(ad => {
+    recordDerivedDeliveryStats(ad);
+    const creatorId = String(ad.createdBy || ad.creatorId || '');
+    if (creatorId) adsByCreator.set(creatorId, (adsByCreator.get(creatorId) || 0) + 1);
+    const driverId = String(ad.deliveryPersonId || '');
+    if (driverId && getAdPaymentState(ad) === 'paid') {
+      paidDeliveriesByDriver.set(driverId, (paidDeliveriesByDriver.get(driverId) || 0) + 1);
+    }
+  });
+  visibleReceiptsForUsers.forEach(receipt => {
+    recordDerivedDeliveryStats(receipt);
+    const driverId = String(receipt.deliveryPersonId || '');
+    if (!driverId || receipt.deliveryStatus !== 'Delivered') return;
+    const summary = deliveredReceiptsByDriver.get(driverId) || { count: 0, fees: 0 };
+    summary.count += 1;
+    summary.fees += Number(receipt.deliveryFeeCollected ?? receipt.actualDeliveryFeeCollected ?? 0) || 0;
+    deliveredReceiptsByDriver.set(driverId, summary);
+  });
 
   return `
     <div class="space-y-6 animate-fade-in-up">
       <div class="page-header flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('users')}</h1>
-          <p class="text-sm text-slate-500 mt-1">${isAr ? `${visibleUsers.length} مستخدم في النظام` : `${visibleUsers.length} system users`}</p>
+          <p id="users-count" class="text-sm text-slate-500 mt-1">${isAr ? `${visibleUsers.length}${visibleUsers.length !== allVisibleUsers.length ? ` من ${allVisibleUsers.length}` : ''} مستخدم في النظام` : `${visibleUsers.length}${visibleUsers.length !== allVisibleUsers.length ? ` of ${allVisibleUsers.length}` : ''} system users`}</p>
         </div>
         ${canAddUsers ? `
         <button onclick="showUserModal()" class="btn-shine w-full sm:w-auto bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
@@ -14460,19 +17233,36 @@ function renderUsersView() {
         ` : ''}
       </div>
 
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        ${visibleUsers.map(u => {
-          const userAds = getVisibleRecords(state.ads).filter(ad => ad.creatorId === u.id);
-          const deliveredAds = getVisibleRecords(state.ads).filter(ad => ad.deliveryPersonId === u.id && getAdPaymentState(ad) === 'paid');
-          const deliveredReceipts = getVisibleRecords(state.receipts).filter(r => r.deliveryPersonId === u.id && r.deliveryStatus === 'Delivered');
-          const deliveryFeesLYD = deliveredReceipts.reduce((sum, r) => sum + (Number(r.deliveryFeeCollected ?? r.actualDeliveryFeeCollected ?? 0) || 0), 0);
+      <div class="smart-filter-panel glass-panel rounded-2xl p-4">
+        <div class="smart-filter-primary">
+          <div class="smart-search-field">
+            <label for="user-search" class="sr-only">${isAr ? 'بحث في المستخدمين' : 'Search users'}</label>
+            <i data-lucide="search" class="h-5 w-5"></i>
+            <input id="user-search" type="search" value="${Security.escapeHtml(state.userSearch || '')}" oninput="updateUserSearch(this.value)" placeholder="${isAr ? 'ابحث بالاسم أو البريد أو الدور...' : 'Search by name, email or role...'}" autocomplete="off" />
+          </div>
+          <div class="smart-filter-chips" aria-label="${isAr ? 'فلتر الدور' : 'Role filter'}">
+            <button type="button" onclick="applyUserRoleFilter('all')" class="smart-filter-chip ${userRoleFilter === 'all' ? 'is-active' : ''}">${isAr ? 'الكل' : 'All'}</button>
+            <button type="button" onclick="applyUserRoleFilter('Admin')" class="smart-filter-chip ${userRoleFilter === 'Admin' ? 'is-active' : ''}">${isAr ? 'مدير' : 'Admins'}</button>
+            <button type="button" onclick="applyUserRoleFilter('Employee')" class="smart-filter-chip ${userRoleFilter === 'Employee' ? 'is-active' : ''}">${isAr ? 'موظف' : 'Employees'}</button>
+            <button type="button" onclick="applyUserRoleFilter('Delivery')" class="smart-filter-chip ${userRoleFilter === 'Delivery' ? 'is-active' : ''}">${isAr ? 'سائق' : 'Drivers'}</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="users-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        ${visibleUsers.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="user-search" class="mx-auto mb-4 h-14 w-14 text-slate-300"></i><p class="text-slate-500">${isAr ? 'لا يوجد مستخدمون يطابقون البحث' : 'No users match your search'}</p></div>` : visibleUsers.map(u => {
+          const userAdsCount = adsByCreator.get(String(u.id)) || 0;
+          const deliveredAdsCount = paidDeliveriesByDriver.get(String(u.id)) || 0;
+          const deliverySummary = deliveredReceiptsByDriver.get(String(u.id)) || { count: 0, fees: 0 };
+          const deliveryFeesLYD = deliverySummary.fees;
+          const deliveryStats = deliveryStatsByDriver.get(String(u.id)) || { totalAssigned: 0, accepted: 0, collected: 0 };
           
           return `
             <div class="glass-panel rounded-xl p-5 hover:scale-[1.02] transition-transform">
               <div class="flex items-start justify-between mb-4">
                 <div class="flex items-center space-x-3 flex-1">
                   <div class="w-14 h-14 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-full flex items-center justify-center text-white font-bold text-xl shadow-lg">
-                    ${u.name.charAt(0)}
+                    ${String(u.name || 'U').charAt(0)}
                   </div>
                   <div class="flex-1">
                     <h3 class="font-bold text-lg text-slate-800 dark:text-white">${Security.escapeHtml(u.name || '')}</h3>
@@ -14512,27 +17302,27 @@ function renderUsersView() {
                   <span class="truncate">${Security.escapeHtml(u.email || '')}</span>
                 </div>
 
-                ${isDeliveryRole(u.role) && u.stats ? `
+                ${isDeliveryRole(u.role) ? `
                   <div class="mt-3 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg space-y-1">
                     <div class="text-xs font-bold text-blue-700 dark:text-blue-300 uppercase mb-2">${isAr ? 'إحصائيات التوصيل' : 'Delivery Stats'}</div>
-                    <div class="flex justify-between text-xs"><span>${isAr ? 'إجمالي المُعيَّن:' : 'Total Assigned:'}</span><span class="font-bold">${u.stats.totalAds || 0}</span></div>
-                    <div class="flex justify-between text-xs"><span>${isAr ? 'المقبول:' : 'Accepted:'}</span><span class="font-bold text-blue-600">${u.stats.accepted || 0}</span></div>
-                    <div class="flex justify-between text-xs"><span>${isAr ? 'المُحصَّل:' : 'Collected:'}</span><span class="font-bold text-emerald-600">${u.stats.collected || 0}</span></div>
+                    <div class="flex justify-between text-xs"><span>${isAr ? 'إجمالي المُعيَّن:' : 'Total Assigned:'}</span><span class="font-bold">${deliveryStats.totalAssigned}</span></div>
+                    <div class="flex justify-between text-xs"><span>${isAr ? 'المقبول:' : 'Accepted:'}</span><span class="font-bold text-blue-600">${deliveryStats.accepted}</span></div>
+                    <div class="flex justify-between text-xs"><span>${isAr ? 'المُحصَّل:' : 'Collected:'}</span><span class="font-bold text-emerald-600">${deliveryStats.collected}</span></div>
                     <div class="flex justify-between text-xs"><span>${isAr ? 'الرسوم المكتسبة:' : 'Fees Earned:'}</span><span class="font-bold text-purple-600">${deliveryFeesLYD.toFixed(0)} LYD</span></div>
                   </div>
                 ` : ''}
 
-                ${userAds.length > 0 ? `
+                ${userAdsCount > 0 ? `
                   <div class="flex items-center space-x-2 text-xs text-slate-500 mt-2">
                     <i data-lucide="megaphone" class="w-3 h-3"></i>
-                    <span>${isAr ? `أنشأ ${userAds.length} إعلان` : `Created ${userAds.length} ads`}</span>
+                    <span>${isAr ? `أنشأ ${userAdsCount} إعلان` : `Created ${userAdsCount} ads`}</span>
                   </div>
                 ` : ''}
 
-                ${deliveredAds.length > 0 ? `
+                ${deliveredAdsCount > 0 ? `
                   <div class="flex items-center space-x-2 text-xs text-emerald-600 mt-2">
                     <i data-lucide="truck" class="w-3 h-3"></i>
-                    <span>${isAr ? `وصَّل ${deliveredAds.length} إعلان` : `Delivered ${deliveredAds.length} ads`}</span>
+                    <span>${isAr ? `وصَّل ${deliveredAdsCount} إعلان` : `Delivered ${deliveredAdsCount} ads`}</span>
                   </div>
                 ` : ''}
                 
@@ -14659,6 +17449,15 @@ function renderAuditView() {
   const hasActiveFilters = state.auditSearch || state.auditActionFilter !== 'all' || 
     state.auditCategoryFilter !== 'all' || state.auditSeverityFilter !== 'all' || 
     state.auditUserFilter !== 'all' || state.auditDateFrom || state.auditDateTo;
+  const auditAdvancedFilterCount = [
+    state.auditActionFilter !== 'all',
+    state.auditCategoryFilter !== 'all',
+    state.auditSeverityFilter !== 'all',
+    state.auditUserFilter !== 'all',
+    !!state.auditDateFrom,
+    !!state.auditDateTo
+  ].filter(Boolean).length;
+  const auditAdvancedFiltersOpen = isWorkspaceFilterPanelExpanded('audit');
   
   // Severity badge colors
   const severityColors = {
@@ -14687,7 +17486,7 @@ function renderAuditView() {
             </span>
             <span>${t('auditLogs')}</span>
           </h1>
-          <p class="text-sm text-slate-500 mt-1">${isAr ? `${totalLogs.toLocaleString()} إجمالي السجلات` : `${totalLogs.toLocaleString()} total entries`} ${hasActiveFilters ? (isAr ? `(مصفّاة من ${allLogs.length.toLocaleString()})` : `(filtered from ${allLogs.length.toLocaleString()})`) : ''}</p>
+          <p class="text-sm text-slate-500 mt-1">${isAr ? `${totalLogs.toLocaleString('en-US')} إجمالي السجلات` : `${totalLogs.toLocaleString('en-US')} total entries`} ${hasActiveFilters ? (isAr ? `(مصفّاة من ${allLogs.length.toLocaleString('en-US')})` : `(filtered from ${allLogs.length.toLocaleString('en-US')})`) : ''}</p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
           ${canExportLogs ? `
@@ -14733,7 +17532,7 @@ function renderAuditView() {
         </div>
         <div class="flex items-center space-x-4 text-xs">
           <div class="text-center">
-            <div class="font-bold text-indigo-700 dark:text-indigo-300">${allLogs.length.toLocaleString()}</div>
+            <div class="font-bold text-indigo-700 dark:text-indigo-300">${allLogs.length.toLocaleString('en-US')}</div>
             <div class="text-[10px] text-indigo-600/70 dark:text-indigo-400/70">${isAr ? 'إجمالي السجلات' : 'Total Logs'}</div>
           </div>
           <div class="text-center">
@@ -14750,50 +17549,55 @@ function renderAuditView() {
           <div class="w-10 h-10 mx-auto mb-2 rounded-lg bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center">
             <i data-lucide="activity" class="w-5 h-5 text-blue-600"></i>
           </div>
-          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.length.toLocaleString()}</div>
+          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.length.toLocaleString('en-US')}</div>
           <div class="text-xs text-slate-500">${isAr ? 'إجمالي السجلات' : 'Total Logs'}</div>
         </div>
         <div class="glass-panel rounded-xl p-4 text-center">
           <div class="w-10 h-10 mx-auto mb-2 rounded-lg bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center">
             <i data-lucide="plus-circle" class="w-5 h-5 text-emerald-600"></i>
           </div>
-          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'create').length.toLocaleString()}</div>
+          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'create').length.toLocaleString('en-US')}</div>
           <div class="text-xs text-slate-500">${isAr ? 'إنشاء' : 'Creates'}</div>
         </div>
         <div class="glass-panel rounded-xl p-4 text-center">
           <div class="w-10 h-10 mx-auto mb-2 rounded-lg bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center">
             <i data-lucide="edit-3" class="w-5 h-5 text-amber-600"></i>
           </div>
-          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'update').length.toLocaleString()}</div>
+          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'update').length.toLocaleString('en-US')}</div>
           <div class="text-xs text-slate-500">${isAr ? 'تعديلات' : 'Updates'}</div>
         </div>
         <div class="glass-panel rounded-xl p-4 text-center">
           <div class="w-10 h-10 mx-auto mb-2 rounded-lg bg-rose-100 dark:bg-rose-900/30 flex items-center justify-center">
             <i data-lucide="trash-2" class="w-5 h-5 text-rose-600"></i>
           </div>
-          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'delete' || l.action === 'Delete').length.toLocaleString()}</div>
+          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'delete' || l.action === 'Delete').length.toLocaleString('en-US')}</div>
           <div class="text-xs text-slate-500">${isAr ? 'حذف' : 'Deletes'}</div>
         </div>
       </div>
 
       <!-- Filters -->
-      <div class="glass-panel rounded-2xl p-4">
-        <div class="flex flex-col lg:flex-row gap-4">
+      <div class="smart-filter-panel glass-panel rounded-2xl p-4">
+        <div class="smart-filter-primary">
           <!-- Search -->
-          <div class="flex-1 relative">
+          <div class="smart-search-field flex-1 relative">
+            <label for="audit-search" class="sr-only">${isAr ? 'بحث في سجل التدقيق' : 'Search audit logs'}</label>
             <i data-lucide="search" class="w-5 h-5 absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"></i>
             <input 
               type="text" 
+              id="audit-search"
               placeholder="${isAr ? 'ابحث في السجلات بالوصف أو المستخدم أو الإجراء...' : 'Search logs by description, user, action...'}"
               value="${Security.escapeHtml(state.auditSearch || '')}"
               oninput="updateAuditFilter('search', this.value)"
               class="w-full pl-12 pr-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all"
             />
-            ${state.auditSearch ? `<button onclick="updateAuditFilter('search', '')" class="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full"><i data-lucide="x" class="w-4 h-4 text-slate-400"></i></button>` : ''}
+            <span id="audit-search-clear">${state.auditSearch ? `<button onclick="clearAuditSearch()" class="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full"><i data-lucide="x" class="w-4 h-4 text-slate-400"></i></button>` : ''}</span>
           </div>
-          
+          ${renderWorkspaceFilterToggle('audit', auditAdvancedFilterCount)}
+        </div>
+
+        <div id="audit-advanced-filters" class="workspace-advanced-panel ${auditAdvancedFiltersOpen ? '' : 'hidden'}" aria-hidden="${auditAdvancedFiltersOpen ? 'false' : 'true'}">
           <!-- Filter Dropdowns -->
-          <div class="flex flex-wrap gap-2">
+          <div class="audit-filter-controls workspace-filter-grid">
             <select onchange="updateAuditFilter('action', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditActionFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all">${isAr ? 'كل الإجراءات' : 'All Actions'}</option>
               ${uniqueActions.map(a => `<option value="${Security.escapeHtml(a)}" ${state.auditActionFilter === a ? 'selected' : ''}>${Security.escapeHtml(a)}</option>`).join('')}
@@ -14838,7 +17642,7 @@ function renderAuditView() {
       </div>
 
       <!-- Logs Table -->
-      <div class="glass-panel rounded-2xl overflow-hidden">
+      <div id="audit-results" class="glass-panel rounded-2xl overflow-hidden">
         ${paginatedLogs.length === 0 ? `
           <div class="p-12 text-center">
             <i data-lucide="${hasActiveFilters ? 'search-x' : 'file-clock'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i>
@@ -14867,8 +17671,8 @@ function renderAuditView() {
                   return `
                     <tr class="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors">
                       <td class="px-4 py-3" data-label="${isAr ? 'الوقت' : 'Timestamp'}">
-                        <div class="text-xs font-medium text-slate-700 dark:text-slate-300">${new Date(log.date).toLocaleDateString()}</div>
-                        <div class="text-[10px] text-slate-500">${new Date(log.date).toLocaleTimeString()}</div>
+                        <div class="text-xs font-medium text-slate-700 dark:text-slate-300">${new Date(log.date).toLocaleDateString(appDateLocale())}</div>
+                        <div class="text-[10px] text-slate-500">${new Date(log.date).toLocaleTimeString(appDateLocale())}</div>
                       </td>
                       <td class="px-4 py-3" data-label="${isAr ? 'المستخدم' : 'User'}">
                         <div class="flex items-center space-x-2">
@@ -14973,7 +17777,16 @@ function updateAuditFilter(filterType, value) {
       }
       // #endregion
       state.auditSearch = clean;
-      break;
+      // Debounced scoped swap: a synchronous full render() per keystroke
+      // rebuilt the whole audit view for every character, which froze typing
+      // and dropped the keyboard on phones.
+      state.auditPage = 1;
+      if (_auditSearchTimer) clearTimeout(_auditSearchTimer);
+      _auditSearchTimer = setTimeout(() => {
+        _auditSearchTimer = null;
+        updateAuditViewFiltered();
+      }, 100);
+      return;
     }
     case 'action': state.auditActionFilter = value; break;
     case 'category': state.auditCategoryFilter = value; break;
@@ -14983,6 +17796,39 @@ function updateAuditFilter(filterType, value) {
     case 'dateTo': state.auditDateTo = value; break;
   }
   state.auditPage = 1; // Reset to first page when filtering
+  render();
+  lucide.createIcons();
+}
+
+let _auditSearchTimer = null;
+function updateAuditViewFiltered() {
+  if (state.currentView !== 'audit') return;
+  const results = document.getElementById('audit-results');
+  if (!results) {
+    render();
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  // Swap only the logs table (and the clear-X wrapper, like the receipts
+  // search) so the search input keeps its caret and the phone keyboard
+  // stays open (same approach as updateCustomersViewFiltered).
+  const tpl = document.createElement('template');
+  tpl.innerHTML = renderAuditView();
+  const newResults = tpl.content.querySelector('#audit-results');
+  if (newResults) results.innerHTML = newResults.innerHTML;
+  const clearEl = document.getElementById('audit-search-clear');
+  const newClear = tpl.content.querySelector('#audit-search-clear');
+  if (clearEl && newClear) clearEl.innerHTML = newClear.innerHTML;
+  if (window.lucide) lucide.createIcons();
+}
+
+function clearAuditSearch() {
+  if (_auditSearchTimer) {
+    clearTimeout(_auditSearchTimer);
+    _auditSearchTimer = null;
+  }
+  state.auditSearch = '';
+  state.auditPage = 1;
   render();
   lucide.createIcons();
 }
@@ -15061,7 +17907,7 @@ function showLogDetails(logId) {
           </div>
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
             <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'الوقت' : 'Timestamp'}</div>
-            <div class="text-xs text-slate-700 dark:text-slate-300">${new Date(log.date).toLocaleString()}</div>
+            <div class="text-xs text-slate-700 dark:text-slate-300">${new Date(log.date).toLocaleString(appDateLocale())}</div>
           </div>
         </div>
 
@@ -15155,8 +18001,13 @@ function downloadFile(content, filename, mimeType) {
   a.download = filename;
   document.body.appendChild(a);
   a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  // iOS Safari processes blob downloads asynchronously after the click task
+  // returns; revoking (or removing the anchor) in the same tick silently
+  // cancels the download. Defer cleanup instead.
+  setTimeout(() => {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 2000);
 }
 
 // Backup all audit logs for permanent storage
@@ -15379,8 +18230,8 @@ function renderSettingsView() {
           <div class="mt-3 p-3 rounded-xl bg-white/60 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-xs text-slate-500">
             ${state.localRecovery?.createdAt
               ? (state.language === 'ar'
-                ? `مفتاح الاستعادة مُنشأ بتاريخ: ${new Date(state.localRecovery.createdAt).toLocaleString()}`
-                : `Recovery key created: ${new Date(state.localRecovery.createdAt).toLocaleString()}`)
+                ? `مفتاح الاستعادة مُنشأ بتاريخ: ${new Date(state.localRecovery.createdAt).toLocaleString(appDateLocale())}`
+                : `Recovery key created: ${new Date(state.localRecovery.createdAt).toLocaleString(appDateLocale())}`)
               : (state.language === 'ar'
                 ? 'لم يتم إنشاء مفتاح استعادة بعد.'
                 : 'No recovery key created yet.')}
@@ -15408,6 +18259,25 @@ function renderSettingsView() {
             <i data-lucide="user-round-x" class="w-5 h-5"></i>
             <span>${isAr ? 'طلب حذف الحساب' : 'Request Account Deletion'}</span>
           </a>
+        </div>
+      </div>
+
+      <!-- Workspace experience -->
+      <div class="glass-panel rounded-2xl p-6">
+        <h2 class="text-xl font-bold mb-2 flex items-center">
+          <i data-lucide="sparkles" class="w-5 h-5 mr-2 text-indigo-500"></i>
+          ${isAr ? 'طريقة عرض مساحة العمل' : 'Workspace experience'}
+        </h2>
+        <p class="mb-4 text-sm text-slate-500">${isAr ? 'العرض البسيط مناسب للعمل اليومي، والعرض المتقدم يُظهر كل الفلاتر والأدوات دائماً. نفس البيانات ونفس الحسابات في الاثنين.' : 'Simple view is best for daily work. Advanced view keeps every filter and tool visible. Both use exactly the same data and calculations.'}</p>
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2" role="group" aria-label="${isAr ? 'اختيار طريقة العرض' : 'Choose workspace experience'}">
+          <button type="button" onclick="setWorkspaceExperienceMode('simple')" class="workspace-experience-choice ${!isAdvancedWorkspaceMode() ? 'is-selected' : ''}" aria-pressed="${!isAdvancedWorkspaceMode() ? 'true' : 'false'}">
+            <span class="workspace-experience-icon"><i data-lucide="sparkles" class="h-5 w-5"></i></span>
+            <span class="text-left"><span class="block font-bold">${isAr ? 'بسيط' : 'Simple'}</span><span class="block text-xs text-slate-500">${isAr ? 'الأساسيات أولاً، والمزيد عند الحاجة' : 'Essentials first, more when needed'}</span></span>
+          </button>
+          <button type="button" onclick="setWorkspaceExperienceMode('advanced')" class="workspace-experience-choice ${isAdvancedWorkspaceMode() ? 'is-selected' : ''}" aria-pressed="${isAdvancedWorkspaceMode() ? 'true' : 'false'}">
+            <span class="workspace-experience-icon"><i data-lucide="sliders-horizontal" class="h-5 w-5"></i></span>
+            <span class="text-left"><span class="block font-bold">${isAr ? 'متقدم' : 'Advanced'}</span><span class="block text-xs text-slate-500">${isAr ? 'كل الفلاتر والأدوات ظاهرة' : 'All filters and tools stay visible'}</span></span>
+          </button>
         </div>
       </div>
 
@@ -15467,7 +18337,7 @@ function renderSettingsView() {
                       const user = state.users.find(u => u.id === h.userId);
                       return `
                         <tr class="border-b border-slate-100 dark:border-slate-800">
-                          <td class="py-2 text-xs text-slate-500">${new Date(h.date).toLocaleString()}</td>
+                          <td class="py-2 text-xs text-slate-500">${new Date(h.date).toLocaleString(appDateLocale())}</td>
                           <td class="py-2 font-mono font-bold text-emerald-600">${h.rate.toFixed(2)}</td>
                           <td class="py-2 text-slate-600 dark:text-slate-400">${Security.escapeHtml(user?.name || (isAr ? 'النظام' : 'System'))}</td>
                         </tr>
@@ -15525,7 +18395,7 @@ function renderSettingsView() {
               <i data-lucide="check-circle" class="w-5 h-5 text-emerald-600"></i>
               <div class="flex-1">
                 <p class="font-medium text-emerald-700 dark:text-emerald-300">${isAr ? 'المزامنة السحابية مفعّلة' : 'Cloud Sync Enabled'}</p>
-                <p class="text-xs text-emerald-600 dark:text-emerald-400 mt-1">${isAr ? 'آخر مزامنة' : 'Last sync'}: ${state.lastCloudSync ? new Date(state.lastCloudSync).toLocaleString() : (isAr ? 'أبداً' : 'Never')}</p>
+                <p class="text-xs text-emerald-600 dark:text-emerald-400 mt-1">${isAr ? 'آخر مزامنة' : 'Last sync'}: ${state.lastCloudSync ? new Date(state.lastCloudSync).toLocaleString(appDateLocale()) : (isAr ? 'أبداً' : 'Never')}</p>
               </div>
             </div>
             <div class="flex space-x-3">
@@ -15580,8 +18450,188 @@ function getAdPaymentState(ad) {
   return 'paid';
 }
 
+// Canonical client-side record scope. The server is authoritative and already
+// returns scoped collections, but this guard also protects local mode, stale
+// offline caches, and permission changes that happen before the next reload.
+function getRecordsVisibleToCurrentUser(moduleName, records) {
+  const visible = getVisibleRecords(Array.isArray(records) ? records : []);
+  if (isCurrentUserAdmin() || currentUserHasPermission(moduleName, 'view')) return visible;
+  if (!currentUserHasPermission(moduleName, 'viewOwn')) return [];
+
+  const userId = String(state.currentUser?.id || '');
+  if (isDeliveryRole(state.currentUser?.role) && (moduleName === 'ads' || moduleName === 'receipts')) {
+    return visible.filter(record => String(record?.deliveryPersonId || '') === userId);
+  }
+  return visible.filter(record =>
+    String(record?.createdBy || record?.creatorId || '') === userId
+  );
+}
+
+function getAdsVisibleToCurrentUser() {
+  return getRecordsVisibleToCurrentUser('ads', state.ads)
+    .filter(ad => ad.recordType !== 'receipt');
+}
+
+function getReceiptsVisibleToCurrentUser() {
+  return getRecordsVisibleToCurrentUser('receipts', state.receipts);
+}
+
+function getPagesVisibleToCurrentUser() {
+  return getRecordsVisibleToCurrentUser('pages', state.pages);
+}
+
+// Current receipts use customerId. Very old local/imported receipts used the
+// `customer` relationship field instead. A non-empty customerId is always
+// authoritative so a stale legacy value cannot attach one receipt to two
+// customers.
+function getReceiptCustomerReferenceId(receipt) {
+  const customerId = String(receipt?.customerId || '').trim();
+  return customerId || String(receipt?.customer || '').trim();
+}
+
+// One canonical relationship reader for Receipt -> Ads navigation. This is a
+// history drill-down, not a money calculation, so it includes both live links
+// and frozen stop/refund funding baselines. settledReceiptId is settlement
+// provenance rather than a funding relationship and intentionally does not
+// match.
+function getAdLinkedReceiptIds(ad) {
+  if (!ad || ad._deleted || ad.recordType === 'receipt') return [];
+  const ids = new Set();
+  const add = value => {
+    const id = String(value || '').trim();
+    if (id) ids.add(id);
+  };
+  [ad.receiptId, ad.fundingReceiptId, ad.linkedDeliveryReceiptId, ad.linkedReceiptId].forEach(add);
+  if (Array.isArray(ad.receiptIds)) ad.receiptIds.forEach(add);
+  [ad.receiptAllocations, ad.dueAllocations, ad.mergedPaidAllocations].forEach(rows => {
+    if (Array.isArray(rows)) rows.forEach(row => add(row?.receiptId));
+  });
+  [ad.stopAllocationBaseline, ad.refundAllocationBaseline, ad.refundDueBaseline].forEach((baseline, index) => {
+    if (Array.isArray(baseline)) {
+      baseline.forEach(row => add(row?.receiptId));
+      return;
+    }
+    if (!baseline || typeof baseline !== 'object') return;
+    if (index === 0) add(baseline.dueLegacyReceiptId);
+    Object.values(baseline).forEach(rows => {
+      if (Array.isArray(rows)) rows.forEach(row => add(row?.receiptId));
+    });
+  });
+  return Array.from(ids);
+}
+
+function isAdLinkedToReceipt(ad, receiptId) {
+  const rid = String(receiptId || '').trim();
+  return Boolean(rid) && getAdLinkedReceiptIds(ad).includes(rid);
+}
+
+function openCustomerReceipts(customerId) {
+  const cid = String(customerId || '').trim();
+  const allowed = typeof canOpenWorkspaceView === 'function' && canOpenWorkspaceView('receipts');
+  const visibleCustomer = Security.isValidRecordId(cid)
+    && getCustomersVisibleToCurrentUser().some(customer => String(customer?.id || '') === cid);
+  if (!allowed || !visibleCustomer) {
+    showNotification(
+      state.language === 'ar' ? 'تعذر فتح الوصولات' : 'Cannot Open Receipts',
+      state.language === 'ar' ? 'لا تملك صلاحية عرض وصولات هذا العميل.' : 'You do not have permission to view this customer’s receipts.',
+      'error'
+    );
+    return false;
+  }
+  // This outside action promises every receipt for the customer, so discard a
+  // stale list search/dropdown combination before applying the relationship.
+  state.receiptSearch = '';
+  state.receiptStatusFilter = 'all';
+  state.receiptPaymentFilter = 'all';
+  state.receiptDateFilter = 'all';
+  state.receiptDebtFilter = 'all';
+  state.receiptCollectedFilter = 'all';
+  state.receiptSortBy = 'newest';
+  state.receiptCustomerFilter = cid;
+  state.receiptRecordFilter = '';
+  navigateTo('receipts');
+  return true;
+}
+
+function clearReceiptCustomerFilter() {
+  state.receiptCustomerFilter = '';
+  if (state.currentView === 'receipts') updateUrlForView('receipts', true);
+  debouncedSaveState();
+  render();
+}
+
+// Open one exact receipt from a warning or drill-down without relying on a
+// customer name/serial search. The permission-scoped receipt list is checked
+// first so a guessed id can never reveal a cached record.
+function openReceiptRecord(receiptId) {
+  const rid = String(receiptId || '').trim();
+  const receipt = Security.isValidRecordId(rid)
+    ? getReceiptsVisibleToCurrentUser().find(item => String(item?.id || '') === rid)
+    : null;
+  const allowed = typeof canOpenWorkspaceView === 'function' && canOpenWorkspaceView('receipts');
+  if (!allowed || !receipt) {
+    showNotification(
+      state.language === 'ar' ? 'تعذر فتح الوصل' : 'Cannot Open Receipt',
+      state.language === 'ar' ? 'لا تملك صلاحية عرض هذا الوصل.' : 'You do not have permission to view this receipt.',
+      'error'
+    );
+    return false;
+  }
+
+  state.receiptSearch = '';
+  state.receiptStatusFilter = 'all';
+  state.receiptPaymentFilter = 'all';
+  state.receiptDateFilter = 'all';
+  state.receiptDebtFilter = 'all';
+  state.receiptCollectedFilter = 'all';
+  state.receiptSortBy = 'newest';
+  state.receiptCustomerFilter = getReceiptCustomerReferenceId(receipt);
+  state.receiptRecordFilter = rid;
+  navigateTo('receipts');
+  return true;
+}
+
+function clearReceiptRecordFilter() {
+  state.receiptRecordFilter = '';
+  if (state.currentView === 'receipts') updateUrlForView('receipts', true);
+  debouncedSaveState();
+  render();
+}
+
+function openReceiptAds(receiptId) {
+  const rid = String(receiptId || '').trim();
+  const allowed = typeof canOpenWorkspaceView === 'function' && canOpenWorkspaceView('ads');
+  const visibleReceipt = Security.isValidRecordId(rid)
+    && getReceiptsVisibleToCurrentUser().some(receipt => String(receipt?.id || '') === rid);
+  if (!allowed || !visibleReceipt) {
+    showNotification(
+      state.language === 'ar' ? 'تعذر فتح الإعلانات' : 'Cannot Open Ads',
+      state.language === 'ar' ? 'لا تملك صلاحية عرض الإعلانات المرتبطة بهذا الوصل.' : 'You do not have permission to view ads linked to this receipt.',
+      'error'
+    );
+    return false;
+  }
+  state.adSearch = '';
+  state.adFilters = { status: 'all', payment: 'all', page: 'all' };
+  state.adReceiptFilter = rid;
+  navigateTo('ads');
+  return true;
+}
+
+function clearAdReceiptFilter() {
+  state.adReceiptFilter = '';
+  if (state.currentView === 'ads') updateUrlForView('ads', true);
+  debouncedSaveState();
+  render();
+}
+
 function getFilteredAds(customersById = null) {
-  let filtered = getVisibleRecords(state.ads).filter(ad => ad.recordType !== 'receipt');
+  let filtered = getAdsVisibleToCurrentUser();
+
+  const receiptFilter = String(state.adReceiptFilter || '').trim();
+  if (receiptFilter) {
+    filtered = filtered.filter(ad => isAdLinkedToReceipt(ad, receiptFilter));
+  }
 
   // Dropdown filters (status / payment / page) — state.adFilters is kept in
   // sync by updateAdFilter(); 'all' or unset means no filtering.
@@ -15612,13 +18662,14 @@ function getFilteredAds(customersById = null) {
     // array for every ad on every keystroke.
     const custMap = customersById || new Map(state.customers.map(c => [c.id, c]));
     const pageMap = new Map((state.pages || []).map(p => [p.id, p]));
+    const canSearchContacts = can('customers', 'viewContacts');
     filtered = filtered.filter(ad => {
       const customer = custMap.get(ad.customerId);
       const page = ad.pageId ? pageMap.get(ad.pageId) : null;
       return (
         customer?.name?.toLowerCase().includes(searchTerm) ||
         ad.id.toLowerCase().includes(searchTerm) ||
-        ad.phoneNumber?.toLowerCase().includes(searchTerm) ||
+        (canSearchContacts && ad.phoneNumber?.toLowerCase().includes(searchTerm)) ||
         ad.serialNumber?.toLowerCase().includes(searchTerm) ||
         page?.name?.toLowerCase().includes(searchTerm)
       );
@@ -15632,39 +18683,159 @@ function getFilteredAds(customersById = null) {
 // CUSTOMER VALIDATION FUNCTIONS
 // ==========================================
 
-// Check if any phone number is already used by another customer
+// Customer identity is phone-based, but the historical data has several
+// shapes (`phone`, `phoneNumber`, `phones[]`, and object entries) and several
+// spellings of a Libyan number. Keep this canonicalizer in one place so create,
+// edit, duplicate discovery and the server all agree that these are identical:
+//   0912345678 / 218912345678 / +218 91 234 5678 / 00218-91-234-5678
+function getCustomerPhoneValue(entry) {
+  if (entry === null || entry === undefined) return '';
+  if (typeof entry === 'object') {
+    return String(entry.number ?? entry.phone ?? entry.phoneNumber ?? entry.value ?? '').trim();
+  }
+  return String(entry).trim();
+}
+
+function normalizeCustomerPhoneKey(value) {
+  let raw = getCustomerPhoneValue(value);
+  if (!raw) return '';
+  // NFKC handles full-width digits. Translate Arabic-Indic and Persian digits
+  // explicitly because customer phones are commonly pasted from Arabic apps.
+  try { raw = raw.normalize('NFKC'); } catch (_) {}
+  raw = raw
+    .replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)))
+    .replace(/[۰-۹]/g, digit => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(digit)));
+  let digits = raw.replace(/\D/g, '');
+  if (!digits) return '';
+
+  // International call-prefix spelling (00218...) is the same as +218....
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  if (digits.startsWith('218')) {
+    let national = digits.slice(3);
+    if (national.startsWith('0')) national = national.slice(1);
+    // Libyan mobile numbers have a nine-digit national part beginning with 9.
+    if (/^9\d{8}$/.test(national)) return `218${national}`;
+    return `218${national}`;
+  }
+  if (/^09\d{8}$/.test(digits)) return `218${digits.slice(1)}`;
+  if (/^9\d{8}$/.test(digits)) return `218${digits}`;
+  return digits;
+}
+
+function getCustomerPhoneEntries(customer) {
+  if (!customer || typeof customer !== 'object') return [];
+  const source = [
+    customer.phone,
+    customer.phoneNumber,
+    ...(Array.isArray(customer.phones) ? customer.phones : [])
+  ];
+  const seen = new Set();
+  const entries = [];
+  for (const item of source) {
+    const value = getCustomerPhoneValue(item);
+    const key = normalizeCustomerPhoneKey(value);
+    if (!value || !key || seen.has(key)) continue;
+    seen.add(key);
+    entries.push({ value, key });
+  }
+  return entries;
+}
+
+// Repeated spellings inside the same form are not useful, but they should not
+// make a beginner repair the form manually. Preserve the first formatting and
+// silently save each real number once.
+function dedupeCustomerPhoneValues(phones) {
+  const seen = new Set();
+  const result = [];
+  for (const phone of (Array.isArray(phones) ? phones : [])) {
+    const value = getCustomerPhoneValue(phone);
+    const key = normalizeCustomerPhoneKey(value);
+    if (!value || !key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+  }
+  return result;
+}
+
+// Check if any phone number is already used by another active customer.
 function checkDuplicatePhone(phones, excludeCustomerId = null) {
-  const allCustomers = getVisibleRecords(state.customers);
-  
-  for (const phone of phones) {
-    if (!phone) continue;
-    
-    // Normalize phone number (remove spaces, dashes, etc.)
-    const normalizedPhone = phone.replace(/[\s\-\(\)]/g, '');
-    
-    for (const customer of allCustomers) {
-      // Skip the current customer being edited
-      if (excludeCustomerId && customer.id === excludeCustomerId) continue;
-      
-      // Check if this customer has the phone number
-      if (customer.phones && Array.isArray(customer.phones)) {
-        const hasPhone = customer.phones.some(p => {
-          const normalizedCustomerPhone = (p || '').replace(/[\s\-\(\)]/g, '');
-          return normalizedCustomerPhone === normalizedPhone;
-        });
-        
-        if (hasPhone) {
-          return {
-            phone: phone,
-            customerId: customer.id,
-            customerName: customer.name || 'Unknown'
-          };
-        }
-      }
+  const requested = dedupeCustomerPhoneValues(phones).map(phone => ({
+    phone,
+    key: normalizeCustomerPhoneKey(phone)
+  }));
+  const excluded = String(excludeCustomerId || '');
+  for (const customer of getVisibleRecords(state.customers)) {
+    if (!customer || customer._deleted || (excluded && String(customer.id) === excluded)) continue;
+    const existingKeys = new Set(getCustomerPhoneEntries(customer).map(entry => entry.key));
+    const match = requested.find(entry => entry.key && existingKeys.has(entry.key));
+    if (!match) continue;
+    return {
+      phone: match.phone,
+      canonicalPhone: match.key,
+      customerId: customer.id,
+      customerName: customer.name || 'Unknown',
+      customer
+    };
+  }
+  return null;
+}
+
+// Return transitive duplicate groups. If A shares one number with B and B
+// shares another with C, all three belong to one repair group.
+function findDuplicateCustomerGroups(customers = state.customers) {
+  const active = getVisibleRecords(Array.isArray(customers) ? customers : [])
+    .filter(customer => customer && !customer._deleted && customer.id);
+  const byId = new Map(active.map(customer => [String(customer.id), customer]));
+  const parent = new Map(active.map(customer => [String(customer.id), String(customer.id)]));
+  const find = id => {
+    let root = id;
+    while (parent.get(root) !== root) root = parent.get(root);
+    let cur = id;
+    while (parent.get(cur) !== cur) {
+      const next = parent.get(cur);
+      parent.set(cur, root);
+      cur = next;
+    }
+    return root;
+  };
+  const unite = (left, right) => {
+    const a = find(left);
+    const b = find(right);
+    if (a !== b) parent.set(b, a);
+  };
+  const firstCustomerByPhone = new Map();
+  for (const customer of active) {
+    const id = String(customer.id);
+    for (const { key } of getCustomerPhoneEntries(customer)) {
+      const first = firstCustomerByPhone.get(key);
+      if (first) unite(first, id);
+      else firstCustomerByPhone.set(key, id);
     }
   }
-  
-  return null; // No duplicate found
+  const grouped = new Map();
+  for (const customer of active) {
+    const root = find(String(customer.id));
+    if (!grouped.has(root)) grouped.set(root, []);
+    grouped.get(root).push(customer);
+  }
+  return Array.from(grouped.values())
+    .filter(group => group.length > 1)
+    .map(group => {
+      const phoneOwners = new Map();
+      for (const customer of group) {
+        for (const entry of getCustomerPhoneEntries(customer)) {
+          if (!phoneOwners.has(entry.key)) phoneOwners.set(entry.key, []);
+          phoneOwners.get(entry.key).push(String(customer.id));
+        }
+      }
+      return {
+        customers: group,
+        sharedPhoneKeys: Array.from(phoneOwners.entries())
+          .filter(([, ids]) => new Set(ids).size > 1)
+          .map(([key]) => key)
+      };
+    })
+    .sort((a, b) => String(a.customers[0]?.name || '').localeCompare(String(b.customers[0]?.name || '')));
 }
 
 // ==========================================
@@ -15718,6 +18889,114 @@ function getAdSpendUSD(ad) {
   }
   if (['pending', 'paused'].includes(status)) return 0;
   return parseFloat(ad.amountUSD) || 0;
+}
+
+// ---------------- Liquidity coverage (owner solvency tracking) ----------------
+// The business historically spent customer deposits. From an admin-chosen start
+// date the app tracks NEW cash actually received and NEW ad spending, and
+// compares the net against everything still owed to customers — so the owner
+// sees whether the fresh money can cover the outstanding customer credit.
+
+// Newest liquidity record wins. state.appSettings is append-only exactly like
+// exchangeRateHistory, so the history of changes is the audit trail.
+function getLiquidityTrackingConfig() {
+  const rows = (Array.isArray(state.appSettings) ? state.appSettings : []).filter(row =>
+    row && !row._deleted && String(row.settingKey || '') === 'liquidityTracking' && row.startDate
+  );
+  if (rows.length === 0) return null;
+  return rows.slice().sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime())[0];
+}
+
+// When did this receipt's money actually arrive? deliveredAt is the driver
+// handover, collectionDate is stamped when a receipt turns Paid, createdAt
+// covers receipts born Paid. collectedAt is stamped at the admin's
+// reconciliation CLICK, which can be long after the cash arrived — so it may
+// only make the money OLDER, never newer: otherwise confirming a backlog of
+// old receipts would mint them as "new" cash inside the tracking window.
+function getReceiptPaidDate(r) {
+  const paidAt = r?.deliveredAt || r?.collectionDate || r?.createdAt || null;
+  if (r?.collectedAt && paidAt) {
+    return new Date(r.collectedAt) < new Date(paidAt) ? r.collectedAt : paidAt;
+  }
+  return r?.collectedAt || paidAt;
+}
+
+function getLiquiditySnapshot() {
+  const config = getLiquidityTrackingConfig();
+  const sinceMs = config ? new Date(config.startDate).getTime() : NaN;
+  const tracking = Number.isFinite(sinceMs);
+
+  let collectedUSD = 0;
+  let liabilityUSD = 0;
+  for (const r of getVisibleRecords(state.receipts)) {
+    const status = String(r.status || '');
+    const detail = r.statusDetail && typeof r.statusDetail === 'object' ? r.statusDetail : {};
+    // A canceled PAID receipt whose refund is not yet handed back still holds
+    // the customer's cash — it stays in the books until the refund is done.
+    const refundOwed = status === 'Canceled' && r.isPaid === true
+      && ['full', 'partial'].includes(String(detail.refundAction || ''))
+      && String(detail.refundStatus || '') !== 'refunded';
+    if ((status === 'Canceled' || status === 'Lost') && !refundOwed) continue;
+    // Cash-bearing receipts: Paid ones, plus UNDERPAID delivery completions —
+    // there the completion flow rewrote amountUSD to the actually-collected
+    // cash and stamped deliveredAt, even though the status stays Not Paid.
+    const underpaidCollected = !!r.deliveredAt && String(r.paymentResult || '') === 'UNDERPAID';
+    if (!(r.isPaid === true || status === 'Paid' || underpaidCollected)) continue;
+    // Owed to customers: the unused credit on every paid receipt INCLUDING
+    // transfer-ins — each receipt's remaining already subtracts its own usage
+    // and outgoing transfers, so summing stays transfer-neutral.
+    liabilityUSD += Math.max(getReceiptUsageStats(r).remainingUSD || 0, 0);
+    if (!tracking) continue;
+    // New cash only: a transfer moves existing money between receipts and a
+    // CARRIED_BALANCE receipt records pre-tracking credit — neither is money
+    // that newly arrived in the window.
+    if (isTransferInReceipt(r)) continue;
+    if (String(r.receiptType || '') === 'CARRIED_BALANCE') continue;
+    const paidAtMs = new Date(getReceiptPaidDate(r) || 0).getTime();
+    if (Number.isFinite(paidAtMs) && paidAtMs >= sinceMs) {
+      collectedUSD += parseFloat(r.amountUSD) || 0;
+    }
+  }
+
+  let adSpendUSD = 0;
+  if (tracking) {
+    for (const a of getVisibleRecords(state.ads)) {
+      if (!a || a.recordType === 'receipt') continue;
+      const spend = getAdSpendUSD(a);
+      if (spend <= 0) continue;
+      const adDateMs = new Date(a.createdAt || a.startDate || 0).getTime();
+      if (Number.isFinite(adDateMs) && adDateMs >= sinceMs) {
+        adSpendUSD += spend;
+      } else {
+        // An old ad grown inside the window spends new money only for the
+        // dated growth — top-ups plus ordinary budget increases recorded in
+        // amountAdjustments — and never more than the ad actually spent.
+        const sumDatedRows = (rows, key) => (Array.isArray(rows) ? rows : []).reduce((sum, t) => {
+          const tMs = new Date(t?.date || 0).getTime();
+          return Number.isFinite(tMs) && tMs >= sinceMs ? sum + (parseFloat(t?.[key]) || 0) : sum;
+        }, 0);
+        const grownSince = sumDatedRows(a.topUps, 'amount') + sumDatedRows(a.amountAdjustments, 'delta');
+        adSpendUSD += Math.min(Math.max(grownSince, 0), spend);
+      }
+    }
+  }
+
+  const netUSD = collectedUSD - adSpendUSD;
+  const shortfallUSD = Math.max(liabilityUSD - Math.max(netUSD, 0), 0);
+  const coveragePercent = liabilityUSD > 0.005
+    ? Math.min(Math.max((Math.max(netUSD, 0) / liabilityUSD) * 100, 0), 999)
+    : 100;
+  return {
+    tracking,
+    startDate: tracking ? config.startDate : null,
+    setBy: tracking ? String(config.setBy || '') : '',
+    collectedUSD: Math.round(collectedUSD * 100) / 100,
+    adSpendUSD: Math.round(adSpendUSD * 100) / 100,
+    netUSD: Math.round(netUSD * 100) / 100,
+    liabilityUSD: Math.round(liabilityUSD * 100) / 100,
+    shortfallUSD: Math.round(shortfallUSD * 100) / 100,
+    coveragePercent: Math.round(coveragePercent * 10) / 10
+  };
 }
 
 // Normalize current and historical page links. Current pages use customerIds;
@@ -16197,8 +19476,30 @@ function getCustomerSortValue(customer, sortType, statsIndex = null) {
 }
 
 function getCustomersVisibleToCurrentUser() {
-  return getVisibleRecords(state.customers).filter(customer =>
-    canActOnRecord('customers', 'view', customer.createdBy || customer.creatorId)
+  const customers = getVisibleRecords(state.customers);
+  if (isCurrentUserAdmin() || currentUserHasPermission('customers', 'view')) return customers;
+  if (!currentUserHasPermission('customers', 'viewOwn')) return [];
+
+  // The backend defines a delivery user's "own" customers as customers
+  // referenced by deliveries assigned to that driver, not customers the driver
+  // originally created. Server-mode customer collections are already scoped by
+  // that rule. Mirror it in local mode so the phone app and local testing behave
+  // the same way without hiding an assigned customer's card/search result.
+  if (isDeliveryRole(state.currentUser?.role)) {
+    if (isServerModeEnabled()) return customers;
+    const userId = String(state.currentUser?.id || '');
+    const assignedCustomerIds = new Set();
+    [...getVisibleRecords(state.receipts || []), ...getVisibleRecords(state.ads || [])].forEach(record => {
+      if (String(record?.deliveryPersonId || '') === userId && record?.customerId) {
+        assignedCustomerIds.add(String(record.customerId));
+      }
+    });
+    return customers.filter(customer => assignedCustomerIds.has(String(customer.id)));
+  }
+
+  const userId = String(state.currentUser?.id || '');
+  return customers.filter(customer =>
+    String(customer.createdBy || customer.creatorId || '') === userId
   );
 }
 
@@ -16208,11 +19509,18 @@ function getFilteredCustomers() {
   // creators' customers in memory. Scope before search, counts, or rendering.
   let filtered = getCustomersVisibleToCurrentUser();
   const searchTerm = String(state.customerSearch || '').toLowerCase().trim();
+  const canViewContacts = can('customers', 'viewContacts');
+  const canViewBalance = can('customers', 'viewBalance');
+  const financialFilter = canViewBalance ? state.customerFinancialFilter : 'all';
+  const requestedSort = String(state.customerSort || 'newest');
+  const nonFinancialSorts = new Set(['newest', 'oldest', 'lastActive']);
+  const effectiveSort = canViewBalance || nonFinancialSorts.has(requestedSort) ? requestedSort : 'newest';
+  const searchPhoneDigits = searchTerm.replace(/\D/g, '');
   
   if (searchTerm) {
     filtered = filtered.filter(c => 
       String(c.name || '').toLowerCase().includes(searchTerm) ||
-      (Array.isArray(c.phones) ? c.phones : []).some(p => String(p || '').includes(searchTerm)) ||
+      (canViewContacts && getCustomerPhoneEntries(c).some(entry => entry.value.toLowerCase().includes(searchTerm) || (searchPhoneDigits && entry.key.includes(searchPhoneDigits)))) ||
       String(c.platform || '').toLowerCase().includes(searchTerm)
     );
   }
@@ -16224,23 +19532,23 @@ function getFilteredCustomers() {
   // ~O(customers log customers × records), freezing the UI for seconds at a few
   // thousand records on every search keystroke / sort change / live-sync tick.
   const needsStats = (
-    state.customerFinancialFilter === 'hasCredit' ||
-    state.customerFinancialFilter === 'hasDebt' ||
-    !(state.customerSort === 'newest' || state.customerSort === 'oldest')
+    financialFilter === 'hasCredit' ||
+    financialFilter === 'hasDebt' ||
+    !(effectiveSort === 'newest' || effectiveSort === 'oldest')
   );
   const statsIndex = needsStats ? buildCustomerStatsIndex() : null;
 
   // Apply financial filter
-  if (state.customerFinancialFilter === 'hasCredit') {
+  if (financialFilter === 'hasCredit') {
     filtered = filtered.filter(c => getCustomerStats(c.id, statsIndex).balance > 0);
-  } else if (state.customerFinancialFilter === 'hasDebt') {
+  } else if (financialFilter === 'hasDebt') {
     filtered = filtered.filter(c => getCustomerStats(c.id, statsIndex).balance < 0);
   }
 
   // Apply sorting (decorate-sort-undecorate: compute each sort value once,
   // reusing the shared statsIndex, instead of recomputing inside the comparator).
   filtered = filtered
-    .map(c => ({ c, v: getCustomerSortValue(c, state.customerSort, statsIndex) }))
+    .map(c => ({ c, v: getCustomerSortValue(c, effectiveSort, statsIndex) }))
     .sort((a, b) => b.v - a.v) // Descending order
     .map(x => x.c);
 
@@ -16889,13 +20197,24 @@ async function updateDeliveryStatus(itemId, status) {
   render();
 }
 
+// Rapid double taps can queue two async saves before the first render removes
+// the action button. Keep one delivery mutation per item in flight; the server
+// remains the authority for transitions across different devices.
+const _deliveryActionInFlight = new Set();
+
 async function markAsCollected(itemId) {
   if (!canDoDeliveryAction('markCollected', itemId)) {
     denyDeliveryAction();
     return;
   }
+  const actionKey = String(itemId || '');
+  if (_deliveryActionInFlight.has(actionKey)) return;
+  _deliveryActionInFlight.add(actionKey);
+  try {
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
+  const currentItem = isReceipt || state.ads.find(a => a.id === itemId);
+  if (!currentItem || currentItem.deliveryStatus === 'Delivered') return;
   let savedOk = false;
   if (isReceipt) {
     // Temp delivery receipts require strict completion (final receipt # + photo + amounts).
@@ -16928,13 +20247,13 @@ async function markAsCollected(itemId) {
     });
   }
   if (!savedOk) return;
-  // Update delivery stats if delivery user
-  if (isDeliveryRole(state.currentUser?.role) && state.currentUser.stats) {
-    state.currentUser.stats.collected = (state.currentUser.stats.collected || 0) + 1;
-    await updateRecord(state.users, state.currentUser.id, { stats: state.currentUser.stats });
-  }
+  // Statistics are derived from delivery records. Never increment a mutable
+  // counter here: a retry from another device must not count twice.
   showNotification(state.language === 'ar' ? 'تم التحصيل' : 'Collected', state.language === 'ar' ? 'تم تسجيل الدفعة كمُحصَّلة' : 'Payment marked as collected', 'success');
   render();
+  } finally {
+    _deliveryActionInFlight.delete(actionKey);
+  }
 }
 
 async function acceptDelivery(itemId) {
@@ -16942,11 +20261,16 @@ async function acceptDelivery(itemId) {
     denyDeliveryAction();
     return;
   }
+  const actionKey = String(itemId || '');
+  if (_deliveryActionInFlight.has(actionKey)) return;
+  _deliveryActionInFlight.add(actionKey);
+  try {
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
+  const currentItem = isReceipt || state.ads.find(a => a.id === itemId);
+  if (!currentItem || ['In Progress', 'Delivered', 'Canceled'].includes(currentItem.deliveryStatus)) return;
   const updateData = {
-    deliveryStatus: 'In Progress',
-    acceptedDate: new Date().toISOString()
+    deliveryStatus: 'In Progress'
   };
 
   if (isReceipt) {
@@ -16954,14 +20278,12 @@ async function acceptDelivery(itemId) {
   } else {
     if (!await updateRecord(state.ads, itemId, updateData)) return;
   }
-  // Update delivery stats
-  if (isDeliveryRole(state.currentUser?.role) && state.currentUser.stats) {
-    state.currentUser.stats.accepted = (state.currentUser.stats.accepted || 0) + 1;
-    state.currentUser.stats.totalAds = (state.currentUser.stats.totalAds || 0) + 1;
-    await updateRecord(state.users, state.currentUser.id, { stats: state.currentUser.stats });
-  }
+  // Accepted/assigned totals are derived from the delivery records below.
   showNotification(state.language === 'ar' ? 'تم القبول' : 'Accepted', state.language === 'ar' ? 'تم قبول التوصيل' : 'Delivery accepted', 'success');
   render();
+  } finally {
+    _deliveryActionInFlight.delete(actionKey);
+  }
 }
 
 // ==========================================
@@ -17908,6 +21230,50 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
   updateReceiptDeliveryCompletionComputed();
 }
 
+// Delivery completion must keep the receipt and every linked ad visually
+// consistent in the same user action. The strict delivery PATCH endpoint
+// performs the server transaction but returns only the receipt, so refresh ads
+// before rendering success. If that read is temporarily unavailable, apply the
+// same exact local reclassification plan as offline mode; the next live sync
+// will still verify it against the server.
+async function refreshAdsAfterReceiptServerCascade(receipt, { allowPaidLocalFallback = false } = {}) {
+  try {
+    if (typeof apiLoadCollectionAll !== 'function') throw new Error('Ads refresh is unavailable');
+    const refreshedAds = await apiLoadCollectionAll('ads', { forceRefresh: true });
+    if (!Array.isArray(refreshedAds)) throw new Error('Ads refresh returned an invalid response');
+    state.ads = refreshedAds;
+    markCollectionDirty('ads');
+    return { consistent: true, source: 'server', updated: refreshedAds.length };
+  } catch (refreshError) {
+    const paid = typeof getReceiptPaymentState === 'function'
+      ? getReceiptPaymentState(receipt) === 'paid'
+      : (receipt?.isPaid === true || String(receipt?.status || '') === 'Paid');
+    if (!allowPaidLocalFallback || !paid) {
+      console.warn('[receiptCascade] Linked ads could not be refreshed after the receipt mutation:', refreshError?.message || refreshError);
+      return { consistent: false, source: 'pending-sync', updated: 0 };
+    }
+    try {
+      const plans = planLocalReceiptPaidAdUpdates(String(receipt?.id || ''), receipt);
+      const updated = applyLocalReceiptPaidAdUpdates(plans);
+      if (ALBAYAN_DEBUG_MODE) {
+        console.warn('[deliveryCompletion] Authoritative ads refresh failed; applied exact local settlement fallback:', refreshError?.message || refreshError);
+      }
+      return { consistent: true, source: 'local-fallback', updated };
+    } catch (fallbackError) {
+      console.warn('[deliveryCompletion] Linked ads could not be refreshed after receipt settlement:', fallbackError?.message || fallbackError);
+      return { consistent: false, source: 'pending-sync', updated: 0 };
+    }
+  }
+}
+
+async function refreshAdsAfterReceiptPaidCascade(receipt) {
+  const paid = typeof getReceiptPaymentState === 'function'
+    ? getReceiptPaymentState(receipt) === 'paid'
+    : (receipt?.isPaid === true || String(receipt?.status || '') === 'Paid');
+  if (!paid) return { consistent: true, source: 'not-paid', updated: 0 };
+  return refreshAdsAfterReceiptServerCascade(receipt, { allowPaidLocalFallback: true });
+}
+
 async function submitReceiptDeliveryCompletion(receiptId) {
   const receipt = _findReceiptForDeliveryModal(receiptId);
   if (!receipt) {
@@ -18038,10 +21404,18 @@ async function submitReceiptDeliveryCompletion(receiptId) {
       const idx = state.receipts.findIndex(r => r && !r._deleted && String(r.id) === String(receipt.id));
       if (idx !== -1) state.receipts[idx] = saved;
       markCollectionDirty('receipts');
+      const adRefresh = await refreshAdsAfterReceiptPaidCascade(saved);
       saveState();
       document.getElementById('delivery-complete-modal')?.remove();
+      forceFullRender();
       showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم إكمال التوصيل وحفظه' : 'Delivery completed and saved', 'success');
-      render();
+      if (!adRefresh.consistent) {
+        showNotification(
+          state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
+          state.language === 'ar' ? 'تم حفظ التوصيل، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Delivery was saved. Linked ads will refresh automatically when the connection returns.',
+          'warning'
+        );
+      }
     } catch (e) {
       // Idempotency / retries: if we hit a conflict, load latest and succeed if already delivered.
       if (e?.status === 409) {
@@ -18052,10 +21426,18 @@ async function submitReceiptDeliveryCompletion(receiptId) {
             const idx = state.receipts.findIndex(r => r && !r._deleted && String(r.id) === String(receipt.id));
             if (idx !== -1) state.receipts[idx] = latestData;
             markCollectionDirty('receipts');
+            const adRefresh = await refreshAdsAfterReceiptPaidCascade(latestData);
             saveState();
             document.getElementById('delivery-complete-modal')?.remove();
+            forceFullRender();
             showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم إكمال التوصيل وحفظه' : 'Delivery completed and saved', 'success');
-            render();
+            if (!adRefresh.consistent) {
+              showNotification(
+                state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
+                state.language === 'ar' ? 'تم حفظ التوصيل، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Delivery was saved. Linked ads will refresh automatically when the connection returns.',
+                'warning'
+              );
+            }
             return;
           }
         } catch (retryErr) {
@@ -18164,7 +21546,12 @@ async function submitReceiptDeliveryCancel(receiptId) {
   // The canceled delivery's debt will never be collected — release any ad
   // funding that was drawn from its due credit.
   let releasedAds = 0;
-  if (!isServerModeEnabled()) {
+  let adRefresh = { consistent: true };
+  if (isServerModeEnabled()) {
+    const savedReceipt = state.receipts.find(row => row && String(row.id) === String(receipt.id)) || receipt;
+    adRefresh = await refreshAdsAfterReceiptServerCascade(savedReceipt);
+    saveState();
+  } else {
     try {
       releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);
     } catch (_) {
@@ -18173,6 +21560,7 @@ async function submitReceiptDeliveryCancel(receiptId) {
   }
   document.getElementById('delivery-cancel-modal')?.remove();
   document.getElementById('delivery-complete-modal')?.remove();
+  forceFullRender();
   showNotification(
     state.language === 'ar' ? 'تم الإلغاء' : 'Canceled',
     (state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled')
@@ -18181,7 +21569,13 @@ async function submitReceiptDeliveryCancel(receiptId) {
         : ''),
     releasedAds > 0 && !isServerModeEnabled() ? 'warning' : 'success'
   );
-  render();
+  if (!adRefresh.consistent) {
+    showNotification(
+      state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
+      state.language === 'ar' ? 'تم حفظ الإلغاء، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Cancellation was saved. Linked ads will refresh automatically when the connection returns.',
+      'warning'
+    );
+  }
 }
 
 async function markAsDelivered(itemId) {
@@ -18263,6 +21657,22 @@ function clearReceiptSearch() {
   lucide.createIcons();
 }
 
+function applyReceiptQuickFilter(mode) {
+  // Quick filters are intentionally mutually exclusive so a beginner never
+  // gets an empty list from a hidden combination. Keep the typed search term,
+  // then reset only the dropdown dimensions before applying the chosen view.
+  state.receiptStatusFilter = 'all';
+  state.receiptPaymentFilter = 'all';
+  state.receiptDateFilter = 'all';
+  state.receiptDebtFilter = 'all';
+  state.receiptCollectedFilter = 'all';
+  state.receiptSortBy = 'newest';
+  if (mode === 'unpaid') state.receiptStatusFilter = 'not_paid';
+  if (mode === 'debt') state.receiptDebtFilter = 'any-debt';
+  if (mode === 'not-collected') state.receiptCollectedFilter = 'not-collected';
+  render();
+}
+
 function updateReceiptFilter(filterType, value) {
   switch (filterType) {
     case 'status':
@@ -18290,12 +21700,15 @@ function updateReceiptFilter(filterType, value) {
 
 function clearAllReceiptFilters() {
   state.receiptSearch = '';
+  state.receiptCustomerFilter = '';
+  state.receiptRecordFilter = '';
   state.receiptStatusFilter = 'all';
   state.receiptPaymentFilter = 'all';
   state.receiptDateFilter = 'all';
   state.receiptDebtFilter = 'all';
   state.receiptCollectedFilter = 'all';
   state.receiptSortBy = 'newest';
+  if (state.currentView === 'receipts') updateUrlForView('receipts', true);
   render();
   lucide.createIcons();
 }
@@ -18568,6 +21981,9 @@ function showReceiptModal(carried = false) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإنشاء وصولات' : 'You do not have permission to create receipts', 'error');
     return;
   }
+  if (typeof resetReceiptCustomerRiskWarningState === 'function') {
+    resetReceiptCustomerRiskWarningState();
+  }
   _newReceiptCarried = !!carried;
   state.activeModal = 'receipt';
   state.modalData = null;
@@ -18747,8 +22163,8 @@ function showReceiptTransferHistory(receiptId) {
     const targetCustomer = state.customers.find(c => c.id === t.toCustomerId);
     const name = targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown');
     return isArT
-      ? `${new Date(t.date).toLocaleString()}: $${(t.amountUSD || 0).toFixed(2)} إلى ${name}`
-      : `${new Date(t.date).toLocaleString()}: $${(t.amountUSD || 0).toFixed(2)} to ${name}`;
+      ? `${new Date(t.date).toLocaleString(appDateLocale())}: $${(t.amountUSD || 0).toFixed(2)} إلى ${name}`
+      : `${new Date(t.date).toLocaleString(appDateLocale())}: $${(t.amountUSD || 0).toFixed(2)} to ${name}`;
   }).join('\n');
   showNotification(isArT ? 'سجل التحويلات' : 'Transfer history', lines, 'info');
 }
@@ -18799,7 +22215,7 @@ function showReceiptEditHistory(receiptId) {
                   <span class="text-xs font-bold text-white bg-amber-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
                   <span class="text-xs text-slate-500">${edit.editedBy || (isArH ? 'غير معروف' : 'Unknown')}</span>
                 </div>
-                <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString()}</span>
+                <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString(appDateLocale())}</span>
               </div>
               
               <div class="space-y-2">
@@ -18823,7 +22239,7 @@ function showReceiptEditHistory(receiptId) {
         <div class="p-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50">
           <p class="text-xs text-slate-500 text-center">
             ${isArH ? `الإجمالي: ${editHistory.length} ${editHistory.length > 1 ? 'تعديلات' : 'تعديل'}` : `Total: ${editHistory.length} edit${editHistory.length > 1 ? 's' : ''}`} •
-            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${new Date(receipt.createdAt).toLocaleString()}
+            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${new Date(receipt.createdAt).toLocaleString(appDateLocale())}
           </p>
         </div>
       </div>
@@ -18883,7 +22299,7 @@ function showAdEditHistory(adId) {
                   <span class="text-xs font-bold text-white bg-purple-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
                   <span class="text-xs text-slate-500">${edit.editedBy || (isArH ? 'غير معروف' : 'Unknown')}</span>
                 </div>
-                <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString()}</span>
+                <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString(appDateLocale())}</span>
               </div>
               
               <div class="space-y-2">
@@ -18907,7 +22323,7 @@ function showAdEditHistory(adId) {
         <div class="p-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50">
           <p class="text-xs text-slate-500 text-center">
             ${isArH ? `الإجمالي: ${editHistory.length} ${editHistory.length > 1 ? 'تعديلات' : 'تعديل'}` : `Total: ${editHistory.length} edit${editHistory.length > 1 ? 's' : ''}`} •
-            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${new Date(ad.createdAt).toLocaleString()}
+            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${new Date(ad.createdAt).toLocaleString(appDateLocale())}
           </p>
         </div>
       </div>
@@ -19429,10 +22845,10 @@ function _refreshTopUpPreview() {
   const endExtraEl = document.getElementById('topup-preview-end-extra');
   if (endEl && baseEnd && !isNaN(new Date(baseEnd).getTime())) {
     const days = tempTopUps.reduce((s, t) => s + (parseInt(t.extendDays, 10) || 0), 0) + typedDays;
-    endEl.textContent = new Date(new Date(baseEnd).getTime() + days * 86400000).toLocaleDateString();
+    endEl.textContent = new Date(new Date(baseEnd).getTime() + days * 86400000).toLocaleDateString(appDateLocale());
     if (endExtraEl) {
       endExtraEl.textContent = days > 0
-        ? (isAr ? `(الأصلية ${new Date(baseEnd).toLocaleDateString()} + ${days} يوم)` : `(original ${new Date(baseEnd).toLocaleDateString()} + ${days} day${days > 1 ? 's' : ''})`)
+        ? (isAr ? `(الأصلية ${new Date(baseEnd).toLocaleDateString(appDateLocale())} + ${days} يوم)` : `(original ${new Date(baseEnd).toLocaleDateString(appDateLocale())} + ${days} day${days > 1 ? 's' : ''})`)
         : '';
     }
   }
@@ -19541,7 +22957,7 @@ async function saveTopUps() {
   if (baseEnd && !isNaN(new Date(baseEnd).getTime())) {
     updates.initialEndDate = baseEnd;
     updates.endDate = new Date(new Date(baseEnd).getTime() + totalExtendDays * 86400000).toISOString();
-    if (totalExtendDays > 0) newEndDisplay = new Date(updates.endDate).toLocaleDateString();
+    if (totalExtendDays > 0) newEndDisplay = new Date(updates.endDate).toLocaleDateString(appDateLocale());
   }
 
   // Charge / refund the funding receipts so the money model stays balanced:
@@ -19714,6 +23130,22 @@ async function saveRefund() {
       const { arr } = _reduceFromBaseline(dueBaseline, remaining);
       updates.dueAllocations = arr;
     }
+    // ROWLESS legacy ads keep their due money only in the dueAmountToUse*
+    // mirror, so the branch above never runs for them and a refund left the
+    // mirror locking the receipt's credit forever. Stand the due baseline up
+    // from the mirror — like the server's _financial_apply_refund — so the
+    // refund releases it and an undo can restore it as a real row.
+    const legacyRid = String(ad.linkedDeliveryReceiptId || ad.receiptId || '');
+    if (!Array.isArray(ad.refundDueBaseline) && !Array.isArray(updates.dueAllocations)
+        && remaining > 0.001 && legacyRid && isAdLegacyDueMirrorForReceipt(ad, legacyRid)) {
+      const mirrorUSD = getAdLegacyDueMirrorUSD(ad, legacyRid);
+      if (mirrorUSD > 0) {
+        const dueBaseline = [{ receiptId: legacyRid, amountUSD: mirrorUSD }];
+        updates.refundDueBaseline = dueBaseline;
+        const { arr } = _reduceFromBaseline(dueBaseline, remaining);
+        updates.dueAllocations = arr;
+      }
+    }
   }
   // Keep the legacy dueAmountToUse* mirror in step with the rows we just wrote.
   // saveAd always writes dueAmountToUseUSD, and the usage readers fall back to it the
@@ -19767,7 +23199,15 @@ async function saveRefund() {
 // CUSTOMER SEARCH / DROPDOWN UTILITIES
 // ==========================================
 
-// Click outside to close dropdown
+// Click outside to close dropdown.
+// CAPTURE phase (the `true`) is required: every suggestion dropdown lives
+// inside a modal panel that carries onclick="event.stopPropagation()" (to keep
+// inside-clicks from closing the modal), so a bubble-phase document listener
+// never fires for taps inside the form — on phones (no Esc key, no hover) the
+// open dropdown then covers the inputs below until the whole modal is lost.
+// Capture fires on the way DOWN to the target, before that stopPropagation
+// runs. Same fix as the delegated record-action listener further below.
+// Selection still works: taps inside the dropdown are skipped by contains().
 document.addEventListener('click', function(e) {
   const dropdowns = document.querySelectorAll('[id$="-dropdown"]');
   dropdowns.forEach(dropdown => {
@@ -19775,7 +23215,7 @@ document.addEventListener('click', function(e) {
       dropdown.classList.add('hidden');
     }
   });
-});
+}, true);
 
 // ==========================================
 // RECEIPT MODAL HELPER FUNCTIONS
@@ -19786,7 +23226,7 @@ function filterReceiptPhones() {
   const dropdown = document.getElementById('receipt-phone-dropdown');
   const searchTerm = searchInput.value.toLowerCase();
   
-  const customers = getVisibleRecords(state.customers);
+  const customers = getCustomersVisibleToCurrentUser();
   const phoneCustomerMap = [];
   customers.forEach(c => {
     c.phones.forEach(phone => {
@@ -20111,11 +23551,13 @@ function removeReceiptPaymentSplit(btn) {
 }
 
 function selectReceiptPhone(phone, customerId) {
-  const customer = state.customers.find(c => c.id === customerId);
-  if (!customer) return;
+  const normalizedCustomerId = String(customerId || '').trim();
+  const customer = getCustomersVisibleToCurrentUser()
+    .find(c => String(c?.id || '') === normalizedCustomerId);
+  if (!customer) return false;
   
   // Set customer ID
-  document.getElementById('receipt-customer-id').value = customerId;
+  document.getElementById('receipt-customer-id').value = normalizedCustomerId;
   
   // Update phone search
   document.getElementById('receipt-phone-search').value = phone;
@@ -20124,7 +23566,336 @@ function selectReceiptPhone(phone, customerId) {
   document.getElementById('receipt-customer-name').value = customer.name;
   
   // Hide dropdown
-  document.getElementById('receipt-phone-dropdown').classList.add('hidden');
+  document.getElementById('receipt-phone-dropdown')?.classList.add('hidden');
+
+  // Editing pre-populates this same picker. Only a genuinely NEW receipt
+  // needs the duplicate-money warning; the frozen hidden editing id is the
+  // reliable source of truth even if mutable modal state changes underneath.
+  const editingId = String(document.getElementById('receipt-editing-id')?.value || '').trim();
+  if (state.activeModal === 'receipt' && !editingId) {
+    requireReceiptCustomerRiskAcknowledgement(normalizedCustomerId);
+  }
+  return true;
+}
+
+// ==========================================
+// NEW RECEIPT: EXISTING DEBT / BALANCE WARNING
+// ==========================================
+
+let _receiptCustomerRiskAcknowledgedSignature = '';
+let _receiptCustomerRiskAcknowledgedCustomerId = '';
+let _receiptCustomerRiskCurrentSignature = '';
+let _receiptCustomerRiskCurrentCustomerId = '';
+let _receiptCustomerRiskFormModal = null;
+let _receiptCustomerRiskReturnFocus = null;
+
+function _receiptCustomerRiskMoneyCents(value) {
+  const amount = Number(value) || 0;
+  return Math.max(Math.round((amount + Number.EPSILON) * 100), 0);
+}
+
+function _receiptCustomerRiskDebtUSD(receipt) {
+  // Mirror the server's single-source debt rule. Historical records can retain
+  // several debt fields that disagree, so taking the largest value would
+  // invent money and overstate the warning.
+  if (getReceiptPaymentState(receipt) === 'paid') {
+    return Math.max(Number(receipt?.amountUSD) || 0, 0);
+  }
+
+  const collection = String(receipt?.statusDetail?.notPaidCollection || '').trim().toLowerCase();
+  if (['office', 'in_shop', 'shop'].includes(collection)) {
+    return Math.max(Number(receipt?.amountUSD) || 0, 0);
+  }
+
+  const localValue = receipt?.debtAmountLocal ?? receipt?.amountLocal;
+  const local = Number(localValue) || 0;
+  const rate = Number(receipt?.exchangeRate) || 0;
+  if (local > 0 && rate > 0) return Math.max(local / rate, 0);
+
+  const usdValue = receipt?.debtAmountUSD ?? receipt?.amountUSD;
+  return Math.max(Number(usdValue) || 0, 0);
+}
+
+// Pure, permission-scoped classifier used by both selection-time and save-time
+// guards. It intentionally warns for a fully allocated unpaid receipt: using
+// its promised credit does not mean the customer has paid the debt.
+function getReceiptCustomerRiskNotices(customerId) {
+  const cid = String(customerId || '').trim();
+  if (!Security.isValidRecordId(cid)) return [];
+
+  const notices = [];
+  for (const receipt of getReceiptsVisibleToCurrentUser()) {
+    if (getReceiptCustomerReferenceId(receipt) !== cid) continue;
+
+    const debtType = getReceiptDebtType(receipt);
+    if (debtType !== 'none') {
+      const amountUSD = _receiptCustomerRiskDebtUSD(receipt);
+      const cents = _receiptCustomerRiskMoneyCents(amountUSD);
+      if (cents < 1) continue;
+      notices.push({ receipt, kind: 'debt', debtType, amountUSD: cents / 100, cents });
+      continue;
+    }
+
+    if (getReceiptPaymentState(receipt) !== 'paid') continue;
+    const remainingUSD = Math.max(Number(getReceiptUsageStats(receipt)?.remainingUSD) || 0, 0);
+    const cents = _receiptCustomerRiskMoneyCents(remainingUSD);
+    if (cents < 1) continue;
+    notices.push({ receipt, kind: 'balance', amountUSD: cents / 100, cents });
+  }
+
+  return notices.sort((left, right) => {
+    if (left.kind !== right.kind) return left.kind === 'debt' ? -1 : 1;
+    const leftDate = new Date(left.receipt?.createdAt || left.receipt?.startDate || 0).getTime() || 0;
+    const rightDate = new Date(right.receipt?.createdAt || right.receipt?.startDate || 0).getTime() || 0;
+    return rightDate - leftDate;
+  });
+}
+
+function _getReceiptCustomerRiskSnapshot(customerId) {
+  const cid = String(customerId || '').trim();
+  const notices = getReceiptCustomerRiskNotices(cid);
+  const parts = notices
+    .map(notice => `${notice.kind}:${notice.kind === 'debt' ? notice.debtType : 'balance'}:${String(notice.receipt?.id || '')}:${notice.cents}`)
+    .sort();
+  return {
+    customerId: cid,
+    notices,
+    signature: parts.length ? `${cid}|${parts.join('|')}` : ''
+  };
+}
+
+function resetReceiptCustomerRiskWarningState() {
+  closeReceiptCustomerRiskWarning(false);
+  _receiptCustomerRiskAcknowledgedSignature = '';
+  _receiptCustomerRiskAcknowledgedCustomerId = '';
+  _receiptCustomerRiskCurrentSignature = '';
+  _receiptCustomerRiskCurrentCustomerId = '';
+  _receiptCustomerRiskFormModal = null;
+}
+
+function closeReceiptCustomerRiskWarning(restoreFocus = true) {
+  const warning = document.getElementById('receipt-customer-risk-warning');
+  if (warning) warning.remove();
+
+  const appModal = document.getElementById('app-modal');
+  if (appModal) {
+    appModal.inert = false;
+    if (typeof appModal.removeAttribute === 'function') appModal.removeAttribute('aria-hidden');
+    else appModal.setAttribute('aria-hidden', 'false');
+  }
+
+  const focusTarget = _receiptCustomerRiskReturnFocus;
+  _receiptCustomerRiskReturnFocus = null;
+  if (restoreFocus && focusTarget?.isConnected && typeof focusTarget.focus === 'function') {
+    try { focusTarget.focus({ preventScroll: true }); } catch (_) { focusTarget.focus(); }
+  }
+}
+
+function acknowledgeReceiptCustomerRiskWarning() {
+  _receiptCustomerRiskAcknowledgedSignature = _receiptCustomerRiskCurrentSignature;
+  _receiptCustomerRiskAcknowledgedCustomerId = _receiptCustomerRiskCurrentCustomerId;
+  closeReceiptCustomerRiskWarning(true);
+}
+
+// Escape, Android Back, and "Choose another" all take this safe path. They do
+// not silently accept the warning while leaving a risky customer selected.
+function cancelReceiptCustomerRiskWarning() {
+  const selectedId = String(document.getElementById('receipt-customer-id')?.value || '').trim();
+  const shouldClear = !selectedId || selectedId === _receiptCustomerRiskCurrentCustomerId;
+  closeReceiptCustomerRiskWarning(false);
+  if (shouldClear) {
+    const customerIdInput = document.getElementById('receipt-customer-id');
+    const customerNameInput = document.getElementById('receipt-customer-name');
+    const phoneInput = document.getElementById('receipt-phone-search');
+    if (customerIdInput) customerIdInput.value = '';
+    if (customerNameInput) customerNameInput.value = '';
+    if (phoneInput) phoneInput.value = '';
+    if (phoneInput && typeof phoneInput.focus === 'function') phoneInput.focus();
+  }
+  _receiptCustomerRiskAcknowledgedSignature = '';
+  _receiptCustomerRiskAcknowledgedCustomerId = '';
+  _receiptCustomerRiskCurrentSignature = '';
+  _receiptCustomerRiskCurrentCustomerId = '';
+}
+
+function viewReceiptFromCustomerRiskWarning(receiptId) {
+  const rid = String(receiptId || '').trim();
+  const visibleReceipt = Security.isValidRecordId(rid)
+    ? getReceiptsVisibleToCurrentUser().find(receipt => String(receipt?.id || '') === rid)
+    : null;
+  if (!visibleReceipt) {
+    showNotification(
+      state.language === 'ar' ? 'تعذر فتح الوصل' : 'Cannot Open Receipt',
+      state.language === 'ar' ? 'هذا الوصل غير متاح لك.' : 'This receipt is not available to you.',
+      'error'
+    );
+    return false;
+  }
+
+  closeReceiptCustomerRiskWarning(false);
+  closeModal();
+  return openReceiptRecord(rid);
+}
+
+function _receiptCustomerRiskSectionHtml(kind, notices, isAr) {
+  if (!notices.length) return '';
+  const isDebt = kind === 'debt';
+  const heading = isDebt
+    ? (isAr ? `وصولات دين غير مدفوعة (${notices.length})` : `Unpaid debt receipts (${notices.length})`)
+    : (isAr ? `وصولات مدفوعة برصيد متبقٍ (${notices.length})` : `Paid receipts with balance (${notices.length})`);
+  const sectionClasses = isDebt
+    ? 'border-rose-200 bg-rose-50/80 dark:border-rose-800 dark:bg-rose-900/20'
+    : 'border-emerald-200 bg-emerald-50/80 dark:border-emerald-800 dark:bg-emerald-900/20';
+  const headingClasses = isDebt
+    ? 'text-rose-700 dark:text-rose-300'
+    : 'text-emerald-700 dark:text-emerald-300';
+
+  return `
+    <section class="rounded-2xl border p-3 ${sectionClasses}">
+      <h3 class="mb-2 flex items-center gap-2 text-sm font-extrabold ${headingClasses}">
+        <i data-lucide="${isDebt ? 'circle-alert' : 'wallet-cards'}" class="h-4 w-4"></i>${heading}
+      </h3>
+      <div class="space-y-2">
+        ${notices.map((notice, index) => {
+          const receipt = notice.receipt || {};
+          const number = String(receipt.finalReceiptNo || receipt.serialNumber || receipt.tempReceiptNo || '').trim();
+          const numberLabel = number
+            ? `#${Security.escapeHtml(number)}`
+            : `${isAr ? 'وصل' : 'Receipt'} ${index + 1}`;
+          const rate = Number(receipt.exchangeRate || state.defaultExchangeRate || 0) || 0;
+          const amountUSD = notice.cents / 100;
+          const amountLocal = amountUSD * rate;
+          const detail = isDebt
+            ? (isAr
+              ? `${notice.debtType === 'delivery' ? 'دين توصيل' : 'دين داخل المحل'} • لم يُدفع بعد`
+              : `${notice.debtType === 'delivery' ? 'Delivery debt' : 'In-shop debt'} • Still unpaid`)
+            : (isAr ? 'رصيد متاح يمكن استخدامه' : 'Available balance can still be used');
+          return `
+            <div class="flex flex-col gap-2 rounded-xl border border-white/80 bg-white/90 p-3 shadow-sm dark:border-slate-700 dark:bg-slate-900/70 sm:flex-row sm:items-center sm:justify-between">
+              <div class="min-w-0">
+                <div class="font-extrabold text-slate-800 dark:text-white">${numberLabel}</div>
+                <div class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">${detail}</div>
+                <div class="mt-1 text-sm font-bold ${headingClasses}">$${amountUSD.toFixed(2)}${rate > 0 ? ` • ${amountLocal.toFixed(2)} LYD` : ''}</div>
+              </div>
+              <button type="button" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" onclick="viewReceiptFromCustomerRiskWarning(this.dataset.receiptId)" class="min-h-11 shrink-0 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-bold text-indigo-700 hover:bg-indigo-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:border-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-200" aria-label="${Security.escapeHtml(isAr ? `عرض الوصل ${number || index + 1}` : `View receipt ${number || index + 1}`)}">
+                ${isAr ? 'عرض الوصل' : 'View receipt'}
+              </button>
+            </div>`;
+        }).join('')}
+      </div>
+    </section>`;
+}
+
+function showReceiptCustomerRiskWarning(customerId, snapshot = null) {
+  const currentSnapshot = snapshot || _getReceiptCustomerRiskSnapshot(customerId);
+  if (!currentSnapshot.signature || !currentSnapshot.notices.length) return false;
+
+  const customer = getCustomersVisibleToCurrentUser()
+    .find(item => String(item?.id || '') === currentSnapshot.customerId);
+  if (!customer) return false;
+
+  closeReceiptCustomerRiskWarning(false);
+  _receiptCustomerRiskCurrentSignature = currentSnapshot.signature;
+  _receiptCustomerRiskCurrentCustomerId = currentSnapshot.customerId;
+  _receiptCustomerRiskReturnFocus = document.getElementById('receipt-customer-name')
+    || document.getElementById('receipt-phone-search')
+    || document.activeElement;
+
+  const isAr = state.language === 'ar';
+  const debtNotices = currentSnapshot.notices.filter(notice => notice.kind === 'debt');
+  const balanceNotices = currentSnapshot.notices.filter(notice => notice.kind === 'balance');
+  const customerName = Security.escapeHtml(String(customer.name || (isAr ? 'العميل' : 'Customer')));
+  const warning = document.createElement('div');
+  warning.id = 'receipt-customer-risk-warning';
+  warning.className = 'mobile-dialog-overlay fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/70 p-2 backdrop-blur-sm sm:p-4';
+  warning.setAttribute('role', 'alertdialog');
+  warning.setAttribute('aria-modal', 'true');
+  warning.setAttribute('aria-labelledby', 'receipt-customer-risk-title');
+  warning.setAttribute('aria-describedby', 'receipt-customer-risk-description');
+  warning.setAttribute('dir', isAr ? 'rtl' : 'ltr');
+  warning.innerHTML = `
+    <div class="flex max-h-[90dvh] w-full max-w-lg flex-col overflow-hidden rounded-3xl border border-amber-200 bg-white shadow-2xl dark:border-amber-800 dark:bg-slate-900" onclick="event.stopPropagation()">
+      <div class="shrink-0 border-b border-amber-100 bg-amber-50 p-4 dark:border-amber-900/50 dark:bg-amber-900/20 sm:p-5">
+        <div class="flex items-start gap-3">
+          <span class="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300"><i data-lucide="triangle-alert" class="h-6 w-6"></i></span>
+          <div class="min-w-0">
+            <h2 id="receipt-customer-risk-title" tabindex="-1" class="text-lg font-extrabold text-slate-900 outline-none dark:text-white">${isAr ? 'تنبيه: لدى العميل وصولات موجودة' : 'Warning: this customer has existing receipts'}</h2>
+            <p id="receipt-customer-risk-description" class="mt-1 text-sm text-slate-600 dark:text-slate-300">${isAr ? `قبل إنشاء وصل جديد للعميل <strong>${customerName}</strong>، راجع المعلومات التالية.` : `Before creating another receipt for <strong>${customerName}</strong>, review the information below.`}</p>
+          </div>
+        </div>
+        <p class="mt-3 rounded-xl bg-white/80 p-3 text-xs font-semibold text-amber-900 dark:bg-slate-900/60 dark:text-amber-200">${isAr ? 'أنشئ وصلاً جديداً فقط إذا كانت هذه دفعة جديدة فعلاً، حتى لا يُسجَّل المال مرتين.' : 'Create a new receipt only if this is genuinely new money, so the same money is not recorded twice.'}</p>
+      </div>
+      <div class="min-h-0 flex-1 space-y-3 overflow-y-auto p-4 custom-scrollbar sm:p-5">
+        ${_receiptCustomerRiskSectionHtml('debt', debtNotices, isAr)}
+        ${_receiptCustomerRiskSectionHtml('balance', balanceNotices, isAr)}
+      </div>
+      <div class="grid shrink-0 grid-cols-1 gap-3 border-t border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800/70 sm:grid-cols-2">
+        <button type="button" onclick="cancelReceiptCustomerRiskWarning()" class="min-h-11 rounded-xl bg-slate-200 px-4 py-2.5 font-bold text-slate-700 hover:bg-slate-300 focus:outline-none focus:ring-2 focus:ring-slate-500 dark:bg-slate-700 dark:text-slate-100 dark:hover:bg-slate-600">${isAr ? 'اختيار عميل آخر' : 'Choose another customer'}</button>
+        <button type="button" onclick="acknowledgeReceiptCustomerRiskWarning()" class="min-h-11 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2.5 font-extrabold text-white shadow-lg hover:from-amber-600 hover:to-orange-600 focus:outline-none focus:ring-2 focus:ring-amber-500">${isAr ? 'متابعة إنشاء الوصل' : 'Continue creating receipt'}</button>
+      </div>
+    </div>`;
+
+  warning.addEventListener('keydown', event => {
+    const isShortcut = (event.ctrlKey || event.metaKey) && String(event.key || '').toLowerCase() === 'k';
+    if (event.key === 'Escape' || isShortcut) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.key === 'Escape') cancelReceiptCustomerRiskWarning();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = Array.from(warning.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+      .filter(element => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
+    if (!focusable.length) {
+      event.preventDefault();
+      warning.querySelector('#receipt-customer-risk-title')?.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (!focusable.includes(document.activeElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }, true);
+
+  const appModal = document.getElementById('app-modal');
+  if (appModal) {
+    _receiptCustomerRiskFormModal = appModal;
+    appModal.inert = true;
+    appModal.setAttribute('aria-hidden', 'true');
+  }
+  document.body.appendChild(warning);
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => warning.querySelector('#receipt-customer-risk-title')?.focus(), 0);
+  return true;
+}
+
+// Returns true when the caller must pause. A signature includes exact receipt
+// ids, status type, and cents, so live-sync changes invalidate an old OK.
+function requireReceiptCustomerRiskAcknowledgement(customerId) {
+  const appModal = document.getElementById('app-modal');
+  if (_receiptCustomerRiskFormModal !== appModal) {
+    _receiptCustomerRiskAcknowledgedSignature = '';
+    _receiptCustomerRiskAcknowledgedCustomerId = '';
+    _receiptCustomerRiskFormModal = appModal;
+  }
+  const normalizedCustomerId = String(customerId || '').trim();
+  if (_receiptCustomerRiskAcknowledgedCustomerId && _receiptCustomerRiskAcknowledgedCustomerId !== normalizedCustomerId) {
+    _receiptCustomerRiskAcknowledgedSignature = '';
+    _receiptCustomerRiskAcknowledgedCustomerId = '';
+  }
+  const snapshot = _getReceiptCustomerRiskSnapshot(normalizedCustomerId);
+  if (!snapshot.signature) return false;
+  if (snapshot.signature === _receiptCustomerRiskAcknowledgedSignature) return false;
+  showReceiptCustomerRiskWarning(customerId, snapshot);
+  return true;
 }
 
 // ==========================================
@@ -20302,17 +24073,20 @@ if (!window.__albayanSafeRecordActionsBound) {
   }, true);
 }
 
-// Close dropdowns when clicking outside
+// Close dropdowns when clicking outside. CAPTURE phase: the modal panel's
+// onclick="event.stopPropagation()" swallows bubble-phase clicks, so without
+// it this listener never fires for taps inside the form (see the comment on
+// the capture-phase listener at the top of this file).
 document.addEventListener('click', (e) => {
   const pageDropdown = document.getElementById('page-customer-dropdown');
   const pageSearch = document.getElementById('page-customer-search');
-  
-  if (pageDropdown && pageSearch && 
-      !pageDropdown.contains(e.target) && 
+
+  if (pageDropdown && pageSearch &&
+      !pageDropdown.contains(e.target) &&
       !pageSearch.contains(e.target)) {
     pageDropdown.classList.add('hidden');
   }
-});
+}, true);
 
 // Rate 1 to SHOW for a stored payment row.
 // MONEY-MATH: 0 is a REAL rate — the app itself fills Rate 1 with 0.00 for
@@ -20862,6 +24636,14 @@ async function _saveReceiptFromModalInner() {
     showNotification(isArV ? 'خطأ' : 'Error', isArV ? 'الرجاء اختيار عميل عن طريق رقم الهاتف' : 'Please select a customer by phone', 'error');
     return;
   }
+
+  // Re-check immediately before a NEW receipt is saved. Live sync may have
+  // added debt or changed a paid balance after the customer was first chosen;
+  // an earlier acknowledgement is valid only while its exact signature stays
+  // unchanged. Editing an existing receipt never enters this warning flow.
+  if (!editTarget && requireReceiptCustomerRiskAcknowledgement(customerId)) {
+    return;
+  }
   
   // Collect all payment splits
   const paymentItems = document.querySelectorAll('.payment-split-item');
@@ -21232,7 +25014,12 @@ async function _saveReceiptFromModalInner() {
     officeFee: 0,
     discount: 0,
     phoneNumber: document.getElementById('receipt-phone-search').value || '',
-    collectionDate: new Date().toISOString(),
+    // When the money arrived. Stamped ONLY when the receipt is Paid: an EDIT
+    // keeps the saved date (rewriting it made every edited old receipt look
+    // newly collected, poisoning the liquidity window), an unpaid receipt
+    // carries no arrival date at all, and the save that turns it Paid stamps
+    // the true payment moment — matching the edit-modal rule in 15-modals.js.
+    collectionDate: (editTarget ? editTarget.collectionDate : '') || (receiptIsPaid ? new Date().toISOString() : ''),
     payments: payments,
     photos
   };
@@ -21848,22 +25635,26 @@ function getReceiptsForAd(customerId, pageId) {
   return getVisibleRecords(state.receipts || []).filter(r => {
     if (!r || r._deleted) return false;
     if (r.customerId !== customerId) return false;
-    if (pageId && r.pageId && r.pageId !== pageId) return false;
+    // Receipt credit belongs to the customer, not to one Facebook page. Older
+    // receipts can still carry a legacy pageId, so filtering on it hid valid
+    // replacement funds when an ad was moved to (or created for) another page.
+    // The server uses the same customer-level ownership rule.
     const statusLower = String(r.status || '').toLowerCase();
     const isPaid = (r.isPaid === true) || statusLower === 'paid';
     if (!isPaid) return false;
 
     // Funding receipts must be real paid receipts.
     // Temp delivery receipts (D#) are allowed ONLY after they are finalized:
-    // - deliveryStatus === Delivered
-    // - final receipt number exists (digits or S-prefixed) (finalReceiptNo/serialNumber)
+    // - a final receipt number exists (digits or S-prefixed)
+    // A receipt may be collected/marked Paid from the Receipts screen after its
+    // delivery workflow. Its old deliveryStatus can remain Office, but Paid plus
+    // a final number is authoritative and is also what the server accepts.
     const looksTemp = (String(r.receiptType || '').toUpperCase() === 'DELIVERY_TEMP') || isTempDeliveryReceiptNo(r.tempReceiptNo);
     if (looksTemp) {
-      const dsLower = String(r.deliveryStatus || '').toLowerCase();
       const finalNo = String(r.finalReceiptNo || r.serialNumber || '').trim();
       // Accept either digits (123) or S-prefixed (S1, S2) for LTT/Libyana/Madar
       const hasFinalNo = (/^\d+$/.test(finalNo) && !finalNo.startsWith('0')) || isAutoSerialNumber(finalNo);
-      if (!(dsLower === 'delivered' && hasFinalNo)) return false;
+      if (!hasFinalNo) return false;
     }
 
     return true;
@@ -21885,15 +25676,19 @@ function initAdFunding(adData = {}) {
   const sourceAllocations = isUnpaidShopDebt && Array.isArray(adData.dueAllocations)
     ? adData.dueAllocations
     : adData.receiptAllocations;
-  state.tempAdFunding = {
-    allocations: Array.isArray(sourceAllocations)
+  const allocations = Array.isArray(sourceAllocations)
       ? sourceAllocations.map(a => ({
           ...a,
           amountUSD: (a && a.amountUSD !== '' && a.amountUSD !== null && isFinite(parseFloat(a.amountUSD)))
             ? Math.round(parseFloat(a.amountUSD) * 100) / 100
             : (a ? a.amountUSD : '')
         }))
-      : []
+      : [];
+  state.tempAdFunding = {
+    allocations,
+    // Frozen only for clear edit feedback. The authoritative comparison at
+    // save time remains state.modalData/server optimistic locking.
+    originalAllocations: allocations.map(row => ({ ...row }))
   };
 }
 
@@ -21909,8 +25704,12 @@ function getEditingAdExistingAllocationUSD(receiptId, kind = 'receipt') {
   const existingAd = state.ads.find(a => a.id === state.modalData.id) || state.modalData;
   if (!existingAd) return 0;
   const rid = String(receiptId || '');
+  const savedMerged = Array.isArray(existingAd.mergedPaidAllocations)
+    && existingAd.mergedPaidAllocations.length
+    ? existingAd.mergedPaidAllocations
+    : existingAd.receiptAllocations;
   const sources = kind === 'merged'
-    ? [existingAd.mergedPaidAllocations || existingAd.receiptAllocations]
+    ? [savedMerged]
     : [existingAd.receiptAllocations];
   const collectionMethod = String(existingAd.collectionMethod || '').toLowerCase();
   const isUnpaidReceiptDebt = getAdPaymentState(existingAd) === 'not_paid'
@@ -21922,11 +25721,13 @@ function getEditingAdExistingAllocationUSD(receiptId, kind = 'receipt') {
     return sum + src.filter(a => a && String(a.receiptId) === rid)
       .reduce((rowSum, a) => rowSum + (parseFloat(a.amountUSD) || 0), 0);
   }, 0);
-  if (kind === 'receipt' && isUnpaidReceiptDebt && !Array.isArray(existingAd.dueAllocations)
-      && String(existingAd.linkedDeliveryReceiptId || existingAd.receiptId || '') === rid) {
-    const rate = Number(existingAd.exchangeRate) || Number(state.defaultExchangeRate) || 1;
-    total += parseFloat(existingAd.dueAmountToUseUSD)
-      || ((parseFloat(existingAd.dueAmountToUseLYD) || 0) / rate);
+  const explicitDueForReceipt = Array.isArray(existingAd.dueAllocations)
+    ? existingAd.dueAllocations
+        .filter(row => row && String(row.receiptId || '') === rid)
+        .reduce((sum, row) => sum + (parseFloat(row.amountUSD) || 0), 0)
+    : 0;
+  if (kind === 'receipt' && isUnpaidReceiptDebt && explicitDueForReceipt <= 0) {
+    total += getAdLegacyDueMirrorUSD(existingAd, rid);
   }
   return Math.round(total * 100) / 100;
 }
@@ -21943,7 +25744,7 @@ function handleAdCustomerChange(customerId, preserveFunding = false) {
       pageSelect.value = '';
     }
   }
-  
+
   state.tempAdFunding = state.tempAdFunding || { allocations: [] };
   if (!preserveFunding) {
     state.tempAdFunding.allocations = [];
@@ -21959,8 +25760,110 @@ function handleAdCustomerChange(customerId, preserveFunding = false) {
 // merged-funds allocations from the previous customer must go with it.
 function clearAdMergeFunding() {
   state.tempMergeFunding = { allocations: [], enabled: false };
+  state.tempMixedReceiptTargetUSD = null;
   try { if (typeof renderAdMergedFundingList === 'function') renderAdMergedFundingList(); } catch (_) {}
   try { if (typeof reflectMergeFundingUI === 'function') reflectMergeFundingUI(); } catch (_) {}
+}
+
+function getTempMergeFundingTotalUSD() {
+  const total = (state.tempMergeFunding?.allocations || []).reduce(
+    (sum, row) => sum + (parseFloat(row?.amountUSD) || 0),
+    0
+  );
+  return Math.round(total * 100) / 100;
+}
+
+// Beginner-friendly bridge from the Paid form to the canonical mixed-debt
+// flow. Example: the user entered $5 on a paid receipt with only $4.63 left.
+// Keep $4.63 as real paid funding, then visibly switch to Not Paid + In Shop
+// so the user can choose an unpaid receipt for the exact $0.37 difference.
+function startAdMixedReceiptFunding() {
+  const isAr = state.language === 'ar';
+  const customerId = String(document.getElementById('ad-customer-id')?.value || '').trim();
+  if (!customerId) {
+    showNotification(
+      isAr ? 'تنبيه' : 'Validation',
+      isAr ? 'اختر الصفحة والعميل أولاً.' : 'Select the page and customer first.',
+      'error'
+    );
+    return;
+  }
+
+  const requestedRows = (state.tempAdFunding?.allocations || [])
+    .filter(row => row?.receiptId && (parseFloat(row.amountUSD) || 0) > 0);
+  if (!requestedRows.length) {
+    showNotification(
+      isAr ? 'تنبيه' : 'Validation',
+      isAr ? 'اختر وصلاً مدفوعاً وأدخل ميزانية الإعلان أولاً.' : 'Choose a paid receipt and enter the ad budget first.',
+      'error'
+    );
+    return;
+  }
+
+  let targetTotal = 0;
+  const paidRows = [];
+  for (const requested of requestedRows) {
+    const receipt = state.receipts.find(r => r && !r._deleted && String(r.id) === String(requested.receiptId));
+    const requestedAmount = Math.round((parseFloat(requested.amountUSD) || 0) * 100) / 100;
+    targetTotal += requestedAmount;
+    const receiptStatus = String(receipt?.status || '').toLowerCase();
+    const receiptIsPaid = !!receipt && (receipt.isPaid === true || receiptStatus === 'paid');
+    if (!receiptIsPaid || String(receipt.customerId || '') !== customerId) {
+      showNotification(
+        isAr ? 'تنبيه' : 'Validation',
+        isAr ? 'الوصل المدفوع غير صالح أو يخص عميلاً آخر.' : 'The paid receipt is invalid or belongs to another customer.',
+        'error'
+      );
+      return;
+    }
+    const usage = getReceiptUsageStats(receipt);
+    const available = Math.max(
+      Math.round(((usage.remainingUSD || 0) + getEditingAdExistingAllocationUSD(receipt.id)) * 100) / 100,
+      0
+    );
+    const paidAmount = Math.min(requestedAmount, available);
+    if (paidAmount > 0.009) {
+      paidRows.push({ receiptId: receipt.id, amountUSD: paidAmount.toFixed(2) });
+    }
+  }
+
+  targetTotal = Math.round(targetTotal * 100) / 100;
+  const paidTotal = Math.round(paidRows.reduce((sum, row) => sum + Number(row.amountUSD), 0) * 100) / 100;
+  const shortfall = Math.round(Math.max(targetTotal - paidTotal, 0) * 100) / 100;
+  if (targetTotal <= 0 || shortfall <= 0.009) {
+    showNotification(
+      isAr ? 'الرصيد كافٍ' : 'Paid Balance Is Enough',
+      isAr ? 'الوصولات المدفوعة المختارة تغطي ميزانية الإعلان بالكامل، لذلك لا يوجد فرق غير مدفوع.' : 'The selected paid receipts already cover the full ad budget, so there is no unpaid difference.',
+      'info'
+    );
+    return;
+  }
+
+  if (!getUnpaidShopReceiptsForCustomer(customerId).length) {
+    showNotification(
+      isAr ? 'لا يوجد وصل غير مدفوع' : 'No Unpaid Receipt',
+      isAr ? `أنشئ وصلاً «غير مدفوع - في المحل» لهذا العميل لتغطية الفرق $${shortfall.toFixed(2)}.` : `Create a “Not Paid - In Shop” receipt for this customer to cover the $${shortfall.toFixed(2)} difference.`,
+      'error'
+    );
+    return;
+  }
+
+  state.tempMixedReceiptTargetUSD = targetTotal;
+  state.tempMergeFunding = { allocations: paidRows, enabled: true };
+  state.tempAdFunding = { allocations: [] };
+  setAdPaymentStatus('not_paid');
+  setAdCollectionMethod('in_shop');
+  reflectMergeFundingUI();
+  showNotification(
+    isAr ? 'اختر الوصل غير المدفوع' : 'Select the Unpaid Receipt',
+    isAr
+      ? `سيُستخدم $${paidTotal.toFixed(2)} من المدفوع. اختر الآن وصلاً غير مدفوع للفرق $${shortfall.toFixed(2)}.`
+      : `$${paidTotal.toFixed(2)} will come from paid credit. Now select an unpaid receipt for the $${shortfall.toFixed(2)} difference.`,
+    'info'
+  );
+  setTimeout(() => {
+    document.getElementById('ad-temp-receipt-link')?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+  }, 0);
 }
 
 function handleAdPageChange(preserveFunding = false) {
@@ -22203,6 +26106,7 @@ function refreshAdTempReceiptOptions() {
 
   const isShop = collectionMethod === 'in_shop';
   const isDriver = collectionMethod === 'driver';
+  const isEditingSavedAd = !!state.modalData?.id;
   const shouldShow = paymentStatus === 'not_paid' && (isDriver || isShop) && !!customerId;
   section.classList.toggle('hidden', !shouldShow);
   if (!shouldShow) {
@@ -22216,12 +26120,18 @@ function refreshAdTempReceiptOptions() {
     ? (isArT ? 'ربط وصل غير مدفوع في المحل' : 'Link Unpaid In-Shop Receipt')
     : (isArT ? 'ربط وصل توصيل (D#)' : 'Link Delivery Receipt (D#)');
   if (help) {
-    help.classList.toggle('hidden', !isShop);
-    help.textContent = isShop
+    const editHelp = isEditingSavedAd
       ? (isArT
-          ? 'اختر الوصل الذي لم يدفعه العميل. سيظهر مبلغ الإعلان كدين (ناقص) حتى تغيّر الوصل والإعلان إلى «مدفوع» بعد استلام المال.'
-          : 'Choose the receipt the customer has not paid. The ad amount counts as debt (minus) until you change the receipt and ad to Paid after receiving the money.')
+          ? 'يمكنك استبدال الوصل المرتبط. عند الحفظ سيعيد النظام الرصيد المحجوز إلى الوصل القديم ويستخدم الوصل الجديد معاً في عملية واحدة.'
+          : 'You can replace the linked receipt. On Save, reserved credit returns to the old receipt and the new receipt is used together in one transaction.')
       : '';
+    const debtHelp = isShop
+      ? (isArT
+          ? 'سيظهر مبلغ الإعلان كدين (ناقص) حتى تسجيل الدفع.'
+          : 'The ad amount remains customer debt (minus) until payment is recorded.')
+      : '';
+    help.classList.toggle('hidden', !(editHelp || debtHelp));
+    help.textContent = [editHelp, debtHelp].filter(Boolean).join(' ');
   }
   if (dueTitle) dueTitle.textContent = isShop
     ? (isArT ? 'ميزانية الإعلان من الوصل غير المدفوع' : 'Ad Budget from Unpaid Receipt')
@@ -22235,7 +26145,6 @@ function refreshAdTempReceiptOptions() {
     : getPendingTempDeliveryReceiptsForCustomer(customerId);
   let current = String(hidden.value || '').trim()
     || String(state.modalData?.linkedDeliveryReceiptId || state.modalData?.receiptId || '').trim();
-  const isEditingSavedAd = !!state.modalData?.id;
   const editingSameMode = isEditingSavedAd
     && String(state.modalData?.collectionMethod || '') === collectionMethod;
   if (!receipts.some(r => String(r.id) === current) && !editingSameMode) current = '';
@@ -22314,6 +26223,7 @@ function onAdTempReceiptChange(receiptId) {
     }
     if (isShop && unpaidFinancial) unpaidFinancial.classList.remove('hidden');
     if (isShop) state.tempAdFunding = { allocations: [] };
+    renderAdDueReceiptReplacementNotice();
     return;
   }
 
@@ -22328,6 +26238,7 @@ function onAdTempReceiptChange(receiptId) {
       dueInput.dataset.maxDue = '0';
       dueInput.dataset.receiptId = '';
     }
+    renderAdDueReceiptReplacementNotice();
     return;
   }
 
@@ -22357,13 +26268,14 @@ function onAdTempReceiptChange(receiptId) {
     if (state.modalData?.id) {
       const existingAd = state.ads.find(a => a.id === state.modalData.id);
       if (existingAd) {
-        if (Array.isArray(existingAd.dueAllocations)) {
-          availableUSD += existingAd.dueAllocations
-            .filter(a => String(a.receiptId) === rid)
-            .reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0);
-        } else if (existingAd.dueAmountToUseUSD > 0 && String(existingAd.linkedDeliveryReceiptId) === rid) {
-          availableUSD += existingAd.dueAmountToUseUSD;
-        }
+        const explicitDueForReceipt = Array.isArray(existingAd.dueAllocations)
+          ? existingAd.dueAllocations
+              .filter(a => String(a?.receiptId || '') === rid)
+              .reduce((sum, a) => sum + (parseFloat(a?.amountUSD) || 0), 0)
+          : 0;
+        availableUSD += explicitDueForReceipt > 0
+          ? explicitDueForReceipt
+          : getAdLegacyDueMirrorUSD(existingAd, rid, r.exchangeRate);
       }
     }
     const exchangeRate = dueUsage.exchangeRate || state.defaultExchangeRate || 1;
@@ -22408,25 +26320,42 @@ function onAdTempReceiptChange(receiptId) {
         // "Available" label updated, the amount did not), so the ad could be
         // saved spending more than the new receipt actually holds.
         const belongsToThisReceipt = dueInput.dataset.receiptId === rid;
+        const originalReceiptId = String(state.modalData?.linkedDeliveryReceiptId || state.modalData?.receiptId || '');
+        const replacingSavedReceipt = !!state.modalData?.id && !!originalReceiptId && originalReceiptId !== rid;
+        const originalDueAmount = replacingSavedReceipt ? getOriginalAdDueAllocationUSD() : 0;
         if (prefillValue !== null) {
           const parsedPrefill = Number(prefillValue);
           dueInput.value = Number.isFinite(parsedPrefill) && parsedPrefill > 0
             ? parsedPrefill.toFixed(2)
             : '';
+        } else if (replacingSavedReceipt && originalDueAmount > 0) {
+          // Relinking changes the SOURCE, never the ad budget/allocation. Keep
+          // the old due share exactly even if the new receipt is larger. If it
+          // is smaller, save-time capacity validation blocks and asks the user
+          // to choose/add funding instead of silently shrinking the ad.
+          dueInput.value = originalDueAmount.toFixed(2);
+          if (isShop) {
+            state.tempMixedReceiptTargetUSD = normalizeAdDriverBudgetUSD(state.modalData?.amountUSD);
+          }
         } else if (!belongsToThisReceipt) {
           // Selecting an office receipt is an explicit choice to use it, so
-          // start with its full remaining amount. The user can still type a
-          // smaller ad budget. Delivery receipts keep the safer blank default.
-          dueInput.value = isShop ? availableUSD.toFixed(2) : '';
+          // start with its full remaining amount. When the user arrived from
+          // the Paid form's "use an unpaid receipt for the difference" action,
+          // prefill only the exact shortfall instead. Delivery receipts keep
+          // the safer blank default.
+          const target = normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD);
+          const paidPart = getTempMergeFundingTotalUSD();
+          const shortfall = target > 0 ? Math.max(target - paidPart, 0) : availableUSD;
+          dueInput.value = isShop ? Math.min(availableUSD, shortfall).toFixed(2) : '';
         }
         dueInput.dataset.receiptId = rid;
       }
-      if (mergeToggle) mergeToggle.classList.toggle('hidden', isShop);
-      if (!isShop) {
-        // Driver debt may optionally combine this due amount with paid funds.
-        initMergeFunding();
-        reflectMergeFundingUI();
-      }
+      // Both Driver and In Shop debt may combine due credit with real paid
+      // receipt funds. The saved record remains Not Paid while any due part
+      // exists, so the customer sees only the difference as debt.
+      if (mergeToggle) mergeToggle.classList.remove('hidden');
+      initMergeFunding();
+      reflectMergeFundingUI();
     } else {
       // No credit available - all used up
       if (dueSection) dueSection.classList.add('hidden');
@@ -22462,6 +26391,61 @@ function onAdTempReceiptChange(receiptId) {
       driverSelect.disabled = false;
     }
   }
+  renderAdDueReceiptReplacementNotice();
+}
+
+function getAdReceiptDisplayLabel(receiptId) {
+  const rid = String(receiptId || '');
+  const receipt = (state.receipts || []).find(row => row && String(row.id) === rid);
+  if (!receipt) return rid ? `#${rid.slice(0, 8)}` : '';
+  const serial = receipt.finalReceiptNo || receipt.serialNumber || receipt.tempReceiptNo || rid.slice(0, 8);
+  return `#${serial}`;
+}
+
+function getOriginalAdDueAllocationUSD() {
+  const ad = state.modalData;
+  if (!ad?.id) return 0;
+  const originalReceiptId = String(ad.linkedDeliveryReceiptId || ad.receiptId || '');
+  const explicitDueForReceipt = Array.isArray(ad.dueAllocations)
+    ? ad.dueAllocations
+      .filter(row => String(row?.receiptId || '') === originalReceiptId)
+      .reduce((sum, row) => sum + (parseFloat(row?.amountUSD) || 0), 0)
+    : 0;
+  if (explicitDueForReceipt > 0) return Math.round(explicitDueForReceipt * 100) / 100;
+  return getAdLegacyDueMirrorUSD(ad, originalReceiptId);
+}
+
+// Explain a due/debt receipt replacement before it is committed. This is
+// especially important on phones where the old option may scroll out of view.
+function renderAdDueReceiptReplacementNotice() {
+  const notice = document.getElementById('ad-linked-receipt-change');
+  if (!notice) return;
+  const ad = state.modalData;
+  const paymentStatus = document.getElementById('ad-payment-status')?.value || '';
+  const collectionMethod = document.getElementById('ad-collection-method')?.value || '';
+  const oldCollection = String(ad?.collectionMethod || '');
+  const oldReceiptId = String(ad?.linkedDeliveryReceiptId || ad?.receiptId || '');
+  const newReceiptId = String(document.getElementById('ad-linked-receipt-id')?.value || '');
+  const changed = !!ad?.id
+    && paymentStatus === 'not_paid'
+    && oldCollection === collectionMethod
+    && oldReceiptId
+    && newReceiptId
+    && oldReceiptId !== newReceiptId;
+  if (!changed) {
+    notice.classList.add('hidden');
+    notice.textContent = '';
+    return;
+  }
+  const oldAmount = getOriginalAdDueAllocationUSD();
+  const newAmount = parseFloat(document.getElementById('ad-due-amount-to-use')?.value) || 0;
+  const oldLabel = getAdReceiptDisplayLabel(oldReceiptId);
+  const newLabel = getAdReceiptDisplayLabel(newReceiptId);
+  const isAr = state.language === 'ar';
+  notice.classList.remove('hidden');
+  notice.textContent = isAr
+    ? `عند الحفظ: سيعود $${oldAmount.toFixed(2)} إلى ${oldLabel} وسيُحجز $${newAmount.toFixed(2)} من ${newLabel}. يتم التغيير معاً دون خصم مزدوج.`
+    : `On Save: $${oldAmount.toFixed(2)} returns to ${oldLabel}, and $${newAmount.toFixed(2)} is reserved from ${newLabel}. Both changes happen together with no double charge.`;
 }
 
 function syncShopDueAllocationToFunding() {
@@ -22483,12 +26467,17 @@ function syncShopDueAllocationToFunding() {
 function initMergeFunding() {
   if (!state.tempMergeFunding) {
     const md = state.modalData;
-    if (md?.hasMergedPaidFunds && Array.isArray(md.mergedPaidAllocations) && md.mergedPaidAllocations.length) {
+    const isMixedShopDebt = getAdPaymentState(md || {}) === 'not_paid'
+      && String(md?.collectionMethod || '').toLowerCase() === 'in_shop';
+    const savedPaidRows = isMixedShopDebt
+      ? md?.receiptAllocations
+      : (md?.mergedPaidAllocations || md?.receiptAllocations);
+    if (Array.isArray(savedPaidRows) && savedPaidRows.length) {
       state.tempMergeFunding = {
         enabled: true,
         // Snap to 2 decimals for display — stored values can carry float
         // residue from proportional stop-ad math (same as initAdFunding).
-        allocations: md.mergedPaidAllocations.map(a => ({
+        allocations: savedPaidRows.map(a => ({
           receiptId: a.receiptId,
           amountUSD: isFinite(parseFloat(a.amountUSD)) ? String(Math.round(parseFloat(a.amountUSD) * 100) / 100) : String(a.amountUSD)
         }))
@@ -22512,9 +26501,20 @@ function onAdDueAmountChange() {
     value = maxDue;
     dueInput.value = value.toFixed(2);
   }
+
+  // Once the user edits the suggested difference, treat the visible paid +
+  // unpaid total as the new intended budget. Future paid-row edits can then
+  // keep the due portion synchronized without restoring an old amount.
+  if (document.getElementById('ad-collection-method')?.value === 'in_shop'
+      && normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD) > 0) {
+    state.tempMixedReceiptTargetUSD = Math.round(
+      (getTempMergeFundingTotalUSD() + value) * 100
+    ) / 100;
+  }
   
   updateAdDueSummary();
   syncShopDueAllocationToFunding();
+  renderAdDueReceiptReplacementNotice();
 }
 
 // Use all available due amount (USD)
@@ -22529,8 +26529,15 @@ function useAllDueAmount() {
     : 0;
   const budgetRemaining = budget > 0 ? Math.max(budget - mergedTotal, 0) : maxDue;
   dueInput.value = Math.min(maxDue, budgetRemaining).toFixed(2);
+  if (document.getElementById('ad-collection-method')?.value === 'in_shop'
+      && normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD) > 0) {
+    state.tempMixedReceiptTargetUSD = Math.round(
+      (getTempMergeFundingTotalUSD() + (parseFloat(dueInput.value) || 0)) * 100
+    ) / 100;
+  }
   updateAdDueSummary();
   syncShopDueAllocationToFunding();
+  renderAdDueReceiptReplacementNotice();
 }
 
 // Update the due amount summary (USD)
@@ -22550,9 +26557,11 @@ function updateAdDueSummary() {
   const isShopDebt = document.getElementById('ad-collection-method')?.value === 'in_shop';
   if (usingUSD > 0) {
     if (isShopDebt) {
+      const paidPart = getTempMergeFundingTotalUSD();
+      const combined = Math.round((paidPart + usingUSD) * 100) / 100;
       summary.innerHTML = isArD
-        ? `دين الإعلان: <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> (${usingLYD.toFixed(0)} LYD). <span class="text-amber-700">سيبقى بالسالب حتى يدفع العميل.</span>`
-        : `Ad debt: <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> (${usingLYD.toFixed(0)} LYD). <span class="text-amber-700">It stays minus until the customer pays.</span>`;
+        ? `المدفوع: <span class="font-medium text-blue-700">$${paidPart.toFixed(2)}</span> + الدين: <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> = الميزانية: <strong>$${combined.toFixed(2)}</strong>. <span class="text-amber-700">الفرق فقط يبقى بالسالب حتى يدفع العميل.</span>`
+        : `Paid: <span class="font-medium text-blue-700">$${paidPart.toFixed(2)}</span> + debt: <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> = budget: <strong>$${combined.toFixed(2)}</strong>. <span class="text-amber-700">Only the difference stays minus until the customer pays.</span>`;
     } else {
       summary.innerHTML = isArD
       ? `سيتم استخدام <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> (${usingLYD.toFixed(0)} LYD) من المستحق. ${remainingUSD > 0 ? `<span class="text-slate-400">سيتبقى $${remainingUSD.toFixed(2)} (${remainingLYD.toFixed(0)} LYD).</span>` : '<span class="text-emerald-600">سيتم استخدام الرصيد بالكامل.</span>'}`
@@ -22615,6 +26624,7 @@ function removeAdMergeFundingAllocation(idx) {
   if (!state.tempMergeFunding?.allocations) return;
   state.tempMergeFunding.allocations.splice(idx, 1);
   renderAdMergedFundingList();
+  syncMixedShopReceiptDifference();
 }
 
 // Update funding receipt in merge mode
@@ -22624,6 +26634,7 @@ function updateAdMergeFundingReceipt(idx, receiptId) {
   if (!allocation) return;
   allocation.receiptId = receiptId;
   renderAdMergedFundingList();
+  syncMixedShopReceiptDifference();
 }
 
 // Update funding amount in merge mode
@@ -22633,6 +26644,19 @@ function updateAdMergeFundingAmount(idx, value) {
   if (!allocation) return;
   allocation.amountUSD = value;
   refreshAdMergedFundingSummary();
+  syncMixedShopReceiptDifference();
+}
+
+function syncMixedShopReceiptDifference() {
+  if (document.getElementById('ad-collection-method')?.value !== 'in_shop') return;
+  const target = normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD);
+  const dueInput = document.getElementById('ad-due-amount-to-use');
+  if (!dueInput || target <= 0 || !String(dueInput.dataset.receiptId || '').trim()) return;
+  const maxDue = Math.max(parseFloat(dueInput.dataset.maxDue) || 0, 0);
+  const shortfall = Math.max(target - getTempMergeFundingTotalUSD(), 0);
+  dueInput.value = Math.min(shortfall, maxDue).toFixed(2);
+  updateAdDueSummary();
+  syncShopDueAllocationToFunding();
 }
 
 // Get paid receipts available for the current customer (for merge mode)
@@ -22640,7 +26664,8 @@ function getPaidReceiptsForMerge(customerId) {
   if (!customerId) return [];
   return getVisibleRecords(state.receipts).filter(r => {
     if (String(r.customerId || '') !== String(customerId)) return false;
-    if (r.isPaid === false) return false;
+    const statusLower = String(r.status || '').trim().toLowerCase();
+    if (!(r.isPaid === true || statusLower === 'paid')) return false;
     // Exclude temp delivery receipts that aren't finalized
     const looksTemp = (String(r.receiptType || '').toUpperCase() === 'DELIVERY_TEMP') || isTempDeliveryReceiptNo(r.tempReceiptNo);
     if (looksTemp) {
@@ -22806,14 +26831,17 @@ function hideAdPageDropdown() {
   if (dropdown) dropdown.classList.add('hidden');
 }
 
-// Hide dropdown when clicking outside
+// Hide dropdown when clicking outside. CAPTURE phase: the modal panel's
+// onclick="event.stopPropagation()" swallows bubble-phase clicks, so without
+// it this listener never fires for taps inside the form (see the comment on
+// the capture-phase listener at the top of this file).
 document.addEventListener('click', function(e) {
   const dropdown = document.getElementById('ad-page-dropdown');
   const search = document.getElementById('ad-page-search');
   if (dropdown && search && !dropdown.contains(e.target) && e.target !== search) {
     dropdown.classList.add('hidden');
   }
-});
+}, true);
 
 // Add ad link input dynamically
 function addAdLinkInput(value = '') {
@@ -22892,6 +26920,34 @@ function setAdPaymentStatus(status) {
     // Expected while the New Ad wizard hasn't rendered the payment section yet
     // (it appears only after a customer is selected) — not an error.
     return;
+  }
+
+  const previousStatus = hiddenInput.value;
+  const previousCollectionMethod = document.getElementById('ad-collection-method')?.value || '';
+  if (status === 'paid' && previousStatus === 'not_paid' && previousCollectionMethod === 'in_shop') {
+    // When the unpaid receipt is later collected, the user settles the whole
+    // mixed ad by switching to Paid. Bring BOTH the original paid portion and
+    // the former due portion into the normal paid funding list so the exact
+    // original total is visible and can be validated by the server.
+    initMergeFunding();
+    const totals = new Map();
+    for (const row of [
+      ...(state.tempMergeFunding?.allocations || []),
+      ...(state.tempAdFunding?.allocations || [])
+    ]) {
+      const receiptId = String(row?.receiptId || '').trim();
+      const amountUSD = parseFloat(row?.amountUSD) || 0;
+      if (!receiptId || amountUSD <= 0) continue;
+      totals.set(receiptId, (totals.get(receiptId) || 0) + amountUSD);
+    }
+    state.tempAdFunding = {
+      allocations: Array.from(totals, ([receiptId, amountUSD]) => ({
+        receiptId,
+        amountUSD: (Math.round(amountUSD * 100) / 100).toFixed(2)
+      }))
+    };
+    state.tempMergeFunding = { allocations: [], enabled: false };
+    state.tempMixedReceiptTargetUSD = null;
   }
   
   // Update hidden input
@@ -23154,6 +27210,20 @@ function _showPhotoPayloadLimit() {
   );
 }
 
+// HEIC/HEIF (the iPhone camera default) cannot be decoded by Chrome on
+// Android: compressImageToDataUrl falls back to the raw data URL and
+// isSafeReceiptPhotoSource rejects it. Without this notice the photo just
+// silently never appears in the preview grid.
+function _showUnsupportedPhotoFormat() {
+  showNotification(
+    state.language === 'ar' ? 'صيغة صورة غير مدعومة' : 'Unsupported photo',
+    state.language === 'ar'
+      ? 'استخدم صورة PNG أو JPG أو WEBP أو GIF — صور HEIC غير مدعومة (غيّر إعداد كاميرا الآيفون إلى "الأكثر توافقاً" أو أرسلها بصيغة JPG).'
+      : 'Use a PNG, JPG, WEBP, or GIF image — HEIC photos are not supported (set the iPhone camera to "Most Compatible" or share as JPG).',
+    'error'
+  );
+}
+
 async function _compressPhotosForUpload(files, concurrency = 2) {
   const input = Array.isArray(files) ? files : [];
   const results = new Array(input.length).fill('');
@@ -23208,8 +27278,15 @@ function uploadAdPhotos(fileList) {
     state.tempAdPhotos = state.tempAdPhotos || [];
     let changed = false;
     let tooLarge = false;
+    let unsupported = false;
     results.forEach(dataUrl => {
-      if (!dataUrl || state.tempAdPhotos.length >= 6 || !isSafeReceiptPhotoSource(dataUrl)) return;
+      // Keep the photo-cap check first so a full grid doesn't show a
+      // misleading "unsupported" message.
+      if (!dataUrl || state.tempAdPhotos.length >= 6) return;
+      if (!isSafeReceiptPhotoSource(dataUrl)) {
+        unsupported = true;
+        return;
+      }
       if (!_preparedPhotoFits(state.tempAdPhotos, dataUrl)) {
         tooLarge = true;
         return;
@@ -23222,6 +27299,7 @@ function uploadAdPhotos(fileList) {
       renderAdPhotoPreviews();
     }
     if (tooLarge) _showPhotoPayloadLimit();
+    if (unsupported) _showUnsupportedPhotoFormat();
   }).finally(() => {
     if (uploadGeneration === _adPhotoUploadGeneration) {
       _adPhotoUploadsInFlight = Math.max(0, _adPhotoUploadsInFlight - files.length);
@@ -23304,8 +27382,15 @@ function uploadReceiptPhotos(fileList) {
     state.tempReceiptPhotos = state.tempReceiptPhotos || [];
     let changed = false;
     let tooLarge = false;
+    let unsupported = false;
     results.forEach(dataUrl => {
-      if (!dataUrl || state.tempReceiptPhotos.length >= 6 || !isSafeReceiptPhotoSource(dataUrl)) return;
+      // Keep the photo-cap check first so a full grid doesn't show a
+      // misleading "unsupported" message.
+      if (!dataUrl || state.tempReceiptPhotos.length >= 6) return;
+      if (!isSafeReceiptPhotoSource(dataUrl)) {
+        unsupported = true;
+        return;
+      }
       if (!_preparedPhotoFits(state.tempReceiptPhotos, dataUrl)) {
         tooLarge = true;
         return;
@@ -23318,6 +27403,7 @@ function uploadReceiptPhotos(fileList) {
       renderReceiptPhotoPreviews();
     }
     if (tooLarge) _showPhotoPayloadLimit();
+    if (unsupported) _showUnsupportedPhotoFormat();
   }).finally(() => {
     if (uploadGeneration === _receiptPhotoUploadGeneration) {
       _receiptPhotoUploadsInFlight = Math.max(0, _receiptPhotoUploadsInFlight - files.length);
@@ -23368,7 +27454,7 @@ function updateAdLocalAmount() {
   const rate = parseFloat(rateInput.value) || 1;
   const localAmount = amount * rate;
   
-  displayEl.innerHTML = `${state.language === 'ar' ? 'بالعملة المحلية' : 'Local'}: <span class="font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(localAmount.toLocaleString())} LYD</span>`;
+  displayEl.innerHTML = `${state.language === 'ar' ? 'بالعملة المحلية' : 'Local'}: <span class="font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(localAmount.toLocaleString('en-US'))} LYD</span>`;
 }
 
 function addAdFundingAllocation() {
@@ -23387,17 +27473,52 @@ function updateAdFundingReceipt(idx, receiptId) {
   if (!state.tempAdFunding?.allocations) return;
   const allocation = state.tempAdFunding.allocations[idx];
   if (!allocation) return;
+  const selectedReceipt = state.receipts.find(r => r && !r._deleted && String(r.id) === String(receiptId || ''));
+  const customerId = String(document.getElementById('ad-customer-id')?.value || '');
+  if (selectedReceipt && customerId && String(selectedReceipt.customerId || '') !== customerId) {
+    showNotification(
+      state.language === 'ar' ? 'وصل غير صالح' : 'Invalid receipt',
+      state.language === 'ar' ? 'هذا الوصل يخص عميلاً آخر.' : 'This receipt belongs to another customer.',
+      'error'
+    );
+    allocation.receiptId = '';
+    allocation.amountUSD = 0;
+    renderAdFundingList();
+    return;
+  }
   allocation.receiptId = receiptId;
   
   // Default to 0, but cap existing values at remaining if receipt is selected
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (receipt) {
-    const remaining = Math.round((getReceiptRemainingUSD(receipt) + getEditingAdExistingAllocationUSD(receipt.id)) * 100) / 100;
-    // If user already entered a value, cap it at remaining; otherwise default to 0
-    if (allocation.amountUSD && parseFloat(allocation.amountUSD) > 0) {
-      allocation.amountUSD = Math.min(remaining, parseFloat(allocation.amountUSD) || 0);
+    const originalUnpaidBudget = getOriginalUnpaidAdBudgetUSD();
+    const isSettlingUnpaidAd = originalUnpaidBudget > 0
+      && String(document.getElementById('ad-payment-status')?.value || '').toLowerCase() === 'paid';
+    if (isSettlingUnpaidAd) {
+      // A stored Not Paid ad can contain only a partial due allocation. When the
+      // user changes its source while settling it, that old partial amount must
+      // not become the new Paid total (for example $1.24 of a $9.00 ad). Fill
+      // this row with the exact remaining settlement amount after all OTHER
+      // rows. Capacity validation still shows a shortage and lets the user split
+      // the total across receipts; it never shrinks or erases customer debt.
+      const otherAllocated = state.tempAdFunding.allocations.reduce((sum, row, rowIndex) => {
+        if (rowIndex === idx) return sum;
+        return sum + (parseFloat(row?.amountUSD) || 0);
+      }, 0);
+      allocation.amountUSD = Math.max(
+        Math.round((originalUnpaidBudget - otherAllocated) * 100) / 100,
+        0
+      );
     } else {
-      allocation.amountUSD = 0;
+      // Relinking changes only the source receipt. Never clamp a saved $30
+      // allocation down to a new $20 balance (silently shrinking the ad), nor
+      // grow it to a larger receipt. Save-time capacity validation will block an
+      // insufficient replacement and the user can add a second receipt.
+      if (allocation.amountUSD && parseFloat(allocation.amountUSD) > 0) {
+        allocation.amountUSD = Math.round((parseFloat(allocation.amountUSD) || 0) * 100) / 100;
+      } else {
+        allocation.amountUSD = 0;
+      }
     }
   } else {
     allocation.amountUSD = 0;
@@ -23469,6 +27590,63 @@ function updateAdFundingAmount(idx, value) {
   // Do NOT re-render the list here; it would replace the input element and break typing focus/caret.
   refreshAdFundingRow(idx);
   refreshAdFundingSummary();
+  renderAdPaidReceiptReplacementNotice();
+}
+
+function getAdAllocationMap(rows) {
+  const result = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const receiptId = String(row?.receiptId || '');
+    const amount = parseFloat(row?.amountUSD) || 0;
+    if (!receiptId || amount <= 0) continue;
+    result.set(receiptId, Math.round(((result.get(receiptId) || 0) + amount) * 100) / 100);
+  }
+  return result;
+}
+
+// Give the user an exact preview of what a paid-receipt replacement means.
+// The actual return/use operation remains authoritative in /api/ads/mutate.
+function renderAdPaidReceiptReplacementNotice() {
+  const notice = document.getElementById('ad-funding-change-notice');
+  if (!notice) return;
+  const ad = state.modalData;
+  const paymentStatus = document.getElementById('ad-payment-status')?.value || '';
+  if (!ad?.id || getAdPaymentState(ad) !== 'paid' || paymentStatus !== 'paid') {
+    notice.classList.add('hidden');
+    notice.textContent = '';
+    return;
+  }
+  const before = getAdAllocationMap(ad.receiptAllocations);
+  const after = getAdAllocationMap(state.tempAdFunding?.allocations);
+  const allIds = new Set([...before.keys(), ...after.keys()]);
+  let returned = 0;
+  let used = 0;
+  const releasedLabels = [];
+  const addedLabels = [];
+  for (const receiptId of allIds) {
+    const oldAmount = before.get(receiptId) || 0;
+    const newAmount = after.get(receiptId) || 0;
+    if (oldAmount > newAmount + 0.005) {
+      returned += oldAmount - newAmount;
+      releasedLabels.push(getAdReceiptDisplayLabel(receiptId));
+    }
+    if (newAmount > oldAmount + 0.005) {
+      used += newAmount - oldAmount;
+      addedLabels.push(getAdReceiptDisplayLabel(receiptId));
+    }
+  }
+  if (returned <= 0.005 && used <= 0.005) {
+    notice.classList.add('hidden');
+    notice.textContent = '';
+    return;
+  }
+  const isAr = state.language === 'ar';
+  const from = releasedLabels.join(', ') || (isAr ? 'الوصل الحالي' : 'the current receipt');
+  const to = addedLabels.join(', ') || (isAr ? 'الوصل المحدد' : 'the selected receipt');
+  notice.classList.remove('hidden');
+  notice.textContent = isAr
+    ? `عند الحفظ: سيعود $${returned.toFixed(2)} إلى ${from} وسيُستخدم $${used.toFixed(2)} من ${to}. الإعلان وأرصدة الوصولات تتحدث معاً دون خصم مزدوج.`
+    : `On Save: $${returned.toFixed(2)} returns to ${from}, and $${used.toFixed(2)} is used from ${to}. The ad and both receipt balances update together with no double charge.`;
 }
 
 function refreshAdFundingRow(idx) {
@@ -23491,11 +27669,18 @@ function refreshAdFundingRow(idx) {
   const usage = getReceiptUsageStats(receipt);
   const receiptRemaining = Math.round(((usage?.remainingUSD ?? 0) + getEditingAdExistingAllocationUSD(receipt.id)) * 100) / 100;
   const plannedSpend = parseFloat(allocation.amountUSD) || 0;
-  const balance = Math.max(receiptRemaining - plannedSpend, 0);
+  const balance = Math.round((receiptRemaining - plannedSpend) * 100) / 100;
   const receiptRate = receipt?.exchangeRate || state.defaultExchangeRate || '-';
 
   if (remainingEl) remainingEl.textContent = `$${Number(receiptRemaining || 0).toFixed(2)}`;
-  if (balanceEl) balanceEl.textContent = `$${Number(balance || 0).toFixed(2)}`;
+  if (balanceEl) {
+    balanceEl.textContent = balance < -0.005
+      ? `${state.language === 'ar' ? 'عجز' : 'Short'} $${Math.abs(balance).toFixed(2)}`
+      : `$${Number(balance || 0).toFixed(2)}`;
+    balanceEl.className = balance < -0.005
+      ? 'text-rose-600 dark:text-rose-400 font-bold'
+      : 'text-blue-600 dark:text-blue-400 font-medium';
+  }
   if (rateEl) rateEl.textContent = String(receiptRate);
 }
 
@@ -23514,14 +27699,27 @@ function renderAdFundingList() {
     // Only show receipts for this customer that still have remaining balance.
     // When editing an existing ad, keep currently-selected receipts visible even if their remaining is now 0.
     let receipts = [];
+    let eligibleReceiptIds = new Set();
     try {
-      receipts = getReceiptsForAd(customerId, pageId).filter(r => {
+      const eligibleReceipts = getReceiptsForAd(customerId, pageId);
+      eligibleReceiptIds = new Set(eligibleReceipts.map(receipt => String(receipt.id)));
+      receipts = eligibleReceipts.filter(r => {
         if (!r) return false;
         if (selectedReceiptIds.has(String(r.id))) return true;
         const usage = getReceiptUsageStats(r);
         const remaining = (usage?.remainingUSD ?? 0) + getEditingAdExistingAllocationUSD(r.id);
         return remaining > 0.0001;
       });
+      // Keep a saved current link visible even if the receipt later became
+      // unavailable. It is clearly labelled and alternatives remain listed,
+      // so editing never silently swaps or hides the old source.
+      for (const receiptId of selectedReceiptIds) {
+        if (receipts.some(receipt => String(receipt.id) === receiptId)) continue;
+        const current = (state.receipts || []).find(receipt =>
+          receipt && String(receipt.id) === receiptId && String(receipt.customerId || '') === String(customerId || '')
+        );
+        if (current) receipts.unshift(current);
+      }
     } catch (filterErr) {
       console.error('Error filtering receipts for ad:', filterErr);
       receipts = [];
@@ -23541,12 +27739,14 @@ function renderAdFundingList() {
     // In the Ad modal, customer selection depends on picking a Page first.
     list.innerHTML = `<div class="py-3 text-center text-xs text-slate-400">${isArL ? 'اختر صفحة وعميلاً أولاً' : 'Select a page & customer first'}</div>`;
     refreshAdFundingSummary();
+    renderAdPaidReceiptReplacementNotice();
     return;
   }
   
   if (receipts.length === 0) {
     list.innerHTML = `<div class="py-3 text-center text-xs text-slate-400">${isArL ? 'لا توجد وصولات برصيد متبقٍ' : 'No receipts with remaining balance'}</div>`;
     refreshAdFundingSummary();
+    renderAdPaidReceiptReplacementNotice();
     return;
   }
   
@@ -23578,7 +27778,11 @@ function renderAdFundingList() {
     );
     const optionsHtml = receipts.filter(r => !usedElsewhere.has(r.id)).map(r => {
       const serial = r.serialNumber || r.finalReceiptNo || (r.receiptType === 'TRANSFER_IN' ? (state.language === 'ar' ? 'تحويل' : 'TRF') : (r.id ? String(r.id).slice(0,6) : '???'));
-      const label = `#${serial} • $${(r.amountUSD || 0).toFixed(2)}`;
+      const unavailable = !eligibleReceiptIds.has(String(r.id));
+      const staleLabel = unavailable
+        ? (isArL ? ' • الرابط الحالي غير متاح — اختر بديلاً' : ' • current link unavailable — choose a replacement')
+        : '';
+      const label = `#${serial} • $${(r.amountUSD || 0).toFixed(2)}${staleLabel}`;
       return `<option value="${r.id || ''}" ${alloc.receiptId === r.id ? 'selected' : ''}>${Security.escapeHtml(label)}</option>`;
     }).join('');
     
@@ -23595,31 +27799,34 @@ function renderAdFundingList() {
 
     // Calculate balance = Remaining - Planned Spend
     const plannedSpend = parseFloat(alloc.amountUSD) || 0;
-    const balance = Math.max(receiptRemaining - plannedSpend, 0);
+    const balance = Math.round((receiptRemaining - plannedSpend) * 100) / 100;
+    const balanceText = balance < -0.005
+      ? `${isArL ? 'عجز' : 'Short'} $${Math.abs(balance).toFixed(2)}`
+      : `$${balance.toFixed(2)}`;
     
     return `
       <div class="space-y-2">
         <div class="flex items-center justify-between">
           <span class="text-xs text-slate-500 flex items-center gap-1"><i data-lucide="receipt" class="w-3 h-3"></i>${isArL ? `تخصيص الوصل رقم ${idx + 1}` : `Receipt Allocation #${idx + 1}`}</span>
-          <button type="button" onclick="removeAdFundingAllocation(${idx})" class="text-xs text-rose-500 hover:text-rose-600">${isArL ? 'إزالة' : 'Remove'}</button>
+          <button type="button" onclick="removeAdFundingAllocation(${idx})" aria-label="${isArL ? `إزالة تخصيص الوصل رقم ${idx + 1}` : `Remove receipt allocation ${idx + 1}`}" class="min-h-11 px-2 text-xs text-rose-500 hover:text-rose-600">${isArL ? 'إزالة' : 'Remove'}</button>
         </div>
-        <div class="grid grid-cols-2 gap-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
-            <label class="block text-[10px] text-slate-400 mb-1">${isArL ? 'الوصل' : 'Receipt'}</label>
-            <select class="w-full glass-input px-2 py-1.5 rounded-lg text-sm" onchange="updateAdFundingReceipt(${idx}, this.value)">
+            <label for="ad-funding-receipt-${idx}" class="block text-[10px] text-slate-400 mb-1">${isArL ? 'الوصل' : 'Receipt'}</label>
+            <select id="ad-funding-receipt-${idx}" class="w-full min-h-11 glass-input px-3 py-2 rounded-lg text-sm" onchange="updateAdFundingReceipt(${idx}, this.value)">
               <option value="">${isArL ? 'اختر...' : 'Select...'}</option>
               ${optionsHtml}
             </select>
           </div>
           <div>
-            <label class="block text-[10px] text-slate-400 mb-1">${isArL ? 'الإنفاق المخطط (USD)' : 'Planned Spend (USD)'}</label>
-            <input type="text" inputmode="decimal" class="w-full glass-input px-2 py-1.5 rounded-lg text-sm" value="${alloc.amountUSD || ''}" oninput="sanitizeMoneyInput(this); updateAdFundingAmount(${idx}, this.value)" onfocus="this.select()" />
+            <label for="ad-funding-amount-${idx}" class="block text-[10px] text-slate-400 mb-1">${isArL ? 'الإنفاق المخطط (USD)' : 'Planned Spend (USD)'}</label>
+            <input id="ad-funding-amount-${idx}" type="text" inputmode="decimal" class="w-full min-h-11 glass-input px-3 py-2 rounded-lg text-sm" value="${alloc.amountUSD || ''}" oninput="sanitizeMoneyInput(this); updateAdFundingAmount(${idx}, this.value)" onfocus="this.select()" />
           </div>
         </div>
         ${receipt ? `
           <div class="text-[10px] text-slate-400 space-y-0.5">
             <div>${isArL ? 'المتبقي' : 'Remaining'}: <span id="ad-funding-remaining-${idx}" class="text-emerald-600 dark:text-emerald-400 font-medium">$${receiptRemaining.toFixed(2)}</span></div>
-            <div>${isArL ? 'الرصيد' : 'Balance'}: <span id="ad-funding-balance-${idx}" class="text-blue-600 dark:text-blue-400 font-medium">$${balance.toFixed(2)}</span></div>
+            <div>${isArL ? 'الرصيد' : 'Balance'}: <span id="ad-funding-balance-${idx}" class="${balance < -0.005 ? 'text-rose-600 dark:text-rose-400 font-bold' : 'text-blue-600 dark:text-blue-400 font-medium'}">${balanceText}</span></div>
             <div>${isArL ? 'السعر' : 'Rate'}: <span id="ad-funding-rate-${idx}" class="text-slate-600 dark:text-slate-300">${receiptRate}</span></div>
           </div>
         ` : ''}
@@ -23628,6 +27835,7 @@ function renderAdFundingList() {
   }).join('');
 
   refreshAdFundingSummary();
+  renderAdPaidReceiptReplacementNotice();
   if (window.lucide) lucide.createIcons();
   } catch (err) {
     console.error('Error rendering ad funding list:', err);
@@ -23994,8 +28202,121 @@ function updateUserRoleInfo(role) {
   
   if (window.lucide) lucide.createIcons();
 }
+let _customerMergeReturnFocus = null;
+
+function getCustomerMergeRelationshipCounts(customerId) {
+  const id = String(customerId || '');
+  const pages = getVisibleRecords(state.pages).filter(page => {
+    if (Array.isArray(page.customerIds)) return page.customerIds.map(String).includes(id);
+    return String(page.customerId || page.customer || '') === id;
+  }).length;
+  const receipts = getVisibleRecords(state.receipts)
+    .filter(receipt => String(receipt.customerId || receipt.customer || '') === id).length;
+  const ads = getVisibleRecords(state.ads)
+    .filter(ad => ad.recordType !== 'receipt' && String(ad.customerId || ad.customer || '') === id).length;
+  return { pages, receipts, ads, total: pages + receipts + ads };
+}
+
+function getRecommendedCustomerToKeep(customers) {
+  return (Array.isArray(customers) ? customers : []).slice().sort((left, right) => {
+    const rightLinks = getCustomerMergeRelationshipCounts(right?.id).total;
+    const leftLinks = getCustomerMergeRelationshipCounts(left?.id).total;
+    if (rightLinks !== leftLinks) return rightLinks - leftLinks;
+    // On equal link counts, keep the older identity. It is more likely to be
+    // the record staff and historical exports already recognize.
+    const leftCreated = Number(left?._created || Date.parse(left?.joinDate || '') || Number.MAX_SAFE_INTEGER);
+    const rightCreated = Number(right?._created || Date.parse(right?.joinDate || '') || Number.MAX_SAFE_INTEGER);
+    if (leftCreated !== rightCreated) return leftCreated - rightCreated;
+    return String(left?.id || '').localeCompare(String(right?.id || ''));
+  })[0] || null;
+}
+
+function setCustomerMergePairFromGroup(groupIndex) {
+  const groups = findDuplicateCustomerGroups(state.customers);
+  const safeIndex = Math.max(0, Math.min(Number(groupIndex) || 0, Math.max(0, groups.length - 1)));
+  const group = groups[safeIndex];
+  if (!group || group.customers.length < 2) return false;
+  const keep = getRecommendedCustomerToKeep(group.customers);
+  const duplicate = group.customers.find(customer => String(customer.id) !== String(keep?.id));
+  state.modalData = {
+    duplicateGroupIndex: safeIndex,
+    keepCustomerId: String(keep?.id || ''),
+    duplicateCustomerId: String(duplicate?.id || ''),
+    idempotencyKey: Security.generateSecureId('customer-merge')
+  };
+  return true;
+}
+
+function showCustomerDuplicateMerge(preferredCustomerId = '') {
+  const isAr = state.language === 'ar';
+  if (!isCurrentUserAdmin()) {
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'دمج العملاء متاح للمدير فقط.' : 'Only an administrator can merge customers.', 'error');
+    return;
+  }
+  if (!isServerModeEnabled()) {
+    showNotification(
+      isAr ? 'يتطلب اتصال الخادم' : 'Server connection required',
+      isAr ? 'الدمج الآمن ينقل كل الروابط في معاملة واحدة، لذلك يجب الاتصال بالخادم أولاً.' : 'Safe merge moves every link in one transaction, so connect to the server first.',
+      'warning'
+    );
+    return;
+  }
+  const groups = findDuplicateCustomerGroups(state.customers);
+  if (groups.length === 0) {
+    showNotification(isAr ? 'لا يوجد تكرار' : 'No duplicates found', isAr ? 'لا توجد أرقام هاتف مشتركة بين العملاء الحاليين.' : 'No active customers share the same normalized phone number.', 'success');
+    return;
+  }
+  const preferred = String(preferredCustomerId || '');
+  const groupIndex = preferred
+    ? Math.max(0, groups.findIndex(group => group.customers.some(customer => String(customer.id) === preferred)))
+    : 0;
+  _customerMergeReturnFocus = document.activeElement && typeof document.activeElement.focus === 'function'
+    ? document.activeElement
+    : null;
+  state.activeModal = 'customer-merge';
+  if (!setCustomerMergePairFromGroup(groupIndex)) return;
+  renderModal();
+}
+
+function selectCustomerDuplicateGroup(groupIndex) {
+  if (!isCurrentUserAdmin() || state.activeModal !== 'customer-merge') return;
+  if (setCustomerMergePairFromGroup(groupIndex)) renderModal();
+}
+
+function selectCustomerMergeKeep(customerId) {
+  if (!isCurrentUserAdmin() || state.activeModal !== 'customer-merge') return;
+  const groups = findDuplicateCustomerGroups(state.customers);
+  const group = groups[Number(state.modalData?.duplicateGroupIndex) || 0];
+  if (!group) return;
+  const keepId = String(customerId || '');
+  if (!group.customers.some(customer => String(customer.id) === keepId)) return;
+  let duplicateId = String(state.modalData?.duplicateCustomerId || '');
+  if (duplicateId === keepId || !group.customers.some(customer => String(customer.id) === duplicateId)) {
+    duplicateId = String(group.customers.find(customer => String(customer.id) !== keepId)?.id || '');
+  }
+  state.modalData.keepCustomerId = keepId;
+  state.modalData.duplicateCustomerId = duplicateId;
+  state.modalData.idempotencyKey = Security.generateSecureId('customer-merge');
+  renderModal();
+}
+
+function selectCustomerMergeDuplicate(customerId) {
+  if (!isCurrentUserAdmin() || state.activeModal !== 'customer-merge') return;
+  const groups = findDuplicateCustomerGroups(state.customers);
+  const group = groups[Number(state.modalData?.duplicateGroupIndex) || 0];
+  const duplicateId = String(customerId || '');
+  if (!group || duplicateId === String(state.modalData?.keepCustomerId || '') || !group.customers.some(customer => String(customer.id) === duplicateId)) return;
+  state.modalData.duplicateCustomerId = duplicateId;
+  state.modalData.idempotencyKey = Security.generateSecureId('customer-merge');
+  renderModal();
+}
+
 function renderModal() {
   const existingModal = document.getElementById('app-modal');
+  const previousCustomerMergeFocusId = existingModal && state.activeModal === 'customer-merge'
+    && existingModal.contains(document.activeElement)
+    ? String(document.activeElement?.id || '')
+    : '';
   if (existingModal) existingModal.remove();
   
   if (!state.activeModal) return;
@@ -24005,7 +28326,8 @@ function renderModal() {
   switch (state.activeModal) {
     case 'customer':
       const custData = state.modalData || {};
-      const phones = custData.phones || [''];
+      const phones = getCustomerPhoneEntries(custData).map(entry => entry.value);
+      if (phones.length === 0) phones.push('');
       const profileLinks = custData.profileLinks || [];
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center">
@@ -24091,6 +28413,113 @@ function renderModal() {
         </form>
       `;
       break;
+    case 'customer-merge': {
+      const isArMerge = state.language === 'ar';
+      const duplicateGroups = findDuplicateCustomerGroups(state.customers);
+      const selectedGroupIndex = Math.max(0, Math.min(
+        Number(state.modalData?.duplicateGroupIndex) || 0,
+        Math.max(0, duplicateGroups.length - 1)
+      ));
+      const selectedGroup = duplicateGroups[selectedGroupIndex];
+      if (!isCurrentUserAdmin() || !selectedGroup) {
+        modalContent = `<h2 id="customer-merge-title" tabindex="-1" class="text-center py-8 text-slate-500">${isArMerge ? 'لا توجد مجموعة تكرار متاحة.' : 'No duplicate group is available.'}</h2>`;
+        break;
+      }
+      const groupCustomers = selectedGroup.customers;
+      const recommendedKeep = getRecommendedCustomerToKeep(groupCustomers);
+      let keepCustomerId = String(state.modalData?.keepCustomerId || recommendedKeep?.id || '');
+      if (!groupCustomers.some(customer => String(customer.id) === keepCustomerId)) {
+        keepCustomerId = String(recommendedKeep?.id || groupCustomers[0]?.id || '');
+      }
+      let duplicateCustomerId = String(state.modalData?.duplicateCustomerId || '');
+      if (duplicateCustomerId === keepCustomerId || !groupCustomers.some(customer => String(customer.id) === duplicateCustomerId)) {
+        duplicateCustomerId = String(groupCustomers.find(customer => String(customer.id) !== keepCustomerId)?.id || '');
+      }
+      state.modalData.keepCustomerId = keepCustomerId;
+      state.modalData.duplicateCustomerId = duplicateCustomerId;
+      const keepCustomer = groupCustomers.find(customer => String(customer.id) === keepCustomerId);
+      const duplicateCustomer = groupCustomers.find(customer => String(customer.id) === duplicateCustomerId);
+      const keepCounts = getCustomerMergeRelationshipCounts(keepCustomerId);
+      const duplicateCounts = getCustomerMergeRelationshipCounts(duplicateCustomerId);
+      const describeCustomer = customer => {
+        const firstPhone = getCustomerPhoneEntries(customer)[0]?.value || (isArMerge ? 'بدون هاتف' : 'No phone');
+        const counts = getCustomerMergeRelationshipCounts(customer?.id);
+        return `${customer?.name || (isArMerge ? 'عميل بدون اسم' : 'Unnamed customer')} · ${firstPhone} · ${counts.total} ${isArMerge ? 'سجل مرتبط' : 'linked'}`;
+      };
+      const sharedPhones = selectedGroup.sharedPhoneKeys
+        .map(key => key.startsWith('218') ? `+${key}` : key)
+        .join(', ');
+      modalContent = `
+        <div class="mb-5">
+          <div class="flex items-start gap-3">
+            <span class="w-11 h-11 rounded-xl bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 flex items-center justify-center shrink-0">
+              <i data-lucide="combine" class="w-6 h-6"></i>
+            </span>
+            <div>
+              <h2 id="customer-merge-title" tabindex="-1" class="text-2xl font-bold text-slate-900 dark:text-white">${isArMerge ? 'دمج العملاء المكررين' : 'Merge duplicate customers'}</h2>
+              <p class="text-sm text-slate-500 mt-1">${isArMerge ? 'اختر السجل الذي سيبقى. سيتم نقل كل الصفحات والوصولات والإعلانات بأمان.' : 'Choose the record to keep. Every page, receipt and ad will be moved safely.'}</p>
+            </div>
+          </div>
+        </div>
+        <form id="modal-form" class="space-y-5 pr-1">
+          ${duplicateGroups.length > 1 ? `
+          <div>
+            <label for="customer-duplicate-group" class="block text-sm font-bold mb-2">${isArMerge ? 'مجموعة التكرار' : 'Duplicate group'}</label>
+            <select id="customer-duplicate-group" onchange="selectCustomerDuplicateGroup(this.value)" class="w-full glass-input px-4 py-3 rounded-xl">
+              ${duplicateGroups.map((group, index) => `<option value="${index}" ${index === selectedGroupIndex ? 'selected' : ''}>${Security.escapeHtml(`${index + 1}. ${group.customers.map(customer => customer.name || 'Unnamed').join(' / ')}`)}</option>`).join('')}
+            </select>
+          </div>` : ''}
+
+          <div class="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 text-sm">
+            <div class="font-bold text-amber-800 dark:text-amber-200">${isArMerge ? 'سبب اكتشاف التكرار' : 'Why these records match'}</div>
+            <div class="mt-1 text-amber-700 dark:text-amber-300 break-all">${isArMerge ? 'رقم هاتف مشترك:' : 'Shared phone:'} ${Security.escapeHtml(sharedPhones || (isArMerge ? 'تم العثور على تطابق' : 'match found'))}</div>
+          </div>
+
+          <div class="grid gap-4 md:grid-cols-2">
+            <div class="rounded-xl border-2 border-emerald-300 dark:border-emerald-700 p-4 bg-emerald-50/60 dark:bg-emerald-900/10">
+              <label for="customer-merge-keep" class="block text-sm font-bold text-emerald-800 dark:text-emerald-300 mb-2">${isArMerge ? '1. العميل الذي سيبقى' : '1. Customer to keep'}</label>
+              <select id="customer-merge-keep" onchange="selectCustomerMergeKeep(this.value)" class="w-full glass-input px-3 py-3 rounded-xl">
+                ${groupCustomers.map(customer => `<option value="${Security.escapeHtml(String(customer.id || ''))}" ${String(customer.id) === keepCustomerId ? 'selected' : ''}>${Security.escapeHtml(describeCustomer(customer))}</option>`).join('')}
+              </select>
+              ${String(recommendedKeep?.id || '') === keepCustomerId ? `<div class="mt-2 inline-flex items-center gap-1 rounded-full bg-emerald-100 dark:bg-emerald-900/40 px-2 py-1 text-xs font-bold text-emerald-700 dark:text-emerald-300"><i data-lucide="sparkles" class="w-3 h-3"></i>${isArMerge ? 'موصى به: لديه سجلات مرتبطة أكثر' : 'Recommended: more linked records'}</div>` : ''}
+              <div class="grid grid-cols-3 gap-2 mt-3 text-center text-xs">
+                <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${keepCounts.pages}</strong>${isArMerge ? 'صفحات' : 'Pages'}</div>
+                <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${keepCounts.receipts}</strong>${isArMerge ? 'وصولات' : 'Receipts'}</div>
+                <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${keepCounts.ads}</strong>${isArMerge ? 'إعلانات' : 'Ads'}</div>
+              </div>
+            </div>
+
+            <div class="rounded-xl border-2 border-rose-200 dark:border-rose-800 p-4 bg-rose-50/60 dark:bg-rose-900/10">
+              <label for="customer-merge-duplicate" class="block text-sm font-bold text-rose-800 dark:text-rose-300 mb-2">${isArMerge ? '2. السجل المكرر الذي سيُؤرشف' : '2. Duplicate to archive'}</label>
+              <select id="customer-merge-duplicate" onchange="selectCustomerMergeDuplicate(this.value)" class="w-full glass-input px-3 py-3 rounded-xl">
+                ${groupCustomers.filter(customer => String(customer.id) !== keepCustomerId).map(customer => `<option value="${Security.escapeHtml(String(customer.id || ''))}" ${String(customer.id) === duplicateCustomerId ? 'selected' : ''}>${Security.escapeHtml(describeCustomer(customer))}</option>`).join('')}
+              </select>
+              <div class="grid grid-cols-3 gap-2 mt-3 text-center text-xs">
+                <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${duplicateCounts.pages}</strong>${isArMerge ? 'صفحات' : 'Pages'}</div>
+                <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${duplicateCounts.receipts}</strong>${isArMerge ? 'وصولات' : 'Receipts'}</div>
+                <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${duplicateCounts.ads}</strong>${isArMerge ? 'إعلانات' : 'Ads'}</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-4 text-sm text-blue-800 dark:text-blue-200">
+            <div class="font-bold">${isArMerge ? `سيتم نقل ${duplicateCounts.total} سجل مرتبط إلى «${Security.escapeHtml(keepCustomer?.name || '')}»` : `${duplicateCounts.total} linked record(s) will move to “${Security.escapeHtml(keepCustomer?.name || '')}”`}</div>
+            <p class="mt-1 text-xs">${isArMerge ? 'لن تُحذف الوصولات أو الإعلانات ولن تتغير مبالغها. بعد نجاح النقل فقط، سيُؤرشف سجل العميل المكرر.' : 'No receipt or ad is deleted and no amount is changed. The duplicate customer is archived only after the move succeeds.'}</p>
+          </div>
+
+          <label class="flex items-start gap-3 rounded-xl border border-slate-200 dark:border-slate-700 p-4 cursor-pointer">
+            <input id="customer-merge-confirm" type="checkbox" required class="mt-1 w-5 h-5 rounded border-slate-300 text-indigo-600" />
+            <span class="text-sm font-medium text-slate-700 dark:text-slate-200">${isArMerge ? 'راجعت السجلين وأؤكد أنهما لنفس العميل.' : 'I reviewed both records and confirm they belong to the same customer.'}</span>
+          </label>
+
+          <div class="flex flex-col-reverse sm:flex-row gap-3 pt-2">
+            <button type="button" onclick="closeModal()" class="flex-1 min-h-12 bg-slate-200 dark:bg-slate-700 px-5 py-3 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600">${isArMerge ? 'إلغاء' : 'Cancel'}</button>
+            <button type="submit" class="flex-1 min-h-12 btn-shine bg-indigo-600 text-white px-5 py-3 rounded-xl font-bold hover:bg-indigo-700 inline-flex items-center justify-center gap-2"><i data-lucide="combine" class="w-5 h-5"></i>${isArMerge ? 'دمج بأمان' : 'Merge safely'}</button>
+          </div>
+        </form>
+      `;
+      break;
+    }
     case 'ad':
       const visibleCustomers = getVisibleRecords(state.customers);
       const visiblePages = getVisibleRecords(state.pages);
@@ -24262,12 +28691,13 @@ function renderModal() {
                   </div>
                   <div id="ad-driver-select" class="hidden"></div>
                   <div id="ad-temp-receipt-link" class="hidden mt-2 p-3 bg-white dark:bg-slate-900 rounded-lg border border-violet-200 dark:border-violet-800 space-y-3">
-                    <label id="ad-linked-receipt-label" class="block text-xs font-bold text-violet-700 dark:text-violet-300">${adData.collectionMethod === 'in_shop' ? (isArAd ? 'ربط وصل غير مدفوع في المحل' : 'Link Unpaid In-Shop Receipt') : (isArAd ? 'ربط وصل توصيل (D#)' : 'Link Delivery Receipt (D#)')}</label>
-                    <select id="ad-temp-receipt-id" class="w-full border border-slate-200 px-3 py-2 rounded-lg text-sm" onchange="onAdTempReceiptChange(this.value)">
+                    <label for="ad-temp-receipt-id" id="ad-linked-receipt-label" class="block text-xs font-bold text-violet-700 dark:text-violet-300">${adData.collectionMethod === 'in_shop' ? (isArAd ? 'ربط وصل غير مدفوع في المحل' : 'Link Unpaid In-Shop Receipt') : (isArAd ? 'ربط وصل توصيل (D#)' : 'Link Delivery Receipt (D#)')}</label>
+                    <select id="ad-temp-receipt-id" aria-describedby="ad-temp-receipt-hint ad-linked-receipt-help ad-linked-receipt-change" class="w-full min-h-11 border border-slate-200 px-3 py-2 rounded-lg text-sm" onchange="onAdTempReceiptChange(this.value)">
                       <option value="">${isArAd ? 'اختر وصلاً معلقاً...' : 'Select pending receipt...'}</option>
                     </select>
                     <div id="ad-temp-receipt-hint" class="text-xs text-slate-500"></div>
                     <div id="ad-linked-receipt-help" class="hidden text-[11px] text-amber-700 dark:text-amber-300"></div>
+                    <div id="ad-linked-receipt-change" role="status" aria-live="polite" class="hidden rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-2 text-[11px] font-medium text-blue-800 dark:text-blue-200"></div>
                     <input type="hidden" id="ad-linked-receipt-id" value="${adData.linkedDeliveryReceiptId || adData.receiptId || ''}" />
                     
                     <!-- Due Amount Usage Section -->
@@ -24380,6 +28810,16 @@ function renderModal() {
               </div>
               <div id="ad-funding-list" class="space-y-2 bg-white dark:bg-slate-900 rounded-lg p-2 min-h-[60px]">
                 <div class="text-xs text-slate-400 text-center py-2">${isArAd ? 'اختر صفحة وعميلاً أولاً' : 'Select a page & customer first'}</div>
+              </div>
+              <div id="ad-funding-change-notice" role="status" aria-live="polite" class="hidden rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-2 text-xs font-medium text-blue-800 dark:text-blue-200"></div>
+              <div class="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-2 space-y-1">
+                <button type="button" onclick="startAdMixedReceiptFunding()" class="w-full flex items-center justify-center gap-2 text-xs font-semibold text-amber-700 dark:text-amber-300 hover:text-amber-800 py-1">
+                  <i data-lucide="split" class="w-4 h-4"></i>
+                  ${isArAd ? 'استخدام وصل غير مدفوع لتغطية الفرق' : 'Use an Unpaid Receipt for the Difference'}
+                </button>
+                <p class="text-[10px] text-center text-amber-600 dark:text-amber-400">
+                  ${isArAd ? 'إذا كان رصيد الوصل المدفوع أقل من ميزانية الإعلان، سيبقى الفرق ديناً على العميل.' : 'If paid receipt credit is short, only the difference stays as customer debt.'}
+                </p>
               </div>
               <div id="ad-funding-summary" class="text-xs text-blue-600 font-medium"></div>
             </div>
@@ -24715,7 +29155,7 @@ function renderModal() {
       }
       break;
     case 'receipt':
-      const receiptCustomers = getVisibleRecords(state.customers);
+      const receiptCustomers = getCustomersVisibleToCurrentUser();
       const receiptData = state.modalData || {};
       const isAdminReceipt = isCurrentUserAdmin();
       const defaultRate1 = getDefaultRate1(PAYMENT_METHODS[0]);
@@ -25186,7 +29626,7 @@ function renderModal() {
                   const targetCustomer = state.customers.find(c => c.id === t.toCustomerId);
                   const name = targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown');
                   return `<div class="flex justify-between">
-                    <span>${new Date(t.date).toLocaleString()}</span>
+                    <span>${new Date(t.date).toLocaleString(appDateLocale())}</span>
                     <span class="font-medium">$${(t.amountUSD || 0).toFixed(2)} → ${name}</span>
                   </div>`;
                 }).join('')}
@@ -25316,7 +29756,7 @@ function renderModal() {
           <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl">
             <div class="text-sm font-medium text-blue-700 dark:text-blue-300">${isArTU ? 'تفاصيل الإعلان' : 'Ad Details'}</div>
             <div class="text-lg font-bold text-blue-600 mt-1">${isArTU ? 'الأصلي' : 'Original'}: $${(parseFloat(topUpBase) || 0).toFixed(2)} → ${isArTU ? 'الجديد' : 'New'}: <span id="topup-preview-new">$${((parseFloat(topUpBase) || 0) + topUpWorkingTotal).toFixed(2)}</span></div>
-            ${topUpBaseEndOk ? `<div class="text-sm font-medium text-blue-700 dark:text-blue-300 mt-1">${isArTU ? 'النهاية' : 'End'}: <span id="topup-preview-end" class="font-bold">${topUpNewEnd.toLocaleDateString()}</span> <span id="topup-preview-end-extra" class="text-xs">${topUpWorkingDays > 0 ? (isArTU ? `(الأصلية ${new Date(topUpBaseEnd).toLocaleDateString()} + ${topUpWorkingDays} يوم)` : `(original ${new Date(topUpBaseEnd).toLocaleDateString()} + ${topUpWorkingDays} day${topUpWorkingDays > 1 ? 's' : ''})`) : ''}</span></div>` : ''}
+            ${topUpBaseEndOk ? `<div class="text-sm font-medium text-blue-700 dark:text-blue-300 mt-1">${isArTU ? 'النهاية' : 'End'}: <span id="topup-preview-end" class="font-bold">${topUpNewEnd.toLocaleDateString(appDateLocale())}</span> <span id="topup-preview-end-extra" class="text-xs">${topUpWorkingDays > 0 ? (isArTU ? `(الأصلية ${new Date(topUpBaseEnd).toLocaleDateString(appDateLocale())} + ${topUpWorkingDays} يوم)` : `(original ${new Date(topUpBaseEnd).toLocaleDateString(appDateLocale())} + ${topUpWorkingDays} day${topUpWorkingDays > 1 ? 's' : ''})`) : ''}</span></div>` : ''}
             ${topUpAvailable !== null ? `<div class="text-sm font-bold mt-1 text-blue-700 dark:text-blue-300">${isArTU ? 'المتاح من وصولات التمويل' : 'Available on funding receipt(s)'}: <span id="topup-preview-available" class="${topUpAvailable < 0.01 ? 'text-rose-600' : 'text-emerald-600'}">$${topUpAvailable.toFixed(2)}</span></div>` : ''}
             ${existingTopUps.length > 0 ? `<div class="text-xs text-slate-500 mt-1">${isArTU ? 'إجمالي الشحنات' : 'Total top-ups'}: $${topUpWorkingTotal.toFixed(2)}</div>` : ''}
           </div>
@@ -25326,7 +29766,7 @@ function renderModal() {
               <div class="p-3 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-between">
                 <div>
                   <div class="font-medium">$${topup.amount}${(parseInt(topup.extendDays, 10) || 0) > 0 ? ` <span class="text-xs font-bold text-emerald-600">${isArTU ? `+${topup.extendDays} يوم` : `+${topup.extendDays} day${topup.extendDays > 1 ? 's' : ''}`}</span>` : ''}</div>
-                  <div class="text-xs text-slate-500">${new Date(topup.date).toLocaleDateString()} - ${Security.escapeHtml(topup.note || '')}</div>
+                  <div class="text-xs text-slate-500">${new Date(topup.date).toLocaleDateString(appDateLocale())} - ${Security.escapeHtml(topup.note || '')}</div>
                 </div>
                 <button type="button" onclick="removeTopUp(${idx})" class="text-rose-500 hover:text-rose-700">
                   <i data-lucide="x-circle" class="w-4 h-4"></i>
@@ -25725,6 +30165,8 @@ function renderModal() {
   let modalSize = 'max-w-md';
   if (state.activeModal === 'split-payments' || state.activeModal === 'top-ups' || state.activeModal === 'refund') {
     modalSize = 'max-w-4xl';
+  } else if (state.activeModal === 'customer-merge') {
+    modalSize = 'max-w-3xl';
   } else if (state.activeModal === 'ad') {
     modalSize = 'max-w-xl'; // Wider modal for new Ad design with sections
   } else if (state.activeModal === 'receipt') {
@@ -25737,13 +30179,65 @@ function renderModal() {
     modalSize = 'max-w-2xl'; // Room for the order line rows
   }
   // Make Ad/Receipt modals scroll on the whole panel (header + content) to avoid "nothing shows" confusion.
-  const modalScrollable = (state.activeModal === 'receipt' || state.activeModal === 'ad')
-    ? ' max-h-[90vh] overflow-y-auto custom-scrollbar'
+  const modalScrollable = state.activeModal === 'customer-merge'
+    ? ' max-h-[90dvh] overflow-y-auto custom-scrollbar'
+    : (state.activeModal === 'receipt' || state.activeModal === 'ad')
+      ? ' max-h-[90vh] overflow-y-auto custom-scrollbar'
+      : '';
+  const modalAccessibility = state.activeModal === 'customer-merge'
+    ? ' role="dialog" aria-modal="true" aria-labelledby="customer-merge-title"'
     : '';
-  modal.innerHTML = `<div class="glass-panel rounded-2xl p-6 w-full ${modalSize}${modalScrollable}" onclick="event.stopPropagation()">${modalContent}</div>`;
+  modal.innerHTML = `<div class="glass-panel rounded-2xl p-6 w-full ${modalSize}${modalScrollable}"${modalAccessibility} onclick="event.stopPropagation()">${modalContent}</div>`;
   modal.onclick = closeModal;
   document.body.appendChild(modal);
   IconQueue.schedule(modal);
+
+  if (state.activeModal === 'customer-merge') {
+    const dialog = modal.firstElementChild;
+    dialog?.addEventListener('keydown', event => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        closeModal();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = Array.from(dialog.querySelectorAll(
+        'button:not([disabled]), select:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
+      )).filter(element => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.querySelector('#customer-merge-title')?.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!focusable.includes(document.activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+    setTimeout(() => {
+      if (!dialog?.isConnected) return;
+      const previousControl = previousCustomerMergeFocusId
+        ? dialog.querySelector(`#${previousCustomerMergeFocusId}`)
+        : null;
+      const focusTarget = previousControl || dialog.querySelector('#customer-merge-title');
+      if (focusTarget && typeof focusTarget.focus === 'function') {
+        try {
+          focusTarget.focus({ preventScroll: true });
+        } catch (_) {
+          focusTarget.focus();
+        }
+      }
+    }, 0);
+  }
   
   // Initialize receipt totals if it's a receipt modal
   if (state.activeModal === 'receipt') {
@@ -26075,6 +30569,68 @@ async function handleModalSubmit() {
       showNotification(isArCP ? 'نجاح' : 'Success', isArCP ? 'تم تغيير كلمة المرور بنجاح' : 'Password changed successfully', 'success');
       break;
     }
+    case 'customer-merge': {
+      const isArMerge = state.language === 'ar';
+      if (!isCurrentUserAdmin()) {
+        showNotification(isArMerge ? 'تم رفض الوصول' : 'Access Denied', isArMerge ? 'دمج العملاء متاح للمدير فقط.' : 'Only an administrator can merge customers.', 'error');
+        return;
+      }
+      if (!isServerModeEnabled()) {
+        showNotification(isArMerge ? 'يتطلب اتصال الخادم' : 'Server connection required', isArMerge ? 'أعد الاتصال بالخادم ثم حاول مرة أخرى.' : 'Reconnect to the server and try again.', 'warning');
+        return;
+      }
+      if (!document.getElementById('customer-merge-confirm')?.checked) {
+        showNotification(isArMerge ? 'التأكيد مطلوب' : 'Confirmation required', isArMerge ? 'أكد أولاً أن السجلين لنفس العميل.' : 'Confirm that both records belong to the same customer.', 'warning');
+        return;
+      }
+      const keepCustomerId = String(state.modalData?.keepCustomerId || '');
+      const duplicateCustomerId = String(state.modalData?.duplicateCustomerId || '');
+      const keepCustomer = state.customers.find(customer => customer && !customer._deleted && String(customer.id) === keepCustomerId);
+      const duplicateCustomer = state.customers.find(customer => customer && !customer._deleted && String(customer.id) === duplicateCustomerId);
+      if (!keepCustomer || !duplicateCustomer || keepCustomerId === duplicateCustomerId) {
+        showNotification(isArMerge ? 'اختيار غير صالح' : 'Invalid selection', isArMerge ? 'اختر سجلين مختلفين ثم حاول مرة أخرى.' : 'Choose two different active records and try again.', 'error');
+        return;
+      }
+      const keepPhoneKeys = new Set(getCustomerPhoneEntries(keepCustomer).map(entry => entry.key));
+      const sharesPhone = getCustomerPhoneEntries(duplicateCustomer).some(entry => keepPhoneKeys.has(entry.key));
+      if (!sharesPhone) {
+        showNotification(isArMerge ? 'تغيرت البيانات' : 'Data changed', isArMerge ? 'لم يعد السجلان يشتركان في رقم هاتف. حدّث الصفحة وحاول مرة أخرى.' : 'These records no longer share a phone number. Refresh and try again.', 'warning');
+        return;
+      }
+      const expectedKeepLastModified = Number(keepCustomer._lastModified);
+      const expectedDuplicateLastModified = Number(duplicateCustomer._lastModified);
+      if (!Number.isSafeInteger(expectedKeepLastModified) || !Number.isSafeInteger(expectedDuplicateLastModified)) {
+        showNotification(isArMerge ? 'يلزم التحديث' : 'Refresh required', isArMerge ? 'السجلان لا يحتويان على نسخة خادم صالحة. حدّث الصفحة ثم حاول.' : 'These records do not have a valid server version. Refresh and try again.', 'warning');
+        return;
+      }
+      const response = await apiMergeCustomers({
+        keepCustomerId,
+        duplicateCustomerId,
+        expectedKeepLastModified,
+        expectedDuplicateLastModified,
+        idempotencyKey: String(state.modalData?.idempotencyKey || '') || Security.generateSecureId('customer-merge')
+      });
+      if (!response.duplicate?.data?._deleted) throw new Error('The server did not archive the duplicate customer. Nothing was applied locally.');
+      applyValidatedServerEntityBatch([
+        { collection: 'customers', entity: response.customer },
+        ...response.updatedPages.map(entity => ({ collection: 'pages', entity })),
+        ...response.updatedReceipts.map(entity => ({ collection: 'receipts', entity })),
+        ...response.updatedAds.map(entity => ({ collection: 'ads', entity })),
+        { collection: 'customers', entity: response.duplicate }
+      ], 'customerMerge');
+      addAuditLog(
+        'Merge',
+        keepCustomerId,
+        `Merged duplicate customer ${duplicateCustomerId} into ${keepCustomerId}`,
+        { duplicateCustomerId, replayed: response.replayed === true }
+      );
+      showNotification(
+        isArMerge ? 'تم الدمج بأمان' : 'Customers merged',
+        isArMerge ? `تم نقل جميع الروابط إلى «${keepCustomer.name || ''}» وأرشفة السجل المكرر.` : `All links now belong to “${keepCustomer.name || 'the kept customer'}”; the duplicate was archived.`,
+        'success'
+      );
+      break;
+    }
     case 'customer': {
       const isAr = state.language === 'ar';
       // Whitespace-only input satisfies the HTML `required` attribute, so
@@ -26087,7 +30643,7 @@ async function handleModalSubmit() {
 
       // Collect all phone numbers
       const phoneInputs = document.querySelectorAll('.customer-phone');
-      const phones = Array.from(phoneInputs).map(input => input.value.trim()).filter(p => p);
+      const phones = dedupeCustomerPhoneValues(Array.from(phoneInputs).map(input => input.value.trim()).filter(p => p));
       // A whitespace-only phone passes `required` but is filtered out above —
       // without this check the customer is saved with zero phone numbers.
       if (phones.length === 0) {
@@ -26103,7 +30659,7 @@ async function handleModalSubmit() {
           isAr ? 'رقم هاتف مكرر' : 'Duplicate Phone Number',
           isAr
             ? `رقم الهاتف "${duplicatePhone.phone}" مسجّل بالفعل للعميل "${duplicatePhone.customerName}". الرجاء استخدام رقم آخر.`
-            : `The phone number "${duplicatePhone.phone}" is already linked to customer "${duplicatePhone.customerName}". Please use a different phone number.`,
+            : `The phone number "${duplicatePhone.phone}" is already linked to customer "${duplicatePhone.customerName}". Use that existing customer instead of creating another.${isCurrentUserAdmin() ? ' To combine old duplicates, close this form and choose Find duplicates on the Customers page.' : ''}`,
           'error'
         );
         return; // Stop here, don't close modal
@@ -26302,6 +30858,29 @@ async function handleModalSubmit() {
             showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'أحد الوصولات المختارة مفقود أو تم حذفه.' : 'One of the selected receipts is missing or was deleted.', 'error');
             return;
           }
+          if (String(receipt.customerId || '') !== String(customerId || '')) {
+            showNotification(
+              isArSubAd ? 'تنبيه' : 'Validation',
+              isArSubAd
+                ? 'لا يمكن تمويل الإعلان من وصل يخص عميلاً آخر. اختر وصلاً مدفوعاً لهذا العميل.'
+                : "An ad cannot be funded from another customer's receipt. Choose a Paid receipt for this customer.",
+              'error'
+            );
+            return;
+          }
+          const receiptPaymentState = typeof getReceiptPaymentState === 'function'
+            ? getReceiptPaymentState(receipt)
+            : ((receipt.isPaid === true || String(receipt.status || '').trim().toLowerCase() === 'paid') ? 'paid' : 'not_paid');
+          if (receiptPaymentState !== 'paid') {
+            showNotification(
+              isArSubAd ? 'تنبيه' : 'Validation',
+              isArSubAd
+                ? 'الوصل الحالي لم يعد صالحاً للتمويل. اختر وصلاً مدفوعاً بديلاً.'
+                : 'The current receipt is no longer eligible. Choose a Paid replacement receipt.',
+              'error'
+            );
+            return;
+          }
           // Calculate remaining balance (total - used - transferred)
           const usageStats = getReceiptUsageStats(receipt);
           let remaining = usageStats.remainingUSD || 0;
@@ -26315,11 +30894,12 @@ async function handleModalSubmit() {
           }
 
           if (plannedTotal > remaining + 0.0001) {
+            const shortfall = Math.max(plannedTotal - remaining, 0);
             showNotification(
               isArSubAd ? 'تنبيه' : 'Validation',
               isArSubAd
-                ? `الصرف المخطط ($${plannedTotal.toFixed(2)}) يتجاوز الرصيد المتاح ($${remaining.toFixed(2)}) للوصل ${receipt.serialNumber || receipt.id}.`
-                : `Planned spend ($${plannedTotal.toFixed(2)}) exceeds available balance ($${remaining.toFixed(2)}) for receipt ${receipt.serialNumber || receipt.id}.`,
+                ? `مبلغ الإعلان لم يتغير. ينقص الوصل ${receipt.serialNumber || receipt.id} مبلغ $${shortfall.toFixed(2)}. أضف وصلاً ثانياً أو اختر وصلاً برصيد كافٍ.`
+                : `The ad amount was not changed. Receipt ${receipt.serialNumber || receipt.id} is short by $${shortfall.toFixed(2)}. Add a second receipt or choose one with enough balance.`,
               'error'
             );
             return;
@@ -26407,6 +30987,12 @@ async function handleModalSubmit() {
         const dueInput = document.getElementById('ad-due-amount-to-use');
         if (dueInput && linkedReceiptId) {
           dueAmountToUseUSD = parseFloat(dueInput.value) || 0;
+          // The validation branches above intentionally keep their receipt
+          // variables block-scoped. Resolve the selected receipt again here so
+          // edit add-back never depends on an out-of-scope `linkedReceipt`.
+          const selectedDueReceipt = state.receipts.find(
+            receipt => receipt && !receipt._deleted && String(receipt.id || '') === String(linkedReceiptId)
+          );
           
           // Validate: check if the amount exceeds available credit
           const dueUsage = getDeliveryReceiptDueUsage(linkedReceiptId);
@@ -26417,13 +31003,14 @@ async function handleModalSubmit() {
           if (isEdit && state.modalData?.id) {
             const existingAd = state.ads.find(a => a.id === state.modalData.id);
             if (existingAd) {
-              if (Array.isArray(existingAd.dueAllocations)) {
-                currentAdUsage = existingAd.dueAllocations
-                  .filter(a => String(a.receiptId) === String(linkedReceiptId))
-                  .reduce((sum, a) => sum + (parseFloat(a.amountUSD) || 0), 0);
-              } else if (existingAd.dueAmountToUseUSD > 0 && String(existingAd.linkedDeliveryReceiptId || existingAd.receiptId) === String(linkedReceiptId)) {
-                currentAdUsage = existingAd.dueAmountToUseUSD;
-              }
+              const explicitDueForReceipt = Array.isArray(existingAd.dueAllocations)
+                ? existingAd.dueAllocations
+                    .filter(a => String(a?.receiptId || '') === String(linkedReceiptId))
+                    .reduce((sum, a) => sum + (parseFloat(a?.amountUSD) || 0), 0)
+                : 0;
+              currentAdUsage = explicitDueForReceipt > 0
+                ? explicitDueForReceipt
+                : getAdLegacyDueMirrorUSD(existingAd, linkedReceiptId, selectedDueReceipt?.exchangeRate);
             }
           }
           
@@ -26450,9 +31037,13 @@ async function handleModalSubmit() {
         }
       }
       
-      // Capture merged paid receipt allocations (if enabled in Not Paid + Driver mode)
+      // Capture real paid receipt allocations mixed into a Not Paid ad. Driver
+      // and In Shop share the same safe UI working state; the server stores
+      // In Shop rows canonically in receiptAllocations (without a legacy mirror).
       let mergedAllocations = [];
-      if (paymentStatus === 'not_paid' && collectionMethod === 'driver' && state.tempMergeFunding?.enabled) {
+      if (paymentStatus === 'not_paid'
+          && (collectionMethod === 'driver' || collectionMethod === 'in_shop')
+          && state.tempMergeFunding?.enabled) {
         mergedAllocations = (state.tempMergeFunding.allocations || [])
           .filter(a => a.receiptId && parseFloat(a.amountUSD) > 0)
           .map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) }));
@@ -26518,11 +31109,29 @@ async function handleModalSubmit() {
       // Combine allocations: merged paid receipts for Not Paid + Driver mode
       // For paid mode, use regular allocations
       const finalAllocations = isPaid ? allocations : mergedAllocations;
+      const mergedTotal = mergedAllocations.reduce(
+        (sum, a) => sum + (parseFloat(a.amountUSD) || 0),
+        0
+      );
+
+      if (isUnpaidShop && selectedUnpaidReceiptId) {
+        amountUSD = Math.round((dueAmountToUseUSD + mergedTotal) * 100) / 100;
+        const intendedBudget = normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD);
+        if (intendedBudget > 0 && Math.abs(amountUSD - intendedBudget) > 0.005) {
+          showNotification(
+            isArSubAd ? 'تنبيه' : 'Validation',
+            isArSubAd
+              ? `الوصل غير المدفوع لا يغطي الفرق كاملاً. التمويل الحالي $${amountUSD.toFixed(2)} من الميزانية المطلوبة $${intendedBudget.toFixed(2)}. اختر وصلاً آخر أو أدخل ميزانية أصغر.`
+              : `The unpaid receipt does not cover the full difference. Current funding is $${amountUSD.toFixed(2)} of the intended $${intendedBudget.toFixed(2)}. Choose another receipt or enter a smaller budget.`,
+            'error'
+          );
+          return;
+        }
+      }
       
       // Receipt funding can cover some/all of the budget, but can never redefine
       // or exceed it. Any unfunded remainder is customer debt until payment.
       if (isUnpaidDriver) {
-        const mergedTotal = mergedAllocations.reduce((sum, a) => sum + (parseFloat(a.amountUSD) || 0), 0);
         const fundedTotal = dueAmountToUseUSD + mergedTotal;
         if (fundedTotal > amountUSD + 0.005) {
           showNotification(
@@ -26576,8 +31185,8 @@ async function handleModalSubmit() {
         dueAmountToUseUSD: dueAmountToUseUSD,
         dueAllocations: dueAllocations,
         linkedDeliveryReceiptId: linkedDeliveryReceiptId,
-        hasMergedPaidFunds: mergedAllocations.length > 0,
-        mergedPaidAllocations: mergedAllocations
+        hasMergedPaidFunds: collectionMethod === 'driver' && mergedAllocations.length > 0,
+        mergedPaidAllocations: collectionMethod === 'driver' ? mergedAllocations : []
       };
 
       // Ordinary edits do not need to re-upload unchanged base64 images. Both
@@ -26604,6 +31213,26 @@ async function handleModalSubmit() {
         }
       }
 
+      // Liquidity window integrity: growing an ad's budget in an ORDINARY
+      // edit spends money exactly like a top-up but writes no dated row.
+      // Record the growth in an append-only ledger so the liquidity window
+      // can count in-window growth of pre-window ads (capped at real spend
+      // when read; shrinking an ad is never recorded — money returning is
+      // handled by refunds).
+      if (isEdit) {
+        const priorAmountUSD = parseFloat(state.modalData?.amountUSD) || 0;
+        const growthUSD = Math.round((amountUSD - priorAmountUSD) * 100) / 100;
+        if (growthUSD > 0.005) {
+          const priorAdjustments = Array.isArray(state.modalData?.amountAdjustments)
+            ? state.modalData.amountAdjustments
+            : [];
+          adUpdates.amountAdjustments = [
+            ...priorAdjustments.map(row => ({ ...row })),
+            { delta: growthUSD, date: new Date().toISOString() }
+          ];
+        }
+      }
+
       if (isPaid && (!state.modalData || !state.modalData.collectionDate)) {
         adUpdates.collectionDate = new Date().toISOString();
       }
@@ -26623,8 +31252,8 @@ async function handleModalSubmit() {
           { key: 'paymentStatus', label: 'Payment Status', format: (v) => v || 'paid' },
           { key: 'deliveryStatus', label: 'Delivery Status', format: (v) => v || 'Office' },
           { key: 'status', label: 'Ad Status', format: (v) => v || 'Active' },
-          { key: 'startDate', label: 'Start Date', format: (v) => v ? new Date(v).toLocaleDateString() : 'N/A' },
-          { key: 'endDate', label: 'End Date', format: (v) => v ? new Date(v).toLocaleDateString() : 'N/A' }
+          { key: 'startDate', label: 'Start Date', format: (v) => v ? new Date(v).toLocaleDateString(appDateLocale()) : 'N/A' },
+          { key: 'endDate', label: 'End Date', format: (v) => v ? new Date(v).toLocaleDateString(appDateLocale()) : 'N/A' }
         ];
         
         fieldsToTrack.forEach(field => {
@@ -27160,6 +31789,12 @@ function showWalletTopupModal(userId) {
 }
 
 function closeModal() {
+  if (typeof resetReceiptCustomerRiskWarningState === 'function') {
+    resetReceiptCustomerRiskWarningState();
+  }
+  const wasCustomerMerge = state.activeModal === 'customer-merge';
+  const customerMergeReturnFocus = wasCustomerMerge ? _customerMergeReturnFocus : null;
+  if (wasCustomerMerge) _customerMergeReturnFocus = null;
   // One-shot preset used by Ads Studio's "Customer login" shortcut. Never
   // let it silently affect a later user created from the normal Users screen.
   window._newUserAccessPreset = '';
@@ -27172,6 +31807,7 @@ function closeModal() {
   // Clear temp funding states
   state.tempAdFunding = null;
   state.tempMergeFunding = null;
+  state.tempMixedReceiptTargetUSD = null;
   // Discard any pending (unsaved) photos so a cancelled upload cannot leak
   // into the next ad/receipt created in this session.
   state.tempAdPhotos = [];
@@ -27194,8 +31830,41 @@ function closeModal() {
   _clothesTempShipLines = [];
   _clothesTempOrderLines = [];
   
-  // Clear URL params (modal, id)
-  clearUrlParams(['modal', 'id']);
+  // Clear URL params (modal, id). When this dialog's opener pushed a history
+  // entry (albayanModal stamp — see updateUrlParams), consume that entry with
+  // history.back() instead: replaceState alone rewrote the entry's URL but
+  // left it stacked, so every open/close cycle cost one dead hardware-Back
+  // press on phones. Skipped when Back itself already popped the entry
+  // (_closingSurfaceFromPopstate, set by the popstate handler) — the new top
+  // entry may be a previous ?modal entry that must survive for back/forward
+  // restore. Openers that never pushed (boot deep-link error paths) fall
+  // through to the old replaceState behaviour.
+  let consumedModalHistoryEntry = false;
+  if (typeof consumeOverlayHistoryEntry === 'function' && !_closingSurfaceFromPopstate) {
+    const topHistoryEntry = window.history.state;
+    if (topHistoryEntry && topHistoryEntry.albayanModal) {
+      consumedModalHistoryEntry = consumeOverlayHistoryEntry();
+    } else if (topHistoryEntry && topHistoryEntry.overlaySentinel && topHistoryEntry.underAlbayanModal) {
+      // Phone browsers: an untracked overlay (duplicate-serial warning…)
+      // opened late over this dialog, so its sentinel sits ON TOP of the
+      // dialog's own ?modal entry — and closeModal is tearing both surfaces
+      // down at once. Consume BOTH entries: rewriting only the sentinel
+      // would leave the buried ?modal entry alive one level down, and a
+      // later Back would resurrect the dismissed dialog. The popstate that
+      // go(-2) fires is pure bookkeeping, so flag it for the router exactly
+      // like consumeOverlayHistoryEntry does. Sentinels are never pushed on
+      // desktop or in the packaged app, so this branch cannot run there.
+      _suppressOverlayPopstateUntil = Date.now() + 800;
+      try {
+        window.history.go(-2);
+        if (_overlaySentinelDepth > 0) _overlaySentinelDepth--;
+        consumedModalHistoryEntry = true;
+      } catch (_) {
+        _suppressOverlayPopstateUntil = 0;
+      }
+    }
+  }
+  if (!consumedModalHistoryEntry) clearUrlParams(['modal', 'id']);
   
   // Force remove ALL modals - be very aggressive
   document.querySelectorAll('#app-modal').forEach(el => {
@@ -27216,6 +31885,11 @@ function closeModal() {
   setTimeout(() => {
     render();
     lucide.createIcons();
+    if (wasCustomerMerge) {
+      const fallbackTrigger = document.querySelector('button[aria-haspopup="dialog"][onclick="showCustomerDuplicateMerge()"]');
+      const focusTarget = customerMergeReturnFocus?.isConnected ? customerMergeReturnFocus : fallbackTrigger;
+      if (focusTarget && typeof focusTarget.focus === 'function') focusTarget.focus();
+    }
   }, 50);
 }
 
@@ -27300,7 +31974,7 @@ async function releaseCanceledDeliveryDueFunding(receiptId) {
   let touched = 0;
   const affectedAds = state.ads.filter(a => a && !a._deleted && a.recordType !== 'receipt' && (
     (Array.isArray(a.dueAllocations) && a.dueAllocations.some(al => String(al?.receiptId || '') === rid)) ||
-    (String(a.linkedDeliveryReceiptId || '') === rid && (parseFloat(a.dueAmountToUseUSD) || 0) > 0)
+    (isAdLegacyDueMirrorForReceipt(a, rid) && getAdLegacyDueMirrorUSD(a, rid) > 0)
   ));
   for (const ad of affectedAds) {
     const updates = {};
@@ -27308,9 +31982,13 @@ async function releaseCanceledDeliveryDueFunding(receiptId) {
       const kept = ad.dueAllocations.filter(al => String(al?.receiptId || '') !== rid);
       if (kept.length !== ad.dueAllocations.length) updates.dueAllocations = kept;
     }
-    // Legacy single-field shape predating dueAllocations.
-    if (String(ad.linkedDeliveryReceiptId || '') === rid && (parseFloat(ad.dueAmountToUseUSD) || 0) > 0) {
+    // Legacy single-field shape predating dueAllocations. The mirror identity
+    // (linkedDeliveryReceiptId, or the older receiptId forms) comes from the
+    // shared reader so this release clears exactly the money the balance
+    // readers counted — both USD and LYD mirrors, like the server does.
+    if (isAdLegacyDueMirrorForReceipt(ad, rid) && getAdLegacyDueMirrorUSD(ad, rid) > 0) {
       updates.dueAmountToUseUSD = 0;
+      updates.dueAmountToUseLYD = 0;
     }
     if (Object.keys(updates).length) {
       const saved = await updateRecord(state.ads, ad.id, updates);
@@ -28378,12 +33056,15 @@ function renderClothesProductCard(p) {
       : (qty <= CLOTHES_LOW_STOCK_THRESHOLD
         ? 'border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400'
         : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300');
+    // touch-action: manipulation on the +/- steppers: the page is zoomable
+    // (user-scalable=yes), so without it iOS Safari can eat a rapid second
+    // tap as double-tap smart zoom instead of a second increment.
     return `
       <span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium border ${chipClass}">
         <span>${Security.escapeHtml(label)}</span>
-        <button type="button" onclick="adjustClothesVariantQty('${p.id}', ${idx}, -1)" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-rose-200 dark:hover:bg-rose-800 flex items-center justify-center leading-none" title="-1">−</button>
+        <button type="button" onclick="adjustClothesVariantQty('${p.id}', ${idx}, -1)" style="touch-action: manipulation" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-rose-200 dark:hover:bg-rose-800 flex items-center justify-center leading-none" title="-1">−</button>
         <span class="font-bold">${qty}</span>
-        <button type="button" onclick="adjustClothesVariantQty('${p.id}', ${idx}, 1)" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-emerald-200 dark:hover:bg-emerald-800 flex items-center justify-center leading-none" title="+1">+</button>
+        <button type="button" onclick="adjustClothesVariantQty('${p.id}', ${idx}, 1)" style="touch-action: manipulation" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-emerald-200 dark:hover:bg-emerald-800 flex items-center justify-center leading-none" title="+1">+</button>
       </span>
     `;
   }).join('');
@@ -30329,14 +35010,37 @@ function printClothesOrderSlip(orderId) {
   `;
   document.body.appendChild(slip);
   document.body.classList.add('print-single');
+  // Phones don't block on window.print(): the native print sheet stays open
+  // while page JS keeps running, afterprint fires during pagination (sheet
+  // still up), and WebKit/Blink re-paginate from the LIVE DOM whenever the
+  // user picks a printer or changes paper/range in that sheet. The old
+  // afterprint/3s-timer cleanup therefore tore the slip down mid-preview and
+  // a re-paginated print regressed to the full app page. Instead: re-apply
+  // the print markup on every beforeprint pass, and only tear down on the
+  // first user interaction with the page — impossible while the native sheet
+  // covers it — with a long timer as the last-resort fallback for webviews
+  // that fire no print events at all. Harmless meanwhile: every
+  // .print-single/.print-target rule lives inside @media print and the slip
+  // node is parked off-screen, so the lingering markup has zero on-screen
+  // effect.
+  const applyPrintMarkup = () => {
+    if (!slip.isConnected) document.body.appendChild(slip);
+    document.body.classList.add('print-single');
+  };
+  let cleanupTimer = 0;
   const cleanup = () => {
     document.body.classList.remove('print-single');
     slip.remove();
-    window.removeEventListener('afterprint', cleanup);
+    window.removeEventListener('beforeprint', applyPrintMarkup);
+    window.removeEventListener('pointerdown', cleanup, true);
+    window.removeEventListener('keydown', cleanup, true);
+    clearTimeout(cleanupTimer);
   };
-  window.addEventListener('afterprint', cleanup);
-  // Safety net for webviews that never fire afterprint (printReceiptCard pattern)
-  setTimeout(cleanup, 3000);
+  window.addEventListener('beforeprint', applyPrintMarkup);
+  // keydown also disarms so a follow-up Ctrl+P prints the full page again.
+  window.addEventListener('pointerdown', cleanup, { once: true, capture: true });
+  window.addEventListener('keydown', cleanup, { once: true, capture: true });
+  cleanupTimer = setTimeout(cleanup, 60000);
   window.print();
 }
 
@@ -31632,6 +36336,50 @@ function renderAdsStudioConnections() {
   ];
   return `<section class="grid gap-6 lg:grid-cols-[1.1fr_1fr]"><div class="glass-panel rounded-3xl p-5 sm:p-7"><div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-600 to-cyan-500 flex items-center justify-center text-white mb-5"><i data-lucide="facebook" class="w-7 h-7"></i></div><span class="inline-flex rounded-full bg-amber-100 dark:bg-amber-900/30 px-3 py-1 text-xs font-bold text-amber-800 dark:text-amber-200">${isAr ? 'قيد تجهيز تكامل ميتا الرسمي' : 'Official Meta integration in preparation'}</span><h2 class="mt-4 text-2xl font-black text-slate-900 dark:text-white">${isAr ? 'الربط الآمن يأتي بعد موافقة ميتا' : 'Secure connection follows Meta approval'}</h2><p class="mt-3 text-slate-500 dark:text-slate-400">${isAr ? 'يمكنك الآن إنشاء الطلبات ومراجعتها بالكامل. النشر المباشر سيفتح فقط بعد حصول تطبيق البيان على الصلاحيات المطلوبة لإدارة حسابات إعلانية تخص عملاء آخرين.' : 'Campaign creation and approval already work. Direct publishing unlocks only after Albayan receives the permissions required to manage third-party client ad accounts.'}</p><div class="mt-5 rounded-2xl bg-red-50 dark:bg-red-900/20 p-4 text-sm text-red-800 dark:text-red-200 flex items-start gap-3"><i data-lucide="shield-alert" class="w-5 h-5 flex-shrink-0"></i><span>${isAr ? 'لن نطلب كلمة مرور فيسبوك ولن نخزن رمز ميتا داخل تطبيق الهاتف أو بيانات الحملة.' : 'We will never ask for a Facebook password or store a Meta token in the mobile app or campaign records.'}</span></div></div><div class="glass-panel rounded-3xl p-5 sm:p-7"><h3 class="text-lg font-black text-slate-900 dark:text-white">${isAr ? 'خطة الإطلاق' : 'Launch checklist'}</h3><div class="mt-5 space-y-3">${checklist.map(([icon,label], index) => `<div class="flex items-center gap-3 rounded-xl border border-slate-200 dark:border-slate-700 p-3"><span class="w-9 h-9 rounded-xl ${index < 2 ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-200' : 'bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300'} flex items-center justify-center"><i data-lucide="${icon}" class="w-4 h-4"></i></span><span class="flex-1 text-sm font-bold text-slate-700 dark:text-slate-200">${label}</span><i data-lucide="${index < 2 ? 'clock-3' : 'circle-dashed'}" class="w-4 h-4 text-slate-400"></i></div>`).join('')}</div></div></section>`;
 }
+function getAdCustomerConfirmationState(ad, spentValue, amountValue = ad?.amountUSD) {
+  const amount = Number(amountValue);
+  const spent = Number(spentValue);
+  const amountMinor = Number.isFinite(amount) ? Math.round(amount * 100) : NaN;
+  const spentMinor = Number.isFinite(spent) ? Math.round(spent * 100) : NaN;
+  const valid = Number.isSafeInteger(amountMinor)
+    && Number.isSafeInteger(spentMinor)
+    && amountMinor >= 0
+    && spentMinor >= 0
+    && spentMinor <= amountMinor;
+  const remainingMinor = valid ? amountMinor - spentMinor : null;
+  const storedSpentRaw = ad?.spentUSD;
+  const storedSpent = Number(storedSpentRaw);
+  const storedSpentMinor = storedSpentRaw !== undefined
+    && storedSpentRaw !== null
+    && String(storedSpentRaw).trim() !== ''
+    && Number.isFinite(storedSpent)
+    ? Math.round(storedSpent * 100)
+    : null;
+  const confirmedRemainingMinor = Number.isSafeInteger(storedSpentMinor)
+    ? Math.max(amountMinor - storedSpentMinor, 0)
+    : null;
+  const existingConfirmationApplies = ad?.remainingCustomerInformed === true
+    && valid
+    && remainingMinor > 0
+    && confirmedRemainingMinor === remainingMinor;
+  return { valid, remainingMinor, existingConfirmationApplies };
+}
+
+function syncAdCustomerInformedControl(ad, informedInput, spentValue, amountValue = ad?.amountUSD) {
+  const confirmation = getAdCustomerConfirmationState(ad, spentValue, amountValue);
+  if (!informedInput) return confirmation;
+  if (confirmation.existingConfirmationApplies) {
+    informedInput.checked = true;
+    informedInput.disabled = true;
+  } else {
+    // Any changed/invalid spend invalidates the old check. The user must
+    // actively check it again after telling the customer the new remainder.
+    informedInput.checked = false;
+    informedInput.disabled = !confirmation.valid || confirmation.remainingMinor <= 0;
+  }
+  return confirmation;
+}
+
 function stopAd(id) {
   // Permission check
   if (!canActOnRecord('ads', 'stopAd', state.ads.find(a => a.id === id)?.creatorId)) {
@@ -31647,6 +36395,7 @@ function stopAd(id) {
   const adAmountUSD = ad.amountUSD || 0;
   const currentSpentUSD = ad.spentUSD || 0;
   const isAlreadyStopped = ad.status === 'Stopped';
+  const alreadyInformed = ad.remainingCustomerInformed === true;
   const previousRemaining = isAlreadyStopped ? (adAmountUSD - currentSpentUSD) : 0;
   
   // Calculate current remaining from receipt allocations
@@ -31676,7 +36425,7 @@ function stopAd(id) {
               <strong>${isAr ? 'العميل' : 'Customer'}:</strong> ${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}<br>
               <strong>${isAr ? 'مبلغ الإعلان' : 'Ad Amount'}:</strong> $${adAmountUSD.toFixed(2)}<br>
               <strong>${isAr ? 'المخصص حالياً' : 'Currently Allocated'}:</strong> $${totalAllocated.toFixed(2)}
-              ${isAlreadyStopped && ad.stoppedAt ? `<br><strong>${isAr ? 'تاريخ الإيقاف' : 'Stopped On'}:</strong> ${new Date(ad.stoppedAt).toLocaleString()}` : ''}
+              ${isAlreadyStopped && ad.stoppedAt ? `<br><strong>${isAr ? 'تاريخ الإيقاف' : 'Stopped On'}:</strong> ${new Date(ad.stoppedAt).toLocaleString(appDateLocale())}` : ''}
             </p>
           </div>
           
@@ -31721,6 +36470,20 @@ function stopAd(id) {
               <span class="text-sm font-bold text-emerald-600" id="stop-ad-remaining">$${(adAmountUSD - currentSpentUSD).toFixed(2)}</span>
             </div>
           </div>
+
+          <label class="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-900/50 ${alreadyInformed ? 'cursor-default' : 'cursor-pointer'}">
+            <input
+              id="stop-ad-customer-informed"
+              type="checkbox"
+              class="mt-0.5 h-5 w-5 shrink-0 accent-emerald-600"
+              ${alreadyInformed ? 'checked disabled' : ''}
+              ${!alreadyInformed && adAmountUSD - currentSpentUSD <= 0 ? 'disabled' : ''}
+            />
+            <span>
+              <span class="block text-sm font-bold text-slate-800 dark:text-slate-100">${isAr ? 'أؤكد أنني أبلغت العميل بالمبلغ المتبقي' : 'I confirm that I told the customer about the remaining amount'}</span>
+              <span id="stop-ad-customer-informed-help" class="block text-xs text-slate-500">${alreadyInformed && ad.remainingCustomerInformedAt ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale()) : (isAr ? 'إذا تغيّر المصروف، أبلغ العميل بالمبلغ المتبقي الجديد ثم حدّد هذا المربع مرة أخرى.' : 'If the spend changes, tell the customer the new remaining amount and check this again.')}</span>
+            </span>
+          </label>
           
           <div class="flex space-x-3 pt-2">
             <button 
@@ -31755,13 +36518,30 @@ function stopAd(id) {
   const spentInput = document.getElementById('stop-ad-spent');
   const spentDisplay = document.getElementById('stop-ad-spent-display');
   const remainingDisplay = document.getElementById('stop-ad-remaining');
+  const informedInput = document.getElementById('stop-ad-customer-informed');
+  const informedHelp = document.getElementById('stop-ad-customer-informed-help');
   
   if (spentInput && spentDisplay && remainingDisplay) {
     spentInput.addEventListener('input', function() {
-      const spent = parseFloat(this.value) || 0;
+      const raw = String(this.value || '').trim();
+      const spent = Number(raw);
+      if (!raw || !Number.isFinite(spent)) {
+        spentDisplay.textContent = '—';
+        remainingDisplay.textContent = '—';
+        syncAdCustomerInformedControl(ad, informedInput, NaN, adAmountUSD);
+        return;
+      }
       const remaining = Math.max(adAmountUSD - spent, 0);
       spentDisplay.textContent = '$' + spent.toFixed(2);
       remainingDisplay.textContent = '$' + remaining.toFixed(2);
+      const confirmation = syncAdCustomerInformedControl(ad, informedInput, spent, adAmountUSD);
+      if (informedHelp) {
+        informedHelp.textContent = confirmation.existingConfirmationApplies && ad.remainingCustomerInformedAt
+          ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale())
+          : (isAr
+              ? 'تغيّر المبلغ المتبقي. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع مرة أخرى.'
+              : 'The remaining amount changed. Tell the customer the new amount, then check this again.');
+      }
     });
     
     // Focus on input
@@ -31769,15 +36549,47 @@ function stopAd(id) {
   }
 }
 
+function updateReconciliationPreview(id) {
+  const ad = state.ads.find(a => String(a.id) === String(id));
+  if (!ad) return;
+  const input = document.getElementById(`reconciliation-spent-${id}`);
+  const remainingDisplay = document.getElementById(`reconciliation-remaining-${id}`);
+  const informedInput = document.getElementById(`reconciliation-informed-${id}`);
+  const informedHelp = document.getElementById(`reconciliation-informed-help-${id}`);
+  if (!input || !remainingDisplay) return;
+  const raw = String(input.value || '').trim();
+  const spent = Number(raw);
+  if (!raw || !Number.isFinite(spent)) {
+    remainingDisplay.textContent = '—';
+    syncAdCustomerInformedControl(ad, informedInput, NaN);
+    return;
+  }
+  const amount = Math.max(Number(ad.amountUSD) || 0, 0);
+  const remaining = Math.max(amount - spent, 0);
+  remainingDisplay.textContent = '$' + remaining.toFixed(2);
+  const confirmation = syncAdCustomerInformedControl(ad, informedInput, spent, amount);
+  if (informedInput && !canActOnRecord('ads', 'stopAd', ad.creatorId || ad.createdBy)) {
+    informedInput.disabled = true;
+  }
+  if (informedHelp) {
+    const isAr = state.language === 'ar';
+    informedHelp.textContent = confirmation.existingConfirmationApplies
+      ? (ad.remainingCustomerInformedAt ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale()) : (isAr ? 'تم حفظ هذا التأكيد للمبلغ الحالي.' : 'This confirmation is saved for the current amount.'))
+      : (isAr
+          ? 'تغيّر المبلغ المتبقي. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع مرة أخرى.'
+          : 'The remaining amount changed. Tell the customer the new amount, then check this again.');
+  }
+}
+
 const _pendingAdStopAttempts = new Map();
 
-function getAdStopAttempt(ad, spentMinorUSD) {
+function getAdStopAttempt(ad, spentMinorUSD, customerInformed = false) {
   const adId = String(ad?.id || '');
   const expectedLastModified = Number(ad?._lastModified);
   if (!Number.isSafeInteger(expectedLastModified) || expectedLastModified < 0) {
     throw new Error('This ad is missing its server version. Refresh and try again.');
   }
-  const fingerprint = JSON.stringify({ adId, spentMinorUSD, expectedLastModified });
+  const fingerprint = JSON.stringify({ adId, spentMinorUSD, customerInformed: customerInformed === true, expectedLastModified });
   const prior = _pendingAdStopAttempts.get(adId);
   if (prior?.fingerprint === fingerprint) return prior;
   if (prior?.promise) return prior;
@@ -31798,10 +36610,14 @@ function completeAdStopAttempt(attempt) {
   }
 }
 
-async function confirmStopAd(id) {
+async function confirmStopAd(id, source = 'modal') {
   const isAr = state.language === 'ar';
   const storedAd = state.ads.find(a => a.id === id);
   if (!storedAd) return;
+  if (!canActOnRecord('ads', 'stopAd', storedAd.creatorId || storedAd.createdBy)) {
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'لا توجد صلاحية لتسوية هذا الإعلان' : 'You do not have permission to reconcile this ad', 'error');
+    return;
+  }
   // Work on a detached copy. Mutating the live record before updateRecord()
   // captured its rollback snapshot made a failed server PATCH impossible to
   // undo and still allowed the success path to continue.
@@ -31815,16 +36631,35 @@ async function confirmStopAd(id) {
       : storedAd.stopAllocationBaseline
   };
   
-  const spentInput = document.getElementById('stop-ad-spent');
+  const isReconciliation = source === 'reconciliation';
+  const inputPrefix = isReconciliation ? `reconciliation-${id}` : 'stop-ad';
+  const spentInput = document.getElementById(`${inputPrefix}-spent`);
   if (!spentInput) return;
-  
-  const spentUSD = parseFloat(spentInput.value) || 0;
+
+  const rawSpent = String(spentInput.value || '').trim();
+  const spentUSD = Number(rawSpent);
   const adAmountUSD = ad.amountUSD || 0;
+
+  if (!rawSpent || !Number.isFinite(spentUSD)) {
+    showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'أدخل المبلغ الذي صرفه فيسبوك فعلياً.' : 'Enter the amount Facebook actually spent.', 'error');
+    return;
+  }
   
   if (spentUSD < 0 || spentUSD > adAmountUSD) {
     showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'يجب أن يكون المبلغ المصروف بين صفر ومبلغ الإعلان' : 'Spent amount must be between 0 and ad amount', 'error');
     return;
   }
+  const informedInput = document.getElementById(
+    isReconciliation ? `reconciliation-informed-${id}` : 'stop-ad-customer-informed'
+  );
+  const confirmation = getAdCustomerConfirmationState(storedAd, spentUSD, adAmountUSD);
+  // An already-saved, disabled check is not a fresh confirmation. The server
+  // will preserve it when the remainder is unchanged; a changed remainder is
+  // confirmed only after the user actively checks the re-enabled control.
+  const customerInformed = confirmation.remainingMinor > 0
+    && confirmation.existingConfirmationApplies !== true
+    && informedInput?.checked === true
+    && informedInput.disabled !== true;
 
   if (isServerModeEnabled()) {
     const spentMinorUSD = Math.round(spentUSD * 100);
@@ -31834,18 +36669,20 @@ async function confirmStopAd(id) {
     }
     let attempt;
     try {
-      attempt = getAdStopAttempt(storedAd, spentMinorUSD);
+      attempt = getAdStopAttempt(storedAd, spentMinorUSD, customerInformed);
     } catch (error) {
       showNotification(isAr ? 'تعذر الحفظ' : 'Ad Not Saved', error.message, 'error');
       return;
     }
     if (attempt.promise) return await attempt.promise;
-    const submitButton = document.getElementById('stop-ad-submit');
+    const submitButtonId = isReconciliation ? `reconciliation-submit-${id}` : 'stop-ad-submit';
+    const submitButton = document.getElementById(submitButtonId);
     if (submitButton) submitButton.disabled = true;
     attempt.promise = (async () => {
       try {
         const response = await apiStopAd(storedAd.id, {
           spentMinorUSD,
+          customerInformed,
           idempotencyKey: attempt.idempotencyKey,
           expectedLastModified: attempt.expectedLastModified
         });
@@ -31879,7 +36716,7 @@ async function confirmStopAd(id) {
         return false;
       } finally {
         attempt.promise = null;
-        const liveButton = document.getElementById('stop-ad-submit');
+        const liveButton = document.getElementById(submitButtonId);
         if (liveButton) liveButton.disabled = false;
       }
     })();
@@ -32025,6 +36862,19 @@ async function confirmStopAd(id) {
     ad.stoppedAt = new Date().toISOString();
   }
   ad.lastUpdated = new Date().toISOString();
+  const informedNow = confirmation.remainingMinor > 0
+    && (confirmation.existingConfirmationApplies || customerInformed);
+  ad.remainingCustomerInformed = informedNow;
+  if (confirmation.existingConfirmationApplies) {
+    ad.remainingCustomerInformedAt = storedAd.remainingCustomerInformedAt || new Date().toISOString();
+    ad.remainingCustomerInformedBy = storedAd.remainingCustomerInformedBy || state.currentUser?.id || '';
+  } else if (customerInformed) {
+    ad.remainingCustomerInformedAt = new Date().toISOString();
+    ad.remainingCustomerInformedBy = state.currentUser?.id || '';
+  } else {
+    delete ad.remainingCustomerInformedAt;
+    delete ad.remainingCustomerInformedBy;
+  }
 
   // Apply the planned allocation amounts (+ audit trail per receipt).
   // MONEY-MATH: zero-amount entries are intentionally KEPT (not filtered out)
@@ -32236,27 +37086,118 @@ async function updateExchangeRate(value) {
   showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث سعر الصرف' : 'Exchange rate updated', 'success');
 }
 
+// Start (or move) the liquidity tracking window. Money-critical and
+// deliberately Admin-only: the chosen date decides which cash counts as "new",
+// so nobody below Admin may move it. Append-only like exchangeRateHistory —
+// every change stays in the history as an audit trail.
+async function updateLiquidityTrackingStart(value) {
+  const isAr = state.language === 'ar';
+  if (!isCurrentUserAdmin()) {
+    showNotification(
+      isAr ? 'تم رفض الوصول' : 'Access Denied',
+      isAr ? 'تغيير تاريخ تتبّع السيولة مسموح للمدير فقط' : 'Only an Admin can set the liquidity tracking date',
+      'error'
+    );
+    render();
+    return;
+  }
+  const parsed = new Date(String(value || ''));
+  if (!value || Number.isNaN(parsed.getTime())) {
+    showNotification(
+      isAr ? 'خطأ في الإدخال' : 'Validation',
+      isAr ? 'اختر تاريخ بداية صحيحاً' : 'Choose a valid start date',
+      'error'
+    );
+    render();
+    return;
+  }
+  // No backdating. Historical receipts edited before this build can carry
+  // rewritten collection dates; letting the window reach behind today would
+  // count that old, already-spent money as "new" cash. Tracking is about the
+  // future: it starts today or later. (24h slack absorbs timezone offsets.)
+  if (parsed.getTime() < Date.now() - 24 * 60 * 60 * 1000) {
+    showNotification(
+      isAr ? 'خطأ في الإدخال' : 'Validation',
+      isAr ? 'لا يمكن اختيار تاريخ في الماضي — يبدأ التتبّع من اليوم أو لاحقاً' : 'The start date cannot be in the past — tracking starts from today or later',
+      'error'
+    );
+    render();
+    return;
+  }
+  const record = {
+    id: generateId('liqcfg'),
+    settingKey: 'liquidityTracking',
+    startDate: parsed.toISOString(),
+    setBy: state.currentUser?.id || 'system',
+    date: new Date().toISOString()
+  };
+  const saved = await addRecord(state.appSettings, record);
+  if (!saved) { render(); return; }
+  showNotification(
+    isAr ? 'تم الحفظ' : 'Saved',
+    isAr ? 'بدأ تتبّع السيولة من التاريخ المحدد' : 'Liquidity tracking now starts from the chosen date',
+    'success'
+  );
+  render();
+}
+
 // Print ONE receipt card. window.print() alone printed the whole Receipts
 // page — every loaded card, other customers' amounts included — onto the
 // paper handed to a single customer. Mark the clicked card and let the
 // @media print rules in style.css hide everything else.
 function printReceiptCard(btn) {
-  const card = btn && btn.closest ? btn.closest('.glass-panel') : null;
+  let card = btn && btn.closest ? btn.closest('.glass-panel') : null;
   if (!card) {
     window.print();
     return;
   }
+  // A live-sync render can replace the card node while the print sheet is
+  // open; remember the receipt id so beforeprint can re-resolve the LIVE
+  // card instead of marking a detached node (which prints blank pages).
+  const receiptId = card.getAttribute('data-receipt-id') || '';
   card.classList.add('print-target');
   document.body.classList.add('print-single');
+  // Phones don't block on window.print(): the native print sheet stays open
+  // while page JS keeps running, afterprint fires during pagination (sheet
+  // still up), and WebKit/Blink re-paginate from the LIVE DOM whenever the
+  // user picks a printer or changes paper/range in that sheet. The old
+  // afterprint/3s-timer cleanup therefore unmarked the card mid-preview and
+  // a re-paginated print regressed to the full Receipts page. Same fix as
+  // printClothesOrderSlip: re-apply the print marks on every beforeprint
+  // pass, and only tear down on the first user interaction with the page —
+  // impossible while the native sheet covers it — with a long timer as the
+  // last-resort fallback for webviews that fire no print events at all.
+  // Harmless meanwhile: every .print-single/.print-target rule lives inside
+  // @media print, so the lingering marks have zero on-screen effect.
+  const applyPrintMarkup = () => {
+    if (!card.isConnected && receiptId) {
+      const live = document.querySelector('[data-receipt-card="true"][data-receipt-id="' + (window.CSS && CSS.escape ? CSS.escape(receiptId) : receiptId) + '"]');
+      if (live) card = live;
+    }
+    if (!card.isConnected) {
+      // Receipt no longer on screen (deleted/filtered out): printing the
+      // full page would be wrong and a detached mark prints blank — abort.
+      cleanup();
+      return;
+    }
+    card.classList.add('print-target');
+    document.body.classList.add('print-single');
+  };
+  let cleanupTimer = 0;
   const cleanup = () => {
     card.classList.remove('print-target');
     document.body.classList.remove('print-single');
-    window.removeEventListener('afterprint', cleanup);
+    window.removeEventListener('beforeprint', applyPrintMarkup);
+    window.removeEventListener('pointerdown', cleanup, true);
+    window.removeEventListener('keydown', cleanup, true);
+    clearTimeout(cleanupTimer);
   };
-  window.addEventListener('afterprint', cleanup);
+  window.addEventListener('beforeprint', applyPrintMarkup);
+  // keydown also disarms so a follow-up Ctrl+P prints the full page again.
+  window.addEventListener('pointerdown', cleanup, { once: true, capture: true });
+  window.addEventListener('keydown', cleanup, { once: true, capture: true });
+  cleanupTimer = setTimeout(cleanup, 60000);
   window.print();
-  // Safety net for webviews that never fire afterprint
-  setTimeout(cleanup, 3000);
 }
 
 function exportData() {
@@ -32380,12 +37321,26 @@ function exportData() {
   const link = document.createElement('a');
   link.href = url;
   link.download = `${serverPartialSnapshot ? 'albayan-server-partial-snapshot' : 'albayan-backup'}-${getTodayDateString()}.json`;
+  // Append before click: Firefox for Android ignores clicks on detached anchors.
+  document.body.appendChild(link);
   link.click();
-  URL.revokeObjectURL(url);
+  // iOS Safari fetches a blob: URL for an <a download> asynchronously, AFTER
+  // the click task returns; revoking in the same tick silently cancels the
+  // download. Keep the click synchronous (user gesture) but defer the cleanup.
+  setTimeout(() => {
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }, 2000);
   
   // Create auto backup
   createAutoBackup();
-  
+
+  // Silences the local-mode "export a backup" durability reminder for 5 days
+  // (see maybeShowLocalDataDurabilityReminder in 17-init.js).
+  if (!serverPartialSnapshot && typeof albayanNoteBackupExported === 'function') {
+    albayanNoteBackupExported();
+  }
+
   addAuditLog('Export', 'system', serverPartialSnapshot ? 'Partial client snapshot exported' : 'Local backup exported successfully');
   showNotification(
     state.language === 'ar' ? 'تم التصدير' : 'Exported',
@@ -32790,6 +37745,9 @@ function importData() {
         state.clothesOrders = Array.isArray(sanitizedImport.clothesOrders) ? sanitizedImport.clothesOrders : [];
         state.clothesSettings = Array.isArray(sanitizedImport.clothesSettings) ? sanitizedImport.clothesSettings : [];
         state.adCampaignRequests = Array.isArray(sanitizedImport.adCampaignRequests) ? sanitizedImport.adCampaignRequests : [];
+        // Restore the liquidity tracking config from the backup, but keep the
+        // device's current value when importing a pre-feature backup file.
+        if (Array.isArray(sanitizedImport.appSettings)) state.appSettings = sanitizedImport.appSettings;
 
         if (sanitizedImport.defaultExchangeRate !== undefined) {
           const rate = parseFloat(sanitizedImport.defaultExchangeRate);
@@ -32870,14 +37828,31 @@ async function init() {
   // Apply theme immediately (prevents white flash in dark mode)
   applyTheme();
   document.documentElement.setAttribute('dir', getDir());
+  document.documentElement.setAttribute('lang', state.language === 'ar' ? 'ar' : 'en');
   setupMobileRuntime().catch((error) => {
     console.warn('[MobileRuntime] Setup failed:', error?.message || error);
   });
   
   setLoadingStatus(state.language === 'ar' ? 'جارٍ تهيئة قاعدة البيانات...' : 'Initializing database...');
   
-  // Initialize IndexedDB for persistent audit log storage
-  await initIndexedDB();
+  // Initialize IndexedDB for persistent audit log storage. initIndexedDB()
+  // can no longer reject or hang (watchdog + onblocked), but keep this await
+  // unable to abort init() before the first render no matter what.
+  await initIndexedDB().catch((e) => {
+    console.warn('IndexedDB init failed:', e);
+    return null;
+  });
+
+  // Ask the browser to mark this origin's storage persistent (best-effort,
+  // fire-and-forget). Protects Chrome/Android against storage-pressure
+  // eviction; it does NOT exempt iOS Safari from ITP's 7-day script-storage
+  // wipe (only Add to Home Screen does), and navigator.storage is undefined
+  // on insecure (plain-HTTP LAN) origins — hence the guards.
+  try {
+    if (navigator.storage && typeof navigator.storage.persist === 'function') {
+      navigator.storage.persist().catch(() => {});
+    }
+  } catch (_) {}
 
   // Opening the app directly from a local file (file://) bypasses the backend,
   // so server mode can never activate. Warn once so the user runs it via a server.
@@ -32940,7 +37915,43 @@ async function init() {
 
   setLoadingStatus(state.language === 'ar' ? 'جارٍ الاتصال بالسيرفر...' : 'Connecting to server...');
   // Detect backend (multi-user internet mode)
-  const serverOk = await apiHealthCheck();
+  let serverOk = await apiHealthCheck();
+  // First-ever visit on this browser profile: a single 3s probe on a slow
+  // phone network silently strands the user in an empty local workspace
+  // (nothing ever re-probes). Escalate 3s → 5s → 8s before deciding, but
+  // ONLY in the ambiguous fresh-install case so returning users, desktop
+  // local testing and Capacitor keep their startup timing. With no backend
+  // at all each attempt fails fast (connection refused / 404), so the
+  // retries only spend time when requests actually hang — exactly the
+  // ambiguous case.
+  //
+  // A returning LOCAL-mode install is NOT a first-ever visit and must keep
+  // the old 3s cold start (hanging networks would otherwise block it 16s on
+  // "Connecting to server..."). Any prior snapshot (loadState() returned
+  // one) or the storage-eviction sentinel cookie (survives Safari ITP /
+  // Chrome wipes — and after a wipe the user needs the storage-loss recovery
+  // screen promptly, not more probing) proves a workspace existed here.
+  const hadPriorLocalWorkspace = legacyCollections !== null ||
+    (typeof _albayanHadDataCookie === 'function' && _albayanHadDataCookie());
+  if (!serverOk && SERVER_API.enabledByDefault && !hadPriorLocalWorkspace &&
+      String(state.serverModeOverride || 'auto') === 'auto' &&
+      state.serverWorkspaceKnown !== true && state.serverMode !== true) {
+    for (const timeoutMs of [5000, 8000]) {
+      try {
+        const data = await apiJson('/api/health', { method: 'GET' }, { timeoutMs });
+        serverOk = !!data?.ok;
+      } catch (_) {
+        serverOk = false;
+      }
+      if (serverOk) break;
+    }
+  }
+  // Recoverable-failure signal (runtime-only, never persisted): the login /
+  // first-run screens can show a "server unreachable — Retry" banner that
+  // calls retryServerDetection() instead of silently offering a device-local
+  // workspace.
+  state.serverProbeFailed = !serverOk && SERVER_API.enabledByDefault &&
+    String(state.serverModeOverride || 'auto') === 'auto';
   state.serverDetected = !!serverOk;
   const override = String(state.serverModeOverride || 'auto');
   if (override === 'local') {
@@ -32978,8 +37989,16 @@ async function init() {
     if (loadingScreen) loadingScreen.style.display = 'none';
     setMobileColdStartBlocked(true);
   };
+  // The connectivity gate is Capacitor-only today because the gate/notice
+  // renderers in src/01b-mobile-runtime.js early-return for browsers. When
+  // that layer defines connectivityUiEnabled() (packaged app OR phone
+  // browser), both cold-start gates below activate for phone browsers too;
+  // until then behavior is byte-for-byte unchanged.
+  const connectivityGateEnabled = (typeof connectivityUiEnabled === 'function')
+    ? !!connectivityUiEnabled()
+    : isPackagedMobileApp();
   const blockPackagedMobileColdStart = !!(
-    isPackagedMobileApp() && state.serverMode && !serverOk && mobileRuntimeNeedsServer()
+    connectivityGateEnabled && state.serverMode && !serverOk && mobileRuntimeNeedsServer()
   );
   if (blockPackagedMobileColdStart) {
     stopForPackagedMobileConnection();
@@ -33012,7 +38031,7 @@ async function init() {
     // A successful health response does not guarantee that the session check
     // also reached the server. Treat a network/timeout failure differently
     // from a definitive 401 (which apiAuthMe returns as null).
-    if (authCheckUnavailable && isPackagedMobileApp() && mobileRuntimeNeedsServer()) {
+    if (authCheckUnavailable && connectivityGateEnabled && mobileRuntimeNeedsServer()) {
       updateMobileServerReachability(false);
       stopForPackagedMobileConnection();
       return;
@@ -33106,6 +38125,18 @@ async function init() {
     // Load huge data collections (IndexedDB-first), migrate legacy localStorage if needed
     await loadCollectionsFromStorage(legacyCollections);
 
+    // The IndexedDB open never settled this boot (watchdog / onblocked): the
+    // store may still hold the full workspace even though this session could
+    // not read it and loaded the collections empty (or from a stale legacy
+    // snapshot). Freeze them so no late-arriving connection can ever flush
+    // these in-memory arrays over the intact stored copies —
+    // markCollectionDirty honors isCollectionCorrupted. A reload with a
+    // healthy open restores everything through the normal path.
+    if (!db && window.__albayanIdbOpenInconclusive === true &&
+        typeof markCollectionCorrupted === 'function') {
+      for (const name of PERSISTED_COLLECTIONS) markCollectionCorrupted(name);
+    }
+
     // Sanitize loaded data before any UI renders (prevents stored XSS from legacy data)
     await sanitizeAllCollectionsForRendering();
     
@@ -33114,6 +38145,10 @@ async function init() {
 
     // Ensure user passwords are always stored hashed (no plaintext in storage)
     await ensureUsersHavePasswordHashes();
+
+    // Local-mode data lives only in this browser and the browser may evict it
+    // (Safari ITP 7-day wipe, Chrome disk pressure) — remind about backups.
+    maybeShowLocalDataDurabilityReminder();
 
     // Restore authenticated user from sessionStorage (more secure than localStorage)
     const session = SessionManager.getSession();
@@ -33253,15 +38288,92 @@ async function init() {
     startCloudSync();
   }
 
-  // Auto-backup once per day (IndexedDB only)
-  if (db) {
-    setInterval(() => {
+  // Auto-backup once per day (IndexedDB only). A phone browser never keeps a
+  // tab alive for 24 continuous hours, so a bare setInterval alone never
+  // fired there — run a due-check at startup, on tab resume AND on the
+  // interval. The newest-backup lookup keeps every trigger idempotent (at
+  // most one backup per AUTO_BACKUP_INTERVAL), and callback-style IDB means
+  // no new awaits before render(). `db` is re-checked per call because the
+  // connection can now drop/reopen mid-session.
+  const runDailyBackupIfDue = () => {
+    if (!db) return;
+    try {
+      const tx = db.transaction([BACKUP_STORE_NAME], 'readonly');
+      const req = tx.objectStore(BACKUP_STORE_NAME).index('createdAt').openCursor(null, 'prev');
+      req.onsuccess = (e) => {
+        const cursor = e.target.result;
+        const newest = cursor && cursor.value ? cursor.value.createdAt || 0 : 0;
+        if (Date.now() - newest >= STORAGE_CONFIG.AUTO_BACKUP_INTERVAL) {
+          createAutoBackup().catch(() => {});
+        }
+      };
+      req.onerror = () => { createAutoBackup().catch(() => {}); };
+    } catch (_) {
       createAutoBackup().catch(() => {});
-    }, STORAGE_CONFIG.AUTO_BACKUP_INTERVAL);
-  }
-  
+    }
+  };
+  runDailyBackupIfDue();
+  setInterval(runDailyBackupIfDue, STORAGE_CONFIG.AUTO_BACKUP_INTERVAL);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') runDailyBackupIfDue();
+  });
+
   render();
 }
+
+// Local mode keeps ALL business data (and the in-app auto-backups) inside
+// this browser's evictable storage: iOS Safari deletes every kind of site
+// storage after 7 days of Safari use without a visit, and Chrome/Android can
+// evict under disk pressure. There is no server copy, so remind the user to
+// export backups from Settings — at most once every 5 days, and not when a
+// recent export exists (the export flow records albayanNoteBackupExported()).
+function maybeShowLocalDataDurabilityReminder() {
+  try {
+    if (isPackagedMobileApp()) return;
+    if (!Array.isArray(state.users) || state.users.length === 0) return;
+    const fiveDays = 5 * TIME_CONSTANTS.MILLISECONDS_PER_DAY;
+    const now = Date.now();
+    const lastExport = Number(localStorage.getItem('albayan_last_backup_export_at')) || 0;
+    const lastReminder = Number(localStorage.getItem('albayan_backup_reminder_at')) || 0;
+    if (now - lastExport < fiveDays || now - lastReminder < fiveDays) return;
+    localStorage.setItem('albayan_backup_reminder_at', String(now));
+    showNotification(
+      state.language === 'ar' ? 'بياناتك في هذا المتصفح فقط' : 'Your Data Lives Only in This Browser',
+      state.language === 'ar'
+        ? 'قد يحذف المتصفح البيانات المخزنة محلياً (سفاري يحذفها بعد 7 أيام دون زيارة). صدّر نسخة احتياطية من الإعدادات بانتظام، وأضِف التطبيق إلى الشاشة الرئيسية.'
+        : 'The browser may delete locally stored data (Safari wipes it after 7 days without a visit). Export a backup from Settings regularly, and add the app to your Home Screen.',
+      'warning'
+    );
+  } catch (_) {}
+}
+
+// Track whether the on-screen keyboard is likely open (a text-entry element
+// has focus) via body.keyboard-open. style.css hides the fixed bottom nav
+// while it is set: iOS Safari anchors position:fixed to the layout viewport,
+// so with the keyboard up the nav otherwise floats mid-screen over the form
+// being typed into. focusout re-checks after a tick so focus moving between
+// fields (or render()'s synchronous focus restore) never flickers the class.
+(function setupKeyboardOpenTracking() {
+  function isTextEntry(el) {
+    if (!el || el === document.body) return false;
+    if (el.isContentEditable) return true;
+    const tag = el.tagName;
+    if (tag === 'TEXTAREA') return true;
+    if (tag !== 'INPUT') return false;
+    const type = String(el.type || 'text').toLowerCase();
+    return !['button', 'submit', 'reset', 'checkbox', 'radio', 'range', 'file', 'color'].includes(type);
+  }
+  document.addEventListener('focusin', (e) => {
+    if (isTextEntry(e.target)) document.body.classList.add('keyboard-open');
+  });
+  document.addEventListener('focusout', () => {
+    setTimeout(() => {
+      if (!isTextEntry(document.activeElement)) {
+        document.body.classList.remove('keyboard-open');
+      }
+    }, 0);
+  });
+})();
 
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', init);

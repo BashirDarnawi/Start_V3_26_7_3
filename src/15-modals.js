@@ -1,5 +1,118 @@
+let _customerMergeReturnFocus = null;
+
+function getCustomerMergeRelationshipCounts(customerId) {
+  const id = String(customerId || '');
+  const pages = getVisibleRecords(state.pages).filter(page => {
+    if (Array.isArray(page.customerIds)) return page.customerIds.map(String).includes(id);
+    return String(page.customerId || page.customer || '') === id;
+  }).length;
+  const receipts = getVisibleRecords(state.receipts)
+    .filter(receipt => String(receipt.customerId || receipt.customer || '') === id).length;
+  const ads = getVisibleRecords(state.ads)
+    .filter(ad => ad.recordType !== 'receipt' && String(ad.customerId || ad.customer || '') === id).length;
+  return { pages, receipts, ads, total: pages + receipts + ads };
+}
+
+function getRecommendedCustomerToKeep(customers) {
+  return (Array.isArray(customers) ? customers : []).slice().sort((left, right) => {
+    const rightLinks = getCustomerMergeRelationshipCounts(right?.id).total;
+    const leftLinks = getCustomerMergeRelationshipCounts(left?.id).total;
+    if (rightLinks !== leftLinks) return rightLinks - leftLinks;
+    // On equal link counts, keep the older identity. It is more likely to be
+    // the record staff and historical exports already recognize.
+    const leftCreated = Number(left?._created || Date.parse(left?.joinDate || '') || Number.MAX_SAFE_INTEGER);
+    const rightCreated = Number(right?._created || Date.parse(right?.joinDate || '') || Number.MAX_SAFE_INTEGER);
+    if (leftCreated !== rightCreated) return leftCreated - rightCreated;
+    return String(left?.id || '').localeCompare(String(right?.id || ''));
+  })[0] || null;
+}
+
+function setCustomerMergePairFromGroup(groupIndex) {
+  const groups = findDuplicateCustomerGroups(state.customers);
+  const safeIndex = Math.max(0, Math.min(Number(groupIndex) || 0, Math.max(0, groups.length - 1)));
+  const group = groups[safeIndex];
+  if (!group || group.customers.length < 2) return false;
+  const keep = getRecommendedCustomerToKeep(group.customers);
+  const duplicate = group.customers.find(customer => String(customer.id) !== String(keep?.id));
+  state.modalData = {
+    duplicateGroupIndex: safeIndex,
+    keepCustomerId: String(keep?.id || ''),
+    duplicateCustomerId: String(duplicate?.id || ''),
+    idempotencyKey: Security.generateSecureId('customer-merge')
+  };
+  return true;
+}
+
+function showCustomerDuplicateMerge(preferredCustomerId = '') {
+  const isAr = state.language === 'ar';
+  if (!isCurrentUserAdmin()) {
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'دمج العملاء متاح للمدير فقط.' : 'Only an administrator can merge customers.', 'error');
+    return;
+  }
+  if (!isServerModeEnabled()) {
+    showNotification(
+      isAr ? 'يتطلب اتصال الخادم' : 'Server connection required',
+      isAr ? 'الدمج الآمن ينقل كل الروابط في معاملة واحدة، لذلك يجب الاتصال بالخادم أولاً.' : 'Safe merge moves every link in one transaction, so connect to the server first.',
+      'warning'
+    );
+    return;
+  }
+  const groups = findDuplicateCustomerGroups(state.customers);
+  if (groups.length === 0) {
+    showNotification(isAr ? 'لا يوجد تكرار' : 'No duplicates found', isAr ? 'لا توجد أرقام هاتف مشتركة بين العملاء الحاليين.' : 'No active customers share the same normalized phone number.', 'success');
+    return;
+  }
+  const preferred = String(preferredCustomerId || '');
+  const groupIndex = preferred
+    ? Math.max(0, groups.findIndex(group => group.customers.some(customer => String(customer.id) === preferred)))
+    : 0;
+  _customerMergeReturnFocus = document.activeElement && typeof document.activeElement.focus === 'function'
+    ? document.activeElement
+    : null;
+  state.activeModal = 'customer-merge';
+  if (!setCustomerMergePairFromGroup(groupIndex)) return;
+  renderModal();
+}
+
+function selectCustomerDuplicateGroup(groupIndex) {
+  if (!isCurrentUserAdmin() || state.activeModal !== 'customer-merge') return;
+  if (setCustomerMergePairFromGroup(groupIndex)) renderModal();
+}
+
+function selectCustomerMergeKeep(customerId) {
+  if (!isCurrentUserAdmin() || state.activeModal !== 'customer-merge') return;
+  const groups = findDuplicateCustomerGroups(state.customers);
+  const group = groups[Number(state.modalData?.duplicateGroupIndex) || 0];
+  if (!group) return;
+  const keepId = String(customerId || '');
+  if (!group.customers.some(customer => String(customer.id) === keepId)) return;
+  let duplicateId = String(state.modalData?.duplicateCustomerId || '');
+  if (duplicateId === keepId || !group.customers.some(customer => String(customer.id) === duplicateId)) {
+    duplicateId = String(group.customers.find(customer => String(customer.id) !== keepId)?.id || '');
+  }
+  state.modalData.keepCustomerId = keepId;
+  state.modalData.duplicateCustomerId = duplicateId;
+  state.modalData.idempotencyKey = Security.generateSecureId('customer-merge');
+  renderModal();
+}
+
+function selectCustomerMergeDuplicate(customerId) {
+  if (!isCurrentUserAdmin() || state.activeModal !== 'customer-merge') return;
+  const groups = findDuplicateCustomerGroups(state.customers);
+  const group = groups[Number(state.modalData?.duplicateGroupIndex) || 0];
+  const duplicateId = String(customerId || '');
+  if (!group || duplicateId === String(state.modalData?.keepCustomerId || '') || !group.customers.some(customer => String(customer.id) === duplicateId)) return;
+  state.modalData.duplicateCustomerId = duplicateId;
+  state.modalData.idempotencyKey = Security.generateSecureId('customer-merge');
+  renderModal();
+}
+
 function renderModal() {
   const existingModal = document.getElementById('app-modal');
+  const previousCustomerMergeFocusId = existingModal && state.activeModal === 'customer-merge'
+    && existingModal.contains(document.activeElement)
+    ? String(document.activeElement?.id || '')
+    : '';
   if (existingModal) existingModal.remove();
   
   if (!state.activeModal) return;
@@ -9,7 +122,8 @@ function renderModal() {
   switch (state.activeModal) {
     case 'customer':
       const custData = state.modalData || {};
-      const phones = custData.phones || [''];
+      const phones = getCustomerPhoneEntries(custData).map(entry => entry.value);
+      if (phones.length === 0) phones.push('');
       const profileLinks = custData.profileLinks || [];
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center">
@@ -95,6 +209,113 @@ function renderModal() {
         </form>
       `;
       break;
+    case 'customer-merge': {
+      const isArMerge = state.language === 'ar';
+      const duplicateGroups = findDuplicateCustomerGroups(state.customers);
+      const selectedGroupIndex = Math.max(0, Math.min(
+        Number(state.modalData?.duplicateGroupIndex) || 0,
+        Math.max(0, duplicateGroups.length - 1)
+      ));
+      const selectedGroup = duplicateGroups[selectedGroupIndex];
+      if (!isCurrentUserAdmin() || !selectedGroup) {
+        modalContent = `<h2 id="customer-merge-title" tabindex="-1" class="text-center py-8 text-slate-500">${isArMerge ? 'لا توجد مجموعة تكرار متاحة.' : 'No duplicate group is available.'}</h2>`;
+        break;
+      }
+      const groupCustomers = selectedGroup.customers;
+      const recommendedKeep = getRecommendedCustomerToKeep(groupCustomers);
+      let keepCustomerId = String(state.modalData?.keepCustomerId || recommendedKeep?.id || '');
+      if (!groupCustomers.some(customer => String(customer.id) === keepCustomerId)) {
+        keepCustomerId = String(recommendedKeep?.id || groupCustomers[0]?.id || '');
+      }
+      let duplicateCustomerId = String(state.modalData?.duplicateCustomerId || '');
+      if (duplicateCustomerId === keepCustomerId || !groupCustomers.some(customer => String(customer.id) === duplicateCustomerId)) {
+        duplicateCustomerId = String(groupCustomers.find(customer => String(customer.id) !== keepCustomerId)?.id || '');
+      }
+      state.modalData.keepCustomerId = keepCustomerId;
+      state.modalData.duplicateCustomerId = duplicateCustomerId;
+      const keepCustomer = groupCustomers.find(customer => String(customer.id) === keepCustomerId);
+      const duplicateCustomer = groupCustomers.find(customer => String(customer.id) === duplicateCustomerId);
+      const keepCounts = getCustomerMergeRelationshipCounts(keepCustomerId);
+      const duplicateCounts = getCustomerMergeRelationshipCounts(duplicateCustomerId);
+      const describeCustomer = customer => {
+        const firstPhone = getCustomerPhoneEntries(customer)[0]?.value || (isArMerge ? 'بدون هاتف' : 'No phone');
+        const counts = getCustomerMergeRelationshipCounts(customer?.id);
+        return `${customer?.name || (isArMerge ? 'عميل بدون اسم' : 'Unnamed customer')} · ${firstPhone} · ${counts.total} ${isArMerge ? 'سجل مرتبط' : 'linked'}`;
+      };
+      const sharedPhones = selectedGroup.sharedPhoneKeys
+        .map(key => key.startsWith('218') ? `+${key}` : key)
+        .join(', ');
+      modalContent = `
+        <div class="mb-5">
+          <div class="flex items-start gap-3">
+            <span class="w-11 h-11 rounded-xl bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 flex items-center justify-center shrink-0">
+              <i data-lucide="combine" class="w-6 h-6"></i>
+            </span>
+            <div>
+              <h2 id="customer-merge-title" tabindex="-1" class="text-2xl font-bold text-slate-900 dark:text-white">${isArMerge ? 'دمج العملاء المكررين' : 'Merge duplicate customers'}</h2>
+              <p class="text-sm text-slate-500 mt-1">${isArMerge ? 'اختر السجل الذي سيبقى. سيتم نقل كل الصفحات والوصولات والإعلانات بأمان.' : 'Choose the record to keep. Every page, receipt and ad will be moved safely.'}</p>
+            </div>
+          </div>
+        </div>
+        <form id="modal-form" class="space-y-5 pr-1">
+          ${duplicateGroups.length > 1 ? `
+          <div>
+            <label for="customer-duplicate-group" class="block text-sm font-bold mb-2">${isArMerge ? 'مجموعة التكرار' : 'Duplicate group'}</label>
+            <select id="customer-duplicate-group" onchange="selectCustomerDuplicateGroup(this.value)" class="w-full glass-input px-4 py-3 rounded-xl">
+              ${duplicateGroups.map((group, index) => `<option value="${index}" ${index === selectedGroupIndex ? 'selected' : ''}>${Security.escapeHtml(`${index + 1}. ${group.customers.map(customer => customer.name || 'Unnamed').join(' / ')}`)}</option>`).join('')}
+            </select>
+          </div>` : ''}
+
+          <div class="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 text-sm">
+            <div class="font-bold text-amber-800 dark:text-amber-200">${isArMerge ? 'سبب اكتشاف التكرار' : 'Why these records match'}</div>
+            <div class="mt-1 text-amber-700 dark:text-amber-300 break-all">${isArMerge ? 'رقم هاتف مشترك:' : 'Shared phone:'} ${Security.escapeHtml(sharedPhones || (isArMerge ? 'تم العثور على تطابق' : 'match found'))}</div>
+          </div>
+
+          <div class="grid gap-4 md:grid-cols-2">
+            <div class="rounded-xl border-2 border-emerald-300 dark:border-emerald-700 p-4 bg-emerald-50/60 dark:bg-emerald-900/10">
+              <label for="customer-merge-keep" class="block text-sm font-bold text-emerald-800 dark:text-emerald-300 mb-2">${isArMerge ? '1. العميل الذي سيبقى' : '1. Customer to keep'}</label>
+              <select id="customer-merge-keep" onchange="selectCustomerMergeKeep(this.value)" class="w-full glass-input px-3 py-3 rounded-xl">
+                ${groupCustomers.map(customer => `<option value="${Security.escapeHtml(String(customer.id || ''))}" ${String(customer.id) === keepCustomerId ? 'selected' : ''}>${Security.escapeHtml(describeCustomer(customer))}</option>`).join('')}
+              </select>
+              ${String(recommendedKeep?.id || '') === keepCustomerId ? `<div class="mt-2 inline-flex items-center gap-1 rounded-full bg-emerald-100 dark:bg-emerald-900/40 px-2 py-1 text-xs font-bold text-emerald-700 dark:text-emerald-300"><i data-lucide="sparkles" class="w-3 h-3"></i>${isArMerge ? 'موصى به: لديه سجلات مرتبطة أكثر' : 'Recommended: more linked records'}</div>` : ''}
+              <div class="grid grid-cols-3 gap-2 mt-3 text-center text-xs">
+                <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${keepCounts.pages}</strong>${isArMerge ? 'صفحات' : 'Pages'}</div>
+                <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${keepCounts.receipts}</strong>${isArMerge ? 'وصولات' : 'Receipts'}</div>
+                <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${keepCounts.ads}</strong>${isArMerge ? 'إعلانات' : 'Ads'}</div>
+              </div>
+            </div>
+
+            <div class="rounded-xl border-2 border-rose-200 dark:border-rose-800 p-4 bg-rose-50/60 dark:bg-rose-900/10">
+              <label for="customer-merge-duplicate" class="block text-sm font-bold text-rose-800 dark:text-rose-300 mb-2">${isArMerge ? '2. السجل المكرر الذي سيُؤرشف' : '2. Duplicate to archive'}</label>
+              <select id="customer-merge-duplicate" onchange="selectCustomerMergeDuplicate(this.value)" class="w-full glass-input px-3 py-3 rounded-xl">
+                ${groupCustomers.filter(customer => String(customer.id) !== keepCustomerId).map(customer => `<option value="${Security.escapeHtml(String(customer.id || ''))}" ${String(customer.id) === duplicateCustomerId ? 'selected' : ''}>${Security.escapeHtml(describeCustomer(customer))}</option>`).join('')}
+              </select>
+              <div class="grid grid-cols-3 gap-2 mt-3 text-center text-xs">
+                <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${duplicateCounts.pages}</strong>${isArMerge ? 'صفحات' : 'Pages'}</div>
+                <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${duplicateCounts.receipts}</strong>${isArMerge ? 'وصولات' : 'Receipts'}</div>
+                <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${duplicateCounts.ads}</strong>${isArMerge ? 'إعلانات' : 'Ads'}</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-4 text-sm text-blue-800 dark:text-blue-200">
+            <div class="font-bold">${isArMerge ? `سيتم نقل ${duplicateCounts.total} سجل مرتبط إلى «${Security.escapeHtml(keepCustomer?.name || '')}»` : `${duplicateCounts.total} linked record(s) will move to “${Security.escapeHtml(keepCustomer?.name || '')}”`}</div>
+            <p class="mt-1 text-xs">${isArMerge ? 'لن تُحذف الوصولات أو الإعلانات ولن تتغير مبالغها. بعد نجاح النقل فقط، سيُؤرشف سجل العميل المكرر.' : 'No receipt or ad is deleted and no amount is changed. The duplicate customer is archived only after the move succeeds.'}</p>
+          </div>
+
+          <label class="flex items-start gap-3 rounded-xl border border-slate-200 dark:border-slate-700 p-4 cursor-pointer">
+            <input id="customer-merge-confirm" type="checkbox" required class="mt-1 w-5 h-5 rounded border-slate-300 text-indigo-600" />
+            <span class="text-sm font-medium text-slate-700 dark:text-slate-200">${isArMerge ? 'راجعت السجلين وأؤكد أنهما لنفس العميل.' : 'I reviewed both records and confirm they belong to the same customer.'}</span>
+          </label>
+
+          <div class="flex flex-col-reverse sm:flex-row gap-3 pt-2">
+            <button type="button" onclick="closeModal()" class="flex-1 min-h-12 bg-slate-200 dark:bg-slate-700 px-5 py-3 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600">${isArMerge ? 'إلغاء' : 'Cancel'}</button>
+            <button type="submit" class="flex-1 min-h-12 btn-shine bg-indigo-600 text-white px-5 py-3 rounded-xl font-bold hover:bg-indigo-700 inline-flex items-center justify-center gap-2"><i data-lucide="combine" class="w-5 h-5"></i>${isArMerge ? 'دمج بأمان' : 'Merge safely'}</button>
+          </div>
+        </form>
+      `;
+      break;
+    }
     case 'ad':
       const visibleCustomers = getVisibleRecords(state.customers);
       const visiblePages = getVisibleRecords(state.pages);
@@ -266,12 +487,13 @@ function renderModal() {
                   </div>
                   <div id="ad-driver-select" class="hidden"></div>
                   <div id="ad-temp-receipt-link" class="hidden mt-2 p-3 bg-white dark:bg-slate-900 rounded-lg border border-violet-200 dark:border-violet-800 space-y-3">
-                    <label id="ad-linked-receipt-label" class="block text-xs font-bold text-violet-700 dark:text-violet-300">${adData.collectionMethod === 'in_shop' ? (isArAd ? 'ربط وصل غير مدفوع في المحل' : 'Link Unpaid In-Shop Receipt') : (isArAd ? 'ربط وصل توصيل (D#)' : 'Link Delivery Receipt (D#)')}</label>
-                    <select id="ad-temp-receipt-id" class="w-full border border-slate-200 px-3 py-2 rounded-lg text-sm" onchange="onAdTempReceiptChange(this.value)">
+                    <label for="ad-temp-receipt-id" id="ad-linked-receipt-label" class="block text-xs font-bold text-violet-700 dark:text-violet-300">${adData.collectionMethod === 'in_shop' ? (isArAd ? 'ربط وصل غير مدفوع في المحل' : 'Link Unpaid In-Shop Receipt') : (isArAd ? 'ربط وصل توصيل (D#)' : 'Link Delivery Receipt (D#)')}</label>
+                    <select id="ad-temp-receipt-id" aria-describedby="ad-temp-receipt-hint ad-linked-receipt-help ad-linked-receipt-change" class="w-full min-h-11 border border-slate-200 px-3 py-2 rounded-lg text-sm" onchange="onAdTempReceiptChange(this.value)">
                       <option value="">${isArAd ? 'اختر وصلاً معلقاً...' : 'Select pending receipt...'}</option>
                     </select>
                     <div id="ad-temp-receipt-hint" class="text-xs text-slate-500"></div>
                     <div id="ad-linked-receipt-help" class="hidden text-[11px] text-amber-700 dark:text-amber-300"></div>
+                    <div id="ad-linked-receipt-change" role="status" aria-live="polite" class="hidden rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-2 text-[11px] font-medium text-blue-800 dark:text-blue-200"></div>
                     <input type="hidden" id="ad-linked-receipt-id" value="${adData.linkedDeliveryReceiptId || adData.receiptId || ''}" />
                     
                     <!-- Due Amount Usage Section -->
@@ -384,6 +606,16 @@ function renderModal() {
               </div>
               <div id="ad-funding-list" class="space-y-2 bg-white dark:bg-slate-900 rounded-lg p-2 min-h-[60px]">
                 <div class="text-xs text-slate-400 text-center py-2">${isArAd ? 'اختر صفحة وعميلاً أولاً' : 'Select a page & customer first'}</div>
+              </div>
+              <div id="ad-funding-change-notice" role="status" aria-live="polite" class="hidden rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-2 text-xs font-medium text-blue-800 dark:text-blue-200"></div>
+              <div class="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-2 space-y-1">
+                <button type="button" onclick="startAdMixedReceiptFunding()" class="w-full flex items-center justify-center gap-2 text-xs font-semibold text-amber-700 dark:text-amber-300 hover:text-amber-800 py-1">
+                  <i data-lucide="split" class="w-4 h-4"></i>
+                  ${isArAd ? 'استخدام وصل غير مدفوع لتغطية الفرق' : 'Use an Unpaid Receipt for the Difference'}
+                </button>
+                <p class="text-[10px] text-center text-amber-600 dark:text-amber-400">
+                  ${isArAd ? 'إذا كان رصيد الوصل المدفوع أقل من ميزانية الإعلان، سيبقى الفرق ديناً على العميل.' : 'If paid receipt credit is short, only the difference stays as customer debt.'}
+                </p>
               </div>
               <div id="ad-funding-summary" class="text-xs text-blue-600 font-medium"></div>
             </div>
@@ -719,7 +951,7 @@ function renderModal() {
       }
       break;
     case 'receipt':
-      const receiptCustomers = getVisibleRecords(state.customers);
+      const receiptCustomers = getCustomersVisibleToCurrentUser();
       const receiptData = state.modalData || {};
       const isAdminReceipt = isCurrentUserAdmin();
       const defaultRate1 = getDefaultRate1(PAYMENT_METHODS[0]);
@@ -1190,7 +1422,7 @@ function renderModal() {
                   const targetCustomer = state.customers.find(c => c.id === t.toCustomerId);
                   const name = targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown');
                   return `<div class="flex justify-between">
-                    <span>${new Date(t.date).toLocaleString()}</span>
+                    <span>${new Date(t.date).toLocaleString(appDateLocale())}</span>
                     <span class="font-medium">$${(t.amountUSD || 0).toFixed(2)} → ${name}</span>
                   </div>`;
                 }).join('')}
@@ -1320,7 +1552,7 @@ function renderModal() {
           <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl">
             <div class="text-sm font-medium text-blue-700 dark:text-blue-300">${isArTU ? 'تفاصيل الإعلان' : 'Ad Details'}</div>
             <div class="text-lg font-bold text-blue-600 mt-1">${isArTU ? 'الأصلي' : 'Original'}: $${(parseFloat(topUpBase) || 0).toFixed(2)} → ${isArTU ? 'الجديد' : 'New'}: <span id="topup-preview-new">$${((parseFloat(topUpBase) || 0) + topUpWorkingTotal).toFixed(2)}</span></div>
-            ${topUpBaseEndOk ? `<div class="text-sm font-medium text-blue-700 dark:text-blue-300 mt-1">${isArTU ? 'النهاية' : 'End'}: <span id="topup-preview-end" class="font-bold">${topUpNewEnd.toLocaleDateString()}</span> <span id="topup-preview-end-extra" class="text-xs">${topUpWorkingDays > 0 ? (isArTU ? `(الأصلية ${new Date(topUpBaseEnd).toLocaleDateString()} + ${topUpWorkingDays} يوم)` : `(original ${new Date(topUpBaseEnd).toLocaleDateString()} + ${topUpWorkingDays} day${topUpWorkingDays > 1 ? 's' : ''})`) : ''}</span></div>` : ''}
+            ${topUpBaseEndOk ? `<div class="text-sm font-medium text-blue-700 dark:text-blue-300 mt-1">${isArTU ? 'النهاية' : 'End'}: <span id="topup-preview-end" class="font-bold">${topUpNewEnd.toLocaleDateString(appDateLocale())}</span> <span id="topup-preview-end-extra" class="text-xs">${topUpWorkingDays > 0 ? (isArTU ? `(الأصلية ${new Date(topUpBaseEnd).toLocaleDateString(appDateLocale())} + ${topUpWorkingDays} يوم)` : `(original ${new Date(topUpBaseEnd).toLocaleDateString(appDateLocale())} + ${topUpWorkingDays} day${topUpWorkingDays > 1 ? 's' : ''})`) : ''}</span></div>` : ''}
             ${topUpAvailable !== null ? `<div class="text-sm font-bold mt-1 text-blue-700 dark:text-blue-300">${isArTU ? 'المتاح من وصولات التمويل' : 'Available on funding receipt(s)'}: <span id="topup-preview-available" class="${topUpAvailable < 0.01 ? 'text-rose-600' : 'text-emerald-600'}">$${topUpAvailable.toFixed(2)}</span></div>` : ''}
             ${existingTopUps.length > 0 ? `<div class="text-xs text-slate-500 mt-1">${isArTU ? 'إجمالي الشحنات' : 'Total top-ups'}: $${topUpWorkingTotal.toFixed(2)}</div>` : ''}
           </div>
@@ -1330,7 +1562,7 @@ function renderModal() {
               <div class="p-3 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-between">
                 <div>
                   <div class="font-medium">$${topup.amount}${(parseInt(topup.extendDays, 10) || 0) > 0 ? ` <span class="text-xs font-bold text-emerald-600">${isArTU ? `+${topup.extendDays} يوم` : `+${topup.extendDays} day${topup.extendDays > 1 ? 's' : ''}`}</span>` : ''}</div>
-                  <div class="text-xs text-slate-500">${new Date(topup.date).toLocaleDateString()} - ${Security.escapeHtml(topup.note || '')}</div>
+                  <div class="text-xs text-slate-500">${new Date(topup.date).toLocaleDateString(appDateLocale())} - ${Security.escapeHtml(topup.note || '')}</div>
                 </div>
                 <button type="button" onclick="removeTopUp(${idx})" class="text-rose-500 hover:text-rose-700">
                   <i data-lucide="x-circle" class="w-4 h-4"></i>
@@ -1729,6 +1961,8 @@ function renderModal() {
   let modalSize = 'max-w-md';
   if (state.activeModal === 'split-payments' || state.activeModal === 'top-ups' || state.activeModal === 'refund') {
     modalSize = 'max-w-4xl';
+  } else if (state.activeModal === 'customer-merge') {
+    modalSize = 'max-w-3xl';
   } else if (state.activeModal === 'ad') {
     modalSize = 'max-w-xl'; // Wider modal for new Ad design with sections
   } else if (state.activeModal === 'receipt') {
@@ -1741,13 +1975,65 @@ function renderModal() {
     modalSize = 'max-w-2xl'; // Room for the order line rows
   }
   // Make Ad/Receipt modals scroll on the whole panel (header + content) to avoid "nothing shows" confusion.
-  const modalScrollable = (state.activeModal === 'receipt' || state.activeModal === 'ad')
-    ? ' max-h-[90vh] overflow-y-auto custom-scrollbar'
+  const modalScrollable = state.activeModal === 'customer-merge'
+    ? ' max-h-[90dvh] overflow-y-auto custom-scrollbar'
+    : (state.activeModal === 'receipt' || state.activeModal === 'ad')
+      ? ' max-h-[90vh] overflow-y-auto custom-scrollbar'
+      : '';
+  const modalAccessibility = state.activeModal === 'customer-merge'
+    ? ' role="dialog" aria-modal="true" aria-labelledby="customer-merge-title"'
     : '';
-  modal.innerHTML = `<div class="glass-panel rounded-2xl p-6 w-full ${modalSize}${modalScrollable}" onclick="event.stopPropagation()">${modalContent}</div>`;
+  modal.innerHTML = `<div class="glass-panel rounded-2xl p-6 w-full ${modalSize}${modalScrollable}"${modalAccessibility} onclick="event.stopPropagation()">${modalContent}</div>`;
   modal.onclick = closeModal;
   document.body.appendChild(modal);
   IconQueue.schedule(modal);
+
+  if (state.activeModal === 'customer-merge') {
+    const dialog = modal.firstElementChild;
+    dialog?.addEventListener('keydown', event => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        closeModal();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = Array.from(dialog.querySelectorAll(
+        'button:not([disabled]), select:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
+      )).filter(element => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.querySelector('#customer-merge-title')?.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!focusable.includes(document.activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+    setTimeout(() => {
+      if (!dialog?.isConnected) return;
+      const previousControl = previousCustomerMergeFocusId
+        ? dialog.querySelector(`#${previousCustomerMergeFocusId}`)
+        : null;
+      const focusTarget = previousControl || dialog.querySelector('#customer-merge-title');
+      if (focusTarget && typeof focusTarget.focus === 'function') {
+        try {
+          focusTarget.focus({ preventScroll: true });
+        } catch (_) {
+          focusTarget.focus();
+        }
+      }
+    }, 0);
+  }
   
   // Initialize receipt totals if it's a receipt modal
   if (state.activeModal === 'receipt') {
@@ -2079,6 +2365,68 @@ async function handleModalSubmit() {
       showNotification(isArCP ? 'نجاح' : 'Success', isArCP ? 'تم تغيير كلمة المرور بنجاح' : 'Password changed successfully', 'success');
       break;
     }
+    case 'customer-merge': {
+      const isArMerge = state.language === 'ar';
+      if (!isCurrentUserAdmin()) {
+        showNotification(isArMerge ? 'تم رفض الوصول' : 'Access Denied', isArMerge ? 'دمج العملاء متاح للمدير فقط.' : 'Only an administrator can merge customers.', 'error');
+        return;
+      }
+      if (!isServerModeEnabled()) {
+        showNotification(isArMerge ? 'يتطلب اتصال الخادم' : 'Server connection required', isArMerge ? 'أعد الاتصال بالخادم ثم حاول مرة أخرى.' : 'Reconnect to the server and try again.', 'warning');
+        return;
+      }
+      if (!document.getElementById('customer-merge-confirm')?.checked) {
+        showNotification(isArMerge ? 'التأكيد مطلوب' : 'Confirmation required', isArMerge ? 'أكد أولاً أن السجلين لنفس العميل.' : 'Confirm that both records belong to the same customer.', 'warning');
+        return;
+      }
+      const keepCustomerId = String(state.modalData?.keepCustomerId || '');
+      const duplicateCustomerId = String(state.modalData?.duplicateCustomerId || '');
+      const keepCustomer = state.customers.find(customer => customer && !customer._deleted && String(customer.id) === keepCustomerId);
+      const duplicateCustomer = state.customers.find(customer => customer && !customer._deleted && String(customer.id) === duplicateCustomerId);
+      if (!keepCustomer || !duplicateCustomer || keepCustomerId === duplicateCustomerId) {
+        showNotification(isArMerge ? 'اختيار غير صالح' : 'Invalid selection', isArMerge ? 'اختر سجلين مختلفين ثم حاول مرة أخرى.' : 'Choose two different active records and try again.', 'error');
+        return;
+      }
+      const keepPhoneKeys = new Set(getCustomerPhoneEntries(keepCustomer).map(entry => entry.key));
+      const sharesPhone = getCustomerPhoneEntries(duplicateCustomer).some(entry => keepPhoneKeys.has(entry.key));
+      if (!sharesPhone) {
+        showNotification(isArMerge ? 'تغيرت البيانات' : 'Data changed', isArMerge ? 'لم يعد السجلان يشتركان في رقم هاتف. حدّث الصفحة وحاول مرة أخرى.' : 'These records no longer share a phone number. Refresh and try again.', 'warning');
+        return;
+      }
+      const expectedKeepLastModified = Number(keepCustomer._lastModified);
+      const expectedDuplicateLastModified = Number(duplicateCustomer._lastModified);
+      if (!Number.isSafeInteger(expectedKeepLastModified) || !Number.isSafeInteger(expectedDuplicateLastModified)) {
+        showNotification(isArMerge ? 'يلزم التحديث' : 'Refresh required', isArMerge ? 'السجلان لا يحتويان على نسخة خادم صالحة. حدّث الصفحة ثم حاول.' : 'These records do not have a valid server version. Refresh and try again.', 'warning');
+        return;
+      }
+      const response = await apiMergeCustomers({
+        keepCustomerId,
+        duplicateCustomerId,
+        expectedKeepLastModified,
+        expectedDuplicateLastModified,
+        idempotencyKey: String(state.modalData?.idempotencyKey || '') || Security.generateSecureId('customer-merge')
+      });
+      if (!response.duplicate?.data?._deleted) throw new Error('The server did not archive the duplicate customer. Nothing was applied locally.');
+      applyValidatedServerEntityBatch([
+        { collection: 'customers', entity: response.customer },
+        ...response.updatedPages.map(entity => ({ collection: 'pages', entity })),
+        ...response.updatedReceipts.map(entity => ({ collection: 'receipts', entity })),
+        ...response.updatedAds.map(entity => ({ collection: 'ads', entity })),
+        { collection: 'customers', entity: response.duplicate }
+      ], 'customerMerge');
+      addAuditLog(
+        'Merge',
+        keepCustomerId,
+        `Merged duplicate customer ${duplicateCustomerId} into ${keepCustomerId}`,
+        { duplicateCustomerId, replayed: response.replayed === true }
+      );
+      showNotification(
+        isArMerge ? 'تم الدمج بأمان' : 'Customers merged',
+        isArMerge ? `تم نقل جميع الروابط إلى «${keepCustomer.name || ''}» وأرشفة السجل المكرر.` : `All links now belong to “${keepCustomer.name || 'the kept customer'}”; the duplicate was archived.`,
+        'success'
+      );
+      break;
+    }
     case 'customer': {
       const isAr = state.language === 'ar';
       // Whitespace-only input satisfies the HTML `required` attribute, so
@@ -2091,7 +2439,7 @@ async function handleModalSubmit() {
 
       // Collect all phone numbers
       const phoneInputs = document.querySelectorAll('.customer-phone');
-      const phones = Array.from(phoneInputs).map(input => input.value.trim()).filter(p => p);
+      const phones = dedupeCustomerPhoneValues(Array.from(phoneInputs).map(input => input.value.trim()).filter(p => p));
       // A whitespace-only phone passes `required` but is filtered out above —
       // without this check the customer is saved with zero phone numbers.
       if (phones.length === 0) {
@@ -2107,7 +2455,7 @@ async function handleModalSubmit() {
           isAr ? 'رقم هاتف مكرر' : 'Duplicate Phone Number',
           isAr
             ? `رقم الهاتف "${duplicatePhone.phone}" مسجّل بالفعل للعميل "${duplicatePhone.customerName}". الرجاء استخدام رقم آخر.`
-            : `The phone number "${duplicatePhone.phone}" is already linked to customer "${duplicatePhone.customerName}". Please use a different phone number.`,
+            : `The phone number "${duplicatePhone.phone}" is already linked to customer "${duplicatePhone.customerName}". Use that existing customer instead of creating another.${isCurrentUserAdmin() ? ' To combine old duplicates, close this form and choose Find duplicates on the Customers page.' : ''}`,
           'error'
         );
         return; // Stop here, don't close modal
@@ -2306,6 +2654,29 @@ async function handleModalSubmit() {
             showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'أحد الوصولات المختارة مفقود أو تم حذفه.' : 'One of the selected receipts is missing or was deleted.', 'error');
             return;
           }
+          if (String(receipt.customerId || '') !== String(customerId || '')) {
+            showNotification(
+              isArSubAd ? 'تنبيه' : 'Validation',
+              isArSubAd
+                ? 'لا يمكن تمويل الإعلان من وصل يخص عميلاً آخر. اختر وصلاً مدفوعاً لهذا العميل.'
+                : "An ad cannot be funded from another customer's receipt. Choose a Paid receipt for this customer.",
+              'error'
+            );
+            return;
+          }
+          const receiptPaymentState = typeof getReceiptPaymentState === 'function'
+            ? getReceiptPaymentState(receipt)
+            : ((receipt.isPaid === true || String(receipt.status || '').trim().toLowerCase() === 'paid') ? 'paid' : 'not_paid');
+          if (receiptPaymentState !== 'paid') {
+            showNotification(
+              isArSubAd ? 'تنبيه' : 'Validation',
+              isArSubAd
+                ? 'الوصل الحالي لم يعد صالحاً للتمويل. اختر وصلاً مدفوعاً بديلاً.'
+                : 'The current receipt is no longer eligible. Choose a Paid replacement receipt.',
+              'error'
+            );
+            return;
+          }
           // Calculate remaining balance (total - used - transferred)
           const usageStats = getReceiptUsageStats(receipt);
           let remaining = usageStats.remainingUSD || 0;
@@ -2319,11 +2690,12 @@ async function handleModalSubmit() {
           }
 
           if (plannedTotal > remaining + 0.0001) {
+            const shortfall = Math.max(plannedTotal - remaining, 0);
             showNotification(
               isArSubAd ? 'تنبيه' : 'Validation',
               isArSubAd
-                ? `الصرف المخطط ($${plannedTotal.toFixed(2)}) يتجاوز الرصيد المتاح ($${remaining.toFixed(2)}) للوصل ${receipt.serialNumber || receipt.id}.`
-                : `Planned spend ($${plannedTotal.toFixed(2)}) exceeds available balance ($${remaining.toFixed(2)}) for receipt ${receipt.serialNumber || receipt.id}.`,
+                ? `مبلغ الإعلان لم يتغير. ينقص الوصل ${receipt.serialNumber || receipt.id} مبلغ $${shortfall.toFixed(2)}. أضف وصلاً ثانياً أو اختر وصلاً برصيد كافٍ.`
+                : `The ad amount was not changed. Receipt ${receipt.serialNumber || receipt.id} is short by $${shortfall.toFixed(2)}. Add a second receipt or choose one with enough balance.`,
               'error'
             );
             return;
@@ -2411,6 +2783,12 @@ async function handleModalSubmit() {
         const dueInput = document.getElementById('ad-due-amount-to-use');
         if (dueInput && linkedReceiptId) {
           dueAmountToUseUSD = parseFloat(dueInput.value) || 0;
+          // The validation branches above intentionally keep their receipt
+          // variables block-scoped. Resolve the selected receipt again here so
+          // edit add-back never depends on an out-of-scope `linkedReceipt`.
+          const selectedDueReceipt = state.receipts.find(
+            receipt => receipt && !receipt._deleted && String(receipt.id || '') === String(linkedReceiptId)
+          );
           
           // Validate: check if the amount exceeds available credit
           const dueUsage = getDeliveryReceiptDueUsage(linkedReceiptId);
@@ -2421,13 +2799,14 @@ async function handleModalSubmit() {
           if (isEdit && state.modalData?.id) {
             const existingAd = state.ads.find(a => a.id === state.modalData.id);
             if (existingAd) {
-              if (Array.isArray(existingAd.dueAllocations)) {
-                currentAdUsage = existingAd.dueAllocations
-                  .filter(a => String(a.receiptId) === String(linkedReceiptId))
-                  .reduce((sum, a) => sum + (parseFloat(a.amountUSD) || 0), 0);
-              } else if (existingAd.dueAmountToUseUSD > 0 && String(existingAd.linkedDeliveryReceiptId || existingAd.receiptId) === String(linkedReceiptId)) {
-                currentAdUsage = existingAd.dueAmountToUseUSD;
-              }
+              const explicitDueForReceipt = Array.isArray(existingAd.dueAllocations)
+                ? existingAd.dueAllocations
+                    .filter(a => String(a?.receiptId || '') === String(linkedReceiptId))
+                    .reduce((sum, a) => sum + (parseFloat(a?.amountUSD) || 0), 0)
+                : 0;
+              currentAdUsage = explicitDueForReceipt > 0
+                ? explicitDueForReceipt
+                : getAdLegacyDueMirrorUSD(existingAd, linkedReceiptId, selectedDueReceipt?.exchangeRate);
             }
           }
           
@@ -2454,9 +2833,13 @@ async function handleModalSubmit() {
         }
       }
       
-      // Capture merged paid receipt allocations (if enabled in Not Paid + Driver mode)
+      // Capture real paid receipt allocations mixed into a Not Paid ad. Driver
+      // and In Shop share the same safe UI working state; the server stores
+      // In Shop rows canonically in receiptAllocations (without a legacy mirror).
       let mergedAllocations = [];
-      if (paymentStatus === 'not_paid' && collectionMethod === 'driver' && state.tempMergeFunding?.enabled) {
+      if (paymentStatus === 'not_paid'
+          && (collectionMethod === 'driver' || collectionMethod === 'in_shop')
+          && state.tempMergeFunding?.enabled) {
         mergedAllocations = (state.tempMergeFunding.allocations || [])
           .filter(a => a.receiptId && parseFloat(a.amountUSD) > 0)
           .map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) }));
@@ -2522,11 +2905,29 @@ async function handleModalSubmit() {
       // Combine allocations: merged paid receipts for Not Paid + Driver mode
       // For paid mode, use regular allocations
       const finalAllocations = isPaid ? allocations : mergedAllocations;
+      const mergedTotal = mergedAllocations.reduce(
+        (sum, a) => sum + (parseFloat(a.amountUSD) || 0),
+        0
+      );
+
+      if (isUnpaidShop && selectedUnpaidReceiptId) {
+        amountUSD = Math.round((dueAmountToUseUSD + mergedTotal) * 100) / 100;
+        const intendedBudget = normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD);
+        if (intendedBudget > 0 && Math.abs(amountUSD - intendedBudget) > 0.005) {
+          showNotification(
+            isArSubAd ? 'تنبيه' : 'Validation',
+            isArSubAd
+              ? `الوصل غير المدفوع لا يغطي الفرق كاملاً. التمويل الحالي $${amountUSD.toFixed(2)} من الميزانية المطلوبة $${intendedBudget.toFixed(2)}. اختر وصلاً آخر أو أدخل ميزانية أصغر.`
+              : `The unpaid receipt does not cover the full difference. Current funding is $${amountUSD.toFixed(2)} of the intended $${intendedBudget.toFixed(2)}. Choose another receipt or enter a smaller budget.`,
+            'error'
+          );
+          return;
+        }
+      }
       
       // Receipt funding can cover some/all of the budget, but can never redefine
       // or exceed it. Any unfunded remainder is customer debt until payment.
       if (isUnpaidDriver) {
-        const mergedTotal = mergedAllocations.reduce((sum, a) => sum + (parseFloat(a.amountUSD) || 0), 0);
         const fundedTotal = dueAmountToUseUSD + mergedTotal;
         if (fundedTotal > amountUSD + 0.005) {
           showNotification(
@@ -2580,8 +2981,8 @@ async function handleModalSubmit() {
         dueAmountToUseUSD: dueAmountToUseUSD,
         dueAllocations: dueAllocations,
         linkedDeliveryReceiptId: linkedDeliveryReceiptId,
-        hasMergedPaidFunds: mergedAllocations.length > 0,
-        mergedPaidAllocations: mergedAllocations
+        hasMergedPaidFunds: collectionMethod === 'driver' && mergedAllocations.length > 0,
+        mergedPaidAllocations: collectionMethod === 'driver' ? mergedAllocations : []
       };
 
       // Ordinary edits do not need to re-upload unchanged base64 images. Both
@@ -2608,6 +3009,26 @@ async function handleModalSubmit() {
         }
       }
 
+      // Liquidity window integrity: growing an ad's budget in an ORDINARY
+      // edit spends money exactly like a top-up but writes no dated row.
+      // Record the growth in an append-only ledger so the liquidity window
+      // can count in-window growth of pre-window ads (capped at real spend
+      // when read; shrinking an ad is never recorded — money returning is
+      // handled by refunds).
+      if (isEdit) {
+        const priorAmountUSD = parseFloat(state.modalData?.amountUSD) || 0;
+        const growthUSD = Math.round((amountUSD - priorAmountUSD) * 100) / 100;
+        if (growthUSD > 0.005) {
+          const priorAdjustments = Array.isArray(state.modalData?.amountAdjustments)
+            ? state.modalData.amountAdjustments
+            : [];
+          adUpdates.amountAdjustments = [
+            ...priorAdjustments.map(row => ({ ...row })),
+            { delta: growthUSD, date: new Date().toISOString() }
+          ];
+        }
+      }
+
       if (isPaid && (!state.modalData || !state.modalData.collectionDate)) {
         adUpdates.collectionDate = new Date().toISOString();
       }
@@ -2627,8 +3048,8 @@ async function handleModalSubmit() {
           { key: 'paymentStatus', label: 'Payment Status', format: (v) => v || 'paid' },
           { key: 'deliveryStatus', label: 'Delivery Status', format: (v) => v || 'Office' },
           { key: 'status', label: 'Ad Status', format: (v) => v || 'Active' },
-          { key: 'startDate', label: 'Start Date', format: (v) => v ? new Date(v).toLocaleDateString() : 'N/A' },
-          { key: 'endDate', label: 'End Date', format: (v) => v ? new Date(v).toLocaleDateString() : 'N/A' }
+          { key: 'startDate', label: 'Start Date', format: (v) => v ? new Date(v).toLocaleDateString(appDateLocale()) : 'N/A' },
+          { key: 'endDate', label: 'End Date', format: (v) => v ? new Date(v).toLocaleDateString(appDateLocale()) : 'N/A' }
         ];
         
         fieldsToTrack.forEach(field => {
@@ -3164,6 +3585,12 @@ function showWalletTopupModal(userId) {
 }
 
 function closeModal() {
+  if (typeof resetReceiptCustomerRiskWarningState === 'function') {
+    resetReceiptCustomerRiskWarningState();
+  }
+  const wasCustomerMerge = state.activeModal === 'customer-merge';
+  const customerMergeReturnFocus = wasCustomerMerge ? _customerMergeReturnFocus : null;
+  if (wasCustomerMerge) _customerMergeReturnFocus = null;
   // One-shot preset used by Ads Studio's "Customer login" shortcut. Never
   // let it silently affect a later user created from the normal Users screen.
   window._newUserAccessPreset = '';
@@ -3176,6 +3603,7 @@ function closeModal() {
   // Clear temp funding states
   state.tempAdFunding = null;
   state.tempMergeFunding = null;
+  state.tempMixedReceiptTargetUSD = null;
   // Discard any pending (unsaved) photos so a cancelled upload cannot leak
   // into the next ad/receipt created in this session.
   state.tempAdPhotos = [];
@@ -3198,8 +3626,41 @@ function closeModal() {
   _clothesTempShipLines = [];
   _clothesTempOrderLines = [];
   
-  // Clear URL params (modal, id)
-  clearUrlParams(['modal', 'id']);
+  // Clear URL params (modal, id). When this dialog's opener pushed a history
+  // entry (albayanModal stamp — see updateUrlParams), consume that entry with
+  // history.back() instead: replaceState alone rewrote the entry's URL but
+  // left it stacked, so every open/close cycle cost one dead hardware-Back
+  // press on phones. Skipped when Back itself already popped the entry
+  // (_closingSurfaceFromPopstate, set by the popstate handler) — the new top
+  // entry may be a previous ?modal entry that must survive for back/forward
+  // restore. Openers that never pushed (boot deep-link error paths) fall
+  // through to the old replaceState behaviour.
+  let consumedModalHistoryEntry = false;
+  if (typeof consumeOverlayHistoryEntry === 'function' && !_closingSurfaceFromPopstate) {
+    const topHistoryEntry = window.history.state;
+    if (topHistoryEntry && topHistoryEntry.albayanModal) {
+      consumedModalHistoryEntry = consumeOverlayHistoryEntry();
+    } else if (topHistoryEntry && topHistoryEntry.overlaySentinel && topHistoryEntry.underAlbayanModal) {
+      // Phone browsers: an untracked overlay (duplicate-serial warning…)
+      // opened late over this dialog, so its sentinel sits ON TOP of the
+      // dialog's own ?modal entry — and closeModal is tearing both surfaces
+      // down at once. Consume BOTH entries: rewriting only the sentinel
+      // would leave the buried ?modal entry alive one level down, and a
+      // later Back would resurrect the dismissed dialog. The popstate that
+      // go(-2) fires is pure bookkeeping, so flag it for the router exactly
+      // like consumeOverlayHistoryEntry does. Sentinels are never pushed on
+      // desktop or in the packaged app, so this branch cannot run there.
+      _suppressOverlayPopstateUntil = Date.now() + 800;
+      try {
+        window.history.go(-2);
+        if (_overlaySentinelDepth > 0) _overlaySentinelDepth--;
+        consumedModalHistoryEntry = true;
+      } catch (_) {
+        _suppressOverlayPopstateUntil = 0;
+      }
+    }
+  }
+  if (!consumedModalHistoryEntry) clearUrlParams(['modal', 'id']);
   
   // Force remove ALL modals - be very aggressive
   document.querySelectorAll('#app-modal').forEach(el => {
@@ -3220,6 +3681,11 @@ function closeModal() {
   setTimeout(() => {
     render();
     lucide.createIcons();
+    if (wasCustomerMerge) {
+      const fallbackTrigger = document.querySelector('button[aria-haspopup="dialog"][onclick="showCustomerDuplicateMerge()"]');
+      const focusTarget = customerMergeReturnFocus?.isConnected ? customerMergeReturnFocus : fallbackTrigger;
+      if (focusTarget && typeof focusTarget.focus === 'function') focusTarget.focus();
+    }
   }, 50);
 }
 
@@ -3304,7 +3770,7 @@ async function releaseCanceledDeliveryDueFunding(receiptId) {
   let touched = 0;
   const affectedAds = state.ads.filter(a => a && !a._deleted && a.recordType !== 'receipt' && (
     (Array.isArray(a.dueAllocations) && a.dueAllocations.some(al => String(al?.receiptId || '') === rid)) ||
-    (String(a.linkedDeliveryReceiptId || '') === rid && (parseFloat(a.dueAmountToUseUSD) || 0) > 0)
+    (isAdLegacyDueMirrorForReceipt(a, rid) && getAdLegacyDueMirrorUSD(a, rid) > 0)
   ));
   for (const ad of affectedAds) {
     const updates = {};
@@ -3312,9 +3778,13 @@ async function releaseCanceledDeliveryDueFunding(receiptId) {
       const kept = ad.dueAllocations.filter(al => String(al?.receiptId || '') !== rid);
       if (kept.length !== ad.dueAllocations.length) updates.dueAllocations = kept;
     }
-    // Legacy single-field shape predating dueAllocations.
-    if (String(ad.linkedDeliveryReceiptId || '') === rid && (parseFloat(ad.dueAmountToUseUSD) || 0) > 0) {
+    // Legacy single-field shape predating dueAllocations. The mirror identity
+    // (linkedDeliveryReceiptId, or the older receiptId forms) comes from the
+    // shared reader so this release clears exactly the money the balance
+    // readers counted — both USD and LYD mirrors, like the server does.
+    if (isAdLegacyDueMirrorForReceipt(ad, rid) && getAdLegacyDueMirrorUSD(ad, rid) > 0) {
       updates.dueAmountToUseUSD = 0;
+      updates.dueAmountToUseLYD = 0;
     }
     if (Object.keys(updates).length) {
       const saved = await updateRecord(state.ads, ad.id, updates);

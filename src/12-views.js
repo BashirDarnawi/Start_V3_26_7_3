@@ -14,6 +14,16 @@ let _lastRenderedUserId = null;
 let _renderInProgress = false;
 let _savedScrollPosition = { top: 0, left: 0 };
 let _resetScrollOnNextRender = false;
+
+// The value a <select> would show if the user hadn't touched it — the option
+// the rendered HTML marked selected (or the first option). SELECTs have no
+// defaultValue property, so the dirty-field snapshot in render() needs this.
+function _selectDefaultValue(sel) {
+  for (let i = 0; i < sel.options.length; i++) {
+    if (sel.options[i].defaultSelected) return sel.options[i].value;
+  }
+  return sel.options.length ? sel.options[0].value : '';
+}
 // The exact HTML last written into the view container. A background live-sync tick
 // calls render() whenever ANY data changed anywhere; if this view's HTML is byte-for-byte
 // what is already on screen, we skip the DOM swap entirely — no icon flash, no re-played
@@ -112,7 +122,7 @@ function render() {
     let viewContainer = null;
     let nextViewHTML = null;
     if (canPartialUpdate) {
-      viewContainer = app.querySelector('.p-4.md\\:p-8');
+      viewContainer = app.querySelector('#workspace-view-content');
       if (viewContainer) {
         nextViewHTML = renderView();
         if (nextViewHTML === _lastViewHTML) {
@@ -129,10 +139,16 @@ function render() {
     }
 
     // Save scroll and lock layout only when a DOM write will actually happen.
+    // While the overlay body scroll lock (01b-mobile-runtime.js) is active,
+    // body is position:fixed and window.scrollY reads 0 — sample the locked
+    // position instead, otherwise a render fired between closeModal() and the
+    // observer's unlock (every modal save on a phone) restores the list to
+    // the top.
     const resetScroll = _resetScrollOnNextRender;
     _resetScrollOnNextRender = false;
+    const _lockedScroll = (typeof _scrollLockActive !== 'undefined' && _scrollLockActive);
     _savedScrollPosition = resetScroll ? { top: 0, left: 0 } : {
-      top: window.pageYOffset || window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0,
+      top: _lockedScroll ? _scrollLockY : (window.pageYOffset || window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0),
       left: window.pageXOffset || window.scrollX || document.documentElement.scrollLeft || document.body.scrollLeft || 0
     };
     lockLayoutForRender(app);
@@ -140,13 +156,35 @@ function render() {
 
     // Hide loading screen on first render
     const loadingScreen = document.getElementById('app-loading-screen');
-    if (loadingScreen) loadingScreen.style.display = 'none';
+    if (loadingScreen) {
+      loadingScreen.style.display = 'none';
+      loadingScreen.setAttribute('aria-busy', 'false');
+    }
 
     if (!state.currentUser) {
       const localFirstRun = !isServerModeEnabled() && (!Array.isArray(state.users) || state.users.length === 0);
+      // An empty local workspace with the albayan_had_data sentinel cookie is
+      // NOT a first run — the browser evicted this origin's storage (iOS ITP
+      // 7-day wipe, Android storage pressure). Showing "create your first
+      // admin" would silently bury the loss; offer backup restore instead.
+      const storageLoss = localFirstRun && !state._storageLossAcknowledged &&
+        typeof albayanDetectStorageLoss === 'function' && albayanDetectStorageLoss();
+      // IndexedDB never answered this boot (open watchdog / onblocked) while
+      // the sentinel cookie proves a local workspace exists on this device:
+      // the data is almost certainly still stored, just unreadable this
+      // session (init froze the collections against overwrite). Never present
+      // that as a fresh install — offer a reload instead.
+      const storageUnavailable = !storageLoss && localFirstRun &&
+        !state._storageLossAcknowledged &&
+        window.__albayanIdbOpenInconclusive === true &&
+        typeof _albayanHadDataCookie === 'function' && _albayanHadDataCookie();
       // Server mode: only after a login attempt reveals the server has no users
       // yet (state.needsServerSetup) do we offer first-run admin creation.
-      if (localFirstRun || (isServerModeEnabled() && state.needsServerSetup)) {
+      if (storageLoss) {
+        app.innerHTML = renderStorageLossRecovery();
+      } else if (storageUnavailable) {
+        app.innerHTML = renderStorageUnavailableNotice();
+      } else if (localFirstRun || (isServerModeEnabled() && state.needsServerSetup)) {
         app.innerHTML = renderFirstRunSetup();
         attachFirstRunHandlers();
       } else {
@@ -175,7 +213,35 @@ function render() {
           // real change.
           if (newViewHTML !== _lastViewHTML) {
             _lastViewHTML = newViewHTML;
+            // A background live-sync tick may swap the view while the user is
+            // mid-entry in an unbound field (e.g. wallet transfer amount).
+            // Snapshot dirty fields (value differs from the HTML default) and
+            // restore them after the swap — but only when the new HTML kept
+            // the SAME default attribute, so a render that intentionally emits
+            // a new value=/checked/selected (clear buttons, programmatic
+            // filter resets) always wins and is never fought.
+            const _dirtyFields = [];
+            viewContainer.querySelectorAll('input[id], textarea[id], select[id]').forEach(el => {
+              if (el.type === 'checkbox' || el.type === 'radio') {
+                if (el.checked !== el.defaultChecked) _dirtyFields.push({ id: el.id, checked: el.checked, defChecked: el.defaultChecked, kind: 'check' });
+              } else if (el.tagName === 'SELECT') {
+                if (el.value !== _selectDefaultValue(el)) _dirtyFields.push({ id: el.id, value: el.value, kind: 'select' });
+              } else if (el.value !== el.defaultValue) {
+                _dirtyFields.push({ id: el.id, value: el.value, def: el.defaultValue, kind: 'text' });
+              }
+            });
             viewContainer.innerHTML = newViewHTML;
+            _dirtyFields.forEach(s => {
+              const el = document.getElementById(s.id);
+              if (!el) return;
+              if (s.kind === 'check') {
+                if (el.defaultChecked === s.defChecked) el.checked = s.checked;
+              } else if (s.kind === 'select') {
+                if (el.value === _selectDefaultValue(el) && Array.prototype.some.call(el.options, o => o.value === s.value)) el.value = s.value;
+              } else if (el.defaultValue === s.def) {
+                el.value = s.value;
+              }
+            });
             // A same-view content change is an UPDATE, not navigation, so it must not
             // re-play the view's entry animation. Strip it synchronously (before paint,
             // so it never starts). Open modals live on document.body and are untouched.
@@ -186,14 +252,18 @@ function render() {
           // else: identical — leave the DOM alone (no swap, no flash, no shake, and the
           // user's scroll/caret/focus are never disturbed).
         } else {
-          app.innerHTML = renderMainApp();
-          _lastViewHTML = renderView();
+          const viewHTML = renderView();
+          app.innerHTML = renderMainApp(viewHTML);
+          _lastViewHTML = viewHTML;
         }
       } else {
         // Navigation (or first render after login): full render WITH the entry animation.
-        app.innerHTML = renderMainApp();
+        // Generate the page once. Several views calculate large financial
+        // indexes, so rendering them twice made every navigation needlessly slow.
+        const viewHTML = renderView();
+        app.innerHTML = renderMainApp(viewHTML);
         // Cache the freshly-navigated view so the next same-view tick can skip.
-        _lastViewHTML = renderView();
+        _lastViewHTML = viewHTML;
       }
 
       _restoreFocusState(_focusBefore);
@@ -229,6 +299,79 @@ function render() {
   }
 }
 
+// Shown instead of first-run setup when the browser evicted this origin's
+// storage while the sentinel cookie proves a local workspace existed before
+// (see albayanDetectStorageLoss in 06-persistence.js).
+function renderStorageLossRecovery() {
+  const isAr = state.language === 'ar';
+  return `
+    <div class="min-h-screen flex items-center justify-center p-4">
+      <div class="glass-panel w-full max-w-md p-8 rounded-3xl animate-fade-in-up" role="alert">
+        <div class="text-center mb-6">
+          <div class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+            <i data-lucide="database-backup" class="h-8 w-8" aria-hidden="true"></i>
+          </div>
+          <h1 class="text-2xl font-bold text-slate-800 dark:text-white">${isAr ? 'تم حذف البيانات المحلية' : 'Local data was deleted'}</h1>
+          <p class="text-sm text-slate-500 mt-2 leading-6">${isAr
+            ? 'يبدو أن المتصفح حذف البيانات المخزّنة محلياً على هذا الجهاز (تفعل متصفحات الهواتف ذلك بعد فترة من عدم الاستخدام أو عند امتلاء التخزين). لم يُحذف أي شيء من الخادم. إذا كان لديك ملف نسخة احتياطية مُصدَّر، استعده الآن.'
+            : 'The browser appears to have deleted the data stored locally on this device (phone browsers do this after a period of no use or under storage pressure). Nothing on a server was deleted. If you have an exported backup file, restore it now.'}</p>
+        </div>
+        <div class="space-y-3">
+          <button type="button" onclick="importData()" class="btn-shine w-full min-h-12 rounded-xl bg-indigo-600 px-5 py-3 font-extrabold text-white hover:bg-indigo-700 flex items-center justify-center gap-2">
+            <i data-lucide="upload" class="w-5 h-5" aria-hidden="true"></i>
+            <span>${isAr ? 'استعادة من نسخة احتياطية' : 'Restore from backup file'}</span>
+          </button>
+          <button type="button" onclick="acknowledgeStorageLoss()" class="w-full min-h-12 rounded-xl glass-panel px-5 py-3 font-bold text-slate-600 dark:text-slate-300">
+            ${isAr ? 'البدء من جديد بدون استعادة' : 'Start fresh without restoring'}
+          </button>
+        </div>
+        <p class="mt-4 text-center text-xs text-slate-400">${isAr
+          ? 'نصيحة: صدِّر نسخة احتياطية من الإعدادات بانتظام، أو استخدم وضع الخادم لحماية بياناتك.'
+          : 'Tip: export a backup from Settings regularly, or use server mode to keep data safe.'}</p>
+      </div>
+    </div>`;
+}
+
+function acknowledgeStorageLoss() {
+  state._storageLossAcknowledged = true;
+  render();
+}
+
+// Shown instead of first-run setup when the IndexedDB open never settled this
+// boot (watchdog / onblocked) while the sentinel cookie proves a local
+// workspace exists on this device. Unlike renderStorageLossRecovery, nothing
+// was deleted — the data is still stored, this session just could not read
+// it — so the primary action is a reload, not a backup restore.
+function renderStorageUnavailableNotice() {
+  const isAr = state.language === 'ar';
+  return `
+    <div class="min-h-screen flex items-center justify-center p-4">
+      <div class="glass-panel w-full max-w-md p-8 rounded-3xl animate-fade-in-up" role="alert">
+        <div class="text-center mb-6">
+          <div class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+            <i data-lucide="database" class="h-8 w-8" aria-hidden="true"></i>
+          </div>
+          <h1 class="text-2xl font-bold text-slate-800 dark:text-white">${isAr ? 'لم تستجب ذاكرة التخزين' : 'Device storage did not respond'}</h1>
+          <p class="text-sm text-slate-500 mt-2 leading-6">${isAr
+            ? 'بياناتك ما تزال محفوظة على هذا الجهاز، لكن المتصفح لم يستجب لطلب قراءتها هذه المرة. لم يُحذف أي شيء — أعد تحميل الصفحة للمحاولة مرة أخرى.'
+            : 'Your data is still on this device, but the browser did not respond when reading it this time. Nothing was deleted — reload the page to try again.'}</p>
+        </div>
+        <div class="space-y-3">
+          <button type="button" onclick="window.location.reload()" class="btn-shine w-full min-h-12 rounded-xl bg-indigo-600 px-5 py-3 font-extrabold text-white hover:bg-indigo-700 flex items-center justify-center gap-2">
+            <i data-lucide="refresh-cw" class="w-5 h-5" aria-hidden="true"></i>
+            <span>${isAr ? 'إعادة تحميل الصفحة' : 'Reload the page'}</span>
+          </button>
+          <button type="button" onclick="acknowledgeStorageLoss()" class="w-full min-h-12 rounded-xl glass-panel px-5 py-3 font-bold text-slate-600 dark:text-slate-300">
+            ${isAr ? 'المتابعة بدون البيانات المحفوظة' : 'Continue without the saved data'}
+          </button>
+        </div>
+        <p class="mt-4 text-center text-xs text-slate-400">${isAr
+          ? 'البيانات المحفوظة محمية من الكتابة فوقها في هذه الجلسة.'
+          : 'The saved data is protected from being overwritten during this session.'}</p>
+      </div>
+    </div>`;
+}
+
 function renderFirstRunSetup() {
   const isAr = state.language === 'ar';
   const serverSetup = isServerModeEnabled() && state.needsServerSetup && state.serverSetupEnabled === true;
@@ -244,6 +387,18 @@ function renderFirstRunSetup() {
           <h1 class="text-2xl font-bold text-slate-800 dark:text-white">${t('appName')}</h1>
           <p class="text-slate-500 mt-1">${modeNote}</p>
         </div>
+
+        ${state.serverProbeFailed && !serverSetup ? `
+        <div class="w-full mb-6 rounded-2xl border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-900/20 p-4 text-sm text-rose-800 dark:text-rose-200" role="alert">
+          <div class="font-bold mb-1">${isAr ? 'تعذّر الوصول إلى الخادم' : 'Server unreachable'}</div>
+          <div class="text-xs mb-3">${isAr
+            ? 'إذا كان لديك حساب على خادم البيان فلا تنشئ حساباً محلياً جديداً — أعد المحاولة أولاً.'
+            : 'If you already have an account on an Albayan server, do not create a new local account — retry the connection first.'}</div>
+          <button type="button" onclick="retryServerDetection()" class="min-h-11 rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-700">
+            ${isAr ? 'إعادة محاولة الاتصال' : 'Retry connection'}
+          </button>
+        </div>
+        ` : ''}
 
         <div class="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 mb-6">
           <div class="text-xs text-slate-600 dark:text-slate-300">
@@ -447,6 +602,10 @@ function attachFirstRunHandlers() {
 function renderLogin() {
   const isRTL = state.language === 'ar';
   const passkeySupported = !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext);
+  // Insecure origins (plain http:// on a LAN IP) hide crypto.subtle and
+  // clipboard/passkey APIs. Login still works via the pure-JS crypto fallback
+  // (02-security.js), but tell the user why security features are degraded.
+  const webCryptoOk = !!(globalThis.crypto && globalThis.crypto.subtle);
   const passkeyHint = passkeySupported
     ? (isRTL ? 'يمكنك استخدام بصمة/Face ID (Passkey) إذا تم إعدادها مسبقاً.' : 'You can use a Passkey (Face ID / Touch ID) if you already set one up.')
     : (isRTL ? 'Passkey يتطلب HTTPS أو localhost. افتح التطبيق عبر localhost لاستخدامه.' : 'Passkeys require HTTPS or localhost. Open the app via localhost to use it.');
@@ -480,6 +639,27 @@ function renderLogin() {
             <div class="text-xs">${isRTL
               ? 'إعداد المتصفح معطّل. اطلب من مشغل الخادم استخدام متغيرات ALBAYAN_BOOTSTRAP_ADMIN_* أو أمر إنشاء المدير من الطرفية.'
               : 'Browser setup is disabled. Ask the server operator to use ALBAYAN_BOOTSTRAP_ADMIN_* or the create-admin CLI command.'}</div>
+          </div>
+          ` : ''}
+
+          ${webCryptoOk ? '' : `
+          <div class="w-full mb-5 rounded-2xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-200" role="note">
+            <div class="font-bold mb-1">${isRTL ? 'اتصال غير مشفّر' : 'Insecure connection'}</div>
+            <div class="text-xs">${isRTL
+              ? 'التطبيق مفتوح عبر HTTP غير الآمن. تسجيل الدخول يعمل، لكن للحماية الكاملة افتحه عبر https:// أو localhost.'
+              : 'The app is open over insecure HTTP. Sign-in still works, but for full security open it via https:// or localhost.'}</div>
+          </div>
+          `}
+
+          ${state.serverProbeFailed ? `
+          <div class="w-full mb-5 rounded-2xl border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-900/20 p-4 text-sm text-rose-800 dark:text-rose-200" role="alert">
+            <div class="font-bold mb-1">${isRTL ? 'تعذّر الوصول إلى الخادم' : 'Server unreachable'}</div>
+            <div class="text-xs mb-3">${isRTL
+              ? 'لم يستجب خادم البيان أثناء بدء التشغيل، لذا يعمل التطبيق الآن على البيانات المحلية لهذا الجهاز فقط.'
+              : 'The Albayan server did not respond during startup, so the app is currently using this device’s local data only.'}</div>
+            <button type="button" onclick="retryServerDetection()" class="min-h-11 rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-700">
+              ${isRTL ? 'إعادة محاولة الاتصال' : 'Retry connection'}
+            </button>
           </div>
           ` : ''}
 
@@ -671,7 +851,125 @@ function attachLoginHandlers() {
   }
 }
 
-function renderMainApp() {
+function getWorkspaceViewTitle(view = state.currentView) {
+  const keyByView = {
+    analytics: 'analytics',
+    customers: 'customers',
+    receipts: 'receipts',
+    pages: 'pages',
+    ads: 'ads',
+    deliveries: 'deliveries',
+    reconciliation: 'jobReconciliation',
+    users: 'users',
+    audit: 'auditLogs',
+    settings: 'settings',
+    'delivery-dashboard': 'dashboard',
+    'clothes-system': 'clothesSystem'
+  };
+  const key = keyByView[view];
+  return key ? t(key) : t('adManager');
+}
+
+function isWorkspaceFilterPanelExpanded(view) {
+  if (isAdvancedWorkspaceMode()) return true;
+  const panels = state.expandedFilterPanels;
+  return !!(panels && typeof panels === 'object' && panels[view]);
+}
+
+function toggleWorkspaceFilterPanel(view) {
+  if (!state.expandedFilterPanels || typeof state.expandedFilterPanels !== 'object' || Array.isArray(state.expandedFilterPanels)) {
+    state.expandedFilterPanels = {};
+  }
+  state.expandedFilterPanels[view] = !state.expandedFilterPanels[view];
+  render();
+}
+
+function renderWorkspaceFilterToggle(view, activeCount = 0) {
+  if (isAdvancedWorkspaceMode()) return '';
+  const isAr = state.language === 'ar';
+  const expanded = isWorkspaceFilterPanelExpanded(view);
+  const safeView = Security.escapeHtml(String(view || ''));
+  const count = Math.max(0, Number(activeCount) || 0);
+  return `
+    <button type="button" onclick="toggleWorkspaceFilterPanel('${safeView}')" class="workspace-filter-toggle touch-target ${expanded ? 'is-open' : ''}" aria-expanded="${expanded ? 'true' : 'false'}" aria-controls="${safeView}-advanced-filters">
+      <i data-lucide="sliders-horizontal" class="w-4 h-4"></i>
+      <span>${expanded ? (isAr ? 'إخفاء الفلاتر' : 'Hide filters') : (isAr ? 'المزيد من الفلاتر' : 'More filters')}</span>
+      ${count > 0 ? `<span class="workspace-filter-count">${count}</span>` : ''}
+      <i data-lucide="chevron-${expanded ? 'up' : 'down'}" class="w-4 h-4"></i>
+    </button>
+  `;
+}
+
+function renderWorkspaceTopbar() {
+  const isAr = state.language === 'ar';
+  const advanced = isAdvancedWorkspaceMode();
+  return `
+    <header class="workspace-topbar sticky top-0 z-30 border-b border-slate-200/80 bg-white/90 dark:border-slate-800 dark:bg-slate-950/90">
+      <div class="mx-auto flex max-w-7xl items-center gap-4 px-8 py-3">
+        <div class="min-w-0">
+          <div class="text-[11px] font-bold uppercase tracking-[0.16em] text-indigo-500">${isAr ? 'مساحة العمل' : 'Workspace'}</div>
+          <div class="truncate text-sm font-bold text-slate-800 dark:text-white">${Security.escapeHtml(getWorkspaceViewTitle())}</div>
+        </div>
+        <button type="button" onclick="toggleCommandPalette()" class="workspace-global-search ml-auto" aria-haspopup="dialog" aria-label="${isAr ? 'البحث الذكي في كل النظام' : 'Smart search across the system'}">
+          <i data-lucide="search" class="h-4 w-4 text-indigo-500"></i>
+          <span class="truncate">${isAr ? 'ابحث عن عميل أو وصل أو صفحة أو إعلان...' : 'Find a customer, receipt, page or ad...'}</span>
+          <kbd>Ctrl K</kbd>
+        </button>
+        <button type="button" onclick="toggleWorkspaceExperienceMode()" class="workspace-mode-toggle" title="${isAr ? 'التبديل بين العرض البسيط والمتقدم' : 'Switch between Simple and Advanced view'}">
+          <i data-lucide="${advanced ? 'sliders-horizontal' : 'sparkles'}" class="h-4 w-4"></i>
+          <span>${advanced ? (isAr ? 'متقدم' : 'Advanced') : (isAr ? 'بسيط' : 'Simple')}</span>
+        </button>
+      </div>
+    </header>
+  `;
+}
+
+function canOpenWorkspaceView(view) {
+  if (isAdminRole(state.currentUser?.role)) return true;
+  if (isDeliveryRole(state.currentUser?.role) && (view === 'delivery-dashboard' || view === 'deliveries')) return true;
+  const permissionByView = {
+    analytics: 'analytics',
+    customers: 'customers',
+    receipts: 'receipts',
+    pages: 'pages',
+    ads: 'ads',
+    deliveries: 'deliveries'
+  };
+  const moduleName = permissionByView[view];
+  return !!moduleName && (currentUserHasPermission(moduleName, 'view') || currentUserHasPermission(moduleName, 'viewOwn'));
+}
+
+function renderMobileBottomNavigation() {
+  const isAr = state.language === 'ar';
+  const candidates = isDeliveryRole(state.currentUser?.role)
+    ? [
+        { id: 'delivery-dashboard', icon: 'layout-dashboard', label: isAr ? 'الرئيسية' : 'Home' },
+        { id: 'deliveries', icon: 'truck', label: isAr ? 'التوصيل' : 'Delivery' }
+      ]
+    : [
+        { id: 'analytics', icon: 'layout-dashboard', label: isAr ? 'الرئيسية' : 'Home' },
+        { id: 'customers', icon: 'users', label: isAr ? 'العملاء' : 'Customers' },
+        { id: 'receipts', icon: 'receipt', label: isAr ? 'الوصولات' : 'Receipts' },
+        { id: 'ads', icon: 'megaphone', label: isAr ? 'الإعلانات' : 'Ads' }
+      ];
+  const items = candidates.filter(item => canOpenWorkspaceView(item.id));
+  return `
+    <nav class="mobile-bottom-nav" aria-label="${isAr ? 'التنقل السريع' : 'Quick navigation'}">
+      ${items.map(item => `
+        <button type="button" onclick="navigateTo('${item.id}')" class="mobile-bottom-nav-item ${state.currentView === item.id ? 'is-active' : ''}" aria-current="${state.currentView === item.id ? 'page' : 'false'}">
+          <i data-lucide="${item.icon}" class="h-5 w-5"></i>
+          <span>${item.label}</span>
+        </button>
+      `).join('')}
+      <button type="button" onclick="toggleMobileMenu()" class="mobile-bottom-nav-item" aria-label="${isAr ? 'المزيد' : 'More'}">
+        <i data-lucide="menu" class="h-5 w-5"></i>
+        <span>${isAr ? 'المزيد' : 'More'}</span>
+      </button>
+    </nav>
+  `;
+}
+
+function renderMainApp(viewHTML = null) {
   const dir = getDir();
   const showSidebar = !['services-hub', 'smart-systems', 'service-placeholder', 'wallet', 'clothes-system', 'ads-studio'].includes(state.currentView);
   
@@ -683,11 +981,16 @@ function renderMainApp() {
         ${showSidebar ? `
         <header class="mobile-app-header sticky top-0 z-20 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-3 sm:px-6 py-3 md:hidden flex justify-between items-center">
           <div class="min-w-0 truncate font-bold">${t('adManager')}</div>
-          <button type="button" onclick="toggleMobileMenu()" class="mobile-menu-button touch-target flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'فتح القائمة' : 'Open menu'}" aria-controls="app-sidebar" aria-expanded="${state.isMobileMenuOpen ? 'true' : 'false'}"><i data-lucide="menu" class="w-6 h-6"></i></button>
+          <div class="flex items-center gap-1">
+            <button type="button" onclick="toggleCommandPalette()" class="touch-target flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'البحث الذكي' : 'Smart search'}"><i data-lucide="search" class="w-5 h-5"></i></button>
+            <button type="button" onclick="toggleMobileMenu()" class="mobile-menu-button touch-target flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'فتح القائمة' : 'Open menu'}" aria-controls="app-sidebar" aria-expanded="${state.isMobileMenuOpen ? 'true' : 'false'}"><i data-lucide="menu" class="w-6 h-6"></i></button>
+          </div>
         </header>
+        ${renderWorkspaceTopbar()}
         ` : ''}
-        <div class="app-content min-w-0 p-4 md:p-8 max-w-7xl mx-auto">${renderView()}</div>
+        <div id="workspace-view-content" class="app-content min-w-0 p-4 md:p-8 max-w-7xl mx-auto">${viewHTML === null ? renderView() : viewHTML}</div>
       </main>
+      ${showSidebar ? renderMobileBottomNavigation() : ''}
     </div>
   `;
 }
@@ -839,6 +1142,13 @@ function renderSidebar() {
 
         ${renderAlwaysAvailableAccountLinks()}
         
+        <button type="button" onclick="toggleWorkspaceExperienceMode()" class="workspace-sidebar-mode w-full min-h-11 flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-xs font-bold">
+          <i data-lucide="${isAdvancedWorkspaceMode() ? 'sliders-horizontal' : 'sparkles'}" class="w-4 h-4"></i>
+          <span>${isAdvancedWorkspaceMode()
+            ? (state.language === 'ar' ? 'العرض المتقدم' : 'Advanced view')
+            : (state.language === 'ar' ? 'العرض البسيط' : 'Simple view')}</span>
+        </button>
+
         <div class="flex items-center justify-between bg-white/20 dark:bg-slate-800/20 rounded-xl p-2">
           <button onclick="toggleTheme()" class="flex-1 flex items-center justify-center space-x-2 py-2 rounded-lg text-xs font-bold hover:bg-white/20">
             <i data-lucide="${state.theme === 'dark' ? 'moon' : state.theme === 'light' ? 'sun' : 'monitor'}" class="w-4 h-4"></i>
@@ -1330,7 +1640,7 @@ function renderWalletView() {
         : (userById.get(String(otherId))?.name || userById.get(String(otherId))?.email || String(otherId || ''));
 
     const amountStr = walletFormatMinor(walletTxAmountMinor(tx), walletTxCurrency(tx));
-    const when = tx.createdAt ? new Date(tx.createdAt).toLocaleString() : '';
+    const when = tx.createdAt ? new Date(tx.createdAt).toLocaleString(appDateLocale()) : '';
     const memo = Security.escapeHtml(String(tx.memo || ''));
 
     return `
@@ -1350,7 +1660,7 @@ function renderWalletView() {
   const subsRows = activeSubs.map(s => {
     const svc = SERVICES[s.serviceId];
     const name = svc ? (isRTL ? svc.nameAr : svc.name) : s.serviceId;
-    const exp = s.expiresAt ? new Date(s.expiresAt).toLocaleDateString() : '';
+    const exp = s.expiresAt ? new Date(s.expiresAt).toLocaleDateString(appDateLocale()) : '';
     return `
       <div class="flex items-center justify-between gap-4 py-2 border-b border-slate-200/60 dark:border-slate-700/60">
         <div class="font-bold text-slate-800 dark:text-white min-w-0 truncate">${Security.escapeHtml(name)}</div>
@@ -1554,6 +1864,13 @@ function renderAnalyticsView() {
   // collected-vs-outstanding amounts, per-customer spend).
   const canViewFinancials = can('analytics', 'viewFinancials');
   const canViewSensitive = can('analytics', 'viewSensitive');
+  // Liquidity coverage is the most sensitive number in the app (it admits how
+  // much customer money is uncovered) — Admin only. The appSettings config
+  // also syncs only to admins, so a wider gate would show non-admins a
+  // permanently empty panel; open it up later only together with a server
+  // read carve-out for the config collection.
+  const canViewLiquidity = isCurrentUserAdmin();
+  const liquidity = canViewLiquidity ? getLiquiditySnapshot() : null;
 
   // Calculate ad revenue - separate paid vs pending/unpaid for clarity.
   // Uses the SAME status-aware spend rule as the customer cards
@@ -1679,7 +1996,7 @@ function renderAnalyticsView() {
     return `
       <div class="flex items-center justify-between text-xs font-medium mb-1">
         <span class="text-slate-500">${label}</span>
-        <span class="text-slate-700 dark:text-slate-200">${value.toLocaleString()} / ${target.toLocaleString()}</span>
+        <span class="text-slate-700 dark:text-slate-200">${value.toLocaleString('en-US')} / ${target.toLocaleString('en-US')}</span>
       </div>
       <div class="w-full h-2 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
         <div class="h-2 ${color} rounded-full" style="width:${pct}%"></div>
@@ -1766,6 +2083,85 @@ function renderAnalyticsView() {
         </div>
         `}
       </div>
+
+      ${canViewLiquidity && liquidity ? (() => {
+        const covered = liquidity.coveragePercent >= 100;
+        const halfway = liquidity.coveragePercent >= 50;
+        // Tailwind needs complete literal class names — never build them from
+        // pieces or the styles silently vanish from the compiled CSS.
+        const statusBadgeClass = covered
+          ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/40'
+          : halfway
+            ? 'bg-amber-50 text-amber-700 dark:bg-amber-900/40'
+            : 'bg-rose-50 text-rose-700 dark:bg-rose-900/40';
+        const statusLabel = covered
+          ? (isAr ? 'آمن — النقد الجديد يغطي أموال العملاء' : 'Safe — new cash covers customer money')
+          : halfway
+            ? (isAr ? 'تغطية جزئية — واصل التحصيل' : 'Partial cover — keep collecting')
+            : (isAr ? 'خطر — النقد الجديد لا يغطي نصف المستحق' : 'Danger — new cash covers less than half');
+        const startDisplay = liquidity.tracking ? new Date(liquidity.startDate).toLocaleDateString(isAr ? 'ar-LY' : 'en-GB') : '';
+        const dateControl = isCurrentUserAdmin() ? `
+            <div class="flex items-center gap-2 flex-wrap">
+              <input type="date" id="liquidity-start-date" ${liquidity.tracking ? `value="${liquidity.startDate.slice(0, 10)}"` : ''} class="glass-input px-3 py-2 rounded-lg text-sm" />
+              <button onclick="updateLiquidityTrackingStart(document.getElementById('liquidity-start-date').value)"
+                class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold">
+                ${liquidity.tracking ? (isAr ? 'تغيير تاريخ البداية' : 'Change start date') : (isAr ? 'ابدأ التتبّع' : 'Start tracking')}
+              </button>
+            </div>` : '';
+        return `
+      <!-- Liquidity Coverage -->
+      <div class="glass-panel rounded-2xl p-5 space-y-4">
+        <div class="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">${isAr ? 'تغطية السيولة' : 'Liquidity Coverage'}</h2>
+            <p class="text-xs text-slate-500 mt-0.5">${
+              liquidity.tracking
+                ? (isAr ? `النقد الجديد منذ ${startDisplay} مقابل كل ما هو مستحق للعملاء` : `New cash since ${startDisplay} vs everything still owed to customers`)
+                : (isAr ? 'تتبّع الأموال الجديدة مقابل المستحق لكل العملاء' : 'Track fresh money against what all customers are owed')
+            }</p>
+          </div>
+          ${liquidity.tracking
+            ? `<span class="text-xs px-3 py-1 rounded-full ${statusBadgeClass} font-semibold">${statusLabel}</span>`
+            : `<span class="text-xs px-3 py-1 rounded-full bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">${isAr ? 'لم يبدأ بعد' : 'Not started yet'}</span>`}
+        </div>
+        ${liquidity.tracking ? `
+        <div class="grid grid-cols-2 xl:grid-cols-4 gap-3 text-sm">
+          <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
+            <p class="text-slate-500 text-xs">${isAr ? 'نقد جديد مُحصَّل' : 'New money collected'}</p>
+            <p class="text-xl font-bold text-emerald-600 dark:text-emerald-400">$${liquidity.collectedUSD.toFixed(2)}</p>
+          </div>
+          <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
+            <p class="text-slate-500 text-xs">${isAr ? 'صُرف على إعلانات جديدة' : 'Spent on new ads'}</p>
+            <p class="text-xl font-bold text-rose-600 dark:text-rose-400">$${liquidity.adSpendUSD.toFixed(2)}</p>
+          </div>
+          <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
+            <p class="text-slate-500 text-xs">${isAr ? 'صافي النقد الجديد' : 'Net new cash'}</p>
+            <p class="text-xl font-bold ${liquidity.netUSD >= 0 ? 'text-slate-800 dark:text-white' : 'text-rose-600 dark:text-rose-400'}">$${liquidity.netUSD.toFixed(2)}</p>
+          </div>
+          <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
+            <p class="text-slate-500 text-xs">${isAr ? 'المستحق لكل العملاء' : 'Owed to all customers'}</p>
+            <p class="text-xl font-bold text-indigo-600 dark:text-indigo-400">$${liquidity.liabilityUSD.toFixed(2)}</p>
+          </div>
+        </div>
+        <div>
+          <div class="flex items-center justify-between text-xs text-slate-500 mb-1">
+            <span>${isAr ? 'نسبة التغطية' : 'Coverage'}: ${liquidity.coveragePercent.toFixed(1)}%</span>
+            ${liquidity.shortfallUSD > 0.005 ? `<span class="font-semibold text-rose-600">${isAr ? 'العجز المتبقي' : 'Still uncovered'}: $${liquidity.shortfallUSD.toFixed(2)}</span>` : `<span class="font-semibold text-emerald-600">${isAr ? 'مُغطّى بالكامل' : 'Fully covered'}</span>`}
+          </div>
+          <div class="w-full h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
+            <div class="h-full rounded-full transition-all duration-500 ${covered ? 'bg-gradient-to-r from-emerald-500 to-teal-500' : (halfway ? 'bg-gradient-to-r from-amber-500 to-orange-500' : 'bg-gradient-to-r from-rose-500 to-red-600')}" style="width: ${Math.min(liquidity.coveragePercent, 100)}%"></div>
+          </div>
+        </div>
+        ${dateControl}
+        ` : `
+        <p class="text-sm text-slate-600 dark:text-slate-300">${isAr
+          ? 'اختر تاريخ البداية (اليوم مثلاً). من ذلك التاريخ سيحسب النظام كل نقد جديد يصلك وكل صرف جديد على الإعلانات، ويقارنه بما هو مستحق لكل العملاء.'
+          : 'Pick a start date (for example today). From that date the system counts every new payment you receive and every new ad you fund, and compares the net against everything customers are still owed.'}</p>
+        ${dateControl || `<p class="text-xs text-slate-500">${isAr ? 'يقوم المدير بتفعيل التتبّع' : 'An Admin starts the tracking'}</p>`}
+        `}
+      </div>
+        `;
+      })() : ''}
 
       <!-- Tracking Panels -->
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -1881,7 +2277,7 @@ function renderAnalyticsView() {
                     <p class="font-medium">${Security.escapeHtml(item.type || '')}: ${Security.escapeHtml(item.name || '')}</p>
                     <p class="text-[11px] text-slate-500">$${item.value.toFixed(2)} • ${Security.escapeHtml(trStatus(item.status || ''))}</p>
                   </div>
-                  <span class="text-[10px] text-slate-400">${item.at ? new Date(item.at).toLocaleDateString() : ''}</span>
+                  <span class="text-[10px] text-slate-400">${item.at ? new Date(item.at).toLocaleDateString(appDateLocale()) : ''}</span>
                 </div>
               `).join('')}
             </div>
@@ -1979,27 +2375,41 @@ function updateCustomersViewFiltered() {
   if (window.lucide) lucide.createIcons();
 }
 
-function renderCustomersGrid(customers) {
+function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
   const isAr = state.language === 'ar';
   if (!Array.isArray(customers) || customers.length === 0) {
     return `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="users" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${isAr ? 'لا يوجد عملاء' : 'No customers found'}</p></div>`;
   }
 
   const totalCustomers = customers.length;
-  const statsIndex = buildCustomerStatsIndex();
+  // renderCustomersView already builds these O(all records) indexes for its
+  // header stats; accept them as params so each search keystroke computes
+  // them once instead of twice (noticeably slow on phones).
+  statsIndex = statsIndex || buildCustomerStatsIndex();
   // customers.viewContacts / customers.viewBalance are real permissions — a
   // user without them must not see phone numbers or money figures.
   const canSeeContacts = can('customers', 'viewContacts');
   const canSeeBalance = can('customers', 'viewBalance');
   const canSeePages = can('pages', 'view');
+  const canSeeReceipts = canOpenWorkspaceView('receipts');
+  const linkedReceiptCountByCustomer = new Map();
+  if (canSeeReceipts) {
+    getReceiptsVisibleToCurrentUser().forEach(receipt => {
+      const customerId = getReceiptCustomerReferenceId(receipt);
+      if (customerId) linkedReceiptCountByCustomer.set(customerId, (linkedReceiptCountByCustomer.get(customerId) || 0) + 1);
+    });
+  }
+  duplicateCustomerIds = duplicateCustomerIds || (isCurrentUserAdmin()
+    ? new Set(findDuplicateCustomerGroups(state.customers).flatMap(group => group.customers.map(customer => String(customer.id))))
+    : new Set());
   const HIDDEN = isAr ? 'محجوب' : 'Hidden';
   return customers.map((c, idx) => {
           const stats = getCustomerStats(c.id, statsIndex);
           const lastAdText = stats.lastAdDate
-            ? new Date(stats.lastAdDate).toLocaleDateString()
+            ? new Date(stats.lastAdDate).toLocaleDateString(appDateLocale())
             : (isAr ? 'أبداً' : 'Never');
 
-    const phones = Array.isArray(c.phones) ? c.phones : [];
+    const phones = getCustomerPhoneEntries(c).map(entry => entry.value);
     const profileLinks = Array.isArray(c.profileLinks) ? c.profileLinks : [];
           // Display number: total - index (so first item = highest number, matching newest-first sort)
           const displayNum = totalCustomers - idx;
@@ -2013,6 +2423,13 @@ function renderCustomersGrid(customers) {
                 <i data-lucide="files" class="w-4 h-4"></i><span>${pagesLabel}</span>
               </button>`
             : '';
+          const linkedReceiptCount = linkedReceiptCountByCustomer.get(String(c.id || '')) || 0;
+          const receiptsLabel = isAr ? `الوصولات ${linkedReceiptCount}` : `Receipts ${linkedReceiptCount}`;
+          const linkedReceiptsButton = canSeeReceipts
+            ? `<button type="button" data-action="view-customer-receipts" data-customer-id="${Security.escapeHtml(String(c.id || ''))}" onclick="openCustomerReceipts(this.dataset.customerId)" aria-label="${Security.escapeHtml(isAr ? `عرض ${linkedReceiptCount} من وصولات العميل ${c.name || ''}` : `View ${linkedReceiptCount} receipts linked to ${c.name || 'this customer'}`)}" class="customer-receipts-button min-h-11 px-3 py-2 bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 rounded-full text-xs font-bold inline-flex items-center gap-1.5 hover:bg-violet-200 dark:hover:bg-violet-900/50 focus:outline-none focus:ring-2 focus:ring-violet-500">
+                <i data-lucide="receipt" class="w-4 h-4"></i><span>${receiptsLabel}</span>
+              </button>`
+            : '';
           
           return `
             <div class="glass-panel rounded-xl p-5 hover:scale-[1.02] transition-transform" data-customer-id="${c.id}">
@@ -2022,9 +2439,11 @@ function renderCustomersGrid(customers) {
                     <span class="px-2 py-0.5 rounded-md bg-blue-100 dark:bg-blue-900/50 text-blue-600 dark:text-blue-400 text-xs font-bold">#${displayNum}</span>
                   <h3 class="font-bold text-lg text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</h3>
                   </div>
-                  <div class="flex items-center space-x-2 mt-1">
+                  <div class="flex min-w-0 flex-wrap items-center gap-2 mt-1">
                     <span class="text-xs px-2 py-1 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 rounded-full">${Security.escapeHtml(c.platform || '')}</span>
+                    ${linkedReceiptsButton}
                     ${linkedPagesButton}
+                    ${duplicateCustomerIds.has(String(c.id)) ? `<button type="button" onclick="showCustomerDuplicateMerge('${Security.escapeHtml(String(c.id || ''))}')" class="min-h-11 px-3 py-2 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 text-xs font-bold inline-flex items-center gap-1.5 hover:bg-amber-200 dark:hover:bg-amber-900/50" aria-haspopup="dialog" title="${isAr ? 'دمج سجل العميل المكرر بأمان' : 'Safely merge this duplicate customer'}"><i data-lucide="copy" class="w-4 h-4"></i><span>${isAr ? 'مكرر' : 'Duplicate'}</span></button>` : ''}
                   </div>
                 </div>
                 <div class="flex space-x-1">
@@ -2127,10 +2546,31 @@ function loadMoreCustomers() {
   updateCustomersViewFiltered();
 }
 
+function applyCustomerQuickFilter(mode) {
+  state.customerFinancialFilter = mode === 'debt' ? 'hasDebt' : (mode === 'credit' ? 'hasCredit' : 'all');
+  render();
+}
+
 function renderCustomersView() {
   const isAr = state.language === 'ar';
+  const canSeeCustomerContacts = can('customers', 'viewContacts');
+  const canSeeCustomerBalances = can('customers', 'viewBalance');
+  const financialCustomerSorts = new Set(['highestPaid', 'lowestPaid', 'mostSpend', 'leastSpend', 'biggestCredit', 'highestDebt']);
+  // A saved filter preference must never become a side channel after an
+  // administrator removes balance access.
+  if (!canSeeCustomerBalances) {
+    state.customerFinancialFilter = 'all';
+    if (financialCustomerSorts.has(String(state.customerSort || ''))) state.customerSort = 'newest';
+  }
   const allFilteredCustomers = getFilteredCustomers();
   const allCustomers = getCustomersVisibleToCurrentUser();
+  const duplicateCustomerGroups = isCurrentUserAdmin() ? findDuplicateCustomerGroups(state.customers) : [];
+  const duplicateCustomerCount = duplicateCustomerGroups.reduce((sum, group) => sum + group.customers.length, 0);
+  const customerAdvancedFilterCount = [
+    canSeeCustomerBalances && state.customerFinancialFilter !== 'all',
+    state.customerSort !== 'newest'
+  ].filter(Boolean).length;
+  const customerAdvancedFiltersOpen = isWorkspaceFilterPanelExpanded('customers');
 
   // Reset pagination whenever the filter/sort/search combination changes.
   const filterFingerprint = JSON.stringify([
@@ -2169,60 +2609,82 @@ function renderCustomersView() {
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('customers')}</h1>
           <p id="customers-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allFilteredCustomers.length} من ${allCustomers.length} عميل` : `${allFilteredCustomers.length} of ${allCustomers.length} customers`}</p>
         </div>
-        ${can('customers', 'add') ? `
-        <button onclick="showCustomerModal()" class="btn-shine w-full sm:w-auto bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
-          <i data-lucide="user-plus" class="w-4 h-4"></i>
-          <span>${t('addCustomer')}</span>
-        </button>
-        ` : ''}
+        <div class="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+          ${isCurrentUserAdmin() ? `
+          <button type="button" onclick="showCustomerDuplicateMerge()" class="w-full sm:w-auto min-h-11 border ${duplicateCustomerCount > 0 ? 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-300' : 'border-slate-200 bg-white/60 text-slate-600 dark:border-slate-700 dark:bg-slate-900/30 dark:text-slate-300'} px-4 py-2 rounded-xl font-bold flex items-center justify-center gap-2" aria-haspopup="dialog">
+            <i data-lucide="scan-search" class="w-4 h-4"></i>
+            <span>${isAr ? 'البحث عن التكرار' : 'Find duplicates'}</span>
+            ${duplicateCustomerCount > 0 ? `<span class="min-w-6 h-6 px-1.5 rounded-full bg-amber-600 text-white text-xs inline-flex items-center justify-center">${duplicateCustomerCount}</span>` : ''}
+          </button>` : ''}
+          ${can('customers', 'add') ? `
+          <button onclick="showCustomerModal()" class="btn-shine w-full sm:w-auto min-h-11 bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
+            <i data-lucide="user-plus" class="w-4 h-4"></i>
+            <span>${t('addCustomer')}</span>
+          </button>
+          ` : ''}
+        </div>
       </div>
 
       <!-- Stats Cards (money figures require customers.viewBalance) -->
-      <div class="grid grid-cols-1 ${can('customers', 'viewBalance') ? 'md:grid-cols-3' : ''} gap-6">
+      <div class="grid grid-cols-1 ${canSeeCustomerBalances ? 'md:grid-cols-3' : ''} gap-6">
         ${renderStatCard(isAr ? 'إجمالي العملاء' : 'Total Customers', allCustomers.length, 'users', 'from-indigo-500 to-purple-600')}
-        ${can('customers', 'viewBalance') ? `
+        ${canSeeCustomerBalances ? `
         ${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', totalRevenue.toFixed(0) + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}
         ${renderStatCard(isAr ? 'الديون المستحقة' : 'Outstanding Debts', totalDebts.toFixed(0) + ' LYD', 'alert-circle', 'from-rose-500 to-pink-600')}
         ` : ''}
       </div>
 
       <!-- Search and Filters -->
-      <div class="glass-panel rounded-xl p-4">
-        <div class="flex flex-col md:flex-row gap-4">
-          <input type="text" id="customer-search" placeholder="${isAr ? 'بحث عن عملاء...' : 'Search customers...'}" value="${Security.escapeHtml(state.customerSearch || '')}" class="flex-1 glass-input px-4 py-2 rounded-lg" oninput="onCustomerSearchInput(this.value)" autocomplete="off" />
-          
-          <div class="customer-filter-controls grid grid-cols-1 sm:grid-cols-2 gap-2">
+      <div class="smart-filter-panel glass-panel rounded-2xl p-4">
+        <div class="smart-filter-primary">
+          <div class="smart-search-field">
+            <label for="customer-search" class="sr-only">${isAr ? 'بحث في العملاء' : 'Search customers'}</label>
+            <i data-lucide="search" class="h-5 w-5"></i>
+            <input type="search" id="customer-search" placeholder="${isAr ? (canSeeCustomerContacts ? 'ابحث بالاسم أو الهاتف...' : 'ابحث بالاسم أو المنصة...') : (canSeeCustomerContacts ? 'Search by name or phone...' : 'Search by name or platform...')}" value="${Security.escapeHtml(state.customerSearch || '')}" oninput="onCustomerSearchInput(this.value)" autocomplete="off" />
+          </div>
+          ${canSeeCustomerBalances ? `<div class="smart-filter-chips" aria-label="${isAr ? 'فلاتر مالية سريعة' : 'Quick financial filters'}">
+            <button type="button" onclick="applyCustomerQuickFilter('all')" class="smart-filter-chip ${state.customerFinancialFilter === 'all' ? 'is-active' : ''}">${isAr ? 'الكل' : 'All'}</button>
+            <button type="button" onclick="applyCustomerQuickFilter('debt')" class="smart-filter-chip ${state.customerFinancialFilter === 'hasDebt' ? 'is-active is-danger' : ''}"><i data-lucide="circle-minus" class="h-4 w-4"></i>${isAr ? 'عليه دين' : 'Has debt'}</button>
+            <button type="button" onclick="applyCustomerQuickFilter('credit')" class="smart-filter-chip ${state.customerFinancialFilter === 'hasCredit' ? 'is-active is-success' : ''}"><i data-lucide="circle-plus" class="h-4 w-4"></i>${isAr ? 'له رصيد' : 'Has credit'}</button>
+          </div>` : ''}
+          ${renderWorkspaceFilterToggle('customers', customerAdvancedFilterCount)}
+        </div>
+
+        <div id="customers-advanced-filters" class="workspace-advanced-panel ${customerAdvancedFiltersOpen ? '' : 'hidden'}" aria-hidden="${customerAdvancedFiltersOpen ? 'false' : 'true'}">
+          <div class="customer-filter-controls workspace-filter-grid">
             <!-- Sort Dropdown -->
             <div class="relative min-w-0">
               <select id="customer-sort" onchange="state.customerSort = this.value; render();" class="w-full min-w-0 glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
                 <option value="newest" ${state.customerSort === 'newest' ? 'selected' : ''}>${isAr ? 'الأحدث أولاً' : 'Newest First'}</option>
                 <option value="oldest" ${state.customerSort === 'oldest' ? 'selected' : ''}>${isAr ? 'الأقدم أولاً' : 'Oldest First'}</option>
                 <option value="lastActive" ${state.customerSort === 'lastActive' ? 'selected' : ''}>${isAr ? 'آخر نشاط (حديثاً)' : 'Last Active (Recently)'}</option>
+                ${canSeeCustomerBalances ? `
                 <option value="highestPaid" ${state.customerSort === 'highestPaid' ? 'selected' : ''}>${isAr ? 'الأعلى دفعاً (إيراد)' : 'Highest Paid (Revenue)'}</option>
                 <option value="lowestPaid" ${state.customerSort === 'lowestPaid' ? 'selected' : ''}>${isAr ? 'الأقل دفعاً' : 'Lowest Paid'}</option>
                 <option value="mostSpend" ${state.customerSort === 'mostSpend' ? 'selected' : ''}>${isAr ? 'الأكثر إنفاقاً (إعلانات)' : 'Most Spend (Ads)'}</option>
                 <option value="leastSpend" ${state.customerSort === 'leastSpend' ? 'selected' : ''}>${isAr ? 'الأقل إنفاقاً' : 'Least Spend'}</option>
                 <option value="biggestCredit" ${state.customerSort === 'biggestCredit' ? 'selected' : ''}>${isAr ? 'أكبر رصيد دائن' : 'Biggest Credit Balance'}</option>
                 <option value="highestDebt" ${state.customerSort === 'highestDebt' ? 'selected' : ''}>${isAr ? 'أعلى دين' : 'Highest Debt'}</option>
+                ` : ''}
               </select>
               <i data-lucide="arrow-up-down" class="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400"></i>
             </div>
             
             <!-- Financial Filter -->
-            <div class="relative min-w-0">
+            ${canSeeCustomerBalances ? `<div class="relative min-w-0">
               <select id="customer-financial-filter" onchange="state.customerFinancialFilter = this.value; render();" class="w-full min-w-0 glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
                 <option value="all" ${state.customerFinancialFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات المالية' : 'All Financials'}</option>
                 <option value="hasCredit" ${state.customerFinancialFilter === 'hasCredit' ? 'selected' : ''}>${isAr ? 'لديه رصيد دائن' : 'Has Credit'}</option>
                 <option value="hasDebt" ${state.customerFinancialFilter === 'hasDebt' ? 'selected' : ''}>${isAr ? 'عليه دين' : 'Has Debt'}</option>
               </select>
               <i data-lucide="filter" class="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400"></i>
-            </div>
+            </div>` : ''}
           </div>
         </div>
       </div>
 
       <div id="customers-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        ${renderCustomersGrid(visibleCustomers)}
+        ${renderCustomersGrid(visibleCustomers, statsIndex, isCurrentUserAdmin() ? new Set(duplicateCustomerGroups.flatMap(group => group.customers.map(customer => String(customer.id)))) : new Set())}
         ${remainingCustomers > 0 ? `
           <div class="col-span-full flex justify-center py-2">
             <button onclick="loadMoreCustomers()" class="px-6 py-3 glass-panel rounded-xl text-sm font-bold text-indigo-600 dark:text-indigo-400 hover:scale-105 transition-transform flex items-center gap-2">
@@ -2252,18 +2714,41 @@ function loadMoreReceipts() {
 
 function renderReceiptsView() {
   const isArV = state.language === 'ar';
-  const allReceipts = getVisibleRecords(state.receipts);
+  const canSearchReceiptContacts = can('customers', 'viewContacts');
+  const allReceipts = getReceiptsVisibleToCurrentUser();
   // PERFORMANCE: one Map lookup per receipt instead of scanning the whole
   // customers array for every receipt (same strict-equality semantics).
-  const customersById = new Map(state.customers.map(c => [c.id, c]));
+  const customersById = new Map(state.customers.map(c => [String(c.id), c]));
+  const receiptCustomerFilter = String(state.receiptCustomerFilter || '').trim();
+  const receiptRecordFilter = String(state.receiptRecordFilter || '').trim();
+  const filterCustomersById = new Map(getCustomersVisibleToCurrentUser().map(c => [String(c.id), c]));
+  const filteredCustomer = receiptCustomerFilter ? filterCustomersById.get(receiptCustomerFilter) : null;
+  const filteredCustomerName = Security.escapeHtml(String(filteredCustomer?.name || (isArV ? 'العميل المحدد' : 'Selected customer')));
+  const filteredReceipt = receiptRecordFilter
+    ? allReceipts.find(receipt => String(receipt?.id || '') === receiptRecordFilter)
+    : null;
+  const filteredReceiptNumber = String(filteredReceipt?.finalReceiptNo || filteredReceipt?.serialNumber || filteredReceipt?.tempReceiptNo || '').trim();
+  const filteredReceiptLabel = Security.escapeHtml(filteredReceiptNumber ? `#${filteredReceiptNumber}` : (isArV ? 'الوصل المحدد' : 'Selected receipt'));
+  const canSeeReceiptAds = canOpenWorkspaceView('ads');
+  const linkedAdCountByReceipt = new Map();
+  if (canSeeReceiptAds) {
+    getAdsVisibleToCurrentUser().forEach(ad => {
+      getAdLinkedReceiptIds(ad).forEach(receiptId => {
+        linkedAdCountByReceipt.set(receiptId, (linkedAdCountByReceipt.get(receiptId) || 0) + 1);
+      });
+    });
+  }
 
   // Apply filters
   let filteredReceipts = allReceipts.filter(receipt => {
-    const customer = customersById.get(receipt.customerId);
+    if (receiptRecordFilter && String(receipt?.id || '') !== receiptRecordFilter) return false;
+    const receiptCustomerId = getReceiptCustomerReferenceId(receipt);
+    if (receiptCustomerFilter && receiptCustomerId !== receiptCustomerFilter) return false;
+    const customer = customersById.get(receiptCustomerId);
     const customerName = customer?.name?.toLowerCase() || '';
     const finalNo = (receipt.finalReceiptNo || receipt.serialNumber || '').toLowerCase();
     const tempNo = (receipt.tempReceiptNo || '').toLowerCase();
-    const phoneNumber = (receipt.phoneNumber || '').toLowerCase();
+    const phoneNumber = canSearchReceiptContacts ? (receipt.phoneNumber || '').toLowerCase() : '';
     const searchTerm = (state.receiptSearch || '').toLowerCase();
     
     // Search filter
@@ -2339,11 +2824,23 @@ function renderReceiptsView() {
     }
   });
   
-  const hasActiveFilters = state.receiptSearch || state.receiptStatusFilter !== 'all' || state.receiptPaymentFilter !== 'all' || state.receiptDateFilter !== 'all' || (state.receiptDebtFilter || 'all') !== 'all' || state.receiptCollectedFilter !== 'all';
+  const hasActiveFilters = receiptRecordFilter || receiptCustomerFilter || state.receiptSearch || state.receiptStatusFilter !== 'all' || state.receiptPaymentFilter !== 'all' || state.receiptDateFilter !== 'all' || (state.receiptDebtFilter || 'all') !== 'all' || state.receiptCollectedFilter !== 'all';
+  const receiptAdvancedFilterCount = [
+    state.receiptStatusFilter !== 'all',
+    state.receiptPaymentFilter !== 'all',
+    state.receiptDateFilter !== 'all',
+    (state.receiptDebtFilter || 'all') !== 'all',
+    state.receiptCollectedFilter !== 'all',
+    state.receiptSortBy !== 'newest'
+  ].filter(Boolean).length;
+  const receiptAdvancedFiltersOpen = isWorkspaceFilterPanelExpanded('receipts');
+  const receiptQuickMode = ['not_paid', 'pending', 'unpaid', 'not-paid'].includes(state.receiptStatusFilter)
+    ? 'unpaid'
+    : (state.receiptDebtFilter === 'any-debt' ? 'debt' : (state.receiptCollectedFilter === 'not-collected' ? 'not-collected' : 'all'));
 
   // Reset pagination whenever the filter/sort/search combination changes.
   const filterFingerprint = JSON.stringify([
-    state.receiptSearch, state.receiptStatusFilter, state.receiptPaymentFilter,
+    receiptRecordFilter, receiptCustomerFilter, state.receiptSearch, state.receiptStatusFilter, state.receiptPaymentFilter,
     state.receiptDateFilter, state.receiptDebtFilter || 'all', state.receiptCollectedFilter, state.receiptSortBy
   ]);
   if (filterFingerprint !== _receiptsFilterFingerprint) {
@@ -2367,24 +2864,35 @@ function renderReceiptsView() {
       </div>
 
       <!-- Search & Filter Bar -->
-      <div class="glass-panel rounded-2xl p-4">
-        <div class="flex flex-col lg:flex-row gap-4">
+      <div class="smart-filter-panel glass-panel rounded-2xl p-4">
+        <div class="smart-filter-primary">
           <!-- Search Input -->
-          <div class="flex-1 relative">
+          <div class="smart-search-field flex-1 relative">
+            <label for="receipt-search-input" class="sr-only">${isArV ? 'بحث في الوصولات' : 'Search receipts'}</label>
             <i data-lucide="search" class="w-5 h-5 absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"></i>
             <input 
               type="text" 
               id="receipt-search-input"
-              placeholder="${isArV ? 'بحث بالعميل أو الرقم التسلسلي أو الهاتف...' : 'Search by customer, serial #, or phone...'}"
+              placeholder="${isArV ? (canSearchReceiptContacts ? 'بحث بالعميل أو الرقم التسلسلي أو الهاتف...' : 'بحث بالعميل أو الرقم التسلسلي...') : (canSearchReceiptContacts ? 'Search by customer, serial #, or phone...' : 'Search by customer or serial #...')}"
               value="${Security.escapeHtml(state.receiptSearch || '')}"
               oninput="updateReceiptSearch(this.value)"
               class="w-full pl-12 pr-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all placeholder:text-slate-400"
             />
             <span id="receipt-search-clear">${state.receiptSearch ? `<button onclick="clearReceiptSearch()" class="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full transition-colors"><i data-lucide="x" class="w-4 h-4 text-slate-400"></i></button>` : ''}</span>
           </div>
-          
+
+          <div id="receipt-quick-filters" class="smart-filter-chips" aria-label="${isArV ? 'فلاتر سريعة' : 'Quick filters'}">
+            <button type="button" onclick="applyReceiptQuickFilter('all')" class="smart-filter-chip ${receiptQuickMode === 'all' ? 'is-active' : ''}">${isArV ? 'الكل' : 'All'}</button>
+            <button type="button" onclick="applyReceiptQuickFilter('unpaid')" class="smart-filter-chip ${receiptQuickMode === 'unpaid' ? 'is-active is-danger' : ''}"><i data-lucide="clock-3" class="h-4 w-4"></i>${isArV ? 'غير مدفوع' : 'Unpaid'}</button>
+            <button type="button" onclick="applyReceiptQuickFilter('debt')" class="smart-filter-chip ${receiptQuickMode === 'debt' ? 'is-active is-danger' : ''}"><i data-lucide="circle-dollar-sign" class="h-4 w-4"></i>${isArV ? 'عليه دين' : 'Debt'}</button>
+            <button type="button" onclick="applyReceiptQuickFilter('not-collected')" class="smart-filter-chip ${receiptQuickMode === 'not-collected' ? 'is-active is-warning' : ''}"><i data-lucide="hand-coins" class="h-4 w-4"></i>${isArV ? 'غير مُحصّل' : 'Not collected'}</button>
+          </div>
+          ${renderWorkspaceFilterToggle('receipts', receiptAdvancedFilterCount)}
+        </div>
+
+        <div id="receipts-advanced-filters" class="workspace-advanced-panel ${receiptAdvancedFiltersOpen ? '' : 'hidden'}" aria-hidden="${receiptAdvancedFiltersOpen ? 'false' : 'true'}">
           <!-- Filter Dropdowns -->
-          <div class="receipt-filter-controls flex flex-wrap gap-2">
+          <div class="receipt-filter-controls workspace-filter-grid">
             <!-- Status Filter -->
             <select onchange="updateReceiptFilter('status', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptStatusFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all" ${state.receiptStatusFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل الحالات' : 'All Status'}</option>
@@ -2449,6 +2957,8 @@ function renderReceiptsView() {
         <div id="receipt-active-filters">${hasActiveFilters ? `
           <div class="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
             <span class="text-xs font-medium text-slate-500">${isArV ? 'الفلاتر النشطة:' : 'Active filters:'}</span>
+            ${receiptRecordFilter ? `<span class="min-h-11 px-2 py-1 bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200 rounded-full text-xs font-bold inline-flex items-center gap-1"><i data-lucide="receipt-text" class="w-3 h-3"></i>${isArV ? 'الوصل' : 'Receipt'}: ${filteredReceiptLabel}<button type="button" onclick="clearReceiptRecordFilter()" class="min-h-11 min-w-11 inline-flex items-center justify-center rounded-full hover:bg-amber-200 dark:hover:bg-amber-800 focus:outline-none focus:ring-2 focus:ring-amber-500" aria-label="${isArV ? 'إزالة فلتر الوصل' : 'Remove receipt filter'}"><i data-lucide="x" class="w-3 h-3"></i></button></span>` : ''}
+            ${receiptCustomerFilter ? `<span class="min-h-11 px-2 py-1 bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 rounded-full text-xs font-medium inline-flex items-center gap-1"><i data-lucide="user-round" class="w-3 h-3"></i>${isArV ? 'العميل' : 'Customer'}: ${filteredCustomerName}<button type="button" onclick="clearReceiptCustomerFilter()" class="min-h-11 min-w-11 inline-flex items-center justify-center rounded-full hover:bg-violet-200 dark:hover:bg-violet-800 focus:outline-none focus:ring-2 focus:ring-violet-500" aria-label="${isArV ? 'إزالة فلتر العميل' : 'Remove customer filter'}"><i data-lucide="x" class="w-3 h-3"></i></button></span>` : ''}
             ${state.receiptSearch ? `<span class="px-2 py-1 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full text-xs font-medium flex items-center"><i data-lucide="search" class="w-3 h-3 mr-1"></i>"${Security.escapeHtml(state.receiptSearch)}"</span>` : ''}
             ${state.receiptStatusFilter !== 'all' ? `<span class="px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-full text-xs font-medium">${isArV ? ({ paid: 'مدفوع', not_paid: 'غير مدفوع / دين', pending: 'غير مدفوع / دين', unpaid: 'غير مدفوع / دين', canceled: 'ملغي', cancelled: 'ملغي', lost: 'ضائع' })[state.receiptStatusFilter] || state.receiptStatusFilter : ({ paid: 'Paid', not_paid: 'Unpaid / Debt', pending: 'Unpaid / Debt', unpaid: 'Unpaid / Debt', canceled: 'Canceled', cancelled: 'Canceled', lost: 'Lost' })[state.receiptStatusFilter] || state.receiptStatusFilter}</span>` : ''}
             ${state.receiptPaymentFilter !== 'all' ? `<span class="px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded-full text-xs font-medium">${isArV ? ({ cash: 'نقدي', usdt: 'USDT', bank: 'حوالة مصرفية', split: 'دفعات مقسّمة' })[state.receiptPaymentFilter] || state.receiptPaymentFilter : state.receiptPaymentFilter}</span>` : ''}
@@ -2461,7 +2971,7 @@ function renderReceiptsView() {
 
       <div id="receipts-grid" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
         ${filteredReceipts.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${hasActiveFilters ? 'search-x' : 'receipt'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${hasActiveFilters ? (isArV ? 'لا توجد وصولات مطابقة للفلاتر' : 'No receipts match your filters') : (isArV ? 'لا توجد وصولات بعد' : 'No receipts yet')}</p>${hasActiveFilters ? `<button onclick="clearAllReceiptFilters()" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">${isArV ? 'مسح كل الفلاتر' : 'Clear all filters'}</button>` : ''}</div>` : visibleReceipts.map((receipt, idx) => {
-          const customer = customersById.get(receipt.customerId);
+          const customer = customersById.get(getReceiptCustomerReferenceId(receipt));
           const displayFinalNo = receipt.finalReceiptNo || receipt.serialNumber || '';
           const displayTempNo = receipt.tempReceiptNo || '';
           // Display number: total - index (so first item = highest number, matching newest-first sort)
@@ -2497,7 +3007,7 @@ function renderReceiptsView() {
           // in both LTR and RTL.
           const _typeAccent = receipt.receiptType === 'CARRIED_BALANCE' ? '#d97706' : '#7c3aed';
           return `
-            <div class="glass-panel rounded-2xl p-6 hover:scale-[1.01] transition-transform" style="border-inline-start:5px solid ${_typeAccent}">
+            <div data-receipt-card="true" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" class="glass-panel rounded-2xl p-6 hover:scale-[1.01] transition-transform ${receiptRecordFilter === String(receipt.id || '') ? 'ring-2 ring-amber-400 ring-offset-2 dark:ring-offset-slate-950' : ''}" style="border-inline-start:5px solid ${_typeAccent}">
               <div class="flex justify-between items-start mb-4">
                 <div>
                   <div class="flex items-center gap-2">
@@ -2509,7 +3019,7 @@ function renderReceiptsView() {
                       ${isArV ? 'الرقم التسلسلي' : 'Serial'}: ${displayTempNo && displayFinalNo ? `${displayTempNo} → ${displayFinalNo}` : (displayTempNo ? `${displayTempNo} ${isArV ? '(مؤقت)' : '(Temp)'}` : displayFinalNo)}
                     </p>
                   ` : ''}
-                  <p class="text-xs text-slate-400 mt-1">${new Date(receipt.createdAt || receipt.startDate).toLocaleString()}</p>
+                  <p class="text-xs text-slate-400 mt-1">${new Date(receipt.createdAt || receipt.startDate).toLocaleString(appDateLocale())}</p>
                   <div class="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1 text-[10px] text-slate-500">
                     <span class="inline-flex items-center gap-1" title="${isArV ? 'تم الإنشاء بواسطة' : 'Created by'}">
                       <i data-lucide="user" class="w-3 h-3"></i>
@@ -2541,7 +3051,7 @@ function renderReceiptsView() {
                   </div>
                   ${receipt.updatedAt ? `
                     <div class="flex items-center mt-0.5 space-x-2">
-                      <p class="text-[10px] text-amber-500 flex items-center"><i data-lucide="edit-3" class="w-2.5 h-2.5 mr-1"></i>${isArV ? 'عُدِّل' : 'Edited'}: ${new Date(receipt.updatedAt).toLocaleString()}</p>
+                      <p class="text-[10px] text-amber-500 flex items-center"><i data-lucide="edit-3" class="w-2.5 h-2.5 mr-1"></i>${isArV ? 'عُدِّل' : 'Edited'}: ${new Date(receipt.updatedAt).toLocaleString(appDateLocale())}</p>
                       ${receipt.editCount ? `<button onclick="showReceiptEditHistory('${receipt.id}')" class="text-[10px] px-1.5 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-full hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors font-medium">${isArV ? `${receipt.editCount} تعديل` : `${receipt.editCount} edit${receipt.editCount > 1 ? 's' : ''}`}</button>` : ''}
                     </div>
                   ` : ''}
@@ -2658,7 +3168,7 @@ function renderReceiptsView() {
                     <span class="text-sm font-medium ${!receipt.collected ? 'text-amber-700 dark:text-amber-300' : fully ? 'text-emerald-700 dark:text-emerald-300' : 'text-orange-700 dark:text-orange-300'}">
                       ${!receipt.collected ? (isAr ? 'لم يُحصَّل' : 'Not Collected') : fully ? (isAr ? 'تم التحصيل' : 'Collected') : (isAr ? 'تحصيل جزئي' : 'Partially Collected')}
                     </span>
-                    ${receipt.collectedAt ? `<span class="text-[10px] text-slate-500">${new Date(receipt.collectedAt).toLocaleDateString()}</span>` : ''}
+                    ${receipt.collectedAt ? `<span class="text-[10px] text-slate-500">${new Date(receipt.collectedAt).toLocaleDateString(appDateLocale())}</span>` : ''}
                     ${receipt.collectedBy ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">${Security.escapeHtml(state.users.find(u => u.id === receipt.collectedBy)?.name || (isArV ? 'مدير' : 'Admin'))}</span>` : ''}
                   </div>
                   <div class="flex items-center gap-2 flex-shrink-0">
@@ -2690,6 +3200,9 @@ function renderReceiptsView() {
                     ${receiptDebtType === 'shop' ? `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300"><i data-lucide="store" class="w-3 h-3"></i>${isArV ? 'دين داخل المحل' : 'In-shop Debt'}</span>` : ''}
                   </div>
                   <div class="flex flex-wrap justify-end gap-2">
+                    ${canSeeReceiptAds ? (() => { const linkedAdCount = linkedAdCountByReceipt.get(String(receipt.id || '')) || 0; return `<button type="button" data-action="view-receipt-ads" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" onclick="openReceiptAds(this.dataset.receiptId)" class="inline-flex min-h-11 items-center gap-1 px-2 text-indigo-600 hover:text-indigo-700 font-bold rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500" title="${isArV ? 'عرض الإعلانات المرتبطة بهذا الوصل' : 'View ads linked to this receipt'}" aria-label="${isArV ? `عرض ${linkedAdCount} من الإعلانات المرتبطة بهذا الوصل` : `View ${linkedAdCount} ads linked to this receipt`}">
+                      <i data-lucide="megaphone" class="w-4 h-4"></i><span class="text-xs">${isArV ? 'الإعلانات' : 'Ads'} ${linkedAdCount}</span>
+                    </button>`; })() : ''}
                     ${receiptPhotoCount > 0 ? `<button type="button" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" onclick="openReceiptPhotoViewer(this.dataset.receiptId, 0)" class="inline-flex items-center gap-1 text-cyan-600 hover:text-cyan-700 font-bold" title="${isArV ? `عرض صور الوصل (${receiptPhotoCount})` : `View receipt photos (${receiptPhotoCount})`}" aria-label="${isArV ? `عرض صور الوصل (${receiptPhotoCount})` : `View receipt photos (${receiptPhotoCount})`}">
                       <i data-lucide="images" class="w-4 h-4"></i><span class="text-xs">${isArV ? 'الصور' : 'Photos'} ${receiptPhotoCount}</span>
                     </button>` : ''}
@@ -2722,9 +3235,51 @@ function renderReceiptsView() {
   `;
 }
 
+let _pageSearchTimer = null;
+function onPageSearchInput(value) {
+  state.pageSearch = Security.sanitizeInput(String(value || ''), { maxLength: 160 });
+  if (_pageSearchTimer) clearTimeout(_pageSearchTimer);
+  _pageSearchTimer = setTimeout(() => {
+    _pageSearchTimer = null;
+    updatePagesViewFiltered();
+  }, 80);
+}
+
+function updatePagesViewFiltered() {
+  if (state.currentView !== 'pages') return;
+  const grid = document.getElementById('pages-grid');
+  const countEl = document.getElementById('pages-count');
+  if (!grid || !countEl) {
+    render();
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  // Swap only the pages grid + count so the search input keeps its caret and
+  // the phone keyboard stays open (same approach as updateCustomersViewFiltered).
+  const tpl = document.createElement('template');
+  tpl.innerHTML = renderPagesView();
+  const newGrid = tpl.content.querySelector('#pages-grid');
+  const newCount = tpl.content.querySelector('#pages-count');
+  if (newGrid) grid.innerHTML = newGrid.innerHTML;
+  if (newCount) countEl.textContent = newCount.textContent;
+  if (window.lucide) lucide.createIcons();
+}
+
 function renderPagesView() {
   const isAr = state.language === 'ar';
-  const visiblePages = getVisibleRecords(state.pages);
+  const allPages = getPagesVisibleToCurrentUser();
+  const pageDisplayNumberById = new Map(allPages.map((page, index) => [String(page.id), allPages.length - index]));
+  const pageSearch = String(state.pageSearch || '').trim().toLocaleLowerCase();
+  const customersById = new Map((state.customers || []).map(customer => [String(customer.id), customer]));
+  const visiblePages = pageSearch
+    ? allPages.filter(page => {
+        const ownerNames = getPageCustomerIds(page)
+          .map(customerId => customersById.get(String(customerId))?.name || '')
+          .join(' ');
+        return [page.name, page.category, ownerNames, page.id]
+          .some(value => String(value || '').toLocaleLowerCase().includes(pageSearch));
+      })
+    : allPages;
   const canSeePageAds = can('ads', 'view');
   const canSeePageFinancials = canSeePageAds
     && can('analytics', 'viewFinancials')
@@ -2735,7 +3290,7 @@ function renderPagesView() {
       <div class="page-header flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('pages')}</h1>
-          <p class="text-sm text-slate-500 mt-1">${isAr ? `${visiblePages.length} صفحة فيسبوك` : `${visiblePages.length} Facebook pages`}</p>
+          <p id="pages-count" class="text-sm text-slate-500 mt-1">${isAr ? `${visiblePages.length}${pageSearch ? ` من ${allPages.length}` : ''} صفحة فيسبوك` : `${visiblePages.length}${pageSearch ? ` of ${allPages.length}` : ''} Facebook pages`}</p>
         </div>
         <button onclick="showPageModal()" class="btn-shine w-full sm:w-auto bg-blue-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
           <i data-lucide="file-plus" class="w-4 h-4"></i>
@@ -2743,8 +3298,17 @@ function renderPagesView() {
         </button>
       </div>
 
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        ${visiblePages.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="file-text" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${isAr ? 'لا توجد صفحات بعد' : 'No pages yet'}</p></div>` : visiblePages.map((p, idx) => {
+      <div class="smart-filter-panel glass-panel rounded-2xl p-4">
+        <label for="page-search" class="sr-only">${isAr ? 'بحث في الصفحات' : 'Search pages'}</label>
+        <div class="smart-search-field">
+          <i data-lucide="search" class="h-5 w-5"></i>
+          <input id="page-search" type="search" value="${Security.escapeHtml(state.pageSearch || '')}" oninput="onPageSearchInput(this.value)" placeholder="${isAr ? 'ابحث باسم الصفحة أو المالك أو التصنيف...' : 'Search by page, owner or category...'}" autocomplete="off" />
+          ${state.pageSearch ? `<button type="button" onclick="state.pageSearch='';render()" aria-label="${isAr ? 'مسح البحث' : 'Clear search'}"><i data-lucide="x" class="h-4 w-4"></i></button>` : ''}
+        </div>
+      </div>
+
+      <div id="pages-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        ${visiblePages.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${pageSearch ? 'search-x' : 'file-text'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${pageSearch ? (isAr ? 'لا توجد صفحات تطابق البحث' : 'No pages match your search') : (isAr ? 'لا توجد صفحات بعد' : 'No pages yet')}</p></div>` : visiblePages.map((p) => {
           const linkedCustomers = getPageCustomerIds(p)
             .map(cid => state.customers.find(c => String(c.id) === String(cid)))
             .filter(Boolean);
@@ -2752,10 +3316,11 @@ function renderPagesView() {
           // ads. Money additionally needs the business financial permission.
           const pageStats = canSeePageAds ? getPageSpendSummary(p.id) : null;
           const lastAdText = pageStats?.lastAdDate
-            ? new Date(pageStats.lastAdDate).toLocaleDateString()
+            ? new Date(pageStats.lastAdDate).toLocaleDateString(appDateLocale())
             : (isAr ? 'أبداً' : 'Never');
-          // Display number: total - index (so first item = highest number)
-          const pageDisplayNum = visiblePages.length - idx;
+          // Keep the card number stable while searching instead of renumbering
+          // the only match as #1.
+          const pageDisplayNum = pageDisplayNumberById.get(String(p.id)) || 0;
           
           return `
             <div class="glass-panel rounded-xl p-5 hover:scale-[1.02] transition-transform">
@@ -2836,12 +3401,28 @@ function renderPagesView() {
 }
 
 let _adSearchTimer = null;
+const ADS_PAGE_SIZE = 50;
+let _adsShowLimit = ADS_PAGE_SIZE;
+let _adsFilterFingerprint = '';
+
+function loadMoreAds() {
+  _adsShowLimit += ADS_PAGE_SIZE;
+  updateAdsViewFiltered();
+}
+
+function applyAdQuickFilter(mode) {
+  state.adFilters = { status: 'all', payment: 'all', page: 'all' };
+  if (mode === 'unpaid') state.adFilters.payment = 'not_paid';
+  if (mode === 'stopped') state.adFilters.status = 'Stopped';
+  render();
+}
+
 function updateAdFilter(type, value) {
   if (!state.adFilters) state.adFilters = {};
   state.adFilters[type] = value;
-  // Same targeted swap as the search box — only the table + count re-render,
-  // so the filter dropdowns and search input keep their values and focus.
-  updateAdsViewFiltered();
+  // Dropdowns also affect quick-chip state and the active-filter badge outside
+  // the table, so refresh the view to keep every indicator truthful.
+  render();
 }
 
 function onAdSearchInput(value) {
@@ -2884,13 +3465,33 @@ function renderAdsView() {
   // (was O(ads × (customers+receipts+users)) on every keystroke). Same Map is
   // passed into getFilteredAds so the search filter is O(1)-per-ad too.
   const customersById = new Map(state.customers.map(c => [c.id, c]));
-  const receiptsById = new Map(state.receipts.map(r => [r.id, r]));
+  const receiptsById = new Map(getReceiptsVisibleToCurrentUser().map(r => [String(r.id), r]));
   const usersById = new Map(state.users.map(u => [String(u.id), u]));
-  const pagesById = new Map((state.pages || []).map(p => [p.id, p]));
+  const pagesById = new Map(getPagesVisibleToCurrentUser().map(p => [p.id, p]));
   const allAds = getFilteredAds(customersById);
   const adF = state.adFilters || {};
-  const visiblePages = getVisibleRecords(state.pages || []);
   const isAr = state.language === 'ar';
+  const adReceiptFilter = String(state.adReceiptFilter || '').trim();
+  const activeReceipt = adReceiptFilter ? receiptsById.get(adReceiptFilter) : null;
+  const activeReceiptLabel = Security.escapeHtml(String(
+    activeReceipt?.finalReceiptNo || activeReceipt?.serialNumber || activeReceipt?.tempReceiptNo || (isAr ? 'الوصل المحدد' : 'Selected receipt')
+  ));
+  const visiblePages = getPagesVisibleToCurrentUser();
+  const canSearchAdContacts = can('customers', 'viewContacts');
+  const adAdvancedFilterCount = [
+    (adF.status || 'all') !== 'all',
+    (adF.payment || 'all') !== 'all',
+    (adF.page || 'all') !== 'all'
+  ].filter(Boolean).length;
+  const adAdvancedFiltersOpen = isWorkspaceFilterPanelExpanded('ads');
+  const adQuickMode = adF.payment === 'not_paid' ? 'unpaid' : (adF.status === 'Stopped' ? 'stopped' : 'all');
+  const adFilterFingerprint = JSON.stringify([adReceiptFilter, state.adSearch, adF.status || 'all', adF.payment || 'all', adF.page || 'all']);
+  if (adFilterFingerprint !== _adsFilterFingerprint) {
+    _adsFilterFingerprint = adFilterFingerprint;
+    _adsShowLimit = ADS_PAGE_SIZE;
+  }
+  const visibleAds = allAds.slice(0, _adsShowLimit);
+  const remainingAds = allAds.length - visibleAds.length;
 
   return `
     <div class="space-y-6 animate-fade-in-up">
@@ -2910,9 +3511,26 @@ function renderAdsView() {
         </div>
       </div>
 
-      <div class="glass-panel rounded-xl p-4">
-        <div class="ad-filter-controls flex flex-col md:flex-row gap-2">
-          <input type="text" id="ad-search" placeholder="${isAr ? 'بحث بالعميل أو الهاتف أو الرقم التسلسلي أو الصفحة...' : 'Search by customer, phone, serial or page...'}" value="${Security.escapeHtml(state.adSearch || '')}" class="flex-1 glass-input px-4 py-2 rounded-lg" oninput="onAdSearchInput(this.value)" autocomplete="off" />
+      <div class="smart-filter-panel glass-panel rounded-2xl p-4">
+        <div class="smart-filter-primary">
+          <div class="smart-search-field">
+            <label for="ad-search" class="sr-only">${isAr ? 'بحث في الإعلانات' : 'Search ads'}</label>
+            <i data-lucide="search" class="h-5 w-5"></i>
+            <input type="search" id="ad-search" placeholder="${isAr ? (canSearchAdContacts ? 'ابحث بالعميل أو الهاتف أو الرقم أو الصفحة...' : 'ابحث بالعميل أو الرقم أو الصفحة...') : (canSearchAdContacts ? 'Search customer, phone, serial or page...' : 'Search customer, serial or page...')}" value="${Security.escapeHtml(state.adSearch || '')}" oninput="onAdSearchInput(this.value)" autocomplete="off" />
+          </div>
+          <div class="smart-filter-chips" aria-label="${isAr ? 'فلاتر إعلانات سريعة' : 'Quick ad filters'}">
+            <button type="button" onclick="applyAdQuickFilter('all')" class="smart-filter-chip ${adQuickMode === 'all' ? 'is-active' : ''}">${isAr ? 'الكل' : 'All'}</button>
+            <button type="button" onclick="applyAdQuickFilter('unpaid')" class="smart-filter-chip ${adQuickMode === 'unpaid' ? 'is-active is-danger' : ''}"><i data-lucide="circle-dollar-sign" class="h-4 w-4"></i>${isAr ? 'غير مدفوع' : 'Unpaid'}</button>
+            <button type="button" onclick="applyAdQuickFilter('stopped')" class="smart-filter-chip ${adQuickMode === 'stopped' ? 'is-active is-warning' : ''}"><i data-lucide="square" class="h-4 w-4"></i>${isAr ? 'متوقف' : 'Stopped'}</button>
+          </div>
+          ${renderWorkspaceFilterToggle('ads', adAdvancedFilterCount)}
+        </div>
+        ${adReceiptFilter ? `<div id="ad-receipt-link-filter" role="status" class="mt-3 flex flex-col gap-2 rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-800 dark:border-indigo-800 dark:bg-indigo-900/20 dark:text-indigo-200 sm:flex-row sm:items-center sm:justify-between">
+          <span class="inline-flex items-center gap-2 font-medium"><i data-lucide="receipt" class="h-4 w-4"></i>${isAr ? 'الإعلانات المرتبطة بالوصل' : 'Ads linked to receipt'} <strong>#${activeReceiptLabel}</strong></span>
+          <button type="button" onclick="clearAdReceiptFilter()" class="min-h-11 inline-flex items-center justify-center gap-1 rounded-lg px-3 font-bold text-indigo-700 hover:bg-indigo-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:text-indigo-200 dark:hover:bg-indigo-900/50" aria-label="${isAr ? 'إزالة فلتر الوصل' : 'Remove receipt filter'}"><i data-lucide="x" class="h-4 w-4"></i>${isAr ? 'عرض كل الإعلانات' : 'Show all ads'}</button>
+        </div>` : ''}
+        <div id="ads-advanced-filters" class="workspace-advanced-panel ${adAdvancedFiltersOpen ? '' : 'hidden'}" aria-hidden="${adAdvancedFiltersOpen ? 'false' : 'true'}">
+          <div class="ad-filter-controls workspace-filter-grid">
           <select onchange="updateAdFilter('status', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
             <option value="all" ${(adF.status || 'all') === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All Status'}</option>
             ${AD_STATUSES.map(s => `<option value="${s}" ${adF.status === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
@@ -2927,11 +3545,12 @@ function renderAdsView() {
             <option value="all" ${(adF.page || 'all') === 'all' ? 'selected' : ''}>${isAr ? 'كل الصفحات' : 'All Pages'}</option>
             ${visiblePages.map(p => `<option value="${Security.escapeHtml(p.id)}" ${adF.page === p.id ? 'selected' : ''}>${Security.escapeHtml(p.name || '')}</option>`).join('')}
           </select>
+          </div>
         </div>
       </div>
 
       <div id="ads-table-container" class="glass-panel rounded-2xl p-6 overflow-x-auto">
-        ${allAds.length === 0 ? `<div class="text-center py-12"><i data-lucide="inbox" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${isAr ? 'لا توجد إعلانات بعد' : 'No ads yet'}</p></div>` : `
+        ${allAds.length === 0 ? `<div class="text-center py-12"><i data-lucide="inbox" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${adReceiptFilter ? (isAr ? 'لا توجد إعلانات مرتبطة بهذا الوصل' : 'No ads are linked to this receipt') : (isAr ? 'لا توجد إعلانات بعد' : 'No ads yet')}</p></div>` : `
           <table class="mobile-card-table w-full text-sm">
             <thead>
               <tr class="border-b-2 border-indigo-200 dark:border-indigo-800">
@@ -2950,7 +3569,7 @@ function renderAdsView() {
               </tr>
             </thead>
             <tbody>
-              ${allAds.map((ad, idx) => {
+              ${visibleAds.map((ad, idx) => {
                 const customer = customersById.get(ad.customerId);
                 const adPhotoCount = getAdPhotoCount(ad);
                 const paymentState = getAdPaymentState(ad);
@@ -2984,11 +3603,7 @@ function renderAdsView() {
                 const adDisplayNum = allAds.length - idx;
                 // All receipts linked to this ad (delivery + funding), deduped —
                 // used for the Serial fallback AND the Payment method display.
-                const adReceiptIds = [...new Set([
-                  ad.linkedDeliveryReceiptId, ad.receiptId, ad.fundingReceiptId,
-                  ...(Array.isArray(ad.receiptIds) ? ad.receiptIds : []),
-                  ...(Array.isArray(ad.receiptAllocations) ? ad.receiptAllocations.map(a => a && a.receiptId) : [])
-                ].filter(Boolean))];
+                const adReceiptIds = getAdLinkedReceiptIds(ad);
                 // Serial: ads rarely carry their own serial number — fall back
                 // to the linked receipt number(s): the delivery receipt
                 // (D#/final no) or the funding receipts' serials.
@@ -3089,20 +3704,20 @@ function renderAdsView() {
                       ${ad.editCount ? `<button onclick="showAdEditHistory('${ad.id}')" class="block mt-1 text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium">${isAr ? `${ad.editCount} تعديل` : `${ad.editCount} edit${ad.editCount > 1 ? 's' : ''}`}</button>` : ''}
                     </td>
                     <td class="py-3 px-2 text-xs" data-label="Date">
-                      <div class="text-slate-500">${(() => { const d = new Date(ad.startDate); return isNaN(d) ? '-' : d.toLocaleDateString(); })()}</div>
+                      <div class="text-slate-500">${(() => { const d = new Date(ad.startDate); return isNaN(d) ? '-' : d.toLocaleDateString(appDateLocale()); })()}</div>
                       ${(() => {
                         // End date (+extra time) and, when topped up, the date
                         // of the latest top-up — visible without opening the ad.
                         const e = new Date(ad.endDate);
                         const endLine = !isNaN(e) && ad.endDate
-                          ? `<div class="text-slate-700 dark:text-slate-300 font-medium">${isAr ? 'الانتهاء' : 'End'}: ${e.toLocaleDateString()}${(parseFloat(ad.extraTimeMinutes) || 0) > 0 ? ` <span class="text-amber-600">+${ad.extraTimeMinutes}${isAr ? 'د' : 'm'}</span>` : ''}</div>`
+                          ? `<div class="text-slate-700 dark:text-slate-300 font-medium">${isAr ? 'الانتهاء' : 'End'}: ${e.toLocaleDateString(appDateLocale())}${(parseFloat(ad.extraTimeMinutes) || 0) > 0 ? ` <span class="text-amber-600">+${ad.extraTimeMinutes}${isAr ? 'د' : 'm'}</span>` : ''}</div>`
                           : '';
                         const ups = Array.isArray(ad.topUps) ? ad.topUps : [];
                         let upLine = '';
                         if (ups.length) {
                           const lastDate = ups.map(t => t && t.date).filter(Boolean).sort().slice(-1)[0];
                           const ld = lastDate ? new Date(lastDate) : null;
-                          const when = ld && !isNaN(ld) ? `: ${ld.toLocaleDateString()}` : '';
+                          const when = ld && !isNaN(ld) ? `: ${ld.toLocaleDateString(appDateLocale())}` : '';
                           upLine = `<div class="text-emerald-600 dark:text-emerald-400 font-medium" title="${isAr ? `${ups.length} عملية شحن، الإجمالي $` : `${ups.length} top-up(s), total $`}${ups.reduce((s, t) => s + (parseFloat(t && t.amount) || 0), 0).toFixed(2)}">&#8593; ${isAr ? 'تم الشحن' : 'Topped up'}${when}</div>`;
                         }
                         return endLine + upLine;
@@ -3136,10 +3751,25 @@ function renderAdsView() {
               }).join('')}
             </tbody>
           </table>
+          ${remainingAds > 0 ? `
+            <div class="flex justify-center border-t border-slate-200 px-3 pt-5 dark:border-slate-700">
+              <button type="button" onclick="loadMoreAds()" class="workspace-load-more"><i data-lucide="chevron-down" class="h-4 w-4"></i>${isAr ? `عرض المزيد (${remainingAds} متبقي)` : `Load more (${remainingAds} remaining)`}</button>
+            </div>
+          ` : ''}
         `}
       </div>
     </div>
   `;
+}
+
+const DELIVERIES_PAGE_SIZE = 30;
+let _deliveriesShowLimit = DELIVERIES_PAGE_SIZE;
+let _deliveriesFilterFingerprint = '';
+let _deliverySearchTimer = null;
+
+function loadMoreDeliveries() {
+  _deliveriesShowLimit += DELIVERIES_PAGE_SIZE;
+  render();
 }
 
 function renderDeliveriesView() {
@@ -3147,6 +3777,7 @@ function renderDeliveriesView() {
   // Deliveries are tracked ONLY on receipts (ads are not a delivery source of truth).
   const allReceipts = getVisibleRecords(state.receipts);
   const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
+  const deliveryCustomersById = new Map((state.customers || []).map(customer => [String(customer.id), customer]));
 
   const deliveryReceipts = allReceipts
     .filter(r => {
@@ -3208,7 +3839,7 @@ function renderDeliveriesView() {
   if (searchTerm) {
     const term = String(searchTerm).toLowerCase();
     filteredDeliveries = filteredDeliveries.filter(d => {
-      const customer = state.customers.find(c => c.id === d.customerId);
+      const customer = deliveryCustomersById.get(String(d.customerId));
       const name = String(customer?.name || '').toLowerCase();
       const phone = String(d.phoneNumber || customer?.phones?.[0] || '').toLowerCase();
       const receiptNo = String(d.tempReceiptNo || d.finalReceiptNo || d.serialNumber || '').toLowerCase();
@@ -3216,6 +3847,13 @@ function renderDeliveriesView() {
     });
   }
   filteredDeliveries.sort((a, b) => new Date(b.createdAt || b.date || 0) - new Date(a.createdAt || a.date || 0));
+  const deliveryFilterFingerprint = JSON.stringify([filterStatus, filterDriver, searchTerm]);
+  if (deliveryFilterFingerprint !== _deliveriesFilterFingerprint) {
+    _deliveriesFilterFingerprint = deliveryFilterFingerprint;
+    _deliveriesShowLimit = DELIVERIES_PAGE_SIZE;
+  }
+  const visibleDeliveryRows = filteredDeliveries.slice(0, _deliveriesShowLimit);
+  const remainingDeliveryRows = filteredDeliveries.length - visibleDeliveryRows.length;
 
   const roleLower = String(state.currentUser?.role || '').toLowerCase();
   const canAssign = roleLower !== 'delivery' && can('deliveries', 'assign');
@@ -3266,7 +3904,7 @@ function renderDeliveriesView() {
           </div>
           <div class="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-900/15 border-l-4 border-emerald-500">
             <div class="text-[11px] font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wide">${isAr ? 'قيمة غير مُحصَّلة' : 'Uncollected Value'}</div>
-            <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.uncollectedLYD.toLocaleString()} <span class="text-sm">LYD</span></div>
+            <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.uncollectedLYD.toLocaleString('en-US')} <span class="text-sm">LYD</span></div>
             <div class="text-[11px] text-slate-500">${isAr ? 'للتحصيل من العملاء' : 'To be collected from customers'}</div>
           </div>
           <div class="p-3 rounded-xl bg-purple-50 dark:bg-purple-900/15 border-l-4 border-purple-500">
@@ -3276,7 +3914,7 @@ function renderDeliveriesView() {
           </div>
           <div class="p-3 rounded-xl bg-blue-50 dark:bg-blue-900/15 border-l-4 border-blue-500">
             <div class="text-[11px] font-bold text-blue-700 dark:text-blue-400 uppercase tracking-wide">${isAr ? 'قيمة نقد السائقين' : 'Driver Cash Value'}</div>
-            <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.driverCashLYD.toLocaleString()} <span class="text-sm">LYD</span></div>
+            <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.driverCashLYD.toLocaleString('en-US')} <span class="text-sm">LYD</span></div>
             <div class="text-[11px] text-slate-500">${isAr ? 'للتحصيل من السائقين' : 'To be collected from drivers'}</div>
           </div>
         </div>
@@ -3316,7 +3954,7 @@ function renderDeliveriesView() {
                   <span>${isAr ? 'معلّقة' : 'Pending'} <b>${driver.pending}</b></span>
                   <span class="text-blue-600 dark:text-blue-400">${isAr ? 'نشطة' : 'Active'} <b>${driver.inProgress}</b></span>
                   <span class="text-emerald-600 dark:text-emerald-400">${isAr ? 'منجزة' : 'Done'} <b>${driver.completed}</b></span>
-                  <span class="text-purple-600 dark:text-purple-400">${isAr ? 'بحوزته' : 'Held'} <b>${driver.heldCash.toLocaleString()}</b> LYD</span>
+                  <span class="text-purple-600 dark:text-purple-400">${isAr ? 'بحوزته' : 'Held'} <b>${driver.heldCash.toLocaleString('en-US')}</b> LYD</span>
                 </div>
               </div>
             `).join('')}
@@ -3331,7 +3969,7 @@ function renderDeliveriesView() {
             <div class="flex flex-wrap items-center gap-2 w-full md:w-auto">
               <div class="relative flex-1 md:flex-none">
                 <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"></i>
-                <input type="text" placeholder="${isAr ? 'بحث...' : 'Search...'}" value="${Security.escapeHtml(searchTerm)}" oninput="filterDeliveries('search', this.value)" class="glass-input w-full md:w-40 pl-9 pr-3 py-2 rounded-lg text-sm">
+                <input id="delivery-search-input" type="text" placeholder="${isAr ? 'بحث...' : 'Search...'}" value="${Security.escapeHtml(searchTerm)}" oninput="filterDeliveries('search', this.value)" class="glass-input w-full md:w-40 pl-9 pr-3 py-2 rounded-lg text-sm">
               </div>
               <select onchange="filterDeliveries('status', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
                 <option value="all" ${filterStatus === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All Status'}</option>
@@ -3345,8 +3983,8 @@ function renderDeliveriesView() {
           </div>
 
           <!-- Delivery Table -->
-          <div class="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
-            <table class="w-full text-sm">
+          <div id="delivery-log-results" class="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
+            <table class="mobile-card-table delivery-mobile-table w-full text-sm">
               <thead>
                 <tr class="bg-slate-50 dark:bg-slate-800/50">
                   <th class="text-left px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'العميل' : 'Customer'}</th>
@@ -3366,8 +4004,8 @@ function renderDeliveriesView() {
                       <p class="text-slate-500">${isAr ? 'لا توجد توصيلات' : 'No deliveries found'}</p>
                     </td>
                   </tr>
-                ` : filteredDeliveries.slice(0, 20).map(ad => {
-          const customer = state.customers.find(c => c.id === ad.customerId);
+                ` : visibleDeliveryRows.map(ad => {
+          const customer = deliveryCustomersById.get(String(ad.customerId));
           const deliveryPerson = ad.deliveryPersonId ? deliveryUsers.find(u => u.id === ad.deliveryPersonId) : null;
                   const collectedCash = _getCollectedCashLocal(ad);
                   const receivedInOffice = _isReceivedInOffice(ad);
@@ -3383,7 +4021,7 @@ function renderDeliveriesView() {
                   const isReceipt = true;
                   return `
                     <tr class="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors">
-                      <td class="px-4 py-3">
+                      <td class="px-4 py-3" data-label="${isAr ? 'العميل' : 'Customer'}">
                         <div class="flex items-center space-x-3">
                           <div class="w-9 h-9 rounded-full bg-gradient-to-br ${isReceipt ? 'from-purple-500 to-pink-600' : 'from-indigo-500 to-purple-600'} flex items-center justify-center text-white font-bold text-sm shadow-md">
                             ${isReceipt ? '<i data-lucide="receipt" class="w-4 h-4"></i>' : (customer?.name?.charAt(0) || '?')}
@@ -3395,7 +4033,7 @@ function renderDeliveriesView() {
                           </div>
                         </div>
                       </td>
-                      <td class="px-4 py-3">
+                      <td class="px-4 py-3" data-label="${isAr ? 'السائق' : 'Driver'}">
                         ${deliveryPerson ? `
                           <div class="flex items-center space-x-2">
                             <div class="w-7 h-7 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-white text-xs font-bold">
@@ -3410,19 +4048,19 @@ function renderDeliveriesView() {
                           </select>
                         ` : `<span class="text-xs text-slate-400">${isAr ? 'غير مُعيَّن' : 'Unassigned'}</span>`)}
                       </td>
-                      <td class="px-4 py-3 text-right">
-                        <div class="font-bold text-emerald-600">${debtLocal.toLocaleString()} LYD</div>
+                      <td class="px-4 py-3 text-right" data-label="${isAr ? 'المبلغ' : 'Amount'}">
+                        <div class="font-bold text-emerald-600">${debtLocal.toLocaleString('en-US')} LYD</div>
                         <div class="text-xs text-slate-500">$${debtUSD.toFixed(2)}</div>
                         ${String(ad.deliveryStatus || '') === 'Delivered' ? `
-                          <div class="text-[10px] text-slate-500 mt-1">${isAr ? 'المُحصَّل' : 'Collected'}: <span class="font-bold text-slate-700 dark:text-slate-300">${collectedCash.toLocaleString()} LYD</span></div>
+                          <div class="text-[10px] text-slate-500 mt-1">${isAr ? 'المُحصَّل' : 'Collected'}: <span class="font-bold text-slate-700 dark:text-slate-300">${collectedCash.toLocaleString('en-US')} LYD</span></div>
                         ` : ''}
                       </td>
-                      <td class="px-4 py-3 text-center">
+                      <td class="px-4 py-3 text-center" data-label="${isAr ? 'الحالة' : 'Status'}">
                         <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-bold ${statusColors[ad.deliveryStatus] || 'bg-slate-100 text-slate-700'}">
                           ${trStatus(ad.deliveryStatus)}
                         </span>
                       </td>
-                      <td class="px-4 py-3 text-center">
+                      <td class="px-4 py-3 text-center" data-label="${isAr ? 'تسليم المكتب' : 'Office handover'}">
                         ${!officeEligible ? `
                           <span class="text-slate-400 text-xs">—</span>
                         ` : receivedInOffice ? `
@@ -3440,10 +4078,10 @@ function renderDeliveriesView() {
                           ` : `<span class="text-xs text-slate-500">${isAr ? 'قيد الانتظار' : 'Pending'}</span>`}
                         `}
                       </td>
-                      <td class="px-4 py-3 text-center">
+                      <td class="px-4 py-3 text-center" data-label="${isAr ? 'التاريخ' : 'Date'}">
                         <div class="text-xs text-slate-600 dark:text-slate-400">${formatDateShort(ad.createdAt || ad.date)}</div>
                       </td>
-                      <td class="px-4 py-3">
+                      <td class="px-4 py-3" data-label="${isAr ? 'الإجراءات' : 'Actions'}">
                         <div class="flex items-center justify-center space-x-1">
                           <select onchange="updateDeliveryStatus('${ad.id}', this.value)" class="glass-input px-2 py-1 rounded-lg text-xs w-24">
                             ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
@@ -3469,9 +4107,9 @@ function renderDeliveriesView() {
               </tbody>
             </table>
           </div>
-          ${filteredDeliveries.length > 20 ? `
-            <div class="mt-3 text-center text-sm text-slate-500">
-              ${isAr ? `عرض 20 من ${filteredDeliveries.length} توصيلة` : `Showing 20 of ${filteredDeliveries.length} deliveries`}
+          ${remainingDeliveryRows > 0 ? `
+            <div class="mt-4 flex justify-center">
+              <button type="button" onclick="loadMoreDeliveries()" class="workspace-load-more"><i data-lucide="chevron-down" class="h-4 w-4"></i>${isAr ? `عرض المزيد (${remainingDeliveryRows} متبقي)` : `Load more (${remainingDeliveryRows} remaining)`}</button>
             </div>
           ` : ''}
         </div>
@@ -3508,7 +4146,7 @@ function renderDeliveriesView() {
                 </div>
 
                 <div class="text-sm mb-2">
-                  <span class="font-bold text-emerald-600">${(ad.amountLocal || 0).toLocaleString()} LYD</span>
+                  <span class="font-bold text-emerald-600">${(ad.amountLocal || 0).toLocaleString('en-US')} LYD</span>
                   <span class="text-xs text-slate-500 ml-2">$${(ad.amountUSD || 0).toFixed(2)}</span>
                 </div>
 
@@ -3557,9 +4195,37 @@ function renderDeliveriesView() {
 // Filter deliveries
 function filterDeliveries(type, value) {
   if (!state.deliveryFilter) state.deliveryFilter = {};
-  state.deliveryFilter[type] = value;
+  state.deliveryFilter[type] = type === 'search'
+    ? Security.sanitizeInput(String(value || ''), { maxLength: 160 })
+    : value;
+  if (type === 'search') {
+    if (_deliverySearchTimer) clearTimeout(_deliverySearchTimer);
+    _deliverySearchTimer = setTimeout(() => {
+      _deliverySearchTimer = null;
+      updateDeliveriesViewFiltered();
+    }, 100);
+    return;
+  }
   render();
-  lucide.createIcons();
+}
+
+function updateDeliveriesViewFiltered() {
+  if (state.currentView !== 'deliveries') return;
+  const results = document.getElementById('delivery-log-results');
+  if (!results) {
+    // View structure not on screen (e.g. mid-navigation): fall back to a full render.
+    render();
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  // Build the fresh view HTML off-screen, then swap in only the results table
+  // so the search input keeps its caret and the phone keyboard stays open
+  // (same approach as updateCustomersViewFiltered).
+  const tpl = document.createElement('template');
+  tpl.innerHTML = renderDeliveriesView();
+  const newResults = tpl.content.querySelector('#delivery-log-results');
+  if (newResults) results.innerHTML = newResults.innerHTML;
+  if (window.lucide) lucide.createIcons();
 }
 
 // Refresh deliveries
@@ -3613,13 +4279,9 @@ function exportDeliveryReport() {
   
   // Prepend a UTF-8 BOM so Excel reads Arabic customer/driver names correctly
   // instead of garbling them (mojibake).
-  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `delivery-report-${getTodayDateString()}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
+  // Route through downloadFile so the blob URL outlives the click task —
+  // iOS Safari cancels the download if the URL is revoked in the same tick.
+  downloadFile('﻿' + csv, `delivery-report-${getTodayDateString()}.csv`, 'text/csv;charset=utf-8');
   showNotification(state.language === 'ar' ? 'اكتمل التصدير' : 'Export Complete', state.language === 'ar' ? 'تم تنزيل تقرير التوصيل' : 'Delivery report downloaded', 'success');
 }
 
@@ -3673,7 +4335,7 @@ async function checkStuckDeliveries() {
             </div>
           </div>
           <div class="flex justify-between text-xs">
-            <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ' : 'Amount'}: ${(d.amountLocal || 0).toLocaleString()} LYD</span>
+            <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ' : 'Amount'}: ${(d.amountLocal || 0).toLocaleString('en-US')} LYD</span>
             <button onclick="navigateTo('deliveries'); this.closest('#app-modal').remove();" class="text-indigo-600 hover:text-indigo-700 font-bold">${isAr ? 'عرض ←' : 'View →'}</button>
           </div>
         </div>
@@ -3934,7 +4596,7 @@ function showDeliveryDetails(itemId) {
         <div class="grid grid-cols-2 gap-3">
           <div class="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-100 dark:border-emerald-800">
             <div class="text-xs text-emerald-600 dark:text-emerald-400 font-medium mb-1">${isAr ? 'المبلغ (LYD)' : 'Amount (LYD)'}</div>
-            <div class="text-2xl font-black text-emerald-700 dark:text-emerald-300">${(ad.amountLocal || 0).toLocaleString()}</div>
+            <div class="text-2xl font-black text-emerald-700 dark:text-emerald-300">${(ad.amountLocal || 0).toLocaleString('en-US')}</div>
           </div>
           <div class="p-4 rounded-xl bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800">
             <div class="text-xs text-blue-600 dark:text-blue-400 font-medium mb-1">${isAr ? 'المبلغ (USD)' : 'Amount (USD)'}</div>
@@ -4356,6 +5018,7 @@ async function submitDeliveryCancel(itemType, itemId) {
 
   const nowIso = new Date().toISOString();
   const uid = state.currentUser?.id || '';
+  let receiptCascadeConsistent = true;
 
   if (type === 'receipt') {
     const receipt = _findReceiptForDeliveryModal(id);
@@ -4371,12 +5034,22 @@ async function submitDeliveryCancel(itemType, itemId) {
     });
     if (!receiptSaved) return;
     // The canceled delivery's debt will never be collected — release any ad
-    // funding that was drawn from its due credit.
+    // funding that was drawn from its due credit. In server mode the receipt
+    // PATCH already releases those rows atomically; install the authoritative
+    // ads instead of issuing stale generic ad PATCHes (which are forbidden).
     let releasedAds = 0;
-    try {
-      releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);
-    } catch (_) {
-      return;
+    let adRefresh = { consistent: true };
+    if (isServerModeEnabled()) {
+      const savedReceipt = state.receipts.find(row => row && String(row.id) === String(receipt.id)) || receipt;
+      adRefresh = await refreshAdsAfterReceiptServerCascade(savedReceipt);
+      receiptCascadeConsistent = adRefresh.consistent;
+      saveState();
+    } else {
+      try {
+        releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);
+      } catch (_) {
+        return;
+      }
     }
     if (releasedAds > 0) {
       showNotification(
@@ -4404,31 +5077,200 @@ async function submitDeliveryCancel(itemType, itemId) {
 
   document.getElementById('delivery-cancel-modal')?.remove();
   document.getElementById('delivery-complete-modal')?.remove();
+  forceFullRender();
   showNotification(state.language === 'ar' ? 'أُلغيت' : 'Canceled', state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled', 'success');
-  render();
+  if (!receiptCascadeConsistent) {
+    showNotification(
+      state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
+      state.language === 'ar' ? 'تم حفظ الإلغاء، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Cancellation was saved. Linked ads will refresh automatically when the connection returns.',
+      'warning'
+    );
+  }
+}
+
+// Reconciliation uses the earliest valid terminal day: the scheduled end day
+// or an earlier manual stop day. Facebook gets the rest of that calendar day
+// to finalize delayed spend, and the ad appears on the following local day.
+function getAdReconciliationCalendarDay(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const calendar = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (calendar) {
+    const year = Number(calendar[1]);
+    const month = Number(calendar[2]) - 1;
+    const day = Number(calendar[3]);
+    const parsed = new Date(year, month, day);
+    if (
+      parsed.getFullYear() === year &&
+      parsed.getMonth() === month &&
+      parsed.getDate() === day
+    ) return parsed;
+    return null;
+  }
+  const parsed = new Date(raw);
+  if (!Number.isFinite(parsed.getTime())) return null;
+  return new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
+}
+
+function getAdReconciliationStartDay(ad) {
+  return getAdReconciliationCalendarDay(ad?.startDate);
+}
+
+function getAdReconciliationEndDay(ad) {
+  return getAdReconciliationCalendarDay(ad?.endDate);
+}
+
+function getAdReconciliationStoppedDay(ad) {
+  const raw = String(ad?.stoppedAt || '').trim();
+  if (!raw) return null;
+  const parsed = new Date(raw);
+  if (!Number.isFinite(parsed.getTime())) return null;
+  return new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
+}
+
+function getAdReconciliationTriggerDay(ad) {
+  const status = String(ad?.status || '').trim().toLowerCase();
+  const endDay = getAdReconciliationEndDay(ad);
+  const stoppedDay = status === 'stopped' ? getAdReconciliationStoppedDay(ad) : null;
+  // Reconciliation itself changes an ended ad to Stopped and may add a new
+  // stoppedAt timestamp. Keep the earlier real terminal day so saving spend
+  // cannot hide an already-eligible ad for another day.
+  if (endDay && stoppedDay) {
+    return endDay.getTime() <= stoppedDay.getTime() ? endDay : stoppedDay;
+  }
+  return stoppedDay || endDay;
+}
+
+function getAdReconciliationAvailableDay(ad) {
+  const triggerDay = getAdReconciliationTriggerDay(ad);
+  if (!triggerDay) return null;
+  const available = new Date(triggerDay.getTime());
+  available.setDate(available.getDate() + 1);
+  return available;
+}
+
+function isAdReadyForReconciliation(ad, now = new Date()) {
+  if (!ad || ad._deleted || ad.recordType === 'receipt' || !Security.isValidRecordId(ad.id)) return false;
+  const status = String(ad.status || '').trim().toLowerCase();
+  if (status === 'canceled' || status === 'cancelled' || status === 'lost') return false;
+  const refundType = String(ad.refundType || '').trim().toLowerCase();
+  if (refundType && refundType !== 'none') return false;
+  const available = getAdReconciliationAvailableDay(ad);
+  const current = new Date(now);
+  if (!available || !Number.isFinite(current.getTime())) return false;
+  const today = new Date(current.getFullYear(), current.getMonth(), current.getDate());
+  return today.getTime() >= available.getTime();
 }
 
 function renderReconciliationView() {
   const isAr = state.language === 'ar';
-  const visibleAds = getVisibleRecords(state.ads).filter(ad => ad.spentUSD);
+  const visibleAds = getVisibleRecords(state.ads)
+    .filter(ad => isAdReadyForReconciliation(ad))
+    .sort((a, b) => {
+      const informedOrder = Number(a.remainingCustomerInformed === true) - Number(b.remainingCustomerInformed === true);
+      if (informedOrder !== 0) return informedOrder;
+      return (getAdReconciliationTriggerDay(a)?.getTime() || 0) - (getAdReconciliationTriggerDay(b)?.getTime() || 0);
+    });
   return `
-    <div class="space-y-6">
-      <h1 class="text-3xl font-bold">${t('jobReconciliation')}</h1>
-      <div class="glass-panel rounded-2xl p-6">
-        ${visibleAds.length === 0 ? `<p class="text-center text-slate-500 py-8">${isAr ? 'لا توجد بيانات تسوية' : 'No reconciliation data'}</p>` : `
-          <div class="space-y-3">
+    <div class="space-y-6 animate-fade-in-up">
+      <div>
+        <h1 class="text-3xl font-bold">${t('jobReconciliation')}</h1>
+        <p class="text-sm text-slate-500 mt-1">${isAr ? 'تظهر الإعلانات في اليوم التالي لانتهائها، أو بعد يوم من إيقافها.' : 'Ads appear the day after their scheduled end, or one day after they are stopped.'}</p>
+      </div>
+      <div class="glass-panel rounded-2xl p-3 sm:p-6">
+        ${visibleAds.length === 0 ? `<div class="text-center text-slate-500 py-10">
+          <i data-lucide="calendar-check" class="w-9 h-9 mx-auto mb-3 text-emerald-500"></i>
+          <p class="font-medium">${isAr ? 'لا توجد إعلانات منتهية تحتاج إلى تسوية الآن' : 'No finished ads need reconciliation now'}</p>
+        </div>` : `
+          <div class="space-y-4">
             ${visibleAds.map(ad => {
-              const customer = state.customers.find(c => c.id === ad.customerId);
-              const diff = (ad.spentUSD || 0) - (ad.amountUSD || 0);
-              const reconClass = diff === 0 ? 'recon-match' : diff > 0 ? 'recon-overspent' : 'recon-underspent';
-              return `<div class="${reconClass} p-4 rounded-lg">
-                <div class="flex justify-between items-center">
-                  <div>
-                    <span class="font-medium">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</span>
-                    <p class="text-sm">${isAr ? 'المُحصَّل' : 'Collected'}: $${ad.amountUSD} | ${isAr ? 'المصروف' : 'Spent'}: $${ad.spentUSD} | ${isAr ? 'الفرق' : 'Diff'}: $${diff.toFixed(2)}</p>
+              const id = String(ad.id);
+              const safeId = Security.escapeHtml(id);
+              const customer = state.customers.find(c => String(c.id) === String(ad.customerId));
+              const page = state.pages.find(p => String(p.id) === String(ad.pageId || ad.page));
+              const amountUSD = Math.max(Number(ad.amountUSD) || 0, 0);
+              const parsedSpent = Number(ad.spentUSD);
+              const hasSavedSpend = ad.spentUSD !== undefined && ad.spentUSD !== null && Number.isFinite(parsedSpent);
+              const spentUSD = hasSavedSpend ? Math.max(parsedSpent, 0) : 0;
+              const remainingUSD = hasSavedSpend ? Math.max(amountUSD - spentUSD, 0) : null;
+              const informed = ad.remainingCustomerInformed === true;
+              const canReconcile = canActOnRecord('ads', 'stopAd', ad.creatorId || ad.createdBy);
+              const adStatus = String(ad.status || '').trim().toLowerCase();
+              const startDay = getAdReconciliationStartDay(ad);
+              const endDay = getAdReconciliationEndDay(ad);
+              const stoppedDay = adStatus === 'stopped' ? getAdReconciliationStoppedDay(ad) : null;
+              const statusVisual = adStatus === 'stopped'
+                ? {
+                    card: 'border-rose-300 border-l-rose-500 bg-rose-50/50 dark:border-rose-800 dark:border-l-rose-500 dark:bg-rose-950/20',
+                    badge: 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300',
+                    label: isAr ? 'متوقف' : 'Stopped'
+                  }
+                : adStatus === 'paused'
+                  ? {
+                      card: 'border-violet-300 border-l-violet-500 bg-violet-50/50 dark:border-violet-800 dark:border-l-violet-500 dark:bg-violet-950/20',
+                      badge: 'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300',
+                      label: isAr ? 'متوقف مؤقتاً' : 'Paused'
+                    }
+                  : {
+                      card: 'border-amber-300 border-l-amber-500 bg-amber-50/50 dark:border-amber-800 dark:border-l-amber-500 dark:bg-amber-950/20',
+                      badge: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+                      label: isAr ? 'انتهى' : 'Ended'
+                    };
+              const informedBy = state.users.find(u => String(u.id) === String(ad.remainingCustomerInformedBy || ''));
+              const informedDetails = informed
+                ? [
+                    informedBy?.name || '',
+                    ad.remainingCustomerInformedAt ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale()) : ''
+                  ].filter(Boolean).join(' • ')
+                : '';
+              return `<section class="rounded-2xl border border-l-4 ${statusVisual.card} p-4 sm:p-5" data-reconciliation-card="${safeId}">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div class="min-w-0">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <span class="rounded-md bg-indigo-100 px-2 py-0.5 text-xs font-bold text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">#${Security.escapeHtml(ad.displayNumber || id)}</span>
+                      <h2 class="font-bold text-lg text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || (isAr ? 'عميل غير معروف' : 'Unknown customer'))}</h2>
+                      <span class="rounded-full px-2.5 py-1 text-xs font-bold ${statusVisual.badge}">${statusVisual.label}</span>
+                      <span class="rounded-full px-2.5 py-1 text-xs font-bold ${informed ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300' : (hasSavedSpend ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300')}">
+                        ${informed ? (isAr ? 'تم إبلاغ العميل' : 'Customer informed') : (hasSavedSpend ? (isAr ? 'تم حفظ المصروف' : 'Spend saved') : (isAr ? 'تحتاج تسوية' : 'Needs reconciliation'))}
+                      </span>
+                    </div>
+                    <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-slate-500">
+                      <span>${Security.escapeHtml(page?.name || (isAr ? 'بدون صفحة' : 'No page'))}</span>
+                      <span aria-hidden="true">•</span>
+                      <span class="rounded-md bg-sky-100 px-2 py-0.5 font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">${isAr ? 'البداية' : 'Start'}: ${startDay?.toLocaleDateString(appDateLocale()) || '-'}</span>
+                      <span aria-hidden="true">•</span>
+                      <span>${stoppedDay ? (isAr ? 'تم إيقافه' : 'Stopped') : (isAr ? 'الانتهاء' : 'End')}: ${(stoppedDay || endDay)?.toLocaleDateString(appDateLocale()) || '-'}</span>
+                    </div>
+                  </div>
+                  <div class="sm:text-right">
+                    <div class="text-xs uppercase tracking-wide text-slate-500">${isAr ? 'ميزانية الإعلان' : 'Ad budget'}</div>
+                    <div class="text-2xl font-bold text-slate-800 dark:text-white">$${amountUSD.toFixed(2)}</div>
                   </div>
                 </div>
-              </div>`;
+
+                <div class="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-end">
+                  <div>
+                    <label for="reconciliation-spent-${safeId}" class="mb-1.5 block text-sm font-bold text-slate-700 dark:text-slate-200">${isAr ? 'المصروف الفعلي على فيسبوك (USD)' : 'Actual Facebook spend (USD)'}</label>
+                    <input id="reconciliation-spent-${safeId}" type="text" inputmode="decimal" value="${hasSavedSpend ? spentUSD.toFixed(2) : ''}" placeholder="0.00" oninput="sanitizeMoneyInput(this); updateReconciliationPreview('${safeId}')" class="glass-input min-h-12 w-full rounded-xl px-4 text-lg font-bold" ${canReconcile ? '' : 'disabled'} />
+                  </div>
+                  <div class="rounded-xl bg-white/70 p-3 dark:bg-slate-900/50">
+                    <div class="text-xs text-slate-500">${isAr ? 'المتبقي الذي سيعود للعميل' : 'Remaining returned to customer'}</div>
+                    <div id="reconciliation-remaining-${safeId}" class="text-xl font-bold text-emerald-600">${remainingUSD === null ? '—' : `$${remainingUSD.toFixed(2)}`}</div>
+                  </div>
+                  <button id="reconciliation-submit-${safeId}" type="button" onclick="confirmStopAd('${safeId}', 'reconciliation')" class="min-h-12 rounded-xl bg-indigo-600 px-5 font-bold text-white shadow hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50" ${canReconcile ? '' : 'disabled'}>
+                    ${hasSavedSpend ? (isAr ? 'تحديث التسوية' : 'Update reconciliation') : (isAr ? 'حفظ وإرجاع المتبقي' : 'Save & return remaining')}
+                  </button>
+                </div>
+
+                <label class="mt-4 flex min-h-12 cursor-pointer items-start gap-3 rounded-xl border border-slate-200 bg-white/80 p-3 dark:border-slate-700 dark:bg-slate-900/50 ${informed ? 'cursor-default' : ''}">
+                  <input id="reconciliation-informed-${safeId}" type="checkbox" class="mt-0.5 h-5 w-5 shrink-0 accent-emerald-600" ${informed ? 'checked disabled' : ''} ${!informed && (remainingUSD === null || remainingUSD <= 0 || !canReconcile) ? 'disabled' : ''} />
+                  <span class="min-w-0">
+                    <span class="block text-sm font-bold text-slate-800 dark:text-slate-100">${isAr ? 'أؤكد أنني أبلغت العميل بالمبلغ المتبقي' : 'I confirm that I told the customer about the remaining amount'}</span>
+                    <span id="reconciliation-informed-help-${safeId}" class="block text-xs text-slate-500">${informedDetails ? Security.escapeHtml(informedDetails) : (isAr ? 'يمكن تحديد هذا بعد إدخال مصروف فعلي أقل من الميزانية. وإذا تغيّر المصروف يجب تأكيد المبلغ الجديد.' : 'Check this after entering spend below the budget. If the spend changes, confirm the new amount again.')}</span>
+                  </span>
+                </label>
+                ${!canReconcile ? `<p class="mt-2 text-xs text-rose-600">${isAr ? 'ليس لديك صلاحية تسوية هذا الإعلان.' : 'You do not have permission to reconcile this ad.'}</p>` : ''}
+              </section>`;
             }).join('')}
           </div>
         `}
@@ -4437,21 +5279,98 @@ function renderReconciliationView() {
   `;
 }
 
+let _userSearchTimer = null;
+function updateUserSearch(value) {
+  state.userSearch = Security.sanitizeInput(String(value || ''), { maxLength: 160 });
+  // Debounced scoped swap: a synchronous full render() per keystroke froze
+  // typing on phones and re-built the whole view for every character.
+  if (_userSearchTimer) clearTimeout(_userSearchTimer);
+  _userSearchTimer = setTimeout(() => {
+    _userSearchTimer = null;
+    updateUsersViewFiltered();
+  }, 80);
+}
+
+function updateUsersViewFiltered() {
+  if (state.currentView !== 'users') return;
+  const grid = document.getElementById('users-grid');
+  const countEl = document.getElementById('users-count');
+  if (!grid || !countEl) {
+    render();
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  const tpl = document.createElement('template');
+  tpl.innerHTML = renderUsersView();
+  const newGrid = tpl.content.querySelector('#users-grid');
+  const newCount = tpl.content.querySelector('#users-count');
+  if (newGrid) grid.innerHTML = newGrid.innerHTML;
+  if (newCount) countEl.textContent = newCount.textContent;
+  if (window.lucide) lucide.createIcons();
+}
+
+function applyUserRoleFilter(role) {
+  state.userRoleFilter = ['all', 'Admin', 'Employee', 'Delivery'].includes(role) ? role : 'all';
+  render();
+}
+
 function renderUsersView() {
   const isAr = state.language === 'ar';
-  const visibleUsers = getVisibleRecords(state.users);
+  const allVisibleUsers = getVisibleRecords(state.users);
+  const userSearch = String(state.userSearch || '').trim().toLocaleLowerCase();
+  const userRoleFilter = String(state.userRoleFilter || 'all');
+  const visibleUsers = allVisibleUsers.filter(user => {
+    if (userRoleFilter !== 'all' && String(user.role || '') !== userRoleFilter) return false;
+    if (!userSearch) return true;
+    return [user.name, user.email, user.role]
+      .some(value => String(value || '').toLocaleLowerCase().includes(userSearch));
+  });
   const isAdmin = isCurrentUserAdmin();
   const canAddUsers = canManageUsersAction('add');
   const canEditUsers = canManageUsersAction('edit');
   const canDeleteUsers = canManageUsersAction('delete');
   const canManagePerms = canManageUsersAction('managePermissions');
+  const visibleAdsForUsers = getVisibleRecords(state.ads);
+  const visibleReceiptsForUsers = getVisibleRecords(state.receipts);
+  const adsByCreator = new Map();
+  const paidDeliveriesByDriver = new Map();
+  const deliveredReceiptsByDriver = new Map();
+  const deliveryStatsByDriver = new Map();
+  const recordDerivedDeliveryStats = item => {
+    const driverId = String(item?.deliveryPersonId || '');
+    if (!driverId) return;
+    const status = String(item?.deliveryStatus || '');
+    const summary = deliveryStatsByDriver.get(driverId) || { totalAssigned: 0, accepted: 0, collected: 0 };
+    summary.totalAssigned += 1;
+    if (item?.acceptedDate || status === 'In Progress' || status === 'Delivered') summary.accepted += 1;
+    if (status === 'Delivered') summary.collected += 1;
+    deliveryStatsByDriver.set(driverId, summary);
+  };
+  visibleAdsForUsers.forEach(ad => {
+    recordDerivedDeliveryStats(ad);
+    const creatorId = String(ad.createdBy || ad.creatorId || '');
+    if (creatorId) adsByCreator.set(creatorId, (adsByCreator.get(creatorId) || 0) + 1);
+    const driverId = String(ad.deliveryPersonId || '');
+    if (driverId && getAdPaymentState(ad) === 'paid') {
+      paidDeliveriesByDriver.set(driverId, (paidDeliveriesByDriver.get(driverId) || 0) + 1);
+    }
+  });
+  visibleReceiptsForUsers.forEach(receipt => {
+    recordDerivedDeliveryStats(receipt);
+    const driverId = String(receipt.deliveryPersonId || '');
+    if (!driverId || receipt.deliveryStatus !== 'Delivered') return;
+    const summary = deliveredReceiptsByDriver.get(driverId) || { count: 0, fees: 0 };
+    summary.count += 1;
+    summary.fees += Number(receipt.deliveryFeeCollected ?? receipt.actualDeliveryFeeCollected ?? 0) || 0;
+    deliveredReceiptsByDriver.set(driverId, summary);
+  });
 
   return `
     <div class="space-y-6 animate-fade-in-up">
       <div class="page-header flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('users')}</h1>
-          <p class="text-sm text-slate-500 mt-1">${isAr ? `${visibleUsers.length} مستخدم في النظام` : `${visibleUsers.length} system users`}</p>
+          <p id="users-count" class="text-sm text-slate-500 mt-1">${isAr ? `${visibleUsers.length}${visibleUsers.length !== allVisibleUsers.length ? ` من ${allVisibleUsers.length}` : ''} مستخدم في النظام` : `${visibleUsers.length}${visibleUsers.length !== allVisibleUsers.length ? ` of ${allVisibleUsers.length}` : ''} system users`}</p>
         </div>
         ${canAddUsers ? `
         <button onclick="showUserModal()" class="btn-shine w-full sm:w-auto bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
@@ -4461,19 +5380,36 @@ function renderUsersView() {
         ` : ''}
       </div>
 
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        ${visibleUsers.map(u => {
-          const userAds = getVisibleRecords(state.ads).filter(ad => ad.creatorId === u.id);
-          const deliveredAds = getVisibleRecords(state.ads).filter(ad => ad.deliveryPersonId === u.id && getAdPaymentState(ad) === 'paid');
-          const deliveredReceipts = getVisibleRecords(state.receipts).filter(r => r.deliveryPersonId === u.id && r.deliveryStatus === 'Delivered');
-          const deliveryFeesLYD = deliveredReceipts.reduce((sum, r) => sum + (Number(r.deliveryFeeCollected ?? r.actualDeliveryFeeCollected ?? 0) || 0), 0);
+      <div class="smart-filter-panel glass-panel rounded-2xl p-4">
+        <div class="smart-filter-primary">
+          <div class="smart-search-field">
+            <label for="user-search" class="sr-only">${isAr ? 'بحث في المستخدمين' : 'Search users'}</label>
+            <i data-lucide="search" class="h-5 w-5"></i>
+            <input id="user-search" type="search" value="${Security.escapeHtml(state.userSearch || '')}" oninput="updateUserSearch(this.value)" placeholder="${isAr ? 'ابحث بالاسم أو البريد أو الدور...' : 'Search by name, email or role...'}" autocomplete="off" />
+          </div>
+          <div class="smart-filter-chips" aria-label="${isAr ? 'فلتر الدور' : 'Role filter'}">
+            <button type="button" onclick="applyUserRoleFilter('all')" class="smart-filter-chip ${userRoleFilter === 'all' ? 'is-active' : ''}">${isAr ? 'الكل' : 'All'}</button>
+            <button type="button" onclick="applyUserRoleFilter('Admin')" class="smart-filter-chip ${userRoleFilter === 'Admin' ? 'is-active' : ''}">${isAr ? 'مدير' : 'Admins'}</button>
+            <button type="button" onclick="applyUserRoleFilter('Employee')" class="smart-filter-chip ${userRoleFilter === 'Employee' ? 'is-active' : ''}">${isAr ? 'موظف' : 'Employees'}</button>
+            <button type="button" onclick="applyUserRoleFilter('Delivery')" class="smart-filter-chip ${userRoleFilter === 'Delivery' ? 'is-active' : ''}">${isAr ? 'سائق' : 'Drivers'}</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="users-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        ${visibleUsers.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="user-search" class="mx-auto mb-4 h-14 w-14 text-slate-300"></i><p class="text-slate-500">${isAr ? 'لا يوجد مستخدمون يطابقون البحث' : 'No users match your search'}</p></div>` : visibleUsers.map(u => {
+          const userAdsCount = adsByCreator.get(String(u.id)) || 0;
+          const deliveredAdsCount = paidDeliveriesByDriver.get(String(u.id)) || 0;
+          const deliverySummary = deliveredReceiptsByDriver.get(String(u.id)) || { count: 0, fees: 0 };
+          const deliveryFeesLYD = deliverySummary.fees;
+          const deliveryStats = deliveryStatsByDriver.get(String(u.id)) || { totalAssigned: 0, accepted: 0, collected: 0 };
           
           return `
             <div class="glass-panel rounded-xl p-5 hover:scale-[1.02] transition-transform">
               <div class="flex items-start justify-between mb-4">
                 <div class="flex items-center space-x-3 flex-1">
                   <div class="w-14 h-14 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-full flex items-center justify-center text-white font-bold text-xl shadow-lg">
-                    ${u.name.charAt(0)}
+                    ${String(u.name || 'U').charAt(0)}
                   </div>
                   <div class="flex-1">
                     <h3 class="font-bold text-lg text-slate-800 dark:text-white">${Security.escapeHtml(u.name || '')}</h3>
@@ -4513,27 +5449,27 @@ function renderUsersView() {
                   <span class="truncate">${Security.escapeHtml(u.email || '')}</span>
                 </div>
 
-                ${isDeliveryRole(u.role) && u.stats ? `
+                ${isDeliveryRole(u.role) ? `
                   <div class="mt-3 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg space-y-1">
                     <div class="text-xs font-bold text-blue-700 dark:text-blue-300 uppercase mb-2">${isAr ? 'إحصائيات التوصيل' : 'Delivery Stats'}</div>
-                    <div class="flex justify-between text-xs"><span>${isAr ? 'إجمالي المُعيَّن:' : 'Total Assigned:'}</span><span class="font-bold">${u.stats.totalAds || 0}</span></div>
-                    <div class="flex justify-between text-xs"><span>${isAr ? 'المقبول:' : 'Accepted:'}</span><span class="font-bold text-blue-600">${u.stats.accepted || 0}</span></div>
-                    <div class="flex justify-between text-xs"><span>${isAr ? 'المُحصَّل:' : 'Collected:'}</span><span class="font-bold text-emerald-600">${u.stats.collected || 0}</span></div>
+                    <div class="flex justify-between text-xs"><span>${isAr ? 'إجمالي المُعيَّن:' : 'Total Assigned:'}</span><span class="font-bold">${deliveryStats.totalAssigned}</span></div>
+                    <div class="flex justify-between text-xs"><span>${isAr ? 'المقبول:' : 'Accepted:'}</span><span class="font-bold text-blue-600">${deliveryStats.accepted}</span></div>
+                    <div class="flex justify-between text-xs"><span>${isAr ? 'المُحصَّل:' : 'Collected:'}</span><span class="font-bold text-emerald-600">${deliveryStats.collected}</span></div>
                     <div class="flex justify-between text-xs"><span>${isAr ? 'الرسوم المكتسبة:' : 'Fees Earned:'}</span><span class="font-bold text-purple-600">${deliveryFeesLYD.toFixed(0)} LYD</span></div>
                   </div>
                 ` : ''}
 
-                ${userAds.length > 0 ? `
+                ${userAdsCount > 0 ? `
                   <div class="flex items-center space-x-2 text-xs text-slate-500 mt-2">
                     <i data-lucide="megaphone" class="w-3 h-3"></i>
-                    <span>${isAr ? `أنشأ ${userAds.length} إعلان` : `Created ${userAds.length} ads`}</span>
+                    <span>${isAr ? `أنشأ ${userAdsCount} إعلان` : `Created ${userAdsCount} ads`}</span>
                   </div>
                 ` : ''}
 
-                ${deliveredAds.length > 0 ? `
+                ${deliveredAdsCount > 0 ? `
                   <div class="flex items-center space-x-2 text-xs text-emerald-600 mt-2">
                     <i data-lucide="truck" class="w-3 h-3"></i>
-                    <span>${isAr ? `وصَّل ${deliveredAds.length} إعلان` : `Delivered ${deliveredAds.length} ads`}</span>
+                    <span>${isAr ? `وصَّل ${deliveredAdsCount} إعلان` : `Delivered ${deliveredAdsCount} ads`}</span>
                   </div>
                 ` : ''}
                 
@@ -4660,6 +5596,15 @@ function renderAuditView() {
   const hasActiveFilters = state.auditSearch || state.auditActionFilter !== 'all' || 
     state.auditCategoryFilter !== 'all' || state.auditSeverityFilter !== 'all' || 
     state.auditUserFilter !== 'all' || state.auditDateFrom || state.auditDateTo;
+  const auditAdvancedFilterCount = [
+    state.auditActionFilter !== 'all',
+    state.auditCategoryFilter !== 'all',
+    state.auditSeverityFilter !== 'all',
+    state.auditUserFilter !== 'all',
+    !!state.auditDateFrom,
+    !!state.auditDateTo
+  ].filter(Boolean).length;
+  const auditAdvancedFiltersOpen = isWorkspaceFilterPanelExpanded('audit');
   
   // Severity badge colors
   const severityColors = {
@@ -4688,7 +5633,7 @@ function renderAuditView() {
             </span>
             <span>${t('auditLogs')}</span>
           </h1>
-          <p class="text-sm text-slate-500 mt-1">${isAr ? `${totalLogs.toLocaleString()} إجمالي السجلات` : `${totalLogs.toLocaleString()} total entries`} ${hasActiveFilters ? (isAr ? `(مصفّاة من ${allLogs.length.toLocaleString()})` : `(filtered from ${allLogs.length.toLocaleString()})`) : ''}</p>
+          <p class="text-sm text-slate-500 mt-1">${isAr ? `${totalLogs.toLocaleString('en-US')} إجمالي السجلات` : `${totalLogs.toLocaleString('en-US')} total entries`} ${hasActiveFilters ? (isAr ? `(مصفّاة من ${allLogs.length.toLocaleString('en-US')})` : `(filtered from ${allLogs.length.toLocaleString('en-US')})`) : ''}</p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
           ${canExportLogs ? `
@@ -4734,7 +5679,7 @@ function renderAuditView() {
         </div>
         <div class="flex items-center space-x-4 text-xs">
           <div class="text-center">
-            <div class="font-bold text-indigo-700 dark:text-indigo-300">${allLogs.length.toLocaleString()}</div>
+            <div class="font-bold text-indigo-700 dark:text-indigo-300">${allLogs.length.toLocaleString('en-US')}</div>
             <div class="text-[10px] text-indigo-600/70 dark:text-indigo-400/70">${isAr ? 'إجمالي السجلات' : 'Total Logs'}</div>
           </div>
           <div class="text-center">
@@ -4751,50 +5696,55 @@ function renderAuditView() {
           <div class="w-10 h-10 mx-auto mb-2 rounded-lg bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center">
             <i data-lucide="activity" class="w-5 h-5 text-blue-600"></i>
           </div>
-          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.length.toLocaleString()}</div>
+          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.length.toLocaleString('en-US')}</div>
           <div class="text-xs text-slate-500">${isAr ? 'إجمالي السجلات' : 'Total Logs'}</div>
         </div>
         <div class="glass-panel rounded-xl p-4 text-center">
           <div class="w-10 h-10 mx-auto mb-2 rounded-lg bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center">
             <i data-lucide="plus-circle" class="w-5 h-5 text-emerald-600"></i>
           </div>
-          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'create').length.toLocaleString()}</div>
+          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'create').length.toLocaleString('en-US')}</div>
           <div class="text-xs text-slate-500">${isAr ? 'إنشاء' : 'Creates'}</div>
         </div>
         <div class="glass-panel rounded-xl p-4 text-center">
           <div class="w-10 h-10 mx-auto mb-2 rounded-lg bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center">
             <i data-lucide="edit-3" class="w-5 h-5 text-amber-600"></i>
           </div>
-          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'update').length.toLocaleString()}</div>
+          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'update').length.toLocaleString('en-US')}</div>
           <div class="text-xs text-slate-500">${isAr ? 'تعديلات' : 'Updates'}</div>
         </div>
         <div class="glass-panel rounded-xl p-4 text-center">
           <div class="w-10 h-10 mx-auto mb-2 rounded-lg bg-rose-100 dark:bg-rose-900/30 flex items-center justify-center">
             <i data-lucide="trash-2" class="w-5 h-5 text-rose-600"></i>
           </div>
-          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'delete' || l.action === 'Delete').length.toLocaleString()}</div>
+          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'delete' || l.action === 'Delete').length.toLocaleString('en-US')}</div>
           <div class="text-xs text-slate-500">${isAr ? 'حذف' : 'Deletes'}</div>
         </div>
       </div>
 
       <!-- Filters -->
-      <div class="glass-panel rounded-2xl p-4">
-        <div class="flex flex-col lg:flex-row gap-4">
+      <div class="smart-filter-panel glass-panel rounded-2xl p-4">
+        <div class="smart-filter-primary">
           <!-- Search -->
-          <div class="flex-1 relative">
+          <div class="smart-search-field flex-1 relative">
+            <label for="audit-search" class="sr-only">${isAr ? 'بحث في سجل التدقيق' : 'Search audit logs'}</label>
             <i data-lucide="search" class="w-5 h-5 absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"></i>
             <input 
               type="text" 
+              id="audit-search"
               placeholder="${isAr ? 'ابحث في السجلات بالوصف أو المستخدم أو الإجراء...' : 'Search logs by description, user, action...'}"
               value="${Security.escapeHtml(state.auditSearch || '')}"
               oninput="updateAuditFilter('search', this.value)"
               class="w-full pl-12 pr-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all"
             />
-            ${state.auditSearch ? `<button onclick="updateAuditFilter('search', '')" class="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full"><i data-lucide="x" class="w-4 h-4 text-slate-400"></i></button>` : ''}
+            <span id="audit-search-clear">${state.auditSearch ? `<button onclick="clearAuditSearch()" class="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full"><i data-lucide="x" class="w-4 h-4 text-slate-400"></i></button>` : ''}</span>
           </div>
-          
+          ${renderWorkspaceFilterToggle('audit', auditAdvancedFilterCount)}
+        </div>
+
+        <div id="audit-advanced-filters" class="workspace-advanced-panel ${auditAdvancedFiltersOpen ? '' : 'hidden'}" aria-hidden="${auditAdvancedFiltersOpen ? 'false' : 'true'}">
           <!-- Filter Dropdowns -->
-          <div class="flex flex-wrap gap-2">
+          <div class="audit-filter-controls workspace-filter-grid">
             <select onchange="updateAuditFilter('action', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditActionFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all">${isAr ? 'كل الإجراءات' : 'All Actions'}</option>
               ${uniqueActions.map(a => `<option value="${Security.escapeHtml(a)}" ${state.auditActionFilter === a ? 'selected' : ''}>${Security.escapeHtml(a)}</option>`).join('')}
@@ -4839,7 +5789,7 @@ function renderAuditView() {
       </div>
 
       <!-- Logs Table -->
-      <div class="glass-panel rounded-2xl overflow-hidden">
+      <div id="audit-results" class="glass-panel rounded-2xl overflow-hidden">
         ${paginatedLogs.length === 0 ? `
           <div class="p-12 text-center">
             <i data-lucide="${hasActiveFilters ? 'search-x' : 'file-clock'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i>
@@ -4868,8 +5818,8 @@ function renderAuditView() {
                   return `
                     <tr class="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors">
                       <td class="px-4 py-3" data-label="${isAr ? 'الوقت' : 'Timestamp'}">
-                        <div class="text-xs font-medium text-slate-700 dark:text-slate-300">${new Date(log.date).toLocaleDateString()}</div>
-                        <div class="text-[10px] text-slate-500">${new Date(log.date).toLocaleTimeString()}</div>
+                        <div class="text-xs font-medium text-slate-700 dark:text-slate-300">${new Date(log.date).toLocaleDateString(appDateLocale())}</div>
+                        <div class="text-[10px] text-slate-500">${new Date(log.date).toLocaleTimeString(appDateLocale())}</div>
                       </td>
                       <td class="px-4 py-3" data-label="${isAr ? 'المستخدم' : 'User'}">
                         <div class="flex items-center space-x-2">
@@ -4974,7 +5924,16 @@ function updateAuditFilter(filterType, value) {
       }
       // #endregion
       state.auditSearch = clean;
-      break;
+      // Debounced scoped swap: a synchronous full render() per keystroke
+      // rebuilt the whole audit view for every character, which froze typing
+      // and dropped the keyboard on phones.
+      state.auditPage = 1;
+      if (_auditSearchTimer) clearTimeout(_auditSearchTimer);
+      _auditSearchTimer = setTimeout(() => {
+        _auditSearchTimer = null;
+        updateAuditViewFiltered();
+      }, 100);
+      return;
     }
     case 'action': state.auditActionFilter = value; break;
     case 'category': state.auditCategoryFilter = value; break;
@@ -4984,6 +5943,39 @@ function updateAuditFilter(filterType, value) {
     case 'dateTo': state.auditDateTo = value; break;
   }
   state.auditPage = 1; // Reset to first page when filtering
+  render();
+  lucide.createIcons();
+}
+
+let _auditSearchTimer = null;
+function updateAuditViewFiltered() {
+  if (state.currentView !== 'audit') return;
+  const results = document.getElementById('audit-results');
+  if (!results) {
+    render();
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  // Swap only the logs table (and the clear-X wrapper, like the receipts
+  // search) so the search input keeps its caret and the phone keyboard
+  // stays open (same approach as updateCustomersViewFiltered).
+  const tpl = document.createElement('template');
+  tpl.innerHTML = renderAuditView();
+  const newResults = tpl.content.querySelector('#audit-results');
+  if (newResults) results.innerHTML = newResults.innerHTML;
+  const clearEl = document.getElementById('audit-search-clear');
+  const newClear = tpl.content.querySelector('#audit-search-clear');
+  if (clearEl && newClear) clearEl.innerHTML = newClear.innerHTML;
+  if (window.lucide) lucide.createIcons();
+}
+
+function clearAuditSearch() {
+  if (_auditSearchTimer) {
+    clearTimeout(_auditSearchTimer);
+    _auditSearchTimer = null;
+  }
+  state.auditSearch = '';
+  state.auditPage = 1;
   render();
   lucide.createIcons();
 }
@@ -5062,7 +6054,7 @@ function showLogDetails(logId) {
           </div>
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
             <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'الوقت' : 'Timestamp'}</div>
-            <div class="text-xs text-slate-700 dark:text-slate-300">${new Date(log.date).toLocaleString()}</div>
+            <div class="text-xs text-slate-700 dark:text-slate-300">${new Date(log.date).toLocaleString(appDateLocale())}</div>
           </div>
         </div>
 
@@ -5156,8 +6148,13 @@ function downloadFile(content, filename, mimeType) {
   a.download = filename;
   document.body.appendChild(a);
   a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  // iOS Safari processes blob downloads asynchronously after the click task
+  // returns; revoking (or removing the anchor) in the same tick silently
+  // cancels the download. Defer cleanup instead.
+  setTimeout(() => {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 2000);
 }
 
 // Backup all audit logs for permanent storage
@@ -5380,8 +6377,8 @@ function renderSettingsView() {
           <div class="mt-3 p-3 rounded-xl bg-white/60 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-xs text-slate-500">
             ${state.localRecovery?.createdAt
               ? (state.language === 'ar'
-                ? `مفتاح الاستعادة مُنشأ بتاريخ: ${new Date(state.localRecovery.createdAt).toLocaleString()}`
-                : `Recovery key created: ${new Date(state.localRecovery.createdAt).toLocaleString()}`)
+                ? `مفتاح الاستعادة مُنشأ بتاريخ: ${new Date(state.localRecovery.createdAt).toLocaleString(appDateLocale())}`
+                : `Recovery key created: ${new Date(state.localRecovery.createdAt).toLocaleString(appDateLocale())}`)
               : (state.language === 'ar'
                 ? 'لم يتم إنشاء مفتاح استعادة بعد.'
                 : 'No recovery key created yet.')}
@@ -5409,6 +6406,25 @@ function renderSettingsView() {
             <i data-lucide="user-round-x" class="w-5 h-5"></i>
             <span>${isAr ? 'طلب حذف الحساب' : 'Request Account Deletion'}</span>
           </a>
+        </div>
+      </div>
+
+      <!-- Workspace experience -->
+      <div class="glass-panel rounded-2xl p-6">
+        <h2 class="text-xl font-bold mb-2 flex items-center">
+          <i data-lucide="sparkles" class="w-5 h-5 mr-2 text-indigo-500"></i>
+          ${isAr ? 'طريقة عرض مساحة العمل' : 'Workspace experience'}
+        </h2>
+        <p class="mb-4 text-sm text-slate-500">${isAr ? 'العرض البسيط مناسب للعمل اليومي، والعرض المتقدم يُظهر كل الفلاتر والأدوات دائماً. نفس البيانات ونفس الحسابات في الاثنين.' : 'Simple view is best for daily work. Advanced view keeps every filter and tool visible. Both use exactly the same data and calculations.'}</p>
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2" role="group" aria-label="${isAr ? 'اختيار طريقة العرض' : 'Choose workspace experience'}">
+          <button type="button" onclick="setWorkspaceExperienceMode('simple')" class="workspace-experience-choice ${!isAdvancedWorkspaceMode() ? 'is-selected' : ''}" aria-pressed="${!isAdvancedWorkspaceMode() ? 'true' : 'false'}">
+            <span class="workspace-experience-icon"><i data-lucide="sparkles" class="h-5 w-5"></i></span>
+            <span class="text-left"><span class="block font-bold">${isAr ? 'بسيط' : 'Simple'}</span><span class="block text-xs text-slate-500">${isAr ? 'الأساسيات أولاً، والمزيد عند الحاجة' : 'Essentials first, more when needed'}</span></span>
+          </button>
+          <button type="button" onclick="setWorkspaceExperienceMode('advanced')" class="workspace-experience-choice ${isAdvancedWorkspaceMode() ? 'is-selected' : ''}" aria-pressed="${isAdvancedWorkspaceMode() ? 'true' : 'false'}">
+            <span class="workspace-experience-icon"><i data-lucide="sliders-horizontal" class="h-5 w-5"></i></span>
+            <span class="text-left"><span class="block font-bold">${isAr ? 'متقدم' : 'Advanced'}</span><span class="block text-xs text-slate-500">${isAr ? 'كل الفلاتر والأدوات ظاهرة' : 'All filters and tools stay visible'}</span></span>
+          </button>
         </div>
       </div>
 
@@ -5468,7 +6484,7 @@ function renderSettingsView() {
                       const user = state.users.find(u => u.id === h.userId);
                       return `
                         <tr class="border-b border-slate-100 dark:border-slate-800">
-                          <td class="py-2 text-xs text-slate-500">${new Date(h.date).toLocaleString()}</td>
+                          <td class="py-2 text-xs text-slate-500">${new Date(h.date).toLocaleString(appDateLocale())}</td>
                           <td class="py-2 font-mono font-bold text-emerald-600">${h.rate.toFixed(2)}</td>
                           <td class="py-2 text-slate-600 dark:text-slate-400">${Security.escapeHtml(user?.name || (isAr ? 'النظام' : 'System'))}</td>
                         </tr>
@@ -5526,7 +6542,7 @@ function renderSettingsView() {
               <i data-lucide="check-circle" class="w-5 h-5 text-emerald-600"></i>
               <div class="flex-1">
                 <p class="font-medium text-emerald-700 dark:text-emerald-300">${isAr ? 'المزامنة السحابية مفعّلة' : 'Cloud Sync Enabled'}</p>
-                <p class="text-xs text-emerald-600 dark:text-emerald-400 mt-1">${isAr ? 'آخر مزامنة' : 'Last sync'}: ${state.lastCloudSync ? new Date(state.lastCloudSync).toLocaleString() : (isAr ? 'أبداً' : 'Never')}</p>
+                <p class="text-xs text-emerald-600 dark:text-emerald-400 mt-1">${isAr ? 'آخر مزامنة' : 'Last sync'}: ${state.lastCloudSync ? new Date(state.lastCloudSync).toLocaleString(appDateLocale()) : (isAr ? 'أبداً' : 'Never')}</p>
               </div>
             </div>
             <div class="flex space-x-3">

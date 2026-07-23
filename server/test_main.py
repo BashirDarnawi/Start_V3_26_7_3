@@ -614,7 +614,10 @@ class TestSoftDeleteIntegrity:
         cookies = {"albayan_session": admin_session}
         r = client.post(
             "/api/collections/customers",
-            json={"id": "test_no_resurrect", "data": {"name": "Ghost"}},
+            json={
+                "id": "test_no_resurrect",
+                "data": {"name": "Ghost", "phones": ["0950000001"]},
+            },
             cookies=cookies,
         )
         assert r.status_code == 200

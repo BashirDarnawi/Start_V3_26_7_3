@@ -699,10 +699,21 @@ async function copyTextToClipboard(text) {
     ta.style.top = '-1000px';
     ta.style.left = '-1000px';
     document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    document.body.removeChild(ta);
-    return true;
+    try {
+      // iOS Safari cannot select a readonly textarea via select(); use Range + setSelectionRange.
+      // The readonly attribute stays on at creation to suppress the iOS keyboard.
+      ta.contentEditable = 'true';
+      ta.readOnly = false;
+      const range = document.createRange();
+      range.selectNodeContents(ta);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      ta.setSelectionRange(0, value.length);
+      return document.execCommand('copy');
+    } finally {
+      document.body.removeChild(ta);
+    }
   } catch {
     return false;
   }

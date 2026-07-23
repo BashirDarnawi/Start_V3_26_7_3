@@ -26,7 +26,13 @@ const _serverLiveSync = {
   // rejected. pollerEpoch changes whenever polling is stopped/restarted, so a
   // late tick is discarded without invalidating an unrelated full load.
   sessionEpoch: 0,
-  pollerEpoch: 0
+  pollerEpoch: 0,
+  // Failure backoff: after consecutive tick failures, polls are skipped until
+  // nextAllowedAt (6s/12s/24s/48s/60s at 3s base). An unreachable server must
+  // not be hammered every 3s from a phone (battery + cell radio); the
+  // visibilitychange/online handlers reset the backoff for an immediate retry.
+  failStreak: 0,
+  nextAllowedAt: 0
 };
 
 function advanceServerSessionEpoch() {
@@ -94,7 +100,8 @@ function computeServerCursorFromState() {
     _maxLastModifiedFromArray(state.clothesSettings),
     _maxLastModifiedFromArray(state.adCampaignRequests),
     _maxLastModifiedFromArray(state.walletTransactions),
-    _maxLastModifiedFromArray(state.serviceSubscriptions)
+    _maxLastModifiedFromArray(state.serviceSubscriptions),
+    _maxLastModifiedFromArray(state.appSettings)
   );
 }
 
@@ -103,6 +110,9 @@ function getServerCollectionVisibilityScope(user, collection) {
   const name = String(collection || '');
   const role = String(user.role || '').toLowerCase();
   if (name === 'exchangeRateHistory') return 'all';
+  // Admin-only configuration records: never fetched (or retained) for
+  // non-admin sessions.
+  if (name === 'appSettings') return role === 'admin' ? 'all' : 'none';
   if (name === 'walletTransactions' || name === 'serviceSubscriptions') {
     return role === 'admin' ? 'all' : 'own';
   }
@@ -498,6 +508,7 @@ async function serverLiveSyncOnce() {
   const adCampaignRequestsDelta = recordsFor('adCampaignRequests');
   const walletTxDelta = recordsFor('walletTransactions');
   const subsDelta = recordsFor('serviceSubscriptions');
+  const appSettingsDelta = recordsFor('appSettings');
 
   // Logged out (or a new session started) while these fetches were in flight?
   // Drop the result — applying it would re-fill the just-wiped state.
@@ -539,6 +550,7 @@ async function serverLiveSyncOnce() {
   changed = applyServerDelta('adCampaignRequests', adCampaignRequestsDelta) || changed;
   changed = applyServerDelta('walletTransactions', walletTxDelta) || changed;
   changed = applyServerDelta('serviceSubscriptions', subsDelta) || changed;
+  changed = applyServerDelta('appSettings', appSettingsDelta) || changed;
 
   const entitlementAfter = getServerServiceEntitlementSnapshot();
   const revokedServices = getRevokedServerServiceEntitlements(entitlementBefore, entitlementAfter);
@@ -676,44 +688,69 @@ async function serverLiveSyncTick() {
   if (_serverLiveSync.inFlight) return;
   _serverLiveSync.inFlight = true;
   updateSyncIndicator('syncing');
+  let ok = false;
   try {
     const result = await serverLiveSyncOnce();
-    updateSyncIndicator(result?.ok === false ? 'error' : 'synced');
+    ok = result?.ok !== false;
+    updateSyncIndicator(ok ? 'synced' : 'error');
   } catch (e) {
     console.warn('[serverLiveSyncTick] Sync failed:', e?.message || e);
     updateSyncIndicator('error');
   } finally {
     _serverLiveSync.inFlight = false;
   }
+  // Exponential failure backoff (capped at 60s); any success resets it.
+  if (ok) {
+    _serverLiveSync.failStreak = 0;
+    _serverLiveSync.nextAllowedAt = 0;
+  } else {
+    _serverLiveSync.failStreak = Math.min((_serverLiveSync.failStreak || 0) + 1, 5);
+    _serverLiveSync.nextAllowedAt = Date.now() +
+      Math.min(60000, (SERVER_API.liveSyncIntervalMs || 3000) * Math.pow(2, _serverLiveSync.failStreak));
+  }
 }
 
-// Visual sync indicator
+// Visual sync indicator. Keep one cancellable hide timer: an older "Synced"
+// timer must never hide a newer "Syncing" or error state.
+let _syncIndicatorHideTimer = null;
 function updateSyncIndicator(status) {
   let indicator = document.getElementById('sync-status-indicator');
   if (!indicator) {
     // Create indicator if it doesn't exist
     indicator = document.createElement('div');
     indicator.id = 'sync-status-indicator';
-    indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300';
+    indicator.className = 'sync-status-indicator fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300';
+    indicator.setAttribute('role', 'status');
+    indicator.setAttribute('aria-live', 'polite');
+    indicator.setAttribute('aria-atomic', 'true');
     document.body.appendChild(indicator);
   }
 
+  if (_syncIndicatorHideTimer) {
+    clearTimeout(_syncIndicatorHideTimer);
+    _syncIndicatorHideTimer = null;
+  }
+  indicator.dataset.status = String(status || '');
+  indicator.onclick = null;
+
   switch (status) {
     case 'syncing':
-      indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300';
+      indicator.className = 'sync-status-indicator fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300';
       indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-blue-500 rounded-full animate-pulse mr-2"></span>' + (state.language === 'ar' ? 'جارٍ المزامنة...' : 'Syncing...');
       indicator.style.opacity = '1';
       break;
     case 'synced':
-      indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300';
+      indicator.className = 'sync-status-indicator fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300';
       indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-emerald-500 rounded-full mr-2"></span>' + (state.language === 'ar' ? 'تمت المزامنة' : 'Synced');
+      indicator.style.opacity = '1';
       // Fade out after 2 seconds
-      setTimeout(() => {
-        if (indicator) indicator.style.opacity = '0';
+      _syncIndicatorHideTimer = setTimeout(() => {
+        _syncIndicatorHideTimer = null;
+        if (indicator?.dataset.status === 'synced') indicator.style.opacity = '0';
       }, 2000);
       break;
     case 'error':
-      indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-rose-100 text-rose-700 dark:bg-rose-900/50 dark:text-rose-300 cursor-pointer';
+      indicator.className = 'sync-status-indicator fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-rose-100 text-rose-700 dark:bg-rose-900/50 dark:text-rose-300 cursor-pointer';
       indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-rose-500 rounded-full mr-2"></span>' + (state.language === 'ar' ? 'فشلت المزامنة - اضغط لإعادة المحاولة' : 'Sync failed - Tap to retry');
       indicator.style.opacity = '1';
       indicator.onclick = () => manualSyncData();
@@ -806,6 +843,8 @@ function startServerLiveSync() {
     ? (_serverLiveSync.serverWatermark || 0)
     : 0;
   _serverLiveSync.lastUsersSyncAt = 0;
+  _serverLiveSync.failStreak = 0;
+  _serverLiveSync.nextAllowedAt = 0;
 
   // Run one immediately, then poll.
   serverLiveSyncTick().catch(() => {});
@@ -814,6 +853,11 @@ function startServerLiveSync() {
     // visibilitychange handler below fires an immediate catch-up sync the
     // moment the app becomes visible again, so no update is ever missed.
     if (document.visibilityState === 'hidden') return;
+    // Definitely offline, or backing off after repeated failures: skip. The
+    // 'online'/'visibilitychange' handlers below reset the backoff and fire
+    // an immediate catch-up tick, so recovery is never delayed by this.
+    if (navigator.onLine === false) return;
+    if (Date.now() < _serverLiveSync.nextAllowedAt) return;
     serverLiveSyncTick().catch(() => {});
   }, SERVER_API.liveSyncIntervalMs || 3000);
 
@@ -823,6 +867,8 @@ function startServerLiveSync() {
       if (document.visibilityState === 'visible' && state.currentUser) {
         // Tab is now visible - do an immediate sync to catch up
         console.log('[LiveSync] Tab visible - triggering immediate sync');
+        _serverLiveSync.failStreak = 0;
+        _serverLiveSync.nextAllowedAt = 0;
         serverLiveSyncTick().catch(() => {});
       }
     };
@@ -835,6 +881,8 @@ function startServerLiveSync() {
       if (state.currentUser) {
         console.log('[LiveSync] Network online - triggering immediate sync');
         showNotification(state.language === 'ar' ? 'عاد الاتصال' : 'Back Online', state.language === 'ar' ? 'تمت إعادة الاتصال بالسيرفر، جارٍ المزامنة...' : 'Reconnected to server, syncing...', 'info');
+        _serverLiveSync.failStreak = 0;
+        _serverLiveSync.nextAllowedAt = 0;
         serverLiveSyncTick().catch(() => {});
       }
     };
@@ -1068,8 +1116,8 @@ async function _handleLoginOnce(email, password, loginGeneration) {
         showNotification(
           state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed',
           state.language === 'ar'
-            ? 'بيانات الدخول غير صحيحة (حساب السيرفر). إذا كنت تريد حساب المتصفح المحلي، اضغط "استخدام المحلي".'
-            : 'Invalid email or password (server account). If you meant your local browser account, click “Use Local”.',
+            ? 'بيانات الدخول غير صحيحة (حساب السيرفر). تأكد من البريد وكلمة المرور المسجّلين على خادم فريقك.'
+            : 'Invalid email or password (server account). Check the credentials registered on your team server.',
           'error'
         );
         return;
@@ -1221,8 +1269,15 @@ async function _handleLoginOnce(email, password, loginGeneration) {
     }
     
     state.currentView = getPostLoginLandingViewForUser(user);
-    // Upgrade legacy hashes to PBKDF2 after successful login
-    if ((user.passwordAlgo || 'sha256') !== 'pbkdf2-sha256') {
+    // Upgrade legacy hashes to PBKDF2 after successful login. Also re-hash
+    // PBKDF2 hashes created with fewer iterations (pure-JS fallback on
+    // insecure http:// origins uses 60k) at full strength once native
+    // crypto.subtle is available.
+    const _subtleAvailable = !!(globalThis.crypto && globalThis.crypto.subtle);
+    const _needsAlgoUpgrade = (user.passwordAlgo || 'sha256') !== 'pbkdf2-sha256';
+    const _needsIterationUpgrade = !_needsAlgoUpgrade && _subtleAvailable &&
+      (Number(user.passwordIterations) || 0) < 310000;
+    if (_needsAlgoUpgrade || _needsIterationUpgrade) {
       try {
         const upgraded = await Security.hashPassword(sanitizedPassword, null, { algo: 'pbkdf2-sha256' });
         if (!loginAttemptIsCurrent(loginGeneration)) return false;

@@ -22,7 +22,12 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run test:js
+      - name: Run permission and browser-state tests
+        run: npm run test:js
+      - name: Run phone and responsive UI tests
+        run: npm run test:mobile-ui
+      - name: Run financial invariants
+        run: npm run test:money
       - run: npm run build
       - run: npm run sync:www
       - run: npm run verify:generated

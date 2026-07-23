@@ -272,7 +272,10 @@ function walletFormatMinor(amountMinor, currency) {
   const d = walletDecimals(c);
   const major = walletFromMinor(amountMinor, c);
   if (!Number.isFinite(major)) return `0 ${c}`;
-  return `${major.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d })} ${c}`;
+  // Pin en-US so money always renders 1,234.56-style regardless of device
+  // locale (Arabic-region phones would otherwise emit Arabic-Indic digits,
+  // and these strings are also persisted into synced audit logs).
+  return `${major.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d })} ${c}`;
 }
 
 function walletFindByIdempotency(idempotencyKey) {
@@ -682,7 +685,13 @@ const state = {
   // Albayan Ads Studio. Campaign requests remain separate from the internal
   // `ads` accounting collection until an authorized manager approves them.
   adCampaignRequests: [],
-  
+
+  // App-wide admin configuration records (append-only, latest-record-wins —
+  // the exchangeRateHistory pattern). Currently holds the liquidity tracking
+  // start date. Admin-only on the server: the collection maps to no permission
+  // module, so only the Admin role can read or write it.
+  appSettings: [],
+
   // Settings
   defaultExchangeRate: 0,
   exchangeRateHistory: [],
@@ -701,17 +710,30 @@ const state = {
   activeModal: null,
   modalData: null,
   viewData: null,
+  // Progressive-disclosure panels opened temporarily while the device remains
+  // in Simple workspace mode. Advanced mode ignores these flags and shows all.
+  expandedFilterPanels: {},
   
   // Customer Filters
   customerSearch: '',
   customerSort: 'newest',
   customerFinancialFilter: 'all',
+
+  // Page Filters
+  pageSearch: '',
   
   // Ad Filters
   adSearch: '',
+  adReceiptFilter: '',
+
+  // User Filters
+  userSearch: '',
+  userRoleFilter: 'all',
 
   // Receipt Filters
   receiptSearch: '',
+  receiptCustomerFilter: '',
+  receiptRecordFilter: '',
   receiptStatusFilter: 'all',
   receiptPaymentFilter: 'all',
   receiptDateFilter: 'all',

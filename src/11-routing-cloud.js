@@ -52,7 +52,9 @@ function getUrlParams() {
     search: params.get('search'),
     tab: params.get('tab'),
     page: params.get('page'),
-    service: params.get('service')
+    service: params.get('service'),
+    customer: params.get('customer'),
+    receipt: params.get('receipt')
   };
 }
 
@@ -68,6 +70,18 @@ function viewUrlParamsFor(view) {
   if (view === 'service-placeholder') {
     return { service: state.viewData?.serviceId || null };
   }
+  if (view === 'receipts') {
+    const customerId = String(state.receiptCustomerFilter || '').trim();
+    const receiptId = String(state.receiptRecordFilter || '').trim();
+    return {
+      customer: Security.isValidRecordId(customerId) ? customerId : null,
+      receipt: Security.isValidRecordId(receiptId) ? receiptId : null
+    };
+  }
+  if (view === 'ads') {
+    const receiptId = String(state.adReceiptFilter || '').trim();
+    return { receipt: Security.isValidRecordId(receiptId) ? receiptId : null };
+  }
   return {};
 }
 
@@ -82,6 +96,35 @@ function restoreViewStateFromUrl(view) {
   }
   if (view === 'service-placeholder' && params.service) {
     state.viewData = { serviceId: params.service };
+  }
+  if (view === 'receipts') {
+    const customerFilter = params.customer && Security.isValidRecordId(params.customer)
+      ? String(params.customer)
+      : '';
+    const receiptFilter = params.receipt && Security.isValidRecordId(params.receipt)
+      ? String(params.receipt)
+      : '';
+    if (customerFilter || receiptFilter) {
+      state.receiptSearch = '';
+      state.receiptStatusFilter = 'all';
+      state.receiptPaymentFilter = 'all';
+      state.receiptDateFilter = 'all';
+      state.receiptDebtFilter = 'all';
+      state.receiptCollectedFilter = 'all';
+      state.receiptSortBy = 'newest';
+    }
+    state.receiptCustomerFilter = customerFilter;
+    state.receiptRecordFilter = receiptFilter;
+  }
+  if (view === 'ads') {
+    const receiptFilter = params.receipt && Security.isValidRecordId(params.receipt)
+      ? String(params.receipt)
+      : '';
+    if (receiptFilter) {
+      state.adSearch = '';
+      state.adFilters = { status: 'all', payment: 'all', page: 'all' };
+    }
+    state.adReceiptFilter = receiptFilter;
   }
 }
 
@@ -100,12 +143,35 @@ function updateUrlParams(newParams, replace = false) {
   
   const search = params.toString();
   const newUrl = window.location.pathname + (search ? '?' + search : '');
-  
+
+  // Stamp modal-pushed entries so closeModal() can tell "the top entry was
+  // pushed for this dialog" and consume it with history.back() instead of
+  // leaving a dead same-URL entry stacked (Back then degraded into N no-op
+  // presses on phones). The timestamp lets the overlay observer
+  // (01b-mobile-runtime.js) skip its sentinel for surfaces whose opener
+  // already created a history entry (tracked modals, collect-receipt).
+  const entryState = { view: state.currentView, params: newParams, albayanModal: !!newParams.modal };
+  if (newParams.modal) _albayanLastModalUrlPushAt = Date.now();
+
   try {
-    if (replace) {
-      window.history.replaceState({ view: state.currentView, params: newParams }, '', newUrl);
+    // Same-address guard (mirror of updateUrlForView's samePlace): the URL
+    // restore path re-runs the real modal openers, whose own updateUrlParams
+    // call must not push a DUPLICATE entry for the address being restored.
+    const samePlace = newUrl === window.location.pathname + window.location.search;
+    // Consume a live overlay sentinel (a chooser/palette surface replaced by
+    // this modal in the same gesture — New Receipt chooser, command-palette
+    // quick actions) by REPLACING it instead of stacking on top: a stranded
+    // sentinel costs the user one dead Back press plus a scroll jump after
+    // the modal closes. Mirrors navigateToInternal; see the overlay history
+    // model in 01b-mobile-runtime.js.
+    const topWasOverlaySentinel = !!(window.history.state && window.history.state.overlaySentinel);
+    if (replace || samePlace || topWasOverlaySentinel) {
+      window.history.replaceState(entryState, '', newUrl);
+      if (topWasOverlaySentinel && typeof _overlaySentinelDepth === 'number' && _overlaySentinelDepth > 0) {
+        _overlaySentinelDepth--;
+      }
     } else {
-      window.history.pushState({ view: state.currentView, params: newParams }, '', newUrl);
+      window.history.pushState(entryState, '', newUrl);
     }
   } catch (e) {
     console.warn('URL params update error:', e);
@@ -158,6 +224,31 @@ function updateUrlForView(view, replace = false) {
 // Handle browser back/forward buttons
 function setupUrlRouting() {
   window.addEventListener('popstate', (event) => {
+    // A history.back() issued by the app itself purely to consume an
+    // overlay/modal entry (X/Cancel close — see the overlay history model in
+    // 01b-mobile-runtime.js): the UI is already correct, and running the
+    // router would only re-render and scroll-reset the unchanged view.
+    if (typeof shouldSuppressOverlayPopstate === 'function' && shouldSuppressOverlayPopstate()) return;
+
+    // Phone browsers: hardware/gesture Back closes the top-most open
+    // overlay/modal/drawer — the same order as the packaged app's native
+    // Back handler — instead of navigating the screen underneath it. The
+    // popped entry is the surface's own sentinel/?modal entry, so the
+    // address bar is already back at the pre-overlay URL and the pop is
+    // fully consumed by the close. Desktop and Capacitor behaviour are
+    // unchanged. Never call history.back()/forward() from here: the
+    // re-fired popstate would re-run restoreModalFromUrl's opener and
+    // clobber unsaved form state.
+    if (typeof closeTopMobileSurface === 'function'
+        && typeof isPhoneBrowserHistoryManaged === 'function'
+        && isPhoneBrowserHistoryManaged()) {
+      _closingSurfaceFromPopstate = true;
+      let closedSurface = false;
+      try { closedSurface = closeTopMobileSurface(); }
+      finally { _closingSurfaceFromPopstate = false; }
+      if (markOverlayPopClose(closedSurface)) return;
+    }
+
     const view = event.state?.view || getViewFromUrl();
     // The address in the bar is the source of truth after back/forward:
     // re-apply the view's sub-state (Clothes tab, service id) before rendering.
@@ -246,6 +337,9 @@ function restoreModalFromUrl() {
     }, 100);
   } else {
     // No modal in URL, close any open modal
+    if (typeof resetReceiptCustomerRiskWarningState === 'function') {
+      resetReceiptCustomerRiskWarningState();
+    }
     if (state.activeModal) {
       state.activeModal = null;
       state.modalData = null;
@@ -266,6 +360,34 @@ function restoreModalFromUrl() {
       document.querySelectorAll('#app-modal').forEach(el => el.remove());
     }
   }
+}
+
+// A closeModal() consume (history.back()/go(-2)) issued in this same task has
+// not landed yet — history traversal is async, so pushing the new view NOW
+// would stack it on top of the very entries the traversal is about to pop,
+// and the traversal would then strand the user on a stale ?modal entry that a
+// later Back resurrects (e.g. duplicate-serial warning → "View Customer").
+// Wait for the suppressed bookkeeping popstate before stamping the URL, with
+// a short fallback timeout in case the traversal is silently dropped at the
+// session-history edge. See the overlay history model in 01b-mobile-runtime.js.
+function _pushViewUrlAfterHistoryConsume(view) {
+  let done = false;
+  let fallbackTimer = null;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    window.removeEventListener('popstate', onConsumePop);
+    if (fallbackTimer) clearTimeout(fallbackTimer);
+    // A newer navigation owns the address bar by now — never stamp a stale view.
+    if (state.currentView !== view) return;
+    const consumesOverlaySentinel = !!(window.history.state && window.history.state.overlaySentinel);
+    updateUrlForView(view, consumesOverlaySentinel);
+  };
+  // Push AFTER the popstate dispatch finishes so the router's own listener
+  // (which swallows this bookkeeping pop) always sees the untouched entry.
+  const onConsumePop = () => { setTimeout(finish, 0); };
+  window.addEventListener('popstate', onConsumePop);
+  fallbackTimer = setTimeout(finish, 300);
 }
 
 // Internal navigation (doesn't push to history if skipHistory=true)
@@ -304,7 +426,22 @@ function navigateToInternal(view, pushHistory = true) {
   
   // Update URL
   if (pushHistory) {
-    updateUrlForView(view);
+    if (typeof _overlayHistoryConsumePending === 'function'
+        && typeof isPhoneBrowserHistoryManaged === 'function'
+        && isPhoneBrowserHistoryManaged()
+        && _overlayHistoryConsumePending()) {
+      // closeModal() in this same gesture issued an entry-consume that has
+      // not landed yet — defer the push or it stacks on doomed entries.
+      _pushViewUrlAfterHistoryConsume(view);
+    } else {
+      // If the top history entry is an overlay sentinel (the nav drawer or a
+      // command-palette style surface pushed it and this navigation closes
+      // it), REPLACE that entry instead of pushing: the sentinel is consumed
+      // and Back from the new view returns to the pre-overlay screen in one
+      // press. See the overlay history model in 01b-mobile-runtime.js.
+      const consumesOverlaySentinel = !!(window.history.state && window.history.state.overlaySentinel);
+      updateUrlForView(view, consumesOverlaySentinel);
+    }
   }
   
   // Render immediately for instant feedback
@@ -326,6 +463,17 @@ function navigateTo(view) {
 
 function toggleMobileMenu() {
   state.isMobileMenuOpen = !state.isMobileMenuOpen;
+  // Phone-browser Back parity: one consumable history entry per drawer open
+  // (the drawer renders inside #app, so the body overlay observer in
+  // 01b-mobile-runtime.js cannot see it — push/consume explicitly here).
+  if (typeof isPhoneBrowserHistoryManaged === 'function' && isPhoneBrowserHistoryManaged()) {
+    if (state.isMobileMenuOpen) {
+      pushMobileOverlayHistoryEntry();
+    } else if (window.history.state && window.history.state.overlaySentinel && _overlaySentinelDepth > 0) {
+      _overlaySentinelDepth--;
+      consumeOverlayHistoryEntry();
+    }
+  }
   // The drawer/backdrop live outside the partial view container. A normal
   // same-view render can intentionally be a no-op when the page HTML did not
   // change, which used to make the hamburger appear completely unresponsive.
@@ -335,6 +483,8 @@ function toggleMobileMenu() {
 // ==========================================
 // COMMAND PALETTE
 // ==========================================
+
+let _commandPaletteSearchTimer = null;
 
 function toggleCommandPalette() {
   state.commandPaletteOpen = !state.commandPaletteOpen;
@@ -347,91 +497,273 @@ function toggleCommandPalette() {
   }
 }
 
+function closeCommandPalette() {
+  if (_commandPaletteSearchTimer) {
+    clearTimeout(_commandPaletteSearchTimer);
+    _commandPaletteSearchTimer = null;
+  }
+  state.commandPaletteOpen = false;
+  renderCommandPalette();
+}
+
+function commandPaletteNavigate(view, beforeNavigate = null) {
+  closeCommandPalette();
+  if (typeof beforeNavigate === 'function') beforeNavigate();
+  navigateTo(view);
+}
+
+function getCommandPaletteBaseCommands() {
+  const isAr = state.language === 'ar';
+  const commands = [];
+  const addView = (id, view, label, icon) => {
+    if (typeof canOpenWorkspaceView === 'function' && !canOpenWorkspaceView(view)) return;
+    commands.push({ id, label, icon, section: isAr ? 'الصفحات' : 'Pages', action: () => commandPaletteNavigate(view) });
+  };
+
+  addView('analytics', 'analytics', isAr ? 'التحليلات' : 'Analytics', 'layout-dashboard');
+  addView('customers', 'customers', isAr ? 'العملاء' : 'Customers', 'users');
+  addView('receipts', 'receipts', isAr ? 'الوصولات' : 'Receipts', 'receipt');
+  addView('pages', 'pages', isAr ? 'الصفحات' : 'Pages', 'file-text');
+  addView('ads', 'ads', isAr ? 'الإعلانات' : 'Ads', 'megaphone');
+  addView('deliveries', 'deliveries', isAr ? 'التوصيلات' : 'Deliveries', 'truck');
+
+  if (isAdminRole(state.currentUser?.role) || currentUserHasPermission('analytics', 'view')) {
+    commands.push({ id: 'reconciliation', label: isAr ? 'التسوية' : 'Reconciliation', icon: 'clipboard-check', section: isAr ? 'الصفحات' : 'Pages', action: () => commandPaletteNavigate('reconciliation') });
+  }
+  if (isAdminRole(state.currentUser?.role) || currentUserHasPermission('users', 'view') || currentUserHasPermission('users', 'viewOwn')) {
+    commands.push({ id: 'users', label: isAr ? 'المستخدمون' : 'Users', icon: 'users-round', section: isAr ? 'الصفحات' : 'Pages', action: () => commandPaletteNavigate('users') });
+  }
+  if (isAdminRole(state.currentUser?.role) || currentUserHasPermission('settings', 'view') || currentUserHasPermission('settings', 'viewOwn')) {
+    commands.push({ id: 'settings', label: isAr ? 'الإعدادات' : 'Settings', icon: 'settings', section: isAr ? 'الصفحات' : 'Pages', action: () => commandPaletteNavigate('settings') });
+  }
+
+  if (can('customers', 'add')) {
+    commands.push({ id: 'add-customer', label: isAr ? 'إضافة عميل جديد' : 'Add new customer', icon: 'user-plus', section: isAr ? 'إجراءات سريعة' : 'Quick actions', action: () => { closeCommandPalette(); showCustomerModal(); } });
+  }
+  if (can('ads', 'add')) {
+    commands.push({ id: 'add-ad', label: isAr ? 'إضافة إعلان جديد' : 'Add new ad', icon: 'plus-circle', section: isAr ? 'إجراءات سريعة' : 'Quick actions', action: () => { closeCommandPalette(); showAdModal(); } });
+  }
+  if (can('receipts', 'add')) {
+    commands.push({ id: 'add-receipt', label: isAr ? 'إضافة وصل جديد' : 'Add new receipt', icon: 'receipt', section: isAr ? 'إجراءات سريعة' : 'Quick actions', action: () => { closeCommandPalette(); showNewReceiptChooser(); } });
+  }
+  if (isCurrentUserAdmin()) {
+    commands.push({ id: 'export', label: isAr ? 'تصدير تقرير البيانات' : 'Export data report', icon: 'download', section: isAr ? 'إجراءات سريعة' : 'Quick actions', action: () => { closeCommandPalette(); exportData(); } });
+  }
+
+  commands.push(
+    { id: 'workspace-mode', label: isAdvancedWorkspaceMode() ? (isAr ? 'استخدام العرض البسيط' : 'Use Simple view') : (isAr ? 'استخدام العرض المتقدم' : 'Use Advanced view'), icon: isAdvancedWorkspaceMode() ? 'sparkles' : 'sliders-horizontal', section: isAr ? 'التفضيلات' : 'Preferences', action: () => { closeCommandPalette(); toggleWorkspaceExperienceMode(); } },
+    { id: 'dark-mode', label: isAr ? 'تبديل المظهر' : 'Change appearance', icon: 'moon', section: isAr ? 'التفضيلات' : 'Preferences', action: () => { closeCommandPalette(); toggleTheme(); } },
+    { id: 'language', label: isAr ? 'التبديل إلى الإنجليزية' : 'Switch to Arabic', icon: 'globe', section: isAr ? 'التفضيلات' : 'Preferences', action: () => { closeCommandPalette(); toggleLanguage(); } },
+    { id: 'logout', label: isAr ? 'تسجيل الخروج' : 'Log out', icon: 'log-out', section: isAr ? 'الحساب' : 'Account', action: () => { closeCommandPalette(); handleLogout(); } }
+  );
+  return commands;
+}
+
+function getCommandPaletteEntityCommands(searchTerm) {
+  const rawTerm = Security.sanitizeInput(String(searchTerm || ''), { maxLength: 120 }).trim();
+  if (rawTerm.length < 2) return [];
+  const term = rawTerm.toLocaleLowerCase();
+  const isAr = state.language === 'ar';
+  const results = [];
+  const matches = (...values) => values.some(value => String(value || '').toLocaleLowerCase().includes(term));
+  const takeMatching = (records, predicate, limit = 5) => {
+    const matchesFound = [];
+    for (const record of records) {
+      if (predicate(record)) matchesFound.push(record);
+      if (matchesFound.length >= limit) break;
+    }
+    return matchesFound;
+  };
+  const canViewContacts = can('customers', 'viewContacts');
+
+  if (typeof canOpenWorkspaceView !== 'function' || canOpenWorkspaceView('customers')) {
+    const customers = typeof getCustomersVisibleToCurrentUser === 'function'
+      ? getCustomersVisibleToCurrentUser()
+      : getVisibleRecords(state.customers || []);
+    takeMatching(customers, customer => {
+      const phones = canViewContacts
+        ? [customer.phone, customer.phoneNumber, ...(Array.isArray(customer.phones) ? customer.phones : [])]
+        : [];
+      return matches(customer.name, customer.id, ...phones);
+    }).forEach((customer, index) => {
+      const label = String(customer.name || (isAr ? 'عميل بدون اسم' : 'Unnamed customer'));
+      const phone = canViewContacts
+        ? String((Array.isArray(customer.phones) ? customer.phones.find(Boolean) : '') || customer.phone || customer.phoneNumber || '')
+        : '';
+      results.push({
+        id: `entity-customer-${index}`,
+        label,
+        description: [isAr ? 'عميل' : 'Customer', phone].filter(Boolean).join(' • '),
+        icon: 'user-round',
+        section: isAr ? 'نتائج العملاء' : 'Customer results',
+        action: () => commandPaletteNavigate('customers', () => {
+          state.customerSearch = label;
+          state.customerFinancialFilter = 'all';
+        })
+      });
+    });
+  }
+
+  if (typeof canOpenWorkspaceView !== 'function' || canOpenWorkspaceView('receipts')) {
+    const customersById = new Map((state.customers || []).map(customer => [String(customer.id), customer]));
+    takeMatching(getReceiptsVisibleToCurrentUser(), receipt => {
+      const customer = customersById.get(String(receipt.customerId));
+      return matches(
+        receipt.finalReceiptNo,
+        receipt.serialNumber,
+        receipt.tempReceiptNo,
+        canViewContacts ? receipt.phoneNumber : '',
+        customer?.name
+      );
+    }).forEach((receipt, index) => {
+      const customer = customersById.get(String(receipt.customerId));
+      const serial = String(receipt.finalReceiptNo || receipt.serialNumber || receipt.tempReceiptNo || '');
+      results.push({
+        id: `entity-receipt-${index}`,
+        label: customer?.name || (isAr ? 'وصل' : 'Receipt'),
+        description: `${isAr ? 'وصل' : 'Receipt'}${serial ? ` • ${serial}` : ''}`,
+        icon: 'receipt',
+        section: isAr ? 'نتائج الوصولات' : 'Receipt results',
+        action: () => commandPaletteNavigate('receipts', () => {
+          state.receiptSearch = serial || String(customer?.name || '');
+          state.receiptStatusFilter = 'all';
+          state.receiptPaymentFilter = 'all';
+          state.receiptDateFilter = 'all';
+          state.receiptDebtFilter = 'all';
+          state.receiptCollectedFilter = 'all';
+        })
+      });
+    });
+  }
+
+  if (typeof canOpenWorkspaceView !== 'function' || canOpenWorkspaceView('pages')) {
+    takeMatching(getPagesVisibleToCurrentUser(), page => matches(page.name, page.category, page.id)).forEach((page, index) => {
+      const label = String(page.name || (isAr ? 'صفحة بدون اسم' : 'Unnamed page'));
+      results.push({
+        id: `entity-page-${index}`,
+        label,
+        description: [isAr ? 'صفحة' : 'Page', page.category].filter(Boolean).join(' • '),
+        icon: 'file-text',
+        section: isAr ? 'نتائج الصفحات' : 'Page results',
+        action: () => commandPaletteNavigate('pages', () => { state.pageSearch = label; })
+      });
+    });
+  }
+
+  if (typeof canOpenWorkspaceView !== 'function' || canOpenWorkspaceView('ads')) {
+    const customersById = new Map((state.customers || []).map(customer => [String(customer.id), customer]));
+    const pagesById = new Map((state.pages || []).map(page => [String(page.id), page]));
+    takeMatching(getAdsVisibleToCurrentUser(), ad => {
+      const customer = customersById.get(String(ad.customerId));
+      const page = pagesById.get(String(ad.pageId || ad.page));
+      return matches(ad.serialNumber, ad.id, canViewContacts ? ad.phoneNumber : '', customer?.name, page?.name);
+    }).forEach((ad, index) => {
+      const customer = customersById.get(String(ad.customerId));
+      const page = pagesById.get(String(ad.pageId || ad.page));
+      const searchValue = String(ad.serialNumber || customer?.name || page?.name || ad.id || '');
+      results.push({
+        id: `entity-ad-${index}`,
+        label: customer?.name || (isAr ? 'إعلان' : 'Ad'),
+        description: [isAr ? 'إعلان' : 'Ad', page?.name, ad.serialNumber].filter(Boolean).join(' • '),
+        icon: 'megaphone',
+        section: isAr ? 'نتائج الإعلانات' : 'Ad results',
+        action: () => commandPaletteNavigate('ads', () => {
+          state.adSearch = searchValue;
+          state.adFilters = { status: 'all', payment: 'all', page: 'all' };
+        })
+      });
+    });
+  }
+  return results.slice(0, 20);
+}
+
+function buildCommandPaletteCommands(searchTerm = '') {
+  const term = String(searchTerm || '').trim().toLocaleLowerCase();
+  const base = getCommandPaletteBaseCommands();
+  const matchingBase = term
+    ? base.filter(command => `${command.label} ${command.description || ''} ${command.section || ''}`.toLocaleLowerCase().includes(term))
+    : base;
+  return [...getCommandPaletteEntityCommands(searchTerm), ...matchingBase];
+}
+
+function renderCommandPaletteResults(commands) {
+  const isAr = state.language === 'ar';
+  if (!commands.length) {
+    return `<div class="px-4 py-10 text-center text-sm text-slate-500"><i data-lucide="search-x" class="mx-auto mb-3 h-8 w-8 text-slate-300"></i>${isAr ? 'لا توجد نتائج مطابقة' : 'No matching results'}</div>`;
+  }
+  let lastSection = '';
+  return commands.map(command => {
+    const section = String(command.section || '');
+    const heading = section && section !== lastSection
+      ? `<div class="command-section-label">${Security.escapeHtml(section)}</div>`
+      : '';
+    lastSection = section;
+    return `${heading}
+      <button type="button" onclick="executeCommand('${Security.escapeHtml(command.id)}')" class="command-item w-full flex items-center gap-3 rounded-xl px-4 py-3 text-left transition-colors hover:bg-slate-50 dark:hover:bg-slate-800">
+        <span class="command-item-icon"><i data-lucide="${Security.escapeHtml(command.icon)}" class="h-5 w-5"></i></span>
+        <span class="min-w-0 flex-1">
+          <span class="block truncate font-semibold text-slate-800 dark:text-white">${Security.escapeHtml(command.label)}</span>
+          ${command.description ? `<span class="block truncate text-xs text-slate-500">${Security.escapeHtml(command.description)}</span>` : ''}
+        </span>
+        <i data-lucide="arrow-right" class="h-4 w-4 text-slate-400 rtl:rotate-180"></i>
+      </button>`;
+  }).join('');
+}
+
 function renderCommandPalette() {
   const existing = document.getElementById('command-palette-modal');
   if (existing) existing.remove();
-  
   if (!state.commandPaletteOpen) return;
-  
+
   const isAr = state.language === 'ar';
-  const commands = [
-    { id: 'analytics', label: isAr ? 'التحليلات' : 'Analytics', icon: 'layout-dashboard', action: () => navigateTo('analytics') },
-    { id: 'customers', label: isAr ? 'العملاء' : 'Customers', icon: 'smile', action: () => navigateTo('customers') },
-    { id: 'receipts', label: isAr ? 'الوصولات' : 'Receipts', icon: 'receipt', action: () => navigateTo('receipts') },
-    { id: 'pages', label: isAr ? 'الصفحات' : 'Pages', icon: 'file-text', action: () => navigateTo('pages') },
-    { id: 'ads', label: isAr ? 'الإعلانات' : 'Ads', icon: 'megaphone', action: () => navigateTo('ads') },
-    { id: 'deliveries', label: isAr ? 'التوصيلات' : 'Deliveries', icon: 'truck', action: () => navigateTo('deliveries') },
-    { id: 'users', label: isAr ? 'المستخدمون' : 'Users', icon: 'users', action: () => navigateTo('users') },
-    { id: 'settings', label: isAr ? 'الإعدادات' : 'Settings', icon: 'settings', action: () => navigateTo('settings') },
-    { id: 'add-customer', label: isAr ? 'إضافة عميل' : 'Add Customer', icon: 'user-plus', action: () => { toggleCommandPalette(); showCustomerModal(); } },
-    { id: 'add-ad', label: isAr ? 'إضافة إعلان' : 'Add Ad', icon: 'plus-circle', action: () => { toggleCommandPalette(); showAdModal(); } },
-    { id: 'add-receipt', label: isAr ? 'إضافة وصل' : 'Add Receipt', icon: 'receipt', action: () => { toggleCommandPalette(); showReceiptModal(); } },
-    { id: 'export', label: isAr ? 'تصدير البيانات' : 'Export Data', icon: 'download', action: () => { toggleCommandPalette(); exportData(); } },
-    { id: 'dark-mode', label: isAr ? 'تبديل الوضع الداكن' : 'Toggle Dark Mode', icon: 'moon', action: () => { toggleCommandPalette(); toggleTheme(); } },
-    { id: 'language', label: isAr ? 'تبديل اللغة' : 'Toggle Language', icon: 'globe', action: () => { toggleCommandPalette(); toggleLanguage(); } },
-    { id: 'logout', label: isAr ? 'تسجيل الخروج' : 'Logout', icon: 'log-out', action: () => { toggleCommandPalette(); handleLogout(); } },
-  ];
-  
+  const commands = buildCommandPaletteCommands('');
   const modal = document.createElement('div');
   modal.id = 'command-palette-modal';
-  modal.className = 'mobile-dialog-overlay fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-start justify-center pt-32 p-4';
-  modal.onclick = toggleCommandPalette;
+  modal.className = 'mobile-dialog-overlay fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-start justify-center pt-20 sm:pt-28 p-4';
+  modal.setAttribute('role', 'dialog');
+  modal.setAttribute('aria-modal', 'true');
+  modal.setAttribute('aria-labelledby', 'command-palette-title');
+  modal.onclick = closeCommandPalette;
   modal.innerHTML = `
-    <div class="glass-panel rounded-2xl p-4 w-full max-w-2xl" onclick="event.stopPropagation()">
-      <div class="flex items-center space-x-3 mb-4 pb-3 border-b border-slate-200 dark:border-slate-700">
-        <i data-lucide="command" class="w-5 h-5 text-indigo-600"></i>
-        <input 
-          type="text" 
-          id="command-search" 
-          placeholder="${isAr ? 'اكتب أمراً أو ابحث...' : 'Type a command or search...'}"
-          class="flex-1 bg-transparent outline-none text-slate-800 dark:text-white"
-          oninput="filterCommands(this.value)"
-        />
-        <kbd class="px-2 py-1 bg-slate-100 dark:bg-slate-800 rounded text-xs">ESC</kbd>
+    <div class="command-palette-panel glass-panel rounded-2xl p-3 sm:p-4 w-full max-w-2xl" onclick="event.stopPropagation()">
+      <h2 id="command-palette-title" class="sr-only">${isAr ? 'البحث الذكي والإجراءات السريعة' : 'Smart search and quick actions'}</h2>
+      <div class="flex items-center gap-3 mb-3 pb-3 border-b border-slate-200 dark:border-slate-700">
+        <i data-lucide="search" class="w-5 h-5 text-indigo-600"></i>
+        <input type="search" id="command-search" placeholder="${isAr ? 'ابحث عن عميل أو وصل أو صفحة أو إعلان...' : 'Find a customer, receipt, page or ad...'}" class="min-w-0 flex-1 bg-transparent outline-none text-slate-800 dark:text-white" oninput="onCommandPaletteSearch(this.value)" aria-label="${isAr ? 'البحث في النظام' : 'Search the system'}" autocomplete="off" />
+        <button type="button" onclick="closeCommandPalette()" class="touch-target flex h-10 w-10 items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${isAr ? 'إغلاق' : 'Close'}"><i data-lucide="x" class="h-5 w-5"></i></button>
       </div>
-      <div id="command-results" class="space-y-1 max-h-96 overflow-y-auto custom-scrollbar">
-        ${commands.map(cmd => `
-          <button onclick="executeCommand('${cmd.id}')" class="command-item w-full flex items-center space-x-3 px-4 py-3 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors text-left">
-            <i data-lucide="${cmd.icon}" class="w-5 h-5 text-slate-400"></i>
-            <span class="flex-1 text-slate-800 dark:text-white">${cmd.label}</span>
-            <i data-lucide="arrow-right" class="w-4 h-4 text-slate-400"></i>
-          </button>
-        `).join('')}
+      <div class="mb-2 px-2 text-xs text-slate-500">${isAr ? 'اكتب حرفين على الأقل للبحث في بيانات العمل' : 'Type at least 2 characters to search business records'}</div>
+      <div id="command-results" class="space-y-1 max-h-[60dvh] overflow-y-auto custom-scrollbar">
+        ${renderCommandPaletteResults(commands)}
       </div>
     </div>
   `;
   document.body.appendChild(modal);
   IconQueue.schedule(modal);
-  
-  // Store commands globally for execution
   window.commandPaletteCommands = commands;
 }
 
 function filterCommands(searchTerm) {
   const results = document.getElementById('command-results');
-  const commands = window.commandPaletteCommands || [];
-  
-  const filtered = commands.filter(cmd => 
-    cmd.label.toLowerCase().includes(searchTerm.toLowerCase())
-  );
-  
-  // XSS-SAFE: Command palette (internal commands only, not user data)
-  results.innerHTML = filtered.map(cmd => `
-    <button onclick="executeCommand('${Security.escapeHtml(cmd.id)}')" class="command-item w-full flex items-center space-x-3 px-4 py-3 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors text-left">
-      <i data-lucide="${Security.escapeHtml(cmd.icon)}" class="w-5 h-5 text-slate-400"></i>
-      <span class="flex-1 text-slate-800 dark:text-white">${Security.escapeHtml(cmd.label)}</span>
-      <i data-lucide="arrow-right" class="w-4 h-4 text-slate-400"></i>
-    </button>
-  `).join('');
-  lucide.createIcons();
+  if (!results) return;
+  const commands = buildCommandPaletteCommands(searchTerm);
+  window.commandPaletteCommands = commands;
+  results.innerHTML = renderCommandPaletteResults(commands);
+  IconQueue.schedule(results);
+}
+
+function onCommandPaletteSearch(searchTerm) {
+  if (_commandPaletteSearchTimer) clearTimeout(_commandPaletteSearchTimer);
+  _commandPaletteSearchTimer = setTimeout(() => {
+    _commandPaletteSearchTimer = null;
+    filterCommands(searchTerm);
+  }, 80);
 }
 
 function executeCommand(commandId) {
   const commands = window.commandPaletteCommands || [];
-  const command = commands.find(c => c.id === commandId);
-  if (command && command.action) {
-    command.action();
-  }
+  const command = commands.find(item => item.id === commandId);
+  if (command && typeof command.action === 'function') command.action();
 }
 
 // The customer-pages summary is a standalone body dialog rather than an

@@ -72,6 +72,16 @@ class EntityUpdateRequest(BaseModel):
     expectedLastModified: Optional[int] = None
 
 
+class CustomerMergeRequest(BaseModel):
+    """Admin-confirmed consolidation of two records for the same person."""
+
+    keepCustomerId: str = Field(min_length=1, max_length=80)
+    duplicateCustomerId: str = Field(min_length=1, max_length=80)
+    expectedKeepLastModified: int = Field(ge=0)
+    expectedDuplicateLastModified: int = Field(ge=0)
+    idempotencyKey: str = Field(min_length=8, max_length=120)
+
+
 class WalletTransferRequest(BaseModel):
     """Server-authoritative wallet transfer.
 
@@ -145,6 +155,14 @@ class ReceiptTransferRequest(BaseModel):
     note: Optional[str] = Field(default=None, max_length=500)
 
 
+class ReceiptSettlementRequest(BaseModel):
+    """Mark a receipt paid and settle every linked ad in one transaction."""
+
+    idempotencyKey: str = Field(min_length=8, max_length=120)
+    expectedLastModified: int = Field(ge=0)
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
 class AdMutationRequest(BaseModel):
     """Create/update an ad and its receipt funding in one transaction."""
 
@@ -159,6 +177,7 @@ class AdStopRequest(BaseModel):
     """Server-authoritative ad stop/re-stop request, expressed in USD cents."""
 
     spentMinorUSD: int = Field(ge=0, le=1_000_000_000)
+    customerInformed: bool = False
     idempotencyKey: str = Field(min_length=8, max_length=120)
     expectedLastModified: int = Field(ge=0)
 
@@ -234,6 +253,15 @@ class EntityResponse(BaseModel):
     data: dict[str, Any]
 
 
+class CustomerMergeResponse(BaseModel):
+    customer: EntityResponse
+    updatedPages: list[EntityResponse] = Field(default_factory=list)
+    updatedReceipts: list[EntityResponse] = Field(default_factory=list)
+    updatedAds: list[EntityResponse] = Field(default_factory=list)
+    duplicate: EntityResponse
+    replayed: bool = False
+
+
 class ClothesOrderMutationResponse(BaseModel):
     order: EntityResponse
     updatedProducts: list[EntityResponse] = Field(default_factory=list)
@@ -250,6 +278,12 @@ class ReceiptTransferResponse(BaseModel):
     sourceReceipt: EntityResponse
     targetReceipt: EntityResponse
     transfer: dict[str, Any]
+    replayed: bool = False
+
+
+class ReceiptSettlementResponse(BaseModel):
+    receipt: EntityResponse
+    updatedAds: list[EntityResponse] = Field(default_factory=list)
     replayed: bool = False
 
 

@@ -24,8 +24,188 @@ function getAdPaymentState(ad) {
   return 'paid';
 }
 
+// Canonical client-side record scope. The server is authoritative and already
+// returns scoped collections, but this guard also protects local mode, stale
+// offline caches, and permission changes that happen before the next reload.
+function getRecordsVisibleToCurrentUser(moduleName, records) {
+  const visible = getVisibleRecords(Array.isArray(records) ? records : []);
+  if (isCurrentUserAdmin() || currentUserHasPermission(moduleName, 'view')) return visible;
+  if (!currentUserHasPermission(moduleName, 'viewOwn')) return [];
+
+  const userId = String(state.currentUser?.id || '');
+  if (isDeliveryRole(state.currentUser?.role) && (moduleName === 'ads' || moduleName === 'receipts')) {
+    return visible.filter(record => String(record?.deliveryPersonId || '') === userId);
+  }
+  return visible.filter(record =>
+    String(record?.createdBy || record?.creatorId || '') === userId
+  );
+}
+
+function getAdsVisibleToCurrentUser() {
+  return getRecordsVisibleToCurrentUser('ads', state.ads)
+    .filter(ad => ad.recordType !== 'receipt');
+}
+
+function getReceiptsVisibleToCurrentUser() {
+  return getRecordsVisibleToCurrentUser('receipts', state.receipts);
+}
+
+function getPagesVisibleToCurrentUser() {
+  return getRecordsVisibleToCurrentUser('pages', state.pages);
+}
+
+// Current receipts use customerId. Very old local/imported receipts used the
+// `customer` relationship field instead. A non-empty customerId is always
+// authoritative so a stale legacy value cannot attach one receipt to two
+// customers.
+function getReceiptCustomerReferenceId(receipt) {
+  const customerId = String(receipt?.customerId || '').trim();
+  return customerId || String(receipt?.customer || '').trim();
+}
+
+// One canonical relationship reader for Receipt -> Ads navigation. This is a
+// history drill-down, not a money calculation, so it includes both live links
+// and frozen stop/refund funding baselines. settledReceiptId is settlement
+// provenance rather than a funding relationship and intentionally does not
+// match.
+function getAdLinkedReceiptIds(ad) {
+  if (!ad || ad._deleted || ad.recordType === 'receipt') return [];
+  const ids = new Set();
+  const add = value => {
+    const id = String(value || '').trim();
+    if (id) ids.add(id);
+  };
+  [ad.receiptId, ad.fundingReceiptId, ad.linkedDeliveryReceiptId, ad.linkedReceiptId].forEach(add);
+  if (Array.isArray(ad.receiptIds)) ad.receiptIds.forEach(add);
+  [ad.receiptAllocations, ad.dueAllocations, ad.mergedPaidAllocations].forEach(rows => {
+    if (Array.isArray(rows)) rows.forEach(row => add(row?.receiptId));
+  });
+  [ad.stopAllocationBaseline, ad.refundAllocationBaseline, ad.refundDueBaseline].forEach((baseline, index) => {
+    if (Array.isArray(baseline)) {
+      baseline.forEach(row => add(row?.receiptId));
+      return;
+    }
+    if (!baseline || typeof baseline !== 'object') return;
+    if (index === 0) add(baseline.dueLegacyReceiptId);
+    Object.values(baseline).forEach(rows => {
+      if (Array.isArray(rows)) rows.forEach(row => add(row?.receiptId));
+    });
+  });
+  return Array.from(ids);
+}
+
+function isAdLinkedToReceipt(ad, receiptId) {
+  const rid = String(receiptId || '').trim();
+  return Boolean(rid) && getAdLinkedReceiptIds(ad).includes(rid);
+}
+
+function openCustomerReceipts(customerId) {
+  const cid = String(customerId || '').trim();
+  const allowed = typeof canOpenWorkspaceView === 'function' && canOpenWorkspaceView('receipts');
+  const visibleCustomer = Security.isValidRecordId(cid)
+    && getCustomersVisibleToCurrentUser().some(customer => String(customer?.id || '') === cid);
+  if (!allowed || !visibleCustomer) {
+    showNotification(
+      state.language === 'ar' ? 'تعذر فتح الوصولات' : 'Cannot Open Receipts',
+      state.language === 'ar' ? 'لا تملك صلاحية عرض وصولات هذا العميل.' : 'You do not have permission to view this customer’s receipts.',
+      'error'
+    );
+    return false;
+  }
+  // This outside action promises every receipt for the customer, so discard a
+  // stale list search/dropdown combination before applying the relationship.
+  state.receiptSearch = '';
+  state.receiptStatusFilter = 'all';
+  state.receiptPaymentFilter = 'all';
+  state.receiptDateFilter = 'all';
+  state.receiptDebtFilter = 'all';
+  state.receiptCollectedFilter = 'all';
+  state.receiptSortBy = 'newest';
+  state.receiptCustomerFilter = cid;
+  state.receiptRecordFilter = '';
+  navigateTo('receipts');
+  return true;
+}
+
+function clearReceiptCustomerFilter() {
+  state.receiptCustomerFilter = '';
+  if (state.currentView === 'receipts') updateUrlForView('receipts', true);
+  debouncedSaveState();
+  render();
+}
+
+// Open one exact receipt from a warning or drill-down without relying on a
+// customer name/serial search. The permission-scoped receipt list is checked
+// first so a guessed id can never reveal a cached record.
+function openReceiptRecord(receiptId) {
+  const rid = String(receiptId || '').trim();
+  const receipt = Security.isValidRecordId(rid)
+    ? getReceiptsVisibleToCurrentUser().find(item => String(item?.id || '') === rid)
+    : null;
+  const allowed = typeof canOpenWorkspaceView === 'function' && canOpenWorkspaceView('receipts');
+  if (!allowed || !receipt) {
+    showNotification(
+      state.language === 'ar' ? 'تعذر فتح الوصل' : 'Cannot Open Receipt',
+      state.language === 'ar' ? 'لا تملك صلاحية عرض هذا الوصل.' : 'You do not have permission to view this receipt.',
+      'error'
+    );
+    return false;
+  }
+
+  state.receiptSearch = '';
+  state.receiptStatusFilter = 'all';
+  state.receiptPaymentFilter = 'all';
+  state.receiptDateFilter = 'all';
+  state.receiptDebtFilter = 'all';
+  state.receiptCollectedFilter = 'all';
+  state.receiptSortBy = 'newest';
+  state.receiptCustomerFilter = getReceiptCustomerReferenceId(receipt);
+  state.receiptRecordFilter = rid;
+  navigateTo('receipts');
+  return true;
+}
+
+function clearReceiptRecordFilter() {
+  state.receiptRecordFilter = '';
+  if (state.currentView === 'receipts') updateUrlForView('receipts', true);
+  debouncedSaveState();
+  render();
+}
+
+function openReceiptAds(receiptId) {
+  const rid = String(receiptId || '').trim();
+  const allowed = typeof canOpenWorkspaceView === 'function' && canOpenWorkspaceView('ads');
+  const visibleReceipt = Security.isValidRecordId(rid)
+    && getReceiptsVisibleToCurrentUser().some(receipt => String(receipt?.id || '') === rid);
+  if (!allowed || !visibleReceipt) {
+    showNotification(
+      state.language === 'ar' ? 'تعذر فتح الإعلانات' : 'Cannot Open Ads',
+      state.language === 'ar' ? 'لا تملك صلاحية عرض الإعلانات المرتبطة بهذا الوصل.' : 'You do not have permission to view ads linked to this receipt.',
+      'error'
+    );
+    return false;
+  }
+  state.adSearch = '';
+  state.adFilters = { status: 'all', payment: 'all', page: 'all' };
+  state.adReceiptFilter = rid;
+  navigateTo('ads');
+  return true;
+}
+
+function clearAdReceiptFilter() {
+  state.adReceiptFilter = '';
+  if (state.currentView === 'ads') updateUrlForView('ads', true);
+  debouncedSaveState();
+  render();
+}
+
 function getFilteredAds(customersById = null) {
-  let filtered = getVisibleRecords(state.ads).filter(ad => ad.recordType !== 'receipt');
+  let filtered = getAdsVisibleToCurrentUser();
+
+  const receiptFilter = String(state.adReceiptFilter || '').trim();
+  if (receiptFilter) {
+    filtered = filtered.filter(ad => isAdLinkedToReceipt(ad, receiptFilter));
+  }
 
   // Dropdown filters (status / payment / page) — state.adFilters is kept in
   // sync by updateAdFilter(); 'all' or unset means no filtering.
@@ -56,13 +236,14 @@ function getFilteredAds(customersById = null) {
     // array for every ad on every keystroke.
     const custMap = customersById || new Map(state.customers.map(c => [c.id, c]));
     const pageMap = new Map((state.pages || []).map(p => [p.id, p]));
+    const canSearchContacts = can('customers', 'viewContacts');
     filtered = filtered.filter(ad => {
       const customer = custMap.get(ad.customerId);
       const page = ad.pageId ? pageMap.get(ad.pageId) : null;
       return (
         customer?.name?.toLowerCase().includes(searchTerm) ||
         ad.id.toLowerCase().includes(searchTerm) ||
-        ad.phoneNumber?.toLowerCase().includes(searchTerm) ||
+        (canSearchContacts && ad.phoneNumber?.toLowerCase().includes(searchTerm)) ||
         ad.serialNumber?.toLowerCase().includes(searchTerm) ||
         page?.name?.toLowerCase().includes(searchTerm)
       );
@@ -76,39 +257,159 @@ function getFilteredAds(customersById = null) {
 // CUSTOMER VALIDATION FUNCTIONS
 // ==========================================
 
-// Check if any phone number is already used by another customer
+// Customer identity is phone-based, but the historical data has several
+// shapes (`phone`, `phoneNumber`, `phones[]`, and object entries) and several
+// spellings of a Libyan number. Keep this canonicalizer in one place so create,
+// edit, duplicate discovery and the server all agree that these are identical:
+//   0912345678 / 218912345678 / +218 91 234 5678 / 00218-91-234-5678
+function getCustomerPhoneValue(entry) {
+  if (entry === null || entry === undefined) return '';
+  if (typeof entry === 'object') {
+    return String(entry.number ?? entry.phone ?? entry.phoneNumber ?? entry.value ?? '').trim();
+  }
+  return String(entry).trim();
+}
+
+function normalizeCustomerPhoneKey(value) {
+  let raw = getCustomerPhoneValue(value);
+  if (!raw) return '';
+  // NFKC handles full-width digits. Translate Arabic-Indic and Persian digits
+  // explicitly because customer phones are commonly pasted from Arabic apps.
+  try { raw = raw.normalize('NFKC'); } catch (_) {}
+  raw = raw
+    .replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)))
+    .replace(/[۰-۹]/g, digit => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(digit)));
+  let digits = raw.replace(/\D/g, '');
+  if (!digits) return '';
+
+  // International call-prefix spelling (00218...) is the same as +218....
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  if (digits.startsWith('218')) {
+    let national = digits.slice(3);
+    if (national.startsWith('0')) national = national.slice(1);
+    // Libyan mobile numbers have a nine-digit national part beginning with 9.
+    if (/^9\d{8}$/.test(national)) return `218${national}`;
+    return `218${national}`;
+  }
+  if (/^09\d{8}$/.test(digits)) return `218${digits.slice(1)}`;
+  if (/^9\d{8}$/.test(digits)) return `218${digits}`;
+  return digits;
+}
+
+function getCustomerPhoneEntries(customer) {
+  if (!customer || typeof customer !== 'object') return [];
+  const source = [
+    customer.phone,
+    customer.phoneNumber,
+    ...(Array.isArray(customer.phones) ? customer.phones : [])
+  ];
+  const seen = new Set();
+  const entries = [];
+  for (const item of source) {
+    const value = getCustomerPhoneValue(item);
+    const key = normalizeCustomerPhoneKey(value);
+    if (!value || !key || seen.has(key)) continue;
+    seen.add(key);
+    entries.push({ value, key });
+  }
+  return entries;
+}
+
+// Repeated spellings inside the same form are not useful, but they should not
+// make a beginner repair the form manually. Preserve the first formatting and
+// silently save each real number once.
+function dedupeCustomerPhoneValues(phones) {
+  const seen = new Set();
+  const result = [];
+  for (const phone of (Array.isArray(phones) ? phones : [])) {
+    const value = getCustomerPhoneValue(phone);
+    const key = normalizeCustomerPhoneKey(value);
+    if (!value || !key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+  }
+  return result;
+}
+
+// Check if any phone number is already used by another active customer.
 function checkDuplicatePhone(phones, excludeCustomerId = null) {
-  const allCustomers = getVisibleRecords(state.customers);
-  
-  for (const phone of phones) {
-    if (!phone) continue;
-    
-    // Normalize phone number (remove spaces, dashes, etc.)
-    const normalizedPhone = phone.replace(/[\s\-\(\)]/g, '');
-    
-    for (const customer of allCustomers) {
-      // Skip the current customer being edited
-      if (excludeCustomerId && customer.id === excludeCustomerId) continue;
-      
-      // Check if this customer has the phone number
-      if (customer.phones && Array.isArray(customer.phones)) {
-        const hasPhone = customer.phones.some(p => {
-          const normalizedCustomerPhone = (p || '').replace(/[\s\-\(\)]/g, '');
-          return normalizedCustomerPhone === normalizedPhone;
-        });
-        
-        if (hasPhone) {
-          return {
-            phone: phone,
-            customerId: customer.id,
-            customerName: customer.name || 'Unknown'
-          };
-        }
-      }
+  const requested = dedupeCustomerPhoneValues(phones).map(phone => ({
+    phone,
+    key: normalizeCustomerPhoneKey(phone)
+  }));
+  const excluded = String(excludeCustomerId || '');
+  for (const customer of getVisibleRecords(state.customers)) {
+    if (!customer || customer._deleted || (excluded && String(customer.id) === excluded)) continue;
+    const existingKeys = new Set(getCustomerPhoneEntries(customer).map(entry => entry.key));
+    const match = requested.find(entry => entry.key && existingKeys.has(entry.key));
+    if (!match) continue;
+    return {
+      phone: match.phone,
+      canonicalPhone: match.key,
+      customerId: customer.id,
+      customerName: customer.name || 'Unknown',
+      customer
+    };
+  }
+  return null;
+}
+
+// Return transitive duplicate groups. If A shares one number with B and B
+// shares another with C, all three belong to one repair group.
+function findDuplicateCustomerGroups(customers = state.customers) {
+  const active = getVisibleRecords(Array.isArray(customers) ? customers : [])
+    .filter(customer => customer && !customer._deleted && customer.id);
+  const byId = new Map(active.map(customer => [String(customer.id), customer]));
+  const parent = new Map(active.map(customer => [String(customer.id), String(customer.id)]));
+  const find = id => {
+    let root = id;
+    while (parent.get(root) !== root) root = parent.get(root);
+    let cur = id;
+    while (parent.get(cur) !== cur) {
+      const next = parent.get(cur);
+      parent.set(cur, root);
+      cur = next;
+    }
+    return root;
+  };
+  const unite = (left, right) => {
+    const a = find(left);
+    const b = find(right);
+    if (a !== b) parent.set(b, a);
+  };
+  const firstCustomerByPhone = new Map();
+  for (const customer of active) {
+    const id = String(customer.id);
+    for (const { key } of getCustomerPhoneEntries(customer)) {
+      const first = firstCustomerByPhone.get(key);
+      if (first) unite(first, id);
+      else firstCustomerByPhone.set(key, id);
     }
   }
-  
-  return null; // No duplicate found
+  const grouped = new Map();
+  for (const customer of active) {
+    const root = find(String(customer.id));
+    if (!grouped.has(root)) grouped.set(root, []);
+    grouped.get(root).push(customer);
+  }
+  return Array.from(grouped.values())
+    .filter(group => group.length > 1)
+    .map(group => {
+      const phoneOwners = new Map();
+      for (const customer of group) {
+        for (const entry of getCustomerPhoneEntries(customer)) {
+          if (!phoneOwners.has(entry.key)) phoneOwners.set(entry.key, []);
+          phoneOwners.get(entry.key).push(String(customer.id));
+        }
+      }
+      return {
+        customers: group,
+        sharedPhoneKeys: Array.from(phoneOwners.entries())
+          .filter(([, ids]) => new Set(ids).size > 1)
+          .map(([key]) => key)
+      };
+    })
+    .sort((a, b) => String(a.customers[0]?.name || '').localeCompare(String(b.customers[0]?.name || '')));
 }
 
 // ==========================================
@@ -162,6 +463,114 @@ function getAdSpendUSD(ad) {
   }
   if (['pending', 'paused'].includes(status)) return 0;
   return parseFloat(ad.amountUSD) || 0;
+}
+
+// ---------------- Liquidity coverage (owner solvency tracking) ----------------
+// The business historically spent customer deposits. From an admin-chosen start
+// date the app tracks NEW cash actually received and NEW ad spending, and
+// compares the net against everything still owed to customers — so the owner
+// sees whether the fresh money can cover the outstanding customer credit.
+
+// Newest liquidity record wins. state.appSettings is append-only exactly like
+// exchangeRateHistory, so the history of changes is the audit trail.
+function getLiquidityTrackingConfig() {
+  const rows = (Array.isArray(state.appSettings) ? state.appSettings : []).filter(row =>
+    row && !row._deleted && String(row.settingKey || '') === 'liquidityTracking' && row.startDate
+  );
+  if (rows.length === 0) return null;
+  return rows.slice().sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime())[0];
+}
+
+// When did this receipt's money actually arrive? deliveredAt is the driver
+// handover, collectionDate is stamped when a receipt turns Paid, createdAt
+// covers receipts born Paid. collectedAt is stamped at the admin's
+// reconciliation CLICK, which can be long after the cash arrived — so it may
+// only make the money OLDER, never newer: otherwise confirming a backlog of
+// old receipts would mint them as "new" cash inside the tracking window.
+function getReceiptPaidDate(r) {
+  const paidAt = r?.deliveredAt || r?.collectionDate || r?.createdAt || null;
+  if (r?.collectedAt && paidAt) {
+    return new Date(r.collectedAt) < new Date(paidAt) ? r.collectedAt : paidAt;
+  }
+  return r?.collectedAt || paidAt;
+}
+
+function getLiquiditySnapshot() {
+  const config = getLiquidityTrackingConfig();
+  const sinceMs = config ? new Date(config.startDate).getTime() : NaN;
+  const tracking = Number.isFinite(sinceMs);
+
+  let collectedUSD = 0;
+  let liabilityUSD = 0;
+  for (const r of getVisibleRecords(state.receipts)) {
+    const status = String(r.status || '');
+    const detail = r.statusDetail && typeof r.statusDetail === 'object' ? r.statusDetail : {};
+    // A canceled PAID receipt whose refund is not yet handed back still holds
+    // the customer's cash — it stays in the books until the refund is done.
+    const refundOwed = status === 'Canceled' && r.isPaid === true
+      && ['full', 'partial'].includes(String(detail.refundAction || ''))
+      && String(detail.refundStatus || '') !== 'refunded';
+    if ((status === 'Canceled' || status === 'Lost') && !refundOwed) continue;
+    // Cash-bearing receipts: Paid ones, plus UNDERPAID delivery completions —
+    // there the completion flow rewrote amountUSD to the actually-collected
+    // cash and stamped deliveredAt, even though the status stays Not Paid.
+    const underpaidCollected = !!r.deliveredAt && String(r.paymentResult || '') === 'UNDERPAID';
+    if (!(r.isPaid === true || status === 'Paid' || underpaidCollected)) continue;
+    // Owed to customers: the unused credit on every paid receipt INCLUDING
+    // transfer-ins — each receipt's remaining already subtracts its own usage
+    // and outgoing transfers, so summing stays transfer-neutral.
+    liabilityUSD += Math.max(getReceiptUsageStats(r).remainingUSD || 0, 0);
+    if (!tracking) continue;
+    // New cash only: a transfer moves existing money between receipts and a
+    // CARRIED_BALANCE receipt records pre-tracking credit — neither is money
+    // that newly arrived in the window.
+    if (isTransferInReceipt(r)) continue;
+    if (String(r.receiptType || '') === 'CARRIED_BALANCE') continue;
+    const paidAtMs = new Date(getReceiptPaidDate(r) || 0).getTime();
+    if (Number.isFinite(paidAtMs) && paidAtMs >= sinceMs) {
+      collectedUSD += parseFloat(r.amountUSD) || 0;
+    }
+  }
+
+  let adSpendUSD = 0;
+  if (tracking) {
+    for (const a of getVisibleRecords(state.ads)) {
+      if (!a || a.recordType === 'receipt') continue;
+      const spend = getAdSpendUSD(a);
+      if (spend <= 0) continue;
+      const adDateMs = new Date(a.createdAt || a.startDate || 0).getTime();
+      if (Number.isFinite(adDateMs) && adDateMs >= sinceMs) {
+        adSpendUSD += spend;
+      } else {
+        // An old ad grown inside the window spends new money only for the
+        // dated growth — top-ups plus ordinary budget increases recorded in
+        // amountAdjustments — and never more than the ad actually spent.
+        const sumDatedRows = (rows, key) => (Array.isArray(rows) ? rows : []).reduce((sum, t) => {
+          const tMs = new Date(t?.date || 0).getTime();
+          return Number.isFinite(tMs) && tMs >= sinceMs ? sum + (parseFloat(t?.[key]) || 0) : sum;
+        }, 0);
+        const grownSince = sumDatedRows(a.topUps, 'amount') + sumDatedRows(a.amountAdjustments, 'delta');
+        adSpendUSD += Math.min(Math.max(grownSince, 0), spend);
+      }
+    }
+  }
+
+  const netUSD = collectedUSD - adSpendUSD;
+  const shortfallUSD = Math.max(liabilityUSD - Math.max(netUSD, 0), 0);
+  const coveragePercent = liabilityUSD > 0.005
+    ? Math.min(Math.max((Math.max(netUSD, 0) / liabilityUSD) * 100, 0), 999)
+    : 100;
+  return {
+    tracking,
+    startDate: tracking ? config.startDate : null,
+    setBy: tracking ? String(config.setBy || '') : '',
+    collectedUSD: Math.round(collectedUSD * 100) / 100,
+    adSpendUSD: Math.round(adSpendUSD * 100) / 100,
+    netUSD: Math.round(netUSD * 100) / 100,
+    liabilityUSD: Math.round(liabilityUSD * 100) / 100,
+    shortfallUSD: Math.round(shortfallUSD * 100) / 100,
+    coveragePercent: Math.round(coveragePercent * 10) / 10
+  };
 }
 
 // Normalize current and historical page links. Current pages use customerIds;
@@ -641,8 +1050,30 @@ function getCustomerSortValue(customer, sortType, statsIndex = null) {
 }
 
 function getCustomersVisibleToCurrentUser() {
-  return getVisibleRecords(state.customers).filter(customer =>
-    canActOnRecord('customers', 'view', customer.createdBy || customer.creatorId)
+  const customers = getVisibleRecords(state.customers);
+  if (isCurrentUserAdmin() || currentUserHasPermission('customers', 'view')) return customers;
+  if (!currentUserHasPermission('customers', 'viewOwn')) return [];
+
+  // The backend defines a delivery user's "own" customers as customers
+  // referenced by deliveries assigned to that driver, not customers the driver
+  // originally created. Server-mode customer collections are already scoped by
+  // that rule. Mirror it in local mode so the phone app and local testing behave
+  // the same way without hiding an assigned customer's card/search result.
+  if (isDeliveryRole(state.currentUser?.role)) {
+    if (isServerModeEnabled()) return customers;
+    const userId = String(state.currentUser?.id || '');
+    const assignedCustomerIds = new Set();
+    [...getVisibleRecords(state.receipts || []), ...getVisibleRecords(state.ads || [])].forEach(record => {
+      if (String(record?.deliveryPersonId || '') === userId && record?.customerId) {
+        assignedCustomerIds.add(String(record.customerId));
+      }
+    });
+    return customers.filter(customer => assignedCustomerIds.has(String(customer.id)));
+  }
+
+  const userId = String(state.currentUser?.id || '');
+  return customers.filter(customer =>
+    String(customer.createdBy || customer.creatorId || '') === userId
   );
 }
 
@@ -652,11 +1083,18 @@ function getFilteredCustomers() {
   // creators' customers in memory. Scope before search, counts, or rendering.
   let filtered = getCustomersVisibleToCurrentUser();
   const searchTerm = String(state.customerSearch || '').toLowerCase().trim();
+  const canViewContacts = can('customers', 'viewContacts');
+  const canViewBalance = can('customers', 'viewBalance');
+  const financialFilter = canViewBalance ? state.customerFinancialFilter : 'all';
+  const requestedSort = String(state.customerSort || 'newest');
+  const nonFinancialSorts = new Set(['newest', 'oldest', 'lastActive']);
+  const effectiveSort = canViewBalance || nonFinancialSorts.has(requestedSort) ? requestedSort : 'newest';
+  const searchPhoneDigits = searchTerm.replace(/\D/g, '');
   
   if (searchTerm) {
     filtered = filtered.filter(c => 
       String(c.name || '').toLowerCase().includes(searchTerm) ||
-      (Array.isArray(c.phones) ? c.phones : []).some(p => String(p || '').includes(searchTerm)) ||
+      (canViewContacts && getCustomerPhoneEntries(c).some(entry => entry.value.toLowerCase().includes(searchTerm) || (searchPhoneDigits && entry.key.includes(searchPhoneDigits)))) ||
       String(c.platform || '').toLowerCase().includes(searchTerm)
     );
   }
@@ -668,23 +1106,23 @@ function getFilteredCustomers() {
   // ~O(customers log customers × records), freezing the UI for seconds at a few
   // thousand records on every search keystroke / sort change / live-sync tick.
   const needsStats = (
-    state.customerFinancialFilter === 'hasCredit' ||
-    state.customerFinancialFilter === 'hasDebt' ||
-    !(state.customerSort === 'newest' || state.customerSort === 'oldest')
+    financialFilter === 'hasCredit' ||
+    financialFilter === 'hasDebt' ||
+    !(effectiveSort === 'newest' || effectiveSort === 'oldest')
   );
   const statsIndex = needsStats ? buildCustomerStatsIndex() : null;
 
   // Apply financial filter
-  if (state.customerFinancialFilter === 'hasCredit') {
+  if (financialFilter === 'hasCredit') {
     filtered = filtered.filter(c => getCustomerStats(c.id, statsIndex).balance > 0);
-  } else if (state.customerFinancialFilter === 'hasDebt') {
+  } else if (financialFilter === 'hasDebt') {
     filtered = filtered.filter(c => getCustomerStats(c.id, statsIndex).balance < 0);
   }
 
   // Apply sorting (decorate-sort-undecorate: compute each sort value once,
   // reusing the shared statsIndex, instead of recomputing inside the comparator).
   filtered = filtered
-    .map(c => ({ c, v: getCustomerSortValue(c, state.customerSort, statsIndex) }))
+    .map(c => ({ c, v: getCustomerSortValue(c, effectiveSort, statsIndex) }))
     .sort((a, b) => b.v - a.v) // Descending order
     .map(x => x.c);
 
@@ -1333,13 +1771,24 @@ async function updateDeliveryStatus(itemId, status) {
   render();
 }
 
+// Rapid double taps can queue two async saves before the first render removes
+// the action button. Keep one delivery mutation per item in flight; the server
+// remains the authority for transitions across different devices.
+const _deliveryActionInFlight = new Set();
+
 async function markAsCollected(itemId) {
   if (!canDoDeliveryAction('markCollected', itemId)) {
     denyDeliveryAction();
     return;
   }
+  const actionKey = String(itemId || '');
+  if (_deliveryActionInFlight.has(actionKey)) return;
+  _deliveryActionInFlight.add(actionKey);
+  try {
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
+  const currentItem = isReceipt || state.ads.find(a => a.id === itemId);
+  if (!currentItem || currentItem.deliveryStatus === 'Delivered') return;
   let savedOk = false;
   if (isReceipt) {
     // Temp delivery receipts require strict completion (final receipt # + photo + amounts).
@@ -1372,13 +1821,13 @@ async function markAsCollected(itemId) {
     });
   }
   if (!savedOk) return;
-  // Update delivery stats if delivery user
-  if (isDeliveryRole(state.currentUser?.role) && state.currentUser.stats) {
-    state.currentUser.stats.collected = (state.currentUser.stats.collected || 0) + 1;
-    await updateRecord(state.users, state.currentUser.id, { stats: state.currentUser.stats });
-  }
+  // Statistics are derived from delivery records. Never increment a mutable
+  // counter here: a retry from another device must not count twice.
   showNotification(state.language === 'ar' ? 'تم التحصيل' : 'Collected', state.language === 'ar' ? 'تم تسجيل الدفعة كمُحصَّلة' : 'Payment marked as collected', 'success');
   render();
+  } finally {
+    _deliveryActionInFlight.delete(actionKey);
+  }
 }
 
 async function acceptDelivery(itemId) {
@@ -1386,11 +1835,16 @@ async function acceptDelivery(itemId) {
     denyDeliveryAction();
     return;
   }
+  const actionKey = String(itemId || '');
+  if (_deliveryActionInFlight.has(actionKey)) return;
+  _deliveryActionInFlight.add(actionKey);
+  try {
   // Check if it's a receipt or an ad
   const isReceipt = state.receipts.find(r => r.id === itemId);
+  const currentItem = isReceipt || state.ads.find(a => a.id === itemId);
+  if (!currentItem || ['In Progress', 'Delivered', 'Canceled'].includes(currentItem.deliveryStatus)) return;
   const updateData = {
-    deliveryStatus: 'In Progress',
-    acceptedDate: new Date().toISOString()
+    deliveryStatus: 'In Progress'
   };
 
   if (isReceipt) {
@@ -1398,14 +1852,12 @@ async function acceptDelivery(itemId) {
   } else {
     if (!await updateRecord(state.ads, itemId, updateData)) return;
   }
-  // Update delivery stats
-  if (isDeliveryRole(state.currentUser?.role) && state.currentUser.stats) {
-    state.currentUser.stats.accepted = (state.currentUser.stats.accepted || 0) + 1;
-    state.currentUser.stats.totalAds = (state.currentUser.stats.totalAds || 0) + 1;
-    await updateRecord(state.users, state.currentUser.id, { stats: state.currentUser.stats });
-  }
+  // Accepted/assigned totals are derived from the delivery records below.
   showNotification(state.language === 'ar' ? 'تم القبول' : 'Accepted', state.language === 'ar' ? 'تم قبول التوصيل' : 'Delivery accepted', 'success');
   render();
+  } finally {
+    _deliveryActionInFlight.delete(actionKey);
+  }
 }
 
 // ==========================================
@@ -2352,6 +2804,50 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
   updateReceiptDeliveryCompletionComputed();
 }
 
+// Delivery completion must keep the receipt and every linked ad visually
+// consistent in the same user action. The strict delivery PATCH endpoint
+// performs the server transaction but returns only the receipt, so refresh ads
+// before rendering success. If that read is temporarily unavailable, apply the
+// same exact local reclassification plan as offline mode; the next live sync
+// will still verify it against the server.
+async function refreshAdsAfterReceiptServerCascade(receipt, { allowPaidLocalFallback = false } = {}) {
+  try {
+    if (typeof apiLoadCollectionAll !== 'function') throw new Error('Ads refresh is unavailable');
+    const refreshedAds = await apiLoadCollectionAll('ads', { forceRefresh: true });
+    if (!Array.isArray(refreshedAds)) throw new Error('Ads refresh returned an invalid response');
+    state.ads = refreshedAds;
+    markCollectionDirty('ads');
+    return { consistent: true, source: 'server', updated: refreshedAds.length };
+  } catch (refreshError) {
+    const paid = typeof getReceiptPaymentState === 'function'
+      ? getReceiptPaymentState(receipt) === 'paid'
+      : (receipt?.isPaid === true || String(receipt?.status || '') === 'Paid');
+    if (!allowPaidLocalFallback || !paid) {
+      console.warn('[receiptCascade] Linked ads could not be refreshed after the receipt mutation:', refreshError?.message || refreshError);
+      return { consistent: false, source: 'pending-sync', updated: 0 };
+    }
+    try {
+      const plans = planLocalReceiptPaidAdUpdates(String(receipt?.id || ''), receipt);
+      const updated = applyLocalReceiptPaidAdUpdates(plans);
+      if (ALBAYAN_DEBUG_MODE) {
+        console.warn('[deliveryCompletion] Authoritative ads refresh failed; applied exact local settlement fallback:', refreshError?.message || refreshError);
+      }
+      return { consistent: true, source: 'local-fallback', updated };
+    } catch (fallbackError) {
+      console.warn('[deliveryCompletion] Linked ads could not be refreshed after receipt settlement:', fallbackError?.message || fallbackError);
+      return { consistent: false, source: 'pending-sync', updated: 0 };
+    }
+  }
+}
+
+async function refreshAdsAfterReceiptPaidCascade(receipt) {
+  const paid = typeof getReceiptPaymentState === 'function'
+    ? getReceiptPaymentState(receipt) === 'paid'
+    : (receipt?.isPaid === true || String(receipt?.status || '') === 'Paid');
+  if (!paid) return { consistent: true, source: 'not-paid', updated: 0 };
+  return refreshAdsAfterReceiptServerCascade(receipt, { allowPaidLocalFallback: true });
+}
+
 async function submitReceiptDeliveryCompletion(receiptId) {
   const receipt = _findReceiptForDeliveryModal(receiptId);
   if (!receipt) {
@@ -2482,10 +2978,18 @@ async function submitReceiptDeliveryCompletion(receiptId) {
       const idx = state.receipts.findIndex(r => r && !r._deleted && String(r.id) === String(receipt.id));
       if (idx !== -1) state.receipts[idx] = saved;
       markCollectionDirty('receipts');
+      const adRefresh = await refreshAdsAfterReceiptPaidCascade(saved);
       saveState();
       document.getElementById('delivery-complete-modal')?.remove();
+      forceFullRender();
       showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم إكمال التوصيل وحفظه' : 'Delivery completed and saved', 'success');
-      render();
+      if (!adRefresh.consistent) {
+        showNotification(
+          state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
+          state.language === 'ar' ? 'تم حفظ التوصيل، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Delivery was saved. Linked ads will refresh automatically when the connection returns.',
+          'warning'
+        );
+      }
     } catch (e) {
       // Idempotency / retries: if we hit a conflict, load latest and succeed if already delivered.
       if (e?.status === 409) {
@@ -2496,10 +3000,18 @@ async function submitReceiptDeliveryCompletion(receiptId) {
             const idx = state.receipts.findIndex(r => r && !r._deleted && String(r.id) === String(receipt.id));
             if (idx !== -1) state.receipts[idx] = latestData;
             markCollectionDirty('receipts');
+            const adRefresh = await refreshAdsAfterReceiptPaidCascade(latestData);
             saveState();
             document.getElementById('delivery-complete-modal')?.remove();
+            forceFullRender();
             showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم إكمال التوصيل وحفظه' : 'Delivery completed and saved', 'success');
-            render();
+            if (!adRefresh.consistent) {
+              showNotification(
+                state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
+                state.language === 'ar' ? 'تم حفظ التوصيل، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Delivery was saved. Linked ads will refresh automatically when the connection returns.',
+                'warning'
+              );
+            }
             return;
           }
         } catch (retryErr) {
@@ -2608,7 +3120,12 @@ async function submitReceiptDeliveryCancel(receiptId) {
   // The canceled delivery's debt will never be collected — release any ad
   // funding that was drawn from its due credit.
   let releasedAds = 0;
-  if (!isServerModeEnabled()) {
+  let adRefresh = { consistent: true };
+  if (isServerModeEnabled()) {
+    const savedReceipt = state.receipts.find(row => row && String(row.id) === String(receipt.id)) || receipt;
+    adRefresh = await refreshAdsAfterReceiptServerCascade(savedReceipt);
+    saveState();
+  } else {
     try {
       releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);
     } catch (_) {
@@ -2617,6 +3134,7 @@ async function submitReceiptDeliveryCancel(receiptId) {
   }
   document.getElementById('delivery-cancel-modal')?.remove();
   document.getElementById('delivery-complete-modal')?.remove();
+  forceFullRender();
   showNotification(
     state.language === 'ar' ? 'تم الإلغاء' : 'Canceled',
     (state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled')
@@ -2625,7 +3143,13 @@ async function submitReceiptDeliveryCancel(receiptId) {
         : ''),
     releasedAds > 0 && !isServerModeEnabled() ? 'warning' : 'success'
   );
-  render();
+  if (!adRefresh.consistent) {
+    showNotification(
+      state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
+      state.language === 'ar' ? 'تم حفظ الإلغاء، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Cancellation was saved. Linked ads will refresh automatically when the connection returns.',
+      'warning'
+    );
+  }
 }
 
 async function markAsDelivered(itemId) {
@@ -2707,6 +3231,22 @@ function clearReceiptSearch() {
   lucide.createIcons();
 }
 
+function applyReceiptQuickFilter(mode) {
+  // Quick filters are intentionally mutually exclusive so a beginner never
+  // gets an empty list from a hidden combination. Keep the typed search term,
+  // then reset only the dropdown dimensions before applying the chosen view.
+  state.receiptStatusFilter = 'all';
+  state.receiptPaymentFilter = 'all';
+  state.receiptDateFilter = 'all';
+  state.receiptDebtFilter = 'all';
+  state.receiptCollectedFilter = 'all';
+  state.receiptSortBy = 'newest';
+  if (mode === 'unpaid') state.receiptStatusFilter = 'not_paid';
+  if (mode === 'debt') state.receiptDebtFilter = 'any-debt';
+  if (mode === 'not-collected') state.receiptCollectedFilter = 'not-collected';
+  render();
+}
+
 function updateReceiptFilter(filterType, value) {
   switch (filterType) {
     case 'status':
@@ -2734,12 +3274,15 @@ function updateReceiptFilter(filterType, value) {
 
 function clearAllReceiptFilters() {
   state.receiptSearch = '';
+  state.receiptCustomerFilter = '';
+  state.receiptRecordFilter = '';
   state.receiptStatusFilter = 'all';
   state.receiptPaymentFilter = 'all';
   state.receiptDateFilter = 'all';
   state.receiptDebtFilter = 'all';
   state.receiptCollectedFilter = 'all';
   state.receiptSortBy = 'newest';
+  if (state.currentView === 'receipts') updateUrlForView('receipts', true);
   render();
   lucide.createIcons();
 }
@@ -3012,6 +3555,9 @@ function showReceiptModal(carried = false) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإنشاء وصولات' : 'You do not have permission to create receipts', 'error');
     return;
   }
+  if (typeof resetReceiptCustomerRiskWarningState === 'function') {
+    resetReceiptCustomerRiskWarningState();
+  }
   _newReceiptCarried = !!carried;
   state.activeModal = 'receipt';
   state.modalData = null;
@@ -3191,8 +3737,8 @@ function showReceiptTransferHistory(receiptId) {
     const targetCustomer = state.customers.find(c => c.id === t.toCustomerId);
     const name = targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown');
     return isArT
-      ? `${new Date(t.date).toLocaleString()}: $${(t.amountUSD || 0).toFixed(2)} إلى ${name}`
-      : `${new Date(t.date).toLocaleString()}: $${(t.amountUSD || 0).toFixed(2)} to ${name}`;
+      ? `${new Date(t.date).toLocaleString(appDateLocale())}: $${(t.amountUSD || 0).toFixed(2)} إلى ${name}`
+      : `${new Date(t.date).toLocaleString(appDateLocale())}: $${(t.amountUSD || 0).toFixed(2)} to ${name}`;
   }).join('\n');
   showNotification(isArT ? 'سجل التحويلات' : 'Transfer history', lines, 'info');
 }
@@ -3243,7 +3789,7 @@ function showReceiptEditHistory(receiptId) {
                   <span class="text-xs font-bold text-white bg-amber-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
                   <span class="text-xs text-slate-500">${edit.editedBy || (isArH ? 'غير معروف' : 'Unknown')}</span>
                 </div>
-                <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString()}</span>
+                <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString(appDateLocale())}</span>
               </div>
               
               <div class="space-y-2">
@@ -3267,7 +3813,7 @@ function showReceiptEditHistory(receiptId) {
         <div class="p-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50">
           <p class="text-xs text-slate-500 text-center">
             ${isArH ? `الإجمالي: ${editHistory.length} ${editHistory.length > 1 ? 'تعديلات' : 'تعديل'}` : `Total: ${editHistory.length} edit${editHistory.length > 1 ? 's' : ''}`} •
-            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${new Date(receipt.createdAt).toLocaleString()}
+            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${new Date(receipt.createdAt).toLocaleString(appDateLocale())}
           </p>
         </div>
       </div>
@@ -3327,7 +3873,7 @@ function showAdEditHistory(adId) {
                   <span class="text-xs font-bold text-white bg-purple-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
                   <span class="text-xs text-slate-500">${edit.editedBy || (isArH ? 'غير معروف' : 'Unknown')}</span>
                 </div>
-                <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString()}</span>
+                <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString(appDateLocale())}</span>
               </div>
               
               <div class="space-y-2">
@@ -3351,7 +3897,7 @@ function showAdEditHistory(adId) {
         <div class="p-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50">
           <p class="text-xs text-slate-500 text-center">
             ${isArH ? `الإجمالي: ${editHistory.length} ${editHistory.length > 1 ? 'تعديلات' : 'تعديل'}` : `Total: ${editHistory.length} edit${editHistory.length > 1 ? 's' : ''}`} •
-            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${new Date(ad.createdAt).toLocaleString()}
+            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${new Date(ad.createdAt).toLocaleString(appDateLocale())}
           </p>
         </div>
       </div>
@@ -3873,10 +4419,10 @@ function _refreshTopUpPreview() {
   const endExtraEl = document.getElementById('topup-preview-end-extra');
   if (endEl && baseEnd && !isNaN(new Date(baseEnd).getTime())) {
     const days = tempTopUps.reduce((s, t) => s + (parseInt(t.extendDays, 10) || 0), 0) + typedDays;
-    endEl.textContent = new Date(new Date(baseEnd).getTime() + days * 86400000).toLocaleDateString();
+    endEl.textContent = new Date(new Date(baseEnd).getTime() + days * 86400000).toLocaleDateString(appDateLocale());
     if (endExtraEl) {
       endExtraEl.textContent = days > 0
-        ? (isAr ? `(الأصلية ${new Date(baseEnd).toLocaleDateString()} + ${days} يوم)` : `(original ${new Date(baseEnd).toLocaleDateString()} + ${days} day${days > 1 ? 's' : ''})`)
+        ? (isAr ? `(الأصلية ${new Date(baseEnd).toLocaleDateString(appDateLocale())} + ${days} يوم)` : `(original ${new Date(baseEnd).toLocaleDateString(appDateLocale())} + ${days} day${days > 1 ? 's' : ''})`)
         : '';
     }
   }
@@ -3985,7 +4531,7 @@ async function saveTopUps() {
   if (baseEnd && !isNaN(new Date(baseEnd).getTime())) {
     updates.initialEndDate = baseEnd;
     updates.endDate = new Date(new Date(baseEnd).getTime() + totalExtendDays * 86400000).toISOString();
-    if (totalExtendDays > 0) newEndDisplay = new Date(updates.endDate).toLocaleDateString();
+    if (totalExtendDays > 0) newEndDisplay = new Date(updates.endDate).toLocaleDateString(appDateLocale());
   }
 
   // Charge / refund the funding receipts so the money model stays balanced:
@@ -4157,6 +4703,22 @@ async function saveRefund() {
       }
       const { arr } = _reduceFromBaseline(dueBaseline, remaining);
       updates.dueAllocations = arr;
+    }
+    // ROWLESS legacy ads keep their due money only in the dueAmountToUse*
+    // mirror, so the branch above never runs for them and a refund left the
+    // mirror locking the receipt's credit forever. Stand the due baseline up
+    // from the mirror — like the server's _financial_apply_refund — so the
+    // refund releases it and an undo can restore it as a real row.
+    const legacyRid = String(ad.linkedDeliveryReceiptId || ad.receiptId || '');
+    if (!Array.isArray(ad.refundDueBaseline) && !Array.isArray(updates.dueAllocations)
+        && remaining > 0.001 && legacyRid && isAdLegacyDueMirrorForReceipt(ad, legacyRid)) {
+      const mirrorUSD = getAdLegacyDueMirrorUSD(ad, legacyRid);
+      if (mirrorUSD > 0) {
+        const dueBaseline = [{ receiptId: legacyRid, amountUSD: mirrorUSD }];
+        updates.refundDueBaseline = dueBaseline;
+        const { arr } = _reduceFromBaseline(dueBaseline, remaining);
+        updates.dueAllocations = arr;
+      }
     }
   }
   // Keep the legacy dueAmountToUse* mirror in step with the rows we just wrote.

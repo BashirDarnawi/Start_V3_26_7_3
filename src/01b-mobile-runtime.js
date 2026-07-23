@@ -21,6 +21,13 @@ function isPackagedMobileApp() {
   return !!(typeof Platform !== 'undefined' && Platform.isCapacitor);
 }
 
+// Connectivity notices/gate apply to the packaged app AND phone browsers:
+// a phone-browser user whose server is unreachable must see the retryable
+// notice instead of a bare login screen (17-init.js calls this when defined).
+function connectivityUiEnabled() {
+  return isPackagedMobileApp() || (typeof Platform !== 'undefined' && Platform.isMobileBrowser === true);
+}
+
 function mobileRuntimeNeedsServer() {
   try {
     return typeof state === 'undefined' || String(state.serverModeOverride || 'auto') !== 'local';
@@ -43,7 +50,7 @@ function removeMobileConnectionGate() {
 }
 
 function renderMobileConnectionGate() {
-  if (!isPackagedMobileApp() || !mobileRuntimeNeedsServer()) return;
+  if (!connectivityUiEnabled() || !mobileRuntimeNeedsServer()) return;
   _mobileColdStartBlocked = true;
   removeMobileConnectivityNotice();
   const app = document.getElementById('app');
@@ -82,7 +89,7 @@ function setMobileColdStartBlocked(blocked) {
 }
 
 function showMobileConnectivityNotice({ serverReachable = _mobileServerReachable } = {}) {
-  if (!isPackagedMobileApp() || !mobileRuntimeNeedsServer()) {
+  if (!connectivityUiEnabled() || !mobileRuntimeNeedsServer()) {
     removeMobileConnectivityNotice();
     return;
   }
@@ -248,6 +255,15 @@ function closeTopMobileSurface() {
     return true;
   }
 
+  // This alert requires an explicit decision. Android Back follows the safe
+  // "choose another customer" path instead of merely deleting the overlay and
+  // leaving an unacknowledged customer selected underneath it.
+  if (topSurface.id === 'receipt-customer-risk-warning') {
+    if (typeof cancelReceiptCustomerRiskWarning === 'function') cancelReceiptCustomerRiskWarning();
+    else topSurface.remove();
+    return true;
+  }
+
   if (topSurface.id === 'app-modal') {
     if (typeof closeModal === 'function') closeModal();
     else {
@@ -307,7 +323,9 @@ async function handleAndroidBackButton(event = {}) {
 }
 
 async function setupMobileRuntime() {
-  if (_mobileRuntimeReady || !isPackagedMobileApp()) return;
+  // Phone browsers get the connectivity notice/gate too; the Android
+  // backButton listener below stays Capacitor-only (plugin guards).
+  if (_mobileRuntimeReady || !connectivityUiEnabled()) return;
   _mobileRuntimeReady = true;
 
   window.addEventListener('offline', () => showMobileConnectivityNotice({ serverReachable: false }));
@@ -329,3 +347,206 @@ async function setupMobileRuntime() {
     }
   }
 }
+
+// ==========================================
+// PHONE BROWSER BACK + OVERLAY HISTORY MODEL
+// ==========================================
+// DESIGN:
+// 1) Tracked #app-modal dialogs push a ?modal=&id= entry on open
+//    (updateUrlParams stamps it { albayanModal: true }); every OTHER
+//    standalone surface (photo viewer, confirm dialogs, command palette) gets
+//    one same-URL sentinel entry ({ overlaySentinel: true }) pushed centrally
+//    by the <body> observer below, so the ~19 creation sites need no edits.
+//    The nav drawer pushes its own sentinel in toggleMobileMenu because it
+//    renders inside #app where the body observer cannot see it.
+// 2) Hardware/gesture Back pops that entry; the popstate handler
+//    (setupUrlRouting, 11-routing-cloud.js) closes the top surface via
+//    closeTopMobileSurface() and stops — the view underneath never navigates
+//    and unsaved form state (temp photos, top-ups…) survives.
+// 3) Closing with X/Cancel/backdrop instead consumes the entry via
+//    history.back() (closeModal, toggleMobileMenu, the observer), and that
+//    popstate is flagged as bookkeeping so the router never re-renders or
+//    scroll-resets the unchanged view.
+// 4) A navigation that starts while a sentinel is on top REPLACES it
+//    (navigateToInternal), keeping Back balanced after drawer/palette navs.
+// 5) Capacitor keeps its native backButton path (isPackagedMobileApp() gates
+//    the sentinel/popstate logic off); desktop keeps today's behaviour — no
+//    sentinels, but closeModal still consumes its own ?modal entries.
+
+let _overlaySentinelDepth = 0;          // sentinels pushed and not yet consumed this session
+let _albayanLastModalUrlPushAt = 0;     // set by updateUrlParams({ modal… }) — see 11-routing-cloud.js
+let _lastOverlayPopCloseAt = 0;         // a Back press just closed a surface (entry already popped)
+let _suppressOverlayPopstateUntil = 0;  // our own balancing history.back() is in flight
+let _closingSurfaceFromPopstate = false;
+
+function isPhoneBrowserHistoryManaged() {
+  return !isPackagedMobileApp() && typeof Platform !== 'undefined' && !!Platform.isMobile;
+}
+
+function pushMobileOverlayHistoryEntry() {
+  if (!isPhoneBrowserHistoryManaged()) return;
+  try {
+    // Same-URL entry: Back pops it and the popstate handler turns the pop
+    // into "close the top overlay". albayanModal is explicitly cleared so
+    // closeModal() never mistakes a sentinel for a tracked-modal entry;
+    // underAlbayanModal remembers that the dialog's own ?modal entry sits
+    // directly beneath this sentinel (overlay opened late over a tracked
+    // modal — e.g. the duplicate-serial warning), so closeModal() can
+    // consume BOTH entries when it tears the whole stack down at once.
+    window.history.pushState(
+      Object.assign({}, window.history.state || {}, {
+        overlaySentinel: true,
+        albayanModal: false,
+        underAlbayanModal: !!(window.history.state && window.history.state.albayanModal)
+      }),
+      '', window.location.href
+    );
+    _overlaySentinelDepth++;
+  } catch (_) {}
+}
+
+function consumeOverlayHistoryEntry() {
+  // Pop the entry that open pushed. The popstate this triggers is pure
+  // bookkeeping (the surface is already closed), so flag it for the router.
+  _suppressOverlayPopstateUntil = Date.now() + 800;
+  try {
+    window.history.back();
+    return true;
+  } catch (_) {
+    _suppressOverlayPopstateUntil = 0;
+    return false;
+  }
+}
+
+function _overlayHistoryConsumePending() {
+  return Date.now() < _suppressOverlayPopstateUntil;
+}
+
+function shouldSuppressOverlayPopstate() {
+  const suppress = _overlayHistoryConsumePending();
+  _suppressOverlayPopstateUntil = 0; // one-shot: never swallow a real Back
+  return suppress;
+}
+
+function markOverlayPopClose(closed) {
+  if (closed) {
+    _lastOverlayPopCloseAt = Date.now();
+    // The popped entry was the surface's sentinel/?modal entry. Depth may
+    // under-count after a tracked-modal pop; under-counting only ever makes
+    // the observer SKIP an auto-consume (the old status quo), never over-pop.
+    if (_overlaySentinelDepth > 0) _overlaySentinelDepth--;
+  }
+  return !!closed;
+}
+
+// ==========================================
+// CENTRAL OVERLAY OBSERVER (history + iOS body scroll lock)
+// ==========================================
+// Every standalone surface is appended directly to <body> (verified across
+// src/), so one childList observer is the single hook for all creation
+// sites: it pushes/consumes the sentinel entries above and toggles a body
+// scroll lock while any dialog is open. The lock matters on iOS < 16, where
+// overscroll-behavior (style.css) is unsupported: drags inside a dialog
+// scrolled the page underneath, and at scrollTop 0 triggered pull-to-refresh
+// — reloading the SPA and discarding half-filled forms. The existing CSS
+// stays as the iOS 16+/Android fast path.
+
+let _overlayObservedCount = 0;
+let _scrollLockActive = false;
+let _scrollLockY = 0;
+
+function _overlaySurfaceCount() {
+  return document.querySelectorAll(
+    '.mobile-dialog-overlay, #receipt-photo-viewer, #command-palette-modal'
+  ).length;
+}
+
+function _lockBodyScrollForOverlay() {
+  if (_scrollLockActive) return;
+  // Same media condition as the .mobile-dialog-overlay scroll rules in
+  // style.css — phones and short landscape windows; desktop stays untouched.
+  try {
+    if (!window.matchMedia('(max-width: 900px), (max-height: 500px)').matches) return;
+  } catch (_) { return; }
+  _scrollLockY = window.scrollY || window.pageYOffset || 0;
+  const bodyStyle = document.body.style;
+  bodyStyle.position = 'fixed';
+  bodyStyle.top = (-_scrollLockY) + 'px';
+  bodyStyle.left = '0';
+  bodyStyle.right = '0';
+  bodyStyle.width = '100%';
+  _scrollLockActive = true;
+}
+
+function _unlockBodyScrollForOverlay() {
+  if (!_scrollLockActive) return;
+  _scrollLockActive = false;
+  const bodyStyle = document.body.style;
+  bodyStyle.position = '';
+  bodyStyle.top = '';
+  bodyStyle.left = '';
+  bodyStyle.right = '';
+  bodyStyle.width = '';
+  const y = _scrollLockY;
+  window.scrollTo(0, y);
+  // closeModal triggers render(), whose own scroll save/restore may read
+  // scrollY as 0 while the body was still position:fixed — restore again
+  // after that render had its chance to run.
+  requestAnimationFrame(() => window.scrollTo(0, y));
+}
+
+function _handleOverlayDomChange() {
+  const count = _overlaySurfaceCount();
+  const previous = _overlayObservedCount;
+  if (count === previous) return;
+  _overlayObservedCount = count;
+
+  if (count > previous) {
+    // Surface(s) opened. If the opener itself just pushed a ?modal history
+    // entry (all tracked #app-modal openers and the collect-receipt dialog
+    // do, via updateUrlParams), Back already has an entry to consume — a
+    // sentinel too would cost the user an extra Back press. One sentinel per
+    // transition: batch-opens of several untracked surfaces in one task are
+    // not a real flow.
+    if (Date.now() - _albayanLastModalUrlPushAt > 400) {
+      pushMobileOverlayHistoryEntry();
+    }
+  } else {
+    // Surface(s) closed by their own X/Cancel/backdrop handler. A Back-press
+    // close is excluded via _lastOverlayPopCloseAt (entry already popped),
+    // and an in-flight closeModal consume via _overlayHistoryConsumePending.
+    const backJustClosedIt = Date.now() - _lastOverlayPopCloseAt <= 300;
+    const entryState = window.history.state;
+    if (isPhoneBrowserHistoryManaged() && !backJustClosedIt && !_overlayHistoryConsumePending()) {
+      if (entryState && entryState.overlaySentinel && _overlaySentinelDepth > 0) {
+        _overlaySentinelDepth--;
+        consumeOverlayHistoryEntry();
+      } else if (entryState && entryState.albayanModal && count === 0
+                 && (typeof state === 'undefined' || !state.activeModal)) {
+        // Untracked ?modal surface (collect-receipt) closed by its inline
+        // backdrop/X remove(): its own pushed entry is on top — consume it.
+        consumeOverlayHistoryEntry();
+      }
+    }
+  }
+
+  if (count > 0 && previous === 0) _lockBodyScrollForOverlay();
+  else if (count === 0 && previous > 0) _unlockBodyScrollForOverlay();
+}
+
+let _overlayObserverInstalled = false;
+function setupOverlaySurfaceObserver() {
+  if (_overlayObserverInstalled) return;
+  if (typeof MutationObserver === 'undefined' || !document.body) return;
+  _overlayObserverInstalled = true;
+  try {
+    const observer = new MutationObserver(_handleOverlayDomChange);
+    // childList only: all overlay surfaces are direct <body> children.
+    observer.observe(document.body, { childList: true });
+    _overlayObservedCount = _overlaySurfaceCount();
+  } catch (_) {
+    _overlayObserverInstalled = false;
+  }
+}
+// script.js executes at the end of <body>, so document.body exists here.
+setupOverlaySurfaceObserver();

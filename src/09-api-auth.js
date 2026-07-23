@@ -21,6 +21,10 @@ const SERVER_API = {
   requestTimeoutMs: 15000, // 15s for better reliability on slow connections
   // Live sync: automatically refresh changes from other users in server mode (no manual refresh).
   liveSyncEnabled: true,
+  // NOTE: the poll loop in src/10-live-sync.js reads this ONCE when it creates
+  // its setInterval (and already skips ticks while the tab is hidden, with an
+  // immediate catch-up sync on visibilitychange). Failure backoff therefore
+  // has to live in that loop — a dynamic getter here would never be re-read.
   liveSyncIntervalMs: 3000, // 3 seconds for faster real-time sync between devices
   usersSyncIntervalMs: 30000, // 30 seconds for users list
   // IMPORTANT: Keep this modest to avoid huge responses that can OOM-kill small ECS tasks.
@@ -261,12 +265,40 @@ async function apiJson(path, options = {}, timeout = {}) {
 async function apiHealthCheck() {
   if (!SERVER_API.enabledByDefault) return false;
   try {
-    // Fast health check (3 second timeout)
+    // Fast health check (3 second timeout). init() escalates with longer
+    // timeouts on a first-ever visit — see the probe retry in src/17-init.js.
     const data = await apiJson('/api/health', { method: 'GET' }, { timeoutMs: 3000 });
     return !!data?.ok;
   } catch {
     return false;
   }
+}
+
+// Recovery path for a failed first-visit backend detection (state.serverProbeFailed).
+// The login/first-run screens can offer a Retry button that calls this: one
+// generous health check, then a reload so init() re-runs full mode detection.
+async function retryServerDetection() {
+  let ok = false;
+  try {
+    const data = await apiJson('/api/health', { method: 'GET' }, { timeoutMs: 8000 });
+    ok = !!data?.ok;
+  } catch (_) {
+    ok = false;
+  }
+  if (ok) {
+    window.location.reload();
+    return true;
+  }
+  try {
+    showNotification(
+      state.language === 'ar' ? 'الخادم غير متاح' : 'Server Unreachable',
+      state.language === 'ar'
+        ? 'ما زال تعذّر الوصول إلى الخادم. تحقق من الاتصال ثم حاول مجدداً.'
+        : 'Still unable to reach the server. Check the connection and try again.',
+      'error'
+    );
+  } catch (_) {}
+  return false;
 }
 
 async function apiAuthMe() {
@@ -398,7 +430,8 @@ const SERVER_SYNC_COLLECTIONS = Object.freeze([
   'ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory',
   'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings',
   'adCampaignRequests',
-  'walletTransactions', 'serviceSubscriptions'
+  'walletTransactions', 'serviceSubscriptions',
+  'appSettings'
 ]);
 
 // Receipt/ad photos are large base64 strings. Normal lists and live deltas
@@ -1185,6 +1218,63 @@ async function apiTransferReceipt(payload) {
   };
 }
 
+// Settle one unpaid receipt and every ad funded from its due/debt balance in a
+// single server transaction. A receipt becoming Paid changes the meaning of
+// those ad allocations, so accepting only a receipt envelope would leave the
+// browser showing stale "Not Paid" ads until the next full sync.
+async function apiSettleReceipt(payload) {
+  const receiptId = String(payload?.receiptId || '').trim();
+  if (!Security.isValidRecordId(receiptId)) throw new Error('Invalid receipt settlement id');
+  const expectedLastModified = Number(payload?.expectedLastModified);
+  if (!Number.isSafeInteger(expectedLastModified) || expectedLastModified < 0) {
+    throw new Error('This receipt is missing its server version. Refresh and try again.');
+  }
+  const body = {
+    expectedLastModified,
+    idempotencyKey: String(payload?.idempotencyKey || '').trim(),
+    data: payload?.data && typeof payload.data === 'object' && !Array.isArray(payload.data)
+      ? payload.data
+      : {}
+  };
+  if (!body.idempotencyKey) throw new Error('Receipt settlement idempotency key is required');
+
+  const identity = getServerSessionIdentity();
+  // A stable body/idempotency key makes a response-loss retry safe: the server
+  // replays the committed result instead of moving the same funding twice.
+  const response = await withRetry(() => apiJson(
+    `/api/receipts/${encodeURIComponent(receiptId)}/settle?include_media=false`,
+    { method: 'POST', body },
+    { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
+  ), 2, 500);
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  if (!response || typeof response !== 'object' || Array.isArray(response) || !Array.isArray(response.updatedAds)) {
+    const error = new Error('Invalid receipt settlement response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+
+  const receipt = validateServerEntityResponse('receipts', response.receipt, 'settlement.receipt');
+  const localReceipt = (state.receipts || []).find(row => row && String(row.id) === receiptId);
+  // include_media=false keeps the response small. Prefer newly edited media
+  // from this request over the old local copy so adding/removing a photo while
+  // marking Paid is reflected immediately instead of waiting for a full sync.
+  receipt.data = mergeMutationInlineMedia('receipts', receipt.data, {
+    ...(localReceipt || {}),
+    ...(body.data || {})
+  });
+  const updatedAds = response.updatedAds.map((entity, index) => {
+    const validated = validateServerEntityResponse('ads', entity, `settlement.updatedAds[${index}]`);
+    const localAd = (state.ads || []).find(row => row && String(row.id) === String(validated.id));
+    validated.data = mergeMutationInlineMedia('ads', validated.data, localAd);
+    return validated;
+  });
+  return {
+    receipt,
+    updatedAds,
+    replayed: response.replayed === true
+  };
+}
+
 // Paid/due/merged allocations change receipt availability, so ad create/edit
 // must cross one server transaction boundary rather than generic collection
 // POST/PATCH calls.
@@ -1207,6 +1297,60 @@ async function apiMutateAd(payload) {
   ad.data = mergeMutationInlineMedia('ads', ad.data, { ...(localAd || {}), ...(payload?.data || {}) });
   return {
     ad,
+    replayed: response.replayed === true
+  };
+}
+
+// Merge two duplicate customers and every relationship that points at the
+// duplicate in ONE server transaction. Generic PATCH + DELETE calls are not
+// safe here: a timeout between requests could leave pages, receipts or ads
+// split across both identities. The idempotency key makes a response-loss retry
+// return the same committed result instead of running the merge twice.
+async function apiMergeCustomers(payload) {
+  const keepCustomerId = String(payload?.keepCustomerId || '');
+  const duplicateCustomerId = String(payload?.duplicateCustomerId || '');
+  if (!Security.isValidRecordId(keepCustomerId) || !Security.isValidRecordId(duplicateCustomerId) || keepCustomerId === duplicateCustomerId) {
+    throw new Error('Choose two different valid customer records.');
+  }
+  const identity = getServerSessionIdentity();
+  const response = await withRetry(() => apiJson('/api/customers/merge?include_media=false', {
+    method: 'POST',
+    body: payload
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 2, 500);
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  if (!response || typeof response !== 'object' || Array.isArray(response)) {
+    const error = new Error('Invalid customer merge response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  if (!Array.isArray(response.updatedPages) || !Array.isArray(response.updatedReceipts) || !Array.isArray(response.updatedAds)) {
+    const error = new Error('Invalid customer merge relationship response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  const customer = validateServerEntityResponse('customers', response.customer, 'merge.customer');
+  const duplicate = validateServerEntityResponse('customers', response.duplicate, 'merge.duplicate');
+  const updatedPages = response.updatedPages.map((entity, index) =>
+    validateServerEntityResponse('pages', entity, `merge.updatedPages[${index}]`)
+  );
+  const updatedReceipts = response.updatedReceipts.map((entity, index) => {
+    const validated = validateServerEntityResponse('receipts', entity, `merge.updatedReceipts[${index}]`);
+    const local = (state.receipts || []).find(row => row && String(row.id) === String(validated.id));
+    validated.data = mergeMutationInlineMedia('receipts', validated.data, local);
+    return validated;
+  });
+  const updatedAds = response.updatedAds.map((entity, index) => {
+    const validated = validateServerEntityResponse('ads', entity, `merge.updatedAds[${index}]`);
+    const local = (state.ads || []).find(row => row && String(row.id) === String(validated.id));
+    validated.data = mergeMutationInlineMedia('ads', validated.data, local);
+    return validated;
+  });
+  return {
+    customer,
+    duplicate,
+    updatedPages,
+    updatedReceipts,
+    updatedAds,
     replayed: response.replayed === true
   };
 }

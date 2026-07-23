@@ -11,14 +11,31 @@ async function init() {
   // Apply theme immediately (prevents white flash in dark mode)
   applyTheme();
   document.documentElement.setAttribute('dir', getDir());
+  document.documentElement.setAttribute('lang', state.language === 'ar' ? 'ar' : 'en');
   setupMobileRuntime().catch((error) => {
     console.warn('[MobileRuntime] Setup failed:', error?.message || error);
   });
   
   setLoadingStatus(state.language === 'ar' ? 'جارٍ تهيئة قاعدة البيانات...' : 'Initializing database...');
   
-  // Initialize IndexedDB for persistent audit log storage
-  await initIndexedDB();
+  // Initialize IndexedDB for persistent audit log storage. initIndexedDB()
+  // can no longer reject or hang (watchdog + onblocked), but keep this await
+  // unable to abort init() before the first render no matter what.
+  await initIndexedDB().catch((e) => {
+    console.warn('IndexedDB init failed:', e);
+    return null;
+  });
+
+  // Ask the browser to mark this origin's storage persistent (best-effort,
+  // fire-and-forget). Protects Chrome/Android against storage-pressure
+  // eviction; it does NOT exempt iOS Safari from ITP's 7-day script-storage
+  // wipe (only Add to Home Screen does), and navigator.storage is undefined
+  // on insecure (plain-HTTP LAN) origins — hence the guards.
+  try {
+    if (navigator.storage && typeof navigator.storage.persist === 'function') {
+      navigator.storage.persist().catch(() => {});
+    }
+  } catch (_) {}
 
   // Opening the app directly from a local file (file://) bypasses the backend,
   // so server mode can never activate. Warn once so the user runs it via a server.
@@ -81,7 +98,43 @@ async function init() {
 
   setLoadingStatus(state.language === 'ar' ? 'جارٍ الاتصال بالسيرفر...' : 'Connecting to server...');
   // Detect backend (multi-user internet mode)
-  const serverOk = await apiHealthCheck();
+  let serverOk = await apiHealthCheck();
+  // First-ever visit on this browser profile: a single 3s probe on a slow
+  // phone network silently strands the user in an empty local workspace
+  // (nothing ever re-probes). Escalate 3s → 5s → 8s before deciding, but
+  // ONLY in the ambiguous fresh-install case so returning users, desktop
+  // local testing and Capacitor keep their startup timing. With no backend
+  // at all each attempt fails fast (connection refused / 404), so the
+  // retries only spend time when requests actually hang — exactly the
+  // ambiguous case.
+  //
+  // A returning LOCAL-mode install is NOT a first-ever visit and must keep
+  // the old 3s cold start (hanging networks would otherwise block it 16s on
+  // "Connecting to server..."). Any prior snapshot (loadState() returned
+  // one) or the storage-eviction sentinel cookie (survives Safari ITP /
+  // Chrome wipes — and after a wipe the user needs the storage-loss recovery
+  // screen promptly, not more probing) proves a workspace existed here.
+  const hadPriorLocalWorkspace = legacyCollections !== null ||
+    (typeof _albayanHadDataCookie === 'function' && _albayanHadDataCookie());
+  if (!serverOk && SERVER_API.enabledByDefault && !hadPriorLocalWorkspace &&
+      String(state.serverModeOverride || 'auto') === 'auto' &&
+      state.serverWorkspaceKnown !== true && state.serverMode !== true) {
+    for (const timeoutMs of [5000, 8000]) {
+      try {
+        const data = await apiJson('/api/health', { method: 'GET' }, { timeoutMs });
+        serverOk = !!data?.ok;
+      } catch (_) {
+        serverOk = false;
+      }
+      if (serverOk) break;
+    }
+  }
+  // Recoverable-failure signal (runtime-only, never persisted): the login /
+  // first-run screens can show a "server unreachable — Retry" banner that
+  // calls retryServerDetection() instead of silently offering a device-local
+  // workspace.
+  state.serverProbeFailed = !serverOk && SERVER_API.enabledByDefault &&
+    String(state.serverModeOverride || 'auto') === 'auto';
   state.serverDetected = !!serverOk;
   const override = String(state.serverModeOverride || 'auto');
   if (override === 'local') {
@@ -119,8 +172,16 @@ async function init() {
     if (loadingScreen) loadingScreen.style.display = 'none';
     setMobileColdStartBlocked(true);
   };
+  // The connectivity gate is Capacitor-only today because the gate/notice
+  // renderers in src/01b-mobile-runtime.js early-return for browsers. When
+  // that layer defines connectivityUiEnabled() (packaged app OR phone
+  // browser), both cold-start gates below activate for phone browsers too;
+  // until then behavior is byte-for-byte unchanged.
+  const connectivityGateEnabled = (typeof connectivityUiEnabled === 'function')
+    ? !!connectivityUiEnabled()
+    : isPackagedMobileApp();
   const blockPackagedMobileColdStart = !!(
-    isPackagedMobileApp() && state.serverMode && !serverOk && mobileRuntimeNeedsServer()
+    connectivityGateEnabled && state.serverMode && !serverOk && mobileRuntimeNeedsServer()
   );
   if (blockPackagedMobileColdStart) {
     stopForPackagedMobileConnection();
@@ -153,7 +214,7 @@ async function init() {
     // A successful health response does not guarantee that the session check
     // also reached the server. Treat a network/timeout failure differently
     // from a definitive 401 (which apiAuthMe returns as null).
-    if (authCheckUnavailable && isPackagedMobileApp() && mobileRuntimeNeedsServer()) {
+    if (authCheckUnavailable && connectivityGateEnabled && mobileRuntimeNeedsServer()) {
       updateMobileServerReachability(false);
       stopForPackagedMobileConnection();
       return;
@@ -247,6 +308,18 @@ async function init() {
     // Load huge data collections (IndexedDB-first), migrate legacy localStorage if needed
     await loadCollectionsFromStorage(legacyCollections);
 
+    // The IndexedDB open never settled this boot (watchdog / onblocked): the
+    // store may still hold the full workspace even though this session could
+    // not read it and loaded the collections empty (or from a stale legacy
+    // snapshot). Freeze them so no late-arriving connection can ever flush
+    // these in-memory arrays over the intact stored copies —
+    // markCollectionDirty honors isCollectionCorrupted. A reload with a
+    // healthy open restores everything through the normal path.
+    if (!db && window.__albayanIdbOpenInconclusive === true &&
+        typeof markCollectionCorrupted === 'function') {
+      for (const name of PERSISTED_COLLECTIONS) markCollectionCorrupted(name);
+    }
+
     // Sanitize loaded data before any UI renders (prevents stored XSS from legacy data)
     await sanitizeAllCollectionsForRendering();
     
@@ -255,6 +328,10 @@ async function init() {
 
     // Ensure user passwords are always stored hashed (no plaintext in storage)
     await ensureUsersHavePasswordHashes();
+
+    // Local-mode data lives only in this browser and the browser may evict it
+    // (Safari ITP 7-day wipe, Chrome disk pressure) — remind about backups.
+    maybeShowLocalDataDurabilityReminder();
 
     // Restore authenticated user from sessionStorage (more secure than localStorage)
     const session = SessionManager.getSession();
@@ -394,15 +471,92 @@ async function init() {
     startCloudSync();
   }
 
-  // Auto-backup once per day (IndexedDB only)
-  if (db) {
-    setInterval(() => {
+  // Auto-backup once per day (IndexedDB only). A phone browser never keeps a
+  // tab alive for 24 continuous hours, so a bare setInterval alone never
+  // fired there — run a due-check at startup, on tab resume AND on the
+  // interval. The newest-backup lookup keeps every trigger idempotent (at
+  // most one backup per AUTO_BACKUP_INTERVAL), and callback-style IDB means
+  // no new awaits before render(). `db` is re-checked per call because the
+  // connection can now drop/reopen mid-session.
+  const runDailyBackupIfDue = () => {
+    if (!db) return;
+    try {
+      const tx = db.transaction([BACKUP_STORE_NAME], 'readonly');
+      const req = tx.objectStore(BACKUP_STORE_NAME).index('createdAt').openCursor(null, 'prev');
+      req.onsuccess = (e) => {
+        const cursor = e.target.result;
+        const newest = cursor && cursor.value ? cursor.value.createdAt || 0 : 0;
+        if (Date.now() - newest >= STORAGE_CONFIG.AUTO_BACKUP_INTERVAL) {
+          createAutoBackup().catch(() => {});
+        }
+      };
+      req.onerror = () => { createAutoBackup().catch(() => {}); };
+    } catch (_) {
       createAutoBackup().catch(() => {});
-    }, STORAGE_CONFIG.AUTO_BACKUP_INTERVAL);
-  }
-  
+    }
+  };
+  runDailyBackupIfDue();
+  setInterval(runDailyBackupIfDue, STORAGE_CONFIG.AUTO_BACKUP_INTERVAL);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') runDailyBackupIfDue();
+  });
+
   render();
 }
+
+// Local mode keeps ALL business data (and the in-app auto-backups) inside
+// this browser's evictable storage: iOS Safari deletes every kind of site
+// storage after 7 days of Safari use without a visit, and Chrome/Android can
+// evict under disk pressure. There is no server copy, so remind the user to
+// export backups from Settings — at most once every 5 days, and not when a
+// recent export exists (the export flow records albayanNoteBackupExported()).
+function maybeShowLocalDataDurabilityReminder() {
+  try {
+    if (isPackagedMobileApp()) return;
+    if (!Array.isArray(state.users) || state.users.length === 0) return;
+    const fiveDays = 5 * TIME_CONSTANTS.MILLISECONDS_PER_DAY;
+    const now = Date.now();
+    const lastExport = Number(localStorage.getItem('albayan_last_backup_export_at')) || 0;
+    const lastReminder = Number(localStorage.getItem('albayan_backup_reminder_at')) || 0;
+    if (now - lastExport < fiveDays || now - lastReminder < fiveDays) return;
+    localStorage.setItem('albayan_backup_reminder_at', String(now));
+    showNotification(
+      state.language === 'ar' ? 'بياناتك في هذا المتصفح فقط' : 'Your Data Lives Only in This Browser',
+      state.language === 'ar'
+        ? 'قد يحذف المتصفح البيانات المخزنة محلياً (سفاري يحذفها بعد 7 أيام دون زيارة). صدّر نسخة احتياطية من الإعدادات بانتظام، وأضِف التطبيق إلى الشاشة الرئيسية.'
+        : 'The browser may delete locally stored data (Safari wipes it after 7 days without a visit). Export a backup from Settings regularly, and add the app to your Home Screen.',
+      'warning'
+    );
+  } catch (_) {}
+}
+
+// Track whether the on-screen keyboard is likely open (a text-entry element
+// has focus) via body.keyboard-open. style.css hides the fixed bottom nav
+// while it is set: iOS Safari anchors position:fixed to the layout viewport,
+// so with the keyboard up the nav otherwise floats mid-screen over the form
+// being typed into. focusout re-checks after a tick so focus moving between
+// fields (or render()'s synchronous focus restore) never flickers the class.
+(function setupKeyboardOpenTracking() {
+  function isTextEntry(el) {
+    if (!el || el === document.body) return false;
+    if (el.isContentEditable) return true;
+    const tag = el.tagName;
+    if (tag === 'TEXTAREA') return true;
+    if (tag !== 'INPUT') return false;
+    const type = String(el.type || 'text').toLowerCase();
+    return !['button', 'submit', 'reset', 'checkbox', 'radio', 'range', 'file', 'color'].includes(type);
+  }
+  document.addEventListener('focusin', (e) => {
+    if (isTextEntry(e.target)) document.body.classList.add('keyboard-open');
+  });
+  document.addEventListener('focusout', () => {
+    setTimeout(() => {
+      if (!isTextEntry(document.activeElement)) {
+        document.body.classList.remove('keyboard-open');
+      }
+    }, 0);
+  });
+})();
 
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', init);

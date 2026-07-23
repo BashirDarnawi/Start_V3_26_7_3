@@ -121,7 +121,7 @@ img, svg, [data-lucide] {
 }
 
 /* Mobile: Extra anti-jump measures */
-@media (max-width: 768px) {
+@media (max-width: 900px) {
   html, body {
     /* Prevent overscroll effects */
     overscroll-behavior: none;
@@ -1090,9 +1090,21 @@ table tbody tr:hover {
   box-shadow: 0 4px 20px rgba(239, 68, 68, 0.2);
 }
 
-/* Toast notifications positioning */
+/* Toast notifications positioning. The page opts into viewport-fit=cover, so
+   in a phone browser the fixed toasts/sync pill must respect the notch and
+   rounded corners: --app-safe-* resolves to env(safe-area-inset-*, 0px) in
+   browsers (0 on desktop, keeping these identical to the Tailwind top-16 /
+   right-4 they override via ID specificity) and to the injected native vars
+   under Capacitor. */
 #notification-container {
   pointer-events: none;
+  top: calc(4rem + var(--app-safe-top));
+  right: max(1rem, var(--app-safe-right));
+}
+
+#sync-status-container {
+  top: calc(1rem + var(--app-safe-top));
+  right: max(1rem, var(--app-safe-right));
 }
 
 #notification-container > * {
@@ -1447,7 +1459,7 @@ textarea:disabled {
 
 /* Only tables that provide data-label attributes opt into the card layout.
    Other tables keep their headings and remain horizontally scrollable. */
-@media (max-width: 768px) {
+@media (max-width: 900px) {
   .mobile-card-table {
     display: block;
     width: 100%;
@@ -1615,14 +1627,22 @@ textarea:disabled {
 
 }
 
-/* Modal responsiveness */
-@media (max-width: 768px) {
+/* Modal responsiveness.
+   900px matches the app shell's own phone breakpoint (.app-main /
+   .mobile-bottom-nav below): landscape phones are 844-915px wide, so the old
+   768px gate reverted their modals to the desktop centered layout — clipped
+   at both ends with no scroll path. The max-height alternative catches Pro
+   Max iPhones/Pixel 8 landscape (932-956px wide but only ~400px tall) and any
+   short window, where centered tall dialogs are equally unusable. */
+@media (max-width: 900px), (max-height: 500px) {
   /* Use the overlay as the single scrolling surface. This keeps the header,
      form and bottom action buttons reachable when browser bars or the phone
-     keyboard reduce the visual viewport. */
+     keyboard reduce the visual viewport. justify-content is deliberately NOT
+     forced: the overlay is a row flex container, so the markup's
+     justify-center keeps narrow panels horizontally centered on short
+     desktop windows while align-items:flex-start provides the scroll path. */
   .mobile-dialog-overlay {
     align-items: flex-start !important;
-    justify-content: flex-start !important;
     min-height: 100dvh;
     overflow-x: hidden !important;
     overflow-y: auto !important;
@@ -1636,8 +1656,6 @@ textarea:disabled {
 
   .mobile-dialog-overlay > :first-child {
     flex-shrink: 0;
-    width: 100%;
-    max-width: 100% !important;
     max-height: none !important;
     margin: 0 !important;
   }
@@ -1649,10 +1667,6 @@ textarea:disabled {
     border-radius: 1rem;
   }
 
-  .mobile-dialog-overlay .glass-panel {
-    max-width: 100%;
-  }
-
   .mobile-dialog-overlay .sticky.bottom-0 {
     padding-bottom: max(0.75rem, var(--app-safe-bottom));
   }
@@ -1662,6 +1676,21 @@ textarea:disabled {
   .mobile-dialog-overlay textarea {
     max-width: 100%;
     font-size: 16px; /* Prevent iOS zoom */
+  }
+}
+
+/* Phone-width only: dialogs span the full width. Kept separate from the
+   combined query above so a short DESKTOP window (max-height:500px arm)
+   gets the overlay scroll path but dialogs keep their own max-w-* caps
+   and horizontal centering. */
+@media (max-width: 900px) {
+  .mobile-dialog-overlay > :first-child {
+    width: 100%;
+    max-width: 100% !important;
+  }
+
+  .mobile-dialog-overlay .glass-panel {
+    max-width: 100%;
   }
 }
 
@@ -1768,11 +1797,26 @@ body.is-mobile input[type="email"],
 body.is-mobile input[type="password"],
 body.is-mobile input[type="number"],
 body.is-mobile input[type="tel"],
+body.is-mobile input[type="date"],
+body.is-mobile input[type="datetime-local"],
+body.is-mobile input[type="time"],
+body.is-mobile input[type="month"],
+body.is-mobile input[type="search"],
+body.is-mobile input[type="url"],
 body.is-mobile textarea,
 body.is-mobile select {
   /* Prevent iOS zoom on input focus (requires 16px+ font) */
   font-size: 16px !important;
 }
+
+/* iOS 15.0-15.3 fallback: dvh units parse only from WebKit 15.4. style.css
+   loads BEFORE assets/tailwind.css (see index.html), so on newer engines the
+   later same-specificity dvh declaration wins, while engines that drop dvh
+   keep these vh caps and modals stay scroll-bounded. */
+.max-h-\[42dvh\] { max-height: 42vh; }
+.max-h-\[60dvh\] { max-height: 60vh; }
+.max-h-\[90dvh\] { max-height: 90vh; }
+.max-h-\[92dvh\] { max-height: 92vh; }
 
 /* Fix for Capacitor safe areas.
    iOS: notch/home-indicator — WKWebView exposes env(safe-area-inset-*).
@@ -1848,10 +1892,14 @@ body.is-mobile * {
 
   .app-sidebar.-translate-x-full {
     transform: translateX(-100%) !important;
+    visibility: hidden;
+    pointer-events: none;
   }
 
   .app-sidebar.translate-x-0 {
     transform: translateX(0) !important;
+    visibility: visible;
+    pointer-events: auto;
   }
 
   .mobile-menu-backdrop {
@@ -2053,4 +2101,469 @@ body.perf-lite .btn-shine:hover,
 body.perf-lite .glass-panel:hover {
   transform: none !important;
   box-shadow: inherit;
+}
+
+/* ==========================================
+   UNIFIED WORKSPACE EXPERIENCE
+   Simple by default, advanced without a separate application.
+   ========================================== */
+
+.workspace-topbar {
+  display: block;
+  -webkit-backdrop-filter: blur(14px) saturate(150%);
+  backdrop-filter: blur(14px) saturate(150%);
+}
+
+.workspace-global-search {
+  display: flex;
+  min-width: 16rem;
+  max-width: 38rem;
+  flex: 1 1 32rem;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 2.75rem;
+  padding: 0.55rem 0.75rem;
+  color: #64748b;
+  background: rgba(248, 250, 252, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 0.9rem;
+  text-align: start;
+}
+
+.workspace-global-search:hover,
+.workspace-global-search:focus-visible {
+  color: #334155;
+  border-color: rgba(79, 70, 229, 0.55);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+}
+
+.dark .workspace-global-search {
+  color: #94a3b8;
+  background: rgba(15, 23, 42, 0.82);
+  border-color: rgba(100, 116, 139, 0.45);
+}
+
+.workspace-global-search kbd {
+  margin-inline-start: auto;
+  flex: none;
+  padding: 0.2rem 0.45rem;
+  color: #64748b;
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.45rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.dark .workspace-global-search kbd {
+  color: #cbd5e1;
+  background: #1e293b;
+  border-color: #334155;
+}
+
+.workspace-mode-toggle,
+.workspace-sidebar-mode {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  padding: 0.55rem 0.85rem;
+  color: #4338ca;
+  background: rgba(238, 242, 255, 0.92);
+  border: 1px solid rgba(129, 140, 248, 0.35);
+  border-radius: 0.9rem;
+  font-size: 0.78rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.dark .workspace-mode-toggle,
+.dark .workspace-sidebar-mode {
+  color: #c7d2fe;
+  background: rgba(49, 46, 129, 0.3);
+  border-color: rgba(129, 140, 248, 0.3);
+}
+
+.smart-filter-panel {
+  overflow: visible;
+}
+
+.smart-filter-primary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.smart-search-field {
+  position: relative;
+  display: flex;
+  flex: 1 1 24rem;
+  min-width: min(100%, 17rem);
+  min-height: 3rem;
+  align-items: center;
+  gap: 0.7rem;
+  padding-inline: 0.9rem;
+  color: #94a3b8;
+  background: rgba(255, 255, 255, 0.9);
+  border: 2px solid #e2e8f0;
+  border-radius: 0.85rem;
+}
+
+.dark .smart-search-field {
+  background: rgba(15, 23, 42, 0.88);
+  border-color: #334155;
+}
+
+.smart-search-field:focus-within {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.13);
+}
+
+.smart-search-field > i,
+.smart-search-field > svg {
+  position: static !important;
+  flex: none;
+  transform: none !important;
+}
+
+.smart-search-field input {
+  position: static !important;
+  min-width: 0;
+  min-height: 2.7rem;
+  flex: 1 1 auto;
+  padding: 0 !important;
+  color: #0f172a;
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.dark .smart-search-field input {
+  color: #f8fafc;
+}
+
+.smart-search-field > button,
+.smart-search-field > span button {
+  position: static !important;
+  display: inline-flex;
+  width: 2.25rem;
+  height: 2.25rem;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  transform: none !important;
+  border-radius: 0.65rem;
+}
+
+.smart-filter-chips {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.45rem;
+  overflow-x: auto;
+  padding: 0.1rem;
+  scrollbar-width: none;
+}
+
+.smart-filter-chips::-webkit-scrollbar {
+  display: none;
+}
+
+.smart-filter-chip {
+  display: inline-flex;
+  min-height: 2.75rem;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.55rem 0.8rem;
+  color: #475569;
+  background: rgba(248, 250, 252, 0.88);
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.dark .smart-filter-chip {
+  color: #cbd5e1;
+  background: rgba(30, 41, 59, 0.7);
+  border-color: #334155;
+}
+
+.smart-filter-chip.is-active {
+  color: #3730a3;
+  background: #e0e7ff;
+  border-color: #818cf8;
+  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.13);
+}
+
+.smart-filter-chip.is-active.is-danger {
+  color: #be123c;
+  background: #fff1f2;
+  border-color: #fda4af;
+}
+
+.smart-filter-chip.is-active.is-warning {
+  color: #b45309;
+  background: #fffbeb;
+  border-color: #fcd34d;
+}
+
+.smart-filter-chip.is-active.is-success {
+  color: #047857;
+  background: #ecfdf5;
+  border-color: #6ee7b7;
+}
+
+.workspace-filter-toggle,
+.workspace-load-more {
+  display: inline-flex;
+  min-height: 2.75rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  padding: 0.55rem 0.85rem;
+  color: #4338ca;
+  background: rgba(238, 242, 255, 0.8);
+  border: 1px solid rgba(129, 140, 248, 0.45);
+  border-radius: 0.85rem;
+  font-size: 0.78rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.workspace-filter-toggle.is-open {
+  color: #312e81;
+  background: #e0e7ff;
+}
+
+.workspace-filter-count {
+  display: inline-flex;
+  min-width: 1.25rem;
+  height: 1.25rem;
+  align-items: center;
+  justify-content: center;
+  padding-inline: 0.25rem;
+  color: white;
+  background: #4f46e5;
+  border-radius: 999px;
+  font-size: 0.65rem;
+}
+
+.workspace-advanced-panel {
+  margin-top: 0.9rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.24);
+}
+
+.workspace-advanced-panel.hidden {
+  display: none !important;
+}
+
+.workspace-filter-grid {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10.5rem), 1fr));
+  gap: 0.6rem !important;
+  width: 100%;
+}
+
+.workspace-filter-grid > *,
+.workspace-filter-grid > .relative,
+.workspace-filter-grid > .contents > * {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: none !important;
+}
+
+.workspace-filter-grid select,
+.workspace-filter-grid input,
+.workspace-filter-grid button {
+  min-height: 2.75rem;
+}
+
+.workspace-load-more {
+  padding-inline: 1.25rem;
+}
+
+.workspace-experience-choice {
+  display: flex;
+  min-height: 4.5rem;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 0.9rem;
+  color: #334155;
+  background: rgba(248, 250, 252, 0.8);
+  border: 2px solid #e2e8f0;
+  border-radius: 1rem;
+  text-align: start;
+}
+
+.workspace-experience-choice.is-selected {
+  color: #312e81;
+  background: #eef2ff;
+  border-color: #6366f1;
+}
+
+.workspace-experience-icon,
+.command-item-icon {
+  display: inline-flex;
+  width: 2.5rem;
+  height: 2.5rem;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  color: #4f46e5;
+  background: #eef2ff;
+  border-radius: 0.8rem;
+}
+
+.command-palette-panel {
+  overflow: hidden;
+}
+
+.command-section-label {
+  padding: 0.7rem 0.85rem 0.25rem;
+  color: #94a3b8;
+  font-size: 0.66rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mobile-bottom-nav {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .workspace-topbar {
+    display: none !important;
+  }
+
+  .mobile-bottom-nav {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 38;
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    gap: 0.15rem;
+    padding: 0.35rem max(0.35rem, var(--app-safe-right)) max(0.35rem, var(--app-safe-bottom)) max(0.35rem, var(--app-safe-left));
+    background: rgba(255, 255, 255, 0.96);
+    border-top: 1px solid rgba(148, 163, 184, 0.3);
+    box-shadow: 0 -8px 24px rgba(15, 23, 42, 0.08);
+    -webkit-backdrop-filter: blur(16px);
+    backdrop-filter: blur(16px);
+  }
+
+  .dark .mobile-bottom-nav {
+    background: rgba(15, 23, 42, 0.96);
+    border-color: rgba(71, 85, 105, 0.65);
+  }
+
+  .mobile-bottom-nav-item {
+    display: flex;
+    min-width: 0;
+    min-height: 3.55rem;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.15rem;
+    padding: 0.25rem 0.1rem;
+    color: #64748b;
+    border-radius: 0.75rem;
+    font-size: 0.62rem;
+    font-weight: 800;
+  }
+
+  .mobile-bottom-nav-item span {
+    display: block;
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mobile-bottom-nav-item.is-active {
+    color: #4338ca;
+    background: #eef2ff;
+  }
+
+  .dark .mobile-bottom-nav-item.is-active {
+    color: #c7d2fe;
+    background: rgba(49, 46, 129, 0.42);
+  }
+
+  .app-content {
+    padding-bottom: calc(5.25rem + var(--app-safe-bottom)) !important;
+  }
+
+  .sync-status-indicator {
+    right: max(0.75rem, var(--app-safe-right)) !important;
+    bottom: calc(5.35rem + var(--app-safe-bottom)) !important;
+  }
+
+  /* While the phone keyboard is up (body.keyboard-open, set in src/17-init.js
+     via focusin/focusout), hide the fixed bottom nav: iOS Safari keeps fixed
+     elements anchored to the LAYOUT viewport, so with the keyboard open the
+     nav otherwise floats mid-screen over the form being typed into, and its
+     buttons still navigate away on mis-taps. Chrome Android simply hides it
+     behind the keyboard. !important beats the display:grid above. */
+  body.keyboard-open .mobile-bottom-nav {
+    display: none !important;
+  }
+
+  body.keyboard-open .sync-status-indicator {
+    bottom: calc(0.75rem + var(--app-safe-bottom)) !important;
+  }
+
+  .smart-filter-primary {
+    align-items: stretch;
+  }
+
+  .smart-search-field,
+  .smart-filter-chips {
+    flex-basis: 100%;
+    width: 100%;
+  }
+
+  .workspace-filter-toggle {
+    width: 100%;
+  }
+
+  .delivery-mobile-table tbody tr td {
+    flex: 1 1 calc(50% - 0.5rem);
+  }
+
+  .delivery-mobile-table tbody tr td:first-child,
+  .delivery-mobile-table tbody tr td:last-child {
+    flex-basis: 100%;
+  }
+}
+
+@media (min-width: 901px) {
+  .workspace-topbar {
+    display: block;
+  }
+
+  .mobile-bottom-nav {
+    display: none !important;
+  }
+}
+
+@media (max-width: 420px) {
+  .smart-filter-panel {
+    padding: 0.75rem !important;
+  }
+
+  .smart-filter-chip {
+    min-height: 2.6rem;
+    padding-inline: 0.7rem;
+  }
 }

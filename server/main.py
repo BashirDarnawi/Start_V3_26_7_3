@@ -9,6 +9,7 @@ import re
 import secrets
 import threading
 import traceback
+import unicodedata
 import uuid
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,10 @@ _SQLITE_COUNTER_LOCK = threading.Lock()
 # patches in-process; the conditional UPDATE below also detects a writer in a
 # different process instead of silently overwriting its newer version.
 _SQLITE_ENTITY_PATCH_LOCK = threading.Lock()
+# Customer identity changes must serialize across a read/check/write cycle.
+# PostgreSQL uses transaction-scoped advisory locks keyed by canonical phone;
+# SQLite uses this process-wide guard (and its own single-writer guarantee).
+_SQLITE_CUSTOMER_PHONE_LOCK = threading.RLock()
 # Clothes orders and their product stock must commit as one unit. PostgreSQL
 # uses row/advisory locks; SQLite needs a process-wide transaction guard.
 _SQLITE_CLOTHES_LOCK = threading.Lock()
@@ -43,6 +48,11 @@ _SQLITE_WALLET_LOCK = threading.Lock()
 # Receipt transfers, ad funding, ad stops and receipt capacity edits share one
 # money pool. SQLite has no row locks, so those operations need one guard too.
 _SQLITE_FINANCIAL_LOCK = threading.Lock()
+# Receipt numbers form one namespace even though older records store them in
+# three JSON fields. SQLite needs one process-wide guard around the canonical
+# read/check/write cycle; PostgreSQL uses per-number transaction advisory
+# locks below.
+_SQLITE_RECEIPT_NUMBER_LOCK = threading.RLock()
 
 # Debug mode: set ALBAYAN_DEBUG_MODE=true to enable debug endpoints
 DEBUG_MODE = os.getenv("ALBAYAN_DEBUG_MODE", "").strip().lower() in {"1", "true", "yes"}
@@ -72,6 +82,8 @@ from .schemas import (
     ClothesShipmentMutationRequest,
     ClothesShipmentMutationResponse,
     CreateUserRequest,
+    CustomerMergeRequest,
+    CustomerMergeResponse,
     EntityCreateRequest,
     EntityResponse,
     EntityUpdateRequest,
@@ -79,6 +91,8 @@ from .schemas import (
     LoginResponse,
     PasswordResetConfirmRequest,
     PasswordResetRequest,
+    ReceiptSettlementRequest,
+    ReceiptSettlementResponse,
     ReceiptTransferRequest,
     ReceiptTransferResponse,
     SetupAdminRequest,
@@ -99,74 +113,106 @@ from .security import (
     verify_password,
 )
 
+# A throwaway PBKDF2 hash used to spend the SAME ~verify time on a login attempt
+# for an unknown email as for a known one. Without it, the known-email path runs
+# 310k-iteration PBKDF2 while the unknown path returns instantly, and the timing
+# gap discloses which emails have accounts (enumeration oracle).
+_DUMMY_PASSWORD_HASH = hash_password("albayan-timing-equalizer")
 
-def _receipt_serial_exists(serial: str, *, exclude_id: str | None = None) -> bool:
-    """True if any non-deleted receipt already has this final receipt number."""
-    serial = sanitize_str(str(serial or ""))[:80]
-    if not serial:
-        return False
-    exclude_id = sanitize_str(str(exclude_id or ""))[:80] or None
-    dialect = str(get_engine().dialect.name or "")
-    if dialect == "postgresql":
-        # IMPORTANT: do NOT use "(:exclude_id IS NULL OR ...)" because passing NULL can trigger
-        # psycopg.errors.AmbiguousParameter in Postgres (cannot infer parameter type).
-        base_sql = """
-        SELECT 1
-        FROM entities
-        WHERE type = 'receipts'
-          AND deleted = false
-          AND (
-            (data_json::jsonb ->> 'serialNumber') = :serial
-            OR (data_json::jsonb ->> 'finalReceiptNo') = :serial
-          )
-        """
-        params: dict[str, Any] = {"serial": serial}
-        if exclude_id:
-            base_sql += " AND id <> :exclude_id"
-            params["exclude_id"] = exclude_id
-        sql = base_sql + " LIMIT 1"
-        with db_conn() as conn:
-            row = conn.execute(text(sql), params).first()
-            return row is not None
-    # Fallback (SQLite/dev): use JSON extract functions if available, else scan bounded set
-    with db_conn() as conn:
-        # SQLite 3.38+ supports json_extract, try it first
-        try:
-            sql = """
-            SELECT 1 FROM entities
-            WHERE type = 'receipts'
-              AND deleted = 0
-              AND (
-                json_extract(data_json, '$.serialNumber') = :serial
-                OR json_extract(data_json, '$.finalReceiptNo') = :serial
-              )
-            """
-            params: dict[str, Any] = {"serial": serial}
-            if exclude_id:
-                sql += " AND id <> :exclude_id"
-                params["exclude_id"] = exclude_id
-            sql += " LIMIT 1"
-            row = conn.execute(text(sql), params).first()
-            return row is not None
-        except Exception:
-            pass  # Fall back to manual scan if json_extract not supported
 
-        # Manual scan fallback - but with LIMIT to avoid loading entire table
-        rows = (
-            conn.execute(text(
-                "SELECT id, data_json FROM entities WHERE type='receipts' AND deleted = 0 LIMIT 10000"
-            ))
-            .mappings()
-            .all()
+_RECEIPT_NUMBER_FIELDS = ("serialNumber", "finalReceiptNo", "tempReceiptNo")
+_RECEIPT_DIGIT_TRANSLATION = str.maketrans(
+    "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
+    "01234567890123456789",
+)
+
+
+def _canonical_receipt_number(value: Any) -> str:
+    """Canonical key shared by final, serial and temporary receipt numbers."""
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    normalized = normalized.translate(_RECEIPT_DIGIT_TRANSLATION).strip().upper()
+    return normalized[:80]
+
+
+def _receipt_number_keys(data: Any) -> set[str]:
+    source = data if isinstance(data, dict) else {}
+    return {
+        key
+        for key in (_canonical_receipt_number(source.get(field)) for field in _RECEIPT_NUMBER_FIELDS)
+        if key
+    }
+
+
+def _normalize_receipt_number_fields(data: dict[str, Any]) -> dict[str, Any]:
+    for field in _RECEIPT_NUMBER_FIELDS:
+        if field in data:
+            data[field] = _canonical_receipt_number(data.get(field))
+    return data
+
+
+def _lock_receipt_number_keys_conn(conn: Any, keys: set[str], *, postgres: bool) -> None:
+    if not postgres:
+        return
+    for key in sorted(keys):
+        conn.execute(
+            text(
+                "SELECT pg_advisory_xact_lock("
+                "hashtextextended(CAST(:key AS text), 0)"
+                ")"
+            ),
+            {"key": f"receiptNumber:{key}"},
         )
-        for r in rows:
-            rid = str(r.get("id") or "")
-            if exclude_id and rid == exclude_id:
+
+
+def _validate_receipt_number_change_conn(
+    conn: Any,
+    receipt_id: str,
+    old_data: Any,
+    new_data: Any,
+    *,
+    postgres: bool,
+    activating: bool = False,
+) -> None:
+    """Reject newly introduced canonical collisions, preserving legacy rows."""
+    old_keys = set() if activating else _receipt_number_keys(old_data)
+    introduced = _receipt_number_keys(new_data) - old_keys
+    if not introduced:
+        return
+    _lock_receipt_number_keys_conn(conn, introduced, postgres=postgres)
+    rows = conn.execute(
+        text(
+            "SELECT id,data_json FROM entities "
+            "WHERE type='receipts' AND deleted=false AND id<>:receipt_id"
+        ),
+        {"receipt_id": receipt_id},
+    ).mappings().all()
+    for row in rows:
+        other = json_loads(row.get("data_json") or "{}") or {}
+        if introduced & _receipt_number_keys(other):
+            raise HTTPException(status_code=409, detail="Receipt number already exists")
+
+
+def _receipt_number_exists(number: str, *, exclude_id: str | None = None) -> bool:
+    key = _canonical_receipt_number(number)
+    if not key:
+        return False
+    excluded = str(exclude_id or "").strip()
+    with db_conn() as conn:
+        rows = conn.execute(
+            text("SELECT id,data_json FROM entities WHERE type='receipts' AND deleted=false")
+        ).mappings().all()
+        for row in rows:
+            if excluded and str(row.get("id") or "") == excluded:
                 continue
-            data = json_loads(r.get("data_json")) or {}
-            if str(data.get("serialNumber") or "") == serial or str(data.get("finalReceiptNo") or "") == serial:
+            data = json_loads(row.get("data_json") or "{}") or {}
+            if key in _receipt_number_keys(data):
                 return True
     return False
+
+
+def _receipt_serial_exists(serial: str, *, exclude_id: str | None = None) -> bool:
+    """Compatibility helper for preflight messages; transaction guard is authoritative."""
+    return _receipt_number_exists(serial, exclude_id=exclude_id)
 
 
 # Auto-serial prefixes issued by the app for payment methods that come with no
@@ -183,58 +229,30 @@ def _is_valid_serial_number(serial: str) -> bool:
     - Regular: digits only, no leading zeros (1, 123, 456, etc.)
     - Auto-serial: prefix + digits, no leading zeros (S1, B2, O3, E4, ...)
     """
-    serial = str(serial or "").strip()
-    if not serial:
-        return False
-    # Prefixed auto-serial (S1, B2, O3, E4...)
-    if len(serial) > 1 and serial[0].upper() in AUTO_SERIAL_PREFIXES:
-        rest = serial[1:]
-        return rest.isdigit() and not rest.startswith("0")
-    # Regular numeric serial
-    return serial.isdigit() and not serial.startswith("0")
+    serial = _canonical_receipt_number(serial)
+    return bool(re.fullmatch(r"(?:[1-9][0-9]*|[SBOE][1-9][0-9]*)", serial))
+
+
+def _validate_receipt_number_fields(data: Any) -> None:
+    source = data if isinstance(data, dict) else {}
+    for field in ("serialNumber", "finalReceiptNo"):
+        if field not in source:
+            continue
+        value = _canonical_receipt_number(source.get(field))
+        if value and not _is_valid_serial_number(value):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid {field} (must be digits or S/B/O/E-prefixed, with no leading zero)",
+            )
+    if "tempReceiptNo" in source:
+        temp_no = _canonical_receipt_number(source.get("tempReceiptNo"))
+        if temp_no and not re.fullmatch(r"D[0-9]+", temp_no):
+            raise HTTPException(status_code=400, detail="Invalid tempReceiptNo (expected D{n})")
 
 
 def _temp_receipt_no_exists(temp_no: str, *, exclude_id: str | None = None) -> bool:
-    """True if any non-deleted receipt already has this temp delivery receipt number."""
-    temp_no = sanitize_str(str(temp_no or ""))[:80]
-    if not temp_no:
-        return False
-    exclude_id = sanitize_str(str(exclude_id or ""))[:80] or None
-    dialect = str(get_engine().dialect.name or "")
-    if dialect == "postgresql":
-        # IMPORTANT: avoid NULL-typed exclude_id param ambiguity in Postgres.
-        base_sql = """
-        SELECT 1
-        FROM entities
-        WHERE type = 'receipts'
-          AND deleted = false
-          AND (data_json::jsonb ->> 'tempReceiptNo') = :temp_no
-        """
-        params: dict[str, Any] = {"temp_no": temp_no}
-        if exclude_id:
-            base_sql += " AND id <> :exclude_id"
-            params["exclude_id"] = exclude_id
-        sql = base_sql + " LIMIT 1"
-        with db_conn() as conn:
-            row = conn.execute(text(sql), params).first()
-            return row is not None
-    # Fallback (SQLite/dev): scan a bounded set
-    with db_conn() as conn:
-        rows = (
-            conn.execute(text("SELECT id, data_json, deleted FROM entities WHERE type='receipts'"))
-            .mappings()
-            .all()
-        )
-        for r in rows:
-            if bool(r.get("deleted")):
-                continue
-            rid = str(r.get("id") or "")
-            if exclude_id and rid == exclude_id:
-                continue
-            data = json_loads(r.get("data_json")) or {}
-            if str(data.get("tempReceiptNo") or "") == temp_no:
-                return True
-    return False
+    """Compatibility helper for preflight messages; transaction guard is authoritative."""
+    return _receipt_number_exists(temp_no, exclude_id=exclude_id)
 
 
 def _next_temp_delivery_receipt_no(created_by: str | None = None) -> str:
@@ -390,6 +408,25 @@ elif _COOKIE_SECURE_ENV in {"0", "false", "no"}:
 else:
     COOKIE_SECURE = not DEBUG_MODE
 
+
+def _cookie_secure_for(request: Request) -> bool:
+    """Secure flag for the session cookie of a plain web login.
+
+    The explicit ALBAYAN_COOKIE_SECURE env override stays authoritative. When
+    it is unset, follow the scheme the client actually used instead of the
+    static `not DEBUG_MODE` default: phones opening http://<lan-ip>:<port>
+    would otherwise receive a Secure cookie that no browser stores over plain
+    HTTP, making every login loop straight back to the sign-in screen.
+    Trusting x-forwarded-proto here is downgrade-proof: forging "https" over
+    direct HTTP only yields a Secure cookie the forger's own browser discards.
+    """
+    if _COOKIE_SECURE_ENV in {"1", "true", "yes"}:
+        return True
+    if _COOKIE_SECURE_ENV in {"0", "false", "no"}:
+        return False
+    fwd = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    return request.url.scheme == "https" or fwd == "https"
+
 # If set, ALL requests must include the origin secret header (added by Cloudflare) or they'll be blocked.
 # This protects your ALB/origin from being accessed directly if someone finds the ALB DNS name.
 ORIGIN_SECRET_HEADER = os.getenv("ALBAYAN_ORIGIN_HEADER", "X-Albayan-Origin").strip() or "X-Albayan-Origin"
@@ -413,6 +450,11 @@ _LOGIN_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_LOGIN_MAX_ATTEMPTS", "20"))
 # per-IP cap so a shared office IP with a few users' honest mistakes never trips
 # it, but far below what brute-forcing a password would need.
 _LOGIN_EMAIL_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_LOGIN_EMAIL_MAX_ATTEMPTS", "60"))
+# Global per-IP ceiling across ALL emails. The (ip,email) bucket above does not
+# stop one IP from spreading a password guess across many distinct accounts
+# (horizontal credential stuffing). Set well above a shared office's honest
+# traffic but far below a stuffing run.
+_LOGIN_IP_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_LOGIN_IP_MAX_ATTEMPTS", "120"))
 
 PASSWORD_RESET_TOKEN_MS = int(os.getenv("ALBAYAN_PASSWORD_RESET_TOKEN_MS", str(15 * 60 * 1000)))
 PASSWORD_RESET_DEV_RETURN_CODE = os.getenv("ALBAYAN_DEV_PASSWORD_RESET_RETURN_CODE", "").strip().lower() in {"1", "true", "yes"}
@@ -474,6 +516,14 @@ def _rate_check(request: Request, email: str) -> tuple[bool, int]:
 
     if not is_allowed:
         return False, int(retry_after_ms or 0)
+
+    # Global per-IP ceiling across all emails: stops one IP from spreading a
+    # single password guess over many accounts (horizontal credential stuffing),
+    # which the per-(ip,email) bucket alone does not cover.
+    ip_key = f"login:ip:{_client_ip(request)}"
+    ok_ip, _left_ip, retry_ip = check_rate_limit(ip_key, _LOGIN_IP_MAX_ATTEMPTS, _LOGIN_WINDOW_MS)
+    if not ok_ip:
+        return False, int(retry_ip or 0)
 
     # Defense in depth: an IP-independent per-account bucket. Even if an
     # attacker rotates IPs (or a forged proxy header) to dodge the (ip,email)
@@ -564,6 +614,13 @@ MAX_JSON_DEPTH = 20  # Maximum nesting depth for JSON
 
 # Financial validation constants
 MAX_FINANCIAL_AMOUNT = 10_000_000  # $10 million max for any single amount
+# A delivery driver enters the cash actually collected. A genuine over-collection
+# (a tip or rounding) is small; an implausibly large amount — whether a fat-finger
+# or an attempt to mint spendable ad credit — must be refused and handled by the
+# office. Blocked only when BOTH the ratio and the absolute overage are exceeded,
+# so ordinary tips and legitimately large deliveries still complete.
+_DELIVERY_OVERPAY_RATIO = float(os.getenv("ALBAYAN_DELIVERY_OVERPAY_RATIO", "3.0"))
+_DELIVERY_OVERPAY_ABS_LOCAL = float(os.getenv("ALBAYAN_DELIVERY_OVERPAY_ABS_LOCAL", "10000"))
 MIN_FINANCIAL_AMOUNT = 0  # No negative amounts allowed
 MAX_EXCHANGE_RATE = 1000  # Maximum exchange rate (LYD per USD)
 MIN_EXCHANGE_RATE = 0.001  # Minimum exchange rate
@@ -1117,6 +1174,56 @@ INLINE_MEDIA_FIELDS: dict[str, tuple[str, ...]] = {
     "adCampaignRequests": ("creativeImages",),
 }
 
+# Customer contact details are sometimes copied onto an ad/receipt so a
+# delivery can retain the historical phone/address used at creation time.
+# ``customers.viewContacts`` governs every copy, not only the customer row.
+CONTACT_REDACTED_ENTITY_TYPES = frozenset({"customers", "receipts", "ads"})
+CONTACT_FIELD_MARKERS = (
+    "phone",
+    "profile",
+    "address",
+    "contact",
+    "email",
+    "whatsapp",
+)
+CONTACT_FIELD_ALIASES = frozenset({"deliveryplace", "deliveryplacename"})
+
+
+def _is_customer_contact_field(key: Any) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", str(key or "").lower())
+    return normalized in CONTACT_FIELD_ALIASES or any(
+        marker in normalized for marker in CONTACT_FIELD_MARKERS
+    )
+
+
+def _without_customer_contacts(value: Any) -> Any:
+    """Copy a JSON value while removing contact-bearing keys at any depth."""
+    if isinstance(value, dict):
+        return {
+            key: _without_customer_contacts(child)
+            for key, child in value.items()
+            if not _is_customer_contact_field(key)
+        }
+    if isinstance(value, list):
+        return [_without_customer_contacts(child) for child in value]
+    return value
+
+
+def _project_entity_contacts_for_user(
+    entity: dict[str, Any], user: dict[str, Any]
+) -> dict[str, Any]:
+    entity_type = str(entity.get("type") or "")
+    if (
+        entity_type not in CONTACT_REDACTED_ENTITY_TYPES
+        or user_has_permission(user, "customers", "viewContacts")
+    ):
+        return entity
+    projected = dict(entity)
+    data = projected.get("data")
+    if isinstance(data, dict):
+        projected["data"] = _without_customer_contacts(data)
+    return projected
+
 
 def _without_inline_media(entity_type: str, data: dict[str, Any]) -> dict[str, Any]:
     """Return a lightweight response copy plus a trustworthy photo count."""
@@ -1161,9 +1268,10 @@ def _project_entity_media_for_user(
     entity: dict[str, Any], user: dict[str, Any], requested: bool = True
 ) -> dict[str, Any]:
     entity_type = str(entity.get("type") or "")
-    return _project_entity_media(
+    media_projected = _project_entity_media(
         entity, _can_include_entity_media(user, entity_type, requested)
     )
+    return _project_entity_contacts_for_user(media_projected, user)
 
 
 def _redacted_ad_campaign_tombstone(entity: dict[str, Any]) -> dict[str, Any]:
@@ -1480,7 +1588,158 @@ def get_entity(entity_type: str, entity_id: str) -> Optional[dict[str, Any]]:
         }
 
 
-def upsert_entity(entity_type: str, entity_id: str, data: dict[str, Any], user_id: str, *, create_if_missing: bool = True) -> dict[str, Any]:
+_PHONE_DIGIT_TRANSLATION = str.maketrans(
+    "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
+    "01234567890123456789",
+)
+
+
+def _customer_phone_display(value: Any) -> str:
+    """Read a phone from modern strings or older object-shaped entries."""
+    if isinstance(value, dict):
+        for key in ("number", "phone", "phoneNumber", "value"):
+            candidate = sanitize_str(str(value.get(key) or ""), 80).strip()
+            if candidate:
+                return candidate
+        return ""
+    return sanitize_str(str(value or ""), 80).strip()
+
+
+def _canonical_customer_phone(value: Any) -> str:
+    """Canonical identity key, including equivalent Libyan mobile formats."""
+    display = _customer_phone_display(value).translate(_PHONE_DIGIT_TRANSLATION)
+    digits = re.sub(r"[^0-9]", "", display)
+    if digits.startswith("00"):
+        digits = digits[2:]
+    if digits.startswith("218"):
+        national = digits[3:]
+        if national.startswith("0"):
+            national = national[1:]
+        digits = f"218{national}"
+    # 09XXXXXXXX, 9XXXXXXXX, +2189XXXXXXXX and 002189XXXXXXXX are one phone.
+    if len(digits) == 10 and digits.startswith("09"):
+        return f"218{digits[1:]}"
+    if len(digits) == 9 and digits.startswith("9"):
+        return f"218{digits}"
+    return digits if 7 <= len(digits) <= 15 else ""
+
+
+def _customer_phone_candidates(data: Any) -> list[Any]:
+    source = data if isinstance(data, dict) else {}
+    values: list[Any] = []
+    raw_phones = source.get("phones")
+    if isinstance(raw_phones, list):
+        values.extend(raw_phones)
+    elif raw_phones not in (None, ""):
+        values.append(raw_phones)
+    for key in ("phone", "phoneNumber"):
+        if source.get(key) not in (None, ""):
+            values.append(source.get(key))
+    return values
+
+
+def _customer_phone_keys(data: Any) -> set[str]:
+    return {
+        key
+        for key in (_canonical_customer_phone(value) for value in _customer_phone_candidates(data))
+        if key
+    }
+
+
+CUSTOMER_PHONE_FIELDS = frozenset({"phones", "phone", "phoneNumber"})
+
+
+def _collapse_customer_phone_entries(data: dict[str, Any]) -> dict[str, Any]:
+    """Collapse aliases within phones[] while preserving the first display value."""
+    raw = data.get("phones")
+    if not isinstance(raw, list):
+        return data
+    seen: set[str] = set()
+    collapsed: list[Any] = []
+    for value in raw:
+        display = _customer_phone_display(value)
+        if not display:
+            continue
+        key = _canonical_customer_phone(value) or f"display:{display.casefold()}"
+        if key in seen:
+            continue
+        seen.add(key)
+        collapsed.append(value)
+    data["phones"] = collapsed
+    return data
+
+
+def _normalize_customer_phone_storage(
+    data: dict[str, Any], *, modern_authoritative: bool = False
+) -> dict[str, Any]:
+    """Normalize phones[] and retire scalar aliases when modern data is supplied."""
+    data = _collapse_customer_phone_entries(data)
+    if modern_authoritative:
+        data.pop("phone", None)
+        data.pop("phoneNumber", None)
+    return data
+
+
+def _lock_customer_phone_keys_conn(conn: Any, keys: set[str], *, postgres: bool) -> None:
+    if not postgres:
+        return
+    for key in sorted(keys):
+        conn.execute(
+            text(
+                "SELECT pg_advisory_xact_lock("
+                "hashtextextended(CAST(:key AS text), 0)"
+                ")"
+            ),
+            {"key": f"customerPhone:{key}"},
+        )
+
+
+def _validate_customer_phone_change_conn(
+    conn: Any,
+    customer_id: str,
+    old_data: Any,
+    new_data: Any,
+    *,
+    postgres: bool,
+    activating: bool = False,
+    phone_fields_touched: bool = False,
+) -> None:
+    """Reject only newly introduced collisions, grandfathering existing dirt."""
+    old_keys = set() if activating else _customer_phone_keys(old_data)
+    new_keys = _customer_phone_keys(new_data)
+    if not new_keys and (activating or bool(old_keys) or phone_fields_touched):
+        raise HTTPException(status_code=400, detail="At least one valid phone number is required")
+    introduced = new_keys - old_keys
+    if not introduced:
+        return
+    _lock_customer_phone_keys_conn(conn, introduced, postgres=postgres)
+    rows = conn.execute(
+        text(
+            "SELECT id,data_json FROM entities "
+            "WHERE type='customers' AND deleted=false AND id<>:customer_id"
+        ),
+        {"customer_id": customer_id},
+    ).mappings().all()
+    for row in rows:
+        other = json_loads(row.get("data_json") or "{}") or {}
+        if introduced & _customer_phone_keys(other):
+            # Intentionally omit the phone, customer id and customer name. This
+            # remains safe even when the caller lacks customers.viewContacts.
+            raise HTTPException(
+                status_code=409,
+                detail="This phone number is already linked to another customer",
+            )
+
+
+def upsert_entity(
+    entity_type: str,
+    entity_id: str,
+    data: dict[str, Any],
+    user_id: str,
+    *,
+    create_if_missing: bool = True,
+    reject_existing: bool = False,
+) -> dict[str, Any]:
     """
     Create or update an entity in the database (atomic operation).
     
@@ -1512,14 +1771,28 @@ def upsert_entity(entity_type: str, entity_id: str, data: dict[str, Any], user_i
         raise HTTPException(status_code=400, detail="Invalid entity id/type")
 
     clean = sanitize_json(data)
+    if entity_type == "customers" and isinstance(clean, dict):
+        clean = _normalize_customer_phone_storage(
+            clean, modern_authoritative="phones" in clean
+        )
+    if entity_type == "receipts" and isinstance(clean, dict):
+        clean = _normalize_receipt_number_fields(clean)
+        _validate_receipt_number_fields(clean)
     # Force server timestamps for consistency
     clean["_lastModified"] = now
 
-    with db_conn() as conn:
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    entity_guard = nullcontext()
+    if not postgres:
+        if entity_type == "customers":
+            entity_guard = _SQLITE_CUSTOMER_PHONE_LOCK
+        elif entity_type == "receipts":
+            entity_guard = _SQLITE_RECEIPT_NUMBER_LOCK
+    with entity_guard, db_conn() as conn:
         existing = (
             conn.execute(
                 text(
-                    "SELECT id, created_at, created_by, deleted FROM entities WHERE type = :type AND id = :id LIMIT 1"
+                    "SELECT id, data_json, created_at, created_by, deleted FROM entities WHERE type = :type AND id = :id LIMIT 1"
                 ),
                 {"type": entity_type, "id": entity_id},
             )
@@ -1528,6 +1801,8 @@ def upsert_entity(entity_type: str, entity_id: str, data: dict[str, Any], user_i
         )
 
         if existing:
+            if reject_existing:
+                raise HTTPException(status_code=409, detail="Record with this ID already exists")
             created_at = int(existing["created_at"])
             created_by = existing["created_by"]
             # DATA-INTEGRITY FIX: preserve the soft-delete flag on updates.
@@ -1541,6 +1816,23 @@ def upsert_entity(entity_type: str, entity_id: str, data: dict[str, Any], user_i
             clean["id"] = entity_id
             clean["_created"] = clean.get("_created") or created_at
             clean["createdBy"] = clean.get("createdBy") or created_by
+            if entity_type == "customers":
+                _validate_customer_phone_change_conn(
+                    conn,
+                    entity_id,
+                    json_loads(existing.get("data_json") or "{}") or {},
+                    clean,
+                    postgres=postgres,
+                    phone_fields_touched=bool(CUSTOMER_PHONE_FIELDS & set(clean)),
+                )
+            if entity_type == "receipts" and not deleted:
+                _validate_receipt_number_change_conn(
+                    conn,
+                    entity_id,
+                    json_loads(existing.get("data_json") or "{}") or {},
+                    clean,
+                    postgres=postgres,
+                )
 
             try:
                 conn.execute(
@@ -1573,6 +1865,24 @@ def upsert_entity(entity_type: str, entity_id: str, data: dict[str, Any], user_i
             clean["id"] = entity_id
             clean["_created"] = clean.get("_created") or created_at
             clean["createdBy"] = clean.get("createdBy") or created_by
+            if entity_type == "customers":
+                _validate_customer_phone_change_conn(
+                    conn,
+                    entity_id,
+                    {},
+                    clean,
+                    postgres=postgres,
+                    activating=True,
+                )
+            if entity_type == "receipts":
+                _validate_receipt_number_change_conn(
+                    conn,
+                    entity_id,
+                    {},
+                    clean,
+                    postgres=postgres,
+                    activating=True,
+                )
 
             try:
                 conn.execute(
@@ -1657,7 +1967,11 @@ def patch_entity(
             del upd[k]
 
     postgres = str(get_engine().dialect.name or "") == "postgresql"
-    guard = nullcontext() if postgres else _SQLITE_ENTITY_PATCH_LOCK
+    guard = (
+        nullcontext()
+        if postgres
+        else (_SQLITE_CUSTOMER_PHONE_LOCK if entity_type == "customers" else _SQLITE_ENTITY_PATCH_LOCK)
+    )
     with guard:
         with db_conn() as conn:
             lock_suffix = " FOR UPDATE" if postgres else ""
@@ -1683,7 +1997,20 @@ def patch_entity(
             data = json_loads(row["data_json"]) or {}
             if not isinstance(data, dict):
                 data = {}
+            old_data = dict(data)
             data.update(upd)
+            if entity_type == "customers":
+                data = _normalize_customer_phone_storage(
+                    data, modern_authoritative="phones" in upd
+                )
+                _validate_customer_phone_change_conn(
+                    conn,
+                    entity_id,
+                    old_data,
+                    data,
+                    postgres=postgres,
+                    phone_fields_touched=bool(CUSTOMER_PHONE_FIELDS & set(upd)),
+                )
             modified = max(now_ms(), baseline + 1)
             data["id"] = entity_id
             data["_created"] = data.get("_created") or int(row["created_at"])
@@ -1719,6 +2046,11 @@ def patch_entity(
                     },
                 )
             except IntegrityError:
+                if entity_type == "customers":
+                    raise HTTPException(
+                        status_code=409,
+                        detail="This phone number is already linked to another customer",
+                    )
                 raise HTTPException(status_code=409, detail="Receipt number already exists")
             if result.rowcount != 1:
                 raise HTTPException(status_code=409, detail="Conflict: record has changed")
@@ -2419,6 +2751,9 @@ _ASSET_MEDIA_TYPES = {
     ".css": "text/css",
     ".js": "application/javascript",
     ".woff2": "font/woff2",
+    # PWA assets (manifest + icons) served from assets/.
+    ".png": "image/png",
+    ".webmanifest": "application/manifest+json",
 }
 
 
@@ -2496,6 +2831,15 @@ def login(payload: LoginRequest, request: Request):
 
     user = _get_user_by_email(str(payload.email))
     if not user:
+        # SECURITY: burn the same PBKDF2 cost as the known-email path so response
+        # time does not reveal whether this email has an account.
+        verify_password(
+            str(payload.password),
+            _DUMMY_PASSWORD_HASH.hash_hex,
+            _DUMMY_PASSWORD_HASH.salt_hex,
+            _DUMMY_PASSWORD_HASH.algo,
+            _DUMMY_PASSWORD_HASH.iterations,
+        )
         # Helpful setup hint (safe, local-first): if there are ZERO users, the server isn't initialized yet.
         # Avoid leaking exact user counts; only disclose the "empty" case.
         try:
@@ -2536,12 +2880,12 @@ def login(payload: LoginRequest, request: Request):
         COOKIE_NAME,
         cookie_val,
         httponly=True,
-        secure=True if is_mobile_app_login else COOKIE_SECURE,
+        secure=True if is_mobile_app_login else _cookie_secure_for(request),
         samesite="none" if is_mobile_app_login else "lax",
         max_age=int(SESSION_DURATION_MS / 1000),
         path="/",
     )
-    
+
     # Reset rate limit on successful login so user isn't penalized for previous failed attempts
     from .rate_limiter import reset_rate_limit
     login_email = str(payload.email).lower()
@@ -2689,7 +3033,7 @@ def setup_admin(payload: SetupAdminRequest, request: Request):
         COOKIE_NAME,
         cookie_val,
         httponly=True,
-        secure=True if is_mobile_app_login else COOKIE_SECURE,
+        secure=True if is_mobile_app_login else _cookie_secure_for(request),
         samesite="none" if is_mobile_app_login else "lax",
         max_age=int(SESSION_DURATION_MS / 1000),
         path="/",
@@ -3041,13 +3385,27 @@ def bootstrap(user: dict[str, Any] = Depends(current_user)):
 
     return BootstrapResponse(
         user=user_row_to_public(user),
-        ads=[e["data"] for e in ads],
-        receipts=[e["data"] for e in receipts],
-        customers=[e["data"] for e in customers],
+        ads=[_project_entity_contacts_for_user(e, user)["data"] for e in ads],
+        receipts=[_project_entity_contacts_for_user(e, user)["data"] for e in receipts],
+        customers=[_project_entity_contacts_for_user(e, user)["data"] for e in customers],
         pages=[e["data"] for e in pages],
         exchangeRateHistory=[e["data"] for e in exh],
         logs=logs,
     )
+
+
+# Names that are permission MODULES (or UI views) but are NOT real generic-store
+# collections. The generic /api/collections routes must refuse them so a caller
+# holding the matching module grant cannot create/read/patch/delete isolated
+# shadow entities (e.g. a junk type="users" row that never reaches the real auth
+# users table). Real accounts, deliveries, audit logs and settings each have
+# their own dedicated, properly-gated endpoints.
+_NON_STORE_COLLECTIONS = frozenset({"users", "deliveries", "settings", "analytics", "auditLogs"})
+
+
+def _reject_non_store_collection(name: str) -> None:
+    if name in _NON_STORE_COLLECTIONS:
+        raise HTTPException(status_code=404, detail="Unknown collection")
 
 
 def _module_for_collection(name: str) -> str:
@@ -5684,13 +6042,17 @@ def _clothes_patch_shipment_atomic(
 # ---------------------------------------------------------------------------
 
 RECEIPT_TRANSFER_MUTATION_COLLECTION = "receiptTransferMutations"
+RECEIPT_SETTLEMENT_MUTATION_COLLECTION = "receiptSettlementMutations"
 AD_FUNDING_MUTATION_COLLECTION = "adFundingMutations"
 AD_STOP_MUTATION_COLLECTION = "adStopMutations"
+CUSTOMER_MERGE_MUTATION_COLLECTION = "customerMergeMutations"
 FINANCIAL_MUTATION_COLLECTIONS = frozenset(
     {
         RECEIPT_TRANSFER_MUTATION_COLLECTION,
+        RECEIPT_SETTLEMENT_MUTATION_COLLECTION,
         AD_FUNDING_MUTATION_COLLECTION,
         AD_STOP_MUTATION_COLLECTION,
+        CUSTOMER_MERGE_MUTATION_COLLECTION,
     }
 )
 
@@ -5705,6 +6067,9 @@ AD_FUNDING_FIELDS = frozenset(
         "spentUSD",
         "stoppedAt",
         "stopAllocationBaseline",
+        "remainingCustomerInformed",
+        "remainingCustomerInformedAt",
+        "remainingCustomerInformedBy",
         "receiptAllocations",
         "dueAllocations",
         "mergedPaidAllocations",
@@ -5718,6 +6083,8 @@ AD_FUNDING_FIELDS = frozenset(
         "isPaid",
         "refundAllocationBaseline",
         "refundDueBaseline",
+        "refundBaselinePaymentStatus",
+        "preRefundStatus",
         "refundType",
         "refundAmount",
         "refundStatus",
@@ -5769,6 +6136,40 @@ def _financial_minor(value: Any, field: str, *, allow_zero: bool = True) -> int:
 
 def _financial_usd(minor: int) -> float:
     return float((Decimal(int(minor)) / Decimal(100)).quantize(Decimal("0.01")))
+
+
+def _financial_confirmed_remaining_minor(ad: dict[str, Any] | None) -> int | None:
+    """Return the exact remainder covered by the saved customer confirmation."""
+    if not ad or ad.get("remainingCustomerInformed") is not True:
+        return None
+    # Older/broken rows may have a confirmation without the spend that it
+    # referred to. Treat that confirmation as unbound rather than silently
+    # applying it to a newly entered amount.
+    if ad.get("spentUSD") in (None, ""):
+        return None
+    amount_minor = _financial_minor(ad.get("amountUSD"), "confirmed ad amount")
+    spent_minor = _financial_minor(ad.get("spentUSD"), "confirmed ad spend")
+    return max(amount_minor - spent_minor, 0)
+
+
+def _financial_clear_changed_remaining_confirmation(
+    existing: dict[str, Any] | None, updated: dict[str, Any]
+) -> None:
+    """Clear a confirmation when an update changes the amount it described."""
+    if not existing or existing.get("remainingCustomerInformed") is not True:
+        return
+    confirmed_remaining = _financial_confirmed_remaining_minor(existing)
+    updated_amount = _financial_minor(updated.get("amountUSD"), "updated ad amount")
+    updated_spent = _financial_minor(updated.get("spentUSD"), "updated ad spend")
+    updated_remaining = max(updated_amount - updated_spent, 0)
+    if (
+        confirmed_remaining is None
+        or updated_remaining <= 0
+        or updated_remaining != confirmed_remaining
+    ):
+        updated["remainingCustomerInformed"] = False
+        updated.pop("remainingCustomerInformedAt", None)
+        updated.pop("remainingCustomerInformedBy", None)
 
 
 def _financial_rate(value: Any) -> Decimal:
@@ -5926,20 +6327,31 @@ def _financial_allocation_map(raw: Any) -> dict[str, int]:
     return result
 
 
+def _financial_legacy_due_receipt_id(ad: dict[str, Any]) -> str:
+    """Receipt represented by the scalar dueAmountToUse* legacy mirror.
+
+    Delivery rows historically used linkedDeliveryReceiptId.  In-Shop rows
+    used receiptId instead, so treating the driver field as the only identity
+    loses real customer debt when old rows are stopped, refunded or restored.
+    The oldest driver rows predate linkedDeliveryReceiptId entirely and stored
+    the delivery receipt in receiptId; the settlement predicate and the ad
+    form both honor that fallback, so the due reader must speak for the same
+    money — otherwise capacity checks ignore a promise settlement converts.
+    """
+    if _financial_ad_payment_status(ad) == "not_paid":
+        method = str(ad.get("collectionMethod") or "")
+        if method == "in_shop":
+            return str(ad.get("receiptId") or "")
+        if method == "driver" and not str(ad.get("linkedDeliveryReceiptId") or ""):
+            return str(ad.get("receiptId") or "")
+    return str(ad.get("linkedDeliveryReceiptId") or "")
+
+
 def _financial_ad_general_usage(ad: dict[str, Any], receipt_id: str) -> int:
     """Mirror getReceiptUsageStats, including legacy records."""
     receipt_map = _financial_allocation_map(ad.get("receiptAllocations"))
-    due_map = _financial_allocation_map(ad.get("dueAllocations"))
     receipt_sum = receipt_map.get(receipt_id, 0)
-    due_sum = due_map.get(receipt_id, 0)
-    legacy_due = 0
-    if str(ad.get("linkedDeliveryReceiptId") or "") == receipt_id and due_sum == 0:
-        legacy_due = _financial_minor(ad.get("dueAmountToUseUSD"), "stored due allocation")
-        if legacy_due == 0 and ad.get("dueAmountToUseLYD"):
-            local_minor = _financial_minor(ad.get("dueAmountToUseLYD"), "stored due allocation")
-            rate = _financial_rate(ad.get("exchangeRate"))
-            legacy_due = int((Decimal(local_minor) / rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-    explicit = receipt_sum + due_sum + legacy_due
+    explicit = receipt_sum + _financial_ad_due_usage(ad, receipt_id)
     if explicit > 0:
         return explicit
     if isinstance(ad.get("receiptAllocations"), list) or isinstance(ad.get("dueAllocations"), list):
@@ -5956,10 +6368,17 @@ def _financial_ad_general_usage(ad: dict[str, Any], receipt_id: str) -> int:
 
 
 def _financial_ad_due_usage(ad: dict[str, Any], receipt_id: str) -> int:
-    due = _financial_allocation_map(ad.get("dueAllocations")).get(receipt_id, 0)
+    due_map = _financial_allocation_map(ad.get("dueAllocations"))
+    due = due_map.get(receipt_id, 0)
     if due > 0:
         return due
-    if str(ad.get("linkedDeliveryReceiptId") or "") != receipt_id:
+    # The scalar mirror is standalone money ONLY for rowless ads. Once due
+    # rows exist the writers keep dueAmountToUse* equal to their sum, so
+    # attributing it to the linked receipt as well would count the same
+    # dollars on two receipts at once.
+    if due_map:
+        return 0
+    if _financial_legacy_due_receipt_id(ad) != receipt_id:
         return 0
     direct = _financial_minor(ad.get("dueAmountToUseUSD"), "stored due allocation")
     if direct:
@@ -5984,15 +6403,11 @@ def _financial_ad_explicit_usage(ad: dict[str, Any], receipt_id: str) -> int:
     while being funded by the customer's cash, not by the receipt's credit.
     """
     paid_rows = _financial_allocation_map(ad.get("receiptAllocations")).get(receipt_id, 0)
-    due_rows = _financial_allocation_map(ad.get("dueAllocations")).get(receipt_id, 0)
-    legacy_due = 0
-    if str(ad.get("linkedDeliveryReceiptId") or "") == receipt_id and due_rows == 0:
-        legacy_due = _financial_minor(ad.get("dueAmountToUseUSD"), "stored due allocation")
-        if legacy_due == 0 and ad.get("dueAmountToUseLYD"):
-            local_minor = _financial_minor(ad.get("dueAmountToUseLYD"), "stored due allocation")
-            rate = _financial_rate(ad.get("exchangeRate"))
-            legacy_due = int((Decimal(local_minor) / rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-    return paid_rows + due_rows + legacy_due
+    # The due reader covers modern allocation rows plus both historical debt
+    # mirrors: driver links used linkedDeliveryReceiptId, while old In-Shop
+    # rows used receiptId.  Positive legacy debt is a real commitment; a bare
+    # zero-debt link remains provenance only.
+    return paid_rows + _financial_ad_due_usage(ad, receipt_id)
 
 
 def _financial_explicit_usage(
@@ -6175,6 +6590,10 @@ def _financial_receipt_ids(ad: dict[str, Any]) -> set[str]:
         if isinstance(baseline, list):
             baseline = {"receipt": baseline}
         if isinstance(baseline, dict):
+            if baseline_name == "stopAllocationBaseline" and baseline.get(
+                "dueLegacyReceiptId"
+            ):
+                ids.add(str(baseline["dueLegacyReceiptId"]))
             for value in baseline.values():
                 if isinstance(value, list):
                     for entry in value:
@@ -6268,7 +6687,9 @@ def _receipt_transfer_atomic(
 
             ad_rows = _financial_active_rows(conn, "ads")
             total = _financial_minor(source.get("amountUSD"), "receipt amount")
-            committed = _financial_usage(ad_rows, source_id) + _financial_outgoing(source)
+            committed = _financial_committed_usage(
+                ad_rows, source_id
+            ) + _financial_outgoing(source)
             if committed + int(body.amountMinorUSD) > total:
                 raise HTTPException(status_code=409, detail="Insufficient available receipt balance")
 
@@ -6446,7 +6867,7 @@ def _financial_validate_paid_receipts(
         if str(data.get("customerId") or "") != customer_id:
             raise HTTPException(status_code=400, detail="Funding receipt belongs to another customer")
         total = _financial_minor(data.get("amountUSD"), "receipt amount")
-        committed = _financial_usage(
+        committed = _financial_committed_usage(
             ad_rows, receipt_id, exclude_ad_id=current_ad_id
         ) + _financial_outgoing(data)
         requested = _financial_minor(allocation.get("amountUSD"), "receipt allocation")
@@ -6587,6 +7008,13 @@ def _financial_derive_ad(
         "spentUSD",
         "stoppedAt",
         "stopAllocationBaseline",
+        "refundAllocationBaseline",
+        "refundDueBaseline",
+        "refundBaselinePaymentStatus",
+        "preRefundStatus",
+        "remainingCustomerInformed",
+        "remainingCustomerInformedAt",
+        "remainingCustomerInformedBy",
         "receiptIds",
         "fundingReceiptId",
         "dueAmountToUseUSD",
@@ -6632,6 +7060,30 @@ def _financial_derive_ad(
     payments: list[dict[str, Any]] = []
     amount_minor = 0
     if payment_status == "paid":
+        if any(
+            _financial_allocations(value, name)
+            for name, value in (
+                (
+                    "dueAllocations",
+                    clean.get("dueAllocations")
+                    if "dueAllocations" in clean
+                    else None,
+                ),
+                (
+                    "mergedPaidAllocations",
+                    clean.get("mergedPaidAllocations")
+                    if "mergedPaidAllocations" in clean
+                    else None,
+                ),
+            )
+        ):
+            # A Paid ad cannot quietly carry an unpaid promise.  Without this
+            # guard a forged/stale client could label the whole ad Paid while
+            # the server silently discarded its due rows and erased the debt.
+            raise HTTPException(
+                status_code=400,
+                detail="Paid ads cannot use unpaid receipt funding",
+            )
         paid_allocations = _financial_allocations(
             paid_request, "receiptAllocations", allow_empty=False
         )
@@ -6742,20 +7194,30 @@ def _financial_derive_ad(
         base["deliveryStatus"] = "Office"
     elif payment_status == "not_paid" and collection_method == "in_shop" and due_request:
         # A receipt created as Not Paid + In Shop is a promise to pay, not cash.
-        # Reserve the chosen portion through dueAllocations so the ad is real
-        # customer debt now, then the same receipt can become paid later.
-        if any(
-            _financial_allocations(value, name)
-            for name, value in (
-                ("receiptAllocations", paid_request),
-                ("mergedPaidAllocations", merged_request),
+        # Reserve the unpaid portion through dueAllocations, while allowing
+        # already-paid receipt credit to cover the first part of the budget.
+        # Example: $4.63 paid + $0.37 due = a $5.00 ad whose remaining debt is
+        # still $0.37.  Keep mergedPaidAllocations reserved for the historical
+        # Driver mirror; In Shop paid rows live only in receiptAllocations.
+        if _financial_allocations(merged_request, "mergedPaidAllocations"):
+            raise HTTPException(
+                status_code=400,
+                detail="In Shop paid funding must use receiptAllocations",
             )
-        ):
-            raise HTTPException(status_code=400, detail="An unpaid In Shop ad cannot use paid receipt funds")
+        paid_allocations = _financial_allocations(
+            paid_request, "receiptAllocations"
+        )
         due_allocations = _financial_allocations(
             due_request, "dueAllocations", allow_empty=False
         )
         linked_id = validate_entity_id(base.get("receiptId") or due_allocations[0]["receiptId"])
+        _financial_validate_paid_receipts(
+            paid_allocations,
+            customer_id=customer_id,
+            locked_receipts=locked_receipts,
+            ad_rows=ad_rows,
+            current_ad_id=current_ad_id,
+        )
         _financial_validate_shop_due_receipt(
             due_allocations,
             linked_receipt_id=linked_id,
@@ -6765,19 +7227,63 @@ def _financial_derive_ad(
             current_ad_id=current_ad_id,
         )
         _financial_validate_combined_capacity(
-            [],
+            paid_allocations,
             due_allocations,
             locked_receipts=locked_receipts,
             ad_rows=ad_rows,
             current_ad_id=current_ad_id,
         )
         amount_minor = sum(
-            _financial_minor(row["amountUSD"], "shop due allocation")
-            for row in due_allocations
+            _financial_minor(row["amountUSD"], "shop receipt allocation")
+            for row in [*paid_allocations, *due_allocations]
         )
         linked_row = locked_receipts.get(linked_id)
         linked_data = _financial_row_data(linked_row) if linked_row else {}
         base["exchangeRate"] = linked_data.get("exchangeRate") or base.get("exchangeRate")
+        base["deliveryPersonId"] = ""
+        base["deliveryStatus"] = "Office"
+        payments = []
+    elif (
+        payment_status == "not_paid"
+        and collection_method == "in_shop"
+        and existing
+        and _financial_ad_payment_status(existing) == "not_paid"
+        and str(existing.get("collectionMethod") or "") == "in_shop"
+        and not _financial_allocations(existing.get("dueAllocations"), "stored dueAllocations")
+        and not str(existing.get("receiptId") or "")
+    ):
+        # Canceling/loss of the linked unpaid receipt releases its due row but
+        # deliberately keeps the original ad debt.  A later ordinary edit must
+        # preserve both that debt and any already-paid receipt portion rather
+        # than rejecting the record or shrinking its amount to the paid rows.
+        if _financial_allocations(merged_request, "mergedPaidAllocations"):
+            raise HTTPException(
+                status_code=400,
+                detail="In Shop paid funding must use receiptAllocations",
+            )
+        paid_allocations = _financial_allocations(
+            paid_request, "receiptAllocations"
+        )
+        _financial_validate_paid_receipts(
+            paid_allocations,
+            customer_id=customer_id,
+            locked_receipts=locked_receipts,
+            ad_rows=ad_rows,
+            current_ad_id=current_ad_id,
+        )
+        amount_minor = _financial_minor(
+            existing.get("amountUSD"), "existing In Shop ad amount"
+        )
+        paid_minor = sum(
+            _financial_minor(row["amountUSD"], "shop receipt allocation")
+            for row in paid_allocations
+        )
+        if paid_minor > amount_minor:
+            raise HTTPException(
+                status_code=400,
+                detail="In Shop paid funding cannot exceed the ad amount",
+            )
+        linked_id = ""
         base["deliveryPersonId"] = ""
         base["deliveryStatus"] = "Office"
         payments = []
@@ -6887,8 +7393,22 @@ def _financial_apply_refund(
 
     current_paid = _financial_allocations(existing.get("receiptAllocations"), "receiptAllocations")
     current_due = _financial_allocations(existing.get("dueAllocations"), "dueAllocations")
-    stored_paid_baseline = existing.get("refundAllocationBaseline")
-    stored_due_baseline = existing.get("refundDueBaseline")
+    existing_refund_type = str(existing.get("refundType") or "None")
+    existing_refund_active = existing_refund_type in {"Full", "Partial"}
+    # Refund baselines are authoritative only while the row is actually in an
+    # active refund lifecycle.  Old/corrupt rows can contain stale or forged
+    # baseline metadata beside refundType=None; trusting it on an "undo" would
+    # replace the current allocations with stale/empty rows and free committed
+    # receipt money for a second spend.
+    stored_paid_baseline = (
+        existing.get("refundAllocationBaseline") if existing_refund_active else None
+    )
+    stored_due_baseline = (
+        existing.get("refundDueBaseline") if existing_refund_active else None
+    )
+    if not existing_refund_active:
+        result.pop("refundBaselinePaymentStatus", None)
+        result.pop("preRefundStatus", None)
     paid_baseline = _financial_allocations(
         stored_paid_baseline if isinstance(stored_paid_baseline, list) else current_paid,
         "refundAllocationBaseline",
@@ -6903,7 +7423,7 @@ def _financial_apply_refund(
     # for exactly the records the fix is meant to serve. Stand the mirror up as the
     # allocation it represents so the refund has something to give back.
     if not isinstance(stored_due_baseline, list) and not due_baseline:
-        linked_due_id = str(existing.get("linkedDeliveryReceiptId") or "")
+        linked_due_id = _financial_legacy_due_receipt_id(existing)
         legacy_due_minor = 0
         if linked_due_id:
             legacy_due_minor = _financial_minor(
@@ -6933,11 +7453,48 @@ def _financial_apply_refund(
         result.pop("spentUSD", None)
         # Undo returns to the status that existed before the refund. Legacy
         # rows did not save it, so Active is the conservative usable default.
-        result["status"] = str(existing.get("preRefundStatus") or "Active")
+        result["status"] = str(
+            existing.get("preRefundStatus")
+            if existing_refund_active and existing.get("preRefundStatus")
+            else existing.get("status") or "Active"
+        )
         result.pop("preRefundStatus", None)
+        if (
+            existing_refund_active
+            and str(existing.get("refundBaselinePaymentStatus") or "") == "paid"
+        ):
+            payment_status = "paid"
+            result["paymentStatus"] = "paid"
+            result["isPaid"] = True
+            result["collectionMethod"] = ""
+            result["collectionPayments"] = []
+            result["paymentMethod"] = ""
+            result["linkedDeliveryReceiptId"] = ""
+        result.pop("refundBaselinePaymentStatus", None)
     else:
-        reduced_paid, remaining = _financial_reduce_allocations(paid_baseline, refund_amount)
-        reduced_due, _ = _financial_reduce_allocations(due_baseline, remaining)
+        is_mixed_shop_debt = (
+            payment_status == "not_paid"
+            and str(result.get("collectionMethod") or "") == "in_shop"
+            and bool(paid_baseline)
+            and bool(due_baseline)
+        )
+        if is_mixed_shop_debt:
+            # Return the still-unpaid promise before returning money the
+            # customer already paid.  For $4.63 paid + $0.37 due, a $0.50
+            # refund must release all $0.37 debt and only $0.13 paid credit.
+            reduced_due, remaining = _financial_reduce_allocations(
+                due_baseline, refund_amount
+            )
+            reduced_paid, _ = _financial_reduce_allocations(
+                paid_baseline, remaining
+            )
+        else:
+            reduced_paid, remaining = _financial_reduce_allocations(
+                paid_baseline, refund_amount
+            )
+            reduced_due, _ = _financial_reduce_allocations(
+                due_baseline, remaining
+            )
         result["receiptAllocations"] = reduced_paid
         result["dueAllocations"] = reduced_due
         result["refundAllocationBaseline"] = paid_baseline
@@ -6945,7 +7502,11 @@ def _financial_apply_refund(
         result["refundType"] = refund_type
         result["refundAmount"] = _financial_usd(refund_amount)
         result["refundStatus"] = sanitize_str(str(requested.get("refundStatus") or "Pending"), 40)
-        result["preRefundStatus"] = str(existing.get("preRefundStatus") or existing.get("status") or "Active")
+        result["preRefundStatus"] = str(
+            existing.get("preRefundStatus")
+            if existing_refund_active and existing.get("preRefundStatus")
+            else existing.get("status") or "Active"
+        )
         result["status"] = "Canceled"
         result["canceledBy"] = str(actor.get("id") or "")
         result["spentUSD"] = _financial_usd(ad_amount - refund_amount)
@@ -6957,6 +7518,8 @@ def _financial_apply_refund(
         result["mergedPaidAllocations"] = paid
     result["receiptIds"] = [row["receiptId"] for row in paid]
     result["fundingReceiptId"] = paid[0]["receiptId"] if paid else ""
+    if payment_status == "paid":
+        result["receiptId"] = paid[0]["receiptId"] if paid else ""
     result["dueAmountToUseUSD"] = _financial_usd(
         sum(_financial_minor(row["amountUSD"], "due allocation") for row in due)
     )
@@ -7179,6 +7742,11 @@ def _ad_mutation_atomic(
                 if is_topup:
                     saved_data["initialAmountUSD"] = _financial_usd(base_minor)
 
+            # A customer confirmation belongs to one exact remaining amount.
+            # Preserve it across unrelated edits, but never carry it across a
+            # changed budget/spend (including refund-derived spend changes).
+            _financial_clear_changed_remaining_confirmation(existing, saved_data)
+
             # The customer itself must be active; funding receipts were already
             # locked in deterministic order above.
             customer_id = validate_entity_id(saved_data.get("customerId"))
@@ -7236,23 +7804,35 @@ def _financial_stop_baseline(ad: dict[str, Any]) -> dict[str, Any]:
         due = _financial_allocations(stored.get("due"), "stop baseline due")
         merged = _financial_allocations(stored.get("merged"), "stop baseline merged")
         legacy = _financial_minor(stored.get("dueLegacy"), "stop baseline legacy due")
+        legacy_receipt_id = str(
+            stored.get("dueLegacyReceiptId")
+            or _financial_legacy_due_receipt_id(ad)
+            or ""
+        )
         return {
             "receipt": receipt,
             "due": due,
             "merged": merged,
             "dueLegacy": _financial_usd(legacy),
+            "dueLegacyReceiptId": legacy_receipt_id if legacy > 0 else "",
+            "paymentStatus": str(stored.get("paymentStatus") or ""),
         }
     receipt = _financial_allocations(ad.get("receiptAllocations"), "receiptAllocations")
     due = _financial_allocations(ad.get("dueAllocations"), "dueAllocations")
     merged = _financial_allocations(ad.get("mergedPaidAllocations"), "mergedPaidAllocations")
     legacy = 0
+    legacy_receipt_id = ""
     if not due:
-        legacy = _financial_minor(ad.get("dueAmountToUseUSD"), "legacy due allocation")
+        legacy_receipt_id = _financial_legacy_due_receipt_id(ad)
+        if legacy_receipt_id:
+            legacy = _financial_ad_due_usage(ad, legacy_receipt_id)
     return {
         "receipt": receipt,
         "due": due,
         "merged": merged,
         "dueLegacy": _financial_usd(legacy),
+        "dueLegacyReceiptId": legacy_receipt_id if legacy > 0 else "",
+        "paymentStatus": _financial_ad_payment_status(ad),
     }
 
 
@@ -7264,7 +7844,11 @@ def _financial_apply_stop(ad: dict[str, Any], spent_minor: int) -> dict[str, Any
     receipt_map = _financial_allocation_map(baseline.get("receipt"))
     due_map = _financial_allocation_map(baseline.get("due"))
     legacy_minor = _financial_minor(baseline.get("dueLegacy"), "stop baseline legacy due")
-    linked_id = str(ad.get("linkedDeliveryReceiptId") or "")
+    linked_id = str(
+        baseline.get("dueLegacyReceiptId")
+        or _financial_legacy_due_receipt_id(ad)
+        or ""
+    )
     entries: list[tuple[str, str, int]] = [
         *(('receipt', receipt_id, amount) for receipt_id, amount in sorted(receipt_map.items())),
         *(('due', receipt_id, amount) for receipt_id, amount in sorted(due_map.items())),
@@ -7274,17 +7858,54 @@ def _financial_apply_stop(ad: dict[str, Any], spent_minor: int) -> dict[str, Any
     pool_total = sum(entry[2] for entry in entries)
     if pool_total > 0 and spent_minor > pool_total:
         raise HTTPException(status_code=409, detail="Spent amount exceeds the ad's funding baseline")
-    plan = _financial_proportional_plan(entries, spent_minor)
+    is_mixed_shop_debt = (
+        _financial_ad_payment_status(ad) == "not_paid"
+        and str(ad.get("collectionMethod") or "") == "in_shop"
+        and bool(receipt_map)
+        and bool(due_map or (legacy_minor and linked_id))
+    )
+    if is_mixed_shop_debt:
+        # Spend already-paid money first.  Only the part Facebook spent above
+        # that paid portion remains promised on the unpaid receipt.  A
+        # proportional split would unnecessarily keep customer debt locked.
+        plan: dict[tuple[str, str], int] = {}
+        remaining_spent = spent_minor
+        for kind, receipt_id, capacity in entries:
+            if kind != "receipt":
+                continue
+            used = min(capacity, remaining_spent)
+            plan[(kind, receipt_id)] = used
+            remaining_spent -= used
+        for kind, receipt_id, capacity in entries:
+            if kind == "receipt":
+                continue
+            used = min(capacity, remaining_spent)
+            plan[(kind, receipt_id)] = used
+            remaining_spent -= used
+        if remaining_spent > 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Spent amount exceeds the ad's funding baseline",
+            )
+    else:
+        plan = _financial_proportional_plan(entries, spent_minor)
     receipt_plan = [
         {"receiptId": receipt_id, "amountUSD": _financial_usd(plan[("receipt", receipt_id)])}
         for receipt_id in sorted(receipt_map)
+        if plan[("receipt", receipt_id)] > 0
     ]
     due_plan = [
         {"receiptId": receipt_id, "amountUSD": _financial_usd(plan[("due", receipt_id)])}
         for receipt_id in sorted(due_map)
+        if plan[("due", receipt_id)] > 0
     ]
     result = dict(ad)
-    payment_status = _financial_ad_payment_status(result)
+    baseline_payment = str(baseline.get("paymentStatus") or "")
+    payment_status = (
+        baseline_payment
+        if baseline_payment in {"paid", "not_paid", "wont_pay"}
+        else _financial_ad_payment_status(result)
+    )
     result["paymentStatus"] = payment_status
     result["isPaid"] = payment_status == "paid"
     result["stopAllocationBaseline"] = baseline
@@ -7298,15 +7919,38 @@ def _financial_apply_stop(ad: dict[str, Any], spent_minor: int) -> dict[str, Any
     if legacy_minor and linked_id:
         due_total += plan[("legacyDue", linked_id)]
     result["dueAmountToUseUSD"] = _financial_usd(due_total)
+    # Any LYD-only mirror has now been folded into the exact USD baseline.
+    # Leaving it behind would make a zero-spend re-stop fall back to the stale
+    # original LYD debt and lock the receipt again.
+    result["dueAmountToUseLYD"] = 0.0
     result["receiptIds"] = [row["receiptId"] for row in receipt_plan]
     result["fundingReceiptId"] = receipt_plan[0]["receiptId"] if receipt_plan else ""
     result["hasMergedPaidFunds"] = bool(receipt_plan) and payment_status == "not_paid"
+    if payment_status == "paid":
+        result["collectionMethod"] = ""
+        result["collectionPayments"] = []
+        result["paymentMethod"] = ""
+        result["linkedDeliveryReceiptId"] = ""
+        result["receiptId"] = receipt_plan[0]["receiptId"] if receipt_plan else ""
     result["status"] = "Stopped"
     result["spentUSD"] = _financial_usd(spent_minor)
     if not result.get("stoppedAt"):
         result["stoppedAt"] = _iso_utc()
     result["lastUpdated"] = _iso_utc()
     return result
+
+
+def _financial_ad_reconciliation_ready(ad: dict[str, Any]) -> bool:
+    """True from the Libyan calendar day after the stored ad end date."""
+    raw = str(ad.get("endDate") or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:.*)?", raw):
+        return False
+    try:
+        end_day = datetime.strptime(raw[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    tripoli_today = (datetime.now(timezone.utc) + timedelta(hours=2)).date()
+    return tripoli_today > end_day
 
 
 def _ad_stop_atomic(
@@ -7317,13 +7961,16 @@ def _ad_stop_atomic(
     if not user_has_permission(actor, "ads", "stopAd"):
         raise HTTPException(status_code=403, detail="Forbidden")
     idem = sanitize_str(body.idempotencyKey, 120)
-    request_hash = _financial_request_hash(
-        {
-            "adId": ad_id,
-            "spentMinorUSD": body.spentMinorUSD,
-            "expectedLastModified": body.expectedLastModified,
-        }
-    )
+    request_identity = {
+        "adId": ad_id,
+        "spentMinorUSD": body.spentMinorUSD,
+        "expectedLastModified": body.expectedLastModified,
+    }
+    # Keep false/omitted requests compatible with stop markers written by the
+    # previous release; only the new affirmative confirmation changes identity.
+    if body.customerInformed:
+        request_identity["customerInformed"] = True
+    request_hash = _financial_request_hash(request_identity)
     postgres = str(get_engine().dialect.name or "") == "postgresql"
     guard = nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK
     with guard:
@@ -7351,11 +7998,41 @@ def _ad_stop_atomic(
             ad = _financial_row_data(ad_row)
             if _financial_receipt_ids(ad) - set(locked_receipts):
                 raise HTTPException(status_code=409, detail="Conflict: ad funding has changed")
-            if str(ad.get("status") or "") in {"Canceled", "Completed", "Lost"} or (
+            status = str(ad.get("status") or "")
+            completed_too_early = status == "Completed" and not _financial_ad_reconciliation_ready(ad)
+            if status in {"Canceled", "Lost"} or completed_too_early or (
                 ad.get("refundType") and str(ad.get("refundType")) != "None"
             ):
                 raise HTTPException(status_code=409, detail="A terminal or refunded ad cannot be stopped")
             plan = _financial_apply_stop(ad, int(body.spentMinorUSD))
+            amount_minor = _financial_minor(plan.get("amountUSD"), "ad amount")
+            new_remaining_minor = max(amount_minor - int(body.spentMinorUSD), 0)
+            confirmed_remaining_minor = _financial_confirmed_remaining_minor(ad)
+            existing_confirmation_applies = (
+                new_remaining_minor > 0
+                and confirmed_remaining_minor is not None
+                and confirmed_remaining_minor == new_remaining_minor
+            )
+            fresh_confirmation = (
+                body.customerInformed is True and new_remaining_minor > 0
+            )
+            informed = existing_confirmation_applies or fresh_confirmation
+            plan["remainingCustomerInformed"] = informed
+            if existing_confirmation_applies:
+                plan["remainingCustomerInformedAt"] = (
+                    ad.get("remainingCustomerInformedAt") or _iso_utc()
+                )
+                plan["remainingCustomerInformedBy"] = (
+                    ad.get("remainingCustomerInformedBy") or actor_id
+                )
+            elif fresh_confirmation:
+                # The remainder changed, so this is a new confirmation. Do not
+                # reuse the timestamp/person from the amount confirmed before.
+                plan["remainingCustomerInformedAt"] = _iso_utc()
+                plan["remainingCustomerInformedBy"] = actor_id
+            else:
+                plan.pop("remainingCustomerInformedAt", None)
+                plan.pop("remainingCustomerInformedBy", None)
             _financial_validate_ad_plan(
                 plan,
                 locked_receipts=locked_receipts,
@@ -7408,13 +8085,17 @@ def _financial_release_canceled_due(
             and str(ad.get("collectionMethod") or "") == "in_shop"
             and str(ad.get("receiptId") or "") == receipt_id
         )
+        legacy_due_receipt_id = _financial_legacy_due_receipt_id(ad)
         due = [
             dict(entry)
             for entry in (ad.get("dueAllocations") or [])
             if isinstance(entry, dict) and str(entry.get("receiptId") or "") != receipt_id
         ]
         ad["dueAllocations"] = due
-        if str(ad.get("linkedDeliveryReceiptId") or "") == receipt_id or is_shop_link:
+        # Zero the mirror for every identity the due reader recognizes —
+        # including the oldest driver rows linked only via receiptId —
+        # so a canceled receipt never keeps backing an ad budget.
+        if legacy_due_receipt_id == receipt_id or is_shop_link:
             ad["dueAmountToUseUSD"] = 0.0
             ad["dueAmountToUseLYD"] = 0.0
         if is_shop_link:
@@ -7427,8 +8108,14 @@ def _financial_release_canceled_due(
                 for entry in (baseline.get("due") or [])
                 if isinstance(entry, dict) and str(entry.get("receiptId") or "") != receipt_id
             ]
-            if str(ad.get("linkedDeliveryReceiptId") or "") == receipt_id or is_shop_link:
+            baseline_legacy_receipt_id = str(
+                baseline.get("dueLegacyReceiptId")
+                or legacy_due_receipt_id
+                or ""
+            )
+            if baseline_legacy_receipt_id == receipt_id:
                 next_baseline["dueLegacy"] = 0.0
+                next_baseline["dueLegacyReceiptId"] = ""
             ad["stopAllocationBaseline"] = next_baseline
         if isinstance(ad.get("refundDueBaseline"), list):
             ad["refundDueBaseline"] = [
@@ -7440,26 +8127,402 @@ def _financial_release_canceled_due(
     return saved
 
 
+def _financial_rows_from_allocation_map(values: dict[str, int]) -> list[dict[str, Any]]:
+    """Return deterministic, exact-cent allocation rows from a minor-unit map."""
+    return [
+        {"receiptId": receipt_id, "amountUSD": _financial_usd(amount)}
+        for receipt_id, amount in sorted(values.items())
+        if amount > 0
+    ]
+
+
+def _financial_ad_effective_amount(ad: dict[str, Any]) -> int:
+    """Amount that still needs funding after stop/refund reconciliation."""
+    value = ad.get("spentUSD") if ad.get("spentUSD") is not None else ad.get("amountUSD")
+    return _financial_minor(value, "ad settlement amount")
+
+
+def _financial_reclassify_ad_for_paid_receipt(
+    ad: dict[str, Any], receipt_id: str, *, actor_id: str
+) -> dict[str, Any] | None:
+    """Move one receipt's due promise into paid funding without changing value.
+
+    Older ads can store explicit due money in a legacy dueAmount mirror instead
+    of an allocation row. Capacity is checked for the complete batch before
+    any row is written. A receipt reference with zero due remains provenance
+    only and never mints an allocation.
+    """
+    payment_status = _financial_ad_payment_status(ad)
+    collection_method = str(ad.get("collectionMethod") or "")
+    is_driver_link = (
+        payment_status == "not_paid"
+        and collection_method == "driver"
+        and str(ad.get("linkedDeliveryReceiptId") or ad.get("receiptId") or "")
+        == receipt_id
+    )
+    is_shop_link = (
+        payment_status == "not_paid"
+        and collection_method == "in_shop"
+        and str(ad.get("receiptId") or "") == receipt_id
+    )
+
+    paid_map = _financial_allocation_map(ad.get("receiptAllocations"))
+    due_map = _financial_allocation_map(ad.get("dueAllocations"))
+    moved_minor = due_map.pop(receipt_id, 0)
+    if moved_minor == 0 and (is_driver_link or is_shop_link):
+        moved_minor = _financial_ad_due_usage(ad, receipt_id)
+    # The direct mirror fallback likewise only speaks for rowless ads: with
+    # due rows surviving for other receipts, the scalar is their sum and
+    # converting it would mint the same money a second time.
+    if moved_minor == 0 and is_shop_link and not due_map:
+        moved_minor = _financial_minor(
+            ad.get("dueAmountToUseUSD"), "stored legacy shop due allocation"
+        )
+        if moved_minor == 0 and ad.get("dueAmountToUseLYD"):
+            local_minor = _financial_minor(
+                ad.get("dueAmountToUseLYD"), "stored legacy shop due allocation"
+            )
+            moved_minor = int(
+                (Decimal(local_minor) / _financial_rate(ad.get("exchangeRate"))).quantize(
+                    Decimal("1"), rounding=ROUND_HALF_UP
+                )
+            )
+
+    stop_baseline = ad.get("stopAllocationBaseline")
+    stop_paid: dict[str, int] = {}
+    stop_due: dict[str, int] = {}
+    stop_moved = 0
+    stop_legacy = 0
+    if isinstance(stop_baseline, dict):
+        stop_paid = _financial_allocation_map(stop_baseline.get("receipt"))
+        stop_due = _financial_allocation_map(stop_baseline.get("due"))
+        stop_moved = stop_due.pop(receipt_id, 0)
+        stop_legacy_receipt_id = str(
+            stop_baseline.get("dueLegacyReceiptId")
+            or _financial_legacy_due_receipt_id(ad)
+            or ""
+        )
+        if stop_legacy_receipt_id == receipt_id and stop_moved == 0:
+            stop_legacy = _financial_minor(
+                stop_baseline.get("dueLegacy"), "stop baseline legacy due"
+            )
+
+    refund_paid = _financial_allocation_map(ad.get("refundAllocationBaseline"))
+    refund_due = _financial_allocation_map(ad.get("refundDueBaseline"))
+    refund_moved = refund_due.pop(receipt_id, 0)
+    baseline_changed = (stop_moved + stop_legacy + refund_moved) > 0
+    if moved_minor <= 0 and not baseline_changed:
+        return None
+
+    result = dict(ad)
+    fully_funded = False
+    if moved_minor > 0:
+        # A delivery/shop link is provenance, not money by itself. Only an
+        # explicit due allocation (or legacy mirror) can become paid funding.
+        next_paid = dict(paid_map)
+        next_paid[receipt_id] = next_paid.get(receipt_id, 0) + moved_minor
+        total_after = sum(next_paid.values()) + sum(due_map.values())
+        target_minor = _financial_ad_effective_amount(ad)
+        if total_after > target_minor:
+            raise HTTPException(
+                status_code=409,
+                detail="Linked ad funding exceeds its authoritative amount",
+            )
+
+        result["receiptAllocations"] = _financial_rows_from_allocation_map(next_paid)
+        result["dueAllocations"] = _financial_rows_from_allocation_map(due_map)
+        result["dueAmountToUseUSD"] = _financial_usd(sum(due_map.values()))
+        result["dueAmountToUseLYD"] = 0.0
+        fully_funded = total_after == target_minor and not due_map
+        if fully_funded:
+            result["paymentStatus"] = "paid"
+            result["isPaid"] = True
+            result["collectionMethod"] = ""
+            result["collectionPayments"] = []
+            result["paymentMethod"] = ""
+            result["linkedDeliveryReceiptId"] = ""
+            result["mergedPaidAllocations"] = []
+            result["hasMergedPaidFunds"] = False
+        else:
+            result["paymentStatus"] = "not_paid"
+            result["isPaid"] = False
+            result["mergedPaidAllocations"] = (
+                [dict(row) for row in result["receiptAllocations"]]
+                if collection_method == "driver"
+                else []
+            )
+            result["hasMergedPaidFunds"] = (
+                bool(result["receiptAllocations"])
+                if collection_method == "driver"
+                else False
+            )
+            if collection_method == "in_shop" and not due_map:
+                result["receiptId"] = ""
+
+        paid_ids = [str(row["receiptId"]) for row in result["receiptAllocations"]]
+        result["receiptIds"] = paid_ids
+        result["fundingReceiptId"] = paid_ids[0] if paid_ids else ""
+        if fully_funded:
+            result["receiptId"] = paid_ids[0] if paid_ids else ""
+
+    # Frozen reconciliation/refund baselines move even if the live allocation
+    # is currently zero (stopped-at-zero or fully refunded). Otherwise a later
+    # re-stop/refund undo would resurrect unpaid debt against a paid receipt.
+    if isinstance(stop_baseline, dict) and (stop_moved or stop_legacy):
+        stop_paid[receipt_id] = (
+            stop_paid.get(receipt_id, 0) + stop_moved + stop_legacy
+        )
+        next_baseline = dict(stop_baseline)
+        next_baseline["receipt"] = _financial_rows_from_allocation_map(stop_paid)
+        next_baseline["due"] = _financial_rows_from_allocation_map(stop_due)
+        next_baseline["dueLegacy"] = 0.0
+        next_baseline["dueLegacyReceiptId"] = ""
+        if (
+            not stop_due
+            and sum(stop_paid.values()) == _financial_minor(ad.get("amountUSD"), "ad amount")
+        ):
+            next_baseline["paymentStatus"] = "paid"
+        next_baseline["merged"] = (
+            [dict(row) for row in next_baseline["receipt"]]
+            if str(next_baseline.get("paymentStatus") or "") != "paid"
+            and _financial_ad_payment_status(result) == "not_paid"
+            and str(result.get("collectionMethod") or "") == "driver"
+            else []
+        )
+        result["stopAllocationBaseline"] = next_baseline
+
+    if refund_moved:
+        refund_paid[receipt_id] = refund_paid.get(receipt_id, 0) + refund_moved
+        result["refundAllocationBaseline"] = _financial_rows_from_allocation_map(refund_paid)
+        result["refundDueBaseline"] = _financial_rows_from_allocation_map(refund_due)
+        if (
+            not refund_due
+            and sum(refund_paid.values()) == _financial_minor(ad.get("amountUSD"), "ad amount")
+        ):
+            result["refundBaselinePaymentStatus"] = "paid"
+
+    # A stopped/refunded row can have no live due allocation while its frozen
+    # baseline carried the promise we just converted. If its live paid rows
+    # already cover the effective current spend (including a zero-spend stop
+    # or full refund), its current badge must become Paid now—not only after a
+    # later re-stop/refund undo.
+    live_paid = _financial_allocation_map(result.get("receiptAllocations"))
+    live_due = _financial_allocation_map(result.get("dueAllocations"))
+    live_target = _financial_ad_effective_amount(result)
+    if baseline_changed and not live_due and sum(live_paid.values()) == live_target:
+        result["paymentStatus"] = "paid"
+        result["isPaid"] = True
+        result["collectionMethod"] = ""
+        result["collectionPayments"] = []
+        result["paymentMethod"] = ""
+        result["linkedDeliveryReceiptId"] = ""
+        result["mergedPaidAllocations"] = []
+        result["hasMergedPaidFunds"] = False
+        paid_rows = _financial_rows_from_allocation_map(live_paid)
+        paid_ids = [str(row["receiptId"]) for row in paid_rows]
+        result["receiptAllocations"] = paid_rows
+        result["receiptIds"] = paid_ids
+        result["fundingReceiptId"] = paid_ids[0] if paid_ids else ""
+        result["receiptId"] = paid_ids[0] if paid_ids else receipt_id
+        result["dueAmountToUseUSD"] = 0.0
+        result["dueAmountToUseLYD"] = 0.0
+
+    result["settledReceiptId"] = receipt_id
+    result["receiptSettledAt"] = _iso_utc()
+    result["receiptSettledBy"] = actor_id
+    result["lastUpdated"] = _iso_utc()
+    return result
+
+
+def _financial_prepare_paid_receipt_ad_updates(
+    conn: Any,
+    receipt_id: str,
+    receipt: dict[str, Any],
+    ad_rows: list[Any],
+    *,
+    actor_id: str,
+    postgres: bool,
+) -> list[tuple[Any, dict[str, Any]]]:
+    """Lock, plan and validate every linked ad before the first write."""
+    customer_id = str(receipt.get("customerId") or "")
+    discovered: list[Any] = []
+    for row in ad_rows:
+        ad = _financial_row_data(row)
+        due_link = _financial_ad_due_usage(ad, receipt_id) > 0
+        legacy_shop_due = 0
+        if (
+            _financial_ad_payment_status(ad) == "not_paid"
+            and str(ad.get("collectionMethod") or "") == "in_shop"
+            and str(ad.get("receiptId") or "") == receipt_id
+        ):
+            legacy_shop_due = _financial_minor(
+                ad.get("dueAmountToUseUSD"), "stored legacy shop due allocation"
+            )
+            if legacy_shop_due == 0 and ad.get("dueAmountToUseLYD"):
+                local_minor = _financial_minor(
+                    ad.get("dueAmountToUseLYD"), "stored legacy shop due allocation"
+                )
+                legacy_shop_due = int(
+                    (
+                        Decimal(local_minor)
+                        / _financial_rate(ad.get("exchangeRate"))
+                    ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+                )
+        stop_baseline = ad.get("stopAllocationBaseline")
+        stop_baseline_due = 0
+        if isinstance(stop_baseline, dict):
+            stop_baseline_due = _financial_allocation_map(
+                stop_baseline.get("due")
+            ).get(receipt_id, 0)
+            stop_legacy_receipt_id = str(
+                stop_baseline.get("dueLegacyReceiptId")
+                or _financial_legacy_due_receipt_id(ad)
+                or ""
+            )
+            if stop_baseline_due == 0 and stop_legacy_receipt_id == receipt_id:
+                stop_baseline_due = _financial_minor(
+                    stop_baseline.get("dueLegacy"), "stop baseline legacy due"
+                )
+        refund_baseline_due = _financial_allocation_map(
+            ad.get("refundDueBaseline")
+        ).get(receipt_id, 0)
+        if (
+            due_link
+            or legacy_shop_due > 0
+            or stop_baseline_due > 0
+            or refund_baseline_due > 0
+        ):
+            discovered.append(row)
+
+    plans: list[tuple[Any, dict[str, Any]]] = []
+    planned_by_id: dict[str, dict[str, Any]] = {}
+    for discovered_row in sorted(discovered, key=lambda item: str(item.get("id") or "")):
+        ad_id = str(discovered_row.get("id") or "")
+        ad_row = _clothes_lock_row(conn, "ads", ad_id, postgres=postgres)
+        if not ad_row or bool(ad_row["deleted"]):
+            continue
+        ad = _financial_row_data(ad_row)
+        plan = _financial_reclassify_ad_for_paid_receipt(
+            ad, receipt_id, actor_id=actor_id
+        )
+        if plan is None:
+            continue
+        if str(plan.get("customerId") or "") != customer_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Linked ad and receipt belong to different customers",
+            )
+        planned_by_id[ad_id] = plan
+        plans.append((ad_row, plan))
+
+    committed = _financial_outgoing(receipt)
+    for row in ad_rows:
+        ad_id = str(row.get("id") or "")
+        data = planned_by_id.get(ad_id) or _financial_row_data(row)
+        if str(data.get("recordType") or "") != "receipt":
+            committed += _financial_ad_committed(data, receipt_id)
+    if committed > _financial_due_total(receipt):
+        raise HTTPException(
+            status_code=409,
+            detail="Paid receipt balance is insufficient for all linked ads",
+        )
+    return plans
+
+
+def _financial_normalize_receipt_paid_pair(
+    old: dict[str, Any], updates: dict[str, Any]
+) -> None:
+    """Keep receipt status/isPaid canonical for every generic and dedicated path."""
+    explicit_status = "status" in updates
+    explicit_paid = "isPaid" in updates
+    requested_status = str(updates.get("status") or "") if explicit_status else ""
+    requested_paid = updates.get("isPaid") if explicit_paid else None
+    if explicit_paid and not isinstance(requested_paid, bool):
+        raise HTTPException(status_code=400, detail="Receipt isPaid must be true or false")
+    if explicit_status and explicit_paid:
+        contradictory = (
+            (requested_status == "Paid" and requested_paid is not True)
+            or (requested_status == "Not Paid" and requested_paid is not False)
+        )
+        if contradictory:
+            raise HTTPException(
+                status_code=400,
+                detail="Receipt status and isPaid must agree",
+            )
+    if explicit_status:
+        if requested_status == "Paid":
+            updates["isPaid"] = True
+        elif requested_status == "Not Paid":
+            updates["isPaid"] = False
+    elif explicit_paid:
+        if requested_paid is True:
+            updates["status"] = "Paid"
+        else:
+            old_status = str(old.get("status") or "")
+            updates["status"] = (
+                old_status if old_status in {"Not Paid", "Canceled", "Lost"} else "Not Paid"
+            )
+
+
 def _financial_patch_receipt_atomic(
     actor: dict[str, Any],
     receipt_id_raw: str,
     updates: dict[str, Any],
     expected_last_modified: int | None,
-) -> dict[str, Any]:
+    *,
+    idempotency_key: str | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]], bool]:
     receipt_id = validate_entity_id(receipt_id_raw)
+    actor_id = validate_entity_id(actor.get("id"))
     clean = sanitize_json(updates or {}) or {}
+    validate_relationship_ids(clean, "receipt settlement data")
+    clean = _normalize_receipt_number_fields(clean)
+    _validate_receipt_number_fields(clean)
     if set(clean) & (RECEIPT_TRANSFER_FIELDS - {"receiptType"}):
         raise HTTPException(status_code=405, detail="Receipt transfer fields are server-controlled")
+    idem = sanitize_str(str(idempotency_key or ""), 120)
+    request_hash = _financial_request_hash(
+        {
+            "receiptId": receipt_id,
+            "expectedLastModified": expected_last_modified,
+            "data": clean,
+        }
+    )
     postgres = str(get_engine().dialect.name or "") == "postgresql"
-    guard = nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK
-    with guard:
+    receipt_number_guard = nullcontext() if postgres else _SQLITE_RECEIPT_NUMBER_LOCK
+    financial_guard = nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK
+    with receipt_number_guard, financial_guard:
         with db_conn() as conn:
+            if idem:
+                _lock_idempotency_key(
+                    conn, idem, postgres=postgres, namespace="receiptSettlement"
+                )
+                prior = _financial_check_marker(
+                    _financial_get_marker(
+                        conn,
+                        RECEIPT_SETTLEMENT_MUTATION_COLLECTION,
+                        "receiptSettlement",
+                        idem,
+                    ),
+                    actor_id,
+                    request_hash,
+                )
+                if prior:
+                    receipt_result = _financial_entity_result(
+                        conn, "receipts", str(prior.get("receiptId") or receipt_id)
+                    )
+                    ad_results = [
+                        _financial_entity_result(conn, "ads", str(ad_id))
+                        for ad_id in prior.get("updatedAdIds", [])
+                    ]
+                    return receipt_result, ad_results, True
             row = _clothes_lock_row(conn, "receipts", receipt_id, postgres=postgres)
             if not row or bool(row["deleted"]):
                 raise HTTPException(status_code=404, detail="Receipt not found")
             if expected_last_modified is not None and int(row["last_modified"]) != int(expected_last_modified):
                 raise HTTPException(status_code=409, detail="Conflict: receipt has changed")
             old = _financial_row_data(row)
+            _financial_normalize_receipt_paid_pair(old, clean)
             if "receiptType" in clean:
                 requested_type = str(clean.get("receiptType") or "")
                 old_type = str(old.get("receiptType") or "")
@@ -7472,6 +8535,18 @@ def _financial_patch_receipt_atomic(
             for key in ("id", "_created", "_lastModified", "_deleted", "createdBy", "createdAt", "creatorId"):
                 clean.pop(key, None)
             merged.update(clean)
+            merged_status = str(merged.get("status") or "")
+            if merged_status == "Paid":
+                merged["isPaid"] = True
+            elif merged_status == "Not Paid":
+                merged["isPaid"] = False
+            _validate_receipt_number_change_conn(
+                conn,
+                receipt_id,
+                old,
+                merged,
+                postgres=postgres,
+            )
             ad_rows = _financial_active_rows(conn, "ads")
             canceled_due_source = (
                 (
@@ -7488,7 +8563,13 @@ def _financial_patch_receipt_atomic(
                     conn, receipt_id, ad_rows, postgres=postgres
                 )
                 ad_rows = _financial_active_rows(conn, "ads")
-            general_used = _financial_usage(ad_rows, receipt_id)
+            # Use the canonical commitment reader, not the broad historical UI
+            # usage fallback.  A rowless Not-Paid driver/shop ad may reference
+            # this receipt solely for collection provenance; charging its whole
+            # budget here falsely blocks settlement even when its due mirror is
+            # zero.  Positive legacy due mirrors remain commitments through
+            # _financial_ad_due_usage.
+            general_used = _financial_committed_usage(ad_rows, receipt_id)
             due_used = _financial_usage(ad_rows, receipt_id, due=True)
             primary_used = max(general_used - due_used, 0)
             outgoing = _financial_outgoing(old)
@@ -7507,11 +8588,62 @@ def _financial_patch_receipt_atomic(
                 raise HTTPException(status_code=409, detail="Receipt due amount is below committed ads")
             if (primary_used > 0 or outgoing > 0) and not _financial_receipt_transferable(merged):
                 raise HTTPException(status_code=409, detail="A funded or transferred receipt must remain paid")
+            old_is_paid = str(old.get("status") or "") == "Paid" or old.get("isPaid") is True
+            new_is_paid = str(merged.get("status") or "") == "Paid" or merged.get("isPaid") is True
+            # SECURITY: a receipt that holds (or is about to hold) spendable credit
+            # must never be reassigned to another customer by a plain edit — that
+            # would silently move the business's liability and let an accomplice
+            # customer spend a victim's stored credit, bypassing the dedicated,
+            # more-guarded /api/receipts/transfers flow. Correcting the customer is
+            # still allowed on an unpaid receipt that carries no credit.
             if str(merged.get("customerId") or "") != str(old.get("customerId") or "") and (
-                general_used > 0 or outgoing > 0
+                general_used > 0 or outgoing > 0 or old_is_paid or new_is_paid
             ):
-                raise HTTPException(status_code=409, detail="A committed receipt cannot change customer")
-            return _clothes_write_row(conn, row, merged)
+                raise HTTPException(
+                    status_code=409,
+                    detail="Reassign a paid receipt's customer through the receipt transfer endpoint",
+                )
+            # SECURITY: a settled receipt's spendable capacity is fixed. Raising
+            # amountUSD/amountLocal/exchangeRate on an already-Paid receipt through a
+            # generic edit would mint credit the customer never paid. Legitimate
+            # over-collection is a Not Paid -> Paid delivery completion (old is not
+            # yet Paid here), and lowering below committed usage is already blocked
+            # above; only an upward edit of an already-settled receipt is refused.
+            if old_is_paid and _financial_due_total(merged) > _financial_due_total(old):
+                raise HTTPException(
+                    status_code=409,
+                    detail="A settled receipt's amount cannot be increased by editing",
+                )
+            ad_plans: list[tuple[Any, dict[str, Any]]] = []
+            if _financial_receipt_transferable(merged):
+                ad_plans = _financial_prepare_paid_receipt_ad_updates(
+                    conn,
+                    receipt_id,
+                    merged,
+                    ad_rows,
+                    actor_id=actor_id,
+                    postgres=postgres,
+                )
+
+            saved_receipt = _clothes_write_row(conn, row, merged)
+            saved_ads = [
+                _clothes_write_row(conn, ad_row, ad_plan)
+                for ad_row, ad_plan in ad_plans
+            ]
+            if idem:
+                _financial_insert_marker(
+                    conn,
+                    RECEIPT_SETTLEMENT_MUTATION_COLLECTION,
+                    "receiptSettlement",
+                    idem,
+                    actor_id,
+                    request_hash,
+                    {
+                        "receiptId": receipt_id,
+                        "updatedAdIds": [item["id"] for item in saved_ads],
+                    },
+                )
+            return saved_receipt, saved_ads, False
 
 
 def _financial_receipt_reference_reason(
@@ -7607,6 +8739,108 @@ def transfer_receipt_balance(
     )
 
 
+@app.post(
+    "/api/receipts/{receipt_id}/settle",
+    response_model=ReceiptSettlementResponse,
+)
+def settle_receipt_and_linked_ads(
+    receipt_id: str,
+    body: ReceiptSettlementRequest,
+    request: Request,
+    include_media: bool = True,
+    user: dict[str, Any] = Depends(current_user),
+):
+    """Turn receipt debt into paid ad funding as one idempotent commit."""
+    require_same_origin(request)
+    # Delivery users must complete a temporary receipt through the generic
+    # PATCH route.  That path verifies assignment, transition order, final
+    # receipt number, proof photo and collected amounts before it computes any
+    # payment fields.  A custom receipts.edit grant must never turn this
+    # convenience endpoint into a way around that proof workflow.
+    if str(user.get("role") or "").strip().lower() == "delivery":
+        raise HTTPException(
+            status_code=403,
+            detail="Delivery users must use the verified delivery completion workflow",
+        )
+    existing = get_entity("receipts", validate_entity_id(receipt_id))
+    if not existing or existing.get("deleted"):
+        raise HTTPException(status_code=404, detail="Receipt not found")
+    existing_data = existing.get("data") if isinstance(existing.get("data"), dict) else {}
+    creator = (
+        existing.get("createdBy")
+        or existing_data.get("createdBy")
+        or existing_data.get("creatorId")
+    )
+    if not user_has_permission(
+        user, "receipts", "edit", record_creator_id=str(creator or "")
+    ):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    updates = sanitize_json(body.data or {}) or {}
+    current_delivery_status = str(existing_data.get("deliveryStatus") or "").strip()
+    requested_delivery_status = str(updates.get("deliveryStatus") or "").strip()
+    if (
+        str(existing_data.get("tempReceiptNo") or "").strip()
+        and current_delivery_status != "Delivered"
+        and requested_delivery_status == "Delivered"
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the verified delivery completion workflow can mark this receipt delivered",
+        )
+    if "status" in updates and str(updates.get("status") or "") != "Paid":
+        raise HTTPException(status_code=400, detail="Receipt settlement status must be Paid")
+    if "isPaid" in updates and updates.get("isPaid") is not True:
+        raise HTTPException(status_code=400, detail="Receipt settlement must mark isPaid true")
+    updates["status"] = "Paid"
+    updates["isPaid"] = True
+    receipt, updated_ads, replayed = _financial_patch_receipt_atomic(
+        user,
+        receipt_id,
+        updates,
+        body.expectedLastModified,
+        idempotency_key=body.idempotencyKey,
+    )
+    if not replayed:
+        audit(
+            str(user.get("id") or ""),
+            "settle",
+            "receipts",
+            receipt["id"],
+            "Settled receipt and linked ads",
+            {"updatedAdIds": [item["id"] for item in updated_ads]},
+        )
+    # Settlement is authorized by receipts.edit, but the transaction may touch
+    # ads the caller is not allowed to read.  Preserve the all-or-nothing money
+    # update while applying the normal ads.view / ads.viewOwn scope to the
+    # response so this endpoint cannot become an ad-record disclosure channel.
+    visible_ads: list[dict[str, Any]] = []
+    for item in updated_ads:
+        item_data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        item_creator = (
+            item.get("createdBy")
+            or item_data.get("createdBy")
+            or item_data.get("creatorId")
+        )
+        if user_has_permission(user, "ads", "view") or user_has_permission(
+            user,
+            "ads",
+            "view",
+            record_creator_id=str(item_creator or ""),
+        ):
+            visible_ads.append(item)
+    return ReceiptSettlementResponse(
+        receipt=EntityResponse(
+            **_project_entity_media_for_user(receipt, user, include_media)
+        ),
+        updatedAds=[
+            EntityResponse(**_project_entity_media_for_user(item, user, include_media))
+            for item in visible_ads
+        ],
+        replayed=replayed,
+    )
+
+
 @app.post("/api/ads/mutate", response_model=AdMutationResponse)
 def mutate_ad_funding(
     body: AdMutationRequest,
@@ -7636,7 +8870,21 @@ def stop_ad_atomic(
     require_same_origin(request)
     ad, replayed = _ad_stop_atomic(user, ad_id, body)
     if not replayed:
-        audit(str(user.get("id")), "stop", "ads", ad["id"], "Stopped ad", {})
+        saved_data = ad.get("data") if isinstance(ad.get("data"), dict) else {}
+        saved_spent = _financial_minor(saved_data.get("spentUSD"), "saved ad spend")
+        saved_amount = _financial_minor(saved_data.get("amountUSD"), "saved ad amount")
+        audit(
+            str(user.get("id")),
+            "stop",
+            "ads",
+            ad["id"],
+            "Reconciled ad spend",
+            {
+                "spentUSD": _financial_usd(saved_spent),
+                "remainingUSD": _financial_usd(max(saved_amount - saved_spent, 0)),
+                "customerInformed": saved_data.get("remainingCustomerInformed") is True,
+            },
+        )
     return AdStopResponse(
         ad=EntityResponse(**_project_entity_media_for_user(ad, user, include_media)), replayed=replayed
     )
@@ -8099,7 +9347,396 @@ SYNC_WATERMARK_COLLECTIONS = (
     "walletTransactions",
     "serviceSubscriptions",
     AD_CAMPAIGN_COLLECTION,
+    # Admin-only app configuration (liquidity tracking start etc.). The name
+    # maps to no permission module, so non-admin watermark/read/write access
+    # is denied by the generic permission path and only Admins sync it.
+    "appSettings",
 )
+
+
+def _customer_merge_request_hash(actor_id: str, body: CustomerMergeRequest) -> str:
+    payload = {
+        "actorId": actor_id,
+        "keepCustomerId": body.keepCustomerId,
+        "duplicateCustomerId": body.duplicateCustomerId,
+        "expectedKeepLastModified": body.expectedKeepLastModified,
+        "expectedDuplicateLastModified": body.expectedDuplicateLastModified,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _customer_merge_marker_id(idempotency_key: str) -> str:
+    digest = hashlib.sha256(f"customerMerge\0{idempotency_key}".encode("utf-8")).hexdigest()
+    return f"customer_merge_{digest[:48]}"
+
+
+def _customer_merge_row(conn: Any, collection: str, entity_id: str) -> Any:
+    return conn.execute(
+        text(
+            "SELECT type,id,data_json,deleted,created_at,created_by,last_modified "
+            "FROM entities WHERE type=:type AND id=:id LIMIT 1"
+        ),
+        {"type": collection, "id": entity_id},
+    ).mappings().first()
+
+
+def _customer_merge_replay(conn: Any, marker_data: dict[str, Any]) -> dict[str, Any]:
+    def load(collection: str, entity_id: str) -> dict[str, Any]:
+        row = _customer_merge_row(conn, collection, entity_id)
+        if not row:
+            raise HTTPException(status_code=409, detail="Stored customer merge result is incomplete")
+        return _entity_from_db_row(row)
+
+    keep_id = str(marker_data.get("keepCustomerId") or "")
+    duplicate_id = str(marker_data.get("duplicateCustomerId") or "")
+    return {
+        "customer": load("customers", keep_id),
+        "updatedPages": [load("pages", str(value)) for value in marker_data.get("updatedPageIds", [])],
+        "updatedReceipts": [load("receipts", str(value)) for value in marker_data.get("updatedReceiptIds", [])],
+        "updatedAds": [load("ads", str(value)) for value in marker_data.get("updatedAdIds", [])],
+        "duplicate": load("customers", duplicate_id),
+        "replayed": True,
+    }
+
+
+def _stable_union_values(first: Any, second: Any) -> list[Any]:
+    values: list[Any] = []
+    seen: set[str] = set()
+    for source in (first, second):
+        if not isinstance(source, list):
+            continue
+        for value in source:
+            try:
+                key = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            except (TypeError, ValueError):
+                key = repr(value)
+            if key in seen:
+                continue
+            seen.add(key)
+            values.append(value)
+    return values
+
+
+def _stable_union_scalar_or_list(first: Any, second: Any) -> list[Any]:
+    def as_list(value: Any) -> list[Any]:
+        if isinstance(value, list):
+            return value
+        return [] if value in (None, "") else [value]
+
+    return _stable_union_values(as_list(first), as_list(second))
+
+
+CUSTOMER_SCALAR_REFERENCE_FIELDS = frozenset(
+    {
+        "customerId",
+        "customer",
+        "transferFromCustomerId",
+        "sourceCustomerId",
+        "targetCustomerId",
+        "toCustomerId",
+    }
+)
+CUSTOMER_LIST_REFERENCE_FIELDS = frozenset({"customerIds", "linkedCustomerIds"})
+
+
+def _rewrite_customer_references(value: Any, duplicate_id: str, keep_id: str) -> tuple[Any, bool]:
+    """Recursively rewrite only known relationship keys, including history lists."""
+    if isinstance(value, list):
+        output: list[Any] = []
+        changed = False
+        for child in value:
+            rewritten, child_changed = _rewrite_customer_references(
+                child, duplicate_id, keep_id
+            )
+            output.append(rewritten)
+            changed = changed or child_changed
+        return output, changed
+    if not isinstance(value, dict):
+        return value, False
+
+    output: dict[str, Any] = {}
+    changed = False
+    for key, child in value.items():
+        if key in CUSTOMER_SCALAR_REFERENCE_FIELDS and str(child or "") == duplicate_id:
+            output[key] = keep_id
+            changed = True
+            continue
+        if key in CUSTOMER_LIST_REFERENCE_FIELDS and isinstance(child, list):
+            rewritten_ids: list[Any] = []
+            seen_ids: set[str] = set()
+            list_changed = False
+            for raw_id in child:
+                rewritten = keep_id if str(raw_id) == duplicate_id else raw_id
+                if rewritten != raw_id:
+                    list_changed = True
+                fingerprint = str(rewritten)
+                if fingerprint in seen_ids:
+                    list_changed = True
+                    continue
+                seen_ids.add(fingerprint)
+                nested, nested_changed = _rewrite_customer_references(
+                    rewritten, duplicate_id, keep_id
+                )
+                rewritten_ids.append(nested)
+                list_changed = list_changed or nested_changed
+            output[key] = rewritten_ids
+            changed = changed or list_changed
+            continue
+        rewritten, child_changed = _rewrite_customer_references(
+            child, duplicate_id, keep_id
+        )
+        output[key] = rewritten
+        changed = changed or child_changed
+    return output, changed
+
+
+def _merge_customer_data(keep: dict[str, Any], duplicate: dict[str, Any]) -> dict[str, Any]:
+    """Keep the chosen identity while retaining non-conflicting duplicate data."""
+
+    def combine(preferred: Any, fallback: Any) -> Any:
+        if isinstance(preferred, dict) and isinstance(fallback, dict):
+            result = dict(fallback)
+            for key, value in preferred.items():
+                result[key] = combine(value, fallback.get(key)) if key in fallback else value
+            return result
+        if isinstance(preferred, list) and isinstance(fallback, list):
+            return _stable_union_values(preferred, fallback)
+        if preferred in (None, "") and fallback not in (None, ""):
+            return fallback
+        return preferred
+
+    merged = combine(keep, duplicate)
+    if not isinstance(merged, dict):
+        merged = dict(keep)
+
+    phones: list[Any] = []
+    seen_phones: set[str] = set()
+    for value in [*_customer_phone_candidates(keep), *_customer_phone_candidates(duplicate)]:
+        display = _customer_phone_display(value)
+        if not display:
+            continue
+        key = _canonical_customer_phone(value) or f"display:{display.casefold()}"
+        if key in seen_phones:
+            continue
+        seen_phones.add(key)
+        # Preserve object entries (label and other metadata), not only display.
+        phones.append(value)
+    if phones:
+        merged["phones"] = phones
+    # The modern phones[] collection is authoritative after a merge. Keeping
+    # scalar aliases would make exports show the same contact more than once.
+    merged.pop("phone", None)
+    merged.pop("phoneNumber", None)
+
+    merged["profileLinks"] = _stable_union_scalar_or_list(
+        keep.get("profileLinks"), duplicate.get("profileLinks")
+    )
+    return _normalize_customer_phone_storage(merged, modern_authoritative=True)
+
+
+def _customer_merge_write_row(
+    conn: Any, row: Any, data: dict[str, Any], *, deleted: bool | None = None
+) -> dict[str, Any]:
+    baseline = int(row["last_modified"])
+    modified = max(now_ms(), baseline + 1)
+    clean = sanitize_json(data or {}) or {}
+    clean["id"] = str(row["id"])
+    clean["_created"] = clean.get("_created") or int(row["created_at"])
+    clean["_lastModified"] = modified
+    if row.get("created_by") is not None:
+        clean["createdBy"] = str(row["created_by"])
+    else:
+        clean.pop("createdBy", None)
+    is_deleted = bool(row["deleted"]) if deleted is None else bool(deleted)
+    clean["_deleted"] = is_deleted
+    result = conn.execute(
+        text(
+            "UPDATE entities SET data_json=:data,last_modified=:modified,deleted=:deleted "
+            "WHERE type=:type AND id=:id AND last_modified=:baseline"
+        ),
+        {
+            "data": json_dumps(clean),
+            "modified": modified,
+            "deleted": is_deleted,
+            "type": str(row["type"]),
+            "id": str(row["id"]),
+            "baseline": baseline,
+        },
+    )
+    if result.rowcount != 1:
+        raise HTTPException(status_code=409, detail="Conflict: linked record has changed")
+    return {
+        "id": str(row["id"]),
+        "type": str(row["type"]),
+        "deleted": is_deleted,
+        "createdAt": int(row["created_at"]),
+        "createdBy": row.get("created_by"),
+        "lastModified": modified,
+        "data": clean,
+    }
+
+
+def _merge_customers_atomic(
+    actor: dict[str, Any], body: CustomerMergeRequest
+) -> dict[str, Any]:
+    actor_id = sanitize_str(str(actor.get("id") or ""), 80)
+    keep_id = validate_entity_id(body.keepCustomerId)
+    duplicate_id = validate_entity_id(body.duplicateCustomerId)
+    if keep_id == duplicate_id:
+        raise HTTPException(status_code=400, detail="Choose two different customers to merge")
+    idem = sanitize_str(body.idempotencyKey, 120)
+    request_hash = _customer_merge_request_hash(actor_id, body)
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_CUSTOMER_PHONE_LOCK
+
+    with guard:
+        with db_conn() as conn:
+            _lock_idempotency_key(
+                conn, idem, postgres=postgres, namespace="customerMerge"
+            )
+            marker_id = _customer_merge_marker_id(idem)
+            marker_row = _customer_merge_row(
+                conn, CUSTOMER_MERGE_MUTATION_COLLECTION, marker_id
+            )
+            if marker_row:
+                marker_data = json_loads(marker_row.get("data_json") or "{}") or {}
+                if (
+                    str(marker_data.get("actorId") or "") != actor_id
+                    or str(marker_data.get("requestHash") or "") != request_hash
+                ):
+                    raise HTTPException(status_code=409, detail="Idempotency key was already used")
+                return _customer_merge_replay(conn, marker_data)
+
+            # Stable order prevents deadlocks when two admins choose opposite sides.
+            locked_customers: dict[str, Any] = {}
+            lock_suffix = " FOR UPDATE" if postgres else ""
+            for customer_id in sorted((keep_id, duplicate_id)):
+                row = conn.execute(
+                    text(
+                        "SELECT type,id,data_json,deleted,created_at,created_by,last_modified "
+                        "FROM entities WHERE type='customers' AND id=:id LIMIT 1" + lock_suffix
+                    ),
+                    {"id": customer_id},
+                ).mappings().first()
+                if not row or bool(row["deleted"]):
+                    raise HTTPException(status_code=404, detail="Customer not found")
+                locked_customers[customer_id] = row
+
+            keep_row = locked_customers[keep_id]
+            duplicate_row = locked_customers[duplicate_id]
+            if int(keep_row["last_modified"]) != int(body.expectedKeepLastModified):
+                raise HTTPException(status_code=409, detail="Conflict: customer to keep has changed")
+            if int(duplicate_row["last_modified"]) != int(body.expectedDuplicateLastModified):
+                raise HTTPException(status_code=409, detail="Conflict: duplicate customer has changed")
+
+            keep_data = json_loads(keep_row.get("data_json") or "{}") or {}
+            duplicate_data = json_loads(duplicate_row.get("data_json") or "{}") or {}
+            if not (_customer_phone_keys(keep_data) & _customer_phone_keys(duplicate_data)):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Customers can only be merged when they share a phone number",
+                )
+
+            merged_customer_data = _merge_customer_data(keep_data, duplicate_data)
+            merged_customer_data["id"] = keep_id
+
+            linked_rows = conn.execute(
+                text(
+                    "SELECT type,id,data_json,deleted,created_at,created_by,last_modified "
+                    "FROM entities WHERE type IN ('pages','receipts','ads') "
+                    "ORDER BY type,id"
+                )
+            ).mappings().all()
+            updated: dict[str, list[dict[str, Any]]] = {
+                "pages": [], "receipts": [], "ads": []
+            }
+            for row in linked_rows:
+                data = json_loads(row.get("data_json") or "{}") or {}
+                if not isinstance(data, dict):
+                    continue
+                data, changed = _rewrite_customer_references(
+                    data, duplicate_id, keep_id
+                )
+                if changed:
+                    updated[str(row["type"])].append(
+                        _customer_merge_write_row(conn, row, data)
+                    )
+
+            customer = _customer_merge_write_row(conn, keep_row, merged_customer_data)
+            duplicate_data = dict(duplicate_data)
+            duplicate_data["mergedIntoCustomerId"] = keep_id
+            duplicate_data["mergedAt"] = now_ms()
+            duplicate_data["mergedBy"] = actor_id
+            duplicate = _customer_merge_write_row(
+                conn, duplicate_row, duplicate_data, deleted=True
+            )
+
+            marker_data = {
+                "actorId": actor_id,
+                "requestHash": request_hash,
+                "idempotencyKey": idem,
+                "keepCustomerId": keep_id,
+                "duplicateCustomerId": duplicate_id,
+                "updatedPageIds": [item["id"] for item in updated["pages"]],
+                "updatedReceiptIds": [item["id"] for item in updated["receipts"]],
+                "updatedAdIds": [item["id"] for item in updated["ads"]],
+            }
+            _insert_entity_in_transaction(
+                conn,
+                CUSTOMER_MERGE_MUTATION_COLLECTION,
+                marker_id,
+                marker_data,
+                actor_id,
+            )
+            return {
+                "customer": customer,
+                "updatedPages": updated["pages"],
+                "updatedReceipts": updated["receipts"],
+                "updatedAds": updated["ads"],
+                "duplicate": duplicate,
+                "replayed": False,
+            }
+
+
+@app.post("/api/customers/merge", response_model=CustomerMergeResponse)
+def merge_customers(
+    body: CustomerMergeRequest,
+    request: Request,
+    include_media: bool = True,
+    admin: dict[str, Any] = Depends(require_admin),
+):
+    """Deliberately consolidate two same-phone customers without deleting history."""
+    require_same_origin(request)
+    result = _merge_customers_atomic(admin, body)
+    if not result.get("replayed"):
+        audit(
+            str(admin.get("id") or ""),
+            "merge",
+            "customers",
+            result["customer"]["id"],
+            "Merged a duplicate customer and reassigned linked records",
+            {
+                "duplicateCustomerId": result["duplicate"]["id"],
+                "updatedPages": len(result["updatedPages"]),
+                "updatedReceipts": len(result["updatedReceipts"]),
+                "updatedAds": len(result["updatedAds"]),
+            },
+        )
+    response_result = dict(result)
+    response_result["customer"] = _project_entity_media_for_user(
+        result["customer"], admin, include_media
+    )
+    response_result["duplicate"] = _project_entity_media_for_user(
+        result["duplicate"], admin, include_media
+    )
+    for key in ("updatedPages", "updatedReceipts", "updatedAds"):
+        response_result[key] = [
+            _project_entity_media_for_user(entity, admin, include_media)
+            for entity in result[key]
+        ]
+    return CustomerMergeResponse(**response_result)
 
 
 def _sync_watermark_max(
@@ -8217,6 +9854,7 @@ def get_collection(
     after_id: Optional[str] = None,
     user: dict[str, Any] = Depends(current_user),
 ):
+    _reject_non_store_collection(collection)
     role_lower = str(user.get("role") or "").lower()
     include_media = _can_include_entity_media(user, collection, include_media)
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
@@ -8264,7 +9902,10 @@ def get_collection(
             after_id=after_id,
             include_media=include_media,
         )
-        return [EntityResponse(**i) for i in rows]
+        return [
+            EntityResponse(**_project_entity_contacts_for_user(i, user))
+            for i in rows
+        ]
 
     # Delivery users should only see records assigned to them (deliveryPersonId == user.id).
     # This avoids leaking the full Ads/Receipts/Customers database to drivers.
@@ -8287,7 +9928,10 @@ def get_collection(
                 after_id=after_id,
                 include_media=include_media,
             )
-            return [EntityResponse(**i) for i in items]
+            return [
+                EntityResponse(**_project_entity_contacts_for_user(i, user))
+                for i in items
+            ]
 
         if collection == "customers":
             items = list_entities(
@@ -8303,7 +9947,10 @@ def get_collection(
                 after_id=after_id,
                 include_media=include_media,
             )
-            return [EntityResponse(**i) for i in items]
+            return [
+                EntityResponse(**_project_entity_contacts_for_user(i, user))
+                for i in items
+            ]
 
     module = _module_for_collection(collection)
     action = _action_for_collection(collection, "view")
@@ -8342,7 +9989,10 @@ def get_collection(
         include_media=include_media,
         ad_campaign_reviewer_scope=ad_campaign_reviewer_scope,
     )
-    return [EntityResponse(**i) for i in items]
+    return [
+        EntityResponse(**_project_entity_contacts_for_user(i, user))
+        for i in items
+    ]
 
 
 def _delivery_customer_is_referenced(customer_id: str, delivery_user_id: str) -> bool:
@@ -8396,6 +10046,7 @@ def get_collection_item(
     entity_id: str,
     user: dict[str, Any] = Depends(current_user),
 ):
+    _reject_non_store_collection(collection)
     role_lower = str(user.get("role") or "").lower()
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
         _require_clothes_subscription(user)
@@ -8476,6 +10127,7 @@ def create_collection_item(
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
+    _reject_non_store_collection(collection)
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
         _require_clothes_subscription(user)
     if collection == AD_CAMPAIGN_COLLECTION:
@@ -8615,7 +10267,7 @@ def create_collection_item(
         if is_temp_delivery and not delivery_person_id_in:
             raise HTTPException(status_code=400, detail="deliveryPersonId is required for delivery receipts")
 
-        temp_in = sanitize_str(str(data_in.get("tempReceiptNo") or ""))[:80]
+        temp_in = _canonical_receipt_number(data_in.get("tempReceiptNo"))
 
         # Server-generated temp receipt number (preferred): if not provided, generate D{n} safely.
         if is_temp_delivery and not temp_in:
@@ -8628,8 +10280,9 @@ def create_collection_item(
             data_in["receiptType"] = sanitize_str(str(data_in.get("receiptType") or ""))[:40] or "DELIVERY_TEMP"
 
         if temp_in:
+            data_in["tempReceiptNo"] = temp_in
             # Temp delivery receipt format: D{n}
-            if not (temp_in.startswith("D") and temp_in[1:].isdigit()):
+            if not re.fullmatch(r"D[0-9]+", temp_in):
                 raise HTTPException(status_code=400, detail="Invalid tempReceiptNo (expected D{n})")
             if _temp_receipt_no_exists(temp_in):
                 raise HTTPException(status_code=409, detail="tempReceiptNo already exists")
@@ -8640,8 +10293,12 @@ def create_collection_item(
         # the bad serial without any format or uniqueness check. Read fresh from
         # data_in so the temp-delivery block above (which may clear serialNumber)
         # is respected.
-        _final_no = sanitize_str(str(data_in.get("finalReceiptNo") or ""))[:80]
-        _serial_no = sanitize_str(str(data_in.get("serialNumber") or ""))[:80]
+        _final_no = _canonical_receipt_number(data_in.get("finalReceiptNo"))
+        _serial_no = _canonical_receipt_number(data_in.get("serialNumber"))
+        if "finalReceiptNo" in data_in:
+            data_in["finalReceiptNo"] = _final_no
+        if "serialNumber" in data_in:
+            data_in["serialNumber"] = _serial_no
         _serials_to_check = [_final_no]
         if _serial_no and _serial_no != _final_no:
             _serials_to_check.append(_serial_no)
@@ -8672,7 +10329,14 @@ def create_collection_item(
             user, collection, entity_id, body_data
         )
     else:
-        saved = upsert_entity(collection, entity_id, body_data, str(user.get("id") or "system"), create_if_missing=True)
+        saved = upsert_entity(
+            collection,
+            entity_id,
+            body_data,
+            str(user.get("id") or "system"),
+            create_if_missing=True,
+            reject_existing=True,
+        )
     replayed_create = bool(saved.pop("_replayed", False))
     if not replayed_create:
         audit(str(user.get("id")), "create", collection, entity_id, f"Created {collection} {entity_id}", {})
@@ -8689,6 +10353,7 @@ def update_collection_item(
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
+    _reject_non_store_collection(collection)
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
         _require_clothes_subscription(user)
     if collection == AD_CAMPAIGN_COLLECTION:
@@ -8736,6 +10401,21 @@ def update_collection_item(
             existing_status == "Stopped" and requested_status and requested_status != "Stopped"
         ):
             raise HTTPException(status_code=405, detail="Ad funding and stopping require the transactional ad API")
+        # SECURITY: paymentStatus/collectionMethod are what the capacity readers
+        # branch on. Rewriting them on a funded ad via a generic edit (with no
+        # transactional capacity re-check) can zero the ad's committed receipt
+        # credit, letting the same receipt money be spent twice. Any CHANGE to
+        # these classification fields must go through /api/ads/mutate; an
+        # unchanged echo from an ordinary edit is still allowed.
+        existing_ad_data = existing.get("data") or {}
+        for _classification in ("paymentStatus", "collectionMethod"):
+            if _classification in financial_updates and str(
+                financial_updates.get(_classification) or ""
+            ) != str(existing_ad_data.get(_classification) or ""):
+                raise HTTPException(
+                    status_code=405,
+                    detail="Ad payment classification requires the transactional ad API",
+                )
     if collection == "receipts":
         old_receipt_type = str((existing.get("data") or {}).get("receiptType") or "")
         if set(financial_updates) & (RECEIPT_TRANSFER_FIELDS - {"receiptType"}):
@@ -8797,6 +10477,9 @@ def update_collection_item(
 
             desired = str(updates.get("deliveryStatus") or "").strip()
             now = now_ms()
+            current_status = str(data.get("deliveryStatus") or "").strip()
+            if desired and desired == current_status:
+                raise HTTPException(status_code=409, detail=f"Delivery is already '{current_status}'")
             if "acceptedDate" in submitted_keys and desired != "In Progress":
                 raise HTTPException(status_code=403, detail="acceptedDate is server-controlled")
             if submitted_keys & {"deliveryCancelReason", "deliveryCancelledAt", "deliveryCancelledBy"} and desired != "Canceled":
@@ -8811,7 +10494,6 @@ def update_collection_item(
             # an ad OUT of 'Delivered' or 'Canceled' (the receipts branch already
             # enforces this). This blocks re-opening a completed/cancelled ad
             # delivery without touching any legitimate forward flow.
-            current_status = str(data.get("deliveryStatus") or "").strip()
             if desired and desired != current_status and current_status in {"Delivered", "Canceled"}:
                 raise HTTPException(
                     status_code=400,
@@ -8918,6 +10600,8 @@ def update_collection_item(
             desired = str(updates.get("deliveryStatus") or "").strip()
             now = now_ms()
             current_status = str(data.get("deliveryStatus") or "").strip()
+            if desired and desired == current_status:
+                raise HTTPException(status_code=409, detail=f"Delivery is already '{current_status}'")
             if "acceptedDate" in submitted_keys and desired != "In Progress":
                 raise HTTPException(status_code=403, detail="acceptedDate is server-controlled")
             if submitted_keys & {"deliveryCancelReason", "deliveryCancelledAt", "deliveryCancelledBy"} and desired != "Canceled":
@@ -9000,9 +10684,9 @@ def update_collection_item(
                         detail=f"Receipt delivery is already finalized ('{current_status}') and cannot be re-settled",
                     )
                 # Required fields (driver must confirm)
-                final_no = sanitize_str(
-                    str(updates.get("finalReceiptNo") or updates.get("serialNumber") or "")
-                )[:80]
+                final_no = _canonical_receipt_number(
+                    updates.get("finalReceiptNo") or updates.get("serialNumber")
+                )
                 if not final_no:
                     raise HTTPException(status_code=400, detail="finalReceiptNo is required")
                 # Allow S-prefixed auto-serial (S1, S2, S3) for LTT/Libyana/Madar, or regular digits
@@ -9038,6 +10722,18 @@ def update_collection_item(
                 if debt_usd is None:
                     debt_usd = _as_float(data.get("amountUSD")) or 0.0
                     updates["debtAmountUSD"] = float(debt_usd)
+
+                # SECURITY: reject an implausibly large collected amount before it
+                # converts to spendable USD ad credit. A real tip/rounding is small;
+                # this blocks the 100x-1000x inflation (mint or fat-finger) while
+                # leaving legitimate deliveries and modest overpayments untouched.
+                _over_local = float(amt_collected) - float(debt_local or 0.0)
+                _debt_ceiling = float(debt_local or 0.0) * _DELIVERY_OVERPAY_RATIO
+                if _over_local > _DELIVERY_OVERPAY_ABS_LOCAL and float(amt_collected) > _debt_ceiling:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Collected amount far exceeds the delivery debt; office confirmation required",
+                    )
 
                 # Compute debt comparison
                 diff = float(amt_collected) - float(debt_local or 0.0)
@@ -9117,7 +10813,7 @@ def update_collection_item(
                 )[:80]
 
         if collection == "receipts":
-            saved = _financial_patch_receipt_atomic(
+            saved, _updated_ads, _replayed = _financial_patch_receipt_atomic(
                 user, entity_id, updates, body.expectedLastModified
             )
         else:
@@ -9203,6 +10899,9 @@ def update_collection_item(
         normalized_delivery_updates = sanitize_json(body.data or {}) or {}
         normalized_delivery_updates.pop("_lastModified", None)
         target_status = str(normalized_delivery_updates.get("deliveryStatus") or "").strip()
+        current_status = str((existing.get("data") or {}).get("deliveryStatus") or "").strip()
+        if target_status and target_status == current_status:
+            raise HTTPException(status_code=409, detail=f"Delivery is already '{current_status}'")
         now_iso = _iso_utc()
         if target_status == "In Progress":
             normalized_delivery_updates["acceptedDate"] = now_iso
@@ -9238,17 +10937,17 @@ def update_collection_item(
     # Receipt number uniqueness enforcement (server-side, multi-user safe)
     if collection == "receipts":
         updates_in = sanitize_json(body.data or {}) or {}
-        temp_in = sanitize_str(str(updates_in.get("tempReceiptNo") or ""))[:80]
+        temp_in = _canonical_receipt_number(updates_in.get("tempReceiptNo"))
 
         if temp_in:
-            if not (temp_in.startswith("D") and temp_in[1:].isdigit()):
+            if not re.fullmatch(r"D[0-9]+", temp_in):
                 raise HTTPException(status_code=400, detail="Invalid tempReceiptNo (expected D{n})")
             if _temp_receipt_no_exists(temp_in, exclude_id=entity_id):
                 raise HTTPException(status_code=409, detail="tempReceiptNo already exists")
 
         # Validate finalReceiptNo AND serialNumber independently (see create path).
-        _final_no = sanitize_str(str(updates_in.get("finalReceiptNo") or ""))[:80]
-        _serial_no = sanitize_str(str(updates_in.get("serialNumber") or ""))[:80]
+        _final_no = _canonical_receipt_number(updates_in.get("finalReceiptNo"))
+        _serial_no = _canonical_receipt_number(updates_in.get("serialNumber"))
         _serials_to_check = [_final_no]
         if _serial_no and _serial_no != _final_no:
             _serials_to_check.append(_serial_no)
@@ -9287,7 +10986,7 @@ def update_collection_item(
             user, entity_id, updates_to_save, body.expectedLastModified
         )
     elif collection == "receipts":
-        saved = _financial_patch_receipt_atomic(
+        saved, _updated_ads, _replayed = _financial_patch_receipt_atomic(
             user, entity_id, updates_to_save, body.expectedLastModified
         )
     else:
@@ -9356,6 +11055,10 @@ def admin_restore_collection_item(
 
     # Sanitize record body
     data = sanitize_json(body.data or {}) or {}
+    if entity_type == "customers":
+        data = _normalize_customer_phone_storage(
+            data, modern_authoritative="phones" in data
+        )
     data["id"] = ent_id
 
     def _as_int(v: Any) -> Optional[int]:
@@ -9368,11 +11071,17 @@ def admin_restore_collection_item(
 
     created_at_in_i = _as_int(created_at_in)
 
-    with db_conn() as conn:
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    customer_guard = (
+        _SQLITE_CUSTOMER_PHONE_LOCK
+        if entity_type == "customers" and not postgres
+        else nullcontext()
+    )
+    with customer_guard, db_conn() as conn:
         existing = (
             conn.execute(
                 text(
-                    "SELECT deleted, created_at, created_by, last_modified FROM entities WHERE type = :type AND id = :id LIMIT 1"
+                    "SELECT data_json, deleted, created_at, created_by, last_modified FROM entities WHERE type = :type AND id = :id LIMIT 1"
                 ),
                 {"type": entity_type, "id": ent_id},
             )
@@ -9424,6 +11133,23 @@ def admin_restore_collection_item(
             "last_modified": int(last_modified),
         }
 
+        if entity_type == "customers" and not deleted:
+            # A deterministic restore may contain a genuinely old, phone-less
+            # customer. Keep that backup contract grandfathered, while still
+            # treating any supplied valid phone as a fresh activation so it
+            # cannot collide with an active customer.
+            restored_phone_keys = _customer_phone_keys(data)
+            _validate_customer_phone_change_conn(
+                conn,
+                ent_id,
+                json_loads(existing.get("data_json") or "{}") if existing else {},
+                data,
+                postgres=postgres,
+                activating=(not existing or bool(existing.get("deleted")))
+                and bool(restored_phone_keys),
+                phone_fields_touched=bool(CUSTOMER_PHONE_FIELDS & set(data)),
+            )
+
         if existing:
             conn.execute(
                 text(
@@ -9460,6 +11186,52 @@ def admin_restore_collection_item(
         lastModified=int(last_modified),
         data=data,
     )
+
+
+def _preflight_import_unique_identities(
+    prepared: list[
+        tuple[
+            str,
+            set[str],
+            list[tuple[str, dict[str, Any], Optional[int], Optional[str]]],
+        ]
+    ]
+) -> None:
+    """Reject duplicate identity keys before an import opens a transaction."""
+    for name, _seen_ids, active in prepared:
+        if name == "customers":
+            owners: dict[str, str] = {}
+            for record_id, data, _created_at, _created_by in active:
+                for key in _customer_phone_keys(data):
+                    owner = owners.get(key)
+                    if owner and owner != record_id:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                "Import conflict in 'customers': active records "
+                                f"'{owner}' and '{record_id}' share a phone number. "
+                                "No data was changed."
+                            ),
+                        )
+                    owners[key] = record_id
+        elif name == "receipts":
+            owners = {}
+            for record_id, data, _created_at, _created_by in active:
+                # A receipt may intentionally mirror the same number in two of
+                # its own fields. Only a collision with a different receipt is
+                # a duplicate identity.
+                for key in _receipt_number_keys(data):
+                    owner = owners.get(key)
+                    if owner and owner != record_id:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                "Import conflict in 'receipts': active records "
+                                f"'{owner}' and '{record_id}' share a receipt number "
+                                "across serial/final/temp fields. No data was changed."
+                            ),
+                        )
+                    owners[key] = record_id
 
 
 @app.post("/api/admin/import")
@@ -9554,6 +11326,8 @@ def admin_bulk_import(
             created_by = sanitize_str(str(data.get("createdBy") or ""))[:80] or None
             active.append((rid, data, created_at, created_by))
         prepared.append((name, seen_ids, active))
+
+    _preflight_import_unique_identities(prepared)
 
     summary: dict[str, dict[str, int]] = {}
     with db_conn() as conn:
@@ -9759,6 +11533,24 @@ def batch_delete_entities(
                         )
                 for customer_id in sorted(customer_ids):
                     _clothes_lock_row(conn, "customers", customer_id, postgres=postgres)
+                # SECURITY/INTEGRITY: match the single-delete atomic guard so the
+                # batch path cannot orphan a customer's receipts/ads. A customer
+                # may only be deleted if every active record that references them
+                # is being deleted in this same batch; otherwise refuse (409),
+                # exactly like _financial_delete_customer_atomic.
+                if customer_ids:
+                    batch_ids = {eid for _c, eid in normalized}
+                    for linked_collection in ("receipts", "ads"):
+                        for linked_row in _financial_active_rows(conn, linked_collection):
+                            linked = _financial_row_data(linked_row)
+                            if (
+                                str(linked.get("customerId") or "") in customer_ids
+                                and str(linked_row["id"]) not in batch_ids
+                            ):
+                                raise HTTPException(
+                                    status_code=409,
+                                    detail="Customer cannot be deleted while linked records exist",
+                                )
 
             for (col, eid) in normalized:
                 exists = (
@@ -9791,6 +11583,7 @@ def delete_collection_item(
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
+    _reject_non_store_collection(collection)
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
         _require_clothes_subscription(user)
     if collection == AD_CAMPAIGN_COLLECTION:

@@ -250,6 +250,7 @@ function toggleTheme() {
 function toggleLanguage() {
   state.language = state.language === 'en' ? 'ar' : 'en';
   document.documentElement.setAttribute('dir', getDir());
+  document.documentElement.setAttribute('lang', state.language === 'ar' ? 'ar' : 'en');
   saveState();
   // Force a FULL re-render, not the partial (same-view) content swap: the
   // <main> wrapper's sidebar-offset margin is direction-dependent
@@ -270,12 +271,56 @@ function toggleLanguage() {
 // scrolling and flashed the background. Performance mode (body.perf-lite)
 // handles weak devices properly by turning effects off permanently.
 
-// Debounced icon refresh (batches multiple calls)
+// Strip data-lucide from the SVGs lucide creates: the library keeps the
+// attribute on the replacement SVG, so every later createIcons() pass
+// re-matched every already-converted icon and rebuilt it (createElement +
+// replaceChild across the whole page) — repeated full-page DOM churn on every
+// render tick and search keystroke. Stripping AFTER each pass makes all the
+// existing bare createIcons() calls cheap without touching them, and keeps
+// the icon-swap pattern working (14-forms.js re-sets data-lucide on a
+// converted SVG right before calling createIcons(), so that SVG re-matches
+// for exactly that one pass). Installed lazily because lucide.min.js is a
+// DEFERRED script now and arrives after script.js evaluates.
+function ensureLucideCreateIconsWrapped() {
+  if (!window.lucide || lucide.__iconsWrapped) return;
+  const _originalCreateIcons = lucide.createIcons.bind(lucide);
+  lucide.createIcons = function (opts) {
+    _originalCreateIcons(opts);
+    const root = (opts && opts.root) || document;
+    root.querySelectorAll('svg[data-lucide]').forEach(svg => svg.removeAttribute('data-lucide'));
+  };
+  lucide.__iconsWrapped = true;
+}
+ensureLucideCreateIconsWrapped();
+
+// Debounced icon refresh (batches multiple calls).
+// EXECUTION ORDER (why flush() must retry): lucide.min.js is a deferred
+// <head> script, while script.js is a CLASSIC end-of-body script — per the
+// HTML spec a classic script executes DURING parsing, BEFORE deferred
+// scripts run. So window.lucide may not exist yet when early code schedules
+// icons; the old `if (!window.lucide) return;` also left `timer` set, which
+// wedged the queue forever. flush() now keeps the queue and retries until
+// the library arrives (deferred scripts are guaranteed to run before
+// DOMContentLoaded, so this resolves within the load phase).
 const IconQueue = {
   pending: new Set(),
   timer: null,
+  retries: 0,
   flush() {
-    if (!window.lucide) return;
+    if (!window.lucide) {
+      // Retry every 50ms; give up after ~10s (blocked/404 library) so no
+      // timer spins forever. A later schedule() starts a fresh retry window.
+      IconQueue.retries++;
+      if (IconQueue.retries > 200) {
+        IconQueue.retries = 0;
+        IconQueue.timer = null;
+        return;
+      }
+      IconQueue.timer = setTimeout(() => IconQueue.flush(), 50);
+      return;
+    }
+    ensureLucideCreateIconsWrapped();
+    IconQueue.retries = 0;
     const containers = Array.from(IconQueue.pending);
     IconQueue.pending.clear();
     IconQueue.timer = null;
@@ -284,10 +329,13 @@ const IconQueue = {
         // Full scan needed
         lucide.createIcons();
       } else {
-        // Scoped scan - much faster
+        // Scoped scan — `root` is the option the bundled lucide actually
+        // supports ({icons, nameAttr, attrs, root, inTemplates}); the old
+        // `nodes:` option does not exist upstream and silently fell back to
+        // a FULL document scan once per queued container.
         for (const c of containers) {
           if (c instanceof Element) {
-            lucide.createIcons({ nodes: c.querySelectorAll('[data-lucide]') });
+            lucide.createIcons({ root: c });
           }
         }
       }
@@ -376,6 +424,9 @@ function showNotification(title, message, type = 'info') {
 
   const notification = document.createElement('div');
   notification.dataset.notifKey = notifKey;
+  notification.setAttribute('role', type === 'error' || type === 'warning' ? 'alert' : 'status');
+  notification.setAttribute('aria-live', type === 'error' || type === 'warning' ? 'assertive' : 'polite');
+  notification.setAttribute('aria-atomic', 'true');
   notification.className = `notification-enter glass-panel px-4 py-3 rounded-xl shadow-lg flex items-start space-x-3 mb-2 ${
     type === 'success' ? 'border-l-4 border-green-500' :
     type === 'error' ? 'border-l-4 border-red-500' :
@@ -400,7 +451,7 @@ function showNotification(title, message, type = 'info') {
       <div class="font-bold text-sm truncate">${safeTitle}</div>
       <div class="text-xs opacity-80 break-words">${safeMessage}</div>
     </div>
-    <button onclick="this.parentElement.remove()" class="text-slate-400 hover:text-slate-600 dark:hover:text-white transition-colors">
+    <button onclick="this.parentElement.remove()" aria-label="${state.language === 'ar' ? 'إغلاق الإشعار' : 'Close notification'}" class="text-slate-400 hover:text-slate-600 dark:hover:text-white transition-colors">
       <i data-lucide="x" class="w-4 h-4"></i>
     </button>
   `;
@@ -414,4 +465,3 @@ function showNotification(title, message, type = 'info') {
     setTimeout(() => notification.remove(), 300);
   }, 5000);
 }
-

@@ -185,6 +185,7 @@ function resetState() {
   S.ads = [];
   S.pages = [];
   S.logs = [];
+  S.appSettings = [];
   S.modalData = null;
   S.tempAdFunding = null;
   sandbox.document.getElementById = () => null;
@@ -335,6 +336,40 @@ async function main() {
     assert(near(paidUsage.usedUSD, dueUsage.usedDueUSD), 'changing Paid exposed a second receipt balance');
   });
 
+  await must('A0b. $4.63 paid plus $0.37 unpaid funds a $5 ad and only $0.37 remains debt', () => {
+    resetState();
+    const paid = paidReceipt('receipt_mixed_paid', 4.63, 5);
+    const unpaid = {
+      id: 'receipt_mixed_unpaid', recordType: 'receipt', customerId: 'c1',
+      amountUSD: 0.37, amountLocal: 1.85, exchangeRate: 5,
+      status: 'Not Paid', isPaid: false, deliveryStatus: 'Office',
+      statusDetail: { notPaidCollection: 'office' }, payments: [], transfers: []
+    };
+    S.receipts.push(unpaid);
+    makeAd({
+      id: 'ad_mixed_a0b', amountUSD: 5, amountLocal: 25, spentUSD: 5,
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'in_shop',
+      receiptId: unpaid.id,
+      receiptAllocations: [{ receiptId: paid.id, amountUSD: 4.63 }],
+      dueAllocations: [{ receiptId: unpaid.id, amountUSD: 0.37 }],
+      dueAmountToUseUSD: 0.37
+    });
+
+    const before = getCustomerStats('c1');
+    assert(near(before.totalPaidUSD, 4.63), `paid total should be $4.63, got ${usd(before.totalPaidUSD)}`);
+    assert(near(before.totalSpentUSD, 5), `ad spend should be $5, got ${usd(before.totalSpentUSD)}`);
+    assert(near(before.balanceUSD, -0.37), `only the difference should be debt, got ${usd(before.balanceUSD)}`);
+    const paidUsage = getReceiptUsageStats(paid);
+    const dueUsage = getDeliveryReceiptDueUsage(unpaid);
+    assert(near(paidUsage.usedUSD, 4.63) && near(paidUsage.remainingUSD, 0), 'paid receipt was not consumed exactly once');
+    assert(near(dueUsage.usedDueUSD, 0.37) && near(dueUsage.remainingDueUSD, 0), 'unpaid receipt difference was not reserved exactly once');
+
+    collect(unpaid, 0.37);
+    const after = getCustomerStats('c1');
+    assert(near(after.totalPaidUSD, 5), `paid total should become $5, got ${usd(after.totalPaidUSD)}`);
+    assert(near(after.balanceUSD, 0), `paying the second receipt should clear the debt, got ${usd(after.balanceUSD)}`);
+  });
+
   await must('A1. an ad funded $30 from a $100 paid receipt consumes exactly $30', () => {
     resetState();
     const r = paidReceipt('receipt_a1', 100);
@@ -361,6 +396,33 @@ async function main() {
     assert(near(stats.remainingUSD, 25), `remainingUSD should be 25, got ${usd(stats.remainingUSD)}`);
     assert(stats.usedUSD <= stats.totalUSD + 0.005, `two ads must not together exceed the receipt: used ${usd(stats.usedUSD)} vs capacity ${usd(stats.totalUSD)}`);
     assert(stats.fundedAds.length === 2, `both ads must be listed as funded, got ${stats.fundedAds.length}`);
+  });
+
+  await must('A2b. replacing an ad receipt returns the old credit and charges the new receipt exactly once', () => {
+    resetState();
+    const oldReceipt = paidReceipt('receipt_relink_old', 100);
+    const newReceipt = paidReceipt('receipt_relink_new', 80);
+    const ad = makeAd({
+      id: 'ad_relink', amountUSD: 30, spentUSD: 30,
+      receiptId: oldReceipt.id,
+      fundingReceiptId: oldReceipt.id,
+      receiptIds: [oldReceipt.id],
+      receiptAllocations: [{ receiptId: oldReceipt.id, amountUSD: 30 }]
+    });
+    assert(near(getReceiptUsageStats(oldReceipt).remainingUSD, 70), 'old receipt did not hold the original allocation');
+    assert(near(getReceiptUsageStats(newReceipt).remainingUSD, 80), 'new receipt was charged before replacement');
+
+    // This is the authoritative shape returned by the atomic ad mutation.
+    ad.receiptId = newReceipt.id;
+    ad.fundingReceiptId = newReceipt.id;
+    ad.receiptIds = [newReceipt.id];
+    ad.receiptAllocations = [{ receiptId: newReceipt.id, amountUSD: 30 }];
+
+    const oldAfter = getReceiptUsageStats(oldReceipt);
+    const newAfter = getReceiptUsageStats(newReceipt);
+    assert(near(oldAfter.usedUSD, 0) && near(oldAfter.remainingUSD, 100), `old credit was not fully returned: ${usd(oldAfter.remainingUSD)}`);
+    assert(near(newAfter.usedUSD, 30) && near(newAfter.remainingUSD, 50), `new receipt was not charged exactly once: ${usd(newAfter.usedUSD)}`);
+    assert(near(oldAfter.usedUSD + newAfter.usedUSD, 30), 'replacement duplicated or lost the ad allocation');
   });
 
   await must('A3-pre. an ad whose allocations point at ANOTHER receipt is not charged here', () => {
@@ -442,6 +504,396 @@ async function main() {
     const due = getDeliveryReceiptDueUsage(r);
     assert(near(due.usedDueUSD, 30), `300 LYD at rate 10 must count as $30 used, got ${usd(due.usedDueUSD)}`);
     assert(near(due.remainingDueUSD, 70), `remainingDueUSD should be 70, got ${usd(due.remainingDueUSD)}`);
+  });
+
+  await must('A4c. a mixed LEGACY In-Shop ad reserves its mirror from the unpaid receipt only', () => {
+    resetState();
+    const paid = paidReceipt('receipt_a4c_paid', 10, 9.7);
+    const shop = {
+      id: 'receipt_a4c_shop', recordType: 'receipt', customerId: 'c1',
+      amountUSD: 30, amountLocal: 291, exchangeRate: 9.7,
+      status: 'Not Paid', isPaid: false, deliveryStatus: 'Office',
+      statusDetail: { notPaidCollection: 'office' }, payments: [], transfers: []
+    };
+    S.receipts.push(shop);
+    makeAd({
+      id: 'ad_a4c', amountUSD: 40, spentUSD: 40,
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'in_shop',
+      receiptId: shop.id,
+      receiptAllocations: [{ receiptId: paid.id, amountUSD: 10 }],
+      dueAllocations: [],
+      dueAmountToUseUSD: 30
+    });
+
+    const shopUsage = getReceiptUsageStats(shop);
+    const shopDueUsage = getDeliveryReceiptDueUsage(shop);
+    const paidUsage = getReceiptUsageStats(paid);
+    assert(near(shopUsage.usedUSD, 30) && near(shopUsage.remainingUSD, 0),
+      `legacy In-Shop mirror should reserve exactly $30, got ${usd(shopUsage.usedUSD)}`);
+    assert(near(shopDueUsage.usedDueUSD, 30) && near(shopDueUsage.remainingDueUSD, 0),
+      'due view did not recognize the legacy In-Shop mirror');
+    assert(near(paidUsage.usedUSD, 10),
+      `the separate paid receipt should be charged only $10, got ${usd(paidUsage.usedUSD)}`);
+  });
+
+  await must('A4d. a LEGACY In-Shop LYD mirror is converted at the saved rate', () => {
+    resetState();
+    const shop = {
+      id: 'receipt_a4d_shop', recordType: 'receipt', customerId: 'c1',
+      amountUSD: 30, amountLocal: 291, exchangeRate: 9.7,
+      status: 'Not Paid', isPaid: false, deliveryStatus: 'Office',
+      statusDetail: { notPaidCollection: 'office' }, payments: [], transfers: []
+    };
+    S.receipts.push(shop);
+    makeAd({
+      id: 'ad_a4d', amountUSD: 30, spentUSD: 30,
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'in_shop',
+      receiptId: shop.id, receiptAllocations: [],
+      dueAmountToUseUSD: 0, dueAmountToUseLYD: 291, exchangeRate: 9.7
+    });
+
+    assert(near(getReceiptUsageStats(shop).usedUSD, 30),
+      '291 LYD legacy In-Shop mirror did not become exactly $30');
+    assert(near(getDeliveryReceiptDueUsage(shop).usedDueUSD, 30),
+      'due view did not convert the legacy In-Shop LYD mirror');
+  });
+
+  await must('A4e. the OLDEST driver ads (receiptId link only, no linkedDeliveryReceiptId) reserve their due mirror', () => {
+    resetState();
+    const r = deliveryReceipt('receipt_a4e', 1000, 10); // $100 due
+    const other = deliveryReceipt('receipt_a4e_other', 500, 10); // $50 due
+    // Pre-linkedDeliveryReceiptId row: the delivery receipt lives in receiptId.
+    makeAd({
+      id: 'ad_a4e', amountUSD: 40, spentUSD: 40,
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'driver',
+      receiptId: r.id,
+      dueAmountToUseUSD: 40
+      // NO allocation arrays, NO linkedDeliveryReceiptId — the oldest shape
+    });
+    // Control: when linkedDeliveryReceiptId IS set, receiptId must NOT charge
+    // a second receipt — the fallback only speaks for rows missing the link.
+    makeAd({
+      id: 'ad_a4e_linked', amountUSD: 10, spentUSD: 10,
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'driver',
+      linkedDeliveryReceiptId: other.id,
+      receiptId: r.id,
+      dueAmountToUseUSD: 10
+    });
+
+    const due = getDeliveryReceiptDueUsage(r);
+    assert(near(due.usedDueUSD, 40), `receiptId-linked driver mirror must reserve $40, got ${usd(due.usedDueUSD)}`);
+    assert(near(due.remainingDueUSD, 60), `remainingDueUSD should be 60, got ${usd(due.remainingDueUSD)}`);
+    assert(due.fundedAds.length === 1, `exactly 1 funded ad expected on the main receipt, got ${due.fundedAds.length}`);
+    assert(near(getReceiptUsageStats(r).usedUSD, 40),
+      `getReceiptUsageStats must count the same $40, got ${usd(getReceiptUsageStats(r).usedUSD)}`);
+    assert(near(getDeliveryReceiptDueUsage(other).usedDueUSD, 10),
+      'the linked control ad must charge its linkedDeliveryReceiptId receipt');
+  });
+
+  await must('A4f. settling a receiptId-linked driver mirror converts EXACTLY what the readers counted, once', () => {
+    resetState();
+    const r = deliveryReceipt('receipt_a4f', 1000, 10); // $100 due
+    const ad = makeAd({
+      id: 'ad_a4f', amountUSD: 40,
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'driver',
+      receiptId: r.id,
+      dueAmountToUseUSD: 40
+    });
+
+    const counted = getDeliveryReceiptDueUsage(r).usedDueUSD;
+    assert(near(counted, 40), `pre-settle reader must count $40, got ${usd(counted)}`);
+
+    collect(r, 100);
+    const plans = sandbox.planLocalReceiptPaidAdUpdates(r.id);
+    assert(plans.length === 1, `the planner must convert the legacy ad, got ${plans.length} plans`);
+    const next = plans[0].data;
+    const movedUSD = (next.receiptAllocations || [])
+      .filter(a => String(a.receiptId) === r.id)
+      .reduce((s, a) => s + a.amountUSD, 0);
+    assert(near(movedUSD, counted), `planner moved ${usd(movedUSD)} but the readers counted ${usd(counted)} — they must agree`);
+    assert(next.isPaid === true && next.paymentStatus === 'paid', 'a fully covered mirror must settle the ad to Paid');
+    assert(near(next.dueAmountToUseUSD, 0), 'the mirror must be cleared after conversion');
+
+    sandbox.applyLocalReceiptPaidAdUpdates(plans);
+    const after = getReceiptUsageStats(r);
+    assert(near(after.usedUSD, 40), `after settlement the receipt must be charged exactly once, got ${usd(after.usedUSD)}`);
+    assert(near(after.remainingUSD, 60), `remaining must be 100-40=60, got ${usd(after.remainingUSD)}`);
+    assert(near(getDeliveryReceiptDueUsage(r).usedDueUSD, 40),
+      'both readers must still describe the same single $40 after settlement');
+  });
+
+  await must('A4g. canceling a delivery releases a receiptId-linked driver mirror — USD and LYD both', async () => {
+    resetState();
+    const r = deliveryReceipt('receipt_a4g', 1000, 10); // $100 due
+    const ad = makeAd({
+      id: 'ad_a4g', amountUSD: 40,
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'driver',
+      receiptId: r.id,
+      dueAmountToUseUSD: 0,
+      dueAmountToUseLYD: 400, // 400 LYD at rate 10 = $40
+      exchangeRate: 10
+    });
+    assert(near(getDeliveryReceiptDueUsage(r).usedDueUSD, 40), 'pre-condition: the LYD mirror reserves $40');
+
+    const touched = await sandbox.releaseCanceledDeliveryDueFunding(r.id);
+    assert(touched === 1, `the release must touch the legacy ad, touched ${touched}`);
+    const stored = S.ads.find(a => a.id === 'ad_a4g');
+    assert(near(stored.dueAmountToUseUSD, 0) && near(stored.dueAmountToUseLYD || 0, 0),
+      'BOTH mirror fields must be zeroed so the uncollectible money stops backing the ad');
+    assert(near(getDeliveryReceiptDueUsage(r).usedDueUSD, 0),
+      `after cancel-release nothing may still be reserved, got ${usd(getDeliveryReceiptDueUsage(r).usedDueUSD)}`);
+  });
+
+  await must('A4h. a PAID driver ad with a stale receiptId mirror reserves NOTHING and cancel leaves it alone', async () => {
+    resetState();
+    const r = deliveryReceipt('receipt_a4h', 1000, 10); // $100 due
+    makeAd({
+      id: 'ad_a4h', amountUSD: 40, spentUSD: 40,
+      paymentStatus: 'paid', isPaid: true, collectionMethod: 'driver',
+      receiptId: r.id,
+      dueAmountToUseUSD: 40,
+      receiptAllocations: [] // rows present so the whole-ad legacy fallback stays off
+    });
+
+    assert(near(getDeliveryReceiptDueUsage(r).usedDueUSD, 0),
+      `a PAID ad's stale mirror must reserve $0 of due credit, got ${usd(getDeliveryReceiptDueUsage(r).usedDueUSD)}`);
+    assert(near(getReceiptUsageStats(r).usedUSD, 0),
+      `a PAID ad's stale mirror must charge $0 of paid balance, got ${usd(getReceiptUsageStats(r).usedUSD)}`);
+
+    const touched = await sandbox.releaseCanceledDeliveryDueFunding(r.id);
+    assert(touched === 0, `cancel-release must not touch a PAID ad, touched ${touched}`);
+    const stored = S.ads.find(a => a.id === 'ad_a4h');
+    assert(near(stored.dueAmountToUseUSD, 40),
+      'the PAID ad\'s stale mirror must stay untouched — it is history, not live debt');
+  });
+
+  await must('A4i. a mirror that MIRRORS surviving due rows is never charged or converted a second time', () => {
+    resetState();
+    const r1 = deliveryReceipt('receipt_a4i_one', 300, 10); // $30 due
+    const r2 = deliveryReceipt('receipt_a4i_two', 300, 10); // $30 due
+    // Mixed shape: the receiptId identity points at r1, but the ad's only real
+    // due money is a row on r2 — and the writers keep the scalar mirror equal
+    // to the surviving rows' sum ($30).
+    makeAd({
+      id: 'ad_a4i', amountUSD: 60, spentUSD: 60,
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'driver',
+      receiptId: r1.id,
+      dueAllocations: [{ receiptId: r2.id, amountUSD: 30 }],
+      dueAmountToUseUSD: 30
+    });
+
+    assert(near(getDeliveryReceiptDueUsage(r1).usedDueUSD, 0),
+      `r1 must not be charged the row-total mirror, got ${usd(getDeliveryReceiptDueUsage(r1).usedDueUSD)}`);
+    assert(near(getDeliveryReceiptDueUsage(r2).usedDueUSD, 30),
+      `r2 must be charged its row exactly once, got ${usd(getDeliveryReceiptDueUsage(r2).usedDueUSD)}`);
+
+    // Settling r1 (collected for exactly its paper value) must succeed and
+    // convert NOTHING — the ad's due money belongs to r2.
+    collect(r1, 30);
+    const plans = sandbox.planLocalReceiptPaidAdUpdates(r1.id);
+    assert(plans.length === 0, `settling r1 must not convert the row-total mirror, got ${plans.length} plans`);
+    assert(near(getReceiptUsageStats(r1).usedUSD, 0),
+      `after settling r1 nothing may be charged to it, got ${usd(getReceiptUsageStats(r1).usedUSD)}`);
+    assert(near(getDeliveryReceiptDueUsage(r2).usedDueUSD, 30),
+      'r2 must still hold its single $30 commitment after r1 settles');
+  });
+
+  await must('A4j. a FULL refund of a rowless receiptId-linked driver mirror returns the due credit', async () => {
+    resetState();
+    const r = deliveryReceipt('receipt_a4j', 1000, 10); // $100 due
+    const ad = makeAd({
+      id: 'ad_a4j', amountUSD: 40, spentUSD: 40,
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'driver',
+      receiptId: r.id,
+      dueAmountToUseUSD: 40
+      // NO allocation arrays — the oldest shape, straight from storage
+    });
+    assert(near(getDeliveryReceiptDueUsage(r).usedDueUSD, 40), 'pre-condition: the mirror reserves $40');
+
+    S.modalData = { id: ad.id, status: ad.status, canceledBy: undefined };
+    setRefundInputs('Full', 40, 'Refunded');
+    await sandbox.saveRefund();
+
+    const saved = S.ads.find(a => a.id === 'ad_a4j');
+    assert(near(saved.dueAmountToUseUSD, 0), `the mirror must be released, still ${usd(saved.dueAmountToUseUSD)}`);
+    assert(near(getDeliveryReceiptDueUsage(r).usedDueUSD, 0),
+      `after a full refund the $40 of due credit must return, got ${usd(getDeliveryReceiptDueUsage(r).usedDueUSD)} still used`);
+    assert(near(getDeliveryReceiptDueUsage(r).remainingDueUSD, 100),
+      'the receipt must be fully spendable again');
+  });
+
+  console.log('\n--- LIQUIDITY COVERAGE: getLiquiditySnapshot ---');
+
+  // Raw paid receipt with explicit dates (the fixtures above stamp "now").
+  function datedPaidReceipt(id, amountUSD, paidDate, extra = {}) {
+    const r = {
+      id, recordType: 'receipt', customerId: 'c1',
+      amountUSD, amountLocal: amountUSD * 5, exchangeRate: 5,
+      status: 'Paid', isPaid: true, deliveryStatus: 'Office',
+      collectionDate: paidDate, createdAt: paidDate,
+      payments: [], transfers: [], ...extra
+    };
+    S.receipts.push(r);
+    return r;
+  }
+  function startLiquidityTracking(startDate, recordedAt) {
+    S.appSettings.push({
+      id: `lq_${recordedAt}`, settingKey: 'liquidityTracking',
+      startDate, setBy: 'u-admin', date: recordedAt
+    });
+  }
+
+  await must('L1. money owed to customers = the unused credit on every paid receipt', () => {
+    resetState();
+    S.appSettings = [];
+    const r1 = paidReceipt('receipt_l1a', 100);
+    paidReceipt('receipt_l1b', 50);
+    makeAd({ id: 'ad_l1', amountUSD: 30, receiptAllocations: [{ receiptId: r1.id, amountUSD: 30 }] });
+
+    const snap = sandbox.getLiquiditySnapshot();
+    assert(snap.tracking === false, 'without a start date nothing is tracked yet');
+    assert(near(snap.liabilityUSD, 120), `owed = (100-30)+50 = $120, got ${usd(snap.liabilityUSD)}`);
+    assert(near(snap.collectedUSD, 0) && near(snap.adSpendUSD, 0), 'no window means no collected/spent numbers');
+  });
+
+  await must('L2. new-cash counts only real money paid inside the window — transfers and carried balances never', () => {
+    resetState();
+    S.appSettings = [];
+    startLiquidityTracking('2026-07-01T00:00:00.000Z', '2026-07-01T08:00:00.000Z');
+    datedPaidReceipt('receipt_l2_old', 30, '2026-06-01T10:00:00.000Z');                      // before the window
+    datedPaidReceipt('receipt_l2_new', 40, '2026-07-10T10:00:00.000Z');                      // real new cash
+    datedPaidReceipt('receipt_l2_tin', 25, '2026-07-11T10:00:00.000Z', { receiptType: 'TRANSFER_IN' });   // moved, not new
+    datedPaidReceipt('receipt_l2_car', 60, '2026-07-12T10:00:00.000Z', { receiptType: 'CARRIED_BALANCE' }); // old credit, not new
+    S.receipts.push({ id: 'receipt_l2_unpaid', recordType: 'receipt', customerId: 'c1', amountUSD: 99,
+      status: 'Not Paid', isPaid: false, payments: [], transfers: [], createdAt: '2026-07-13T10:00:00.000Z' });
+
+    const snap = sandbox.getLiquiditySnapshot();
+    assert(snap.tracking === true && snap.startDate === '2026-07-01T00:00:00.000Z', 'the start date was not read');
+    assert(near(snap.collectedUSD, 40), `only the $40 receipt is NEW cash, got ${usd(snap.collectedUSD)}`);
+    assert(near(snap.liabilityUSD, 30 + 40 + 25 + 60), `owed must count every paid receipt, got ${usd(snap.liabilityUSD)}`);
+
+    // The NEWEST start date wins (append-only history, like the exchange rate).
+    startLiquidityTracking('2026-07-15T00:00:00.000Z', '2026-07-15T08:00:00.000Z');
+    const moved = sandbox.getLiquiditySnapshot();
+    assert(near(moved.collectedUSD, 0), `after moving the start to Jul 15 nothing is new yet, got ${usd(moved.collectedUSD)}`);
+  });
+
+  await must('L3. new ad spending counts new ads fully and old ads only for their in-window top-ups (capped)', () => {
+    resetState();
+    S.appSettings = [];
+    startLiquidityTracking('2026-07-01T00:00:00.000Z', '2026-07-01T08:00:00.000Z');
+    datedPaidReceipt('receipt_l3', 100, '2026-07-05T10:00:00.000Z');
+    makeAd({ id: 'ad_l3_new', amountUSD: 30, status: 'Active', createdAt: '2026-07-05T12:00:00.000Z' });
+    makeAd({ id: 'ad_l3_old', amountUSD: 100, status: 'Active', createdAt: '2026-06-01T12:00:00.000Z',
+      topUps: [{ date: '2026-07-08T10:00:00.000Z', amount: 20 }, { date: '2026-06-15T10:00:00.000Z', amount: 5 }] });
+    makeAd({ id: 'ad_l3_cap', amountUSD: 500, spentUSD: 10, status: 'Stopped', createdAt: '2026-06-01T12:00:00.000Z',
+      topUps: [{ date: '2026-07-09T10:00:00.000Z', amount: 50 }] });
+    makeAd({ id: 'ad_l3_pending', amountUSD: 80, status: 'Pending', createdAt: '2026-07-06T12:00:00.000Z' });
+
+    const snap = sandbox.getLiquiditySnapshot();
+    assert(near(snap.adSpendUSD, 30 + 20 + 10),
+      `spend = new $30 + in-window top-up $20 + capped $10, got ${usd(snap.adSpendUSD)}`);
+    assert(near(snap.netUSD, snap.collectedUSD - snap.adSpendUSD), 'net must equal collected minus spent');
+  });
+
+  await must('L4. coverage and shortfall describe exactly how much customer money is still uncovered', () => {
+    resetState();
+    S.appSettings = [];
+    startLiquidityTracking('2026-07-01T00:00:00.000Z', '2026-07-01T08:00:00.000Z');
+    // $100 collected in-window; $40 of it already promised to a new ad;
+    // $120 owed overall (the untouched $60 of the new receipt + $60 old).
+    const rNew = datedPaidReceipt('receipt_l4_new', 100, '2026-07-05T10:00:00.000Z');
+    datedPaidReceipt('receipt_l4_old', 60, '2026-06-01T10:00:00.000Z');
+    makeAd({ id: 'ad_l4', amountUSD: 40, status: 'Active', createdAt: '2026-07-06T12:00:00.000Z',
+      receiptAllocations: [{ receiptId: rNew.id, amountUSD: 40 }] });
+
+    const snap = sandbox.getLiquiditySnapshot();
+    assert(near(snap.collectedUSD, 100), `collected should be $100, got ${usd(snap.collectedUSD)}`);
+    assert(near(snap.adSpendUSD, 40), `ad spend should be $40, got ${usd(snap.adSpendUSD)}`);
+    assert(near(snap.netUSD, 60), `net new cash should be $60, got ${usd(snap.netUSD)}`);
+    assert(near(snap.liabilityUSD, 120), `owed should be (100-40)+60 = $120, got ${usd(snap.liabilityUSD)}`);
+    assert(near(snap.shortfallUSD, 60), `uncovered should be 120-60 = $60, got ${usd(snap.shortfallUSD)}`);
+    assert(near(snap.coveragePercent, 50), `coverage should be 50%, got ${snap.coveragePercent}%`);
+  });
+
+  await must('L5. the explicit cash-arrival stamp beats a rewritten collectionDate', () => {
+    resetState();
+    startLiquidityTracking('2026-07-01T00:00:00.000Z', '2026-07-01T08:00:00.000Z');
+    // A form-edit once rewrote this old receipt's collectionDate into the
+    // window; its real cash confirmation (collectedAt) is from June and wins.
+    datedPaidReceipt('receipt_l5_edited', 50, '2026-07-10T10:00:00.000Z', { collectedAt: '2026-06-01T10:00:00.000Z' });
+    // A genuine in-window collection with no other stamps still counts.
+    datedPaidReceipt('receipt_l5_real', 15, '2026-07-09T10:00:00.000Z');
+
+    const snap = sandbox.getLiquiditySnapshot();
+    assert(near(snap.collectedUSD, 15),
+      `only the genuinely new $15 is new cash — the edited old receipt must not count, got ${usd(snap.collectedUSD)}`);
+  });
+
+  await must('L6. confirming an OLD receipt as collected inside the window must not mint new cash', () => {
+    resetState();
+    startLiquidityTracking('2026-07-01T00:00:00.000Z', '2026-07-01T08:00:00.000Z');
+    // Receipt paid in March; the admin only clicks "collected" in July while
+    // reconciling the backlog. The click-time stamp must not make it new.
+    datedPaidReceipt('receipt_l6', 500, '2026-03-01T10:00:00.000Z', { collected: true, collectedAt: '2026-07-20T10:00:00.000Z' });
+
+    const snap = sandbox.getLiquiditySnapshot();
+    assert(near(snap.collectedUSD, 0),
+      `a late confirmation of old money must count $0 new cash, got ${usd(snap.collectedUSD)}`);
+    assert(near(snap.liabilityUSD, 500), 'the old receipt still counts as owed');
+  });
+
+  await must('L7. a canceled receipt stays in the books until its refund is actually handed back', () => {
+    resetState();
+    startLiquidityTracking('2026-07-01T00:00:00.000Z', '2026-07-01T08:00:00.000Z');
+    const r = datedPaidReceipt('receipt_l7', 400, '2026-07-05T10:00:00.000Z');
+    r.status = 'Canceled';
+    r.statusDetail = { refundAction: 'full', refundStatus: 'pending' };
+
+    const pending = sandbox.getLiquiditySnapshot();
+    assert(near(pending.liabilityUSD, 400),
+      `while the refund is pending the shop still owes $400, got ${usd(pending.liabilityUSD)}`);
+    assert(near(pending.collectedUSD, 400), 'the in-window collection is still real cash while held');
+
+    r.statusDetail.refundStatus = 'refunded';
+    const done = sandbox.getLiquiditySnapshot();
+    assert(near(done.liabilityUSD, 0),
+      `after the refund is handed back nothing is owed, got ${usd(done.liabilityUSD)}`);
+    assert(near(done.collectedUSD, 0), 'refunded money is no longer held cash');
+  });
+
+  await must('L8. an UNDERPAID delivery completion is real collected cash despite its Not Paid status', () => {
+    resetState();
+    startLiquidityTracking('2026-07-01T00:00:00.000Z', '2026-07-01T08:00:00.000Z');
+    S.receipts.push({
+      id: 'receipt_l8', recordType: 'receipt', customerId: 'c1',
+      amountUSD: 35, amountLocal: 175, exchangeRate: 5,
+      status: 'Not Paid', isPaid: false,
+      deliveryStatus: 'Delivered', deliveredAt: '2026-07-10T10:00:00.000Z',
+      paymentResult: 'UNDERPAID',
+      payments: [], transfers: [], createdAt: '2026-06-20T10:00:00.000Z'
+    });
+
+    const snap = sandbox.getLiquiditySnapshot();
+    assert(near(snap.collectedUSD, 35),
+      `the driver really collected $35 in the window, got ${usd(snap.collectedUSD)}`);
+    assert(near(snap.liabilityUSD, 35), 'the collected-but-underpaid money is owed to the customer');
+  });
+
+  await must('L9. growing a PRE-WINDOW ad by an ordinary edit counts the dated growth (capped at real spend)', () => {
+    resetState();
+    startLiquidityTracking('2026-07-01T00:00:00.000Z', '2026-07-01T08:00:00.000Z');
+    datedPaidReceipt('receipt_l9', 100, '2026-07-05T10:00:00.000Z');
+    // Ordinary-edit growth recorded in the append-only amountAdjustments ledger.
+    makeAd({ id: 'ad_l9_grown', amountUSD: 100, status: 'Active', createdAt: '2026-06-01T12:00:00.000Z',
+      amountAdjustments: [{ delta: 25, date: '2026-07-08T10:00:00.000Z' }, { delta: 10, date: '2026-06-15T10:00:00.000Z' }] });
+    // The cap: growth claims $50 but the stopped ad only ever spent $10.
+    makeAd({ id: 'ad_l9_capped', amountUSD: 500, spentUSD: 10, status: 'Stopped', createdAt: '2026-06-01T12:00:00.000Z',
+      amountAdjustments: [{ delta: 50, date: '2026-07-09T10:00:00.000Z' }] });
+
+    const snap = sandbox.getLiquiditySnapshot();
+    assert(near(snap.adSpendUSD, 25 + 10),
+      `spend = in-window growth $25 + capped $10, got ${usd(snap.adSpendUSD)}`);
   });
 
   console.log('\n--- SOFT DELETES ---');
@@ -570,6 +1022,30 @@ async function main() {
       `the customer's full $200 of due credit must still be available, got ${usd(due.remainingDueUSD)} ` +
       `— this ad is funded by the customer's cash, not by the receipt's credit`
     );
+  });
+
+  await must('A7b. a rowless In-Shop receipt link with a zero mirror is provenance, not money', () => {
+    resetState();
+    const shop = {
+      id: 'receipt_a7b_shop', recordType: 'receipt', customerId: 'c1',
+      amountUSD: 30, amountLocal: 291, exchangeRate: 9.7,
+      status: 'Not Paid', isPaid: false, deliveryStatus: 'Office',
+      statusDetail: { notPaidCollection: 'office' }, payments: [], transfers: []
+    };
+    S.receipts.push(shop);
+    makeAd({
+      id: 'ad_a7b_shop', amountUSD: 30, spentUSD: 30,
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'in_shop',
+      receiptId: shop.id, dueAmountToUseUSD: 0
+      // no allocation arrays: the link is history only and cannot mint $30
+    });
+
+    const paidView = getReceiptUsageStats(shop);
+    const dueView = getDeliveryReceiptDueUsage(shop);
+    assert(near(paidView.usedUSD, 0) && near(paidView.remainingUSD, 30),
+      'rowless zero In-Shop provenance incorrectly consumed the whole ad');
+    assert(near(dueView.usedDueUSD, 0) && near(dueView.remainingDueUSD, 30),
+      'rowless zero In-Shop provenance incorrectly consumed due capacity');
   });
 
   await must('A8. delivery collection Rate 1 is never 0 for any payment method', () => {

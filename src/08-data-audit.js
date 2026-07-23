@@ -146,6 +146,317 @@ function addRecord(array, record) {
   return Promise.resolve(true);
 }
 
+function _localFundingMinor(value) {
+  if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) return 0;
+  if (typeof value === 'boolean') throw new Error('Stored funding amount is invalid');
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) throw new Error('Stored funding amount is invalid');
+  if (parsed === 0) return 0;
+  // All local settlement math uses integer cents. Add a scale-aware epsilon
+  // before half-up rounding so values such as 1.005 do not become 100 cents
+  // because of binary floating-point representation.
+  const scaled = parsed * 100;
+  return Math.floor(scaled + 0.5 + (Number.EPSILON * Math.max(1, Math.abs(scaled)) * 4));
+}
+
+function _localFundingMap(rows) {
+  const result = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const receiptId = String(row?.receiptId || '');
+    const amount = _localFundingMinor(row?.amountUSD);
+    if (!receiptId || amount <= 0) continue;
+    result.set(receiptId, (result.get(receiptId) || 0) + amount);
+  }
+  return result;
+}
+
+function _localFundingRows(values) {
+  return [...values.entries()]
+    .filter(([, amount]) => amount > 0)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([receiptId, amount]) => ({ receiptId, amountUSD: amount / 100 }));
+}
+
+function _localLegacyDueMinor(ad) {
+  const direct = _localFundingMinor(ad?.dueAmountToUseUSD);
+  if (direct > 0) return direct;
+  const rawLocal = ad?.dueAmountToUseLYD;
+  if (rawLocal === undefined || rawLocal === null || (typeof rawLocal === 'string' && rawLocal.trim() === '')) return 0;
+  if (typeof rawLocal === 'boolean') throw new Error('Stored funding amount is invalid');
+  const lyd = Number(rawLocal);
+  if (!Number.isFinite(lyd) || lyd < 0) throw new Error('Stored funding amount is invalid');
+  if (lyd === 0) return 0;
+  if (typeof ad?.exchangeRate === 'boolean') throw new Error('Stored funding exchange rate is invalid');
+  const rate = Number(ad?.exchangeRate);
+  if (!Number.isFinite(rate) || rate <= 0) throw new Error('Stored funding exchange rate is invalid');
+  return _localFundingMinor(lyd / rate);
+}
+
+// Legacy debt rows stored the promised amount in dueAmountToUseUSD/LYD instead
+// of dueAllocations. Driver ads identify that receipt via
+// linkedDeliveryReceiptId — or, for the oldest rows that predate that field,
+// via receiptId; In-Shop ads identify it via receiptId. Settlement and the ad
+// form both honor the receiptId fallback, so the balance readers must speak
+// for the same money. A zero-amount link remains provenance only and must
+// never become money.
+function isAdLegacyDueMirrorForReceipt(ad, receiptId) {
+  const rid = String(receiptId || '');
+  if (!ad || !rid) return false;
+  if (String(ad.linkedDeliveryReceiptId || '') === rid) return true;
+  const paymentState = typeof getAdPaymentState === 'function'
+    ? getAdPaymentState(ad)
+    : (ad.isPaid === true ? 'paid' : 'not_paid');
+  if (paymentState !== 'not_paid') return false;
+  const method = String(ad.collectionMethod || '');
+  if (method === 'in_shop') return String(ad.receiptId || '') === rid;
+  return method === 'driver'
+    && String(ad.linkedDeliveryReceiptId || '') === ''
+    && String(ad.receiptId || '') === rid;
+}
+
+function getAdLegacyDueMirrorUSD(ad, receiptId, fallbackRate = 0) {
+  if (!isAdLegacyDueMirrorForReceipt(ad, receiptId)) return 0;
+  const direct = Number(ad?.dueAmountToUseUSD);
+  if (Number.isFinite(direct) && direct > 0) return Math.round(direct * 100) / 100;
+  const local = Number(ad?.dueAmountToUseLYD);
+  const rate = Number(ad?.exchangeRate) || Number(fallbackRate) || Number(state.defaultExchangeRate) || 0;
+  if (!Number.isFinite(local) || local <= 0 || !Number.isFinite(rate) || rate <= 0) return 0;
+  return Math.round((local / rate) * 100) / 100;
+}
+
+function _localAdCommittedMinor(ad, receiptId) {
+  const rid = String(receiptId || '');
+  const paid = _localFundingMap(ad?.receiptAllocations).get(rid) || 0;
+  const dueMap = _localFundingMap(ad?.dueAllocations);
+  const due = dueMap.get(rid) || 0;
+  let legacyDue = 0;
+  // The scalar mirror is standalone money ONLY for rowless ads. Once due
+  // rows exist the writers keep dueAmountToUseUSD equal to their sum, so
+  // attributing it to the linked receipt again would count the same
+  // dollars on two receipts at once.
+  if (isAdLegacyDueMirrorForReceipt(ad, rid) && due === 0 && dueMap.size === 0) {
+    legacyDue = _localLegacyDueMinor(ad);
+  }
+  const explicit = paid + due + legacyDue;
+  if (explicit > 0) return explicit;
+
+  // Once either allocation ledger exists, a missing row means this receipt
+  // committed zero. Falling back to the full ad amount would charge another
+  // receipt for money it never supplied.
+  if (Array.isArray(ad?.receiptAllocations) || Array.isArray(ad?.dueAllocations)) return 0;
+  const paymentState = typeof getAdPaymentState === 'function'
+    ? getAdPaymentState(ad)
+    : (ad?.isPaid === true ? 'paid' : 'not_paid');
+  if (paymentState === 'not_paid' && ['driver', 'in_shop'].includes(String(ad?.collectionMethod || ''))) {
+    return 0;
+  }
+  const references = new Set([
+    String(ad?.fundingReceiptId || ''),
+    String(ad?.receiptId || ''),
+    String(ad?.linkedDeliveryReceiptId || '')
+  ]);
+  if (!references.has(rid)) return 0;
+  return _localFundingMinor(ad?.spentUSD !== undefined && ad?.spentUSD !== null ? ad.spentUSD : ad?.amountUSD);
+}
+
+function _localReceiptOutgoingMinor(receipt) {
+  if (receipt?.transfers === undefined || receipt?.transfers === null) return 0;
+  if (!Array.isArray(receipt.transfers)) throw new Error('Stored receipt transfers are invalid');
+  return receipt.transfers.reduce((sum, transfer) => {
+    if (!transfer || typeof transfer !== 'object' || Array.isArray(transfer)) {
+      throw new Error('Stored receipt transfer is invalid');
+    }
+    const amount = Number(transfer.amountUSD);
+    if (!Number.isFinite(amount) || amount < 0) throw new Error('Stored receipt transfer amount is invalid');
+    return sum + _localFundingMinor(amount);
+  }, 0);
+}
+
+// Local/offline parity for the server settlement transaction. It converts only
+// explicit due money (allocation row or positive legacy dueAmount mirror); a
+// link by itself is provenance and never mints credit. Every plan is validated
+// before updateRecord changes the receipt or any ad.
+function planLocalReceiptPaidAdUpdates(receiptId, nextReceipt = null) {
+  const rid = String(receiptId || '');
+  const receipt = nextReceipt || (state.receipts || []).find(row => row && String(row.id) === rid);
+  if (!receipt || receipt._deleted) throw new Error('Receipt not found');
+  const receiptCustomerId = String(receipt.customerId || '');
+  const actorId = String(state.currentUser?.id || '');
+  const now = new Date().toISOString();
+  const plans = [];
+  const plannedById = new Map();
+  for (let index = 0; index < (state.ads || []).length; index++) {
+    const ad = state.ads[index];
+    if (!ad || ad._deleted || String(ad.recordType || '') === 'receipt') continue;
+    const paymentState = typeof getAdPaymentState === 'function'
+      ? getAdPaymentState(ad)
+      : (ad.isPaid === true ? 'paid' : 'not_paid');
+    const collectionMethod = String(ad.collectionMethod || '');
+    const isDriverLink = paymentState === 'not_paid'
+      && collectionMethod === 'driver'
+      && String(ad.linkedDeliveryReceiptId || ad.receiptId || '') === rid;
+    const isShopLink = paymentState === 'not_paid'
+      && collectionMethod === 'in_shop'
+      && String(ad.receiptId || '') === rid;
+
+    const paid = _localFundingMap(ad.receiptAllocations);
+    const due = _localFundingMap(ad.dueAllocations);
+    let moved = due.get(rid) || 0;
+    due.delete(rid);
+    // The scalar mirror converts as standalone money only for rowless ads;
+    // when due rows survive for other receipts the mirror is their sum and
+    // converting it here would mint the same dollars a second time.
+    if (moved <= 0 && (isDriverLink || isShopLink) && due.size === 0) moved = _localLegacyDueMinor(ad);
+
+    const stopBaseline = ad.stopAllocationBaseline;
+    const hasStopBaseline = !!stopBaseline && typeof stopBaseline === 'object' && !Array.isArray(stopBaseline);
+    const stopPaid = _localFundingMap(hasStopBaseline ? stopBaseline.receipt : []);
+    const stopDue = _localFundingMap(hasStopBaseline ? stopBaseline.due : []);
+    const stopMoved = stopDue.get(rid) || 0;
+    stopDue.delete(rid);
+    const stopLegacy = hasStopBaseline && stopMoved <= 0 && (isDriverLink || isShopLink)
+      ? _localFundingMinor(stopBaseline.dueLegacy)
+      : 0;
+    const refundPaid = _localFundingMap(ad.refundAllocationBaseline);
+    const refundDue = _localFundingMap(ad.refundDueBaseline);
+    const refundMoved = refundDue.get(rid) || 0;
+    refundDue.delete(rid);
+    const baselineChanged = stopMoved + stopLegacy + refundMoved > 0;
+    if (moved <= 0 && !baselineChanged) continue;
+
+    if (String(ad.customerId || '') !== receiptCustomerId) {
+      throw new Error('Linked ad and receipt belong to different customers');
+    }
+
+    const next = { ...ad };
+    let fullyFunded = false;
+    if (moved > 0) {
+      paid.set(rid, (paid.get(rid) || 0) + moved);
+      const target = _localFundingMinor(ad.spentUSD !== undefined && ad.spentUSD !== null ? ad.spentUSD : ad.amountUSD);
+      const totalAfter = [...paid.values(), ...due.values()].reduce((sum, amount) => sum + amount, 0);
+      if (totalAfter > target) throw new Error('Linked ad funding exceeds its authoritative amount');
+
+      const receiptAllocations = _localFundingRows(paid);
+      const dueAllocations = _localFundingRows(due);
+      fullyFunded = totalAfter === target && due.size === 0;
+      Object.assign(next, {
+        receiptAllocations,
+        dueAllocations,
+        dueAmountToUseUSD: [...due.values()].reduce((sum, amount) => sum + amount, 0) / 100,
+        dueAmountToUseLYD: 0,
+        receiptIds: receiptAllocations.map(row => row.receiptId),
+        fundingReceiptId: receiptAllocations[0]?.receiptId || ''
+      });
+      if (fullyFunded) {
+        Object.assign(next, {
+          paymentStatus: 'paid', isPaid: true, collectionMethod: '', collectionPayments: [],
+          paymentMethod: '', linkedDeliveryReceiptId: '', mergedPaidAllocations: [],
+          hasMergedPaidFunds: false, receiptId: receiptAllocations[0]?.receiptId || ''
+        });
+      } else {
+        next.paymentStatus = 'not_paid';
+        next.isPaid = false;
+        next.mergedPaidAllocations = collectionMethod === 'driver'
+          ? receiptAllocations.map(row => ({ ...row }))
+          : [];
+        next.hasMergedPaidFunds = collectionMethod === 'driver' && receiptAllocations.length > 0;
+        if (collectionMethod === 'in_shop' && due.size === 0) next.receiptId = '';
+      }
+    }
+
+    // Frozen stop/refund baselines move even when live funding is zero. A later
+    // reconciliation/refund reversal must never resurrect paid money as debt.
+    if (hasStopBaseline && (stopMoved > 0 || stopLegacy > 0)) {
+      stopPaid.set(rid, (stopPaid.get(rid) || 0) + stopMoved + stopLegacy);
+      const baselineReceiptRows = _localFundingRows(stopPaid);
+      const nextBaseline = {
+        ...stopBaseline,
+        receipt: baselineReceiptRows,
+        due: _localFundingRows(stopDue),
+        dueLegacy: 0
+      };
+      if (stopDue.size === 0 && [...stopPaid.values()].reduce((sum, amount) => sum + amount, 0) === _localFundingMinor(ad.amountUSD)) {
+        nextBaseline.paymentStatus = 'paid';
+      }
+      nextBaseline.merged = String(nextBaseline.paymentStatus || '') !== 'paid'
+        && getAdPaymentState(next) === 'not_paid'
+        && String(next.collectionMethod || '') === 'driver'
+          ? baselineReceiptRows.map(row => ({ ...row }))
+          : [];
+      next.stopAllocationBaseline = nextBaseline;
+    }
+    if (refundMoved > 0) {
+      refundPaid.set(rid, (refundPaid.get(rid) || 0) + refundMoved);
+      next.refundAllocationBaseline = _localFundingRows(refundPaid);
+      next.refundDueBaseline = _localFundingRows(refundDue);
+      if (refundDue.size === 0 && [...refundPaid.values()].reduce((sum, amount) => sum + amount, 0) === _localFundingMinor(ad.amountUSD)) {
+        next.refundBaselinePaymentStatus = 'paid';
+      }
+    }
+
+    // A stopped-at-zero or fully-refunded ad may have no live due row: only
+    // its frozen baseline contained the promise converted above. Align the
+    // current badge/provenance immediately when its live rows now fully cover
+    // the effective spend (including a zero-dollar effective spend).
+    const livePaid = _localFundingMap(next.receiptAllocations);
+    const liveDue = _localFundingMap(next.dueAllocations);
+    const liveTarget = _localFundingMinor(next.spentUSD !== undefined && next.spentUSD !== null ? next.spentUSD : next.amountUSD);
+    if (baselineChanged && liveDue.size === 0 && [...livePaid.values()].reduce((sum, amount) => sum + amount, 0) === liveTarget) {
+      const paidRows = _localFundingRows(livePaid);
+      const paidIds = paidRows.map(row => row.receiptId);
+      Object.assign(next, {
+        paymentStatus: 'paid',
+        isPaid: true,
+        collectionMethod: '',
+        collectionPayments: [],
+        paymentMethod: '',
+        linkedDeliveryReceiptId: '',
+        mergedPaidAllocations: [],
+        hasMergedPaidFunds: false,
+        receiptAllocations: paidRows,
+        receiptIds: paidIds,
+        fundingReceiptId: paidIds[0] || '',
+        receiptId: paidIds[0] || rid,
+        dueAmountToUseUSD: 0,
+        dueAmountToUseLYD: 0
+      });
+    }
+
+    Object.assign(next, {
+      settledReceiptId: rid,
+      receiptSettledAt: now,
+      receiptSettledBy: actorId,
+      lastUpdated: now,
+      _lastModified: getMonotonicTime()
+    });
+    const plan = { index, data: next };
+    plans.push(plan);
+    plannedById.set(String(ad.id || ''), next);
+  }
+
+  // Simulate the complete batch before changing either receipt or ads. The
+  // newly Paid receipt has one capacity: its resulting amountUSD, minus money
+  // already transferred out and every surviving paid/due ad commitment.
+  const capacity = _localFundingMinor(receipt.amountUSD);
+  let committed = _localReceiptOutgoingMinor(receipt);
+  for (const ad of state.ads || []) {
+    if (!ad || ad._deleted || String(ad.recordType || '') === 'receipt') continue;
+    const simulated = plannedById.get(String(ad.id || '')) || ad;
+    committed += _localAdCommittedMinor(simulated, rid);
+  }
+  if (committed > capacity) throw new Error('Paid receipt balance is insufficient for all linked ads');
+  return plans;
+}
+
+function applyLocalReceiptPaidAdUpdates(plans) {
+  for (const plan of Array.isArray(plans) ? plans : []) {
+    if (!Number.isInteger(plan?.index) || !plan?.data) continue;
+    state.ads[plan.index] = plan.data;
+  }
+  if (Array.isArray(plans) && plans.length > 0) markCollectionDirty('ads');
+  return Array.isArray(plans) ? plans.length : 0;
+}
+
 /**
  * Update an existing record in a collection (merge semantics).
  * 
@@ -218,18 +529,82 @@ function updateRecord(array, id, updates, expectedLastModified) {
       }
     }
 
-    array[index] = { ...array[index], ...sanitizedUpdates, _lastModified: getMonotonicTime() };
-    if (isServerModeEnabled() && collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function') {
-      array[index] = makeLightweightMediaRecord(collectionName, array[index]);
+    // A Not Paid -> Paid receipt is not an isolated row edit. Every linked ad
+    // must move from due/debt funding to paid funding in the SAME transaction,
+    // and the browser must install the whole authoritative result together.
+    // Keep one stable key for this updateRecord attempt so a network retry can
+    // safely replay the settlement instead of charging funding twice.
+    const _oldReceiptStatus = collectionName === 'receipts'
+      ? String(old.status || '').trim().toLowerCase()
+      : '';
+    // Keep the canonical Paid/Not Paid pair consistent even for legacy callers
+    // that supplied only one side. Canceled/Lost deliberately keep their own
+    // status because they can retain historical money without being "Paid".
+    const _requestedReceiptStatus = collectionName === 'receipts' && sanitizedUpdates.status !== undefined
+      ? String(sanitizedUpdates.status || '').trim().toLowerCase()
+      : '';
+    if (_requestedReceiptStatus === 'paid') sanitizedUpdates.isPaid = true;
+    if (_requestedReceiptStatus === 'not paid' || _requestedReceiptStatus === 'not_paid') sanitizedUpdates.isPaid = false;
+    if (collectionName === 'receipts'
+        && sanitizedUpdates.status === undefined
+        && sanitizedUpdates.isPaid === true
+        && (_oldReceiptStatus === 'not paid' || _oldReceiptStatus === 'not_paid')) {
+      sanitizedUpdates.status = 'Paid';
     }
-    // Keep currentUser in sync when updating own user record (important for profile changes)
-    if (collectionName === 'users' && state.currentUser?.id === id) {
-      state.currentUser = array[index];
+    const _nextReceiptStatus = collectionName === 'receipts'
+      ? String(sanitizedUpdates.status ?? old.status ?? '').trim().toLowerCase()
+      : '';
+    // Route EVERY resulting Paid receipt through the cascade endpoint, not only
+    // a fresh transition. This repairs old Paid receipts whose ads still carry
+    // legacy due rows and returns those repaired ads immediately to the UI.
+    const _settlesReceipt = collectionName === 'receipts'
+      && _nextReceiptStatus === 'paid';
+    const _receiptSettlementKey = _settlesReceipt
+      ? Security.generateSecureId('receipt-settlement')
+      : '';
+    let _localReceiptAdPlans = [];
+    if (_settlesReceipt && !isServerModeEnabled()) {
+      try {
+        _localReceiptAdPlans = planLocalReceiptPaidAdUpdates(id, {
+          ...old,
+          ...sanitizedUpdates,
+          status: 'Paid',
+          isPaid: true
+        });
+      } catch (error) {
+        showNotification(
+          state.language === 'ar' ? 'تعذر تسوية الوصل' : 'Receipt settlement blocked',
+          error?.message || 'Linked ad funding is invalid.',
+          'error'
+        );
+        return Promise.resolve(false);
+      }
     }
-    if (collectionName) markCollectionDirty(collectionName);
-    saveState();
-    addAuditLog('Update', id, `Updated ${getRecordType(array[index])}`, { old, new: array[index] });
-    RenderQueue.schedule('updateRecord');
+
+    // Ordinary records keep the established optimistic UX. Settlement is the
+    // exception: do not paint the receipt Paid before its linked ads are also
+    // committed, because that briefly presents two contradictory money states.
+    if (!(_settlesReceipt && isServerModeEnabled())) {
+      array[index] = { ...array[index], ...sanitizedUpdates, _lastModified: getMonotonicTime() };
+      if (isServerModeEnabled() && collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function') {
+        array[index] = makeLightweightMediaRecord(collectionName, array[index]);
+      }
+      // Keep currentUser in sync when updating own user record (important for profile changes)
+      if (collectionName === 'users' && state.currentUser?.id === id) {
+        state.currentUser = array[index];
+      }
+      if (collectionName) markCollectionDirty(collectionName);
+      const locallyUpdatedAds = applyLocalReceiptPaidAdUpdates(_localReceiptAdPlans);
+      saveState();
+      addAuditLog('Update', id, `Updated ${getRecordType(array[index])}`, {
+        old,
+        new: array[index],
+        locallySettledAdIds: locallyUpdatedAds > 0
+          ? _localReceiptAdPlans.map(plan => String(plan.data?.id || '')).filter(Boolean)
+          : []
+      });
+      RenderQueue.schedule('updateRecord');
+    }
 
     // Server write-through (always-online multi-user mode)
     if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
@@ -255,18 +630,39 @@ function updateRecord(array, id, updates, expectedLastModified) {
         } else {
           expected = _providedExpected != null ? _providedExpected : (old._lastModified || 0);
         }
-        return apiPatchEntity(collectionName, id, sanitizedUpdates, expected)
-        .then((entity) => {
-          if (entity?.data) {
+        const mutation = _settlesReceipt
+          ? apiSettleReceipt({
+              receiptId: id,
+              expectedLastModified: expected,
+              idempotencyKey: _receiptSettlementKey,
+              data: sanitizedUpdates
+            })
+          : apiPatchEntity(collectionName, id, sanitizedUpdates, expected);
+        return mutation
+        .then((entityOrSettlement) => {
+          if (_settlesReceipt) {
+            const settlement = entityOrSettlement;
+            const [savedReceipt] = applyValidatedServerEntityBatch([
+              { collection: 'receipts', entity: settlement.receipt },
+              ...settlement.updatedAds.map(entity => ({ collection: 'ads', entity }))
+            ], 'receiptSettlement');
+            addAuditLog('Update', id, `Settled ${getRecordType(savedReceipt || old)}`, {
+              old,
+              new: savedReceipt || settlement.receipt?.data,
+              updatedAdIds: settlement.updatedAds.map(entity => entity.id),
+              replayed: settlement.replayed === true
+            });
+          } else if (entityOrSettlement?.data) {
             const idx = array.findIndex(x => x && x.id === id);
             if (idx !== -1) {
-              array[idx] = Security.sanitizeObject(entity.data);
+              array[idx] = Security.sanitizeObject(entityOrSettlement.data);
               if (collectionName) markCollectionDirty(collectionName);
               saveState();
-              // Force full render to ensure list views update
-              forceFullRender();
             }
           }
+          // Force full render to ensure receipt cards, ad rows, customer debt,
+          // analytics and reconciliation all reflect the same committed state.
+          forceFullRender();
           return true;
         })
         .catch(async (e) => {
@@ -772,11 +1168,15 @@ function getReceiptUsageStats(receipt) {
       ? ad.dueAllocations.filter(a => String(a.receiptId || '') === receiptId).reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0)
       : 0;
 
-    // Legacy: check linkedDeliveryReceiptId with dueAmountToUseUSD
-    let legacyDueUsage = 0;
-    if (String(ad.linkedDeliveryReceiptId || '') === receiptId && dueAllocSum === 0) {
-      legacyDueUsage = parseFloat(ad.dueAmountToUseUSD) || 0;
-    }
+    // Legacy due mirrors belong to Driver links (linkedDeliveryReceiptId) or
+    // Not Paid In-Shop links (receiptId), but only for ROWLESS ads: once any
+    // positive due row exists, the writers keep the scalar mirror equal to the
+    // rows' sum, so reading it here would charge the same money twice.
+    const hasAnyPositiveDueRow = Array.isArray(ad.dueAllocations)
+      && ad.dueAllocations.some(a => (parseFloat(a?.amountUSD) || 0) > 0);
+    const legacyDueUsage = !hasAnyPositiveDueRow
+      ? getAdLegacyDueMirrorUSD(ad, receiptId, receiptObj.exchangeRate)
+      : 0;
 
     // Use explicit allocations if available, otherwise fall back to ad spend
     const explicitAllocations = receiptAllocSum + dueAllocSum + legacyDueUsage;
@@ -802,6 +1202,16 @@ function getReceiptUsageStats(receipt) {
       Array.isArray(ad.receiptAllocations) ||
       Array.isArray(ad.dueAllocations);
     if (hasAllocationData) {
+      return sum;
+    }
+
+    // A rowless Not Paid Driver/In-Shop reference is provenance, not proof that
+    // the receipt funded the whole ad. Only the positive legacy mirror above
+    // can turn this link into a commitment.
+    const paymentState = typeof getAdPaymentState === 'function'
+      ? getAdPaymentState(ad)
+      : (ad.isPaid === true ? 'paid' : 'not_paid');
+    if (paymentState === 'not_paid' && ['driver', 'in_shop'].includes(String(ad.collectionMethod || ''))) {
       return sum;
     }
 
@@ -892,18 +1302,13 @@ function getDeliveryReceiptDueUsage(receipt) {
     const paidRows = sumFor(ad.receiptAllocations);
     const dueRows = sumFor(ad.dueAllocations);
 
-    // The legacy mirror only speaks for an ad that has no due row for this receipt.
+    // The legacy mirror only speaks for a ROWLESS ad: once any positive due
+    // row exists (for this receipt or another), the scalar is the rows' sum,
+    // not additional money.
     let legacyDue = 0;
-    const hasDueRow = Array.isArray(ad.dueAllocations)
-      && ad.dueAllocations.some(a => String(a.receiptId || '') === receiptId);
-    if (!hasDueRow && String(ad.linkedDeliveryReceiptId || '') === receiptId) {
-      legacyDue = parseFloat(ad.dueAmountToUseUSD) || 0;
-      if (!legacyDue) {
-        const lyd = parseFloat(ad.dueAmountToUseLYD) || 0;
-        const adRate = ad.exchangeRate || exchangeRate || 1;
-        legacyDue = lyd > 0 && adRate > 0 ? lyd / adRate : 0;
-      }
-    }
+    const hasAnyPositiveDueRow = Array.isArray(ad.dueAllocations)
+      && ad.dueAllocations.some(a => (parseFloat(a?.amountUSD) || 0) > 0);
+    if (!hasAnyPositiveDueRow) legacyDue = getAdLegacyDueMirrorUSD(ad, receiptId, exchangeRate);
 
     const committed = paidRows + dueRows + legacyDue;
     if (committed > 0) {
@@ -983,11 +1388,20 @@ function getReceiptDebtType(receipt) {
   return isDeliveryReceiptRecord(receipt) ? 'delivery' : 'shop';
 }
 
+// Locale for every user-visible date. Without an explicit locale, phones set
+// to Arabic default to ar-SA — Hijri calendar with Arabic-Indic digits — so
+// 2026-07-22 rendered as year ١٤٤٨. The -u- extension keys pin the Gregorian
+// calendar and latin digits; they are honored by every Intl implementation
+// far below the iOS 15 baseline.
+function appDateLocale() {
+  return state.language === 'ar' ? 'ar-LY-u-ca-gregory-nu-latn' : 'en-GB';
+}
+
 function formatDateShort(date) {
   const never = state.language === 'ar' ? 'أبداً' : 'Never';
   if (!date) return never;
   try {
-    return new Date(date).toLocaleString();
+    return new Date(date).toLocaleString(appDateLocale());
   } catch (e) {
     return never;
   }

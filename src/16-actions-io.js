@@ -1,3 +1,47 @@
+function getAdCustomerConfirmationState(ad, spentValue, amountValue = ad?.amountUSD) {
+  const amount = Number(amountValue);
+  const spent = Number(spentValue);
+  const amountMinor = Number.isFinite(amount) ? Math.round(amount * 100) : NaN;
+  const spentMinor = Number.isFinite(spent) ? Math.round(spent * 100) : NaN;
+  const valid = Number.isSafeInteger(amountMinor)
+    && Number.isSafeInteger(spentMinor)
+    && amountMinor >= 0
+    && spentMinor >= 0
+    && spentMinor <= amountMinor;
+  const remainingMinor = valid ? amountMinor - spentMinor : null;
+  const storedSpentRaw = ad?.spentUSD;
+  const storedSpent = Number(storedSpentRaw);
+  const storedSpentMinor = storedSpentRaw !== undefined
+    && storedSpentRaw !== null
+    && String(storedSpentRaw).trim() !== ''
+    && Number.isFinite(storedSpent)
+    ? Math.round(storedSpent * 100)
+    : null;
+  const confirmedRemainingMinor = Number.isSafeInteger(storedSpentMinor)
+    ? Math.max(amountMinor - storedSpentMinor, 0)
+    : null;
+  const existingConfirmationApplies = ad?.remainingCustomerInformed === true
+    && valid
+    && remainingMinor > 0
+    && confirmedRemainingMinor === remainingMinor;
+  return { valid, remainingMinor, existingConfirmationApplies };
+}
+
+function syncAdCustomerInformedControl(ad, informedInput, spentValue, amountValue = ad?.amountUSD) {
+  const confirmation = getAdCustomerConfirmationState(ad, spentValue, amountValue);
+  if (!informedInput) return confirmation;
+  if (confirmation.existingConfirmationApplies) {
+    informedInput.checked = true;
+    informedInput.disabled = true;
+  } else {
+    // Any changed/invalid spend invalidates the old check. The user must
+    // actively check it again after telling the customer the new remainder.
+    informedInput.checked = false;
+    informedInput.disabled = !confirmation.valid || confirmation.remainingMinor <= 0;
+  }
+  return confirmation;
+}
+
 function stopAd(id) {
   // Permission check
   if (!canActOnRecord('ads', 'stopAd', state.ads.find(a => a.id === id)?.creatorId)) {
@@ -13,6 +57,7 @@ function stopAd(id) {
   const adAmountUSD = ad.amountUSD || 0;
   const currentSpentUSD = ad.spentUSD || 0;
   const isAlreadyStopped = ad.status === 'Stopped';
+  const alreadyInformed = ad.remainingCustomerInformed === true;
   const previousRemaining = isAlreadyStopped ? (adAmountUSD - currentSpentUSD) : 0;
   
   // Calculate current remaining from receipt allocations
@@ -42,7 +87,7 @@ function stopAd(id) {
               <strong>${isAr ? 'العميل' : 'Customer'}:</strong> ${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}<br>
               <strong>${isAr ? 'مبلغ الإعلان' : 'Ad Amount'}:</strong> $${adAmountUSD.toFixed(2)}<br>
               <strong>${isAr ? 'المخصص حالياً' : 'Currently Allocated'}:</strong> $${totalAllocated.toFixed(2)}
-              ${isAlreadyStopped && ad.stoppedAt ? `<br><strong>${isAr ? 'تاريخ الإيقاف' : 'Stopped On'}:</strong> ${new Date(ad.stoppedAt).toLocaleString()}` : ''}
+              ${isAlreadyStopped && ad.stoppedAt ? `<br><strong>${isAr ? 'تاريخ الإيقاف' : 'Stopped On'}:</strong> ${new Date(ad.stoppedAt).toLocaleString(appDateLocale())}` : ''}
             </p>
           </div>
           
@@ -87,6 +132,20 @@ function stopAd(id) {
               <span class="text-sm font-bold text-emerald-600" id="stop-ad-remaining">$${(adAmountUSD - currentSpentUSD).toFixed(2)}</span>
             </div>
           </div>
+
+          <label class="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-900/50 ${alreadyInformed ? 'cursor-default' : 'cursor-pointer'}">
+            <input
+              id="stop-ad-customer-informed"
+              type="checkbox"
+              class="mt-0.5 h-5 w-5 shrink-0 accent-emerald-600"
+              ${alreadyInformed ? 'checked disabled' : ''}
+              ${!alreadyInformed && adAmountUSD - currentSpentUSD <= 0 ? 'disabled' : ''}
+            />
+            <span>
+              <span class="block text-sm font-bold text-slate-800 dark:text-slate-100">${isAr ? 'أؤكد أنني أبلغت العميل بالمبلغ المتبقي' : 'I confirm that I told the customer about the remaining amount'}</span>
+              <span id="stop-ad-customer-informed-help" class="block text-xs text-slate-500">${alreadyInformed && ad.remainingCustomerInformedAt ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale()) : (isAr ? 'إذا تغيّر المصروف، أبلغ العميل بالمبلغ المتبقي الجديد ثم حدّد هذا المربع مرة أخرى.' : 'If the spend changes, tell the customer the new remaining amount and check this again.')}</span>
+            </span>
+          </label>
           
           <div class="flex space-x-3 pt-2">
             <button 
@@ -121,13 +180,30 @@ function stopAd(id) {
   const spentInput = document.getElementById('stop-ad-spent');
   const spentDisplay = document.getElementById('stop-ad-spent-display');
   const remainingDisplay = document.getElementById('stop-ad-remaining');
+  const informedInput = document.getElementById('stop-ad-customer-informed');
+  const informedHelp = document.getElementById('stop-ad-customer-informed-help');
   
   if (spentInput && spentDisplay && remainingDisplay) {
     spentInput.addEventListener('input', function() {
-      const spent = parseFloat(this.value) || 0;
+      const raw = String(this.value || '').trim();
+      const spent = Number(raw);
+      if (!raw || !Number.isFinite(spent)) {
+        spentDisplay.textContent = '—';
+        remainingDisplay.textContent = '—';
+        syncAdCustomerInformedControl(ad, informedInput, NaN, adAmountUSD);
+        return;
+      }
       const remaining = Math.max(adAmountUSD - spent, 0);
       spentDisplay.textContent = '$' + spent.toFixed(2);
       remainingDisplay.textContent = '$' + remaining.toFixed(2);
+      const confirmation = syncAdCustomerInformedControl(ad, informedInput, spent, adAmountUSD);
+      if (informedHelp) {
+        informedHelp.textContent = confirmation.existingConfirmationApplies && ad.remainingCustomerInformedAt
+          ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale())
+          : (isAr
+              ? 'تغيّر المبلغ المتبقي. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع مرة أخرى.'
+              : 'The remaining amount changed. Tell the customer the new amount, then check this again.');
+      }
     });
     
     // Focus on input
@@ -135,15 +211,47 @@ function stopAd(id) {
   }
 }
 
+function updateReconciliationPreview(id) {
+  const ad = state.ads.find(a => String(a.id) === String(id));
+  if (!ad) return;
+  const input = document.getElementById(`reconciliation-spent-${id}`);
+  const remainingDisplay = document.getElementById(`reconciliation-remaining-${id}`);
+  const informedInput = document.getElementById(`reconciliation-informed-${id}`);
+  const informedHelp = document.getElementById(`reconciliation-informed-help-${id}`);
+  if (!input || !remainingDisplay) return;
+  const raw = String(input.value || '').trim();
+  const spent = Number(raw);
+  if (!raw || !Number.isFinite(spent)) {
+    remainingDisplay.textContent = '—';
+    syncAdCustomerInformedControl(ad, informedInput, NaN);
+    return;
+  }
+  const amount = Math.max(Number(ad.amountUSD) || 0, 0);
+  const remaining = Math.max(amount - spent, 0);
+  remainingDisplay.textContent = '$' + remaining.toFixed(2);
+  const confirmation = syncAdCustomerInformedControl(ad, informedInput, spent, amount);
+  if (informedInput && !canActOnRecord('ads', 'stopAd', ad.creatorId || ad.createdBy)) {
+    informedInput.disabled = true;
+  }
+  if (informedHelp) {
+    const isAr = state.language === 'ar';
+    informedHelp.textContent = confirmation.existingConfirmationApplies
+      ? (ad.remainingCustomerInformedAt ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale()) : (isAr ? 'تم حفظ هذا التأكيد للمبلغ الحالي.' : 'This confirmation is saved for the current amount.'))
+      : (isAr
+          ? 'تغيّر المبلغ المتبقي. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع مرة أخرى.'
+          : 'The remaining amount changed. Tell the customer the new amount, then check this again.');
+  }
+}
+
 const _pendingAdStopAttempts = new Map();
 
-function getAdStopAttempt(ad, spentMinorUSD) {
+function getAdStopAttempt(ad, spentMinorUSD, customerInformed = false) {
   const adId = String(ad?.id || '');
   const expectedLastModified = Number(ad?._lastModified);
   if (!Number.isSafeInteger(expectedLastModified) || expectedLastModified < 0) {
     throw new Error('This ad is missing its server version. Refresh and try again.');
   }
-  const fingerprint = JSON.stringify({ adId, spentMinorUSD, expectedLastModified });
+  const fingerprint = JSON.stringify({ adId, spentMinorUSD, customerInformed: customerInformed === true, expectedLastModified });
   const prior = _pendingAdStopAttempts.get(adId);
   if (prior?.fingerprint === fingerprint) return prior;
   if (prior?.promise) return prior;
@@ -164,10 +272,14 @@ function completeAdStopAttempt(attempt) {
   }
 }
 
-async function confirmStopAd(id) {
+async function confirmStopAd(id, source = 'modal') {
   const isAr = state.language === 'ar';
   const storedAd = state.ads.find(a => a.id === id);
   if (!storedAd) return;
+  if (!canActOnRecord('ads', 'stopAd', storedAd.creatorId || storedAd.createdBy)) {
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'لا توجد صلاحية لتسوية هذا الإعلان' : 'You do not have permission to reconcile this ad', 'error');
+    return;
+  }
   // Work on a detached copy. Mutating the live record before updateRecord()
   // captured its rollback snapshot made a failed server PATCH impossible to
   // undo and still allowed the success path to continue.
@@ -181,16 +293,35 @@ async function confirmStopAd(id) {
       : storedAd.stopAllocationBaseline
   };
   
-  const spentInput = document.getElementById('stop-ad-spent');
+  const isReconciliation = source === 'reconciliation';
+  const inputPrefix = isReconciliation ? `reconciliation-${id}` : 'stop-ad';
+  const spentInput = document.getElementById(`${inputPrefix}-spent`);
   if (!spentInput) return;
-  
-  const spentUSD = parseFloat(spentInput.value) || 0;
+
+  const rawSpent = String(spentInput.value || '').trim();
+  const spentUSD = Number(rawSpent);
   const adAmountUSD = ad.amountUSD || 0;
+
+  if (!rawSpent || !Number.isFinite(spentUSD)) {
+    showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'أدخل المبلغ الذي صرفه فيسبوك فعلياً.' : 'Enter the amount Facebook actually spent.', 'error');
+    return;
+  }
   
   if (spentUSD < 0 || spentUSD > adAmountUSD) {
     showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'يجب أن يكون المبلغ المصروف بين صفر ومبلغ الإعلان' : 'Spent amount must be between 0 and ad amount', 'error');
     return;
   }
+  const informedInput = document.getElementById(
+    isReconciliation ? `reconciliation-informed-${id}` : 'stop-ad-customer-informed'
+  );
+  const confirmation = getAdCustomerConfirmationState(storedAd, spentUSD, adAmountUSD);
+  // An already-saved, disabled check is not a fresh confirmation. The server
+  // will preserve it when the remainder is unchanged; a changed remainder is
+  // confirmed only after the user actively checks the re-enabled control.
+  const customerInformed = confirmation.remainingMinor > 0
+    && confirmation.existingConfirmationApplies !== true
+    && informedInput?.checked === true
+    && informedInput.disabled !== true;
 
   if (isServerModeEnabled()) {
     const spentMinorUSD = Math.round(spentUSD * 100);
@@ -200,18 +331,20 @@ async function confirmStopAd(id) {
     }
     let attempt;
     try {
-      attempt = getAdStopAttempt(storedAd, spentMinorUSD);
+      attempt = getAdStopAttempt(storedAd, spentMinorUSD, customerInformed);
     } catch (error) {
       showNotification(isAr ? 'تعذر الحفظ' : 'Ad Not Saved', error.message, 'error');
       return;
     }
     if (attempt.promise) return await attempt.promise;
-    const submitButton = document.getElementById('stop-ad-submit');
+    const submitButtonId = isReconciliation ? `reconciliation-submit-${id}` : 'stop-ad-submit';
+    const submitButton = document.getElementById(submitButtonId);
     if (submitButton) submitButton.disabled = true;
     attempt.promise = (async () => {
       try {
         const response = await apiStopAd(storedAd.id, {
           spentMinorUSD,
+          customerInformed,
           idempotencyKey: attempt.idempotencyKey,
           expectedLastModified: attempt.expectedLastModified
         });
@@ -245,7 +378,7 @@ async function confirmStopAd(id) {
         return false;
       } finally {
         attempt.promise = null;
-        const liveButton = document.getElementById('stop-ad-submit');
+        const liveButton = document.getElementById(submitButtonId);
         if (liveButton) liveButton.disabled = false;
       }
     })();
@@ -391,6 +524,19 @@ async function confirmStopAd(id) {
     ad.stoppedAt = new Date().toISOString();
   }
   ad.lastUpdated = new Date().toISOString();
+  const informedNow = confirmation.remainingMinor > 0
+    && (confirmation.existingConfirmationApplies || customerInformed);
+  ad.remainingCustomerInformed = informedNow;
+  if (confirmation.existingConfirmationApplies) {
+    ad.remainingCustomerInformedAt = storedAd.remainingCustomerInformedAt || new Date().toISOString();
+    ad.remainingCustomerInformedBy = storedAd.remainingCustomerInformedBy || state.currentUser?.id || '';
+  } else if (customerInformed) {
+    ad.remainingCustomerInformedAt = new Date().toISOString();
+    ad.remainingCustomerInformedBy = state.currentUser?.id || '';
+  } else {
+    delete ad.remainingCustomerInformedAt;
+    delete ad.remainingCustomerInformedBy;
+  }
 
   // Apply the planned allocation amounts (+ audit trail per receipt).
   // MONEY-MATH: zero-amount entries are intentionally KEPT (not filtered out)
@@ -602,27 +748,118 @@ async function updateExchangeRate(value) {
   showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث سعر الصرف' : 'Exchange rate updated', 'success');
 }
 
+// Start (or move) the liquidity tracking window. Money-critical and
+// deliberately Admin-only: the chosen date decides which cash counts as "new",
+// so nobody below Admin may move it. Append-only like exchangeRateHistory —
+// every change stays in the history as an audit trail.
+async function updateLiquidityTrackingStart(value) {
+  const isAr = state.language === 'ar';
+  if (!isCurrentUserAdmin()) {
+    showNotification(
+      isAr ? 'تم رفض الوصول' : 'Access Denied',
+      isAr ? 'تغيير تاريخ تتبّع السيولة مسموح للمدير فقط' : 'Only an Admin can set the liquidity tracking date',
+      'error'
+    );
+    render();
+    return;
+  }
+  const parsed = new Date(String(value || ''));
+  if (!value || Number.isNaN(parsed.getTime())) {
+    showNotification(
+      isAr ? 'خطأ في الإدخال' : 'Validation',
+      isAr ? 'اختر تاريخ بداية صحيحاً' : 'Choose a valid start date',
+      'error'
+    );
+    render();
+    return;
+  }
+  // No backdating. Historical receipts edited before this build can carry
+  // rewritten collection dates; letting the window reach behind today would
+  // count that old, already-spent money as "new" cash. Tracking is about the
+  // future: it starts today or later. (24h slack absorbs timezone offsets.)
+  if (parsed.getTime() < Date.now() - 24 * 60 * 60 * 1000) {
+    showNotification(
+      isAr ? 'خطأ في الإدخال' : 'Validation',
+      isAr ? 'لا يمكن اختيار تاريخ في الماضي — يبدأ التتبّع من اليوم أو لاحقاً' : 'The start date cannot be in the past — tracking starts from today or later',
+      'error'
+    );
+    render();
+    return;
+  }
+  const record = {
+    id: generateId('liqcfg'),
+    settingKey: 'liquidityTracking',
+    startDate: parsed.toISOString(),
+    setBy: state.currentUser?.id || 'system',
+    date: new Date().toISOString()
+  };
+  const saved = await addRecord(state.appSettings, record);
+  if (!saved) { render(); return; }
+  showNotification(
+    isAr ? 'تم الحفظ' : 'Saved',
+    isAr ? 'بدأ تتبّع السيولة من التاريخ المحدد' : 'Liquidity tracking now starts from the chosen date',
+    'success'
+  );
+  render();
+}
+
 // Print ONE receipt card. window.print() alone printed the whole Receipts
 // page — every loaded card, other customers' amounts included — onto the
 // paper handed to a single customer. Mark the clicked card and let the
 // @media print rules in style.css hide everything else.
 function printReceiptCard(btn) {
-  const card = btn && btn.closest ? btn.closest('.glass-panel') : null;
+  let card = btn && btn.closest ? btn.closest('.glass-panel') : null;
   if (!card) {
     window.print();
     return;
   }
+  // A live-sync render can replace the card node while the print sheet is
+  // open; remember the receipt id so beforeprint can re-resolve the LIVE
+  // card instead of marking a detached node (which prints blank pages).
+  const receiptId = card.getAttribute('data-receipt-id') || '';
   card.classList.add('print-target');
   document.body.classList.add('print-single');
+  // Phones don't block on window.print(): the native print sheet stays open
+  // while page JS keeps running, afterprint fires during pagination (sheet
+  // still up), and WebKit/Blink re-paginate from the LIVE DOM whenever the
+  // user picks a printer or changes paper/range in that sheet. The old
+  // afterprint/3s-timer cleanup therefore unmarked the card mid-preview and
+  // a re-paginated print regressed to the full Receipts page. Same fix as
+  // printClothesOrderSlip: re-apply the print marks on every beforeprint
+  // pass, and only tear down on the first user interaction with the page —
+  // impossible while the native sheet covers it — with a long timer as the
+  // last-resort fallback for webviews that fire no print events at all.
+  // Harmless meanwhile: every .print-single/.print-target rule lives inside
+  // @media print, so the lingering marks have zero on-screen effect.
+  const applyPrintMarkup = () => {
+    if (!card.isConnected && receiptId) {
+      const live = document.querySelector('[data-receipt-card="true"][data-receipt-id="' + (window.CSS && CSS.escape ? CSS.escape(receiptId) : receiptId) + '"]');
+      if (live) card = live;
+    }
+    if (!card.isConnected) {
+      // Receipt no longer on screen (deleted/filtered out): printing the
+      // full page would be wrong and a detached mark prints blank — abort.
+      cleanup();
+      return;
+    }
+    card.classList.add('print-target');
+    document.body.classList.add('print-single');
+  };
+  let cleanupTimer = 0;
   const cleanup = () => {
     card.classList.remove('print-target');
     document.body.classList.remove('print-single');
-    window.removeEventListener('afterprint', cleanup);
+    window.removeEventListener('beforeprint', applyPrintMarkup);
+    window.removeEventListener('pointerdown', cleanup, true);
+    window.removeEventListener('keydown', cleanup, true);
+    clearTimeout(cleanupTimer);
   };
-  window.addEventListener('afterprint', cleanup);
+  window.addEventListener('beforeprint', applyPrintMarkup);
+  // keydown also disarms so a follow-up Ctrl+P prints the full page again.
+  window.addEventListener('pointerdown', cleanup, { once: true, capture: true });
+  window.addEventListener('keydown', cleanup, { once: true, capture: true });
+  cleanupTimer = setTimeout(cleanup, 60000);
   window.print();
-  // Safety net for webviews that never fire afterprint
-  setTimeout(cleanup, 3000);
 }
 
 function exportData() {
@@ -746,12 +983,26 @@ function exportData() {
   const link = document.createElement('a');
   link.href = url;
   link.download = `${serverPartialSnapshot ? 'albayan-server-partial-snapshot' : 'albayan-backup'}-${getTodayDateString()}.json`;
+  // Append before click: Firefox for Android ignores clicks on detached anchors.
+  document.body.appendChild(link);
   link.click();
-  URL.revokeObjectURL(url);
+  // iOS Safari fetches a blob: URL for an <a download> asynchronously, AFTER
+  // the click task returns; revoking in the same tick silently cancels the
+  // download. Keep the click synchronous (user gesture) but defer the cleanup.
+  setTimeout(() => {
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }, 2000);
   
   // Create auto backup
   createAutoBackup();
-  
+
+  // Silences the local-mode "export a backup" durability reminder for 5 days
+  // (see maybeShowLocalDataDurabilityReminder in 17-init.js).
+  if (!serverPartialSnapshot && typeof albayanNoteBackupExported === 'function') {
+    albayanNoteBackupExported();
+  }
+
   addAuditLog('Export', 'system', serverPartialSnapshot ? 'Partial client snapshot exported' : 'Local backup exported successfully');
   showNotification(
     state.language === 'ar' ? 'تم التصدير' : 'Exported',
@@ -1156,6 +1407,9 @@ function importData() {
         state.clothesOrders = Array.isArray(sanitizedImport.clothesOrders) ? sanitizedImport.clothesOrders : [];
         state.clothesSettings = Array.isArray(sanitizedImport.clothesSettings) ? sanitizedImport.clothesSettings : [];
         state.adCampaignRequests = Array.isArray(sanitizedImport.adCampaignRequests) ? sanitizedImport.adCampaignRequests : [];
+        // Restore the liquidity tracking config from the backup, but keep the
+        // device's current value when importing a pre-feature backup file.
+        if (Array.isArray(sanitizedImport.appSettings)) state.appSettings = sanitizedImport.appSettings;
 
         if (sanitizedImport.defaultExchangeRate !== undefined) {
           const rate = parseFloat(sanitizedImport.defaultExchangeRate);

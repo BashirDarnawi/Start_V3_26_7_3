@@ -28,8 +28,10 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     environment:
-      # SECURITY: Set ALBAYAN_COOKIE_SECURE=true in production (requires HTTPS)
-      ALBAYAN_COOKIE_SECURE: "${ALBAYAN_COOKIE_SECURE:-false}"
+      # SECURITY: empty = auto (Secure follows the request scheme — https
+      # direct or via x-forwarded-proto gets Secure cookies, plain HTTP gets
+      # storable ones). Set explicitly to true/false only to pin one behavior.
+      ALBAYAN_COOKIE_SECURE: "${ALBAYAN_COOKIE_SECURE:-}"
       ALBAYAN_CORS_ORIGINS: "${ALBAYAN_CORS_ORIGINS:-}"
       # Enable only when every request passes through a trusted proxy that
       # overwrites forwarding headers (for example Cloudflare/Caddy).

@@ -45,10 +45,13 @@ const Platform = {
     const ua = navigator.userAgent || '';
     const uaLower = ua.toLowerCase();
     
-    // Check for Capacitor (mobile app)
+    // Check for Capacitor (mobile app). document.URL is read defensively:
+    // headless test sandboxes stub document without it, and detect() is now
+    // reachable from routing paths (browser Back/overlay history model).
+    const docUrl = String((typeof document !== 'undefined' && document.URL) || '');
     const isCapacitor = typeof window.Capacitor !== 'undefined' ||
-                        document.URL.startsWith('capacitor://') ||
-                        document.URL.startsWith('ionic://');
+                        docUrl.startsWith('capacitor://') ||
+                        docUrl.startsWith('ionic://');
     
     // Detect specific platform
     let platform = 'web';
@@ -208,3 +211,66 @@ function togglePerformanceMode(on) {
 // exists) — before the first render, so there is no styled->lite flash.
 applyPerformanceMode();
 
+// ==========================================
+// WORKSPACE EXPERIENCE MODE
+// ==========================================
+// The same business system serves beginners and power users. "Simple" keeps
+// the everyday search and quick filters visible while advanced filters stay
+// one tap away. "Advanced" keeps every filter expanded. This is deliberately
+// a per-device UI preference: it never changes or migrates business data.
+const ALBAYAN_EXPERIENCE_MODE_KEY = 'albayan_experience_mode';
+
+function getWorkspaceExperienceMode() {
+  let preference = null;
+  try { preference = localStorage.getItem(ALBAYAN_EXPERIENCE_MODE_KEY); } catch (_) {}
+  return preference === 'advanced' ? 'advanced' : 'simple';
+}
+
+function isAdvancedWorkspaceMode() {
+  return getWorkspaceExperienceMode() === 'advanced';
+}
+
+function applyWorkspaceExperienceMode() {
+  const advanced = isAdvancedWorkspaceMode();
+  try {
+    if (document.body) {
+      document.body.classList.toggle('workspace-advanced', advanced);
+      document.body.classList.toggle('workspace-simple', !advanced);
+    }
+  } catch (_) {}
+  return advanced ? 'advanced' : 'simple';
+}
+
+function setWorkspaceExperienceMode(mode, options = {}) {
+  const next = mode === 'advanced' ? 'advanced' : 'simple';
+  try { localStorage.setItem(ALBAYAN_EXPERIENCE_MODE_KEY, next); } catch (_) {}
+  applyWorkspaceExperienceMode();
+
+  // A full shell render refreshes the global header, navigation and every
+  // progressive filter panel. Guard the calls because this module loads before
+  // the renderer is declared in the generated bundle.
+  if (options.render !== false) {
+    if (typeof forceFullRender === 'function') forceFullRender();
+    else if (typeof render === 'function') render();
+  }
+
+  if (options.notify !== false && typeof showNotification === 'function' && typeof state !== 'undefined') {
+    const isAr = state.language === 'ar';
+    showNotification(
+      isAr ? 'طريقة عرض مساحة العمل' : 'Workspace View',
+      next === 'advanced'
+        ? (isAr ? 'تم إظهار جميع الأدوات والفلاتر المتقدمة.' : 'All advanced tools and filters are now visible.')
+        : (isAr ? 'تم تفعيل العرض البسيط. الأدوات المتقدمة ما زالت على بُعد ضغطة واحدة.' : 'Simple view is on. Advanced tools remain one tap away.'),
+      'success'
+    );
+  }
+  return next;
+}
+
+function toggleWorkspaceExperienceMode() {
+  return setWorkspaceExperienceMode(isAdvancedWorkspaceMode() ? 'simple' : 'advanced');
+}
+
+// Apply before the first app render to avoid controls flashing open and then
+// collapsing on startup.
+applyWorkspaceExperienceMode();
