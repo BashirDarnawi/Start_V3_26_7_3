@@ -851,3 +851,53 @@ class TestReceiptSettleTerminal:
         assert cdata["dueAllocations"] == [
             {"receiptId": old_rid, "amountUSD": 9.0}
         ]
+
+    def test_settle_frees_old_receipt_for_deletion(self, admin):
+        """The owner's follow-up bug: after a settle the old unpaid receipt
+        showed UNUSED/zero linked ads, yet DELETE was refused with "linked to
+        ad funding" because the ad's stop baseline still named it. The relink
+        retargets baselines at the replacement receipt, so the freed receipt
+        must now be deletable and no baseline may reference it."""
+        ad_id, cust, old_rid, new_rid, version = self._stopped_unpaid_shop_ad(
+            "delfree", admin
+        )
+
+        settled = _update_ad(
+            ad_id,
+            "settle-delfree-move",
+            {
+                "relinkReceiptOnly": True,
+                "paymentStatus": "paid",
+                "receiptAllocations": [{"receiptId": new_rid, "amountUSD": 1.24}],
+                "dueAllocations": [],
+            },
+            version,
+            admin,
+        )
+        assert settled.status_code == 200, settled.text
+
+        data = self._current(ad_id, admin)
+        baseline = data.get("stopAllocationBaseline") or {}
+        named = {
+            str(entry.get("receiptId") or "")
+            for rows in baseline.values()
+            if isinstance(rows, list)
+            for entry in rows
+            if isinstance(entry, dict)
+        }
+        named.add(str(baseline.get("dueLegacyReceiptId") or ""))
+        assert old_rid not in named, baseline
+        assert new_rid in named or not any(named - {""}), baseline
+
+        deleted = client.delete(
+            f"/api/collections/receipts/{old_rid}", cookies=admin
+        )
+        assert deleted.status_code == 200, deleted.text
+
+        # The replacement receipt legitimately backs the money and must still
+        # be protected against deletion.
+        blocked = client.delete(
+            f"/api/collections/receipts/{new_rid}", cookies=admin
+        )
+        assert blocked.status_code == 409, blocked.text
+        assert "ad funding" in blocked.text

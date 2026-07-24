@@ -7878,6 +7878,57 @@ def _financial_apply_relink(
         result["receiptId"] = linked_id if linked_id else (paid_ids[0] if paid_ids else "")
     result["isPaid"] = payment_status == "paid"
     result["paymentStatus"] = payment_status
+
+    # Retarget historical baselines at the receipt that now backs the money.
+    # The stop/refund baselines still name the VACATED receipt, and
+    # _financial_receipt_ids counts baselines as live links — so the freed
+    # receipt could never be deleted ("linked to ad funding") even though its
+    # allocations were fully released. Amounts are left untouched; only the
+    # receiptId strings move, and only when the mapping is unambiguous
+    # (exactly one newly-introduced receipt). Consumers stay consistent:
+    # refunds snapshot CURRENT allocations, and a terminal ad can never be
+    # re-stopped, so no path can resurrect usage against the old receipt.
+    old_ids = {
+        str(row.get("receiptId") or "")
+        for field in ("receiptAllocations", "dueAllocations", "mergedPaidAllocations")
+        for row in (existing.get(field) or [])
+        if isinstance(row, dict) and row.get("receiptId")
+    }
+    new_ids = set(paid_ids) | set(due_ids)
+    vacated = {rid for rid in old_ids if rid and rid not in new_ids}
+    introduced = sorted(rid for rid in new_ids if rid and rid not in old_ids)
+    if vacated and len(introduced) == 1:
+        replacement = introduced[0]
+
+        def _retarget_rows(rows: Any) -> Any:
+            if not isinstance(rows, list):
+                return rows
+            return [
+                (
+                    {**row, "receiptId": replacement}
+                    if isinstance(row, dict) and str(row.get("receiptId") or "") in vacated
+                    else row
+                )
+                for row in rows
+            ]
+
+        for baseline_name in ("refundAllocationBaseline", "refundDueBaseline"):
+            if isinstance(result.get(baseline_name), list):
+                result[baseline_name] = _retarget_rows(result[baseline_name])
+            elif isinstance(result.get(baseline_name), dict):
+                result[baseline_name] = {
+                    key: _retarget_rows(value)
+                    for key, value in result[baseline_name].items()
+                }
+        stop_baseline = result.get("stopAllocationBaseline")
+        if isinstance(stop_baseline, dict):
+            next_baseline = dict(stop_baseline)
+            for key, value in stop_baseline.items():
+                if isinstance(value, list):
+                    next_baseline[key] = _retarget_rows(value)
+            if str(next_baseline.get("dueLegacyReceiptId") or "") in vacated:
+                next_baseline["dueLegacyReceiptId"] = replacement
+            result["stopAllocationBaseline"] = next_baseline
     return result
 
 

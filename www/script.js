@@ -30864,6 +30864,49 @@ function terminalSettleOnlyChangesFundingAndPayment(liveAd, adUpdates, photosDir
 // Local-mode counterpart of the server relink primitive: re-point the funding
 // allocations and their derived mirrors WITHOUT touching amountUSD/spentUSD/
 // status (updateRecord merges, so any field left out keeps its stored value).
+// Mirrors the server's baseline retarget in _financial_apply_relink: the
+// stop/refund baselines still name the VACATED receipt, and the delete guard
+// counts baselines as live links — without this the freed receipt could never
+// be deleted ("linked to ad funding"). Amounts untouched; only receiptId
+// strings move, and only when the mapping is unambiguous (exactly one newly
+// introduced receipt).
+function _relinkBaselineUpdates(liveAd, pools) {
+  const oldIds = new Set();
+  ['receiptAllocations', 'dueAllocations', 'mergedPaidAllocations'].forEach(field => {
+    (Array.isArray(liveAd[field]) ? liveAd[field] : []).forEach(row => {
+      if (row && row.receiptId) oldIds.add(String(row.receiptId));
+    });
+  });
+  const newIds = new Set([...pools.paid, ...pools.due].map(row => String(row.receiptId)));
+  const vacated = new Set([...oldIds].filter(id => id && !newIds.has(id)));
+  const introduced = [...newIds].filter(id => id && !oldIds.has(id));
+  if (!vacated.size || introduced.length !== 1) return {};
+  const replacement = introduced[0];
+  const retargetRows = rows => (Array.isArray(rows)
+    ? rows.map(row => (row && vacated.has(String(row.receiptId || '')) ? { ...row, receiptId: replacement } : row))
+    : rows);
+  const updates = {};
+  ['refundAllocationBaseline', 'refundDueBaseline'].forEach(name => {
+    const baseline = liveAd[name];
+    if (Array.isArray(baseline)) updates[name] = retargetRows(baseline);
+    else if (baseline && typeof baseline === 'object') {
+      const next = {};
+      Object.keys(baseline).forEach(key => { next[key] = retargetRows(baseline[key]); });
+      updates[name] = next;
+    }
+  });
+  const stopBaseline = liveAd.stopAllocationBaseline;
+  if (stopBaseline && typeof stopBaseline === 'object') {
+    const next = { ...stopBaseline };
+    Object.keys(stopBaseline).forEach(key => {
+      if (Array.isArray(stopBaseline[key])) next[key] = retargetRows(stopBaseline[key]);
+    });
+    if (vacated.has(String(next.dueLegacyReceiptId || ''))) next.dueLegacyReceiptId = replacement;
+    updates.stopAllocationBaseline = next;
+  }
+  return updates;
+}
+
 async function applyLocalReceiptRelink(liveAd, pools) {
   const paymentState = getAdPaymentState(liveAd);
   const collectionMethod = String(liveAd.collectionMethod || '');
@@ -30890,6 +30933,7 @@ async function applyLocalReceiptRelink(liveAd, pools) {
     updates.linkedDeliveryReceiptId = '';
     updates.receiptId = linkedId || (paidIds[0] || '');
   }
+  Object.assign(updates, _relinkBaselineUpdates(liveAd, pools));
   return await updateRecord(state.ads, liveAd.id, updates);
 }
 
@@ -30918,6 +30962,7 @@ async function applyLocalReceiptSettle(liveAd, pools) {
   };
   // The ordinary Not Paid -> Paid save stamps the collection date too.
   if (!liveAd.collectionDate) updates.collectionDate = new Date().toISOString();
+  Object.assign(updates, _relinkBaselineUpdates(liveAd, { paid: pools.paid, due: [] }));
   return await updateRecord(state.ads, liveAd.id, updates);
 }
 
