@@ -3696,6 +3696,12 @@ function getOriginalUnpaidDriverBudgetUSD() {
 function getOriginalUnpaidAdBudgetUSD() {
   const ad = state.modalData;
   if (!ad || getAdPaymentState(ad) !== 'not_paid') return 0;
+  // TERMINAL-aware settle target: a stopped/canceled/completed ad's unpaid
+  // budget is dead (stop already released the unspent part) — only its
+  // COMMITTED total (the stop-reduced allocation rows, e.g. $1.24 of a
+  // stopped $9.00 ad) still holds receipt money, so THAT is the amount the
+  // settle UI must ask for. A live debt still settles its full budget.
+  if (adIsTerminalForEdit(ad)) return getAdCommittedFundingTotalUSD(ad);
   return normalizeAdDriverBudgetUSD(ad.amountUSD);
 }
 
@@ -4311,10 +4317,13 @@ function updateAdFundingReceipt(idx, receiptId) {
     if (isSettlingUnpaidAd) {
       // A stored Not Paid ad can contain only a partial due allocation. When the
       // user changes its source while settling it, that old partial amount must
-      // not become the new Paid total (for example $1.24 of a $9.00 ad). Fill
-      // this row with the exact remaining settlement amount after all OTHER
-      // rows. Capacity validation still shows a shortage and lets the user split
-      // the total across receipts; it never shrinks or erases customer debt.
+      // not become the new Paid total (for example $1.24 of a $9.00 LIVE ad).
+      // Fill this row with the exact remaining settlement amount after all OTHER
+      // rows. getOriginalUnpaidAdBudgetUSD is terminal-aware: for a TERMINAL ad
+      // the target IS that committed $1.24, because the stop already released
+      // the rest of the budget. Capacity validation still shows a shortage and
+      // lets the user split the total across receipts; it never shrinks or
+      // erases customer debt.
       const otherAllocated = state.tempAdFunding.allocations.reduce((sum, row, rowIndex) => {
         if (rowIndex === idx) return sum;
         return sum + (parseFloat(row?.amountUSD) || 0);

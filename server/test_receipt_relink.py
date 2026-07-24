@@ -11,6 +11,16 @@ Money invariants under test:
   * Optimistic locking still catches a stale expectedLastModified (409).
   * A NORMAL edit of a terminal ad stays blocked (regression guard).
 
+SETTLE variant (TestReceiptSettleTerminal): a terminal ad whose debt the
+customer has now paid may flip not_paid -> paid while moving its COMMITTED
+total from the due pool onto paid receipt(s):
+  * Cross-pool conservation to the cent (old paid + old due == new paid).
+  * The old unpaid receipt ends at ZERO use; the new one must have capacity
+    (409 leaves the ad untouched).
+  * spentUSD / amountUSD / status stay untouched; mirrors are rebuilt.
+  * paid -> not_paid stays forbidden (400); a settle on a non-terminal ad
+    stays forbidden (400) — live debts settle through the ordinary edit path.
+
 Run with: PYTHONPATH=. pytest server/test_receipt_relink.py -v
 """
 
@@ -524,3 +534,320 @@ class TestReceiptRelinkGuards:
         )
         assert blocked.status_code == 409, blocked.text
         assert "terminal or refunded ad" in blocked.text
+
+
+class TestReceiptSettleTerminal:
+    """Terminal-ad SETTLE: the customer paid a stopped ad's remaining debt, so
+    its committed due funding moves onto a paid receipt and the ad becomes
+    paid — amount/spend/status untouched, old unpaid receipt fully freed.
+
+    Production shape under test: ad $9.00, Stopped, spentUSD $1.24, not_paid,
+    dueAllocations [{old unpaid In-Shop receipt: 1.24}] (stop already released
+    the unspent $7.76). Settling must move exactly $1.24 to a paid receipt."""
+
+    def _stopped_unpaid_shop_ad(self, tag, admin, *, paid_receipt_amount=60):
+        cust = f"settle_cust_{tag}"
+        old_rid = f"settle_due_{tag}"
+        new_rid = f"settle_paid_{tag}"
+        ad_id = f"settle_ad_{tag}"
+        _customer(cust, admin)
+        _office_receipt(old_rid, cust, 9, admin)
+        _paid_receipt(new_rid, cust, paid_receipt_amount, admin)
+        created = _create_ad(
+            ad_id,
+            f"settle-create-{tag}",
+            {
+                "customerId": cust,
+                "paymentStatus": "not_paid",
+                "collectionMethod": "in_shop",
+                "exchangeRate": 5,
+                "receiptId": old_rid,
+                "dueAllocations": [{"receiptId": old_rid, "amountUSD": 9}],
+            },
+            admin,
+        )
+        assert created.status_code == 200, created.text
+        stopped = _stop_ad(
+            ad_id,
+            f"settle-stop-{tag}",
+            124,
+            created.json()["ad"]["lastModified"],
+            admin,
+        )
+        assert stopped.status_code == 200, stopped.text
+        data = stopped.json()["ad"]["data"]
+        assert data["status"] == "Stopped"
+        assert data["spentUSD"] == 1.24
+        assert data["amountUSD"] == 9.0
+        assert data["dueAllocations"] == [
+            {"receiptId": old_rid, "amountUSD": 1.24}
+        ]
+        return ad_id, cust, old_rid, new_rid, stopped.json()["ad"]["lastModified"]
+
+    def _current(self, ad_id, admin):
+        response = client.get(f"/api/collections/ads/{ad_id}", cookies=admin)
+        assert response.status_code == 200, response.text
+        return response.json()["data"]
+
+    def test_settle_moves_committed_due_to_paid_receipt(self, admin):
+        ad_id, cust, old_rid, new_rid, version = self._stopped_unpaid_shop_ad(
+            "happy", admin
+        )
+
+        settled = _update_ad(
+            ad_id,
+            "settle-happy-move",
+            {
+                "relinkReceiptOnly": True,
+                "paymentStatus": "paid",
+                "receiptAllocations": [{"receiptId": new_rid, "amountUSD": 1.24}],
+                "dueAllocations": [],
+            },
+            version,
+            admin,
+        )
+        assert settled.status_code == 200, settled.text
+        data = settled.json()["ad"]["data"]
+        # Payment flipped, pools moved, money identity untouched.
+        assert data["paymentStatus"] == "paid"
+        assert data["isPaid"] is True
+        assert data["status"] == "Stopped"
+        assert data["spentUSD"] == 1.24
+        assert data["amountUSD"] == 9.0
+        assert data["receiptAllocations"] == [
+            {"receiptId": new_rid, "amountUSD": 1.24}
+        ]
+        assert data["dueAllocations"] == []
+        # Derived mirrors are rebuilt exactly like a plain relink would.
+        assert data["dueAmountToUseUSD"] == 0.0
+        assert data["dueAmountToUseLYD"] == 0.0
+        assert data["receiptIds"] == [new_rid]
+        assert data["fundingReceiptId"] == new_rid
+        assert data["receiptId"] == new_rid
+        assert data["linkedDeliveryReceiptId"] == ""
+        assert data["collectionMethod"] == ""
+        assert data["collectionPayments"] == []
+        assert data["paymentMethod"] == ""
+        assert data["mergedPaidAllocations"] == []
+        assert data["hasMergedPaidFunds"] is False
+        # The marker never persists onto the stored row.
+        assert "relinkReceiptOnly" not in data
+
+        # OLD unpaid receipt ends at ZERO use (the owner's standing
+        # requirement): a fresh In-Shop ad can reserve its whole $9 again.
+        freed = _create_ad(
+            "settle_happy_free_a",
+            "settle-happy-free-a",
+            {
+                "customerId": cust,
+                "paymentStatus": "not_paid",
+                "collectionMethod": "in_shop",
+                "exchangeRate": 5,
+                "receiptId": old_rid,
+                "dueAllocations": [{"receiptId": old_rid, "amountUSD": 9}],
+            },
+            admin,
+        )
+        assert freed.status_code == 200, freed.text
+
+        # NEW receipt now carries the moved $1.24 of its $60: one cent more
+        # than the remaining $58.76 must 409, the exact remainder must fit.
+        over = _create_ad(
+            "settle_happy_over_b",
+            "settle-happy-over-b",
+            {
+                "customerId": cust,
+                "paymentStatus": "paid",
+                "exchangeRate": 5,
+                "receiptAllocations": [{"receiptId": new_rid, "amountUSD": 58.77}],
+            },
+            admin,
+        )
+        assert over.status_code == 409, over.text
+        exact = _create_ad(
+            "settle_happy_exact_b",
+            "settle-happy-exact-b",
+            {
+                "customerId": cust,
+                "paymentStatus": "paid",
+                "exchangeRate": 5,
+                "receiptAllocations": [{"receiptId": new_rid, "amountUSD": 58.76}],
+            },
+            admin,
+        )
+        assert exact.status_code == 200, exact.text
+
+    def test_settle_rejected_unless_paid_total_equals_committed_total(self, admin):
+        ad_id, cust, old_rid, new_rid, version = self._stopped_unpaid_shop_ad(
+            "total", admin
+        )
+
+        # The dead $9.00 budget is NOT the settle amount — only the committed
+        # $1.24 is. Too much, too little and one-cent-off all fail closed.
+        for index, wrong in enumerate((9.0, 1.23, 1.25)):
+            rejected = _update_ad(
+                ad_id,
+                f"settle-total-wrong-{index}",
+                {
+                    "relinkReceiptOnly": True,
+                    "paymentStatus": "paid",
+                    "receiptAllocations": [
+                        {"receiptId": new_rid, "amountUSD": wrong}
+                    ],
+                    "dueAllocations": [],
+                },
+                version,
+                admin,
+            )
+            assert rejected.status_code == 400, rejected.text
+            assert "preserve the ad's committed amount" in rejected.text
+
+        # A settle may not leave part of the money behind in the due pool.
+        split = _update_ad(
+            ad_id,
+            "settle-total-split",
+            {
+                "relinkReceiptOnly": True,
+                "paymentStatus": "paid",
+                "receiptAllocations": [{"receiptId": new_rid, "amountUSD": 1.00}],
+                "dueAllocations": [{"receiptId": old_rid, "amountUSD": 0.24}],
+            },
+            version,
+            admin,
+        )
+        assert split.status_code == 400, split.text
+
+        # After every rejection the ad still holds its original debt shape.
+        cdata = self._current(ad_id, admin)
+        assert cdata["paymentStatus"] == "not_paid"
+        assert cdata["status"] == "Stopped"
+        assert cdata["receiptAllocations"] == []
+        assert cdata["dueAllocations"] == [
+            {"receiptId": old_rid, "amountUSD": 1.24}
+        ]
+
+    def test_settle_insufficient_new_receipt_balance_leaves_ad_untouched(self, admin):
+        ad_id, cust, old_rid, new_rid, version = self._stopped_unpaid_shop_ad(
+            "short", admin, paid_receipt_amount=1
+        )
+
+        rejected = _update_ad(
+            ad_id,
+            "settle-short-move",
+            {
+                "relinkReceiptOnly": True,
+                "paymentStatus": "paid",
+                "receiptAllocations": [{"receiptId": new_rid, "amountUSD": 1.24}],
+                "dueAllocations": [],
+            },
+            version,
+            admin,
+        )
+        assert rejected.status_code == 409, rejected.text
+        assert "Insufficient balance" in rejected.text
+
+        cdata = self._current(ad_id, admin)
+        assert cdata["paymentStatus"] == "not_paid"
+        assert cdata["status"] == "Stopped"
+        assert cdata["spentUSD"] == 1.24
+        assert cdata["amountUSD"] == 9.0
+        assert cdata["receiptAllocations"] == []
+        assert cdata["dueAllocations"] == [
+            {"receiptId": old_rid, "amountUSD": 1.24}
+        ]
+        assert cdata["collectionMethod"] == "in_shop"
+
+    def test_settle_reverse_paid_to_not_paid_is_rejected(self, admin):
+        cust = "settle_cust_reverse"
+        paid_rid = "settle_paid_reverse_a"
+        due_rid = "settle_due_reverse_b"
+        _customer(cust, admin)
+        _paid_receipt(paid_rid, cust, 50, admin)
+        _office_receipt(due_rid, cust, 40, admin)
+        created = _create_ad(
+            "settle_ad_reverse",
+            "settle-reverse-create",
+            {
+                "customerId": cust,
+                "paymentStatus": "paid",
+                "exchangeRate": 5,
+                "receiptAllocations": [{"receiptId": paid_rid, "amountUSD": 40}],
+            },
+            admin,
+        )
+        assert created.status_code == 200, created.text
+        stopped = _stop_ad(
+            "settle_ad_reverse",
+            "settle-reverse-stop",
+            3000,
+            created.json()["ad"]["lastModified"],
+            admin,
+        )
+        assert stopped.status_code == 200, stopped.text
+
+        rejected = _update_ad(
+            "settle_ad_reverse",
+            "settle-reverse-move",
+            {
+                "relinkReceiptOnly": True,
+                "paymentStatus": "not_paid",
+                "receiptAllocations": [],
+                "dueAllocations": [{"receiptId": due_rid, "amountUSD": 30}],
+            },
+            stopped.json()["ad"]["lastModified"],
+            admin,
+        )
+        assert rejected.status_code == 400, rejected.text
+        assert "cannot change the ad payment status" in rejected.text
+
+        cdata = self._current("settle_ad_reverse", admin)
+        assert cdata["paymentStatus"] == "paid"
+        assert cdata["receiptAllocations"] == [
+            {"receiptId": paid_rid, "amountUSD": 30.0}
+        ]
+
+    def test_settle_requires_a_terminal_ad(self, admin):
+        cust = "settle_cust_active"
+        old_rid = "settle_due_active_a"
+        new_rid = "settle_paid_active_b"
+        _customer(cust, admin)
+        _office_receipt(old_rid, cust, 9, admin)
+        _paid_receipt(new_rid, cust, 60, admin)
+        created = _create_ad(
+            "settle_ad_active",
+            "settle-active-create",
+            {
+                "customerId": cust,
+                "paymentStatus": "not_paid",
+                "collectionMethod": "in_shop",
+                "exchangeRate": 5,
+                "receiptId": old_rid,
+                "dueAllocations": [{"receiptId": old_rid, "amountUSD": 9}],
+            },
+            admin,
+        )
+        assert created.status_code == 200, created.text
+
+        # Even with perfect cross-pool conservation, a LIVE unpaid ad must
+        # settle through the ordinary edit path (which funds the full budget
+        # and rewrites the money identity) — never through the relink flag.
+        rejected = _update_ad(
+            "settle_ad_active",
+            "settle-active-move",
+            {
+                "relinkReceiptOnly": True,
+                "paymentStatus": "paid",
+                "receiptAllocations": [{"receiptId": new_rid, "amountUSD": 9}],
+                "dueAllocations": [],
+            },
+            created.json()["ad"]["lastModified"],
+            admin,
+        )
+        assert rejected.status_code == 400, rejected.text
+        assert "cannot change the ad payment status" in rejected.text
+
+        cdata = self._current("settle_ad_active", admin)
+        assert cdata["paymentStatus"] == "not_paid"
+        assert cdata["dueAllocations"] == [
+            {"receiptId": old_rid, "amountUSD": 9.0}
+        ]

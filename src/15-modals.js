@@ -341,6 +341,14 @@ function renderModal() {
         && adData.collectionMethod === 'in_shop'
         && Array.isArray(adData.dueAllocations)
         && adData.dueAllocations.some(row => row && row.receiptId && Number(row.amountUSD) > 0);
+      // Settle target for the funding hint: a LIVE debt settles its full
+      // budget, a TERMINAL ad only its committed total (stop already released
+      // the rest) — in step with getOriginalUnpaidAdBudgetUSD and the save-
+      // time validation, so the hint never demands the dead $9.00 of a
+      // stopped ad whose remaining committed spend is $1.24.
+      const adSettleTargetUSD = adIsTerminalForEdit(adData)
+        ? getAdCommittedFundingTotalUSD(adData)
+        : Number(adData.amountUSD || 0);
 
       if (visiblePages.length === 0) {
         modalContent = `
@@ -605,8 +613,8 @@ function renderModal() {
               </div>
               <div id="ad-driver-settlement-hint" class="hidden p-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 text-xs text-amber-700 dark:text-amber-300">
                 ${isArAd
-                  ? `المبلغ المطلوب تسويته: <strong>$${Number(adData.amountUSD || 0).toFixed(2)}</strong>. يجب أن يساوي مجموع الوصولات المدفوعة هذا المبلغ.`
-                  : `Amount to settle: <strong>$${Number(adData.amountUSD || 0).toFixed(2)}</strong>. Paid receipt funding must total this amount.`}
+                  ? `المبلغ المطلوب تسويته: <strong>$${adSettleTargetUSD.toFixed(2)}</strong>. يجب أن يساوي مجموع الوصولات المدفوعة هذا المبلغ.`
+                  : `Amount to settle: <strong>$${adSettleTargetUSD.toFixed(2)}</strong>. Paid receipt funding must total this amount.`}
               </div>
               <div id="ad-funding-list" class="space-y-2 bg-white dark:bg-slate-900 rounded-lg p-2 min-h-[60px]">
                 <div class="text-xs text-slate-400 text-center py-2">${isArAd ? 'اختر صفحة وعميلاً أولاً' : 'Select a page & customer first'}</div>
@@ -2259,8 +2267,10 @@ async function saveAdThroughAtomicServer(action, adId, expectedLastModified, dat
 
 // A terminal ad (Stopped/Canceled/Completed/Lost or refunded) refuses every
 // edit EXCEPT a receipt relink — moving its committed funding onto a different
-// receipt. These helpers mirror the server's _financial_apply_relink so the
-// client can (a) decide a save is a pure relink and (b) apply it in local mode.
+// receipt — and its SETTLE variant, which flips a paid-off debt not_paid ->
+// paid while moving that same committed total onto paid receipt(s). These
+// helpers mirror the server's _financial_apply_relink so the client can
+// (a) decide a save is a pure relink/settle and (b) apply it in local mode.
 function adIsTerminalForEdit(ad) {
   const status = String((ad && ad.status) || '');
   const refundType = String((ad && ad.refundType) || '');
@@ -2306,11 +2316,41 @@ function computeTerminalRelinkPools(liveAd, adUpdates) {
   return { paid: newPaid, due: newDue };
 }
 
-// True only when the funding receipt is the ONLY thing the save changed on a
-// terminal ad. Any other editable field keeps the "Ad Finished — use Refund"
-// block, because a relink must never silently drop an unrelated edit.
-function terminalRelinkOnlyChangesFunding(liveAd, adUpdates, photosDirty) {
-  if (photosDirty) return false;
+// The ad's CURRENT committed funding total across both pools. For a terminal
+// ad this is what still holds receipt money (stop already released the
+// unspent budget), so it is the exact amount a settle must move — e.g. $1.24
+// of a stopped $9.00 ad, never the dead $9.00 budget.
+function getAdCommittedFundingTotalUSD(ad) {
+  const paid = _relinkPoolSum(_relinkNormalizePool(ad && ad.receiptAllocations));
+  const due = _relinkPoolSum(_relinkNormalizePool(ad && ad.dueAllocations));
+  return Math.round((paid + due) * 100) / 100;
+}
+
+// SETTLE variant (terminal ads only): the customer has now PAID the debt of a
+// Stopped/Canceled/Completed/Lost ad. Recognized when the save flips payment
+// not_paid -> paid while moving the ad's whole CURRENT committed total (paid
+// + due pools together) into PAID receipt rows — conserved to the cent, with
+// no due rows left. The old unpaid receipt is freed by omission exactly like
+// a relink; amountUSD/spentUSD/status stay untouched. Returns the new pools
+// or null (not a settle). The server independently re-checks every rule.
+function computeTerminalSettlePools(liveAd, adUpdates) {
+  if (getAdPaymentState(liveAd) !== 'not_paid') return null;
+  if (getAdPaymentState(adUpdates) !== 'paid') return null;
+  const newPaid = _relinkNormalizePool(adUpdates && adUpdates.receiptAllocations);
+  const newDue = _relinkNormalizePool(adUpdates && adUpdates.dueAllocations);
+  if (newDue.length !== 0 || newPaid.length === 0) return null;
+  const committed = getAdCommittedFundingTotalUSD(liveAd);
+  if (committed <= 0.005) return null;
+  if (Math.abs(committed - _relinkPoolSum(newPaid)) > 0.005) return null;
+  return { paid: newPaid, due: [] };
+}
+
+// Shared "nothing ELSE changed" core for the two terminal-ad primitives:
+// every editable non-funding, non-payment field must match the stored ad.
+// Payment state and collection method are checked by the callers — a relink
+// forbids changing them, while a settle IS the not_paid -> paid flip (which
+// also legitimately clears the collection method).
+function _terminalEditKeepsNonFundingFields(liveAd, adUpdates) {
   const sameStr = (a, b) => String(a == null ? '' : a) === String(b == null ? '' : b);
   const sameTime = (a, b) => {
     const ta = new Date(a || 0).getTime();
@@ -2320,8 +2360,6 @@ function terminalRelinkOnlyChangesFunding(liveAd, adUpdates, photosDirty) {
   };
   if (!sameStr(adUpdates.customerId, liveAd.customerId)) return false;
   if (!sameStr(adUpdates.pageId, liveAd.pageId)) return false;
-  if (getAdPaymentState(adUpdates) !== getAdPaymentState(liveAd)) return false;
-  if (!sameStr(adUpdates.collectionMethod, liveAd.collectionMethod)) return false;
   if (!sameTime(adUpdates.startDate, liveAd.startDate)) return false;
   if (!sameTime(adUpdates.endDate, liveAd.endDate)) return false;
   const oldLinks = Array.isArray(liveAd.adLinks)
@@ -2330,6 +2368,25 @@ function terminalRelinkOnlyChangesFunding(liveAd, adUpdates, photosDirty) {
   const newLinks = Array.isArray(adUpdates.adLinks) ? adUpdates.adLinks : [];
   if (JSON.stringify(oldLinks) !== JSON.stringify(newLinks)) return false;
   return true;
+}
+
+// True only when the funding receipt is the ONLY thing the save changed on a
+// terminal ad. Any other editable field keeps the "Ad Finished — use Refund"
+// block, because a relink must never silently drop an unrelated edit.
+function terminalRelinkOnlyChangesFunding(liveAd, adUpdates, photosDirty) {
+  if (photosDirty) return false;
+  const sameStr = (a, b) => String(a == null ? '' : a) === String(b == null ? '' : b);
+  if (getAdPaymentState(adUpdates) !== getAdPaymentState(liveAd)) return false;
+  if (!sameStr(adUpdates.collectionMethod, liveAd.collectionMethod)) return false;
+  return _terminalEditKeepsNonFundingFields(liveAd, adUpdates);
+}
+
+// Settle counterpart: the not_paid -> paid flip IS the point of the save, and
+// switching the form to Paid legitimately clears the collection method, so
+// only the remaining editable fields must be untouched.
+function terminalSettleOnlyChangesFundingAndPayment(liveAd, adUpdates, photosDirty) {
+  if (photosDirty) return false;
+  return _terminalEditKeepsNonFundingFields(liveAd, adUpdates);
 }
 
 // Local-mode counterpart of the server relink primitive: re-point the funding
@@ -2361,6 +2418,34 @@ async function applyLocalReceiptRelink(liveAd, pools) {
     updates.linkedDeliveryReceiptId = '';
     updates.receiptId = linkedId || (paidIds[0] || '');
   }
+  return await updateRecord(state.ads, liveAd.id, updates);
+}
+
+// Local-mode counterpart of the server SETTLE branch: flip the terminal debt
+// to Paid and move the committed pools WITHOUT touching amountUSD/spentUSD/
+// status (updateRecord merges, so omitted fields keep their stored values).
+// Field-for-field mirror of _financial_apply_relink's settle transition.
+async function applyLocalReceiptSettle(liveAd, pools) {
+  const paidIds = pools.paid.map(row => row.receiptId);
+  const updates = {
+    paymentStatus: 'paid',
+    isPaid: true,
+    collectionMethod: '',
+    collectionPayments: [],
+    paymentMethod: '',
+    receiptAllocations: pools.paid,
+    dueAllocations: [],
+    receiptIds: paidIds,
+    fundingReceiptId: paidIds[0] || '',
+    receiptId: paidIds[0] || '',
+    dueAmountToUseUSD: 0,
+    dueAmountToUseLYD: 0,
+    mergedPaidAllocations: [],
+    hasMergedPaidFunds: false,
+    linkedDeliveryReceiptId: ''
+  };
+  // The ordinary Not Paid -> Paid save stamps the collection date too.
+  if (!liveAd.collectionDate) updates.collectionDate = new Date().toISOString();
   return await updateRecord(state.ads, liveAd.id, updates);
 }
 
@@ -2624,12 +2709,14 @@ async function handleModalSubmit() {
         const liveAd = state.ads.find(a => a && !a._deleted && String(a.id) === String(state.modalData.id));
         if (liveAd) state.modalData = liveAd;
       }
-      // A terminal/refunded ad still accepts ONE money-safe edit: relinking its
-      // funding receipt (free the old receipt, move the spent amount to a new
-      // one). So the "terminal ads cannot be edited" decision is deferred until
-      // after the funding form is read — see the terminal-ad branch at save
-      // time, which relinks a pure funding-receipt change and blocks anything
-      // else with the "Ad Finished — use Refund" notice.
+      // A terminal/refunded ad still accepts TWO money-safe edits: relinking
+      // its funding receipt (free the old receipt, move the spent amount to a
+      // new one) and SETTLING its paid-off debt (flip not_paid -> paid while
+      // the committed total moves onto paid receipts). So the "terminal ads
+      // cannot be edited" decision is deferred until after the funding form
+      // is read — see the terminal-ad branch at save time, which dispatches a
+      // pure funding/settle change and blocks anything else with the
+      // "Ad Finished — use Refund" notice.
       if (_adPhotoUploadsInFlight > 0) {
         showNotification(
           isArSubAd ? 'جاري تجهيز الصور' : 'Preparing photos',
@@ -2765,13 +2852,26 @@ async function handleModalSubmit() {
         // Set amountUSD from allocations total for paid ads (ensures consistency)
         const settlingUnpaidDebt = isEdit
           && getAdPaymentState(state.modalData) === 'not_paid';
-        const originalUnpaidBudget = normalizeAdDriverBudgetUSD(state.modalData?.amountUSD);
-        if (settlingUnpaidDebt && originalUnpaidBudget > 0 && Math.abs(totalAllocated - originalUnpaidBudget) > 0.005) {
+        const isTerminalSettle = settlingUnpaidDebt && adIsTerminalForEdit(state.modalData);
+        // A LIVE debt settles its FULL unpaid budget (amountUSD). A TERMINAL
+        // ad's budget is dead — stop already released the unspent part — so
+        // only its COMMITTED total still holds receipt money and THAT is what
+        // the paid funding must equal (e.g. $1.24 of a stopped $9.00 ad).
+        // getOriginalUnpaidAdBudgetUSD makes the same terminal-aware choice
+        // for the funding UI's hint and autofill, keeping all three in step.
+        const requiredSettleUSD = isTerminalSettle
+          ? getAdCommittedFundingTotalUSD(state.modalData)
+          : normalizeAdDriverBudgetUSD(state.modalData?.amountUSD);
+        if (settlingUnpaidDebt && requiredSettleUSD > 0 && Math.abs(totalAllocated - requiredSettleUSD) > 0.005) {
           showNotification(
             isArSubAd ? 'تنبيه' : 'Validation',
-            isArSubAd
-              ? `يجب أن يساوي مجموع تمويل الوصولات ($${totalAllocated.toFixed(2)}) مبلغ الإعلان غير المدفوع ($${originalUnpaidBudget.toFixed(2)}).`
-              : `Receipt funding ($${totalAllocated.toFixed(2)}) must equal the unpaid ad amount ($${originalUnpaidBudget.toFixed(2)}).`,
+            isTerminalSettle
+              ? (isArSubAd
+                ? `يجب أن يساوي مجموع تمويل الوصولات ($${totalAllocated.toFixed(2)}) المبلغ المُنفَق المستحق على هذا الإعلان المنتهي ($${requiredSettleUSD.toFixed(2)}).`
+                : `Receipt funding ($${totalAllocated.toFixed(2)}) must equal this finished ad's committed spend ($${requiredSettleUSD.toFixed(2)}).`)
+              : (isArSubAd
+                ? `يجب أن يساوي مجموع تمويل الوصولات ($${totalAllocated.toFixed(2)}) مبلغ الإعلان غير المدفوع ($${requiredSettleUSD.toFixed(2)}).`
+                : `Receipt funding ($${totalAllocated.toFixed(2)}) must equal the unpaid ad amount ($${requiredSettleUSD.toFixed(2)}).`),
             'error'
           );
           return;
@@ -3178,42 +3278,67 @@ async function handleModalSubmit() {
         adUpdates.collectionDate = new Date().toISOString();
       }
       
-      // A terminal/refunded ad accepts exactly one edit: a receipt relink. If
-      // the only change is the funding receipt, free the old receipt and move
-      // the spent amount to the new one (amount/spend/status untouched). Any
-      // other change keeps the "Ad Finished — use Refund" block.
+      // A terminal/refunded ad accepts exactly two edits. (1) A receipt
+      // RELINK: the only change is the funding receipt — free the old receipt
+      // and move the spent amount to the new one (amount/spend/status/payment
+      // untouched). (2) A SETTLE: the customer paid the debt, so payment
+      // flips not_paid -> paid while the whole committed total moves onto
+      // paid receipt(s), conserved to the cent, and the old unpaid receipt is
+      // fully freed. Any other change keeps the "Ad Finished — use Refund"
+      // block.
       if (isEdit && adIsTerminalForEdit(state.modalData)) {
         const liveTerminalAd = state.modalData;
-        const relinkPools = computeTerminalRelinkPools(liveTerminalAd, adUpdates);
+        // Settle is detected FIRST: it is non-null only when the payment
+        // flipped not_paid -> paid, and a flipped payment can never be a
+        // plain relink (which forbids payment changes) — this also lets a
+        // settle move the funding onto a different receipt in the same save.
+        const settlePools = computeTerminalSettlePools(liveTerminalAd, adUpdates);
+        const relinkPools = settlePools ? null : computeTerminalRelinkPools(liveTerminalAd, adUpdates);
         const onlyFundingChanged = relinkPools
           && terminalRelinkOnlyChangesFunding(liveTerminalAd, adUpdates, state.tempAdPhotosDirty);
-        if (!relinkPools || !onlyFundingChanged) {
+        const settleShapeOk = settlePools
+          && terminalSettleOnlyChangesFundingAndPayment(liveTerminalAd, adUpdates, state.tempAdPhotosDirty);
+        if (!onlyFundingChanged && !settleShapeOk) {
           showNotification(
             isArSubAd ? 'إعلان منتهٍ' : 'Ad Finished',
             isArSubAd
-              ? 'هذا الإعلان منتهٍ (موقوف/ملغى/مكتمل) أو مُسترجَع. يمكن فقط تغيير وصل تمويله؛ لإعادة المال أو تعديل مبلغه استخدم الاسترجاع.'
-              : 'This ad is finished (stopped/canceled/completed) or refunded. Only its funding receipt can be changed; to return or adjust its money, use Refund.',
+              ? 'هذا الإعلان منتهٍ (موقوف/ملغى/مكتمل) أو مُسترجَع. يمكن فقط تغيير وصل تمويله أو تسوية دينه على وصل مدفوع؛ لإعادة المال أو تعديل مبلغه استخدم الاسترجاع.'
+              : 'This ad is finished (stopped/canceled/completed) or refunded. Only its funding receipt can be changed or its debt settled onto a paid receipt; to return or adjust its money, use Refund.',
             'warning'
           );
           return;
         }
         if (isServerModeEnabled()) {
           const expectedLastModified = Number(liveTerminalAd?._lastModified);
-          await saveAdThroughAtomicServer('update', liveTerminalAd.id, expectedLastModified, {
-            relinkReceiptOnly: true,
-            receiptAllocations: relinkPools.paid,
-            dueAllocations: relinkPools.due
-          });
+          await saveAdThroughAtomicServer('update', liveTerminalAd.id, expectedLastModified, settlePools
+            ? {
+                relinkReceiptOnly: true,
+                paymentStatus: 'paid',
+                receiptAllocations: settlePools.paid,
+                dueAllocations: []
+              }
+            : {
+                relinkReceiptOnly: true,
+                receiptAllocations: relinkPools.paid,
+                dueAllocations: relinkPools.due
+              });
+        } else if (settlePools) {
+          const settled = await applyLocalReceiptSettle(liveTerminalAd, settlePools);
+          if (!settled) return;
         } else {
           const relinked = await applyLocalReceiptRelink(liveTerminalAd, relinkPools);
           if (!relinked) return;
         }
         showNotification(
           isArSubAd ? 'تم التحديث' : 'Updated',
-          isArSubAd ? 'تم تغيير وصل تمويل الإعلان وتحرير الوصل السابق.' : 'The ad funding receipt was changed and the old receipt was released.',
+          settlePools
+            ? (isArSubAd ? 'تمت تسوية دين الإعلان: انتقل التمويل إلى الوصل المدفوع وتم تحرير الوصل غير المدفوع بالكامل.' : 'The ad debt was settled: its committed funding moved to the paid receipt and the unpaid receipt was fully released.')
+            : (isArSubAd ? 'تم تغيير وصل تمويل الإعلان وتحرير الوصل السابق.' : 'The ad funding receipt was changed and the old receipt was released.'),
           'success'
         );
-        addLog('update', 'ad', liveTerminalAd.id, 'Relinked ad funding receipt');
+        addLog('update', 'ad', liveTerminalAd.id, settlePools
+          ? 'Settled terminal ad debt onto paid receipt'
+          : 'Relinked ad funding receipt');
         state.tempAdFunding = { allocations: [] };
         state.tempAdPhotos = [];
         closeModal();

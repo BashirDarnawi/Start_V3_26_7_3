@@ -7728,6 +7728,16 @@ def _financial_apply_relink(
     much the ad spent, only where that spend is backed. walletTransactions and
     every stop/refund baseline are left untouched (allocations are derived
     state — there is no reversal ledger to write).
+
+    SETTLE variant: the ONE payment transition a relink may carry. When the
+    customer pays a TERMINAL ad's outstanding debt, the request may flip
+    paymentStatus not_paid -> paid TOGETHER WITH moving the committed funding
+    from the due pool onto paid receipt(s). Conservation then holds across the
+    pools as one sum (old paid + old due == new paid, to the cent) and nothing
+    may remain in the due pool — a settled ad is an ordinary paid ad. The old
+    unpaid receipt is freed by omission exactly like a plain relink, and
+    amount/spend/status stay untouched. The reverse (paid -> not_paid) and a
+    settle on a non-terminal or refund-active ad remain forbidden.
     """
     result = dict(existing)
     payment_status = _financial_ad_payment_status(existing)
@@ -7762,9 +7772,24 @@ def _financial_apply_relink(
             detail="A receipt relink cannot change the ad amount, spend, status or refund",
         )
     requested_payment = requested.get("paymentStatus")
-    if requested_payment is not None and _financial_ad_payment_status(
-        {"paymentStatus": requested_payment}
-    ) != payment_status:
+    new_payment_status = payment_status
+    if requested_payment is not None:
+        new_payment_status = _financial_ad_payment_status(
+            {"paymentStatus": requested_payment}
+        )
+    # SETTLE gate: the only payment transition a relink may carry is
+    # not_paid -> paid, and only on a terminal-STATUS ad with no active refund
+    # (a refund's frozen baselines must never sit beside a flipped payment
+    # status, and a live unpaid ad settles through the ordinary edit path
+    # which funds the FULL budget). Everything else keeps the rejection.
+    is_settle = new_payment_status != payment_status
+    if is_settle and (
+        payment_status != "not_paid"
+        or new_payment_status != "paid"
+        or str(existing.get("status") or "")
+        not in {"Stopped", "Canceled", "Completed", "Lost"}
+        or str(existing.get("refundType") or "None") not in {"", "None"}
+    ):
         raise HTTPException(
             status_code=400,
             detail="A receipt relink cannot change the ad payment status",
@@ -7788,10 +7813,23 @@ def _financial_apply_relink(
         _financial_minor(row["amountUSD"], "dueAllocations") for row in new_due
     )
 
-    # Money is conserved: a relink preserves each pool's committed total to the
-    # cent. The old receipt is freed by omission, the new one takes the exact
-    # same amount — never more, never less.
-    if new_paid_minor != old_paid_minor or new_due_minor != old_due_minor:
+    # Money is conserved. A plain relink preserves EACH pool's committed total
+    # to the cent; a settle moves the committed total ACROSS the pools (due ->
+    # paid) while conserving their combined sum to the cent. Either way the
+    # old receipt is freed by omission and the new one takes the exact same
+    # amount — never more, never less.
+    if is_settle:
+        if new_due:
+            raise HTTPException(
+                status_code=400,
+                detail="A settled ad must fund its whole committed amount from paid receipts",
+            )
+        if new_paid_minor != old_paid_minor + old_due_minor:
+            raise HTTPException(
+                status_code=400,
+                detail="A receipt relink must preserve the ad's committed amount",
+            )
+    elif new_paid_minor != old_paid_minor or new_due_minor != old_due_minor:
         raise HTTPException(
             status_code=400,
             detail="A receipt relink must preserve the ad's committed amount",
@@ -7805,6 +7843,16 @@ def _financial_apply_relink(
     paid_ids = [str(row["receiptId"]) for row in new_paid]
     due_ids = [str(row["receiptId"]) for row in new_due]
     linked_id = due_ids[0] if due_ids else ""
+
+    if is_settle:
+        # The debt is paid: the row becomes an ordinary paid ad. Collection
+        # bookkeeping belongs to unpaid ads only — blank it exactly like
+        # _financial_derive_ad and the refund-undo-to-paid path do.
+        payment_status = "paid"
+        collection_method = ""
+        result["collectionMethod"] = ""
+        result["collectionPayments"] = []
+        result["paymentMethod"] = ""
 
     result["receiptAllocations"] = new_paid
     result["dueAllocations"] = new_due
@@ -7971,10 +8019,12 @@ def _ad_mutation_atomic(
             is_refund = body.action == "update" and "refundType" in clean_request
             # A receipt relink is the only other terminal-ad-capable edit. It
             # moves the ad's committed funding onto a different receipt while
-            # preserving amount/spend/status, so — like a refund — it is exempt
-            # from the terminal block below. The two are mutually exclusive: a
-            # request that asks for both is rejected outright rather than
-            # silently doing one of them.
+            # preserving amount/spend/status (its SETTLE variant may also flip
+            # a terminal debt not_paid -> paid while moving that committed
+            # total due -> paid, conserved — see _financial_apply_relink), so
+            # — like a refund — it is exempt from the terminal block below.
+            # The two are mutually exclusive: a request that asks for both is
+            # rejected outright rather than silently doing one of them.
             relink_requested = (
                 body.action == "update" and clean_request.get("relinkReceiptOnly") is True
             )
