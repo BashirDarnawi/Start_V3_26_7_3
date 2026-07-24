@@ -901,3 +901,68 @@ class TestReceiptSettleTerminal:
         )
         assert blocked.status_code == 409, blocked.text
         assert "ad funding" in blocked.text
+
+    def test_startup_backfill_repairs_pre_retarget_settles(self, admin):
+        """Ads settled BEFORE the baseline retarget shipped still carry a stop
+        baseline naming the vacated receipt in the database, so the freed
+        receipt stayed undeletable even after upgrading. The startup backfill
+        (backfill_relink_baselines) must repair that stored state."""
+        from server.db import json_loads as _json_loads
+        from server.main import backfill_relink_baselines
+
+        ad_id, cust, old_rid, new_rid, version = self._stopped_unpaid_shop_ad(
+            "backfill", admin
+        )
+
+        # Simulate the OLD code's settle: live funding re-pointed at the paid
+        # receipt and payment flipped, but the stop baseline left naming the
+        # old receipt (exactly what pre-retarget deployments persisted).
+        with db_conn() as conn:
+            row = conn.execute(
+                text("SELECT data_json FROM entities WHERE type='ads' AND id=:id"),
+                {"id": ad_id},
+            ).mappings().one()
+            data = _json_loads(row["data_json"]) or {}
+            data["paymentStatus"] = "paid"
+            data["isPaid"] = True
+            data["receiptAllocations"] = [{"receiptId": new_rid, "amountUSD": 1.24}]
+            data["dueAllocations"] = []
+            data["receiptIds"] = [new_rid]
+            data["fundingReceiptId"] = new_rid
+            data["receiptId"] = new_rid
+            data["dueAmountToUseUSD"] = 0.0
+            data["dueAmountToUseLYD"] = 0.0
+            baseline = data.get("stopAllocationBaseline") or {}
+            assert any(
+                str(entry.get("receiptId") or "") == old_rid
+                for rows_value in baseline.values()
+                if isinstance(rows_value, list)
+                for entry in rows_value
+                if isinstance(entry, dict)
+            ), baseline
+            conn.execute(
+                text("UPDATE entities SET data_json=:d WHERE type='ads' AND id=:id"),
+                {"d": json_dumps(data), "id": ad_id},
+            )
+
+        # Stale state reproduced: deletion is refused despite zero live links.
+        blocked = client.delete(
+            f"/api/collections/receipts/{old_rid}", cookies=admin
+        )
+        assert blocked.status_code == 409, blocked.text
+
+        repaired = backfill_relink_baselines()
+        assert repaired >= 1
+
+        # Idempotent: a second pass finds nothing left to change.
+        assert backfill_relink_baselines() == 0
+
+        deleted = client.delete(
+            f"/api/collections/receipts/{old_rid}", cookies=admin
+        )
+        assert deleted.status_code == 200, deleted.text
+
+        still_blocked = client.delete(
+            f"/api/collections/receipts/{new_rid}", cookies=admin
+        )
+        assert still_blocked.status_code == 409, still_blocked.text

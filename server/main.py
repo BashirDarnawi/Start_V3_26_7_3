@@ -2347,6 +2347,101 @@ def backfill_customer_names() -> int:
     return stamped
 
 
+def backfill_relink_baselines() -> int:
+    """Retarget stale stop/refund baselines left by pre-retarget relinks.
+
+    Ads settled/relinked before the baseline-retarget shipped still carry
+    stop/refund baselines naming the VACATED receipt. _financial_receipt_ids
+    counts baselines as live links, so those fully-freed receipts could never
+    be deleted ("linked to ad funding"). Repair rule — deliberately narrow and
+    unambiguous, mirroring _financial_apply_relink's own retarget:
+      (a) the ad has no active refund (refundType empty/None — refund undo
+          restores from baselines, so refunded ads keep theirs untouched), and
+      (b) its LIVE allocations reference exactly ONE receipt R, and
+      (c) a baseline names some other receipt X != R  ->  rewrite X to R.
+    Amounts are never changed; last_modified is left untouched (display-only
+    linkage data — the delete guard re-reads rows directly). Idempotent: after
+    the first pass no baseline names a non-live receipt, so it is a no-op on
+    every later startup.
+
+    Returns the number of ads repaired.
+    """
+    repaired = 0
+    try:
+        with db_conn() as conn:
+            rows = conn.execute(
+                text("SELECT id, data_json FROM entities WHERE type = 'ads' AND deleted = false")
+            ).mappings().all()
+            for row in rows:
+                data = json_loads(row.get("data_json") or "{}") or {}
+                if not isinstance(data, dict):
+                    continue
+                refund_type = str(data.get("refundType") or "")
+                if refund_type and refund_type != "None":
+                    continue
+                live_ids = {
+                    str(entry.get("receiptId") or "")
+                    for field in ("receiptAllocations", "dueAllocations", "mergedPaidAllocations")
+                    for entry in (data.get(field) or [])
+                    if isinstance(entry, dict) and entry.get("receiptId")
+                }
+                live_ids.discard("")
+                if len(live_ids) != 1:
+                    continue
+                replacement = next(iter(live_ids))
+
+                changed = False
+
+                def _retarget(rows_value: Any) -> Any:
+                    nonlocal changed
+                    if not isinstance(rows_value, list):
+                        return rows_value
+                    out = []
+                    for entry in rows_value:
+                        if (
+                            isinstance(entry, dict)
+                            and entry.get("receiptId")
+                            and str(entry["receiptId"]) != replacement
+                        ):
+                            changed = True
+                            out.append({**entry, "receiptId": replacement})
+                        else:
+                            out.append(entry)
+                    return out
+
+                for baseline_name in ("refundAllocationBaseline", "refundDueBaseline"):
+                    baseline = data.get(baseline_name)
+                    if isinstance(baseline, list):
+                        data[baseline_name] = _retarget(baseline)
+                    elif isinstance(baseline, dict):
+                        data[baseline_name] = {
+                            key: _retarget(value) for key, value in baseline.items()
+                        }
+                stop_baseline = data.get("stopAllocationBaseline")
+                if isinstance(stop_baseline, dict):
+                    next_baseline = dict(stop_baseline)
+                    for key, value in stop_baseline.items():
+                        if isinstance(value, list):
+                            next_baseline[key] = _retarget(value)
+                    legacy_id = str(next_baseline.get("dueLegacyReceiptId") or "")
+                    if legacy_id and legacy_id != replacement:
+                        next_baseline["dueLegacyReceiptId"] = replacement
+                        changed = True
+                    data["stopAllocationBaseline"] = next_baseline
+                if not changed:
+                    continue
+                conn.execute(
+                    text("UPDATE entities SET data_json = :d WHERE type = 'ads' AND id = :id"),
+                    {"d": json_dumps(data), "id": str(row["id"])},
+                )
+                repaired += 1
+        if repaired:
+            print(f"[albayan] Retargeted stale relink baselines on {repaired} ads")
+    except Exception as e:
+        print(f"[albayan] relink-baseline backfill skipped/failed: {type(e).__name__}: {e}")
+    return repaired
+
+
 @app.on_event("startup")
 def _startup():
     _ensure_minified_script()
@@ -2388,6 +2483,7 @@ def _startup():
     # role can read the customer's name. Idempotent — a no-op once complete.
     try:
         backfill_customer_names()
+        backfill_relink_baselines()
     except Exception as e:
         print(f"[albayan] customerName backfill failed: {e}")
 
