@@ -4551,6 +4551,23 @@ function describe409(error, conflictText) {
       ? 'الوصل الجديد لا يملك رصيداً كافياً لتغطية المبلغ المُنفَق من هذا الإعلان. اختر وصلاً برصيد كافٍ أو أضف وصلاً آخر.'
       : "The new receipt doesn't have enough available balance to cover this ad's spent amount. Choose a receipt with enough balance.";
   }
+  // Receipt money-edit rules from _financial_patch_receipt_atomic. These are
+  // deliberate refusals, not concurrency — refreshing can never fix them.
+  if (/settled receipt's amount cannot be increased/i.test(detail)) {
+    return state.language === 'ar'
+      ? 'هذا الوصل تمت تسويته، لذا لا يمكن زيادة قيمته بالتعديل. مجموع الدفعات يجب أن يبقى مساوياً لقيمة الوصل الحالية.'
+      : "This receipt was settled, so its value cannot be increased by editing. The payments must add up to the receipt's current value.";
+  }
+  if (/receipt amount is below committed ads and transfers|receipt due amount is below committed ads/i.test(detail)) {
+    return state.language === 'ar'
+      ? 'لا يمكن تخفيض قيمة الوصل تحت المبلغ المحجوز للإعلانات والتحويلات المرتبطة به. حرر الارتباطات أولاً أو اجعل المجموع يغطي المبلغ الملتزم به.'
+      : "The receipt's value cannot go below the amount its linked ads and transfers already committed. Release those links first, or keep the total at least equal to the committed amount.";
+  }
+  if (/funded or transferred receipt must remain paid/i.test(detail)) {
+    return state.language === 'ar'
+      ? 'هذا الوصل يموّل إعلانات أو تحويلات، لذا يجب أن يبقى مدفوعاً.'
+      : 'This receipt funds ads or transfers, so it must remain paid.';
+  }
   return detail || conflictText;
 }
 

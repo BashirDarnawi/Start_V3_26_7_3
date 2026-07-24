@@ -748,7 +748,17 @@ function updateRecord(array, id, updates, expectedLastModified) {
           return true;
         })
         .catch(async (e) => {
-          if (e?.status === 409) {
+          // Only a REAL version conflict ("Conflict: ..." detail) means someone
+          // else changed the record; reload-and-retry is the right advice there.
+          // Every other 409 is a deliberate business-rule refusal (e.g. "A
+          // settled receipt's amount cannot be increased by editing") — telling
+          // the user it "changed on another device" sent them chasing phantom
+          // editors, and refreshing could never fix it. Name the real reason.
+          const _realConflict = e?.status === 409 &&
+            (typeof isVersionConflict409 === 'function'
+              ? isVersionConflict409(e)
+              : /^conflict:/i.test(String(e?.message || '').trim()));
+          if (_realConflict) {
             try {
               const latest = await apiGetEntity(collectionName, id);
               const idx = array.findIndex(x => x && x.id === id);
@@ -760,12 +770,35 @@ function updateRecord(array, id, updates, expectedLastModified) {
                 if (collectionName) markCollectionDirty(collectionName);
                 saveState();
               }
-              showNotification('Conflict', 'This record was changed by another user. We loaded the latest version.', 'warning');
+              showNotification(
+                state.language === 'ar' ? 'تعارض' : 'Conflict',
+                state.language === 'ar'
+                  ? 'تم تغيير هذا السجل من مستخدم آخر. تم تحميل أحدث نسخة.'
+                  : 'This record was changed by another user. We loaded the latest version.',
+                'warning'
+              );
               render();
               return false;
             } catch (err) {
               // fallthrough to rollback
             }
+          } else if (e?.status === 409) {
+            // Rule refusal: roll back the optimistic write and surface the
+            // server's actual reason (localized for the known rules).
+            const idx = array.findIndex(x => x && x.id === id);
+            if (idx !== -1) array[idx] = old;
+            if (collectionName) markCollectionDirty(collectionName);
+            saveState();
+            const reason = typeof describe409 === 'function'
+              ? describe409(e, String(e?.message || ''))
+              : String(e?.message || '');
+            showNotification(
+              state.language === 'ar' ? 'غير مسموح' : 'Not Allowed',
+              reason || (state.language === 'ar' ? 'رفض الخادم هذا التعديل.' : 'The server refused this change.'),
+              'warning'
+            );
+            render();
+            return false;
           }
 
           // Rollback on failure

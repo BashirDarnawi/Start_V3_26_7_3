@@ -6801,7 +6801,17 @@ function updateRecord(array, id, updates, expectedLastModified) {
           return true;
         })
         .catch(async (e) => {
-          if (e?.status === 409) {
+          // Only a REAL version conflict ("Conflict: ..." detail) means someone
+          // else changed the record; reload-and-retry is the right advice there.
+          // Every other 409 is a deliberate business-rule refusal (e.g. "A
+          // settled receipt's amount cannot be increased by editing") — telling
+          // the user it "changed on another device" sent them chasing phantom
+          // editors, and refreshing could never fix it. Name the real reason.
+          const _realConflict = e?.status === 409 &&
+            (typeof isVersionConflict409 === 'function'
+              ? isVersionConflict409(e)
+              : /^conflict:/i.test(String(e?.message || '').trim()));
+          if (_realConflict) {
             try {
               const latest = await apiGetEntity(collectionName, id);
               const idx = array.findIndex(x => x && x.id === id);
@@ -6813,12 +6823,35 @@ function updateRecord(array, id, updates, expectedLastModified) {
                 if (collectionName) markCollectionDirty(collectionName);
                 saveState();
               }
-              showNotification('Conflict', 'This record was changed by another user. We loaded the latest version.', 'warning');
+              showNotification(
+                state.language === 'ar' ? 'تعارض' : 'Conflict',
+                state.language === 'ar'
+                  ? 'تم تغيير هذا السجل من مستخدم آخر. تم تحميل أحدث نسخة.'
+                  : 'This record was changed by another user. We loaded the latest version.',
+                'warning'
+              );
               render();
               return false;
             } catch (err) {
               // fallthrough to rollback
             }
+          } else if (e?.status === 409) {
+            // Rule refusal: roll back the optimistic write and surface the
+            // server's actual reason (localized for the known rules).
+            const idx = array.findIndex(x => x && x.id === id);
+            if (idx !== -1) array[idx] = old;
+            if (collectionName) markCollectionDirty(collectionName);
+            saveState();
+            const reason = typeof describe409 === 'function'
+              ? describe409(e, String(e?.message || ''))
+              : String(e?.message || '');
+            showNotification(
+              state.language === 'ar' ? 'غير مسموح' : 'Not Allowed',
+              reason || (state.language === 'ar' ? 'رفض الخادم هذا التعديل.' : 'The server refused this change.'),
+              'warning'
+            );
+            render();
+            return false;
           }
 
           // Rollback on failure
@@ -23137,6 +23170,23 @@ function describe409(error, conflictText) {
     return state.language === 'ar'
       ? 'الوصل الجديد لا يملك رصيداً كافياً لتغطية المبلغ المُنفَق من هذا الإعلان. اختر وصلاً برصيد كافٍ أو أضف وصلاً آخر.'
       : "The new receipt doesn't have enough available balance to cover this ad's spent amount. Choose a receipt with enough balance.";
+  }
+  // Receipt money-edit rules from _financial_patch_receipt_atomic. These are
+  // deliberate refusals, not concurrency — refreshing can never fix them.
+  if (/settled receipt's amount cannot be increased/i.test(detail)) {
+    return state.language === 'ar'
+      ? 'هذا الوصل تمت تسويته، لذا لا يمكن زيادة قيمته بالتعديل. مجموع الدفعات يجب أن يبقى مساوياً لقيمة الوصل الحالية.'
+      : "This receipt was settled, so its value cannot be increased by editing. The payments must add up to the receipt's current value.";
+  }
+  if (/receipt amount is below committed ads and transfers|receipt due amount is below committed ads/i.test(detail)) {
+    return state.language === 'ar'
+      ? 'لا يمكن تخفيض قيمة الوصل تحت المبلغ المحجوز للإعلانات والتحويلات المرتبطة به. حرر الارتباطات أولاً أو اجعل المجموع يغطي المبلغ الملتزم به.'
+      : "The receipt's value cannot go below the amount its linked ads and transfers already committed. Release those links first, or keep the total at least equal to the committed amount.";
+  }
+  if (/funded or transferred receipt must remain paid/i.test(detail)) {
+    return state.language === 'ar'
+      ? 'هذا الوصل يموّل إعلانات أو تحويلات، لذا يجب أن يبقى مدفوعاً.'
+      : 'This receipt funds ads or transfers, so it must remain paid.';
   }
   return detail || conflictText;
 }
