@@ -15090,7 +15090,10 @@ function renderReceiptsView() {
                   ${receipt.updatedAt ? `
                     <div class="flex items-center mt-0.5 space-x-2">
                       <p class="text-[10px] text-amber-500 flex items-center"><i data-lucide="edit-3" class="w-2.5 h-2.5 mr-1"></i>${isArV ? 'عُدِّل' : 'Edited'}: ${new Date(receipt.updatedAt).toLocaleString(appDateLocale())}</p>
-                      ${receipt.editCount ? `<button onclick="showReceiptEditHistory('${receipt.id}')" class="text-[10px] px-1.5 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-full hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors font-medium">${isArV ? `${receipt.editCount} تعديل` : `${receipt.editCount} edit${receipt.editCount > 1 ? 's' : ''}`}</button>` : ''}
+                      ${(() => {
+                        const n = (Array.isArray(receipt.editHistory) ? receipt.editHistory.length : 0) || Number(receipt.editCount || 0);
+                        return n ? `<button onclick="showReceiptEditHistory('${receipt.id}')" class="text-[10px] px-1.5 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-full hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors font-medium">${isArV ? `${n} تعديل` : `${n} edit${n > 1 ? 's' : ''}`}</button>` : '';
+                      })()}
                     </div>
                   ` : ''}
                 </div>
@@ -15273,6 +15276,33 @@ function renderReceiptsView() {
   `;
 }
 
+// Open a customer from anywhere the name is shown (e.g. a page card's owner):
+// same navigation the command palette uses — the Customers view filtered to
+// exactly that customer.
+function goToCustomerById(customerId) {
+  const isAr = state.language === 'ar';
+  if (typeof canOpenWorkspaceView === 'function' && !canOpenWorkspaceView('customers')) {
+    showNotification(
+      isAr ? 'تم رفض الوصول' : 'Access Denied',
+      isAr ? 'لا تملك صلاحية عرض العملاء.' : 'You do not have permission to view customers.',
+      'error'
+    );
+    return;
+  }
+  const customer = (state.customers || []).find(c => c && !c._deleted && String(c.id) === String(customerId));
+  if (!customer) {
+    showNotification(
+      isAr ? 'غير موجود' : 'Not Found',
+      isAr ? 'تعذر العثور على هذا العميل.' : 'This customer could not be found.',
+      'warning'
+    );
+    return;
+  }
+  state.customerSearch = String(customer.name || '');
+  state.customerFinancialFilter = 'all';
+  navigateTo('customers');
+}
+
 let _pageSearchTimer = null;
 function onPageSearchInput(value) {
   state.pageSearch = Security.sanitizeInput(String(value || ''), { maxLength: 160 });
@@ -15393,10 +15423,10 @@ function renderPagesView() {
                   ${linkedCustomers.length > 0 ? `
                     <div class="space-y-1">
                       ${linkedCustomers.slice(0, 2).map(c => `
-                        <div class="text-sm text-slate-700 dark:text-slate-300 flex items-center space-x-2">
+                        <button type="button" onclick="goToCustomerById('${Security.escapeHtml(String(c.id))}')" class="text-sm text-slate-700 dark:text-slate-300 flex items-center space-x-2 hover:text-indigo-600 dark:hover:text-indigo-400 hover:underline text-left" title="${isAr ? 'فتح صفحة العميل' : 'Open customer'}">
                           <span class="w-1.5 h-1.5 bg-indigo-500 rounded-full"></span>
                           <span>${Security.escapeHtml(c.name || '')}</span>
-                        </div>
+                        </button>
                       `).join('')}
                       ${linkedCustomers.length > 2 ? `<div class="text-xs text-slate-500 ml-3.5">+${linkedCustomers.length - 2} ${isAr ? 'آخرون' : 'more'}</div>` : ''}
                     </div>
@@ -15742,7 +15772,10 @@ function renderAdsView() {
                     </td>
                     <td class="py-3 px-2" data-label="Serial">
                       ${serialDisplay ? `<span class="font-mono text-xs">${Security.escapeHtml(serialDisplay)}</span>` : '-'}
-                      ${ad.editCount ? `<button onclick="showAdEditHistory('${ad.id}')" class="block mt-1 text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium">${isAr ? `${ad.editCount} تعديل` : `${ad.editCount} edit${ad.editCount > 1 ? 's' : ''}`}</button>` : ''}
+                      ${(() => {
+                        const n = (Array.isArray(ad.editHistory) ? ad.editHistory.length : 0) || Number(ad.editCount || 0);
+                        return n ? `<button onclick="showAdEditHistory('${ad.id}')" class="block mt-1 text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium">${isAr ? `${n} تعديل` : `${n} edit${n > 1 ? 's' : ''}`}</button>` : '';
+                      })()}
                     </td>
                     <td class="py-3 px-2 text-xs" data-label="Date">
                       <div class="text-slate-500">${(() => { const d = new Date(ad.startDate); return isNaN(d) ? '-' : d.toLocaleDateString(appDateLocale()); })()}</div>
@@ -16859,7 +16892,10 @@ function renderDeliveryDashboard() {
                         <span class="text-xs font-bold text-emerald-600">$${Number(ad.amountUSD || 0).toFixed(2)} (${Number(ad.amountLocal || 0).toFixed(0)} LYD)</span>
                         <span class="payment-badge text-[10px] md:text-xs">${Security.escapeHtml(trMethod(ad.paymentMethod || ''))}</span>
                         <span class="delivery-${(ad.deliveryStatus || '').toLowerCase().replace(' ', '')} px-2 py-0.5 md:py-1 rounded-full text-[10px] md:text-xs font-bold">${Security.escapeHtml(trStatus(ad.deliveryStatus || ''))}</span>
-                        ${ad.editCount ? `<button onclick="showReceiptEditHistory('${ad.id}')" class="text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium flex items-center gap-1"><i data-lucide="history" class="w-3 h-3"></i>${ad.editCount}</button>` : ''}
+                        ${(() => {
+                          const n = (Array.isArray(ad.editHistory) ? ad.editHistory.length : 0) || Number(ad.editCount || 0);
+                          return n ? `<button onclick="showAdEditHistory('${ad.id}')" class="text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium flex items-center gap-1"><i data-lucide="history" class="w-3 h-3"></i>${n}</button>` : '';
+                        })()}
                       </div>
                     </div>
                     <div class="flex flex-row md:flex-col gap-2 w-full md:w-auto">
@@ -30957,6 +30993,42 @@ function _relinkBaselineUpdates(liveAd, pools) {
   return updates;
 }
 
+// Local-mode mirror of the server's relink/settle history entry: these money
+// moves bypass the ordinary edit path (which appends history client-side), so
+// without this they were invisible in the history viewer.
+function _relinkHistoryUpdates(liveAd, pools, isSettle) {
+  const oldIds = new Set();
+  ['receiptAllocations', 'dueAllocations', 'mergedPaidAllocations'].forEach(field => {
+    (Array.isArray(liveAd[field]) ? liveAd[field] : []).forEach(row => {
+      if (row && row.receiptId) oldIds.add(String(row.receiptId));
+    });
+  });
+  const newIds = new Set([...pools.paid, ...pools.due].map(row => String(row.receiptId)));
+  const vacated = [...oldIds].filter(id => id && !newIds.has(id));
+  const introduced = [...newIds].filter(id => id && !oldIds.has(id));
+  const label = rid => {
+    const receipt = (state.receipts || []).find(r => r && String(r.id) === String(rid));
+    return String(receipt?.serialNumber || receipt?.finalReceiptNo || receipt?.tempReceiptNo || rid);
+  };
+  const changes = [];
+  if (vacated.length || introduced.length) {
+    changes.push({
+      field: 'Funding Receipt',
+      from: vacated.map(label).sort().join(', ') || '—',
+      to: introduced.map(label).sort().join(', ') || '—'
+    });
+  }
+  if (isSettle) changes.push({ field: 'Payment Status', from: 'Not Paid', to: 'Paid' });
+  if (!changes.length) return {};
+  const editHistory = Array.isArray(liveAd.editHistory) ? [...liveAd.editHistory] : [];
+  editHistory.push({
+    editedAt: new Date().toISOString(),
+    editedBy: state.currentUser?.name || 'Unknown',
+    changes
+  });
+  return { editHistory, editCount: editHistory.length };
+}
+
 async function applyLocalReceiptRelink(liveAd, pools) {
   const paymentState = getAdPaymentState(liveAd);
   const collectionMethod = String(liveAd.collectionMethod || '');
@@ -30984,6 +31056,7 @@ async function applyLocalReceiptRelink(liveAd, pools) {
     updates.receiptId = linkedId || (paidIds[0] || '');
   }
   Object.assign(updates, _relinkBaselineUpdates(liveAd, pools));
+  Object.assign(updates, _relinkHistoryUpdates(liveAd, pools, false));
   return await updateRecord(state.ads, liveAd.id, updates);
 }
 
@@ -31013,6 +31086,7 @@ async function applyLocalReceiptSettle(liveAd, pools) {
   // The ordinary Not Paid -> Paid save stamps the collection date too.
   if (!liveAd.collectionDate) updates.collectionDate = new Date().toISOString();
   Object.assign(updates, _relinkBaselineUpdates(liveAd, { paid: pools.paid, due: [] }));
+  Object.assign(updates, _relinkHistoryUpdates(liveAd, { paid: pools.paid, due: [] }, true));
   return await updateRecord(state.ads, liveAd.id, updates);
 }
 

@@ -2435,6 +2435,42 @@ function _relinkBaselineUpdates(liveAd, pools) {
   return updates;
 }
 
+// Local-mode mirror of the server's relink/settle history entry: these money
+// moves bypass the ordinary edit path (which appends history client-side), so
+// without this they were invisible in the history viewer.
+function _relinkHistoryUpdates(liveAd, pools, isSettle) {
+  const oldIds = new Set();
+  ['receiptAllocations', 'dueAllocations', 'mergedPaidAllocations'].forEach(field => {
+    (Array.isArray(liveAd[field]) ? liveAd[field] : []).forEach(row => {
+      if (row && row.receiptId) oldIds.add(String(row.receiptId));
+    });
+  });
+  const newIds = new Set([...pools.paid, ...pools.due].map(row => String(row.receiptId)));
+  const vacated = [...oldIds].filter(id => id && !newIds.has(id));
+  const introduced = [...newIds].filter(id => id && !oldIds.has(id));
+  const label = rid => {
+    const receipt = (state.receipts || []).find(r => r && String(r.id) === String(rid));
+    return String(receipt?.serialNumber || receipt?.finalReceiptNo || receipt?.tempReceiptNo || rid);
+  };
+  const changes = [];
+  if (vacated.length || introduced.length) {
+    changes.push({
+      field: 'Funding Receipt',
+      from: vacated.map(label).sort().join(', ') || '—',
+      to: introduced.map(label).sort().join(', ') || '—'
+    });
+  }
+  if (isSettle) changes.push({ field: 'Payment Status', from: 'Not Paid', to: 'Paid' });
+  if (!changes.length) return {};
+  const editHistory = Array.isArray(liveAd.editHistory) ? [...liveAd.editHistory] : [];
+  editHistory.push({
+    editedAt: new Date().toISOString(),
+    editedBy: state.currentUser?.name || 'Unknown',
+    changes
+  });
+  return { editHistory, editCount: editHistory.length };
+}
+
 async function applyLocalReceiptRelink(liveAd, pools) {
   const paymentState = getAdPaymentState(liveAd);
   const collectionMethod = String(liveAd.collectionMethod || '');
@@ -2462,6 +2498,7 @@ async function applyLocalReceiptRelink(liveAd, pools) {
     updates.receiptId = linkedId || (paidIds[0] || '');
   }
   Object.assign(updates, _relinkBaselineUpdates(liveAd, pools));
+  Object.assign(updates, _relinkHistoryUpdates(liveAd, pools, false));
   return await updateRecord(state.ads, liveAd.id, updates);
 }
 
@@ -2491,6 +2528,7 @@ async function applyLocalReceiptSettle(liveAd, pools) {
   // The ordinary Not Paid -> Paid save stamps the collection date too.
   if (!liveAd.collectionDate) updates.collectionDate = new Date().toISOString();
   Object.assign(updates, _relinkBaselineUpdates(liveAd, { paid: pools.paid, due: [] }));
+  Object.assign(updates, _relinkHistoryUpdates(liveAd, { paid: pools.paid, due: [] }, true));
   return await updateRecord(state.ads, liveAd.id, updates);
 }
 

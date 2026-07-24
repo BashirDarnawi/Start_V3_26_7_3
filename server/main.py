@@ -7807,7 +7807,11 @@ def _financial_apply_refund(
 
 
 def _financial_apply_relink(
-    existing: dict[str, Any], requested: dict[str, Any]
+    existing: dict[str, Any],
+    requested: dict[str, Any],
+    *,
+    actor_name: str = "",
+    receipt_labels: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Move an ad's committed funding onto a different receipt WITHOUT touching
     its money identity.
@@ -7993,6 +7997,35 @@ def _financial_apply_relink(
     new_ids = set(paid_ids) | set(due_ids)
     vacated = {rid for rid in old_ids if rid and rid not in new_ids}
     introduced = sorted(rid for rid in new_ids if rid and rid not in old_ids)
+
+    # Record the move in the ad's edit history (the ordinary edit path appends
+    # client-side; relink/settle bypass it, which left these money moves
+    # invisible in the history viewer). Same entry shape the client writes:
+    # {editedAt, editedBy, changes:[{field, from, to}]}.
+    _labels = receipt_labels or {}
+
+    def _receipt_label(rid: str) -> str:
+        return str(_labels.get(rid) or rid)
+
+    _history_changes: list[dict[str, str]] = []
+    if vacated or introduced:
+        _history_changes.append({
+            "field": "Funding Receipt",
+            "from": ", ".join(sorted(_receipt_label(r) for r in vacated)) or "—",
+            "to": ", ".join(sorted(_receipt_label(r) for r in introduced)) or "—",
+        })
+    if is_settle:
+        _history_changes.append({"field": "Payment Status", "from": "Not Paid", "to": "Paid"})
+    if _history_changes:
+        _history = list(result.get("editHistory")) if isinstance(result.get("editHistory"), list) else []
+        _history.append({
+            "editedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "editedBy": actor_name or "System",
+            "changes": _history_changes,
+        })
+        result["editHistory"] = _history
+        result["editCount"] = len(_history)
+
     if vacated and len(introduced) == 1:
         replacement = introduced[0]
 
@@ -8198,7 +8231,23 @@ def _ad_mutation_atomic(
                 )
             elif is_relink:
                 assert existing is not None
-                saved_data = _financial_apply_relink(existing, clean_request)
+                _relink_labels = {}
+                for _rid, _rrow in (locked_receipts or {}).items():
+                    if not _rrow:
+                        continue
+                    _rdata = _financial_row_data(_rrow)
+                    _relink_labels[str(_rid)] = str(
+                        _rdata.get("serialNumber")
+                        or _rdata.get("finalReceiptNo")
+                        or _rdata.get("tempReceiptNo")
+                        or _rid
+                    )
+                saved_data = _financial_apply_relink(
+                    existing,
+                    clean_request,
+                    actor_name=sanitize_str(str(actor.get("name") or ""), 120),
+                    receipt_labels=_relink_labels,
+                )
                 _financial_validate_ad_plan(
                     saved_data,
                     locked_receipts=locked_receipts,
