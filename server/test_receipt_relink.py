@@ -966,3 +966,79 @@ class TestReceiptSettleTerminal:
             f"/api/collections/receipts/{new_rid}", cookies=admin
         )
         assert still_blocked.status_code == 409, still_blocked.text
+
+
+class TestPaidReceiptSplitIncrease:
+    """A paid receipt's value may rise ONLY when the split-payments editor
+    backs every cent with an itemized payment line (production case: a $100
+    settled receipt whose customer really paid 120 LYD + 100 USD @ 8.5 =
+    $102.13). A bare amount bump still refuses — that would mint credit."""
+
+    def _paid_100(self, tag, admin):
+        cid = f"split_cust_{tag}"
+        rid = f"split_rcpt_{tag}"
+        _customer(cid, admin)
+        _paid_receipt(rid, cid, 100, admin)
+        row = client.get(f"/api/collections/receipts/{rid}", cookies=admin)
+        assert row.status_code == 200, row.text
+        return rid, row.json()["lastModified"]
+
+    def _patch(self, rid, data, expected, admin):
+        return client.patch(
+            f"/api/collections/receipts/{rid}",
+            json={"data": data, "expectedLastModified": expected},
+            cookies=admin,
+        )
+
+    def test_backed_split_increase_is_allowed(self, admin):
+        rid, version = self._paid_100("backed", admin)
+        # 120 LYD @ r2 9.5 -> ceil(12.631..) = 12.64; 100 USD @ rate 8.5 ->
+        # R1 850 LYD @ r2 9.5 -> ceil(89.473..) = 89.48; sum 102.12 + the
+        # client's house cent on fractional totals -> amountUSD 102.13.
+        patched = self._patch(
+            rid,
+            {
+                "payments": [
+                    {"method": "Cash (LYD)", "amount": 120, "rate": 1, "rate2": 9.5},
+                    {"method": "Cash (USD)", "amount": 100, "rate": 8.5, "rate2": 9.5},
+                ],
+                "amountUSD": 102.13,
+                "amountLocal": 970,
+                "exchangeRate": 970 / 102.13,
+            },
+            version,
+            admin,
+        )
+        assert patched.status_code == 200, patched.text
+        data = patched.json()["data"]
+        assert data["amountUSD"] == 102.13
+        assert data["amountLocal"] == 970
+
+    def test_bare_increase_still_refused(self, admin):
+        rid, version = self._paid_100("bare", admin)
+        patched = self._patch(rid, {"amountUSD": 102.13}, version, admin)
+        assert patched.status_code == 409, patched.text
+        assert "cannot be increased" in patched.text
+        row = client.get(f"/api/collections/receipts/{rid}", cookies=admin)
+        assert row.json()["data"]["amountUSD"] == 100
+
+    def test_overclaimed_increase_refused(self, admin):
+        rid, version = self._paid_100("overclaim", admin)
+        # Payments only justify $102.13; claiming $105 must refuse.
+        patched = self._patch(
+            rid,
+            {
+                "payments": [
+                    {"method": "Cash (LYD)", "amount": 120, "rate": 1, "rate2": 9.5},
+                    {"method": "Cash (USD)", "amount": 100, "rate": 8.5, "rate2": 9.5},
+                ],
+                "amountUSD": 105,
+                "amountLocal": 970,
+            },
+            version,
+            admin,
+        )
+        assert patched.status_code == 409, patched.text
+        assert "cannot be increased" in patched.text
+        row = client.get(f"/api/collections/receipts/{rid}", cookies=admin)
+        assert row.json()["data"]["amountUSD"] == 100

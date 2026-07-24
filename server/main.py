@@ -9130,15 +9130,23 @@ def _financial_patch_receipt_atomic(
                 )
             # SECURITY: a settled receipt's spendable capacity is fixed. Raising
             # amountUSD/amountLocal/exchangeRate on an already-Paid receipt through a
-            # generic edit would mint credit the customer never paid. Legitimate
+            # BARE edit would mint credit the customer never paid. Legitimate
             # over-collection is a Not Paid -> Paid delivery completion (old is not
             # yet Paid here), and lowering below committed usage is already blocked
-            # above; only an upward edit of an already-settled receipt is refused.
+            # above. One upward path IS legitimate: the split-payments editor
+            # recording the real collected money — every credit cent is then
+            # backed by an itemized payment line, so nothing is minted. Allow the
+            # raise only when the new amount is fully covered by the recorded
+            # payment breakdown (same per-line ceiling rounding as the client,
+            # plus its one "house cent" snap on fractional totals).
             if old_is_paid and _financial_due_total(merged) > _financial_due_total(old):
-                raise HTTPException(
-                    status_code=409,
-                    detail="A settled receipt's amount cannot be increased by editing",
-                )
+                backed_minor = _receipt_payments_credit_minor(merged.get("payments"))
+                amount_minor = _financial_minor(merged.get("amountUSD"), "receipt amount")
+                if backed_minor is None or amount_minor > backed_minor + 1:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="A settled receipt's amount cannot be increased by editing",
+                    )
             ad_plans: list[tuple[Any, dict[str, Any]]] = []
             if _financial_receipt_transferable(merged):
                 ad_plans = _financial_prepare_paid_receipt_ad_updates(
@@ -9169,6 +9177,47 @@ def _financial_patch_receipt_atomic(
                     },
                 )
             return saved_receipt, saved_ads, False
+
+
+# Methods whose typed amount is USD; their ads-credit line converts the LYD
+# value (amount*rate) back through rate2. Mirrors saveSplitPayments/saveReceipt.
+_USD_BASED_PAYMENT_METHODS = {"USDT", "Bank Transfer (USD)", "Cash (USD)"}
+
+
+def _receipt_payments_credit_minor(payments: Any) -> int | None:
+    """Ads credit (in cents) that a receipt's itemized payments justify.
+
+    Reimplements the client's split-payment math exactly (src/13-filters-helpers
+    saveSplitPayments / src/14-forms ceilingRound): per line, R1 = amount*rate;
+    credit = R1/rate2 for USD-based methods else amount/rate2, rounded UP to the
+    cent (with the client's epsilon on exact-cent values). Returns None when
+    there is no usable itemized breakdown — the caller then refuses an upward
+    edit, because unbacked credit would be minted from nothing.
+    """
+    if not isinstance(payments, list) or not payments:
+        return None
+    total = 0
+    saw_line = False
+    for entry in payments:
+        if not isinstance(entry, dict):
+            return None
+        try:
+            amount = float(entry.get("amount") or 0)
+            rate = float(entry.get("rate") or 0)
+            rate2 = float(entry.get("rate2") or 0)
+        except (TypeError, ValueError):
+            return None
+        if amount <= 0:
+            continue
+        saw_line = True
+        if rate2 <= 0:
+            continue
+        r1 = amount * rate
+        base = (r1 / rate2) if str(entry.get("method") or "") in _USD_BASED_PAYMENT_METHODS else (amount / rate2)
+        cents = base * 100
+        nearest = round(cents)
+        total += int(nearest) if abs(cents - nearest) < 1e-6 else int(math.ceil(cents))
+    return total if saw_line else None
 
 
 def _financial_receipt_reference_reason(
