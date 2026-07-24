@@ -17,7 +17,8 @@
     "verify:generated": "node scripts/verify-artifacts.js",
     "verify:mobile": "node scripts/verify-artifacts.js --include-native",
     "release:prepare": "npm run build && npm test && npm run sync:mobile && npm run verify:mobile",
-    "release:check": "npm test && npm run verify:mobile"
+    "release:check": "npm test && npm run verify:mobile",
+    "release:image": "npm run build && npm test && docker build -t bashird/albayan:latest -f server/Dockerfile . && docker push bashird/albayan:latest"
   },
   "keywords": [],
   "author": "",
