@@ -624,6 +624,41 @@ check('in-app browsers keep the WhatsApp share dialog open instead of faking suc
   /if \(typeof Platform !== 'undefined' && Platform\.isInAppBrowser\) \{[\s\S]{0,700}?return;[\s\S]{0,40}?\}/.test(whatsAppShareBody) &&
   whatsAppShareBody.includes('copy the text from the preview, or open this page in your real browser'));
 
+// Login experience: device-local saved-account chooser + opt-in remember-me.
+const permissionsSrc = read('src/04-permissions.js');
+const savedAccountsSection = views.slice(
+  views.indexOf('const ALBAYAN_SAVED_ACCOUNTS_KEY'),
+  views.indexOf('function _renderLoginBrandHeader(')
+);
+check('saved sign-in accounts store only name/email/lastUsedAt (never credentials)',
+  savedAccountsSection.length > 0 &&
+  savedAccountsSection.includes("'albayan_saved_accounts'") &&
+  savedAccountsSection.includes('ALBAYAN_SAVED_ACCOUNTS_MAX = 5') &&
+  savedAccountsSection.includes('lastUsedAt: Math.max(0, Number(') &&
+  (savedAccountsSection.match(/try \{/g) || []).length >= 3 &&
+  !/password|token|secret|hash|session/i.test(savedAccountsSection),
+  'saved-account helpers must persist only {name,email,lastUsedAt} inside try/catch');
+check('login account chooser renders when saved accounts exist',
+  views.includes('const savedAccounts = getSavedLoginAccounts();') &&
+  views.includes("savedAccounts.length > 0 && _loginChooserMode === 'auto'") &&
+  views.includes('function renderLoginAccountChooser(') &&
+  views.includes('اختر حسابًا') &&
+  views.includes('onclick="loginChooserPick(this.dataset.email)"') &&
+  views.includes('onclick="loginChooserUseAnother()"') &&
+  views.includes('onclick="removeSavedLoginAccount(this.dataset.email)"') &&
+  views.includes('maskEmailForDisplay(acc.email)') &&
+  views.includes('onclick="loginShowAccountChooser()"'));
+check('remember-me is opt-in and wired into the server login payload',
+  views.includes('id="login-remember"') &&
+  !views.includes('id="login-remember" checked') &&
+  views.includes("document.getElementById('login-remember')") &&
+  liveSync.includes('function handleLogin(email, password, rememberMe)') &&
+  liveSync.includes('_handleLoginOnce(email, password, generation, rememberMe === true)') &&
+  serverApi.includes('rememberMe: rememberMe === true'));
+check('password and passkey logins both upsert the device account list',
+  (liveSync.match(/rememberLoginAccount\(user\);/g) || []).length >= 2 &&
+  permissionsSrc.includes('rememberLoginAccount(user);'));
+
 const openBraces = (css.match(/\{/g) || []).length;
 const closeBraces = (css.match(/\}/g) || []).length;
 check('mobile stylesheet braces are balanced', openBraces === closeBraces,

@@ -1220,6 +1220,8 @@ async function passkeySignIn() {
     // Login
     SessionManager.createSession(user.id);
     state.currentUser = user;
+    // Device-local convenience list for the "choose an account" screen.
+    rememberLoginAccount(user);
     if (!Array.isArray(state.currentUser.subscriptions)) {
       state.currentUser.subscriptions = [];
       if (isAdminRole(state.currentUser.role)) {

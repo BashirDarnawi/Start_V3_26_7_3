@@ -3712,6 +3712,8 @@ async function passkeySignIn() {
     // Login
     SessionManager.createSession(user.id);
     state.currentUser = user;
+    // Device-local convenience list for the "choose an account" screen.
+    rememberLoginAccount(user);
     if (!Array.isArray(state.currentUser.subscriptions)) {
       state.currentUser.subscriptions = [];
       if (isAdminRole(state.currentUser.role)) {
@@ -8322,7 +8324,7 @@ async function apiAuthMe() {
   }
 }
 
-async function apiLogin(email, password) {
+async function apiLogin(email, password, rememberMe = false) {
   // Check client-side rate limit cooldown first
   const cooldownCheck = isRateLimited('login');
   if (cooldownCheck.limited) {
@@ -8332,8 +8334,11 @@ async function apiLogin(email, password) {
     err.retryAfter = cooldownCheck.retryAfter;
     throw err;
   }
-  
-  const payload = { email, password };
+
+  // rememberMe is a STRICT boolean opt-in: when true the server issues a
+  // long-lived session (ALBAYAN_SESSION_REMEMBER_MS, default 30 days) instead
+  // of the standard one. Older servers simply ignore the extra field.
+  const payload = { email, password, rememberMe: rememberMe === true };
   try {
   const res = await apiJson('/api/auth/login', { method: 'POST', body: payload }, { timeoutMs: 12000 });
   return res?.user || null;
@@ -10861,7 +10866,7 @@ function loginAttemptIsCurrent(generation) {
   return generation === _loginGeneration && !_logoutInFlight && !_serverAuthExpiryInFlight;
 }
 
-function handleLogin(email, password) {
+function handleLogin(email, password, rememberMe) {
   if (_logoutInFlight || _serverAuthExpiryInFlight) {
     showNotification(
       state.language === 'ar' ? 'الرجاء الانتظار' : 'Please Wait',
@@ -10874,7 +10879,7 @@ function handleLogin(email, password) {
 
   const generation = ++_loginGeneration;
   setLoginFormBusy(true);
-  const promise = _handleLoginOnce(email, password, generation)
+  const promise = _handleLoginOnce(email, password, generation, rememberMe === true)
     .catch((error) => {
       if (loginAttemptIsCurrent(generation)) {
         console.warn('[handleLogin] Failed:', error?.message || error);
@@ -10892,7 +10897,7 @@ function handleLogin(email, password) {
   return promise;
 }
 
-async function _handleLoginOnce(email, password, loginGeneration) {
+async function _handleLoginOnce(email, password, loginGeneration, rememberMe) {
   // #region agent log
   // Hypothesis H-LOGIN: Login failures are caused by one of:
   // (a) user not found due to stored email whitespace/case issues
@@ -10924,7 +10929,7 @@ async function _handleLoginOnce(email, password, loginGeneration) {
         }
       } catch (_) {}
       // #endregion
-      const user = await apiLogin(email, password);
+      const user = await apiLogin(email, password, rememberMe === true);
       if (!loginAttemptIsCurrent(loginGeneration)) return false;
       if (!user) {
         // #region agent log
@@ -10947,6 +10952,8 @@ async function _handleLoginOnce(email, password, loginGeneration) {
       }
       advanceServerSessionEpoch();
       state.currentUser = user;
+      // Device-local convenience list for the "choose an account" screen.
+      rememberLoginAccount(user);
       // Switch from the unauthenticated namespace to this exact
       // server+user cache before any business data is read or written.
       activateServerCollectionStorage(user);
@@ -11209,9 +11216,11 @@ async function _handleLoginOnce(email, password, loginGeneration) {
     
     // Create secure session
     SessionManager.createSession(user.id);
-    
+
     state.currentUser = user;
-    
+    // Device-local convenience list for the "choose an account" screen.
+    rememberLoginAccount(user);
+
     // Ensure user has subscriptions array (backwards compatibility)
     if (!Array.isArray(state.currentUser.subscriptions)) {
       state.currentUser.subscriptions = [];
@@ -12972,6 +12981,7 @@ function attachFirstRunHandlers() {
           invalidateUsersListCache();
           advanceServerSessionEpoch();
           state.currentUser = user;
+          rememberLoginAccount(user);
           activateServerCollectionStorage(user);
           if (!Array.isArray(state.currentUser.subscriptions)) {
             state.currentUser.subscriptions = isAdminRole(state.currentUser.role) ? Object.keys(SERVICES) : [];
@@ -13038,6 +13048,7 @@ function attachFirstRunHandlers() {
 
       SessionManager.createSession(admin.id);
       state.currentUser = admin;
+      rememberLoginAccount(admin);
       state.currentView = getPostLoginLandingViewForUser(admin);
       saveState();
 
@@ -13057,29 +13068,220 @@ function attachFirstRunHandlers() {
   });
 }
 
-function renderLogin() {
-  const isRTL = state.language === 'ar';
-  const passkeySupported = !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext);
-  // Insecure origins (plain http:// on a LAN IP) hide crypto.subtle and
-  // clipboard/passkey APIs. Login still works via the pure-JS crypto fallback
-  // (02-security.js), but tell the user why security features are degraded.
-  const webCryptoOk = !!(globalThis.crypto && globalThis.crypto.subtle);
-  const passkeyHint = passkeySupported
-    ? (isRTL ? 'يمكنك استخدام بصمة/Face ID (Passkey) إذا تم إعدادها مسبقاً.' : 'You can use a Passkey (Face ID / Touch ID) if you already set one up.')
-    : (isRTL ? 'Passkey يتطلب HTTPS أو localhost. افتح التطبيق عبر localhost لاستخدامه.' : 'Passkeys require HTTPS or localhost. Open the app via localhost to use it.');
+// ==========================================
+// SAVED SIGN-IN ACCOUNTS (device-local chooser)
+// ==========================================
+// Storage contract: localStorage key 'albayan_saved_accounts' holds an array
+// of AT MOST 5 entries shaped EXACTLY {name, email, lastUsedAt} — never any
+// sign-in credential, cookie value or record id. Both the read and the write
+// path re-pick exactly these three fields, so a tampered or legacy value can
+// never smuggle anything else into storage. Everything is wrapped in
+// try/catch: in private mode the chooser simply never appears.
+const ALBAYAN_SAVED_ACCOUNTS_KEY = 'albayan_saved_accounts';
+const ALBAYAN_SAVED_ACCOUNTS_MAX = 5;
 
+// Pre-login chooser UI state (in-memory only; reset after a successful login).
+let _loginChooserMode = 'auto'; // 'auto' => chooser when saved accounts exist
+let _loginPrefillEmail = '';
+
+function _normalizeSavedAccountEmail(value) {
+  const email = String(value || '').trim().toLowerCase();
+  if (!email || email.length > 120) return '';
+  const at = email.indexOf('@');
+  if (at < 1 || at === email.length - 1) return '';
+  return email;
+}
+
+function getSavedLoginAccounts() {
+  try {
+    const raw = localStorage.getItem(ALBAYAN_SAVED_ACCOUNTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const out = [];
+    for (const entry of parsed) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      const email = _normalizeSavedAccountEmail(entry.email);
+      if (!email) continue;
+      if (out.some(acc => acc.email === email)) continue;
+      out.push({
+        name: String(entry.name || '').slice(0, 80),
+        email: email,
+        lastUsedAt: Math.max(0, Number(entry.lastUsedAt) || 0)
+      });
+      if (out.length >= ALBAYAN_SAVED_ACCOUNTS_MAX) break;
+    }
+    return out;
+  } catch (_) {
+    return [];
+  }
+}
+
+function _writeSavedLoginAccounts(list) {
+  try {
+    const safe = (Array.isArray(list) ? list : [])
+      .map(acc => ({
+        name: String((acc && acc.name) || '').slice(0, 80),
+        email: _normalizeSavedAccountEmail(acc && acc.email),
+        lastUsedAt: Math.max(0, Number(acc && acc.lastUsedAt) || 0)
+      }))
+      .filter(acc => acc.email)
+      .slice(0, ALBAYAN_SAVED_ACCOUNTS_MAX);
+    if (safe.length === 0) {
+      localStorage.removeItem(ALBAYAN_SAVED_ACCOUNTS_KEY);
+    } else {
+      localStorage.setItem(ALBAYAN_SAVED_ACCOUNTS_KEY, JSON.stringify(safe));
+    }
+  } catch (_) { /* storage blocked: best-effort convenience only */ }
+}
+
+// Upsert after EVERY successful sign-in (form or biometric), newest first.
+function rememberLoginAccount(user) {
+  try {
+    const email = _normalizeSavedAccountEmail(user && user.email);
+    if (email) {
+      const rest = getSavedLoginAccounts().filter(acc => acc.email !== email);
+      _writeSavedLoginAccounts([
+        { name: String((user && user.name) || ''), email: email, lastUsedAt: Date.now() },
+        ...rest
+      ]);
+    }
+  } catch (_) {}
+  // The next logged-out render starts from the chooser again.
+  _loginChooserMode = 'auto';
+  _loginPrefillEmail = '';
+}
+
+function removeSavedLoginAccount(email) {
+  const target = _normalizeSavedAccountEmail(email);
+  if (!target) return;
+  const isAr = state.language === 'ar';
+  const entry = getSavedLoginAccounts().find(acc => acc.email === target);
+  const label = (entry && entry.name) ? entry.name : target;
+  const ok = confirm(isAr
+    ? `إزالة "${label}" من هذا الجهاز؟ لن يُحذف الحساب نفسه.`
+    : `Remove "${label}" from this device? The account itself is not deleted.`);
+  if (!ok) return;
+  _writeSavedLoginAccounts(getSavedLoginAccounts().filter(acc => acc.email !== target));
+  if (_loginPrefillEmail === target) _loginPrefillEmail = '';
+  render();
+}
+
+function loginChooserPick(email) {
+  const target = _normalizeSavedAccountEmail(email);
+  if (!target || !getSavedLoginAccounts().some(acc => acc.email === target)) return;
+  _loginPrefillEmail = target;
+  _loginChooserMode = 'form';
+  render();
+}
+
+function loginChooserUseAnother() {
+  _loginPrefillEmail = '';
+  _loginChooserMode = 'form';
+  render();
+}
+
+function loginShowAccountChooser() {
+  _loginPrefillEmail = '';
+  _loginChooserMode = 'auto';
+  render();
+}
+
+// bashir_darnawi@… — the domain never renders on the shared login screen.
+function maskEmailForDisplay(email) {
+  const value = String(email || '');
+  const at = value.indexOf('@');
+  if (at < 1) return value;
+  let local = value.slice(0, at);
+  if (local.length > 24) local = local.slice(0, 24) + '…';
+  return local + '@…';
+}
+
+function _savedAccountInitial(acc) {
+  const source = String((acc && (acc.name || acc.email)) || '').trim();
+  return (source.charAt(0) || 'A').toUpperCase();
+}
+
+// Shared header (brand mark + bilingual title) for both pre-login surfaces.
+function _renderLoginBrandHeader(subtitle) {
   return `
-    <div class="min-h-screen flex items-center justify-center p-4">
-      <div class="w-full max-w-md">
-        <div class="glass-panel w-full p-8 rounded-3xl animate-fade-in-up">
           <div class="text-center mb-8">
             <div class="w-16 h-16 rounded-3xl mx-auto mb-4 alb-mark alb-mark-dot flex items-center justify-center">
               <span class="text-white text-2xl font-extrabold">A</span>
             </div>
             <h1 class="text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">${t('appName')}</h1>
-            <p class="text-slate-500 mt-2">${t('signInTitle')}</p>
-          </div>
+            <p class="text-slate-500 mt-2">${subtitle}</p>
+          </div>`;
+}
 
+// "See also"-style footer: policy links + copyright (shared by both surfaces).
+function renderLoginFooterLinks(isRTL) {
+  return `
+          <div data-account-policy-links class="mt-4 flex flex-wrap items-center justify-center gap-2 text-xs">
+            <a href="https://albayanhub.com/privacy" target="_blank" rel="noopener noreferrer" class="min-h-11 inline-flex items-center px-3 font-semibold text-indigo-600 dark:text-indigo-300 hover:underline">
+              ${isRTL ? 'سياسة الخصوصية' : 'Privacy Policy'}
+            </a>
+            <a href="https://albayanhub.com/delete-account" target="_blank" rel="noopener noreferrer" class="min-h-11 inline-flex items-center px-3 font-semibold text-rose-600 dark:text-rose-300 hover:underline">
+              ${isRTL ? 'طلب حذف الحساب' : 'Request Account Deletion'}
+            </a>
+          </div>
+          <p class="mt-2 text-center text-[11px] text-slate-400">© ${new Date().getFullYear()} ${t('appName')}</p>`;
+}
+
+// "اختر حسابًا" — device-local account chooser shown before the form when
+// this device has signed in before. Purely presentational: picking a card only
+// prefills the email; the user still authenticates normally.
+function renderLoginAccountChooser(savedAccounts, bannersHTML, isRTL) {
+  const cards = savedAccounts.map(acc => {
+    const safeEmail = Security.escapeHtml(acc.email);
+    const displayName = acc.name || maskEmailForDisplay(acc.email);
+    return `
+            <div class="relative">
+              <button type="button" data-email="${safeEmail}" onclick="loginChooserPick(this.dataset.email)"
+                class="w-full min-h-12 flex items-center gap-3 rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50 p-3 ${isRTL ? 'pl-11' : 'pr-11'} hover:shadow-md hover:border-indigo-300 transition-all">
+                <div class="w-11 h-11 rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300 flex items-center justify-center font-extrabold text-lg flex-shrink-0">${Security.escapeHtml(_savedAccountInitial(acc))}</div>
+                <div class="min-w-0 flex-1 ${isRTL ? 'text-right' : 'text-left'}">
+                  <div class="font-bold text-slate-800 dark:text-white truncate">${Security.escapeHtml(displayName)}</div>
+                  <div class="text-xs text-slate-500 truncate" dir="ltr">${Security.escapeHtml(maskEmailForDisplay(acc.email))}</div>
+                </div>
+                <span class="text-xs font-bold text-indigo-600 dark:text-indigo-300 flex-shrink-0">${isRTL ? 'تسجيل الدخول' : 'Sign in'}</span>
+              </button>
+              <button type="button" data-email="${safeEmail}" onclick="removeSavedLoginAccount(this.dataset.email)"
+                class="absolute ${isRTL ? 'left-0' : 'right-0'} top-1/2 -translate-y-1/2 min-h-11 min-w-11 flex items-center justify-center rounded-xl text-slate-400 hover:text-rose-600"
+                aria-label="${isRTL ? `إزالة ${safeEmail} من هذا الجهاز` : `Remove ${safeEmail} from this device`}"
+                title="${isRTL ? 'إزالة من هذا الجهاز' : 'Remove from this device'}">
+                <i data-lucide="x" class="w-4 h-4"></i>
+              </button>
+            </div>`;
+  }).join('');
+
+  return `
+    <div class="min-h-screen flex items-center justify-center p-4">
+      <div class="w-full max-w-md">
+        <div class="glass-panel w-full p-8 rounded-3xl animate-fade-in-up">
+          ${_renderLoginBrandHeader(isRTL ? 'اختر حسابًا' : 'Choose an account')}
+          ${bannersHTML}
+          <div class="space-y-3">
+            ${cards}
+            <button type="button" onclick="loginChooserUseAnother()"
+              class="w-full min-h-12 flex items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-slate-300 dark:border-slate-700 p-3 font-bold text-slate-500 dark:text-slate-300 hover:border-indigo-300 hover:text-indigo-600 transition-all">
+              <i data-lucide="user-plus" class="w-5 h-5"></i>
+              <span>${isRTL ? 'إضافة حساب آخر' : 'Use another account'}</span>
+            </button>
+          </div>
+          <button onclick="toggleLanguage()" class="mt-5 text-xs text-slate-400 alb-hover-brand mx-auto block min-h-11">${state.language === 'en' ? 'العربية' : 'English'}</button>
+          ${renderLoginFooterLinks(isRTL)}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// Every status banner shown above the pre-login surfaces (server first-run
+// setup, insecure-context notice, server-unreachable retry). Shared so the
+// chooser and the form can never drift apart.
+function _renderLoginBanners(isRTL, webCryptoOk) {
+  return `
           ${(isServerModeEnabled() && state.serverHasNoUsers && state.serverSetupEnabled === true) ? `
           <button type="button" onclick="startServerSetup()" class="w-full mb-5 text-left rounded-2xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-900/20 p-4 hover:shadow-md transition-all">
             <div class="flex items-center gap-3">
@@ -13119,16 +13321,60 @@ function renderLogin() {
               ${isRTL ? 'إعادة محاولة الاتصال' : 'Retry connection'}
             </button>
           </div>
-          ` : ''}
+          ` : ''}`;
+}
 
-          <form id="login-form" class="space-y-4">
+function renderLogin() {
+  const isRTL = state.language === 'ar';
+  const passkeySupported = !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext);
+  // Insecure origins (plain http:// on a LAN IP) hide crypto.subtle and
+  // clipboard/passkey APIs. Login still works via the pure-JS crypto fallback
+  // (02-security.js), but tell the user why security features are degraded.
+  const webCryptoOk = !!(globalThis.crypto && globalThis.crypto.subtle);
+  const passkeyHint = passkeySupported
+    ? (isRTL ? 'يمكنك استخدام بصمة/Face ID (Passkey) إذا تم إعدادها مسبقاً.' : 'You can use a Passkey (Face ID / Touch ID) if you already set one up.')
+    : (isRTL ? 'Passkey يتطلب HTTPS أو localhost. افتح التطبيق عبر localhost لاستخدامه.' : 'Passkeys require HTTPS or localhost. Open the app via localhost to use it.');
+
+  const bannersHTML = _renderLoginBanners(isRTL, webCryptoOk);
+  const savedAccounts = getSavedLoginAccounts();
+  // A prefilled account that was removed meanwhile falls back to the plain form.
+  const prefillAccount = _loginPrefillEmail
+    ? (savedAccounts.find(acc => acc.email === _loginPrefillEmail) || null)
+    : null;
+  if (_loginPrefillEmail && !prefillAccount) _loginPrefillEmail = '';
+  const showChooser = savedAccounts.length > 0 && _loginChooserMode === 'auto' && !prefillAccount;
+  if (showChooser) return renderLoginAccountChooser(savedAccounts, bannersHTML, isRTL);
+
+  const emailFieldHTML = prefillAccount ? `
+            <div>
+              <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${t('email')}</label>
+              <div class="flex items-center gap-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50 px-3 py-2">
+                <div class="w-9 h-9 rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300 flex items-center justify-center font-extrabold flex-shrink-0">${Security.escapeHtml(_savedAccountInitial(prefillAccount))}</div>
+                <div class="min-w-0 flex-1 ${isRTL ? 'text-right' : 'text-left'}">
+                  <div class="text-sm font-bold text-slate-800 dark:text-white truncate">${Security.escapeHtml(prefillAccount.name || maskEmailForDisplay(prefillAccount.email))}</div>
+                  <div class="text-xs text-slate-500 truncate" dir="ltr">${Security.escapeHtml(maskEmailForDisplay(prefillAccount.email))}</div>
+                </div>
+                <button type="button" onclick="loginShowAccountChooser()" class="min-h-11 px-2 text-sm font-bold alb-link flex-shrink-0">${isRTL ? 'تغيير' : 'Change'}</button>
+              </div>
+              <input type="hidden" id="login-email" value="${Security.escapeHtml(prefillAccount.email)}" />
+            </div>` : `
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${t('email')}</label>
               <div class="relative">
                 <i data-lucide="mail" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
                 <input type="email" id="login-email" required class="w-full pl-10 pr-4 py-3 glass-input rounded-xl" placeholder="name@company.com" autocomplete="username" />
               </div>
-            </div>
+            </div>`;
+
+  return `
+    <div class="min-h-screen flex items-center justify-center p-4">
+      <div class="w-full max-w-md">
+        <div class="glass-panel w-full p-8 rounded-3xl animate-fade-in-up">
+          ${_renderLoginBrandHeader(t('signInTitle'))}
+          ${bannersHTML}
+
+          <form id="login-form" class="space-y-4">
+            ${emailFieldHTML}
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${t('password')}</label>
               <div class="relative">
@@ -13136,6 +13382,13 @@ function renderLogin() {
                 <input type="password" id="login-password" required class="w-full pl-10 pr-4 py-3 glass-input rounded-xl" placeholder="••••••••" autocomplete="current-password" />
               </div>
             </div>
+
+            ${isServerModeEnabled() ? `
+            <label class="flex items-center gap-2 pt-1 select-none cursor-pointer" for="login-remember">
+              <input type="checkbox" id="login-remember" class="w-4 h-4 accent-indigo-600" />
+              <span class="text-sm text-slate-600 dark:text-slate-300">${isRTL ? 'تذكرني على هذا الجهاز' : 'Remember me on this device'}</span>
+            </label>
+            ` : ''}
 
             <div class="flex items-center justify-between pt-1">
               ${isServerModeEnabled()
@@ -13160,7 +13413,7 @@ function renderLogin() {
           <button type="button"
             onclick="passkeySignIn()"
             ${passkeySupported ? '' : 'disabled'}
-            class="w-full glass-panel rounded-xl px-4 py-3 font-extrabold flex items-center justify-center gap-2 ${passkeySupported ? 'hover:shadow-xl' : 'opacity-60 cursor-not-allowed'}"
+            class="w-full glass-panel rounded-xl px-4 py-3 font-extrabold flex items-center justify-center gap-2 ${passkeySupported ? 'hover:shadow-xl' : 'opacity-60 cursor-not-allowed'}${prefillAccount && passkeySupported ? ' border border-indigo-200 dark:border-indigo-800' : ''}"
             title="${Security.escapeHtml(passkeyHint)}"
           >
             <i data-lucide="key-round" class="w-5 h-5"></i>
@@ -13169,14 +13422,12 @@ function renderLogin() {
           <div class="mt-2 text-[11px] text-slate-400 text-center">
             ${passkeyHint}
           </div>
-          <div data-account-policy-links class="mt-4 flex flex-wrap items-center justify-center gap-2 text-xs">
-            <a href="https://albayanhub.com/privacy" target="_blank" rel="noopener noreferrer" class="min-h-11 inline-flex items-center px-3 font-semibold text-indigo-600 dark:text-indigo-300 hover:underline">
-              ${isRTL ? 'سياسة الخصوصية' : 'Privacy Policy'}
-            </a>
-            <a href="https://albayanhub.com/delete-account" target="_blank" rel="noopener noreferrer" class="min-h-11 inline-flex items-center px-3 font-semibold text-rose-600 dark:text-rose-300 hover:underline">
-              ${isRTL ? 'طلب حذف الحساب' : 'Request Account Deletion'}
-            </a>
-          </div>
+          ${savedAccounts.length > 0 ? `
+          <button type="button" onclick="loginShowAccountChooser()" class="mt-3 text-xs text-slate-400 alb-hover-brand mx-auto block min-h-11">
+            ${isRTL ? 'لست أنت؟ إدارة الحسابات المحفوظة' : 'Not you? Manage saved accounts'}
+          </button>
+          ` : ''}
+          ${renderLoginFooterLinks(isRTL)}
         </div>
       </div>
     </div>
@@ -13215,9 +13466,9 @@ function restoreRequestedViewAfterLogin(requestedView) {
   return false;
 }
 
-function loginFromCurrentRoute(email, password) {
+function loginFromCurrentRoute(email, password, rememberMe) {
   const requestedView = getViewFromUrl();
-  const loginPromise = handleLogin(email, password);
+  const loginPromise = handleLogin(email, password, rememberMe === true);
   if (!loginPromise || typeof loginPromise.then !== 'function') return loginPromise;
 
   // Both click and submit can fire for the same form action. handleLogin()
@@ -13269,7 +13520,8 @@ function attachLoginHandlers() {
         }
       } catch (_) {}
       // #endregion
-      loginFromCurrentRoute(email, password);
+      const rememberEl = document.getElementById('login-remember');
+      loginFromCurrentRoute(email, password, !!(rememberEl && rememberEl.checked));
     });
 
     // #region agent log
@@ -13300,12 +13552,22 @@ function attachLoginHandlers() {
           // If valid, force the login call here so we don't depend on submit firing.
           if (formOk === true) {
             e.preventDefault();
-            loginFromCurrentRoute(email, password);
+            const rememberEl = document.getElementById('login-remember');
+            loginFromCurrentRoute(email, password, !!(rememberEl && rememberEl.checked));
           }
         });
       }
     } catch (_) {}
     // #endregion
+
+    // A chosen saved account already filled the email — put the caret straight
+    // into the password box so sign-in is one field away.
+    if (_loginPrefillEmail) {
+      const passwordField = document.getElementById('login-password');
+      if (passwordField) {
+        try { passwordField.focus({ preventScroll: true }); } catch (_) { try { passwordField.focus(); } catch (_) {} }
+      }
+    }
   }
 }
 

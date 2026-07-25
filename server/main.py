@@ -394,6 +394,13 @@ DELETE_ACCOUNT_PATH = PROJECT_ROOT / "delete-account.html"
 
 COOKIE_NAME = "albayan_session"
 SESSION_DURATION_MS = int(os.getenv("ALBAYAN_SESSION_MS", str(8 * 60 * 60 * 1000)))
+# Opt-in "Remember me" sessions: a login carrying rememberMe=true gets this
+# lifetime (session row expires_at AND cookie max-age) instead of the default.
+# Expiry is enforced server-side per session in _auth_user_from_cookie, so the
+# cookie lifetime is presentation only — the DB row is the authority.
+SESSION_REMEMBER_DURATION_MS = int(
+    os.getenv("ALBAYAN_SESSION_REMEMBER_MS", str(30 * 24 * 60 * 60 * 1000))
+)
 # SECURITY: Default to secure cookies in production (HTTPS only)
 # In development, can be set to False via environment variable.
 # Tri-state: if the env var is set, honor its boolean value (so testing over
@@ -982,12 +989,17 @@ def _get_user_by_id_any(user_id: str) -> Optional[dict[str, Any]]:
         return dict(row) if row else None
 
 
-def _create_session(user_id: str, request: Request) -> tuple[str, str]:
+def _create_session(
+    user_id: str, request: Request, duration_ms: Optional[int] = None
+) -> tuple[str, str]:
     session_id = new_id("sess")
     token = new_id("tok")
     token_hash = hash_token(token)
     now = now_ms()
-    expires = now + SESSION_DURATION_MS
+    # duration_ms is chosen by the caller from server-side constants only
+    # (SESSION_DURATION_MS / SESSION_REMEMBER_DURATION_MS) — never client input.
+    lifetime_ms = SESSION_DURATION_MS if duration_ms is None else max(60_000, int(duration_ms))
+    expires = now + lifetime_ms
     ip = request.client.host if request.client else None
     ua = request.headers.get("user-agent")
 
@@ -3111,7 +3123,11 @@ def login(payload: LoginRequest, request: Request):
     ):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    session_id, token = _create_session(user["id"], request)
+    # "Remember me": schema-validated strict boolean; True selects the long
+    # server-side session lifetime, anything else keeps the standard one.
+    remember_me = payload.rememberMe is True
+    session_lifetime_ms = SESSION_REMEMBER_DURATION_MS if remember_me else SESSION_DURATION_MS
+    session_id, token = _create_session(user["id"], request, duration_ms=session_lifetime_ms)
     cookie_val = new_session_cookie_value(session_id, token)
 
     resp = JSONResponse(content=LoginResponse(user=user_row_to_public(user)).model_dump())
@@ -3128,7 +3144,7 @@ def login(payload: LoginRequest, request: Request):
         httponly=True,
         secure=True if is_mobile_app_login else _cookie_secure_for(request),
         samesite="none" if is_mobile_app_login else "lax",
-        max_age=int(SESSION_DURATION_MS / 1000),
+        max_age=int(session_lifetime_ms / 1000),
         path="/",
     )
 
@@ -3137,8 +3153,15 @@ def login(payload: LoginRequest, request: Request):
     login_email = str(payload.email).lower()
     reset_rate_limit(f"login:{_rate_key(request, login_email)}")
     reset_rate_limit(f"login:email:{login_email}")
-    
-    audit(user["id"], "login", "auth", user["id"], f"User {user['email']} logged in", {})
+
+    audit(
+        user["id"],
+        "login",
+        "auth",
+        user["id"],
+        f"User {user['email']} logged in",
+        {"rememberMe": remember_me, "sessionLifetimeMs": session_lifetime_ms},
+    )
     return resp
 
 

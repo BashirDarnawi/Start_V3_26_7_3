@@ -1,10 +1,13 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, StrictBool
 from typing import Any, Literal, Optional
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=256)
+    # "Remember me": STRICT JSON boolean so a stray string/number can never
+    # silently opt a login into the month-long session lifetime.
+    rememberMe: StrictBool = False
 
 
 class UserPublic(BaseModel):

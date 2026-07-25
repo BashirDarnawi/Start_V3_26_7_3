@@ -962,7 +962,7 @@ function loginAttemptIsCurrent(generation) {
   return generation === _loginGeneration && !_logoutInFlight && !_serverAuthExpiryInFlight;
 }
 
-function handleLogin(email, password) {
+function handleLogin(email, password, rememberMe) {
   if (_logoutInFlight || _serverAuthExpiryInFlight) {
     showNotification(
       state.language === 'ar' ? 'الرجاء الانتظار' : 'Please Wait',
@@ -975,7 +975,7 @@ function handleLogin(email, password) {
 
   const generation = ++_loginGeneration;
   setLoginFormBusy(true);
-  const promise = _handleLoginOnce(email, password, generation)
+  const promise = _handleLoginOnce(email, password, generation, rememberMe === true)
     .catch((error) => {
       if (loginAttemptIsCurrent(generation)) {
         console.warn('[handleLogin] Failed:', error?.message || error);
@@ -993,7 +993,7 @@ function handleLogin(email, password) {
   return promise;
 }
 
-async function _handleLoginOnce(email, password, loginGeneration) {
+async function _handleLoginOnce(email, password, loginGeneration, rememberMe) {
   // #region agent log
   // Hypothesis H-LOGIN: Login failures are caused by one of:
   // (a) user not found due to stored email whitespace/case issues
@@ -1025,7 +1025,7 @@ async function _handleLoginOnce(email, password, loginGeneration) {
         }
       } catch (_) {}
       // #endregion
-      const user = await apiLogin(email, password);
+      const user = await apiLogin(email, password, rememberMe === true);
       if (!loginAttemptIsCurrent(loginGeneration)) return false;
       if (!user) {
         // #region agent log
@@ -1048,6 +1048,8 @@ async function _handleLoginOnce(email, password, loginGeneration) {
       }
       advanceServerSessionEpoch();
       state.currentUser = user;
+      // Device-local convenience list for the "choose an account" screen.
+      rememberLoginAccount(user);
       // Switch from the unauthenticated namespace to this exact
       // server+user cache before any business data is read or written.
       activateServerCollectionStorage(user);
@@ -1310,9 +1312,11 @@ async function _handleLoginOnce(email, password, loginGeneration) {
     
     // Create secure session
     SessionManager.createSession(user.id);
-    
+
     state.currentUser = user;
-    
+    // Device-local convenience list for the "choose an account" screen.
+    rememberLoginAccount(user);
+
     // Ensure user has subscriptions array (backwards compatibility)
     if (!Array.isArray(state.currentUser.subscriptions)) {
       state.currentUser.subscriptions = [];

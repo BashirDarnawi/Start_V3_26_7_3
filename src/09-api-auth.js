@@ -343,7 +343,7 @@ async function apiAuthMe() {
   }
 }
 
-async function apiLogin(email, password) {
+async function apiLogin(email, password, rememberMe = false) {
   // Check client-side rate limit cooldown first
   const cooldownCheck = isRateLimited('login');
   if (cooldownCheck.limited) {
@@ -353,8 +353,11 @@ async function apiLogin(email, password) {
     err.retryAfter = cooldownCheck.retryAfter;
     throw err;
   }
-  
-  const payload = { email, password };
+
+  // rememberMe is a STRICT boolean opt-in: when true the server issues a
+  // long-lived session (ALBAYAN_SESSION_REMEMBER_MS, default 30 days) instead
+  // of the standard one. Older servers simply ignore the extra field.
+  const payload = { email, password, rememberMe: rememberMe === true };
   try {
   const res = await apiJson('/api/auth/login', { method: 'POST', body: payload }, { timeoutMs: 12000 });
   return res?.user || null;
