@@ -10353,9 +10353,15 @@ _DELIVERY_PAYMENT_FIELDS = {
     "isPaid", "status", "collectionDate", "paymentResult", "overpaidAmount",
     "remainingDue", "feeDifferenceStatus", "feeDiff", "debtAmountLocal",
     "debtAmountUSD", "amountLocal", "amountUSD", "amountCollectedFromCustomer",
-    "actualDeliveryFeeCollected", "deliveryFeeCollected", "finalReceiptNo",
-    "serialNumber", "receiptImage", "photos",
+    "actualDeliveryFeeCollected", "deliveryFeeCollected", "deliveryFeePaidBy",
+    "finalReceiptNo", "serialNumber", "receiptImage", "photos",
 }
+
+# Who paid the delivery fee. 'customer' is the historical/implicit default;
+# 'shop' means the owner covered it (free delivery / paid from shop cash) and
+# the fee is a tracked loss. The fee itself stays LYD-only and NEVER feeds the
+# receipt's amountUSD / ads-credit math.
+_DELIVERY_FEE_PAYERS = {"customer", "shop"}
 
 _DELIVERY_TRANSITIONS: dict[str, set[str]] = {
     "": {"Needs Delivery", "In Progress", "Office"},
@@ -11750,6 +11756,13 @@ def update_collection_item(
         old_receipt_type = str((existing.get("data") or {}).get("receiptType") or "")
         if set(financial_updates) & (RECEIPT_TRANSFER_FIELDS - {"receiptType"}):
             raise HTTPException(status_code=405, detail="Receipt transfer fields are server-controlled")
+        # Any role writing the fee payer must use a valid value; readers treat
+        # everything except 'shop' as the customer, so garbage would silently
+        # hide a real shop-covered loss.
+        if "deliveryFeePaidBy" in financial_updates:
+            _fee_payer_in = str(financial_updates.get("deliveryFeePaidBy") or "").strip().lower()
+            if _fee_payer_in not in _DELIVERY_FEE_PAYERS:
+                raise HTTPException(status_code=400, detail="deliveryFeePaidBy must be 'customer' or 'shop'")
         if "receiptType" in financial_updates and (
             old_receipt_type == "TRANSFER_IN"
             or str(financial_updates.get("receiptType") or "") != old_receipt_type
@@ -11878,6 +11891,9 @@ def update_collection_item(
                 "amountCollectedFromCustomer",
                 "actualDeliveryFeeCollected",
                 "deliveryFeeCollected",
+                # Who paid the fee: 'customer' (default) or 'shop' (owner-covered
+                # loss). Validated + defaulted in the Delivered computation below.
+                "deliveryFeePaidBy",
                 "driverNotes",
                 # How the collected money + fee were paid (split-payment rows, same shape
                 # a receipt stores). Descriptive only: the authoritative amount is still
@@ -11962,6 +11978,7 @@ def update_collection_item(
                 "amountCollectedFromCustomer",
                 "actualDeliveryFeeCollected",
                 "deliveryFeeCollected",
+                "deliveryFeePaidBy",
                 "receiptImage",
                 "photos",
                 # The payment-method breakdown is settlement evidence too.
@@ -12043,6 +12060,17 @@ def update_collection_item(
                 if fee_collected < 0:
                     raise HTTPException(status_code=400, detail="actualDeliveryFeeCollected must be >= 0")
 
+                # Who paid the fee. Absent/blank (old clients) defaults to
+                # 'customer' — the historical implicit behaviour; anything else
+                # must be exactly 'customer' or 'shop'.
+                fee_paid_by_raw = updates.get("deliveryFeePaidBy")
+                if fee_paid_by_raw is None or str(fee_paid_by_raw).strip() == "":
+                    fee_paid_by = str(data.get("deliveryFeePaidBy") or "").strip().lower() or "customer"
+                else:
+                    fee_paid_by = str(fee_paid_by_raw).strip().lower()
+                if fee_paid_by not in _DELIVERY_FEE_PAYERS:
+                    raise HTTPException(status_code=400, detail="deliveryFeePaidBy must be 'customer' or 'shop'")
+
                 # Preserve debt baseline (what customer SHOULD pay)
                 debt_local = _as_float(data.get("debtAmountLocal"))
                 if debt_local is None:
@@ -12091,6 +12119,7 @@ def update_collection_item(
                 updates["amountCollectedFromCustomer"] = float(amt_collected)
                 updates["actualDeliveryFeeCollected"] = float(fee_collected)
                 updates["deliveryFeeCollected"] = float(fee_collected)
+                updates["deliveryFeePaidBy"] = fee_paid_by
                 updates["paymentResult"] = payment_result
                 updates["overpaidAmount"] = overpaid
                 updates["remainingDue"] = remaining_due

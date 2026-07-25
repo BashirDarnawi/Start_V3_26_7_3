@@ -15302,6 +15302,18 @@ function renderReceiptsView() {
                       ${isArV ? `العمولة ${({ SAME: 'مطابقة', LOWER: 'أقل', HIGHER: 'أعلى' })[receipt.feeDifferenceStatus] || receipt.feeDifferenceStatus}` : `Fee ${receipt.feeDifferenceStatus.toLowerCase()}`}
                     </div>
                   ` : ''}
+                  ${(() => {
+                    // Delivery fee actually collected + who paid it. Old records
+                    // without deliveryFeePaidBy read as customer-paid (today's
+                    // implicit behaviour); shop-paid is a visible loss.
+                    if (String(receipt.deliveryStatus || '') !== 'Delivered') return '';
+                    const feeCollectedRaw = receipt.actualDeliveryFeeCollected ?? receipt.deliveryFeeCollected;
+                    if (feeCollectedRaw === undefined || feeCollectedRaw === null) return '';
+                    const feeShopPaid = String(receipt.deliveryFeePaidBy || 'customer') === 'shop';
+                    return `<div class="text-[10px] mt-0.5 font-bold ${feeShopPaid ? 'text-rose-600' : 'text-slate-600 dark:text-slate-300'}">
+                      ${isArV ? 'قيمة التوصيل' : 'Delivery fee'}: ${(Number(feeCollectedRaw) || 0).toFixed(0)} LYD • ${feeShopPaid ? (isArV ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isArV ? 'دفعها العميل' : 'paid by customer')}
+                    </div>`;
+                  })()}
                   ${hasTransfers ? `<div class="text-xs text-blue-600 mt-1 flex items-center justify-end space-x-1" title="${isArV ? 'تم التحويل' : 'Transferred'}${lastTransferNameSafe ? (isArV ? ' إلى ' : ' to ') + lastTransferNameSafe : ''}"><i data-lucide="swap" class="w-3 h-3"></i><span>${isArV ? 'تم التحويل' : 'Transferred'}</span></div>` : ''}
                 </div>
               </div>
@@ -16077,6 +16089,20 @@ function renderDeliveriesView() {
     uncollectedLYD: deliveryReceipts.reduce((sum, d) => sum + _getOutstandingDueLocal(d), 0),
     heldByDrivers: heldRows.length,
     driverCashLYD: heldRows.reduce((sum, d) => sum + _getCollectedCashLocal(d), 0),
+    // Delivery-fee money (LYD only, never ads credit): what was collected in
+    // fees, how much of it the shop/owner covered (a loss), and the aggregate
+    // variance vs the quoted fees — the sum of each completion's stored
+    // feeDiff, i.e. exactly the HIGHER/LOWER semantics the driver flow computes.
+    feesCollectedLYD: deliveredRows.reduce((sum, d) => {
+      const raw = d.deliveryFeeCollected ?? d.actualDeliveryFeeCollected;
+      return sum + ((raw === undefined || raw === null) ? 0 : (Number(raw) || 0));
+    }, 0),
+    feesShopPaidLYD: deliveredRows.reduce((sum, d) => {
+      if (String(d.deliveryFeePaidBy || 'customer') !== 'shop') return sum;
+      const raw = d.deliveryFeeCollected ?? d.actualDeliveryFeeCollected;
+      return sum + ((raw === undefined || raw === null) ? 0 : (Number(raw) || 0));
+    }, 0),
+    feeVarianceLYD: deliveredRows.reduce((sum, d) => sum + (d.feeDifferenceStatus ? (Number(d.feeDiff) || 0) : 0), 0),
   };
 
   const driverPerformance = deliveryUsers.map(driver => {
@@ -16196,6 +16222,13 @@ function renderDeliveriesView() {
           <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>${isAr ? 'مكتمل' : 'Completed'} <b>${stats.completed}</b></span>
           <span class="text-slate-300">→</span>
           <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>${isAr ? 'ملغي' : 'Canceled'} <b>${stats.canceled}</b></span>
+        </div>
+        <!-- Delivery-fee money strip: collected, shop-covered loss, variance vs quoted -->
+        <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700 flex flex-wrap items-center gap-x-5 gap-y-1 text-sm">
+          <span class="text-[11px] font-bold text-slate-400 uppercase tracking-wide">${isAr ? 'رسوم التوصيل' : 'Delivery Fees'}</span>
+          <span>${isAr ? 'المُحصَّل' : 'Collected'} <b>${stats.feesCollectedLYD.toLocaleString('en-US')}</b> LYD</span>
+          <span class="${stats.feesShopPaidLYD > 0 ? 'text-rose-600 font-medium' : ''}">${isAr ? 'يتحملها المحل (خسارة)' : 'Paid by shop (loss)'} <b>${stats.feesShopPaidLYD.toLocaleString('en-US')}</b> LYD</span>
+          <span class="${stats.feeVarianceLYD < 0 ? 'text-amber-600' : 'text-purple-600'}">${isAr ? 'الفرق عن المتفق عليه' : 'Variance vs quoted'} <b>${stats.feeVarianceLYD >= 0 ? '+' : '-'}${Math.abs(stats.feeVarianceLYD).toLocaleString('en-US')}</b> LYD</span>
         </div>
       </div>
       `}
@@ -17078,6 +17111,22 @@ function renderDeliveryDashboard() {
                           ${isAr ? 'الرسوم المتفق عليها' : 'Quoted fee'}: <span class="font-bold text-emerald-600">${Number(ad.quotedDeliveryFee || 0).toFixed(0)} LYD</span>
                         </div>
                       ` : ''}
+                      ${(() => {
+                        // After completion: the fee actually collected, who paid
+                        // it, and the HIGHER/LOWER variance vs the quoted fee
+                        // (same semantics the completion flow computes).
+                        if (!ad.isReceipt || String(ad.deliveryStatus || '') !== 'Delivered') return '';
+                        const feeRaw = ad.actualDeliveryFeeCollected ?? ad.deliveryFeeCollected;
+                        if (feeRaw === undefined || feeRaw === null) return '';
+                        const shopPaid = String(ad.deliveryFeePaidBy || 'customer') === 'shop';
+                        const feeDiffNum = Number(ad.feeDiff) || 0;
+                        const varianceChip = ad.feeDifferenceStatus && ad.feeDifferenceStatus !== 'SAME'
+                          ? ` <span class="font-bold ${ad.feeDifferenceStatus === 'HIGHER' ? 'text-purple-600' : 'text-amber-600'}">(${ad.feeDifferenceStatus === 'HIGHER' ? '+' : '-'}${Math.abs(feeDiffNum).toFixed(0)} LYD ${isAr ? 'عن المتفق عليه' : 'vs quoted'})</span>`
+                          : '';
+                        return `<div class="text-[11px] text-slate-500 mt-0.5">
+                          ${isAr ? 'قيمة التوصيل المُحصَّلة' : 'Fee collected'}: <span class="font-bold ${shopPaid ? 'text-rose-600' : 'text-emerald-600'}">${(Number(feeRaw) || 0).toFixed(0)} LYD</span> • <span class="${shopPaid ? 'text-rose-600 font-bold' : ''}">${shopPaid ? (isAr ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isAr ? 'دفعها العميل' : 'paid by customer')}</span>${varianceChip}
+                        </div>`;
+                      })()}
                       ${ad.isReceipt && ad.deliveryInstructions ? `
                         <div class="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/30 rounded-lg p-2 mt-1 border border-amber-200 dark:border-amber-800">
                           <span class="font-bold">📝 ${isAr ? 'تعليمات' : 'Instructions'}:</span> ${Security.escapeHtml(String(ad.deliveryInstructions || ''))}
@@ -17637,9 +17686,13 @@ function renderUsersView() {
     recordDerivedDeliveryStats(receipt);
     const driverId = String(receipt.deliveryPersonId || '');
     if (!driverId || receipt.deliveryStatus !== 'Delivered') return;
-    const summary = deliveredReceiptsByDriver.get(driverId) || { count: 0, fees: 0 };
+    const summary = deliveredReceiptsByDriver.get(driverId) || { count: 0, fees: 0, feesShop: 0 };
     summary.count += 1;
-    summary.fees += Number(receipt.deliveryFeeCollected ?? receipt.actualDeliveryFeeCollected ?? 0) || 0;
+    const _feeLYD = Number(receipt.deliveryFeeCollected ?? receipt.actualDeliveryFeeCollected ?? 0) || 0;
+    summary.fees += _feeLYD;
+    // Fees the shop/owner covered (free delivery, paid from shop cash) are a
+    // loss, not driver earnings from the customer. Unset payer = customer.
+    if (String(receipt.deliveryFeePaidBy || 'customer') === 'shop') summary.feesShop += _feeLYD;
     deliveredReceiptsByDriver.set(driverId, summary);
   });
 
@@ -17678,8 +17731,9 @@ function renderUsersView() {
         ${visibleUsers.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="user-search" class="mx-auto mb-4 h-14 w-14 text-slate-300"></i><p class="text-slate-500">${isAr ? 'لا يوجد مستخدمون يطابقون البحث' : 'No users match your search'}</p></div>` : visibleUsers.map(u => {
           const userAdsCount = adsByCreator.get(String(u.id)) || 0;
           const deliveredAdsCount = paidDeliveriesByDriver.get(String(u.id)) || 0;
-          const deliverySummary = deliveredReceiptsByDriver.get(String(u.id)) || { count: 0, fees: 0 };
+          const deliverySummary = deliveredReceiptsByDriver.get(String(u.id)) || { count: 0, fees: 0, feesShop: 0 };
           const deliveryFeesLYD = deliverySummary.fees;
+          const deliveryFeesShopLYD = deliverySummary.feesShop || 0;
           const deliveryStats = deliveryStatsByDriver.get(String(u.id)) || { totalAssigned: 0, accepted: 0, collected: 0 };
           
           return `
@@ -17734,6 +17788,7 @@ function renderUsersView() {
                     <div class="flex justify-between text-xs"><span>${isAr ? 'المقبول:' : 'Accepted:'}</span><span class="font-bold text-blue-600">${deliveryStats.accepted}</span></div>
                     <div class="flex justify-between text-xs"><span>${isAr ? 'المُحصَّل:' : 'Collected:'}</span><span class="font-bold text-emerald-600">${deliveryStats.collected}</span></div>
                     <div class="flex justify-between text-xs"><span>${isAr ? 'الرسوم المكتسبة:' : 'Fees Earned:'}</span><span class="font-bold text-purple-600">${deliveryFeesLYD.toFixed(0)} LYD</span></div>
+                    ${deliveryFeesShopLYD > 0 ? `<div class="flex justify-between text-xs"><span>${isAr ? 'رسوم يتحملها المحل (خسارة):' : 'Shop-paid Fees (Loss):'}</span><span class="font-bold text-rose-600">${deliveryFeesShopLYD.toFixed(0)} LYD</span></div>` : ''}
                   </div>
                 ` : ''}
 
@@ -21487,11 +21542,11 @@ function updateReceiptDeliveryCompletionComputed() {
   const quoted = Number(receipt.quotedDeliveryFee ?? 0) || 0;
 
   const finalNo = String(document.getElementById('delivery-final-receipt-no')?.value || '').trim();
-  // Collected + fee are now split-payment rows (same math as a receipt): R1 = LYD total.
+  // Collected money is split-payment rows (same math as a receipt): R1 = LYD total.
+  // The fee is a plain LYD amount — no rates, never part of the USD math.
   const collectedTotals = getPaymentTotalsFromDom(document.getElementById('delivery-collected-payments'));
-  const feeTotals = getPaymentTotalsFromDom(document.getElementById('delivery-fee-payment'));
   const collected = collectedTotals.totalR1;   // LYD — compared against the debt
-  const actualFee = feeTotals.totalR1;          // LYD — compared against the quoted fee
+  const actualFee = _readDeliveryFeeLyd();     // LYD — compared against the quoted fee
   const totalEl = document.getElementById('delivery-collected-total');
   if (totalEl) totalEl.textContent = `${collected.toFixed(0)} LYD` + (collectedTotals.totalR2 ? ` ($${collectedTotals.totalR2.toFixed(2)})` : '');
   const notes = String(document.getElementById('delivery-driver-notes')?.value || '').trim();
@@ -21507,11 +21562,13 @@ function updateReceiptDeliveryCompletionComputed() {
   const debtEl = document.getElementById('delivery-debt-compare');
   if (feeEl) {
     const diff = feeCmp.feeDiff;
-    feeEl.textContent = feeCmp.feeDifferenceStatus === 'SAME'
+    const feeBase = feeCmp.feeDifferenceStatus === 'SAME'
       ? (isArC ? 'قيمة التوصيل: مطابقة' : 'Fee: SAME')
       : (feeCmp.feeDifferenceStatus === 'LOWER'
         ? (isArC ? `قيمة التوصيل: أقل (${Math.abs(diff).toFixed(0)} LYD)` : `Fee: LOWER (${Math.abs(diff).toFixed(0)} LYD)`)
         : (isArC ? `قيمة التوصيل: أعلى (${diff.toFixed(0)} LYD)` : `Fee: HIGHER (${diff.toFixed(0)} LYD)`));
+    const feePaidByShop = _readDeliveryFeePaidBy() === 'shop';
+    feeEl.textContent = feeBase + (feePaidByShop ? (isArC ? ' • يتحملها المحل' : ' • paid by shop') : '');
   }
   if (debtEl) {
     if (debtCmp.paymentResult === 'PAID_EXACT') debtEl.textContent = isArC ? 'الدفع: مطابق تماماً' : 'Payment: PAID EXACT';
@@ -21648,6 +21705,41 @@ function _readDeliveryPaymentRows(containerId) {
   })).filter(p => p.amount > 0);
 }
 
+// ---- Delivery fee: plain LYD cash (no Rate 1 / Rate 2) ---------------------------
+// The delivery fee is flat LYD cash handed to the driver. It must NEVER become
+// USD ads credit, so the fee input is a simple LYD amount + method + who paid
+// it (customer vs shop) instead of a full split-payment row with rates. The
+// stored shape stays deliveryFeePayments[{method, amount, rate, rate2}] so every
+// existing reader keeps working: the simplified row writes rate 1 (amount is
+// already LYD) and rate2 0 (a fee has no USD value).
+function _deliveryFeeStoredLyd(receipt) {
+  const rows = Array.isArray(receipt?.deliveryFeePayments) ? receipt.deliveryFeePayments : [];
+  if (rows.length) {
+    // Backward-read: rows saved by the old rate-based UI hold LYD = amount x rate.
+    return rows.reduce((sum, p) => {
+      const amount = Number(p?.amount) || 0;
+      const rate = Number(p?.rate);
+      return sum + amount * (Number.isFinite(rate) && rate > 0 ? rate : 1);
+    }, 0);
+  }
+  const stored = receipt?.actualDeliveryFeeCollected ?? receipt?.deliveryFeeCollected;
+  return (stored === undefined || stored === null || stored === '') ? null : (Number(stored) || 0);
+}
+
+// Empty input reads as 0 (same as the old getPaymentTotalsFromDom behaviour).
+function _readDeliveryFeeLyd() {
+  const el = document.getElementById('delivery-fee-amount');
+  if (!el) return 0;
+  return parseFloat(el.value) || 0;
+}
+
+// Who paid the delivery fee: 'customer' (default — today's implicit behaviour)
+// or 'shop' (owner covered it: free delivery / paid from shop cash = a loss).
+function _readDeliveryFeePaidBy() {
+  const checked = document.querySelector('input[name="delivery-fee-paid-by"]:checked');
+  return (checked && checked.value === 'shop') ? 'shop' : 'customer';
+}
+
 async function openReceiptDeliveryCompletionModal(receiptId) {
   const isArD = state.language === 'ar';
   let receipt = _findReceiptForDeliveryModal(receiptId);
@@ -21707,10 +21799,12 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
     : [{ method: _cashLyd, amount: (receipt.amountCollectedFromCustomer ?? ''), rate1: 1, rate2: _dRate }];
   const collectedRowsHtml = _storedCollected
     .map((p, i) => _deliveryPaymentRowHtml(p, { removable: i > 0 })).join('');
-  const _storedFee = (Array.isArray(receipt.deliveryFeePayments) && receipt.deliveryFeePayments.length)
-    ? { method: receipt.deliveryFeePayments[0].method, amount: receipt.deliveryFeePayments[0].amount, rate1: receipt.deliveryFeePayments[0].rate, rate2: receipt.deliveryFeePayments[0].rate2 }
-    : { method: _cashLyd, amount: (receipt.actualDeliveryFeeCollected ?? receipt.deliveryFeeCollected ?? (quoted || '')), rate1: 1, rate2: _dRate };
-  const feeRowHtml = _deliveryPaymentRowHtml(_storedFee, { removable: false });
+  // Fee prefill: stored rows first (old rate-based rows normalize to LYD via
+  // _deliveryFeeStoredLyd), then the stored fee amount, then the quoted fee.
+  const _storedFeeLyd = _deliveryFeeStoredLyd(receipt);
+  const feeAmountValue = (_storedFeeLyd === null) ? (quoted || '') : _storedFeeLyd;
+  const feeMethod = (Array.isArray(receipt.deliveryFeePayments) && receipt.deliveryFeePayments[0]?.method) || _cashLyd;
+  const feePaidBy = receipt.deliveryFeePaidBy === 'shop' ? 'shop' : 'customer';
 
   // Remove any existing modal
   document.getElementById('delivery-complete-modal')?.remove();
@@ -21763,8 +21857,28 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
         </div>
 
         <div>
-          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'قيمة التوصيل المُحصَّلة *' : 'Delivery fee collected *'}</label>
-          <div id="delivery-fee-payment">${feeRowHtml}</div>
+          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'قيمة التوصيل المُحصَّلة (LYD) *' : 'Delivery fee collected (LYD) *'}</label>
+          <div id="delivery-fee-payment" class="p-2.5 rounded-lg bg-white/70 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-700">
+            <div class="grid grid-cols-2 gap-2">
+              <select id="delivery-fee-method" class="w-full glass-input px-2 py-1.5 rounded text-xs font-medium">
+                ${paymentMethodOptions(feeMethod).map(m => `<option value="${Security.escapeHtml(m)}" ${m === feeMethod ? 'selected' : ''}>${Security.escapeHtml(trMethod(m))}</option>`).join('')}
+              </select>
+              <input id="delivery-fee-amount" type="text" inputmode="decimal" class="w-full glass-input px-2 py-1.5 rounded text-xs font-bold" value="${Security.escapeHtml(String(feeAmountValue))}" placeholder="0" oninput="sanitizeMoneyInput(this); updateReceiptDeliveryCompletionComputed()" />
+            </div>
+            <div class="mt-2">
+              <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">${isArD ? 'من دفع قيمة التوصيل؟' : 'Delivery paid by'}</div>
+              <div class="grid grid-cols-2 gap-2" role="radiogroup" aria-label="${isArD ? 'من دفع قيمة التوصيل' : 'Delivery paid by'}">
+                <label class="flex items-center gap-1.5 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-700 dark:text-slate-200 cursor-pointer">
+                  <input type="radio" name="delivery-fee-paid-by" value="customer" ${feePaidBy === 'shop' ? '' : 'checked'} onchange="updateReceiptDeliveryCompletionComputed()" />
+                  <span>${isArD ? 'دفعها العميل' : 'Customer paid'}</span>
+                </label>
+                <label class="flex items-center gap-1.5 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-bold text-rose-600 cursor-pointer">
+                  <input type="radio" name="delivery-fee-paid-by" value="shop" ${feePaidBy === 'shop' ? 'checked' : ''} onchange="updateReceiptDeliveryCompletionComputed()" />
+                  <span>${isArD ? 'يتحملها المحل (خسارة)' : 'Shop paid (loss)'}</span>
+                </label>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
@@ -21867,14 +21981,21 @@ async function submitReceiptDeliveryCompletion(receiptId) {
   }
 
   const finalNo = String(document.getElementById('delivery-final-receipt-no')?.value || '').trim();
-  // Collected + fee are split-payment rows (same math as a receipt): R1 = LYD, R2 = USD.
+  // Collected money is split-payment rows (same math as a receipt): R1 = LYD, R2 = USD.
+  // The fee is a plain LYD amount + method + payer. Only the COLLECTED rows feed
+  // the USD (ads credit) math — the fee never converts to USD.
   const collectedTotals = getPaymentTotalsFromDom(document.getElementById('delivery-collected-payments'));
-  const feeTotals = getPaymentTotalsFromDom(document.getElementById('delivery-fee-payment'));
   const collected = collectedTotals.totalR1;                 // LYD collected (vs debt)
   const collectedUSDFromRows = collectedTotals.totalR2;      // USD value of what was collected
-  const actualFee = feeTotals.totalR1;                        // LYD fee (vs quoted)
+  const actualFee = _readDeliveryFeeLyd();                    // LYD fee (vs quoted)
   const collectedPayments = _readDeliveryPaymentRows('delivery-collected-payments');
-  const feePayments = _readDeliveryPaymentRows('delivery-fee-payment');
+  const feeMethod = document.getElementById('delivery-fee-method')?.value || 'Cash (LYD)';
+  const feePaidBy = _readDeliveryFeePaidBy();
+  // Legacy row shape (rate 1 => amount is already LYD, rate2 0 => no USD value)
+  // so every existing reader of deliveryFeePayments keeps working unchanged.
+  const feePayments = actualFee > 0
+    ? [{ method: feeMethod, amount: actualFee, rate: 1, rate2: 0, collectionType: 'delivery' }]
+    : [];
   const notes = String(document.getElementById('delivery-driver-notes')?.value || '').trim();
   const imgData = String(document.getElementById('delivery-receipt-image-data')?.dataset?.imageData || '').trim();
 
@@ -21928,7 +22049,8 @@ async function submitReceiptDeliveryCompletion(receiptId) {
     tempReceiptNo: receipt.tempReceiptNo || '',
     finalReceiptNo: finalNo,
     amountCollectedFromCustomer: collected,
-    actualDeliveryFeeCollected: actualFee
+    actualDeliveryFeeCollected: actualFee,
+    deliveryFeePaidBy: feePaidBy
   });
 
   const newStatus = (debtCmp.paymentResult === 'UNDERPAID') ? 'Not Paid' : 'Paid';
@@ -21944,6 +22066,9 @@ async function submitReceiptDeliveryCompletion(receiptId) {
     amountCollectedFromCustomer: collected,
     actualDeliveryFeeCollected: actualFee,
     deliveryFeeCollected: actualFee,
+    // Who paid the fee: 'customer' (default) or 'shop' (owner covered it — a
+    // trackable loss). Old records without this field read as 'customer'.
+    deliveryFeePaidBy: feePaidBy,
     driverNotes: notes,
     debtAmountLocal: receipt.debtAmountLocal ?? debtLocal,
     debtAmountUSD: receipt.debtAmountUSD ?? collectionTarget.amountUSD,

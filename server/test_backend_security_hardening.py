@@ -4022,6 +4022,154 @@ class TestReceiptAndAdTransactions:
         assert isinstance(body.get("deliveryFeePayments"), list) and len(body["deliveryFeePayments"]) == 1
         assert body["deliveryFeePayments"][0]["method"] == "Cash (LYD)"
 
+    def _fee_payer_receipt(self, receipt_id, customer_id, temp_no, actors):
+        self._customer(customer_id, actors)
+        self._receipt(
+            receipt_id,
+            customer_id,
+            100,
+            actors,
+            status="Not Paid",
+            isPaid=False,
+            amountLocal=950,
+            debtAmountLocal=950,
+            debtAmountUSD=100,
+            exchangeRate=9.5,
+            quotedDeliveryFee=15,
+            tempReceiptNo=temp_no,
+            deliveryStatus="Needs Delivery",
+            deliveryPersonId=actors["driver"]["id"],
+        )
+        assert client.patch(
+            f"/api/collections/receipts/{receipt_id}",
+            json={"data": {"deliveryStatus": "In Progress", "acceptedDate": "x"}},
+            cookies=actors["driver_cookies"],
+        ).status_code == 200
+
+    def test_delivery_completion_fee_payer_persisted_and_money_clean(self, actors):
+        # deliveryFeePaidBy='shop' (owner covered the fee — a tracked loss) is
+        # accepted + persisted, and the fee NEVER leaks into the receipt money:
+        # amountLocal/amountUSD (the ads-credit source) come only from
+        # amountCollectedFromCustomer.
+        self._fee_payer_receipt("fin_feepayer_receipt", "fin_feepayer_customer", "D61001", actors)
+        done = client.patch(
+            "/api/collections/receipts/fin_feepayer_receipt",
+            json={"data": {
+                "deliveryStatus": "Delivered",
+                "finalReceiptNo": "661001",
+                "receiptImage": "data:image/png;base64,AAAA",
+                "amountCollectedFromCustomer": 950,
+                "actualDeliveryFeeCollected": 15,
+                "deliveryFeePaidBy": "shop",
+                "deliveryFeePayments": [{"method": "Cash (LYD)", "amount": 15, "rate": 1, "rate2": 0, "collectionType": "delivery"}],
+            }},
+            cookies=actors["driver_cookies"],
+        )
+        assert done.status_code == 200, done.text
+        body = done.json()["data"]
+        assert body.get("deliveryFeePaidBy") == "shop"
+        assert body.get("feeDifferenceStatus") == "SAME"
+        # Fee money must not inflate the collected money / USD ads credit.
+        assert abs(float(body.get("amountLocal") or 0) - 950) < 0.01
+        assert abs(float(body.get("amountUSD") or 0) - 100) < 0.01
+
+    def test_delivery_completion_fee_payer_defaults_to_customer(self, actors):
+        # Old completion payloads without deliveryFeePaidBy still work and are
+        # stamped with the historical implicit payer: the customer.
+        self._fee_payer_receipt("fin_feedefault_receipt", "fin_feedefault_customer", "D61002", actors)
+        done = client.patch(
+            "/api/collections/receipts/fin_feedefault_receipt",
+            json={"data": {
+                "deliveryStatus": "Delivered",
+                "finalReceiptNo": "661002",
+                "receiptImage": "data:image/png;base64,AAAA",
+                "amountCollectedFromCustomer": 950,
+                "actualDeliveryFeeCollected": 15,
+            }},
+            cookies=actors["driver_cookies"],
+        )
+        assert done.status_code == 200, done.text
+        assert done.json()["data"].get("deliveryFeePaidBy") == "customer"
+
+    def test_delivery_completion_validates_fee_payer_and_fee_amount(self, actors):
+        # An unknown payer is refused outright; a negative fee is refused (string
+        # form) or clamped to 0 (numeric form, by the financial sanitizer) — a
+        # negative fee can never persist either way.
+        self._fee_payer_receipt("fin_feebad_receipt", "fin_feebad_customer", "D61003", actors)
+        bad_payer = client.patch(
+            "/api/collections/receipts/fin_feebad_receipt",
+            json={"data": {
+                "deliveryStatus": "Delivered",
+                "finalReceiptNo": "661003",
+                "receiptImage": "data:image/png;base64,AAAA",
+                "amountCollectedFromCustomer": 950,
+                "actualDeliveryFeeCollected": 15,
+                "deliveryFeePaidBy": "driver",
+            }},
+            cookies=actors["driver_cookies"],
+        )
+        assert bad_payer.status_code == 400, bad_payer.text
+        assert "deliveryFeePaidBy" in str(bad_payer.json().get("detail") or "")
+        bad_fee = client.patch(
+            "/api/collections/receipts/fin_feebad_receipt",
+            json={"data": {
+                "deliveryStatus": "Delivered",
+                "finalReceiptNo": "661003",
+                "receiptImage": "data:image/png;base64,AAAA",
+                "amountCollectedFromCustomer": 950,
+                "actualDeliveryFeeCollected": "-5",
+                "deliveryFeePaidBy": "customer",
+            }},
+            cookies=actors["driver_cookies"],
+        )
+        assert bad_fee.status_code == 400, bad_fee.text
+        # The refusals must not consume the receipt: it still completes, and a
+        # numeric negative fee is stored as 0, never below.
+        done = client.patch(
+            "/api/collections/receipts/fin_feebad_receipt",
+            json={"data": {
+                "deliveryStatus": "Delivered",
+                "finalReceiptNo": "661003",
+                "receiptImage": "data:image/png;base64,AAAA",
+                "amountCollectedFromCustomer": 950,
+                "actualDeliveryFeeCollected": -5,
+                "deliveryFeePaidBy": "shop",
+            }},
+            cookies=actors["driver_cookies"],
+        )
+        assert done.status_code == 200, done.text
+        body = done.json()["data"]
+        assert float(body.get("deliveryFeeCollected") or 0) == 0
+        assert body.get("deliveryFeePaidBy") == "shop"
+
+    def test_driver_cannot_rewrite_fee_payer_after_completion(self, actors):
+        # The payer is settlement evidence: once delivered, the assigned driver
+        # cannot flip it (e.g. to reclassify pocketed fee cash as a shop loss).
+        self._fee_payer_receipt("fin_feelock_receipt", "fin_feelock_customer", "D61004", actors)
+        done = client.patch(
+            "/api/collections/receipts/fin_feelock_receipt",
+            json={"data": {
+                "deliveryStatus": "Delivered",
+                "finalReceiptNo": "661004",
+                "receiptImage": "data:image/png;base64,AAAA",
+                "amountCollectedFromCustomer": 950,
+                "actualDeliveryFeeCollected": 15,
+                "deliveryFeePaidBy": "customer",
+            }},
+            cookies=actors["driver_cookies"],
+        )
+        assert done.status_code == 200, done.text
+        rewrite = client.patch(
+            "/api/collections/receipts/fin_feelock_receipt",
+            json={"data": {"deliveryFeePaidBy": "shop"}},
+            cookies=actors["driver_cookies"],
+        )
+        assert rewrite.status_code == 403, rewrite.text
+        stored = client.get(
+            "/api/collections/receipts/fin_feelock_receipt", cookies=actors["admin"]
+        )
+        assert stored.json()["data"].get("deliveryFeePaidBy") == "customer"
+
 
 class TestReceiptPaidCascade:
     """Receipt payment and every linked money move are one atomic operation."""

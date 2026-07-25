@@ -324,6 +324,43 @@ check('new delivery saves offer WhatsApp only after the saved row is confirmed',
   forms.includes('setTimeout(() => showDeliveryWhatsAppPrompt(newlyCreatedDeliveryReceiptId), 0);') &&
   forms.indexOf("saved = created?.data ? Security.sanitizeObject(created.data) : null;") <
     forms.indexOf('if (isTempDelivery && canShareDeliveryReceiptToWhatsApp(saved))'));
+check('delivery fee input is plain LYD with a payer choice and no rate fields',
+  (() => {
+    // The fee section of the Mark-Delivered modal: simple LYD amount + method +
+    // who paid it (customer vs shop). The old split-payment row exposed Rate 1 /
+    // Rate 2 on a flat cash fee — those must never come back, and the fee must
+    // never join the USD (ads credit) math.
+    const feeStart = helpers.indexOf('id="delivery-fee-payment"');
+    const feeEnd = helpers.indexOf('delivery-receipt-image-data', feeStart);
+    if (feeStart === -1 || feeEnd === -1 || feeEnd < feeStart) return false;
+    const feeSection = helpers.slice(feeStart, feeEnd);
+    return feeSection.includes('id="delivery-fee-amount"') &&
+      feeSection.includes('id="delivery-fee-method"') &&
+      feeSection.includes('name="delivery-fee-paid-by"') &&
+      feeSection.includes('value="customer"') &&
+      feeSection.includes('value="shop"') &&
+      feeSection.includes('Customer paid') &&
+      feeSection.includes('دفعها العميل') &&
+      feeSection.includes('Shop paid (loss)') &&
+      feeSection.includes('يتحملها المحل (خسارة)') &&
+      !feeSection.includes('payment-rate1') &&
+      !feeSection.includes('payment-rate2') &&
+      !feeSection.includes('payment-split-item') &&
+      helpers.includes('function _readDeliveryFeeLyd()') &&
+      helpers.includes('function _readDeliveryFeePaidBy()') &&
+      helpers.includes("rate: 1, rate2: 0, collectionType: 'delivery'") &&
+      helpers.includes('deliveryFeePaidBy: feePaidBy');
+  })());
+check('collected fee and payer surface on receipt cards and delivery summaries',
+  views.includes("String(receipt.deliveryFeePaidBy || 'customer') === 'shop'") &&
+  views.includes("String(ad.deliveryFeePaidBy || 'customer') === 'shop'") &&
+  views.includes('paid by shop (loss)') &&
+  views.includes('paid by customer') &&
+  views.includes('يتحملها المحل (خسارة)') &&
+  views.includes('دفعها العميل') &&
+  views.includes('feesShopPaidLYD') &&
+  views.includes('feeVarianceLYD') &&
+  views.includes("isAr ? 'رسوم يتحملها المحل (خسارة):' : 'Shop-paid Fees (Loss):'"));
 check('customer filters cannot overflow the phone card',
   views.includes('customer-filter-controls') &&
   css.includes('.customer-filter-controls'));

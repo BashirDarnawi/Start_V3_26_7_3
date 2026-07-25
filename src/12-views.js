@@ -3096,6 +3096,18 @@ function renderReceiptsView() {
                       ${isArV ? `العمولة ${({ SAME: 'مطابقة', LOWER: 'أقل', HIGHER: 'أعلى' })[receipt.feeDifferenceStatus] || receipt.feeDifferenceStatus}` : `Fee ${receipt.feeDifferenceStatus.toLowerCase()}`}
                     </div>
                   ` : ''}
+                  ${(() => {
+                    // Delivery fee actually collected + who paid it. Old records
+                    // without deliveryFeePaidBy read as customer-paid (today's
+                    // implicit behaviour); shop-paid is a visible loss.
+                    if (String(receipt.deliveryStatus || '') !== 'Delivered') return '';
+                    const feeCollectedRaw = receipt.actualDeliveryFeeCollected ?? receipt.deliveryFeeCollected;
+                    if (feeCollectedRaw === undefined || feeCollectedRaw === null) return '';
+                    const feeShopPaid = String(receipt.deliveryFeePaidBy || 'customer') === 'shop';
+                    return `<div class="text-[10px] mt-0.5 font-bold ${feeShopPaid ? 'text-rose-600' : 'text-slate-600 dark:text-slate-300'}">
+                      ${isArV ? 'قيمة التوصيل' : 'Delivery fee'}: ${(Number(feeCollectedRaw) || 0).toFixed(0)} LYD • ${feeShopPaid ? (isArV ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isArV ? 'دفعها العميل' : 'paid by customer')}
+                    </div>`;
+                  })()}
                   ${hasTransfers ? `<div class="text-xs text-blue-600 mt-1 flex items-center justify-end space-x-1" title="${isArV ? 'تم التحويل' : 'Transferred'}${lastTransferNameSafe ? (isArV ? ' إلى ' : ' to ') + lastTransferNameSafe : ''}"><i data-lucide="swap" class="w-3 h-3"></i><span>${isArV ? 'تم التحويل' : 'Transferred'}</span></div>` : ''}
                 </div>
               </div>
@@ -3871,6 +3883,20 @@ function renderDeliveriesView() {
     uncollectedLYD: deliveryReceipts.reduce((sum, d) => sum + _getOutstandingDueLocal(d), 0),
     heldByDrivers: heldRows.length,
     driverCashLYD: heldRows.reduce((sum, d) => sum + _getCollectedCashLocal(d), 0),
+    // Delivery-fee money (LYD only, never ads credit): what was collected in
+    // fees, how much of it the shop/owner covered (a loss), and the aggregate
+    // variance vs the quoted fees — the sum of each completion's stored
+    // feeDiff, i.e. exactly the HIGHER/LOWER semantics the driver flow computes.
+    feesCollectedLYD: deliveredRows.reduce((sum, d) => {
+      const raw = d.deliveryFeeCollected ?? d.actualDeliveryFeeCollected;
+      return sum + ((raw === undefined || raw === null) ? 0 : (Number(raw) || 0));
+    }, 0),
+    feesShopPaidLYD: deliveredRows.reduce((sum, d) => {
+      if (String(d.deliveryFeePaidBy || 'customer') !== 'shop') return sum;
+      const raw = d.deliveryFeeCollected ?? d.actualDeliveryFeeCollected;
+      return sum + ((raw === undefined || raw === null) ? 0 : (Number(raw) || 0));
+    }, 0),
+    feeVarianceLYD: deliveredRows.reduce((sum, d) => sum + (d.feeDifferenceStatus ? (Number(d.feeDiff) || 0) : 0), 0),
   };
 
   const driverPerformance = deliveryUsers.map(driver => {
@@ -3990,6 +4016,13 @@ function renderDeliveriesView() {
           <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>${isAr ? 'مكتمل' : 'Completed'} <b>${stats.completed}</b></span>
           <span class="text-slate-300">→</span>
           <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>${isAr ? 'ملغي' : 'Canceled'} <b>${stats.canceled}</b></span>
+        </div>
+        <!-- Delivery-fee money strip: collected, shop-covered loss, variance vs quoted -->
+        <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700 flex flex-wrap items-center gap-x-5 gap-y-1 text-sm">
+          <span class="text-[11px] font-bold text-slate-400 uppercase tracking-wide">${isAr ? 'رسوم التوصيل' : 'Delivery Fees'}</span>
+          <span>${isAr ? 'المُحصَّل' : 'Collected'} <b>${stats.feesCollectedLYD.toLocaleString('en-US')}</b> LYD</span>
+          <span class="${stats.feesShopPaidLYD > 0 ? 'text-rose-600 font-medium' : ''}">${isAr ? 'يتحملها المحل (خسارة)' : 'Paid by shop (loss)'} <b>${stats.feesShopPaidLYD.toLocaleString('en-US')}</b> LYD</span>
+          <span class="${stats.feeVarianceLYD < 0 ? 'text-amber-600' : 'text-purple-600'}">${isAr ? 'الفرق عن المتفق عليه' : 'Variance vs quoted'} <b>${stats.feeVarianceLYD >= 0 ? '+' : '-'}${Math.abs(stats.feeVarianceLYD).toLocaleString('en-US')}</b> LYD</span>
         </div>
       </div>
       `}
@@ -4872,6 +4905,22 @@ function renderDeliveryDashboard() {
                           ${isAr ? 'الرسوم المتفق عليها' : 'Quoted fee'}: <span class="font-bold text-emerald-600">${Number(ad.quotedDeliveryFee || 0).toFixed(0)} LYD</span>
                         </div>
                       ` : ''}
+                      ${(() => {
+                        // After completion: the fee actually collected, who paid
+                        // it, and the HIGHER/LOWER variance vs the quoted fee
+                        // (same semantics the completion flow computes).
+                        if (!ad.isReceipt || String(ad.deliveryStatus || '') !== 'Delivered') return '';
+                        const feeRaw = ad.actualDeliveryFeeCollected ?? ad.deliveryFeeCollected;
+                        if (feeRaw === undefined || feeRaw === null) return '';
+                        const shopPaid = String(ad.deliveryFeePaidBy || 'customer') === 'shop';
+                        const feeDiffNum = Number(ad.feeDiff) || 0;
+                        const varianceChip = ad.feeDifferenceStatus && ad.feeDifferenceStatus !== 'SAME'
+                          ? ` <span class="font-bold ${ad.feeDifferenceStatus === 'HIGHER' ? 'text-purple-600' : 'text-amber-600'}">(${ad.feeDifferenceStatus === 'HIGHER' ? '+' : '-'}${Math.abs(feeDiffNum).toFixed(0)} LYD ${isAr ? 'عن المتفق عليه' : 'vs quoted'})</span>`
+                          : '';
+                        return `<div class="text-[11px] text-slate-500 mt-0.5">
+                          ${isAr ? 'قيمة التوصيل المُحصَّلة' : 'Fee collected'}: <span class="font-bold ${shopPaid ? 'text-rose-600' : 'text-emerald-600'}">${(Number(feeRaw) || 0).toFixed(0)} LYD</span> • <span class="${shopPaid ? 'text-rose-600 font-bold' : ''}">${shopPaid ? (isAr ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isAr ? 'دفعها العميل' : 'paid by customer')}</span>${varianceChip}
+                        </div>`;
+                      })()}
                       ${ad.isReceipt && ad.deliveryInstructions ? `
                         <div class="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/30 rounded-lg p-2 mt-1 border border-amber-200 dark:border-amber-800">
                           <span class="font-bold">📝 ${isAr ? 'تعليمات' : 'Instructions'}:</span> ${Security.escapeHtml(String(ad.deliveryInstructions || ''))}
@@ -5431,9 +5480,13 @@ function renderUsersView() {
     recordDerivedDeliveryStats(receipt);
     const driverId = String(receipt.deliveryPersonId || '');
     if (!driverId || receipt.deliveryStatus !== 'Delivered') return;
-    const summary = deliveredReceiptsByDriver.get(driverId) || { count: 0, fees: 0 };
+    const summary = deliveredReceiptsByDriver.get(driverId) || { count: 0, fees: 0, feesShop: 0 };
     summary.count += 1;
-    summary.fees += Number(receipt.deliveryFeeCollected ?? receipt.actualDeliveryFeeCollected ?? 0) || 0;
+    const _feeLYD = Number(receipt.deliveryFeeCollected ?? receipt.actualDeliveryFeeCollected ?? 0) || 0;
+    summary.fees += _feeLYD;
+    // Fees the shop/owner covered (free delivery, paid from shop cash) are a
+    // loss, not driver earnings from the customer. Unset payer = customer.
+    if (String(receipt.deliveryFeePaidBy || 'customer') === 'shop') summary.feesShop += _feeLYD;
     deliveredReceiptsByDriver.set(driverId, summary);
   });
 
@@ -5472,8 +5525,9 @@ function renderUsersView() {
         ${visibleUsers.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="user-search" class="mx-auto mb-4 h-14 w-14 text-slate-300"></i><p class="text-slate-500">${isAr ? 'لا يوجد مستخدمون يطابقون البحث' : 'No users match your search'}</p></div>` : visibleUsers.map(u => {
           const userAdsCount = adsByCreator.get(String(u.id)) || 0;
           const deliveredAdsCount = paidDeliveriesByDriver.get(String(u.id)) || 0;
-          const deliverySummary = deliveredReceiptsByDriver.get(String(u.id)) || { count: 0, fees: 0 };
+          const deliverySummary = deliveredReceiptsByDriver.get(String(u.id)) || { count: 0, fees: 0, feesShop: 0 };
           const deliveryFeesLYD = deliverySummary.fees;
+          const deliveryFeesShopLYD = deliverySummary.feesShop || 0;
           const deliveryStats = deliveryStatsByDriver.get(String(u.id)) || { totalAssigned: 0, accepted: 0, collected: 0 };
           
           return `
@@ -5528,6 +5582,7 @@ function renderUsersView() {
                     <div class="flex justify-between text-xs"><span>${isAr ? 'المقبول:' : 'Accepted:'}</span><span class="font-bold text-blue-600">${deliveryStats.accepted}</span></div>
                     <div class="flex justify-between text-xs"><span>${isAr ? 'المُحصَّل:' : 'Collected:'}</span><span class="font-bold text-emerald-600">${deliveryStats.collected}</span></div>
                     <div class="flex justify-between text-xs"><span>${isAr ? 'الرسوم المكتسبة:' : 'Fees Earned:'}</span><span class="font-bold text-purple-600">${deliveryFeesLYD.toFixed(0)} LYD</span></div>
+                    ${deliveryFeesShopLYD > 0 ? `<div class="flex justify-between text-xs"><span>${isAr ? 'رسوم يتحملها المحل (خسارة):' : 'Shop-paid Fees (Loss):'}</span><span class="font-bold text-rose-600">${deliveryFeesShopLYD.toFixed(0)} LYD</span></div>` : ''}
                   </div>
                 ` : ''}
 
