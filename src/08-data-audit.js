@@ -916,28 +916,45 @@ function updateRecord(array, id, updates, expectedLastModified) {
                 if (collectionName) markCollectionDirty(collectionName);
                 saveState();
               }
-              // Refresh the frozen modal-open baseline: live-sync never
-              // touches state.modalData, so without this a still-open modal
-              // replays the same stale expectedLastModified and loops the
-              // identical conflict on every further Save.
-              if (_latestData && state.modalData && String(state.modalData.id) === String(id)) {
-                state.modalData._lastModified = _latestData._lastModified;
+              // Reload the OPEN modal from the fresh copy — form fields AND
+              // baseline together. Refreshing only the version stamp under a
+              // form that still displays the stale snapshot was a silent
+              // lost-update: the next Save would pass the optimistic lock and
+              // overwrite the other user's committed change with old values.
+              // A full reload makes "We loaded the latest version" true and
+              // keeps the lock meaningful (unsaved edits are discarded — the
+              // honest cost of a real conflict).
+              if (_latestData && state.modalData && String(state.modalData.id) === String(id)
+                  && idx !== -1 && state.activeModal) {
+                state.modalData = array[idx];
+                try { if (typeof renderModal === 'function') renderModal(); } catch (_) {}
               }
               // A settle/unsettle whose FIRST attempt committed but whose
               // response was lost lands here on the user's manual retry: the
               // fresh idempotency key bypasses the server replay marker and
-              // the stale modal baseline 409s. When the reloaded record
-              // already shows exactly the state this save wanted, that
-              // "conflict" is the user's own committed change — say so
-              // instead of sending them chasing a phantom other editor
-              // (mirrors the create path's serverRecordMatchesCreateRetry
-              // grace). Keys must NOT be reused across manual retries: the
-              // server replay hash covers expectedLastModified + data, which
-              // change per attempt, so reuse would 409 "already used".
+              // the stale modal baseline 409s. Claim "already saved" ONLY
+              // when the stored record actually matches what THIS save
+              // intended field-by-field — the status boolean alone misfired
+              // for any concurrent edit on a Paid receipt (every paid-keeping
+              // edit routes through the settle path), showing a success toast
+              // for an edit that was never saved. Volatile server-stamped
+              // keys are excluded; a too-strict match only downgrades to the
+              // honest conflict warning, never to a false success.
+              const _volatileMatchKeys = ['_lastModified', 'lastModified', 'updatedAt', 'editHistory', 'editCount', 'collectionDate', 'deliveryHistory', 'customerName', 'createdByName'];
+              const _intentMatchesLatest = () => {
+                try {
+                  return Object.keys(sanitizedUpdates || {}).every(key => {
+                    if (_volatileMatchKeys.includes(key)) return true;
+                    const sent = sanitizedUpdates[key] === undefined ? null : sanitizedUpdates[key];
+                    const stored = _latestData[key] === undefined ? null : _latestData[key];
+                    return JSON.stringify(sent) === JSON.stringify(stored);
+                  });
+                } catch (_) { return false; }
+              };
               const _alreadyApplied = !!_latestData && (
                 (_settlesReceipt && (String(_latestData.status || '').toLowerCase() === 'paid' || _latestData.isPaid === true)) ||
                 (_convertsReceipt && _latestData.isPaid === false)
-              );
+              ) && _intentMatchesLatest();
               if (_alreadyApplied) {
                 showNotification(
                   state.language === 'ar' ? 'تم الحفظ' : 'Already saved',

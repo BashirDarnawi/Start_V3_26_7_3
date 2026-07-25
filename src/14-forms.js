@@ -1526,13 +1526,16 @@ async function saveReceiptFromModal() {
     await _saveReceiptFromModalInner();
   } finally {
     _savingReceiptInFlight = false;
-    // Re-query deliberately: on success closeModal() removed the node and
-    // getElementById returns null, which is a safe no-op.
-    const _saveBtnAfter = document.getElementById('receipt-save-btn');
-    if (_saveBtnAfter) {
-      _saveBtnAfter.disabled = false;
-      _saveBtnAfter.classList.remove('opacity-60');
-      _saveBtnAfter.innerHTML = _saveBtnHtml;
+    // Restore ONLY the element captured at click time. Re-querying by id
+    // could stamp this save's captured label/state onto a DIFFERENT, later-
+    // opened receipt modal's Save button (the user can cancel and open
+    // another receipt while a 90s media save is still in flight). If the
+    // original node was removed (closeModal on success), isConnected is
+    // false and this is a safe no-op.
+    if (_saveBtn && _saveBtn.isConnected) {
+      _saveBtn.disabled = false;
+      _saveBtn.classList.remove('opacity-60');
+      _saveBtn.innerHTML = _saveBtnHtml;
     }
   }
 }

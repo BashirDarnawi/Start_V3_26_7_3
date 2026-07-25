@@ -275,6 +275,12 @@ function closeTopMobileSurface() {
 
   // Delivery, collect, history and chooser dialogs are standalone overlays
   // without activeModal state. Clean their URL/working state as well as DOM.
+  // The driver completion form keeps a crash-recovery draft; write the
+  // pending debounced keystrokes before Back destroys the DOM the draft
+  // writer reads from (the timer would no-op after removal).
+  if (topSurface.id === 'delivery-complete-modal' && typeof _flushDeliveryCompletionDraftNow === 'function') {
+    try { _flushDeliveryCompletionDraftNow(); } catch (_) {}
+  }
   topSurface.remove();
   clearGenericMobileModalState(topSurface);
   return true;

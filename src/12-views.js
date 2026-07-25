@@ -2765,17 +2765,20 @@ function renderReceiptsView() {
     const receiptCustomerId = getReceiptCustomerReferenceId(receipt);
     if (receiptCustomerFilter && receiptCustomerId !== receiptCustomerFilter) return false;
     const customer = customersById.get(receiptCustomerId);
-    // Fall back to any denormalized name stamped on the receipt so name search
-    // still works for a role that can see receipts but not load customers.
-    const customerName = foldSearchText(customer?.name || receipt.customerName || '');
-    const finalNo = foldSearchText(receipt.finalReceiptNo || receipt.serialNumber || '');
-    const tempNo = foldSearchText(receipt.tempReceiptNo || '');
-    const phoneNumber = canSearchReceiptContacts ? foldSearchText(receipt.phoneNumber || '') : '';
-    const searchTerm = receiptSearchTerm;
 
-    // Search filter
-    if (searchTerm && !customerName.includes(searchTerm) && !finalNo.includes(searchTerm) && !tempNo.includes(searchTerm) && !phoneNumber.includes(searchTerm)) {
-      return false;
+    // Search filter. Fold ONLY while a query exists: foldSearchText (NFKC +
+    // 6 regex passes) on four fields per receipt per render was measurable
+    // jank on phones for the common no-search repaint. Falls back to any
+    // denormalized name stamped on the receipt so name search still works
+    // for a role that can see receipts but not load customers.
+    if (receiptSearchTerm) {
+      const customerName = foldSearchText(customer?.name || receipt.customerName || '');
+      const finalNo = foldSearchText(receipt.finalReceiptNo || receipt.serialNumber || '');
+      const tempNo = foldSearchText(receipt.tempReceiptNo || '');
+      const phoneNumber = canSearchReceiptContacts ? foldSearchText(receipt.phoneNumber || '') : '';
+      if (!customerName.includes(receiptSearchTerm) && !finalNo.includes(receiptSearchTerm) && !tempNo.includes(receiptSearchTerm) && !phoneNumber.includes(receiptSearchTerm)) {
+        return false;
+      }
     }
     
     // Status filter

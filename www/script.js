@@ -600,6 +600,12 @@ function closeTopMobileSurface() {
 
   // Delivery, collect, history and chooser dialogs are standalone overlays
   // without activeModal state. Clean their URL/working state as well as DOM.
+  // The driver completion form keeps a crash-recovery draft; write the
+  // pending debounced keystrokes before Back destroys the DOM the draft
+  // writer reads from (the timer would no-op after removal).
+  if (topSurface.id === 'delivery-complete-modal' && typeof _flushDeliveryCompletionDraftNow === 'function') {
+    try { _flushDeliveryCompletionDraftNow(); } catch (_) {}
+  }
   topSurface.remove();
   clearGenericMobileModalState(topSurface);
   return true;
@@ -7071,28 +7077,45 @@ function updateRecord(array, id, updates, expectedLastModified) {
                 if (collectionName) markCollectionDirty(collectionName);
                 saveState();
               }
-              // Refresh the frozen modal-open baseline: live-sync never
-              // touches state.modalData, so without this a still-open modal
-              // replays the same stale expectedLastModified and loops the
-              // identical conflict on every further Save.
-              if (_latestData && state.modalData && String(state.modalData.id) === String(id)) {
-                state.modalData._lastModified = _latestData._lastModified;
+              // Reload the OPEN modal from the fresh copy — form fields AND
+              // baseline together. Refreshing only the version stamp under a
+              // form that still displays the stale snapshot was a silent
+              // lost-update: the next Save would pass the optimistic lock and
+              // overwrite the other user's committed change with old values.
+              // A full reload makes "We loaded the latest version" true and
+              // keeps the lock meaningful (unsaved edits are discarded — the
+              // honest cost of a real conflict).
+              if (_latestData && state.modalData && String(state.modalData.id) === String(id)
+                  && idx !== -1 && state.activeModal) {
+                state.modalData = array[idx];
+                try { if (typeof renderModal === 'function') renderModal(); } catch (_) {}
               }
               // A settle/unsettle whose FIRST attempt committed but whose
               // response was lost lands here on the user's manual retry: the
               // fresh idempotency key bypasses the server replay marker and
-              // the stale modal baseline 409s. When the reloaded record
-              // already shows exactly the state this save wanted, that
-              // "conflict" is the user's own committed change — say so
-              // instead of sending them chasing a phantom other editor
-              // (mirrors the create path's serverRecordMatchesCreateRetry
-              // grace). Keys must NOT be reused across manual retries: the
-              // server replay hash covers expectedLastModified + data, which
-              // change per attempt, so reuse would 409 "already used".
+              // the stale modal baseline 409s. Claim "already saved" ONLY
+              // when the stored record actually matches what THIS save
+              // intended field-by-field — the status boolean alone misfired
+              // for any concurrent edit on a Paid receipt (every paid-keeping
+              // edit routes through the settle path), showing a success toast
+              // for an edit that was never saved. Volatile server-stamped
+              // keys are excluded; a too-strict match only downgrades to the
+              // honest conflict warning, never to a false success.
+              const _volatileMatchKeys = ['_lastModified', 'lastModified', 'updatedAt', 'editHistory', 'editCount', 'collectionDate', 'deliveryHistory', 'customerName', 'createdByName'];
+              const _intentMatchesLatest = () => {
+                try {
+                  return Object.keys(sanitizedUpdates || {}).every(key => {
+                    if (_volatileMatchKeys.includes(key)) return true;
+                    const sent = sanitizedUpdates[key] === undefined ? null : sanitizedUpdates[key];
+                    const stored = _latestData[key] === undefined ? null : _latestData[key];
+                    return JSON.stringify(sent) === JSON.stringify(stored);
+                  });
+                } catch (_) { return false; }
+              };
               const _alreadyApplied = !!_latestData && (
                 (_settlesReceipt && (String(_latestData.status || '').toLowerCase() === 'paid' || _latestData.isPaid === true)) ||
                 (_convertsReceipt && _latestData.isPaid === false)
-              );
+              ) && _intentMatchesLatest();
               if (_alreadyApplied) {
                 showNotification(
                   state.language === 'ar' ? 'تم الحفظ' : 'Already saved',
@@ -8405,9 +8428,28 @@ const ADS_STUDIO_MEDIA_TIMEOUT_MS = 90000;
 // Small bodies keep the 20s timeout everywhere (desktop behavior unchanged).
 const MEDIA_BODY_SIZE_THRESHOLD_BYTES = 200 * 1024;
 function mediaAwareTimeoutMs(body) {
+  // Deliberately NOT JSON.stringify(body): apiFetch serializes the same body
+  // again for the wire, and doubling a multi-megabyte photo payload's
+  // serialization caused a real memory/CPU spike on old phones. A shallow
+  // walk over string values (photos live at most a few levels deep:
+  // data.photos[i], data.adPhotos[i], data.receiptImage) sums lengths and
+  // spots data-URL prefixes without materializing a second copy.
   try {
-    const s = JSON.stringify(body || {});
-    if (s.length > MEDIA_BODY_SIZE_THRESHOLD_BYTES || s.indexOf('data:image/') !== -1) {
+    let size = 0;
+    const scan = (val, depth) => {
+      if (val === null || val === undefined || size > MEDIA_BODY_SIZE_THRESHOLD_BYTES) return false;
+      if (typeof val === 'string') {
+        size += val.length;
+        return val.length > 32 && val.indexOf('data:image/') === 0;
+      }
+      if (depth <= 0 || typeof val !== 'object') return false;
+      const values = Array.isArray(val) ? val : Object.values(val);
+      for (const child of values) {
+        if (scan(child, depth - 1)) return true;
+      }
+      return false;
+    };
+    if (scan(body || {}, 4) || size > MEDIA_BODY_SIZE_THRESHOLD_BYTES) {
       return ADS_STUDIO_MEDIA_TIMEOUT_MS;
     }
   } catch (_) {}
@@ -15181,17 +15223,20 @@ function renderReceiptsView() {
     const receiptCustomerId = getReceiptCustomerReferenceId(receipt);
     if (receiptCustomerFilter && receiptCustomerId !== receiptCustomerFilter) return false;
     const customer = customersById.get(receiptCustomerId);
-    // Fall back to any denormalized name stamped on the receipt so name search
-    // still works for a role that can see receipts but not load customers.
-    const customerName = foldSearchText(customer?.name || receipt.customerName || '');
-    const finalNo = foldSearchText(receipt.finalReceiptNo || receipt.serialNumber || '');
-    const tempNo = foldSearchText(receipt.tempReceiptNo || '');
-    const phoneNumber = canSearchReceiptContacts ? foldSearchText(receipt.phoneNumber || '') : '';
-    const searchTerm = receiptSearchTerm;
 
-    // Search filter
-    if (searchTerm && !customerName.includes(searchTerm) && !finalNo.includes(searchTerm) && !tempNo.includes(searchTerm) && !phoneNumber.includes(searchTerm)) {
-      return false;
+    // Search filter. Fold ONLY while a query exists: foldSearchText (NFKC +
+    // 6 regex passes) on four fields per receipt per render was measurable
+    // jank on phones for the common no-search repaint. Falls back to any
+    // denormalized name stamped on the receipt so name search still works
+    // for a role that can see receipts but not load customers.
+    if (receiptSearchTerm) {
+      const customerName = foldSearchText(customer?.name || receipt.customerName || '');
+      const finalNo = foldSearchText(receipt.finalReceiptNo || receipt.serialNumber || '');
+      const tempNo = foldSearchText(receipt.tempReceiptNo || '');
+      const phoneNumber = canSearchReceiptContacts ? foldSearchText(receipt.phoneNumber || '') : '';
+      if (!customerName.includes(receiptSearchTerm) && !finalNo.includes(receiptSearchTerm) && !tempNo.includes(receiptSearchTerm) && !phoneNumber.includes(receiptSearchTerm)) {
+        return false;
+      }
     }
     
     // Status filter
@@ -22013,6 +22058,26 @@ function _deliveryDraftKey(receiptId) {
   return _DELIVERY_DRAFT_PREFIX + String(receiptId || '');
 }
 
+// Flush the pending debounced draft write immediately. The 500ms debounce
+// alone lost the newest keystrokes in the exact scenario the draft exists
+// for: tapping the photo Upload label backgrounds the WebView for the
+// camera, timers are suspended before the pending write fires, and the
+// process kill happens with the draft stale. visibilitychange:hidden is the
+// last reliable moment to write; pagehide covers bfcache navigations.
+// _saveDeliveryCompletionDraftNow() self-guards (no completion modal -> no-op),
+// so these listeners are safe to keep registered permanently.
+function _flushDeliveryCompletionDraftNow() {
+  if (_deliveryDraftSaveTimer) {
+    clearTimeout(_deliveryDraftSaveTimer);
+    _deliveryDraftSaveTimer = null;
+  }
+  try { _saveDeliveryCompletionDraftNow(); } catch (_) {}
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') _flushDeliveryCompletionDraftNow();
+});
+window.addEventListener('pagehide', _flushDeliveryCompletionDraftNow, { passive: true });
+
 function _saveDeliveryCompletionDraftNow() {
   const modal = document.getElementById('delivery-complete-modal');
   if (!modal) return;
@@ -22427,7 +22492,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
             <div class="text-xs text-slate-500">${Security.escapeHtml(customer?.name || (isArD ? 'غير معروف' : 'Unknown'))}</div>
           </div>
         </div>
-        <button onclick="this.closest('#delivery-complete-modal').remove()" class="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
+        <button onclick="_flushDeliveryCompletionDraftNow(); this.closest('#delivery-complete-modal').remove()" class="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
           <i data-lucide="x" class="w-4 h-4 text-slate-600 dark:text-slate-300"></i>
         </button>
       </div>
@@ -22437,7 +22502,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
           <div class="text-xs text-slate-500 mb-1">${isArD ? 'الوصل' : 'Receipt'}</div>
           <div class="font-bold text-indigo-600">${Security.escapeHtml(tempNo || 'D?')}${finalNo ? ` → ${Security.escapeHtml(finalNo)}` : ''}</div>
           ${place ? `<div class="text-xs text-slate-600 dark:text-slate-300 mt-1"><span class="font-bold">📍</span> ${Security.escapeHtml(place)}</div>` : ''}
-          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(0)} LYD</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span class="font-bold text-emerald-600 dark:text-emerald-400">${quoted.toFixed(0)} LYD</span></div>
+          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span id="delivery-complete-debt" class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(0)} LYD</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span id="delivery-complete-quoted" class="font-bold text-emerald-600 dark:text-emerald-400">${quoted.toFixed(0)} LYD</span></div>
           ${phone ? `<div class="text-xs text-slate-500 mt-1">${isArD ? 'الهاتف' : 'Phone'}: <span class="font-bold text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone)}</span></div>` : ''}
         </div>
 
@@ -22839,6 +22904,14 @@ async function submitReceiptDeliveryCompletion(receiptId) {
             if (_deliveryCompletionOpen && _deliveryCompletionOpen.id === String(receipt.id)) {
               _deliveryCompletionOpen.lastMod = latestData._lastModified || 0;
             }
+            // The toast says "review the figures" — make the baked-in header
+            // figures actually show the fresh ones, not the open-time values.
+            try {
+              const debtEl = document.getElementById('delivery-complete-debt');
+              const quotedEl = document.getElementById('delivery-complete-quoted');
+              if (debtEl) debtEl.textContent = `${getReceiptCollectionTarget(latestData).amountLocal.toFixed(0)} LYD`;
+              if (quotedEl) quotedEl.textContent = `${(Number(latestData.quotedDeliveryFee ?? 0) || 0).toFixed(0)} LYD`;
+            } catch (_) {}
             updateReceiptDeliveryCompletionComputed();
             showNotification(
               state.language === 'ar' ? 'تغيّر الوصل' : 'Receipt changed',
@@ -26404,13 +26477,16 @@ async function saveReceiptFromModal() {
     await _saveReceiptFromModalInner();
   } finally {
     _savingReceiptInFlight = false;
-    // Re-query deliberately: on success closeModal() removed the node and
-    // getElementById returns null, which is a safe no-op.
-    const _saveBtnAfter = document.getElementById('receipt-save-btn');
-    if (_saveBtnAfter) {
-      _saveBtnAfter.disabled = false;
-      _saveBtnAfter.classList.remove('opacity-60');
-      _saveBtnAfter.innerHTML = _saveBtnHtml;
+    // Restore ONLY the element captured at click time. Re-querying by id
+    // could stamp this save's captured label/state onto a DIFFERENT, later-
+    // opened receipt modal's Save button (the user can cancel and open
+    // another receipt while a 90s media save is still in flight). If the
+    // original node was removed (closeModal on success), isConnected is
+    // false and this is a safe no-op.
+    if (_saveBtn && _saveBtn.isConnected) {
+      _saveBtn.disabled = false;
+      _saveBtn.classList.remove('opacity-60');
+      _saveBtn.innerHTML = _saveBtnHtml;
     }
   }
 }

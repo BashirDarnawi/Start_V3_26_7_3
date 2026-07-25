@@ -2810,6 +2810,26 @@ function _deliveryDraftKey(receiptId) {
   return _DELIVERY_DRAFT_PREFIX + String(receiptId || '');
 }
 
+// Flush the pending debounced draft write immediately. The 500ms debounce
+// alone lost the newest keystrokes in the exact scenario the draft exists
+// for: tapping the photo Upload label backgrounds the WebView for the
+// camera, timers are suspended before the pending write fires, and the
+// process kill happens with the draft stale. visibilitychange:hidden is the
+// last reliable moment to write; pagehide covers bfcache navigations.
+// _saveDeliveryCompletionDraftNow() self-guards (no completion modal -> no-op),
+// so these listeners are safe to keep registered permanently.
+function _flushDeliveryCompletionDraftNow() {
+  if (_deliveryDraftSaveTimer) {
+    clearTimeout(_deliveryDraftSaveTimer);
+    _deliveryDraftSaveTimer = null;
+  }
+  try { _saveDeliveryCompletionDraftNow(); } catch (_) {}
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') _flushDeliveryCompletionDraftNow();
+});
+window.addEventListener('pagehide', _flushDeliveryCompletionDraftNow, { passive: true });
+
 function _saveDeliveryCompletionDraftNow() {
   const modal = document.getElementById('delivery-complete-modal');
   if (!modal) return;
@@ -3224,7 +3244,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
             <div class="text-xs text-slate-500">${Security.escapeHtml(customer?.name || (isArD ? 'غير معروف' : 'Unknown'))}</div>
           </div>
         </div>
-        <button onclick="this.closest('#delivery-complete-modal').remove()" class="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
+        <button onclick="_flushDeliveryCompletionDraftNow(); this.closest('#delivery-complete-modal').remove()" class="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
           <i data-lucide="x" class="w-4 h-4 text-slate-600 dark:text-slate-300"></i>
         </button>
       </div>
@@ -3234,7 +3254,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
           <div class="text-xs text-slate-500 mb-1">${isArD ? 'الوصل' : 'Receipt'}</div>
           <div class="font-bold text-indigo-600">${Security.escapeHtml(tempNo || 'D?')}${finalNo ? ` → ${Security.escapeHtml(finalNo)}` : ''}</div>
           ${place ? `<div class="text-xs text-slate-600 dark:text-slate-300 mt-1"><span class="font-bold">📍</span> ${Security.escapeHtml(place)}</div>` : ''}
-          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(0)} LYD</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span class="font-bold text-emerald-600 dark:text-emerald-400">${quoted.toFixed(0)} LYD</span></div>
+          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span id="delivery-complete-debt" class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(0)} LYD</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span id="delivery-complete-quoted" class="font-bold text-emerald-600 dark:text-emerald-400">${quoted.toFixed(0)} LYD</span></div>
           ${phone ? `<div class="text-xs text-slate-500 mt-1">${isArD ? 'الهاتف' : 'Phone'}: <span class="font-bold text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone)}</span></div>` : ''}
         </div>
 
@@ -3636,6 +3656,14 @@ async function submitReceiptDeliveryCompletion(receiptId) {
             if (_deliveryCompletionOpen && _deliveryCompletionOpen.id === String(receipt.id)) {
               _deliveryCompletionOpen.lastMod = latestData._lastModified || 0;
             }
+            // The toast says "review the figures" — make the baked-in header
+            // figures actually show the fresh ones, not the open-time values.
+            try {
+              const debtEl = document.getElementById('delivery-complete-debt');
+              const quotedEl = document.getElementById('delivery-complete-quoted');
+              if (debtEl) debtEl.textContent = `${getReceiptCollectionTarget(latestData).amountLocal.toFixed(0)} LYD`;
+              if (quotedEl) quotedEl.textContent = `${(Number(latestData.quotedDeliveryFee ?? 0) || 0).toFixed(0)} LYD`;
+            } catch (_) {}
             updateReceiptDeliveryCompletionComputed();
             showNotification(
               state.language === 'ar' ? 'تغيّر الوصل' : 'Receipt changed',

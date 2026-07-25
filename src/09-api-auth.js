@@ -449,9 +449,28 @@ const ADS_STUDIO_MEDIA_TIMEOUT_MS = 90000;
 // Small bodies keep the 20s timeout everywhere (desktop behavior unchanged).
 const MEDIA_BODY_SIZE_THRESHOLD_BYTES = 200 * 1024;
 function mediaAwareTimeoutMs(body) {
+  // Deliberately NOT JSON.stringify(body): apiFetch serializes the same body
+  // again for the wire, and doubling a multi-megabyte photo payload's
+  // serialization caused a real memory/CPU spike on old phones. A shallow
+  // walk over string values (photos live at most a few levels deep:
+  // data.photos[i], data.adPhotos[i], data.receiptImage) sums lengths and
+  // spots data-URL prefixes without materializing a second copy.
   try {
-    const s = JSON.stringify(body || {});
-    if (s.length > MEDIA_BODY_SIZE_THRESHOLD_BYTES || s.indexOf('data:image/') !== -1) {
+    let size = 0;
+    const scan = (val, depth) => {
+      if (val === null || val === undefined || size > MEDIA_BODY_SIZE_THRESHOLD_BYTES) return false;
+      if (typeof val === 'string') {
+        size += val.length;
+        return val.length > 32 && val.indexOf('data:image/') === 0;
+      }
+      if (depth <= 0 || typeof val !== 'object') return false;
+      const values = Array.isArray(val) ? val : Object.values(val);
+      for (const child of values) {
+        if (scan(child, depth - 1)) return true;
+      }
+      return false;
+    };
+    if (scan(body || {}, 4) || size > MEDIA_BODY_SIZE_THRESHOLD_BYTES) {
       return ADS_STUDIO_MEDIA_TIMEOUT_MS;
     }
   } catch (_) {}
