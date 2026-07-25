@@ -659,6 +659,69 @@ check('password and passkey logins both upsert the device account list',
   (liveSync.match(/rememberLoginAccount\(user\);/g) || []).length >= 2 &&
   permissionsSrc.includes('rememberLoginAccount(user);'));
 
+// Phase 2 — SYSTEM-BROWSER app login for the packaged Capacitor apps:
+// the app opens the hosted login page in the real browser and receives a
+// one-time code back through the albayan://auth deep link (PKCE-bound).
+const androidManifest = read('android/app/src/main/AndroidManifest.xml');
+const iosPlist = read('ios/App/App/Info.plist');
+const appLoginStartBody = serverApi.slice(
+  serverApi.indexOf('async function startAppBrowserLogin('),
+  serverApi.indexOf('function cancelAppBrowserLogin(')
+);
+
+check('packaged app defaults to the system-browser sign-in with an in-app fallback',
+  views.includes('function renderNativeAppLogin(') &&
+  views.includes('return renderNativeAppLogin(bannersHTML, isRTL);') &&
+  views.includes('onclick="startAppBrowserLogin()"') &&
+  views.includes('onclick="nativeLoginUseForm()"') &&
+  views.includes('onclick="nativeLoginUseBrowser()"') &&
+  views.includes('onclick="cancelAppBrowserLogin()"') &&
+  serverApi.includes('Platform.isCapacitor && isServerModeEnabled()'));
+
+check('browser login sends only the SHA-256 challenge — the verifier never leaves the device',
+  appLoginStartBody.includes('_appLoginSha256Hex(verifier)') &&
+  appLoginStartBody.includes("'&app_challenge='") &&
+  !appLoginStartBody.includes('app_verifier') &&
+  appLoginStartBody.indexOf('app_challenge=') !== -1 &&
+  appLoginStartBody.indexOf('encodeURIComponent(challenge)') !== -1 &&
+  !/app_challenge=[^']*verifier/.test(appLoginStartBody),
+  'startAppBrowserLogin must put the challenge (not the verifier) in the URL');
+
+check('deep-link callback is state-bound and exchanged for a session (PKCE)',
+  serverApi.includes("const APP_LOGIN_DEEP_LINK = 'albayan://auth'") &&
+  serverApi.includes('parsed.state !== pending.state') &&
+  serverApi.includes("'/api/auth/app-login/exchange'") &&
+  liveSync.includes('async function completeAppBrowserLogin(code, verifier)') &&
+  liveSync.includes('await apiAppLoginExchange(code, verifier)') &&
+  liveSync.includes('await _activateServerSession(user, generation);'));
+
+check('password login and app-exchange share one post-auth pipeline',
+  liveSync.includes('async function _activateServerSession(user, loginGeneration)') &&
+  liveSync.includes('return await _activateServerSession(user, loginGeneration);'));
+
+check('albayan://auth deep link is registered and listened for on both platforms',
+  androidManifest.includes('android:scheme="albayan"') &&
+  androidManifest.includes('android.intent.category.BROWSABLE') &&
+  iosPlist.includes('<string>albayan</string>') &&
+  serverApi.includes("addListener('appUrlOpen'") &&
+  serverApi.includes('getLaunchUrl') &&
+  mobileRuntime.includes('setupAppLoginDeepLinks'));
+
+check('web login page captures the app request, scrubs the URL, and hands off a one-time code',
+  init.includes('detectAppLoginRequestFromUrl') &&
+  serverApi.includes('sessionStorage.setItem(APP_LOGIN_WEB_REQUEST_KEY') &&
+  serverApi.includes("['app_login', 'app_state', 'app_challenge', 'app_platform'].forEach((k) => params.delete(k));") &&
+  liveSync.includes('await maybeCompleteAppLoginHandoff(user);') &&
+  serverApi.includes("'/api/auth/app-login/handoff'") &&
+  views.includes('Signing in to the Albayan app'));
+
+check('an already-signed-in web session never hands off to the app without an explicit tap',
+  init.includes('maybeOfferAppLoginHandoffForActiveSession') &&
+  serverApi.includes('function maybeOfferAppLoginHandoffForActiveSession()') &&
+  serverApi.includes('albayanConfirmAppHandoff()') &&
+  serverApi.includes('albayanDeclineAppHandoff()') &&
+  serverApi.includes('clearPendingAppLoginRequest();'));
+
 const openBraces = (css.match(/\{/g) || []).length;
 const closeBraces = (css.match(/\}/g) || []).length;
 check('mobile stylesheet braces are balanced', openBraces === closeBraces,

@@ -1039,6 +1039,79 @@ async function _handleLoginOnce(email, password, loginGeneration, rememberMe) {
         return;
       }
 
+      // SYSTEM-BROWSER APP LOGIN (Phase 2): this browser tab was opened BY
+      // the packaged app to sign in. Hand the session back to the app with a
+      // one-time code instead of loading the workspace here.
+      if (typeof maybeCompleteAppLoginHandoff === 'function') {
+        const handedOff = await maybeCompleteAppLoginHandoff(user);
+        if (handedOff) return true;
+        if (!loginAttemptIsCurrent(loginGeneration)) return false;
+      }
+
+      return await _activateServerSession(user, loginGeneration);
+    } catch (e) {
+      if (!loginAttemptIsCurrent(loginGeneration)) return false;
+      // #region agent log
+      try {
+        if (typeof window.__albayanDebugEmit === 'function') {
+          window.__albayanDebugEmit('H-LOGIN', 'script.js:handleLogin', 'server_login_error', {
+            status: e?.status ?? null,
+            name: String(e?.name || '').slice(0, 40),
+            msg: String(e?.message || '').slice(0, 120),
+          });
+        }
+      } catch (_) {}
+      // #endregion
+      // Fresh server with no users yet — show the first-run setup screen so the
+      // owner can create the first admin from the browser (no shell needed).
+      // The server returns 503 with a "not initialized" hint in that case.
+      const _msg = String(e?.message || '');
+      if (e?.status === 503 && /not initialized|no users/i.test(_msg)) {
+        const setupStatus = await apiNeedsSetup();
+        const browserSetupAvailable = setupStatus?.needsSetup === true && setupStatus?.setupEnabled === true;
+        state.needsServerSetup = browserSetupAvailable;
+        state.serverHasNoUsers = true;
+        state.serverSetupEnabled = setupStatus?.setupEnabled === true;
+        if (browserSetupAvailable) {
+          showNotification(
+            state.language === 'ar' ? 'إعداد أول مرة' : 'First-time setup',
+            state.language === 'ar' ? 'لا يوجد حساب بعد. أدخل رمز إعداد الخادم لإنشاء المدير الأول.' : 'No account exists yet. Enter the server setup token to create the first admin.',
+            'info'
+          );
+        } else {
+          showNotification(
+            state.language === 'ar' ? 'إعداد الخادم مطلوب' : 'Server Setup Required',
+            state.language === 'ar'
+              ? 'إعداد المتصفح معطّل. يجب على مشغل الخادم استخدام متغيرات ALBAYAN_BOOTSTRAP_ADMIN_* أو أمر إنشاء المدير من الطرفية.'
+              : 'Browser setup is disabled. The server operator must use the ALBAYAN_BOOTSTRAP_ADMIN_* environment variables or the create-admin CLI command.',
+            'warning'
+          );
+        }
+        render();
+        return;
+      }
+      if (e?.status === 401) {
+        showNotification(
+          state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed',
+          state.language === 'ar'
+            ? 'بيانات الدخول غير صحيحة (حساب السيرفر). تأكد من البريد وكلمة المرور المسجّلين على خادم فريقك.'
+            : 'Invalid email or password (server account). Check the credentials registered on your team server.',
+          'error'
+        );
+        return;
+      }
+      showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', e?.message || (state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login failed'), 'error');
+      return;
+    }
+  }
+
+  return _handleLocalLoginOnce(email, password, loginGeneration);
+}
+
+// Everything that happens AFTER the server has authenticated a user —
+// shared by the password login above and the system-browser app login
+// exchange (completeAppBrowserLogin), so the two flows can never drift.
+async function _activateServerSession(user, loginGeneration) {
       // Abort/detach every request and response cache belonging to the prior
       // anonymous/user identity before activating this login.
       cancelPendingRequests();
@@ -1127,62 +1200,46 @@ async function _handleLoginOnce(email, password, loginGeneration, rememberMe) {
       startServerLiveSync();
       render();
       return;
-    } catch (e) {
-      if (!loginAttemptIsCurrent(loginGeneration)) return false;
-      // #region agent log
-      try {
-        if (typeof window.__albayanDebugEmit === 'function') {
-          window.__albayanDebugEmit('H-LOGIN', 'script.js:handleLogin', 'server_login_error', {
-            status: e?.status ?? null,
-            name: String(e?.name || '').slice(0, 40),
-            msg: String(e?.message || '').slice(0, 120),
-          });
-        }
-      } catch (_) {}
-      // #endregion
-      // Fresh server with no users yet — show the first-run setup screen so the
-      // owner can create the first admin from the browser (no shell needed).
-      // The server returns 503 with a "not initialized" hint in that case.
-      const _msg = String(e?.message || '');
-      if (e?.status === 503 && /not initialized|no users/i.test(_msg)) {
-        const setupStatus = await apiNeedsSetup();
-        const browserSetupAvailable = setupStatus?.needsSetup === true && setupStatus?.setupEnabled === true;
-        state.needsServerSetup = browserSetupAvailable;
-        state.serverHasNoUsers = true;
-        state.serverSetupEnabled = setupStatus?.setupEnabled === true;
-        if (browserSetupAvailable) {
-          showNotification(
-            state.language === 'ar' ? 'إعداد أول مرة' : 'First-time setup',
-            state.language === 'ar' ? 'لا يوجد حساب بعد. أدخل رمز إعداد الخادم لإنشاء المدير الأول.' : 'No account exists yet. Enter the server setup token to create the first admin.',
-            'info'
-          );
-        } else {
-          showNotification(
-            state.language === 'ar' ? 'إعداد الخادم مطلوب' : 'Server Setup Required',
-            state.language === 'ar'
-              ? 'إعداد المتصفح معطّل. يجب على مشغل الخادم استخدام متغيرات ALBAYAN_BOOTSTRAP_ADMIN_* أو أمر إنشاء المدير من الطرفية.'
-              : 'Browser setup is disabled. The server operator must use the ALBAYAN_BOOTSTRAP_ADMIN_* environment variables or the create-admin CLI command.',
-            'warning'
-          );
-        }
-        render();
-        return;
-      }
-      if (e?.status === 401) {
-        showNotification(
-          state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed',
-          state.language === 'ar'
-            ? 'بيانات الدخول غير صحيحة (حساب السيرفر). تأكد من البريد وكلمة المرور المسجّلين على خادم فريقك.'
-            : 'Invalid email or password (server account). Check the credentials registered on your team server.',
-          'error'
-        );
-        return;
-      }
-      showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', e?.message || (state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login failed'), 'error');
-      return;
-    }
-  }
+}
 
+// SYSTEM-BROWSER APP LOGIN (Phase 2), native side: exchange the one-time
+// deep-link code plus the device-held PKCE verifier for a session, then run
+// the exact same post-auth pipeline as a password login. Called only from
+// _processAppLoginCallback (09-api-auth.js), which owns the pending-request
+// bookkeeping and the waiting/busy UI.
+async function completeAppBrowserLogin(code, verifier) {
+  if (_logoutInFlight || _serverAuthExpiryInFlight) {
+    showNotification(
+      state.language === 'ar' ? 'الرجاء الانتظار' : 'Please Wait',
+      state.language === 'ar' ? 'جارٍ إنهاء الجلسة السابقة.' : 'The previous session is still closing.',
+      'info'
+    );
+    return false;
+  }
+  const generation = ++_loginGeneration;
+  try {
+    const user = await apiAppLoginExchange(code, verifier);
+    if (!loginAttemptIsCurrent(generation)) return false;
+    if (!user) throw new Error('Exchange returned no user');
+    await _activateServerSession(user, generation);
+    return true;
+  } catch (e) {
+    if (!loginAttemptIsCurrent(generation)) return false;
+    console.warn('[AppLogin] exchange failed:', e?.message || e);
+    showNotification(
+      state.language === 'ar' ? 'تعذّر إكمال تسجيل الدخول' : 'Sign-In Could Not Be Completed',
+      state.language === 'ar'
+        ? 'انتهت صلاحية رمز الدخول أو تعذّر الاتصال. ابدأ تسجيل الدخول من التطبيق مرة أخرى.'
+        : 'The sign-in code expired or the server could not be reached. Start the sign-in from the app again.',
+      'error'
+    );
+    return false;
+  }
+}
+
+// LOCAL (single-device) sign-in — the non-server tail of _handleLoginOnce,
+// split out unchanged when the server path gained _activateServerSession.
+async function _handleLocalLoginOnce(email, password, loginGeneration) {
   // Sanitize inputs
   const sanitizedEmail = Security.sanitizeInput(email.toLowerCase().trim(), { maxLength: 100 });
   const sanitizedPassword = password; // Don't modify password as it might contain special chars

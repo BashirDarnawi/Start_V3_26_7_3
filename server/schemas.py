@@ -22,6 +22,25 @@ class LoginResponse(BaseModel):
     user: UserPublic
 
 
+class AppLoginHandoffRequest(BaseModel):
+    """Web -> app handoff for the system-browser app login (Phase 2).
+
+    ``challenge`` is the lowercase-hex SHA-256 of a verifier that only the
+    packaged app knows. The authenticated web session sends it here to mint
+    a one-time code; the app must later present the matching verifier to
+    exchange that code for its own session (PKCE-style binding)."""
+
+    challenge: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    platform: Optional[str] = Field(default=None, max_length=32)
+
+
+class AppLoginExchangeRequest(BaseModel):
+    """App-side exchange of a one-time handoff code + verifier for a session."""
+
+    code: str = Field(min_length=20, max_length=256)
+    verifier: str = Field(min_length=20, max_length=256)
+
+
 class PasswordResetRequest(BaseModel):
     email: EmailStr
 

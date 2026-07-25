@@ -32,6 +32,7 @@ SESSIONS = "sessions"
 ENTITIES = "entities"
 AUDIT_LOGS = "audit_logs"
 PASSWORD_RESETS = "password_resets"
+APP_LOGINS = "app_logins"
 
 
 def _default_sqlite_path() -> Path:
@@ -289,6 +290,33 @@ def define_schema():
         Index("password_resets_user_id", pr.c.user_id)
         Index("password_resets_expires_at", pr.c.expires_at)
         Index("password_resets_token_hash", pr.c.token_hash)
+
+    if APP_LOGINS not in METADATA.tables:
+        # One-time handoff codes for the system-browser app login (Phase 2):
+        # the packaged iOS/Android app opens the hosted login page in the real
+        # phone browser; after the user signs in there, the web session mints
+        # one of these codes (stored HASHED, bound to a PKCE-style SHA-256
+        # challenge) and bounces back into the app via albayan://auth. The app
+        # then exchanges code+verifier for its own session. Same hashed
+        # one-shot-token model as password_resets.
+        Table(
+            APP_LOGINS,
+            METADATA,
+            Column("id", String(80), primary_key=True),
+            Column("user_id", String(80), ForeignKey(f"{USERS}.id"), nullable=False),
+            Column("code_hash", String(128), nullable=False, unique=True),
+            Column("challenge_hash", String(128), nullable=False),
+            Column("created_at", BigInteger, nullable=False),
+            Column("expires_at", BigInteger, nullable=False),
+            Column("used_at", BigInteger, nullable=True),
+            Column("ip", String(80), nullable=True),
+            Column("user_agent", Text, nullable=True),
+            Column("platform", String(32), nullable=True),
+        )
+        al = METADATA.tables[APP_LOGINS]
+        Index("app_logins_user_id", al.c.user_id)
+        Index("app_logins_expires_at", al.c.expires_at)
+        Index("app_logins_code_hash", al.c.code_hash)
 
 
 def init_db():

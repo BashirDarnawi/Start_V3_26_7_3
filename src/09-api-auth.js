@@ -1921,3 +1921,535 @@ async function serverLoadAllData() {
   if (loadAborted()) return abortedResult();
   return { failed, forbidden };
 }
+
+// ==========================================
+// SYSTEM-BROWSER APP LOGIN (Phase 2)
+// ==========================================
+// Sabil-style sign-in for the packaged Capacitor iOS/Android apps: the app
+// never collects credentials in its WebView. Instead it opens the hosted
+// login page in the phone's REAL browser (Safari/Chrome — where passkeys and
+// saved passwords actually work), the user signs in there, and the web page
+// bounces back into the app via the albayan://auth deep link carrying a
+// ONE-TIME code. The app exchanges code+verifier (PKCE-style: the verifier
+// never leaves the device; only its SHA-256 travels) for its own session.
+//
+// Two sides live here because both run from this same bundle:
+//   NATIVE side (Capacitor): startAppBrowserLogin / deep-link handling.
+//   WEB side (system browser): detects ?app_login=1 requests, mints the
+//   handoff code after login, renders the "return to app" screen.
+
+const APP_LOGIN_DEEP_LINK = 'albayan://auth';
+// Native app: the pending {state, verifier} while the browser round-trip is
+// in flight. localStorage (not memory) because Android may kill the activity
+// while the browser is foregrounded. The verifier is useless on its own —
+// redeeming it also requires the one-time code that only ever travels
+// browser -> app via the deep link on this same device.
+const APP_LOGIN_PENDING_KEY = 'albayan_app_login_pending';
+// Web page: the app's sign-in request {state, challenge} while the user
+// authenticates. sessionStorage: tab-scoped and gone when the tab closes.
+const APP_LOGIN_WEB_REQUEST_KEY = 'albayan_app_login_request';
+const APP_LOGIN_REQUEST_TTL_MS = 10 * 60 * 1000;
+
+let _appLoginCallbackQueue = '';
+let _appLoginDrainAttempts = 0;
+let _appLoginExchangeBusy = false;
+// Native login screen mode: 'browser' (default, Sabil-style) or 'form'
+// (classic in-app email+password, kept as an explicit fallback).
+let _nativeLoginMode = 'browser';
+
+// The packaged app signs in through the system browser only in server mode
+// (a local-only override has no server to sign in to).
+function isSystemBrowserLoginEnabled() {
+  return !!(typeof Platform !== 'undefined' && Platform.isCapacitor && isServerModeEnabled());
+}
+
+// Unbiased random lowercase-hex token (n bytes -> 2n hex chars).
+function _appLoginRandomHex(nBytes) {
+  const n = Math.max(8, Number(nBytes) || 32);
+  try {
+    const bytes = new Uint8Array(n);
+    crypto.getRandomValues(bytes);
+    let out = '';
+    for (let i = 0; i < bytes.length; i++) out += (bytes[i] + 256).toString(16).slice(1);
+    return out;
+  } catch (_) {
+    // Capacitor WebViews always have crypto; this fallback only keeps the
+    // flow alive in exotic test sandboxes.
+    let out = '';
+    while (out.length < n * 2) out += Math.floor(Math.random() * 16).toString(16);
+    return out.slice(0, n * 2);
+  }
+}
+
+// SHA-256 of a string as lowercase hex. Uses WebCrypto (always present in
+// the app WebViews' secure context) with the pure-JS fallback from
+// 02-security.js for insecure test/LAN origins.
+async function _appLoginSha256Hex(value) {
+  const data = new TextEncoder().encode(String(value));
+  let digest;
+  if (globalThis.crypto && globalThis.crypto.subtle) {
+    digest = new Uint8Array(await crypto.subtle.digest('SHA-256', data));
+  } else if (typeof _albFallbackSha256 === 'function') {
+    digest = _albFallbackSha256(data);
+  } else {
+    throw new Error('SHA-256 unavailable');
+  }
+  let out = '';
+  for (let i = 0; i < digest.length; i++) out += (digest[i] + 256).toString(16).slice(1);
+  return out;
+}
+
+// ---------- NATIVE SIDE (packaged app) ----------
+
+function _readAppLoginPending() {
+  try {
+    const raw = localStorage.getItem(APP_LOGIN_PENDING_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const stateToken = String((parsed && parsed.state) || '');
+    const verifier = String((parsed && parsed.verifier) || '');
+    const createdAt = Number(parsed && parsed.createdAt) || 0;
+    if (!/^[0-9a-f]{32,128}$/.test(stateToken) || !/^[0-9a-f]{32,128}$/.test(verifier)) return null;
+    if (!createdAt || Date.now() - createdAt > APP_LOGIN_REQUEST_TTL_MS) return null;
+    return { state: stateToken, verifier: verifier, createdAt: createdAt };
+  } catch (_) {
+    return null;
+  }
+}
+
+function clearAppBrowserLoginPending() {
+  try { localStorage.removeItem(APP_LOGIN_PENDING_KEY); } catch (_) {}
+}
+
+// The native login screen shows a waiting card while a browser round-trip
+// is pending, and a busy card while the code exchange runs.
+function isAppBrowserLoginWaiting() {
+  return !!_readAppLoginPending();
+}
+function isAppBrowserLoginExchanging() {
+  return _appLoginExchangeBusy === true;
+}
+
+function _openInSystemBrowser(url) {
+  // Capacitor routes external-origin _blank navigations to the real system
+  // browser (Safari / Chrome) — the same mechanism the login screen's
+  // privacy-policy links already rely on in the packaged app.
+  try {
+    const win = window.open(url, '_blank');
+    if (win) return true;
+  } catch (_) {}
+  try {
+    const a = document.createElement('a');
+    a.href = url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// Kick off the Sabil-style sign-in: mint state+verifier, remember them
+// device-locally, and open the hosted login page with the CHALLENGE only.
+async function startAppBrowserLogin() {
+  if (!isSystemBrowserLoginEnabled()) return false;
+  try {
+    const existing = _readAppLoginPending();
+    let stateToken;
+    let verifier;
+    if (existing) {
+      // Re-tapping "Open browser again" keeps the SAME pending request so a
+      // login already in progress in the browser can still come back.
+      stateToken = existing.state;
+      verifier = existing.verifier;
+    } else {
+      stateToken = _appLoginRandomHex(16);
+      verifier = _appLoginRandomHex(32);
+      try {
+        localStorage.setItem(APP_LOGIN_PENDING_KEY, JSON.stringify({
+          state: stateToken,
+          verifier: verifier,
+          createdAt: Date.now()
+        }));
+      } catch (_) {
+        showNotification(
+          state.language === 'ar' ? 'التخزين غير متاح' : 'Storage Unavailable',
+          state.language === 'ar'
+            ? 'تعذّر بدء تسجيل الدخول عبر المتصفح. استخدم تسجيل الدخول داخل التطبيق.'
+            : 'Could not start browser sign-in. Use in-app sign-in instead.',
+          'error'
+        );
+        return false;
+      }
+    }
+    const challenge = await _appLoginSha256Hex(verifier);
+    const base = getServerBaseUrl() || MOBILE_SERVER_URL;
+    const url = base + '/?app_login=1'
+      + '&app_state=' + encodeURIComponent(stateToken)
+      + '&app_challenge=' + encodeURIComponent(challenge)
+      + '&app_platform=' + encodeURIComponent((typeof Platform !== 'undefined' && Platform.platform) || 'app');
+    const opened = _openInSystemBrowser(url);
+    if (!opened) {
+      clearAppBrowserLoginPending();
+      showNotification(
+        state.language === 'ar' ? 'تعذّر فتح المتصفح' : 'Could Not Open Browser',
+        state.language === 'ar'
+          ? 'لم يتمكن التطبيق من فتح المتصفح. استخدم تسجيل الدخول داخل التطبيق.'
+          : 'The app could not open the browser. Use in-app sign-in instead.',
+        'error'
+      );
+    }
+    render();
+    return opened;
+  } catch (e) {
+    clearAppBrowserLoginPending();
+    console.warn('[AppLogin] start failed:', e?.message || e);
+    showNotification(
+      state.language === 'ar' ? 'خطأ' : 'Error',
+      state.language === 'ar' ? 'تعذّر بدء تسجيل الدخول عبر المتصفح.' : 'Could not start browser sign-in.',
+      'error'
+    );
+    render();
+    return false;
+  }
+}
+
+function cancelAppBrowserLogin() {
+  clearAppBrowserLoginPending();
+  render();
+}
+
+function isAppLoginCallbackUrl(url) {
+  return /^albayan:\/\/auth([/?#]|$)/i.test(String(url || ''));
+}
+
+// Parse albayan://auth?code=...&state=... defensively (custom-scheme URLs
+// parse inconsistently across WebViews, so never rely on new URL()).
+function _parseAppLoginCallback(url) {
+  const raw = String(url || '');
+  const q = raw.indexOf('?');
+  if (q < 0) return null;
+  let query = raw.slice(q + 1);
+  const h = query.indexOf('#');
+  if (h >= 0) query = query.slice(0, h);
+  let params;
+  try { params = new URLSearchParams(query); } catch (_) { return null; }
+  const code = String(params.get('code') || '');
+  const stateToken = String(params.get('state') || '');
+  if (!/^[A-Za-z0-9._~-]{20,256}$/.test(code)) return null;
+  if (!/^[0-9a-f]{16,128}$/.test(stateToken)) return null;
+  return { code: code, state: stateToken };
+}
+
+// Deep-link entry point (appUrlOpen + cold-start launch URL). Queues the
+// callback until init() has settled server mode and storage, because the
+// exchange runs the full post-login pipeline.
+function handleAppLoginDeepLink(url) {
+  if (!isAppLoginCallbackUrl(url)) return false;
+  _appLoginCallbackQueue = String(url);
+  _appLoginDrainAttempts = 0;
+  _drainAppLoginCallbackQueue();
+  return true;
+}
+
+function _drainAppLoginCallbackQueue() {
+  if (!_appLoginCallbackQueue) return;
+  if (window.__albayanInitSettled !== true) {
+    // Cold start: init() is still probing the server / restoring storage.
+    if (_appLoginDrainAttempts++ < 240) setTimeout(_drainAppLoginCallbackQueue, 250);
+    else _appLoginCallbackQueue = '';
+    return;
+  }
+  const url = _appLoginCallbackQueue;
+  _appLoginCallbackQueue = '';
+  _processAppLoginCallback(url).catch((e) => {
+    console.warn('[AppLogin] callback processing failed:', e?.message || e);
+  });
+}
+
+async function _processAppLoginCallback(url) {
+  if (_appLoginExchangeBusy) return;
+  if (typeof state !== 'undefined' && state.currentUser) {
+    // Already signed in (e.g. stale link re-opened) — nothing to do.
+    clearAppBrowserLoginPending();
+    return;
+  }
+  const parsed = _parseAppLoginCallback(url);
+  const pending = _readAppLoginPending();
+  const isAr = typeof state !== 'undefined' && state.language === 'ar';
+  if (!parsed || !pending || parsed.state !== pending.state) {
+    // Unknown/expired/foreign link: never exchange a code this app did not
+    // request (state binding), and burn any stale pending request.
+    clearAppBrowserLoginPending();
+    showNotification(
+      isAr ? 'انتهت صلاحية الرابط' : 'Sign-In Link Expired',
+      isAr ? 'ابدأ تسجيل الدخول من التطبيق مرة أخرى.' : 'Start the sign-in from the app again.',
+      'error'
+    );
+    if (typeof render === 'function') render();
+    return;
+  }
+  _appLoginExchangeBusy = true;
+  try { if (typeof render === 'function') render(); } catch (_) {}
+  try {
+    await completeAppBrowserLogin(parsed.code, pending.verifier);
+  } finally {
+    _appLoginExchangeBusy = false;
+    clearAppBrowserLoginPending();
+    if (typeof state === 'undefined' || !state.currentUser) {
+      try { if (typeof render === 'function') render(); } catch (_) {}
+    }
+  }
+}
+
+async function apiAppLoginExchange(code, verifier) {
+  const res = await apiJson(
+    '/api/auth/app-login/exchange',
+    { method: 'POST', body: { code: code, verifier: verifier } },
+    { timeoutMs: 15000 }
+  );
+  return (res && res.user) || null;
+}
+
+// Register the albayan:// deep-link listeners (packaged app only). Called
+// from setupMobileRuntime(); safe to call multiple times.
+let _appLoginDeepLinksReady = false;
+async function setupAppLoginDeepLinks() {
+  if (_appLoginDeepLinksReady) return;
+  if (!(typeof Platform !== 'undefined' && Platform.isCapacitor)) return;
+  const App = (typeof getCapacitorAppPlugin === 'function') ? getCapacitorAppPlugin() : null;
+  if (!App) return;
+  _appLoginDeepLinksReady = true;
+  try {
+    if (App.addListener) {
+      await App.addListener('appUrlOpen', (event) => {
+        try { handleAppLoginDeepLink(event && event.url); } catch (_) {}
+      });
+    }
+  } catch (e) {
+    console.warn('[AppLogin] appUrlOpen listener unavailable:', e?.message || e);
+  }
+  try {
+    // Cold start: the deep link may have LAUNCHED the app instead of
+    // resuming it — the listener above never fires for that first URL.
+    if (App.getLaunchUrl) {
+      const launch = await App.getLaunchUrl();
+      if (launch && launch.url) handleAppLoginDeepLink(launch.url);
+    }
+  } catch (_) {}
+}
+
+// ---------- WEB SIDE (page opened in the system browser) ----------
+
+// Called early in init(): capture ?app_login=1&app_state=&app_challenge=
+// into sessionStorage and scrub the parameters from the address bar so they
+// never linger in history/bookmarks/share sheets.
+function detectAppLoginRequestFromUrl() {
+  if (typeof Platform !== 'undefined' && Platform.isCapacitor) return;
+  let params;
+  try { params = new URLSearchParams(window.location.search || ''); } catch (_) { return; }
+  if (params.get('app_login') !== '1') return;
+  const stateToken = String(params.get('app_state') || '');
+  const challenge = String(params.get('app_challenge') || '');
+  const platform = String(params.get('app_platform') || '').slice(0, 16);
+  if (/^[0-9a-f]{16,128}$/.test(stateToken) && /^[0-9a-f]{64}$/.test(challenge)) {
+    try {
+      sessionStorage.setItem(APP_LOGIN_WEB_REQUEST_KEY, JSON.stringify({
+        state: stateToken,
+        challenge: challenge,
+        platform: platform,
+        createdAt: Date.now()
+      }));
+    } catch (_) { /* storage blocked: banner/handoff simply won't appear */ }
+  }
+  try {
+    ['app_login', 'app_state', 'app_challenge', 'app_platform'].forEach((k) => params.delete(k));
+    const qs = params.toString();
+    window.history.replaceState(
+      window.history.state,
+      '',
+      window.location.pathname + (qs ? '?' + qs : '')
+    );
+  } catch (_) {}
+}
+
+function getPendingAppLoginRequest() {
+  try {
+    const raw = sessionStorage.getItem(APP_LOGIN_WEB_REQUEST_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const stateToken = String((parsed && parsed.state) || '');
+    const challenge = String((parsed && parsed.challenge) || '');
+    const createdAt = Number(parsed && parsed.createdAt) || 0;
+    if (!/^[0-9a-f]{16,128}$/.test(stateToken) || !/^[0-9a-f]{64}$/.test(challenge)) return null;
+    if (!createdAt || Date.now() - createdAt > APP_LOGIN_REQUEST_TTL_MS) {
+      clearPendingAppLoginRequest();
+      return null;
+    }
+    return {
+      state: stateToken,
+      challenge: challenge,
+      platform: String((parsed && parsed.platform) || '').slice(0, 16),
+      createdAt: createdAt
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function clearPendingAppLoginRequest() {
+  try { sessionStorage.removeItem(APP_LOGIN_WEB_REQUEST_KEY); } catch (_) {}
+}
+
+async function apiAppLoginHandoff(challenge, platform) {
+  const res = await apiJson(
+    '/api/auth/app-login/handoff',
+    { method: 'POST', body: { challenge: challenge, platform: platform || null } },
+    { timeoutMs: 12000 }
+  );
+  return (res && res.code) || '';
+}
+
+function _appLoginReturnDeepLink(code, stateToken) {
+  return APP_LOGIN_DEEP_LINK
+    + '?code=' + encodeURIComponent(String(code))
+    + '&state=' + encodeURIComponent(String(stateToken));
+}
+
+function albayanReturnToApp() {
+  const ret = window.__albayanAppLoginReturn;
+  if (!ret || !ret.code) return;
+  try { window.location.href = _appLoginReturnDeepLink(ret.code, ret.state); } catch (_) {}
+}
+
+// "You're signed in — return to the app" surface. Stored on window so any
+// stray render() re-paints IT (renderLogin short-circuits to this) instead
+// of dropping the user back onto a login form.
+function _renderAppLoginReturnHTML() {
+  const ret = window.__albayanAppLoginReturn;
+  if (!ret) return '';
+  const isAr = state.language === 'ar';
+  const name = Security.escapeHtml(String(ret.name || ''));
+  return `
+    <div class="min-h-screen flex items-center justify-center p-4">
+      <div class="w-full max-w-md">
+        <div class="glass-panel w-full p-8 rounded-3xl animate-fade-in-up text-center">
+          <div class="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-2xl bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+            <i data-lucide="check" class="h-8 w-8" aria-hidden="true"></i>
+          </div>
+          <h1 class="text-2xl font-extrabold text-slate-900 dark:text-white">
+            ${isAr ? 'تم تسجيل الدخول' : 'You are signed in'}
+          </h1>
+          ${name ? `<p class="mt-2 text-sm text-slate-600 dark:text-slate-300">${name}</p>` : ''}
+          <p class="mt-3 text-sm leading-6 text-slate-600 dark:text-slate-300">
+            ${isAr ? 'جارٍ إرجاعك إلى تطبيق البيان...' : 'Returning you to the Albayan app...'}
+          </p>
+          <button type="button" onclick="albayanReturnToApp()"
+            class="mt-6 min-h-12 w-full btn-shine alb-btn-primary rounded-xl px-5 py-3 font-extrabold text-white">
+            ${isAr ? 'فتح تطبيق البيان' : 'Open the Albayan app'}
+          </button>
+          <p class="mt-4 text-xs text-slate-400">
+            ${isAr ? 'يمكنك إغلاق هذا التبويب بعد فتح التطبيق.' : 'You can close this tab once the app opens.'}
+          </p>
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderAppLoginReturnScreen(user, code, stateToken) {
+  window.__albayanAppLoginReturn = {
+    code: String(code),
+    state: String(stateToken),
+    name: String((user && user.name) || '')
+  };
+  const app = document.getElementById('app');
+  if (app) {
+    app.innerHTML = _renderAppLoginReturnHTML();
+    try { if (typeof IconQueue !== 'undefined') IconQueue.schedule(app); } catch (_) {}
+  }
+  // Automatic bounce back into the app; the button stays as the fallback
+  // for browsers that block scripted custom-scheme navigations.
+  albayanReturnToApp();
+}
+
+// Hook for the login flows: when this browser tab is an app sign-in
+// round-trip, mint the one-time code and bounce back instead of loading the
+// full workspace here. Returns true when the handoff took over the screen.
+async function maybeCompleteAppLoginHandoff(user) {
+  const request = getPendingAppLoginRequest();
+  if (!request) return false;
+  try {
+    const code = await apiAppLoginHandoff(request.challenge, request.platform);
+    if (!code) throw new Error('No handoff code returned');
+    clearPendingAppLoginRequest();
+    renderAppLoginReturnScreen(user, code, request.state);
+    return true;
+  } catch (e) {
+    console.warn('[AppLogin] handoff failed:', e?.message || e);
+    clearPendingAppLoginRequest();
+    showNotification(
+      state.language === 'ar' ? 'تعذّر الرجوع إلى التطبيق' : 'Could Not Return to the App',
+      state.language === 'ar'
+        ? 'تعذّر تسليم تسجيل الدخول إلى التطبيق. ابدأ من التطبيق مرة أخرى.'
+        : 'The sign-in could not be handed back to the app. Start again from the app.',
+      'error'
+    );
+    return false;
+  }
+}
+
+// Web session already signed in when an app sign-in request arrives: ask
+// before handing that session to the app (never silently — the link could
+// have been opened into someone else's signed-in browser).
+function maybeOfferAppLoginHandoffForActiveSession() {
+  if (typeof state === 'undefined' || !state.currentUser) return false;
+  if (typeof Platform !== 'undefined' && Platform.isCapacitor) return false;
+  const request = getPendingAppLoginRequest();
+  if (!request) return false;
+  if (document.getElementById('app-login-handoff-confirm')) return true;
+  const isAr = state.language === 'ar';
+  const name = Security.escapeHtml(String(state.currentUser.name || state.currentUser.email || ''));
+  const overlay = document.createElement('div');
+  overlay.id = 'app-login-handoff-confirm';
+  overlay.setAttribute('role', 'alertdialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.className = 'fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/60 p-4';
+  overlay.innerHTML = `
+    <div class="glass-panel w-full max-w-sm rounded-3xl p-6 text-center">
+      <div class="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">
+        <i data-lucide="smartphone" class="h-7 w-7" aria-hidden="true"></i>
+      </div>
+      <h2 class="text-xl font-extrabold text-slate-900 dark:text-white">
+        ${isAr ? 'تسجيل الدخول إلى تطبيق البيان؟' : 'Sign in to the Albayan app?'}
+      </h2>
+      <p class="mt-2 text-sm text-slate-600 dark:text-slate-300">
+        ${isAr ? `سيتم تسجيل دخول التطبيق على هذا الهاتف باسم ${name}.` : `The app on this phone will be signed in as ${name}.`}
+      </p>
+      <button type="button" onclick="albayanConfirmAppHandoff()"
+        class="mt-5 min-h-12 w-full btn-shine alb-btn-primary rounded-xl px-5 py-3 font-extrabold text-white">
+        ${isAr ? 'متابعة إلى التطبيق' : 'Continue to the app'}
+      </button>
+      <button type="button" onclick="albayanDeclineAppHandoff()"
+        class="mt-3 min-h-11 w-full rounded-xl px-5 py-2 font-bold text-slate-500 hover:text-slate-700 dark:text-slate-300">
+        ${isAr ? 'ليس الآن' : 'Not now'}
+      </button>
+    </div>`;
+  document.body.appendChild(overlay);
+  try { if (typeof IconQueue !== 'undefined') IconQueue.schedule(overlay); } catch (_) {}
+  return true;
+}
+
+async function albayanConfirmAppHandoff() {
+  const request = getPendingAppLoginRequest();
+  document.getElementById('app-login-handoff-confirm')?.remove();
+  if (!request || !state.currentUser) return;
+  await maybeCompleteAppLoginHandoff(state.currentUser);
+}
+
+function albayanDeclineAppHandoff() {
+  clearPendingAppLoginRequest();
+  document.getElementById('app-login-handoff-confirm')?.remove();
+}

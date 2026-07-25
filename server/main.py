@@ -74,6 +74,8 @@ from .schemas import (
     AdMutationResponse,
     AdStopRequest,
     AdStopResponse,
+    AppLoginExchangeRequest,
+    AppLoginHandoffRequest,
     BatchDeleteRequest,
     BootstrapResponse,
     ChangePasswordRequest,
@@ -401,6 +403,20 @@ SESSION_DURATION_MS = int(os.getenv("ALBAYAN_SESSION_MS", str(8 * 60 * 60 * 1000
 SESSION_REMEMBER_DURATION_MS = int(
     os.getenv("ALBAYAN_SESSION_REMEMBER_MS", str(30 * 24 * 60 * 60 * 1000))
 )
+# System-browser app login (Phase 2): the packaged iOS/Android apps open the
+# hosted login page in the phone's real browser (passkeys/password managers
+# work there); after the user signs in, the web session mints a ONE-TIME
+# handoff code bound to a PKCE-style SHA-256 challenge and bounces back into
+# the app (albayan://auth), which exchanges code+verifier for its own session.
+# Codes are single-use, short-lived and stored hashed (like password resets).
+APP_LOGIN_CODE_TTL_MS = int(os.getenv("ALBAYAN_APP_LOGIN_CODE_MS", str(2 * 60 * 1000)))
+# Sessions minted through the app exchange default to the long "remember me"
+# lifetime: a packaged phone app is a personal device, and re-driving the
+# whole browser round-trip every 8 hours would be hostile. Operators can
+# shorten it independently of the web remember-me lifetime.
+APP_LOGIN_SESSION_MS = int(
+    os.getenv("ALBAYAN_APP_SESSION_MS", str(SESSION_REMEMBER_DURATION_MS))
+)
 # SECURITY: Default to secure cookies in production (HTTPS only)
 # In development, can be set to False via environment variable.
 # Tri-state: if the env var is set, honor its boolean value (so testing over
@@ -472,6 +488,14 @@ _RESET_EMAIL_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_RESET_EMAIL_MAX_ATTEMPTS", "1
 _SETUP_WINDOW_MS = int(os.getenv("ALBAYAN_SETUP_WINDOW_MS", str(15 * 60 * 1000)))
 _SETUP_IP_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_SETUP_IP_MAX_ATTEMPTS", "10"))
 _SETUP_GLOBAL_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_SETUP_GLOBAL_MAX_ATTEMPTS", "100"))
+
+# System-browser app-login limiter knobs. Handoff is authenticated (per-user
+# and per-IP buckets); exchange is anonymous (per-IP bucket). Codes carry
+# 256 bits of entropy, so these limits exist to bound abuse noise, not as the
+# security boundary.
+_APP_LOGIN_WINDOW_MS = int(os.getenv("ALBAYAN_APP_LOGIN_WINDOW_MS", str(15 * 60 * 1000)))
+_APP_LOGIN_HANDOFF_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_APP_LOGIN_HANDOFF_MAX_ATTEMPTS", "10"))
+_APP_LOGIN_EXCHANGE_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_APP_LOGIN_EXCHANGE_MAX_ATTEMPTS", "30"))
 
 
 def _client_ip(request: Request) -> str:
@@ -600,6 +624,37 @@ def _setup_rate_check(request: Request) -> tuple[bool, int]:
         return False, int(retry or 0)
     allowed, _left, retry = check_rate_limit(
         "setup:global", _SETUP_GLOBAL_MAX_ATTEMPTS, _SETUP_WINDOW_MS
+    )
+    return bool(allowed), 0 if allowed else int(retry or 0)
+
+
+def _app_handoff_rate_check(request: Request, user_id: str) -> tuple[bool, int]:
+    """Limit app-login handoff-code minting per IP and per authenticated user."""
+    from .rate_limiter import check_rate_limit
+
+    allowed, _left, retry = check_rate_limit(
+        f"applogin-handoff:ip:{_client_ip(request)}",
+        _APP_LOGIN_HANDOFF_MAX_ATTEMPTS,
+        _APP_LOGIN_WINDOW_MS,
+    )
+    if not allowed:
+        return False, int(retry or 0)
+    allowed, _left, retry = check_rate_limit(
+        f"applogin-handoff:user:{user_id}",
+        _APP_LOGIN_HANDOFF_MAX_ATTEMPTS,
+        _APP_LOGIN_WINDOW_MS,
+    )
+    return bool(allowed), 0 if allowed else int(retry or 0)
+
+
+def _app_exchange_rate_check(request: Request) -> tuple[bool, int]:
+    """Limit anonymous app-login code exchanges per peer IP."""
+    from .rate_limiter import check_rate_limit
+
+    allowed, _left, retry = check_rate_limit(
+        f"applogin-exchange:ip:{_client_ip(request)}",
+        _APP_LOGIN_EXCHANGE_MAX_ATTEMPTS,
+        _APP_LOGIN_WINDOW_MS,
     )
     return bool(allowed), 0 if allowed else int(retry or 0)
 
@@ -3569,6 +3624,205 @@ def password_reset_confirm(body: PasswordResetConfirmRequest, request: Request):
 
     audit(user_id, "password_reset", "auth", user_id, "Password reset via token", {})
     return {"ok": True}
+
+
+# ==========================================
+# SYSTEM-BROWSER APP LOGIN (Phase 2)
+# ==========================================
+# The packaged iOS/Android apps do not collect credentials in the WebView.
+# Instead they open the hosted login page in the phone's REAL browser with a
+# PKCE-style challenge; after the user signs in there, the authenticated web
+# session calls /handoff to mint a one-time code, redirects to
+# albayan://auth?code=...&state=..., and the app calls /exchange with the
+# original verifier to obtain its own session cookie.
+
+_APP_LOGIN_TOKEN_CHARS_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
+
+
+def _valid_app_login_token(value: str, min_len: int = 20, max_len: int = 256) -> bool:
+    return (
+        min_len <= len(value) <= max_len
+        and bool(_APP_LOGIN_TOKEN_CHARS_RE.fullmatch(value))
+    )
+
+
+@app.post("/api/auth/app-login/handoff")
+def app_login_handoff(
+    body: AppLoginHandoffRequest,
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+):
+    """Mint a one-time app-login code for the signed-in web user.
+
+    The code is returned ONCE in plaintext (it immediately leaves for the
+    app via the albayan:// deep link) and stored hashed. It is bound to the
+    SHA-256 challenge supplied by the app, so only the app holding the
+    matching verifier can redeem it — a leaked/phished code alone is useless.
+    """
+    require_same_origin(request)
+
+    allowed, wait_ms = _app_handoff_rate_check(request, str(user.get("id") or ""))
+    if not allowed:
+        wait_seconds = max(1, int(wait_ms / 1000))
+        raise HTTPException(
+            status_code=429,
+            detail="Too many app sign-in attempts. Please wait and try again.",
+            headers={"Retry-After": str(wait_seconds)},
+        )
+
+    # Schema already pins challenge to ^[0-9a-f]{64}$ (lowercase SHA-256 hex).
+    challenge_hash = str(body.challenge)
+    platform = (body.platform or "").strip()[:32] or None
+
+    code = secrets.token_urlsafe(32)
+    code_hash = hash_token(code)
+    now = now_ms()
+    ip = request.client.host if request.client else None
+    ua = request.headers.get("user-agent")
+
+    with db_conn() as conn:
+        # One live code per user, plus opportunistic cleanup of dead codes —
+        # same atomic single-statement pattern as password_resets.
+        conn.execute(
+            text(
+                "DELETE FROM app_logins WHERE expires_at <= :now "
+                "OR used_at IS NOT NULL OR user_id = :user_id"
+            ),
+            {"now": now, "user_id": user["id"]},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO app_logins (
+                  id, user_id, code_hash, challenge_hash,
+                  created_at, expires_at, used_at, ip, user_agent, platform
+                )
+                VALUES (
+                  :id, :user_id, :code_hash, :challenge_hash,
+                  :created_at, :expires_at, NULL, :ip, :user_agent, :platform
+                )
+                """
+            ),
+            {
+                "id": new_id("applogin"),
+                "user_id": user["id"],
+                "code_hash": code_hash,
+                "challenge_hash": challenge_hash,
+                "created_at": now,
+                "expires_at": now + APP_LOGIN_CODE_TTL_MS,
+                "ip": ip,
+                "user_agent": ua,
+                "platform": platform,
+            },
+        )
+
+    audit(
+        user["id"],
+        "app_login_handoff",
+        "auth",
+        user["id"],
+        f"App sign-in handoff code issued for {user['email']}",
+        {"platform": platform or "unknown"},
+    )
+    return {"code": code, "expiresInMs": APP_LOGIN_CODE_TTL_MS}
+
+
+@app.post("/api/auth/app-login/exchange", response_model=LoginResponse)
+def app_login_exchange(body: AppLoginExchangeRequest, request: Request):
+    """Redeem a one-time handoff code + PKCE verifier for an app session.
+
+    Anonymous by design (the app has no session yet). Every failure is the
+    same generic 400 so the endpoint discloses nothing about which part was
+    wrong; the code is burned on first claim regardless of the verifier
+    outcome, so an intercepted code cannot be retried against.
+    """
+    require_same_origin(request)
+
+    allowed, wait_ms = _app_exchange_rate_check(request)
+    if not allowed:
+        wait_seconds = max(1, int(wait_ms / 1000))
+        raise HTTPException(
+            status_code=429,
+            detail="Too many attempts. Please wait and try again.",
+            headers={"Retry-After": str(wait_seconds)},
+        )
+
+    invalid = HTTPException(status_code=400, detail="Invalid or expired sign-in code")
+    code = str(body.code or "").strip()
+    verifier = str(body.verifier or "").strip()
+    if not _valid_app_login_token(code) or not _valid_app_login_token(verifier):
+        raise invalid
+
+    code_hash = hash_token(code)
+    computed_challenge = hashlib.sha256(verifier.encode("utf-8")).hexdigest()
+    now = now_ms()
+
+    with db_conn() as conn:
+        row = (
+            conn.execute(
+                text(
+                    "SELECT id, user_id, challenge_hash FROM app_logins "
+                    "WHERE code_hash = :code_hash LIMIT 1"
+                ),
+                {"code_hash": code_hash},
+            )
+            .mappings()
+            .first()
+        )
+        if not row:
+            raise invalid
+
+        # Atomically claim the one-shot code BEFORE verifying the challenge:
+        # exactly one exchange can ever win, and a wrong-verifier attempt
+        # burns the code instead of leaving it retryable.
+        claimed = conn.execute(
+            text(
+                "UPDATE app_logins SET used_at = :used_at "
+                "WHERE id = :id AND used_at IS NULL AND expires_at > :now"
+            ),
+            {"used_at": now, "now": now, "id": row["id"]},
+        )
+        if claimed.rowcount != 1:
+            raise invalid
+
+    if not secrets_compare(computed_challenge, str(row.get("challenge_hash") or "")):
+        raise invalid
+
+    user = _get_user_by_id(str(row.get("user_id") or ""))
+    if not user:
+        raise invalid
+
+    session_id, token = _create_session(
+        user["id"], request, duration_ms=APP_LOGIN_SESSION_MS
+    )
+    cookie_val = new_session_cookie_value(session_id, token)
+
+    resp = JSONResponse(content=LoginResponse(user=user_row_to_public(user)).model_dump())
+    # Same cookie semantics as /api/auth/login: the packaged apps either call
+    # through Capacitor's native HTTP layer (no Origin header — the native
+    # cookie jar ignores SameSite) or from a trusted app WebView origin, which
+    # needs SameSite=None to be sent cross-site.
+    login_origin = request.headers.get("origin") or ""
+    is_mobile_app_login = login_origin in MOBILE_APP_ORIGINS
+    resp.set_cookie(
+        COOKIE_NAME,
+        cookie_val,
+        httponly=True,
+        secure=True if is_mobile_app_login else _cookie_secure_for(request),
+        samesite="none" if is_mobile_app_login else "lax",
+        max_age=int(APP_LOGIN_SESSION_MS / 1000),
+        path="/",
+    )
+
+    audit(
+        user["id"],
+        "app_login",
+        "auth",
+        user["id"],
+        f"User {user['email']} signed in via system-browser app login",
+        {"sessionLifetimeMs": APP_LOGIN_SESSION_MS},
+    )
+    return resp
 
 
 def _page_all(collection: str, **kwargs: Any) -> list[dict[str, Any]]:

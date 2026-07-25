@@ -15,6 +15,13 @@ async function init() {
   setupMobileRuntime().catch((error) => {
     console.warn('[MobileRuntime] Setup failed:', error?.message || error);
   });
+
+  // SYSTEM-BROWSER APP LOGIN, web side: capture ?app_login=1 request params
+  // (state + PKCE challenge from the packaged app) into sessionStorage and
+  // scrub them from the address bar before any routing/render reads the URL.
+  if (typeof detectAppLoginRequestFromUrl === 'function') {
+    try { detectAppLoginRequestFromUrl(); } catch (_) {}
+  }
   
   setLoadingStatus(state.language === 'ar' ? 'جارٍ تهيئة قاعدة البيانات...' : 'Initializing database...');
   
@@ -171,6 +178,10 @@ async function init() {
     setupUrlRouting();
     if (loadingScreen) loadingScreen.style.display = 'none';
     setMobileColdStartBlocked(true);
+    // Startup settled (in the blocked state). A queued app-login deep link
+    // may now be processed — its exchange will surface the connectivity
+    // error honestly instead of waiting forever.
+    window.__albayanInitSettled = true;
   };
   // The connectivity gate is Capacitor-only today because the gate/notice
   // renderers in src/01b-mobile-runtime.js early-return for browsers. When
@@ -501,7 +512,18 @@ async function init() {
     if (document.visibilityState === 'visible') runDailyBackupIfDue();
   });
 
+  // Startup fully settled: queued app-login deep links (cold start via
+  // albayan://auth) may now run the exchange + post-login pipeline.
+  window.__albayanInitSettled = true;
+
   render();
+
+  // SYSTEM-BROWSER APP LOGIN, web side: the app asked this browser to sign
+  // in while a web session is ALREADY active — offer to hand that session
+  // to the app (explicit tap; never silently).
+  if (typeof maybeOfferAppLoginHandoffForActiveSession === 'function') {
+    try { maybeOfferAppLoginHandoffForActiveSession(); } catch (_) {}
+  }
 }
 
 // Local mode keeps ALL business data (and the in-app auto-backups) inside

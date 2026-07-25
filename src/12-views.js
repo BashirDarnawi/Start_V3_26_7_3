@@ -815,6 +815,20 @@ function renderLoginAccountChooser(savedAccounts, bannersHTML, isRTL) {
 // chooser and the form can never drift apart.
 function _renderLoginBanners(isRTL, webCryptoOk) {
   return `
+          ${(typeof getPendingAppLoginRequest === 'function' && !Platform.isCapacitor && getPendingAppLoginRequest()) ? `
+          <div class="w-full mb-5 rounded-2xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-900/20 p-4 text-sm text-indigo-800 dark:text-indigo-200" role="note">
+            <div class="flex items-center gap-3">
+              <i data-lucide="smartphone" class="w-5 h-5 flex-shrink-0"></i>
+              <div>
+                <div class="font-bold mb-1">${isRTL ? 'تسجيل الدخول إلى تطبيق البيان' : 'Signing in to the Albayan app'}</div>
+                <div class="text-xs">${isRTL
+                  ? 'بعد تسجيل الدخول هنا سترجع تلقائياً إلى التطبيق على هاتفك.'
+                  : 'After you sign in here, you will be sent back to the app on your phone.'}</div>
+              </div>
+            </div>
+          </div>
+          ` : ''}
+
           ${(isServerModeEnabled() && state.serverHasNoUsers && state.serverSetupEnabled === true) ? `
           <button type="button" onclick="startServerSetup()" class="w-full mb-5 text-left rounded-2xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-900/20 p-4 hover:shadow-md transition-all">
             <div class="flex items-center gap-3">
@@ -857,8 +871,84 @@ function _renderLoginBanners(isRTL, webCryptoOk) {
           ` : ''}`;
 }
 
+// Native login screen mode toggles (packaged app only).
+function nativeLoginUseForm() {
+  _nativeLoginMode = 'form';
+  render();
+}
+
+function nativeLoginUseBrowser() {
+  _nativeLoginMode = 'browser';
+  render();
+}
+
+// The packaged app's default sign-in surface (SYSTEM-BROWSER login):
+// one primary button that opens the hosted login page in Safari/Chrome,
+// a waiting card while the browser round-trip is in flight, and an
+// explicit fallback link to the classic in-app form.
+function renderNativeAppLogin(bannersHTML, isRTL) {
+  const waiting = typeof isAppBrowserLoginWaiting === 'function' && isAppBrowserLoginWaiting();
+  const exchanging = typeof isAppBrowserLoginExchanging === 'function' && isAppBrowserLoginExchanging();
+
+  let bodyHTML;
+  if (exchanging) {
+    bodyHTML = `
+          <div class="text-center py-2" role="status" aria-live="polite">
+            <div class="w-12 h-12 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mx-auto mb-4"></div>
+            <p class="font-bold text-slate-700 dark:text-slate-200">${isRTL ? 'جارٍ إكمال تسجيل الدخول...' : 'Completing sign-in...'}</p>
+          </div>`;
+  } else if (waiting) {
+    bodyHTML = `
+          <div class="text-center py-2" role="status" aria-live="polite">
+            <div class="w-12 h-12 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mx-auto mb-4"></div>
+            <p class="font-bold text-slate-700 dark:text-slate-200">${isRTL ? 'أكمل تسجيل الدخول في المتصفح' : 'Finish signing in in the browser'}</p>
+            <p class="mt-2 text-xs text-slate-500 dark:text-slate-400">${isRTL
+              ? 'سيعيدك المتصفح إلى التطبيق تلقائياً بعد تسجيل الدخول.'
+              : 'The browser will bring you back to the app automatically after you sign in.'}</p>
+            <button type="button" onclick="startAppBrowserLogin()" class="mt-5 w-full min-h-12 btn-shine alb-btn-primary text-white font-extrabold py-3 rounded-xl transition-all">
+              ${isRTL ? 'فتح المتصفح مرة أخرى' : 'Open the browser again'}
+            </button>
+            <button type="button" onclick="cancelAppBrowserLogin()" class="mt-3 w-full min-h-11 rounded-xl px-4 py-2 font-bold text-slate-500 hover:text-slate-700 dark:text-slate-300">
+              ${isRTL ? 'إلغاء' : 'Cancel'}
+            </button>
+          </div>`;
+  } else {
+    bodyHTML = `
+          <button type="button" onclick="startAppBrowserLogin()" class="w-full min-h-12 btn-shine alb-btn-primary text-white font-extrabold py-3 rounded-xl transition-all flex items-center justify-center gap-2">
+            <i data-lucide="log-in" class="w-5 h-5"></i>
+            <span>${isRTL ? 'تسجيل الدخول' : 'Sign in'}</span>
+          </button>
+          <p class="mt-3 text-xs text-slate-500 dark:text-slate-400 text-center leading-5">${isRTL
+            ? 'يفتح المتصفح لتسجيل الدخول بأمان — كلمات المرور المحفوظة ومفاتيح المرور تعمل هناك.'
+            : 'Opens your browser to sign in securely — saved passwords and passkeys work there.'}</p>
+          <button type="button" onclick="nativeLoginUseForm()" class="mt-4 text-xs text-slate-400 alb-hover-brand mx-auto block min-h-11">
+            ${isRTL ? 'تسجيل الدخول داخل التطبيق بدلاً من ذلك' : 'Sign in inside the app instead'}
+          </button>`;
+  }
+
+  return `
+    <div class="min-h-screen flex items-center justify-center p-4">
+      <div class="w-full max-w-md">
+        <div class="glass-panel w-full p-8 rounded-3xl animate-fade-in-up">
+          ${_renderLoginBrandHeader(t('signInTitle'))}
+          ${bannersHTML}
+          ${bodyHTML}
+          <button onclick="toggleLanguage()" class="mt-5 text-xs text-slate-400 alb-hover-brand mx-auto block min-h-11">${state.language === 'en' ? 'العربية' : 'English'}</button>
+          ${renderLoginFooterLinks(isRTL)}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function renderLogin() {
   const isRTL = state.language === 'ar';
+  // SYSTEM-BROWSER APP LOGIN, web side: after a successful handoff the tab
+  // shows "return to the app" — keep showing it through any stray re-render
+  // instead of dropping the user back onto a login form.
+  if (window.__albayanAppLoginReturn && typeof _renderAppLoginReturnHTML === 'function') {
+    return _renderAppLoginReturnHTML();
+  }
   const passkeySupported = !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext);
   // Insecure origins (plain http:// on a LAN IP) hide crypto.subtle and
   // clipboard/passkey APIs. Login still works via the pure-JS crypto fallback
@@ -869,6 +959,16 @@ function renderLogin() {
     : (isRTL ? 'Passkey يتطلب HTTPS أو localhost. افتح التطبيق عبر localhost لاستخدامه.' : 'Passkeys require HTTPS or localhost. Open the app via localhost to use it.');
 
   const bannersHTML = _renderLoginBanners(isRTL, webCryptoOk);
+
+  // SYSTEM-BROWSER APP LOGIN, native side (Sabil-style): the packaged app
+  // signs in through the phone's real browser by default — passkeys and
+  // saved passwords work there. The classic in-app form stays one explicit
+  // tap away as a fallback (nativeLoginUseForm).
+  if (typeof isSystemBrowserLoginEnabled === 'function' && isSystemBrowserLoginEnabled()
+      && (typeof _nativeLoginMode === 'undefined' || _nativeLoginMode !== 'form')) {
+    return renderNativeAppLogin(bannersHTML, isRTL);
+  }
+
   const savedAccounts = getSavedLoginAccounts();
   // A prefilled account that was removed meanwhile falls back to the plain form.
   const prefillAccount = _loginPrefillEmail
@@ -955,6 +1055,11 @@ function renderLogin() {
           <div class="mt-2 text-[11px] text-slate-400 text-center">
             ${passkeyHint}
           </div>
+          ${(typeof isSystemBrowserLoginEnabled === 'function' && isSystemBrowserLoginEnabled()) ? `
+          <button type="button" onclick="nativeLoginUseBrowser()" class="mt-3 text-xs font-bold alb-link mx-auto block min-h-11">
+            ${isRTL ? 'تسجيل الدخول عبر المتصفح (مستحسن)' : 'Sign in with the browser (recommended)'}
+          </button>
+          ` : ''}
           ${savedAccounts.length > 0 ? `
           <button type="button" onclick="loginShowAccountChooser()" class="mt-3 text-xs text-slate-400 alb-hover-brand mx-auto block min-h-11">
             ${isRTL ? 'لست أنت؟ إدارة الحسابات المحفوظة' : 'Not you? Manage saved accounts'}

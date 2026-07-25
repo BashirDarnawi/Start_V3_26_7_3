@@ -352,6 +352,15 @@ async function setupMobileRuntime() {
       }
     }
   }
+
+  // SYSTEM-BROWSER APP LOGIN (Phase 2): listen for the albayan://auth deep
+  // link that brings a finished browser sign-in back into the packaged app
+  // (Capacitor-only; the function guards itself).
+  if (typeof setupAppLoginDeepLinks === 'function') {
+    setupAppLoginDeepLinks().catch((error) => {
+      console.warn('[MobileRuntime] App-login deep links unavailable:', error?.message || error);
+    });
+  }
 }
 
 // ==========================================
