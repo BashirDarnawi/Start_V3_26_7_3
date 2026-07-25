@@ -2530,6 +2530,13 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                       </div>
                     </div>
                   </div>
+                  ${(stats.receiptDebtUSD > 0.005 || stats.receiptDebtLYD > 0.005) ? `
+                  <!-- Uncommitted Not Paid receipt debt (already inside Balance; Spent stays ads-only) -->
+                  <div class="mt-2 flex items-center justify-between gap-2 text-[11px] font-bold text-rose-600 dark:text-rose-400">
+                    <span class="inline-flex items-center gap-1"><i data-lucide="receipt" class="w-3 h-3"></i>${isAr ? 'دين وصولات غير مدفوعة' : 'Unpaid receipt debt'}</span>
+                    <span dir="ltr">${stats.receiptDebtLYD.toFixed(0)} LYD · $${stats.receiptDebtUSD.toFixed(2)}</span>
+                  </div>
+                  ` : ''}
                 </div>
                 `}
               </div>

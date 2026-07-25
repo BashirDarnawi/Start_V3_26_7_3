@@ -370,6 +370,121 @@ async function main() {
     assert(near(after.balanceUSD, 0), `paying the second receipt should clear the debt, got ${usd(after.balanceUSD)}`);
   });
 
+  console.log('\n--- CUSTOMER AGGREGATION: standalone unpaid-receipt debt (getCustomerStats.receiptDebt*) ---');
+
+  await must('C1. a standalone Not Paid delivery receipt with NO ads is customer debt (Mo Zilzal shape)', () => {
+    resetState();
+    // Production shape: D12(Temp), Not Paid, delivery debt, $26.59 / 252.50 LYD,
+    // zero linked ads. The receipts view says "Customer debt"; the customer
+    // card/filter/header must agree instead of showing 0/0/+0.
+    S.receipts.push({
+      id: 'receipt_c1', recordType: 'receipt', customerId: 'c1',
+      tempReceiptNo: 'D12', amountUSD: 26.59, amountLocal: 252.50, exchangeRate: 9.5,
+      status: 'Not Paid', isPaid: false, deliveryStatus: 'Needs Delivery',
+      statusDetail: { notPaidCollection: 'delivery' }, payments: [], transfers: []
+    });
+
+    const stats = getCustomerStats('c1');
+    assert(near(stats.totalPaidUSD, 0) && near(stats.totalSpentUSD, 0), 'a receipt with no ads minted paid credit or ad spend');
+    assert(near(stats.receiptDebtUSD, 26.59), `capacity 26.59, committed 0 -> receipt debt $26.59, got ${usd(stats.receiptDebtUSD)}`);
+    assert(near(stats.receiptDebtLYD, 252.50), `the stored 252.50 LYD must be preserved exactly, got ${stats.receiptDebtLYD}`);
+    assert(near(stats.balanceUSD, -26.59), `balance must show the debt, got ${usd(stats.balanceUSD)}`);
+    assert(near(stats.balanceLYD, -252.50), `LYD balance must show the debt, got ${stats.balanceLYD}`);
+    assert(near(stats.balance, -252.50), 'legacy balance must carry the same debt for filters/sorts/header');
+
+    // The "Has debt" quick filter and the Outstanding Debts header both read
+    // balance < 0 — the customer must now be visible to them.
+    S.customerSearch = '';
+    S.customerSort = 'newest';
+    S.customerFinancialFilter = 'hasDebt';
+    const filtered = sandbox.getFilteredCustomers();
+    assert(filtered.some(c => String(c.id) === 'c1'), 'the debtor is still invisible to the Has debt filter');
+    S.customerFinancialFilter = 'all';
+
+    // Canceled/Lost receipts stay excluded exactly as getReceiptDebtType says.
+    S.receipts[0].deliveryStatus = 'Canceled';
+    const released = getCustomerStats('c1');
+    assert(near(released.receiptDebtUSD, 0) && near(released.balanceUSD, 0),
+      'a canceled delivery mission must release the debt from the customer totals');
+    S.receipts[0].deliveryStatus = 'Needs Delivery';
+  });
+
+  await must('C2. a $9 unpaid In-Shop receipt fully backing a $9 unpaid ad stays ONE $9 debt, not $18', () => {
+    resetState();
+    S.defaultExchangeRate = 9.7;
+    const r = {
+      id: 'receipt_c2', recordType: 'receipt', customerId: 'c1',
+      amountUSD: 9, amountLocal: 87.3, exchangeRate: 9.7,
+      status: 'Not Paid', isPaid: false, deliveryStatus: 'Office',
+      statusDetail: { notPaidCollection: 'office' }, payments: [], transfers: []
+    };
+    S.receipts.push(r);
+    makeAd({
+      id: 'ad_c2', amountUSD: 9, amountLocal: 87.3, spentUSD: 9,
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'in_shop',
+      receiptId: r.id, receiptAllocations: [],
+      dueAllocations: [{ receiptId: r.id, amountUSD: 9 }], dueAmountToUseUSD: 9
+    });
+
+    const stats = getCustomerStats('c1');
+    assert(near(stats.totalSpentUSD, 9), `the ad side must carry the $9, got ${usd(stats.totalSpentUSD)}`);
+    assert(near(stats.receiptDebtUSD, 0), `committed 9 of 9 -> +$0 from the receipt, got ${usd(stats.receiptDebtUSD)}`);
+    assert(near(stats.balanceUSD, -9), `total debt must stay $9, not $18: got ${usd(stats.balanceUSD)}`);
+    assert(near(stats.balanceLYD, -87.3), `total LYD debt must stay 87.30, got ${stats.balanceLYD}`);
+  });
+
+  await must('C3. after the backed ad stops at $1.24 the receipt re-carries the uncommitted $7.76', () => {
+    resetState();
+    S.defaultExchangeRate = 9.7;
+    const r = {
+      id: 'receipt_c3', recordType: 'receipt', customerId: 'c1',
+      amountUSD: 9, amountLocal: 87.3, exchangeRate: 9.7,
+      status: 'Not Paid', isPaid: false, deliveryStatus: 'Office',
+      statusDetail: { notPaidCollection: 'office' }, payments: [], transfers: []
+    };
+    S.receipts.push(r);
+    // Exactly the record shape the stop flow leaves behind: status Stopped,
+    // spentUSD = real spend, the due row shrunk proportionally and the legacy
+    // mirror kept in sync (scripts/../src/16-actions-io.js stopAd/_applyPlan).
+    makeAd({
+      id: 'ad_c3', amountUSD: 9, amountLocal: 87.3, spentUSD: 1.24, status: 'Stopped',
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'in_shop',
+      receiptId: r.id, receiptAllocations: [],
+      dueAllocations: [{ receiptId: r.id, amountUSD: 1.24 }], dueAmountToUseUSD: 1.24
+    });
+
+    const stats = getCustomerStats('c1');
+    assert(near(stats.totalSpentUSD, 1.24), `stopped ad spend must be $1.24, got ${usd(stats.totalSpentUSD)}`);
+    assert(near(stats.receiptDebtUSD, 7.76), `capacity 9 - committed 1.24 -> +$7.76 from the receipt, got ${usd(stats.receiptDebtUSD)}`);
+    assert(near(stats.balanceUSD, -9), `ad -1.24 plus receipt -7.76 must total exactly -$9.00, got ${usd(stats.balanceUSD)}`);
+  });
+
+  await must('C4. a zero-value D receipt with ad-derived debt adds NOTHING (the ads carry it all)', () => {
+    resetState();
+    const r = {
+      id: 'receipt_c4', recordType: 'receipt', customerId: 'c1',
+      tempReceiptNo: 'D13', amountUSD: 0, amountLocal: 0, exchangeRate: 9.7,
+      status: 'Not Paid', isPaid: false, deliveryStatus: 'Needs Delivery',
+      statusDetail: { notPaidCollection: 'delivery' }, payments: [], transfers: []
+    };
+    S.receipts.push(r);
+    makeAd({
+      id: 'ad_c4', amountUSD: 50, spentUSD: 50,
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'driver',
+      linkedDeliveryReceiptId: r.id, receiptId: r.id,
+      receiptAllocations: [], dueAllocations: []
+    });
+
+    const target = sandbox.getReceiptCollectionTarget(r);
+    assert(target.source === 'linked_ads' && near(target.debtUSD, 50),
+      `pre-condition: the receipt derives its $50 debt from the linked ad (source ${target.source})`);
+
+    const stats = getCustomerStats('c1');
+    assert(near(stats.totalSpentUSD, 50), `the unpaid ad must carry the $50, got ${usd(stats.totalSpentUSD)}`);
+    assert(near(stats.receiptDebtUSD, 0), `a linked_ads receipt must add $0, got ${usd(stats.receiptDebtUSD)}`);
+    assert(near(stats.balanceUSD, -50), `total debt must stay $50, not $100: got ${usd(stats.balanceUSD)}`);
+  });
+
   await must('A1. an ad funded $30 from a $100 paid receipt consumes exactly $30', () => {
     resetState();
     const r = paidReceipt('receipt_a1', 100);

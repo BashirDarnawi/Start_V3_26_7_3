@@ -14736,6 +14736,13 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                       </div>
                     </div>
                   </div>
+                  ${(stats.receiptDebtUSD > 0.005 || stats.receiptDebtLYD > 0.005) ? `
+                  <!-- Uncommitted Not Paid receipt debt (already inside Balance; Spent stays ads-only) -->
+                  <div class="mt-2 flex items-center justify-between gap-2 text-[11px] font-bold text-rose-600 dark:text-rose-400">
+                    <span class="inline-flex items-center gap-1"><i data-lucide="receipt" class="w-3 h-3"></i>${isAr ? 'دين وصولات غير مدفوعة' : 'Unpaid receipt debt'}</span>
+                    <span dir="ltr">${stats.receiptDebtLYD.toFixed(0)} LYD · $${stats.receiptDebtUSD.toFixed(2)}</span>
+                  </div>
+                  ` : ''}
                 </div>
                 `}
               </div>
@@ -19717,9 +19724,40 @@ function getCustomerStats(customerId, statsIndex = null) {
     totalSpentLYD = customerAds.reduce((sum, ad) => sum + getAdSpendLYD(ad), 0);
   }
   
-  // Calculate balance (paid - spent)
-  const balanceLYD = totalPaidLYD - totalSpentLYD;
-  const balanceUSD = totalPaidUSD - totalSpentUSD;
+  // Standalone unpaid-receipt debt. Paid comes only from paid receipts and
+  // Spent only from ads, so a Not Paid receipt whose promised money is not
+  // committed to any ad (a plain delivery/in-shop debt) appeared in NO
+  // customer total: the card showed 0/0/+0 while the receipts view showed
+  // "Customer debt", and the "Has debt" filter missed the customer. Count the
+  // UNCOMMITTED remainder of each debt receipt exactly once:
+  //  - getReceiptCollectionTarget is the shared capacity read model
+  //    (stored debt -> receipt amounts -> linked-ads derivation);
+  //  - a 'linked_ads' target lives entirely on unpaid ads already counted in
+  //    Spent above, so the receipt itself must contribute nothing;
+  //  - money committed to ads from this receipt's due pool
+  //    (getDeliveryReceiptDueUsage.usedDueUSD) also surfaces as ad spend, so
+  //    only the remainder may be added — the same dollars never count twice.
+  let receiptDebtUSD = 0;
+  let receiptDebtLYD = 0;
+  customerReceipts.forEach(receipt => {
+    if (getReceiptDebtType(receipt) === 'none') return;
+    const target = getReceiptCollectionTarget(receipt);
+    if (target.source === 'linked_ads' || !(target.debtUSD > 0)) return;
+    const committedUSD = getDeliveryReceiptDueUsage(receipt).usedDueUSD || 0;
+    const uncommittedUSD = Math.max(target.debtUSD - committedUSD, 0);
+    if (uncommittedUSD <= 0) return;
+    receiptDebtUSD += uncommittedUSD;
+    // debtLYD/debtUSD is the receipt's own rate (exchangeRate with the
+    // defaultExchangeRate fallback, as normalized by the read model); scaling
+    // by it preserves the stored LYD figure exactly when nothing is committed.
+    receiptDebtLYD += target.debtLYD * (uncommittedUSD / target.debtUSD);
+  });
+  receiptDebtUSD = Math.round(receiptDebtUSD * 100) / 100;
+  receiptDebtLYD = Math.round(receiptDebtLYD * 100) / 100;
+
+  // Calculate balance (paid - spent - uncommitted receipt debt)
+  const balanceLYD = totalPaidLYD - totalSpentLYD - receiptDebtLYD;
+  const balanceUSD = totalPaidUSD - totalSpentUSD - receiptDebtUSD;
   
   // Legacy balance (for backwards compatibility)
   const totalSpent = totalSpentLYD;
@@ -19745,6 +19783,9 @@ function getCustomerStats(customerId, statsIndex = null) {
     totalSpentUSD,
     totalPaidUSD,
     balanceUSD,
+    // Uncommitted Not Paid receipt debt (already subtracted from the balances)
+    receiptDebtUSD,
+    receiptDebtLYD,
     // Other stats
     lastAdDate,
     totalAds: customerAds.length,

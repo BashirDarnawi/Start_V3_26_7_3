@@ -2180,8 +2180,13 @@ check('positive unpaid driver budget appears as negative customer balance withou
   const stats = sandbox.getCustomerStats('customer_debt');
   assert(stats.totalPaidUSD === 0, `unpaid delivery reference counted as paid: $${stats.totalPaidUSD}`);
   assert(stats.totalSpentUSD === 40, `positive ad budget should count as $40 spent, got $${stats.totalSpentUSD}`);
-  assert(stats.balanceUSD === -40, `customer debt should be -$40, got $${stats.balanceUSD}`);
-  assert(stats.balanceLYD === -380, `customer debt should be -380 LYD, got ${stats.balanceLYD}`);
+  // The linked D receipt commits NONE of its promised $100 to the ad
+  // (dueAmountToUseUSD 0, empty due rows), so it is a SEPARATE customer debt:
+  // $40 unfunded ad budget + $100 uncommitted delivery promise = $140.
+  assert(stats.receiptDebtUSD === 100, `uncommitted delivery promise should be $100 of receipt debt, got $${stats.receiptDebtUSD}`);
+  assert(stats.receiptDebtLYD === 950, `uncommitted delivery promise should be 950 LYD of receipt debt, got ${stats.receiptDebtLYD}`);
+  assert(stats.balanceUSD === -140, `customer debt should be -$140 (ad $40 + receipt $100), got $${stats.balanceUSD}`);
+  assert(stats.balanceLYD === -1330, `customer debt should be -1330 LYD (ad 380 + receipt 950), got ${stats.balanceLYD}`);
 
   const due = sandbox.getDeliveryReceiptDueUsage('delivery_reference');
   assert(due.usedDueUSD === 0, `link-only driver ad consumed $${due.usedDueUSD} of receipt credit`);
@@ -2372,6 +2377,9 @@ check('unpaid shop receipt + linked ad is minus until receipt becomes Paid', () 
     const before = sandbox.getCustomerStats('shop_debt_customer');
     assert(before.totalPaidUSD === 0, `unpaid receipt counted as paid: $${before.totalPaidUSD}`);
     assert(before.totalSpentUSD === 30, `shop ad spend should be $30, got $${before.totalSpentUSD}`);
+    // The receipt's $30 promise is fully committed to the ad, so the receipt
+    // itself may add NO extra debt (the ad's spend already carries it).
+    assert(before.receiptDebtUSD === 0, `fully committed shop receipt double-counted: $${before.receiptDebtUSD}`);
     assert(before.balanceUSD === -30, `shop debt should be -$30, got $${before.balanceUSD}`);
     assert(before.balanceLYD === -291, `shop debt should be -291 LYD, got ${before.balanceLYD}`);
     const dueBefore = sandbox.getDeliveryReceiptDueUsage(receipt);
