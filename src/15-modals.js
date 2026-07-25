@@ -107,6 +107,52 @@ function selectCustomerMergeDuplicate(customerId) {
   renderModal();
 }
 
+// Prepare a detached history update. Never push into the live ad's array:
+// a conflict or failed server request must not leave a ghost edit in state.
+function buildAdEditHistoryUpdates(oldAd, changes, editorName = state.currentUser?.name || 'Unknown', editedAt = new Date().toISOString()) {
+  const editHistory = Array.isArray(oldAd?.editHistory)
+    ? oldAd.editHistory.map(entry => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return entry;
+        return {
+          ...entry,
+          changes: Array.isArray(entry.changes)
+            ? entry.changes.map(change => (
+                change && typeof change === 'object' && !Array.isArray(change)
+                  ? { ...change }
+                  : change
+              ))
+            : entry.changes
+        };
+      })
+    : [];
+  const detachedChanges = Array.isArray(changes)
+    ? changes
+        .filter(change => change && typeof change === 'object' && !Array.isArray(change))
+        .map(change => ({ ...change }))
+    : [];
+
+  if (detachedChanges.length === 0) {
+    const storedCount = Number(oldAd?.editCount);
+    return {
+      editHistory,
+      editCount: editHistory.length || (
+        Number.isSafeInteger(storedCount) && storedCount > 0 ? storedCount : 0
+      )
+    };
+  }
+
+  editHistory.push({
+    editedAt,
+    editedBy: String(editorName || 'Unknown'),
+    changes: detachedChanges
+  });
+  return {
+    editHistory,
+    editCount: editHistory.length,
+    updatedAt: editedAt
+  };
+}
+
 function renderModal() {
   const existingModal = document.getElementById('app-modal');
   const previousCustomerMergeFocusId = existingModal && state.activeModal === 'customer-merge'
@@ -336,6 +382,7 @@ function renderModal() {
       // creator, so it gracefully falls back to the "USER" badge.
       const creatorIsAdmin = isAdminRole(adCreator?.role);
       const isArAd = state.language === 'ar';
+      const adHistoryCount = getAdEditHistoryCount(adData);
       const adPaymentState = getAdPaymentState(adData);
       const hasLinkedShopReceipt = adPaymentState === 'not_paid'
         && adData.collectionMethod === 'in_shop'
@@ -371,8 +418,8 @@ function renderModal() {
         <div class="flex flex-col h-full max-h-[85vh]">
           <!-- FIXED HEADER -->
           <div class="flex-shrink-0 flex items-center justify-between pb-4 border-b border-slate-200 dark:border-slate-700">
-            <div class="flex items-center space-x-3">
-              <span class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg">
+            <div class="min-w-0 flex items-center space-x-3">
+              <span class="w-10 h-10 shrink-0 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg">
                 <i data-lucide="megaphone" class="w-5 h-5 text-white"></i>
               </span>
               <div>
@@ -380,9 +427,18 @@ function renderModal() {
                 <p class="text-slate-400 text-xs">${isArAd ? 'املأ جميع الأقسام أدناه' : 'Fill all sections below'}</p>
               </div>
             </div>
-            <button type="button" onclick="closeModal()" class="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-rose-100 hover:text-rose-600 transition-colors">
-              <i data-lucide="x" class="w-4 h-4"></i>
-            </button>
+            <div class="flex shrink-0 items-center gap-2">
+              ${isEdit ? `
+                <button type="button" data-action="view-ad-edit-history" data-ad-id="${Security.escapeHtml(String(adData.id || ''))}" onclick="showAdEditHistory(this.dataset.adId)" class="min-h-11 inline-flex items-center justify-center gap-1.5 rounded-xl border border-purple-200 dark:border-purple-800 bg-purple-50 dark:bg-purple-900/20 px-3 text-xs font-bold text-purple-700 dark:text-purple-300 hover:bg-purple-100 dark:hover:bg-purple-900/40 focus:outline-none focus:ring-2 focus:ring-purple-500" title="${isArAd ? 'عرض سجل تعديلات الإعلان' : 'View ad edit history'}" aria-label="${isArAd ? `عرض سجل تعديلات الإعلان، ${adHistoryCount}` : `View ad edit history, ${adHistoryCount} edits`}">
+                  <i data-lucide="history" class="w-4 h-4 shrink-0"></i>
+                  <span class="hidden sm:inline">${isArAd ? 'السجل' : 'History'}</span>
+                  <span class="min-w-5 rounded-full bg-purple-600 px-1.5 py-0.5 text-center text-[10px] leading-none text-white">${adHistoryCount}</span>
+                </button>
+              ` : ''}
+              <button type="button" onclick="closeModal()" class="min-h-11 min-w-11 rounded-full bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-rose-100 hover:text-rose-600 transition-colors" aria-label="${isArAd ? 'إغلاق' : 'Close'}">
+                <i data-lucide="x" class="w-4 h-4"></i>
+              </button>
+            </div>
           </div>
 
           <!-- SCROLLABLE FORM BODY -->
@@ -966,8 +1022,7 @@ function renderModal() {
       const receiptCustomers = getCustomersVisibleToCurrentUser();
       const receiptData = state.modalData || {};
       const isAdminReceipt = isCurrentUserAdmin();
-      const defaultRate1 = getDefaultRate1(PAYMENT_METHODS[0]);
-      const existingPayments = receiptData.payments || [{ method: PAYMENT_METHODS[0], amount: 0, rate: defaultRate1, rate2: state.defaultExchangeRate, collectionType: 'office', deliveryPersonId: '' }];
+      const existingPayments = getReceiptFormPayments(receiptData);
       const receiptDeliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
       const isArR = state.language === 'ar';
       // Copy (not alias) the live record's photos so add/remove in the modal
@@ -2845,16 +2900,22 @@ async function handleModalSubmit() {
         amountUSD = totals.totalR2;
       }
       
-      // #ad-rate does NOT exist in the ad modal template — reading it always
-      // fell through to the CURRENT global default, so every save silently
-      // rewrote a saved ad's exchangeRate (and any LYD figure derived from it)
-      // with today's market rate instead of the rate the ad was created at.
-      // Keep the ad's own stored rate on edit; use the default only for a new ad.
-      let exchangeRate = parseFloat(
-        (isEdit && Number.isFinite(Number(state.modalData?.exchangeRate)) && Number(state.modalData.exchangeRate) > 0)
-          ? state.modalData.exchangeRate
-          : state.defaultExchangeRate
-      );
+      // A Driver debt uses the linked receipt's rate. Other flows preserve the
+      // saved ad rate on edit and use the current default only for a new ad.
+      const linkedDriverReceipt = isUnpaidDriver && selectedUnpaidReceiptId
+        ? state.receipts.find(receipt => (
+            receipt
+            && !receipt._deleted
+            && String(receipt.id || '') === selectedUnpaidReceiptId
+          ))
+        : null;
+      let exchangeRate = resolveAdExchangeRateForSave({
+        isEdit,
+        ad: state.modalData,
+        isUnpaidDriver,
+        linkedReceipt: linkedDriverReceipt,
+        driverBudgetRate: document.getElementById('ad-driver-budget-rate')?.value
+      });
       const isPaid = paymentStatus === 'paid';
       // These three inputs do NOT exist in the ad modal template. Reading them
       // always yielded false/undefined, which on EDIT erased spentUSD /
@@ -3262,7 +3323,7 @@ async function handleModalSubmit() {
         pageId: pageId,
         amountUSD,
         exchangeRate,
-        amountLocal: amountUSD * exchangeRate,
+        amountLocal: adAmountLocalForSave(amountUSD, exchangeRate),
         paymentMethod: (isPaid ? '' : (collectionPayments[0]?.method || '')) || '',
         status: state.modalData?.status || 'Active',
         // If Not Paid + Driver AND linked to a temp delivery receipt, the delivery is tracked on the receipt (not on the ad),
@@ -3481,21 +3542,10 @@ async function handleModalSubmit() {
           });
         }
         
-        // Add to edit history if there are changes
-        if (changes.length > 0) {
-          const editHistory = oldAd.editHistory || [];
-          editHistory.push({
-            editedAt: new Date().toISOString(),
-            editedBy: state.currentUser?.name || 'Unknown',
-            changes: changes
-          });
-          adUpdates.editHistory = editHistory;
-          adUpdates.editCount = editHistory.length;
-          adUpdates.updatedAt = new Date().toISOString();
-        } else {
-          adUpdates.editHistory = oldAd.editHistory || [];
-          adUpdates.editCount = oldAd.editCount || 0;
-        }
+        // Work on a detached history copy. The live record changes only after
+        // the save succeeds, so a rejected/conflicted edit cannot create a
+        // false history row or duplicate it on retry.
+        Object.assign(adUpdates, buildAdEditHistoryUpdates(oldAd, changes));
         
         if (isServerModeEnabled()) {
           const expectedLastModified = Number(oldAd?._lastModified);

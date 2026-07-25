@@ -597,10 +597,29 @@ function getLinkedPagesForCustomer(customerId) {
   );
 }
 
-// Prefer the exact historical rate recorded by amountLocal/amountUSD. This is
-// more reliable than today's default and remains correct if exchange rates are
-// changed later. The shared resolver covers receipt-funded ads and legacy data.
+// Linked unpaid debt uses its receipt as the authoritative rate. Otherwise,
+// prefer the exact historical rate recorded by amountLocal/amountUSD: it is
+// more reliable than today's default for independent or already-paid ads.
 function getAdSpendExchangeRate(ad) {
+  // For an unpaid Driver/In-Shop ad, its linked debt receipt is the currency
+  // source of truth. This order also repairs historical rows immediately after
+  // an admin corrects the receipt from (for example) 9.50 to 9.70, instead of
+  // leaving the customer card, receipt card and Ads table disagreeing forever.
+  const paymentState = getAdPaymentState(ad);
+  const collectionMethod = String(ad?.collectionMethod || '');
+  if (paymentState === 'not_paid' && ['driver', 'in_shop'].includes(collectionMethod)) {
+    const linkedReceiptId = collectionMethod === 'driver'
+      ? String(ad?.linkedDeliveryReceiptId || ad?.receiptId || '')
+      : String(ad?.receiptId || '');
+    const linkedReceipt = linkedReceiptId
+      ? (state.receipts || []).find(receipt => (
+          receipt && !receipt._deleted && String(receipt.id || '') === linkedReceiptId
+        ))
+      : null;
+    const linkedRate = Number(linkedReceipt?.exchangeRate);
+    if (Number.isFinite(linkedRate) && linkedRate > 0) return linkedRate;
+  }
+
   const amountUSD = Number(ad?.amountUSD);
   const amountLocal = Number(ad?.amountLocal);
   if (Number.isFinite(amountUSD) && amountUSD > 0 && Number.isFinite(amountLocal) && amountLocal > 0) {
@@ -618,7 +637,106 @@ function getAdSpendExchangeRate(ad) {
 }
 
 function getAdSpendLYD(ad) {
-  return getAdSpendUSD(ad) * getAdSpendExchangeRate(ad);
+  return Math.round(getAdSpendUSD(ad) * getAdSpendExchangeRate(ad) * 100) / 100;
+}
+
+// One read model for the amount a Not Paid receipt represents. Most receipts
+// store that amount directly, but historical/manual Driver flows can create a
+// zero-value D receipt and keep the real customer debt on its linked ad. That
+// link is a collection target only: it must NEVER become paid receipt credit
+// or receipt usage (getReceiptUsageStats deliberately remains unchanged).
+function getReceiptCollectionTarget(receipt, ads = state.ads) {
+  const empty = {
+    amountUSD: 0,
+    amountLocal: 0,
+    debtUSD: 0,
+    debtLYD: 0,
+    source: 'none',
+    linkedAds: []
+  };
+  if (!receipt || receipt._deleted) return empty;
+
+  const rateValue = Number(receipt.exchangeRate || state.defaultExchangeRate || 0);
+  const receiptRate = Number.isFinite(rateValue) && rateValue > 0 ? rateValue : 0;
+  const positive = value => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  };
+  const finish = (usd, local, source, linkedAds = []) => {
+    let amountUSD = positive(usd);
+    let amountLocal = positive(local);
+    if (!amountUSD && amountLocal && receiptRate) amountUSD = amountLocal / receiptRate;
+    if (!amountLocal && amountUSD && receiptRate) amountLocal = amountUSD * receiptRate;
+    amountUSD = Math.round(amountUSD * 100) / 100;
+    amountLocal = Math.round(amountLocal * 100) / 100;
+    return {
+      amountUSD,
+      amountLocal,
+      debtUSD: amountUSD,
+      debtLYD: amountLocal,
+      source,
+      linkedAds
+    };
+  };
+
+  // Explicit frozen debt is authoritative after a delivery is completed.
+  const storedDebtUSD = positive(receipt.debtAmountUSD);
+  const storedDebtLocal = positive(receipt.debtAmountLocal);
+  if (storedDebtUSD || storedDebtLocal) {
+    return finish(storedDebtUSD, storedDebtLocal, 'stored_debt');
+  }
+
+  // Current receipts normally store the promised amount in their own amount
+  // fields. Legacy aliases are accepted at read time without rewriting data.
+  const storedAmountUSD = positive(receipt.amountUSD) || positive(receipt.amount);
+  const storedAmountLocal = positive(receipt.amountLocal) || positive(receipt.amountLYD);
+  if (storedAmountUSD || storedAmountLocal) {
+    return finish(storedAmountUSD, storedAmountLocal, 'receipt_amount');
+  }
+
+  // Only a current unpaid Driver receipt may derive a missing target from ads.
+  // In-Shop receipts already carry an explicit receipt amount. Paid/cancelled
+  // receipts and historical stop/refund baselines are intentionally excluded.
+  if (getReceiptDebtType(receipt) !== 'delivery') return empty;
+  const receiptId = String(receipt.id || '');
+  const customerId = String(receipt.customerId || '');
+  if (!receiptId || !customerId) return empty;
+
+  let amountUSD = 0;
+  let amountLocal = 0;
+  const linkedAds = [];
+  for (const ad of getVisibleRecords(Array.isArray(ads) ? ads : [])) {
+    if (!ad || ad._deleted || String(ad.recordType || '') === 'receipt') continue;
+    if (String(ad.customerId || ad.customer || '') !== customerId) continue;
+    if (getAdPaymentState(ad) !== 'not_paid' || String(ad.collectionMethod || '') !== 'driver') continue;
+
+    const linkedId = String(ad.linkedDeliveryReceiptId || '');
+    const legacyLinkedId = !linkedId ? String(ad.receiptId || '') : '';
+    if (linkedId !== receiptId && legacyLinkedId !== receiptId) continue;
+
+    const spendUSD = Math.max(getAdSpendUSD(ad), 0);
+    const paidRows = Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length
+      ? ad.receiptAllocations
+      : (Array.isArray(ad.mergedPaidAllocations) ? ad.mergedPaidAllocations : []);
+    const paidUSD = paidRows.reduce(
+      (sum, row) => sum + Math.max(Number(row?.amountUSD) || 0, 0),
+      0
+    );
+    const debtUSD = Math.max(spendUSD - paidUSD, 0);
+    if (debtUSD <= 0) continue;
+
+    const adRate = getAdSpendExchangeRate(ad);
+    amountUSD += debtUSD;
+    amountLocal += debtUSD * adRate;
+    linkedAds.push(ad);
+  }
+
+  return finish(amountUSD, amountLocal, linkedAds.length ? 'linked_ads' : 'none', linkedAds);
+}
+
+// Backward-readable name for receipt-card and reporting call sites.
+function getReceiptLinkedDebtStats(receipt, ads = state.ads) {
+  return getReceiptCollectionTarget(receipt, ads);
 }
 
 // One authoritative, customer-scoped summary for the Customers drill-down.
@@ -1949,9 +2067,9 @@ function buildDeliveryReceiptWhatsAppMessage(receipt) {
   const driverName = _whatsAppShareField(driver?.name || '—', 160);
   const instructions = _whatsAppShareField(receipt.deliveryInstructions || '—', 500);
   const creatorName = _whatsAppShareField(getKnownUserNameById(creatorId) || String(receipt.createdByName || '').trim() || state.currentUser?.name || '—', 160);
-  const debtUSD = Number(receipt.debtAmountUSD ?? receipt.amountUSD ?? 0) || 0;
-  const fxRate = Number(receipt.exchangeRate || state.defaultExchangeRate || 0) || 0;
-  const debtLocal = Number(receipt.debtAmountLocal ?? receipt.amountLocal ?? (debtUSD * fxRate)) || 0;
+  const collectionTarget = getReceiptCollectionTarget(receipt);
+  const debtUSD = collectionTarget.amountUSD;
+  const debtLocal = collectionTarget.amountLocal;
   const deliveryFee = Number(receipt.quotedDeliveryFee || 0) || 0;
   const money = `${debtLocal.toFixed(2)} LYD${debtUSD > 0 ? ` ($${debtUSD.toFixed(2)})` : ''}`;
 
@@ -2480,7 +2598,7 @@ function updateReceiptDeliveryCompletionComputed() {
   const receipt = _findReceiptForDeliveryModal(rid);
   if (!receipt) return;
 
-  const debt = Number(receipt.debtAmountLocal ?? receipt.amountLocal ?? 0) || 0;
+  const debt = getReceiptCollectionTarget(receipt).amountLocal;
   const quoted = Number(receipt.quotedDeliveryFee ?? 0) || 0;
 
   const finalNo = String(document.getElementById('delivery-final-receipt-no')?.value || '').trim();
@@ -2686,7 +2804,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
 
   const customer = state.customers.find(c => c && !c._deleted && String(c.id) === String(receipt.customerId));
   const phone = String(receipt.phoneNumber || customer?.phones?.[0] || '').trim();
-  const debt = Number(receipt.debtAmountLocal ?? receipt.amountLocal ?? 0) || 0;
+  const debt = getReceiptCollectionTarget(receipt).amountLocal;
   const quoted = Number(receipt.quotedDeliveryFee ?? 0) || 0;
   const tempNo = String(receipt.tempReceiptNo || '').trim();
   const finalNo = String(receipt.finalReceiptNo || receipt.serialNumber || '').trim();
@@ -2904,7 +3022,8 @@ async function submitReceiptDeliveryCompletion(receiptId) {
     return;
   }
 
-  const debtLocal = Number(receipt.debtAmountLocal ?? receipt.amountLocal ?? 0) || 0;
+  const collectionTarget = getReceiptCollectionTarget(receipt);
+  const debtLocal = collectionTarget.amountLocal;
   const quoted = Number(receipt.quotedDeliveryFee ?? 0) || 0;
   const debtCmp = compareDebt(debtLocal, collected);
   const feeCmp = compareFees(quoted, actualFee);
@@ -2942,7 +3061,7 @@ async function submitReceiptDeliveryCompletion(receiptId) {
     deliveryFeeCollected: actualFee,
     driverNotes: notes,
     debtAmountLocal: receipt.debtAmountLocal ?? debtLocal,
-    debtAmountUSD: receipt.debtAmountUSD ?? (Number(receipt.amountUSD || 0) || 0),
+    debtAmountUSD: receipt.debtAmountUSD ?? collectionTarget.amountUSD,
     paymentResult: debtCmp.paymentResult,
     overpaidAmount: debtCmp.overpaidAmount,
     remainingDue: debtCmp.remainingDue,
@@ -3326,10 +3445,16 @@ let _tempCollectPayments = [];   // [{ method, amount }] working list for the "N
 let _collectReceiptId = '';
 let _collectTargetLYD = 0;
 
+function _receiptCashCollectionTargetLocal(receipt) {
+  return getReceiptPaymentState(receipt) === 'not_paid'
+    ? getReceiptCollectionTarget(receipt).amountLocal
+    : (Number(receipt?.amountLocal) || 0);
+}
+
 // The receipt's own payment breakdown in LYD (used for the "Yes = same" path
 // and to seed the "No" editor). Each split's LYD value is amount × rate1.
 function _receiptCollectionBreakdown(receipt) {
-  const target = Number(receipt.amountLocal) || 0;
+  const target = _receiptCashCollectionTargetLocal(receipt);
   if (Array.isArray(receipt.payments) && receipt.payments.length) {
     return receipt.payments
       .map(p => ({ method: p.method || 'Cash (LYD)', amount: Math.round((Number(p.amount) || 0) * (Number(p.rate) || 1) * 100) / 100 }))
@@ -3343,7 +3468,7 @@ function openCollectReceiptModal(receiptId) {
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
   const isAr = state.language === 'ar';
-  const targetLYD = Number(receipt.amountLocal) || 0;
+  const targetLYD = _receiptCashCollectionTargetLocal(receipt);
   const serialTxt = receipt.serialNumber || receipt.tempReceiptNo || receipt.finalReceiptNo || receiptId.slice(0, 8);
   _collectReceiptId = receiptId;
   _collectTargetLYD = targetLYD;
@@ -3398,7 +3523,7 @@ async function collectReceiptSame(receiptId) {
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
   const breakdown = _receiptCollectionBreakdown(receipt);
-  await _saveReceiptCollection(receipt, breakdown, Number(receipt.amountLocal) || 0, true);
+  await _saveReceiptCollection(receipt, breakdown, _receiptCashCollectionTargetLocal(receipt), true);
 }
 
 // "No" — switch the modal to the payment-methods editor (like the ad form).
@@ -3480,7 +3605,7 @@ function collectReceiptCustomBack(receiptId) {
   const body = document.getElementById('collect-modal-body');
   if (receipt && body) {
     const serialTxt = receipt.serialNumber || receipt.tempReceiptNo || receipt.finalReceiptNo || receiptId.slice(0, 8);
-    body.innerHTML = _collectAskView(receiptId, receipt, state.language === 'ar', Number(receipt.amountLocal) || 0, serialTxt);
+    body.innerHTML = _collectAskView(receiptId, receipt, state.language === 'ar', _receiptCashCollectionTargetLocal(receipt), serialTxt);
     if (window.lucide) lucide.createIcons();
   }
 }
@@ -3503,7 +3628,7 @@ async function confirmCollectReceipt(receiptId) {
 // Shared save for both the "Yes" and "No" paths.
 async function _saveReceiptCollection(receipt, payments, totalLYD, matchesReceipt) {
   if (!_canMarkCollected()) return;
-  const targetLYD = Number(receipt.amountLocal) || 0;
+  const targetLYD = _receiptCashCollectionTargetLocal(receipt);
   const savedOk = await updateRecord(state.receipts, receipt.id, {
     collected: true,
     collectedAmount: totalLYD,
@@ -3856,87 +3981,155 @@ function showReceiptEditHistory(receiptId) {
   lucide.createIcons();
 }
 
+function _adEditHistoryText(value, fallback = '—') {
+  if (value === null || value === undefined) return fallback;
+  let text;
+  if (typeof value === 'object') {
+    try {
+      text = JSON.stringify(value);
+    } catch (_) {
+      text = String(value);
+    }
+  } else {
+    text = String(value);
+  }
+  text = String(text || '').trim();
+  return text ? text.slice(0, 500) : fallback;
+}
+
+// Normalize legacy/imported rows before rendering. Older data can use
+// date/userName/oldValue/newValue, and a malformed row must never break the
+// whole Ads screen.
+function getAdEditHistoryEntries(ad) {
+  const rows = Array.isArray(ad?.editHistory) ? ad.editHistory : [];
+  return rows
+    .filter(row => row && typeof row === 'object' && !Array.isArray(row))
+    .map(row => {
+      const rawChanges = Array.isArray(row.changes) ? row.changes : [];
+      const changes = rawChanges.map(change => {
+        if (!change || typeof change !== 'object' || Array.isArray(change)) {
+          return {
+            field: 'Change',
+            from: '—',
+            to: _adEditHistoryText(change)
+          };
+        }
+        return {
+          field: _adEditHistoryText(change.field || change.label, 'Change'),
+          from: _adEditHistoryText(change.from ?? change.oldValue ?? change.before),
+          to: _adEditHistoryText(change.to ?? change.newValue ?? change.after)
+        };
+      });
+      return {
+        editedAt: row.editedAt || row.date || row.updatedAt || '',
+        editedBy: _adEditHistoryText(row.editedBy || row.userName || row.actorName, 'Unknown'),
+        changes
+      };
+    });
+}
+
+function getAdEditHistoryCount(ad) {
+  const detailedCount = getAdEditHistoryEntries(ad).length;
+  if (detailedCount > 0) return detailedCount;
+  const storedCount = Number(ad?.editCount);
+  return Number.isSafeInteger(storedCount) && storedCount > 0 ? storedCount : 0;
+}
+
+function _formatAdEditHistoryDate(value, isAr) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? (isAr ? 'تاريخ غير معروف' : 'Unknown date')
+    : date.toLocaleString(appDateLocale());
+}
+
 // Show ad edit history modal
 function showAdEditHistory(adId) {
-  const ad = state.ads.find(a => a.id === adId);
+  const ad = state.ads.find(a => String(a.id || '') === String(adId || ''));
   if (!ad) return;
-  
+
   const isArH = state.language === 'ar';
-  const editHistory = ad.editHistory || [];
+  const editHistory = getAdEditHistoryEntries(ad);
   if (editHistory.length === 0) {
-    showNotification(isArH ? 'سجل التعديلات' : 'Edit History', isArH ? 'لا يوجد سجل تعديلات لهذا الإعلان.' : 'No edit history recorded for this ad.', 'info');
+    const legacyCount = getAdEditHistoryCount(ad);
+    showNotification(
+      isArH ? 'سجل التعديلات' : 'Edit History',
+      legacyCount > 0
+        ? (isArH ? 'عدد التعديلات محفوظ، لكن تفاصيل هذا السجل القديم غير متاحة.' : 'An edit count exists, but details for this older record are unavailable.')
+        : (isArH ? 'لا يوجد سجل تعديلات لهذا الإعلان.' : 'No edit history recorded for this ad.'),
+      'info'
+    );
     return;
   }
-  
+
   const customer = state.customers.find(c => c.id === ad.customerId);
   const page = state.pages.find(p => p.id === ad.pageId);
-  
+  const createdLabel = _formatAdEditHistoryDate(ad.createdAt, isArH);
+
   const modalHTML = `
-    <div id="edit-history-modal" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
+    <div id="edit-history-modal" role="dialog" aria-modal="true" aria-labelledby="ad-edit-history-title" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
       <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] overflow-hidden" onclick="event.stopPropagation()">
-        <div class="p-6 border-b border-slate-200 dark:border-slate-700">
-          <div class="flex items-center justify-between">
-            <div>
-              <h2 class="text-xl font-bold text-slate-800 dark:text-white flex items-center">
+        <div class="p-4 sm:p-6 border-b border-slate-200 dark:border-slate-700">
+          <div class="flex items-center justify-between gap-3">
+            <div class="min-w-0">
+              <h2 id="ad-edit-history-title" class="text-xl font-bold text-slate-800 dark:text-white flex items-center">
                 <i data-lucide="history" class="w-5 h-5 mr-2 text-purple-500"></i>
                 ${isArH ? 'سجل التعديلات' : 'Edit History'}
               </h2>
-              <p class="text-sm text-slate-500 mt-1">
-                ${isArH ? 'إعلان للعميل' : 'Ad for'} ${Security.escapeHtml(customer?.name || (isArH ? 'غير معروف' : 'Unknown'))} • ${Security.escapeHtml(page?.name || (isArH ? 'صفحة غير معروفة' : 'Unknown Page'))}
+              <p class="text-sm text-slate-500 mt-1 truncate">
+                ${isArH ? 'إعلان للعميل' : 'Ad for'} ${Security.escapeHtml(customer?.name || ad.customerName || (isArH ? 'غير معروف' : 'Unknown'))} • ${Security.escapeHtml(page?.name || (isArH ? 'صفحة غير معروفة' : 'Unknown Page'))}
               </p>
             </div>
-            <button onclick="document.getElementById('edit-history-modal').remove()" class="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors">
+            <button type="button" onclick="document.getElementById('edit-history-modal').remove()" class="min-h-11 min-w-11 inline-flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors" aria-label="${isArH ? 'إغلاق سجل التعديلات' : 'Close edit history'}">
               <i data-lucide="x" class="w-5 h-5"></i>
             </button>
           </div>
         </div>
-        
-        <div class="p-6 overflow-y-auto max-h-[60vh] space-y-4">
+
+        <div class="p-4 sm:p-6 overflow-y-auto max-h-[60vh] space-y-4">
           ${editHistory.slice().reverse().map((edit, idx) => `
             <div class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-4 border border-slate-200 dark:border-slate-700">
-              <div class="flex items-center justify-between mb-3">
-                <div class="flex items-center space-x-2">
-                  <span class="text-xs font-bold text-white bg-purple-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
-                  <span class="text-xs text-slate-500">${edit.editedBy || (isArH ? 'غير معروف' : 'Unknown')}</span>
+              <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
+                <div class="flex min-w-0 items-center gap-2">
+                  <span class="shrink-0 text-xs font-bold text-white bg-purple-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
+                  <span class="truncate text-xs text-slate-500">${Security.escapeHtml(edit.editedBy)}</span>
                 </div>
-                <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString(appDateLocale())}</span>
+                <span class="text-xs text-slate-400">${Security.escapeHtml(_formatAdEditHistoryDate(edit.editedAt, isArH))}</span>
               </div>
-              
+
               <div class="space-y-2">
-                ${edit.changes.map(change => `
+                ${edit.changes.length ? edit.changes.map(change => `
                   <div class="flex items-start text-sm bg-white dark:bg-slate-800 rounded-lg p-3 border border-slate-100 dark:border-slate-700">
-                    <div class="flex-1">
-                      <span class="font-medium text-slate-700 dark:text-slate-300">${change.field}</span>
-                      <div class="flex items-center mt-1 space-x-2 text-xs">
-                        <span class="px-2 py-1 bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 rounded line-through">${change.from}</span>
-                        <i data-lucide="arrow-right" class="w-3 h-3 text-slate-400"></i>
-                        <span class="px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded">${change.to}</span>
+                    <div class="min-w-0 flex-1">
+                      <span class="font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(change.field)}</span>
+                      <div class="flex flex-wrap items-center mt-1 gap-2 text-xs">
+                        <span class="max-w-full break-words px-2 py-1 bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 rounded line-through">${Security.escapeHtml(change.from)}</span>
+                        <i data-lucide="arrow-right" class="w-3 h-3 shrink-0 text-slate-400"></i>
+                        <span class="max-w-full break-words px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded">${Security.escapeHtml(change.to)}</span>
                       </div>
                     </div>
                   </div>
-                `).join('')}
+                `).join('') : `
+                  <div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-3 text-xs text-slate-500">
+                    ${isArH ? 'لم تُحفظ تفاصيل الحقول لهذا التعديل القديم.' : 'No field details were saved for this older edit.'}
+                  </div>
+                `}
               </div>
             </div>
           `).join('')}
         </div>
-        
+
         <div class="p-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50">
           <p class="text-xs text-slate-500 text-center">
             ${isArH ? `الإجمالي: ${editHistory.length} ${editHistory.length > 1 ? 'تعديلات' : 'تعديل'}` : `Total: ${editHistory.length} edit${editHistory.length > 1 ? 's' : ''}`} •
-            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${new Date(ad.createdAt).toLocaleString(appDateLocale())}
+            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${Security.escapeHtml(createdLabel)}
           </p>
         </div>
       </div>
     </div>
   `;
-  
-  // Remove any existing modal first
+
   document.getElementById('edit-history-modal')?.remove();
-  
-  // Add modal to DOM
   document.body.insertAdjacentHTML('beforeend', modalHTML);
-  
-  // Initialize Lucide icons in the new modal
   lucide.createIcons();
 }
 

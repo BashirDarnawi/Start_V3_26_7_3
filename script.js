@@ -15020,6 +15020,9 @@ function renderReceiptsView() {
           const hasMultiplePayments = payments.length > 1;
           const receiptPhotoCount = getReceiptPhotoCount(receipt);
           const receiptDebtType = getReceiptDebtType(receipt);
+          const collectionTarget = getReceiptCollectionTarget(receipt);
+          const hasCustomerDebt = receiptDebtType !== 'none'
+            && (collectionTarget.amountUSD > 0 || collectionTarget.amountLocal > 0);
 
           // Calculate total paid as sum of R1 values (amount × rate)
           const totalPaid = payments.reduce((sum, p) => sum + ((p.amount || 0) * (p.rate || 1)), 0) || receipt.amountLocal;
@@ -15097,9 +15100,10 @@ function renderReceiptsView() {
                     </div>
                   ` : ''}
                 </div>
-                <div class="text-right">
-                  <div class="text-2xl font-bold text-emerald-600">$${receipt.amountUSD?.toFixed(2)}</div>
-                  <div class="text-sm text-slate-500">${receipt.amountLocal?.toFixed(2)} LYD</div>
+                <div class="text-right" ${hasCustomerDebt ? 'data-receipt-linked-debt="true"' : ''}>
+                  <div class="text-2xl font-bold ${hasCustomerDebt ? 'text-rose-600' : 'text-emerald-600'}">$${(hasCustomerDebt ? collectionTarget.amountUSD : Number(receipt.amountUSD || 0)).toFixed(2)}</div>
+                  <div class="text-sm ${hasCustomerDebt ? 'text-rose-500 font-semibold' : 'text-slate-500'}">${(hasCustomerDebt ? collectionTarget.amountLocal : Number(receipt.amountLocal || 0)).toFixed(2)} LYD</div>
+                  ${hasCustomerDebt ? `<div class="text-[10px] font-bold text-rose-600 mt-1">${isArV ? 'دين العميل' : 'Customer debt'}</div>` : ''}
                   ${receipt.isPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isArV ? 'مدفوع' : 'Paid'}</div>` : `<div class="text-xs text-amber-600 mt-1">⏳ ${isArV ? 'غير مدفوع' : 'Unpaid'}</div>`}
                   ${receipt.paymentResult ? `
                     <div class="text-[10px] mt-1 ${receipt.paymentResult === 'UNDERPAID' ? 'text-rose-600' : receipt.paymentResult === 'OVERPAID' ? 'text-blue-600' : 'text-emerald-600'} font-bold">
@@ -15116,7 +15120,7 @@ function renderReceiptsView() {
               </div>
 
               <div class="space-y-2 mb-4 text-sm border-t border-b border-slate-200 dark:border-slate-700 py-3">
-                <div class="flex justify-between"><span class="text-slate-500">${isArV ? 'سعر الصرف' : 'Exchange Rate'}:</span><span class="font-medium">${receipt.exchangeRate?.toFixed(2)}</span></div>
+                <div class="flex justify-between"><span class="text-slate-500">${isArV ? 'سعر الصرف' : 'Exchange Rate'}:</span><span class="font-medium">${Number(receipt.exchangeRate || state.defaultExchangeRate || 0).toFixed(2)}</span></div>
                 ${receipt.officeFee ? `<div class="flex justify-between"><span class="text-slate-500">${isArV ? 'عمولة المكتب' : 'Office Fee'}:</span><span class="font-medium text-amber-600">+${receipt.officeFee?.toFixed(2)} LYD</span></div>` : ''}
                 ${receipt.discount ? `<div class="flex justify-between"><span class="text-slate-500">${isArV ? 'الخصم' : 'Discount'}:</span><span class="font-medium text-emerald-600">-${receipt.discount?.toFixed(2)} LYD</span></div>` : ''}
               </div>
@@ -15191,7 +15195,9 @@ function renderReceiptsView() {
 
               <!-- Collection (with amount) -->
               ${(() => {
-                const targetLYD = Number(receipt.amountLocal) || 0;
+                const targetLYD = receiptDebtType !== 'none'
+                  ? (Number(collectionTarget.amountLocal) || 0)
+                  : (Number(receipt.amountLocal) || 0);
                 // Amount actually collected. Older receipts have no
                 // collectedAmount: treat a collected-but-amountless receipt as
                 // fully collected so nothing looks "unpaid" after the upgrade.
@@ -15669,7 +15675,8 @@ function renderAdsView() {
                 const deliveryPerson = effectiveDeliveryPersonId ? usersById.get(String(effectiveDeliveryPersonId)) : null;
                 const isLinkedToDeliveryReceipt = !!linkedReceipt;
                 // Use consistent exchange rate calculation
-                const receiptExchangeRate = getEffectiveExchangeRate(ad);
+                const receiptExchangeRate = getAdSpendExchangeRate(ad);
+                const adAmountLocalForDisplay = (Number(ad.amountUSD) || 0) * receiptExchangeRate;
                 // Display number: total - index (so first item = highest number)
                 const adDisplayNum = allAds.length - idx;
                 // All receipts linked to this ad (delivery + funding), deduped —
@@ -15730,7 +15737,7 @@ function renderAdsView() {
                       ${!isAdPaid ? `<span class="text-[10px] font-semibold mt-0.5">${isAr ? 'دين غير مدفوع' : 'Unpaid debt'}</span>` : ''}
                     </td>
                     <td class="py-3 px-2" data-label="Rate">${receiptExchangeRate?.toFixed(2) || ad.exchangeRate?.toFixed(2) || '0.00'}</td>
-                    <td class="py-3 px-2 font-medium ${amountColorClass}" data-label="Local">${(Number(ad.amountLocal) || 0).toFixed(2)} LYD</td>
+                    <td class="py-3 px-2 font-medium ${amountColorClass}" data-label="Local">${adAmountLocalForDisplay.toFixed(2)} LYD</td>
                     <td class="py-3 px-2" data-label="Payment">
                       ${paymentMethods.length ? `
                         <div class="flex flex-wrap gap-1">
@@ -16084,8 +16091,9 @@ function renderDeliveriesView() {
                   const collectedCash = _getCollectedCashLocal(ad);
                   const receivedInOffice = _isReceivedInOffice(ad);
                   const officeEligible = String(ad.deliveryStatus || '') === 'Delivered' && collectedCash > 0;
-                  const debtLocal = Number(ad.debtAmountLocal ?? ad.amountLocal ?? 0) || 0;
-                  const debtUSD = Number(ad.debtAmountUSD ?? ad.amountUSD ?? 0) || 0;
+                  const deliveryTarget = getReceiptCollectionTarget(ad);
+                  const debtLocal = deliveryTarget.amountLocal;
+                  const debtUSD = deliveryTarget.amountUSD;
                   const statusColors = {
                     'Needs Delivery': 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
                     'In Progress': 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
@@ -16346,7 +16354,7 @@ function exportDeliveryReport() {
   deliveryAds.forEach(r => {
     const customer = state.customers.find(c => c.id === r.customerId);
     const driver = r.deliveryPersonId ? deliveryUsers.find(u => u.id === r.deliveryPersonId) : null;
-    const debt = Number(r.debtAmountLocal ?? r.amountLocal ?? 0) || 0;
+    const debt = getReceiptCollectionTarget(r).amountLocal;
     const collected = Number(r.amountCollectedFromCustomer ?? (String(r.deliveryStatus || '') === 'Delivered' ? (r.amountLocal || 0) : 0)) || 0;
     const remaining = Number(r.remainingDue ?? Math.max(0, debt - collected)) || 0;
     const received = (typeof r.isReceivedInOffice === 'boolean') ? r.isReceivedInOffice : !!r.officeHandover;
@@ -16476,8 +16484,8 @@ function _getOutstandingDueLocal(item) {
   if (ds === 'Canceled') return 0;
   const rem = Number(item.remainingDue);
   if (Number.isFinite(rem)) return Math.max(0, rem);
-  const debt = Number(item.debtAmountLocal);
-  if (Number.isFinite(debt)) return Math.max(0, debt - _getCollectedCashLocal(item));
+  const debt = getReceiptCollectionTarget(item).amountLocal;
+  if (debt > 0) return Math.max(0, debt - _getCollectedCashLocal(item));
   if (item.isPaid) return 0;
   const amt = Number(item.amountLocal);
   if (Number.isFinite(amt)) return Math.max(0, amt);
@@ -19253,10 +19261,29 @@ function getLinkedPagesForCustomer(customerId) {
   );
 }
 
-// Prefer the exact historical rate recorded by amountLocal/amountUSD. This is
-// more reliable than today's default and remains correct if exchange rates are
-// changed later. The shared resolver covers receipt-funded ads and legacy data.
+// Linked unpaid debt uses its receipt as the authoritative rate. Otherwise,
+// prefer the exact historical rate recorded by amountLocal/amountUSD: it is
+// more reliable than today's default for independent or already-paid ads.
 function getAdSpendExchangeRate(ad) {
+  // For an unpaid Driver/In-Shop ad, its linked debt receipt is the currency
+  // source of truth. This order also repairs historical rows immediately after
+  // an admin corrects the receipt from (for example) 9.50 to 9.70, instead of
+  // leaving the customer card, receipt card and Ads table disagreeing forever.
+  const paymentState = getAdPaymentState(ad);
+  const collectionMethod = String(ad?.collectionMethod || '');
+  if (paymentState === 'not_paid' && ['driver', 'in_shop'].includes(collectionMethod)) {
+    const linkedReceiptId = collectionMethod === 'driver'
+      ? String(ad?.linkedDeliveryReceiptId || ad?.receiptId || '')
+      : String(ad?.receiptId || '');
+    const linkedReceipt = linkedReceiptId
+      ? (state.receipts || []).find(receipt => (
+          receipt && !receipt._deleted && String(receipt.id || '') === linkedReceiptId
+        ))
+      : null;
+    const linkedRate = Number(linkedReceipt?.exchangeRate);
+    if (Number.isFinite(linkedRate) && linkedRate > 0) return linkedRate;
+  }
+
   const amountUSD = Number(ad?.amountUSD);
   const amountLocal = Number(ad?.amountLocal);
   if (Number.isFinite(amountUSD) && amountUSD > 0 && Number.isFinite(amountLocal) && amountLocal > 0) {
@@ -19274,7 +19301,106 @@ function getAdSpendExchangeRate(ad) {
 }
 
 function getAdSpendLYD(ad) {
-  return getAdSpendUSD(ad) * getAdSpendExchangeRate(ad);
+  return Math.round(getAdSpendUSD(ad) * getAdSpendExchangeRate(ad) * 100) / 100;
+}
+
+// One read model for the amount a Not Paid receipt represents. Most receipts
+// store that amount directly, but historical/manual Driver flows can create a
+// zero-value D receipt and keep the real customer debt on its linked ad. That
+// link is a collection target only: it must NEVER become paid receipt credit
+// or receipt usage (getReceiptUsageStats deliberately remains unchanged).
+function getReceiptCollectionTarget(receipt, ads = state.ads) {
+  const empty = {
+    amountUSD: 0,
+    amountLocal: 0,
+    debtUSD: 0,
+    debtLYD: 0,
+    source: 'none',
+    linkedAds: []
+  };
+  if (!receipt || receipt._deleted) return empty;
+
+  const rateValue = Number(receipt.exchangeRate || state.defaultExchangeRate || 0);
+  const receiptRate = Number.isFinite(rateValue) && rateValue > 0 ? rateValue : 0;
+  const positive = value => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  };
+  const finish = (usd, local, source, linkedAds = []) => {
+    let amountUSD = positive(usd);
+    let amountLocal = positive(local);
+    if (!amountUSD && amountLocal && receiptRate) amountUSD = amountLocal / receiptRate;
+    if (!amountLocal && amountUSD && receiptRate) amountLocal = amountUSD * receiptRate;
+    amountUSD = Math.round(amountUSD * 100) / 100;
+    amountLocal = Math.round(amountLocal * 100) / 100;
+    return {
+      amountUSD,
+      amountLocal,
+      debtUSD: amountUSD,
+      debtLYD: amountLocal,
+      source,
+      linkedAds
+    };
+  };
+
+  // Explicit frozen debt is authoritative after a delivery is completed.
+  const storedDebtUSD = positive(receipt.debtAmountUSD);
+  const storedDebtLocal = positive(receipt.debtAmountLocal);
+  if (storedDebtUSD || storedDebtLocal) {
+    return finish(storedDebtUSD, storedDebtLocal, 'stored_debt');
+  }
+
+  // Current receipts normally store the promised amount in their own amount
+  // fields. Legacy aliases are accepted at read time without rewriting data.
+  const storedAmountUSD = positive(receipt.amountUSD) || positive(receipt.amount);
+  const storedAmountLocal = positive(receipt.amountLocal) || positive(receipt.amountLYD);
+  if (storedAmountUSD || storedAmountLocal) {
+    return finish(storedAmountUSD, storedAmountLocal, 'receipt_amount');
+  }
+
+  // Only a current unpaid Driver receipt may derive a missing target from ads.
+  // In-Shop receipts already carry an explicit receipt amount. Paid/cancelled
+  // receipts and historical stop/refund baselines are intentionally excluded.
+  if (getReceiptDebtType(receipt) !== 'delivery') return empty;
+  const receiptId = String(receipt.id || '');
+  const customerId = String(receipt.customerId || '');
+  if (!receiptId || !customerId) return empty;
+
+  let amountUSD = 0;
+  let amountLocal = 0;
+  const linkedAds = [];
+  for (const ad of getVisibleRecords(Array.isArray(ads) ? ads : [])) {
+    if (!ad || ad._deleted || String(ad.recordType || '') === 'receipt') continue;
+    if (String(ad.customerId || ad.customer || '') !== customerId) continue;
+    if (getAdPaymentState(ad) !== 'not_paid' || String(ad.collectionMethod || '') !== 'driver') continue;
+
+    const linkedId = String(ad.linkedDeliveryReceiptId || '');
+    const legacyLinkedId = !linkedId ? String(ad.receiptId || '') : '';
+    if (linkedId !== receiptId && legacyLinkedId !== receiptId) continue;
+
+    const spendUSD = Math.max(getAdSpendUSD(ad), 0);
+    const paidRows = Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length
+      ? ad.receiptAllocations
+      : (Array.isArray(ad.mergedPaidAllocations) ? ad.mergedPaidAllocations : []);
+    const paidUSD = paidRows.reduce(
+      (sum, row) => sum + Math.max(Number(row?.amountUSD) || 0, 0),
+      0
+    );
+    const debtUSD = Math.max(spendUSD - paidUSD, 0);
+    if (debtUSD <= 0) continue;
+
+    const adRate = getAdSpendExchangeRate(ad);
+    amountUSD += debtUSD;
+    amountLocal += debtUSD * adRate;
+    linkedAds.push(ad);
+  }
+
+  return finish(amountUSD, amountLocal, linkedAds.length ? 'linked_ads' : 'none', linkedAds);
+}
+
+// Backward-readable name for receipt-card and reporting call sites.
+function getReceiptLinkedDebtStats(receipt, ads = state.ads) {
+  return getReceiptCollectionTarget(receipt, ads);
 }
 
 // One authoritative, customer-scoped summary for the Customers drill-down.
@@ -20605,9 +20731,9 @@ function buildDeliveryReceiptWhatsAppMessage(receipt) {
   const driverName = _whatsAppShareField(driver?.name || '—', 160);
   const instructions = _whatsAppShareField(receipt.deliveryInstructions || '—', 500);
   const creatorName = _whatsAppShareField(getKnownUserNameById(creatorId) || String(receipt.createdByName || '').trim() || state.currentUser?.name || '—', 160);
-  const debtUSD = Number(receipt.debtAmountUSD ?? receipt.amountUSD ?? 0) || 0;
-  const fxRate = Number(receipt.exchangeRate || state.defaultExchangeRate || 0) || 0;
-  const debtLocal = Number(receipt.debtAmountLocal ?? receipt.amountLocal ?? (debtUSD * fxRate)) || 0;
+  const collectionTarget = getReceiptCollectionTarget(receipt);
+  const debtUSD = collectionTarget.amountUSD;
+  const debtLocal = collectionTarget.amountLocal;
   const deliveryFee = Number(receipt.quotedDeliveryFee || 0) || 0;
   const money = `${debtLocal.toFixed(2)} LYD${debtUSD > 0 ? ` ($${debtUSD.toFixed(2)})` : ''}`;
 
@@ -21136,7 +21262,7 @@ function updateReceiptDeliveryCompletionComputed() {
   const receipt = _findReceiptForDeliveryModal(rid);
   if (!receipt) return;
 
-  const debt = Number(receipt.debtAmountLocal ?? receipt.amountLocal ?? 0) || 0;
+  const debt = getReceiptCollectionTarget(receipt).amountLocal;
   const quoted = Number(receipt.quotedDeliveryFee ?? 0) || 0;
 
   const finalNo = String(document.getElementById('delivery-final-receipt-no')?.value || '').trim();
@@ -21342,7 +21468,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
 
   const customer = state.customers.find(c => c && !c._deleted && String(c.id) === String(receipt.customerId));
   const phone = String(receipt.phoneNumber || customer?.phones?.[0] || '').trim();
-  const debt = Number(receipt.debtAmountLocal ?? receipt.amountLocal ?? 0) || 0;
+  const debt = getReceiptCollectionTarget(receipt).amountLocal;
   const quoted = Number(receipt.quotedDeliveryFee ?? 0) || 0;
   const tempNo = String(receipt.tempReceiptNo || '').trim();
   const finalNo = String(receipt.finalReceiptNo || receipt.serialNumber || '').trim();
@@ -21560,7 +21686,8 @@ async function submitReceiptDeliveryCompletion(receiptId) {
     return;
   }
 
-  const debtLocal = Number(receipt.debtAmountLocal ?? receipt.amountLocal ?? 0) || 0;
+  const collectionTarget = getReceiptCollectionTarget(receipt);
+  const debtLocal = collectionTarget.amountLocal;
   const quoted = Number(receipt.quotedDeliveryFee ?? 0) || 0;
   const debtCmp = compareDebt(debtLocal, collected);
   const feeCmp = compareFees(quoted, actualFee);
@@ -21598,7 +21725,7 @@ async function submitReceiptDeliveryCompletion(receiptId) {
     deliveryFeeCollected: actualFee,
     driverNotes: notes,
     debtAmountLocal: receipt.debtAmountLocal ?? debtLocal,
-    debtAmountUSD: receipt.debtAmountUSD ?? (Number(receipt.amountUSD || 0) || 0),
+    debtAmountUSD: receipt.debtAmountUSD ?? collectionTarget.amountUSD,
     paymentResult: debtCmp.paymentResult,
     overpaidAmount: debtCmp.overpaidAmount,
     remainingDue: debtCmp.remainingDue,
@@ -21982,10 +22109,16 @@ let _tempCollectPayments = [];   // [{ method, amount }] working list for the "N
 let _collectReceiptId = '';
 let _collectTargetLYD = 0;
 
+function _receiptCashCollectionTargetLocal(receipt) {
+  return getReceiptPaymentState(receipt) === 'not_paid'
+    ? getReceiptCollectionTarget(receipt).amountLocal
+    : (Number(receipt?.amountLocal) || 0);
+}
+
 // The receipt's own payment breakdown in LYD (used for the "Yes = same" path
 // and to seed the "No" editor). Each split's LYD value is amount × rate1.
 function _receiptCollectionBreakdown(receipt) {
-  const target = Number(receipt.amountLocal) || 0;
+  const target = _receiptCashCollectionTargetLocal(receipt);
   if (Array.isArray(receipt.payments) && receipt.payments.length) {
     return receipt.payments
       .map(p => ({ method: p.method || 'Cash (LYD)', amount: Math.round((Number(p.amount) || 0) * (Number(p.rate) || 1) * 100) / 100 }))
@@ -21999,7 +22132,7 @@ function openCollectReceiptModal(receiptId) {
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
   const isAr = state.language === 'ar';
-  const targetLYD = Number(receipt.amountLocal) || 0;
+  const targetLYD = _receiptCashCollectionTargetLocal(receipt);
   const serialTxt = receipt.serialNumber || receipt.tempReceiptNo || receipt.finalReceiptNo || receiptId.slice(0, 8);
   _collectReceiptId = receiptId;
   _collectTargetLYD = targetLYD;
@@ -22054,7 +22187,7 @@ async function collectReceiptSame(receiptId) {
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
   const breakdown = _receiptCollectionBreakdown(receipt);
-  await _saveReceiptCollection(receipt, breakdown, Number(receipt.amountLocal) || 0, true);
+  await _saveReceiptCollection(receipt, breakdown, _receiptCashCollectionTargetLocal(receipt), true);
 }
 
 // "No" — switch the modal to the payment-methods editor (like the ad form).
@@ -22136,7 +22269,7 @@ function collectReceiptCustomBack(receiptId) {
   const body = document.getElementById('collect-modal-body');
   if (receipt && body) {
     const serialTxt = receipt.serialNumber || receipt.tempReceiptNo || receipt.finalReceiptNo || receiptId.slice(0, 8);
-    body.innerHTML = _collectAskView(receiptId, receipt, state.language === 'ar', Number(receipt.amountLocal) || 0, serialTxt);
+    body.innerHTML = _collectAskView(receiptId, receipt, state.language === 'ar', _receiptCashCollectionTargetLocal(receipt), serialTxt);
     if (window.lucide) lucide.createIcons();
   }
 }
@@ -22159,7 +22292,7 @@ async function confirmCollectReceipt(receiptId) {
 // Shared save for both the "Yes" and "No" paths.
 async function _saveReceiptCollection(receipt, payments, totalLYD, matchesReceipt) {
   if (!_canMarkCollected()) return;
-  const targetLYD = Number(receipt.amountLocal) || 0;
+  const targetLYD = _receiptCashCollectionTargetLocal(receipt);
   const savedOk = await updateRecord(state.receipts, receipt.id, {
     collected: true,
     collectedAmount: totalLYD,
@@ -22512,87 +22645,155 @@ function showReceiptEditHistory(receiptId) {
   lucide.createIcons();
 }
 
+function _adEditHistoryText(value, fallback = '—') {
+  if (value === null || value === undefined) return fallback;
+  let text;
+  if (typeof value === 'object') {
+    try {
+      text = JSON.stringify(value);
+    } catch (_) {
+      text = String(value);
+    }
+  } else {
+    text = String(value);
+  }
+  text = String(text || '').trim();
+  return text ? text.slice(0, 500) : fallback;
+}
+
+// Normalize legacy/imported rows before rendering. Older data can use
+// date/userName/oldValue/newValue, and a malformed row must never break the
+// whole Ads screen.
+function getAdEditHistoryEntries(ad) {
+  const rows = Array.isArray(ad?.editHistory) ? ad.editHistory : [];
+  return rows
+    .filter(row => row && typeof row === 'object' && !Array.isArray(row))
+    .map(row => {
+      const rawChanges = Array.isArray(row.changes) ? row.changes : [];
+      const changes = rawChanges.map(change => {
+        if (!change || typeof change !== 'object' || Array.isArray(change)) {
+          return {
+            field: 'Change',
+            from: '—',
+            to: _adEditHistoryText(change)
+          };
+        }
+        return {
+          field: _adEditHistoryText(change.field || change.label, 'Change'),
+          from: _adEditHistoryText(change.from ?? change.oldValue ?? change.before),
+          to: _adEditHistoryText(change.to ?? change.newValue ?? change.after)
+        };
+      });
+      return {
+        editedAt: row.editedAt || row.date || row.updatedAt || '',
+        editedBy: _adEditHistoryText(row.editedBy || row.userName || row.actorName, 'Unknown'),
+        changes
+      };
+    });
+}
+
+function getAdEditHistoryCount(ad) {
+  const detailedCount = getAdEditHistoryEntries(ad).length;
+  if (detailedCount > 0) return detailedCount;
+  const storedCount = Number(ad?.editCount);
+  return Number.isSafeInteger(storedCount) && storedCount > 0 ? storedCount : 0;
+}
+
+function _formatAdEditHistoryDate(value, isAr) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? (isAr ? 'تاريخ غير معروف' : 'Unknown date')
+    : date.toLocaleString(appDateLocale());
+}
+
 // Show ad edit history modal
 function showAdEditHistory(adId) {
-  const ad = state.ads.find(a => a.id === adId);
+  const ad = state.ads.find(a => String(a.id || '') === String(adId || ''));
   if (!ad) return;
-  
+
   const isArH = state.language === 'ar';
-  const editHistory = ad.editHistory || [];
+  const editHistory = getAdEditHistoryEntries(ad);
   if (editHistory.length === 0) {
-    showNotification(isArH ? 'سجل التعديلات' : 'Edit History', isArH ? 'لا يوجد سجل تعديلات لهذا الإعلان.' : 'No edit history recorded for this ad.', 'info');
+    const legacyCount = getAdEditHistoryCount(ad);
+    showNotification(
+      isArH ? 'سجل التعديلات' : 'Edit History',
+      legacyCount > 0
+        ? (isArH ? 'عدد التعديلات محفوظ، لكن تفاصيل هذا السجل القديم غير متاحة.' : 'An edit count exists, but details for this older record are unavailable.')
+        : (isArH ? 'لا يوجد سجل تعديلات لهذا الإعلان.' : 'No edit history recorded for this ad.'),
+      'info'
+    );
     return;
   }
-  
+
   const customer = state.customers.find(c => c.id === ad.customerId);
   const page = state.pages.find(p => p.id === ad.pageId);
-  
+  const createdLabel = _formatAdEditHistoryDate(ad.createdAt, isArH);
+
   const modalHTML = `
-    <div id="edit-history-modal" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
+    <div id="edit-history-modal" role="dialog" aria-modal="true" aria-labelledby="ad-edit-history-title" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
       <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] overflow-hidden" onclick="event.stopPropagation()">
-        <div class="p-6 border-b border-slate-200 dark:border-slate-700">
-          <div class="flex items-center justify-between">
-            <div>
-              <h2 class="text-xl font-bold text-slate-800 dark:text-white flex items-center">
+        <div class="p-4 sm:p-6 border-b border-slate-200 dark:border-slate-700">
+          <div class="flex items-center justify-between gap-3">
+            <div class="min-w-0">
+              <h2 id="ad-edit-history-title" class="text-xl font-bold text-slate-800 dark:text-white flex items-center">
                 <i data-lucide="history" class="w-5 h-5 mr-2 text-purple-500"></i>
                 ${isArH ? 'سجل التعديلات' : 'Edit History'}
               </h2>
-              <p class="text-sm text-slate-500 mt-1">
-                ${isArH ? 'إعلان للعميل' : 'Ad for'} ${Security.escapeHtml(customer?.name || (isArH ? 'غير معروف' : 'Unknown'))} • ${Security.escapeHtml(page?.name || (isArH ? 'صفحة غير معروفة' : 'Unknown Page'))}
+              <p class="text-sm text-slate-500 mt-1 truncate">
+                ${isArH ? 'إعلان للعميل' : 'Ad for'} ${Security.escapeHtml(customer?.name || ad.customerName || (isArH ? 'غير معروف' : 'Unknown'))} • ${Security.escapeHtml(page?.name || (isArH ? 'صفحة غير معروفة' : 'Unknown Page'))}
               </p>
             </div>
-            <button onclick="document.getElementById('edit-history-modal').remove()" class="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors">
+            <button type="button" onclick="document.getElementById('edit-history-modal').remove()" class="min-h-11 min-w-11 inline-flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors" aria-label="${isArH ? 'إغلاق سجل التعديلات' : 'Close edit history'}">
               <i data-lucide="x" class="w-5 h-5"></i>
             </button>
           </div>
         </div>
-        
-        <div class="p-6 overflow-y-auto max-h-[60vh] space-y-4">
+
+        <div class="p-4 sm:p-6 overflow-y-auto max-h-[60vh] space-y-4">
           ${editHistory.slice().reverse().map((edit, idx) => `
             <div class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-4 border border-slate-200 dark:border-slate-700">
-              <div class="flex items-center justify-between mb-3">
-                <div class="flex items-center space-x-2">
-                  <span class="text-xs font-bold text-white bg-purple-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
-                  <span class="text-xs text-slate-500">${edit.editedBy || (isArH ? 'غير معروف' : 'Unknown')}</span>
+              <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
+                <div class="flex min-w-0 items-center gap-2">
+                  <span class="shrink-0 text-xs font-bold text-white bg-purple-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
+                  <span class="truncate text-xs text-slate-500">${Security.escapeHtml(edit.editedBy)}</span>
                 </div>
-                <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString(appDateLocale())}</span>
+                <span class="text-xs text-slate-400">${Security.escapeHtml(_formatAdEditHistoryDate(edit.editedAt, isArH))}</span>
               </div>
-              
+
               <div class="space-y-2">
-                ${edit.changes.map(change => `
+                ${edit.changes.length ? edit.changes.map(change => `
                   <div class="flex items-start text-sm bg-white dark:bg-slate-800 rounded-lg p-3 border border-slate-100 dark:border-slate-700">
-                    <div class="flex-1">
-                      <span class="font-medium text-slate-700 dark:text-slate-300">${change.field}</span>
-                      <div class="flex items-center mt-1 space-x-2 text-xs">
-                        <span class="px-2 py-1 bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 rounded line-through">${change.from}</span>
-                        <i data-lucide="arrow-right" class="w-3 h-3 text-slate-400"></i>
-                        <span class="px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded">${change.to}</span>
+                    <div class="min-w-0 flex-1">
+                      <span class="font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(change.field)}</span>
+                      <div class="flex flex-wrap items-center mt-1 gap-2 text-xs">
+                        <span class="max-w-full break-words px-2 py-1 bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 rounded line-through">${Security.escapeHtml(change.from)}</span>
+                        <i data-lucide="arrow-right" class="w-3 h-3 shrink-0 text-slate-400"></i>
+                        <span class="max-w-full break-words px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded">${Security.escapeHtml(change.to)}</span>
                       </div>
                     </div>
                   </div>
-                `).join('')}
+                `).join('') : `
+                  <div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-3 text-xs text-slate-500">
+                    ${isArH ? 'لم تُحفظ تفاصيل الحقول لهذا التعديل القديم.' : 'No field details were saved for this older edit.'}
+                  </div>
+                `}
               </div>
             </div>
           `).join('')}
         </div>
-        
+
         <div class="p-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50">
           <p class="text-xs text-slate-500 text-center">
             ${isArH ? `الإجمالي: ${editHistory.length} ${editHistory.length > 1 ? 'تعديلات' : 'تعديل'}` : `Total: ${editHistory.length} edit${editHistory.length > 1 ? 's' : ''}`} •
-            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${new Date(ad.createdAt).toLocaleString(appDateLocale())}
+            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${Security.escapeHtml(createdLabel)}
           </p>
         </div>
       </div>
     </div>
   `;
-  
-  // Remove any existing modal first
+
   document.getElementById('edit-history-modal')?.remove();
-  
-  // Add modal to DOM
   document.body.insertAdjacentHTML('beforeend', modalHTML);
-  
-  // Initialize Lucide icons in the new modal
   lucide.createIcons();
 }
 
@@ -23936,18 +24137,34 @@ function _receiptCustomerRiskDebtUSD(receipt) {
     return Math.max(Number(receipt?.amountUSD) || 0, 0);
   }
 
+  let own = 0;
   const collection = String(receipt?.statusDetail?.notPaidCollection || '').trim().toLowerCase();
   if (['office', 'in_shop', 'shop'].includes(collection)) {
-    return Math.max(Number(receipt?.amountUSD) || 0, 0);
+    own = Math.max(Number(receipt?.amountUSD) || 0, 0);
+  } else {
+    const localValue = receipt?.debtAmountLocal ?? receipt?.amountLocal;
+    const local = Number(localValue) || 0;
+    const rate = Number(receipt?.exchangeRate) || 0;
+    if (local > 0 && rate > 0) {
+      own = Math.max(local / rate, 0);
+    } else {
+      const usdValue = receipt?.debtAmountUSD ?? receipt?.amountUSD;
+      own = Math.max(Number(usdValue) || 0, 0);
+    }
   }
+  if (own > 0) return own;
 
-  const localValue = receipt?.debtAmountLocal ?? receipt?.amountLocal;
-  const local = Number(localValue) || 0;
-  const rate = Number(receipt?.exchangeRate) || 0;
-  if (local > 0 && rate > 0) return Math.max(local / rate, 0);
-
-  const usdValue = receipt?.debtAmountUSD ?? receipt?.amountUSD;
-  return Math.max(Number(usdValue) || 0, 0);
+  // Zero-value driver (D#) receipts keep the real customer debt on their
+  // linked ads, so the receipt's own fields read 0 and the warning notice was
+  // silently dropped. getReceiptCollectionTarget derives that debt from the
+  // linked ads (last resort only — the receipt's own authoritative fields
+  // above always win), so the warning shows the same debt the receipt card
+  // shows.
+  if (typeof getReceiptCollectionTarget === 'function') {
+    const target = getReceiptCollectionTarget(receipt);
+    return Math.max(Number(target?.debtUSD) || 0, 0);
+  }
+  return own;
 }
 
 // Pure, permission-scoped classifier used by both selection-time and save-time
@@ -24684,6 +24901,95 @@ function receiptExchangeRate(payments, totalLYD, totalUSD) {
   return state.defaultExchangeRate;
 }
 
+// A Not Paid receipt may intentionally have no money rows yet. Keep payments[]
+// empty (so it never invents received cash), while still preserving the Rate 2
+// the user entered for the debt and any ads linked to it.
+function receiptExchangeRateForSave(payments, enteredPaymentRows, totalLYD, totalUSD, status, existingRate) {
+  const savedRows = Array.isArray(payments) ? payments : [];
+  if (savedRows.length > 0) {
+    return receiptExchangeRate(savedRows, totalLYD, totalUSD);
+  }
+
+  if (status === 'Not Paid') {
+    const enteredRows = Array.isArray(enteredPaymentRows) ? enteredPaymentRows : [];
+    const enteredRate = enteredRows
+      .map(row => Number(row?.rate2))
+      .find(rate => Number.isFinite(rate) && rate > 0);
+    if (enteredRate) return enteredRate;
+
+    const previousRate = Number(existingRate);
+    if (Number.isFinite(previousRate) && previousRate > 0) return previousRate;
+  }
+
+  return state.defaultExchangeRate;
+}
+
+// Reopen an all-zero receipt with one editable form row. The row is only a UI
+// seed; saveReceiptFromModal still drops it from payments[] until money exists.
+function getReceiptFormPayments(receiptData) {
+  const data = receiptData && typeof receiptData === 'object' ? receiptData : {};
+  const savedPayments = Array.isArray(data.payments) ? data.payments : [];
+  if (savedPayments.length > 0) return savedPayments;
+
+  const savedMethod = String(data.paymentMethod || '').trim();
+  const method = savedMethod && savedMethod !== 'Split Payment'
+    ? savedMethod
+    : PAYMENT_METHODS[0];
+  const savedRate = Number(data.exchangeRate);
+  const rate2 = Number.isFinite(savedRate) && savedRate > 0
+    ? savedRate
+    : state.defaultExchangeRate;
+  const statusDetail = data.statusDetail && typeof data.statusDetail === 'object'
+    ? data.statusDetail
+    : {};
+  const isPaid = data.status === 'Paid' || data.isPaid === true;
+
+  return [{
+    method,
+    amount: 0,
+    rate: getDefaultRate1(method),
+    rate2,
+    collectionType: isPaid
+      ? (statusDetail.paidCollection || 'office')
+      : (statusDetail.notPaidCollection || 'office'),
+    deliveryPersonId: isPaid
+      ? (statusDetail.paidDeliveryPersonId || data.deliveryPersonId || '')
+      : (data.deliveryPersonId || '')
+  }];
+}
+
+// Driver debt is denominated at the linked delivery receipt's rate. Prefer the
+// live linked record over a hidden field or a stale ad/default rate.
+function resolveAdExchangeRateForSave({
+  isEdit = false,
+  ad = null,
+  isUnpaidDriver = false,
+  linkedReceipt = null,
+  driverBudgetRate = null
+} = {}) {
+  const validRate = value => {
+    const rate = Number(value);
+    return Number.isFinite(rate) && rate > 0 ? rate : 0;
+  };
+
+  if (isUnpaidDriver) {
+    const linkedRate = validRate(linkedReceipt?.exchangeRate);
+    if (linkedRate) return linkedRate;
+    const selectedRate = validRate(driverBudgetRate);
+    if (selectedRate) return selectedRate;
+  }
+
+  const existingRate = isEdit ? validRate(ad?.exchangeRate) : 0;
+  return existingRate || validRate(state.defaultExchangeRate) || 1;
+}
+
+function adAmountLocalForSave(amountUSD, exchangeRate) {
+  const amount = Number(amountUSD);
+  const rate = Number(exchangeRate);
+  if (!Number.isFinite(amount) || !Number.isFinite(rate)) return 0;
+  return Math.round(amount * rate * 100) / 100;
+}
+
 function ceilingRound(value) {
   const v = Number(value);
   if (!Number.isFinite(v) || v === 0) return 0;
@@ -24982,6 +25288,7 @@ async function _saveReceiptFromModalInner() {
   // Collect all payment splits
   const paymentItems = document.querySelectorAll('.payment-split-item');
   const payments = [];
+  const enteredPaymentRows = [];
   
   paymentItems.forEach(item => {
     const method = item.querySelector('.payment-method').value;
@@ -24997,16 +25304,18 @@ async function _saveReceiptFromModalInner() {
     const collectionType = item.querySelector('.collection-type').value;
     const deliveryPersonSelect = item.querySelector('.delivery-person');
     const deliveryPersonId = deliveryPersonSelect ? deliveryPersonSelect.value : '';
+    const enteredPayment = {
+      method,
+      amount,
+      rate,
+      rate2,
+      collectionType,
+      deliveryPersonId
+    };
+    enteredPaymentRows.push(enteredPayment);
     
     if (amount > 0) {
-      payments.push({
-        method,
-        amount,
-        rate,
-        rate2,
-        collectionType,
-        deliveryPersonId
-      });
+      payments.push(enteredPayment);
     }
   });
   
@@ -25053,8 +25362,15 @@ async function _saveReceiptFromModalInner() {
   // of 9.70, because the credit total is rounded up in the customer's favour.
   // With a split (different rates per row) the effective average is the only
   // meaningful figure, so keep deriving it there.
-  const avgRate = receiptExchangeRate(payments, totalLYD, totalUSD);
   const status = document.getElementById('receipt-status').value || 'Paid';
+  const avgRate = receiptExchangeRateForSave(
+    payments,
+    enteredPaymentRows,
+    totalLYD,
+    totalUSD,
+    status,
+    editTarget?.exchangeRate
+  );
   const photos = state.tempReceiptPhotos || [];
 
   // A receipt records money that was RECEIVED. Rows with amount 0 are dropped
@@ -28665,6 +28981,52 @@ function selectCustomerMergeDuplicate(customerId) {
   renderModal();
 }
 
+// Prepare a detached history update. Never push into the live ad's array:
+// a conflict or failed server request must not leave a ghost edit in state.
+function buildAdEditHistoryUpdates(oldAd, changes, editorName = state.currentUser?.name || 'Unknown', editedAt = new Date().toISOString()) {
+  const editHistory = Array.isArray(oldAd?.editHistory)
+    ? oldAd.editHistory.map(entry => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return entry;
+        return {
+          ...entry,
+          changes: Array.isArray(entry.changes)
+            ? entry.changes.map(change => (
+                change && typeof change === 'object' && !Array.isArray(change)
+                  ? { ...change }
+                  : change
+              ))
+            : entry.changes
+        };
+      })
+    : [];
+  const detachedChanges = Array.isArray(changes)
+    ? changes
+        .filter(change => change && typeof change === 'object' && !Array.isArray(change))
+        .map(change => ({ ...change }))
+    : [];
+
+  if (detachedChanges.length === 0) {
+    const storedCount = Number(oldAd?.editCount);
+    return {
+      editHistory,
+      editCount: editHistory.length || (
+        Number.isSafeInteger(storedCount) && storedCount > 0 ? storedCount : 0
+      )
+    };
+  }
+
+  editHistory.push({
+    editedAt,
+    editedBy: String(editorName || 'Unknown'),
+    changes: detachedChanges
+  });
+  return {
+    editHistory,
+    editCount: editHistory.length,
+    updatedAt: editedAt
+  };
+}
+
 function renderModal() {
   const existingModal = document.getElementById('app-modal');
   const previousCustomerMergeFocusId = existingModal && state.activeModal === 'customer-merge'
@@ -28894,6 +29256,7 @@ function renderModal() {
       // creator, so it gracefully falls back to the "USER" badge.
       const creatorIsAdmin = isAdminRole(adCreator?.role);
       const isArAd = state.language === 'ar';
+      const adHistoryCount = getAdEditHistoryCount(adData);
       const adPaymentState = getAdPaymentState(adData);
       const hasLinkedShopReceipt = adPaymentState === 'not_paid'
         && adData.collectionMethod === 'in_shop'
@@ -28929,8 +29292,8 @@ function renderModal() {
         <div class="flex flex-col h-full max-h-[85vh]">
           <!-- FIXED HEADER -->
           <div class="flex-shrink-0 flex items-center justify-between pb-4 border-b border-slate-200 dark:border-slate-700">
-            <div class="flex items-center space-x-3">
-              <span class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg">
+            <div class="min-w-0 flex items-center space-x-3">
+              <span class="w-10 h-10 shrink-0 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg">
                 <i data-lucide="megaphone" class="w-5 h-5 text-white"></i>
               </span>
               <div>
@@ -28938,9 +29301,18 @@ function renderModal() {
                 <p class="text-slate-400 text-xs">${isArAd ? 'املأ جميع الأقسام أدناه' : 'Fill all sections below'}</p>
               </div>
             </div>
-            <button type="button" onclick="closeModal()" class="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-rose-100 hover:text-rose-600 transition-colors">
-              <i data-lucide="x" class="w-4 h-4"></i>
-            </button>
+            <div class="flex shrink-0 items-center gap-2">
+              ${isEdit ? `
+                <button type="button" data-action="view-ad-edit-history" data-ad-id="${Security.escapeHtml(String(adData.id || ''))}" onclick="showAdEditHistory(this.dataset.adId)" class="min-h-11 inline-flex items-center justify-center gap-1.5 rounded-xl border border-purple-200 dark:border-purple-800 bg-purple-50 dark:bg-purple-900/20 px-3 text-xs font-bold text-purple-700 dark:text-purple-300 hover:bg-purple-100 dark:hover:bg-purple-900/40 focus:outline-none focus:ring-2 focus:ring-purple-500" title="${isArAd ? 'عرض سجل تعديلات الإعلان' : 'View ad edit history'}" aria-label="${isArAd ? `عرض سجل تعديلات الإعلان، ${adHistoryCount}` : `View ad edit history, ${adHistoryCount} edits`}">
+                  <i data-lucide="history" class="w-4 h-4 shrink-0"></i>
+                  <span class="hidden sm:inline">${isArAd ? 'السجل' : 'History'}</span>
+                  <span class="min-w-5 rounded-full bg-purple-600 px-1.5 py-0.5 text-center text-[10px] leading-none text-white">${adHistoryCount}</span>
+                </button>
+              ` : ''}
+              <button type="button" onclick="closeModal()" class="min-h-11 min-w-11 rounded-full bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-rose-100 hover:text-rose-600 transition-colors" aria-label="${isArAd ? 'إغلاق' : 'Close'}">
+                <i data-lucide="x" class="w-4 h-4"></i>
+              </button>
+            </div>
           </div>
 
           <!-- SCROLLABLE FORM BODY -->
@@ -29524,8 +29896,7 @@ function renderModal() {
       const receiptCustomers = getCustomersVisibleToCurrentUser();
       const receiptData = state.modalData || {};
       const isAdminReceipt = isCurrentUserAdmin();
-      const defaultRate1 = getDefaultRate1(PAYMENT_METHODS[0]);
-      const existingPayments = receiptData.payments || [{ method: PAYMENT_METHODS[0], amount: 0, rate: defaultRate1, rate2: state.defaultExchangeRate, collectionType: 'office', deliveryPersonId: '' }];
+      const existingPayments = getReceiptFormPayments(receiptData);
       const receiptDeliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
       const isArR = state.language === 'ar';
       // Copy (not alias) the live record's photos so add/remove in the modal
@@ -31403,16 +31774,22 @@ async function handleModalSubmit() {
         amountUSD = totals.totalR2;
       }
       
-      // #ad-rate does NOT exist in the ad modal template — reading it always
-      // fell through to the CURRENT global default, so every save silently
-      // rewrote a saved ad's exchangeRate (and any LYD figure derived from it)
-      // with today's market rate instead of the rate the ad was created at.
-      // Keep the ad's own stored rate on edit; use the default only for a new ad.
-      let exchangeRate = parseFloat(
-        (isEdit && Number.isFinite(Number(state.modalData?.exchangeRate)) && Number(state.modalData.exchangeRate) > 0)
-          ? state.modalData.exchangeRate
-          : state.defaultExchangeRate
-      );
+      // A Driver debt uses the linked receipt's rate. Other flows preserve the
+      // saved ad rate on edit and use the current default only for a new ad.
+      const linkedDriverReceipt = isUnpaidDriver && selectedUnpaidReceiptId
+        ? state.receipts.find(receipt => (
+            receipt
+            && !receipt._deleted
+            && String(receipt.id || '') === selectedUnpaidReceiptId
+          ))
+        : null;
+      let exchangeRate = resolveAdExchangeRateForSave({
+        isEdit,
+        ad: state.modalData,
+        isUnpaidDriver,
+        linkedReceipt: linkedDriverReceipt,
+        driverBudgetRate: document.getElementById('ad-driver-budget-rate')?.value
+      });
       const isPaid = paymentStatus === 'paid';
       // These three inputs do NOT exist in the ad modal template. Reading them
       // always yielded false/undefined, which on EDIT erased spentUSD /
@@ -31820,7 +32197,7 @@ async function handleModalSubmit() {
         pageId: pageId,
         amountUSD,
         exchangeRate,
-        amountLocal: amountUSD * exchangeRate,
+        amountLocal: adAmountLocalForSave(amountUSD, exchangeRate),
         paymentMethod: (isPaid ? '' : (collectionPayments[0]?.method || '')) || '',
         status: state.modalData?.status || 'Active',
         // If Not Paid + Driver AND linked to a temp delivery receipt, the delivery is tracked on the receipt (not on the ad),
@@ -32039,21 +32416,10 @@ async function handleModalSubmit() {
           });
         }
         
-        // Add to edit history if there are changes
-        if (changes.length > 0) {
-          const editHistory = oldAd.editHistory || [];
-          editHistory.push({
-            editedAt: new Date().toISOString(),
-            editedBy: state.currentUser?.name || 'Unknown',
-            changes: changes
-          });
-          adUpdates.editHistory = editHistory;
-          adUpdates.editCount = editHistory.length;
-          adUpdates.updatedAt = new Date().toISOString();
-        } else {
-          adUpdates.editHistory = oldAd.editHistory || [];
-          adUpdates.editCount = oldAd.editCount || 0;
-        }
+        // Work on a detached history copy. The live record changes only after
+        // the save succeeds, so a rejected/conflicted edit cannot create a
+        // false history row or duplicate it on retry.
+        Object.assign(adUpdates, buildAdEditHistoryUpdates(oldAd, changes));
         
         if (isServerModeEnabled()) {
           const expectedLastModified = Number(oldAd?._lastModified);

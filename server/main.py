@@ -6836,6 +6836,299 @@ def _financial_due_total(data: dict[str, Any]) -> int:
     return _financial_minor(usd_value, "receipt due amount")
 
 
+def _financial_valid_rate(value: Any) -> Decimal | None:
+    """Return a real LYD/USD rate without inventing the usual ``1`` fallback."""
+    try:
+        rate = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    if (
+        not rate.is_finite()
+        or rate <= Decimal(str(MIN_EXCHANGE_RATE))
+        or rate > Decimal(str(MAX_EXCHANGE_RATE))
+    ):
+        return None
+    return rate
+
+
+def _financial_status_aware_ad_spend(ad: dict[str, Any]) -> int:
+    """Mirror the frontend's canonical current-spend calculation in cents."""
+    status = str(ad.get("status") or "").strip().lower()
+    if status in {"pending", "paused"}:
+        return 0
+    if status == "stopped" and "spentUSD" in ad:
+        return _financial_minor(ad.get("spentUSD"), "stored stopped ad spend")
+    if status in {"completed", "canceled", "lost"} and "spentUSD" in ad:
+        return _financial_minor(ad.get("spentUSD"), "stored final ad spend")
+    return _financial_minor(ad.get("amountUSD"), "stored ad amount")
+
+
+def _financial_ad_spend_rate(
+    ad: dict[str, Any], receipt: dict[str, Any]
+) -> Decimal:
+    """Resolve the linked debt rate, repairing stale historical ad mirrors."""
+    receipt_rate = _financial_valid_rate(receipt.get("exchangeRate"))
+    if receipt_rate:
+        return receipt_rate
+    amount_usd = _financial_minor(ad.get("amountUSD"), "stored ad amount")
+    amount_local = _financial_minor(ad.get("amountLocal"), "stored ad local amount")
+    if amount_usd > 0 and amount_local > 0:
+        return Decimal(amount_local) / Decimal(amount_usd)
+    return (
+        _financial_valid_rate(ad.get("exchangeRate"))
+        or Decimal(1)
+    )
+
+
+def _financial_delivery_collection_target(
+    receipt_id: str,
+    receipt: dict[str, Any],
+    ad_rows: list[Any],
+) -> dict[str, Any]:
+    """Return the cash target for one delivery receipt without minting capacity.
+
+    Most receipts carry their promised amount directly. Historical/manual
+    Driver flows can instead leave a zero-value D receipt and keep the real
+    customer debt on its current linked ads. That derived value is ONLY a
+    delivery-completion target; callers must not feed it into
+    ``_financial_due_total`` before money is physically collected.
+    """
+
+    def _complete_pair(usd_minor: int, local_minor: int) -> tuple[int, int]:
+        rate = _financial_valid_rate(receipt.get("exchangeRate"))
+        if usd_minor <= 0 and local_minor > 0 and rate:
+            usd_minor = int(
+                (Decimal(local_minor) / rate).quantize(
+                    Decimal("1"), rounding=ROUND_HALF_UP
+                )
+            )
+        if local_minor <= 0 and usd_minor > 0 and rate:
+            local_minor = int(
+                (Decimal(usd_minor) * rate).quantize(
+                    Decimal("1"), rounding=ROUND_HALF_UP
+                )
+            )
+        return max(usd_minor, 0), max(local_minor, 0)
+
+    debt_usd = _financial_minor(
+        receipt.get("debtAmountUSD"), "stored receipt debt"
+    )
+    debt_local = _financial_minor(
+        receipt.get("debtAmountLocal"), "stored receipt local debt"
+    )
+    if debt_usd > 0 or debt_local > 0:
+        debt_usd, debt_local = _complete_pair(debt_usd, debt_local)
+        return {
+            "usdMinor": debt_usd,
+            "localMinor": debt_local,
+            "source": "stored_debt",
+            "linkedAdIds": [],
+        }
+
+    amount_usd_raw = (
+        receipt.get("amountUSD")
+        if receipt.get("amountUSD") is not None
+        else receipt.get("amount")
+    )
+    amount_local_raw = (
+        receipt.get("amountLocal")
+        if receipt.get("amountLocal") is not None
+        else receipt.get("amountLYD")
+    )
+    amount_usd = _financial_minor(amount_usd_raw, "stored receipt amount")
+    amount_local = _financial_minor(
+        amount_local_raw, "stored receipt local amount"
+    )
+    if amount_usd > 0 or amount_local > 0:
+        amount_usd, amount_local = _complete_pair(amount_usd, amount_local)
+        return {
+            "usdMinor": amount_usd,
+            "localMinor": amount_local,
+            "source": "receipt_amount",
+            "linkedAdIds": [],
+        }
+
+    raw_status = str(receipt.get("status") or "").strip().lower()
+    normalized_status = re.sub(r"[\s_-]+", "", raw_status)
+    if normalized_status in {"canceled", "cancelled"}:
+        payment_state = "canceled"
+    elif normalized_status == "lost":
+        payment_state = "lost"
+    elif normalized_status == "paid":
+        payment_state = "paid"
+    elif normalized_status in {"notpaid", "unpaid", "pending"}:
+        # Explicit status is authoritative over stale historical isPaid.
+        payment_state = "not_paid"
+    elif receipt.get("isPaid") is True:
+        payment_state = "paid"
+    elif receipt.get("isPaid") is False:
+        payment_state = "not_paid"
+    else:
+        payment_state = "unknown"
+    status_detail = (
+        receipt.get("statusDetail")
+        if isinstance(receipt.get("statusDetail"), dict)
+        else {}
+    )
+    collection = str(status_detail.get("notPaidCollection") or "").strip().lower()
+    temp_number = str(receipt.get("tempReceiptNo") or "").strip()
+    receipt_type = str(receipt.get("receiptType") or "").strip().upper()
+    delivery_status = str(receipt.get("deliveryStatus") or "").strip()
+    is_delivery = (
+        collection == "delivery"
+        or receipt_type == "DELIVERY_TEMP"
+        or bool(re.fullmatch(r"D[0-9]+", temp_number))
+        or delivery_status not in {"", "Office"}
+    )
+    if (
+        payment_state != "not_paid"
+        or not is_delivery
+        or not str(receipt.get("customerId") or "")
+        or receipt_type == "TRANSFER_IN"
+        or delivery_status.lower() in {"canceled", "cancelled"}
+    ):
+        return {
+            "usdMinor": 0,
+            "localMinor": 0,
+            "source": "none",
+            "linkedAdIds": [],
+        }
+
+    customer_id = str(receipt.get("customerId") or "")
+    total_usd = 0
+    total_local = 0
+    linked_ids: list[str] = []
+    for row in ad_rows:
+        if bool(row.get("deleted")):
+            continue
+        ad = _financial_row_data(row)
+        if str(ad.get("recordType") or "") == "receipt":
+            continue
+        if str(ad.get("customerId") or ad.get("customer") or "") != customer_id:
+            continue
+        if (
+            _financial_ad_payment_status(ad) != "not_paid"
+            or str(ad.get("collectionMethod") or "").strip().lower() != "driver"
+        ):
+            continue
+        modern_link = str(ad.get("linkedDeliveryReceiptId") or "")
+        current_link = modern_link or str(ad.get("receiptId") or "")
+        if current_link != receipt_id:
+            continue
+
+        spend_minor = _financial_status_aware_ad_spend(ad)
+        paid_raw = ad.get("receiptAllocations")
+        if not (isinstance(paid_raw, list) and paid_raw):
+            paid_raw = ad.get("mergedPaidAllocations")
+        paid_minor = sum(_financial_allocation_map(paid_raw).values())
+        unpaid_minor = max(spend_minor - paid_minor, 0)
+        if unpaid_minor <= 0:
+            continue
+
+        rate = _financial_ad_spend_rate(ad, receipt)
+        total_usd += unpaid_minor
+        total_local += int(
+            (Decimal(unpaid_minor) * rate).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+        )
+        linked_ids.append(str(row.get("id") or ""))
+
+    return {
+        "usdMinor": total_usd,
+        "localMinor": total_local,
+        "source": "linked_ads" if linked_ids else "none",
+        "linkedAdIds": linked_ids,
+    }
+
+
+def _financial_apply_delivery_completion_truth(
+    receipt_id: str,
+    old: dict[str, Any],
+    merged: dict[str, Any],
+    ad_rows: list[Any],
+) -> None:
+    """Recompute delivery money from locked receipt/ad state before persistence."""
+    if (
+        str(merged.get("deliveryStatus") or "").strip() != "Delivered"
+        or str(old.get("deliveryStatus") or "").strip() == "Delivered"
+    ):
+        return
+
+    target = _financial_delivery_collection_target(receipt_id, old, ad_rows)
+    debt_usd = int(target["usdMinor"])
+    debt_local = int(target["localMinor"])
+    collected_local = _financial_minor(
+        merged.get("amountCollectedFromCustomer"),
+        "amountCollectedFromCustomer",
+    )
+
+    over_local = collected_local - debt_local
+    over_abs_minor = int(
+        (Decimal(str(_DELIVERY_OVERPAY_ABS_LOCAL)) * Decimal(100)).quantize(
+            Decimal("1"), rounding=ROUND_HALF_UP
+        )
+    )
+    debt_ceiling = int(
+        (Decimal(debt_local) * Decimal(str(_DELIVERY_OVERPAY_RATIO))).quantize(
+            Decimal("1"), rounding=ROUND_HALF_UP
+        )
+    )
+    if over_local > over_abs_minor and collected_local > debt_ceiling:
+        raise HTTPException(
+            status_code=400,
+            detail="Collected amount far exceeds the delivery debt; office confirmation required",
+        )
+
+    diff = collected_local - debt_local
+    if diff == 0:
+        payment_result = "PAID_EXACT"
+        overpaid = 0
+        remaining_due = 0
+    elif diff > 0:
+        payment_result = "OVERPAID"
+        overpaid = diff
+        remaining_due = 0
+    else:
+        payment_result = "UNDERPAID"
+        overpaid = 0
+        remaining_due = -diff
+
+    trusted_rate: Decimal | None = None
+    if target["source"] == "linked_ads" and debt_usd > 0 and debt_local > 0:
+        trusted_rate = Decimal(debt_local) / Decimal(debt_usd)
+    if trusted_rate is None:
+        trusted_rate = _financial_valid_rate(old.get("exchangeRate"))
+    if trusted_rate is None and debt_usd > 0 and debt_local > 0:
+        trusted_rate = Decimal(debt_local) / Decimal(debt_usd)
+
+    if trusted_rate:
+        collected_usd = int(
+            (Decimal(collected_local) / trusted_rate).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+        )
+    else:
+        # Preserve the historical no-rate behavior without ever treating LYD as USD.
+        collected_usd = debt_usd
+
+    merged["debtAmountUSD"] = _financial_usd(debt_usd)
+    merged["debtAmountLocal"] = _financial_usd(debt_local)
+    merged["amountUSD"] = _financial_usd(collected_usd)
+    merged["amountLocal"] = _financial_usd(collected_local)
+    if target["source"] == "linked_ads" and trusted_rate:
+        merged["exchangeRate"] = float(trusted_rate)
+    merged["paymentResult"] = payment_result
+    merged["overpaidAmount"] = _financial_usd(overpaid)
+    merged["remainingDue"] = _financial_usd(remaining_due)
+    if remaining_due == 0:
+        merged["status"] = "Paid"
+        merged["isPaid"] = True
+    else:
+        merged["status"] = "Not Paid"
+        merged["isPaid"] = False
+
+
 def _financial_receipt_ids(ad: dict[str, Any]) -> set[str]:
     ids: set[str] = set()
     for field in ("receiptAllocations", "dueAllocations", "mergedPaidAllocations"):
@@ -7417,6 +7710,15 @@ def _financial_derive_ad(
             locked_receipts=locked_receipts,
             ad_rows=ad_rows,
             current_ad_id=current_ad_id,
+        )
+        # The delivery receipt defines the customer's debt currency. Never
+        # trust a stale/default rate supplied by the client for a linked Driver
+        # ad; the common calculation below will recompute amountLocal from this
+        # authoritative rate.
+        linked_row = locked_receipts.get(linked_id)
+        linked_data = _financial_row_data(linked_row) if linked_row else {}
+        base["exchangeRate"] = (
+            linked_data.get("exchangeRate") or base.get("exchangeRate")
         )
         # Both pools can point at the same receipt here (merged paid + linked due);
         # cap the ad's TOTAL draw per receipt so it cannot spend the same money twice.
@@ -9122,6 +9424,14 @@ def _financial_patch_receipt_atomic(
                 postgres=postgres,
             )
             ad_rows = _financial_active_rows(conn, "ads")
+            # Delivery completion money is authoritative only here, after the
+            # receipt row is locked and after taking the current ad snapshot.
+            # In particular, a historical zero-value D receipt may derive its
+            # cash target from linked unpaid Driver ads, but that target never
+            # enters _financial_due_total before collection.
+            _financial_apply_delivery_completion_truth(
+                receipt_id, old, merged, ad_rows
+            )
             canceled_due_source = (
                 (
                     str(merged.get("deliveryStatus") or "") == "Canceled"
@@ -11356,17 +11666,11 @@ def update_collection_item(
                     debt_usd = _as_float(data.get("amountUSD")) or 0.0
                     updates["debtAmountUSD"] = float(debt_usd)
 
-                # SECURITY: reject an implausibly large collected amount before it
-                # converts to spendable USD ad credit. A real tip/rounding is small;
-                # this blocks the 100x-1000x inflation (mint or fat-finger) while
-                # leaving legitimate deliveries and modest overpayments untouched.
-                _over_local = float(amt_collected) - float(debt_local or 0.0)
-                _debt_ceiling = float(debt_local or 0.0) * _DELIVERY_OVERPAY_RATIO
-                if _over_local > _DELIVERY_OVERPAY_ABS_LOCAL and float(amt_collected) > _debt_ceiling:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Collected amount far exceeds the delivery debt; office confirmation required",
-                    )
+                # The authoritative overpayment guard runs again inside
+                # _financial_patch_receipt_atomic after locking the receipt and
+                # deriving any zero-value D-receipt target from current linked
+                # ads. A pre-lock check against the stored zero would reject a
+                # legitimate large collection before that target can be seen.
 
                 # Compute debt comparison
                 diff = float(amt_collected) - float(debt_local or 0.0)

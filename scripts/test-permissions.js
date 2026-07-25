@@ -1100,6 +1100,85 @@ check('receipt edit history refuses without receipts.viewHistory', () => {
   assert(lastNote() && /Access Denied/i.test(lastNote().t), 'history was not blocked');
 });
 
+check('ad edit history builder never mutates the saved ad before success', () => {
+  const oldAd = {
+    id: 'ad-history-copy',
+    editHistory: [{
+      editedAt: '2026-07-20T10:00:00.000Z',
+      editedBy: 'First editor',
+      changes: [{ field: 'Amount', from: '$5.00', to: '$6.00' }]
+    }],
+    editCount: 1
+  };
+  const before = JSON.stringify(oldAd);
+  const updates = sandbox.buildAdEditHistoryUpdates(
+    oldAd,
+    [{ field: 'Exchange Rate', from: '9.50', to: '9.70' }],
+    'Second editor',
+    '2026-07-25T10:00:00.000Z'
+  );
+
+  assert(JSON.stringify(oldAd) === before, 'building the update mutated the live saved ad');
+  assert(updates.editHistory !== oldAd.editHistory, 'history array was not detached');
+  assert(updates.editHistory[0] !== oldAd.editHistory[0], 'legacy history row was not detached');
+  assert(updates.editHistory[0].changes !== oldAd.editHistory[0].changes, 'nested changes were not detached');
+  assert(updates.editHistory.length === 2 && updates.editCount === 2, 'new edit was not appended exactly once');
+  assert(updates.editHistory[1].editedBy === 'Second editor', 'editor identity was not recorded');
+  updates.editHistory[0].changes[0].to = 'tampered';
+  assert(oldAd.editHistory[0].changes[0].to === '$6.00', 'detached update still aliased a saved nested change');
+});
+
+check('ad edit history viewer safely handles malformed and unsafe legacy rows', () => {
+  const originalAds = S.ads;
+  const originalCustomers = S.customers;
+  const originalPages = S.pages;
+  const originalInsertAdjacentHTML = sandbox.document.body.insertAdjacentHTML;
+  let inserted = '';
+  sandbox.document.body.insertAdjacentHTML = (_position, html) => { inserted = String(html); };
+  try {
+    S.customers = [{ id: 'history-customer', name: 'Safe Customer' }];
+    S.pages = [{ id: 'history-page', name: 'Safe Page' }];
+    S.ads = [{
+      id: 'history-ad',
+      customerId: 'history-customer',
+      pageId: 'history-page',
+      createdAt: 'not-a-date',
+      editHistory: [
+        null,
+        'broken-row',
+        {
+          date: 'bad-date',
+          userName: '<script>alert(1)</script>',
+          changes: null
+        },
+        {
+          editedAt: '2026-07-25T11:00:00.000Z',
+          editedBy: '<img src=x onerror=alert(1)>',
+          changes: [
+            null,
+            { field: '<b>Rate</b>', oldValue: { rate: 9.5 }, newValue: '<i>9.7</i>' }
+          ]
+        }
+      ]
+    }];
+
+    sandbox.showAdEditHistory('history-ad');
+    assert(inserted.includes('id="ad-edit-history-title"'), 'history dialog was not rendered');
+    assert(inserted.includes('&lt;script&gt;alert(1)&lt;/script&gt;'), 'legacy editor name was not escaped');
+    assert(inserted.includes('&lt;img src=x onerror=alert(1)&gt;'), 'editor value was not escaped');
+    assert(inserted.includes('&lt;b&gt;Rate&lt;/b&gt;'), 'field label was not escaped');
+    assert(inserted.includes('&lt;i&gt;9.7&lt;/i&gt;'), 'new value was not escaped');
+    assert(!inserted.includes('<script>alert(1)</script>') && !inserted.includes('<img src=x'), 'unsafe legacy HTML reached the dialog');
+    assert(inserted.includes('Unknown date'), 'invalid legacy dates were not handled');
+    assert(inserted.includes('No field details were saved for this older edit.'), 'missing legacy change details were not explained');
+  } finally {
+    sandbox.document.body.insertAdjacentHTML = originalInsertAdjacentHTML;
+    S.ads = originalAds;
+    S.customers = originalCustomers;
+    S.pages = originalPages;
+  }
+});
+
 check('uploadAdPhotos refuses without ads.uploadPhotos', () => {
   loginAs(employee({ ads: ['view', 'add'] }));
   clearNotes();
@@ -1438,6 +1517,64 @@ check('291 LYD at rate 9.70 gives exactly $30.00 (was $30.02)', () => {
 check('the receipt stores the rate the user typed (was 9.69 for 9.70)', () => {
   const rate = sandbox.receiptExchangeRate([{ method: 'Cash (LYD)', rate2: 9.7 }], 291, 30);
   assert(rate === 9.7, `expected the typed rate 9.7, got ${rate}`);
+});
+
+check('a zero-value Not Paid receipt keeps Rate 2 without inventing a payment', () => {
+  S.defaultExchangeRate = 9.5;
+  const enteredRows = [{
+    method: 'Cash (LYD)',
+    amount: 0,
+    rate: 1,
+    rate2: 9.7,
+    collectionType: 'delivery',
+    deliveryPersonId: 'u-driver'
+  }];
+  const payments = enteredRows.filter(row => row.amount > 0);
+  const rate = sandbox.receiptExchangeRateForSave(
+    payments,
+    enteredRows,
+    0,
+    0,
+    'Not Paid',
+    null
+  );
+
+  assert(payments.length === 0, 'zero-value receipt recorded money that was not received');
+  assert(rate === 9.7, `expected zero-value receipt to keep 9.7, got ${rate}`);
+});
+
+check('reopening a zero-value receipt seeds the saved exchange rate for editing', () => {
+  S.defaultExchangeRate = 9.5;
+  const rows = sandbox.getReceiptFormPayments({
+    status: 'Not Paid',
+    isPaid: false,
+    paymentMethod: 'Cash (LYD)',
+    exchangeRate: 9.7,
+    payments: [],
+    deliveryPersonId: 'u-driver',
+    statusDetail: { notPaidCollection: 'delivery' }
+  });
+
+  assert(rows.length === 1, `expected one editable seed row, got ${rows.length}`);
+  assert(rows[0].amount === 0, 'edit seed row must not invent a received amount');
+  assert(rows[0].rate2 === 9.7, `expected saved rate 9.7, got ${rows[0].rate2}`);
+  assert(rows[0].collectionType === 'delivery', 'delivery collection choice was not restored');
+  assert(rows[0].deliveryPersonId === 'u-driver', 'assigned driver was not restored');
+});
+
+check('a Driver ad uses its linked receipt rate ($50 at 9.70 is 485 LYD)', () => {
+  S.defaultExchangeRate = 9.5;
+  const rate = sandbox.resolveAdExchangeRateForSave({
+    isEdit: true,
+    ad: { exchangeRate: 9.5 },
+    isUnpaidDriver: true,
+    linkedReceipt: { id: 'receipt-rate-970', exchangeRate: 9.7 },
+    driverBudgetRate: 9.5
+  });
+
+  assert(rate === 9.7, `expected linked receipt rate 9.7, got ${rate}`);
+  const amountLocal = sandbox.adAmountLocalForSave(50, rate);
+  assert(amountLocal === 485, `$50 at 9.7 should be 485 LYD, got ${amountLocal}`);
 });
 
 check('a split still stores the effective average rate', () => {
@@ -2465,6 +2602,114 @@ check('receipt view renders every debt filter and filters old and new records', 
   const anyDebtHtml = visible(sandbox.renderReceiptsView());
   assert(anyDebtHtml.includes('New Delivery Debt') && anyDebtHtml.includes('Legacy Delivery Debt') && anyDebtHtml.includes('Shop Debt'), 'Any Debt omitted a debt source');
   assert(!anyDebtHtml.includes('Paid Customer'), 'Any Debt included a paid receipt');
+});
+
+check('zero-value unpaid receipt shows its linked ad debt without inventing receipt credit', () => {
+  seedReceiptDebtFilterState();
+  const debtReceipt = {
+    id: 'receipt_zero_driver_debt', customerId: 'customer_new_delivery',
+    status: 'Not Paid', isPaid: false,
+    statusDetail: { notPaidCollection: 'delivery' },
+    receiptType: 'DELIVERY_TEMP', deliveryStatus: 'Needs Delivery',
+    deliveryPersonId: 'u-driver', tempReceiptNo: 'D13',
+    amountUSD: 0, amountLocal: 0, exchangeRate: 9.7,
+    createdAt: '2026-07-24T23:54:43Z', payments: [], transfers: []
+  };
+  S.receipts = [debtReceipt];
+  S.ads = [{
+    id: 'ad_zero_driver_debt', recordType: 'ad',
+    customerId: debtReceipt.customerId,
+    // Historical row saved before the linked receipt became authoritative.
+    amountUSD: 50, amountLocal: 475, exchangeRate: 9.5,
+    paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'driver',
+    linkedDeliveryReceiptId: debtReceipt.id, receiptId: debtReceipt.id,
+    receiptAllocations: [], dueAllocations: [],
+    status: 'Active', startDate: '2026-07-24T00:00:00Z',
+    endDate: '2026-08-01T00:00:00Z'
+  }];
+
+  const debt = sandbox.getReceiptLinkedDebtStats(debtReceipt);
+  assert(debt.debtUSD === 50, `expected $50 linked debt, got $${debt.debtUSD}`);
+  assert(debt.debtLYD === 485, `expected 485 LYD linked debt, got ${debt.debtLYD}`);
+  assert(debt.linkedAds.length === 1, 'linked debt did not retain its ad reference');
+  const customerStats = sandbox.getCustomerStats(debtReceipt.customerId);
+  assert(customerStats.balanceUSD === -50 && customerStats.balanceLYD === -485,
+    'historical customer debt did not adopt the corrected linked receipt rate');
+
+  const usage = sandbox.getReceiptUsageStats(debtReceipt);
+  assert(usage.usedUSD === 0 && usage.remainingUSD === 0,
+    'displaying debt minted paid receipt credit or usage');
+
+  const html = visible(sandbox.renderReceiptsView());
+  assert(html.includes('data-receipt-linked-debt="true"'), 'receipt card is missing the linked customer-debt display');
+  assert(html.includes('Customer debt'), 'receipt card does not label the amount as customer debt');
+  assert(html.includes('$50.00') && html.includes('485.00 LYD'),
+    'receipt card does not show the linked debt in both currencies');
+  assert(html.includes('9.70'), 'receipt card does not show the debt receipt exchange rate');
+  assert(sandbox.buildDeliveryReceiptWhatsAppMessage(debtReceipt).includes('485.00 LYD ($50.00)'),
+    'delivery message still tells the driver to collect zero');
+});
+
+check('linked Driver collection target subtracts paid funding and uses status-aware spend', () => {
+  seedReceiptDebtFilterState();
+  const debtReceipt = {
+    id: 'receipt_driver_collection_target', customerId: 'customer_new_delivery',
+    status: 'Not Paid', isPaid: false,
+    statusDetail: { notPaidCollection: 'delivery' },
+    receiptType: 'DELIVERY_TEMP', deliveryStatus: 'In Progress',
+    tempReceiptNo: 'D14', amountUSD: 0, amountLocal: 0,
+    exchangeRate: 9.7, payments: [], transfers: []
+  };
+  S.receipts = [debtReceipt];
+  S.ads = [
+    {
+      id: 'ad_driver_part_paid', recordType: 'ad', customerId: debtReceipt.customerId,
+      amountUSD: 50, exchangeRate: 9.7, status: 'Active',
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'driver',
+      linkedDeliveryReceiptId: debtReceipt.id, receiptId: debtReceipt.id,
+      receiptAllocations: [{ receiptId: 'receipt_paid_elsewhere', amountUSD: 20 }],
+      mergedPaidAllocations: [{ receiptId: 'receipt_paid_elsewhere', amountUSD: 20 }],
+      dueAllocations: []
+    },
+    {
+      id: 'ad_driver_stopped', recordType: 'ad', customerId: debtReceipt.customerId,
+      amountUSD: 40, spentUSD: 5, exchangeRate: 9.7, status: 'Stopped',
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'driver',
+      linkedDeliveryReceiptId: debtReceipt.id, receiptId: debtReceipt.id,
+      receiptAllocations: [], dueAllocations: []
+    },
+    {
+      id: 'ad_driver_already_paid', recordType: 'ad', customerId: debtReceipt.customerId,
+      amountUSD: 100, exchangeRate: 9.7, status: 'Active',
+      paymentStatus: 'paid', isPaid: true, collectionMethod: 'driver',
+      linkedDeliveryReceiptId: debtReceipt.id, receiptId: debtReceipt.id,
+      receiptAllocations: [], dueAllocations: []
+    },
+    {
+      id: 'ad_driver_other_customer', recordType: 'ad', customerId: 'customer_paid',
+      amountUSD: 100, exchangeRate: 9.7, status: 'Active',
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'driver',
+      linkedDeliveryReceiptId: debtReceipt.id, receiptId: debtReceipt.id,
+      receiptAllocations: [], dueAllocations: []
+    }
+  ];
+
+  const target = sandbox.getReceiptCollectionTarget(debtReceipt);
+  assert(target.amountUSD === 35, `expected $35 after paid funding/status rules, got $${target.amountUSD}`);
+  assert(target.amountLocal === 339.5, `expected 339.50 LYD, got ${target.amountLocal}`);
+  assert(target.linkedAds.length === 2, 'paid or other-customer ad leaked into the collection target');
+
+  const storedTarget = sandbox.getReceiptCollectionTarget({
+    ...debtReceipt,
+    amountUSD: 10,
+    amountLocal: 97
+  });
+  assert(storedTarget.amountUSD === 10 && storedTarget.amountLocal === 97,
+    'a linked ad overrode the receipt’s explicit stored collection amount');
+  assert(storedTarget.source === 'receipt_amount', 'stored receipt target source was not preserved');
+  assert(sandbox._receiptCashCollectionTargetLocal({
+    status: 'Paid', isPaid: true, amountLocal: 500, debtAmountLocal: 485
+  }) === 500, 'office handover lost a real delivery overpayment by reverting to the old debt baseline');
 });
 
 function seedWhatsAppDeliveryState() {

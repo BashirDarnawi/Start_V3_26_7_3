@@ -26,6 +26,14 @@ const customerMergeModal = modals.slice(
   modals.indexOf("case 'customer-merge':"),
   modals.indexOf("case 'ad':")
 );
+const adEditModal = modals.slice(
+  modals.indexOf("case 'ad':"),
+  modals.indexOf("case 'user':")
+);
+const adEditHistoryViewer = helpers.slice(
+  helpers.indexOf('function _adEditHistoryText'),
+  helpers.indexOf('const _pendingReceiptTransferAttempts')
+);
 const clothes = read('src/15b-clothes.js');
 const adsStudio = read('src/15c-ads-studio.js');
 const css = read('style.css');
@@ -148,6 +156,27 @@ check('phone dialogs use one safe scrolling overlay',
   views.includes('mobile-dialog-overlay fixed inset-0') &&
   helpers.includes('mobile-dialog-overlay fixed inset-0') &&
   modals.includes('mobile-dialog-overlay fixed inset-0'));
+check('Edit Ad keeps an always-visible phone-sized history action in its fixed header',
+  adEditModal.includes('data-action="view-ad-edit-history"') &&
+  adEditModal.includes('data-ad-id="${Security.escapeHtml(String(adData.id || \'\'))}"') &&
+  adEditModal.includes('onclick="showAdEditHistory(this.dataset.adId)"') &&
+  adEditModal.includes('class="min-h-11 inline-flex') &&
+  adEditModal.includes("const adHistoryCount = getAdEditHistoryCount(adData);") &&
+  adEditModal.includes("${isEdit ? `"));
+check('ad history rendering is defensive, escaped and accessible',
+  adEditHistoryViewer.includes("Array.isArray(ad?.editHistory)") &&
+  adEditHistoryViewer.includes("Security.escapeHtml(edit.editedBy)") &&
+  adEditHistoryViewer.includes("Security.escapeHtml(change.field)") &&
+  adEditHistoryViewer.includes("Security.escapeHtml(change.from)") &&
+  adEditHistoryViewer.includes("Security.escapeHtml(change.to)") &&
+  adEditHistoryViewer.includes('role="dialog"') &&
+  adEditHistoryViewer.includes('aria-modal="true"') &&
+  adEditHistoryViewer.includes('No field details were saved for this older edit.'));
+check('ad edit history is detached before save so failed edits cannot create ghost rows',
+  modals.includes('function buildAdEditHistoryUpdates(') &&
+  modals.includes('oldAd.editHistory.map(entry =>') &&
+  modals.includes('Object.assign(adUpdates, buildAdEditHistoryUpdates(oldAd, changes));') &&
+  !modals.includes('const editHistory = oldAd.editHistory || [];'));
 check('Android keeps normal document scrolling',
   !/body\.platform-android\s*\{[^}]*overflow\s*:\s*hidden/s.test(css) &&
   !/body\.platform-android\s+#app\s*\{/s.test(css));

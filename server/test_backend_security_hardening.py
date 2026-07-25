@@ -2610,6 +2610,53 @@ class TestReceiptAndAdTransactions:
         assert saved_data["dueAmountToUseLYD"] == 0
         assert saved_data["receiptId"] == ""
 
+    def test_driver_ad_uses_linked_receipt_exchange_rate(self, actors):
+        self._customer("fin_driver_rate_customer", actors)
+        self._receipt(
+            "fin_driver_rate_receipt",
+            "fin_driver_rate_customer",
+            0,
+            actors,
+            status="Not Paid",
+            isPaid=False,
+            amountLocal=0,
+            debtAmountLocal=0,
+            debtAmountUSD=0,
+            exchangeRate=9.7,
+            payments=[],
+            tempReceiptNo="D97001",
+            deliveryStatus="Needs Delivery",
+            deliveryPersonId=actors["driver"]["id"],
+            statusDetail={"notPaidCollection": "delivery"},
+        )
+
+        created = self._mutate_ad(
+            "fin_driver_rate_ad",
+            "fin-driver-rate-create-001",
+            {
+                "customerId": "fin_driver_rate_customer",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "driver",
+                # Simulate a stale client still carrying the old default. The
+                # linked receipt is authoritative and must replace this value.
+                "exchangeRate": 9.5,
+                "driverBudgetUSD": 50,
+                "linkedDeliveryReceiptId": "fin_driver_rate_receipt",
+                "receiptId": "fin_driver_rate_receipt",
+                "receiptAllocations": [],
+                "mergedPaidAllocations": [],
+                "dueAllocations": [],
+            },
+            actors,
+        )
+
+        assert created.status_code == 200, created.text
+        saved = created.json()["ad"]["data"]
+        assert saved["amountUSD"] == 50
+        assert saved["exchangeRate"] == 9.7
+        assert saved["amountLocal"] == 485
+        assert saved["linkedDeliveryReceiptId"] == "fin_driver_rate_receipt"
+
     def test_unfunded_driver_budget_is_debt_until_exact_paid_settlement(self, actors):
         self._customer("fin_driver_debt_customer", actors)
         self._receipt(
@@ -2758,6 +2805,274 @@ class TestReceiptAndAdTransactions:
             {"receiptId": "fin_driver_debt_paid", "amountUSD": 100.0}
         ]
         assert "driverBudgetUSD" not in settled_data
+
+    def test_zero_delivery_collection_target_is_status_aware_and_customer_scoped(self):
+        receipt = {
+            "customerId": "fin_zero_target_customer",
+            "status": "Not Paid",
+            "isPaid": False,
+            "amountUSD": 0,
+            "amountLocal": 0,
+            "debtAmountUSD": 0,
+            "debtAmountLocal": 0,
+            "exchangeRate": 9.7,
+            "tempReceiptNo": "D73000",
+            "receiptType": "DELIVERY_TEMP",
+            "deliveryStatus": "In Progress",
+        }
+
+        def ad_row(ad_id, **data):
+            return {
+                "id": ad_id,
+                "deleted": False,
+                "data_json": json_dumps(
+                    {
+                        "recordType": "ad",
+                        "customerId": "fin_zero_target_customer",
+                        "paymentStatus": "not_paid",
+                        "collectionMethod": "driver",
+                        "status": "Active",
+                        **data,
+                    }
+                ),
+            }
+
+        rows = [
+            # This historical ad still says 9.5 ($50 / 475), while its linked
+            # receipt has since been corrected to 9.7. The receipt is the debt
+            # rate authority. The merged mirror repeats the same $10 paid money
+            # and must not be counted twice, leaving $40 / 388 LYD of debt.
+            ad_row(
+                "fin_zero_target_mixed",
+                linkedDeliveryReceiptId="fin_zero_target_receipt",
+                receiptId="fin_zero_target_receipt",
+                amountUSD=50,
+                amountLocal=475,
+                exchangeRate=9.5,
+                receiptAllocations=[
+                    {"receiptId": "fin_zero_target_paid", "amountUSD": 10}
+                ],
+                mergedPaidAllocations=[
+                    {"receiptId": "fin_zero_target_paid", "amountUSD": 10}
+                ],
+            ),
+            # A stopped ad contributes actual spend, not its original budget.
+            ad_row(
+                "fin_zero_target_stopped",
+                linkedDeliveryReceiptId="fin_zero_target_receipt",
+                amountUSD=30,
+                amountLocal=285,
+                spentUSD=5,
+                status="Stopped",
+                receiptAllocations=[],
+                mergedPaidAllocations=[],
+            ),
+            # Old Driver rows used receiptId before linkedDeliveryReceiptId.
+            ad_row(
+                "fin_zero_target_legacy",
+                receiptId="fin_zero_target_receipt",
+                amountUSD=3,
+                amountLocal=30,
+                receiptAllocations=[],
+                mergedPaidAllocations=[],
+            ),
+            # Pending/paused spend, another customer, another current receipt,
+            # Paid ads, and frozen historical links are not current debt here.
+            ad_row(
+                "fin_zero_target_paused",
+                linkedDeliveryReceiptId="fin_zero_target_receipt",
+                amountUSD=100,
+                amountLocal=950,
+                status="Paused",
+            ),
+            ad_row(
+                "fin_zero_target_other_customer",
+                customerId="fin_zero_target_other_customer",
+                linkedDeliveryReceiptId="fin_zero_target_receipt",
+                amountUSD=100,
+                amountLocal=950,
+            ),
+            ad_row(
+                "fin_zero_target_other_receipt",
+                linkedDeliveryReceiptId="fin_zero_target_other_receipt",
+                receiptId="fin_zero_target_receipt",
+                amountUSD=100,
+                amountLocal=950,
+            ),
+            ad_row(
+                "fin_zero_target_paid_ad",
+                linkedDeliveryReceiptId="fin_zero_target_receipt",
+                amountUSD=100,
+                amountLocal=950,
+                paymentStatus="paid",
+                isPaid=True,
+            ),
+            ad_row(
+                "fin_zero_target_frozen_only",
+                amountUSD=100,
+                amountLocal=950,
+                stopAllocationBaseline={
+                    "due": [
+                        {
+                            "receiptId": "fin_zero_target_receipt",
+                            "amountUSD": 100,
+                        }
+                    ]
+                },
+            ),
+        ]
+
+        target = main_module._financial_delivery_collection_target(
+            "fin_zero_target_receipt", receipt, rows
+        )
+        assert target["source"] == "linked_ads"
+        assert target["usdMinor"] == 4800
+        assert target["localMinor"] == 46560
+        assert target["linkedAdIds"] == [
+            "fin_zero_target_mixed",
+            "fin_zero_target_stopped",
+            "fin_zero_target_legacy",
+        ]
+        # A derived collection target is not pre-payment receipt capacity.
+        assert main_module._financial_due_total(receipt) == 0
+        # Explicit historical status wins over a stale boolean mirror.
+        legacy_receipt = {
+            **receipt,
+            "status": "Unpaid",
+            "isPaid": True,
+        }
+        legacy_target = main_module._financial_delivery_collection_target(
+            "fin_zero_target_receipt", legacy_receipt, rows
+        )
+        assert legacy_target["usdMinor"] == 4800
+        assert legacy_target["localMinor"] == 46560
+
+    def test_zero_value_driver_receipt_completes_against_linked_ad_debt(self, actors):
+        self._customer("fin_zero_delivery_customer", actors)
+        receipt = self._receipt(
+            "fin_zero_delivery_receipt",
+            "fin_zero_delivery_customer",
+            0,
+            actors,
+            status="Not Paid",
+            isPaid=False,
+            amountLocal=0,
+            debtAmountLocal=0,
+            debtAmountUSD=0,
+            exchangeRate=9.7,
+            statusDetail={"notPaidCollection": "delivery"},
+            tempReceiptNo="D73001",
+            receiptType="DELIVERY_TEMP",
+            deliveryStatus="Needs Delivery",
+            deliveryPersonId=actors["driver"]["id"],
+        )
+        created = self._mutate_ad(
+            "fin_zero_delivery_ad",
+            "fin-zero-delivery-ad-create-001",
+            {
+                "customerId": "fin_zero_delivery_customer",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "driver",
+                "exchangeRate": 9.7,
+                "driverBudgetUSD": 50,
+                "linkedDeliveryReceiptId": "fin_zero_delivery_receipt",
+                "receiptId": "fin_zero_delivery_receipt",
+                "receiptAllocations": [],
+                "mergedPaidAllocations": [],
+                "dueAllocations": [],
+            },
+            actors,
+        )
+        assert created.status_code == 200, created.text
+
+        # Simulate the production legacy mismatch: the zero D receipt was
+        # corrected to 9.7, but this already-saved ad still mirrors 9.5.
+        with db_conn() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT data_json FROM entities "
+                    "WHERE type='ads' AND id='fin_zero_delivery_ad'"
+                )
+            ).mappings().first()
+            assert row
+            stale_ad = json.loads(row["data_json"])
+            stale_ad["exchangeRate"] = 9.5
+            stale_ad["amountLocal"] = 475
+            conn.execute(
+                text(
+                    "UPDATE entities SET data_json=:data, last_modified=:modified "
+                    "WHERE type='ads' AND id='fin_zero_delivery_ad'"
+                ),
+                {"data": json_dumps(stale_ad), "modified": now_ms()},
+            )
+
+        # The linked ad is a collection target only. Before physical payment,
+        # the zero-value receipt still cannot fund even one due dollar.
+        premature_credit = self._mutate_ad(
+            "fin_zero_delivery_premature",
+            "fin-zero-delivery-premature-001",
+            {
+                "customerId": "fin_zero_delivery_customer",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "driver",
+                "exchangeRate": 9.7,
+                "driverBudgetUSD": 1,
+                "linkedDeliveryReceiptId": "fin_zero_delivery_receipt",
+                "receiptId": "fin_zero_delivery_receipt",
+                "receiptAllocations": [],
+                "mergedPaidAllocations": [],
+                "dueAllocations": [
+                    {
+                        "receiptId": "fin_zero_delivery_receipt",
+                        "amountUSD": 1,
+                    }
+                ],
+            },
+            actors,
+        )
+        assert premature_credit.status_code == 409, premature_credit.text
+        stored_before = client.get(
+            "/api/collections/receipts/fin_zero_delivery_receipt",
+            cookies=actors["admin"],
+        )
+        assert stored_before.status_code == 200
+        assert stored_before.json()["data"]["amountUSD"] == 0
+        assert stored_before.json()["data"]["debtAmountUSD"] == 0
+
+        accepted = client.patch(
+            "/api/collections/receipts/fin_zero_delivery_receipt",
+            json={
+                "expectedLastModified": receipt["lastModified"],
+                "data": {"deliveryStatus": "In Progress", "acceptedDate": "x"},
+            },
+            cookies=actors["driver_cookies"],
+        )
+        assert accepted.status_code == 200, accepted.text
+        completed = client.patch(
+            "/api/collections/receipts/fin_zero_delivery_receipt",
+            json={
+                "expectedLastModified": accepted.json()["lastModified"],
+                "data": {
+                    "deliveryStatus": "Delivered",
+                    "finalReceiptNo": "773001",
+                    "receiptImage": "data:image/png;base64,AAAA",
+                    "amountCollectedFromCustomer": 485,
+                    "actualDeliveryFeeCollected": 0,
+                },
+            },
+            cookies=actors["driver_cookies"],
+        )
+        assert completed.status_code == 200, completed.text
+        completed_data = completed.json()["data"]
+        assert completed_data["deliveryStatus"] == "Delivered"
+        assert completed_data["paymentResult"] == "PAID_EXACT"
+        assert completed_data["status"] == "Paid"
+        assert completed_data["isPaid"] is True
+        assert completed_data["debtAmountUSD"] == 50
+        assert completed_data["debtAmountLocal"] == 485
+        assert completed_data["amountUSD"] == 50
+        assert completed_data["amountLocal"] == 485
+        assert completed_data["exchangeRate"] == 9.7
 
     def test_driver_due_ad_can_settle_from_same_receipt_after_delivery(self, actors):
         self._customer("fin_driver_same_receipt_customer", actors)

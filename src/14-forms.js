@@ -405,18 +405,34 @@ function _receiptCustomerRiskDebtUSD(receipt) {
     return Math.max(Number(receipt?.amountUSD) || 0, 0);
   }
 
+  let own = 0;
   const collection = String(receipt?.statusDetail?.notPaidCollection || '').trim().toLowerCase();
   if (['office', 'in_shop', 'shop'].includes(collection)) {
-    return Math.max(Number(receipt?.amountUSD) || 0, 0);
+    own = Math.max(Number(receipt?.amountUSD) || 0, 0);
+  } else {
+    const localValue = receipt?.debtAmountLocal ?? receipt?.amountLocal;
+    const local = Number(localValue) || 0;
+    const rate = Number(receipt?.exchangeRate) || 0;
+    if (local > 0 && rate > 0) {
+      own = Math.max(local / rate, 0);
+    } else {
+      const usdValue = receipt?.debtAmountUSD ?? receipt?.amountUSD;
+      own = Math.max(Number(usdValue) || 0, 0);
+    }
   }
+  if (own > 0) return own;
 
-  const localValue = receipt?.debtAmountLocal ?? receipt?.amountLocal;
-  const local = Number(localValue) || 0;
-  const rate = Number(receipt?.exchangeRate) || 0;
-  if (local > 0 && rate > 0) return Math.max(local / rate, 0);
-
-  const usdValue = receipt?.debtAmountUSD ?? receipt?.amountUSD;
-  return Math.max(Number(usdValue) || 0, 0);
+  // Zero-value driver (D#) receipts keep the real customer debt on their
+  // linked ads, so the receipt's own fields read 0 and the warning notice was
+  // silently dropped. getReceiptCollectionTarget derives that debt from the
+  // linked ads (last resort only — the receipt's own authoritative fields
+  // above always win), so the warning shows the same debt the receipt card
+  // shows.
+  if (typeof getReceiptCollectionTarget === 'function') {
+    const target = getReceiptCollectionTarget(receipt);
+    return Math.max(Number(target?.debtUSD) || 0, 0);
+  }
+  return own;
 }
 
 // Pure, permission-scoped classifier used by both selection-time and save-time
@@ -1153,6 +1169,95 @@ function receiptExchangeRate(payments, totalLYD, totalUSD) {
   return state.defaultExchangeRate;
 }
 
+// A Not Paid receipt may intentionally have no money rows yet. Keep payments[]
+// empty (so it never invents received cash), while still preserving the Rate 2
+// the user entered for the debt and any ads linked to it.
+function receiptExchangeRateForSave(payments, enteredPaymentRows, totalLYD, totalUSD, status, existingRate) {
+  const savedRows = Array.isArray(payments) ? payments : [];
+  if (savedRows.length > 0) {
+    return receiptExchangeRate(savedRows, totalLYD, totalUSD);
+  }
+
+  if (status === 'Not Paid') {
+    const enteredRows = Array.isArray(enteredPaymentRows) ? enteredPaymentRows : [];
+    const enteredRate = enteredRows
+      .map(row => Number(row?.rate2))
+      .find(rate => Number.isFinite(rate) && rate > 0);
+    if (enteredRate) return enteredRate;
+
+    const previousRate = Number(existingRate);
+    if (Number.isFinite(previousRate) && previousRate > 0) return previousRate;
+  }
+
+  return state.defaultExchangeRate;
+}
+
+// Reopen an all-zero receipt with one editable form row. The row is only a UI
+// seed; saveReceiptFromModal still drops it from payments[] until money exists.
+function getReceiptFormPayments(receiptData) {
+  const data = receiptData && typeof receiptData === 'object' ? receiptData : {};
+  const savedPayments = Array.isArray(data.payments) ? data.payments : [];
+  if (savedPayments.length > 0) return savedPayments;
+
+  const savedMethod = String(data.paymentMethod || '').trim();
+  const method = savedMethod && savedMethod !== 'Split Payment'
+    ? savedMethod
+    : PAYMENT_METHODS[0];
+  const savedRate = Number(data.exchangeRate);
+  const rate2 = Number.isFinite(savedRate) && savedRate > 0
+    ? savedRate
+    : state.defaultExchangeRate;
+  const statusDetail = data.statusDetail && typeof data.statusDetail === 'object'
+    ? data.statusDetail
+    : {};
+  const isPaid = data.status === 'Paid' || data.isPaid === true;
+
+  return [{
+    method,
+    amount: 0,
+    rate: getDefaultRate1(method),
+    rate2,
+    collectionType: isPaid
+      ? (statusDetail.paidCollection || 'office')
+      : (statusDetail.notPaidCollection || 'office'),
+    deliveryPersonId: isPaid
+      ? (statusDetail.paidDeliveryPersonId || data.deliveryPersonId || '')
+      : (data.deliveryPersonId || '')
+  }];
+}
+
+// Driver debt is denominated at the linked delivery receipt's rate. Prefer the
+// live linked record over a hidden field or a stale ad/default rate.
+function resolveAdExchangeRateForSave({
+  isEdit = false,
+  ad = null,
+  isUnpaidDriver = false,
+  linkedReceipt = null,
+  driverBudgetRate = null
+} = {}) {
+  const validRate = value => {
+    const rate = Number(value);
+    return Number.isFinite(rate) && rate > 0 ? rate : 0;
+  };
+
+  if (isUnpaidDriver) {
+    const linkedRate = validRate(linkedReceipt?.exchangeRate);
+    if (linkedRate) return linkedRate;
+    const selectedRate = validRate(driverBudgetRate);
+    if (selectedRate) return selectedRate;
+  }
+
+  const existingRate = isEdit ? validRate(ad?.exchangeRate) : 0;
+  return existingRate || validRate(state.defaultExchangeRate) || 1;
+}
+
+function adAmountLocalForSave(amountUSD, exchangeRate) {
+  const amount = Number(amountUSD);
+  const rate = Number(exchangeRate);
+  if (!Number.isFinite(amount) || !Number.isFinite(rate)) return 0;
+  return Math.round(amount * rate * 100) / 100;
+}
+
 function ceilingRound(value) {
   const v = Number(value);
   if (!Number.isFinite(v) || v === 0) return 0;
@@ -1451,6 +1556,7 @@ async function _saveReceiptFromModalInner() {
   // Collect all payment splits
   const paymentItems = document.querySelectorAll('.payment-split-item');
   const payments = [];
+  const enteredPaymentRows = [];
   
   paymentItems.forEach(item => {
     const method = item.querySelector('.payment-method').value;
@@ -1466,16 +1572,18 @@ async function _saveReceiptFromModalInner() {
     const collectionType = item.querySelector('.collection-type').value;
     const deliveryPersonSelect = item.querySelector('.delivery-person');
     const deliveryPersonId = deliveryPersonSelect ? deliveryPersonSelect.value : '';
+    const enteredPayment = {
+      method,
+      amount,
+      rate,
+      rate2,
+      collectionType,
+      deliveryPersonId
+    };
+    enteredPaymentRows.push(enteredPayment);
     
     if (amount > 0) {
-      payments.push({
-        method,
-        amount,
-        rate,
-        rate2,
-        collectionType,
-        deliveryPersonId
-      });
+      payments.push(enteredPayment);
     }
   });
   
@@ -1522,8 +1630,15 @@ async function _saveReceiptFromModalInner() {
   // of 9.70, because the credit total is rounded up in the customer's favour.
   // With a split (different rates per row) the effective average is the only
   // meaningful figure, so keep deriving it there.
-  const avgRate = receiptExchangeRate(payments, totalLYD, totalUSD);
   const status = document.getElementById('receipt-status').value || 'Paid';
+  const avgRate = receiptExchangeRateForSave(
+    payments,
+    enteredPaymentRows,
+    totalLYD,
+    totalUSD,
+    status,
+    editTarget?.exchangeRate
+  );
   const photos = state.tempReceiptPhotos || [];
 
   // A receipt records money that was RECEIVED. Rows with amount 0 are dropped

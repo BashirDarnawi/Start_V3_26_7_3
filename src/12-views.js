@@ -2994,6 +2994,9 @@ function renderReceiptsView() {
           const hasMultiplePayments = payments.length > 1;
           const receiptPhotoCount = getReceiptPhotoCount(receipt);
           const receiptDebtType = getReceiptDebtType(receipt);
+          const collectionTarget = getReceiptCollectionTarget(receipt);
+          const hasCustomerDebt = receiptDebtType !== 'none'
+            && (collectionTarget.amountUSD > 0 || collectionTarget.amountLocal > 0);
 
           // Calculate total paid as sum of R1 values (amount × rate)
           const totalPaid = payments.reduce((sum, p) => sum + ((p.amount || 0) * (p.rate || 1)), 0) || receipt.amountLocal;
@@ -3071,9 +3074,10 @@ function renderReceiptsView() {
                     </div>
                   ` : ''}
                 </div>
-                <div class="text-right">
-                  <div class="text-2xl font-bold text-emerald-600">$${receipt.amountUSD?.toFixed(2)}</div>
-                  <div class="text-sm text-slate-500">${receipt.amountLocal?.toFixed(2)} LYD</div>
+                <div class="text-right" ${hasCustomerDebt ? 'data-receipt-linked-debt="true"' : ''}>
+                  <div class="text-2xl font-bold ${hasCustomerDebt ? 'text-rose-600' : 'text-emerald-600'}">$${(hasCustomerDebt ? collectionTarget.amountUSD : Number(receipt.amountUSD || 0)).toFixed(2)}</div>
+                  <div class="text-sm ${hasCustomerDebt ? 'text-rose-500 font-semibold' : 'text-slate-500'}">${(hasCustomerDebt ? collectionTarget.amountLocal : Number(receipt.amountLocal || 0)).toFixed(2)} LYD</div>
+                  ${hasCustomerDebt ? `<div class="text-[10px] font-bold text-rose-600 mt-1">${isArV ? 'دين العميل' : 'Customer debt'}</div>` : ''}
                   ${receipt.isPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isArV ? 'مدفوع' : 'Paid'}</div>` : `<div class="text-xs text-amber-600 mt-1">⏳ ${isArV ? 'غير مدفوع' : 'Unpaid'}</div>`}
                   ${receipt.paymentResult ? `
                     <div class="text-[10px] mt-1 ${receipt.paymentResult === 'UNDERPAID' ? 'text-rose-600' : receipt.paymentResult === 'OVERPAID' ? 'text-blue-600' : 'text-emerald-600'} font-bold">
@@ -3090,7 +3094,7 @@ function renderReceiptsView() {
               </div>
 
               <div class="space-y-2 mb-4 text-sm border-t border-b border-slate-200 dark:border-slate-700 py-3">
-                <div class="flex justify-between"><span class="text-slate-500">${isArV ? 'سعر الصرف' : 'Exchange Rate'}:</span><span class="font-medium">${receipt.exchangeRate?.toFixed(2)}</span></div>
+                <div class="flex justify-between"><span class="text-slate-500">${isArV ? 'سعر الصرف' : 'Exchange Rate'}:</span><span class="font-medium">${Number(receipt.exchangeRate || state.defaultExchangeRate || 0).toFixed(2)}</span></div>
                 ${receipt.officeFee ? `<div class="flex justify-between"><span class="text-slate-500">${isArV ? 'عمولة المكتب' : 'Office Fee'}:</span><span class="font-medium text-amber-600">+${receipt.officeFee?.toFixed(2)} LYD</span></div>` : ''}
                 ${receipt.discount ? `<div class="flex justify-between"><span class="text-slate-500">${isArV ? 'الخصم' : 'Discount'}:</span><span class="font-medium text-emerald-600">-${receipt.discount?.toFixed(2)} LYD</span></div>` : ''}
               </div>
@@ -3165,7 +3169,9 @@ function renderReceiptsView() {
 
               <!-- Collection (with amount) -->
               ${(() => {
-                const targetLYD = Number(receipt.amountLocal) || 0;
+                const targetLYD = receiptDebtType !== 'none'
+                  ? (Number(collectionTarget.amountLocal) || 0)
+                  : (Number(receipt.amountLocal) || 0);
                 // Amount actually collected. Older receipts have no
                 // collectedAmount: treat a collected-but-amountless receipt as
                 // fully collected so nothing looks "unpaid" after the upgrade.
@@ -3643,7 +3649,8 @@ function renderAdsView() {
                 const deliveryPerson = effectiveDeliveryPersonId ? usersById.get(String(effectiveDeliveryPersonId)) : null;
                 const isLinkedToDeliveryReceipt = !!linkedReceipt;
                 // Use consistent exchange rate calculation
-                const receiptExchangeRate = getEffectiveExchangeRate(ad);
+                const receiptExchangeRate = getAdSpendExchangeRate(ad);
+                const adAmountLocalForDisplay = (Number(ad.amountUSD) || 0) * receiptExchangeRate;
                 // Display number: total - index (so first item = highest number)
                 const adDisplayNum = allAds.length - idx;
                 // All receipts linked to this ad (delivery + funding), deduped —
@@ -3704,7 +3711,7 @@ function renderAdsView() {
                       ${!isAdPaid ? `<span class="text-[10px] font-semibold mt-0.5">${isAr ? 'دين غير مدفوع' : 'Unpaid debt'}</span>` : ''}
                     </td>
                     <td class="py-3 px-2" data-label="Rate">${receiptExchangeRate?.toFixed(2) || ad.exchangeRate?.toFixed(2) || '0.00'}</td>
-                    <td class="py-3 px-2 font-medium ${amountColorClass}" data-label="Local">${(Number(ad.amountLocal) || 0).toFixed(2)} LYD</td>
+                    <td class="py-3 px-2 font-medium ${amountColorClass}" data-label="Local">${adAmountLocalForDisplay.toFixed(2)} LYD</td>
                     <td class="py-3 px-2" data-label="Payment">
                       ${paymentMethods.length ? `
                         <div class="flex flex-wrap gap-1">
@@ -4058,8 +4065,9 @@ function renderDeliveriesView() {
                   const collectedCash = _getCollectedCashLocal(ad);
                   const receivedInOffice = _isReceivedInOffice(ad);
                   const officeEligible = String(ad.deliveryStatus || '') === 'Delivered' && collectedCash > 0;
-                  const debtLocal = Number(ad.debtAmountLocal ?? ad.amountLocal ?? 0) || 0;
-                  const debtUSD = Number(ad.debtAmountUSD ?? ad.amountUSD ?? 0) || 0;
+                  const deliveryTarget = getReceiptCollectionTarget(ad);
+                  const debtLocal = deliveryTarget.amountLocal;
+                  const debtUSD = deliveryTarget.amountUSD;
                   const statusColors = {
                     'Needs Delivery': 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
                     'In Progress': 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
@@ -4320,7 +4328,7 @@ function exportDeliveryReport() {
   deliveryAds.forEach(r => {
     const customer = state.customers.find(c => c.id === r.customerId);
     const driver = r.deliveryPersonId ? deliveryUsers.find(u => u.id === r.deliveryPersonId) : null;
-    const debt = Number(r.debtAmountLocal ?? r.amountLocal ?? 0) || 0;
+    const debt = getReceiptCollectionTarget(r).amountLocal;
     const collected = Number(r.amountCollectedFromCustomer ?? (String(r.deliveryStatus || '') === 'Delivered' ? (r.amountLocal || 0) : 0)) || 0;
     const remaining = Number(r.remainingDue ?? Math.max(0, debt - collected)) || 0;
     const received = (typeof r.isReceivedInOffice === 'boolean') ? r.isReceivedInOffice : !!r.officeHandover;
@@ -4450,8 +4458,8 @@ function _getOutstandingDueLocal(item) {
   if (ds === 'Canceled') return 0;
   const rem = Number(item.remainingDue);
   if (Number.isFinite(rem)) return Math.max(0, rem);
-  const debt = Number(item.debtAmountLocal);
-  if (Number.isFinite(debt)) return Math.max(0, debt - _getCollectedCashLocal(item));
+  const debt = getReceiptCollectionTarget(item).amountLocal;
+  if (debt > 0) return Math.max(0, debt - _getCollectedCashLocal(item));
   if (item.isPaid) return 0;
   const amt = Number(item.amountLocal);
   if (Number.isFinite(amt)) return Math.max(0, amt);
