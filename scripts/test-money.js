@@ -1179,6 +1179,44 @@ async function main() {
     }
   });
 
+  await must('A9. money inputs convert Arabic separators/digits instead of deleting them (no 10x corruption)', () => {
+    resetState();
+    const sanitizeMoneyInput = sandbox.sanitizeMoneyInput;
+    const normalizeDigitsAscii = sandbox.normalizeDigitsAscii;
+    assert(typeof sanitizeMoneyInput === 'function', 'sanitizeMoneyInput missing from bundle');
+    assert(typeof normalizeDigitsAscii === 'function', 'normalizeDigitsAscii missing from bundle');
+
+    // The exact element surface sanitizeMoneyInput touches: value (read+write),
+    // selectionStart, setSelectionRange — same shape as the real money inputs.
+    const run = (raw) => {
+      const el = { value: raw, selectionStart: String(raw).length, setSelectionRange() {} };
+      sanitizeMoneyInput(el);
+      return el.value;
+    };
+
+    // Arabic comma U+060C '،' (full Arabic keyboard on iOS/Gboard; amounts pasted
+    // from Arabic WhatsApp/Messenger). Dropping it turned 12،5 into 125 (10x).
+    assert(run('12،5') === '12.5', `'12،5' must become '12.5', got '${run('12،5')}'`);
+    assert(run('12،50') === '12.50', `'12،50' must become '12.50', got '${run('12،50')}'`);
+    // Arabic-Indic digits + Arabic decimal separator U+066B (iOS numeric pad).
+    assert(run('١٢٫٥') === '12.5', `'١٢٫٥' must become '12.5', got '${run('١٢٫٥')}'`);
+    // Extended Arabic-Indic (Persian-layout) digits.
+    assert(run('۱۲') === '12', `'۱۲' must become '12', got '${run('۱۲')}'`);
+    // ASCII comma stays handled; the Arabic comma behaves EXACTLY like it:
+    // extra separators are dropped, digits kept (same as '1,2,3' / '1.2.3').
+    assert(run('12,5') === '12.5', `'12,5' must become '12.5', got '${run('12,5')}'`);
+    assert(run('1،2،3') === run('1,2,3'), `'1،2،3' ('${run('1،2،3')}') must equal '1,2,3' ('${run('1,2,3')}')`);
+
+    // The number the app actually stores downstream.
+    assert(near(parseFloat(run('12،5')), 12.5), `parsed '12،5' must be 12.5, got ${parseFloat(run('12،5'))}`);
+
+    // Shared helper reused by receipt-number fields: digits only, returns a string.
+    assert(normalizeDigitsAscii('١٢٣') === '123', `normalizeDigitsAscii('١٢٣') must be '123', got '${normalizeDigitsAscii('١٢٣')}'`);
+    assert(normalizeDigitsAscii('۴۵۶') === '456', `normalizeDigitsAscii('۴۵۶') must be '456', got '${normalizeDigitsAscii('۴۵۶')}'`);
+    assert(normalizeDigitsAscii('D٧') === 'D7', `normalizeDigitsAscii must leave non-digits alone: got '${normalizeDigitsAscii('D٧')}'`);
+    assert(normalizeDigitsAscii(null) === '', `normalizeDigitsAscii(null) must be '', got '${normalizeDigitsAscii(null)}'`);
+  });
+
   console.log('\n\n############################################################');
   console.log('# GROUP B — TARGET BEHAVIOUR (known broken today)');
   console.log('#   Each test asserts the CORRECT behaviour. It fails today.');

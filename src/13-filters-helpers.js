@@ -227,9 +227,11 @@ function getFilteredAds(customersById = null) {
 
   // Read the search term from state (kept in sync by the debounced input handler).
   // Fall back to the DOM only if state hasn't been set yet.
-  const searchTerm = String(
+  // foldSearchText on BOTH sides: Arabic-keyboard digits (٠-٩) and unhamza'd
+  // Arabic spellings must match the ASCII/canonical stored values.
+  const searchTerm = foldSearchText(
     state.adSearch != null ? state.adSearch : (document.getElementById('ad-search')?.value || '')
-  ).toLowerCase().trim();
+  ).trim();
 
   if (searchTerm) {
     // PERFORMANCE: one Map lookup per ad instead of scanning the whole customers
@@ -241,11 +243,11 @@ function getFilteredAds(customersById = null) {
       const customer = custMap.get(ad.customerId);
       const page = ad.pageId ? pageMap.get(ad.pageId) : null;
       return (
-        customer?.name?.toLowerCase().includes(searchTerm) ||
-        ad.id.toLowerCase().includes(searchTerm) ||
-        (canSearchContacts && ad.phoneNumber?.toLowerCase().includes(searchTerm)) ||
-        ad.serialNumber?.toLowerCase().includes(searchTerm) ||
-        page?.name?.toLowerCase().includes(searchTerm)
+        foldSearchText(customer?.name).includes(searchTerm) ||
+        foldSearchText(ad.id).includes(searchTerm) ||
+        (canSearchContacts && foldSearchText(ad.phoneNumber).includes(searchTerm)) ||
+        foldSearchText(ad.serialNumber).includes(searchTerm) ||
+        foldSearchText(page?.name).includes(searchTerm)
       );
     });
   }
@@ -294,6 +296,31 @@ function normalizeCustomerPhoneKey(value) {
   if (/^09\d{8}$/.test(digits)) return `218${digits.slice(1)}`;
   if (/^9\d{8}$/.test(digits)) return `218${digits}`;
   return digits;
+}
+
+// Compare-time search normalizer, applied to BOTH the query and the haystack
+// at every search/filter site (never to stored values or the visible input —
+// rewriting the user's typed ٠-٩ mid-typing would visibly mutate the field):
+//  - Arabic-Indic ٠-٩ / Persian ۰-۹ digits fold to ASCII (normalizeDigitsAscii,
+//    the same write-side normalizer used by money/receipt-number inputs), so a
+//    Gboard/iOS Arabic-keyboard query like ١٢٣ matches stored "123";
+//  - toLowerCase() for Latin;
+//  - conservative Arabic letter folding so the standard unhamza'd keyboard
+//    spellings match: hamza alif forms آأإٱ -> ا, ة -> ه, ى -> ي, and
+//    tashkeel/tatweel stripped (U+064B-U+0655 includes the combining
+//    hamza/madda so decomposed forms fold too, U+0670 dagger alif, U+0640
+//    tatweel).
+// NFKC first folds full-width digits and Arabic presentation forms; guarded
+// because very old engines lack String.normalize.
+function foldSearchText(value) {
+  let s = String(value === null || value === undefined ? '' : value);
+  try { s = s.normalize('NFKC'); } catch (_) {}
+  return normalizeDigitsAscii(s)
+    .toLowerCase()
+    .replace(/[آأإٱ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/[ً-ٰٕـ]/g, '');
 }
 
 function getCustomerPhoneEntries(customer) {
@@ -421,23 +448,86 @@ function findDuplicateCustomerGroups(customers = state.customers) {
 // getCustomerStats — turns O(customers × records) view rendering into
 // O(customers + records). Results are identical to the per-call filters.
 function buildCustomerStatsIndex() {
+  // Receipts first: the ads loop below needs each receipt's exchange rate to
+  // reproduce getDeliveryReceiptDueUsage's legacy-mirror math exactly.
+  const receiptsByCustomer = new Map();
+  const receiptRateById = new Map();
+  for (const r of getVisibleRecords(state.receipts)) {
+    // Same fallback chain as getDeliveryReceiptDueUsage's `exchangeRate`.
+    receiptRateById.set(String(r.id || ''), r.exchangeRate || state.defaultExchangeRate || 1);
+    const customerId = String(r.customerId || '');
+    if (!customerId) continue;
+    const list = receiptsByCustomer.get(customerId);
+    if (list) list.push(r); else receiptsByCustomer.set(customerId, [r]);
+  }
   const adsByCustomer = new Map();
+  // committedUSDByReceiptId[rid] = the total explicitly committed against that
+  // receipt across ALL ads (receiptAllocations + dueAllocations rows + the
+  // rowless legacy due mirror) — the same number getDeliveryReceiptDueUsage
+  // computes as usedDueUSD, but for every receipt in ONE ads pass instead of
+  // one full ads scan per receipt. getCustomerStats' debt block reads this so
+  // the customers view no longer rescans state.ads per unpaid receipt on
+  // every keystroke / live-sync render.
+  const committedUSDByReceiptId = new Map();
   for (const ad of getVisibleRecords(state.ads)) {
     // Very old ads did not have recordType yet. Only the explicit receipt
     // mirror is not an ad; this matches getFilteredAds() and keeps old data
     // visible after a live refresh even before a migration has persisted it.
     if (ad.recordType === 'receipt') continue;
+    // Commitments count even when the ad has no customerId, so accumulate them
+    // BEFORE the customer grouping guard. Per receipt id the arithmetic below
+    // mirrors getDeliveryReceiptDueUsage exactly (filter-then-reduce per pool,
+    // then paid + due + legacyDue added per ad) so the sums stay bit-identical.
+    const perReceipt = new Map(); // rid -> { paid, due }
+    const bucketFor = (rid) => {
+      let bucket = perReceipt.get(rid);
+      if (!bucket) { bucket = { paid: 0, due: 0 }; perReceipt.set(rid, bucket); }
+      return bucket;
+    };
+    if (Array.isArray(ad.receiptAllocations)) {
+      for (const row of ad.receiptAllocations) {
+        const rid = String((row && row.receiptId) || '');
+        bucketFor(rid).paid += parseFloat(row && row.amountUSD) || 0;
+      }
+    }
+    if (Array.isArray(ad.dueAllocations)) {
+      for (const row of ad.dueAllocations) {
+        const rid = String((row && row.receiptId) || '');
+        bucketFor(rid).due += parseFloat(row && row.amountUSD) || 0;
+      }
+    }
+    // The legacy scalar mirror only speaks for a ROWLESS ad (same guard as
+    // getDeliveryReceiptDueUsage): once any positive due row exists the scalar
+    // is the rows' sum, not additional money. Candidate receipt ids come from
+    // isAdLegacyDueMirrorForReceipt's two link fields; getAdLegacyDueMirrorUSD
+    // itself returns 0 for non-mirrors, and duplicate ids must be evaluated
+    // once so the same mirror is never added twice.
+    const hasAnyPositiveDueRow = Array.isArray(ad.dueAllocations)
+      && ad.dueAllocations.some(a => (parseFloat(a?.amountUSD) || 0) > 0);
+    const legacyByReceipt = new Map();
+    if (!hasAnyPositiveDueRow) {
+      const linkedId = String(ad.linkedDeliveryReceiptId || '');
+      const receiptRefId = String(ad.receiptId || '');
+      const candidates = linkedId === receiptRefId ? [linkedId] : [linkedId, receiptRefId];
+      for (const rid of candidates) {
+        if (!rid) continue;
+        const legacy = getAdLegacyDueMirrorUSD(ad, rid, receiptRateById.get(rid) || 0);
+        if (legacy > 0) {
+          legacyByReceipt.set(rid, legacy);
+          if (!perReceipt.has(rid)) perReceipt.set(rid, { paid: 0, due: 0 });
+        }
+      }
+    }
+    for (const [rid, bucket] of perReceipt) {
+      const committed = bucket.paid + bucket.due + (legacyByReceipt.get(rid) || 0);
+      if (committed > 0) {
+        committedUSDByReceiptId.set(rid, (committedUSDByReceiptId.get(rid) || 0) + committed);
+      }
+    }
     const customerId = String(ad.customerId || ad.customer || '');
     if (!customerId) continue;
     const list = adsByCustomer.get(customerId);
     if (list) list.push(ad); else adsByCustomer.set(customerId, [ad]);
-  }
-  const receiptsByCustomer = new Map();
-  for (const r of getVisibleRecords(state.receipts)) {
-    const customerId = String(r.customerId || '');
-    if (!customerId) continue;
-    const list = receiptsByCustomer.get(customerId);
-    if (list) list.push(r); else receiptsByCustomer.set(customerId, [r]);
   }
   const pagesByCustomer = new Map();
   for (const p of getVisibleRecords(state.pages)) {
@@ -446,7 +536,7 @@ function buildCustomerStatsIndex() {
       if (list) list.push(p); else pagesByCustomer.set(cid, [p]);
     }
   }
-  return { adsByCustomer, receiptsByCustomer, pagesByCustomer };
+  return { adsByCustomer, receiptsByCustomer, pagesByCustomer, committedUSDByReceiptId };
 }
 
 // Status-aware USD "spent" for a single ad — the ONE definition of how much
@@ -892,7 +982,13 @@ function getCustomerStats(customerId, statsIndex = null) {
     if (getReceiptDebtType(receipt) === 'none') return;
     const target = getReceiptCollectionTarget(receipt);
     if (target.source === 'linked_ads' || !(target.debtUSD > 0)) return;
-    const committedUSD = getDeliveryReceiptDueUsage(receipt).usedDueUSD || 0;
+    // PERFORMANCE: with a statsIndex (list renders), the committed total is a
+    // Map lookup built in ONE ads pass; without one (single-record callers),
+    // keep the exact per-receipt scan. Same number either way — the index
+    // mirrors getDeliveryReceiptDueUsage.usedDueUSD bit for bit.
+    const committedUSD = (statsIndex && statsIndex.committedUSDByReceiptId)
+      ? (statsIndex.committedUSDByReceiptId.get(String(receipt.id || '')) || 0)
+      : (getDeliveryReceiptDueUsage(receipt).usedDueUSD || 0);
     const uncommittedUSD = Math.max(target.debtUSD - committedUSD, 0);
     if (uncommittedUSD <= 0) return;
     receiptDebtUSD += uncommittedUSD;
@@ -955,7 +1051,10 @@ function renderCustomerPageSpendingDetail(summary, permissions = {}) {
   const canViewAds = permissions.canViewAds !== undefined ? permissions.canViewAds : can('ads', 'view');
   const canViewBalance = permissions.canViewBalance !== undefined ? permissions.canViewBalance : can('customers', 'viewBalance');
   const lastAdText = summary.lastAdDate
-    ? new Date(summary.lastAdDate).toLocaleDateString(isAr ? 'ar-LY' : undefined)
+    // appDateLocale() (not the raw device locale): an English UI on an ar-SA
+    // device otherwise renders this one stat as a Hijri year with Arabic-Indic
+    // digits, unlike every other lastAdDate in the app.
+    ? new Date(summary.lastAdDate).toLocaleDateString(appDateLocale())
     : (isAr ? 'أبداً' : 'Never');
   const pageName = Security.escapeHtml(summary.pageName || '');
   const category = Security.escapeHtml(summary.pageCategory || '');
@@ -1229,12 +1328,16 @@ function getCustomersVisibleToCurrentUser() {
   );
 }
 
-function getFilteredCustomers() {
+function getFilteredCustomers(sharedStatsIndex = null) {
   // Do not rely only on the server/cached collection being pre-scoped. During
   // permission changes and in local mode, a viewOwn user may still have other
   // creators' customers in memory. Scope before search, counts, or rendering.
   let filtered = getCustomersVisibleToCurrentUser();
-  const searchTerm = String(state.customerSearch || '').toLowerCase().trim();
+  // foldSearchText on BOTH sides: Arabic-Indic digits fold to ASCII (so the
+  // /\D/ strip below no longer deletes them — it used to turn ٠٩١٢٣٤٥٦٧٨ into
+  // '' and skip the canonical phone-key match entirely) and unhamza'd Arabic
+  // name spellings match stored hamza forms.
+  const searchTerm = foldSearchText(state.customerSearch || '').trim();
   const canViewContacts = can('customers', 'viewContacts');
   const canViewBalance = can('customers', 'viewBalance');
   const financialFilter = canViewBalance ? state.customerFinancialFilter : 'all';
@@ -1242,12 +1345,12 @@ function getFilteredCustomers() {
   const nonFinancialSorts = new Set(['newest', 'oldest', 'lastActive']);
   const effectiveSort = canViewBalance || nonFinancialSorts.has(requestedSort) ? requestedSort : 'newest';
   const searchPhoneDigits = searchTerm.replace(/\D/g, '');
-  
+
   if (searchTerm) {
-    filtered = filtered.filter(c => 
-      String(c.name || '').toLowerCase().includes(searchTerm) ||
-      (canViewContacts && getCustomerPhoneEntries(c).some(entry => entry.value.toLowerCase().includes(searchTerm) || (searchPhoneDigits && entry.key.includes(searchPhoneDigits)))) ||
-      String(c.platform || '').toLowerCase().includes(searchTerm)
+    filtered = filtered.filter(c =>
+      foldSearchText(c.name).includes(searchTerm) ||
+      (canViewContacts && getCustomerPhoneEntries(c).some(entry => foldSearchText(entry.value).includes(searchTerm) || (searchPhoneDigits && entry.key.includes(searchPhoneDigits)))) ||
+      foldSearchText(c.platform).includes(searchTerm)
     );
   }
   
@@ -1262,7 +1365,9 @@ function getFilteredCustomers() {
     financialFilter === 'hasDebt' ||
     !(effectiveSort === 'newest' || effectiveSort === 'oldest')
   );
-  const statsIndex = needsStats ? buildCustomerStatsIndex() : null;
+  // renderCustomersView passes its own index so the whole customers render
+  // pass builds it exactly ONCE (header stats + filter + sort + cards).
+  const statsIndex = needsStats ? (sharedStatsIndex || buildCustomerStatsIndex()) : sharedStatsIndex;
 
   // Apply financial filter
   if (financialFilter === 'hasCredit') {
@@ -1779,8 +1884,11 @@ function exportUserPermissions(userId) {
   };
   
   const json = JSON.stringify(exportData, null, 2);
-  downloadFile(json, `permissions-${user.name.toLowerCase().replace(/\s+/g, '-')}-${new Date().toISOString().split('T')[0]}.json`, 'application/json');
-  
+  // downloadFile returns false (with its own warning) inside FB/IG in-app
+  // browsers where blob downloads silently fail — no false success toast.
+  const downloaded = downloadFile(json, `permissions-${user.name.toLowerCase().replace(/\s+/g, '-')}-${new Date().toISOString().split('T')[0]}.json`, 'application/json');
+  if (downloaded === false) return;
+
   showNotification(state.language === 'ar' ? 'تم التصدير' : 'Exported', state.language === 'ar' ? `تم تصدير صلاحيات ${user.name}` : `Permissions exported for ${user.name}`, 'success');
 }
 
@@ -2177,6 +2285,21 @@ function openDeliveryReceiptWhatsAppShare(receiptId) {
   document.body.appendChild(link);
   link.click();
   link.remove();
+  // FB/IG/Messenger in-app browsers drop script-initiated _blank navigations
+  // inconsistently (and iOS never auto-launches an app from a JS navigation).
+  // The attempt above is harmless when the shell honors it — but do NOT tear
+  // down the dialog (it holds the working Copy fallback) and do NOT claim
+  // WhatsApp opened. Keep the preview open and tell the user the way out.
+  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+    showNotification(
+      isAr ? 'إن لم يفتح واتساب' : 'If WhatsApp did not open',
+      isAr
+        ? 'داخل متصفح فيسبوك/إنستغرام قد لا يعمل فتح واتساب — انسخ النص من المعاينة، أو افتح هذه الصفحة في متصفحك الحقيقي.'
+        : 'Inside the Facebook/Instagram browser the handoff may not work — copy the text from the preview, or open this page in your real browser.',
+      'warning'
+    );
+    return;
+  }
   closeDeliveryWhatsAppPrompt(false);
   showNotification(
     isAr ? 'تم فتح واتساب' : 'WhatsApp opened',
@@ -2313,9 +2436,27 @@ function readFileAsDataUrl(file) {
 }
 
 async function compressImageToDataUrl(file) {
-  const originalDataUrl = await readFileAsDataUrl(file);
+  let originalDataUrl = await readFileAsDataUrl(file);
   try {
-    const type = String(file.type || '').toLowerCase();
+    let type = String(file.type || '').toLowerCase();
+    // Android SAF/content-provider pickers (third-party file managers, Drive
+    // routes, FB/IG WebView choosers) hand over real JPEGs with a BLANK or
+    // generic MIME type; readAsDataURL then emits data:application/octet-stream
+    // and isSafeReceiptPhotoSource rejects a perfectly decodable photo as
+    // "unsupported". Sniff the base64 magic bytes and rewrite the prefix so
+    // EVERY exit path below (GIF keep-original, small-file keep-original,
+    // larger-output keep-original, catch fallback) emits a proper
+    // data:image/... URL. Genuinely non-image files sniff to nothing and are
+    // rejected exactly as before.
+    if (!type || type === 'application/octet-stream') {
+      const b64 = originalDataUrl.slice(originalDataUrl.indexOf(',') + 1);
+      if (b64.startsWith('/9j/')) type = 'image/jpeg';
+      else if (b64.startsWith('iVBOR')) type = 'image/png';
+      else if (b64.startsWith('R0lGOD')) type = 'image/gif';
+      else if (b64.startsWith('UklGR')) type = 'image/webp';
+      else type = '';
+      if (type) originalDataUrl = 'data:' + type + ';base64,' + b64;
+    }
     if (!/^image\//.test(type)) return originalDataUrl;
     // Animated GIFs cannot survive a canvas re-encode (only the first frame
     // would remain) — always keep them untouched.
@@ -2366,6 +2507,17 @@ function isSafeReceiptPhotoSource(value) {
   // angle brackets and backticks are forbidden so the value is attribute-safe.
   if (/^https:\/\/[^\s"'<>`]+$/i.test(source)) return true;
   return /^(?:\/|\.\/|\.\.\/)[^\s"'<>`]+$/.test(source);
+}
+
+// Distinguish "valid image, just bigger than the 8M-char cap above" from a
+// truly unsupported format, so an oversized JPG gets the "too large" message
+// instead of being told it is not a JPG. Prefix-only regex: never run a
+// full-string pattern over an 8M+ character value. Keep the size threshold
+// aligned with isSafeReceiptPhotoSource.
+function isOversizedReceiptPhotoSource(value) {
+  const source = String(value || '').trim();
+  return source.length > 8 * 1024 * 1024
+    && /^data:image\/(?:png|jpe?g|gif|webp);base64,/i.test(source);
 }
 
 function getReceiptPhotoSources(receipt) {
@@ -2608,6 +2760,12 @@ function handleDeliveryReceiptPhotoUpload(fileList) {
   if (!file) return;
   compressImageToDataUrl(file).then((dataUrl) => {
     if (!isSafeReceiptPhotoSource(dataUrl)) {
+      // A valid image over the cap must say "too large", not "unsupported" —
+      // telling a driver their JPG is not a JPG misdirects the retry.
+      if (isOversizedReceiptPhotoSource(dataUrl)) {
+        _showPhotoPayloadLimit();
+        return;
+      }
       showNotification(
         state.language === 'ar' ? 'صيغة صورة غير مدعومة' : 'Unsupported photo',
         state.language === 'ar' ? 'استخدم صورة PNG أو JPG أو WEBP أو GIF.' : 'Use a PNG, JPG, WEBP, or GIF image.',
@@ -2622,7 +2780,114 @@ function handleDeliveryReceiptPhotoUpload(fileList) {
     document.getElementById('delivery-receipt-image-button')?.classList.remove('hidden');
     document.getElementById('delivery-receipt-image-empty')?.classList.add('hidden');
     updateReceiptDeliveryCompletionComputed();
-  }).catch(() => {});
+  }).catch((err) => {
+    // compressImageToDataUrl only rejects when the FileReader itself fails
+    // (iCloud photo that cannot download, expired Android picker document,
+    // WebView memory pressure). The proof photo is REQUIRED, so silence here
+    // left the driver staring at a disabled submit with no explanation.
+    try { console.warn('[deliveryPhoto] Could not read the picked photo:', err?.message || err); } catch (_) {}
+    showNotification(
+      state.language === 'ar' ? 'خطأ' : 'Error',
+      state.language === 'ar' ? 'تعذر قراءة الصورة — حاول مرة أخرى أو اختر صورة أخرى.' : 'Could not read the photo — try again or pick a different photo.',
+      'error'
+    );
+  });
+}
+
+// ---- Delivery completion draft (survives Android camera round-trips) -------------
+// Tapping the photo input launches the camera activity; on low-RAM phones and
+// inside Facebook/Instagram in-app WebViews the OS routinely kills the browser
+// process while the camera is foreground, cold-reloading the SPA and destroying
+// the transient completion modal. Persist a draft of the typed fields (and the
+// already-delivered photo) so reopening the modal restores the driver's work.
+// localStorage, NOT sessionStorage: in-app WebView sessionStorage is process
+// memory and dies with exactly the kill being defended against.
+const _DELIVERY_DRAFT_PREFIX = 'albayan_delivery_draft_';
+const _DELIVERY_DRAFT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+let _deliveryDraftSaveTimer = null;
+
+function _deliveryDraftKey(receiptId) {
+  return _DELIVERY_DRAFT_PREFIX + String(receiptId || '');
+}
+
+function _saveDeliveryCompletionDraftNow() {
+  const modal = document.getElementById('delivery-complete-modal');
+  if (!modal) return;
+  const rid = String(modal.dataset.receiptId || '');
+  if (!rid) return;
+  const rowsEl = document.getElementById('delivery-collected-payments');
+  const collected = rowsEl
+    ? Array.from(rowsEl.querySelectorAll('.payment-split-item')).map(item => ({
+        method: item.querySelector('.payment-method')?.value || '',
+        amount: item.querySelector('.payment-amount')?.value || '',
+        rate1: item.querySelector('.payment-rate1')?.value || '',
+        rate2: item.querySelector('.payment-rate2')?.value || ''
+      }))
+    : [];
+  const draft = {
+    // Tie the draft to the exact server copy it was typed against (mirrors the
+    // _deliveryCompletionOpen conflict baseline) so a concurrent admin edit
+    // invalidates it instead of silently resurfacing stale numbers.
+    lastMod: (_deliveryCompletionOpen && _deliveryCompletionOpen.id === rid) ? (_deliveryCompletionOpen.lastMod || 0) : 0,
+    savedAt: Date.now(),
+    finalNo: String(document.getElementById('delivery-final-receipt-no')?.value || ''),
+    collected,
+    feeMethod: document.getElementById('delivery-fee-method')?.value || '',
+    feeAmount: String(document.getElementById('delivery-fee-amount')?.value || ''),
+    feePaidBy: _readDeliveryFeePaidBy(),
+    notes: String(document.getElementById('delivery-driver-notes')?.value || ''),
+    photo: String(document.getElementById('delivery-receipt-image-data')?.dataset?.imageData || '')
+  };
+  const key = _deliveryDraftKey(rid);
+  try {
+    localStorage.setItem(key, JSON.stringify(draft));
+  } catch (_) {
+    // Quota exceeded (compressed data URLs can be 300KB+): retry once without
+    // the photo so at least every typed field survives the round-trip.
+    try {
+      draft.photo = '';
+      localStorage.setItem(key, JSON.stringify(draft));
+    } catch (_) {}
+  }
+}
+
+function _readDeliveryCompletionDraft(receipt) {
+  try {
+    const raw = localStorage.getItem(_deliveryDraftKey(String(receipt?.id || '')));
+    if (!raw) return null;
+    const draft = JSON.parse(raw);
+    if (!draft || typeof draft !== 'object' || Array.isArray(draft)) return null;
+    if ((Number(draft.lastMod) || 0) !== (receipt?._lastModified || 0)) return null;
+    const savedAt = Number(draft.savedAt) || 0;
+    if (!savedAt || (Date.now() - savedAt) > _DELIVERY_DRAFT_MAX_AGE_MS) return null;
+    return draft;
+  } catch (_) {
+    return null;
+  }
+}
+
+function _clearDeliveryCompletionDraft(receiptId) {
+  try { localStorage.removeItem(_deliveryDraftKey(String(receiptId || ''))); } catch (_) {}
+}
+
+// Abandoned drafts (delivery completed on another device, receipt reassigned…)
+// must not pile up in localStorage forever — sweep anything past the 24h gate.
+function _pruneDeliveryCompletionDrafts() {
+  try {
+    const doomed = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key || key.indexOf(_DELIVERY_DRAFT_PREFIX) !== 0) continue;
+      let stale = true;
+      try {
+        const draft = JSON.parse(localStorage.getItem(key) || '');
+        const savedAt = Number(draft?.savedAt) || 0;
+        stale = !savedAt || (Date.now() - savedAt) > _DELIVERY_DRAFT_MAX_AGE_MS;
+      } catch (_) {}
+      if (stale) doomed.push(key);
+    }
+    doomed.forEach(key => localStorage.removeItem(key));
+  } catch (_) {}
 }
 
 function updateReceiptDeliveryCompletionComputed() {
@@ -2635,7 +2900,9 @@ function updateReceiptDeliveryCompletionComputed() {
   const debt = getReceiptCollectionTarget(receipt).amountLocal;
   const quoted = Number(receipt.quotedDeliveryFee ?? 0) || 0;
 
-  const finalNo = String(document.getElementById('delivery-final-receipt-no')?.value || '').trim();
+  // Normalize Arabic-Indic digits at the READ site too (not only oninput) so
+  // pastes/autofill that bypass the input handler still validate as ASCII.
+  const finalNo = normalizeDigitsAscii(document.getElementById('delivery-final-receipt-no')?.value || '').trim();
   // Collected money is split-payment rows (same math as a receipt): R1 = LYD total.
   // The fee is a plain LYD amount — no rates, never part of the USD math.
   const collectedTotals = getPaymentTotalsFromDom(document.getElementById('delivery-collected-payments'));
@@ -2696,6 +2963,14 @@ function updateReceiptDeliveryCompletionComputed() {
 
   // Keep notes (no-op, but avoids unused var warnings in some linters)
   void notes;
+
+  // Every input/change handler in the modal funnels through this function, so
+  // it is the single (debounced) write point for the crash-recovery draft.
+  if (_deliveryDraftSaveTimer) clearTimeout(_deliveryDraftSaveTimer);
+  _deliveryDraftSaveTimer = setTimeout(() => {
+    _deliveryDraftSaveTimer = null;
+    _saveDeliveryCompletionDraftNow();
+  }, 500);
 }
 
 // Snapshot of {id, lastMod} captured when the delivery-completion modal opens,
@@ -2751,7 +3026,7 @@ function _deliveryPaymentRowHtml(payment, opts = {}) {
           <input type="text" inputmode="decimal" class="payment-rate2 w-full glass-input px-2 py-1 rounded text-xs text-center" value="${Security.escapeHtml(String(rate2))}" placeholder="0" oninput="sanitizeMoneyInput(this, 4); updateReceiptDeliveryCompletionComputed()" />
         </div>
       </div>
-      ${opts.removable ? `<button type="button" onclick="removeDeliveryPaymentRow(this)" class="mt-2 text-[11px] font-bold text-rose-600">${isAr ? '× حذف' : '× Remove'}</button>` : ''}
+      ${opts.removable ? `<button type="button" onclick="removeDeliveryPaymentRow(this)" class="mt-2 text-[11px] font-bold text-rose-600 dark:text-rose-400">${isAr ? '× حذف' : '× Remove'}</button>` : ''}
     </div>`;
 }
 
@@ -2878,9 +3153,9 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
   const debt = getReceiptCollectionTarget(receipt).amountLocal;
   const quoted = Number(receipt.quotedDeliveryFee ?? 0) || 0;
   const tempNo = String(receipt.tempReceiptNo || '').trim();
-  const finalNo = String(receipt.finalReceiptNo || receipt.serialNumber || '').trim();
+  let finalNo = String(receipt.finalReceiptNo || receipt.serialNumber || '').trim();
   const place = String(receipt.deliveryPlaceName || '').trim();
-  const deliveryReceiptPhoto = getDeliveryReceiptPhotoSource(receipt);
+  let deliveryReceiptPhoto = getDeliveryReceiptPhotoSource(receipt);
 
   // Initial rows. Re-completing an already-delivered receipt reloads its stored payment
   // rows; a fresh completion seeds one Cash (LYD) row for the collected amount (empty, so
@@ -2888,17 +3163,42 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
   // the quoted fee). Cash (LYD) => Rate1 1, Rate2 the default exchange rate.
   const _dRate = Number(state.defaultExchangeRate) || 0;
   const _cashLyd = PAYMENT_METHODS.includes('Cash (LYD)') ? 'Cash (LYD)' : PAYMENT_METHODS[0];
-  const _storedCollected = Array.isArray(receipt.payments) && receipt.payments.length
+  let _storedCollected = Array.isArray(receipt.payments) && receipt.payments.length
     ? receipt.payments.map(p => ({ method: p.method, amount: p.amount, rate1: p.rate, rate2: p.rate2 }))
     : [{ method: _cashLyd, amount: (receipt.amountCollectedFromCustomer ?? ''), rate1: 1, rate2: _dRate }];
-  const collectedRowsHtml = _storedCollected
-    .map((p, i) => _deliveryPaymentRowHtml(p, { removable: i > 0 })).join('');
   // Fee prefill: stored rows first (old rate-based rows normalize to LYD via
   // _deliveryFeeStoredLyd), then the stored fee amount, then the quoted fee.
   const _storedFeeLyd = _deliveryFeeStoredLyd(receipt);
-  const feeAmountValue = (_storedFeeLyd === null) ? (quoted || '') : _storedFeeLyd;
-  const feeMethod = (Array.isArray(receipt.deliveryFeePayments) && receipt.deliveryFeePayments[0]?.method) || _cashLyd;
-  const feePaidBy = receipt.deliveryFeePaidBy === 'shop' ? 'shop' : 'customer';
+  let feeAmountValue = (_storedFeeLyd === null) ? (quoted || '') : _storedFeeLyd;
+  let feeMethod = (Array.isArray(receipt.deliveryFeePayments) && receipt.deliveryFeePayments[0]?.method) || _cashLyd;
+  let feePaidBy = receipt.deliveryFeePaidBy === 'shop' ? 'shop' : 'customer';
+  let notesSeed = String(receipt.driverNotes || '');
+
+  // Rehydrate a crash-recovery draft (Android camera round-trips can kill the
+  // tab — see _saveDeliveryCompletionDraftNow). Only a draft written against
+  // this exact server copy (same _lastModified) and younger than 24h is used;
+  // the draft's photo is re-validated before it can reach the DOM.
+  _pruneDeliveryCompletionDrafts();
+  const _draft = _readDeliveryCompletionDraft(receipt);
+  if (_draft) {
+    if (typeof _draft.finalNo === 'string') finalNo = _draft.finalNo.trim();
+    if (Array.isArray(_draft.collected) && _draft.collected.length) {
+      _storedCollected = _draft.collected.map(p => ({
+        method: (p && typeof p.method === 'string' && p.method) ? p.method : _cashLyd,
+        amount: (p && p.amount !== undefined && p.amount !== null) ? p.amount : '',
+        rate1: (p && p.rate1 !== undefined && p.rate1 !== null) ? p.rate1 : '',
+        rate2: (p && p.rate2 !== undefined && p.rate2 !== null) ? p.rate2 : ''
+      }));
+    }
+    if (typeof _draft.feeMethod === 'string' && _draft.feeMethod) feeMethod = _draft.feeMethod;
+    if (typeof _draft.feeAmount === 'string' || typeof _draft.feeAmount === 'number') feeAmountValue = _draft.feeAmount;
+    if (_draft.feePaidBy === 'shop' || _draft.feePaidBy === 'customer') feePaidBy = _draft.feePaidBy;
+    if (typeof _draft.notes === 'string') notesSeed = _draft.notes;
+    const _draftPhoto = String(_draft.photo || '').trim();
+    if (_draftPhoto && isSafeReceiptPhotoSource(_draftPhoto)) deliveryReceiptPhoto = _draftPhoto;
+  }
+  const collectedRowsHtml = _storedCollected
+    .map((p, i) => _deliveryPaymentRowHtml(p, { removable: i > 0 })).join('');
 
   // Remove any existing modal
   document.getElementById('delivery-complete-modal')?.remove();
@@ -2907,7 +3207,10 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
   modal.id = 'delivery-complete-modal';
   modal.dataset.receiptId = String(receipt.id);
   modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
-  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+  // NO backdrop-dismiss here. On phones the overlay is the scroll surface, and
+  // the habitual "tap outside the input to dismiss the keyboard" gesture lands
+  // on the backdrop — one stray tap must never destroy a mid-delivery form
+  // (typed data + proof photo). Close paths: the header X and Android Back.
 
   modal.innerHTML = `
     <div class="glass-panel rounded-2xl p-6 w-full max-w-lg animate-slide-up" onclick="event.stopPropagation()">
@@ -2931,14 +3234,14 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
           <div class="text-xs text-slate-500 mb-1">${isArD ? 'الوصل' : 'Receipt'}</div>
           <div class="font-bold text-indigo-600">${Security.escapeHtml(tempNo || 'D?')}${finalNo ? ` → ${Security.escapeHtml(finalNo)}` : ''}</div>
           ${place ? `<div class="text-xs text-slate-600 dark:text-slate-300 mt-1"><span class="font-bold">📍</span> ${Security.escapeHtml(place)}</div>` : ''}
-          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(0)} LYD</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span class="font-bold text-emerald-600">${quoted.toFixed(0)} LYD</span></div>
+          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(0)} LYD</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span class="font-bold text-emerald-600 dark:text-emerald-400">${quoted.toFixed(0)} LYD</span></div>
           ${phone ? `<div class="text-xs text-slate-500 mt-1">${isArD ? 'الهاتف' : 'Phone'}: <span class="font-bold text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone)}</span></div>` : ''}
         </div>
 
         <div>
           <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'رقم الوصل النهائي *' : 'Final receipt number *'}</label>
-          <input id="delivery-final-receipt-no" type="text" inputmode="numeric" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isArD ? 'مثال: 45873' : 'e.g., 45873'}" value="${Security.escapeHtml(finalNo)}" oninput="this.value=this.value.replace(/[^0-9]/g,''); updateReceiptDeliveryCompletionComputed()" />
-          <div id="delivery-final-receipt-error" class="mt-1 text-[11px] text-rose-600"></div>
+          <input id="delivery-final-receipt-no" type="text" inputmode="numeric" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isArD ? 'مثال: 45873' : 'e.g., 45873'}" value="${Security.escapeHtml(finalNo)}" oninput="this.value=normalizeDigitsAscii(this.value).replace(/[^0-9]/g,''); updateReceiptDeliveryCompletionComputed()" />
+          <div id="delivery-final-receipt-error" class="mt-1 text-[11px] text-rose-600 dark:text-rose-400"></div>
         </div>
 
         <div>
@@ -2962,11 +3265,11 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
             <div class="mt-2">
               <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">${isArD ? 'من دفع قيمة التوصيل؟' : 'Delivery paid by'}</div>
               <div class="grid grid-cols-2 gap-2" role="radiogroup" aria-label="${isArD ? 'من دفع قيمة التوصيل' : 'Delivery paid by'}">
-                <label class="flex items-center gap-1.5 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-700 dark:text-slate-200 cursor-pointer">
+                <label class="flex items-center gap-1.5 min-h-11 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-700 dark:text-slate-200 cursor-pointer">
                   <input type="radio" name="delivery-fee-paid-by" value="customer" ${feePaidBy === 'shop' ? '' : 'checked'} onchange="updateReceiptDeliveryCompletionComputed()" />
                   <span>${isArD ? 'دفعها العميل' : 'Customer paid'}</span>
                 </label>
-                <label class="flex items-center gap-1.5 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-bold text-rose-600 cursor-pointer">
+                <label class="flex items-center gap-1.5 min-h-11 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-bold text-rose-600 cursor-pointer">
                   <input type="radio" name="delivery-fee-paid-by" value="shop" ${feePaidBy === 'shop' ? 'checked' : ''} onchange="updateReceiptDeliveryCompletionComputed()" />
                   <span>${isArD ? 'يتحملها المحل (خسارة)' : 'Shop paid (loss)'}</span>
                 </label>
@@ -2980,7 +3283,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
             <div class="text-xs font-bold text-slate-600 dark:text-slate-400">${isArD ? 'صورة الوصل *' : 'Receipt photo *'}</div>
             <label class="text-xs font-bold text-indigo-600 hover:text-indigo-700 cursor-pointer">
               ${isArD ? 'رفع صورة' : 'Upload'}
-              <input type="file" accept="image/*" class="hidden" onchange="handleDeliveryReceiptPhotoUpload(this.files)" />
+              <input type="file" accept="image/*" class="hidden" onchange="handleDeliveryReceiptPhotoUpload(this.files); this.value=''" />
             </label>
           </div>
           <input type="hidden" id="delivery-receipt-image-data" data-image-data="${Security.escapeHtml(deliveryReceiptPhoto)}" />
@@ -2995,7 +3298,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
 
         <div>
           <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'ملاحظات السائق (اختياري)' : 'Driver notes (optional)'}</label>
-          <textarea id="delivery-driver-notes" rows="2" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isArD ? 'ملاحظات...' : 'Notes...'}" oninput="updateReceiptDeliveryCompletionComputed()">${Security.escapeHtml(String(receipt.driverNotes || ''))}</textarea>
+          <textarea id="delivery-driver-notes" rows="2" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isArD ? 'ملاحظات...' : 'Notes...'}" oninput="updateReceiptDeliveryCompletionComputed()">${Security.escapeHtml(notesSeed)}</textarea>
         </div>
 
         <div class="grid grid-cols-2 gap-3 text-xs">
@@ -3067,6 +3370,30 @@ async function refreshAdsAfterReceiptPaidCascade(receipt) {
   return refreshAdsAfterReceiptServerCascade(receipt, { allowPaidLocalFallback: true });
 }
 
+// Map raw engine failures ('Load failed' on Safari, 'Failed to fetch' on
+// Chromium, AbortError timeouts) to a bilingual, actionable message. Returns
+// null when the server WAS reached (e.status set) or the error does not look
+// like a connectivity failure — callers then keep their real HTTP detail.
+// Callers should log the raw e.message to the console for diagnostics.
+function describeNetworkError(e) {
+  if (e?.status) return null; // server WAS reached — keep the real HTTP detail
+  const name = String(e?.name || '');
+  const msg = String(e?.message || '');
+  const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  const looksNetwork = offline
+    || name === 'AbortError'
+    || (name === 'TypeError' && /failed to fetch|load failed|network|cancelled/i.test(msg));
+  if (!looksNetwork) return null;
+  if (offline) {
+    return state.language === 'ar'
+      ? 'لا يوجد اتصال بالإنترنت — لم يتم الحفظ ولم يُفقد ما أدخلته. أعد الاتصال ثم حاول مرة أخرى.'
+      : 'You are offline — nothing was saved and nothing you entered was lost. Reconnect and try again.';
+  }
+  return state.language === 'ar'
+    ? 'تعذر الوصول إلى الخادم — لم يتم الحفظ ولم يُفقد ما أدخلته. تحقق من الإشارة ثم أعد المحاولة.'
+    : 'Could not reach the server — nothing was saved and nothing you entered was lost. Check your signal and try again.';
+}
+
 async function submitReceiptDeliveryCompletion(receiptId) {
   const receipt = _findReceiptForDeliveryModal(receiptId);
   if (!receipt) {
@@ -3074,7 +3401,9 @@ async function submitReceiptDeliveryCompletion(receiptId) {
     return;
   }
 
-  const finalNo = String(document.getElementById('delivery-final-receipt-no')?.value || '').trim();
+  // Normalize Arabic-Indic digits at the save-time read too so the /^\d+$/
+  // validation below and the stored value are always ASCII-consistent.
+  const finalNo = normalizeDigitsAscii(document.getElementById('delivery-final-receipt-no')?.value || '').trim();
   // Collected money is split-payment rows (same math as a receipt): R1 = LYD, R2 = USD.
   // The fee is a plain LYD amount + method + payer. Only the COLLECTED rows feed
   // the USD (ads credit) math — the fee never converts to USD.
@@ -3209,17 +3538,40 @@ async function submitReceiptDeliveryCompletion(receiptId) {
       const idx = state.receipts.findIndex(r => r && !r._deleted && String(r.id) === String(receipt.id));
       if (idx !== -1) state.receipts[idx] = saved;
       markCollectionDirty('receipts');
-      const adRefresh = await refreshAdsAfterReceiptPaidCascade(saved);
+      // Close the form and paint success IMMEDIATELY. The old code awaited a
+      // full (driver-scoped) ads re-download here, freezing a dead "Mark
+      // Delivered" button for seconds on field networks. The exact local
+      // reclassification plan — the same one the offline fallback uses —
+      // keeps the linked ads visually consistent until the authoritative
+      // background refresh lands.
+      const paidNow = typeof getReceiptPaymentState === 'function'
+        ? getReceiptPaymentState(saved) === 'paid'
+        : (saved.isPaid === true || String(saved.status || '') === 'Paid');
+      if (paidNow) {
+        try { applyLocalReceiptPaidAdUpdates(planLocalReceiptPaidAdUpdates(String(saved.id), saved)); } catch (_) {}
+      }
       saveState();
+      _clearDeliveryCompletionDraft(receipt.id);
       document.getElementById('delivery-complete-modal')?.remove();
       forceFullRender();
       showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم إكمال التوصيل وحفظه' : 'Delivery completed and saved', 'success');
-      if (!adRefresh.consistent) {
-        showNotification(
-          state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
-          state.language === 'ar' ? 'تم حفظ التوصيل، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Delivery was saved. Linked ads will refresh automatically when the connection returns.',
-          'warning'
-        );
+      if (paidNow) {
+        // Authoritative ads refresh WITHOUT awaiting (allowPaidLocalFallback
+        // stays false — the exact local plan above was already applied, so a
+        // failed refresh must not re-apply it). apiLoadCollectionAll's own
+        // session-identity guard prevents a post-logout state.ads stomp.
+        refreshAdsAfterReceiptServerCascade(saved).then((adRefresh) => {
+          if (adRefresh && adRefresh.consistent) {
+            saveState();
+            RenderQueue.schedule('deliveryAdsCascade');
+          } else {
+            showNotification(
+              state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
+              state.language === 'ar' ? 'تم حفظ التوصيل، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Delivery was saved. Linked ads will refresh automatically when the connection returns.',
+              'warning'
+            );
+          }
+        }).catch(() => {});
       }
     } catch (e) {
       // Idempotency / retries: if we hit a conflict, load latest and succeed if already delivered.
@@ -3231,18 +3583,66 @@ async function submitReceiptDeliveryCompletion(receiptId) {
             const idx = state.receipts.findIndex(r => r && !r._deleted && String(r.id) === String(receipt.id));
             if (idx !== -1) state.receipts[idx] = latestData;
             markCollectionDirty('receipts');
-            const adRefresh = await refreshAdsAfterReceiptPaidCascade(latestData);
+            const paidAfterRetry = typeof getReceiptPaymentState === 'function'
+              ? getReceiptPaymentState(latestData) === 'paid'
+              : (latestData.isPaid === true || String(latestData.status || '') === 'Paid');
+            if (paidAfterRetry) {
+              try { applyLocalReceiptPaidAdUpdates(planLocalReceiptPaidAdUpdates(String(latestData.id), latestData)); } catch (_) {}
+            }
             saveState();
+            _clearDeliveryCompletionDraft(receipt.id);
             document.getElementById('delivery-complete-modal')?.remove();
             forceFullRender();
             showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم إكمال التوصيل وحفظه' : 'Delivery completed and saved', 'success');
-            if (!adRefresh.consistent) {
-              showNotification(
-                state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
-                state.language === 'ar' ? 'تم حفظ التوصيل، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Delivery was saved. Linked ads will refresh automatically when the connection returns.',
-                'warning'
-              );
+            if (paidAfterRetry) {
+              refreshAdsAfterReceiptServerCascade(latestData).then((adRefresh) => {
+                if (adRefresh && adRefresh.consistent) {
+                  saveState();
+                  RenderQueue.schedule('deliveryAdsCascade');
+                } else {
+                  showNotification(
+                    state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
+                    state.language === 'ar' ? 'تم حفظ التوصيل، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Delivery was saved. Linked ads will refresh automatically when the connection returns.',
+                    'warning'
+                  );
+                }
+              }).catch(() => {});
             }
+            return;
+          }
+          if (latestData && latestData.id) {
+            // GENUINE concurrent edit (admin changed the receipt while the
+            // form was open). Without a rebase every retry re-sends the same
+            // stale baseline and 409s forever; the only old escape was
+            // close+reopen, which destroyed the typed data and the photo.
+            // Install the fresh copy, rebase the conflict baseline, keep the
+            // driver's DOM inputs untouched, and let the next tap succeed.
+            const idxLive = state.receipts.findIndex(r => r && !r._deleted && String(r.id) === String(receipt.id));
+            if (idxLive !== -1) state.receipts[idxLive] = latestData;
+            markCollectionDirty('receipts');
+            saveState();
+            if (String(latestData.deliveryStatus || '') === 'Canceled') {
+              // Re-delivering a canceled receipt must not be one tap away.
+              _clearDeliveryCompletionDraft(receipt.id);
+              document.getElementById('delivery-complete-modal')?.remove();
+              forceFullRender();
+              showNotification(
+                state.language === 'ar' ? 'غير مسموح' : 'Not Allowed',
+                state.language === 'ar' ? 'تم إلغاء هذا التوصيل من الإدارة.' : 'This delivery was canceled by an admin.',
+                'error'
+              );
+              return;
+            }
+            if (_deliveryCompletionOpen && _deliveryCompletionOpen.id === String(receipt.id)) {
+              _deliveryCompletionOpen.lastMod = latestData._lastModified || 0;
+            }
+            updateReceiptDeliveryCompletionComputed();
+            showNotification(
+              state.language === 'ar' ? 'تغيّر الوصل' : 'Receipt changed',
+              state.language === 'ar' ? 'تغيّر الوصل أثناء فتح النافذة — راجع البيانات ثم اضغط "تم التوصيل" مرة أخرى.' : 'The receipt changed while this form was open — review the figures and tap Mark Delivered again.',
+              'warning'
+            );
+            if (btn) btn.disabled = false;
             return;
           }
         } catch (retryErr) {
@@ -3250,15 +3650,25 @@ async function submitReceiptDeliveryCompletion(receiptId) {
           if (ALBAYAN_DEBUG_MODE) console.warn('[handleDeliveryComplete] Retry fetch failed:', retryErr?.message || retryErr);
         }
       }
-      const status = e?.status ? `HTTP ${e.status}` : '';
-      const detail = (e?.payload && typeof e.payload === 'object' && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
-      showNotification(state.language === 'ar' ? 'خطأ في الخادم' : 'Server Error', (state.language === 'ar' ? 'فشل حفظ التوصيل: ' : 'Failed to save delivery: ') + `${status ? status + ' - ' : ''}${detail}`, 'error');
+      const netMessage = describeNetworkError(e);
+      if (netMessage) {
+        // Keep the raw engine string ('Load failed', 'Failed to fetch'…) in
+        // the console; the toast must be bilingual and actionable for the
+        // Arabic-first drivers this flow targets.
+        try { console.warn('[deliveryCompletion] Network failure:', e?.message || e); } catch (_) {}
+        showNotification(state.language === 'ar' ? 'مشكلة في الاتصال' : 'Connection problem', netMessage, 'error');
+      } else {
+        const status = e?.status ? `HTTP ${e.status}` : '';
+        const detail = (e?.payload && typeof e.payload === 'object' && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
+        showNotification(state.language === 'ar' ? 'خطأ في الخادم' : 'Server Error', (state.language === 'ar' ? 'فشل حفظ التوصيل: ' : 'Failed to save delivery: ') + `${status ? status + ' - ' : ''}${detail}`, 'error');
+      }
       if (btn) btn.disabled = false;
       return;
     }
   } else {
     const saved = await updateRecord(state.receipts, receipt.id, updates);
     if (!saved) return;
+    _clearDeliveryCompletionDraft(receipt.id);
     document.getElementById('delivery-complete-modal')?.remove();
     showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم إكمال التوصيل وحفظه' : 'Delivery completed and saved', 'success');
     render();
@@ -3289,7 +3699,14 @@ function openReceiptDeliveryCancelModal(receiptId) {
   const modal = document.createElement('div');
   modal.id = 'delivery-cancel-modal';
   modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
-  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+  // Backdrop taps are how phone users dismiss the keyboard — never let one
+  // silently destroy a typed cancel reason. Empty form still closes instantly.
+  modal.onclick = (e) => {
+    if (e.target !== modal) return;
+    const typedReason = String(document.getElementById('delivery-cancel-reason')?.value || '');
+    if (typedReason.trim() && !confirm(state.language === 'ar' ? 'تجاهل السبب المكتوب؟' : 'Discard the typed reason?')) return;
+    modal.remove();
+  };
   modal.innerHTML = `
     <div class="glass-panel rounded-2xl p-6 w-full max-w-md animate-slide-up" onclick="event.stopPropagation()">
       <div class="flex items-center justify-between mb-4">
@@ -3328,81 +3745,131 @@ function openReceiptDeliveryCancelModal(receiptId) {
 async function submitReceiptDeliveryCancel(receiptId) {
   const receipt = _findReceiptForDeliveryModal(receiptId);
   if (!receipt) return;
-  const reason = String(document.getElementById('delivery-cancel-reason')?.value || '').trim();
-  if (!reason) {
-    showNotification(state.language === 'ar' ? 'خطأ في الإدخال' : 'Validation', state.language === 'ar' ? 'سبب الإلغاء مطلوب.' : 'Cancel reason is required.', 'error');
-    return;
-  }
-  const nextHistory = Array.isArray(receipt.deliveryHistory) ? [...receipt.deliveryHistory] : [];
-  nextHistory.push({
-    ts: new Date().toISOString(),
-    userId: state.currentUser?.id || '',
-    action: 'CANCELLED_BY_DRIVER',
-    reason
-  });
-  const canceledOk = await updateRecord(state.receipts, receipt.id, {
-    deliveryStatus: 'Canceled',
-    deliveryCancelReason: reason,
-    deliveryCancelledAt: new Date().toISOString(),
-    deliveryCancelledBy: state.currentUser?.id || '',
-    deliveryHistory: nextHistory
-  });
-  if (!canceledOk) return;
-  // The canceled delivery's debt will never be collected — release any ad
-  // funding that was drawn from its due credit.
-  let releasedAds = 0;
-  let adRefresh = { consistent: true };
-  if (isServerModeEnabled()) {
-    const savedReceipt = state.receipts.find(row => row && String(row.id) === String(receipt.id)) || receipt;
-    adRefresh = await refreshAdsAfterReceiptServerCascade(savedReceipt);
-    saveState();
-  } else {
-    try {
-      releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);
-    } catch (_) {
+  // Double-taps are endemic on touch (iOS fires both clicks ~100-300ms apart):
+  // keep one cancel mutation per receipt in flight, same as markAsCollected.
+  const actionKey = String(receipt.id || receiptId || '');
+  if (_deliveryActionInFlight.has(actionKey)) return;
+  _deliveryActionInFlight.add(actionKey);
+  try {
+    const reason = String(document.getElementById('delivery-cancel-reason')?.value || '').trim();
+    if (!reason) {
+      showNotification(state.language === 'ar' ? 'خطأ في الإدخال' : 'Validation', state.language === 'ar' ? 'سبب الإلغاء مطلوب.' : 'Cancel reason is required.', 'error');
       return;
     }
-  }
-  document.getElementById('delivery-cancel-modal')?.remove();
-  document.getElementById('delivery-complete-modal')?.remove();
-  forceFullRender();
-  showNotification(
-    state.language === 'ar' ? 'تم الإلغاء' : 'Canceled',
-    (state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled')
-      + (releasedAds > 0 && !isServerModeEnabled()
-        ? (state.language === 'ar' ? ` — تم تحرير تمويل ${releasedAds} إعلان(ات) كان مأخوذاً من دين هذا التوصيل` : ` — funding of ${releasedAds} ad(s) drawn from this delivery's debt was released`)
-        : ''),
-    releasedAds > 0 && !isServerModeEnabled() ? 'warning' : 'success'
-  );
-  if (!adRefresh.consistent) {
+    const nextHistory = Array.isArray(receipt.deliveryHistory) ? [...receipt.deliveryHistory] : [];
+    nextHistory.push({
+      ts: new Date().toISOString(),
+      userId: state.currentUser?.id || '',
+      action: 'CANCELLED_BY_DRIVER',
+      reason
+    });
+    const canceledOk = await updateRecord(state.receipts, receipt.id, {
+      deliveryStatus: 'Canceled',
+      deliveryCancelReason: reason,
+      deliveryCancelledAt: new Date().toISOString(),
+      deliveryCancelledBy: state.currentUser?.id || '',
+      deliveryHistory: nextHistory
+    });
+    if (!canceledOk) return;
+    // The canceled delivery's debt will never be collected — release any ad
+    // funding that was drawn from its due credit.
+    let releasedAds = 0;
+    if (!isServerModeEnabled()) {
+      try {
+        releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);
+      } catch (_) {
+        return;
+      }
+    }
+    _clearDeliveryCompletionDraft(receipt.id);
+    // Both stacked surfaces (cancel dialog over the completion form) close in
+    // ONE task, so the body overlay observer (src/01b-mobile-runtime.js) sees
+    // a single 2->0 mutation and consumes only ONE overlay-history sentinel —
+    // stranding the second and turning the driver's next hardware Back press
+    // into a dead no-op + scroll reset. Mirror closeModal's go(-2) teardown:
+    // consume both consecutive sentinel entries in one traversal and flag the
+    // resulting popstate as bookkeeping; the observer's decrease branch is
+    // then skipped via its _overlayHistoryConsumePending() gate.
+    const cancelModalEl = document.getElementById('delivery-cancel-modal');
+    const completeModalEl = document.getElementById('delivery-complete-modal');
+    if (cancelModalEl && completeModalEl
+        && typeof isPhoneBrowserHistoryManaged === 'function' && isPhoneBrowserHistoryManaged()
+        && typeof _overlaySentinelDepth === 'number' && _overlaySentinelDepth >= 2
+        && window.history.state && window.history.state.overlaySentinel
+        && !window.history.state.underAlbayanModal) {
+      _suppressOverlayPopstateUntil = Date.now() + 800;
+      try {
+        window.history.go(-2);
+        _overlaySentinelDepth -= 2;
+      } catch (_) {
+        _suppressOverlayPopstateUntil = 0;
+      }
+    }
+    if (cancelModalEl) cancelModalEl.remove();
+    if (completeModalEl) completeModalEl.remove();
+    render();
     showNotification(
-      state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
-      state.language === 'ar' ? 'تم حفظ الإلغاء، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Cancellation was saved. Linked ads will refresh automatically when the connection returns.',
-      'warning'
+      state.language === 'ar' ? 'تم الإلغاء' : 'Canceled',
+      (state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled')
+        + (releasedAds > 0 && !isServerModeEnabled()
+          ? (state.language === 'ar' ? ` — تم تحرير تمويل ${releasedAds} إعلان(ات) كان مأخوذاً من دين هذا التوصيل` : ` — funding of ${releasedAds} ad(s) drawn from this delivery's debt was released`)
+          : ''),
+      releasedAds > 0 && !isServerModeEnabled() ? 'warning' : 'success'
     );
+    if (isServerModeEnabled()) {
+      // Refresh the linked ads WITHOUT blocking the close: the receipt PATCH
+      // already committed, the cancel UI only reads receipt.deliveryStatus
+      // (updated by the echo above), and ads reconcile seconds later — or via
+      // delta live-sync, exactly what the Sync-pending toast promises.
+      const savedReceipt = state.receipts.find(row => row && String(row.id) === String(receipt.id)) || receipt;
+      saveState();
+      refreshAdsAfterReceiptServerCascade(savedReceipt).then((adRefresh) => {
+        if (adRefresh && adRefresh.consistent) {
+          saveState();
+          RenderQueue.schedule('deliveryAdsCascade');
+        } else {
+          showNotification(
+            state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
+            state.language === 'ar' ? 'تم حفظ الإلغاء، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Cancellation was saved. Linked ads will refresh automatically when the connection returns.',
+            'warning'
+          );
+        }
+      }).catch(() => {});
+    }
+  } finally {
+    _deliveryActionInFlight.delete(actionKey);
   }
 }
 
 async function markAsDelivered(itemId) {
-  // Check if it's a receipt or an ad
-  const isReceipt = state.receipts.find(r => r.id === itemId);
-  if (isReceipt) {
-    // Strict flow for temp delivery receipts: require final receipt # + photo + amounts
-    if (isTempDeliveryReceiptNo(isReceipt.tempReceiptNo)) {
-      openReceiptDeliveryCompletionModal(itemId);
-      return;
+  // One delivery mutation per item in flight (double-tap guard, same pattern
+  // as markAsCollected/acceptDelivery).
+  const actionKey = String(itemId || '');
+  if (_deliveryActionInFlight.has(actionKey)) return;
+  _deliveryActionInFlight.add(actionKey);
+  try {
+    // Check if it's a receipt or an ad
+    const isReceipt = state.receipts.find(r => r.id === itemId);
+    if (isReceipt) {
+      // Strict flow for temp delivery receipts: require final receipt # + photo + amounts
+      if (isTempDeliveryReceiptNo(isReceipt.tempReceiptNo)) {
+        openReceiptDeliveryCompletionModal(itemId);
+        return;
+      }
+      // Delivered ≠ Office Handover. Office handover is a separate step (isReceivedInOffice).
+      const savedOk = await updateRecord(state.receipts, itemId, { deliveryStatus: 'Delivered' });
+      if (!savedOk) return;
+    } else {
+      const savedOk = await updateRecord(state.ads, itemId, {
+        deliveryStatus: 'Delivered'
+      });
+      if (!savedOk) return;
     }
-    // Delivered ≠ Office Handover. Office handover is a separate step (isReceivedInOffice).
-    const savedOk = await updateRecord(state.receipts, itemId, { deliveryStatus: 'Delivered' });
-    if (!savedOk) return;
-  } else {
-    const savedOk = await updateRecord(state.ads, itemId, {
-      deliveryStatus: 'Delivered'
-    });
-    if (!savedOk) return;
+    showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم التحديد كمُوصَّل' : 'Marked as delivered', 'success');
+    render();
+  } finally {
+    _deliveryActionInFlight.delete(actionKey);
   }
-  showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم التحديد كمُوصَّل' : 'Marked as delivered', 'success');
-  render();
 }
 
 // ==========================================
@@ -4040,22 +4507,22 @@ function showReceiptEditHistory(receiptId) {
           ${editHistory.slice().reverse().map((edit, idx) => `
             <div class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-4 border border-slate-200 dark:border-slate-700">
               <div class="flex items-center justify-between mb-3">
-                <div class="flex items-center space-x-2">
-                  <span class="text-xs font-bold text-white bg-amber-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
-                  <span class="text-xs text-slate-500">${edit.editedBy || (isArH ? 'غير معروف' : 'Unknown')}</span>
+                <div class="flex min-w-0 items-center gap-2">
+                  <span class="shrink-0 text-xs font-bold text-white bg-amber-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
+                  <span class="truncate text-xs text-slate-500">${Security.escapeHtml(edit.editedBy || (isArH ? 'غير معروف' : 'Unknown'))}</span>
                 </div>
                 <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString(appDateLocale())}</span>
               </div>
-              
+
               <div class="space-y-2">
                 ${edit.changes.map(change => `
                   <div class="flex items-start text-sm bg-white dark:bg-slate-800 rounded-lg p-3 border border-slate-100 dark:border-slate-700">
-                    <div class="flex-1">
-                      <span class="font-medium text-slate-700 dark:text-slate-300">${change.field}</span>
-                      <div class="flex items-center mt-1 space-x-2 text-xs">
-                        <span class="px-2 py-1 bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 rounded line-through">${change.from}</span>
-                        <i data-lucide="arrow-right" class="w-3 h-3 text-slate-400"></i>
-                        <span class="px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded">${change.to}</span>
+                    <div class="min-w-0 flex-1">
+                      <span class="font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(_adEditHistoryText(change.field, 'Field'))}</span>
+                      <div class="flex flex-wrap items-center mt-1 gap-2 text-xs">
+                        <span class="max-w-full break-words px-2 py-1 bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 rounded line-through">${Security.escapeHtml(_adEditHistoryText(change.from))}</span>
+                        <i data-lucide="arrow-right" class="w-3 h-3 shrink-0 text-slate-400"></i>
+                        <span class="max-w-full break-words px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded">${Security.escapeHtml(_adEditHistoryText(change.to))}</span>
                       </div>
                     </div>
                   </div>
@@ -4539,6 +5006,12 @@ async function saveSplitPayments() {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
     return;
   }
+  // Double-tap guard: a second Save while the first PATCH is in flight would
+  // commit an identical duplicate PATCH and show a second "Saved" toast.
+  const actionKey = String(receiptId);
+  if (_deliveryActionInFlight.has(actionKey)) return;
+  _deliveryActionInFlight.add(actionKey);
+  try {
   const paymentItems = document.querySelectorAll('.split-payment-item');
   const payments = [];
 
@@ -4664,6 +5137,9 @@ async function saveSplitPayments() {
   showNotification(state.language === 'ar' ? 'تم الحفظ' : 'Saved', state.language === 'ar' ? 'تم حفظ الدفعات المقسمة بنجاح' : 'Split payments saved successfully', 'success');
   closeModal();
   render();
+  } finally {
+    _deliveryActionInFlight.delete(actionKey);
+  }
 }
 
 // Top-ups management functions

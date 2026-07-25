@@ -281,20 +281,72 @@ check('Edit Ad receipt replacement is explicit, atomic-looking and phone accessi
   modals.includes('The ad amount was not changed.') &&
   modals.includes('Choose a Paid replacement receipt.') &&
   modals.includes('aria-describedby="ad-temp-receipt-hint ad-linked-receipt-help ad-linked-receipt-change"'));
-check('driver completion refreshes linked ads before final render and success',
+check('driver completion closes instantly and reconciles linked ads without blocking the driver',
   helpers.includes('async function refreshAdsAfterReceiptServerCascade(receipt') &&
   helpers.includes('async function refreshAdsAfterReceiptPaidCascade(receipt)') &&
   helpers.includes("apiLoadCollectionAll('ads', { forceRefresh: true })") &&
-  (helpers.match(/await refreshAdsAfterReceiptPaidCascade\(/g) || []).length >= 2 &&
-  helpers.indexOf('const adRefresh = await refreshAdsAfterReceiptPaidCascade(saved);') < helpers.indexOf('forceFullRender();', helpers.indexOf('const adRefresh = await refreshAdsAfterReceiptPaidCascade(saved);')) &&
-  helpers.indexOf('const adRefresh = await refreshAdsAfterReceiptPaidCascade(saved);') < helpers.indexOf("showNotification(state.language === 'ar' ? 'تم التوصيل'", helpers.indexOf('const adRefresh = await refreshAdsAfterReceiptPaidCascade(saved);')));
+  // The old flow AWAITED a full driver-scoped ads re-download between the
+  // receipt PATCH and the modal close — a dead "Mark Delivered" button for
+  // seconds on field networks. New contract: apply the exact local ad
+  // reclassification plan synchronously, close + toast, then run the
+  // authoritative refresh in the background (never re-blocking the UI).
+  !helpers.includes('await refreshAdsAfterReceiptPaidCascade(') &&
+  !helpers.includes('await refreshAdsAfterReceiptServerCascade(') &&
+  helpers.includes('applyLocalReceiptPaidAdUpdates(planLocalReceiptPaidAdUpdates(String(saved.id), saved))') &&
+  helpers.includes('applyLocalReceiptPaidAdUpdates(planLocalReceiptPaidAdUpdates(String(latestData.id), latestData))') &&
+  helpers.includes('refreshAdsAfterReceiptServerCascade(saved).then(') &&
+  helpers.includes('refreshAdsAfterReceiptServerCascade(latestData).then(') &&
+  helpers.indexOf("showNotification(state.language === 'ar' ? 'تم التوصيل'") < helpers.indexOf('refreshAdsAfterReceiptServerCascade(saved).then('));
 check('server delivery cancellation refreshes released ads without stale ad PATCHes',
-  views.includes('adRefresh = await refreshAdsAfterReceiptServerCascade(savedReceipt);') &&
+  // views: submitDeliveryCancel now follows the SAME non-blocking contract as
+  // the driver cancel — the receipt PATCH (which releases the rows atomically
+  // server-side) is awaited, then the modal closes + renders immediately and
+  // the authoritative ads refresh runs in the background; on failure the
+  // Sync-pending toast promises the delta live-sync reconciliation. It must
+  // never AWAIT the full ads re-download before closing (dead Cancel button
+  // for seconds on field networks) and must never issue stale ad PATCHes.
+  !views.includes('await refreshAdsAfterReceiptServerCascade(') &&
+  views.includes('refreshAdsAfterReceiptServerCascade(savedReceipt).then(') &&
   views.includes('} else {\n      try {\n        releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);') &&
-  helpers.includes('adRefresh = await refreshAdsAfterReceiptServerCascade(savedReceipt);') &&
-  helpers.includes('} else {\n    try {\n      releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);') &&
-  views.indexOf('adRefresh = await refreshAdsAfterReceiptServerCascade(savedReceipt);') < views.indexOf('forceFullRender();', views.indexOf('adRefresh = await refreshAdsAfterReceiptServerCascade(savedReceipt);')) &&
-  helpers.indexOf('adRefresh = await refreshAdsAfterReceiptServerCascade(savedReceipt);') < helpers.indexOf('forceFullRender();', helpers.indexOf('adRefresh = await refreshAdsAfterReceiptServerCascade(savedReceipt);')));
+  views.includes('if (deferredServerAdsRefresh) deferredServerAdsRefresh();') &&
+  // close + render + Canceled toast all come BEFORE the deferred refresh kick
+  views.indexOf("state.language === 'ar' ? 'أُلغيت' : 'Canceled'") < views.indexOf('if (deferredServerAdsRefresh) deferredServerAdsRefresh();') &&
+  // helpers: the DRIVER cancel keeps the same contract.
+  helpers.includes('refreshAdsAfterReceiptServerCascade(savedReceipt).then(') &&
+  helpers.includes('releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);') &&
+  helpers.indexOf("state.language === 'ar' ? 'تم الإلغاء' : 'Canceled'") < helpers.indexOf('refreshAdsAfterReceiptServerCascade(savedReceipt).then('));
+check('driver final receipt number normalizes Arabic-Indic digits instead of deleting them',
+  forms.includes('function normalizeDigitsAscii(value)') &&
+  helpers.includes("this.value=normalizeDigitsAscii(this.value).replace(/[^0-9]/g,'')") &&
+  (helpers.match(/normalizeDigitsAscii\(document\.getElementById\('delivery-final-receipt-no'\)\?\.value \|\| ''\)\.trim\(\)/g) || []).length >= 2);
+const deliveryCompletionModalsSection = (() => {
+  const start = helpers.indexOf('async function openReceiptDeliveryCompletionModal');
+  const end = helpers.indexOf('async function submitReceiptDeliveryCancel');
+  return (start > 0 && end > start) ? helpers.slice(start, end) : '';
+})();
+check('one stray backdrop tap cannot destroy the driver completion form',
+  deliveryCompletionModalsSection.length > 0 &&
+  // The completion modal must have NO backdrop-dismiss at all; the stacked
+  // cancel dialog may only dismiss after confirming a typed reason away.
+  !deliveryCompletionModalsSection.includes('if (e.target === modal) modal.remove();') &&
+  deliveryCompletionModalsSection.includes('Discard the typed reason?') &&
+  deliveryCompletionModalsSection.includes('تجاهل السبب المكتوب؟'));
+check('delivery completion draft survives camera round-trip process kills',
+  helpers.includes("const _DELIVERY_DRAFT_PREFIX = 'albayan_delivery_draft_';") &&
+  helpers.includes('function _saveDeliveryCompletionDraftNow()') &&
+  helpers.includes('localStorage.setItem(key, JSON.stringify(draft));') &&
+  helpers.includes('const _draft = _readDeliveryCompletionDraft(receipt);') &&
+  (helpers.match(/_clearDeliveryCompletionDraft\(receipt\.id\);/g) || []).length >= 4 &&
+  helpers.includes('_pruneDeliveryCompletionDrafts();'));
+check('driver photo retry and read failures are surfaced, not swallowed',
+  helpers.includes('onchange="handleDeliveryReceiptPhotoUpload(this.files); this.value=\'\'"') &&
+  helpers.includes('تعذر قراءة الصورة — حاول مرة أخرى أو اختر صورة أخرى.') &&
+  helpers.includes('Could not read the photo — try again or pick a different photo.'));
+check('a genuine 409 during delivery completion rebases instead of dead-looping',
+  helpers.includes('_deliveryCompletionOpen.lastMod = latestData._lastModified || 0;') &&
+  helpers.includes('The receipt changed while this form was open — review the figures and tap Mark Delivered again.') &&
+  helpers.includes('This delivery was canceled by an admin.') &&
+  helpers.includes('function describeNetworkError(e)'));
 check('delivery log paginates filtered rows and exposes bilingual phone-card labels',
   views.includes('const DELIVERIES_PAGE_SIZE = 30;') &&
   views.includes('_deliveriesShowLimit += DELIVERIES_PAGE_SIZE;') &&
@@ -536,6 +588,41 @@ check('receipt edits preserve the saved collection date (liquidity window integr
   helpers.includes('function getLiquiditySnapshot()') &&
   helpers.includes("const paidAt = r?.deliveredAt || r?.collectionDate || r?.createdAt || null;") &&
   helpers.includes("new Date(r.collectedAt) < new Date(paidAt) ? r.collectedAt : paidAt"));
+
+// Arabic-keyboard search: every list search folds Arabic-Indic/Persian digits
+// and unhamza'd Arabic spellings on BOTH the query and the haystack. Without
+// this, a driver typing ٠٩١٢٣٤٥٦٧٨ or احمد on a phone keyboard gets silent
+// zero results against the ASCII/hamza-form stored values.
+check('search folds Arabic-Indic digits and Arabic spelling variants on both sides',
+  helpers.includes('function foldSearchText(value)') &&
+  /function foldSearchText[\s\S]{0,400}normalizeDigitsAscii\(/.test(helpers) &&
+  // customers view: folded term feeds the digit-only phone key match (the
+  // /\D/ strip must never see unfolded ٠-٩, which it would delete)
+  helpers.includes("const searchTerm = foldSearchText(state.customerSearch || '').trim();") &&
+  helpers.includes("const searchPhoneDigits = searchTerm.replace(/\\D/g, '');") &&
+  helpers.includes('foldSearchText(c.name).includes(searchTerm)') &&
+  // ads, receipts, deliveries, audit log, command palette, pickers
+  helpers.includes('foldSearchText(customer?.name).includes(searchTerm)') &&
+  views.includes("const receiptSearchTerm = foldSearchText(state.receiptSearch || '');") &&
+  views.includes("const name = foldSearchText(customer?.name || '');") &&
+  views.includes('const auditSearchTerm = state.auditSearch ? foldSearchText(state.auditSearch) : \'\';') &&
+  routing.includes('const matches = (...values) => values.some(value => foldSearchText(value).includes(term));') &&
+  forms.includes('foldSearchText(item.phone).includes(searchTerm)') &&
+  forms.includes('foldSearchText(c.name).includes(searchTerm)'));
+
+// WhatsApp dispatch inside FB/IG in-app browsers: script-initiated _blank
+// navigation is silently dropped by Meta shells, so the share handler must
+// NOT close the dialog (it holds the Copy fallback) and must NOT toast
+// "WhatsApp opened" — it warns and returns, keeping the preview open.
+const whatsAppShareBody = helpers.slice(
+  helpers.indexOf('function openDeliveryReceiptWhatsAppShare'),
+  helpers.indexOf('function showDeliveryWhatsAppPrompt')
+);
+check('in-app browsers keep the WhatsApp share dialog open instead of faking success',
+  /Platform\.isInAppBrowser/.test(whatsAppShareBody) &&
+  whatsAppShareBody.indexOf('Platform.isInAppBrowser') < whatsAppShareBody.indexOf('closeDeliveryWhatsAppPrompt(false)') &&
+  /if \(typeof Platform !== 'undefined' && Platform\.isInAppBrowser\) \{[\s\S]{0,700}?return;[\s\S]{0,40}?\}/.test(whatsAppShareBody) &&
+  whatsAppShareBody.includes('copy the text from the preview, or open this page in your real browser'));
 
 const openBraces = (css.match(/\{/g) || []).length;
 const closeBraces = (css.match(/\}/g) || []).length;

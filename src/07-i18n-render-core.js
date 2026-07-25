@@ -228,14 +228,37 @@ function getDir() {
 
 function applyTheme() {
   const root = document.documentElement;
-  const isDark = state.theme === 'dark' || 
+  const isDark = state.theme === 'dark' ||
     (state.theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-  
+
   if (isDark) {
     root.classList.add('dark');
   } else {
     root.classList.remove('dark');
   }
+
+  // Keep the browser's used color-scheme in sync with the APP theme (the
+  // app theme is a manual light/dark/system toggle, not the OS scheme).
+  // Without this, UA-rendered widgets (<select> panes, Android date-picker
+  // dialogs, scrollbars, autofill) stay WHITE against the app's dark UI on
+  // Chromium Android + FB/IG webviews, and Chrome/Samsung "auto dark" would
+  // algorithmically invert the light theme. Complements the static
+  // <meta name="color-scheme" content="light dark"> in index.html, which
+  // covers the pre-JS first paint; this inline style then wins per-theme.
+  try { root.style.colorScheme = isDark ? 'dark' : 'light'; } catch (_) {}
+
+  // The two media-keyed theme-color metas in index.html track the OS scheme
+  // for first paint only. Once the app theme is applied, pin BOTH metas to
+  // it so the browser toolbar / installed-PWA status bar matches the in-app
+  // theme (drop the media filter; identical content on both makes
+  // duplicate-meta precedence irrelevant). Values mirror index.html's pair.
+  try {
+    const themeMetas = document.querySelectorAll('meta[name="theme-color"]');
+    for (let i = 0; i < themeMetas.length; i++) {
+      themeMetas[i].removeAttribute('media');
+      themeMetas[i].setAttribute('content', isDark ? '#020617' : '#f8fafc');
+    }
+  } catch (_) {}
 }
 
 function toggleTheme() {
@@ -386,6 +409,36 @@ const RenderQueue = {
 // ==========================================
 // NOTIFICATIONS
 // ==========================================
+
+// Shared bilingual warning for features that in-app browsers (Facebook/
+// Instagram/Messenger webviews, bare Android WebViews) silently swallow:
+// blob <a download> clicks and window.print() are no-ops there, with no
+// error and no UI. Callers gate on Platform.isInAppBrowser and show this
+// INSTEAD of attempting the action (and instead of a false success toast).
+// kind: 'download' | 'print'.
+function notifyInAppBrowserLimitation(kind) {
+  const isAr = state.language === 'ar';
+  const openHint = isAr
+    ? 'افتح الصفحة في Safari أو Chrome (قائمة ⋯ ← «فتح في المتصفح»)'
+    : 'open this page in Safari or Chrome (menu -> "Open in browser")';
+  if (kind === 'print') {
+    showNotification(
+      isAr ? 'الطباعة غير متاحة هنا' : 'Printing unavailable here',
+      isAr
+        ? `الطباعة لا تعمل داخل متصفح فيسبوك/إنستغرام المدمج — ${openHint} ثم أعد المحاولة.`
+        : `Printing doesn't work inside the Facebook/Instagram in-app browser — ${openHint}, then try again.`,
+      'warning'
+    );
+  } else {
+    showNotification(
+      isAr ? 'التنزيل غير متاح هنا' : 'Download unavailable here',
+      isAr
+        ? `التنزيلات لا تعمل داخل متصفح فيسبوك/إنستغرام المدمج — ${openHint} ثم أعد المحاولة.`
+        : `Downloads don't work inside the Facebook/Instagram in-app browser — ${openHint}, then try again.`,
+      'warning'
+    );
+  }
+}
 
 function showNotification(title, message, type = 'info') {
   // #region agent log

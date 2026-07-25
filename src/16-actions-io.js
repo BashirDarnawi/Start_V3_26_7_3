@@ -808,6 +808,14 @@ async function updateLiquidityTrackingStart(value) {
 // paper handed to a single customer. Mark the clicked card and let the
 // @media print rules in style.css hide everything else.
 function printReceiptCard(btn) {
+  // FB/IG in-app browsers never implement window.print() (WKWebView shells
+  // and Facebook's Android WebView alike): the Print tap did NOTHING, with
+  // zero feedback. Guard at the top — before any listeners/timers are
+  // installed — and explain how to get a working browser instead.
+  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+    notifyInAppBrowserLimitation('print');
+    return;
+  }
   let card = btn && btn.closest ? btn.closest('.glass-panel') : null;
   if (!card) {
     window.print();
@@ -859,6 +867,17 @@ function printReceiptCard(btn) {
   window.addEventListener('pointerdown', cleanup, { once: true, capture: true });
   window.addEventListener('keydown', cleanup, { once: true, capture: true });
   cleanupTimer = setTimeout(cleanup, 60000);
+  window.print();
+}
+
+// Whole-page print for inline onclick handlers (ads list print button).
+// Same in-app-browser guard as printReceiptCard: window.print() is a silent
+// no-op inside FB/IG webviews, so warn instead of doing nothing.
+function printCurrentPage() {
+  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+    notifyInAppBrowserLimitation('print');
+    return;
+  }
   window.print();
 }
 
@@ -978,6 +997,39 @@ function exportData() {
   };
   
   const dataStr = JSON.stringify(exportState, null, 2);
+
+  // FB/IG in-app browsers cannot download blob files AT ALL (their WKWebView/
+  // WebView shells wire no download handler), yet the old code "succeeded":
+  // it toasted 'Exported successfully' and snoozed the 5-day local-backup
+  // durability reminder while NO file was ever saved — a false safety signal
+  // in exactly the environment whose storage is most evictable. Warn BEFORE
+  // attempting, keep the local auto-backup, offer the clipboard as an escape
+  // hatch, and never claim success or silence the reminder here.
+  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+    createAutoBackup();
+    const isAr = state.language === 'ar';
+    const wantsCopy = typeof copyTextToClipboard === 'function' && confirm(
+      isAr
+        ? 'التنزيلات لا تعمل داخل متصفح فيسبوك/إنستغرام المدمج. افتح الصفحة في Safari أو Chrome (قائمة ⋯ ← «فتح في المتصفح») لتنزيل ملف النسخة الاحتياطية.\n\nهل تريد نسخ النسخة الاحتياطية إلى الحافظة بدلاً من ذلك؟'
+        : 'Downloads don\'t work inside the Facebook/Instagram in-app browser. Open this page in Safari or Chrome (menu -> "Open in browser") to download the backup file.\n\nCopy the backup to the clipboard instead?'
+    );
+    if (wantsCopy) {
+      copyTextToClipboard(dataStr).then((ok) => {
+        showNotification(
+          ok ? (isAr ? 'تم النسخ' : 'Copied') : (isAr ? 'فشل النسخ' : 'Copy failed'),
+          ok
+            ? (isAr ? 'تم نسخ النسخة الاحتياطية إلى الحافظة — الصقها في ملف واحفظها في مكان آمن.' : 'Backup copied to the clipboard — paste it into a file and keep it somewhere safe.')
+            : (isAr ? 'تعذّر النسخ إلى الحافظة. افتح الصفحة في متصفحك الحقيقي لتنزيل الملف.' : 'Could not copy to the clipboard. Open this page in your real browser to download the file.'),
+          ok ? 'success' : 'error'
+        );
+      });
+    } else {
+      notifyInAppBrowserLimitation('download');
+    }
+    addAuditLog('Export', 'system', 'Backup export not attempted: in-app browser cannot download files (clipboard offered)');
+    return;
+  }
+
   const dataBlob = new Blob([dataStr], { type: 'application/json' });
   const url = URL.createObjectURL(dataBlob);
   const link = document.createElement('a');

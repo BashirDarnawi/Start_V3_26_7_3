@@ -440,7 +440,10 @@ function _clothesCsvCell(v) {
 
 function _clothesDownloadCsv(rows, filenameBase) {
   const csv = rows.map(r => r.map(_clothesCsvCell).join(',')).join('\n');
-  downloadFile('﻿' + csv, `${filenameBase}-${getTodayDateString()}.csv`, 'text/csv;charset=utf-8');
+  // downloadFile returns false (with its own warning) inside FB/IG in-app
+  // browsers where blob downloads silently fail — no false success toast.
+  const downloaded = downloadFile('﻿' + csv, `${filenameBase}-${getTodayDateString()}.csv`, 'text/csv;charset=utf-8');
+  if (downloaded === false) return;
   showNotification(clothesIsAr() ? 'تم التصدير' : 'Exported', clothesIsAr() ? 'تم تنزيل ملف CSV.' : 'CSV file downloaded.', 'success');
 }
 
@@ -597,17 +600,18 @@ function onClothesProductSearchInput(el) {
 }
 
 function getFilteredClothesProducts() {
-  const q = _clothesProductSearch.trim().toLowerCase();
+  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
+  const q = foldSearchText(_clothesProductSearch.trim());
   let items = getVisibleClothesProducts();
   if (q) {
     items = items.filter(p => {
-      const name = String(p.name || '').toLowerCase();
-      const category = String(p.category || '').toLowerCase();
+      const name = foldSearchText(p.name);
+      const category = foldSearchText(p.category);
       if (name.includes(q) || category.includes(q)) return true;
       const variants = Array.isArray(p.variants) ? p.variants : [];
       return variants.some(v =>
-        String(v?.color || '').toLowerCase().includes(q) ||
-        String(v?.size || '').toLowerCase().includes(q)
+        foldSearchText(v?.color).includes(q) ||
+        foldSearchText(v?.size).includes(q)
       );
     });
   }
@@ -1335,17 +1339,18 @@ function setClothesShipmentStatusFilter(value) {
 }
 
 function getFilteredClothesShipments() {
-  const q = _clothesShipmentSearch.trim().toLowerCase();
+  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
+  const q = foldSearchText(_clothesShipmentSearch.trim());
   let items = getVisibleClothesShipments();
   if (_clothesShipmentStatusFilter !== 'all') {
     items = items.filter(s => s.status === _clothesShipmentStatusFilter);
   }
   if (q) {
     items = items.filter(s => {
-      if (String(s.ref || '').toLowerCase().includes(q)) return true;
-      if (String(s.supplier || '').toLowerCase().includes(q)) return true;
+      if (foldSearchText(s.ref).includes(q)) return true;
+      if (foldSearchText(s.supplier).includes(q)) return true;
       const lines = Array.isArray(s.lines) ? s.lines : [];
-      return lines.some(line => clothesProductNameById(line.productId).toLowerCase().includes(q));
+      return lines.some(line => foldSearchText(clothesProductNameById(line.productId)).includes(q));
     });
   }
   return items;
@@ -2166,7 +2171,8 @@ function setClothesOrderPaymentFilter(value) {
 }
 
 function getFilteredClothesOrders() {
-  const q = _clothesOrderSearch.trim().toLowerCase();
+  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
+  const q = foldSearchText(_clothesOrderSearch.trim());
   let items = getVisibleClothesOrders();
   if (_clothesOrderStatusFilter !== 'all') {
     items = items.filter(o => o.status === _clothesOrderStatusFilter);
@@ -2176,10 +2182,10 @@ function getFilteredClothesOrders() {
   }
   if (q) {
     items = items.filter(o => {
-      if (String(o.customerName || '').toLowerCase().includes(q)) return true;
-      if (String(o.customerPhone || '').toLowerCase().includes(q)) return true;
+      if (foldSearchText(o.customerName).includes(q)) return true;
+      if (foldSearchText(o.customerPhone).includes(q)) return true;
       const lines = Array.isArray(o.lines) ? o.lines : [];
-      return lines.some(line => clothesProductNameById(line.productId).toLowerCase().includes(q));
+      return lines.some(line => foldSearchText(clothesProductNameById(line.productId)).includes(q));
     });
   }
   return items;
@@ -2651,6 +2657,12 @@ function printClothesOrderSlip(orderId) {
   const order = getVisibleClothesOrders().find(o => o.id === orderId);
   if (!order) return;
   const isAr = clothesIsAr();
+  // FB/IG in-app browsers silently no-op window.print(); warn instead of
+  // arming print listeners that will never fire (same guard as printReceiptCard).
+  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+    if (typeof notifyInAppBrowserLimitation === 'function') notifyInAppBrowserLimitation('print');
+    return;
+  }
   const totals = getClothesOrderTotals(order);
   const lines = Array.isArray(order.lines) ? order.lines : [];
   const payMeta = clothesPaymentStatusMeta(order.paymentStatus);

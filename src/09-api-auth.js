@@ -440,6 +440,23 @@ const SERVER_SYNC_COLLECTIONS = Object.freeze([
 // clients keep receiving full records because the backend default is true.
 const LIGHTWEIGHT_MEDIA_COLLECTIONS = new Set(['ads', 'receipts', 'adCampaignRequests']);
 const ADS_STUDIO_MEDIA_TIMEOUT_MS = 90000;
+// Media-carrying money writes (delivery-completion PATCH embedding the
+// driver's required base64 proof photo plus existing photos, ad edits with
+// adPhotos) legitimately need minutes on a weak mobile uplink (10-50KB/s on
+// 3G / in-app WebViews). A fixed 20s abort made those saves deterministically
+// impossible in the field, so any request body that embeds an image — or is
+// simply large — gets the same 90s budget Ads Studio media already uses.
+// Small bodies keep the 20s timeout everywhere (desktop behavior unchanged).
+const MEDIA_BODY_SIZE_THRESHOLD_BYTES = 200 * 1024;
+function mediaAwareTimeoutMs(body) {
+  try {
+    const s = JSON.stringify(body || {});
+    if (s.length > MEDIA_BODY_SIZE_THRESHOLD_BYTES || s.indexOf('data:image/') !== -1) {
+      return ADS_STUDIO_MEDIA_TIMEOUT_MS;
+    }
+  } catch (_) {}
+  return TIME_CONSTANTS.API_TIMEOUT_LONG_MS;
+}
 const INLINE_MEDIA_FIELDS_BY_COLLECTION = Object.freeze({
   ads: Object.freeze(['adPhotos', 'photos']),
   receipts: Object.freeze(['photos', 'receiptImage']),
@@ -1195,10 +1212,13 @@ async function apiPurchaseSubscription({ serviceId, idempotencyKey, userId }) {
 // idempotency key so a response-loss retry replays the same result.
 async function apiTransferReceipt(payload) {
   const identity = getServerSessionIdentity();
-  const response = await apiJson('/api/receipts/transfers?include_media=false', {
+  // A stable body/idempotency key makes a response-loss retry safe: the server
+  // checks the receiptTransfer marker BEFORE the version-conflict check and
+  // replays the committed result instead of moving the same balance twice.
+  const response = await withRetry(() => apiJson('/api/receipts/transfers?include_media=false', {
     method: 'POST',
     body: payload
-  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 2, 500);
   if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
   if (!response || typeof response !== 'object' || Array.isArray(response)) {
     const error = new Error('Invalid receipt transfer response');
@@ -1337,10 +1357,18 @@ async function apiMutateAd(payload) {
   const action = String(payload?.action || '');
   if (!['create', 'update'].includes(action)) throw new Error('Invalid ad mutation action');
   const identity = getServerSessionIdentity();
-  const response = await apiJson('/api/ads/mutate?include_media=false', {
+  // A stable body/idempotency key makes a response-loss retry safe: the server
+  // checks the adFunding idempotency marker BEFORE the version-conflict check
+  // and replays the committed result instead of moving the same funding twice
+  // (the caller pins adId + idempotencyKey + payload per attempt, so retries
+  // resend identical bytes). Bodies carrying adPhotos get the media timeout;
+  // those retry once instead of twice because each retry re-uploads the whole
+  // body from byte 0 and would otherwise saturate a weak uplink for minutes.
+  const _mutateTimeoutMs = mediaAwareTimeoutMs(payload && payload.data);
+  const response = await withRetry(() => apiJson('/api/ads/mutate?include_media=false', {
     method: 'POST',
     body: payload
-  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+  }, { timeoutMs: _mutateTimeoutMs }), _mutateTimeoutMs === ADS_STUDIO_MEDIA_TIMEOUT_MS ? 1 : 2, 500);
   if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
   if (!response || typeof response !== 'object' || Array.isArray(response)) {
     const error = new Error('Invalid ad mutation response');
@@ -1498,7 +1526,15 @@ async function apiPatchEntity(collection, id, updates, expectedLastModified) {
   const local = (Array.isArray(state[collection]) ? state[collection] : [])
     .find(row => row && String(row.id) === String(id));
   const path = `/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}${omitMedia ? '?include_media=false' : ''}`;
-  const timeoutMs = String(collection || '') === 'adCampaignRequests' ? ADS_STUDIO_MEDIA_TIMEOUT_MS : TIME_CONSTANTS.API_TIMEOUT_LONG_MS;
+  // Delivery-completion PATCHes embed the driver's required base64 proof
+  // photo (plus re-sent existing photos) and can never finish inside 20s on a
+  // slow uplink, so image-carrying bodies get the 90s media budget. Those
+  // retry once instead of twice: each retry re-uploads the whole body from
+  // byte 0, and three 90s uploads would hold a weak uplink ~4.5 minutes.
+  // adCampaignRequests keeps its shipped 90s + 2-retries behavior unchanged.
+  const _isAdsStudioPatch = String(collection || '') === 'adCampaignRequests';
+  const timeoutMs = _isAdsStudioPatch ? ADS_STUDIO_MEDIA_TIMEOUT_MS : mediaAwareTimeoutMs(updates);
+  const _patchRetries = (!_isAdsStudioPatch && timeoutMs === ADS_STUDIO_MEDIA_TIMEOUT_MS) ? 1 : 2;
   const entity = await requestValidatedServerEntity(collection, 'patch', () =>
     withRetry(() =>
       apiJson(
@@ -1506,7 +1542,7 @@ async function apiPatchEntity(collection, id, updates, expectedLastModified) {
         { method: 'PATCH', body: { data: updates, expectedLastModified } },
         { timeoutMs }
       )
-    , 2, 500)
+    , _patchRetries, 500)
   );
   if (String(collection || '') === 'adCampaignRequests') entity.data = makeLightweightMediaRecord(collection, entity.data);
   else entity.data = mergeMutationInlineMedia(collection, entity.data, { ...(local || {}), ...(updates || {}) });

@@ -43,6 +43,13 @@
     <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
     <meta name="theme-color" content="#f8fafc" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#020617" media="(prefers-color-scheme: dark)">
+    <!-- Declares dark support BEFORE script.js parses (the multi-second
+         perf-lite window on phones), which exempts the page from Chrome/
+         Samsung/WebView "auto dark" algorithmic inversion at first paint.
+         applyTheme() (src/07-i18n-render-core.js) then pins the used scheme
+         to the app's actual manual theme via an inline style, and re-points
+         the theme-color metas above the same way. -->
+    <meta name="color-scheme" content="light dark">
 
     <!-- Fonts (self-hosted Inter — see scripts/download-fonts.js) -->
     <link rel="stylesheet" href="assets/fonts.css">

@@ -80,13 +80,55 @@ const Platform = {
       /iphone|ipad|ipod|android|blackberry|windows phone/i.test(ua) ||
       (isTouch && window.innerWidth < 768)
     );
-    
+
+    // Detect in-app browsers (webviews embedded inside other apps). Users
+    // arrive from Facebook ads, so the FB/IG/Messenger in-app browsers are a
+    // primary environment — and they silently break blob downloads,
+    // window.print() and target=_blank handoffs. Detection is deliberately
+    // token-based (explicit app UA markers only): NO generic "iOS without a
+    // Safari/ token" heuristic, because the installed PWA also drops the
+    // Safari/ token and would be misclassified. Capacitor is excluded first:
+    // its Android shell UA carries the same '; wv)' WebView marker.
+    let isInAppBrowser = false;
+    let inAppBrowserKind = null;
+    if (!isCapacitor) {
+      try {
+        if (/FBAN|FBAV|FB_IAB|FBIOS/i.test(ua)) {
+          // Facebook family. Messenger ships the same FB tokens plus its own
+          // app names (MessengerForiOS / Orca-Android), so the sub-check is
+          // safe — it only runs once an FB token already matched.
+          isInAppBrowser = true;
+          inAppBrowserKind = /messenger|orca/i.test(ua) ? 'messenger' : 'facebook';
+        } else if (/instagram/i.test(ua)) {
+          isInAppBrowser = true;
+          inAppBrowserKind = 'instagram';
+        } else if (/android/i.test(ua) && /; wv\)/.test(ua)) {
+          // Stock Android WebView marker (Chrome's "; wv)" token) — covers
+          // FB Lite, Gmail, and any other app hosting a bare WebView.
+          isInAppBrowser = true;
+          inAppBrowserKind = 'android-webview';
+        } else if (/\bLine\/|MicroMessenger|Snapchat|TikTok|musical_ly|BytedanceWebview|\bGSA\//i.test(ua)) {
+          // Other well-known in-app shells (LINE, WeChat, Snapchat, TikTok,
+          // the Google app). Same degraded capabilities; no finer branding
+          // is needed by any consumer.
+          isInAppBrowser = true;
+          inAppBrowserKind = 'other';
+        }
+      } catch (_) {
+        // Never let UA sniffing break platform detection.
+        isInAppBrowser = false;
+        inAppBrowserKind = null;
+      }
+    }
+
     this._cache = {
       isCapacitor,
       platform,
       isTouch,
       supportsHover,
       isMobileBrowser,
+      isInAppBrowser,
+      inAppBrowserKind,
       isMobile: isCapacitor || isMobileBrowser,
       isWeb: !isCapacitor,
       isIOS: platform === 'ios',
@@ -108,6 +150,12 @@ const Platform = {
   get supportsHover() { return this.detect().supportsHover; },
   get isMobile() { return this.detect().isMobile; },
   get isMobileBrowser() { return this.detect().isMobileBrowser; },
+  // In-app webview shells (Facebook/Instagram/Messenger, bare Android
+  // WebViews, other known app browsers). Consumers use this to degrade
+  // gracefully where those shells silently break downloads/printing.
+  get isInAppBrowser() { return this.detect().isInAppBrowser; },
+  // 'facebook' | 'instagram' | 'messenger' | 'android-webview' | 'other' | null
+  get inAppBrowserKind() { return this.detect().inAppBrowserKind; },
   get isWeb() { return this.detect().isWeb; },
   get isIOS() { return this.detect().isIOS; },
   get isAndroid() { return this.detect().isAndroid; },
@@ -120,14 +168,15 @@ const Platform = {
     if (!body) return;
     
     // Remove old classes
-    body.classList.remove('platform-web', 'platform-ios', 'platform-android', 'platform-harmony', 'platform-capacitor', 'is-touch', 'no-hover', 'is-mobile');
-    
+    body.classList.remove('platform-web', 'platform-ios', 'platform-android', 'platform-harmony', 'platform-capacitor', 'platform-inapp', 'is-touch', 'no-hover', 'is-mobile');
+
     // Add new classes
     if (p.isCapacitor) body.classList.add('platform-capacitor');
     body.classList.add(`platform-${p.platform}`);
     if (p.isTouch) body.classList.add('is-touch');
     if (!p.supportsHover) body.classList.add('no-hover');
     if (p.isMobile) body.classList.add('is-mobile');
+    if (p.isInAppBrowser) body.classList.add('platform-inapp');
   }
 };
 

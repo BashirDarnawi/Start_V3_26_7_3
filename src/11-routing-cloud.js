@@ -566,10 +566,12 @@ function getCommandPaletteBaseCommands() {
 function getCommandPaletteEntityCommands(searchTerm) {
   const rawTerm = Security.sanitizeInput(String(searchTerm || ''), { maxLength: 120 }).trim();
   if (rawTerm.length < 2) return [];
-  const term = rawTerm.toLocaleLowerCase();
+  // foldSearchText on BOTH sides so Arabic-Indic digit queries and unhamza'd
+  // Arabic spellings match stored records (global helper, 13-filters-helpers).
+  const term = foldSearchText(rawTerm);
   const isAr = state.language === 'ar';
   const results = [];
-  const matches = (...values) => values.some(value => String(value || '').toLocaleLowerCase().includes(term));
+  const matches = (...values) => values.some(value => foldSearchText(value).includes(term));
   const takeMatching = (records, predicate, limit = 5) => {
     const matchesFound = [];
     for (const record of records) {
@@ -682,10 +684,10 @@ function getCommandPaletteEntityCommands(searchTerm) {
 }
 
 function buildCommandPaletteCommands(searchTerm = '') {
-  const term = String(searchTerm || '').trim().toLocaleLowerCase();
+  const term = foldSearchText(String(searchTerm || '').trim());
   const base = getCommandPaletteBaseCommands();
   const matchingBase = term
-    ? base.filter(command => `${command.label} ${command.description || ''} ${command.section || ''}`.toLocaleLowerCase().includes(term))
+    ? base.filter(command => foldSearchText(`${command.label} ${command.description || ''} ${command.section || ''}`).includes(term))
     : base;
   return [...getCommandPaletteEntityCommands(searchTerm), ...matchingBase];
 }

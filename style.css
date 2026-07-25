@@ -2567,3 +2567,15 @@ body.perf-lite .glass-panel:hover {
     padding-inline: 0.7rem;
   }
 }
+
+/* Dark-mode counterpart to the brand remap above (.text-indigo-600 ->
+   var(--brand-blue) !important, ~line 493): that remap is !important, so
+   Tailwind's non-!important dark:text-indigo-300 utilities can NEVER win
+   against it — adding dark: classes in templates silently does nothing for
+   indigo. One dark-scoped counter-rule lightens every indigo-600 label
+   (receipt serial lines, the driver modal's receipt number, "+ Add method")
+   to a readable tint of the brand blue (~7:1 on the dark glass surface),
+   keeping light mode and the brand remap untouched. */
+.dark .text-indigo-600 {
+  color: #8caaff !important;
+}

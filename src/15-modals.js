@@ -719,7 +719,7 @@ function renderModal() {
                 </div>
                 ${canModifyAdPhotosInCurrentModal() ? `<label class="text-xs bg-orange-600 text-white px-2 py-1 rounded-lg font-medium cursor-pointer hover:bg-orange-700">
                   ${isArAd ? '+ رفع' : '+ Upload'}
-                  <input type="file" accept="image/*" multiple class="hidden" onchange="uploadAdPhotos(this.files)" />
+                  <input type="file" accept="image/*" multiple class="hidden" onchange="uploadAdPhotos(this.files); this.value=''" />
                 </label>` : ''}
               </div>
               <div id="ad-photo-previews" class="grid grid-cols-4 gap-2 min-h-[40px] bg-white dark:bg-slate-900 rounded-lg p-2">
@@ -1420,7 +1420,7 @@ function renderModal() {
                   </label>
                   <label class="text-xs text-indigo-600 hover:text-indigo-700 font-medium flex items-center space-x-1 cursor-pointer">
                     <i data-lucide="upload" class="w-3 h-3"></i><span>${isArR ? 'إضافة صورة' : 'Add Photo'}</span>
-                    <input type="file" accept="image/*" multiple class="hidden" onchange="uploadReceiptPhotos(this.files)" />
+                    <input type="file" accept="image/*" multiple class="hidden" onchange="uploadReceiptPhotos(this.files); this.value=''" />
                   </label>
                 </div>
                 <div id="receipt-photo-previews" class="grid grid-cols-4 gap-2"></div>
@@ -1429,7 +1429,7 @@ function renderModal() {
 
             <!-- Action Buttons -->
             <div class="flex space-x-2 px-1 pt-3 border-t border-slate-200 dark:border-slate-700">
-              <button type="button" onclick="saveReceiptFromModal()" class="flex-1 btn-shine bg-purple-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-purple-700">
+              <button type="button" id="receipt-save-btn" onclick="saveReceiptFromModal()" class="flex-1 btn-shine bg-purple-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-purple-700">
                 <i data-lucide="check" class="w-4 h-4 inline mr-1.5"></i>${isArR ? (isEdit ? 'حفظ' : 'إنشاء') : (isEdit ? 'Save' : 'Create')}
               </button>
               <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-slate-300">${isArR ? 'إلغاء' : 'Cancel'}</button>

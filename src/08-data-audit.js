@@ -780,6 +780,14 @@ function updateRecord(array, id, updates, expectedLastModified) {
       }
     }
 
+    // Identity of the exact object this call optimistically wrote (stays null
+    // when the settle/convert guard below skips the optimistic write). Error
+    // paths may only roll the slot back while it still holds THIS object:
+    // live-sync deltas and chained-PATCH echoes install fresh objects in the
+    // same slot, and overwriting one of those with the stale open-time
+    // snapshot would clobber a newer committed copy that the sync watermark
+    // has already consumed.
+    let _optimisticRecord = null;
     // Ordinary records keep the established optimistic UX. Settlement and its
     // reverse (debt conversion) are the exceptions: do not paint the receipt
     // Paid/Not Paid before its linked ads are also committed, because that
@@ -789,6 +797,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
       if (isServerModeEnabled() && collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function') {
         array[index] = makeLightweightMediaRecord(collectionName, array[index]);
       }
+      _optimisticRecord = array[index];
       // Keep currentUser in sync when updating own user record (important for profile changes)
       if (collectionName === 'users' && state.currentUser?.id === id) {
         state.currentUser = array[index];
@@ -867,9 +876,20 @@ function updateRecord(array, id, updates, expectedLastModified) {
               saveState();
             }
           }
-          // Force full render to ensure receipt cards, ad rows, customer debt,
-          // analytics and reconciliation all reflect the same committed state.
-          forceFullRender();
+          // Settle/convert skipped the optimistic paint, so this echo is the
+          // FIRST paint of the committed multi-entity state (receipt + ads +
+          // customer debt + reconciliation): keep the full render. A plain
+          // PATCH echo was already painted optimistically 100-500ms ago —
+          // schedule a normal render instead so the identical-HTML skip turns
+          // the common byte-identical echo into a no-DOM-op rather than a
+          // second full innerHTML swap (double entry-animation + icon flash
+          // on phones); when the server echo really drifted, only the view
+          // container repaints via the partial path.
+          if (_settlesReceipt || _convertsReceipt) {
+            forceFullRender();
+          } else {
+            RenderQueue.schedule('patchEcho');
+          }
           return true;
         })
         .catch(async (e) => {
@@ -887,21 +907,54 @@ function updateRecord(array, id, updates, expectedLastModified) {
             try {
               const latest = await apiGetEntity(collectionName, id);
               const idx = array.findIndex(x => x && x.id === id);
+              let _latestData = null;
               if (idx !== -1 && latest?.data) {
-                 const latestData = Security.sanitizeObject(latest.data);
+                 _latestData = Security.sanitizeObject(latest.data);
                  array[idx] = collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function'
-                   ? makeLightweightMediaRecord(collectionName, latestData)
-                   : latestData;
+                   ? makeLightweightMediaRecord(collectionName, _latestData)
+                   : _latestData;
                 if (collectionName) markCollectionDirty(collectionName);
                 saveState();
               }
-              showNotification(
-                state.language === 'ar' ? 'تعارض' : 'Conflict',
-                state.language === 'ar'
-                  ? 'تم تغيير هذا السجل من مستخدم آخر. تم تحميل أحدث نسخة.'
-                  : 'This record was changed by another user. We loaded the latest version.',
-                'warning'
+              // Refresh the frozen modal-open baseline: live-sync never
+              // touches state.modalData, so without this a still-open modal
+              // replays the same stale expectedLastModified and loops the
+              // identical conflict on every further Save.
+              if (_latestData && state.modalData && String(state.modalData.id) === String(id)) {
+                state.modalData._lastModified = _latestData._lastModified;
+              }
+              // A settle/unsettle whose FIRST attempt committed but whose
+              // response was lost lands here on the user's manual retry: the
+              // fresh idempotency key bypasses the server replay marker and
+              // the stale modal baseline 409s. When the reloaded record
+              // already shows exactly the state this save wanted, that
+              // "conflict" is the user's own committed change — say so
+              // instead of sending them chasing a phantom other editor
+              // (mirrors the create path's serverRecordMatchesCreateRetry
+              // grace). Keys must NOT be reused across manual retries: the
+              // server replay hash covers expectedLastModified + data, which
+              // change per attempt, so reuse would 409 "already used".
+              const _alreadyApplied = !!_latestData && (
+                (_settlesReceipt && (String(_latestData.status || '').toLowerCase() === 'paid' || _latestData.isPaid === true)) ||
+                (_convertsReceipt && _latestData.isPaid === false)
               );
+              if (_alreadyApplied) {
+                showNotification(
+                  state.language === 'ar' ? 'تم الحفظ' : 'Already saved',
+                  state.language === 'ar'
+                    ? 'تم حفظ تغييرك بالفعل رغم انقطاع الشبكة. تم تحميل أحدث نسخة.'
+                    : 'Already saved: your first attempt reached the server despite the network error. Showing the latest version.',
+                  'success'
+                );
+              } else {
+                showNotification(
+                  state.language === 'ar' ? 'تعارض' : 'Conflict',
+                  state.language === 'ar'
+                    ? 'تم تغيير هذا السجل من مستخدم آخر. تم تحميل أحدث نسخة.'
+                    : 'This record was changed by another user. We loaded the latest version.',
+                  'warning'
+                );
+              }
               render();
               return false;
             } catch (err) {
@@ -910,10 +963,17 @@ function updateRecord(array, id, updates, expectedLastModified) {
           } else if (e?.status === 409) {
             // Rule refusal: roll back the optimistic write and surface the
             // server's actual reason (localized for the known rules).
+            // Restore only while the slot still holds this call's optimistic
+            // object — if live-sync (or a chained PATCH echo) installed a
+            // newer copy mid-flight, writing the stale open-time snapshot
+            // would clobber committed money state. Settle/convert made no
+            // optimistic write, so nothing needs restoring for them.
             const idx = array.findIndex(x => x && x.id === id);
-            if (idx !== -1) array[idx] = old;
-            if (collectionName) markCollectionDirty(collectionName);
-            saveState();
+            if (idx !== -1 && _optimisticRecord && array[idx] === _optimisticRecord) {
+              array[idx] = old;
+              if (collectionName) markCollectionDirty(collectionName);
+              saveState();
+            }
             const reason = typeof describe409 === 'function'
               ? describe409(e, String(e?.message || ''))
               : String(e?.message || '');
@@ -926,11 +986,16 @@ function updateRecord(array, id, updates, expectedLastModified) {
             return false;
           }
 
-          // Rollback on failure
+          // Rollback on failure — same identity guard as the rule-refusal
+          // branch: never write the stale snapshot over a slot that live-sync
+          // or a chained echo replaced mid-flight, and settle/convert (which
+          // made no optimistic write) restores nothing.
           const idx = array.findIndex(x => x && x.id === id);
-          if (idx !== -1) array[idx] = old;
-          if (collectionName) markCollectionDirty(collectionName);
-          saveState();
+          if (idx !== -1 && _optimisticRecord && array[idx] === _optimisticRecord) {
+            array[idx] = old;
+            if (collectionName) markCollectionDirty(collectionName);
+            saveState();
+          }
           // Handle 401 - session expired, prompt re-login
           if (e?.status === 401) {
             showNotification('Session Expired', 'Your session has expired. Please log out and log back in.', 'warning');
@@ -1557,7 +1622,12 @@ function getDeliveryReceiptDueUsage(receipt) {
     }
   }
 
-  const transferredUSD = getReceiptUsageStats(receiptObj).transferredUSD || 0;
+  // transferredUSD depends ONLY on receiptObj.transfers (same reduce as
+  // getReceiptUsageStats). Calling getReceiptUsageStats here executed a SECOND
+  // full ads scan per receipt just to read this array-local number — a real
+  // cost inside per-keystroke renders on phones.
+  const transfers = receiptObj.transfers || [];
+  const transferredUSD = transfers.reduce((sum, t) => sum + (t.amountUSD || 0), 0) || 0;
   const remainingDueUSD = Math.max(totalDueUSD - usedDueUSD - transferredUSD, 0);
 
   return {

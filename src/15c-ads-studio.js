@@ -475,8 +475,9 @@ function renderAdsStudioReviewHistory(campaign) {
 
 function renderAdsStudioCampaigns() {
   const isAr = adsStudioIsAr();
-  const query = _adsStudioSearch.trim().toLowerCase();
-  const campaigns = getVisibleAdsStudioCampaigns().filter(item => !query || [item.name, item.pageName, item.objective, item.status].some(value => String(value || '').toLowerCase().includes(query)));
+  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
+  const query = foldSearchText(_adsStudioSearch.trim());
+  const campaigns = getVisibleAdsStudioCampaigns().filter(item => !query || [item.name, item.pageName, item.objective, item.status].some(value => foldSearchText(value).includes(query)));
   return `
     <section>
       <div class="glass-panel rounded-2xl p-4 mb-5 flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -494,8 +495,8 @@ function onAdsStudioSearch(value) {
   window._adsStudioSearchTimer = setTimeout(() => {
     const list = document.getElementById('ads-studio-campaign-list');
     if (!list || state.currentView !== 'ads-studio' || _adsStudioActiveTab !== 'campaigns') return;
-    const query = _adsStudioSearch.trim().toLowerCase();
-    const campaigns = getVisibleAdsStudioCampaigns().filter(item => !query || [item.name, item.pageName, item.objective, item.status].some(value => String(value || '').toLowerCase().includes(query)));
+    const query = foldSearchText(_adsStudioSearch.trim());
+    const campaigns = getVisibleAdsStudioCampaigns().filter(item => !query || [item.name, item.pageName, item.objective, item.status].some(value => foldSearchText(value).includes(query)));
     list.innerHTML = campaigns.length ? campaigns.map(renderAdsStudioCampaignCard).join('') : renderAdsStudioEmptyState();
     if (typeof IconQueue !== 'undefined') IconQueue.schedule(list);
   }, 100);
@@ -645,7 +646,14 @@ function renderAdsStudioCreativePreview() {
 
 async function onAdsStudioCreativeSelected(input) {
   const candidates = Array.from(input?.files || []);
-  const formatFiles = candidates.filter(file => ADS_STUDIO_ALLOWED_IMAGE_MIME_TYPES.has(String(file?.type || '').toLowerCase()));
+  // Blank/generic MIME types are real JPEG/PNGs from Android SAF pickers —
+  // let compressImageToDataUrl sniff the magic bytes instead of rejecting
+  // here; isSafeAdsStudioCreativeSource still gates the OUTPUT to normalized
+  // png/jpeg/webp data URLs, so nothing unsupported can get through.
+  const formatFiles = candidates.filter(file => {
+    const t = String(file?.type || '').toLowerCase();
+    return !t || t === 'application/octet-stream' || ADS_STUDIO_ALLOWED_IMAGE_MIME_TYPES.has(t);
+  });
   const rejectedCount = candidates.length - formatFiles.length;
   input.value = '';
   if (rejectedCount > 0) {

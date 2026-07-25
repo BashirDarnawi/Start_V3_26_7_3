@@ -2575,7 +2575,13 @@ function renderCustomersView() {
     state.customerFinancialFilter = 'all';
     if (financialCustomerSorts.has(String(state.customerSort || ''))) state.customerSort = 'newest';
   }
-  const allFilteredCustomers = getFilteredCustomers();
+  // ONE statsIndex per render pass: getFilteredCustomers (financial filter +
+  // sort), the header stat cards and every customer card all reuse it. Each
+  // index build is a full ads/receipts/pages pass, and the debt block in
+  // getCustomerStats now depends on the index's committedUSDByReceiptId to
+  // avoid per-receipt ads rescans — so build it once, up front.
+  const statsIndex = buildCustomerStatsIndex();
+  const allFilteredCustomers = getFilteredCustomers(statsIndex);
   const allCustomers = getCustomersVisibleToCurrentUser();
   const duplicateCustomerGroups = isCurrentUserAdmin() ? findDuplicateCustomerGroups(state.customers) : [];
   const duplicateCustomerCount = duplicateCustomerGroups.reduce((sum, group) => sum + group.customers.length, 0);
@@ -2596,11 +2602,10 @@ function renderCustomersView() {
   const visibleCustomers = allFilteredCustomers.slice(0, _customersShowLimit);
   const remainingCustomers = allFilteredCustomers.length - visibleCustomers.length;
 
-  // Calculate overall stats
+  // Calculate overall stats (reusing the pass-wide statsIndex built above)
   let totalRevenue = 0;
   let totalDebts = 0;
 
-  const statsIndex = buildCustomerStatsIndex();
   allCustomers.forEach(c => {
     const stats = getCustomerStats(c.id, statsIndex);
     totalRevenue += stats.totalPaid;
@@ -2752,7 +2757,9 @@ function renderReceiptsView() {
     });
   }
 
-  // Apply filters
+  // Apply filters. foldSearchText on BOTH sides of the search so Arabic-Indic
+  // digit queries (٠-٩) and unhamza'd Arabic names match the stored values.
+  const receiptSearchTerm = foldSearchText(state.receiptSearch || '');
   let filteredReceipts = allReceipts.filter(receipt => {
     if (receiptRecordFilter && String(receipt?.id || '') !== receiptRecordFilter) return false;
     const receiptCustomerId = getReceiptCustomerReferenceId(receipt);
@@ -2760,12 +2767,12 @@ function renderReceiptsView() {
     const customer = customersById.get(receiptCustomerId);
     // Fall back to any denormalized name stamped on the receipt so name search
     // still works for a role that can see receipts but not load customers.
-    const customerName = (customer?.name || receipt.customerName || '').toLowerCase();
-    const finalNo = (receipt.finalReceiptNo || receipt.serialNumber || '').toLowerCase();
-    const tempNo = (receipt.tempReceiptNo || '').toLowerCase();
-    const phoneNumber = canSearchReceiptContacts ? (receipt.phoneNumber || '').toLowerCase() : '';
-    const searchTerm = (state.receiptSearch || '').toLowerCase();
-    
+    const customerName = foldSearchText(customer?.name || receipt.customerName || '');
+    const finalNo = foldSearchText(receipt.finalReceiptNo || receipt.serialNumber || '');
+    const tempNo = foldSearchText(receipt.tempReceiptNo || '');
+    const phoneNumber = canSearchReceiptContacts ? foldSearchText(receipt.phoneNumber || '') : '';
+    const searchTerm = receiptSearchTerm;
+
     // Search filter
     if (searchTerm && !customerName.includes(searchTerm) && !finalNo.includes(searchTerm) && !tempNo.includes(searchTerm) && !phoneNumber.includes(searchTerm)) {
       return false;
@@ -3066,7 +3073,7 @@ function renderReceiptsView() {
                       </span>`;
                     })() : ''}
                     ${receipt.receiptType === 'CARRIED_BALANCE' ? `
-                      <span class="inline-flex items-center gap-1 font-medium" style="color:#b45309" title="${isArV ? 'رصيد سابق: العميل استهلك جزءاً من رصيده — سُجِّل المتبقي فقط' : 'Existing balance: the customer already used part — only the remainder was recorded'}">
+                      <span class="inline-flex items-center gap-1 font-medium text-amber-700 dark:text-amber-300" title="${isArV ? 'رصيد سابق: العميل استهلك جزءاً من رصيده — سُجِّل المتبقي فقط' : 'Existing balance: the customer already used part — only the remainder was recorded'}">
                         <i data-lucide="history" class="w-3 h-3"></i>
                         <span>${isArV ? 'رصيد سابق (المتبقي)' : 'Existing balance (remaining)'}</span>
                       </span>` : ''}
@@ -3082,17 +3089,17 @@ function renderReceiptsView() {
                   ` : ''}
                 </div>
                 <div class="text-right" ${hasCustomerDebt ? 'data-receipt-linked-debt="true"' : ''}>
-                  <div class="text-2xl font-bold ${hasCustomerDebt ? 'text-rose-600' : 'text-emerald-600'}">$${(hasCustomerDebt ? collectionTarget.amountUSD : Number(receipt.amountUSD || 0)).toFixed(2)}</div>
+                  <div class="text-2xl font-bold ${hasCustomerDebt ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}">$${(hasCustomerDebt ? collectionTarget.amountUSD : Number(receipt.amountUSD || 0)).toFixed(2)}</div>
                   <div class="text-sm ${hasCustomerDebt ? 'text-rose-500 font-semibold' : 'text-slate-500'}">${(hasCustomerDebt ? collectionTarget.amountLocal : Number(receipt.amountLocal || 0)).toFixed(2)} LYD</div>
-                  ${hasCustomerDebt ? `<div class="text-[10px] font-bold text-rose-600 mt-1">${isArV ? 'دين العميل' : 'Customer debt'}</div>` : ''}
+                  ${hasCustomerDebt ? `<div class="text-[10px] font-bold text-rose-600 dark:text-rose-400 mt-1">${isArV ? 'دين العميل' : 'Customer debt'}</div>` : ''}
                   ${receipt.isPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isArV ? 'مدفوع' : 'Paid'}</div>` : `<div class="text-xs text-amber-600 mt-1">⏳ ${isArV ? 'غير مدفوع' : 'Unpaid'}</div>`}
                   ${receipt.paymentResult ? `
-                    <div class="text-[10px] mt-1 ${receipt.paymentResult === 'UNDERPAID' ? 'text-rose-600' : receipt.paymentResult === 'OVERPAID' ? 'text-blue-600' : 'text-emerald-600'} font-bold">
+                    <div class="text-[10px] mt-1 ${receipt.paymentResult === 'UNDERPAID' ? 'text-rose-600 dark:text-rose-400' : receipt.paymentResult === 'OVERPAID' ? 'text-blue-600' : 'text-emerald-600'} font-bold">
                       ${receipt.paymentResult === 'PAID_EXACT' ? (isArV ? 'مدفوع بالضبط' : 'Paid exact') : receipt.paymentResult === 'OVERPAID' ? `${isArV ? 'دفع زائد' : 'Overpaid'} +${Number(receipt.overpaidAmount || 0).toFixed(0)} LYD` : `${isArV ? 'المتبقي' : 'Remaining'} ${Number(receipt.remainingDue || 0).toFixed(0)} LYD`}
                     </div>
                   ` : ''}
                   ${receipt.feeDifferenceStatus ? `
-                    <div class="text-[10px] ${receipt.feeDifferenceStatus === 'SAME' ? 'text-slate-500' : receipt.feeDifferenceStatus === 'LOWER' ? 'text-amber-600' : 'text-purple-600'} font-bold">
+                    <div class="text-[10px] ${receipt.feeDifferenceStatus === 'SAME' ? 'text-slate-500' : receipt.feeDifferenceStatus === 'LOWER' ? 'text-amber-600' : 'text-purple-600 dark:text-purple-300'} font-bold">
                       ${isArV ? `العمولة ${({ SAME: 'مطابقة', LOWER: 'أقل', HIGHER: 'أعلى' })[receipt.feeDifferenceStatus] || receipt.feeDifferenceStatus}` : `Fee ${receipt.feeDifferenceStatus.toLowerCase()}`}
                     </div>
                   ` : ''}
@@ -3104,7 +3111,7 @@ function renderReceiptsView() {
                     const feeCollectedRaw = receipt.actualDeliveryFeeCollected ?? receipt.deliveryFeeCollected;
                     if (feeCollectedRaw === undefined || feeCollectedRaw === null) return '';
                     const feeShopPaid = String(receipt.deliveryFeePaidBy || 'customer') === 'shop';
-                    return `<div class="text-[10px] mt-0.5 font-bold ${feeShopPaid ? 'text-rose-600' : 'text-slate-600 dark:text-slate-300'}">
+                    return `<div class="text-[10px] mt-0.5 font-bold ${feeShopPaid ? 'text-rose-600 dark:text-rose-400' : 'text-slate-600 dark:text-slate-300'}">
                       ${isArV ? 'قيمة التوصيل' : 'Delivery fee'}: ${(Number(feeCollectedRaw) || 0).toFixed(0)} LYD • ${feeShopPaid ? (isArV ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isArV ? 'دفعها العميل' : 'paid by customer')}
                     </div>`;
                   })()}
@@ -3336,7 +3343,8 @@ function renderPagesView() {
   const isAr = state.language === 'ar';
   const allPages = getPagesVisibleToCurrentUser();
   const pageDisplayNumberById = new Map(allPages.map((page, index) => [String(page.id), allPages.length - index]));
-  const pageSearch = String(state.pageSearch || '').trim().toLocaleLowerCase();
+  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
+  const pageSearch = foldSearchText(String(state.pageSearch || '').trim());
   const customersById = new Map((state.customers || []).map(customer => [String(customer.id), customer]));
   const visiblePages = pageSearch
     ? allPages.filter(page => {
@@ -3344,7 +3352,7 @@ function renderPagesView() {
           .map(customerId => customersById.get(String(customerId))?.name || '')
           .join(' ');
         return [page.name, page.category, ownerNames, page.id]
-          .some(value => String(value || '').toLocaleLowerCase().includes(pageSearch));
+          .some(value => foldSearchText(value).includes(pageSearch));
       })
     : allPages;
   const canSeePageAds = can('ads', 'view');
@@ -3572,7 +3580,7 @@ function renderAdsView() {
             <i data-lucide="plus" class="w-4 h-4"></i>
             <span>${t('addAd')}</span>
           </button>
-          <button onclick="window.print()" class="btn-shine bg-slate-600 text-white px-3 py-2 rounded-xl">
+          <button onclick="printCurrentPage()" class="btn-shine bg-slate-600 text-white px-3 py-2 rounded-xl">
             <i data-lucide="printer" class="w-4 h-4"></i>
           </button>
         </div>
@@ -3846,7 +3854,33 @@ function loadMoreDeliveries() {
   render();
 }
 
-function renderDeliveriesView() {
+// One-render-pass memo for getReceiptCollectionTarget. Legacy zero-amount
+// delivery receipts derive their collection target by scanning ALL ads
+// (13-filters-helpers linked-ads derivation), and a single deliveries render
+// used to run that scan twice per such receipt (uncollected-total reduce +
+// visible row). Keyed by receipt id and cleared at the top of every
+// renderDeliveriesView pass, so data edits are always picked up and the cache
+// never outlives the pass that filled it.
+const _deliveryCollectionTargetCache = new Map();
+function _getCollectionTargetCached(item) {
+  const key = String((item && item.id) || '');
+  if (!key) return getReceiptCollectionTarget(item);
+  if (_deliveryCollectionTargetCache.has(key)) return _deliveryCollectionTargetCache.get(key);
+  const target = getReceiptCollectionTarget(item);
+  _deliveryCollectionTargetCache.set(key, target);
+  return target;
+}
+
+// logOnly=true is the scoped-search fast path: updateDeliveriesViewFiltered
+// swaps ONLY #delivery-log-results into the live DOM, so the stats tiles and
+// the driver-performance panel in the throwaway template are never seen.
+// They don't depend on the search term either — skipping their computation
+// (full reduces over every delivery receipt, incl. per-legacy-receipt ad
+// scans, plus ~6 filter passes per driver) removes the heavy part of every
+// search keystroke on phones.
+function renderDeliveriesView(logOnly) {
+  const logOnlyPass = logOnly === true;
+  _deliveryCollectionTargetCache.clear();
   const isAr = state.language === 'ar';
   // Deliveries are tracked ONLY on receipts (ads are not a delivery source of truth).
   const allReceipts = getVisibleRecords(state.receipts);
@@ -3870,10 +3904,17 @@ function renderDeliveriesView() {
       amountUSD: Number(r.amountUSD || 0) || 0
     }));
 
+  // The stats tiles and driver-performance panel are skipped entirely on
+  // log-only (search keystroke) passes — see the logOnly note above. Their
+  // markup blocks below are guarded the same way, so stats/driverPerformance
+  // are never read while null/empty.
+  let stats = null;
+  let driverPerformance = [];
+  if (!logOnlyPass) {
   const deliveredRows = deliveryReceipts.filter(d => d.deliveryStatus === 'Delivered');
   const heldRows = deliveredRows.filter(d => !_isReceivedInOffice(d) && _getCollectedCashLocal(d) > 0);
 
-  const stats = {
+  stats = {
     pendingDelivery: deliveryReceipts.filter(d => d.deliveryStatus === 'Needs Delivery').length,
     pendingAssignment: deliveryReceipts.filter(d => !d.deliveryPersonId && d.deliveryStatus !== 'Canceled' && d.deliveryStatus !== 'Delivered').length,
     inProgress: deliveryReceipts.filter(d => d.deliveryStatus === 'In Progress').length,
@@ -3899,7 +3940,7 @@ function renderDeliveriesView() {
     feeVarianceLYD: deliveredRows.reduce((sum, d) => sum + (d.feeDifferenceStatus ? (Number(d.feeDiff) || 0) : 0), 0),
   };
 
-  const driverPerformance = deliveryUsers.map(driver => {
+  driverPerformance = deliveryUsers.map(driver => {
     const driverDeliveries = deliveryReceipts.filter(d => String(d.deliveryPersonId || '') === String(driver.id || ''));
     const delivered = driverDeliveries.filter(d => d.deliveryStatus === 'Delivered');
     const completed = delivered.filter(d => _isReceivedInOffice(d) || _getCollectedCashLocal(d) <= 0);
@@ -3916,6 +3957,7 @@ function renderDeliveriesView() {
       successRate: driverDeliveries.length > 0 ? Math.round((delivered.length / driverDeliveries.length) * 100) : 0
     };
   }).sort((a, b) => b.completed - a.completed);
+  }
 
   const filterStatus = state.deliveryFilter?.status || 'all';
   const filterDriver = state.deliveryFilter?.driver || 'all';
@@ -3925,12 +3967,14 @@ function renderDeliveriesView() {
   if (filterStatus !== 'all') filteredDeliveries = filteredDeliveries.filter(d => d.deliveryStatus === filterStatus);
   if (filterDriver !== 'all') filteredDeliveries = filteredDeliveries.filter(d => String(d.deliveryPersonId || '') === String(filterDriver || ''));
   if (searchTerm) {
-    const term = String(searchTerm).toLowerCase();
+    // foldSearchText on BOTH sides: the driver's primary phone lookup must
+    // match Arabic-keyboard digits (٠٩١٢...) and unhamza'd name spellings.
+    const term = foldSearchText(searchTerm);
     filteredDeliveries = filteredDeliveries.filter(d => {
       const customer = deliveryCustomersById.get(String(d.customerId));
-      const name = String(customer?.name || '').toLowerCase();
-      const phone = String(d.phoneNumber || customer?.phones?.[0] || '').toLowerCase();
-      const receiptNo = String(d.tempReceiptNo || d.finalReceiptNo || d.serialNumber || '').toLowerCase();
+      const name = foldSearchText(customer?.name || '');
+      const phone = foldSearchText(d.phoneNumber || customer?.phones?.[0] || '');
+      const receiptNo = foldSearchText(d.tempReceiptNo || d.finalReceiptNo || d.serialNumber || '');
       return name.includes(term) || phone.includes(term) || receiptNo.includes(term);
     });
   }
@@ -3981,7 +4025,7 @@ function renderDeliveriesView() {
         </div>
       </div>
 
-      ${!canViewDeliveryStats ? '' : `
+      ${(logOnlyPass || !canViewDeliveryStats) ? '' : `
       <!-- Stats (compact): 4 money/count tiles + pipeline strip in one panel -->
       <div class="glass-panel rounded-2xl p-4">
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -4021,15 +4065,15 @@ function renderDeliveriesView() {
         <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700 flex flex-wrap items-center gap-x-5 gap-y-1 text-sm">
           <span class="text-[11px] font-bold text-slate-400 uppercase tracking-wide">${isAr ? 'رسوم التوصيل' : 'Delivery Fees'}</span>
           <span>${isAr ? 'المُحصَّل' : 'Collected'} <b>${stats.feesCollectedLYD.toLocaleString('en-US')}</b> LYD</span>
-          <span class="${stats.feesShopPaidLYD > 0 ? 'text-rose-600 font-medium' : ''}">${isAr ? 'يتحملها المحل (خسارة)' : 'Paid by shop (loss)'} <b>${stats.feesShopPaidLYD.toLocaleString('en-US')}</b> LYD</span>
-          <span class="${stats.feeVarianceLYD < 0 ? 'text-amber-600' : 'text-purple-600'}">${isAr ? 'الفرق عن المتفق عليه' : 'Variance vs quoted'} <b>${stats.feeVarianceLYD >= 0 ? '+' : '-'}${Math.abs(stats.feeVarianceLYD).toLocaleString('en-US')}</b> LYD</span>
+          <span class="${stats.feesShopPaidLYD > 0 ? 'text-rose-600 dark:text-rose-400 font-medium' : ''}">${isAr ? 'يتحملها المحل (خسارة)' : 'Paid by shop (loss)'} <b>${stats.feesShopPaidLYD.toLocaleString('en-US')}</b> LYD</span>
+          <span class="${stats.feeVarianceLYD < 0 ? 'text-amber-600' : 'text-purple-600 dark:text-purple-300'}">${isAr ? 'الفرق عن المتفق عليه' : 'Variance vs quoted'} <b>${stats.feeVarianceLYD >= 0 ? '+' : '-'}${Math.abs(stats.feeVarianceLYD).toLocaleString('en-US')}</b> LYD</span>
         </div>
       </div>
       `}
 
       <!-- Driver Performance & Delivery Log Grid -->
       <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        ${!canViewDeliveryStats ? '' : `
+        ${(logOnlyPass || !canViewDeliveryStats) ? '' : `
         <!-- Driver Performance (compact rows, same numbers) -->
         <div class="glass-panel rounded-2xl p-4">
           <h2 class="text-base font-bold text-slate-800 dark:text-white mb-3">${isAr ? 'أداء السائقين' : 'Driver Performance'}</h2>
@@ -4105,7 +4149,7 @@ function renderDeliveriesView() {
                   const collectedCash = _getCollectedCashLocal(ad);
                   const receivedInOffice = _isReceivedInOffice(ad);
                   const officeEligible = String(ad.deliveryStatus || '') === 'Delivered' && collectedCash > 0;
-                  const deliveryTarget = getReceiptCollectionTarget(ad);
+                  const deliveryTarget = _getCollectionTargetCached(ad);
                   const debtLocal = deliveryTarget.amountLocal;
                   const debtUSD = deliveryTarget.amountUSD;
                   const statusColors = {
@@ -4318,12 +4362,16 @@ function updateDeliveriesViewFiltered() {
   }
   // Build the fresh view HTML off-screen, then swap in only the results table
   // so the search input keeps its caret and the phone keyboard stays open
-  // (same approach as updateCustomersViewFiltered).
+  // (same approach as updateCustomersViewFiltered). logOnly=true skips the
+  // stats tiles + driver-performance computations — nothing outside
+  // #delivery-log-results is ever read from this throwaway template.
   const tpl = document.createElement('template');
-  tpl.innerHTML = renderDeliveriesView();
+  tpl.innerHTML = renderDeliveriesView(true);
   const newResults = tpl.content.querySelector('#delivery-log-results');
   if (newResults) results.innerHTML = newResults.innerHTML;
-  if (window.lucide) lucide.createIcons();
+  // Scoped icon pass: only the swapped results table needs new icons —
+  // re-scanning the whole document per keystroke was wasted work.
+  IconQueue.schedule(results);
 }
 
 // Refresh deliveries
@@ -4379,7 +4427,9 @@ function exportDeliveryReport() {
   // instead of garbling them (mojibake).
   // Route through downloadFile so the blob URL outlives the click task —
   // iOS Safari cancels the download if the URL is revoked in the same tick.
-  downloadFile('﻿' + csv, `delivery-report-${getTodayDateString()}.csv`, 'text/csv;charset=utf-8');
+  // downloadFile refuses inside FB/IG in-app browsers (with its own warning):
+  // only claim "downloaded" when the download actually started.
+  if (!downloadFile('﻿' + csv, `delivery-report-${getTodayDateString()}.csv`, 'text/csv;charset=utf-8')) return;
   showNotification(state.language === 'ar' ? 'اكتمل التصدير' : 'Export Complete', state.language === 'ar' ? 'تم تنزيل تقرير التوصيل' : 'Delivery report downloaded', 'success');
 }
 
@@ -4498,7 +4548,9 @@ function _getOutstandingDueLocal(item) {
   if (ds === 'Canceled') return 0;
   const rem = Number(item.remainingDue);
   if (Number.isFinite(rem)) return Math.max(0, rem);
-  const debt = getReceiptCollectionTarget(item).amountLocal;
+  // Cached per render pass: for legacy zero-amount receipts this derivation
+  // scans every ad, and the per-row markup asks for the same target again.
+  const debt = _getCollectionTargetCached(item).amountLocal;
   if (debt > 0) return Math.max(0, debt - _getCollectedCashLocal(item));
   if (item.isPaid) return 0;
   const amt = Number(item.amountLocal);
@@ -4549,8 +4601,9 @@ async function setOfficeHandover(itemId, received) {
 
   addAuditLog('update', id, next ? 'Office handover marked as received' : 'Office handover undone', { isReceipt: !!receipt });
   showNotification(isAr ? 'نجاح' : 'Success', next ? (isAr ? 'تم استلام النقد في المكتب' : 'Cash received at office') : (isAr ? 'تم التراجع عن التسليم للمكتب' : 'Office handover undone'), 'success');
+  // render() already schedules scoped icon creation (IconQueue.schedule(app)),
+  // so the old follow-up full-document lucide.createIcons() was pure waste.
   render();
-  if (window.lucide) lucide.createIcons();
 }
 
 // Backwards-compatible wrapper (mark as received)
@@ -4915,10 +4968,10 @@ function renderDeliveryDashboard() {
                         const shopPaid = String(ad.deliveryFeePaidBy || 'customer') === 'shop';
                         const feeDiffNum = Number(ad.feeDiff) || 0;
                         const varianceChip = ad.feeDifferenceStatus && ad.feeDifferenceStatus !== 'SAME'
-                          ? ` <span class="font-bold ${ad.feeDifferenceStatus === 'HIGHER' ? 'text-purple-600' : 'text-amber-600'}">(${ad.feeDifferenceStatus === 'HIGHER' ? '+' : '-'}${Math.abs(feeDiffNum).toFixed(0)} LYD ${isAr ? 'عن المتفق عليه' : 'vs quoted'})</span>`
+                          ? ` <span class="font-bold ${ad.feeDifferenceStatus === 'HIGHER' ? 'text-purple-600 dark:text-purple-300' : 'text-amber-600'}">(${ad.feeDifferenceStatus === 'HIGHER' ? '+' : '-'}${Math.abs(feeDiffNum).toFixed(0)} LYD ${isAr ? 'عن المتفق عليه' : 'vs quoted'})</span>`
                           : '';
                         return `<div class="text-[11px] text-slate-500 mt-0.5">
-                          ${isAr ? 'قيمة التوصيل المُحصَّلة' : 'Fee collected'}: <span class="font-bold ${shopPaid ? 'text-rose-600' : 'text-emerald-600'}">${(Number(feeRaw) || 0).toFixed(0)} LYD</span> • <span class="${shopPaid ? 'text-rose-600 font-bold' : ''}">${shopPaid ? (isAr ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isAr ? 'دفعها العميل' : 'paid by customer')}</span>${varianceChip}
+                          ${isAr ? 'قيمة التوصيل المُحصَّلة' : 'Fee collected'}: <span class="font-bold ${shopPaid ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}">${(Number(feeRaw) || 0).toFixed(0)} LYD</span> • <span class="${shopPaid ? 'text-rose-600 dark:text-rose-400 font-bold' : ''}">${shopPaid ? (isAr ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isAr ? 'دفعها العميل' : 'paid by customer')}</span>${varianceChip}
                         </div>`;
                       })()}
                       ${ad.isReceipt && ad.deliveryInstructions ? `
@@ -5139,7 +5192,7 @@ async function submitDeliveryCancel(itemType, itemId) {
 
   const nowIso = new Date().toISOString();
   const uid = state.currentUser?.id || '';
-  let receiptCascadeConsistent = true;
+  let deferredServerAdsRefresh = null;
 
   if (type === 'receipt') {
     const receipt = _findReceiptForDeliveryModal(id);
@@ -5159,12 +5212,28 @@ async function submitDeliveryCancel(itemType, itemId) {
     // PATCH already releases those rows atomically; install the authoritative
     // ads instead of issuing stale generic ad PATCHes (which are forbidden).
     let releasedAds = 0;
-    let adRefresh = { consistent: true };
     if (isServerModeEnabled()) {
+      // Refresh the linked ads WITHOUT blocking the close (same non-blocking
+      // pattern as the driver cancel path): the receipt PATCH already
+      // committed, this view only reads receipt.deliveryStatus (updated by
+      // the echo above), and ads reconcile seconds later — or via delta
+      // live-sync, exactly what the Sync-pending toast promises.
       const savedReceipt = state.receipts.find(row => row && String(row.id) === String(receipt.id)) || receipt;
-      adRefresh = await refreshAdsAfterReceiptServerCascade(savedReceipt);
-      receiptCascadeConsistent = adRefresh.consistent;
       saveState();
+      deferredServerAdsRefresh = () => {
+        refreshAdsAfterReceiptServerCascade(savedReceipt).then((adRefresh) => {
+          if (adRefresh && adRefresh.consistent) {
+            saveState();
+            RenderQueue.schedule('deliveryAdsCascade');
+          } else {
+            showNotification(
+              state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
+              state.language === 'ar' ? 'تم حفظ الإلغاء، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Cancellation was saved. Linked ads will refresh automatically when the connection returns.',
+              'warning'
+            );
+          }
+        }).catch(() => {});
+      };
     } else {
       try {
         releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);
@@ -5198,15 +5267,15 @@ async function submitDeliveryCancel(itemType, itemId) {
 
   document.getElementById('delivery-cancel-modal')?.remove();
   document.getElementById('delivery-complete-modal')?.remove();
-  forceFullRender();
+  // A plain render() is enough here: state.receipts/state.ads were just
+  // replaced, so the view HTML genuinely differs and the identical-HTML skip
+  // cannot swallow the update — no need to blow away the partial-update
+  // caches with forceFullRender().
+  render();
   showNotification(state.language === 'ar' ? 'أُلغيت' : 'Canceled', state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled', 'success');
-  if (!receiptCascadeConsistent) {
-    showNotification(
-      state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
-      state.language === 'ar' ? 'تم حفظ الإلغاء، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Cancellation was saved. Linked ads will refresh automatically when the connection returns.',
-      'warning'
-    );
-  }
+  // Kick off the (already committed) server-mode ads reconciliation AFTER the
+  // close + render so the modal never hangs on a slow connection.
+  if (deferredServerAdsRefresh) deferredServerAdsRefresh();
 }
 
 // Reconciliation uses the earliest valid terminal day: the scheduled end day
@@ -5438,13 +5507,14 @@ function applyUserRoleFilter(role) {
 function renderUsersView() {
   const isAr = state.language === 'ar';
   const allVisibleUsers = getVisibleRecords(state.users);
-  const userSearch = String(state.userSearch || '').trim().toLocaleLowerCase();
+  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
+  const userSearch = foldSearchText(String(state.userSearch || '').trim());
   const userRoleFilter = String(state.userRoleFilter || 'all');
   const visibleUsers = allVisibleUsers.filter(user => {
     if (userRoleFilter !== 'all' && String(user.role || '') !== userRoleFilter) return false;
     if (!userSearch) return true;
     return [user.name, user.email, user.role]
-      .some(value => String(value || '').toLocaleLowerCase().includes(userSearch));
+      .some(value => foldSearchText(value).includes(userSearch));
   });
   const isAdmin = isCurrentUserAdmin();
   const canAddUsers = canManageUsersAction('add');
@@ -5581,8 +5651,8 @@ function renderUsersView() {
                     <div class="flex justify-between text-xs"><span>${isAr ? 'إجمالي المُعيَّن:' : 'Total Assigned:'}</span><span class="font-bold">${deliveryStats.totalAssigned}</span></div>
                     <div class="flex justify-between text-xs"><span>${isAr ? 'المقبول:' : 'Accepted:'}</span><span class="font-bold text-blue-600">${deliveryStats.accepted}</span></div>
                     <div class="flex justify-between text-xs"><span>${isAr ? 'المُحصَّل:' : 'Collected:'}</span><span class="font-bold text-emerald-600">${deliveryStats.collected}</span></div>
-                    <div class="flex justify-between text-xs"><span>${isAr ? 'الرسوم المكتسبة:' : 'Fees Earned:'}</span><span class="font-bold text-purple-600">${deliveryFeesLYD.toFixed(0)} LYD</span></div>
-                    ${deliveryFeesShopLYD > 0 ? `<div class="flex justify-between text-xs"><span>${isAr ? 'رسوم يتحملها المحل (خسارة):' : 'Shop-paid Fees (Loss):'}</span><span class="font-bold text-rose-600">${deliveryFeesShopLYD.toFixed(0)} LYD</span></div>` : ''}
+                    <div class="flex justify-between text-xs"><span>${isAr ? 'الرسوم المكتسبة:' : 'Fees Earned:'}</span><span class="font-bold text-purple-600 dark:text-purple-300">${deliveryFeesLYD.toFixed(0)} LYD</span></div>
+                    ${deliveryFeesShopLYD > 0 ? `<div class="flex justify-between text-xs"><span>${isAr ? 'رسوم يتحملها المحل (خسارة):' : 'Shop-paid Fees (Loss):'}</span><span class="font-bold text-rose-600 dark:text-rose-400">${deliveryFeesShopLYD.toFixed(0)} LYD</span></div>` : ''}
                   </div>
                 ` : ''}
 
@@ -5659,16 +5729,18 @@ function renderAuditView() {
   refreshServerAuditLogs();
   const allLogs = getVisibleAuditLogs();
 
-  // Apply filters
+  // Apply filters. foldSearchText on BOTH sides of the search so Arabic-Indic
+  // digit queries and unhamza'd Arabic spellings match stored log fields.
+  const auditSearchTerm = state.auditSearch ? foldSearchText(state.auditSearch) : '';
   let filteredLogs = allLogs.filter(log => {
     // Search filter
-    if (state.auditSearch) {
-      const search = state.auditSearch.toLowerCase();
-      const matchesSearch = 
-        (log.description || '').toLowerCase().includes(search) ||
-        (log.userName || '').toLowerCase().includes(search) ||
-        (log.action || '').toLowerCase().includes(search) ||
-        (log.resourceId || '').toLowerCase().includes(search);
+    if (auditSearchTerm) {
+      const search = auditSearchTerm;
+      const matchesSearch =
+        foldSearchText(log.description || '').includes(search) ||
+        foldSearchText(log.userName || '').includes(search) ||
+        foldSearchText(log.action || '').includes(search) ||
+        foldSearchText(log.resourceId || '').includes(search);
       if (!matchesSearch) return false;
     }
     
@@ -6232,6 +6304,7 @@ function exportAuditLogs(format) {
   // Scoped: a viewOwn-only user exports only their own entries.
   const allLogs = getVisibleAuditLogs();
 
+  let downloaded = false;
   if (format === 'csv') {
     const headers = ['Date', 'Time', 'User', 'Action', 'Category', 'Severity', 'Description', 'Resource ID'];
     const rows = allLogs.map(log => {
@@ -6258,16 +6331,27 @@ function exportAuditLogs(format) {
     const csv = [headers.join(','), ...rows].join('\n');
     // UTF-8 BOM so Excel reads Arabic text correctly (downloadFile is shared
     // with JSON export, so add the BOM here rather than inside it).
-    downloadFile('﻿' + csv, `audit-logs-${new Date().toISOString().split('T')[0]}.csv`, 'text/csv;charset=utf-8');
+    downloaded = downloadFile('﻿' + csv, `audit-logs-${new Date().toISOString().split('T')[0]}.csv`, 'text/csv;charset=utf-8');
   } else {
     const json = JSON.stringify(allLogs, null, 2);
-    downloadFile(json, `audit-logs-${new Date().toISOString().split('T')[0]}.json`, 'application/json');
+    downloaded = downloadFile(json, `audit-logs-${new Date().toISOString().split('T')[0]}.json`, 'application/json');
   }
-  
+
+  // Only claim success when the download actually started (downloadFile
+  // refuses inside FB/IG in-app browsers and shows its own warning).
+  if (!downloaded) return;
   showNotification(state.language === 'ar' ? 'اكتمل التصدير' : 'Export Complete', state.language === 'ar' ? `تم تصدير سجلات التدقيق بصيغة ${format.toUpperCase()}` : `Audit logs exported as ${format.toUpperCase()}`, 'success');
 }
 
+// Returns true when the download was actually started, false when it was
+// refused up-front (in-app browser). Callers must gate their success toasts
+// on the return value — FB/IG webviews swallow blob <a download> clicks as a
+// silent no-op on BOTH platforms, so an unconditional toast lies to the user.
 function downloadFile(content, filename, mimeType) {
+  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+    notifyInAppBrowserLimitation('download');
+    return false;
+  }
   const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -6282,6 +6366,7 @@ function downloadFile(content, filename, mimeType) {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }, 2000);
+  return true;
 }
 
 // Backup all audit logs for permanent storage
@@ -6302,11 +6387,13 @@ async function backupAuditLogs() {
   };
   
   const json = JSON.stringify(backup, null, 2);
-  downloadFile(json, `audit-logs-backup-${new Date().toISOString().split('T')[0]}.json`, 'application/json');
-  
+  // downloadFile refuses inside FB/IG in-app browsers (with its own warning):
+  // don't log or toast a "backup complete" that never happened.
+  if (!downloadFile(json, `audit-logs-backup-${new Date().toISOString().split('T')[0]}.json`, 'application/json')) return;
+
   // Add backup log entry
   addAuditLog('backup', 'system', `Backed up ${allLogs.length} audit logs`, { backupSize: json.length });
-  
+
   showNotification(state.language === 'ar' ? 'اكتمل النسخ الاحتياطي' : 'Backup Complete', state.language === 'ar' ? `تم نسخ ${allLogs.length} سجل احتياطياً بنجاح` : `${allLogs.length} logs backed up successfully`, 'success');
 }
 

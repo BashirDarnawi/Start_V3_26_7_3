@@ -80,13 +80,55 @@ const Platform = {
       /iphone|ipad|ipod|android|blackberry|windows phone/i.test(ua) ||
       (isTouch && window.innerWidth < 768)
     );
-    
+
+    // Detect in-app browsers (webviews embedded inside other apps). Users
+    // arrive from Facebook ads, so the FB/IG/Messenger in-app browsers are a
+    // primary environment — and they silently break blob downloads,
+    // window.print() and target=_blank handoffs. Detection is deliberately
+    // token-based (explicit app UA markers only): NO generic "iOS without a
+    // Safari/ token" heuristic, because the installed PWA also drops the
+    // Safari/ token and would be misclassified. Capacitor is excluded first:
+    // its Android shell UA carries the same '; wv)' WebView marker.
+    let isInAppBrowser = false;
+    let inAppBrowserKind = null;
+    if (!isCapacitor) {
+      try {
+        if (/FBAN|FBAV|FB_IAB|FBIOS/i.test(ua)) {
+          // Facebook family. Messenger ships the same FB tokens plus its own
+          // app names (MessengerForiOS / Orca-Android), so the sub-check is
+          // safe — it only runs once an FB token already matched.
+          isInAppBrowser = true;
+          inAppBrowserKind = /messenger|orca/i.test(ua) ? 'messenger' : 'facebook';
+        } else if (/instagram/i.test(ua)) {
+          isInAppBrowser = true;
+          inAppBrowserKind = 'instagram';
+        } else if (/android/i.test(ua) && /; wv\)/.test(ua)) {
+          // Stock Android WebView marker (Chrome's "; wv)" token) — covers
+          // FB Lite, Gmail, and any other app hosting a bare WebView.
+          isInAppBrowser = true;
+          inAppBrowserKind = 'android-webview';
+        } else if (/\bLine\/|MicroMessenger|Snapchat|TikTok|musical_ly|BytedanceWebview|\bGSA\//i.test(ua)) {
+          // Other well-known in-app shells (LINE, WeChat, Snapchat, TikTok,
+          // the Google app). Same degraded capabilities; no finer branding
+          // is needed by any consumer.
+          isInAppBrowser = true;
+          inAppBrowserKind = 'other';
+        }
+      } catch (_) {
+        // Never let UA sniffing break platform detection.
+        isInAppBrowser = false;
+        inAppBrowserKind = null;
+      }
+    }
+
     this._cache = {
       isCapacitor,
       platform,
       isTouch,
       supportsHover,
       isMobileBrowser,
+      isInAppBrowser,
+      inAppBrowserKind,
       isMobile: isCapacitor || isMobileBrowser,
       isWeb: !isCapacitor,
       isIOS: platform === 'ios',
@@ -108,6 +150,12 @@ const Platform = {
   get supportsHover() { return this.detect().supportsHover; },
   get isMobile() { return this.detect().isMobile; },
   get isMobileBrowser() { return this.detect().isMobileBrowser; },
+  // In-app webview shells (Facebook/Instagram/Messenger, bare Android
+  // WebViews, other known app browsers). Consumers use this to degrade
+  // gracefully where those shells silently break downloads/printing.
+  get isInAppBrowser() { return this.detect().isInAppBrowser; },
+  // 'facebook' | 'instagram' | 'messenger' | 'android-webview' | 'other' | null
+  get inAppBrowserKind() { return this.detect().inAppBrowserKind; },
   get isWeb() { return this.detect().isWeb; },
   get isIOS() { return this.detect().isIOS; },
   get isAndroid() { return this.detect().isAndroid; },
@@ -120,14 +168,15 @@ const Platform = {
     if (!body) return;
     
     // Remove old classes
-    body.classList.remove('platform-web', 'platform-ios', 'platform-android', 'platform-harmony', 'platform-capacitor', 'is-touch', 'no-hover', 'is-mobile');
-    
+    body.classList.remove('platform-web', 'platform-ios', 'platform-android', 'platform-harmony', 'platform-capacitor', 'platform-inapp', 'is-touch', 'no-hover', 'is-mobile');
+
     // Add new classes
     if (p.isCapacitor) body.classList.add('platform-capacitor');
     body.classList.add(`platform-${p.platform}`);
     if (p.isTouch) body.classList.add('is-touch');
     if (!p.supportsHover) body.classList.add('no-hover');
     if (p.isMobile) body.classList.add('is-mobile');
+    if (p.isInAppBrowser) body.classList.add('platform-inapp');
   }
 };
 
@@ -5814,14 +5863,37 @@ function getDir() {
 
 function applyTheme() {
   const root = document.documentElement;
-  const isDark = state.theme === 'dark' || 
+  const isDark = state.theme === 'dark' ||
     (state.theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-  
+
   if (isDark) {
     root.classList.add('dark');
   } else {
     root.classList.remove('dark');
   }
+
+  // Keep the browser's used color-scheme in sync with the APP theme (the
+  // app theme is a manual light/dark/system toggle, not the OS scheme).
+  // Without this, UA-rendered widgets (<select> panes, Android date-picker
+  // dialogs, scrollbars, autofill) stay WHITE against the app's dark UI on
+  // Chromium Android + FB/IG webviews, and Chrome/Samsung "auto dark" would
+  // algorithmically invert the light theme. Complements the static
+  // <meta name="color-scheme" content="light dark"> in index.html, which
+  // covers the pre-JS first paint; this inline style then wins per-theme.
+  try { root.style.colorScheme = isDark ? 'dark' : 'light'; } catch (_) {}
+
+  // The two media-keyed theme-color metas in index.html track the OS scheme
+  // for first paint only. Once the app theme is applied, pin BOTH metas to
+  // it so the browser toolbar / installed-PWA status bar matches the in-app
+  // theme (drop the media filter; identical content on both makes
+  // duplicate-meta precedence irrelevant). Values mirror index.html's pair.
+  try {
+    const themeMetas = document.querySelectorAll('meta[name="theme-color"]');
+    for (let i = 0; i < themeMetas.length; i++) {
+      themeMetas[i].removeAttribute('media');
+      themeMetas[i].setAttribute('content', isDark ? '#020617' : '#f8fafc');
+    }
+  } catch (_) {}
 }
 
 function toggleTheme() {
@@ -5972,6 +6044,36 @@ const RenderQueue = {
 // ==========================================
 // NOTIFICATIONS
 // ==========================================
+
+// Shared bilingual warning for features that in-app browsers (Facebook/
+// Instagram/Messenger webviews, bare Android WebViews) silently swallow:
+// blob <a download> clicks and window.print() are no-ops there, with no
+// error and no UI. Callers gate on Platform.isInAppBrowser and show this
+// INSTEAD of attempting the action (and instead of a false success toast).
+// kind: 'download' | 'print'.
+function notifyInAppBrowserLimitation(kind) {
+  const isAr = state.language === 'ar';
+  const openHint = isAr
+    ? 'افتح الصفحة في Safari أو Chrome (قائمة ⋯ ← «فتح في المتصفح»)'
+    : 'open this page in Safari or Chrome (menu -> "Open in browser")';
+  if (kind === 'print') {
+    showNotification(
+      isAr ? 'الطباعة غير متاحة هنا' : 'Printing unavailable here',
+      isAr
+        ? `الطباعة لا تعمل داخل متصفح فيسبوك/إنستغرام المدمج — ${openHint} ثم أعد المحاولة.`
+        : `Printing doesn't work inside the Facebook/Instagram in-app browser — ${openHint}, then try again.`,
+      'warning'
+    );
+  } else {
+    showNotification(
+      isAr ? 'التنزيل غير متاح هنا' : 'Download unavailable here',
+      isAr
+        ? `التنزيلات لا تعمل داخل متصفح فيسبوك/إنستغرام المدمج — ${openHint} ثم أعد المحاولة.`
+        : `Downloads don't work inside the Facebook/Instagram in-app browser — ${openHint}, then try again.`,
+      'warning'
+    );
+  }
+}
 
 function showNotification(title, message, type = 'info') {
   // #region agent log
@@ -6833,6 +6935,14 @@ function updateRecord(array, id, updates, expectedLastModified) {
       }
     }
 
+    // Identity of the exact object this call optimistically wrote (stays null
+    // when the settle/convert guard below skips the optimistic write). Error
+    // paths may only roll the slot back while it still holds THIS object:
+    // live-sync deltas and chained-PATCH echoes install fresh objects in the
+    // same slot, and overwriting one of those with the stale open-time
+    // snapshot would clobber a newer committed copy that the sync watermark
+    // has already consumed.
+    let _optimisticRecord = null;
     // Ordinary records keep the established optimistic UX. Settlement and its
     // reverse (debt conversion) are the exceptions: do not paint the receipt
     // Paid/Not Paid before its linked ads are also committed, because that
@@ -6842,6 +6952,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
       if (isServerModeEnabled() && collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function') {
         array[index] = makeLightweightMediaRecord(collectionName, array[index]);
       }
+      _optimisticRecord = array[index];
       // Keep currentUser in sync when updating own user record (important for profile changes)
       if (collectionName === 'users' && state.currentUser?.id === id) {
         state.currentUser = array[index];
@@ -6920,9 +7031,20 @@ function updateRecord(array, id, updates, expectedLastModified) {
               saveState();
             }
           }
-          // Force full render to ensure receipt cards, ad rows, customer debt,
-          // analytics and reconciliation all reflect the same committed state.
-          forceFullRender();
+          // Settle/convert skipped the optimistic paint, so this echo is the
+          // FIRST paint of the committed multi-entity state (receipt + ads +
+          // customer debt + reconciliation): keep the full render. A plain
+          // PATCH echo was already painted optimistically 100-500ms ago —
+          // schedule a normal render instead so the identical-HTML skip turns
+          // the common byte-identical echo into a no-DOM-op rather than a
+          // second full innerHTML swap (double entry-animation + icon flash
+          // on phones); when the server echo really drifted, only the view
+          // container repaints via the partial path.
+          if (_settlesReceipt || _convertsReceipt) {
+            forceFullRender();
+          } else {
+            RenderQueue.schedule('patchEcho');
+          }
           return true;
         })
         .catch(async (e) => {
@@ -6940,21 +7062,54 @@ function updateRecord(array, id, updates, expectedLastModified) {
             try {
               const latest = await apiGetEntity(collectionName, id);
               const idx = array.findIndex(x => x && x.id === id);
+              let _latestData = null;
               if (idx !== -1 && latest?.data) {
-                 const latestData = Security.sanitizeObject(latest.data);
+                 _latestData = Security.sanitizeObject(latest.data);
                  array[idx] = collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function'
-                   ? makeLightweightMediaRecord(collectionName, latestData)
-                   : latestData;
+                   ? makeLightweightMediaRecord(collectionName, _latestData)
+                   : _latestData;
                 if (collectionName) markCollectionDirty(collectionName);
                 saveState();
               }
-              showNotification(
-                state.language === 'ar' ? 'تعارض' : 'Conflict',
-                state.language === 'ar'
-                  ? 'تم تغيير هذا السجل من مستخدم آخر. تم تحميل أحدث نسخة.'
-                  : 'This record was changed by another user. We loaded the latest version.',
-                'warning'
+              // Refresh the frozen modal-open baseline: live-sync never
+              // touches state.modalData, so without this a still-open modal
+              // replays the same stale expectedLastModified and loops the
+              // identical conflict on every further Save.
+              if (_latestData && state.modalData && String(state.modalData.id) === String(id)) {
+                state.modalData._lastModified = _latestData._lastModified;
+              }
+              // A settle/unsettle whose FIRST attempt committed but whose
+              // response was lost lands here on the user's manual retry: the
+              // fresh idempotency key bypasses the server replay marker and
+              // the stale modal baseline 409s. When the reloaded record
+              // already shows exactly the state this save wanted, that
+              // "conflict" is the user's own committed change — say so
+              // instead of sending them chasing a phantom other editor
+              // (mirrors the create path's serverRecordMatchesCreateRetry
+              // grace). Keys must NOT be reused across manual retries: the
+              // server replay hash covers expectedLastModified + data, which
+              // change per attempt, so reuse would 409 "already used".
+              const _alreadyApplied = !!_latestData && (
+                (_settlesReceipt && (String(_latestData.status || '').toLowerCase() === 'paid' || _latestData.isPaid === true)) ||
+                (_convertsReceipt && _latestData.isPaid === false)
               );
+              if (_alreadyApplied) {
+                showNotification(
+                  state.language === 'ar' ? 'تم الحفظ' : 'Already saved',
+                  state.language === 'ar'
+                    ? 'تم حفظ تغييرك بالفعل رغم انقطاع الشبكة. تم تحميل أحدث نسخة.'
+                    : 'Already saved: your first attempt reached the server despite the network error. Showing the latest version.',
+                  'success'
+                );
+              } else {
+                showNotification(
+                  state.language === 'ar' ? 'تعارض' : 'Conflict',
+                  state.language === 'ar'
+                    ? 'تم تغيير هذا السجل من مستخدم آخر. تم تحميل أحدث نسخة.'
+                    : 'This record was changed by another user. We loaded the latest version.',
+                  'warning'
+                );
+              }
               render();
               return false;
             } catch (err) {
@@ -6963,10 +7118,17 @@ function updateRecord(array, id, updates, expectedLastModified) {
           } else if (e?.status === 409) {
             // Rule refusal: roll back the optimistic write and surface the
             // server's actual reason (localized for the known rules).
+            // Restore only while the slot still holds this call's optimistic
+            // object — if live-sync (or a chained PATCH echo) installed a
+            // newer copy mid-flight, writing the stale open-time snapshot
+            // would clobber committed money state. Settle/convert made no
+            // optimistic write, so nothing needs restoring for them.
             const idx = array.findIndex(x => x && x.id === id);
-            if (idx !== -1) array[idx] = old;
-            if (collectionName) markCollectionDirty(collectionName);
-            saveState();
+            if (idx !== -1 && _optimisticRecord && array[idx] === _optimisticRecord) {
+              array[idx] = old;
+              if (collectionName) markCollectionDirty(collectionName);
+              saveState();
+            }
             const reason = typeof describe409 === 'function'
               ? describe409(e, String(e?.message || ''))
               : String(e?.message || '');
@@ -6979,11 +7141,16 @@ function updateRecord(array, id, updates, expectedLastModified) {
             return false;
           }
 
-          // Rollback on failure
+          // Rollback on failure — same identity guard as the rule-refusal
+          // branch: never write the stale snapshot over a slot that live-sync
+          // or a chained echo replaced mid-flight, and settle/convert (which
+          // made no optimistic write) restores nothing.
           const idx = array.findIndex(x => x && x.id === id);
-          if (idx !== -1) array[idx] = old;
-          if (collectionName) markCollectionDirty(collectionName);
-          saveState();
+          if (idx !== -1 && _optimisticRecord && array[idx] === _optimisticRecord) {
+            array[idx] = old;
+            if (collectionName) markCollectionDirty(collectionName);
+            saveState();
+          }
           // Handle 401 - session expired, prompt re-login
           if (e?.status === 401) {
             showNotification('Session Expired', 'Your session has expired. Please log out and log back in.', 'warning');
@@ -7610,7 +7777,12 @@ function getDeliveryReceiptDueUsage(receipt) {
     }
   }
 
-  const transferredUSD = getReceiptUsageStats(receiptObj).transferredUSD || 0;
+  // transferredUSD depends ONLY on receiptObj.transfers (same reduce as
+  // getReceiptUsageStats). Calling getReceiptUsageStats here executed a SECOND
+  // full ads scan per receipt just to read this array-local number — a real
+  // cost inside per-keystroke renders on phones.
+  const transfers = receiptObj.transfers || [];
+  const transferredUSD = transfers.reduce((sum, t) => sum + (t.amountUSD || 0), 0) || 0;
   const remainingDueUSD = Math.max(totalDueUSD - usedDueUSD - transferredUSD, 0);
 
   return {
@@ -8224,6 +8396,23 @@ const SERVER_SYNC_COLLECTIONS = Object.freeze([
 // clients keep receiving full records because the backend default is true.
 const LIGHTWEIGHT_MEDIA_COLLECTIONS = new Set(['ads', 'receipts', 'adCampaignRequests']);
 const ADS_STUDIO_MEDIA_TIMEOUT_MS = 90000;
+// Media-carrying money writes (delivery-completion PATCH embedding the
+// driver's required base64 proof photo plus existing photos, ad edits with
+// adPhotos) legitimately need minutes on a weak mobile uplink (10-50KB/s on
+// 3G / in-app WebViews). A fixed 20s abort made those saves deterministically
+// impossible in the field, so any request body that embeds an image — or is
+// simply large — gets the same 90s budget Ads Studio media already uses.
+// Small bodies keep the 20s timeout everywhere (desktop behavior unchanged).
+const MEDIA_BODY_SIZE_THRESHOLD_BYTES = 200 * 1024;
+function mediaAwareTimeoutMs(body) {
+  try {
+    const s = JSON.stringify(body || {});
+    if (s.length > MEDIA_BODY_SIZE_THRESHOLD_BYTES || s.indexOf('data:image/') !== -1) {
+      return ADS_STUDIO_MEDIA_TIMEOUT_MS;
+    }
+  } catch (_) {}
+  return TIME_CONSTANTS.API_TIMEOUT_LONG_MS;
+}
 const INLINE_MEDIA_FIELDS_BY_COLLECTION = Object.freeze({
   ads: Object.freeze(['adPhotos', 'photos']),
   receipts: Object.freeze(['photos', 'receiptImage']),
@@ -8979,10 +9168,13 @@ async function apiPurchaseSubscription({ serviceId, idempotencyKey, userId }) {
 // idempotency key so a response-loss retry replays the same result.
 async function apiTransferReceipt(payload) {
   const identity = getServerSessionIdentity();
-  const response = await apiJson('/api/receipts/transfers?include_media=false', {
+  // A stable body/idempotency key makes a response-loss retry safe: the server
+  // checks the receiptTransfer marker BEFORE the version-conflict check and
+  // replays the committed result instead of moving the same balance twice.
+  const response = await withRetry(() => apiJson('/api/receipts/transfers?include_media=false', {
     method: 'POST',
     body: payload
-  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 2, 500);
   if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
   if (!response || typeof response !== 'object' || Array.isArray(response)) {
     const error = new Error('Invalid receipt transfer response');
@@ -9121,10 +9313,18 @@ async function apiMutateAd(payload) {
   const action = String(payload?.action || '');
   if (!['create', 'update'].includes(action)) throw new Error('Invalid ad mutation action');
   const identity = getServerSessionIdentity();
-  const response = await apiJson('/api/ads/mutate?include_media=false', {
+  // A stable body/idempotency key makes a response-loss retry safe: the server
+  // checks the adFunding idempotency marker BEFORE the version-conflict check
+  // and replays the committed result instead of moving the same funding twice
+  // (the caller pins adId + idempotencyKey + payload per attempt, so retries
+  // resend identical bytes). Bodies carrying adPhotos get the media timeout;
+  // those retry once instead of twice because each retry re-uploads the whole
+  // body from byte 0 and would otherwise saturate a weak uplink for minutes.
+  const _mutateTimeoutMs = mediaAwareTimeoutMs(payload && payload.data);
+  const response = await withRetry(() => apiJson('/api/ads/mutate?include_media=false', {
     method: 'POST',
     body: payload
-  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+  }, { timeoutMs: _mutateTimeoutMs }), _mutateTimeoutMs === ADS_STUDIO_MEDIA_TIMEOUT_MS ? 1 : 2, 500);
   if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
   if (!response || typeof response !== 'object' || Array.isArray(response)) {
     const error = new Error('Invalid ad mutation response');
@@ -9282,7 +9482,15 @@ async function apiPatchEntity(collection, id, updates, expectedLastModified) {
   const local = (Array.isArray(state[collection]) ? state[collection] : [])
     .find(row => row && String(row.id) === String(id));
   const path = `/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}${omitMedia ? '?include_media=false' : ''}`;
-  const timeoutMs = String(collection || '') === 'adCampaignRequests' ? ADS_STUDIO_MEDIA_TIMEOUT_MS : TIME_CONSTANTS.API_TIMEOUT_LONG_MS;
+  // Delivery-completion PATCHes embed the driver's required base64 proof
+  // photo (plus re-sent existing photos) and can never finish inside 20s on a
+  // slow uplink, so image-carrying bodies get the 90s media budget. Those
+  // retry once instead of twice: each retry re-uploads the whole body from
+  // byte 0, and three 90s uploads would hold a weak uplink ~4.5 minutes.
+  // adCampaignRequests keeps its shipped 90s + 2-retries behavior unchanged.
+  const _isAdsStudioPatch = String(collection || '') === 'adCampaignRequests';
+  const timeoutMs = _isAdsStudioPatch ? ADS_STUDIO_MEDIA_TIMEOUT_MS : mediaAwareTimeoutMs(updates);
+  const _patchRetries = (!_isAdsStudioPatch && timeoutMs === ADS_STUDIO_MEDIA_TIMEOUT_MS) ? 1 : 2;
   const entity = await requestValidatedServerEntity(collection, 'patch', () =>
     withRetry(() =>
       apiJson(
@@ -9290,7 +9498,7 @@ async function apiPatchEntity(collection, id, updates, expectedLastModified) {
         { method: 'PATCH', body: { data: updates, expectedLastModified } },
         { timeoutMs }
       )
-    , 2, 500)
+    , _patchRetries, 500)
   );
   if (String(collection || '') === 'adCampaignRequests') entity.data = makeLightweightMediaRecord(collection, entity.data);
   else entity.data = mergeMutationInlineMedia(collection, entity.data, { ...(local || {}), ...(updates || {}) });
@@ -11781,10 +11989,12 @@ function getCommandPaletteBaseCommands() {
 function getCommandPaletteEntityCommands(searchTerm) {
   const rawTerm = Security.sanitizeInput(String(searchTerm || ''), { maxLength: 120 }).trim();
   if (rawTerm.length < 2) return [];
-  const term = rawTerm.toLocaleLowerCase();
+  // foldSearchText on BOTH sides so Arabic-Indic digit queries and unhamza'd
+  // Arabic spellings match stored records (global helper, 13-filters-helpers).
+  const term = foldSearchText(rawTerm);
   const isAr = state.language === 'ar';
   const results = [];
-  const matches = (...values) => values.some(value => String(value || '').toLocaleLowerCase().includes(term));
+  const matches = (...values) => values.some(value => foldSearchText(value).includes(term));
   const takeMatching = (records, predicate, limit = 5) => {
     const matchesFound = [];
     for (const record of records) {
@@ -11897,10 +12107,10 @@ function getCommandPaletteEntityCommands(searchTerm) {
 }
 
 function buildCommandPaletteCommands(searchTerm = '') {
-  const term = String(searchTerm || '').trim().toLocaleLowerCase();
+  const term = foldSearchText(String(searchTerm || '').trim());
   const base = getCommandPaletteBaseCommands();
   const matchingBase = term
-    ? base.filter(command => `${command.label} ${command.description || ''} ${command.section || ''}`.toLocaleLowerCase().includes(term))
+    ? base.filter(command => foldSearchText(`${command.label} ${command.description || ''} ${command.section || ''}`).includes(term))
     : base;
   return [...getCommandPaletteEntityCommands(searchTerm), ...matchingBase];
 }
@@ -14781,7 +14991,13 @@ function renderCustomersView() {
     state.customerFinancialFilter = 'all';
     if (financialCustomerSorts.has(String(state.customerSort || ''))) state.customerSort = 'newest';
   }
-  const allFilteredCustomers = getFilteredCustomers();
+  // ONE statsIndex per render pass: getFilteredCustomers (financial filter +
+  // sort), the header stat cards and every customer card all reuse it. Each
+  // index build is a full ads/receipts/pages pass, and the debt block in
+  // getCustomerStats now depends on the index's committedUSDByReceiptId to
+  // avoid per-receipt ads rescans — so build it once, up front.
+  const statsIndex = buildCustomerStatsIndex();
+  const allFilteredCustomers = getFilteredCustomers(statsIndex);
   const allCustomers = getCustomersVisibleToCurrentUser();
   const duplicateCustomerGroups = isCurrentUserAdmin() ? findDuplicateCustomerGroups(state.customers) : [];
   const duplicateCustomerCount = duplicateCustomerGroups.reduce((sum, group) => sum + group.customers.length, 0);
@@ -14802,11 +15018,10 @@ function renderCustomersView() {
   const visibleCustomers = allFilteredCustomers.slice(0, _customersShowLimit);
   const remainingCustomers = allFilteredCustomers.length - visibleCustomers.length;
 
-  // Calculate overall stats
+  // Calculate overall stats (reusing the pass-wide statsIndex built above)
   let totalRevenue = 0;
   let totalDebts = 0;
 
-  const statsIndex = buildCustomerStatsIndex();
   allCustomers.forEach(c => {
     const stats = getCustomerStats(c.id, statsIndex);
     totalRevenue += stats.totalPaid;
@@ -14958,7 +15173,9 @@ function renderReceiptsView() {
     });
   }
 
-  // Apply filters
+  // Apply filters. foldSearchText on BOTH sides of the search so Arabic-Indic
+  // digit queries (٠-٩) and unhamza'd Arabic names match the stored values.
+  const receiptSearchTerm = foldSearchText(state.receiptSearch || '');
   let filteredReceipts = allReceipts.filter(receipt => {
     if (receiptRecordFilter && String(receipt?.id || '') !== receiptRecordFilter) return false;
     const receiptCustomerId = getReceiptCustomerReferenceId(receipt);
@@ -14966,12 +15183,12 @@ function renderReceiptsView() {
     const customer = customersById.get(receiptCustomerId);
     // Fall back to any denormalized name stamped on the receipt so name search
     // still works for a role that can see receipts but not load customers.
-    const customerName = (customer?.name || receipt.customerName || '').toLowerCase();
-    const finalNo = (receipt.finalReceiptNo || receipt.serialNumber || '').toLowerCase();
-    const tempNo = (receipt.tempReceiptNo || '').toLowerCase();
-    const phoneNumber = canSearchReceiptContacts ? (receipt.phoneNumber || '').toLowerCase() : '';
-    const searchTerm = (state.receiptSearch || '').toLowerCase();
-    
+    const customerName = foldSearchText(customer?.name || receipt.customerName || '');
+    const finalNo = foldSearchText(receipt.finalReceiptNo || receipt.serialNumber || '');
+    const tempNo = foldSearchText(receipt.tempReceiptNo || '');
+    const phoneNumber = canSearchReceiptContacts ? foldSearchText(receipt.phoneNumber || '') : '';
+    const searchTerm = receiptSearchTerm;
+
     // Search filter
     if (searchTerm && !customerName.includes(searchTerm) && !finalNo.includes(searchTerm) && !tempNo.includes(searchTerm) && !phoneNumber.includes(searchTerm)) {
       return false;
@@ -15272,7 +15489,7 @@ function renderReceiptsView() {
                       </span>`;
                     })() : ''}
                     ${receipt.receiptType === 'CARRIED_BALANCE' ? `
-                      <span class="inline-flex items-center gap-1 font-medium" style="color:#b45309" title="${isArV ? 'رصيد سابق: العميل استهلك جزءاً من رصيده — سُجِّل المتبقي فقط' : 'Existing balance: the customer already used part — only the remainder was recorded'}">
+                      <span class="inline-flex items-center gap-1 font-medium text-amber-700 dark:text-amber-300" title="${isArV ? 'رصيد سابق: العميل استهلك جزءاً من رصيده — سُجِّل المتبقي فقط' : 'Existing balance: the customer already used part — only the remainder was recorded'}">
                         <i data-lucide="history" class="w-3 h-3"></i>
                         <span>${isArV ? 'رصيد سابق (المتبقي)' : 'Existing balance (remaining)'}</span>
                       </span>` : ''}
@@ -15288,17 +15505,17 @@ function renderReceiptsView() {
                   ` : ''}
                 </div>
                 <div class="text-right" ${hasCustomerDebt ? 'data-receipt-linked-debt="true"' : ''}>
-                  <div class="text-2xl font-bold ${hasCustomerDebt ? 'text-rose-600' : 'text-emerald-600'}">$${(hasCustomerDebt ? collectionTarget.amountUSD : Number(receipt.amountUSD || 0)).toFixed(2)}</div>
+                  <div class="text-2xl font-bold ${hasCustomerDebt ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}">$${(hasCustomerDebt ? collectionTarget.amountUSD : Number(receipt.amountUSD || 0)).toFixed(2)}</div>
                   <div class="text-sm ${hasCustomerDebt ? 'text-rose-500 font-semibold' : 'text-slate-500'}">${(hasCustomerDebt ? collectionTarget.amountLocal : Number(receipt.amountLocal || 0)).toFixed(2)} LYD</div>
-                  ${hasCustomerDebt ? `<div class="text-[10px] font-bold text-rose-600 mt-1">${isArV ? 'دين العميل' : 'Customer debt'}</div>` : ''}
+                  ${hasCustomerDebt ? `<div class="text-[10px] font-bold text-rose-600 dark:text-rose-400 mt-1">${isArV ? 'دين العميل' : 'Customer debt'}</div>` : ''}
                   ${receipt.isPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isArV ? 'مدفوع' : 'Paid'}</div>` : `<div class="text-xs text-amber-600 mt-1">⏳ ${isArV ? 'غير مدفوع' : 'Unpaid'}</div>`}
                   ${receipt.paymentResult ? `
-                    <div class="text-[10px] mt-1 ${receipt.paymentResult === 'UNDERPAID' ? 'text-rose-600' : receipt.paymentResult === 'OVERPAID' ? 'text-blue-600' : 'text-emerald-600'} font-bold">
+                    <div class="text-[10px] mt-1 ${receipt.paymentResult === 'UNDERPAID' ? 'text-rose-600 dark:text-rose-400' : receipt.paymentResult === 'OVERPAID' ? 'text-blue-600' : 'text-emerald-600'} font-bold">
                       ${receipt.paymentResult === 'PAID_EXACT' ? (isArV ? 'مدفوع بالضبط' : 'Paid exact') : receipt.paymentResult === 'OVERPAID' ? `${isArV ? 'دفع زائد' : 'Overpaid'} +${Number(receipt.overpaidAmount || 0).toFixed(0)} LYD` : `${isArV ? 'المتبقي' : 'Remaining'} ${Number(receipt.remainingDue || 0).toFixed(0)} LYD`}
                     </div>
                   ` : ''}
                   ${receipt.feeDifferenceStatus ? `
-                    <div class="text-[10px] ${receipt.feeDifferenceStatus === 'SAME' ? 'text-slate-500' : receipt.feeDifferenceStatus === 'LOWER' ? 'text-amber-600' : 'text-purple-600'} font-bold">
+                    <div class="text-[10px] ${receipt.feeDifferenceStatus === 'SAME' ? 'text-slate-500' : receipt.feeDifferenceStatus === 'LOWER' ? 'text-amber-600' : 'text-purple-600 dark:text-purple-300'} font-bold">
                       ${isArV ? `العمولة ${({ SAME: 'مطابقة', LOWER: 'أقل', HIGHER: 'أعلى' })[receipt.feeDifferenceStatus] || receipt.feeDifferenceStatus}` : `Fee ${receipt.feeDifferenceStatus.toLowerCase()}`}
                     </div>
                   ` : ''}
@@ -15310,7 +15527,7 @@ function renderReceiptsView() {
                     const feeCollectedRaw = receipt.actualDeliveryFeeCollected ?? receipt.deliveryFeeCollected;
                     if (feeCollectedRaw === undefined || feeCollectedRaw === null) return '';
                     const feeShopPaid = String(receipt.deliveryFeePaidBy || 'customer') === 'shop';
-                    return `<div class="text-[10px] mt-0.5 font-bold ${feeShopPaid ? 'text-rose-600' : 'text-slate-600 dark:text-slate-300'}">
+                    return `<div class="text-[10px] mt-0.5 font-bold ${feeShopPaid ? 'text-rose-600 dark:text-rose-400' : 'text-slate-600 dark:text-slate-300'}">
                       ${isArV ? 'قيمة التوصيل' : 'Delivery fee'}: ${(Number(feeCollectedRaw) || 0).toFixed(0)} LYD • ${feeShopPaid ? (isArV ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isArV ? 'دفعها العميل' : 'paid by customer')}
                     </div>`;
                   })()}
@@ -15542,7 +15759,8 @@ function renderPagesView() {
   const isAr = state.language === 'ar';
   const allPages = getPagesVisibleToCurrentUser();
   const pageDisplayNumberById = new Map(allPages.map((page, index) => [String(page.id), allPages.length - index]));
-  const pageSearch = String(state.pageSearch || '').trim().toLocaleLowerCase();
+  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
+  const pageSearch = foldSearchText(String(state.pageSearch || '').trim());
   const customersById = new Map((state.customers || []).map(customer => [String(customer.id), customer]));
   const visiblePages = pageSearch
     ? allPages.filter(page => {
@@ -15550,7 +15768,7 @@ function renderPagesView() {
           .map(customerId => customersById.get(String(customerId))?.name || '')
           .join(' ');
         return [page.name, page.category, ownerNames, page.id]
-          .some(value => String(value || '').toLocaleLowerCase().includes(pageSearch));
+          .some(value => foldSearchText(value).includes(pageSearch));
       })
     : allPages;
   const canSeePageAds = can('ads', 'view');
@@ -15778,7 +15996,7 @@ function renderAdsView() {
             <i data-lucide="plus" class="w-4 h-4"></i>
             <span>${t('addAd')}</span>
           </button>
-          <button onclick="window.print()" class="btn-shine bg-slate-600 text-white px-3 py-2 rounded-xl">
+          <button onclick="printCurrentPage()" class="btn-shine bg-slate-600 text-white px-3 py-2 rounded-xl">
             <i data-lucide="printer" class="w-4 h-4"></i>
           </button>
         </div>
@@ -16052,7 +16270,33 @@ function loadMoreDeliveries() {
   render();
 }
 
-function renderDeliveriesView() {
+// One-render-pass memo for getReceiptCollectionTarget. Legacy zero-amount
+// delivery receipts derive their collection target by scanning ALL ads
+// (13-filters-helpers linked-ads derivation), and a single deliveries render
+// used to run that scan twice per such receipt (uncollected-total reduce +
+// visible row). Keyed by receipt id and cleared at the top of every
+// renderDeliveriesView pass, so data edits are always picked up and the cache
+// never outlives the pass that filled it.
+const _deliveryCollectionTargetCache = new Map();
+function _getCollectionTargetCached(item) {
+  const key = String((item && item.id) || '');
+  if (!key) return getReceiptCollectionTarget(item);
+  if (_deliveryCollectionTargetCache.has(key)) return _deliveryCollectionTargetCache.get(key);
+  const target = getReceiptCollectionTarget(item);
+  _deliveryCollectionTargetCache.set(key, target);
+  return target;
+}
+
+// logOnly=true is the scoped-search fast path: updateDeliveriesViewFiltered
+// swaps ONLY #delivery-log-results into the live DOM, so the stats tiles and
+// the driver-performance panel in the throwaway template are never seen.
+// They don't depend on the search term either — skipping their computation
+// (full reduces over every delivery receipt, incl. per-legacy-receipt ad
+// scans, plus ~6 filter passes per driver) removes the heavy part of every
+// search keystroke on phones.
+function renderDeliveriesView(logOnly) {
+  const logOnlyPass = logOnly === true;
+  _deliveryCollectionTargetCache.clear();
   const isAr = state.language === 'ar';
   // Deliveries are tracked ONLY on receipts (ads are not a delivery source of truth).
   const allReceipts = getVisibleRecords(state.receipts);
@@ -16076,10 +16320,17 @@ function renderDeliveriesView() {
       amountUSD: Number(r.amountUSD || 0) || 0
     }));
 
+  // The stats tiles and driver-performance panel are skipped entirely on
+  // log-only (search keystroke) passes — see the logOnly note above. Their
+  // markup blocks below are guarded the same way, so stats/driverPerformance
+  // are never read while null/empty.
+  let stats = null;
+  let driverPerformance = [];
+  if (!logOnlyPass) {
   const deliveredRows = deliveryReceipts.filter(d => d.deliveryStatus === 'Delivered');
   const heldRows = deliveredRows.filter(d => !_isReceivedInOffice(d) && _getCollectedCashLocal(d) > 0);
 
-  const stats = {
+  stats = {
     pendingDelivery: deliveryReceipts.filter(d => d.deliveryStatus === 'Needs Delivery').length,
     pendingAssignment: deliveryReceipts.filter(d => !d.deliveryPersonId && d.deliveryStatus !== 'Canceled' && d.deliveryStatus !== 'Delivered').length,
     inProgress: deliveryReceipts.filter(d => d.deliveryStatus === 'In Progress').length,
@@ -16105,7 +16356,7 @@ function renderDeliveriesView() {
     feeVarianceLYD: deliveredRows.reduce((sum, d) => sum + (d.feeDifferenceStatus ? (Number(d.feeDiff) || 0) : 0), 0),
   };
 
-  const driverPerformance = deliveryUsers.map(driver => {
+  driverPerformance = deliveryUsers.map(driver => {
     const driverDeliveries = deliveryReceipts.filter(d => String(d.deliveryPersonId || '') === String(driver.id || ''));
     const delivered = driverDeliveries.filter(d => d.deliveryStatus === 'Delivered');
     const completed = delivered.filter(d => _isReceivedInOffice(d) || _getCollectedCashLocal(d) <= 0);
@@ -16122,6 +16373,7 @@ function renderDeliveriesView() {
       successRate: driverDeliveries.length > 0 ? Math.round((delivered.length / driverDeliveries.length) * 100) : 0
     };
   }).sort((a, b) => b.completed - a.completed);
+  }
 
   const filterStatus = state.deliveryFilter?.status || 'all';
   const filterDriver = state.deliveryFilter?.driver || 'all';
@@ -16131,12 +16383,14 @@ function renderDeliveriesView() {
   if (filterStatus !== 'all') filteredDeliveries = filteredDeliveries.filter(d => d.deliveryStatus === filterStatus);
   if (filterDriver !== 'all') filteredDeliveries = filteredDeliveries.filter(d => String(d.deliveryPersonId || '') === String(filterDriver || ''));
   if (searchTerm) {
-    const term = String(searchTerm).toLowerCase();
+    // foldSearchText on BOTH sides: the driver's primary phone lookup must
+    // match Arabic-keyboard digits (٠٩١٢...) and unhamza'd name spellings.
+    const term = foldSearchText(searchTerm);
     filteredDeliveries = filteredDeliveries.filter(d => {
       const customer = deliveryCustomersById.get(String(d.customerId));
-      const name = String(customer?.name || '').toLowerCase();
-      const phone = String(d.phoneNumber || customer?.phones?.[0] || '').toLowerCase();
-      const receiptNo = String(d.tempReceiptNo || d.finalReceiptNo || d.serialNumber || '').toLowerCase();
+      const name = foldSearchText(customer?.name || '');
+      const phone = foldSearchText(d.phoneNumber || customer?.phones?.[0] || '');
+      const receiptNo = foldSearchText(d.tempReceiptNo || d.finalReceiptNo || d.serialNumber || '');
       return name.includes(term) || phone.includes(term) || receiptNo.includes(term);
     });
   }
@@ -16187,7 +16441,7 @@ function renderDeliveriesView() {
         </div>
       </div>
 
-      ${!canViewDeliveryStats ? '' : `
+      ${(logOnlyPass || !canViewDeliveryStats) ? '' : `
       <!-- Stats (compact): 4 money/count tiles + pipeline strip in one panel -->
       <div class="glass-panel rounded-2xl p-4">
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -16227,15 +16481,15 @@ function renderDeliveriesView() {
         <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700 flex flex-wrap items-center gap-x-5 gap-y-1 text-sm">
           <span class="text-[11px] font-bold text-slate-400 uppercase tracking-wide">${isAr ? 'رسوم التوصيل' : 'Delivery Fees'}</span>
           <span>${isAr ? 'المُحصَّل' : 'Collected'} <b>${stats.feesCollectedLYD.toLocaleString('en-US')}</b> LYD</span>
-          <span class="${stats.feesShopPaidLYD > 0 ? 'text-rose-600 font-medium' : ''}">${isAr ? 'يتحملها المحل (خسارة)' : 'Paid by shop (loss)'} <b>${stats.feesShopPaidLYD.toLocaleString('en-US')}</b> LYD</span>
-          <span class="${stats.feeVarianceLYD < 0 ? 'text-amber-600' : 'text-purple-600'}">${isAr ? 'الفرق عن المتفق عليه' : 'Variance vs quoted'} <b>${stats.feeVarianceLYD >= 0 ? '+' : '-'}${Math.abs(stats.feeVarianceLYD).toLocaleString('en-US')}</b> LYD</span>
+          <span class="${stats.feesShopPaidLYD > 0 ? 'text-rose-600 dark:text-rose-400 font-medium' : ''}">${isAr ? 'يتحملها المحل (خسارة)' : 'Paid by shop (loss)'} <b>${stats.feesShopPaidLYD.toLocaleString('en-US')}</b> LYD</span>
+          <span class="${stats.feeVarianceLYD < 0 ? 'text-amber-600' : 'text-purple-600 dark:text-purple-300'}">${isAr ? 'الفرق عن المتفق عليه' : 'Variance vs quoted'} <b>${stats.feeVarianceLYD >= 0 ? '+' : '-'}${Math.abs(stats.feeVarianceLYD).toLocaleString('en-US')}</b> LYD</span>
         </div>
       </div>
       `}
 
       <!-- Driver Performance & Delivery Log Grid -->
       <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        ${!canViewDeliveryStats ? '' : `
+        ${(logOnlyPass || !canViewDeliveryStats) ? '' : `
         <!-- Driver Performance (compact rows, same numbers) -->
         <div class="glass-panel rounded-2xl p-4">
           <h2 class="text-base font-bold text-slate-800 dark:text-white mb-3">${isAr ? 'أداء السائقين' : 'Driver Performance'}</h2>
@@ -16311,7 +16565,7 @@ function renderDeliveriesView() {
                   const collectedCash = _getCollectedCashLocal(ad);
                   const receivedInOffice = _isReceivedInOffice(ad);
                   const officeEligible = String(ad.deliveryStatus || '') === 'Delivered' && collectedCash > 0;
-                  const deliveryTarget = getReceiptCollectionTarget(ad);
+                  const deliveryTarget = _getCollectionTargetCached(ad);
                   const debtLocal = deliveryTarget.amountLocal;
                   const debtUSD = deliveryTarget.amountUSD;
                   const statusColors = {
@@ -16524,12 +16778,16 @@ function updateDeliveriesViewFiltered() {
   }
   // Build the fresh view HTML off-screen, then swap in only the results table
   // so the search input keeps its caret and the phone keyboard stays open
-  // (same approach as updateCustomersViewFiltered).
+  // (same approach as updateCustomersViewFiltered). logOnly=true skips the
+  // stats tiles + driver-performance computations — nothing outside
+  // #delivery-log-results is ever read from this throwaway template.
   const tpl = document.createElement('template');
-  tpl.innerHTML = renderDeliveriesView();
+  tpl.innerHTML = renderDeliveriesView(true);
   const newResults = tpl.content.querySelector('#delivery-log-results');
   if (newResults) results.innerHTML = newResults.innerHTML;
-  if (window.lucide) lucide.createIcons();
+  // Scoped icon pass: only the swapped results table needs new icons —
+  // re-scanning the whole document per keystroke was wasted work.
+  IconQueue.schedule(results);
 }
 
 // Refresh deliveries
@@ -16585,7 +16843,9 @@ function exportDeliveryReport() {
   // instead of garbling them (mojibake).
   // Route through downloadFile so the blob URL outlives the click task —
   // iOS Safari cancels the download if the URL is revoked in the same tick.
-  downloadFile('﻿' + csv, `delivery-report-${getTodayDateString()}.csv`, 'text/csv;charset=utf-8');
+  // downloadFile refuses inside FB/IG in-app browsers (with its own warning):
+  // only claim "downloaded" when the download actually started.
+  if (!downloadFile('﻿' + csv, `delivery-report-${getTodayDateString()}.csv`, 'text/csv;charset=utf-8')) return;
   showNotification(state.language === 'ar' ? 'اكتمل التصدير' : 'Export Complete', state.language === 'ar' ? 'تم تنزيل تقرير التوصيل' : 'Delivery report downloaded', 'success');
 }
 
@@ -16704,7 +16964,9 @@ function _getOutstandingDueLocal(item) {
   if (ds === 'Canceled') return 0;
   const rem = Number(item.remainingDue);
   if (Number.isFinite(rem)) return Math.max(0, rem);
-  const debt = getReceiptCollectionTarget(item).amountLocal;
+  // Cached per render pass: for legacy zero-amount receipts this derivation
+  // scans every ad, and the per-row markup asks for the same target again.
+  const debt = _getCollectionTargetCached(item).amountLocal;
   if (debt > 0) return Math.max(0, debt - _getCollectedCashLocal(item));
   if (item.isPaid) return 0;
   const amt = Number(item.amountLocal);
@@ -16755,8 +17017,9 @@ async function setOfficeHandover(itemId, received) {
 
   addAuditLog('update', id, next ? 'Office handover marked as received' : 'Office handover undone', { isReceipt: !!receipt });
   showNotification(isAr ? 'نجاح' : 'Success', next ? (isAr ? 'تم استلام النقد في المكتب' : 'Cash received at office') : (isAr ? 'تم التراجع عن التسليم للمكتب' : 'Office handover undone'), 'success');
+  // render() already schedules scoped icon creation (IconQueue.schedule(app)),
+  // so the old follow-up full-document lucide.createIcons() was pure waste.
   render();
-  if (window.lucide) lucide.createIcons();
 }
 
 // Backwards-compatible wrapper (mark as received)
@@ -17121,10 +17384,10 @@ function renderDeliveryDashboard() {
                         const shopPaid = String(ad.deliveryFeePaidBy || 'customer') === 'shop';
                         const feeDiffNum = Number(ad.feeDiff) || 0;
                         const varianceChip = ad.feeDifferenceStatus && ad.feeDifferenceStatus !== 'SAME'
-                          ? ` <span class="font-bold ${ad.feeDifferenceStatus === 'HIGHER' ? 'text-purple-600' : 'text-amber-600'}">(${ad.feeDifferenceStatus === 'HIGHER' ? '+' : '-'}${Math.abs(feeDiffNum).toFixed(0)} LYD ${isAr ? 'عن المتفق عليه' : 'vs quoted'})</span>`
+                          ? ` <span class="font-bold ${ad.feeDifferenceStatus === 'HIGHER' ? 'text-purple-600 dark:text-purple-300' : 'text-amber-600'}">(${ad.feeDifferenceStatus === 'HIGHER' ? '+' : '-'}${Math.abs(feeDiffNum).toFixed(0)} LYD ${isAr ? 'عن المتفق عليه' : 'vs quoted'})</span>`
                           : '';
                         return `<div class="text-[11px] text-slate-500 mt-0.5">
-                          ${isAr ? 'قيمة التوصيل المُحصَّلة' : 'Fee collected'}: <span class="font-bold ${shopPaid ? 'text-rose-600' : 'text-emerald-600'}">${(Number(feeRaw) || 0).toFixed(0)} LYD</span> • <span class="${shopPaid ? 'text-rose-600 font-bold' : ''}">${shopPaid ? (isAr ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isAr ? 'دفعها العميل' : 'paid by customer')}</span>${varianceChip}
+                          ${isAr ? 'قيمة التوصيل المُحصَّلة' : 'Fee collected'}: <span class="font-bold ${shopPaid ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}">${(Number(feeRaw) || 0).toFixed(0)} LYD</span> • <span class="${shopPaid ? 'text-rose-600 dark:text-rose-400 font-bold' : ''}">${shopPaid ? (isAr ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isAr ? 'دفعها العميل' : 'paid by customer')}</span>${varianceChip}
                         </div>`;
                       })()}
                       ${ad.isReceipt && ad.deliveryInstructions ? `
@@ -17345,7 +17608,7 @@ async function submitDeliveryCancel(itemType, itemId) {
 
   const nowIso = new Date().toISOString();
   const uid = state.currentUser?.id || '';
-  let receiptCascadeConsistent = true;
+  let deferredServerAdsRefresh = null;
 
   if (type === 'receipt') {
     const receipt = _findReceiptForDeliveryModal(id);
@@ -17365,12 +17628,28 @@ async function submitDeliveryCancel(itemType, itemId) {
     // PATCH already releases those rows atomically; install the authoritative
     // ads instead of issuing stale generic ad PATCHes (which are forbidden).
     let releasedAds = 0;
-    let adRefresh = { consistent: true };
     if (isServerModeEnabled()) {
+      // Refresh the linked ads WITHOUT blocking the close (same non-blocking
+      // pattern as the driver cancel path): the receipt PATCH already
+      // committed, this view only reads receipt.deliveryStatus (updated by
+      // the echo above), and ads reconcile seconds later — or via delta
+      // live-sync, exactly what the Sync-pending toast promises.
       const savedReceipt = state.receipts.find(row => row && String(row.id) === String(receipt.id)) || receipt;
-      adRefresh = await refreshAdsAfterReceiptServerCascade(savedReceipt);
-      receiptCascadeConsistent = adRefresh.consistent;
       saveState();
+      deferredServerAdsRefresh = () => {
+        refreshAdsAfterReceiptServerCascade(savedReceipt).then((adRefresh) => {
+          if (adRefresh && adRefresh.consistent) {
+            saveState();
+            RenderQueue.schedule('deliveryAdsCascade');
+          } else {
+            showNotification(
+              state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
+              state.language === 'ar' ? 'تم حفظ الإلغاء، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Cancellation was saved. Linked ads will refresh automatically when the connection returns.',
+              'warning'
+            );
+          }
+        }).catch(() => {});
+      };
     } else {
       try {
         releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);
@@ -17404,15 +17683,15 @@ async function submitDeliveryCancel(itemType, itemId) {
 
   document.getElementById('delivery-cancel-modal')?.remove();
   document.getElementById('delivery-complete-modal')?.remove();
-  forceFullRender();
+  // A plain render() is enough here: state.receipts/state.ads were just
+  // replaced, so the view HTML genuinely differs and the identical-HTML skip
+  // cannot swallow the update — no need to blow away the partial-update
+  // caches with forceFullRender().
+  render();
   showNotification(state.language === 'ar' ? 'أُلغيت' : 'Canceled', state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled', 'success');
-  if (!receiptCascadeConsistent) {
-    showNotification(
-      state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
-      state.language === 'ar' ? 'تم حفظ الإلغاء، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Cancellation was saved. Linked ads will refresh automatically when the connection returns.',
-      'warning'
-    );
-  }
+  // Kick off the (already committed) server-mode ads reconciliation AFTER the
+  // close + render so the modal never hangs on a slow connection.
+  if (deferredServerAdsRefresh) deferredServerAdsRefresh();
 }
 
 // Reconciliation uses the earliest valid terminal day: the scheduled end day
@@ -17644,13 +17923,14 @@ function applyUserRoleFilter(role) {
 function renderUsersView() {
   const isAr = state.language === 'ar';
   const allVisibleUsers = getVisibleRecords(state.users);
-  const userSearch = String(state.userSearch || '').trim().toLocaleLowerCase();
+  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
+  const userSearch = foldSearchText(String(state.userSearch || '').trim());
   const userRoleFilter = String(state.userRoleFilter || 'all');
   const visibleUsers = allVisibleUsers.filter(user => {
     if (userRoleFilter !== 'all' && String(user.role || '') !== userRoleFilter) return false;
     if (!userSearch) return true;
     return [user.name, user.email, user.role]
-      .some(value => String(value || '').toLocaleLowerCase().includes(userSearch));
+      .some(value => foldSearchText(value).includes(userSearch));
   });
   const isAdmin = isCurrentUserAdmin();
   const canAddUsers = canManageUsersAction('add');
@@ -17787,8 +18067,8 @@ function renderUsersView() {
                     <div class="flex justify-between text-xs"><span>${isAr ? 'إجمالي المُعيَّن:' : 'Total Assigned:'}</span><span class="font-bold">${deliveryStats.totalAssigned}</span></div>
                     <div class="flex justify-between text-xs"><span>${isAr ? 'المقبول:' : 'Accepted:'}</span><span class="font-bold text-blue-600">${deliveryStats.accepted}</span></div>
                     <div class="flex justify-between text-xs"><span>${isAr ? 'المُحصَّل:' : 'Collected:'}</span><span class="font-bold text-emerald-600">${deliveryStats.collected}</span></div>
-                    <div class="flex justify-between text-xs"><span>${isAr ? 'الرسوم المكتسبة:' : 'Fees Earned:'}</span><span class="font-bold text-purple-600">${deliveryFeesLYD.toFixed(0)} LYD</span></div>
-                    ${deliveryFeesShopLYD > 0 ? `<div class="flex justify-between text-xs"><span>${isAr ? 'رسوم يتحملها المحل (خسارة):' : 'Shop-paid Fees (Loss):'}</span><span class="font-bold text-rose-600">${deliveryFeesShopLYD.toFixed(0)} LYD</span></div>` : ''}
+                    <div class="flex justify-between text-xs"><span>${isAr ? 'الرسوم المكتسبة:' : 'Fees Earned:'}</span><span class="font-bold text-purple-600 dark:text-purple-300">${deliveryFeesLYD.toFixed(0)} LYD</span></div>
+                    ${deliveryFeesShopLYD > 0 ? `<div class="flex justify-between text-xs"><span>${isAr ? 'رسوم يتحملها المحل (خسارة):' : 'Shop-paid Fees (Loss):'}</span><span class="font-bold text-rose-600 dark:text-rose-400">${deliveryFeesShopLYD.toFixed(0)} LYD</span></div>` : ''}
                   </div>
                 ` : ''}
 
@@ -17865,16 +18145,18 @@ function renderAuditView() {
   refreshServerAuditLogs();
   const allLogs = getVisibleAuditLogs();
 
-  // Apply filters
+  // Apply filters. foldSearchText on BOTH sides of the search so Arabic-Indic
+  // digit queries and unhamza'd Arabic spellings match stored log fields.
+  const auditSearchTerm = state.auditSearch ? foldSearchText(state.auditSearch) : '';
   let filteredLogs = allLogs.filter(log => {
     // Search filter
-    if (state.auditSearch) {
-      const search = state.auditSearch.toLowerCase();
-      const matchesSearch = 
-        (log.description || '').toLowerCase().includes(search) ||
-        (log.userName || '').toLowerCase().includes(search) ||
-        (log.action || '').toLowerCase().includes(search) ||
-        (log.resourceId || '').toLowerCase().includes(search);
+    if (auditSearchTerm) {
+      const search = auditSearchTerm;
+      const matchesSearch =
+        foldSearchText(log.description || '').includes(search) ||
+        foldSearchText(log.userName || '').includes(search) ||
+        foldSearchText(log.action || '').includes(search) ||
+        foldSearchText(log.resourceId || '').includes(search);
       if (!matchesSearch) return false;
     }
     
@@ -18438,6 +18720,7 @@ function exportAuditLogs(format) {
   // Scoped: a viewOwn-only user exports only their own entries.
   const allLogs = getVisibleAuditLogs();
 
+  let downloaded = false;
   if (format === 'csv') {
     const headers = ['Date', 'Time', 'User', 'Action', 'Category', 'Severity', 'Description', 'Resource ID'];
     const rows = allLogs.map(log => {
@@ -18464,16 +18747,27 @@ function exportAuditLogs(format) {
     const csv = [headers.join(','), ...rows].join('\n');
     // UTF-8 BOM so Excel reads Arabic text correctly (downloadFile is shared
     // with JSON export, so add the BOM here rather than inside it).
-    downloadFile('﻿' + csv, `audit-logs-${new Date().toISOString().split('T')[0]}.csv`, 'text/csv;charset=utf-8');
+    downloaded = downloadFile('﻿' + csv, `audit-logs-${new Date().toISOString().split('T')[0]}.csv`, 'text/csv;charset=utf-8');
   } else {
     const json = JSON.stringify(allLogs, null, 2);
-    downloadFile(json, `audit-logs-${new Date().toISOString().split('T')[0]}.json`, 'application/json');
+    downloaded = downloadFile(json, `audit-logs-${new Date().toISOString().split('T')[0]}.json`, 'application/json');
   }
-  
+
+  // Only claim success when the download actually started (downloadFile
+  // refuses inside FB/IG in-app browsers and shows its own warning).
+  if (!downloaded) return;
   showNotification(state.language === 'ar' ? 'اكتمل التصدير' : 'Export Complete', state.language === 'ar' ? `تم تصدير سجلات التدقيق بصيغة ${format.toUpperCase()}` : `Audit logs exported as ${format.toUpperCase()}`, 'success');
 }
 
+// Returns true when the download was actually started, false when it was
+// refused up-front (in-app browser). Callers must gate their success toasts
+// on the return value — FB/IG webviews swallow blob <a download> clicks as a
+// silent no-op on BOTH platforms, so an unconditional toast lies to the user.
 function downloadFile(content, filename, mimeType) {
+  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+    notifyInAppBrowserLimitation('download');
+    return false;
+  }
   const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -18488,6 +18782,7 @@ function downloadFile(content, filename, mimeType) {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }, 2000);
+  return true;
 }
 
 // Backup all audit logs for permanent storage
@@ -18508,11 +18803,13 @@ async function backupAuditLogs() {
   };
   
   const json = JSON.stringify(backup, null, 2);
-  downloadFile(json, `audit-logs-backup-${new Date().toISOString().split('T')[0]}.json`, 'application/json');
-  
+  // downloadFile refuses inside FB/IG in-app browsers (with its own warning):
+  // don't log or toast a "backup complete" that never happened.
+  if (!downloadFile(json, `audit-logs-backup-${new Date().toISOString().split('T')[0]}.json`, 'application/json')) return;
+
   // Add backup log entry
   addAuditLog('backup', 'system', `Backed up ${allLogs.length} audit logs`, { backupSize: json.length });
-  
+
   showNotification(state.language === 'ar' ? 'اكتمل النسخ الاحتياطي' : 'Backup Complete', state.language === 'ar' ? `تم نسخ ${allLogs.length} سجل احتياطياً بنجاح` : `${allLogs.length} logs backed up successfully`, 'success');
 }
 
@@ -19133,9 +19430,11 @@ function getFilteredAds(customersById = null) {
 
   // Read the search term from state (kept in sync by the debounced input handler).
   // Fall back to the DOM only if state hasn't been set yet.
-  const searchTerm = String(
+  // foldSearchText on BOTH sides: Arabic-keyboard digits (٠-٩) and unhamza'd
+  // Arabic spellings must match the ASCII/canonical stored values.
+  const searchTerm = foldSearchText(
     state.adSearch != null ? state.adSearch : (document.getElementById('ad-search')?.value || '')
-  ).toLowerCase().trim();
+  ).trim();
 
   if (searchTerm) {
     // PERFORMANCE: one Map lookup per ad instead of scanning the whole customers
@@ -19147,11 +19446,11 @@ function getFilteredAds(customersById = null) {
       const customer = custMap.get(ad.customerId);
       const page = ad.pageId ? pageMap.get(ad.pageId) : null;
       return (
-        customer?.name?.toLowerCase().includes(searchTerm) ||
-        ad.id.toLowerCase().includes(searchTerm) ||
-        (canSearchContacts && ad.phoneNumber?.toLowerCase().includes(searchTerm)) ||
-        ad.serialNumber?.toLowerCase().includes(searchTerm) ||
-        page?.name?.toLowerCase().includes(searchTerm)
+        foldSearchText(customer?.name).includes(searchTerm) ||
+        foldSearchText(ad.id).includes(searchTerm) ||
+        (canSearchContacts && foldSearchText(ad.phoneNumber).includes(searchTerm)) ||
+        foldSearchText(ad.serialNumber).includes(searchTerm) ||
+        foldSearchText(page?.name).includes(searchTerm)
       );
     });
   }
@@ -19200,6 +19499,31 @@ function normalizeCustomerPhoneKey(value) {
   if (/^09\d{8}$/.test(digits)) return `218${digits.slice(1)}`;
   if (/^9\d{8}$/.test(digits)) return `218${digits}`;
   return digits;
+}
+
+// Compare-time search normalizer, applied to BOTH the query and the haystack
+// at every search/filter site (never to stored values or the visible input —
+// rewriting the user's typed ٠-٩ mid-typing would visibly mutate the field):
+//  - Arabic-Indic ٠-٩ / Persian ۰-۹ digits fold to ASCII (normalizeDigitsAscii,
+//    the same write-side normalizer used by money/receipt-number inputs), so a
+//    Gboard/iOS Arabic-keyboard query like ١٢٣ matches stored "123";
+//  - toLowerCase() for Latin;
+//  - conservative Arabic letter folding so the standard unhamza'd keyboard
+//    spellings match: hamza alif forms آأإٱ -> ا, ة -> ه, ى -> ي, and
+//    tashkeel/tatweel stripped (U+064B-U+0655 includes the combining
+//    hamza/madda so decomposed forms fold too, U+0670 dagger alif, U+0640
+//    tatweel).
+// NFKC first folds full-width digits and Arabic presentation forms; guarded
+// because very old engines lack String.normalize.
+function foldSearchText(value) {
+  let s = String(value === null || value === undefined ? '' : value);
+  try { s = s.normalize('NFKC'); } catch (_) {}
+  return normalizeDigitsAscii(s)
+    .toLowerCase()
+    .replace(/[آأإٱ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/[ً-ٰٕـ]/g, '');
 }
 
 function getCustomerPhoneEntries(customer) {
@@ -19327,23 +19651,86 @@ function findDuplicateCustomerGroups(customers = state.customers) {
 // getCustomerStats — turns O(customers × records) view rendering into
 // O(customers + records). Results are identical to the per-call filters.
 function buildCustomerStatsIndex() {
+  // Receipts first: the ads loop below needs each receipt's exchange rate to
+  // reproduce getDeliveryReceiptDueUsage's legacy-mirror math exactly.
+  const receiptsByCustomer = new Map();
+  const receiptRateById = new Map();
+  for (const r of getVisibleRecords(state.receipts)) {
+    // Same fallback chain as getDeliveryReceiptDueUsage's `exchangeRate`.
+    receiptRateById.set(String(r.id || ''), r.exchangeRate || state.defaultExchangeRate || 1);
+    const customerId = String(r.customerId || '');
+    if (!customerId) continue;
+    const list = receiptsByCustomer.get(customerId);
+    if (list) list.push(r); else receiptsByCustomer.set(customerId, [r]);
+  }
   const adsByCustomer = new Map();
+  // committedUSDByReceiptId[rid] = the total explicitly committed against that
+  // receipt across ALL ads (receiptAllocations + dueAllocations rows + the
+  // rowless legacy due mirror) — the same number getDeliveryReceiptDueUsage
+  // computes as usedDueUSD, but for every receipt in ONE ads pass instead of
+  // one full ads scan per receipt. getCustomerStats' debt block reads this so
+  // the customers view no longer rescans state.ads per unpaid receipt on
+  // every keystroke / live-sync render.
+  const committedUSDByReceiptId = new Map();
   for (const ad of getVisibleRecords(state.ads)) {
     // Very old ads did not have recordType yet. Only the explicit receipt
     // mirror is not an ad; this matches getFilteredAds() and keeps old data
     // visible after a live refresh even before a migration has persisted it.
     if (ad.recordType === 'receipt') continue;
+    // Commitments count even when the ad has no customerId, so accumulate them
+    // BEFORE the customer grouping guard. Per receipt id the arithmetic below
+    // mirrors getDeliveryReceiptDueUsage exactly (filter-then-reduce per pool,
+    // then paid + due + legacyDue added per ad) so the sums stay bit-identical.
+    const perReceipt = new Map(); // rid -> { paid, due }
+    const bucketFor = (rid) => {
+      let bucket = perReceipt.get(rid);
+      if (!bucket) { bucket = { paid: 0, due: 0 }; perReceipt.set(rid, bucket); }
+      return bucket;
+    };
+    if (Array.isArray(ad.receiptAllocations)) {
+      for (const row of ad.receiptAllocations) {
+        const rid = String((row && row.receiptId) || '');
+        bucketFor(rid).paid += parseFloat(row && row.amountUSD) || 0;
+      }
+    }
+    if (Array.isArray(ad.dueAllocations)) {
+      for (const row of ad.dueAllocations) {
+        const rid = String((row && row.receiptId) || '');
+        bucketFor(rid).due += parseFloat(row && row.amountUSD) || 0;
+      }
+    }
+    // The legacy scalar mirror only speaks for a ROWLESS ad (same guard as
+    // getDeliveryReceiptDueUsage): once any positive due row exists the scalar
+    // is the rows' sum, not additional money. Candidate receipt ids come from
+    // isAdLegacyDueMirrorForReceipt's two link fields; getAdLegacyDueMirrorUSD
+    // itself returns 0 for non-mirrors, and duplicate ids must be evaluated
+    // once so the same mirror is never added twice.
+    const hasAnyPositiveDueRow = Array.isArray(ad.dueAllocations)
+      && ad.dueAllocations.some(a => (parseFloat(a?.amountUSD) || 0) > 0);
+    const legacyByReceipt = new Map();
+    if (!hasAnyPositiveDueRow) {
+      const linkedId = String(ad.linkedDeliveryReceiptId || '');
+      const receiptRefId = String(ad.receiptId || '');
+      const candidates = linkedId === receiptRefId ? [linkedId] : [linkedId, receiptRefId];
+      for (const rid of candidates) {
+        if (!rid) continue;
+        const legacy = getAdLegacyDueMirrorUSD(ad, rid, receiptRateById.get(rid) || 0);
+        if (legacy > 0) {
+          legacyByReceipt.set(rid, legacy);
+          if (!perReceipt.has(rid)) perReceipt.set(rid, { paid: 0, due: 0 });
+        }
+      }
+    }
+    for (const [rid, bucket] of perReceipt) {
+      const committed = bucket.paid + bucket.due + (legacyByReceipt.get(rid) || 0);
+      if (committed > 0) {
+        committedUSDByReceiptId.set(rid, (committedUSDByReceiptId.get(rid) || 0) + committed);
+      }
+    }
     const customerId = String(ad.customerId || ad.customer || '');
     if (!customerId) continue;
     const list = adsByCustomer.get(customerId);
     if (list) list.push(ad); else adsByCustomer.set(customerId, [ad]);
-  }
-  const receiptsByCustomer = new Map();
-  for (const r of getVisibleRecords(state.receipts)) {
-    const customerId = String(r.customerId || '');
-    if (!customerId) continue;
-    const list = receiptsByCustomer.get(customerId);
-    if (list) list.push(r); else receiptsByCustomer.set(customerId, [r]);
   }
   const pagesByCustomer = new Map();
   for (const p of getVisibleRecords(state.pages)) {
@@ -19352,7 +19739,7 @@ function buildCustomerStatsIndex() {
       if (list) list.push(p); else pagesByCustomer.set(cid, [p]);
     }
   }
-  return { adsByCustomer, receiptsByCustomer, pagesByCustomer };
+  return { adsByCustomer, receiptsByCustomer, pagesByCustomer, committedUSDByReceiptId };
 }
 
 // Status-aware USD "spent" for a single ad — the ONE definition of how much
@@ -19798,7 +20185,13 @@ function getCustomerStats(customerId, statsIndex = null) {
     if (getReceiptDebtType(receipt) === 'none') return;
     const target = getReceiptCollectionTarget(receipt);
     if (target.source === 'linked_ads' || !(target.debtUSD > 0)) return;
-    const committedUSD = getDeliveryReceiptDueUsage(receipt).usedDueUSD || 0;
+    // PERFORMANCE: with a statsIndex (list renders), the committed total is a
+    // Map lookup built in ONE ads pass; without one (single-record callers),
+    // keep the exact per-receipt scan. Same number either way — the index
+    // mirrors getDeliveryReceiptDueUsage.usedDueUSD bit for bit.
+    const committedUSD = (statsIndex && statsIndex.committedUSDByReceiptId)
+      ? (statsIndex.committedUSDByReceiptId.get(String(receipt.id || '')) || 0)
+      : (getDeliveryReceiptDueUsage(receipt).usedDueUSD || 0);
     const uncommittedUSD = Math.max(target.debtUSD - committedUSD, 0);
     if (uncommittedUSD <= 0) return;
     receiptDebtUSD += uncommittedUSD;
@@ -19861,7 +20254,10 @@ function renderCustomerPageSpendingDetail(summary, permissions = {}) {
   const canViewAds = permissions.canViewAds !== undefined ? permissions.canViewAds : can('ads', 'view');
   const canViewBalance = permissions.canViewBalance !== undefined ? permissions.canViewBalance : can('customers', 'viewBalance');
   const lastAdText = summary.lastAdDate
-    ? new Date(summary.lastAdDate).toLocaleDateString(isAr ? 'ar-LY' : undefined)
+    // appDateLocale() (not the raw device locale): an English UI on an ar-SA
+    // device otherwise renders this one stat as a Hijri year with Arabic-Indic
+    // digits, unlike every other lastAdDate in the app.
+    ? new Date(summary.lastAdDate).toLocaleDateString(appDateLocale())
     : (isAr ? 'أبداً' : 'Never');
   const pageName = Security.escapeHtml(summary.pageName || '');
   const category = Security.escapeHtml(summary.pageCategory || '');
@@ -20135,12 +20531,16 @@ function getCustomersVisibleToCurrentUser() {
   );
 }
 
-function getFilteredCustomers() {
+function getFilteredCustomers(sharedStatsIndex = null) {
   // Do not rely only on the server/cached collection being pre-scoped. During
   // permission changes and in local mode, a viewOwn user may still have other
   // creators' customers in memory. Scope before search, counts, or rendering.
   let filtered = getCustomersVisibleToCurrentUser();
-  const searchTerm = String(state.customerSearch || '').toLowerCase().trim();
+  // foldSearchText on BOTH sides: Arabic-Indic digits fold to ASCII (so the
+  // /\D/ strip below no longer deletes them — it used to turn ٠٩١٢٣٤٥٦٧٨ into
+  // '' and skip the canonical phone-key match entirely) and unhamza'd Arabic
+  // name spellings match stored hamza forms.
+  const searchTerm = foldSearchText(state.customerSearch || '').trim();
   const canViewContacts = can('customers', 'viewContacts');
   const canViewBalance = can('customers', 'viewBalance');
   const financialFilter = canViewBalance ? state.customerFinancialFilter : 'all';
@@ -20148,12 +20548,12 @@ function getFilteredCustomers() {
   const nonFinancialSorts = new Set(['newest', 'oldest', 'lastActive']);
   const effectiveSort = canViewBalance || nonFinancialSorts.has(requestedSort) ? requestedSort : 'newest';
   const searchPhoneDigits = searchTerm.replace(/\D/g, '');
-  
+
   if (searchTerm) {
-    filtered = filtered.filter(c => 
-      String(c.name || '').toLowerCase().includes(searchTerm) ||
-      (canViewContacts && getCustomerPhoneEntries(c).some(entry => entry.value.toLowerCase().includes(searchTerm) || (searchPhoneDigits && entry.key.includes(searchPhoneDigits)))) ||
-      String(c.platform || '').toLowerCase().includes(searchTerm)
+    filtered = filtered.filter(c =>
+      foldSearchText(c.name).includes(searchTerm) ||
+      (canViewContacts && getCustomerPhoneEntries(c).some(entry => foldSearchText(entry.value).includes(searchTerm) || (searchPhoneDigits && entry.key.includes(searchPhoneDigits)))) ||
+      foldSearchText(c.platform).includes(searchTerm)
     );
   }
   
@@ -20168,7 +20568,9 @@ function getFilteredCustomers() {
     financialFilter === 'hasDebt' ||
     !(effectiveSort === 'newest' || effectiveSort === 'oldest')
   );
-  const statsIndex = needsStats ? buildCustomerStatsIndex() : null;
+  // renderCustomersView passes its own index so the whole customers render
+  // pass builds it exactly ONCE (header stats + filter + sort + cards).
+  const statsIndex = needsStats ? (sharedStatsIndex || buildCustomerStatsIndex()) : sharedStatsIndex;
 
   // Apply financial filter
   if (financialFilter === 'hasCredit') {
@@ -20685,8 +21087,11 @@ function exportUserPermissions(userId) {
   };
   
   const json = JSON.stringify(exportData, null, 2);
-  downloadFile(json, `permissions-${user.name.toLowerCase().replace(/\s+/g, '-')}-${new Date().toISOString().split('T')[0]}.json`, 'application/json');
-  
+  // downloadFile returns false (with its own warning) inside FB/IG in-app
+  // browsers where blob downloads silently fail — no false success toast.
+  const downloaded = downloadFile(json, `permissions-${user.name.toLowerCase().replace(/\s+/g, '-')}-${new Date().toISOString().split('T')[0]}.json`, 'application/json');
+  if (downloaded === false) return;
+
   showNotification(state.language === 'ar' ? 'تم التصدير' : 'Exported', state.language === 'ar' ? `تم تصدير صلاحيات ${user.name}` : `Permissions exported for ${user.name}`, 'success');
 }
 
@@ -21083,6 +21488,21 @@ function openDeliveryReceiptWhatsAppShare(receiptId) {
   document.body.appendChild(link);
   link.click();
   link.remove();
+  // FB/IG/Messenger in-app browsers drop script-initiated _blank navigations
+  // inconsistently (and iOS never auto-launches an app from a JS navigation).
+  // The attempt above is harmless when the shell honors it — but do NOT tear
+  // down the dialog (it holds the working Copy fallback) and do NOT claim
+  // WhatsApp opened. Keep the preview open and tell the user the way out.
+  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+    showNotification(
+      isAr ? 'إن لم يفتح واتساب' : 'If WhatsApp did not open',
+      isAr
+        ? 'داخل متصفح فيسبوك/إنستغرام قد لا يعمل فتح واتساب — انسخ النص من المعاينة، أو افتح هذه الصفحة في متصفحك الحقيقي.'
+        : 'Inside the Facebook/Instagram browser the handoff may not work — copy the text from the preview, or open this page in your real browser.',
+      'warning'
+    );
+    return;
+  }
   closeDeliveryWhatsAppPrompt(false);
   showNotification(
     isAr ? 'تم فتح واتساب' : 'WhatsApp opened',
@@ -21219,9 +21639,27 @@ function readFileAsDataUrl(file) {
 }
 
 async function compressImageToDataUrl(file) {
-  const originalDataUrl = await readFileAsDataUrl(file);
+  let originalDataUrl = await readFileAsDataUrl(file);
   try {
-    const type = String(file.type || '').toLowerCase();
+    let type = String(file.type || '').toLowerCase();
+    // Android SAF/content-provider pickers (third-party file managers, Drive
+    // routes, FB/IG WebView choosers) hand over real JPEGs with a BLANK or
+    // generic MIME type; readAsDataURL then emits data:application/octet-stream
+    // and isSafeReceiptPhotoSource rejects a perfectly decodable photo as
+    // "unsupported". Sniff the base64 magic bytes and rewrite the prefix so
+    // EVERY exit path below (GIF keep-original, small-file keep-original,
+    // larger-output keep-original, catch fallback) emits a proper
+    // data:image/... URL. Genuinely non-image files sniff to nothing and are
+    // rejected exactly as before.
+    if (!type || type === 'application/octet-stream') {
+      const b64 = originalDataUrl.slice(originalDataUrl.indexOf(',') + 1);
+      if (b64.startsWith('/9j/')) type = 'image/jpeg';
+      else if (b64.startsWith('iVBOR')) type = 'image/png';
+      else if (b64.startsWith('R0lGOD')) type = 'image/gif';
+      else if (b64.startsWith('UklGR')) type = 'image/webp';
+      else type = '';
+      if (type) originalDataUrl = 'data:' + type + ';base64,' + b64;
+    }
     if (!/^image\//.test(type)) return originalDataUrl;
     // Animated GIFs cannot survive a canvas re-encode (only the first frame
     // would remain) — always keep them untouched.
@@ -21272,6 +21710,17 @@ function isSafeReceiptPhotoSource(value) {
   // angle brackets and backticks are forbidden so the value is attribute-safe.
   if (/^https:\/\/[^\s"'<>`]+$/i.test(source)) return true;
   return /^(?:\/|\.\/|\.\.\/)[^\s"'<>`]+$/.test(source);
+}
+
+// Distinguish "valid image, just bigger than the 8M-char cap above" from a
+// truly unsupported format, so an oversized JPG gets the "too large" message
+// instead of being told it is not a JPG. Prefix-only regex: never run a
+// full-string pattern over an 8M+ character value. Keep the size threshold
+// aligned with isSafeReceiptPhotoSource.
+function isOversizedReceiptPhotoSource(value) {
+  const source = String(value || '').trim();
+  return source.length > 8 * 1024 * 1024
+    && /^data:image\/(?:png|jpe?g|gif|webp);base64,/i.test(source);
 }
 
 function getReceiptPhotoSources(receipt) {
@@ -21514,6 +21963,12 @@ function handleDeliveryReceiptPhotoUpload(fileList) {
   if (!file) return;
   compressImageToDataUrl(file).then((dataUrl) => {
     if (!isSafeReceiptPhotoSource(dataUrl)) {
+      // A valid image over the cap must say "too large", not "unsupported" —
+      // telling a driver their JPG is not a JPG misdirects the retry.
+      if (isOversizedReceiptPhotoSource(dataUrl)) {
+        _showPhotoPayloadLimit();
+        return;
+      }
       showNotification(
         state.language === 'ar' ? 'صيغة صورة غير مدعومة' : 'Unsupported photo',
         state.language === 'ar' ? 'استخدم صورة PNG أو JPG أو WEBP أو GIF.' : 'Use a PNG, JPG, WEBP, or GIF image.',
@@ -21528,7 +21983,114 @@ function handleDeliveryReceiptPhotoUpload(fileList) {
     document.getElementById('delivery-receipt-image-button')?.classList.remove('hidden');
     document.getElementById('delivery-receipt-image-empty')?.classList.add('hidden');
     updateReceiptDeliveryCompletionComputed();
-  }).catch(() => {});
+  }).catch((err) => {
+    // compressImageToDataUrl only rejects when the FileReader itself fails
+    // (iCloud photo that cannot download, expired Android picker document,
+    // WebView memory pressure). The proof photo is REQUIRED, so silence here
+    // left the driver staring at a disabled submit with no explanation.
+    try { console.warn('[deliveryPhoto] Could not read the picked photo:', err?.message || err); } catch (_) {}
+    showNotification(
+      state.language === 'ar' ? 'خطأ' : 'Error',
+      state.language === 'ar' ? 'تعذر قراءة الصورة — حاول مرة أخرى أو اختر صورة أخرى.' : 'Could not read the photo — try again or pick a different photo.',
+      'error'
+    );
+  });
+}
+
+// ---- Delivery completion draft (survives Android camera round-trips) -------------
+// Tapping the photo input launches the camera activity; on low-RAM phones and
+// inside Facebook/Instagram in-app WebViews the OS routinely kills the browser
+// process while the camera is foreground, cold-reloading the SPA and destroying
+// the transient completion modal. Persist a draft of the typed fields (and the
+// already-delivered photo) so reopening the modal restores the driver's work.
+// localStorage, NOT sessionStorage: in-app WebView sessionStorage is process
+// memory and dies with exactly the kill being defended against.
+const _DELIVERY_DRAFT_PREFIX = 'albayan_delivery_draft_';
+const _DELIVERY_DRAFT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+let _deliveryDraftSaveTimer = null;
+
+function _deliveryDraftKey(receiptId) {
+  return _DELIVERY_DRAFT_PREFIX + String(receiptId || '');
+}
+
+function _saveDeliveryCompletionDraftNow() {
+  const modal = document.getElementById('delivery-complete-modal');
+  if (!modal) return;
+  const rid = String(modal.dataset.receiptId || '');
+  if (!rid) return;
+  const rowsEl = document.getElementById('delivery-collected-payments');
+  const collected = rowsEl
+    ? Array.from(rowsEl.querySelectorAll('.payment-split-item')).map(item => ({
+        method: item.querySelector('.payment-method')?.value || '',
+        amount: item.querySelector('.payment-amount')?.value || '',
+        rate1: item.querySelector('.payment-rate1')?.value || '',
+        rate2: item.querySelector('.payment-rate2')?.value || ''
+      }))
+    : [];
+  const draft = {
+    // Tie the draft to the exact server copy it was typed against (mirrors the
+    // _deliveryCompletionOpen conflict baseline) so a concurrent admin edit
+    // invalidates it instead of silently resurfacing stale numbers.
+    lastMod: (_deliveryCompletionOpen && _deliveryCompletionOpen.id === rid) ? (_deliveryCompletionOpen.lastMod || 0) : 0,
+    savedAt: Date.now(),
+    finalNo: String(document.getElementById('delivery-final-receipt-no')?.value || ''),
+    collected,
+    feeMethod: document.getElementById('delivery-fee-method')?.value || '',
+    feeAmount: String(document.getElementById('delivery-fee-amount')?.value || ''),
+    feePaidBy: _readDeliveryFeePaidBy(),
+    notes: String(document.getElementById('delivery-driver-notes')?.value || ''),
+    photo: String(document.getElementById('delivery-receipt-image-data')?.dataset?.imageData || '')
+  };
+  const key = _deliveryDraftKey(rid);
+  try {
+    localStorage.setItem(key, JSON.stringify(draft));
+  } catch (_) {
+    // Quota exceeded (compressed data URLs can be 300KB+): retry once without
+    // the photo so at least every typed field survives the round-trip.
+    try {
+      draft.photo = '';
+      localStorage.setItem(key, JSON.stringify(draft));
+    } catch (_) {}
+  }
+}
+
+function _readDeliveryCompletionDraft(receipt) {
+  try {
+    const raw = localStorage.getItem(_deliveryDraftKey(String(receipt?.id || '')));
+    if (!raw) return null;
+    const draft = JSON.parse(raw);
+    if (!draft || typeof draft !== 'object' || Array.isArray(draft)) return null;
+    if ((Number(draft.lastMod) || 0) !== (receipt?._lastModified || 0)) return null;
+    const savedAt = Number(draft.savedAt) || 0;
+    if (!savedAt || (Date.now() - savedAt) > _DELIVERY_DRAFT_MAX_AGE_MS) return null;
+    return draft;
+  } catch (_) {
+    return null;
+  }
+}
+
+function _clearDeliveryCompletionDraft(receiptId) {
+  try { localStorage.removeItem(_deliveryDraftKey(String(receiptId || ''))); } catch (_) {}
+}
+
+// Abandoned drafts (delivery completed on another device, receipt reassigned…)
+// must not pile up in localStorage forever — sweep anything past the 24h gate.
+function _pruneDeliveryCompletionDrafts() {
+  try {
+    const doomed = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key || key.indexOf(_DELIVERY_DRAFT_PREFIX) !== 0) continue;
+      let stale = true;
+      try {
+        const draft = JSON.parse(localStorage.getItem(key) || '');
+        const savedAt = Number(draft?.savedAt) || 0;
+        stale = !savedAt || (Date.now() - savedAt) > _DELIVERY_DRAFT_MAX_AGE_MS;
+      } catch (_) {}
+      if (stale) doomed.push(key);
+    }
+    doomed.forEach(key => localStorage.removeItem(key));
+  } catch (_) {}
 }
 
 function updateReceiptDeliveryCompletionComputed() {
@@ -21541,7 +22103,9 @@ function updateReceiptDeliveryCompletionComputed() {
   const debt = getReceiptCollectionTarget(receipt).amountLocal;
   const quoted = Number(receipt.quotedDeliveryFee ?? 0) || 0;
 
-  const finalNo = String(document.getElementById('delivery-final-receipt-no')?.value || '').trim();
+  // Normalize Arabic-Indic digits at the READ site too (not only oninput) so
+  // pastes/autofill that bypass the input handler still validate as ASCII.
+  const finalNo = normalizeDigitsAscii(document.getElementById('delivery-final-receipt-no')?.value || '').trim();
   // Collected money is split-payment rows (same math as a receipt): R1 = LYD total.
   // The fee is a plain LYD amount — no rates, never part of the USD math.
   const collectedTotals = getPaymentTotalsFromDom(document.getElementById('delivery-collected-payments'));
@@ -21602,6 +22166,14 @@ function updateReceiptDeliveryCompletionComputed() {
 
   // Keep notes (no-op, but avoids unused var warnings in some linters)
   void notes;
+
+  // Every input/change handler in the modal funnels through this function, so
+  // it is the single (debounced) write point for the crash-recovery draft.
+  if (_deliveryDraftSaveTimer) clearTimeout(_deliveryDraftSaveTimer);
+  _deliveryDraftSaveTimer = setTimeout(() => {
+    _deliveryDraftSaveTimer = null;
+    _saveDeliveryCompletionDraftNow();
+  }, 500);
 }
 
 // Snapshot of {id, lastMod} captured when the delivery-completion modal opens,
@@ -21657,7 +22229,7 @@ function _deliveryPaymentRowHtml(payment, opts = {}) {
           <input type="text" inputmode="decimal" class="payment-rate2 w-full glass-input px-2 py-1 rounded text-xs text-center" value="${Security.escapeHtml(String(rate2))}" placeholder="0" oninput="sanitizeMoneyInput(this, 4); updateReceiptDeliveryCompletionComputed()" />
         </div>
       </div>
-      ${opts.removable ? `<button type="button" onclick="removeDeliveryPaymentRow(this)" class="mt-2 text-[11px] font-bold text-rose-600">${isAr ? '× حذف' : '× Remove'}</button>` : ''}
+      ${opts.removable ? `<button type="button" onclick="removeDeliveryPaymentRow(this)" class="mt-2 text-[11px] font-bold text-rose-600 dark:text-rose-400">${isAr ? '× حذف' : '× Remove'}</button>` : ''}
     </div>`;
 }
 
@@ -21784,9 +22356,9 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
   const debt = getReceiptCollectionTarget(receipt).amountLocal;
   const quoted = Number(receipt.quotedDeliveryFee ?? 0) || 0;
   const tempNo = String(receipt.tempReceiptNo || '').trim();
-  const finalNo = String(receipt.finalReceiptNo || receipt.serialNumber || '').trim();
+  let finalNo = String(receipt.finalReceiptNo || receipt.serialNumber || '').trim();
   const place = String(receipt.deliveryPlaceName || '').trim();
-  const deliveryReceiptPhoto = getDeliveryReceiptPhotoSource(receipt);
+  let deliveryReceiptPhoto = getDeliveryReceiptPhotoSource(receipt);
 
   // Initial rows. Re-completing an already-delivered receipt reloads its stored payment
   // rows; a fresh completion seeds one Cash (LYD) row for the collected amount (empty, so
@@ -21794,17 +22366,42 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
   // the quoted fee). Cash (LYD) => Rate1 1, Rate2 the default exchange rate.
   const _dRate = Number(state.defaultExchangeRate) || 0;
   const _cashLyd = PAYMENT_METHODS.includes('Cash (LYD)') ? 'Cash (LYD)' : PAYMENT_METHODS[0];
-  const _storedCollected = Array.isArray(receipt.payments) && receipt.payments.length
+  let _storedCollected = Array.isArray(receipt.payments) && receipt.payments.length
     ? receipt.payments.map(p => ({ method: p.method, amount: p.amount, rate1: p.rate, rate2: p.rate2 }))
     : [{ method: _cashLyd, amount: (receipt.amountCollectedFromCustomer ?? ''), rate1: 1, rate2: _dRate }];
-  const collectedRowsHtml = _storedCollected
-    .map((p, i) => _deliveryPaymentRowHtml(p, { removable: i > 0 })).join('');
   // Fee prefill: stored rows first (old rate-based rows normalize to LYD via
   // _deliveryFeeStoredLyd), then the stored fee amount, then the quoted fee.
   const _storedFeeLyd = _deliveryFeeStoredLyd(receipt);
-  const feeAmountValue = (_storedFeeLyd === null) ? (quoted || '') : _storedFeeLyd;
-  const feeMethod = (Array.isArray(receipt.deliveryFeePayments) && receipt.deliveryFeePayments[0]?.method) || _cashLyd;
-  const feePaidBy = receipt.deliveryFeePaidBy === 'shop' ? 'shop' : 'customer';
+  let feeAmountValue = (_storedFeeLyd === null) ? (quoted || '') : _storedFeeLyd;
+  let feeMethod = (Array.isArray(receipt.deliveryFeePayments) && receipt.deliveryFeePayments[0]?.method) || _cashLyd;
+  let feePaidBy = receipt.deliveryFeePaidBy === 'shop' ? 'shop' : 'customer';
+  let notesSeed = String(receipt.driverNotes || '');
+
+  // Rehydrate a crash-recovery draft (Android camera round-trips can kill the
+  // tab — see _saveDeliveryCompletionDraftNow). Only a draft written against
+  // this exact server copy (same _lastModified) and younger than 24h is used;
+  // the draft's photo is re-validated before it can reach the DOM.
+  _pruneDeliveryCompletionDrafts();
+  const _draft = _readDeliveryCompletionDraft(receipt);
+  if (_draft) {
+    if (typeof _draft.finalNo === 'string') finalNo = _draft.finalNo.trim();
+    if (Array.isArray(_draft.collected) && _draft.collected.length) {
+      _storedCollected = _draft.collected.map(p => ({
+        method: (p && typeof p.method === 'string' && p.method) ? p.method : _cashLyd,
+        amount: (p && p.amount !== undefined && p.amount !== null) ? p.amount : '',
+        rate1: (p && p.rate1 !== undefined && p.rate1 !== null) ? p.rate1 : '',
+        rate2: (p && p.rate2 !== undefined && p.rate2 !== null) ? p.rate2 : ''
+      }));
+    }
+    if (typeof _draft.feeMethod === 'string' && _draft.feeMethod) feeMethod = _draft.feeMethod;
+    if (typeof _draft.feeAmount === 'string' || typeof _draft.feeAmount === 'number') feeAmountValue = _draft.feeAmount;
+    if (_draft.feePaidBy === 'shop' || _draft.feePaidBy === 'customer') feePaidBy = _draft.feePaidBy;
+    if (typeof _draft.notes === 'string') notesSeed = _draft.notes;
+    const _draftPhoto = String(_draft.photo || '').trim();
+    if (_draftPhoto && isSafeReceiptPhotoSource(_draftPhoto)) deliveryReceiptPhoto = _draftPhoto;
+  }
+  const collectedRowsHtml = _storedCollected
+    .map((p, i) => _deliveryPaymentRowHtml(p, { removable: i > 0 })).join('');
 
   // Remove any existing modal
   document.getElementById('delivery-complete-modal')?.remove();
@@ -21813,7 +22410,10 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
   modal.id = 'delivery-complete-modal';
   modal.dataset.receiptId = String(receipt.id);
   modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
-  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+  // NO backdrop-dismiss here. On phones the overlay is the scroll surface, and
+  // the habitual "tap outside the input to dismiss the keyboard" gesture lands
+  // on the backdrop — one stray tap must never destroy a mid-delivery form
+  // (typed data + proof photo). Close paths: the header X and Android Back.
 
   modal.innerHTML = `
     <div class="glass-panel rounded-2xl p-6 w-full max-w-lg animate-slide-up" onclick="event.stopPropagation()">
@@ -21837,14 +22437,14 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
           <div class="text-xs text-slate-500 mb-1">${isArD ? 'الوصل' : 'Receipt'}</div>
           <div class="font-bold text-indigo-600">${Security.escapeHtml(tempNo || 'D?')}${finalNo ? ` → ${Security.escapeHtml(finalNo)}` : ''}</div>
           ${place ? `<div class="text-xs text-slate-600 dark:text-slate-300 mt-1"><span class="font-bold">📍</span> ${Security.escapeHtml(place)}</div>` : ''}
-          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(0)} LYD</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span class="font-bold text-emerald-600">${quoted.toFixed(0)} LYD</span></div>
+          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(0)} LYD</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span class="font-bold text-emerald-600 dark:text-emerald-400">${quoted.toFixed(0)} LYD</span></div>
           ${phone ? `<div class="text-xs text-slate-500 mt-1">${isArD ? 'الهاتف' : 'Phone'}: <span class="font-bold text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone)}</span></div>` : ''}
         </div>
 
         <div>
           <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'رقم الوصل النهائي *' : 'Final receipt number *'}</label>
-          <input id="delivery-final-receipt-no" type="text" inputmode="numeric" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isArD ? 'مثال: 45873' : 'e.g., 45873'}" value="${Security.escapeHtml(finalNo)}" oninput="this.value=this.value.replace(/[^0-9]/g,''); updateReceiptDeliveryCompletionComputed()" />
-          <div id="delivery-final-receipt-error" class="mt-1 text-[11px] text-rose-600"></div>
+          <input id="delivery-final-receipt-no" type="text" inputmode="numeric" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isArD ? 'مثال: 45873' : 'e.g., 45873'}" value="${Security.escapeHtml(finalNo)}" oninput="this.value=normalizeDigitsAscii(this.value).replace(/[^0-9]/g,''); updateReceiptDeliveryCompletionComputed()" />
+          <div id="delivery-final-receipt-error" class="mt-1 text-[11px] text-rose-600 dark:text-rose-400"></div>
         </div>
 
         <div>
@@ -21868,11 +22468,11 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
             <div class="mt-2">
               <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">${isArD ? 'من دفع قيمة التوصيل؟' : 'Delivery paid by'}</div>
               <div class="grid grid-cols-2 gap-2" role="radiogroup" aria-label="${isArD ? 'من دفع قيمة التوصيل' : 'Delivery paid by'}">
-                <label class="flex items-center gap-1.5 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-700 dark:text-slate-200 cursor-pointer">
+                <label class="flex items-center gap-1.5 min-h-11 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-700 dark:text-slate-200 cursor-pointer">
                   <input type="radio" name="delivery-fee-paid-by" value="customer" ${feePaidBy === 'shop' ? '' : 'checked'} onchange="updateReceiptDeliveryCompletionComputed()" />
                   <span>${isArD ? 'دفعها العميل' : 'Customer paid'}</span>
                 </label>
-                <label class="flex items-center gap-1.5 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-bold text-rose-600 cursor-pointer">
+                <label class="flex items-center gap-1.5 min-h-11 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-bold text-rose-600 cursor-pointer">
                   <input type="radio" name="delivery-fee-paid-by" value="shop" ${feePaidBy === 'shop' ? 'checked' : ''} onchange="updateReceiptDeliveryCompletionComputed()" />
                   <span>${isArD ? 'يتحملها المحل (خسارة)' : 'Shop paid (loss)'}</span>
                 </label>
@@ -21886,7 +22486,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
             <div class="text-xs font-bold text-slate-600 dark:text-slate-400">${isArD ? 'صورة الوصل *' : 'Receipt photo *'}</div>
             <label class="text-xs font-bold text-indigo-600 hover:text-indigo-700 cursor-pointer">
               ${isArD ? 'رفع صورة' : 'Upload'}
-              <input type="file" accept="image/*" class="hidden" onchange="handleDeliveryReceiptPhotoUpload(this.files)" />
+              <input type="file" accept="image/*" class="hidden" onchange="handleDeliveryReceiptPhotoUpload(this.files); this.value=''" />
             </label>
           </div>
           <input type="hidden" id="delivery-receipt-image-data" data-image-data="${Security.escapeHtml(deliveryReceiptPhoto)}" />
@@ -21901,7 +22501,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
 
         <div>
           <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'ملاحظات السائق (اختياري)' : 'Driver notes (optional)'}</label>
-          <textarea id="delivery-driver-notes" rows="2" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isArD ? 'ملاحظات...' : 'Notes...'}" oninput="updateReceiptDeliveryCompletionComputed()">${Security.escapeHtml(String(receipt.driverNotes || ''))}</textarea>
+          <textarea id="delivery-driver-notes" rows="2" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="${isArD ? 'ملاحظات...' : 'Notes...'}" oninput="updateReceiptDeliveryCompletionComputed()">${Security.escapeHtml(notesSeed)}</textarea>
         </div>
 
         <div class="grid grid-cols-2 gap-3 text-xs">
@@ -21973,6 +22573,30 @@ async function refreshAdsAfterReceiptPaidCascade(receipt) {
   return refreshAdsAfterReceiptServerCascade(receipt, { allowPaidLocalFallback: true });
 }
 
+// Map raw engine failures ('Load failed' on Safari, 'Failed to fetch' on
+// Chromium, AbortError timeouts) to a bilingual, actionable message. Returns
+// null when the server WAS reached (e.status set) or the error does not look
+// like a connectivity failure — callers then keep their real HTTP detail.
+// Callers should log the raw e.message to the console for diagnostics.
+function describeNetworkError(e) {
+  if (e?.status) return null; // server WAS reached — keep the real HTTP detail
+  const name = String(e?.name || '');
+  const msg = String(e?.message || '');
+  const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  const looksNetwork = offline
+    || name === 'AbortError'
+    || (name === 'TypeError' && /failed to fetch|load failed|network|cancelled/i.test(msg));
+  if (!looksNetwork) return null;
+  if (offline) {
+    return state.language === 'ar'
+      ? 'لا يوجد اتصال بالإنترنت — لم يتم الحفظ ولم يُفقد ما أدخلته. أعد الاتصال ثم حاول مرة أخرى.'
+      : 'You are offline — nothing was saved and nothing you entered was lost. Reconnect and try again.';
+  }
+  return state.language === 'ar'
+    ? 'تعذر الوصول إلى الخادم — لم يتم الحفظ ولم يُفقد ما أدخلته. تحقق من الإشارة ثم أعد المحاولة.'
+    : 'Could not reach the server — nothing was saved and nothing you entered was lost. Check your signal and try again.';
+}
+
 async function submitReceiptDeliveryCompletion(receiptId) {
   const receipt = _findReceiptForDeliveryModal(receiptId);
   if (!receipt) {
@@ -21980,7 +22604,9 @@ async function submitReceiptDeliveryCompletion(receiptId) {
     return;
   }
 
-  const finalNo = String(document.getElementById('delivery-final-receipt-no')?.value || '').trim();
+  // Normalize Arabic-Indic digits at the save-time read too so the /^\d+$/
+  // validation below and the stored value are always ASCII-consistent.
+  const finalNo = normalizeDigitsAscii(document.getElementById('delivery-final-receipt-no')?.value || '').trim();
   // Collected money is split-payment rows (same math as a receipt): R1 = LYD, R2 = USD.
   // The fee is a plain LYD amount + method + payer. Only the COLLECTED rows feed
   // the USD (ads credit) math — the fee never converts to USD.
@@ -22115,17 +22741,40 @@ async function submitReceiptDeliveryCompletion(receiptId) {
       const idx = state.receipts.findIndex(r => r && !r._deleted && String(r.id) === String(receipt.id));
       if (idx !== -1) state.receipts[idx] = saved;
       markCollectionDirty('receipts');
-      const adRefresh = await refreshAdsAfterReceiptPaidCascade(saved);
+      // Close the form and paint success IMMEDIATELY. The old code awaited a
+      // full (driver-scoped) ads re-download here, freezing a dead "Mark
+      // Delivered" button for seconds on field networks. The exact local
+      // reclassification plan — the same one the offline fallback uses —
+      // keeps the linked ads visually consistent until the authoritative
+      // background refresh lands.
+      const paidNow = typeof getReceiptPaymentState === 'function'
+        ? getReceiptPaymentState(saved) === 'paid'
+        : (saved.isPaid === true || String(saved.status || '') === 'Paid');
+      if (paidNow) {
+        try { applyLocalReceiptPaidAdUpdates(planLocalReceiptPaidAdUpdates(String(saved.id), saved)); } catch (_) {}
+      }
       saveState();
+      _clearDeliveryCompletionDraft(receipt.id);
       document.getElementById('delivery-complete-modal')?.remove();
       forceFullRender();
       showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم إكمال التوصيل وحفظه' : 'Delivery completed and saved', 'success');
-      if (!adRefresh.consistent) {
-        showNotification(
-          state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
-          state.language === 'ar' ? 'تم حفظ التوصيل، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Delivery was saved. Linked ads will refresh automatically when the connection returns.',
-          'warning'
-        );
+      if (paidNow) {
+        // Authoritative ads refresh WITHOUT awaiting (allowPaidLocalFallback
+        // stays false — the exact local plan above was already applied, so a
+        // failed refresh must not re-apply it). apiLoadCollectionAll's own
+        // session-identity guard prevents a post-logout state.ads stomp.
+        refreshAdsAfterReceiptServerCascade(saved).then((adRefresh) => {
+          if (adRefresh && adRefresh.consistent) {
+            saveState();
+            RenderQueue.schedule('deliveryAdsCascade');
+          } else {
+            showNotification(
+              state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
+              state.language === 'ar' ? 'تم حفظ التوصيل، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Delivery was saved. Linked ads will refresh automatically when the connection returns.',
+              'warning'
+            );
+          }
+        }).catch(() => {});
       }
     } catch (e) {
       // Idempotency / retries: if we hit a conflict, load latest and succeed if already delivered.
@@ -22137,18 +22786,66 @@ async function submitReceiptDeliveryCompletion(receiptId) {
             const idx = state.receipts.findIndex(r => r && !r._deleted && String(r.id) === String(receipt.id));
             if (idx !== -1) state.receipts[idx] = latestData;
             markCollectionDirty('receipts');
-            const adRefresh = await refreshAdsAfterReceiptPaidCascade(latestData);
+            const paidAfterRetry = typeof getReceiptPaymentState === 'function'
+              ? getReceiptPaymentState(latestData) === 'paid'
+              : (latestData.isPaid === true || String(latestData.status || '') === 'Paid');
+            if (paidAfterRetry) {
+              try { applyLocalReceiptPaidAdUpdates(planLocalReceiptPaidAdUpdates(String(latestData.id), latestData)); } catch (_) {}
+            }
             saveState();
+            _clearDeliveryCompletionDraft(receipt.id);
             document.getElementById('delivery-complete-modal')?.remove();
             forceFullRender();
             showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم إكمال التوصيل وحفظه' : 'Delivery completed and saved', 'success');
-            if (!adRefresh.consistent) {
-              showNotification(
-                state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
-                state.language === 'ar' ? 'تم حفظ التوصيل، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Delivery was saved. Linked ads will refresh automatically when the connection returns.',
-                'warning'
-              );
+            if (paidAfterRetry) {
+              refreshAdsAfterReceiptServerCascade(latestData).then((adRefresh) => {
+                if (adRefresh && adRefresh.consistent) {
+                  saveState();
+                  RenderQueue.schedule('deliveryAdsCascade');
+                } else {
+                  showNotification(
+                    state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
+                    state.language === 'ar' ? 'تم حفظ التوصيل، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Delivery was saved. Linked ads will refresh automatically when the connection returns.',
+                    'warning'
+                  );
+                }
+              }).catch(() => {});
             }
+            return;
+          }
+          if (latestData && latestData.id) {
+            // GENUINE concurrent edit (admin changed the receipt while the
+            // form was open). Without a rebase every retry re-sends the same
+            // stale baseline and 409s forever; the only old escape was
+            // close+reopen, which destroyed the typed data and the photo.
+            // Install the fresh copy, rebase the conflict baseline, keep the
+            // driver's DOM inputs untouched, and let the next tap succeed.
+            const idxLive = state.receipts.findIndex(r => r && !r._deleted && String(r.id) === String(receipt.id));
+            if (idxLive !== -1) state.receipts[idxLive] = latestData;
+            markCollectionDirty('receipts');
+            saveState();
+            if (String(latestData.deliveryStatus || '') === 'Canceled') {
+              // Re-delivering a canceled receipt must not be one tap away.
+              _clearDeliveryCompletionDraft(receipt.id);
+              document.getElementById('delivery-complete-modal')?.remove();
+              forceFullRender();
+              showNotification(
+                state.language === 'ar' ? 'غير مسموح' : 'Not Allowed',
+                state.language === 'ar' ? 'تم إلغاء هذا التوصيل من الإدارة.' : 'This delivery was canceled by an admin.',
+                'error'
+              );
+              return;
+            }
+            if (_deliveryCompletionOpen && _deliveryCompletionOpen.id === String(receipt.id)) {
+              _deliveryCompletionOpen.lastMod = latestData._lastModified || 0;
+            }
+            updateReceiptDeliveryCompletionComputed();
+            showNotification(
+              state.language === 'ar' ? 'تغيّر الوصل' : 'Receipt changed',
+              state.language === 'ar' ? 'تغيّر الوصل أثناء فتح النافذة — راجع البيانات ثم اضغط "تم التوصيل" مرة أخرى.' : 'The receipt changed while this form was open — review the figures and tap Mark Delivered again.',
+              'warning'
+            );
+            if (btn) btn.disabled = false;
             return;
           }
         } catch (retryErr) {
@@ -22156,15 +22853,25 @@ async function submitReceiptDeliveryCompletion(receiptId) {
           if (ALBAYAN_DEBUG_MODE) console.warn('[handleDeliveryComplete] Retry fetch failed:', retryErr?.message || retryErr);
         }
       }
-      const status = e?.status ? `HTTP ${e.status}` : '';
-      const detail = (e?.payload && typeof e.payload === 'object' && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
-      showNotification(state.language === 'ar' ? 'خطأ في الخادم' : 'Server Error', (state.language === 'ar' ? 'فشل حفظ التوصيل: ' : 'Failed to save delivery: ') + `${status ? status + ' - ' : ''}${detail}`, 'error');
+      const netMessage = describeNetworkError(e);
+      if (netMessage) {
+        // Keep the raw engine string ('Load failed', 'Failed to fetch'…) in
+        // the console; the toast must be bilingual and actionable for the
+        // Arabic-first drivers this flow targets.
+        try { console.warn('[deliveryCompletion] Network failure:', e?.message || e); } catch (_) {}
+        showNotification(state.language === 'ar' ? 'مشكلة في الاتصال' : 'Connection problem', netMessage, 'error');
+      } else {
+        const status = e?.status ? `HTTP ${e.status}` : '';
+        const detail = (e?.payload && typeof e.payload === 'object' && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
+        showNotification(state.language === 'ar' ? 'خطأ في الخادم' : 'Server Error', (state.language === 'ar' ? 'فشل حفظ التوصيل: ' : 'Failed to save delivery: ') + `${status ? status + ' - ' : ''}${detail}`, 'error');
+      }
       if (btn) btn.disabled = false;
       return;
     }
   } else {
     const saved = await updateRecord(state.receipts, receipt.id, updates);
     if (!saved) return;
+    _clearDeliveryCompletionDraft(receipt.id);
     document.getElementById('delivery-complete-modal')?.remove();
     showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم إكمال التوصيل وحفظه' : 'Delivery completed and saved', 'success');
     render();
@@ -22195,7 +22902,14 @@ function openReceiptDeliveryCancelModal(receiptId) {
   const modal = document.createElement('div');
   modal.id = 'delivery-cancel-modal';
   modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
-  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+  // Backdrop taps are how phone users dismiss the keyboard — never let one
+  // silently destroy a typed cancel reason. Empty form still closes instantly.
+  modal.onclick = (e) => {
+    if (e.target !== modal) return;
+    const typedReason = String(document.getElementById('delivery-cancel-reason')?.value || '');
+    if (typedReason.trim() && !confirm(state.language === 'ar' ? 'تجاهل السبب المكتوب؟' : 'Discard the typed reason?')) return;
+    modal.remove();
+  };
   modal.innerHTML = `
     <div class="glass-panel rounded-2xl p-6 w-full max-w-md animate-slide-up" onclick="event.stopPropagation()">
       <div class="flex items-center justify-between mb-4">
@@ -22234,81 +22948,131 @@ function openReceiptDeliveryCancelModal(receiptId) {
 async function submitReceiptDeliveryCancel(receiptId) {
   const receipt = _findReceiptForDeliveryModal(receiptId);
   if (!receipt) return;
-  const reason = String(document.getElementById('delivery-cancel-reason')?.value || '').trim();
-  if (!reason) {
-    showNotification(state.language === 'ar' ? 'خطأ في الإدخال' : 'Validation', state.language === 'ar' ? 'سبب الإلغاء مطلوب.' : 'Cancel reason is required.', 'error');
-    return;
-  }
-  const nextHistory = Array.isArray(receipt.deliveryHistory) ? [...receipt.deliveryHistory] : [];
-  nextHistory.push({
-    ts: new Date().toISOString(),
-    userId: state.currentUser?.id || '',
-    action: 'CANCELLED_BY_DRIVER',
-    reason
-  });
-  const canceledOk = await updateRecord(state.receipts, receipt.id, {
-    deliveryStatus: 'Canceled',
-    deliveryCancelReason: reason,
-    deliveryCancelledAt: new Date().toISOString(),
-    deliveryCancelledBy: state.currentUser?.id || '',
-    deliveryHistory: nextHistory
-  });
-  if (!canceledOk) return;
-  // The canceled delivery's debt will never be collected — release any ad
-  // funding that was drawn from its due credit.
-  let releasedAds = 0;
-  let adRefresh = { consistent: true };
-  if (isServerModeEnabled()) {
-    const savedReceipt = state.receipts.find(row => row && String(row.id) === String(receipt.id)) || receipt;
-    adRefresh = await refreshAdsAfterReceiptServerCascade(savedReceipt);
-    saveState();
-  } else {
-    try {
-      releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);
-    } catch (_) {
+  // Double-taps are endemic on touch (iOS fires both clicks ~100-300ms apart):
+  // keep one cancel mutation per receipt in flight, same as markAsCollected.
+  const actionKey = String(receipt.id || receiptId || '');
+  if (_deliveryActionInFlight.has(actionKey)) return;
+  _deliveryActionInFlight.add(actionKey);
+  try {
+    const reason = String(document.getElementById('delivery-cancel-reason')?.value || '').trim();
+    if (!reason) {
+      showNotification(state.language === 'ar' ? 'خطأ في الإدخال' : 'Validation', state.language === 'ar' ? 'سبب الإلغاء مطلوب.' : 'Cancel reason is required.', 'error');
       return;
     }
-  }
-  document.getElementById('delivery-cancel-modal')?.remove();
-  document.getElementById('delivery-complete-modal')?.remove();
-  forceFullRender();
-  showNotification(
-    state.language === 'ar' ? 'تم الإلغاء' : 'Canceled',
-    (state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled')
-      + (releasedAds > 0 && !isServerModeEnabled()
-        ? (state.language === 'ar' ? ` — تم تحرير تمويل ${releasedAds} إعلان(ات) كان مأخوذاً من دين هذا التوصيل` : ` — funding of ${releasedAds} ad(s) drawn from this delivery's debt was released`)
-        : ''),
-    releasedAds > 0 && !isServerModeEnabled() ? 'warning' : 'success'
-  );
-  if (!adRefresh.consistent) {
+    const nextHistory = Array.isArray(receipt.deliveryHistory) ? [...receipt.deliveryHistory] : [];
+    nextHistory.push({
+      ts: new Date().toISOString(),
+      userId: state.currentUser?.id || '',
+      action: 'CANCELLED_BY_DRIVER',
+      reason
+    });
+    const canceledOk = await updateRecord(state.receipts, receipt.id, {
+      deliveryStatus: 'Canceled',
+      deliveryCancelReason: reason,
+      deliveryCancelledAt: new Date().toISOString(),
+      deliveryCancelledBy: state.currentUser?.id || '',
+      deliveryHistory: nextHistory
+    });
+    if (!canceledOk) return;
+    // The canceled delivery's debt will never be collected — release any ad
+    // funding that was drawn from its due credit.
+    let releasedAds = 0;
+    if (!isServerModeEnabled()) {
+      try {
+        releasedAds = await releaseCanceledDeliveryDueFunding(receipt.id);
+      } catch (_) {
+        return;
+      }
+    }
+    _clearDeliveryCompletionDraft(receipt.id);
+    // Both stacked surfaces (cancel dialog over the completion form) close in
+    // ONE task, so the body overlay observer (src/01b-mobile-runtime.js) sees
+    // a single 2->0 mutation and consumes only ONE overlay-history sentinel —
+    // stranding the second and turning the driver's next hardware Back press
+    // into a dead no-op + scroll reset. Mirror closeModal's go(-2) teardown:
+    // consume both consecutive sentinel entries in one traversal and flag the
+    // resulting popstate as bookkeeping; the observer's decrease branch is
+    // then skipped via its _overlayHistoryConsumePending() gate.
+    const cancelModalEl = document.getElementById('delivery-cancel-modal');
+    const completeModalEl = document.getElementById('delivery-complete-modal');
+    if (cancelModalEl && completeModalEl
+        && typeof isPhoneBrowserHistoryManaged === 'function' && isPhoneBrowserHistoryManaged()
+        && typeof _overlaySentinelDepth === 'number' && _overlaySentinelDepth >= 2
+        && window.history.state && window.history.state.overlaySentinel
+        && !window.history.state.underAlbayanModal) {
+      _suppressOverlayPopstateUntil = Date.now() + 800;
+      try {
+        window.history.go(-2);
+        _overlaySentinelDepth -= 2;
+      } catch (_) {
+        _suppressOverlayPopstateUntil = 0;
+      }
+    }
+    if (cancelModalEl) cancelModalEl.remove();
+    if (completeModalEl) completeModalEl.remove();
+    render();
     showNotification(
-      state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
-      state.language === 'ar' ? 'تم حفظ الإلغاء، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Cancellation was saved. Linked ads will refresh automatically when the connection returns.',
-      'warning'
+      state.language === 'ar' ? 'تم الإلغاء' : 'Canceled',
+      (state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled')
+        + (releasedAds > 0 && !isServerModeEnabled()
+          ? (state.language === 'ar' ? ` — تم تحرير تمويل ${releasedAds} إعلان(ات) كان مأخوذاً من دين هذا التوصيل` : ` — funding of ${releasedAds} ad(s) drawn from this delivery's debt was released`)
+          : ''),
+      releasedAds > 0 && !isServerModeEnabled() ? 'warning' : 'success'
     );
+    if (isServerModeEnabled()) {
+      // Refresh the linked ads WITHOUT blocking the close: the receipt PATCH
+      // already committed, the cancel UI only reads receipt.deliveryStatus
+      // (updated by the echo above), and ads reconcile seconds later — or via
+      // delta live-sync, exactly what the Sync-pending toast promises.
+      const savedReceipt = state.receipts.find(row => row && String(row.id) === String(receipt.id)) || receipt;
+      saveState();
+      refreshAdsAfterReceiptServerCascade(savedReceipt).then((adRefresh) => {
+        if (adRefresh && adRefresh.consistent) {
+          saveState();
+          RenderQueue.schedule('deliveryAdsCascade');
+        } else {
+          showNotification(
+            state.language === 'ar' ? 'المزامنة معلقة' : 'Sync pending',
+            state.language === 'ar' ? 'تم حفظ الإلغاء، وسيتم تحديث الإعلانات المرتبطة تلقائياً عند عودة الاتصال.' : 'Cancellation was saved. Linked ads will refresh automatically when the connection returns.',
+            'warning'
+          );
+        }
+      }).catch(() => {});
+    }
+  } finally {
+    _deliveryActionInFlight.delete(actionKey);
   }
 }
 
 async function markAsDelivered(itemId) {
-  // Check if it's a receipt or an ad
-  const isReceipt = state.receipts.find(r => r.id === itemId);
-  if (isReceipt) {
-    // Strict flow for temp delivery receipts: require final receipt # + photo + amounts
-    if (isTempDeliveryReceiptNo(isReceipt.tempReceiptNo)) {
-      openReceiptDeliveryCompletionModal(itemId);
-      return;
+  // One delivery mutation per item in flight (double-tap guard, same pattern
+  // as markAsCollected/acceptDelivery).
+  const actionKey = String(itemId || '');
+  if (_deliveryActionInFlight.has(actionKey)) return;
+  _deliveryActionInFlight.add(actionKey);
+  try {
+    // Check if it's a receipt or an ad
+    const isReceipt = state.receipts.find(r => r.id === itemId);
+    if (isReceipt) {
+      // Strict flow for temp delivery receipts: require final receipt # + photo + amounts
+      if (isTempDeliveryReceiptNo(isReceipt.tempReceiptNo)) {
+        openReceiptDeliveryCompletionModal(itemId);
+        return;
+      }
+      // Delivered ≠ Office Handover. Office handover is a separate step (isReceivedInOffice).
+      const savedOk = await updateRecord(state.receipts, itemId, { deliveryStatus: 'Delivered' });
+      if (!savedOk) return;
+    } else {
+      const savedOk = await updateRecord(state.ads, itemId, {
+        deliveryStatus: 'Delivered'
+      });
+      if (!savedOk) return;
     }
-    // Delivered ≠ Office Handover. Office handover is a separate step (isReceivedInOffice).
-    const savedOk = await updateRecord(state.receipts, itemId, { deliveryStatus: 'Delivered' });
-    if (!savedOk) return;
-  } else {
-    const savedOk = await updateRecord(state.ads, itemId, {
-      deliveryStatus: 'Delivered'
-    });
-    if (!savedOk) return;
+    showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم التحديد كمُوصَّل' : 'Marked as delivered', 'success');
+    render();
+  } finally {
+    _deliveryActionInFlight.delete(actionKey);
   }
-  showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم التحديد كمُوصَّل' : 'Marked as delivered', 'success');
-  render();
 }
 
 // ==========================================
@@ -22946,22 +23710,22 @@ function showReceiptEditHistory(receiptId) {
           ${editHistory.slice().reverse().map((edit, idx) => `
             <div class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-4 border border-slate-200 dark:border-slate-700">
               <div class="flex items-center justify-between mb-3">
-                <div class="flex items-center space-x-2">
-                  <span class="text-xs font-bold text-white bg-amber-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
-                  <span class="text-xs text-slate-500">${edit.editedBy || (isArH ? 'غير معروف' : 'Unknown')}</span>
+                <div class="flex min-w-0 items-center gap-2">
+                  <span class="shrink-0 text-xs font-bold text-white bg-amber-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
+                  <span class="truncate text-xs text-slate-500">${Security.escapeHtml(edit.editedBy || (isArH ? 'غير معروف' : 'Unknown'))}</span>
                 </div>
                 <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString(appDateLocale())}</span>
               </div>
-              
+
               <div class="space-y-2">
                 ${edit.changes.map(change => `
                   <div class="flex items-start text-sm bg-white dark:bg-slate-800 rounded-lg p-3 border border-slate-100 dark:border-slate-700">
-                    <div class="flex-1">
-                      <span class="font-medium text-slate-700 dark:text-slate-300">${change.field}</span>
-                      <div class="flex items-center mt-1 space-x-2 text-xs">
-                        <span class="px-2 py-1 bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 rounded line-through">${change.from}</span>
-                        <i data-lucide="arrow-right" class="w-3 h-3 text-slate-400"></i>
-                        <span class="px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded">${change.to}</span>
+                    <div class="min-w-0 flex-1">
+                      <span class="font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(_adEditHistoryText(change.field, 'Field'))}</span>
+                      <div class="flex flex-wrap items-center mt-1 gap-2 text-xs">
+                        <span class="max-w-full break-words px-2 py-1 bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 rounded line-through">${Security.escapeHtml(_adEditHistoryText(change.from))}</span>
+                        <i data-lucide="arrow-right" class="w-3 h-3 shrink-0 text-slate-400"></i>
+                        <span class="max-w-full break-words px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded">${Security.escapeHtml(_adEditHistoryText(change.to))}</span>
                       </div>
                     </div>
                   </div>
@@ -23445,6 +24209,12 @@ async function saveSplitPayments() {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
     return;
   }
+  // Double-tap guard: a second Save while the first PATCH is in flight would
+  // commit an identical duplicate PATCH and show a second "Saved" toast.
+  const actionKey = String(receiptId);
+  if (_deliveryActionInFlight.has(actionKey)) return;
+  _deliveryActionInFlight.add(actionKey);
+  try {
   const paymentItems = document.querySelectorAll('.split-payment-item');
   const payments = [];
 
@@ -23570,6 +24340,9 @@ async function saveSplitPayments() {
   showNotification(state.language === 'ar' ? 'تم الحفظ' : 'Saved', state.language === 'ar' ? 'تم حفظ الدفعات المقسمة بنجاح' : 'Split payments saved successfully', 'success');
   closeModal();
   render();
+  } finally {
+    _deliveryActionInFlight.delete(actionKey);
+  }
 }
 
 // Top-ups management functions
@@ -24132,8 +24905,10 @@ document.addEventListener('click', function(e) {
 function filterReceiptPhones() {
   const searchInput = document.getElementById('receipt-phone-search');
   const dropdown = document.getElementById('receipt-phone-dropdown');
-  const searchTerm = searchInput.value.toLowerCase();
-  
+  // foldSearchText on BOTH sides: Arabic-keyboard digits and unhamza'd
+  // spellings must match the stored ASCII phones / hamza-form names.
+  const searchTerm = foldSearchText(searchInput.value);
+
   const customers = getCustomersVisibleToCurrentUser();
   const phoneCustomerMap = [];
   customers.forEach(c => {
@@ -24141,10 +24916,10 @@ function filterReceiptPhones() {
       phoneCustomerMap.push({ phone, customer: c });
     });
   });
-  
-  const filtered = phoneCustomerMap.filter(item => 
-    item.phone.includes(searchTerm) ||
-    item.customer.name.toLowerCase().includes(searchTerm)
+
+  const filtered = phoneCustomerMap.filter(item =>
+    foldSearchText(item.phone).includes(searchTerm) ||
+    foldSearchText(item.customer.name).includes(searchTerm)
   );
   
   if (filtered.length > 0 && searchTerm) {
@@ -24829,14 +25604,15 @@ function requireReceiptCustomerRiskAcknowledgement(customerId) {
 function filterPageCustomers() {
   const searchInput = document.getElementById('page-customer-search');
   const dropdown = document.getElementById('page-customer-dropdown');
-  const searchTerm = searchInput?.value.toLowerCase() || '';
-  
+  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
+  const searchTerm = foldSearchText(searchInput?.value || '');
+
   const customers = getVisibleRecords(state.customers);
-  
-  const filtered = customers.filter(c => 
-    c.name.toLowerCase().includes(searchTerm) ||
-    c.phones.some(p => p.includes(searchTerm)) ||
-    c.platform.toLowerCase().includes(searchTerm)
+
+  const filtered = customers.filter(c =>
+    foldSearchText(c.name).includes(searchTerm) ||
+    c.phones.some(p => foldSearchText(p).includes(searchTerm)) ||
+    foldSearchText(c.platform).includes(searchTerm)
   );
   
   if (filtered.length > 0 && searchTerm) {
@@ -25611,10 +26387,31 @@ let _savingReceiptInFlight = false;
 async function saveReceiptFromModal() {
   if (_savingReceiptInFlight) return;
   _savingReceiptInFlight = true;
+  // Busy feedback: settle/unsettle edits are server-confirmed (no optimistic
+  // paint) and can take up to ~60s across retries on a stalled connection.
+  // Without this the Save button reads as dead — users background the tab or
+  // hardware-Back out mid-save. Mirrors delivery-complete-submit's disable.
+  // (Kept HERE, not in _saveReceiptFromModalInner, so every validation
+  // early-return restores the button through the same finally.)
+  const _saveBtn = document.getElementById('receipt-save-btn');
+  const _saveBtnHtml = _saveBtn ? _saveBtn.innerHTML : '';
+  if (_saveBtn) {
+    _saveBtn.disabled = true;
+    _saveBtn.classList.add('opacity-60');
+    _saveBtn.textContent = state.language === 'ar' ? 'جارٍ الحفظ…' : 'Saving…';
+  }
   try {
     await _saveReceiptFromModalInner();
   } finally {
     _savingReceiptInFlight = false;
+    // Re-query deliberately: on success closeModal() removed the node and
+    // getElementById returns null, which is a safe no-op.
+    const _saveBtnAfter = document.getElementById('receipt-save-btn');
+    if (_saveBtnAfter) {
+      _saveBtnAfter.disabled = false;
+      _saveBtnAfter.classList.remove('opacity-60');
+      _saveBtnAfter.innerHTML = _saveBtnHtml;
+    }
   }
 }
 
@@ -26280,11 +27077,15 @@ function validateReceiptNumberInput(input) {
     return;
   }
 
-  // Remove any non-digit characters
-  let value = input.value.replace(/[^0-9]/g, '');
+  // Normalize Arabic-Indic / Extended digits to ASCII FIRST so typing on an
+  // Arabic keyboard is converted (stored as ASCII) instead of visibly deleted
+  // by the [^0-9] strip, then remove any remaining non-digit characters.
+  const normalizedOriginal = normalizeDigitsAscii(originalValue);
+  let value = normalizedOriginal.replace(/[^0-9]/g, '');
 
-  // Check if user tried to enter non-digit characters
-  if (originalValue !== value && originalValue.length > 0) {
+  // Check if user tried to enter non-digit characters (compare against the
+  // digit-normalized original so Arabic digits do not trigger the shake).
+  if (normalizedOriginal !== value && originalValue.length > 0) {
     input.classList.add('animate-shake');
     setTimeout(() => input.classList.remove('animate-shake'), 300);
   }
@@ -27114,12 +27915,20 @@ function isUnpaidShopReceipt(receipt, customerId = '') {
   return status !== 'Canceled' && status !== 'Lost';
 }
 
-function getUnpaidShopReceiptsForCustomer(customerId) {
+// usageOut (optional Map) collects each candidate's due usage so callers that
+// also need it (the option-label builder below) do not recompute it — each
+// getDeliveryReceiptDueUsage call scans all ads, so doubling it made every
+// radio/select tap in the ad form visibly slow on phones with many ads.
+function getUnpaidShopReceiptsForCustomer(customerId, usageOut) {
   const cid = String(customerId || '');
   if (!cid) return [];
   return getVisibleRecords(state.receipts)
     .filter(receipt => isUnpaidShopReceipt(receipt, cid))
-    .filter(receipt => getDeliveryReceiptDueUsage(receipt).remainingDueUSD > 0.009)
+    .filter(receipt => {
+      const usage = getDeliveryReceiptDueUsage(receipt);
+      if (usageOut) usageOut.set(String(receipt.id), usage);
+      return usage.remainingDueUSD > 0.009;
+    })
     .sort((a, b) => new Date(b.createdAt || b.startDate || 0) - new Date(a.createdAt || a.startDate || 0));
 }
 
@@ -27174,8 +27983,9 @@ function refreshAdTempReceiptOptions() {
     ? (isArT ? 'ميزانية الإعلان (USD)' : 'Ad Budget (USD)')
     : (isArT ? 'الصرف المخطط (USD)' : 'Planned Spend (USD)');
 
+  const dueUsageById = new Map();
   const receipts = isShop
-    ? getUnpaidShopReceiptsForCustomer(customerId)
+    ? getUnpaidShopReceiptsForCustomer(customerId, dueUsageById)
     : getPendingTempDeliveryReceiptsForCustomer(customerId);
   let current = String(hidden.value || '').trim()
     || String(state.modalData?.linkedDeliveryReceiptId || state.modalData?.receiptId || '').trim();
@@ -27207,8 +28017,9 @@ function refreshAdTempReceiptOptions() {
     `<option value="">${isShop ? (isArT ? 'اختر وصلاً غير مدفوع...' : 'Select an unpaid receipt...') : (isArT ? 'اختر وصلاً معلقاً...' : 'Select pending receipt...')}</option>`,
     extraOption,
     ...receipts.map(r => {
-      // Calculate available credit in USD
-      const dueUsage = getDeliveryReceiptDueUsage(r);
+      // Calculate available credit in USD (reuse the usage computed during the
+      // shop filter above; the driver path's map is empty, so it falls back).
+      const dueUsage = dueUsageById.get(String(r.id)) || getDeliveryReceiptDueUsage(r);
       const availableUSD = dueUsage.remainingDueUSD;
       const place = String(r.deliveryPlaceName || '').trim();
       const receiptNumber = r.tempReceiptNo || r.serialNumber || r.finalReceiptNo || (isArT ? 'وصل بدون رقم' : 'Unnumbered receipt');
@@ -27836,10 +28647,11 @@ function openTempDeliveryReceiptFromAd() {
 }
 
 // Filter customers in multi-customer selection
+// foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
 function filterAdCustomers(searchTerm) {
-  const term = searchTerm.toLowerCase();
+  const term = foldSearchText(searchTerm);
   document.querySelectorAll('.ad-customer-btn').forEach(btn => {
-    const customerName = btn.dataset.customerName || '';
+    const customerName = foldSearchText(btn.dataset.customerName || '');
     btn.style.display = customerName.includes(term) ? '' : 'none';
   });
 }
@@ -27847,9 +28659,9 @@ function filterAdCustomers(searchTerm) {
 // Filter pages dropdown
 function filterAdPages() {
   const input = document.getElementById('ad-page-search');
-  const term = (input?.value || '').toLowerCase();
+  const term = foldSearchText(input?.value || '');
   document.querySelectorAll('#ad-page-dropdown .page-option').forEach(opt => {
-    const name = opt.dataset.name || '';
+    const name = foldSearchText(opt.dataset.name || '');
     opt.style.display = name.includes(term) ? '' : 'none';
   });
   showAdPageDropdown();
@@ -28324,7 +29136,10 @@ function uploadAdPhotos(fileList) {
       // misleading "unsupported" message.
       if (!dataUrl || state.tempAdPhotos.length >= 6) return;
       if (!isSafeReceiptPhotoSource(dataUrl)) {
-        unsupported = true;
+        // Valid image over the 8M-char cap: say "too large", not "unsupported"
+        // (the HEIC-oriented message misdirects the retry).
+        if (isOversizedReceiptPhotoSource(dataUrl)) tooLarge = true;
+        else unsupported = true;
         return;
       }
       if (!_preparedPhotoFits(state.tempAdPhotos, dataUrl)) {
@@ -28428,7 +29243,10 @@ function uploadReceiptPhotos(fileList) {
       // misleading "unsupported" message.
       if (!dataUrl || state.tempReceiptPhotos.length >= 6) return;
       if (!isSafeReceiptPhotoSource(dataUrl)) {
-        unsupported = true;
+        // Valid image over the 8M-char cap: say "too large", not "unsupported"
+        // (the HEIC-oriented message misdirects the retry).
+        if (isOversizedReceiptPhotoSource(dataUrl)) tooLarge = true;
+        else unsupported = true;
         return;
       }
       if (!_preparedPhotoFits(state.tempReceiptPhotos, dataUrl)) {
@@ -28570,6 +29388,16 @@ function updateAdFundingReceipt(idx, receiptId) {
   refreshAdFundingSummary();
 }
 
+// Shared digit normalizer: maps Arabic-Indic (U+0660-U+0669) and Extended
+// Arabic-Indic / Persian (U+06F0-U+06F9) digits to ASCII 0-9 and returns a
+// string. Used by money inputs AND receipt-number fields so Arabic-keyboard
+// typing/pastes are converted instead of silently deleted.
+function normalizeDigitsAscii(value) {
+  return String(value == null ? '' : value)
+    .replace(/[٠-٩]/g, d => String.fromCharCode(d.charCodeAt(0) - 0x0660 + 48)) // Arabic-Indic
+    .replace(/[۰-۹]/g, d => String.fromCharCode(d.charCodeAt(0) - 0x06F0 + 48)); // Extended (Persian)
+}
+
 // Money input validator (prevents multiple decimals, limits to 2 decimal places)
 function sanitizeMoneyInput(input, maxDecimals = 2) {
   if (!input) return;
@@ -28578,10 +29406,11 @@ function sanitizeMoneyInput(input, maxDecimals = 2) {
   // Normalize non-ASCII numerals/separators BEFORE filtering, so an Arabic
   // keyboard entry is not corrupted: previously "12,5" (comma decimal) became
   // "125" (a 10x error) and Arabic-Indic digits were deleted entirely.
-  val = val
-    .replace(/[٠-٩]/g, d => String.fromCharCode(d.charCodeAt(0) - 0x0660 + 48)) // Arabic-Indic
-    .replace(/[۰-۹]/g, d => String.fromCharCode(d.charCodeAt(0) - 0x06F0 + 48)) // Extended (Persian)
-    .replace(/[,٫]/g, '.'); // comma / Arabic decimal separator -> dot
+  // The Arabic comma U+060C '،' (full Arabic keyboard comma key on iOS/Gboard,
+  // and amounts pasted from Arabic WhatsApp/Messenger chats) counts as a
+  // decimal separator too — dropping it turned "12،5" into "125" (10x error).
+  val = normalizeDigitsAscii(val)
+    .replace(/[,٫،]/g, '.'); // comma / Arabic decimal separator U+066B / Arabic comma U+060C -> dot
 
   // Preserve cursor position
   const cursorPos = input.selectionStart || 0;
@@ -29966,7 +30795,7 @@ function renderModal() {
                 </div>
                 ${canModifyAdPhotosInCurrentModal() ? `<label class="text-xs bg-orange-600 text-white px-2 py-1 rounded-lg font-medium cursor-pointer hover:bg-orange-700">
                   ${isArAd ? '+ رفع' : '+ Upload'}
-                  <input type="file" accept="image/*" multiple class="hidden" onchange="uploadAdPhotos(this.files)" />
+                  <input type="file" accept="image/*" multiple class="hidden" onchange="uploadAdPhotos(this.files); this.value=''" />
                 </label>` : ''}
               </div>
               <div id="ad-photo-previews" class="grid grid-cols-4 gap-2 min-h-[40px] bg-white dark:bg-slate-900 rounded-lg p-2">
@@ -30667,7 +31496,7 @@ function renderModal() {
                   </label>
                   <label class="text-xs text-indigo-600 hover:text-indigo-700 font-medium flex items-center space-x-1 cursor-pointer">
                     <i data-lucide="upload" class="w-3 h-3"></i><span>${isArR ? 'إضافة صورة' : 'Add Photo'}</span>
-                    <input type="file" accept="image/*" multiple class="hidden" onchange="uploadReceiptPhotos(this.files)" />
+                    <input type="file" accept="image/*" multiple class="hidden" onchange="uploadReceiptPhotos(this.files); this.value=''" />
                   </label>
                 </div>
                 <div id="receipt-photo-previews" class="grid grid-cols-4 gap-2"></div>
@@ -30676,7 +31505,7 @@ function renderModal() {
 
             <!-- Action Buttons -->
             <div class="flex space-x-2 px-1 pt-3 border-t border-slate-200 dark:border-slate-700">
-              <button type="button" onclick="saveReceiptFromModal()" class="flex-1 btn-shine bg-purple-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-purple-700">
+              <button type="button" id="receipt-save-btn" onclick="saveReceiptFromModal()" class="flex-1 btn-shine bg-purple-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-purple-700">
                 <i data-lucide="check" class="w-4 h-4 inline mr-1.5"></i>${isArR ? (isEdit ? 'حفظ' : 'إنشاء') : (isEdit ? 'Save' : 'Create')}
               </button>
               <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-slate-300">${isArR ? 'إلغاء' : 'Cancel'}</button>
@@ -34226,7 +35055,10 @@ function _clothesCsvCell(v) {
 
 function _clothesDownloadCsv(rows, filenameBase) {
   const csv = rows.map(r => r.map(_clothesCsvCell).join(',')).join('\n');
-  downloadFile('﻿' + csv, `${filenameBase}-${getTodayDateString()}.csv`, 'text/csv;charset=utf-8');
+  // downloadFile returns false (with its own warning) inside FB/IG in-app
+  // browsers where blob downloads silently fail — no false success toast.
+  const downloaded = downloadFile('﻿' + csv, `${filenameBase}-${getTodayDateString()}.csv`, 'text/csv;charset=utf-8');
+  if (downloaded === false) return;
   showNotification(clothesIsAr() ? 'تم التصدير' : 'Exported', clothesIsAr() ? 'تم تنزيل ملف CSV.' : 'CSV file downloaded.', 'success');
 }
 
@@ -34383,17 +35215,18 @@ function onClothesProductSearchInput(el) {
 }
 
 function getFilteredClothesProducts() {
-  const q = _clothesProductSearch.trim().toLowerCase();
+  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
+  const q = foldSearchText(_clothesProductSearch.trim());
   let items = getVisibleClothesProducts();
   if (q) {
     items = items.filter(p => {
-      const name = String(p.name || '').toLowerCase();
-      const category = String(p.category || '').toLowerCase();
+      const name = foldSearchText(p.name);
+      const category = foldSearchText(p.category);
       if (name.includes(q) || category.includes(q)) return true;
       const variants = Array.isArray(p.variants) ? p.variants : [];
       return variants.some(v =>
-        String(v?.color || '').toLowerCase().includes(q) ||
-        String(v?.size || '').toLowerCase().includes(q)
+        foldSearchText(v?.color).includes(q) ||
+        foldSearchText(v?.size).includes(q)
       );
     });
   }
@@ -35121,17 +35954,18 @@ function setClothesShipmentStatusFilter(value) {
 }
 
 function getFilteredClothesShipments() {
-  const q = _clothesShipmentSearch.trim().toLowerCase();
+  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
+  const q = foldSearchText(_clothesShipmentSearch.trim());
   let items = getVisibleClothesShipments();
   if (_clothesShipmentStatusFilter !== 'all') {
     items = items.filter(s => s.status === _clothesShipmentStatusFilter);
   }
   if (q) {
     items = items.filter(s => {
-      if (String(s.ref || '').toLowerCase().includes(q)) return true;
-      if (String(s.supplier || '').toLowerCase().includes(q)) return true;
+      if (foldSearchText(s.ref).includes(q)) return true;
+      if (foldSearchText(s.supplier).includes(q)) return true;
       const lines = Array.isArray(s.lines) ? s.lines : [];
-      return lines.some(line => clothesProductNameById(line.productId).toLowerCase().includes(q));
+      return lines.some(line => foldSearchText(clothesProductNameById(line.productId)).includes(q));
     });
   }
   return items;
@@ -35952,7 +36786,8 @@ function setClothesOrderPaymentFilter(value) {
 }
 
 function getFilteredClothesOrders() {
-  const q = _clothesOrderSearch.trim().toLowerCase();
+  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
+  const q = foldSearchText(_clothesOrderSearch.trim());
   let items = getVisibleClothesOrders();
   if (_clothesOrderStatusFilter !== 'all') {
     items = items.filter(o => o.status === _clothesOrderStatusFilter);
@@ -35962,10 +36797,10 @@ function getFilteredClothesOrders() {
   }
   if (q) {
     items = items.filter(o => {
-      if (String(o.customerName || '').toLowerCase().includes(q)) return true;
-      if (String(o.customerPhone || '').toLowerCase().includes(q)) return true;
+      if (foldSearchText(o.customerName).includes(q)) return true;
+      if (foldSearchText(o.customerPhone).includes(q)) return true;
       const lines = Array.isArray(o.lines) ? o.lines : [];
-      return lines.some(line => clothesProductNameById(line.productId).toLowerCase().includes(q));
+      return lines.some(line => foldSearchText(clothesProductNameById(line.productId)).includes(q));
     });
   }
   return items;
@@ -36437,6 +37272,12 @@ function printClothesOrderSlip(orderId) {
   const order = getVisibleClothesOrders().find(o => o.id === orderId);
   if (!order) return;
   const isAr = clothesIsAr();
+  // FB/IG in-app browsers silently no-op window.print(); warn instead of
+  // arming print listeners that will never fire (same guard as printReceiptCard).
+  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+    if (typeof notifyInAppBrowserLimitation === 'function') notifyInAppBrowserLimitation('print');
+    return;
+  }
   const totals = getClothesOrderTotals(order);
   const lines = Array.isArray(order.lines) ? order.lines : [];
   const payMeta = clothesPaymentStatusMeta(order.paymentStatus);
@@ -37201,8 +38042,9 @@ function renderAdsStudioReviewHistory(campaign) {
 
 function renderAdsStudioCampaigns() {
   const isAr = adsStudioIsAr();
-  const query = _adsStudioSearch.trim().toLowerCase();
-  const campaigns = getVisibleAdsStudioCampaigns().filter(item => !query || [item.name, item.pageName, item.objective, item.status].some(value => String(value || '').toLowerCase().includes(query)));
+  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
+  const query = foldSearchText(_adsStudioSearch.trim());
+  const campaigns = getVisibleAdsStudioCampaigns().filter(item => !query || [item.name, item.pageName, item.objective, item.status].some(value => foldSearchText(value).includes(query)));
   return `
     <section>
       <div class="glass-panel rounded-2xl p-4 mb-5 flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -37220,8 +38062,8 @@ function onAdsStudioSearch(value) {
   window._adsStudioSearchTimer = setTimeout(() => {
     const list = document.getElementById('ads-studio-campaign-list');
     if (!list || state.currentView !== 'ads-studio' || _adsStudioActiveTab !== 'campaigns') return;
-    const query = _adsStudioSearch.trim().toLowerCase();
-    const campaigns = getVisibleAdsStudioCampaigns().filter(item => !query || [item.name, item.pageName, item.objective, item.status].some(value => String(value || '').toLowerCase().includes(query)));
+    const query = foldSearchText(_adsStudioSearch.trim());
+    const campaigns = getVisibleAdsStudioCampaigns().filter(item => !query || [item.name, item.pageName, item.objective, item.status].some(value => foldSearchText(value).includes(query)));
     list.innerHTML = campaigns.length ? campaigns.map(renderAdsStudioCampaignCard).join('') : renderAdsStudioEmptyState();
     if (typeof IconQueue !== 'undefined') IconQueue.schedule(list);
   }, 100);
@@ -37371,7 +38213,14 @@ function renderAdsStudioCreativePreview() {
 
 async function onAdsStudioCreativeSelected(input) {
   const candidates = Array.from(input?.files || []);
-  const formatFiles = candidates.filter(file => ADS_STUDIO_ALLOWED_IMAGE_MIME_TYPES.has(String(file?.type || '').toLowerCase()));
+  // Blank/generic MIME types are real JPEG/PNGs from Android SAF pickers —
+  // let compressImageToDataUrl sniff the magic bytes instead of rejecting
+  // here; isSafeAdsStudioCreativeSource still gates the OUTPUT to normalized
+  // png/jpeg/webp data URLs, so nothing unsupported can get through.
+  const formatFiles = candidates.filter(file => {
+    const t = String(file?.type || '').toLowerCase();
+    return !t || t === 'application/octet-stream' || ADS_STUDIO_ALLOWED_IMAGE_MIME_TYPES.has(t);
+  });
   const rejectedCount = candidates.length - formatFiles.length;
   input.value = '';
   if (rejectedCount > 0) {
@@ -38637,6 +39486,14 @@ async function updateLiquidityTrackingStart(value) {
 // paper handed to a single customer. Mark the clicked card and let the
 // @media print rules in style.css hide everything else.
 function printReceiptCard(btn) {
+  // FB/IG in-app browsers never implement window.print() (WKWebView shells
+  // and Facebook's Android WebView alike): the Print tap did NOTHING, with
+  // zero feedback. Guard at the top — before any listeners/timers are
+  // installed — and explain how to get a working browser instead.
+  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+    notifyInAppBrowserLimitation('print');
+    return;
+  }
   let card = btn && btn.closest ? btn.closest('.glass-panel') : null;
   if (!card) {
     window.print();
@@ -38688,6 +39545,17 @@ function printReceiptCard(btn) {
   window.addEventListener('pointerdown', cleanup, { once: true, capture: true });
   window.addEventListener('keydown', cleanup, { once: true, capture: true });
   cleanupTimer = setTimeout(cleanup, 60000);
+  window.print();
+}
+
+// Whole-page print for inline onclick handlers (ads list print button).
+// Same in-app-browser guard as printReceiptCard: window.print() is a silent
+// no-op inside FB/IG webviews, so warn instead of doing nothing.
+function printCurrentPage() {
+  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+    notifyInAppBrowserLimitation('print');
+    return;
+  }
   window.print();
 }
 
@@ -38807,6 +39675,39 @@ function exportData() {
   };
   
   const dataStr = JSON.stringify(exportState, null, 2);
+
+  // FB/IG in-app browsers cannot download blob files AT ALL (their WKWebView/
+  // WebView shells wire no download handler), yet the old code "succeeded":
+  // it toasted 'Exported successfully' and snoozed the 5-day local-backup
+  // durability reminder while NO file was ever saved — a false safety signal
+  // in exactly the environment whose storage is most evictable. Warn BEFORE
+  // attempting, keep the local auto-backup, offer the clipboard as an escape
+  // hatch, and never claim success or silence the reminder here.
+  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+    createAutoBackup();
+    const isAr = state.language === 'ar';
+    const wantsCopy = typeof copyTextToClipboard === 'function' && confirm(
+      isAr
+        ? 'التنزيلات لا تعمل داخل متصفح فيسبوك/إنستغرام المدمج. افتح الصفحة في Safari أو Chrome (قائمة ⋯ ← «فتح في المتصفح») لتنزيل ملف النسخة الاحتياطية.\n\nهل تريد نسخ النسخة الاحتياطية إلى الحافظة بدلاً من ذلك؟'
+        : 'Downloads don\'t work inside the Facebook/Instagram in-app browser. Open this page in Safari or Chrome (menu -> "Open in browser") to download the backup file.\n\nCopy the backup to the clipboard instead?'
+    );
+    if (wantsCopy) {
+      copyTextToClipboard(dataStr).then((ok) => {
+        showNotification(
+          ok ? (isAr ? 'تم النسخ' : 'Copied') : (isAr ? 'فشل النسخ' : 'Copy failed'),
+          ok
+            ? (isAr ? 'تم نسخ النسخة الاحتياطية إلى الحافظة — الصقها في ملف واحفظها في مكان آمن.' : 'Backup copied to the clipboard — paste it into a file and keep it somewhere safe.')
+            : (isAr ? 'تعذّر النسخ إلى الحافظة. افتح الصفحة في متصفحك الحقيقي لتنزيل الملف.' : 'Could not copy to the clipboard. Open this page in your real browser to download the file.'),
+          ok ? 'success' : 'error'
+        );
+      });
+    } else {
+      notifyInAppBrowserLimitation('download');
+    }
+    addAuditLog('Export', 'system', 'Backup export not attempted: in-app browser cannot download files (clipboard offered)');
+    return;
+  }
+
   const dataBlob = new Blob([dataStr], { type: 'application/json' });
   const url = URL.createObjectURL(dataBlob);
   const link = document.createElement('a');

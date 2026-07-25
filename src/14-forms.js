@@ -27,8 +27,10 @@ document.addEventListener('click', function(e) {
 function filterReceiptPhones() {
   const searchInput = document.getElementById('receipt-phone-search');
   const dropdown = document.getElementById('receipt-phone-dropdown');
-  const searchTerm = searchInput.value.toLowerCase();
-  
+  // foldSearchText on BOTH sides: Arabic-keyboard digits and unhamza'd
+  // spellings must match the stored ASCII phones / hamza-form names.
+  const searchTerm = foldSearchText(searchInput.value);
+
   const customers = getCustomersVisibleToCurrentUser();
   const phoneCustomerMap = [];
   customers.forEach(c => {
@@ -36,10 +38,10 @@ function filterReceiptPhones() {
       phoneCustomerMap.push({ phone, customer: c });
     });
   });
-  
-  const filtered = phoneCustomerMap.filter(item => 
-    item.phone.includes(searchTerm) ||
-    item.customer.name.toLowerCase().includes(searchTerm)
+
+  const filtered = phoneCustomerMap.filter(item =>
+    foldSearchText(item.phone).includes(searchTerm) ||
+    foldSearchText(item.customer.name).includes(searchTerm)
   );
   
   if (filtered.length > 0 && searchTerm) {
@@ -724,14 +726,15 @@ function requireReceiptCustomerRiskAcknowledgement(customerId) {
 function filterPageCustomers() {
   const searchInput = document.getElementById('page-customer-search');
   const dropdown = document.getElementById('page-customer-dropdown');
-  const searchTerm = searchInput?.value.toLowerCase() || '';
-  
+  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
+  const searchTerm = foldSearchText(searchInput?.value || '');
+
   const customers = getVisibleRecords(state.customers);
-  
-  const filtered = customers.filter(c => 
-    c.name.toLowerCase().includes(searchTerm) ||
-    c.phones.some(p => p.includes(searchTerm)) ||
-    c.platform.toLowerCase().includes(searchTerm)
+
+  const filtered = customers.filter(c =>
+    foldSearchText(c.name).includes(searchTerm) ||
+    c.phones.some(p => foldSearchText(p).includes(searchTerm)) ||
+    foldSearchText(c.platform).includes(searchTerm)
   );
   
   if (filtered.length > 0 && searchTerm) {
@@ -1506,10 +1509,31 @@ let _savingReceiptInFlight = false;
 async function saveReceiptFromModal() {
   if (_savingReceiptInFlight) return;
   _savingReceiptInFlight = true;
+  // Busy feedback: settle/unsettle edits are server-confirmed (no optimistic
+  // paint) and can take up to ~60s across retries on a stalled connection.
+  // Without this the Save button reads as dead — users background the tab or
+  // hardware-Back out mid-save. Mirrors delivery-complete-submit's disable.
+  // (Kept HERE, not in _saveReceiptFromModalInner, so every validation
+  // early-return restores the button through the same finally.)
+  const _saveBtn = document.getElementById('receipt-save-btn');
+  const _saveBtnHtml = _saveBtn ? _saveBtn.innerHTML : '';
+  if (_saveBtn) {
+    _saveBtn.disabled = true;
+    _saveBtn.classList.add('opacity-60');
+    _saveBtn.textContent = state.language === 'ar' ? 'جارٍ الحفظ…' : 'Saving…';
+  }
   try {
     await _saveReceiptFromModalInner();
   } finally {
     _savingReceiptInFlight = false;
+    // Re-query deliberately: on success closeModal() removed the node and
+    // getElementById returns null, which is a safe no-op.
+    const _saveBtnAfter = document.getElementById('receipt-save-btn');
+    if (_saveBtnAfter) {
+      _saveBtnAfter.disabled = false;
+      _saveBtnAfter.classList.remove('opacity-60');
+      _saveBtnAfter.innerHTML = _saveBtnHtml;
+    }
   }
 }
 
@@ -2175,11 +2199,15 @@ function validateReceiptNumberInput(input) {
     return;
   }
 
-  // Remove any non-digit characters
-  let value = input.value.replace(/[^0-9]/g, '');
+  // Normalize Arabic-Indic / Extended digits to ASCII FIRST so typing on an
+  // Arabic keyboard is converted (stored as ASCII) instead of visibly deleted
+  // by the [^0-9] strip, then remove any remaining non-digit characters.
+  const normalizedOriginal = normalizeDigitsAscii(originalValue);
+  let value = normalizedOriginal.replace(/[^0-9]/g, '');
 
-  // Check if user tried to enter non-digit characters
-  if (originalValue !== value && originalValue.length > 0) {
+  // Check if user tried to enter non-digit characters (compare against the
+  // digit-normalized original so Arabic digits do not trigger the shake).
+  if (normalizedOriginal !== value && originalValue.length > 0) {
     input.classList.add('animate-shake');
     setTimeout(() => input.classList.remove('animate-shake'), 300);
   }
@@ -3009,12 +3037,20 @@ function isUnpaidShopReceipt(receipt, customerId = '') {
   return status !== 'Canceled' && status !== 'Lost';
 }
 
-function getUnpaidShopReceiptsForCustomer(customerId) {
+// usageOut (optional Map) collects each candidate's due usage so callers that
+// also need it (the option-label builder below) do not recompute it — each
+// getDeliveryReceiptDueUsage call scans all ads, so doubling it made every
+// radio/select tap in the ad form visibly slow on phones with many ads.
+function getUnpaidShopReceiptsForCustomer(customerId, usageOut) {
   const cid = String(customerId || '');
   if (!cid) return [];
   return getVisibleRecords(state.receipts)
     .filter(receipt => isUnpaidShopReceipt(receipt, cid))
-    .filter(receipt => getDeliveryReceiptDueUsage(receipt).remainingDueUSD > 0.009)
+    .filter(receipt => {
+      const usage = getDeliveryReceiptDueUsage(receipt);
+      if (usageOut) usageOut.set(String(receipt.id), usage);
+      return usage.remainingDueUSD > 0.009;
+    })
     .sort((a, b) => new Date(b.createdAt || b.startDate || 0) - new Date(a.createdAt || a.startDate || 0));
 }
 
@@ -3069,8 +3105,9 @@ function refreshAdTempReceiptOptions() {
     ? (isArT ? 'ميزانية الإعلان (USD)' : 'Ad Budget (USD)')
     : (isArT ? 'الصرف المخطط (USD)' : 'Planned Spend (USD)');
 
+  const dueUsageById = new Map();
   const receipts = isShop
-    ? getUnpaidShopReceiptsForCustomer(customerId)
+    ? getUnpaidShopReceiptsForCustomer(customerId, dueUsageById)
     : getPendingTempDeliveryReceiptsForCustomer(customerId);
   let current = String(hidden.value || '').trim()
     || String(state.modalData?.linkedDeliveryReceiptId || state.modalData?.receiptId || '').trim();
@@ -3102,8 +3139,9 @@ function refreshAdTempReceiptOptions() {
     `<option value="">${isShop ? (isArT ? 'اختر وصلاً غير مدفوع...' : 'Select an unpaid receipt...') : (isArT ? 'اختر وصلاً معلقاً...' : 'Select pending receipt...')}</option>`,
     extraOption,
     ...receipts.map(r => {
-      // Calculate available credit in USD
-      const dueUsage = getDeliveryReceiptDueUsage(r);
+      // Calculate available credit in USD (reuse the usage computed during the
+      // shop filter above; the driver path's map is empty, so it falls back).
+      const dueUsage = dueUsageById.get(String(r.id)) || getDeliveryReceiptDueUsage(r);
       const availableUSD = dueUsage.remainingDueUSD;
       const place = String(r.deliveryPlaceName || '').trim();
       const receiptNumber = r.tempReceiptNo || r.serialNumber || r.finalReceiptNo || (isArT ? 'وصل بدون رقم' : 'Unnumbered receipt');
@@ -3731,10 +3769,11 @@ function openTempDeliveryReceiptFromAd() {
 }
 
 // Filter customers in multi-customer selection
+// foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
 function filterAdCustomers(searchTerm) {
-  const term = searchTerm.toLowerCase();
+  const term = foldSearchText(searchTerm);
   document.querySelectorAll('.ad-customer-btn').forEach(btn => {
-    const customerName = btn.dataset.customerName || '';
+    const customerName = foldSearchText(btn.dataset.customerName || '');
     btn.style.display = customerName.includes(term) ? '' : 'none';
   });
 }
@@ -3742,9 +3781,9 @@ function filterAdCustomers(searchTerm) {
 // Filter pages dropdown
 function filterAdPages() {
   const input = document.getElementById('ad-page-search');
-  const term = (input?.value || '').toLowerCase();
+  const term = foldSearchText(input?.value || '');
   document.querySelectorAll('#ad-page-dropdown .page-option').forEach(opt => {
-    const name = opt.dataset.name || '';
+    const name = foldSearchText(opt.dataset.name || '');
     opt.style.display = name.includes(term) ? '' : 'none';
   });
   showAdPageDropdown();
@@ -4219,7 +4258,10 @@ function uploadAdPhotos(fileList) {
       // misleading "unsupported" message.
       if (!dataUrl || state.tempAdPhotos.length >= 6) return;
       if (!isSafeReceiptPhotoSource(dataUrl)) {
-        unsupported = true;
+        // Valid image over the 8M-char cap: say "too large", not "unsupported"
+        // (the HEIC-oriented message misdirects the retry).
+        if (isOversizedReceiptPhotoSource(dataUrl)) tooLarge = true;
+        else unsupported = true;
         return;
       }
       if (!_preparedPhotoFits(state.tempAdPhotos, dataUrl)) {
@@ -4323,7 +4365,10 @@ function uploadReceiptPhotos(fileList) {
       // misleading "unsupported" message.
       if (!dataUrl || state.tempReceiptPhotos.length >= 6) return;
       if (!isSafeReceiptPhotoSource(dataUrl)) {
-        unsupported = true;
+        // Valid image over the 8M-char cap: say "too large", not "unsupported"
+        // (the HEIC-oriented message misdirects the retry).
+        if (isOversizedReceiptPhotoSource(dataUrl)) tooLarge = true;
+        else unsupported = true;
         return;
       }
       if (!_preparedPhotoFits(state.tempReceiptPhotos, dataUrl)) {
@@ -4465,6 +4510,16 @@ function updateAdFundingReceipt(idx, receiptId) {
   refreshAdFundingSummary();
 }
 
+// Shared digit normalizer: maps Arabic-Indic (U+0660-U+0669) and Extended
+// Arabic-Indic / Persian (U+06F0-U+06F9) digits to ASCII 0-9 and returns a
+// string. Used by money inputs AND receipt-number fields so Arabic-keyboard
+// typing/pastes are converted instead of silently deleted.
+function normalizeDigitsAscii(value) {
+  return String(value == null ? '' : value)
+    .replace(/[٠-٩]/g, d => String.fromCharCode(d.charCodeAt(0) - 0x0660 + 48)) // Arabic-Indic
+    .replace(/[۰-۹]/g, d => String.fromCharCode(d.charCodeAt(0) - 0x06F0 + 48)); // Extended (Persian)
+}
+
 // Money input validator (prevents multiple decimals, limits to 2 decimal places)
 function sanitizeMoneyInput(input, maxDecimals = 2) {
   if (!input) return;
@@ -4473,10 +4528,11 @@ function sanitizeMoneyInput(input, maxDecimals = 2) {
   // Normalize non-ASCII numerals/separators BEFORE filtering, so an Arabic
   // keyboard entry is not corrupted: previously "12,5" (comma decimal) became
   // "125" (a 10x error) and Arabic-Indic digits were deleted entirely.
-  val = val
-    .replace(/[٠-٩]/g, d => String.fromCharCode(d.charCodeAt(0) - 0x0660 + 48)) // Arabic-Indic
-    .replace(/[۰-۹]/g, d => String.fromCharCode(d.charCodeAt(0) - 0x06F0 + 48)) // Extended (Persian)
-    .replace(/[,٫]/g, '.'); // comma / Arabic decimal separator -> dot
+  // The Arabic comma U+060C '،' (full Arabic keyboard comma key on iOS/Gboard,
+  // and amounts pasted from Arabic WhatsApp/Messenger chats) counts as a
+  // decimal separator too — dropping it turned "12،5" into "125" (10x error).
+  val = normalizeDigitsAscii(val)
+    .replace(/[,٫،]/g, '.'); // comma / Arabic decimal separator U+066B / Arabic comma U+060C -> dot
 
   // Preserve cursor position
   const cursorPos = input.selectionStart || 0;
