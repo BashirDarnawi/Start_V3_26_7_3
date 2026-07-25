@@ -525,6 +525,86 @@ function planLocalReceiptPaidAdUpdates(receiptId, nextReceipt = null) {
   return plans;
 }
 
+// Local/offline parity for the server's REVERSE settlement (/unsettle): a
+// funded PAID receipt explicitly flipped to Not Paid migrates each linked
+// ad's paid rows for THIS receipt into its due pool — conserved to the cent,
+// other receipts' rows untouched, amount/spend/status/refund untouched. The
+// blocked cases throw the SAME detail strings the server refuses with, so the
+// caller localizes them through describe409 exactly like server mode.
+function planLocalReceiptDebtAdUpdates(receiptId, nextReceipt = null) {
+  const rid = String(receiptId || '');
+  const receipt = nextReceipt || (state.receipts || []).find(row => row && String(row.id) === rid);
+  if (!receipt || receipt._deleted) throw new Error('Receipt not found');
+  if (String(receipt.receiptType || '') === 'TRANSFER_IN' || receipt.transferFromReceiptId) {
+    throw new Error('A transferred-in receipt must remain paid');
+  }
+  if (_localReceiptOutgoingMinor(receipt) > 0) {
+    throw new Error('A receipt with outgoing transfers must remain paid');
+  }
+  const receiptCustomerId = String(receipt.customerId || '');
+  const notPaidCollection = String(receipt.statusDetail?.notPaidCollection || '').trim().toLowerCase();
+  const isDelivery = notPaidCollection === 'delivery'
+    || String(receipt.deliveryStatus || '').trim() === 'Needs Delivery';
+  const method = isDelivery ? 'driver' : 'in_shop';
+  const now = new Date().toISOString();
+  const plans = [];
+  for (let index = 0; index < (state.ads || []).length; index++) {
+    const ad = state.ads[index];
+    if (!ad || ad._deleted || String(ad.recordType || '') === 'receipt') continue;
+    const paid = _localFundingMap(ad.receiptAllocations);
+    const moved = paid.get(rid) || 0;
+    if (moved <= 0) {
+      // A legacy rowless paid ad charges its whole spend by reference; there
+      // is no allocation row to migrate, so the conversion must refuse.
+      if (!Array.isArray(ad.receiptAllocations) && !Array.isArray(ad.dueAllocations)
+          && _localAdCommittedMinor(ad, rid) > 0) {
+        throw new Error('A receipt funding a legacy pre-allocation ad must remain paid');
+      }
+      continue;
+    }
+    paid.delete(rid);
+    if (String(ad.customerId || '') !== receiptCustomerId) {
+      throw new Error('Linked ad and receipt belong to different customers');
+    }
+    if (['Stopped', 'Canceled', 'Completed', 'Lost'].includes(String(ad.status || ''))
+        || (ad.refundType && String(ad.refundType) !== 'None')) {
+      throw new Error('A receipt funding a finished or refunded ad must remain paid');
+    }
+    const due = _localFundingMap(ad.dueAllocations);
+    for (const key of due.keys()) {
+      if (String(key) !== rid) throw new Error('A receipt funding an ad that owes another receipt must remain paid');
+    }
+    due.set(rid, (due.get(rid) || 0) + moved);
+
+    const receiptAllocations = _localFundingRows(paid);
+    const dueAllocations = _localFundingRows(due);
+    const next = {
+      ...ad,
+      receiptAllocations,
+      dueAllocations,
+      receiptIds: receiptAllocations.map(row => row.receiptId),
+      fundingReceiptId: receiptAllocations[0]?.receiptId || '',
+      dueAmountToUseUSD: [...due.values()].reduce((sum, amount) => sum + amount, 0) / 100,
+      dueAmountToUseLYD: 0,
+      paymentStatus: 'not_paid',
+      isPaid: false,
+      collectionMethod: method,
+      collectionPayments: [],
+      paymentMethod: '',
+      mergedPaidAllocations: method === 'driver'
+        ? receiptAllocations.map(row => ({ ...row }))
+        : [],
+      hasMergedPaidFunds: method === 'driver' && receiptAllocations.length > 0,
+      linkedDeliveryReceiptId: method === 'driver' ? rid : '',
+      receiptId: rid,
+      lastUpdated: now,
+      _lastModified: getMonotonicTime()
+    };
+    plans.push({ index, data: next });
+  }
+  return plans;
+}
+
 function applyLocalReceiptPaidAdUpdates(plans) {
   for (const plan of Array.isArray(plans) ? plans : []) {
     if (!Number.isInteger(plan?.index) || !plan?.data) continue;
@@ -644,6 +724,21 @@ function updateRecord(array, id, updates, expectedLastModified) {
     const _receiptSettlementKey = _settlesReceipt
       ? Security.generateSecureId('receipt-settlement')
       : '';
+    // The REVERSE transition: an edit that explicitly flips a PAID receipt to
+    // Not Paid while its PAID pool funds ads. That funding must migrate into
+    // the ads' due pool in the SAME commit (server: /unsettle cascade; local:
+    // planLocalReceiptDebtAdUpdates), conserved to the cent. Unfunded
+    // paid -> not-paid edits keep the ordinary PATCH path.
+    const _convertsReceipt = collectionName === 'receipts'
+      && !_settlesReceipt
+      && (_oldReceiptStatus === 'paid' || old.isPaid === true)
+      && (_nextReceiptStatus === 'not paid' || _nextReceiptStatus === 'not_paid')
+      && (state.ads || []).some(ad => ad && !ad._deleted
+          && String(ad.recordType || '') !== 'receipt'
+          && (_localFundingMap(ad.receiptAllocations).get(String(id)) || 0) > 0);
+    const _receiptConversionKey = _convertsReceipt
+      ? Security.generateSecureId('receipt-unsettle')
+      : '';
     let _localReceiptAdPlans = [];
     if (_settlesReceipt && !isServerModeEnabled()) {
       try {
@@ -661,12 +756,35 @@ function updateRecord(array, id, updates, expectedLastModified) {
         );
         return Promise.resolve(false);
       }
+    } else if (_convertsReceipt && !isServerModeEnabled()) {
+      try {
+        _localReceiptAdPlans = planLocalReceiptDebtAdUpdates(id, {
+          ...old,
+          ...sanitizedUpdates,
+          status: 'Not Paid',
+          isPaid: false
+        });
+      } catch (error) {
+        // Same refusals, same localized wording as server mode: the planner
+        // throws the server's own detail strings, describe409 translates them.
+        const _detail = String(error?.message || '');
+        const reason = typeof describe409 === 'function'
+          ? describe409({ status: 409, message: _detail }, _detail)
+          : _detail;
+        showNotification(
+          state.language === 'ar' ? 'تعذر تحويل الوصل إلى دين' : 'Receipt conversion blocked',
+          reason || 'Linked ad funding is invalid.',
+          'error'
+        );
+        return Promise.resolve(false);
+      }
     }
 
-    // Ordinary records keep the established optimistic UX. Settlement is the
-    // exception: do not paint the receipt Paid before its linked ads are also
-    // committed, because that briefly presents two contradictory money states.
-    if (!(_settlesReceipt && isServerModeEnabled())) {
+    // Ordinary records keep the established optimistic UX. Settlement and its
+    // reverse (debt conversion) are the exceptions: do not paint the receipt
+    // Paid/Not Paid before its linked ads are also committed, because that
+    // briefly presents two contradictory money states.
+    if (!((_settlesReceipt || _convertsReceipt) && isServerModeEnabled())) {
       array[index] = { ...array[index], ...sanitizedUpdates, _lastModified: getMonotonicTime() };
       if (isServerModeEnabled() && collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function') {
         array[index] = makeLightweightMediaRecord(collectionName, array[index]);
@@ -719,16 +837,23 @@ function updateRecord(array, id, updates, expectedLastModified) {
               idempotencyKey: _receiptSettlementKey,
               data: sanitizedUpdates
             })
-          : apiPatchEntity(collectionName, id, sanitizedUpdates, expected);
+          : (_convertsReceipt
+            ? apiUnsettleReceipt({
+                receiptId: id,
+                expectedLastModified: expected,
+                idempotencyKey: _receiptConversionKey,
+                data: sanitizedUpdates
+              })
+            : apiPatchEntity(collectionName, id, sanitizedUpdates, expected));
         return mutation
         .then((entityOrSettlement) => {
-          if (_settlesReceipt) {
+          if (_settlesReceipt || _convertsReceipt) {
             const settlement = entityOrSettlement;
             const [savedReceipt] = applyValidatedServerEntityBatch([
               { collection: 'receipts', entity: settlement.receipt },
               ...settlement.updatedAds.map(entity => ({ collection: 'ads', entity }))
-            ], 'receiptSettlement');
-            addAuditLog('Update', id, `Settled ${getRecordType(savedReceipt || old)}`, {
+            ], _settlesReceipt ? 'receiptSettlement' : 'receiptDebtConversion');
+            addAuditLog('Update', id, `${_settlesReceipt ? 'Settled' : 'Converted to debt'} ${getRecordType(savedReceipt || old)}`, {
               old,
               new: savedReceipt || settlement.receipt?.data,
               updatedAdIds: settlement.updatedAds.map(entity => entity.id),

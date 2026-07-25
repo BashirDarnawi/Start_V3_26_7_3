@@ -236,10 +236,15 @@ check('receipt settlement installs the Paid receipt and affected ads as one serv
   serverApi.includes('!Array.isArray(response.updatedAds)') &&
   serverApi.includes("validateServerEntityResponse('receipts', response.receipt") &&
   serverApi.includes("validateServerEntityResponse('ads', entity, `settlement.updatedAds[") &&
-  dataAudit.includes("], 'receiptSettlement');") &&
+  // The reverse (paid -> Not Paid debt conversion) shares the exact batch
+  // rule: neither direction paints the receipt optimistically, and both
+  // install receipt + ads from the same server-confirmed envelope.
+  serverApi.includes('async function apiUnsettleReceipt(payload)') &&
+  serverApi.includes('/unsettle?include_media=false') &&
+  dataAudit.includes("], _settlesReceipt ? 'receiptSettlement' : 'receiptDebtConversion');") &&
   dataAudit.includes('...settlement.updatedAds.map') &&
-  dataAudit.includes('if (!(_settlesReceipt && isServerModeEnabled()))') &&
-  dataAudit.indexOf('if (!(_settlesReceipt && isServerModeEnabled()))') < dataAudit.indexOf("], 'receiptSettlement');"));
+  dataAudit.includes('if (!((_settlesReceipt || _convertsReceipt) && isServerModeEnabled()))') &&
+  dataAudit.indexOf('if (!((_settlesReceipt || _convertsReceipt) && isServerModeEnabled()))') < dataAudit.indexOf("], _settlesReceipt ? 'receiptSettlement' : 'receiptDebtConversion');"));
 check('offline receipt settlement validates the whole money batch and migrates frozen baselines',
   dataAudit.includes('function planLocalReceiptPaidAdUpdates(receiptId, nextReceipt = null)') &&
   dataAudit.includes("throw new Error('Linked ad and receipt belong to different customers')") &&

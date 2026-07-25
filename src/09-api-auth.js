@@ -1275,6 +1275,61 @@ async function apiSettleReceipt(payload) {
   };
 }
 
+// The exact REVERSE of apiSettleReceipt: convert a funded PAID receipt back
+// into customer debt. The server migrates every linked ad's paid rows for
+// this receipt into its due pool in the same transaction, so the browser must
+// install the receipt AND the converted ads together — a receipt-only
+// envelope would briefly show paid ads backed by an unpaid receipt.
+async function apiUnsettleReceipt(payload) {
+  const receiptId = String(payload?.receiptId || '').trim();
+  if (!Security.isValidRecordId(receiptId)) throw new Error('Invalid receipt conversion id');
+  const expectedLastModified = Number(payload?.expectedLastModified);
+  if (!Number.isSafeInteger(expectedLastModified) || expectedLastModified < 0) {
+    throw new Error('This receipt is missing its server version. Refresh and try again.');
+  }
+  const body = {
+    expectedLastModified,
+    idempotencyKey: String(payload?.idempotencyKey || '').trim(),
+    data: payload?.data && typeof payload.data === 'object' && !Array.isArray(payload.data)
+      ? payload.data
+      : {}
+  };
+  if (!body.idempotencyKey) throw new Error('Receipt conversion idempotency key is required');
+
+  const identity = getServerSessionIdentity();
+  // A stable body/idempotency key makes a response-loss retry safe: the server
+  // replays the committed result instead of moving the same funding twice.
+  const response = await withRetry(() => apiJson(
+    `/api/receipts/${encodeURIComponent(receiptId)}/unsettle?include_media=false`,
+    { method: 'POST', body },
+    { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
+  ), 2, 500);
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  if (!response || typeof response !== 'object' || Array.isArray(response) || !Array.isArray(response.updatedAds)) {
+    const error = new Error('Invalid receipt conversion response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+
+  const receipt = validateServerEntityResponse('receipts', response.receipt, 'conversion.receipt');
+  const localReceipt = (state.receipts || []).find(row => row && String(row.id) === receiptId);
+  receipt.data = mergeMutationInlineMedia('receipts', receipt.data, {
+    ...(localReceipt || {}),
+    ...(body.data || {})
+  });
+  const updatedAds = response.updatedAds.map((entity, index) => {
+    const validated = validateServerEntityResponse('ads', entity, `conversion.updatedAds[${index}]`);
+    const localAd = (state.ads || []).find(row => row && String(row.id) === String(validated.id));
+    validated.data = mergeMutationInlineMedia('ads', validated.data, localAd);
+    return validated;
+  });
+  return {
+    receipt,
+    updatedAds,
+    replayed: response.replayed === true
+  };
+}
+
 // Paid/due/merged allocations change receipt availability, so ad create/edit
 // must cross one server transaction boundary rather than generic collection
 // POST/PATCH calls.

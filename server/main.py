@@ -9300,6 +9300,199 @@ def _financial_prepare_paid_receipt_ad_updates(
     return plans
 
 
+def _financial_prepare_unpaid_receipt_ad_updates(
+    conn: Any,
+    receipt_id: str,
+    receipt: dict[str, Any],
+    ad_rows: list[Any],
+    *,
+    actor_id: str,
+    actor_name: str = "",
+    postgres: bool,
+) -> list[tuple[Any, dict[str, Any]]]:
+    """Lock, plan and validate the REVERSE settlement before the first write.
+
+    The receipt in ``receipt`` is the post-edit (Not Paid) state. Every ad
+    funded from this receipt's PAID pool moves EXACTLY this receipt's paid
+    rows into its due pool — conserved to the cent, other receipts' rows
+    untouched, spentUSD/amountUSD/status/refund untouched (the exact mirror
+    of _financial_reclassify_ad_for_paid_receipt / the relink settle branch).
+    The ads take whichever not_paid collection shape matches the receipt's
+    new collection type: DRIVER (dueAllocations + linkedDeliveryReceiptId +
+    mergedPaidAllocations mirroring the surviving paid rows) or IN-SHOP
+    (dueAllocations + receiptId). Cases whose money history must not be
+    rewritten refuse the whole conversion with an honest 409:
+      * a terminal (Stopped/Canceled/Completed/Lost) or refunded linked ad,
+      * an ad that already owes debt on ANOTHER receipt (both due validators
+        accept exactly one linked debt receipt), and
+      * a legacy rowless ad whose whole spend is charged by reference — there
+        is no allocation row to migrate, so converting would strand its money.
+    """
+    customer_id = str(receipt.get("customerId") or "")
+    status_detail = (
+        receipt.get("statusDetail")
+        if isinstance(receipt.get("statusDetail"), dict)
+        else {}
+    )
+    not_paid_collection = str(
+        (status_detail or {}).get("notPaidCollection") or ""
+    ).strip().lower()
+    is_delivery = (
+        not_paid_collection == "delivery"
+        or str(receipt.get("deliveryStatus") or "").strip() == "Needs Delivery"
+    )
+    collection_method = "driver" if is_delivery else "in_shop"
+
+    discovered: list[Any] = []
+    for row in ad_rows:
+        ad = _financial_row_data(row)
+        if str(ad.get("recordType") or "") == "receipt":
+            continue
+        if _financial_allocation_map(ad.get("receiptAllocations")).get(receipt_id, 0) > 0:
+            discovered.append(row)
+            continue
+        if (
+            not isinstance(ad.get("receiptAllocations"), list)
+            and not isinstance(ad.get("dueAllocations"), list)
+            and _financial_ad_committed(ad, receipt_id) > 0
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="A receipt funding a legacy pre-allocation ad must remain paid",
+            )
+
+    # The due-side validators read the linked receipt from a locked map. The
+    # stored row still holds the PRE-edit (Paid) shape, so hand them the
+    # post-edit state instead — same shape _financial_row_data expects.
+    validation_receipts: dict[str, Any] = {
+        receipt_id: {"deleted": False, "data_json": json_dumps(receipt)}
+    }
+
+    plans: list[tuple[Any, dict[str, Any]]] = []
+    planned_by_id: dict[str, dict[str, Any]] = {}
+    for discovered_row in sorted(discovered, key=lambda item: str(item.get("id") or "")):
+        ad_id = str(discovered_row.get("id") or "")
+        ad_row = _clothes_lock_row(conn, "ads", ad_id, postgres=postgres)
+        if not ad_row or bool(ad_row["deleted"]):
+            continue
+        ad = _financial_row_data(ad_row)
+        paid_map = _financial_allocation_map(ad.get("receiptAllocations"))
+        moved_minor = paid_map.pop(receipt_id, 0)
+        if moved_minor <= 0:
+            continue
+        if str(ad.get("customerId") or "") != customer_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Linked ad and receipt belong to different customers",
+            )
+        if str(ad.get("status") or "") in {"Stopped", "Canceled", "Completed", "Lost"} or (
+            ad.get("refundType") and str(ad.get("refundType")) != "None"
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="A receipt funding a finished or refunded ad must remain paid",
+            )
+        due_map = _financial_allocation_map(ad.get("dueAllocations"))
+        if any(rid != receipt_id for rid in due_map):
+            raise HTTPException(
+                status_code=409,
+                detail="A receipt funding an ad that owes another receipt must remain paid",
+            )
+        due_map[receipt_id] = due_map.get(receipt_id, 0) + moved_minor
+
+        plan = dict(ad)
+        paid_rows = _financial_rows_from_allocation_map(paid_map)
+        due_rows = _financial_rows_from_allocation_map(due_map)
+        paid_ids = [str(entry["receiptId"]) for entry in paid_rows]
+        plan["receiptAllocations"] = paid_rows
+        plan["dueAllocations"] = due_rows
+        plan["receiptIds"] = paid_ids
+        plan["fundingReceiptId"] = paid_ids[0] if paid_ids else ""
+        plan["dueAmountToUseUSD"] = _financial_usd(sum(due_map.values()))
+        # The moved USD rows are authoritative; a stale LYD mirror would let
+        # the legacy due reader double-count the debt (same rule as relink).
+        plan["dueAmountToUseLYD"] = 0.0
+        plan["paymentStatus"] = "not_paid"
+        plan["isPaid"] = False
+        plan["collectionMethod"] = collection_method
+        plan["collectionPayments"] = []
+        plan["paymentMethod"] = ""
+        if collection_method == "driver":
+            plan["mergedPaidAllocations"] = [dict(entry) for entry in paid_rows]
+            plan["hasMergedPaidFunds"] = bool(paid_rows)
+            plan["linkedDeliveryReceiptId"] = receipt_id
+            plan["receiptId"] = receipt_id
+        else:
+            plan["mergedPaidAllocations"] = []
+            plan["hasMergedPaidFunds"] = False
+            plan["linkedDeliveryReceiptId"] = ""
+            plan["receiptId"] = receipt_id
+        # Same history entry shape the relink/settle primitives append, so the
+        # money move stays visible in the ad's edit-history viewer.
+        _history = (
+            list(plan.get("editHistory"))
+            if isinstance(plan.get("editHistory"), list)
+            else []
+        )
+        _history.append(
+            {
+                "editedAt": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "editedBy": actor_name or "System",
+                "changes": [
+                    {"field": "Payment Status", "from": "Paid", "to": "Not Paid"}
+                ],
+            }
+        )
+        plan["editHistory"] = _history
+        plan["editCount"] = len(_history)
+        plan["lastUpdated"] = _iso_utc()
+
+        # SAME per-pool validators the relink path uses for the pool that
+        # changed (the due side). The surviving paid rows on OTHER receipts
+        # are byte-identical to the stored state, so their capacity is
+        # unchanged by construction.
+        if collection_method == "driver":
+            _financial_validate_due_receipt(
+                due_rows,
+                linked_receipt_id=receipt_id,
+                customer_id=customer_id,
+                locked_receipts=validation_receipts,
+                ad_rows=ad_rows,
+                current_ad_id=ad_id,
+                require_pending=False,
+            )
+        else:
+            _financial_validate_shop_due_receipt(
+                due_rows,
+                linked_receipt_id=receipt_id,
+                customer_id=customer_id,
+                locked_receipts=validation_receipts,
+                ad_rows=ad_rows,
+                current_ad_id=ad_id,
+                require_unpaid=False,
+            )
+        planned_by_id[ad_id] = plan
+        plans.append((ad_row, plan))
+
+    # Batch conservation check, mirroring _financial_prepare_paid_receipt_ad_updates:
+    # after every plan, the receipt's ONE capacity (the debt basis, since it is
+    # Not Paid now) must still cover every surviving commitment.
+    committed = _financial_outgoing(receipt)
+    for row in ad_rows:
+        ad_id = str(row.get("id") or "")
+        data = planned_by_id.get(ad_id) or _financial_row_data(row)
+        if str(data.get("recordType") or "") != "receipt":
+            committed += _financial_ad_committed(data, receipt_id)
+    if committed > _financial_due_total(receipt):
+        raise HTTPException(
+            status_code=409,
+            detail="Receipt debt balance is insufficient for all linked ads",
+        )
+    return plans
+
+
 def _financial_normalize_receipt_paid_pair(
     old: dict[str, Any], updates: dict[str, Any]
 ) -> None:
@@ -9342,6 +9535,7 @@ def _financial_patch_receipt_atomic(
     expected_last_modified: int | None,
     *,
     idempotency_key: str | None = None,
+    convert_funding_to_debt: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], bool]:
     receipt_id = validate_entity_id(receipt_id_raw)
     actor_id = validate_entity_id(actor.get("id"))
@@ -9352,13 +9546,16 @@ def _financial_patch_receipt_atomic(
     if set(clean) & (RECEIPT_TRANSFER_FIELDS - {"receiptType"}):
         raise HTTPException(status_code=405, detail="Receipt transfer fields are server-controlled")
     idem = sanitize_str(str(idempotency_key or ""), 120)
-    request_hash = _financial_request_hash(
-        {
-            "receiptId": receipt_id,
-            "expectedLastModified": expected_last_modified,
-            "data": clean,
-        }
-    )
+    _hash_payload: dict[str, Any] = {
+        "receiptId": receipt_id,
+        "expectedLastModified": expected_last_modified,
+        "data": clean,
+    }
+    # Only stamped when set so pre-existing settle markers keep replaying with
+    # their original hashes.
+    if convert_funding_to_debt:
+        _hash_payload["convertFundingToDebt"] = True
+    request_hash = _financial_request_hash(_hash_payload)
     postgres = str(get_engine().dialect.name or "") == "postgresql"
     receipt_number_guard = nullcontext() if postgres else _SQLITE_RECEIPT_NUMBER_LOCK
     financial_guard = nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK
@@ -9394,6 +9591,33 @@ def _financial_patch_receipt_atomic(
                 raise HTTPException(status_code=409, detail="Conflict: receipt has changed")
             old = _financial_row_data(row)
             _financial_normalize_receipt_paid_pair(old, clean)
+            if convert_funding_to_debt:
+                # Explicit paid -> not_paid conversion (the exact REVERSE of the
+                # settle cascade). Refuse the cases whose money history must not
+                # be rewritten BEFORE any planning:
+                #   * a TRANSFER_IN receipt or one with outgoing transfers —
+                #     transfer chains must stay paid-backed, and
+                #   * a receipt that is not actually paid — there is no paid
+                #     funding to convert.
+                if str(old.get("receiptType") or "") == "TRANSFER_IN" or old.get(
+                    "transferFromReceiptId"
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="A transferred-in receipt must remain paid",
+                    )
+                if _financial_outgoing(old) > 0:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="A receipt with outgoing transfers must remain paid",
+                    )
+                if not (
+                    str(old.get("status") or "") == "Paid" or old.get("isPaid") is True
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Only a paid receipt can convert its funding to customer debt",
+                    )
             if "receiptType" in clean:
                 requested_type = str(clean.get("receiptType") or "")
                 old_type = str(old.get("receiptType") or "")
@@ -9416,6 +9640,13 @@ def _financial_patch_receipt_atomic(
                 merged["isPaid"] = True
             elif merged_status == "Not Paid":
                 merged["isPaid"] = False
+            if convert_funding_to_debt and (
+                merged_status != "Not Paid" or merged.get("isPaid") is not False
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Receipt debt conversion must set the receipt Not Paid",
+                )
             _validate_receipt_number_change_conn(
                 conn,
                 receipt_id,
@@ -9470,7 +9701,16 @@ def _financial_patch_receipt_atomic(
                 raise HTTPException(status_code=409, detail="Receipt amount is below committed ads and transfers")
             if capacity < due_used:
                 raise HTTPException(status_code=409, detail="Receipt due amount is below committed ads")
-            if (primary_used > 0 or outgoing > 0) and not _financial_receipt_transferable(merged):
+            # The debt conversion is the ONE legitimate way a funded paid
+            # receipt may stop being paid: its paid ad funding migrates into
+            # the ads' due pool in this same transaction (planned below).
+            # Outgoing transfers were already refused above, so the guard only
+            # steps aside for the funding it is about to migrate.
+            if (
+                (primary_used > 0 or outgoing > 0)
+                and not _financial_receipt_transferable(merged)
+                and not convert_funding_to_debt
+            ):
                 raise HTTPException(status_code=409, detail="A funded or transferred receipt must remain paid")
             old_is_paid = str(old.get("status") or "") == "Paid" or old.get("isPaid") is True
             new_is_paid = str(merged.get("status") or "") == "Paid" or merged.get("isPaid") is True
@@ -9514,6 +9754,16 @@ def _financial_patch_receipt_atomic(
                     merged,
                     ad_rows,
                     actor_id=actor_id,
+                    postgres=postgres,
+                )
+            elif convert_funding_to_debt:
+                ad_plans = _financial_prepare_unpaid_receipt_ad_updates(
+                    conn,
+                    receipt_id,
+                    merged,
+                    ad_rows,
+                    actor_id=actor_id,
+                    actor_name=sanitize_str(str(actor.get("name") or ""), 120),
                     postgres=postgres,
                 )
 
@@ -9747,6 +9997,143 @@ def settle_receipt_and_linked_ads(
     # ads the caller is not allowed to read.  Preserve the all-or-nothing money
     # update while applying the normal ads.view / ads.viewOwn scope to the
     # response so this endpoint cannot become an ad-record disclosure channel.
+    visible_ads: list[dict[str, Any]] = []
+    for item in updated_ads:
+        item_data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        item_creator = (
+            item.get("createdBy")
+            or item_data.get("createdBy")
+            or item_data.get("creatorId")
+        )
+        if user_has_permission(user, "ads", "view") or user_has_permission(
+            user,
+            "ads",
+            "view",
+            record_creator_id=str(item_creator or ""),
+        ):
+            visible_ads.append(item)
+    return ReceiptSettlementResponse(
+        receipt=EntityResponse(
+            **_project_entity_media_for_user(receipt, user, include_media)
+        ),
+        updatedAds=[
+            EntityResponse(**_project_entity_media_for_user(item, user, include_media))
+            for item in visible_ads
+        ],
+        replayed=replayed,
+    )
+
+
+@app.post(
+    "/api/receipts/{receipt_id}/unsettle",
+    response_model=ReceiptSettlementResponse,
+)
+def unsettle_receipt_and_linked_ads(
+    receipt_id: str,
+    body: ReceiptSettlementRequest,
+    request: Request,
+    include_media: bool = True,
+    user: dict[str, Any] = Depends(current_user),
+):
+    """Turn a funded PAID receipt back into customer debt in one idempotent
+    commit — the exact reverse of the settle cascade. Each linked ad's paid
+    rows for THIS receipt move into its due pool, conserved to the cent."""
+    require_same_origin(request)
+    # Mirrors the settle endpoint's rule: a delivery-role grant must never
+    # reclassify money. Drivers only complete deliveries through the verified
+    # PATCH workflow.
+    if str(user.get("role") or "").strip().lower() == "delivery":
+        raise HTTPException(
+            status_code=403,
+            detail="Delivery users cannot convert receipts to customer debt",
+        )
+    existing = get_entity("receipts", validate_entity_id(receipt_id))
+    if not existing or existing.get("deleted"):
+        raise HTTPException(status_code=404, detail="Receipt not found")
+    existing_data = existing.get("data") if isinstance(existing.get("data"), dict) else {}
+    creator = (
+        existing.get("createdBy")
+        or existing_data.get("createdBy")
+        or existing_data.get("creatorId")
+    )
+    if not user_has_permission(
+        user, "receipts", "edit", record_creator_id=str(creator or "")
+    ):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    updates = sanitize_json(body.data or {}) or {}
+    if "status" in updates and str(updates.get("status") or "") != "Not Paid":
+        raise HTTPException(
+            status_code=400, detail="Receipt debt conversion status must be Not Paid"
+        )
+    if "isPaid" in updates and updates.get("isPaid") is not False:
+        raise HTTPException(
+            status_code=400, detail="Receipt debt conversion must mark isPaid false"
+        )
+    if str(updates.get("deliveryStatus") or "").strip() == "Delivered":
+        raise HTTPException(
+            status_code=400,
+            detail="Receipt debt conversion cannot mark a delivery completed",
+        )
+    updates["status"] = "Not Paid"
+    updates["isPaid"] = False
+    # A delivery-debt conversion produces a REAL pending delivery receipt, so
+    # mirror the create path's provisioning: a driver must be assigned and the
+    # receipt needs its temporary D-number. The number is derived stably (the
+    # stored one wins once assigned) so an idempotent response-loss retry
+    # replays instead of hashing differently.
+    _status_detail = (
+        updates.get("statusDetail")
+        if isinstance(updates.get("statusDetail"), dict)
+        else (
+            existing_data.get("statusDetail")
+            if isinstance(existing_data.get("statusDetail"), dict)
+            else {}
+        )
+    )
+    _not_paid_collection = str(
+        (_status_detail or {}).get("notPaidCollection") or ""
+    ).strip().lower()
+    _delivery_status = str(
+        updates.get("deliveryStatus")
+        if updates.get("deliveryStatus") is not None
+        else existing_data.get("deliveryStatus") or ""
+    ).strip()
+    if _not_paid_collection == "delivery" or _delivery_status == "Needs Delivery":
+        _person = str(
+            updates.get("deliveryPersonId")
+            if updates.get("deliveryPersonId") is not None
+            else existing_data.get("deliveryPersonId") or ""
+        ).strip()
+        if not _person:
+            raise HTTPException(
+                status_code=400,
+                detail="deliveryPersonId is required for delivery receipts",
+            )
+        _temp_no = _canonical_receipt_number(
+            updates.get("tempReceiptNo")
+        ) or _canonical_receipt_number(existing_data.get("tempReceiptNo"))
+        updates["tempReceiptNo"] = _temp_no or _next_temp_delivery_receipt_no(
+            str(user.get("id") or "system")
+        )
+    receipt, updated_ads, replayed = _financial_patch_receipt_atomic(
+        user,
+        receipt_id,
+        updates,
+        body.expectedLastModified,
+        idempotency_key=body.idempotencyKey,
+        convert_funding_to_debt=True,
+    )
+    if not replayed:
+        audit(
+            str(user.get("id") or ""),
+            "unsettle",
+            "receipts",
+            receipt["id"],
+            "Converted paid receipt funding to customer debt",
+            {"updatedAdIds": [item["id"] for item in updated_ads]},
+        )
+    # Same ads.view / ads.viewOwn response scoping as the settle endpoint.
     visible_ads: list[dict[str, Any]] = []
     for item in updated_ads:
         item_data = item.get("data") if isinstance(item.get("data"), dict) else {}

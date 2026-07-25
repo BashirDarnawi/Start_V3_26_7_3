@@ -4761,6 +4761,33 @@ function describe409(error, conflictText) {
       ? 'هذا الوصل يموّل إعلانات أو تحويلات، لذا يجب أن يبقى مدفوعاً.'
       : 'This receipt funds ads or transfers, so it must remain paid.';
   }
+  // Paid -> Not Paid debt-conversion refusals (server /unsettle cascade and
+  // its local-mode mirror). Honest rule refusals: refreshing never fixes them.
+  if (/transferred-in receipt must remain paid/i.test(detail)) {
+    return state.language === 'ar'
+      ? 'هذا الوصل ناتج عن تحويل رصيد من وصل آخر، لذا يجب أن يبقى مدفوعاً.'
+      : 'This receipt was transferred in from another receipt, so it must remain paid.';
+  }
+  if (/receipt with outgoing transfers must remain paid/i.test(detail)) {
+    return state.language === 'ar'
+      ? 'هذا الوصل حوّل جزءاً من رصيده إلى عميل آخر، لذا يجب أن يبقى مدفوعاً. احذف التحويل أولاً.'
+      : 'This receipt already transferred part of its balance to another customer, so it must remain paid. Delete the transfer first.';
+  }
+  if (/funding a finished or refunded ad must remain paid/i.test(detail)) {
+    return state.language === 'ar'
+      ? 'هذا الوصل يموّل إعلاناً منتهياً أو مسترجَعاً، ولا يمكن إعادة كتابة تاريخه المالي — يجب أن يبقى الوصل مدفوعاً.'
+      : 'This receipt funds a finished or refunded ad whose money history cannot be rewritten — the receipt must remain paid.';
+  }
+  if (/ad that owes another receipt must remain paid/i.test(detail)) {
+    return state.language === 'ar'
+      ? 'هذا الوصل يموّل جزئياً إعلاناً عليه دين على وصل آخر، لذا يجب أن يبقى مدفوعاً. سوِّ دين الإعلان أولاً.'
+      : "This receipt part-funds an ad that still owes debt on another receipt, so it must remain paid. Settle that ad's debt first.";
+  }
+  if (/legacy pre-allocation ad must remain paid/i.test(detail)) {
+    return state.language === 'ar'
+      ? 'هذا الوصل يموّل إعلاناً بصيغة قديمة بدون صفوف تمويل، لذا يجب أن يبقى مدفوعاً.'
+      : 'This receipt funds an old-format ad without funding rows, so it must remain paid.';
+  }
   return detail || conflictText;
 }
 
