@@ -1406,6 +1406,101 @@ async function apiMutateAd(payload) {
   };
 }
 
+// Read-only Meta Ads integration. Tokens never enter the browser: these calls
+// talk only to Albayan's authenticated backend, which talks to Meta server-side.
+async function apiMetaAdsStatus() {
+  return await apiJson('/api/meta-ads/status', { method: 'GET' }, { timeoutMs: 15000 });
+}
+
+async function apiMetaAdsAccounts() {
+  const response = await apiJson('/api/meta-ads/accounts', { method: 'GET' }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+  return Array.isArray(response?.accounts) ? response.accounts : [];
+}
+
+async function apiMetaAdsForAccount(accountId, search = '') {
+  const safeAccountId = String(accountId || '').replace(/^act_/, '');
+  if (!/^[0-9]{1,40}$/.test(safeAccountId)) throw new Error('Invalid Meta ad-account ID');
+  const query = search ? `?search=${encodeURIComponent(String(search).slice(0, 100))}` : '';
+  const response = await apiJson(
+    `/api/meta-ads/accounts/${encodeURIComponent(safeAccountId)}/ads${query}`,
+    { method: 'GET' },
+    { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
+  );
+  return Array.isArray(response?.ads) ? response.ads : [];
+}
+
+function validateMetaAdMutationResponse(response, context, localAd) {
+  if (!response || typeof response !== 'object' || Array.isArray(response)) {
+    const error = new Error('Invalid Meta synchronization response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  const ad = validateServerEntityResponse('ads', response.ad, context);
+  ad.data = mergeMutationInlineMedia('ads', ad.data, localAd);
+  return {
+    ad,
+    replayed: response.replayed === true,
+    changes: Array.isArray(response.changes) ? response.changes : []
+  };
+}
+
+async function apiLinkMetaAd(adId, metaAdId, expectedLastModified, operationId) {
+  const safeAdId = String(adId || '');
+  const safeMetaAdId = String(metaAdId || '');
+  if (!Security.isValidRecordId(safeAdId)) throw new Error('Invalid Albayan ad ID');
+  if (!/^[0-9]{1,40}$/.test(safeMetaAdId)) throw new Error('Enter a valid numeric Meta ad ID');
+  const identity = getServerSessionIdentity();
+  const response = await apiJson(`/api/meta-ads/ads/${encodeURIComponent(safeAdId)}/link`, {
+    method: 'POST',
+    body: { metaAdId: safeMetaAdId, expectedLastModified, operationId }
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  const localAd = (state.ads || []).find(row => row && String(row.id) === safeAdId);
+  return validateMetaAdMutationResponse(response, 'metaLink.ad', localAd);
+}
+
+async function apiSyncMetaAd(adId, expectedLastModified, operationId) {
+  const safeAdId = String(adId || '');
+  if (!Security.isValidRecordId(safeAdId)) throw new Error('Invalid Albayan ad ID');
+  const identity = getServerSessionIdentity();
+  const response = await apiJson(`/api/meta-ads/ads/${encodeURIComponent(safeAdId)}/sync`, {
+    method: 'POST',
+    body: { expectedLastModified, operationId }
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  const localAd = (state.ads || []).find(row => row && String(row.id) === safeAdId);
+  return validateMetaAdMutationResponse(response, 'metaSync.ad', localAd);
+}
+
+async function apiUnlinkMetaAd(adId, expectedLastModified, operationId) {
+  const safeAdId = String(adId || '');
+  if (!Security.isValidRecordId(safeAdId)) throw new Error('Invalid Albayan ad ID');
+  const identity = getServerSessionIdentity();
+  const response = await apiJson(`/api/meta-ads/ads/${encodeURIComponent(safeAdId)}/unlink`, {
+    method: 'POST',
+    body: { expectedLastModified, operationId }
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  const localAd = (state.ads || []).find(row => row && String(row.id) === safeAdId);
+  return validateMetaAdMutationResponse(response, 'metaUnlink.ad', localAd);
+}
+
+async function apiSyncDueMetaAds(limit = 20) {
+  const identity = getServerSessionIdentity();
+  const response = await apiJson('/api/meta-ads/sync-due', {
+    method: 'POST',
+    body: { limit: Math.max(1, Math.min(100, Number(limit) || 20)) }
+  }, { timeoutMs: 120000 });
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  const rows = Array.isArray(response?.ads) ? response.ads : [];
+  return rows.map((entity, index) => {
+    const validated = validateServerEntityResponse('ads', entity, `metaSyncDue.ads[${index}]`);
+    const localAd = (state.ads || []).find(row => row && String(row.id) === String(validated.id));
+    validated.data = mergeMutationInlineMedia('ads', validated.data, localAd);
+    return validated;
+  });
+}
+
 // Merge two duplicate customers and every relationship that points at the
 // duplicate in ONE server transaction. Generic PATCH + DELETE calls are not
 // safe here: a timeout between requests could leave pages, receipts or ads

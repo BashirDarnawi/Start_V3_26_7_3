@@ -36,6 +36,7 @@ const adEditHistoryViewer = helpers.slice(
 );
 const clothes = read('src/15b-clothes.js');
 const adsStudio = read('src/15c-ads-studio.js');
+const metaAds = read('src/15d-meta-ads.js');
 const actionsIo = read('src/16-actions-io.js');
 const css = read('style.css');
 
@@ -675,6 +676,34 @@ check('admin data integrity check is read-only, phone-safe, and server-backed',
   actionsIo.includes("updateUrlParams({ modal: 'data-integrity', id: 'report' })") &&
   modals.includes("case 'data-integrity':") &&
   modals.includes('max-h-[80dvh] overflow-y-auto'));
+
+check('Meta Ads UI is admin-only, server-backed, and explicitly read-only',
+  metaAds.includes('if (!isCurrentUserAdmin() || !isServerModeEnabled()) return') &&
+  metaAds.includes('Read-only — Albayan accounting and photos are never changed.') &&
+  metaAds.includes('apiMetaAdsStatus()') &&
+  metaAds.includes('apiLinkMetaAd(') &&
+  metaAds.includes('apiSyncMetaAd(') &&
+  metaAds.includes('apiUnlinkMetaAd(') &&
+  !metaAds.includes('api.facebook.com') &&
+  !metaAds.includes('graph.facebook.com') &&
+  !metaAds.includes('localStorage.setItem'));
+check('Meta Ads controls are reachable outside edit and fit phone dialogs',
+  views.includes('renderMetaAdsHeaderButton(isAr)') &&
+  views.includes('renderMetaAdActionButton(ad, isAr)') &&
+  views.includes('renderMetaAdStatusSummary(ad, isAr)') &&
+  metaAds.includes('Math.min(...values)') &&
+  metaAds.includes("window.visualViewport?.addEventListener('resize'") &&
+  metaAds.includes("panel.style.setProperty('max-height'") &&
+  metaAds.includes("panel.style.setProperty('overflow-y', 'auto', 'important')") &&
+  metaAds.includes('style="max-height:${interactiveHeight - 48}px"') &&
+  metaAds.includes('w-full max-w-3xl overflow-y-auto') &&
+  metaAds.includes('min-h-11') &&
+  metaAds.includes('sm:grid-cols'));
+check('Meta Ads API wrapper never accepts a token from browser code',
+  serverApi.includes("apiJson('/api/meta-ads/status'") &&
+  serverApi.includes("'/api/meta-ads/sync-due'") &&
+  !serverApi.includes('metaAccessToken') &&
+  !serverApi.includes('access_token'));
 
 // Phase 2 — SYSTEM-BROWSER app login for the packaged Capacitor apps:
 // the app opens the hosted login page in the real browser and receives a

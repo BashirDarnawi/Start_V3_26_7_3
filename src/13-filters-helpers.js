@@ -247,7 +247,11 @@ function getFilteredAds(customersById = null) {
         foldSearchText(ad.id).includes(searchTerm) ||
         (canSearchContacts && foldSearchText(ad.phoneNumber).includes(searchTerm)) ||
         foldSearchText(ad.serialNumber).includes(searchTerm) ||
-        foldSearchText(page?.name).includes(searchTerm)
+        foldSearchText(page?.name).includes(searchTerm) ||
+        foldSearchText(ad.metaAdId).includes(searchTerm) ||
+        foldSearchText(ad.metaAdName).includes(searchTerm) ||
+        foldSearchText(ad.metaCampaignName).includes(searchTerm) ||
+        foldSearchText(ad.metaAdSetName).includes(searchTerm)
       );
     });
   }

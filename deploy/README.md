@@ -18,6 +18,44 @@ Files:
 - `albayan.env.example` — environment variables (DATABASE_URL, cookie secure, etc.)
 - `albayan.service` — systemd unit (reads env file, runs uvicorn)
 
+## Meta Ads read-only synchronization
+
+Albayan can link one local ad to one real Meta ad and automatically read its
+live status, name, campaign, ad set, budget, dates, spend, reach, impressions,
+clicks, and results. It is intentionally **read-only**. It does not publish,
+pause, edit, or delete anything in Meta, and it never replaces Albayan's
+customer, receipt, debt, exchange rate, local status, photos, or notes.
+
+1. Create or select a Meta app that can access your business ad accounts.
+2. Create a long-lived server/system-user access token with read access to the
+   required ad accounts (`ads_read`). Do not use your Facebook password.
+3. In the Jelastic container environment, add:
+
+   ```text
+   ALBAYAN_META_ACCESS_TOKEN=your-token
+   ALBAYAN_META_APP_SECRET=your-app-secret
+   ALBAYAN_META_AD_ACCOUNT_IDS=123456789,987654321
+   ALBAYAN_META_BACKGROUND_SYNC=true
+   ALBAYAN_META_SYNC_INTERVAL_MINUTES=15
+   ```
+
+   The account allowlist is strongly recommended. Enter account IDs without
+   the `act_` prefix. `ALBAYAN_META_APP_SECRET` enables Meta's app-secret proof
+   on every request and should be configured in production.
+4. Restart/redeploy the container. Sign in to Albayan as Admin, open **Ads**,
+   press **Meta Sync**, and confirm the connection says **Ready**.
+5. Press the small **Link** button on an Albayan ad. Choose the ad account and
+   real Meta ad, or paste the real numeric Meta ad ID.
+
+Secrets stay in the server environment. Never enter them into the Albayan web
+page, Android/iOS app, GitHub source, a screenshot, or a chat. If a token is
+ever exposed, revoke it in Meta immediately and create a replacement.
+
+The worker checks linked ads in small batches. Failed requests use increasing
+retry delays; a manual **Sync now** remains available. In a deployment with
+multiple app containers, run the background worker in only one container by
+setting `ALBAYAN_META_BACKGROUND_SYNC=false` on the other replicas.
+
 
 
 ## Database migrations

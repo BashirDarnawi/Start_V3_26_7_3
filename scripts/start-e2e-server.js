@@ -47,6 +47,9 @@ const child = spawn(findPython(), [
     ALBAYAN_COOKIE_SECURE: 'false',
     ALBAYAN_DEBUG_MODE: 'false',
     ALBAYAN_ENABLE_ONLINE_IMPORT: 'false',
+    ALBAYAN_META_ACCESS_TOKEN: '',
+    ALBAYAN_META_APP_SECRET: '',
+    ALBAYAN_META_BACKGROUND_SYNC: 'false',
     ALBAYAN_BOOTSTRAP_ADMIN_EMAIL: 'e2e.admin@albayan.example.com',
     ALBAYAN_BOOTSTRAP_ADMIN_PASSWORD: 'E2eAdminPassword123!',
     ALBAYAN_BOOTSTRAP_ADMIN_NAME: 'E2E Administrator'

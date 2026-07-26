@@ -152,3 +152,30 @@ test('administrator can run the read-only data integrity check', async ({ page }
   await page.getByRole('button', { name: /^close$/i }).click();
   await expect(page.locator('#app-modal')).toBeHidden();
 });
+
+test('Meta Ads connection manager is safe, readable, and phone-sized', async ({ page }) => {
+  await signIn(page);
+  await page.goto('/ads');
+  const [statusResponse] = await Promise.all([
+    page.waitForResponse(response => response.url().includes('/api/meta-ads/status')),
+    page.getByRole('button', { name: /meta sync/i }).click()
+  ]);
+  expect(statusResponse.ok(), `Meta status failed with HTTP ${statusResponse.status()}`).toBe(true);
+  const modal = page.locator('#meta-ads-modal');
+  await expect(modal).toBeVisible();
+  await expect(page.getByText(/read-only.*accounting and photos are never changed/i)).toBeVisible();
+  await expect(page.getByText(/setup needed/i)).toBeVisible();
+  await expect(page.getByText(/never type the access token into albayan or chat/i)).toBeVisible();
+  await expect(modal.locator('code')).not.toContainText('secret-token-must-never-leak');
+  await expect(modal.locator('code')).not.toContainText('secret-app-value-must-never-leak');
+  const bounds = await modal.locator(':scope > div').evaluate(element => {
+    const box = element.getBoundingClientRect();
+    return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: window.innerWidth, height: window.innerHeight };
+  });
+  expect(bounds.left).toBeGreaterThanOrEqual(-1);
+  expect(bounds.right).toBeLessThanOrEqual(bounds.width + 1);
+  expect(bounds.top).toBeGreaterThanOrEqual(-1);
+  expect(bounds.bottom).toBeLessThanOrEqual(bounds.height + 1);
+  await modal.getByRole('button', { name: /close/i }).click();
+  await expect(modal).toHaveCount(0);
+});
