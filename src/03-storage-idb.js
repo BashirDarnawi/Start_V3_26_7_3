@@ -122,28 +122,136 @@ function _scopedCollectionStorageName(collectionName, capturedScope = _collectio
  * Creates necessary object stores and handles version upgrades.
  * Falls back gracefully if IndexedDB is not supported.
  *
+ * @param {Function} [onLateOpen] - Adoption callback for an open that succeeds
+ *   AFTER this promise already resolved null (watchdog / onblocked). Passing it
+ *   means "adopt the late connection AND recover": the callback must re-persist
+ *   the authoritative in-memory state (the onclose reopen path does this via
+ *   markAllCollectionsDirty() + saveState()). Without it a late connection is
+ *   closed and `db` stays null — required at startup, where the collections
+ *   were already loaded WITHOUT IndexedDB and flushing them would overwrite
+ *   the intact stored copies.
  * @returns {Promise<IDBDatabase|null>} Promise resolving to database instance or null if unsupported
  */
-function initIndexedDB() {
-  return new Promise((resolve, reject) => {
+function initIndexedDB(onLateOpen) {
+  return new Promise((resolve) => {
     if (!window.indexedDB) {
       console.warn('IndexedDB not supported, falling back to localStorage');
       resolve(null);
       return;
     }
-    
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    
+
+    // RESILIENCE: this promise must ALWAYS settle and can NEVER reject —
+    // init() awaits it before the first render, so a hung or failed open
+    // would strand the user on the loading screen forever. Known hangs:
+    // Safari 14.1–15.x can drop the open request without firing any event,
+    // and a DB_VERSION bump in another tab leaves this request in the
+    // (previously unhandled) "blocked" state.
+    let settled = false;
+    let timer = null;
+    const done = (val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(val);
+    };
+
+    // Watchdog: if no event ever arrives, continue without IndexedDB.
+    // This outcome is INCONCLUSIVE — the store may hold an intact workspace
+    // that simply could not be read this session — so flag it for init() /
+    // render(), which must not present the workspace as a fresh install.
+    // A connection that arrives AFTER this fires is NOT silently adopted
+    // (that used to flip saveState() into drop-collections mode and let the
+    // next flush overwrite the intact IndexedDB data): see the case split in
+    // request.onsuccess below.
+    timer = setTimeout(() => {
+      console.warn('IndexedDB open timed out, continuing without it');
+      window.__albayanIdbOpenInconclusive = true;
+      done(null);
+    }, 3000);
+
+    let request;
+    try {
+      request = indexedDB.open(DB_NAME, DB_VERSION);
+    } catch (e) {
+      // Chrome throws a synchronous SecurityError when site data is blocked.
+      console.warn('IndexedDB unavailable:', e);
+      done(null);
+      return;
+    }
+
     request.onerror = (event) => {
       console.error('IndexedDB error:', event.target.error);
-      resolve(null);
+      done(null);
     };
-    
+
+    // Another tab still holds a connection at an older schema version.
+    // Fall back to localStorage mode instead of hanging forever. Like the
+    // watchdog, this is inconclusive: the stored data itself is intact.
+    request.onblocked = () => {
+      console.warn('IndexedDB open blocked by another tab');
+      window.__albayanIdbOpenInconclusive = true;
+      done(null);
+    };
+
     request.onsuccess = (event) => {
-      db = event.target.result;
-      resolve(db);
+      const database = event.target.result;
+      // LATE OPEN (the watchdog or onblocked already resolved this promise
+      // with null): adopting the connection is only safe when the caller can
+      // recover, because `db` truthiness makes saveState() drop the business
+      // collections from the localStorage snapshot and re-enables the dirty
+      // flush — with in-memory arrays that were loaded WITHOUT IndexedDB.
+      // At startup (no onLateOpen) close the connection and stay in the
+      // db === null snapshot mode for the whole session; the intact
+      // IndexedDB dataset survives untouched until the next reload. The
+      // onclose reopen path passes a recovery callback instead: there the
+      // in-memory state IS authoritative, so adopt and re-persist it.
+      if (settled && typeof onLateOpen !== 'function') {
+        try { database.close(); } catch (_) {}
+        return;
+      }
+      db = database;
+      window.__albayanIdbOpenInconclusive = false;
+      // Let a future DB_VERSION bump in another tab proceed instead of being
+      // blocked forever. Closing mid-session degrades gracefully: every idb*
+      // helper guards `if (!db)` per call.
+      database.onversionchange = () => {
+        try { database.close(); } catch (_) {}
+        if (db === database) db = null;
+      };
+      // iOS Safari force-closes the connection when the tab is backgrounded
+      // or the device is locked ("Connection to Indexed Database server
+      // lost"). Null the handle immediately — saveState() then keeps the
+      // business collections inside the localStorage snapshot — and try to
+      // reopen; a successful reopen re-persists everything to IndexedDB via
+      // the normal dirty-flush machinery.
+      database.onclose = () => {
+        if (db !== database) return; // a newer connection already took over
+        db = null;
+        // Recovery runs whether the reopen settles in time (then branch) or
+        // arrives late after its own watchdog (onLateOpen inside onsuccess):
+        // edits made during the db === null window live only in the
+        // localStorage snapshot, so everything must be marked dirty and
+        // re-persisted the moment a connection is adopted — otherwise the
+        // next saveState() would strip the collections from the snapshot
+        // while IndexedDB still holds the pre-close data.
+        const recover = () => {
+          if (typeof markAllCollectionsDirty === 'function') {
+            markAllCollectionsDirty();
+            saveState();
+          }
+        };
+        initIndexedDB(recover).then((reopened) => {
+          if (reopened) recover();
+        }).catch(() => {});
+      };
+      if (settled) {
+        // Late adoption (onclose reopen path only): re-persist before anyone
+        // can observe the truthy `db` and skip collections in saveState().
+        try { onLateOpen(); } catch (_) {}
+      }
+      done(database);
     };
-    
+
     request.onupgradeneeded = (event) => {
       const database = event.target.result;
       
@@ -332,6 +440,10 @@ function getCollectionChunkKey(collectionName, index, capturedScope = _collectio
  */
 async function saveCollectionToIndexedDB(collectionName, data) {
   if (!db) return false;
+  // MULTI-TAB SAFETY: a tab that lost the single-writer lock must never
+  // rewrite a collection from its (possibly stale) in-memory array — that
+  // would silently delete records the winning tab already persisted.
+  if (typeof isAnotherTabWriter === 'function' && isAnotherTabWriter()) return false;
   const name = String(collectionName || '');
   if (!name) return false;
   // Capture the scope before the first await. A logout/login during the write

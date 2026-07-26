@@ -1,5 +1,164 @@
+let _customerMergeReturnFocus = null;
+
+function getCustomerMergeRelationshipCounts(customerId) {
+  const id = String(customerId || '');
+  const pages = getVisibleRecords(state.pages).filter(page => {
+    if (Array.isArray(page.customerIds)) return page.customerIds.map(String).includes(id);
+    return String(page.customerId || page.customer || '') === id;
+  }).length;
+  const receipts = getVisibleRecords(state.receipts)
+    .filter(receipt => String(receipt.customerId || receipt.customer || '') === id).length;
+  const ads = getVisibleRecords(state.ads)
+    .filter(ad => ad.recordType !== 'receipt' && String(ad.customerId || ad.customer || '') === id).length;
+  return { pages, receipts, ads, total: pages + receipts + ads };
+}
+
+function getRecommendedCustomerToKeep(customers) {
+  return (Array.isArray(customers) ? customers : []).slice().sort((left, right) => {
+    const rightLinks = getCustomerMergeRelationshipCounts(right?.id).total;
+    const leftLinks = getCustomerMergeRelationshipCounts(left?.id).total;
+    if (rightLinks !== leftLinks) return rightLinks - leftLinks;
+    // On equal link counts, keep the older identity. It is more likely to be
+    // the record staff and historical exports already recognize.
+    const leftCreated = Number(left?._created || Date.parse(left?.joinDate || '') || Number.MAX_SAFE_INTEGER);
+    const rightCreated = Number(right?._created || Date.parse(right?.joinDate || '') || Number.MAX_SAFE_INTEGER);
+    if (leftCreated !== rightCreated) return leftCreated - rightCreated;
+    return String(left?.id || '').localeCompare(String(right?.id || ''));
+  })[0] || null;
+}
+
+function setCustomerMergePairFromGroup(groupIndex) {
+  const groups = findDuplicateCustomerGroups(state.customers);
+  const safeIndex = Math.max(0, Math.min(Number(groupIndex) || 0, Math.max(0, groups.length - 1)));
+  const group = groups[safeIndex];
+  if (!group || group.customers.length < 2) return false;
+  const keep = getRecommendedCustomerToKeep(group.customers);
+  const duplicate = group.customers.find(customer => String(customer.id) !== String(keep?.id));
+  state.modalData = {
+    duplicateGroupIndex: safeIndex,
+    keepCustomerId: String(keep?.id || ''),
+    duplicateCustomerId: String(duplicate?.id || ''),
+    idempotencyKey: Security.generateSecureId('customer-merge')
+  };
+  return true;
+}
+
+function showCustomerDuplicateMerge(preferredCustomerId = '') {
+  const isAr = state.language === 'ar';
+  if (!isCurrentUserAdmin()) {
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'دمج العملاء متاح للمدير فقط.' : 'Only an administrator can merge customers.', 'error');
+    return;
+  }
+  if (!isServerModeEnabled()) {
+    showNotification(
+      isAr ? 'يتطلب اتصال الخادم' : 'Server connection required',
+      isAr ? 'الدمج الآمن ينقل كل الروابط في معاملة واحدة، لذلك يجب الاتصال بالخادم أولاً.' : 'Safe merge moves every link in one transaction, so connect to the server first.',
+      'warning'
+    );
+    return;
+  }
+  const groups = findDuplicateCustomerGroups(state.customers);
+  if (groups.length === 0) {
+    showNotification(isAr ? 'لا يوجد تكرار' : 'No duplicates found', isAr ? 'لا توجد أرقام هاتف مشتركة بين العملاء الحاليين.' : 'No active customers share the same normalized phone number.', 'success');
+    return;
+  }
+  const preferred = String(preferredCustomerId || '');
+  const groupIndex = preferred
+    ? Math.max(0, groups.findIndex(group => group.customers.some(customer => String(customer.id) === preferred)))
+    : 0;
+  _customerMergeReturnFocus = document.activeElement && typeof document.activeElement.focus === 'function'
+    ? document.activeElement
+    : null;
+  state.activeModal = 'customer-merge';
+  if (!setCustomerMergePairFromGroup(groupIndex)) return;
+  renderModal();
+}
+
+function selectCustomerDuplicateGroup(groupIndex) {
+  if (!isCurrentUserAdmin() || state.activeModal !== 'customer-merge') return;
+  if (setCustomerMergePairFromGroup(groupIndex)) renderModal();
+}
+
+function selectCustomerMergeKeep(customerId) {
+  if (!isCurrentUserAdmin() || state.activeModal !== 'customer-merge') return;
+  const groups = findDuplicateCustomerGroups(state.customers);
+  const group = groups[Number(state.modalData?.duplicateGroupIndex) || 0];
+  if (!group) return;
+  const keepId = String(customerId || '');
+  if (!group.customers.some(customer => String(customer.id) === keepId)) return;
+  let duplicateId = String(state.modalData?.duplicateCustomerId || '');
+  if (duplicateId === keepId || !group.customers.some(customer => String(customer.id) === duplicateId)) {
+    duplicateId = String(group.customers.find(customer => String(customer.id) !== keepId)?.id || '');
+  }
+  state.modalData.keepCustomerId = keepId;
+  state.modalData.duplicateCustomerId = duplicateId;
+  state.modalData.idempotencyKey = Security.generateSecureId('customer-merge');
+  renderModal();
+}
+
+function selectCustomerMergeDuplicate(customerId) {
+  if (!isCurrentUserAdmin() || state.activeModal !== 'customer-merge') return;
+  const groups = findDuplicateCustomerGroups(state.customers);
+  const group = groups[Number(state.modalData?.duplicateGroupIndex) || 0];
+  const duplicateId = String(customerId || '');
+  if (!group || duplicateId === String(state.modalData?.keepCustomerId || '') || !group.customers.some(customer => String(customer.id) === duplicateId)) return;
+  state.modalData.duplicateCustomerId = duplicateId;
+  state.modalData.idempotencyKey = Security.generateSecureId('customer-merge');
+  renderModal();
+}
+
+// Prepare a detached history update. Never push into the live ad's array:
+// a conflict or failed server request must not leave a ghost edit in state.
+function buildAdEditHistoryUpdates(oldAd, changes, editorName = state.currentUser?.name || 'Unknown', editedAt = new Date().toISOString()) {
+  const editHistory = Array.isArray(oldAd?.editHistory)
+    ? oldAd.editHistory.map(entry => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return entry;
+        return {
+          ...entry,
+          changes: Array.isArray(entry.changes)
+            ? entry.changes.map(change => (
+                change && typeof change === 'object' && !Array.isArray(change)
+                  ? { ...change }
+                  : change
+              ))
+            : entry.changes
+        };
+      })
+    : [];
+  const detachedChanges = Array.isArray(changes)
+    ? changes
+        .filter(change => change && typeof change === 'object' && !Array.isArray(change))
+        .map(change => ({ ...change }))
+    : [];
+
+  if (detachedChanges.length === 0) {
+    const storedCount = Number(oldAd?.editCount);
+    return {
+      editHistory,
+      editCount: editHistory.length || (
+        Number.isSafeInteger(storedCount) && storedCount > 0 ? storedCount : 0
+      )
+    };
+  }
+
+  editHistory.push({
+    editedAt,
+    editedBy: String(editorName || 'Unknown'),
+    changes: detachedChanges
+  });
+  return {
+    editHistory,
+    editCount: editHistory.length,
+    updatedAt: editedAt
+  };
+}
+
 function renderModal() {
   const existingModal = document.getElementById('app-modal');
+  const previousCustomerMergeFocusId = existingModal && state.activeModal === 'customer-merge'
+    && existingModal.contains(document.activeElement)
+    ? String(document.activeElement?.id || '')
+    : '';
   if (existingModal) existingModal.remove();
   
   if (!state.activeModal) return;
@@ -9,7 +168,8 @@ function renderModal() {
   switch (state.activeModal) {
     case 'customer':
       const custData = state.modalData || {};
-      const phones = custData.phones || [''];
+      const phones = getCustomerPhoneEntries(custData).map(entry => entry.value);
+      if (phones.length === 0) phones.push('');
       const profileLinks = custData.profileLinks || [];
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center">
@@ -95,6 +255,113 @@ function renderModal() {
         </form>
       `;
       break;
+    case 'customer-merge': {
+      const isArMerge = state.language === 'ar';
+      const duplicateGroups = findDuplicateCustomerGroups(state.customers);
+      const selectedGroupIndex = Math.max(0, Math.min(
+        Number(state.modalData?.duplicateGroupIndex) || 0,
+        Math.max(0, duplicateGroups.length - 1)
+      ));
+      const selectedGroup = duplicateGroups[selectedGroupIndex];
+      if (!isCurrentUserAdmin() || !selectedGroup) {
+        modalContent = `<h2 id="customer-merge-title" tabindex="-1" class="text-center py-8 text-slate-500">${isArMerge ? 'لا توجد مجموعة تكرار متاحة.' : 'No duplicate group is available.'}</h2>`;
+        break;
+      }
+      const groupCustomers = selectedGroup.customers;
+      const recommendedKeep = getRecommendedCustomerToKeep(groupCustomers);
+      let keepCustomerId = String(state.modalData?.keepCustomerId || recommendedKeep?.id || '');
+      if (!groupCustomers.some(customer => String(customer.id) === keepCustomerId)) {
+        keepCustomerId = String(recommendedKeep?.id || groupCustomers[0]?.id || '');
+      }
+      let duplicateCustomerId = String(state.modalData?.duplicateCustomerId || '');
+      if (duplicateCustomerId === keepCustomerId || !groupCustomers.some(customer => String(customer.id) === duplicateCustomerId)) {
+        duplicateCustomerId = String(groupCustomers.find(customer => String(customer.id) !== keepCustomerId)?.id || '');
+      }
+      state.modalData.keepCustomerId = keepCustomerId;
+      state.modalData.duplicateCustomerId = duplicateCustomerId;
+      const keepCustomer = groupCustomers.find(customer => String(customer.id) === keepCustomerId);
+      const duplicateCustomer = groupCustomers.find(customer => String(customer.id) === duplicateCustomerId);
+      const keepCounts = getCustomerMergeRelationshipCounts(keepCustomerId);
+      const duplicateCounts = getCustomerMergeRelationshipCounts(duplicateCustomerId);
+      const describeCustomer = customer => {
+        const firstPhone = getCustomerPhoneEntries(customer)[0]?.value || (isArMerge ? 'بدون هاتف' : 'No phone');
+        const counts = getCustomerMergeRelationshipCounts(customer?.id);
+        return `${customer?.name || (isArMerge ? 'عميل بدون اسم' : 'Unnamed customer')} · ${firstPhone} · ${counts.total} ${isArMerge ? 'سجل مرتبط' : 'linked'}`;
+      };
+      const sharedPhones = selectedGroup.sharedPhoneKeys
+        .map(key => key.startsWith('218') ? `+${key}` : key)
+        .join(', ');
+      modalContent = `
+        <div class="mb-5">
+          <div class="flex items-start gap-3">
+            <span class="w-11 h-11 rounded-xl bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 flex items-center justify-center shrink-0">
+              <i data-lucide="combine" class="w-6 h-6"></i>
+            </span>
+            <div>
+              <h2 id="customer-merge-title" tabindex="-1" class="text-2xl font-bold text-slate-900 dark:text-white">${isArMerge ? 'دمج العملاء المكررين' : 'Merge duplicate customers'}</h2>
+              <p class="text-sm text-slate-500 mt-1">${isArMerge ? 'اختر السجل الذي سيبقى. سيتم نقل كل الصفحات والوصولات والإعلانات بأمان.' : 'Choose the record to keep. Every page, receipt and ad will be moved safely.'}</p>
+            </div>
+          </div>
+        </div>
+        <form id="modal-form" class="space-y-5 pr-1">
+          ${duplicateGroups.length > 1 ? `
+          <div>
+            <label for="customer-duplicate-group" class="block text-sm font-bold mb-2">${isArMerge ? 'مجموعة التكرار' : 'Duplicate group'}</label>
+            <select id="customer-duplicate-group" onchange="selectCustomerDuplicateGroup(this.value)" class="w-full glass-input px-4 py-3 rounded-xl">
+              ${duplicateGroups.map((group, index) => `<option value="${index}" ${index === selectedGroupIndex ? 'selected' : ''}>${Security.escapeHtml(`${index + 1}. ${group.customers.map(customer => customer.name || 'Unnamed').join(' / ')}`)}</option>`).join('')}
+            </select>
+          </div>` : ''}
+
+          <div class="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 text-sm">
+            <div class="font-bold text-amber-800 dark:text-amber-200">${isArMerge ? 'سبب اكتشاف التكرار' : 'Why these records match'}</div>
+            <div class="mt-1 text-amber-700 dark:text-amber-300 break-all">${isArMerge ? 'رقم هاتف مشترك:' : 'Shared phone:'} ${Security.escapeHtml(sharedPhones || (isArMerge ? 'تم العثور على تطابق' : 'match found'))}</div>
+          </div>
+
+          <div class="grid gap-4 md:grid-cols-2">
+            <div class="rounded-xl border-2 border-emerald-300 dark:border-emerald-700 p-4 bg-emerald-50/60 dark:bg-emerald-900/10">
+              <label for="customer-merge-keep" class="block text-sm font-bold text-emerald-800 dark:text-emerald-300 mb-2">${isArMerge ? '1. العميل الذي سيبقى' : '1. Customer to keep'}</label>
+              <select id="customer-merge-keep" onchange="selectCustomerMergeKeep(this.value)" class="w-full glass-input px-3 py-3 rounded-xl">
+                ${groupCustomers.map(customer => `<option value="${Security.escapeHtml(String(customer.id || ''))}" ${String(customer.id) === keepCustomerId ? 'selected' : ''}>${Security.escapeHtml(describeCustomer(customer))}</option>`).join('')}
+              </select>
+              ${String(recommendedKeep?.id || '') === keepCustomerId ? `<div class="mt-2 inline-flex items-center gap-1 rounded-full bg-emerald-100 dark:bg-emerald-900/40 px-2 py-1 text-xs font-bold text-emerald-700 dark:text-emerald-300"><i data-lucide="sparkles" class="w-3 h-3"></i>${isArMerge ? 'موصى به: لديه سجلات مرتبطة أكثر' : 'Recommended: more linked records'}</div>` : ''}
+              <div class="grid grid-cols-3 gap-2 mt-3 text-center text-xs">
+                <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${keepCounts.pages}</strong>${isArMerge ? 'صفحات' : 'Pages'}</div>
+                <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${keepCounts.receipts}</strong>${isArMerge ? 'وصولات' : 'Receipts'}</div>
+                <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${keepCounts.ads}</strong>${isArMerge ? 'إعلانات' : 'Ads'}</div>
+              </div>
+            </div>
+
+            <div class="rounded-xl border-2 border-rose-200 dark:border-rose-800 p-4 bg-rose-50/60 dark:bg-rose-900/10">
+              <label for="customer-merge-duplicate" class="block text-sm font-bold text-rose-800 dark:text-rose-300 mb-2">${isArMerge ? '2. السجل المكرر الذي سيُؤرشف' : '2. Duplicate to archive'}</label>
+              <select id="customer-merge-duplicate" onchange="selectCustomerMergeDuplicate(this.value)" class="w-full glass-input px-3 py-3 rounded-xl">
+                ${groupCustomers.filter(customer => String(customer.id) !== keepCustomerId).map(customer => `<option value="${Security.escapeHtml(String(customer.id || ''))}" ${String(customer.id) === duplicateCustomerId ? 'selected' : ''}>${Security.escapeHtml(describeCustomer(customer))}</option>`).join('')}
+              </select>
+              <div class="grid grid-cols-3 gap-2 mt-3 text-center text-xs">
+                <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${duplicateCounts.pages}</strong>${isArMerge ? 'صفحات' : 'Pages'}</div>
+                <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${duplicateCounts.receipts}</strong>${isArMerge ? 'وصولات' : 'Receipts'}</div>
+                <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${duplicateCounts.ads}</strong>${isArMerge ? 'إعلانات' : 'Ads'}</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-4 text-sm text-blue-800 dark:text-blue-200">
+            <div class="font-bold">${isArMerge ? `سيتم نقل ${duplicateCounts.total} سجل مرتبط إلى «${Security.escapeHtml(keepCustomer?.name || '')}»` : `${duplicateCounts.total} linked record(s) will move to “${Security.escapeHtml(keepCustomer?.name || '')}”`}</div>
+            <p class="mt-1 text-xs">${isArMerge ? 'لن تُحذف الوصولات أو الإعلانات ولن تتغير مبالغها. بعد نجاح النقل فقط، سيُؤرشف سجل العميل المكرر.' : 'No receipt or ad is deleted and no amount is changed. The duplicate customer is archived only after the move succeeds.'}</p>
+          </div>
+
+          <label class="flex items-start gap-3 rounded-xl border border-slate-200 dark:border-slate-700 p-4 cursor-pointer">
+            <input id="customer-merge-confirm" type="checkbox" required class="mt-1 w-5 h-5 rounded border-slate-300 text-indigo-600" />
+            <span class="text-sm font-medium text-slate-700 dark:text-slate-200">${isArMerge ? 'راجعت السجلين وأؤكد أنهما لنفس العميل.' : 'I reviewed both records and confirm they belong to the same customer.'}</span>
+          </label>
+
+          <div class="flex flex-col-reverse sm:flex-row gap-3 pt-2">
+            <button type="button" onclick="closeModal()" class="flex-1 min-h-12 bg-slate-200 dark:bg-slate-700 px-5 py-3 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600">${isArMerge ? 'إلغاء' : 'Cancel'}</button>
+            <button type="submit" class="flex-1 min-h-12 btn-shine bg-indigo-600 text-white px-5 py-3 rounded-xl font-bold hover:bg-indigo-700 inline-flex items-center justify-center gap-2"><i data-lucide="combine" class="w-5 h-5"></i>${isArMerge ? 'دمج بأمان' : 'Merge safely'}</button>
+          </div>
+        </form>
+      `;
+      break;
+    }
     case 'ad':
       const visibleCustomers = getVisibleRecords(state.customers);
       const visiblePages = getVisibleRecords(state.pages);
@@ -103,11 +370,32 @@ function renderModal() {
       // Copy (not alias) the live record's photos — the receipt modal already
       // does this (see state.tempReceiptPhotos below). Aliasing meant adding or
       // removing a photo mutated the SAVED ad immediately, even on Cancel.
-      state.tempAdPhotos = (adData.adPhotos || adData.photos || []).slice();
+      _adPhotoUploadGeneration++;
+      _adPhotoUploadsInFlight = 0;
+      state.tempAdPhotos = (!isEdit || can('ads', 'viewPhotos')) ? getAdPhotoSources(adData) : [];
+      state.tempAdPhotosDirty = false;
       const durationDaysDefault = (adData.days !== undefined ? adData.days : (adData.startDate && adData.endDate ? Math.max(0, Math.round((new Date(adData.endDate) - new Date(adData.startDate)) / (1000 * 60 * 60 * 24))) : ''));
-      const isAdminUser = isCurrentUserAdmin();
       const adCreator = isEdit && adData.creatorId ? state.users.find(u => u.id === adData.creatorId) : state.currentUser;
+      // Badge describes the ad's CREATOR, not the viewer. Driving it from the
+      // viewer's role mislabeled an Admin-created ad as "USER" for a non-admin
+      // editor (and vice-versa). isAdminRole() returns false for an unresolved
+      // creator, so it gracefully falls back to the "USER" badge.
+      const creatorIsAdmin = isAdminRole(adCreator?.role);
       const isArAd = state.language === 'ar';
+      const adHistoryCount = getAdEditHistoryCount(adData);
+      const adPaymentState = getAdPaymentState(adData);
+      const hasLinkedShopReceipt = adPaymentState === 'not_paid'
+        && adData.collectionMethod === 'in_shop'
+        && Array.isArray(adData.dueAllocations)
+        && adData.dueAllocations.some(row => row && row.receiptId && Number(row.amountUSD) > 0);
+      // Settle target for the funding hint: a LIVE debt settles its full
+      // budget, a TERMINAL ad only its committed total (stop already released
+      // the rest) — in step with getOriginalUnpaidAdBudgetUSD and the save-
+      // time validation, so the hint never demands the dead $9.00 of a
+      // stopped ad whose remaining committed spend is $1.24.
+      const adSettleTargetUSD = adIsTerminalForEdit(adData)
+        ? getAdCommittedFundingTotalUSD(adData)
+        : Number(adData.amountUSD || 0);
 
       if (visiblePages.length === 0) {
         modalContent = `
@@ -130,8 +418,8 @@ function renderModal() {
         <div class="flex flex-col h-full max-h-[85vh]">
           <!-- FIXED HEADER -->
           <div class="flex-shrink-0 flex items-center justify-between pb-4 border-b border-slate-200 dark:border-slate-700">
-            <div class="flex items-center space-x-3">
-              <span class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg">
+            <div class="min-w-0 flex items-center space-x-3">
+              <span class="w-10 h-10 shrink-0 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg">
                 <i data-lucide="megaphone" class="w-5 h-5 text-white"></i>
               </span>
               <div>
@@ -139,9 +427,18 @@ function renderModal() {
                 <p class="text-slate-400 text-xs">${isArAd ? 'املأ جميع الأقسام أدناه' : 'Fill all sections below'}</p>
               </div>
             </div>
-            <button type="button" onclick="closeModal()" class="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-rose-100 hover:text-rose-600 transition-colors">
-              <i data-lucide="x" class="w-4 h-4"></i>
-            </button>
+            <div class="flex shrink-0 items-center gap-2">
+              ${isEdit ? `
+                <button type="button" data-action="view-ad-edit-history" data-ad-id="${Security.escapeHtml(String(adData.id || ''))}" onclick="showAdEditHistory(this.dataset.adId)" class="min-h-11 inline-flex items-center justify-center gap-1.5 rounded-xl border border-purple-200 dark:border-purple-800 bg-purple-50 dark:bg-purple-900/20 px-3 text-xs font-bold text-purple-700 dark:text-purple-300 hover:bg-purple-100 dark:hover:bg-purple-900/40 focus:outline-none focus:ring-2 focus:ring-purple-500" title="${isArAd ? 'عرض سجل تعديلات الإعلان' : 'View ad edit history'}" aria-label="${isArAd ? `عرض سجل تعديلات الإعلان، ${adHistoryCount}` : `View ad edit history, ${adHistoryCount} edits`}">
+                  <i data-lucide="history" class="w-4 h-4 shrink-0"></i>
+                  <span class="hidden sm:inline">${isArAd ? 'السجل' : 'History'}</span>
+                  <span class="min-w-5 rounded-full bg-purple-600 px-1.5 py-0.5 text-center text-[10px] leading-none text-white">${adHistoryCount}</span>
+                </button>
+              ` : ''}
+              <button type="button" onclick="closeModal()" class="min-h-11 min-w-11 rounded-full bg-slate-100 dark:bg-slate-700 flex items-center justify-center hover:bg-rose-100 hover:text-rose-600 transition-colors" aria-label="${isArAd ? 'إغلاق' : 'Close'}">
+                <i data-lucide="x" class="w-4 h-4"></i>
+              </button>
+            </div>
           </div>
 
           <!-- SCROLLABLE FORM BODY -->
@@ -162,8 +459,8 @@ function renderModal() {
                   </div>
                   <span class="text-sm text-slate-600 dark:text-slate-300">${Security.escapeHtml(adCreator?.name || (isArAd ? 'غير معروف' : 'Unknown'))}</span>
                 </div>
-                <span class="px-2 py-0.5 rounded-full text-[9px] font-bold ${isAdminUser ? 'bg-amber-100 text-amber-600' : 'bg-slate-200 text-slate-500'}">
-                  ${isAdminUser ? (isArAd ? 'أدمن' : 'ADMIN') : (isArAd ? 'مستخدم' : 'USER')}
+                <span class="px-2 py-0.5 rounded-full text-[9px] font-bold ${creatorIsAdmin ? 'bg-amber-100 text-amber-600' : 'bg-slate-200 text-slate-500'}">
+                  ${creatorIsAdmin ? (isArAd ? 'أدمن' : 'ADMIN') : (isArAd ? 'مستخدم' : 'USER')}
                 </span>
               </div>
               <input type="hidden" id="ad-creator-id" value="${adCreator?.id || state.currentUser?.id || ''}" />
@@ -200,26 +497,26 @@ function renderModal() {
               </div>
               <div class="grid grid-cols-3 gap-2">
                 <button type="button" onclick="setAdPaymentStatus('paid')" id="ad-pay-status-paid"
-                  class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'border-emerald-500 bg-emerald-100 dark:bg-emerald-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
-                  <i data-lucide="check-circle" class="w-5 h-5 ${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'text-emerald-600' : 'text-slate-400'}"></i>
-                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'text-emerald-700' : 'text-slate-500'}">${trStatus('Paid')}</span>
+                  class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adPaymentState === 'paid' ? 'border-emerald-500 bg-emerald-100 dark:bg-emerald-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
+                  <i data-lucide="check-circle" class="w-5 h-5 ${adPaymentState === 'paid' ? 'text-emerald-600' : 'text-slate-400'}"></i>
+                  <span class="text-xs font-semibold mt-1 ${adPaymentState === 'paid' ? 'text-emerald-700' : 'text-slate-500'}">${trStatus('Paid')}</span>
                 </button>
                 <button type="button" onclick="setAdPaymentStatus('not_paid')" id="ad-pay-status-not-paid"
-                  class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adData.paymentStatus === 'not_paid' ? 'border-amber-500 bg-amber-100 dark:bg-amber-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
-                  <i data-lucide="clock" class="w-5 h-5 ${adData.paymentStatus === 'not_paid' ? 'text-amber-600' : 'text-slate-400'}"></i>
-                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'not_paid' ? 'text-amber-700' : 'text-slate-500'}">${isArAd ? 'غير مدفوع' : 'Not Paid'}</span>
+                  class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adPaymentState === 'not_paid' ? 'border-amber-500 bg-amber-100 dark:bg-amber-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
+                  <i data-lucide="clock" class="w-5 h-5 ${adPaymentState === 'not_paid' ? 'text-amber-600' : 'text-slate-400'}"></i>
+                  <span class="text-xs font-semibold mt-1 ${adPaymentState === 'not_paid' ? 'text-amber-700' : 'text-slate-500'}">${isArAd ? 'غير مدفوع' : 'Not Paid'}</span>
                 </button>
                 <button type="button" onclick="setAdPaymentStatus('wont_pay')" id="ad-pay-status-wont"
-                  class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adData.paymentStatus === 'wont_pay' ? 'border-rose-500 bg-rose-100 dark:bg-rose-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
-                  <i data-lucide="x-octagon" class="w-5 h-5 ${adData.paymentStatus === 'wont_pay' ? 'text-rose-600' : 'text-slate-400'}"></i>
-                  <span class="text-xs font-semibold mt-1 ${adData.paymentStatus === 'wont_pay' ? 'text-rose-700' : 'text-slate-500'}">${isArAd ? 'لن يدفع' : "Won't Pay"}</span>
+                  class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adPaymentState === 'wont_pay' ? 'border-rose-500 bg-rose-100 dark:bg-rose-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
+                  <i data-lucide="x-octagon" class="w-5 h-5 ${adPaymentState === 'wont_pay' ? 'text-rose-600' : 'text-slate-400'}"></i>
+                  <span class="text-xs font-semibold mt-1 ${adPaymentState === 'wont_pay' ? 'text-rose-700' : 'text-slate-500'}">${isArAd ? 'لن يدفع' : "Won't Pay"}</span>
                 </button>
               </div>
-              <input type="hidden" id="ad-payment-status" value="${adData.paymentStatus || 'paid'}" />
+              <input type="hidden" id="ad-payment-status" value="${adPaymentState}" />
             </div>
 
             <!-- NOT PAID OPTIONS -->
-            <div id="ad-not-paid-options" class="${adData.paymentStatus === 'not_paid' ? '' : 'hidden'}">
+            <div id="ad-not-paid-options" class="${adPaymentState === 'not_paid' ? '' : 'hidden'}">
               <div class="p-4 rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 space-y-3">
                 <label class="block text-xs font-bold text-amber-700">${isArAd ? 'كيف سيتم تحصيل الدفع؟' : 'How will payment be collected?'}</label>
                 <div class="grid grid-cols-2 gap-2">
@@ -236,24 +533,46 @@ function renderModal() {
                 </div>
                 <input type="hidden" id="ad-collection-method" value="${adData.collectionMethod || ''}" />
                 <div id="ad-collection-details" class="${adData.collectionMethod ? '' : 'hidden'} pt-2 border-t border-amber-200">
+                  <div id="ad-driver-budget-section" class="${adData.collectionMethod === 'driver' ? '' : 'hidden'} mb-3 p-3 bg-violet-50 dark:bg-violet-900/20 rounded-lg border border-violet-200 dark:border-violet-800 space-y-2">
+                    <label for="ad-driver-budget-usd" class="block text-xs font-bold text-violet-700 dark:text-violet-300">${isArAd ? 'ميزانية الإعلان (USD) *' : 'Ad Budget (USD) *'}</label>
+                    <input
+                      type="text"
+                      inputmode="decimal"
+                      id="ad-driver-budget-usd"
+                      value="${Security.escapeHtml(Number(adData.amountUSD || 0) > 0 ? Number(adData.amountUSD).toFixed(2) : '')}"
+                      class="w-full border border-violet-300 dark:border-violet-700 bg-white dark:bg-slate-900 px-3 py-2 rounded-lg text-sm font-bold"
+                      placeholder="0.00"
+                      oninput="sanitizeMoneyInput(this); updateAdDriverBudgetSummary()"
+                      onfocus="this.select()"
+                    />
+                    <input type="hidden" id="ad-driver-budget-rate" value="${Security.escapeHtml(String(adData.exchangeRate || state.defaultExchangeRate || 1))}" />
+                    <div id="ad-driver-budget-summary" class="text-[11px] text-violet-600 dark:text-violet-300"></div>
+                    <div class="text-[11px] text-amber-700 dark:text-amber-300">
+                      ${isArAd
+                        ? 'سيظهر هذا المبلغ كدين على العميل حتى تسجيل الدفع. لاحقاً عدّل الإعلان إلى «مدفوع» واربط وصل العميل.'
+                        : 'This amount appears as customer debt until payment is recorded. Later edit the ad to Paid and link the customer receipt.'}
+                    </div>
+                  </div>
                   <div id="ad-driver-select" class="hidden"></div>
-                  <div id="ad-temp-receipt-link" class="hidden mt-2 p-3 bg-white rounded-lg border border-violet-200 space-y-3">
-                    <label class="block text-xs font-bold text-violet-700">${isArAd ? 'ربط وصل توصيل (D#)' : 'Link Delivery Receipt (D#)'}</label>
-                    <select id="ad-temp-receipt-id" class="w-full border border-slate-200 px-3 py-2 rounded-lg text-sm" onchange="onAdTempReceiptChange(this.value)">
+                  <div id="ad-temp-receipt-link" class="hidden mt-2 p-3 bg-white dark:bg-slate-900 rounded-lg border border-violet-200 dark:border-violet-800 space-y-3">
+                    <label for="ad-temp-receipt-id" id="ad-linked-receipt-label" class="block text-xs font-bold text-violet-700 dark:text-violet-300">${adData.collectionMethod === 'in_shop' ? (isArAd ? 'ربط وصل غير مدفوع في المحل' : 'Link Unpaid In-Shop Receipt') : (isArAd ? 'ربط وصل توصيل (D#)' : 'Link Delivery Receipt (D#)')}</label>
+                    <select id="ad-temp-receipt-id" aria-describedby="ad-temp-receipt-hint ad-linked-receipt-help ad-linked-receipt-change" class="w-full min-h-11 border border-slate-200 px-3 py-2 rounded-lg text-sm" onchange="onAdTempReceiptChange(this.value)">
                       <option value="">${isArAd ? 'اختر وصلاً معلقاً...' : 'Select pending receipt...'}</option>
                     </select>
                     <div id="ad-temp-receipt-hint" class="text-xs text-slate-500"></div>
-                    <input type="hidden" id="ad-linked-receipt-id" value="${adData.receiptId || ''}" />
+                    <div id="ad-linked-receipt-help" class="hidden text-[11px] text-amber-700 dark:text-amber-300"></div>
+                    <div id="ad-linked-receipt-change" role="status" aria-live="polite" class="hidden rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-2 text-[11px] font-medium text-blue-800 dark:text-blue-200"></div>
+                    <input type="hidden" id="ad-linked-receipt-id" value="${adData.linkedDeliveryReceiptId || adData.receiptId || ''}" />
                     
                     <!-- Due Amount Usage Section -->
                     <div id="ad-due-amount-section" class="hidden p-3 bg-violet-50 rounded-lg border border-violet-200 space-y-2">
                       <div class="flex items-center justify-between">
-                        <span class="text-xs font-semibold text-violet-700">${isArAd ? 'استخدام رصيد من الوصل المستحق' : 'Use Credit from Due Receipt'}</span>
+                        <span id="ad-due-title" class="text-xs font-semibold text-violet-700">${isArAd ? 'استخدام رصيد من الوصل المستحق' : 'Use Credit from Due Receipt'}</span>
                         <span id="ad-due-available" class="text-xs text-violet-600 font-medium">${isArAd ? 'المتاح: $0.00' : 'Available: $0.00'}</span>
                   </div>
                       <div class="grid grid-cols-2 gap-2">
                         <div>
-                          <label class="block text-[10px] text-slate-500 mb-1">${isArAd ? 'الصرف المخطط (USD)' : 'Planned Spend (USD)'}</label>
+                          <label id="ad-due-amount-label" class="block text-[10px] text-slate-500 mb-1">${isArAd ? 'الصرف المخطط (USD)' : 'Planned Spend (USD)'}</label>
                           <input type="text" id="ad-due-amount-to-use" inputmode="decimal" class="w-full border border-violet-300 px-3 py-2 rounded-lg text-sm bg-white" placeholder="0.00" oninput="sanitizeMoneyInput(this); onAdDueAmountChange()" onfocus="this.select()" />
                 </div>
                         <div>
@@ -293,7 +612,7 @@ function renderModal() {
             </div>
 
             <!-- UNPAID FINANCIAL -->
-            <div id="ad-unpaid-financial" class="${adData.paymentStatus === 'paid' || !adData.paymentStatus ? 'hidden' : (adData.paymentStatus === 'not_paid' && adData.collectionMethod === 'driver' ? 'hidden' : '')}">
+            <div id="ad-unpaid-financial" class="${adPaymentState === 'paid' ? 'hidden' : (adPaymentState === 'not_paid' && (adData.collectionMethod === 'driver' || hasLinkedShopReceipt) ? 'hidden' : '')}">
               <div class="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 space-y-2">
                 <div class="flex justify-between items-center">
                   <span class="text-xs font-bold text-slate-600">${isArAd ? 'التفاصيل المالية' : 'Financial Details'}</span>
@@ -302,18 +621,32 @@ function renderModal() {
                 <div id="receipt-financial-section">
                   ${renderReceiptFinancials(
                     adData.collectionPayments && adData.collectionPayments.length ? adData.collectionPayments : [{
+                      // Reconstruct a row that round-trips to the SAME USD credit
+                      // as the paid ad. amount = the LYD figure, rate1 = 1,
+                      // rate2 = the ad's own rate — so both USD-based and
+                      // LYD-based methods recompute amountUSD correctly.
+                      // Previously amount=amountUSD with rate2=defaultRate made a
+                      // LYD method divide the USD figure by the rate again,
+                      // gutting the recorded amount ~10x (audit recheck HIGH #3).
                       method: adData.paymentMethod || PAYMENT_METHODS[0],
-                      amount: adData.amountUSD || 0,
-                      rate: adData.exchangeRate || getDefaultRate1(adData.paymentMethod || PAYMENT_METHODS[0]),
-                      rate2: state.defaultExchangeRate,
+                      amount: adData.amountLocal || ((adData.amountUSD || 0) * (adData.exchangeRate || state.defaultExchangeRate || 1)),
+                      rate: 1,
+                      rate2: adData.exchangeRate || state.defaultExchangeRate,
                       collectionType: 'office',
                       deliveryPersonId: adData.deliveryPersonId || ''
                     }],
                     adData.collectionPayments && adData.collectionPayments.length ? adData.collectionPayments : [{
+                      // Reconstruct a row that round-trips to the SAME USD credit
+                      // as the paid ad. amount = the LYD figure, rate1 = 1,
+                      // rate2 = the ad's own rate — so both USD-based and
+                      // LYD-based methods recompute amountUSD correctly.
+                      // Previously amount=amountUSD with rate2=defaultRate made a
+                      // LYD method divide the USD figure by the rate again,
+                      // gutting the recorded amount ~10x (audit recheck HIGH #3).
                       method: adData.paymentMethod || PAYMENT_METHODS[0],
-                      amount: adData.amountUSD || 0,
-                      rate: adData.exchangeRate || getDefaultRate1(adData.paymentMethod || PAYMENT_METHODS[0]),
-                      rate2: state.defaultExchangeRate,
+                      amount: adData.amountLocal || ((adData.amountUSD || 0) * (adData.exchangeRate || state.defaultExchangeRate || 1)),
+                      rate: 1,
+                      rate2: adData.exchangeRate || state.defaultExchangeRate,
                       collectionType: 'office',
                       deliveryPersonId: adData.deliveryPersonId || ''
                     }],
@@ -324,7 +657,7 @@ function renderModal() {
             </div>
 
             <!-- SECTION 3: Receipt Funding (PAID ONLY) -->
-            <div id="ad-receipt-funding-section" class="${adData.paymentStatus === 'paid' || !adData.paymentStatus ? '' : 'hidden'} bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-xl p-4 space-y-3 border border-blue-200 dark:border-blue-800">
+            <div id="ad-receipt-funding-section" class="${adPaymentState === 'paid' ? '' : 'hidden'} bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-xl p-4 space-y-3 border border-blue-200 dark:border-blue-800">
               <div class="flex items-center justify-between">
                 <div class="text-xs font-bold text-blue-700 dark:text-blue-400 uppercase tracking-wider flex items-center gap-2">
                   <span class="w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center text-[10px]">3</span>
@@ -334,8 +667,23 @@ function renderModal() {
                   ${isArAd ? '+ إضافة وصل' : '+ Add Receipt'}
                 </button>
               </div>
+              <div id="ad-driver-settlement-hint" class="hidden p-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 text-xs text-amber-700 dark:text-amber-300">
+                ${isArAd
+                  ? `المبلغ المطلوب تسويته: <strong>$${adSettleTargetUSD.toFixed(2)}</strong>. يجب أن يساوي مجموع الوصولات المدفوعة هذا المبلغ.`
+                  : `Amount to settle: <strong>$${adSettleTargetUSD.toFixed(2)}</strong>. Paid receipt funding must total this amount.`}
+              </div>
               <div id="ad-funding-list" class="space-y-2 bg-white dark:bg-slate-900 rounded-lg p-2 min-h-[60px]">
                 <div class="text-xs text-slate-400 text-center py-2">${isArAd ? 'اختر صفحة وعميلاً أولاً' : 'Select a page & customer first'}</div>
+              </div>
+              <div id="ad-funding-change-notice" role="status" aria-live="polite" class="hidden rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-2 text-xs font-medium text-blue-800 dark:text-blue-200"></div>
+              <div class="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-2 space-y-1">
+                <button type="button" onclick="startAdMixedReceiptFunding()" class="w-full flex items-center justify-center gap-2 text-xs font-semibold text-amber-700 dark:text-amber-300 hover:text-amber-800 py-1">
+                  <i data-lucide="split" class="w-4 h-4"></i>
+                  ${isArAd ? 'استخدام وصل غير مدفوع لتغطية الفرق' : 'Use an Unpaid Receipt for the Difference'}
+                </button>
+                <p class="text-[10px] text-center text-amber-600 dark:text-amber-400">
+                  ${isArAd ? 'إذا كان رصيد الوصل المدفوع أقل من ميزانية الإعلان، سيبقى الفرق ديناً على العميل.' : 'If paid receipt credit is short, only the difference stays as customer debt.'}
+                </p>
               </div>
               <div id="ad-funding-summary" class="text-xs text-blue-600 font-medium"></div>
             </div>
@@ -369,10 +717,10 @@ function renderModal() {
                   <span class="w-5 h-5 rounded-full bg-orange-600 text-white flex items-center justify-center text-[10px]">5</span>
                   ${isArAd ? 'الصور' : 'Photos'}
                 </div>
-                <label class="text-xs bg-orange-600 text-white px-2 py-1 rounded-lg font-medium cursor-pointer hover:bg-orange-700">
+                ${canModifyAdPhotosInCurrentModal() ? `<label class="text-xs bg-orange-600 text-white px-2 py-1 rounded-lg font-medium cursor-pointer hover:bg-orange-700">
                   ${isArAd ? '+ رفع' : '+ Upload'}
-                  <input type="file" accept="image/*" multiple class="hidden" onchange="uploadAdPhotos(this.files)" />
-                </label>
+                  <input type="file" accept="image/*" multiple class="hidden" onchange="uploadAdPhotos(this.files); this.value=''" />
+                </label>` : ''}
               </div>
               <div id="ad-photo-previews" class="grid grid-cols-4 gap-2 min-h-[40px] bg-white dark:bg-slate-900 rounded-lg p-2">
                 <div class="text-xs text-slate-400 col-span-4 text-center py-2">${isArAd ? 'لا توجد صور بعد' : 'No photos yet'}</div>
@@ -468,6 +816,20 @@ function renderModal() {
             </div>
           </div>
           
+          ${!isEdit && isAdminEditor ? `
+            <div class="rounded-xl border border-cyan-200 bg-cyan-50 p-4 dark:border-cyan-800 dark:bg-cyan-900/20">
+              <label class="mb-2 block text-xs font-bold uppercase text-cyan-800 dark:text-cyan-200">${isArU ? 'نوع الوصول' : 'Access preset'}</label>
+              <select id="user-access-preset" class="glass-input min-h-12 w-full rounded-xl px-4">
+                <option value="adsStudioCustomer" ${window._newUserAccessPreset === 'adsStudioCustomer' ? 'selected' : ''}>${isArU ? 'عميل استوديو الإعلانات — يرى حملاته فقط' : 'Ads Studio customer — own campaigns only'}</option>
+                <option value="salesAgent" ${window._newUserAccessPreset !== 'adsStudioCustomer' ? 'selected' : ''}>${isArU ? 'موظف مبيعات' : 'Sales employee'}</option>
+                <option value="adsStudioReviewer">${isArU ? 'مراجع حملات العملاء' : 'Ads Studio reviewer'}</option>
+                <option value="clothesSubscriber">${isArU ? 'مشترك نظام الملابس' : 'Clothes System subscriber'}</option>
+                <option value="viewer">${isArU ? 'قراءة فقط' : 'Read only'}</option>
+              </select>
+              <p class="mt-2 text-xs text-cyan-700 dark:text-cyan-300">${isArU ? 'حساب عميل استوديو الإعلانات لا يحصل على صلاحية الإعلانات الداخلية أو الوصلات أو بيانات العملاء.' : 'An Ads Studio customer receives no access to internal Ads, Receipts, or customer records.'}</p>
+            </div>
+          ` : ''}
+
           <!-- Role Info -->
           <div id="role-info" class="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
             <div class="flex items-center space-x-3">
@@ -657,16 +1019,18 @@ function renderModal() {
       }
       break;
     case 'receipt':
-      const receiptCustomers = getVisibleRecords(state.customers);
+      const receiptCustomers = getCustomersVisibleToCurrentUser();
       const receiptData = state.modalData || {};
       const isAdminReceipt = isCurrentUserAdmin();
-      const defaultRate1 = getDefaultRate1(PAYMENT_METHODS[0]);
-      const existingPayments = receiptData.payments || [{ method: PAYMENT_METHODS[0], amount: 0, rate: defaultRate1, rate2: state.defaultExchangeRate, collectionType: 'office', deliveryPersonId: '' }];
+      const existingPayments = getReceiptFormPayments(receiptData);
       const receiptDeliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
       const isArR = state.language === 'ar';
       // Copy (not alias) the live record's photos so add/remove in the modal
       // does not mutate the saved receipt when the user cancels.
-      state.tempReceiptPhotos = (receiptData.photos || []).slice();
+      _receiptPhotoUploadGeneration++;
+      _receiptPhotoUploadsInFlight = 0;
+      state.tempReceiptPhotos = getReceiptPhotoSources(receiptData);
+      state.tempReceiptPhotosDirty = false;
       
       if (receiptCustomers.length === 0) {
         modalContent = `
@@ -694,8 +1058,22 @@ function renderModal() {
                  state.modalData can never redirect this save onto the wrong
                  record. Empty value = create a brand-new receipt. -->
             <input type="hidden" id="receipt-editing-id" value="${Security.escapeHtml(String(receiptData.id || ''))}" />
+            ${(_newReceiptCarried && !receiptData.id) ? `
+            <!-- Existing-balance mode: same full form, only tagged on save. -->
+            <div class="p-3 rounded-lg" style="background:#fffbeb;border:1px solid #fcd34d">
+              <div class="flex items-center gap-2 text-sm font-extrabold" style="color:#b45309">
+                <i data-lucide="history" class="w-4 h-4"></i>
+                ${isArR ? 'رصيد سابق' : 'Existing Balance'}
+              </div>
+              <div class="text-xs mt-1" style="color:#92400e">
+                ${isArR
+                  ? 'أدخل المبلغ المتبقّي لعميلٍ استهلك جزءاً من رصيده سابقاً. يُحتسب كإيراد ويمكنه تمويل الإعلانات.'
+                  : "Enter the customer's REMAINING amount (they already used part of their balance elsewhere). It counts as revenue and can fund ads."}
+              </div>
+            </div>
+            ` : ''}
             <!-- Phone Search Section -->
-            <div class="grid grid-cols-2 gap-3 p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
+            <div class="receipt-phone-search grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
               <div>
                 <label class="block text-xs font-medium text-slate-500 mb-2 flex items-center">
                   <i data-lucide="phone" class="w-3 h-3 mr-1"></i>
@@ -709,9 +1087,9 @@ function renderModal() {
                   oninput="filterReceiptPhones()"
                   onfocus="showReceiptPhoneDropdown()"
                 />
-                <div id="receipt-phone-dropdown" class="absolute z-20 mt-1 w-80 glass-panel rounded-lg shadow-xl max-h-40 overflow-y-auto hidden">
+                <div id="receipt-phone-dropdown" class="absolute z-20 mt-1 w-full sm:w-80 max-w-[calc(100vw-2rem)] glass-panel rounded-lg shadow-xl max-h-40 overflow-y-auto hidden">
                   ${phoneCustomerMap.map(item => `
-                    <div class="px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer phone-option" data-phone="${Security.escapeHtml(item.phone)}" data-customer-id="${Security.escapeHtml(item.customer.id)}" onclick="selectReceiptPhone(this.dataset.phone, this.dataset.customerId)">
+                    <div class="touch-target px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer phone-option" role="button" tabindex="0" data-phone="${Security.escapeHtml(item.phone)}" data-customer-id="${Security.escapeHtml(item.customer.id)}" onclick="selectReceiptPhone(this.dataset.phone, this.dataset.customerId)" onkeydown="if(event.key === 'Enter' || event.key === ' '){ event.preventDefault(); selectReceiptPhone(this.dataset.phone, this.dataset.customerId); }">
                       <div class="text-sm font-medium">${Security.escapeHtml(item.phone)}</div>
                       <div class="text-xs text-slate-500">${Security.escapeHtml(item.customer.name)} - ${Security.escapeHtml(item.customer.platform)}</div>
                     </div>
@@ -740,11 +1118,11 @@ function renderModal() {
             <!-- Status Tabs -->
             <div class="px-1">
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1.5">${isArR ? 'الحالة' : 'Status'}</label>
-              <div class="grid grid-cols-4 gap-1.5" id="receipt-status-tabs">
-                <button type="button" onclick="setReceiptStatus(this, 'Paid')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${!receiptData.status || receiptData.status === 'Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Paid">${trStatus('Paid')}</button>
-                <button type="button" onclick="setReceiptStatus(this, 'Not Paid')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Not Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Not Paid">${isArR ? 'غير مدفوع' : 'Not Paid'}</button>
-                <button type="button" onclick="setReceiptStatus(this, 'Canceled')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Canceled' ? 'bg-rose-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Canceled">${isArR ? 'ملغي' : 'Canceled'}</button>
-                <button type="button" onclick="setReceiptStatus(this, 'Lost')" class="receipt-status-btn px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Lost' ? 'bg-slate-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Lost">${isArR ? 'مفقود' : 'Lost'}</button>
+              <div class="grid grid-cols-2 sm:grid-cols-4 gap-1.5" id="receipt-status-tabs">
+                <button type="button" onclick="setReceiptStatus(this, 'Paid')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${!receiptData.status || receiptData.status === 'Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Paid">${trStatus('Paid')}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Not Paid')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Not Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Not Paid">${isArR ? 'غير مدفوع' : 'Not Paid'}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Canceled')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Canceled' ? 'bg-rose-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Canceled">${isArR ? 'ملغي' : 'Canceled'}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Lost')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Lost' ? 'bg-slate-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Lost">${isArR ? 'مفقود' : 'Lost'}</button>
               </div>
               <input type="hidden" id="receipt-status" value="${receiptData.status || 'Paid'}" />
 
@@ -1042,7 +1420,7 @@ function renderModal() {
                   </label>
                   <label class="text-xs text-indigo-600 hover:text-indigo-700 font-medium flex items-center space-x-1 cursor-pointer">
                     <i data-lucide="upload" class="w-3 h-3"></i><span>${isArR ? 'إضافة صورة' : 'Add Photo'}</span>
-                    <input type="file" accept="image/*" multiple class="hidden" onchange="uploadReceiptPhotos(this.files)" />
+                    <input type="file" accept="image/*" multiple class="hidden" onchange="uploadReceiptPhotos(this.files); this.value=''" />
                   </label>
                 </div>
                 <div id="receipt-photo-previews" class="grid grid-cols-4 gap-2"></div>
@@ -1051,7 +1429,7 @@ function renderModal() {
 
             <!-- Action Buttons -->
             <div class="flex space-x-2 px-1 pt-3 border-t border-slate-200 dark:border-slate-700">
-              <button type="button" onclick="saveReceiptFromModal()" class="flex-1 btn-shine bg-purple-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-purple-700">
+              <button type="button" id="receipt-save-btn" onclick="saveReceiptFromModal()" class="flex-1 btn-shine bg-purple-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-purple-700">
                 <i data-lucide="check" class="w-4 h-4 inline mr-1.5"></i>${isArR ? (isEdit ? 'حفظ' : 'إنشاء') : (isEdit ? 'Save' : 'Create')}
               </button>
               <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-slate-300">${isArR ? 'إلغاء' : 'Cancel'}</button>
@@ -1111,7 +1489,7 @@ function renderModal() {
                   const targetCustomer = state.customers.find(c => c.id === t.toCustomerId);
                   const name = targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown');
                   return `<div class="flex justify-between">
-                    <span>${new Date(t.date).toLocaleString()}</span>
+                    <span>${new Date(t.date).toLocaleString(appDateLocale())}</span>
                     <span class="font-medium">$${(t.amountUSD || 0).toFixed(2)} → ${name}</span>
                   </div>`;
                 }).join('')}
@@ -1241,7 +1619,7 @@ function renderModal() {
           <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl">
             <div class="text-sm font-medium text-blue-700 dark:text-blue-300">${isArTU ? 'تفاصيل الإعلان' : 'Ad Details'}</div>
             <div class="text-lg font-bold text-blue-600 mt-1">${isArTU ? 'الأصلي' : 'Original'}: $${(parseFloat(topUpBase) || 0).toFixed(2)} → ${isArTU ? 'الجديد' : 'New'}: <span id="topup-preview-new">$${((parseFloat(topUpBase) || 0) + topUpWorkingTotal).toFixed(2)}</span></div>
-            ${topUpBaseEndOk ? `<div class="text-sm font-medium text-blue-700 dark:text-blue-300 mt-1">${isArTU ? 'النهاية' : 'End'}: <span id="topup-preview-end" class="font-bold">${topUpNewEnd.toLocaleDateString()}</span> <span id="topup-preview-end-extra" class="text-xs">${topUpWorkingDays > 0 ? (isArTU ? `(الأصلية ${new Date(topUpBaseEnd).toLocaleDateString()} + ${topUpWorkingDays} يوم)` : `(original ${new Date(topUpBaseEnd).toLocaleDateString()} + ${topUpWorkingDays} day${topUpWorkingDays > 1 ? 's' : ''})`) : ''}</span></div>` : ''}
+            ${topUpBaseEndOk ? `<div class="text-sm font-medium text-blue-700 dark:text-blue-300 mt-1">${isArTU ? 'النهاية' : 'End'}: <span id="topup-preview-end" class="font-bold">${topUpNewEnd.toLocaleDateString(appDateLocale())}</span> <span id="topup-preview-end-extra" class="text-xs">${topUpWorkingDays > 0 ? (isArTU ? `(الأصلية ${new Date(topUpBaseEnd).toLocaleDateString(appDateLocale())} + ${topUpWorkingDays} يوم)` : `(original ${new Date(topUpBaseEnd).toLocaleDateString(appDateLocale())} + ${topUpWorkingDays} day${topUpWorkingDays > 1 ? 's' : ''})`) : ''}</span></div>` : ''}
             ${topUpAvailable !== null ? `<div class="text-sm font-bold mt-1 text-blue-700 dark:text-blue-300">${isArTU ? 'المتاح من وصولات التمويل' : 'Available on funding receipt(s)'}: <span id="topup-preview-available" class="${topUpAvailable < 0.01 ? 'text-rose-600' : 'text-emerald-600'}">$${topUpAvailable.toFixed(2)}</span></div>` : ''}
             ${existingTopUps.length > 0 ? `<div class="text-xs text-slate-500 mt-1">${isArTU ? 'إجمالي الشحنات' : 'Total top-ups'}: $${topUpWorkingTotal.toFixed(2)}</div>` : ''}
           </div>
@@ -1251,7 +1629,7 @@ function renderModal() {
               <div class="p-3 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-between">
                 <div>
                   <div class="font-medium">$${topup.amount}${(parseInt(topup.extendDays, 10) || 0) > 0 ? ` <span class="text-xs font-bold text-emerald-600">${isArTU ? `+${topup.extendDays} يوم` : `+${topup.extendDays} day${topup.extendDays > 1 ? 's' : ''}`}</span>` : ''}</div>
-                  <div class="text-xs text-slate-500">${new Date(topup.date).toLocaleDateString()} - ${Security.escapeHtml(topup.note || '')}</div>
+                  <div class="text-xs text-slate-500">${new Date(topup.date).toLocaleDateString(appDateLocale())} - ${Security.escapeHtml(topup.note || '')}</div>
                 </div>
                 <button type="button" onclick="removeTopUp(${idx})" class="text-rose-500 hover:text-rose-700">
                   <i data-lucide="x-circle" class="w-4 h-4"></i>
@@ -1592,6 +1970,51 @@ function renderModal() {
       `;
       break;
 
+    case 'data-integrity': {
+      const isArIntegrity = state.language === 'ar';
+      const report = state.modalData && typeof state.modalData === 'object' ? state.modalData : {};
+      const issues = Array.isArray(report.issues) ? report.issues : [];
+      const healthy = report.ok === true;
+      modalContent = `
+        <div class="max-h-[80dvh] overflow-y-auto custom-scrollbar pr-1">
+          <div class="text-center mb-5">
+            <div class="w-14 h-14 rounded-2xl ${healthy ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' : 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300'} flex items-center justify-center mx-auto mb-3">
+              <i data-lucide="${healthy ? 'shield-check' : 'shield-alert'}" class="w-7 h-7"></i>
+            </div>
+            <h2 class="text-2xl font-bold">${isArIntegrity ? 'فحص سلامة البيانات' : 'Data Integrity Check'}</h2>
+            <p class="mt-2 text-sm ${healthy ? 'text-emerald-700 dark:text-emerald-300' : 'text-rose-700 dark:text-rose-300'} font-bold">
+              ${healthy
+                ? (isArIntegrity ? 'لم يتم العثور على مشاكل في الروابط أو التكرار.' : 'No duplicate or broken-link problems were found.')
+                : (isArIntegrity ? `تم العثور على ${Number(report.issueCount || 0)} مشكلة تحتاج إلى مراجعة.` : `${Number(report.issueCount || 0)} problem(s) need review.`)}
+            </p>
+          </div>
+          <div class="grid grid-cols-2 gap-3 mb-4">
+            <div class="rounded-xl bg-slate-50 dark:bg-slate-900/50 p-3 text-center">
+              <div class="text-2xl font-bold">${Number(report.recordsChecked || 0).toLocaleString()}</div>
+              <div class="text-xs text-slate-500">${isArIntegrity ? 'سجل تم فحصه' : 'Records checked'}</div>
+            </div>
+            <div class="rounded-xl bg-slate-50 dark:bg-slate-900/50 p-3 text-center">
+              <div class="text-2xl font-bold ${healthy ? 'text-emerald-600' : 'text-rose-600'}">${Number(report.issueCount || 0).toLocaleString()}</div>
+              <div class="text-xs text-slate-500">${isArIntegrity ? 'مشكلة' : 'Issues'}</div>
+            </div>
+          </div>
+          ${issues.length ? `<div class="space-y-2">
+            ${issues.map(item => `<div class="rounded-xl border border-rose-200 dark:border-rose-900/60 bg-rose-50/60 dark:bg-rose-950/20 p-3">
+              <div class="flex flex-wrap items-center gap-2 text-xs">
+                <span class="font-bold text-rose-700 dark:text-rose-300">${Security.escapeHtml(String(item.code || 'issue'))}</span>
+                <span class="text-slate-500">${Security.escapeHtml(String(item.entityType || ''))} · ${Security.escapeHtml(String(item.entityId || ''))}</span>
+              </div>
+              <div class="mt-1 text-sm text-slate-700 dark:text-slate-200">${Security.escapeHtml(String(item.message || ''))}</div>
+            </div>`).join('')}
+            ${Number(report.hiddenIssueCount || 0) > 0 ? `<p class="text-xs text-slate-500 text-center">+${Number(report.hiddenIssueCount)} ${isArIntegrity ? 'مشكلة إضافية' : 'more issues'}</p>` : ''}
+          </div>` : ''}
+          <button type="button" onclick="closeModal()" class="mt-5 w-full min-h-12 rounded-xl bg-slate-200 dark:bg-slate-700 px-5 py-3 font-bold hover:bg-slate-300 dark:hover:bg-slate-600">
+            ${isArIntegrity ? 'إغلاق' : 'Close'}
+          </button>
+        </div>`;
+      break;
+    }
+
     case 'clothes-product':
       modalContent = renderClothesProductModal();
       break;
@@ -1645,11 +2068,13 @@ function renderModal() {
 
   const modal = document.createElement('div');
   modal.id = 'app-modal';
-  modal.className = 'fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4';
+  modal.className = 'mobile-dialog-overlay fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4';
   // Smaller, more compact modal sizes
   let modalSize = 'max-w-md';
   if (state.activeModal === 'split-payments' || state.activeModal === 'top-ups' || state.activeModal === 'refund') {
     modalSize = 'max-w-4xl';
+  } else if (state.activeModal === 'customer-merge') {
+    modalSize = 'max-w-3xl';
   } else if (state.activeModal === 'ad') {
     modalSize = 'max-w-xl'; // Wider modal for new Ad design with sections
   } else if (state.activeModal === 'receipt') {
@@ -1662,13 +2087,65 @@ function renderModal() {
     modalSize = 'max-w-2xl'; // Room for the order line rows
   }
   // Make Ad/Receipt modals scroll on the whole panel (header + content) to avoid "nothing shows" confusion.
-  const modalScrollable = (state.activeModal === 'receipt' || state.activeModal === 'ad')
-    ? ' max-h-[90vh] overflow-y-auto custom-scrollbar'
+  const modalScrollable = state.activeModal === 'customer-merge'
+    ? ' max-h-[90dvh] overflow-y-auto custom-scrollbar'
+    : (state.activeModal === 'receipt' || state.activeModal === 'ad')
+      ? ' max-h-[90vh] overflow-y-auto custom-scrollbar'
+      : '';
+  const modalAccessibility = state.activeModal === 'customer-merge'
+    ? ' role="dialog" aria-modal="true" aria-labelledby="customer-merge-title"'
     : '';
-  modal.innerHTML = `<div class="glass-panel rounded-2xl p-6 w-full ${modalSize}${modalScrollable}" onclick="event.stopPropagation()">${modalContent}</div>`;
+  modal.innerHTML = `<div class="glass-panel rounded-2xl p-6 w-full ${modalSize}${modalScrollable}"${modalAccessibility} onclick="event.stopPropagation()">${modalContent}</div>`;
   modal.onclick = closeModal;
   document.body.appendChild(modal);
   IconQueue.schedule(modal);
+
+  if (state.activeModal === 'customer-merge') {
+    const dialog = modal.firstElementChild;
+    dialog?.addEventListener('keydown', event => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        closeModal();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = Array.from(dialog.querySelectorAll(
+        'button:not([disabled]), select:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
+      )).filter(element => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.querySelector('#customer-merge-title')?.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!focusable.includes(document.activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+    setTimeout(() => {
+      if (!dialog?.isConnected) return;
+      const previousControl = previousCustomerMergeFocusId
+        ? dialog.querySelector(`#${previousCustomerMergeFocusId}`)
+        : null;
+      const focusTarget = previousControl || dialog.querySelector('#customer-merge-title');
+      if (focusTarget && typeof focusTarget.focus === 'function') {
+        try {
+          focusTarget.focus({ preventScroll: true });
+        } catch (_) {
+          focusTarget.focus();
+        }
+      }
+    }, 0);
+  }
   
   // Initialize receipt totals if it's a receipt modal
   if (state.activeModal === 'receipt') {
@@ -1707,8 +2184,9 @@ function renderModal() {
         }
       }
       // Initialize payment status UI (default to 'paid' for new ads)
-      const initialPaymentStatus = adData.paymentStatus || 'paid';
+      const initialPaymentStatus = getAdPaymentState(adData);
       setAdPaymentStatus(initialPaymentStatus);
+      updateAdDriverBudgetSummary();
       // Render funding list right away so the user always sees guidance / first allocation row
       renderAdFundingList();
       updateAdLocalAmount();
@@ -1813,15 +2291,43 @@ function completeAdMutationAttempt(attempt) {
   }
 }
 
+function resolveAdPrimaryReceiptId({ paymentStatus, collectionMethod, linkedDeliveryReceiptId, allocations, dueAllocations } = {}) {
+  const normalizedStatus = getAdPaymentState({ paymentStatus });
+  const normalizedCollection = String(collectionMethod || '').toLowerCase();
+  if (normalizedStatus === 'not_paid' && normalizedCollection === 'driver') {
+    return String(linkedDeliveryReceiptId || '');
+  }
+  if (normalizedStatus === 'not_paid' && normalizedCollection === 'in_shop') {
+    return String((Array.isArray(dueAllocations) ? dueAllocations[0]?.receiptId : '') || '');
+  }
+  if (normalizedStatus === 'paid') {
+    return String(Array.isArray(allocations) ? (allocations[0]?.receiptId || '') : '');
+  }
+  return '';
+}
+
 function buildServerAdMutationData(adUpdates, { create = false } = {}) {
   const data = Security.sanitizeObject(adUpdates || {});
+  const hasPaymentStatus = Object.prototype.hasOwnProperty.call(adUpdates || {}, 'paymentStatus');
+  const normalizedPaymentStatus = getAdPaymentState(adUpdates);
+  if (hasPaymentStatus) data.paymentStatus = normalizedPaymentStatus;
+  // Paid ads remain server-derived from receipt allocations. Not Paid + Driver
+  // is different: its positive budget is real customer debt even when no
+  // receipt credit funds it yet, so send one narrowly-scoped request value.
+  if (hasPaymentStatus && normalizedPaymentStatus === 'not_paid' && String(adUpdates?.collectionMethod || '').toLowerCase() === 'driver') {
+    data.driverBudgetUSD = normalizeAdDriverBudgetUSD(adUpdates?.amountUSD);
+  } else {
+    delete data.driverBudgetUSD;
+  }
   // These values are materialized from allocations/payment rows by the server.
   // Sending them would invite a forged total that disagrees with the funding
   // rows. The allocation requests themselves remain explicit inputs.
+  // customerName is likewise server-authoritative: the server stamps it from
+  // the customers table by customerId, so a client value is never trusted.
   for (const field of [
     'amountUSD', 'amountLocal', 'receiptIds', 'fundingReceiptId',
     'dueAmountToUseUSD', 'hasMergedPaidFunds', 'isPaid', 'initialAmountUSD',
-    'spentUSD', 'canceledBy'
+    'spentUSD', 'canceledBy', 'customerName'
   ]) delete data[field];
   if (create) {
     data.recordType = 'ad';
@@ -1857,6 +2363,273 @@ async function saveAdThroughAtomicServer(action, adId, expectedLastModified, dat
   } finally {
     attempt.promise = null;
   }
+}
+
+// A terminal ad (Stopped/Canceled/Completed/Lost or refunded) refuses every
+// edit EXCEPT a receipt relink — moving its committed funding onto a different
+// receipt — and its SETTLE variant, which flips a paid-off debt not_paid ->
+// paid while moving that same committed total onto paid receipt(s). These
+// helpers mirror the server's _financial_apply_relink so the client can
+// (a) decide a save is a pure relink/settle and (b) apply it in local mode.
+function adIsTerminalForEdit(ad) {
+  const status = String((ad && ad.status) || '');
+  const refundType = String((ad && ad.refundType) || '');
+  return ['Stopped', 'Canceled', 'Completed', 'Lost'].indexOf(status) !== -1
+    || (refundType !== '' && refundType !== 'None');
+}
+
+function _relinkPoolSum(rows) {
+  return (Array.isArray(rows) ? rows : []).reduce(
+    (sum, row) => sum + (parseFloat(row && row.amountUSD) || 0),
+    0
+  );
+}
+
+function _relinkNormalizePool(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .filter(row => row && row.receiptId && (parseFloat(row.amountUSD) || 0) > 0)
+    .map(row => ({
+      receiptId: String(row.receiptId),
+      amountUSD: Math.round((parseFloat(row.amountUSD) || 0) * 100) / 100
+    }));
+}
+
+// Return the new funding pools when the save re-points the ad onto a DIFFERENT
+// receipt while conserving every pool's committed total to the cent; otherwise
+// null (not a relink). Old receipts drop out by omission — exactly what frees
+// them. The server independently re-checks conservation, so this only gates UX.
+function computeTerminalRelinkPools(liveAd, adUpdates) {
+  const oldPaid = _relinkNormalizePool(liveAd && liveAd.receiptAllocations);
+  const oldDue = _relinkNormalizePool(liveAd && liveAd.dueAllocations);
+  const newPaid = _relinkNormalizePool(adUpdates && adUpdates.receiptAllocations);
+  const newDue = _relinkNormalizePool(adUpdates && adUpdates.dueAllocations);
+  if (Math.abs(_relinkPoolSum(oldPaid) - _relinkPoolSum(newPaid)) > 0.005) return null;
+  if (Math.abs(_relinkPoolSum(oldDue) - _relinkPoolSum(newDue)) > 0.005) return null;
+  if (newPaid.length === 0 && newDue.length === 0) return null;
+  const oldIds = new Set(oldPaid.concat(oldDue).map(row => row.receiptId));
+  const newIds = new Set(newPaid.concat(newDue).map(row => row.receiptId));
+  let moved = oldIds.size !== newIds.size;
+  if (!moved) {
+    newIds.forEach(id => { if (!oldIds.has(id)) moved = true; });
+  }
+  if (!moved) return null;
+  return { paid: newPaid, due: newDue };
+}
+
+// The ad's CURRENT committed funding total across both pools. For a terminal
+// ad this is what still holds receipt money (stop already released the
+// unspent budget), so it is the exact amount a settle must move — e.g. $1.24
+// of a stopped $9.00 ad, never the dead $9.00 budget.
+function getAdCommittedFundingTotalUSD(ad) {
+  const paid = _relinkPoolSum(_relinkNormalizePool(ad && ad.receiptAllocations));
+  const due = _relinkPoolSum(_relinkNormalizePool(ad && ad.dueAllocations));
+  return Math.round((paid + due) * 100) / 100;
+}
+
+// SETTLE variant (terminal ads only): the customer has now PAID the debt of a
+// Stopped/Canceled/Completed/Lost ad. Recognized when the save flips payment
+// not_paid -> paid while moving the ad's whole CURRENT committed total (paid
+// + due pools together) into PAID receipt rows — conserved to the cent, with
+// no due rows left. The old unpaid receipt is freed by omission exactly like
+// a relink; amountUSD/spentUSD/status stay untouched. Returns the new pools
+// or null (not a settle). The server independently re-checks every rule.
+function computeTerminalSettlePools(liveAd, adUpdates) {
+  if (getAdPaymentState(liveAd) !== 'not_paid') return null;
+  if (getAdPaymentState(adUpdates) !== 'paid') return null;
+  const newPaid = _relinkNormalizePool(adUpdates && adUpdates.receiptAllocations);
+  const newDue = _relinkNormalizePool(adUpdates && adUpdates.dueAllocations);
+  if (newDue.length !== 0 || newPaid.length === 0) return null;
+  const committed = getAdCommittedFundingTotalUSD(liveAd);
+  if (committed <= 0.005) return null;
+  if (Math.abs(committed - _relinkPoolSum(newPaid)) > 0.005) return null;
+  return { paid: newPaid, due: [] };
+}
+
+// Shared "nothing ELSE changed" core for the two terminal-ad primitives:
+// every editable non-funding, non-payment field must match the stored ad.
+// Payment state and collection method are checked by the callers — a relink
+// forbids changing them, while a settle IS the not_paid -> paid flip (which
+// also legitimately clears the collection method).
+function _terminalEditKeepsNonFundingFields(liveAd, adUpdates) {
+  const sameStr = (a, b) => String(a == null ? '' : a) === String(b == null ? '' : b);
+  const sameTime = (a, b) => {
+    const ta = new Date(a || 0).getTime();
+    const tb = new Date(b || 0).getTime();
+    if (!isFinite(ta) && !isFinite(tb)) return true;
+    return ta === tb;
+  };
+  if (!sameStr(adUpdates.customerId, liveAd.customerId)) return false;
+  if (!sameStr(adUpdates.pageId, liveAd.pageId)) return false;
+  if (!sameTime(adUpdates.startDate, liveAd.startDate)) return false;
+  if (!sameTime(adUpdates.endDate, liveAd.endDate)) return false;
+  const oldLinks = Array.isArray(liveAd.adLinks)
+    ? liveAd.adLinks
+    : (liveAd.adLink ? [liveAd.adLink] : []);
+  const newLinks = Array.isArray(adUpdates.adLinks) ? adUpdates.adLinks : [];
+  if (JSON.stringify(oldLinks) !== JSON.stringify(newLinks)) return false;
+  return true;
+}
+
+// True only when the funding receipt is the ONLY thing the save changed on a
+// terminal ad. Any other editable field keeps the "Ad Finished — use Refund"
+// block, because a relink must never silently drop an unrelated edit.
+function terminalRelinkOnlyChangesFunding(liveAd, adUpdates, photosDirty) {
+  if (photosDirty) return false;
+  const sameStr = (a, b) => String(a == null ? '' : a) === String(b == null ? '' : b);
+  if (getAdPaymentState(adUpdates) !== getAdPaymentState(liveAd)) return false;
+  if (!sameStr(adUpdates.collectionMethod, liveAd.collectionMethod)) return false;
+  return _terminalEditKeepsNonFundingFields(liveAd, adUpdates);
+}
+
+// Settle counterpart: the not_paid -> paid flip IS the point of the save, and
+// switching the form to Paid legitimately clears the collection method, so
+// only the remaining editable fields must be untouched.
+function terminalSettleOnlyChangesFundingAndPayment(liveAd, adUpdates, photosDirty) {
+  if (photosDirty) return false;
+  return _terminalEditKeepsNonFundingFields(liveAd, adUpdates);
+}
+
+// Local-mode counterpart of the server relink primitive: re-point the funding
+// allocations and their derived mirrors WITHOUT touching amountUSD/spentUSD/
+// status (updateRecord merges, so any field left out keeps its stored value).
+// Mirrors the server's baseline retarget in _financial_apply_relink: the
+// stop/refund baselines still name the VACATED receipt, and the delete guard
+// counts baselines as live links — without this the freed receipt could never
+// be deleted ("linked to ad funding"). Amounts untouched; only receiptId
+// strings move, and only when the mapping is unambiguous (exactly one newly
+// introduced receipt).
+function _relinkBaselineUpdates(liveAd, pools) {
+  const oldIds = new Set();
+  ['receiptAllocations', 'dueAllocations', 'mergedPaidAllocations'].forEach(field => {
+    (Array.isArray(liveAd[field]) ? liveAd[field] : []).forEach(row => {
+      if (row && row.receiptId) oldIds.add(String(row.receiptId));
+    });
+  });
+  const newIds = new Set([...pools.paid, ...pools.due].map(row => String(row.receiptId)));
+  const vacated = new Set([...oldIds].filter(id => id && !newIds.has(id)));
+  const introduced = [...newIds].filter(id => id && !oldIds.has(id));
+  if (!vacated.size || introduced.length !== 1) return {};
+  const replacement = introduced[0];
+  const retargetRows = rows => (Array.isArray(rows)
+    ? rows.map(row => (row && vacated.has(String(row.receiptId || '')) ? { ...row, receiptId: replacement } : row))
+    : rows);
+  const updates = {};
+  ['refundAllocationBaseline', 'refundDueBaseline'].forEach(name => {
+    const baseline = liveAd[name];
+    if (Array.isArray(baseline)) updates[name] = retargetRows(baseline);
+    else if (baseline && typeof baseline === 'object') {
+      const next = {};
+      Object.keys(baseline).forEach(key => { next[key] = retargetRows(baseline[key]); });
+      updates[name] = next;
+    }
+  });
+  const stopBaseline = liveAd.stopAllocationBaseline;
+  if (stopBaseline && typeof stopBaseline === 'object') {
+    const next = { ...stopBaseline };
+    Object.keys(stopBaseline).forEach(key => {
+      if (Array.isArray(stopBaseline[key])) next[key] = retargetRows(stopBaseline[key]);
+    });
+    if (vacated.has(String(next.dueLegacyReceiptId || ''))) next.dueLegacyReceiptId = replacement;
+    updates.stopAllocationBaseline = next;
+  }
+  return updates;
+}
+
+// Local-mode mirror of the server's relink/settle history entry: these money
+// moves bypass the ordinary edit path (which appends history client-side), so
+// without this they were invisible in the history viewer.
+function _relinkHistoryUpdates(liveAd, pools, isSettle) {
+  const oldIds = new Set();
+  ['receiptAllocations', 'dueAllocations', 'mergedPaidAllocations'].forEach(field => {
+    (Array.isArray(liveAd[field]) ? liveAd[field] : []).forEach(row => {
+      if (row && row.receiptId) oldIds.add(String(row.receiptId));
+    });
+  });
+  const newIds = new Set([...pools.paid, ...pools.due].map(row => String(row.receiptId)));
+  const vacated = [...oldIds].filter(id => id && !newIds.has(id));
+  const introduced = [...newIds].filter(id => id && !oldIds.has(id));
+  const label = rid => {
+    const receipt = (state.receipts || []).find(r => r && String(r.id) === String(rid));
+    return String(receipt?.serialNumber || receipt?.finalReceiptNo || receipt?.tempReceiptNo || rid);
+  };
+  const changes = [];
+  if (vacated.length || introduced.length) {
+    changes.push({
+      field: 'Funding Receipt',
+      from: vacated.map(label).sort().join(', ') || '—',
+      to: introduced.map(label).sort().join(', ') || '—'
+    });
+  }
+  if (isSettle) changes.push({ field: 'Payment Status', from: 'Not Paid', to: 'Paid' });
+  if (!changes.length) return {};
+  const editHistory = Array.isArray(liveAd.editHistory) ? [...liveAd.editHistory] : [];
+  editHistory.push({
+    editedAt: new Date().toISOString(),
+    editedBy: state.currentUser?.name || 'Unknown',
+    changes
+  });
+  return { editHistory, editCount: editHistory.length };
+}
+
+async function applyLocalReceiptRelink(liveAd, pools) {
+  const paymentState = getAdPaymentState(liveAd);
+  const collectionMethod = String(liveAd.collectionMethod || '');
+  const paidIds = pools.paid.map(row => row.receiptId);
+  const dueIds = pools.due.map(row => row.receiptId);
+  const linkedId = dueIds[0] || '';
+  const dueTotal = Math.round(_relinkPoolSum(pools.due) * 100) / 100;
+  const updates = {
+    receiptAllocations: pools.paid,
+    dueAllocations: pools.due,
+    receiptIds: paidIds,
+    fundingReceiptId: paidIds[0] || '',
+    dueAmountToUseUSD: dueTotal,
+    dueAmountToUseLYD: 0
+  };
+  if (paymentState === 'not_paid' && collectionMethod === 'driver') {
+    updates.mergedPaidAllocations = pools.paid;
+    updates.hasMergedPaidFunds = pools.paid.length > 0;
+    updates.linkedDeliveryReceiptId = linkedId || String(liveAd.linkedDeliveryReceiptId || '');
+    updates.receiptId = updates.linkedDeliveryReceiptId || (paidIds[0] || '');
+  } else {
+    updates.mergedPaidAllocations = [];
+    updates.hasMergedPaidFunds = false;
+    updates.linkedDeliveryReceiptId = '';
+    updates.receiptId = linkedId || (paidIds[0] || '');
+  }
+  Object.assign(updates, _relinkBaselineUpdates(liveAd, pools));
+  Object.assign(updates, _relinkHistoryUpdates(liveAd, pools, false));
+  return await updateRecord(state.ads, liveAd.id, updates);
+}
+
+// Local-mode counterpart of the server SETTLE branch: flip the terminal debt
+// to Paid and move the committed pools WITHOUT touching amountUSD/spentUSD/
+// status (updateRecord merges, so omitted fields keep their stored values).
+// Field-for-field mirror of _financial_apply_relink's settle transition.
+async function applyLocalReceiptSettle(liveAd, pools) {
+  const paidIds = pools.paid.map(row => row.receiptId);
+  const updates = {
+    paymentStatus: 'paid',
+    isPaid: true,
+    collectionMethod: '',
+    collectionPayments: [],
+    paymentMethod: '',
+    receiptAllocations: pools.paid,
+    dueAllocations: [],
+    receiptIds: paidIds,
+    fundingReceiptId: paidIds[0] || '',
+    receiptId: paidIds[0] || '',
+    dueAmountToUseUSD: 0,
+    dueAmountToUseLYD: 0,
+    mergedPaidAllocations: [],
+    hasMergedPaidFunds: false,
+    linkedDeliveryReceiptId: ''
+  };
+  // The ordinary Not Paid -> Paid save stamps the collection date too.
+  if (!liveAd.collectionDate) updates.collectionDate = new Date().toISOString();
+  Object.assign(updates, _relinkBaselineUpdates(liveAd, { paid: pools.paid, due: [] }));
+  Object.assign(updates, _relinkHistoryUpdates(liveAd, { paid: pools.paid, due: [] }, true));
+  return await updateRecord(state.ads, liveAd.id, updates);
 }
 
 async function handleModalSubmit() {
@@ -1973,6 +2746,68 @@ async function handleModalSubmit() {
       showNotification(isArCP ? 'نجاح' : 'Success', isArCP ? 'تم تغيير كلمة المرور بنجاح' : 'Password changed successfully', 'success');
       break;
     }
+    case 'customer-merge': {
+      const isArMerge = state.language === 'ar';
+      if (!isCurrentUserAdmin()) {
+        showNotification(isArMerge ? 'تم رفض الوصول' : 'Access Denied', isArMerge ? 'دمج العملاء متاح للمدير فقط.' : 'Only an administrator can merge customers.', 'error');
+        return;
+      }
+      if (!isServerModeEnabled()) {
+        showNotification(isArMerge ? 'يتطلب اتصال الخادم' : 'Server connection required', isArMerge ? 'أعد الاتصال بالخادم ثم حاول مرة أخرى.' : 'Reconnect to the server and try again.', 'warning');
+        return;
+      }
+      if (!document.getElementById('customer-merge-confirm')?.checked) {
+        showNotification(isArMerge ? 'التأكيد مطلوب' : 'Confirmation required', isArMerge ? 'أكد أولاً أن السجلين لنفس العميل.' : 'Confirm that both records belong to the same customer.', 'warning');
+        return;
+      }
+      const keepCustomerId = String(state.modalData?.keepCustomerId || '');
+      const duplicateCustomerId = String(state.modalData?.duplicateCustomerId || '');
+      const keepCustomer = state.customers.find(customer => customer && !customer._deleted && String(customer.id) === keepCustomerId);
+      const duplicateCustomer = state.customers.find(customer => customer && !customer._deleted && String(customer.id) === duplicateCustomerId);
+      if (!keepCustomer || !duplicateCustomer || keepCustomerId === duplicateCustomerId) {
+        showNotification(isArMerge ? 'اختيار غير صالح' : 'Invalid selection', isArMerge ? 'اختر سجلين مختلفين ثم حاول مرة أخرى.' : 'Choose two different active records and try again.', 'error');
+        return;
+      }
+      const keepPhoneKeys = new Set(getCustomerPhoneEntries(keepCustomer).map(entry => entry.key));
+      const sharesPhone = getCustomerPhoneEntries(duplicateCustomer).some(entry => keepPhoneKeys.has(entry.key));
+      if (!sharesPhone) {
+        showNotification(isArMerge ? 'تغيرت البيانات' : 'Data changed', isArMerge ? 'لم يعد السجلان يشتركان في رقم هاتف. حدّث الصفحة وحاول مرة أخرى.' : 'These records no longer share a phone number. Refresh and try again.', 'warning');
+        return;
+      }
+      const expectedKeepLastModified = Number(keepCustomer._lastModified);
+      const expectedDuplicateLastModified = Number(duplicateCustomer._lastModified);
+      if (!Number.isSafeInteger(expectedKeepLastModified) || !Number.isSafeInteger(expectedDuplicateLastModified)) {
+        showNotification(isArMerge ? 'يلزم التحديث' : 'Refresh required', isArMerge ? 'السجلان لا يحتويان على نسخة خادم صالحة. حدّث الصفحة ثم حاول.' : 'These records do not have a valid server version. Refresh and try again.', 'warning');
+        return;
+      }
+      const response = await apiMergeCustomers({
+        keepCustomerId,
+        duplicateCustomerId,
+        expectedKeepLastModified,
+        expectedDuplicateLastModified,
+        idempotencyKey: String(state.modalData?.idempotencyKey || '') || Security.generateSecureId('customer-merge')
+      });
+      if (!response.duplicate?.data?._deleted) throw new Error('The server did not archive the duplicate customer. Nothing was applied locally.');
+      applyValidatedServerEntityBatch([
+        { collection: 'customers', entity: response.customer },
+        ...response.updatedPages.map(entity => ({ collection: 'pages', entity })),
+        ...response.updatedReceipts.map(entity => ({ collection: 'receipts', entity })),
+        ...response.updatedAds.map(entity => ({ collection: 'ads', entity })),
+        { collection: 'customers', entity: response.duplicate }
+      ], 'customerMerge');
+      addAuditLog(
+        'Merge',
+        keepCustomerId,
+        `Merged duplicate customer ${duplicateCustomerId} into ${keepCustomerId}`,
+        { duplicateCustomerId, replayed: response.replayed === true }
+      );
+      showNotification(
+        isArMerge ? 'تم الدمج بأمان' : 'Customers merged',
+        isArMerge ? `تم نقل جميع الروابط إلى «${keepCustomer.name || ''}» وأرشفة السجل المكرر.` : `All links now belong to “${keepCustomer.name || 'the kept customer'}”; the duplicate was archived.`,
+        'success'
+      );
+      break;
+    }
     case 'customer': {
       const isAr = state.language === 'ar';
       // Whitespace-only input satisfies the HTML `required` attribute, so
@@ -1985,7 +2820,7 @@ async function handleModalSubmit() {
 
       // Collect all phone numbers
       const phoneInputs = document.querySelectorAll('.customer-phone');
-      const phones = Array.from(phoneInputs).map(input => input.value.trim()).filter(p => p);
+      const phones = dedupeCustomerPhoneValues(Array.from(phoneInputs).map(input => input.value.trim()).filter(p => p));
       // A whitespace-only phone passes `required` but is filtered out above —
       // without this check the customer is saved with zero phone numbers.
       if (phones.length === 0) {
@@ -2001,7 +2836,7 @@ async function handleModalSubmit() {
           isAr ? 'رقم هاتف مكرر' : 'Duplicate Phone Number',
           isAr
             ? `رقم الهاتف "${duplicatePhone.phone}" مسجّل بالفعل للعميل "${duplicatePhone.customerName}". الرجاء استخدام رقم آخر.`
-            : `The phone number "${duplicatePhone.phone}" is already linked to customer "${duplicatePhone.customerName}". Please use a different phone number.`,
+            : `The phone number "${duplicatePhone.phone}" is already linked to customer "${duplicatePhone.customerName}". Use that existing customer instead of creating another.${isCurrentUserAdmin() ? ' To combine old duplicates, close this form and choose Find duplicates on the Customers page.' : ''}`,
           'error'
         );
         return; // Stop here, don't close modal
@@ -2043,8 +2878,49 @@ async function handleModalSubmit() {
     case 'ad':
       try {
       const isArSubAd = state.language === 'ar';
+      // ROOT-CAUSE FIX (false "Ad Changed" toast, part 1): live-sync REPLACES
+      // objects inside state.ads, so state.modalData is a snapshot detached at
+      // modal-OPEN time. A legitimate server-side bump while the modal is open
+      // (a receipt settlement cascading into its linked ads, a customer merge,
+      // another tab) left the snapshot's _lastModified stale and made this
+      // save 409 against a version nobody was editing. Re-point modalData at
+      // the CURRENT record so the optimistic-lock baseline — and every stored
+      // value preserved through this save (spentUSD, editHistory, top-up
+      // baselines, prior amountAdjustments…) — is read at SAVE time. Real
+      // concurrent edits are still caught by the server's row lock.
+      if (isEdit && state.modalData?.id) {
+        const liveAd = state.ads.find(a => a && !a._deleted && String(a.id) === String(state.modalData.id));
+        if (liveAd) state.modalData = liveAd;
+      }
+      // A terminal/refunded ad still accepts TWO money-safe edits: relinking
+      // its funding receipt (free the old receipt, move the spent amount to a
+      // new one) and SETTLING its paid-off debt (flip not_paid -> paid while
+      // the committed total moves onto paid receipts). So the "terminal ads
+      // cannot be edited" decision is deferred until after the funding form
+      // is read — see the terminal-ad branch at save time, which dispatches a
+      // pure funding/settle change and blocks anything else with the
+      // "Ad Finished — use Refund" notice.
+      if (_adPhotoUploadsInFlight > 0) {
+        showNotification(
+          isArSubAd ? 'جاري تجهيز الصور' : 'Preparing photos',
+          isArSubAd ? 'انتظر لحظة حتى ينتهي تجهيز الصور، ثم احفظ الإعلان.' : 'Please wait for the photos to finish preparing, then save the ad.',
+          'info'
+        );
+        return;
+      }
+      if (state.tempAdPhotosDirty && !canModifyAdPhotosInCurrentModal()) {
+        showNotification(
+          isArSubAd ? 'تم رفض الوصول' : 'Access Denied',
+          isArSubAd ? 'لا يمكن تغيير صور إعلان محفوظ دون صلاحية عرض الصور ورفعها.' : 'Saved ad photos cannot be changed without both View Photos and Upload Photos permissions.',
+          'error'
+        );
+        return;
+      }
       const paymentStatus = document.getElementById('ad-payment-status')?.value || 'paid';
       const collectionMethod = document.getElementById('ad-collection-method')?.value || '';
+      const isUnpaidDriver = paymentStatus === 'not_paid' && collectionMethod === 'driver';
+      const isUnpaidShop = paymentStatus === 'not_paid' && collectionMethod === 'in_shop';
+      const selectedUnpaidReceiptId = String(document.getElementById('ad-linked-receipt-id')?.value || '').trim();
       const adLinkInputs = Array.from(document.querySelectorAll('.ad-link-input')).map(i => (i.value || '').trim()).filter(Boolean);
       
       // Get amount based on payment status
@@ -2054,6 +2930,14 @@ async function handleModalSubmit() {
         // For paid ads, calculate amount from receipt allocations planned spend
         const allocations = (state.tempAdFunding?.allocations || []).filter(a => a.receiptId && parseFloat(a.amountUSD) > 0);
         amountUSD = allocations.reduce((sum, a) => sum + parseFloat(a.amountUSD), 0);
+      } else if (isUnpaidDriver) {
+        // A driver-collected ad can be pure debt before any receipt money is
+        // available. Its budget is independent from optional receipt funding.
+        amountUSD = normalizeAdDriverBudgetUSD(document.getElementById('ad-driver-budget-usd')?.value);
+      } else if (isUnpaidShop && selectedUnpaidReceiptId) {
+        // The linked unpaid receipt is the source of this ad's promised budget.
+        // It is reserved below as due credit and counts as customer debt now.
+        amountUSD = normalizeAdDriverBudgetUSD(document.getElementById('ad-due-amount-to-use')?.value);
       } else {
         // Use financial details (R2 totals) for Not Paid / Won't Pay
         collectionPayments = getReceiptPaymentData();
@@ -2061,16 +2945,22 @@ async function handleModalSubmit() {
         amountUSD = totals.totalR2;
       }
       
-      // #ad-rate does NOT exist in the ad modal template — reading it always
-      // fell through to the CURRENT global default, so every save silently
-      // rewrote a saved ad's exchangeRate (and any LYD figure derived from it)
-      // with today's market rate instead of the rate the ad was created at.
-      // Keep the ad's own stored rate on edit; use the default only for a new ad.
-      let exchangeRate = parseFloat(
-        (isEdit && Number.isFinite(Number(state.modalData?.exchangeRate)) && Number(state.modalData.exchangeRate) > 0)
-          ? state.modalData.exchangeRate
-          : state.defaultExchangeRate
-      );
+      // A Driver debt uses the linked receipt's rate. Other flows preserve the
+      // saved ad rate on edit and use the current default only for a new ad.
+      const linkedDriverReceipt = isUnpaidDriver && selectedUnpaidReceiptId
+        ? state.receipts.find(receipt => (
+            receipt
+            && !receipt._deleted
+            && String(receipt.id || '') === selectedUnpaidReceiptId
+          ))
+        : null;
+      let exchangeRate = resolveAdExchangeRateForSave({
+        isEdit,
+        ad: state.modalData,
+        isUnpaidDriver,
+        linkedReceipt: linkedDriverReceipt,
+        driverBudgetRate: document.getElementById('ad-driver-budget-rate')?.value
+      });
       const isPaid = paymentStatus === 'paid';
       // These three inputs do NOT exist in the ad modal template. Reading them
       // always yielded false/undefined, which on EDIT erased spentUSD /
@@ -2103,6 +2993,23 @@ async function handleModalSubmit() {
         amountUSD = 0;
       }
 
+      if (isUnpaidDriver && amountUSD <= 0) {
+        showNotification(
+          isArSubAd ? 'تنبيه' : 'Validation',
+          isArSubAd ? 'أدخل ميزانية إعلان أكبر من صفر.' : 'Enter an ad budget greater than zero.',
+          'error'
+        );
+        return;
+      }
+      if (isUnpaidShop && selectedUnpaidReceiptId && amountUSD <= 0) {
+        showNotification(
+          isArSubAd ? 'تنبيه' : 'Validation',
+          isArSubAd ? 'أدخل ميزانية الإعلان من الوصل غير المدفوع.' : 'Enter the ad budget from the unpaid receipt.',
+          'error'
+        );
+        return;
+      }
+
       // Validate funding allocations (only required when paid)
       let allocations = (state.tempAdFunding?.allocations || []).filter(a => a.receiptId && parseFloat(a.amountUSD) > 0)
         .map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) }));
@@ -2132,6 +3039,32 @@ async function handleModalSubmit() {
         }
 
         // Set amountUSD from allocations total for paid ads (ensures consistency)
+        const settlingUnpaidDebt = isEdit
+          && getAdPaymentState(state.modalData) === 'not_paid';
+        const isTerminalSettle = settlingUnpaidDebt && adIsTerminalForEdit(state.modalData);
+        // A LIVE debt settles its FULL unpaid budget (amountUSD). A TERMINAL
+        // ad's budget is dead — stop already released the unspent part — so
+        // only its COMMITTED total still holds receipt money and THAT is what
+        // the paid funding must equal (e.g. $1.24 of a stopped $9.00 ad).
+        // getOriginalUnpaidAdBudgetUSD makes the same terminal-aware choice
+        // for the funding UI's hint and autofill, keeping all three in step.
+        const requiredSettleUSD = isTerminalSettle
+          ? getAdCommittedFundingTotalUSD(state.modalData)
+          : normalizeAdDriverBudgetUSD(state.modalData?.amountUSD);
+        if (settlingUnpaidDebt && requiredSettleUSD > 0 && Math.abs(totalAllocated - requiredSettleUSD) > 0.005) {
+          showNotification(
+            isArSubAd ? 'تنبيه' : 'Validation',
+            isTerminalSettle
+              ? (isArSubAd
+                ? `يجب أن يساوي مجموع تمويل الوصولات ($${totalAllocated.toFixed(2)}) المبلغ المُنفَق المستحق على هذا الإعلان المنتهي ($${requiredSettleUSD.toFixed(2)}).`
+                : `Receipt funding ($${totalAllocated.toFixed(2)}) must equal this finished ad's committed spend ($${requiredSettleUSD.toFixed(2)}).`)
+              : (isArSubAd
+                ? `يجب أن يساوي مجموع تمويل الوصولات ($${totalAllocated.toFixed(2)}) مبلغ الإعلان غير المدفوع ($${requiredSettleUSD.toFixed(2)}).`
+                : `Receipt funding ($${totalAllocated.toFixed(2)}) must equal the unpaid ad amount ($${requiredSettleUSD.toFixed(2)}).`),
+            'error'
+          );
+          return;
+        }
         amountUSD = totalAllocated;
 
         for (const [receiptId, plannedTotal] of totalsByReceipt.entries()) {
@@ -2143,27 +3076,48 @@ async function handleModalSubmit() {
             showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'أحد الوصولات المختارة مفقود أو تم حذفه.' : 'One of the selected receipts is missing or was deleted.', 'error');
             return;
           }
+          if (String(receipt.customerId || '') !== String(customerId || '')) {
+            showNotification(
+              isArSubAd ? 'تنبيه' : 'Validation',
+              isArSubAd
+                ? 'لا يمكن تمويل الإعلان من وصل يخص عميلاً آخر. اختر وصلاً مدفوعاً لهذا العميل.'
+                : "An ad cannot be funded from another customer's receipt. Choose a Paid receipt for this customer.",
+              'error'
+            );
+            return;
+          }
+          const receiptPaymentState = typeof getReceiptPaymentState === 'function'
+            ? getReceiptPaymentState(receipt)
+            : ((receipt.isPaid === true || String(receipt.status || '').trim().toLowerCase() === 'paid') ? 'paid' : 'not_paid');
+          if (receiptPaymentState !== 'paid') {
+            showNotification(
+              isArSubAd ? 'تنبيه' : 'Validation',
+              isArSubAd
+                ? 'الوصل الحالي لم يعد صالحاً للتمويل. اختر وصلاً مدفوعاً بديلاً.'
+                : 'The current receipt is no longer eligible. Choose a Paid replacement receipt.',
+              'error'
+            );
+            return;
+          }
           // Calculate remaining balance (total - used - transferred)
           const usageStats = getReceiptUsageStats(receipt);
           let remaining = usageStats.remainingUSD || 0;
 
           // If editing, add back what this ad already allocated from this receipt
           if (isEdit && state.modalData?.id) {
-            const existingAd = state.ads.find(a => a.id === state.modalData.id);
-            if (existingAd?.receiptAllocations) {
-              const existingAlloc = existingAd.receiptAllocations
-                .filter(a => String(a.receiptId) === String(receiptId))
-                .reduce((sum, a) => sum + (parseFloat(a.amountUSD) || 0), 0);
-              remaining += existingAlloc;
-            }
+            // This includes the ad's current due allocation when converting a
+            // Driver debt to Paid. The server replaces those rows atomically,
+            // so the current ad must not block its own settlement receipt.
+            remaining += getEditingAdExistingAllocationUSD(receiptId);
           }
 
           if (plannedTotal > remaining + 0.0001) {
+            const shortfall = Math.max(plannedTotal - remaining, 0);
             showNotification(
               isArSubAd ? 'تنبيه' : 'Validation',
               isArSubAd
-                ? `الصرف المخطط ($${plannedTotal.toFixed(2)}) يتجاوز الرصيد المتاح ($${remaining.toFixed(2)}) للوصل ${receipt.serialNumber || receipt.id}.`
-                : `Planned spend ($${plannedTotal.toFixed(2)}) exceeds available balance ($${remaining.toFixed(2)}) for receipt ${receipt.serialNumber || receipt.id}.`,
+                ? `مبلغ الإعلان لم يتغير. ينقص الوصل ${receipt.serialNumber || receipt.id} مبلغ $${shortfall.toFixed(2)}. أضف وصلاً ثانياً أو اختر وصلاً برصيد كافٍ.`
+                : `The ad amount was not changed. Receipt ${receipt.serialNumber || receipt.id} is short by $${shortfall.toFixed(2)}. Add a second receipt or choose one with enough balance.`,
               'error'
             );
             return;
@@ -2207,28 +3161,59 @@ async function handleModalSubmit() {
             return;
           }
 
-          // Receipt is the source of truth for money details in this flow.
-          // Do NOT use Ad financial splits; derive totals from the linked receipt.
-          const debtUsd = Number(linkedReceipt.debtAmountUSD ?? linkedReceipt.amountUSD ?? 0) || 0;
-          amountUSD = Number.isFinite(debtUsd) ? debtUsd : 0;
+          // The receipt is the source of truth for driver assignment and rate.
+          // The ad budget remains independent so an unfunded ad can be debt.
+          const rRate = Number(linkedReceipt.exchangeRate || 0) || 0;
+          if (rRate > 0) exchangeRate = rRate;
+          collectionPayments = [];
+        } else if (collectionMethod === 'in_shop' && selectedUnpaidReceiptId) {
+          const linkedReceipt = state.receipts.find(r => r && !r._deleted && String(r.id) === selectedUnpaidReceiptId);
+          if (!linkedReceipt) {
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'الوصل غير المدفوع المحدد غير موجود.' : 'The selected unpaid receipt was not found.', 'error');
+            return;
+          }
+          if (String(linkedReceipt.customerId || '') !== String(customerId || '')) {
+            showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'الوصل المحدد يخص عميلاً آخر.' : 'Selected receipt belongs to a different customer.', 'error');
+            return;
+          }
+          if (!isUnpaidShopReceipt(linkedReceipt, customerId)) {
+            const becamePaid = linkedReceipt.isPaid === true || String(linkedReceipt.status || '') === 'Paid';
+            showNotification(
+              isArSubAd ? 'تنبيه' : 'Validation',
+              becamePaid
+                ? (isArSubAd ? 'تم دفع هذا الوصل الآن. غيّر حالة الإعلان إلى «مدفوع» لإكمال التسوية.' : 'This receipt is now Paid. Change the ad to Paid to complete settlement.')
+                : (isArSubAd ? 'الوصل المحدد ليس وصلاً صالحاً غير مدفوع في المحل.' : 'Selected receipt is not a valid unpaid In-Shop receipt.'),
+              'error'
+            );
+            return;
+          }
           const rRate = Number(linkedReceipt.exchangeRate || 0) || 0;
           if (rRate > 0) exchangeRate = rRate;
           collectionPayments = [];
         }
       }
       
-      // Capture due amount to use from delivery receipt (Not Paid + Driver mode)
+      // Capture the promised amount from a linked unpaid receipt. Delivery uses
+      // linkedDeliveryReceiptId; In Shop uses receiptId while sharing the same
+      // due-allocation ledger so neither can spend receipt money twice.
       let dueAmountToUseUSD = 0;
       let linkedDeliveryReceiptId = '';
       let dueAllocations = [];
-      if (paymentStatus === 'not_paid' && collectionMethod === 'driver') {
-        linkedDeliveryReceiptId = document.getElementById('ad-linked-receipt-id')?.value || '';
+      if (paymentStatus === 'not_paid' && (collectionMethod === 'driver' || (collectionMethod === 'in_shop' && selectedUnpaidReceiptId))) {
+        const linkedReceiptId = selectedUnpaidReceiptId;
+        linkedDeliveryReceiptId = collectionMethod === 'driver' ? linkedReceiptId : '';
         const dueInput = document.getElementById('ad-due-amount-to-use');
-        if (dueInput && linkedDeliveryReceiptId) {
+        if (dueInput && linkedReceiptId) {
           dueAmountToUseUSD = parseFloat(dueInput.value) || 0;
+          // The validation branches above intentionally keep their receipt
+          // variables block-scoped. Resolve the selected receipt again here so
+          // edit add-back never depends on an out-of-scope `linkedReceipt`.
+          const selectedDueReceipt = state.receipts.find(
+            receipt => receipt && !receipt._deleted && String(receipt.id || '') === String(linkedReceiptId)
+          );
           
           // Validate: check if the amount exceeds available credit
-          const dueUsage = getDeliveryReceiptDueUsage(linkedDeliveryReceiptId);
+          const dueUsage = getDeliveryReceiptDueUsage(linkedReceiptId);
           const availableUSD = dueUsage.remainingDueUSD;
           
           // If editing an existing ad, add back what this ad already used
@@ -2236,13 +3221,14 @@ async function handleModalSubmit() {
           if (isEdit && state.modalData?.id) {
             const existingAd = state.ads.find(a => a.id === state.modalData.id);
             if (existingAd) {
-              if (Array.isArray(existingAd.dueAllocations)) {
-                currentAdUsage = existingAd.dueAllocations
-                  .filter(a => String(a.receiptId) === String(linkedDeliveryReceiptId))
-                  .reduce((sum, a) => sum + (parseFloat(a.amountUSD) || 0), 0);
-              } else if (existingAd.dueAmountToUseUSD > 0 && String(existingAd.linkedDeliveryReceiptId) === String(linkedDeliveryReceiptId)) {
-                currentAdUsage = existingAd.dueAmountToUseUSD;
-              }
+              const explicitDueForReceipt = Array.isArray(existingAd.dueAllocations)
+                ? existingAd.dueAllocations
+                    .filter(a => String(a?.receiptId || '') === String(linkedReceiptId))
+                    .reduce((sum, a) => sum + (parseFloat(a?.amountUSD) || 0), 0)
+                : 0;
+              currentAdUsage = explicitDueForReceipt > 0
+                ? explicitDueForReceipt
+                : getAdLegacyDueMirrorUSD(existingAd, linkedReceiptId, selectedDueReceipt?.exchangeRate);
             }
           }
           
@@ -2262,16 +3248,20 @@ async function handleModalSubmit() {
           // Create due allocation
           if (dueAmountToUseUSD > 0) {
             dueAllocations.push({
-              receiptId: linkedDeliveryReceiptId,
+              receiptId: linkedReceiptId,
               amountUSD: dueAmountToUseUSD
             });
           }
         }
       }
       
-      // Capture merged paid receipt allocations (if enabled in Not Paid + Driver mode)
+      // Capture real paid receipt allocations mixed into a Not Paid ad. Driver
+      // and In Shop share the same safe UI working state; the server stores
+      // In Shop rows canonically in receiptAllocations (without a legacy mirror).
       let mergedAllocations = [];
-      if (paymentStatus === 'not_paid' && collectionMethod === 'driver' && state.tempMergeFunding?.enabled) {
+      if (paymentStatus === 'not_paid'
+          && (collectionMethod === 'driver' || collectionMethod === 'in_shop')
+          && state.tempMergeFunding?.enabled) {
         mergedAllocations = (state.tempMergeFunding.allocations || [])
           .filter(a => a.receiptId && parseFloat(a.amountUSD) > 0)
           .map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) }));
@@ -2337,12 +3327,40 @@ async function handleModalSubmit() {
       // Combine allocations: merged paid receipts for Not Paid + Driver mode
       // For paid mode, use regular allocations
       const finalAllocations = isPaid ? allocations : mergedAllocations;
+      const mergedTotal = mergedAllocations.reduce(
+        (sum, a) => sum + (parseFloat(a.amountUSD) || 0),
+        0
+      );
+
+      if (isUnpaidShop && selectedUnpaidReceiptId) {
+        amountUSD = Math.round((dueAmountToUseUSD + mergedTotal) * 100) / 100;
+        const intendedBudget = normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD);
+        if (intendedBudget > 0 && Math.abs(amountUSD - intendedBudget) > 0.005) {
+          showNotification(
+            isArSubAd ? 'تنبيه' : 'Validation',
+            isArSubAd
+              ? `الوصل غير المدفوع لا يغطي الفرق كاملاً. التمويل الحالي $${amountUSD.toFixed(2)} من الميزانية المطلوبة $${intendedBudget.toFixed(2)}. اختر وصلاً آخر أو أدخل ميزانية أصغر.`
+              : `The unpaid receipt does not cover the full difference. Current funding is $${amountUSD.toFixed(2)} of the intended $${intendedBudget.toFixed(2)}. Choose another receipt or enter a smaller budget.`,
+            'error'
+          );
+          return;
+        }
+      }
       
-      // For Not Paid + Driver mode, update amountUSD to reflect total from due + merged allocations
-      // This ensures the ad credit shows the correct amount, not the full receipt amount
-      if (paymentStatus === 'not_paid' && collectionMethod === 'driver') {
-        const mergedTotal = mergedAllocations.reduce((sum, a) => sum + (parseFloat(a.amountUSD) || 0), 0);
-        amountUSD = dueAmountToUseUSD + mergedTotal;
+      // Receipt funding can cover some/all of the budget, but can never redefine
+      // or exceed it. Any unfunded remainder is customer debt until payment.
+      if (isUnpaidDriver) {
+        const fundedTotal = dueAmountToUseUSD + mergedTotal;
+        if (fundedTotal > amountUSD + 0.005) {
+          showNotification(
+            isArSubAd ? 'تنبيه' : 'Validation',
+            isArSubAd
+              ? `إجمالي التمويل ($${fundedTotal.toFixed(2)}) أكبر من ميزانية الإعلان ($${amountUSD.toFixed(2)}).`
+              : `Receipt funding ($${fundedTotal.toFixed(2)}) exceeds the ad budget ($${amountUSD.toFixed(2)}).`,
+            'error'
+          );
+          return;
+        }
       }
       
       const adUpdates = {
@@ -2350,14 +3368,20 @@ async function handleModalSubmit() {
         pageId: pageId,
         amountUSD,
         exchangeRate,
-        amountLocal: amountUSD * exchangeRate,
+        amountLocal: adAmountLocalForSave(amountUSD, exchangeRate),
         paymentMethod: (isPaid ? '' : (collectionPayments[0]?.method || '')) || '',
         status: state.modalData?.status || 'Active',
         // If Not Paid + Driver AND linked to a temp delivery receipt, the delivery is tracked on the receipt (not on the ad),
         // so we keep the ad out of the Delivery dashboard to avoid duplicates.
         deliveryStatus: (paymentStatus === 'not_paid' && collectionMethod === 'driver') ? 'Office' : (state.modalData?.deliveryStatus || 'Office'),
         deliveryPersonId: (paymentStatus === 'not_paid' && collectionMethod === 'driver') ? '' : (state.modalData?.deliveryPersonId || ''),
-        receiptId: (paymentStatus === 'not_paid' && collectionMethod === 'driver') ? linkedDeliveryReceiptId : (state.modalData?.receiptId || ''),
+        receiptId: resolveAdPrimaryReceiptId({
+          paymentStatus,
+          collectionMethod,
+          linkedDeliveryReceiptId,
+          allocations: finalAllocations,
+          dueAllocations
+        }),
         paymentStatus,
         collectionMethod,
         adLinks: adLinkInputs,
@@ -2374,13 +3398,35 @@ async function handleModalSubmit() {
         receiptAllocations: finalAllocations,
         receiptIds: finalAllocations.map(a => a.receiptId),
         fundingReceiptId: finalAllocations[0]?.receiptId || '',
-        // Due amount fields for Not Paid + Driver mode (stored in USD like paid allocations)
+        // Due rows reserve promised money from either a delivery receipt or an
+        // unpaid In Shop receipt without pretending it has already been paid.
         dueAmountToUseUSD: dueAmountToUseUSD,
         dueAllocations: dueAllocations,
         linkedDeliveryReceiptId: linkedDeliveryReceiptId,
-        hasMergedPaidFunds: mergedAllocations.length > 0,
-        mergedPaidAllocations: mergedAllocations
+        hasMergedPaidFunds: collectionMethod === 'driver' && mergedAllocations.length > 0,
+        mergedPaidAllocations: collectionMethod === 'driver' ? mergedAllocations : []
       };
+
+      // Denormalize the customer's display NAME (never phone/contact) so a role
+      // that can view ads but not load the customers collection still sees who
+      // the ad is for — mirrors createdByName. This client stamp serves LOCAL
+      // mode (spread into the new ad via addRecord); in server mode
+      // buildServerAdMutationData strips it and the server stamps it
+      // authoritatively from the customers table, and updateRecord protects it
+      // on edit. The live customer name always wins on read when available.
+      if (customerId) {
+        const _adCustomer = (state.customers || []).find(c => c && String(c.id) === String(customerId));
+        if (_adCustomer && _adCustomer.name) adUpdates.customerName = String(_adCustomer.name);
+      }
+
+      // Ordinary edits do not need to re-upload unchanged base64 images. Both
+      // the generic local update and the atomic server mutation merge omitted
+      // fields over the stored record. Sending [] remains an intentional clear.
+      if (isEdit && !state.tempAdPhotosDirty) {
+        delete adUpdates.adPhotos;
+      } else if (isEdit) {
+        adUpdates.photos = []; // clear the legacy field after an intentional edit
+      }
 
       // Re-baseline the top-up arithmetic. saveTopUps derives the ad's amount
       // and end date from initialAmountUSD/initialEndDate + the top-ups. Those
@@ -2397,10 +3443,97 @@ async function handleModalSubmit() {
         }
       }
 
+      // Liquidity window integrity: growing an ad's budget in an ORDINARY
+      // edit spends money exactly like a top-up but writes no dated row.
+      // Record the growth in an append-only ledger so the liquidity window
+      // can count in-window growth of pre-window ads (capped at real spend
+      // when read; shrinking an ad is never recorded — money returning is
+      // handled by refunds).
+      if (isEdit) {
+        const priorAmountUSD = parseFloat(state.modalData?.amountUSD) || 0;
+        const growthUSD = Math.round((amountUSD - priorAmountUSD) * 100) / 100;
+        if (growthUSD > 0.005) {
+          const priorAdjustments = Array.isArray(state.modalData?.amountAdjustments)
+            ? state.modalData.amountAdjustments
+            : [];
+          adUpdates.amountAdjustments = [
+            ...priorAdjustments.map(row => ({ ...row })),
+            { delta: growthUSD, date: new Date().toISOString() }
+          ];
+        }
+      }
+
       if (isPaid && (!state.modalData || !state.modalData.collectionDate)) {
         adUpdates.collectionDate = new Date().toISOString();
       }
       
+      // A terminal/refunded ad accepts exactly two edits. (1) A receipt
+      // RELINK: the only change is the funding receipt — free the old receipt
+      // and move the spent amount to the new one (amount/spend/status/payment
+      // untouched). (2) A SETTLE: the customer paid the debt, so payment
+      // flips not_paid -> paid while the whole committed total moves onto
+      // paid receipt(s), conserved to the cent, and the old unpaid receipt is
+      // fully freed. Any other change keeps the "Ad Finished — use Refund"
+      // block.
+      if (isEdit && adIsTerminalForEdit(state.modalData)) {
+        const liveTerminalAd = state.modalData;
+        // Settle is detected FIRST: it is non-null only when the payment
+        // flipped not_paid -> paid, and a flipped payment can never be a
+        // plain relink (which forbids payment changes) — this also lets a
+        // settle move the funding onto a different receipt in the same save.
+        const settlePools = computeTerminalSettlePools(liveTerminalAd, adUpdates);
+        const relinkPools = settlePools ? null : computeTerminalRelinkPools(liveTerminalAd, adUpdates);
+        const onlyFundingChanged = relinkPools
+          && terminalRelinkOnlyChangesFunding(liveTerminalAd, adUpdates, state.tempAdPhotosDirty);
+        const settleShapeOk = settlePools
+          && terminalSettleOnlyChangesFundingAndPayment(liveTerminalAd, adUpdates, state.tempAdPhotosDirty);
+        if (!onlyFundingChanged && !settleShapeOk) {
+          showNotification(
+            isArSubAd ? 'إعلان منتهٍ' : 'Ad Finished',
+            isArSubAd
+              ? 'هذا الإعلان منتهٍ (موقوف/ملغى/مكتمل) أو مُسترجَع. يمكن فقط تغيير وصل تمويله أو تسوية دينه على وصل مدفوع؛ لإعادة المال أو تعديل مبلغه استخدم الاسترجاع.'
+              : 'This ad is finished (stopped/canceled/completed) or refunded. Only its funding receipt can be changed or its debt settled onto a paid receipt; to return or adjust its money, use Refund.',
+            'warning'
+          );
+          return;
+        }
+        if (isServerModeEnabled()) {
+          const expectedLastModified = Number(liveTerminalAd?._lastModified);
+          await saveAdThroughAtomicServer('update', liveTerminalAd.id, expectedLastModified, settlePools
+            ? {
+                relinkReceiptOnly: true,
+                paymentStatus: 'paid',
+                receiptAllocations: settlePools.paid,
+                dueAllocations: []
+              }
+            : {
+                relinkReceiptOnly: true,
+                receiptAllocations: relinkPools.paid,
+                dueAllocations: relinkPools.due
+              });
+        } else if (settlePools) {
+          const settled = await applyLocalReceiptSettle(liveTerminalAd, settlePools);
+          if (!settled) return;
+        } else {
+          const relinked = await applyLocalReceiptRelink(liveTerminalAd, relinkPools);
+          if (!relinked) return;
+        }
+        showNotification(
+          isArSubAd ? 'تم التحديث' : 'Updated',
+          settlePools
+            ? (isArSubAd ? 'تمت تسوية دين الإعلان: انتقل التمويل إلى الوصل المدفوع وتم تحرير الوصل غير المدفوع بالكامل.' : 'The ad debt was settled: its committed funding moved to the paid receipt and the unpaid receipt was fully released.')
+            : (isArSubAd ? 'تم تغيير وصل تمويل الإعلان وتحرير الوصل السابق.' : 'The ad funding receipt was changed and the old receipt was released.'),
+          'success'
+        );
+        addLog('update', 'ad', liveTerminalAd.id, settlePools
+          ? 'Settled terminal ad debt onto paid receipt'
+          : 'Relinked ad funding receipt');
+        state.tempAdFunding = { allocations: [] };
+        state.tempAdPhotos = [];
+        closeModal();
+        return;
+      }
+
       if (isEdit) {
         // Track changes for edit history
         const oldAd = state.modalData;
@@ -2416,8 +3549,8 @@ async function handleModalSubmit() {
           { key: 'paymentStatus', label: 'Payment Status', format: (v) => v || 'paid' },
           { key: 'deliveryStatus', label: 'Delivery Status', format: (v) => v || 'Office' },
           { key: 'status', label: 'Ad Status', format: (v) => v || 'Active' },
-          { key: 'startDate', label: 'Start Date', format: (v) => v ? new Date(v).toLocaleDateString() : 'N/A' },
-          { key: 'endDate', label: 'End Date', format: (v) => v ? new Date(v).toLocaleDateString() : 'N/A' }
+          { key: 'startDate', label: 'Start Date', format: (v) => v ? new Date(v).toLocaleDateString(appDateLocale()) : 'N/A' },
+          { key: 'endDate', label: 'End Date', format: (v) => v ? new Date(v).toLocaleDateString(appDateLocale()) : 'N/A' }
         ];
         
         fieldsToTrack.forEach(field => {
@@ -2454,21 +3587,10 @@ async function handleModalSubmit() {
           });
         }
         
-        // Add to edit history if there are changes
-        if (changes.length > 0) {
-          const editHistory = oldAd.editHistory || [];
-          editHistory.push({
-            editedAt: new Date().toISOString(),
-            editedBy: state.currentUser?.name || 'Unknown',
-            changes: changes
-          });
-          adUpdates.editHistory = editHistory;
-          adUpdates.editCount = editHistory.length;
-          adUpdates.updatedAt = new Date().toISOString();
-        } else {
-          adUpdates.editHistory = oldAd.editHistory || [];
-          adUpdates.editCount = oldAd.editCount || 0;
-        }
+        // Work on a detached history copy. The live record changes only after
+        // the save succeeds, so a rejected/conflicted edit cannot create a
+        // false history row or duplicate it on retry.
+        Object.assign(adUpdates, buildAdEditHistoryUpdates(oldAd, changes));
         
         if (isServerModeEnabled()) {
           const expectedLastModified = Number(oldAd?._lastModified);
@@ -2529,11 +3651,14 @@ async function handleModalSubmit() {
       closeModal();
       } catch (error) {
         console.error('Error saving ad:', error);
-        const conflict = error?.status === 409;
+        // "Changed on another device" is reserved for real version conflicts
+        // ("Conflict: …"). Other 409s are business-rule refusals whose actual
+        // reason must reach the user (see describe409).
+        const conflict = isVersionConflict409(error);
         showNotification(
           conflict ? (state.language === 'ar' ? 'تعارض في التعديل' : 'Ad Changed') : (state.language === 'ar' ? 'خطأ' : 'Error'),
-          conflict
-            ? (state.language === 'ar' ? 'تم تغيير هذا الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+          error?.status === 409
+            ? describe409(error, state.language === 'ar' ? 'تم تغيير هذا الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
             : (state.language === 'ar' ? `فشل حفظ الإعلان: ${error.message}` : `Failed to save ad: ${error.message}`),
           conflict ? 'warning' : 'error'
         );
@@ -2616,8 +3741,11 @@ async function handleModalSubmit() {
             return {}; // Admins get all permissions automatically
           case 'Delivery':
             return PERMISSION_TEMPLATES.deliveryDriver.permissions;
-          case 'Employee':
-            return PERMISSION_TEMPLATES.salesAgent.permissions;
+          case 'Employee': {
+            const presetKey = String(document.getElementById('user-access-preset')?.value || window._newUserAccessPreset || 'salesAgent');
+            const preset = PERMISSION_TEMPLATES[presetKey] || PERMISSION_TEMPLATES.salesAgent;
+            return preset.permissions;
+          }
           default:
             return PERMISSION_TEMPLATES.viewer.permissions;
         }
@@ -2950,15 +4078,36 @@ function showWalletTopupModal(userId) {
 }
 
 function closeModal() {
+  if (typeof resetReceiptCustomerRiskWarningState === 'function') {
+    resetReceiptCustomerRiskWarningState();
+  }
+  const wasCustomerMerge = state.activeModal === 'customer-merge';
+  const customerMergeReturnFocus = wasCustomerMerge ? _customerMergeReturnFocus : null;
+  if (wasCustomerMerge) _customerMergeReturnFocus = null;
+  // One-shot preset used by Ads Studio's "Customer login" shortcut. Never
+  // let it silently affect a later user created from the normal Users screen.
+  window._newUserAccessPreset = '';
   state.activeModal = null;
   state.modalData = null;
+  // Existing-balance mode never leaks to the next receipt (showReceiptModal also
+  // resets it on open, but clear it here too so a cancelled carried receipt is clean).
+  _newReceiptCarried = false;
 
   // Clear temp funding states
   state.tempAdFunding = null;
   state.tempMergeFunding = null;
+  state.tempMixedReceiptTargetUSD = null;
   // Discard any pending (unsaved) photos so a cancelled upload cannot leak
   // into the next ad/receipt created in this session.
   state.tempAdPhotos = [];
+  state.tempReceiptPhotos = [];
+  state.tempAdPhotosDirty = false;
+  state.tempReceiptPhotosDirty = false;
+  _adPhotoUploadGeneration++;
+  _receiptPhotoUploadGeneration++;
+  _adPhotoUploadsInFlight = 0;
+  _receiptPhotoUploadsInFlight = 0;
+  closeReceiptPhotoViewer();
   // Discard any pending (unsaved) top-up edits so they cannot leak into the
   // next ad's top-up session.
   tempTopUps = [];
@@ -2970,8 +4119,41 @@ function closeModal() {
   _clothesTempShipLines = [];
   _clothesTempOrderLines = [];
   
-  // Clear URL params (modal, id)
-  clearUrlParams(['modal', 'id']);
+  // Clear URL params (modal, id). When this dialog's opener pushed a history
+  // entry (albayanModal stamp — see updateUrlParams), consume that entry with
+  // history.back() instead: replaceState alone rewrote the entry's URL but
+  // left it stacked, so every open/close cycle cost one dead hardware-Back
+  // press on phones. Skipped when Back itself already popped the entry
+  // (_closingSurfaceFromPopstate, set by the popstate handler) — the new top
+  // entry may be a previous ?modal entry that must survive for back/forward
+  // restore. Openers that never pushed (boot deep-link error paths) fall
+  // through to the old replaceState behaviour.
+  let consumedModalHistoryEntry = false;
+  if (typeof consumeOverlayHistoryEntry === 'function' && !_closingSurfaceFromPopstate) {
+    const topHistoryEntry = window.history.state;
+    if (topHistoryEntry && topHistoryEntry.albayanModal) {
+      consumedModalHistoryEntry = consumeOverlayHistoryEntry();
+    } else if (topHistoryEntry && topHistoryEntry.overlaySentinel && topHistoryEntry.underAlbayanModal) {
+      // Phone browsers: an untracked overlay (duplicate-serial warning…)
+      // opened late over this dialog, so its sentinel sits ON TOP of the
+      // dialog's own ?modal entry — and closeModal is tearing both surfaces
+      // down at once. Consume BOTH entries: rewriting only the sentinel
+      // would leave the buried ?modal entry alive one level down, and a
+      // later Back would resurrect the dismissed dialog. The popstate that
+      // go(-2) fires is pure bookkeeping, so flag it for the router exactly
+      // like consumeOverlayHistoryEntry does. Sentinels are never pushed on
+      // desktop or in the packaged app, so this branch cannot run there.
+      _suppressOverlayPopstateUntil = Date.now() + 800;
+      try {
+        window.history.go(-2);
+        if (_overlaySentinelDepth > 0) _overlaySentinelDepth--;
+        consumedModalHistoryEntry = true;
+      } catch (_) {
+        _suppressOverlayPopstateUntil = 0;
+      }
+    }
+  }
+  if (!consumedModalHistoryEntry) clearUrlParams(['modal', 'id']);
   
   // Force remove ALL modals - be very aggressive
   document.querySelectorAll('#app-modal').forEach(el => {
@@ -2992,6 +4174,11 @@ function closeModal() {
   setTimeout(() => {
     render();
     lucide.createIcons();
+    if (wasCustomerMerge) {
+      const fallbackTrigger = document.querySelector('button[aria-haspopup="dialog"][onclick="showCustomerDuplicateMerge()"]');
+      const focusTarget = customerMergeReturnFocus?.isConnected ? customerMergeReturnFocus : fallbackTrigger;
+      if (focusTarget && typeof focusTarget.focus === 'function') focusTarget.focus();
+    }
   }, 50);
 }
 
@@ -3076,7 +4263,7 @@ async function releaseCanceledDeliveryDueFunding(receiptId) {
   let touched = 0;
   const affectedAds = state.ads.filter(a => a && !a._deleted && a.recordType !== 'receipt' && (
     (Array.isArray(a.dueAllocations) && a.dueAllocations.some(al => String(al?.receiptId || '') === rid)) ||
-    (String(a.linkedDeliveryReceiptId || '') === rid && (parseFloat(a.dueAmountToUseUSD) || 0) > 0)
+    (isAdLegacyDueMirrorForReceipt(a, rid) && getAdLegacyDueMirrorUSD(a, rid) > 0)
   ));
   for (const ad of affectedAds) {
     const updates = {};
@@ -3084,9 +4271,13 @@ async function releaseCanceledDeliveryDueFunding(receiptId) {
       const kept = ad.dueAllocations.filter(al => String(al?.receiptId || '') !== rid);
       if (kept.length !== ad.dueAllocations.length) updates.dueAllocations = kept;
     }
-    // Legacy single-field shape predating dueAllocations.
-    if (String(ad.linkedDeliveryReceiptId || '') === rid && (parseFloat(ad.dueAmountToUseUSD) || 0) > 0) {
+    // Legacy single-field shape predating dueAllocations. The mirror identity
+    // (linkedDeliveryReceiptId, or the older receiptId forms) comes from the
+    // shared reader so this release clears exactly the money the balance
+    // readers counted — both USD and LYD mirrors, like the server does.
+    if (isAdLegacyDueMirrorForReceipt(ad, rid) && getAdLegacyDueMirrorUSD(ad, rid) > 0) {
       updates.dueAmountToUseUSD = 0;
+      updates.dueAmountToUseLYD = 0;
     }
     if (Object.keys(updates).length) {
       const saved = await updateRecord(state.ads, ad.id, updates);

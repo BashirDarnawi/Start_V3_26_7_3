@@ -15,6 +15,12 @@ node_modules/
 __pycache__/
 *.pyc
 .pycache_tmp/
+.pytest_cache/
+.pytest_tmp*/
+.tmp/
+playwright-report/
+test-results/
+backups/
 server/data/
 *.db
 

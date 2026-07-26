@@ -19,13 +19,26 @@ const _serverLiveSync = {
   serverWatermark: 0,
   fullLoadCursorReady: false,
   collectionCursors: Object.create(null),
+  serviceEntitlements: null,
   // Authentication identity and poller lifecycle are deliberately separate.
   // sessionEpoch changes only when the authenticated session changes; it is
   // part of getServerSessionIdentity(), so late full-load/cache responses are
   // rejected. pollerEpoch changes whenever polling is stopped/restarted, so a
   // late tick is discarded without invalidating an unrelated full load.
   sessionEpoch: 0,
-  pollerEpoch: 0
+  pollerEpoch: 0,
+  // Failure backoff: after consecutive tick failures, polls are skipped until
+  // nextAllowedAt (6s/12s/24s/48s/60s at 3s base). An unreachable server must
+  // not be hammered every 3s from a phone (battery + cell radio); the
+  // visibilitychange/online handlers reset the backoff for an immediate retry.
+  failStreak: 0,
+  nextAllowedAt: 0,
+  // Collections already purged after a per-collection 403 (permission boundary).
+  // A revoked collection keeps returning 403 every 3s until the current user's
+  // permissions refresh (every usersSyncIntervalMs). Tracking already-purged
+  // collections here stops an identical 403 from re-clearing state + writing
+  // IndexedDB + forcing a full re-render on every tick (battery/jank storm).
+  purgedForbidden: new Set()
 };
 
 function advanceServerSessionEpoch() {
@@ -34,7 +47,35 @@ function advanceServerSessionEpoch() {
   _serverLiveSync.cursor = 0;
   _serverLiveSync.fullLoadCursorReady = false;
   _serverLiveSync.collectionCursors = Object.create(null);
+  _serverLiveSync.serviceEntitlements = null;
+  if (typeof clearTransientEntityMediaCache === 'function') clearTransientEntityMediaCache('adCampaignRequests');
   _serverLiveSync.lastDeliverySig = null;
+  if (_serverLiveSync.purgedForbidden instanceof Set) _serverLiveSync.purgedForbidden.clear();
+  else _serverLiveSync.purgedForbidden = new Set();
+}
+
+const SERVER_SERVICE_ENTITLEMENT_COLLECTIONS = Object.freeze({
+  ad_maker: Object.freeze(['adCampaignRequests']),
+  clothes_system: Object.freeze(['clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings'])
+});
+const SERVER_MEDIA_BEARING_COLLECTIONS = new Set(['ads', 'receipts', 'adCampaignRequests', 'clothesProducts']);
+
+function getServerServiceEntitlementSnapshot(user = state.currentUser, subscriptions = state.serviceSubscriptions, nowMs = Date.now()) {
+  const uid = String(user?.id || '');
+  const rows = Array.isArray(subscriptions) ? subscriptions : [];
+  const snapshot = Object.create(null);
+  for (const serviceId of Object.keys(SERVER_SERVICE_ENTITLEMENT_COLLECTIONS)) {
+    snapshot[serviceId] = !!uid && rows.some(row => row && !row._deleted &&
+      String(row.userId || '') === uid && String(row.serviceId || '') === serviceId &&
+      String(row.status || '') === 'active' &&
+      (!row.expiresAt || new Date(row.expiresAt).getTime() > nowMs));
+  }
+  return snapshot;
+}
+
+function getRevokedServerServiceEntitlements(before, after) {
+  return Object.keys(SERVER_SERVICE_ENTITLEMENT_COLLECTIONS)
+    .filter(serviceId => before?.[serviceId] === true && after?.[serviceId] !== true);
 }
 
 function getServerCollectionCursor(collection) {
@@ -65,8 +106,10 @@ function computeServerCursorFromState() {
     _maxLastModifiedFromArray(state.clothesShipments),
     _maxLastModifiedFromArray(state.clothesOrders),
     _maxLastModifiedFromArray(state.clothesSettings),
+    _maxLastModifiedFromArray(state.adCampaignRequests),
     _maxLastModifiedFromArray(state.walletTransactions),
-    _maxLastModifiedFromArray(state.serviceSubscriptions)
+    _maxLastModifiedFromArray(state.serviceSubscriptions),
+    _maxLastModifiedFromArray(state.appSettings)
   );
 }
 
@@ -75,6 +118,9 @@ function getServerCollectionVisibilityScope(user, collection) {
   const name = String(collection || '');
   const role = String(user.role || '').toLowerCase();
   if (name === 'exchangeRateHistory') return 'all';
+  // Admin-only configuration records: never fetched (or retained) for
+  // non-admin sessions.
+  if (name === 'appSettings') return role === 'admin' ? 'all' : 'none';
   if (name === 'walletTransactions' || name === 'serviceSubscriptions') {
     return role === 'admin' ? 'all' : 'own';
   }
@@ -82,6 +128,10 @@ function getServerCollectionVisibilityScope(user, collection) {
   if (role === 'delivery' && ['ads', 'receipts', 'customers'].includes(name)) return 'assigned';
   const modulePermissions = user.permissions?.[name];
   if (!Array.isArray(modulePermissions)) return 'none';
+  // Review access is deliberately narrower than ordinary view-all access: the
+  // server omits unfinished customer drafts. Keeping this scope distinct also
+  // forces cache/IndexedDB purge when an employee changes from view to review.
+  if (name === 'adCampaignRequests' && modulePermissions.some(action => String(action).toLowerCase() === 'review')) return 'review';
   if (modulePermissions.some(action => String(action).toLowerCase() === 'view')) return 'all';
   if (modulePermissions.some(action => String(action).toLowerCase() === 'viewown')) return 'own';
   return 'none';
@@ -100,6 +150,11 @@ function getAuthorizedServerSyncCollections(user = state.currentUser) {
     if (collection.startsWith('clothes') && !isAdminRole(user?.role)) {
       return hasSubscription('clothes_system');
     }
+    if (collection === 'adCampaignRequests' && !isAdminRole(user?.role)) {
+      const isReviewer = Array.isArray(user?.permissions?.adCampaignRequests) &&
+        user.permissions.adCampaignRequests.some(action => String(action).toLowerCase() === 'review');
+      return isReviewer || hasSubscription('ad_maker');
+    }
     return true;
   });
 }
@@ -113,6 +168,12 @@ async function clearServerCollectionsForVisibility(collections) {
   const names = Array.from(new Set((collections || []).map(String)))
     .filter(name => SERVER_SYNC_COLLECTIONS.includes(name));
   if (names.length === 0) return false;
+  // Body-mounted viewers outlive the view HTML. Close them synchronously before
+  // any media-bearing collection is purged or an old photo can remain visible.
+  if (names.some(name => SERVER_MEDIA_BEARING_COLLECTIONS.has(name)) && typeof closeReceiptPhotoViewer === 'function') {
+    closeReceiptPhotoViewer(false);
+  }
+  if (typeof clearTransientEntityMediaCache === 'function') clearTransientEntityMediaCache(names);
   for (const name of names) {
     if (serverSessionIdentityChanged(identity)) return false;
     state[name] = [];
@@ -146,6 +207,7 @@ async function apiLoadCollectionSince(collection, sinceMs) {
   const since = Number.isFinite(Number(sinceMs)) ? Number(sinceMs) : 0;
   while (true) {
     let path = `/api/collections/${encodeURIComponent(collection)}?updated_since=${encodeURIComponent(String(since))}&limit=${limit}&include_deleted=true`;
+    if (LIGHTWEIGHT_MEDIA_COLLECTIONS.has(String(collection || ''))) path += '&include_media=false';
     if (afterLastModified !== null && afterId) {
       path += `&after_last_modified=${encodeURIComponent(String(afterLastModified))}&after_id=${encodeURIComponent(afterId)}`;
     }
@@ -163,6 +225,7 @@ async function apiLoadCollectionSince(collection, sinceMs) {
     let lastEntity = null;
     for (const rawEntity of items) {
       const entity = validateServerEntityResponse(collection, rawEntity, `delta[${all.length}]`);
+      if (String(collection || '') === 'adCampaignRequests') entity.data = makeLightweightMediaRecord(collection, entity.data);
       lastEntity = entity;
       mergeServerEntityDataById(all, indexById, entity);
     }
@@ -202,6 +265,44 @@ function _cheapSyncSig(arr) {
   return arr.length + ':' + maxLM + ':' + (h >>> 0);
 }
 
+function _deltaRecordVersion(record) {
+  if (!record || record._lastModified == null || record._lastModified === '') return null;
+  const version = Number(record._lastModified);
+  return Number.isFinite(version) ? version : null;
+}
+
+// The server deliberately overlaps each delta window so an update cannot be
+// missed at a cursor boundary. Most records in a poll are therefore exact
+// replays of records already in memory. Replace an existing object only for a
+// newer server revision (or the equal-revision deletion tie handled below);
+// preserving object identity for normal equal/stale replays also prevents a
+// needless whole-view render every 3s.
+function _shouldApplyDeltaRecord(incoming, current) {
+  const incomingVersion = _deltaRecordVersion(incoming);
+  const currentVersion = _deltaRecordVersion(current);
+
+  if (incomingVersion !== null && currentVersion !== null) {
+    if (incomingVersion > currentVersion) return true;
+    if (incomingVersion < currentVersion) return false;
+
+    // A generic server delete can land in the same millisecond as the write it
+    // deletes. In that tie, deletion must win or the active row can survive on
+    // this client forever. Replayed tombstones remain no-ops, and an equal-
+    // version active record can never resurrect a tombstone.
+    return incoming._deleted === true && current?._deleted !== true;
+  }
+  if (incomingVersion !== null) return true;
+  if (currentVersion !== null) return false;
+
+  // Legacy/offline records may predate server revision stamps. Keep supporting
+  // them without reporting an identical replay as a change.
+  try {
+    return JSON.stringify(incoming) !== JSON.stringify(current);
+  } catch (_) {
+    return true;
+  }
+}
+
 function applyServerDelta(collectionName, records) {
   if (!Array.isArray(records) || records.length === 0) return false;
   if (!Array.isArray(state[collectionName])) state[collectionName] = [];
@@ -223,17 +324,25 @@ function applyServerDelta(collectionName, records) {
 
   for (const rec of records) {
     if (!rec || !rec.id) continue;
-    const clean = Security.sanitizeObject(rec);
+    const existingIndex = byId.get(rec.id);
+    const existing = existingIndex !== undefined ? arr[existingIndex] : null;
+    const prepared = mergeMatchingVersionInlineMedia(collectionName, rec, existing);
+    const clean = Security.sanitizeObject(prepared);
     const idx = byId.get(clean.id);
     if (idx !== undefined) {
+      if (!_shouldApplyDeltaRecord(clean, arr[idx])) continue;
       arr[idx] = clean;                       // update existing in place
+      changed = true;
     } else if (newById.has(clean.id)) {
-      newOnes[newById.get(clean.id)] = clean; // dup id within this delta -> keep last
+      const stagedIndex = newById.get(clean.id);
+      if (!_shouldApplyDeltaRecord(clean, newOnes[stagedIndex])) continue;
+      newOnes[stagedIndex] = clean;           // duplicate id -> keep newest revision
+      changed = true;
     } else {
       newById.set(clean.id, newOnes.length);
       newOnes.push(clean);
+      changed = true;
     }
-    changed = true;
   }
 
   // Prepend new records once. Reverse to preserve the previous behavior where
@@ -243,6 +352,33 @@ function applyServerDelta(collectionName, records) {
     arr.unshift(...newOnes);
   }
   return changed;
+}
+
+// Customer page spending and the delivery WhatsApp preview are body-mounted
+// dialogs rather than children of #app. A normal view render cannot update or
+// remove them, so any authoritative state replacement must close them before
+// stale financial/contact data can remain visible. Never restore focus here:
+// the original card/button may already have been replaced by sync or logout.
+function _closeCustomerPagesDialogForStateChange() {
+  let closed = false;
+  const shareDialog = document.getElementById('delivery-whatsapp-share-dialog');
+  if (shareDialog) {
+    try {
+      if (typeof closeDeliveryWhatsAppPrompt === 'function') closeDeliveryWhatsAppPrompt(false);
+      else shareDialog.remove();
+    } catch (_) { shareDialog.remove(); }
+    closed = true;
+  }
+  const dialog = document.getElementById('customer-pages-dialog');
+  if (!dialog) return closed;
+  try {
+    if (typeof closeCustomerPagesDialog === 'function') {
+      closeCustomerPagesDialog(false);
+      return true;
+    }
+  } catch (_) {}
+  dialog.remove();
+  return true;
 }
 
 async function serverLiveSyncOnce() {
@@ -263,6 +399,33 @@ async function serverLiveSyncOnce() {
   );
 
   const roleLower = String(state.currentUser.role || '').toLowerCase();
+
+  // The delivery branch below early-returns before the users/permissions refresh
+  // block (~:600), which is the ONLY in-session path that re-reads /api/auth/me
+  // and rewrites state.currentUser.role/permissions. Without this, an admin
+  // promoting an active Delivery user (Delivery->Employee) or altering their
+  // permissions never reached that session until re-login, while every other
+  // role got the change within usersSyncIntervalMs. Run the SAME throttled
+  // refresh here so access changes propagate to delivery sessions too.
+  if (roleLower === 'delivery') {
+    const nowMs = Date.now();
+    if ((nowMs - (_serverLiveSync.lastUsersSyncAt || 0)) > (SERVER_API.usersSyncIntervalMs || 60000)) {
+      _serverLiveSync.lastUsersSyncAt = nowMs;
+      let accessChanged = false;
+      try { accessChanged = await refreshCurrentUserPermissions(); }
+      catch (e) { if (ALBAYAN_DEBUG_MODE) console.warn('[serverLiveSyncOnce] delivery access refresh failed:', e?.message || e); }
+      if (_syncAborted()) return { ok: false, skipped: true };
+      if (accessChanged) {
+        // roleLower is recomputed next tick and per-collection cursors default to
+        // 0, so the employee/admin branch performs a full catch-up. Reset the
+        // delivery signature and force a render now so the sidebar/landing view
+        // unlock immediately.
+        _serverLiveSync.lastDeliverySig = null;
+        if (typeof forceFullRender === 'function') forceFullRender();
+        if (String(state.currentUser.role || '').toLowerCase() !== 'delivery') return { ok: true };
+      }
+    }
+  }
 
   // Delivery users: do a small "replace" sync of only assigned deliveries + linked customers.
   // This guarantees removals (unassigned items) disappear without needing manual refresh.
@@ -325,8 +488,13 @@ async function serverLiveSyncOnce() {
       state.serverLastSyncAt = new Date().toISOString();
       state.serverLastSyncErrorAt = null;
     }
-    // Always re-render when data changed (not just cursor) - ensures edits from admin show immediately
-    if (changed) RenderQueue.schedule('liveSync(delivery)');
+    // Always re-render when data changed (not just cursor) - ensures edits from admin show immediately.
+    // The delivery replacement includes ads/customers, so an open customer-page
+    // summary would otherwise keep showing the pre-sync snapshot above the new view.
+    if (changed) {
+      _closeCustomerPagesDialogForStateChange();
+      RenderQueue.schedule('liveSync(delivery)');
+    }
     return { ok: !deliveryFetchFailed };
   }
 
@@ -339,6 +507,7 @@ async function serverLiveSyncOnce() {
   // whose zero cursor then performs a complete catch-up for the newly granted
   // collection.
   const deltaCollections = getAuthorizedServerSyncCollections();
+  const entitlementBefore = _serverLiveSync.serviceEntitlements || getServerServiceEntitlementSnapshot();
   if (!_serverLiveSync.collectionCursors || typeof _serverLiveSync.collectionCursors !== 'object') {
     _serverLiveSync.collectionCursors = Object.create(null);
   }
@@ -371,8 +540,10 @@ async function serverLiveSyncOnce() {
   const clothesShipmentsDelta = recordsFor('clothesShipments');
   const clothesOrdersDelta = recordsFor('clothesOrders');
   const clothesSettingsDelta = recordsFor('clothesSettings');
+  const adCampaignRequestsDelta = recordsFor('adCampaignRequests');
   const walletTxDelta = recordsFor('walletTransactions');
   const subsDelta = recordsFor('serviceSubscriptions');
+  const appSettingsDelta = recordsFor('appSettings');
 
   // Logged out (or a new session started) while these fetches were in flight?
   // Drop the result — applying it would re-fill the just-wiped state.
@@ -382,23 +553,75 @@ async function serverLiveSyncOnce() {
   // broader collection from memory, request cache and this user's IndexedDB
   // namespace before anything can render it again.
   const forbiddenCollections = deltaResults.filter(result => result.forbidden).map(result => result.collection);
-  if (forbiddenCollections.length > 0) {
-    await clearServerCollectionsForVisibility(forbiddenCollections);
+  if (!(_serverLiveSync.purgedForbidden instanceof Set)) _serverLiveSync.purgedForbidden = new Set();
+  // Only act on collections NOT already purged. A revoked collection keeps
+  // returning 403 every 3s until the current user's permissions refresh; without
+  // this guard each identical 403 would re-clear state, re-write IndexedDB, and
+  // force a full re-render every tick for ~30s.
+  const newlyForbidden = forbiddenCollections.filter(name => !_serverLiveSync.purgedForbidden.has(name));
+  // ROOT CAUSE: the first time a previously-authorized collection returns 403,
+  // collapse the usersSyncInterval wait so refreshCurrentUserPermissions runs
+  // this very tick (below) — it drops the collection from the authorized list,
+  // so it is never requested again and the churn ends immediately.
+  if (newlyForbidden.length > 0) _serverLiveSync.lastUsersSyncAt = 0;
+  const customerPageForbidden = newlyForbidden.some(name =>
+    name === 'ads' || name === 'receipts' || name === 'customers' || name === 'pages' || name === 'exchangeRateHistory'
+  );
+  // A 403 means access is already revoked. Close the financial snapshot before
+  // awaiting cache/IndexedDB cleanup so slow storage cannot prolong exposure.
+  if (customerPageForbidden) _closeCustomerPagesDialogForStateChange();
+  if (newlyForbidden.length > 0) {
+    await clearServerCollectionsForVisibility(newlyForbidden);
     if (_syncAborted()) return { ok: false, skipped: true };
+    for (const name of newlyForbidden) _serverLiveSync.purgedForbidden.add(name);
   }
 
-  let changed = forbiddenCollections.length > 0;
-  changed = applyServerDelta('ads', adsDelta) || changed;
-  changed = applyServerDelta('receipts', receiptsDelta) || changed;
-  changed = applyServerDelta('customers', customersDelta) || changed;
-  changed = applyServerDelta('pages', pagesDelta) || changed;
-  changed = applyServerDelta('exchangeRateHistory', exhDelta) || changed;
+  let changed = newlyForbidden.length > 0;
+  let customerPagesDataChanged = customerPageForbidden;
+  const adsChanged = applyServerDelta('ads', adsDelta);
+  changed = adsChanged || changed;
+  const receiptsChanged = applyServerDelta('receipts', receiptsDelta);
+  changed = receiptsChanged || changed;
+  const customersChanged = applyServerDelta('customers', customersDelta);
+  changed = customersChanged || changed;
+  const pagesChanged = applyServerDelta('pages', pagesDelta);
+  changed = pagesChanged || changed;
+  customerPagesDataChanged = adsChanged || receiptsChanged || customersChanged || pagesChanged || customerPagesDataChanged;
+  const exchangeRatesChanged = applyServerDelta('exchangeRateHistory', exhDelta);
+  changed = exchangeRatesChanged || changed;
+  customerPagesDataChanged = exchangeRatesChanged || customerPagesDataChanged;
   changed = applyServerDelta('clothesProducts', clothesProductsDelta) || changed;
   changed = applyServerDelta('clothesShipments', clothesShipmentsDelta) || changed;
   changed = applyServerDelta('clothesOrders', clothesOrdersDelta) || changed;
   changed = applyServerDelta('clothesSettings', clothesSettingsDelta) || changed;
+  changed = applyServerDelta('adCampaignRequests', adCampaignRequestsDelta) || changed;
   changed = applyServerDelta('walletTransactions', walletTxDelta) || changed;
   changed = applyServerDelta('serviceSubscriptions', subsDelta) || changed;
+  changed = applyServerDelta('appSettings', appSettingsDelta) || changed;
+
+  const entitlementAfter = getServerServiceEntitlementSnapshot();
+  const revokedServices = getRevokedServerServiceEntitlements(entitlementBefore, entitlementAfter);
+  _serverLiveSync.serviceEntitlements = entitlementAfter;
+  if (revokedServices.length > 0) {
+    const revokedCollections = Array.from(new Set(revokedServices.flatMap(serviceId => SERVER_SERVICE_ENTITLEMENT_COLLECTIONS[serviceId] || [])));
+    // Hide body-mounted photos and unfinished Ads Studio form state before the
+    // first await. Slow IndexedDB cleanup must never extend revoked access.
+    if (revokedServices.includes('ad_maker') && typeof resetAdsStudioSessionState === 'function') resetAdsStudioSessionState();
+    await clearServerCollectionsForVisibility(revokedCollections);
+    if (_syncAborted()) return { ok: false, skipped: true };
+    cancelPendingRequests();
+    const scopedReload = await serverLoadAllData();
+    if (_syncAborted() || scopedReload?.aborted) return { ok: false, skipped: true };
+    _serverLiveSync.serviceEntitlements = getServerServiceEntitlementSnapshot();
+    const reloadFailed = Array.isArray(scopedReload?.failed) && scopedReload.failed.length > 0;
+    if (reloadFailed) state.serverLastSyncErrorAt = new Date().toISOString();
+    else {
+      state.serverLastSyncAt = new Date().toISOString();
+      state.serverLastSyncErrorAt = null;
+    }
+    RenderQueue.schedule('liveSync(subscription-revoked)');
+    return { ok: !reloadFailed };
+  }
   
   // Ensure data migration on live sync (only if data changed, debounced to not block render)
   if (changed) {
@@ -412,6 +635,10 @@ async function serverLiveSyncOnce() {
   // retain their own prior cursor and are retried without blocking others.
   for (const result of deltaResults) {
     if (!result.ok || result.forbidden) continue;
+    // A collection that now returns a clean (non-forbidden) result is authorized
+    // again, so drop it from the purged set: a later re-revoke must purge and
+    // re-render exactly once more, not be silently swallowed by the guard.
+    if (_serverLiveSync.purgedForbidden instanceof Set) _serverLiveSync.purgedForbidden.delete(result.collection);
     const maxDelta = _maxLastModifiedFromArray(result.records);
     _serverLiveSync.collectionCursors[result.collection] = Math.max(result.since, maxDelta);
     if (maxDelta > (_serverLiveSync.serverWatermark || 0)) _serverLiveSync.serverWatermark = maxDelta;
@@ -458,6 +685,14 @@ async function serverLiveSyncOnce() {
         ? getServerVisibilityScopeChanges(accessBefore, state.currentUser)
         : [];
       if (permsChanged) {
+        // Permissions moved, so any prior per-collection 403 purge is stale.
+        // Reset the guard so a re-grant-then-re-revoke cycle still purges once.
+        if (_serverLiveSync.purgedForbidden instanceof Set) _serverLiveSync.purgedForbidden.clear();
+        // Access revocation can hide pages, ads, balances, or the customer itself.
+        // Close immediately, before cache writes/refetches, so its old authorized
+        // snapshot cannot outlive the newly-scoped state even on a slow network.
+        _closeCustomerPagesDialogForStateChange();
+        customerPagesDataChanged = true;
         // Stop reusing any in-flight/broader snapshot, purge the affected
         // collections, then perform a fresh server-scoped load. A view->viewOwn
         // response has no tombstones for rows that became unauthorized, so
@@ -498,6 +733,7 @@ async function serverLiveSyncOnce() {
     state.serverLastSyncAt = new Date().toISOString();
     state.serverLastSyncErrorAt = null;
   }
+  if (customerPagesDataChanged) _closeCustomerPagesDialogForStateChange();
   if (changed) RenderQueue.schedule('liveSync(delta)');
   return { ok: !anyFetchFailed };
 }
@@ -506,44 +742,69 @@ async function serverLiveSyncTick() {
   if (_serverLiveSync.inFlight) return;
   _serverLiveSync.inFlight = true;
   updateSyncIndicator('syncing');
+  let ok = false;
   try {
     const result = await serverLiveSyncOnce();
-    updateSyncIndicator(result?.ok === false ? 'error' : 'synced');
+    ok = result?.ok !== false;
+    updateSyncIndicator(ok ? 'synced' : 'error');
   } catch (e) {
     console.warn('[serverLiveSyncTick] Sync failed:', e?.message || e);
     updateSyncIndicator('error');
   } finally {
     _serverLiveSync.inFlight = false;
   }
+  // Exponential failure backoff (capped at 60s); any success resets it.
+  if (ok) {
+    _serverLiveSync.failStreak = 0;
+    _serverLiveSync.nextAllowedAt = 0;
+  } else {
+    _serverLiveSync.failStreak = Math.min((_serverLiveSync.failStreak || 0) + 1, 5);
+    _serverLiveSync.nextAllowedAt = Date.now() +
+      Math.min(60000, (SERVER_API.liveSyncIntervalMs || 3000) * Math.pow(2, _serverLiveSync.failStreak));
+  }
 }
 
-// Visual sync indicator
+// Visual sync indicator. Keep one cancellable hide timer: an older "Synced"
+// timer must never hide a newer "Syncing" or error state.
+let _syncIndicatorHideTimer = null;
 function updateSyncIndicator(status) {
   let indicator = document.getElementById('sync-status-indicator');
   if (!indicator) {
     // Create indicator if it doesn't exist
     indicator = document.createElement('div');
     indicator.id = 'sync-status-indicator';
-    indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300';
+    indicator.className = 'sync-status-indicator fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300';
+    indicator.setAttribute('role', 'status');
+    indicator.setAttribute('aria-live', 'polite');
+    indicator.setAttribute('aria-atomic', 'true');
     document.body.appendChild(indicator);
   }
 
+  if (_syncIndicatorHideTimer) {
+    clearTimeout(_syncIndicatorHideTimer);
+    _syncIndicatorHideTimer = null;
+  }
+  indicator.dataset.status = String(status || '');
+  indicator.onclick = null;
+
   switch (status) {
     case 'syncing':
-      indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300';
+      indicator.className = 'sync-status-indicator fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300';
       indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-blue-500 rounded-full animate-pulse mr-2"></span>' + (state.language === 'ar' ? 'جارٍ المزامنة...' : 'Syncing...');
       indicator.style.opacity = '1';
       break;
     case 'synced':
-      indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300';
+      indicator.className = 'sync-status-indicator fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300';
       indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-emerald-500 rounded-full mr-2"></span>' + (state.language === 'ar' ? 'تمت المزامنة' : 'Synced');
+      indicator.style.opacity = '1';
       // Fade out after 2 seconds
-      setTimeout(() => {
-        if (indicator) indicator.style.opacity = '0';
+      _syncIndicatorHideTimer = setTimeout(() => {
+        _syncIndicatorHideTimer = null;
+        if (indicator?.dataset.status === 'synced') indicator.style.opacity = '0';
       }, 2000);
       break;
     case 'error':
-      indicator.className = 'fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-rose-100 text-rose-700 dark:bg-rose-900/50 dark:text-rose-300 cursor-pointer';
+      indicator.className = 'sync-status-indicator fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-rose-100 text-rose-700 dark:bg-rose-900/50 dark:text-rose-300 cursor-pointer';
       indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-rose-500 rounded-full mr-2"></span>' + (state.language === 'ar' ? 'فشلت المزامنة - اضغط لإعادة المحاولة' : 'Sync failed - Tap to retry');
       indicator.style.opacity = '1';
       indicator.onclick = () => manualSyncData();
@@ -623,6 +884,7 @@ function startServerLiveSync() {
 
   stopServerLiveSync();
   _serverLiveSync.startedForUserId = uid;
+  _serverLiveSync.serviceEntitlements = getServerServiceEntitlementSnapshot();
   // Seed from the server watermark when we have one (authoritative, skew-free).
   // Before the first server load this session it is 0, so fall back to the state
   // estimate for a fast start; serverLoadAllData re-seeds authoritatively (and
@@ -635,6 +897,8 @@ function startServerLiveSync() {
     ? (_serverLiveSync.serverWatermark || 0)
     : 0;
   _serverLiveSync.lastUsersSyncAt = 0;
+  _serverLiveSync.failStreak = 0;
+  _serverLiveSync.nextAllowedAt = 0;
 
   // Run one immediately, then poll.
   serverLiveSyncTick().catch(() => {});
@@ -643,6 +907,11 @@ function startServerLiveSync() {
     // visibilitychange handler below fires an immediate catch-up sync the
     // moment the app becomes visible again, so no update is ever missed.
     if (document.visibilityState === 'hidden') return;
+    // Definitely offline, or backing off after repeated failures: skip. The
+    // 'online'/'visibilitychange' handlers below reset the backoff and fire
+    // an immediate catch-up tick, so recovery is never delayed by this.
+    if (navigator.onLine === false) return;
+    if (Date.now() < _serverLiveSync.nextAllowedAt) return;
     serverLiveSyncTick().catch(() => {});
   }, SERVER_API.liveSyncIntervalMs || 3000);
 
@@ -652,6 +921,8 @@ function startServerLiveSync() {
       if (document.visibilityState === 'visible' && state.currentUser) {
         // Tab is now visible - do an immediate sync to catch up
         console.log('[LiveSync] Tab visible - triggering immediate sync');
+        _serverLiveSync.failStreak = 0;
+        _serverLiveSync.nextAllowedAt = 0;
         serverLiveSyncTick().catch(() => {});
       }
     };
@@ -664,6 +935,8 @@ function startServerLiveSync() {
       if (state.currentUser) {
         console.log('[LiveSync] Network online - triggering immediate sync');
         showNotification(state.language === 'ar' ? 'عاد الاتصال' : 'Back Online', state.language === 'ar' ? 'تمت إعادة الاتصال بالسيرفر، جارٍ المزامنة...' : 'Reconnected to server, syncing...', 'info');
+        _serverLiveSync.failStreak = 0;
+        _serverLiveSync.nextAllowedAt = 0;
         serverLiveSyncTick().catch(() => {});
       }
     };
@@ -689,7 +962,7 @@ function loginAttemptIsCurrent(generation) {
   return generation === _loginGeneration && !_logoutInFlight && !_serverAuthExpiryInFlight;
 }
 
-function handleLogin(email, password) {
+function handleLogin(email, password, rememberMe) {
   if (_logoutInFlight || _serverAuthExpiryInFlight) {
     showNotification(
       state.language === 'ar' ? 'الرجاء الانتظار' : 'Please Wait',
@@ -702,7 +975,7 @@ function handleLogin(email, password) {
 
   const generation = ++_loginGeneration;
   setLoginFormBusy(true);
-  const promise = _handleLoginOnce(email, password, generation)
+  const promise = _handleLoginOnce(email, password, generation, rememberMe === true)
     .catch((error) => {
       if (loginAttemptIsCurrent(generation)) {
         console.warn('[handleLogin] Failed:', error?.message || error);
@@ -720,7 +993,7 @@ function handleLogin(email, password) {
   return promise;
 }
 
-async function _handleLoginOnce(email, password, loginGeneration) {
+async function _handleLoginOnce(email, password, loginGeneration, rememberMe) {
   // #region agent log
   // Hypothesis H-LOGIN: Login failures are caused by one of:
   // (a) user not found due to stored email whitespace/case issues
@@ -752,7 +1025,7 @@ async function _handleLoginOnce(email, password, loginGeneration) {
         }
       } catch (_) {}
       // #endregion
-      const user = await apiLogin(email, password);
+      const user = await apiLogin(email, password, rememberMe === true);
       if (!loginAttemptIsCurrent(loginGeneration)) return false;
       if (!user) {
         // #region agent log
@@ -766,6 +1039,79 @@ async function _handleLoginOnce(email, password, loginGeneration) {
         return;
       }
 
+      // SYSTEM-BROWSER APP LOGIN (Phase 2): this browser tab was opened BY
+      // the packaged app to sign in. Hand the session back to the app with a
+      // one-time code instead of loading the workspace here.
+      if (typeof maybeCompleteAppLoginHandoff === 'function') {
+        const handedOff = await maybeCompleteAppLoginHandoff(user);
+        if (handedOff) return true;
+        if (!loginAttemptIsCurrent(loginGeneration)) return false;
+      }
+
+      return await _activateServerSession(user, loginGeneration);
+    } catch (e) {
+      if (!loginAttemptIsCurrent(loginGeneration)) return false;
+      // #region agent log
+      try {
+        if (typeof window.__albayanDebugEmit === 'function') {
+          window.__albayanDebugEmit('H-LOGIN', 'script.js:handleLogin', 'server_login_error', {
+            status: e?.status ?? null,
+            name: String(e?.name || '').slice(0, 40),
+            msg: String(e?.message || '').slice(0, 120),
+          });
+        }
+      } catch (_) {}
+      // #endregion
+      // Fresh server with no users yet — show the first-run setup screen so the
+      // owner can create the first admin from the browser (no shell needed).
+      // The server returns 503 with a "not initialized" hint in that case.
+      const _msg = String(e?.message || '');
+      if (e?.status === 503 && /not initialized|no users/i.test(_msg)) {
+        const setupStatus = await apiNeedsSetup();
+        const browserSetupAvailable = setupStatus?.needsSetup === true && setupStatus?.setupEnabled === true;
+        state.needsServerSetup = browserSetupAvailable;
+        state.serverHasNoUsers = true;
+        state.serverSetupEnabled = setupStatus?.setupEnabled === true;
+        if (browserSetupAvailable) {
+          showNotification(
+            state.language === 'ar' ? 'إعداد أول مرة' : 'First-time setup',
+            state.language === 'ar' ? 'لا يوجد حساب بعد. أدخل رمز إعداد الخادم لإنشاء المدير الأول.' : 'No account exists yet. Enter the server setup token to create the first admin.',
+            'info'
+          );
+        } else {
+          showNotification(
+            state.language === 'ar' ? 'إعداد الخادم مطلوب' : 'Server Setup Required',
+            state.language === 'ar'
+              ? 'إعداد المتصفح معطّل. يجب على مشغل الخادم استخدام متغيرات ALBAYAN_BOOTSTRAP_ADMIN_* أو أمر إنشاء المدير من الطرفية.'
+              : 'Browser setup is disabled. The server operator must use the ALBAYAN_BOOTSTRAP_ADMIN_* environment variables or the create-admin CLI command.',
+            'warning'
+          );
+        }
+        render();
+        return;
+      }
+      if (e?.status === 401) {
+        showNotification(
+          state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed',
+          state.language === 'ar'
+            ? 'بيانات الدخول غير صحيحة (حساب السيرفر). تأكد من البريد وكلمة المرور المسجّلين على خادم فريقك.'
+            : 'Invalid email or password (server account). Check the credentials registered on your team server.',
+          'error'
+        );
+        return;
+      }
+      showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', e?.message || (state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login failed'), 'error');
+      return;
+    }
+  }
+
+  return _handleLocalLoginOnce(email, password, loginGeneration);
+}
+
+// Everything that happens AFTER the server has authenticated a user —
+// shared by the password login above and the system-browser app login
+// exchange (completeAppBrowserLogin), so the two flows can never drift.
+async function _activateServerSession(user, loginGeneration) {
       // Abort/detach every request and response cache belonging to the prior
       // anonymous/user identity before activating this login.
       cancelPendingRequests();
@@ -775,6 +1121,8 @@ async function _handleLoginOnce(email, password, loginGeneration) {
       }
       advanceServerSessionEpoch();
       state.currentUser = user;
+      // Device-local convenience list for the "choose an account" screen.
+      rememberLoginAccount(user);
       // Switch from the unauthenticated namespace to this exact
       // server+user cache before any business data is read or written.
       activateServerCollectionStorage(user);
@@ -852,62 +1200,46 @@ async function _handleLoginOnce(email, password, loginGeneration) {
       startServerLiveSync();
       render();
       return;
-    } catch (e) {
-      if (!loginAttemptIsCurrent(loginGeneration)) return false;
-      // #region agent log
-      try {
-        if (typeof window.__albayanDebugEmit === 'function') {
-          window.__albayanDebugEmit('H-LOGIN', 'script.js:handleLogin', 'server_login_error', {
-            status: e?.status ?? null,
-            name: String(e?.name || '').slice(0, 40),
-            msg: String(e?.message || '').slice(0, 120),
-          });
-        }
-      } catch (_) {}
-      // #endregion
-      // Fresh server with no users yet — show the first-run setup screen so the
-      // owner can create the first admin from the browser (no shell needed).
-      // The server returns 503 with a "not initialized" hint in that case.
-      const _msg = String(e?.message || '');
-      if (e?.status === 503 && /not initialized|no users/i.test(_msg)) {
-        const setupStatus = await apiNeedsSetup();
-        const browserSetupAvailable = setupStatus?.needsSetup === true && setupStatus?.setupEnabled === true;
-        state.needsServerSetup = browserSetupAvailable;
-        state.serverHasNoUsers = true;
-        state.serverSetupEnabled = setupStatus?.setupEnabled === true;
-        if (browserSetupAvailable) {
-          showNotification(
-            state.language === 'ar' ? 'إعداد أول مرة' : 'First-time setup',
-            state.language === 'ar' ? 'لا يوجد حساب بعد. أدخل رمز إعداد الخادم لإنشاء المدير الأول.' : 'No account exists yet. Enter the server setup token to create the first admin.',
-            'info'
-          );
-        } else {
-          showNotification(
-            state.language === 'ar' ? 'إعداد الخادم مطلوب' : 'Server Setup Required',
-            state.language === 'ar'
-              ? 'إعداد المتصفح معطّل. يجب على مشغل الخادم استخدام متغيرات ALBAYAN_BOOTSTRAP_ADMIN_* أو أمر إنشاء المدير من الطرفية.'
-              : 'Browser setup is disabled. The server operator must use the ALBAYAN_BOOTSTRAP_ADMIN_* environment variables or the create-admin CLI command.',
-            'warning'
-          );
-        }
-        render();
-        return;
-      }
-      if (e?.status === 401) {
-        showNotification(
-          state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed',
-          state.language === 'ar'
-            ? 'بيانات الدخول غير صحيحة (حساب السيرفر). إذا كنت تريد حساب المتصفح المحلي، اضغط "استخدام المحلي".'
-            : 'Invalid email or password (server account). If you meant your local browser account, click “Use Local”.',
-          'error'
-        );
-        return;
-      }
-      showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', e?.message || (state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login failed'), 'error');
-      return;
-    }
-  }
+}
 
+// SYSTEM-BROWSER APP LOGIN (Phase 2), native side: exchange the one-time
+// deep-link code plus the device-held PKCE verifier for a session, then run
+// the exact same post-auth pipeline as a password login. Called only from
+// _processAppLoginCallback (09-api-auth.js), which owns the pending-request
+// bookkeeping and the waiting/busy UI.
+async function completeAppBrowserLogin(code, verifier) {
+  if (_logoutInFlight || _serverAuthExpiryInFlight) {
+    showNotification(
+      state.language === 'ar' ? 'الرجاء الانتظار' : 'Please Wait',
+      state.language === 'ar' ? 'جارٍ إنهاء الجلسة السابقة.' : 'The previous session is still closing.',
+      'info'
+    );
+    return false;
+  }
+  const generation = ++_loginGeneration;
+  try {
+    const user = await apiAppLoginExchange(code, verifier);
+    if (!loginAttemptIsCurrent(generation)) return false;
+    if (!user) throw new Error('Exchange returned no user');
+    await _activateServerSession(user, generation);
+    return true;
+  } catch (e) {
+    if (!loginAttemptIsCurrent(generation)) return false;
+    console.warn('[AppLogin] exchange failed:', e?.message || e);
+    showNotification(
+      state.language === 'ar' ? 'تعذّر إكمال تسجيل الدخول' : 'Sign-In Could Not Be Completed',
+      state.language === 'ar'
+        ? 'انتهت صلاحية رمز الدخول أو تعذّر الاتصال. ابدأ تسجيل الدخول من التطبيق مرة أخرى.'
+        : 'The sign-in code expired or the server could not be reached. Start the sign-in from the app again.',
+      'error'
+    );
+    return false;
+  }
+}
+
+// LOCAL (single-device) sign-in — the non-server tail of _handleLoginOnce,
+// split out unchanged when the server path gained _activateServerSession.
+async function _handleLocalLoginOnce(email, password, loginGeneration) {
   // Sanitize inputs
   const sanitizedEmail = Security.sanitizeInput(email.toLowerCase().trim(), { maxLength: 100 });
   const sanitizedPassword = password; // Don't modify password as it might contain special chars
@@ -1037,9 +1369,11 @@ async function _handleLoginOnce(email, password, loginGeneration) {
     
     // Create secure session
     SessionManager.createSession(user.id);
-    
+
     state.currentUser = user;
-    
+    // Device-local convenience list for the "choose an account" screen.
+    rememberLoginAccount(user);
+
     // Ensure user has subscriptions array (backwards compatibility)
     if (!Array.isArray(state.currentUser.subscriptions)) {
       state.currentUser.subscriptions = [];
@@ -1050,8 +1384,15 @@ async function _handleLoginOnce(email, password, loginGeneration) {
     }
     
     state.currentView = getPostLoginLandingViewForUser(user);
-    // Upgrade legacy hashes to PBKDF2 after successful login
-    if ((user.passwordAlgo || 'sha256') !== 'pbkdf2-sha256') {
+    // Upgrade legacy hashes to PBKDF2 after successful login. Also re-hash
+    // PBKDF2 hashes created with fewer iterations (pure-JS fallback on
+    // insecure http:// origins uses 60k) at full strength once native
+    // crypto.subtle is available.
+    const _subtleAvailable = !!(globalThis.crypto && globalThis.crypto.subtle);
+    const _needsAlgoUpgrade = (user.passwordAlgo || 'sha256') !== 'pbkdf2-sha256';
+    const _needsIterationUpgrade = !_needsAlgoUpgrade && _subtleAvailable &&
+      (Number(user.passwordIterations) || 0) < 310000;
+    if (_needsAlgoUpgrade || _needsIterationUpgrade) {
       try {
         const upgraded = await Security.hashPassword(sanitizedPassword, null, { algo: 'pbkdf2-sha256' });
         if (!loginAttemptIsCurrent(loginGeneration)) return false;
@@ -1125,6 +1466,15 @@ function resetAuthenticatedServerCaches() {
   _serverLiveSync.cursor = 0;
   _serverLiveSync.fullLoadCursorReady = false;
   _serverLiveSync.collectionCursors = Object.create(null);
+  _serverLiveSync.serviceEntitlements = null;
+  if (typeof clearTransientEntityMediaCache === 'function') clearTransientEntityMediaCache('adCampaignRequests');
+  // A body-mounted full-screen photo must never survive logout or expiry. Do
+  // not restore focus to a control that belonged to the previous user.
+  if (typeof closeReceiptPhotoViewer === 'function') closeReceiptPhotoViewer(false);
+  // Ads Studio keeps an unsaved draft and compressed photos in memory. Reset
+  // them with every auth transition so one customer can never inherit another
+  // customer's unfinished work after logout or session expiry.
+  if (typeof resetAdsStudioSessionState === 'function') resetAdsStudioSessionState();
 }
 
 function discardPendingServerUserUpdates() {
@@ -1136,6 +1486,10 @@ function discardPendingServerUserUpdates() {
 }
 
 async function wipeAuthenticatedServerDataFromClient() {
+  // This helper is also used by the session-expiry path, which does not pass
+  // through the normal logout function. Remove body-mounted financial data
+  // before clearing auth/state or awaiting IndexedDB writes.
+  _closeCustomerPagesDialogForStateChange();
   const collections = Array.isArray(PERSISTED_COLLECTIONS)
     ? PERSISTED_COLLECTIONS
     : ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory'];
@@ -1150,6 +1504,7 @@ async function wipeAuthenticatedServerDataFromClient() {
 }
 
 function emergencyFinishClientSignOut(serverMode, expired) {
+  _closeCustomerPagesDialogForStateChange();
   try { stopServerLiveSync(); } catch (_) {}
   try { advanceServerSessionEpoch(); } catch (_) {}
   try { cancelPendingRequests(); } catch (_) {}
@@ -1176,6 +1531,7 @@ function emergencyFinishClientSignOut(serverMode, expired) {
 async function _handleLogoutOnce() {
   const serverMode = isServerModeEnabled();
   const overlay = showSessionTransitionOverlay(state.language === 'ar' ? 'جارٍ تسجيل الخروج...' : 'Signing out...');
+  _closeCustomerPagesDialogForStateChange();
   try {
     if (state.currentUser) {
       addAuditLog('Logout', state.currentUser.id, `User ${Security.escapeHtml(state.currentUser.name)} logged out`);

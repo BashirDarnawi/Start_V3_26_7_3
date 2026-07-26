@@ -114,7 +114,8 @@ class TestDriverCannotReSettle:
         }}, cookies=driver)
         assert r1.status_code == 200, r1.text
 
-        # Re-settle attempt: Delivered -> Delivered with a smaller amount. Must be blocked.
+        # Re-settle attempt: Delivered -> Delivered with a smaller amount. The
+        # terminal-state/idempotency guard reports this as a state conflict.
         r2 = client.patch("/api/collections/receipts/s49_receipt", json={"data": {
             "deliveryStatus": "Delivered",
             "finalReceiptNo": "77001",
@@ -122,8 +123,10 @@ class TestDriverCannotReSettle:
             "amountCollectedFromCustomer": 0.0,
             "actualDeliveryFeeCollected": 0.0,
         }}, cookies=driver)
-        assert r2.status_code == 400, r2.text
-        assert "finalized" in r2.json().get("detail", "").lower()
+        assert r2.status_code == 409, r2.text
+        conflict_reason = r2.json().get("detail", "").lower()
+        assert "already" in conflict_reason
+        assert "delivered" in conflict_reason
 
         # The recorded settlement is unchanged.
         got = client.get("/api/collections/receipts/s49_receipt", cookies=admin).json()["data"]

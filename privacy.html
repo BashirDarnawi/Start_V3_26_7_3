@@ -11,38 +11,46 @@
     h1 { font-size: 1.7rem; margin-bottom: 0.2em; }
     h2 { font-size: 1.15rem; margin-top: 2em; }
     .muted { opacity: 0.7; font-size: 0.9rem; }
+    .notice { margin: 1.5rem 0; padding: 1rem; border: 1px solid #c4b5fd; border-radius: 0.75rem; background: rgba(237, 233, 254, 0.65); }
     .ar { direction: rtl; text-align: right; border-top: 2px solid #94a3b8; margin-top: 3em; padding-top: 2em; }
     a { color: #6d28d9; }
   </style>
 </head>
 <body>
   <h1>Privacy Policy — Albayan</h1>
-  <p class="muted">Effective date: 4 July 2026 · Contact: <a href="mailto:bashirdernawi1999@gmail.com">bashirdernawi1999@gmail.com</a></p>
+  <p class="muted">Effective date: 17 July 2026 · Contact: <a href="mailto:bashirdernawi1999@gmail.com">bashirdernawi1999@gmail.com</a></p>
+
+  <div class="notice">
+    To ask us to delete your Albayan account, use the public
+    <a href="/delete-account"><strong>account-deletion request page</strong></a>.
+  </div>
 
   <h2>What Albayan is</h2>
   <p>Albayan is a business management application (web, iOS and Android) used by advertising-office teams to manage customers, advertisements, receipts, deliveries and related business records.</p>
 
   <h2>Information we collect</h2>
   <ul>
-    <li><strong>Account information:</strong> your name, email address and an encrypted (hashed) form of your password. We never store your password itself.</li>
-    <li><strong>Business records you create:</strong> customers, advertisements, receipts, payments, delivery information and any photos you attach (for example receipt photos).</li>
-    <li><strong>Technical logs:</strong> basic request logs (time, IP address, browser type) and an in-app audit log of actions (who created or changed a record), kept for security and accountability.</li>
+    <li><strong>Account information:</strong> your name, email address and a securely hashed form of your password. We do not store your plain-text password.</li>
+    <li><strong>Business records you create:</strong> customers, advertisements, receipts, payments, delivery information and any photos you attach (for example receipt or advertisement photos).</li>
+    <li><strong>Technical and audit logs:</strong> basic request information (such as time, IP address and browser type) and an in-app history of who created or changed a record, used for security, troubleshooting and accountability.</li>
   </ul>
 
   <h2>How your information is used</h2>
-  <p>Your data is used only to provide the app's features to you and your team: signing in, showing and syncing your business records between your team's devices, and keeping an audit history. We do <strong>not</strong> sell your data, show advertising, or share your data with third parties for marketing.</p>
+  <p>Your data is used to provide the app's features to you and your team: signing in, showing and syncing your team's business records, protecting the service, troubleshooting problems and keeping an audit history. We do <strong>not</strong> sell your data, show advertising, or share your data with third parties for marketing.</p>
 
   <h2>Where your information is stored</h2>
   <ul>
-    <li><strong>Server mode:</strong> data is stored on Albayan's server infrastructure (hosted on Amazon Web Services) and transmitted over encrypted HTTPS connections.</li>
-    <li><strong>Offline / local mode:</strong> data is stored only inside your browser or device storage and does not leave your device.</li>
+    <li><strong>Server mode:</strong> Albayan's current server infrastructure is hosted through the Libyan Spider JPaaS (Jelastic) platform. Data is transmitted between the app and the server over encrypted HTTPS connections.</li>
+    <li><strong>Local mode:</strong> when the application is deliberately configured to use local storage instead of server mode, its records remain in that browser or device storage unless a user exports or transfers them.</li>
   </ul>
 
-  <h2>Data retention and deletion</h2>
-  <p>Business records are kept as long as your team's workspace is active. Audit logs are kept for approximately 90 days and then deleted. To delete your account and its data, ask your workspace administrator or email us at the address above — we will delete the account and associated personal data within 30 days.</p>
+  <h2>Data retention and account deletion</h2>
+  <p>Business records are generally kept while the team's workspace is active. Audit logs are retained for security and accountability and removed through the server's configured retention cleanup. The current default retention setting is 90 days, but an administrator may configure another permitted period, and the actual removal date depends on when operational cleanup runs. Operational backups may remain until their normal rotation expires.</p>
+  <p>When an administrator deletes an account, sign-in access is disabled. After a verified deletion request, an administrator can run Albayan's privacy-anonymization process to replace the account's name, email address and credentials with non-identifying values and remove its active sessions and password-reset records. Because Albayan is a shared business-record system, advertisements, receipts, payment records and other records belonging to the workspace are not automatically erased. The non-identifying internal account id and audit references may be retained when reasonably needed to preserve record integrity, investigate abuse, protect the service, or meet legal, tax or accounting obligations.</p>
+  <p>You may submit a verified request to delete or anonymize personal information that is not required for those purposes. Requests are reviewed rather than processed automatically. We will explain what action was taken and identify any information that must be retained. Submit a request through the <a href="/delete-account">account-deletion request page</a> or email <a href="mailto:bashirdernawi1999@gmail.com">bashirdernawi1999@gmail.com</a>.</p>
 
   <h2>Your rights</h2>
-  <p>You can request a copy of your data, correction of wrong data, or deletion of your account at any time using the contact above.</p>
+  <p>You can request access to your personal data, correction of inaccurate personal data, or deletion of eligible personal data using the contact options above. We may ask you to verify that you own the account before acting on a request.</p>
 
   <h2>Children</h2>
   <p>Albayan is a business tool and is not directed at children under 13.</p>
@@ -52,32 +60,39 @@
 
   <div class="ar" lang="ar" dir="rtl">
     <h1>سياسة الخصوصية — البيان</h1>
-    <p class="muted">تاريخ السريان: 4 يوليو 2026 · للتواصل: <a href="mailto:bashirdernawi1999@gmail.com">bashirdernawi1999@gmail.com</a></p>
+    <p class="muted">تاريخ السريان: 17 يوليو 2026 · للتواصل: <a href="mailto:bashirdernawi1999@gmail.com">bashirdernawi1999@gmail.com</a></p>
+
+    <div class="notice">
+      لطلب حذف حسابك في البيان، استخدم
+      <a href="/delete-account"><strong>صفحة طلب حذف الحساب</strong></a> العامة.
+    </div>
 
     <h2>ما هو تطبيق البيان</h2>
     <p>«البيان» تطبيق لإدارة الأعمال (ويب و iOS وأندرويد) تستخدمه فرق مكاتب الإعلانات لإدارة العملاء والإعلانات والإيصالات والتوصيل والسجلات التجارية المرتبطة بها.</p>
 
     <h2>المعلومات التي نجمعها</h2>
     <ul>
-      <li><strong>معلومات الحساب:</strong> الاسم والبريد الإلكتروني وكلمة المرور بصيغة مشفّرة (Hash). لا نخزّن كلمة المرور نفسها أبداً.</li>
-      <li><strong>السجلات التجارية التي تنشئها:</strong> العملاء والإعلانات والإيصالات والمدفوعات ومعلومات التوصيل وأي صور ترفقها (مثل صور الإيصالات).</li>
-      <li><strong>سجلات تقنية:</strong> سجلات طلبات أساسية (الوقت، عنوان IP، نوع المتصفح) وسجل تدقيق داخل التطبيق (من أنشأ أو عدّل سجلاً) لأغراض الأمان والمساءلة.</li>
+      <li><strong>معلومات الحساب:</strong> الاسم والبريد الإلكتروني ونسخة مؤمّنة بتقنية التجزئة من كلمة المرور. لا نخزّن كلمة المرور بصيغتها النصية الأصلية.</li>
+      <li><strong>السجلات التجارية التي تنشئها:</strong> العملاء والإعلانات والإيصالات والمدفوعات ومعلومات التوصيل وأي صور ترفقها، مثل صور الإيصالات أو الإعلانات.</li>
+      <li><strong>السجلات التقنية وسجل التدقيق:</strong> معلومات الطلب الأساسية، مثل الوقت وعنوان IP ونوع المتصفح، وسجل داخل التطبيق يوضح من أنشأ سجلاً أو عدّله، وذلك للأمان وحل المشكلات والمساءلة.</li>
     </ul>
 
     <h2>كيف نستخدم معلوماتك</h2>
-    <p>تُستخدم بياناتك فقط لتقديم ميزات التطبيق لك ولفريقك: تسجيل الدخول، وعرض ومزامنة السجلات بين أجهزة الفريق، وحفظ سجل التدقيق. نحن <strong>لا</strong> نبيع بياناتك ولا نعرض إعلانات ولا نشاركها مع أطراف ثالثة لأغراض تسويقية.</p>
+    <p>تُستخدم بياناتك لتقديم ميزات التطبيق لك ولفريقك، مثل تسجيل الدخول وعرض سجلات العمل ومزامنتها وحماية الخدمة وحل المشكلات وحفظ سجل التدقيق. نحن <strong>لا</strong> نبيع بياناتك ولا نعرض إعلانات ولا نشاركها مع أطراف ثالثة لأغراض تسويقية.</p>
 
     <h2>أين تُخزَّن معلوماتك</h2>
     <ul>
-      <li><strong>وضع الخادم:</strong> تُخزَّن البيانات على خوادم البيان (مستضافة لدى Amazon Web Services) وتُنقل عبر اتصالات HTTPS مشفّرة.</li>
-      <li><strong>الوضع المحلي / بدون إنترنت:</strong> تُخزَّن البيانات داخل جهازك فقط ولا تغادره.</li>
+      <li><strong>وضع الخادم:</strong> تتم استضافة البنية التحتية الحالية لخوادم البيان عبر منصة Libyan Spider JPaaS (Jelastic). تُنقل البيانات بين التطبيق والخادم عبر اتصالات HTTPS مشفّرة.</li>
+      <li><strong>الوضع المحلي:</strong> عندما يُضبط التطبيق عمداً على استخدام التخزين المحلي بدلاً من وضع الخادم، تبقى سجلاته داخل ذلك المتصفح أو الجهاز ما لم يصدّرها المستخدم أو ينقلها.</li>
     </ul>
 
-    <h2>الاحتفاظ بالبيانات وحذفها</h2>
-    <p>تُحفَظ السجلات التجارية طالما كانت مساحة عمل فريقك نشطة. تُحفَظ سجلات التدقيق لمدة 90 يوماً تقريباً ثم تُحذَف. لحذف حسابك وبياناته، اطلب ذلك من مدير مساحة العمل أو راسلنا على البريد أعلاه — سنحذف الحساب والبيانات الشخصية المرتبطة به خلال 30 يوماً.</p>
+    <h2>الاحتفاظ بالبيانات وحذف الحساب</h2>
+    <p>تُحفَظ السجلات التجارية عادةً طالما كانت مساحة عمل الفريق نشطة. وتُحتفظ بسجلات التدقيق لأغراض الأمان والمساءلة، ثم تُزال وفق إعداد مدة الاحتفاظ وعملية التنظيف المطبقة على الخادم. الإعداد الافتراضي الحالي هو 90 يوماً، لكن يمكن للمدير اختيار مدة أخرى مسموح بها، كما يعتمد تاريخ الإزالة الفعلي على وقت تشغيل التنظيف التشغيلي. وقد تبقى النسخ الاحتياطية إلى أن تنتهي دورة الاستبدال المعتادة الخاصة بها.</p>
+    <p>عندما يحذف المدير حساباً، تتوقف إمكانية تسجيل الدخول. وبعد التحقق من طلب الحذف، يستطيع المدير تشغيل عملية إخفاء الهوية في البيان لاستبدال اسم الحساب وبريده الإلكتروني وبيانات اعتماده بقيم غير معرّفة للهوية، وحذف جلساته النشطة وسجلات إعادة تعيين كلمة المرور. ولأن البيان نظام مشترك للسجلات التجارية، لا تُمحى تلقائياً الإعلانات والإيصالات وسجلات الدفع والسجلات الأخرى التابعة لمساحة العمل. وقد نحتفظ بمعرّف الحساب الداخلي غير المعرّف للهوية ومراجع سجل التدقيق عندما يكون ذلك ضرورياً بصورة معقولة للحفاظ على سلامة السجلات أو التحقيق في إساءة الاستخدام أو حماية الخدمة أو الوفاء بالالتزامات القانونية أو الضريبية أو المحاسبية.</p>
+    <p>يمكنك تقديم طلب موثّق لحذف المعلومات الشخصية التي لا يلزم الاحتفاظ بها لهذه الأغراض أو إخفاء هويتها. تُراجع الطلبات ولا تُنفّذ تلقائياً. سنوضح الإجراء الذي اتُخذ ونبيّن أي معلومات يلزم الاحتفاظ بها. أرسل الطلب عبر <a href="/delete-account">صفحة طلب حذف الحساب</a> أو البريد الإلكتروني <a href="mailto:bashirdernawi1999@gmail.com">bashirdernawi1999@gmail.com</a>.</p>
 
     <h2>حقوقك</h2>
-    <p>يمكنك في أي وقت طلب نسخة من بياناتك أو تصحيح بيانات خاطئة أو حذف حسابك عبر وسيلة التواصل أعلاه.</p>
+    <p>يمكنك طلب الوصول إلى بياناتك الشخصية أو تصحيح البيانات غير الدقيقة أو حذف البيانات الشخصية المؤهلة للحذف باستخدام وسائل التواصل أعلاه. وقد نطلب منك التحقق من ملكيتك للحساب قبل تنفيذ الطلب.</p>
 
     <h2>الأطفال</h2>
     <p>«البيان» أداة أعمال وليست موجهة للأطفال دون 13 عاماً.</p>

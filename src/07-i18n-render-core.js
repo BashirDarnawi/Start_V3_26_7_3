@@ -228,14 +228,37 @@ function getDir() {
 
 function applyTheme() {
   const root = document.documentElement;
-  const isDark = state.theme === 'dark' || 
+  const isDark = state.theme === 'dark' ||
     (state.theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-  
+
   if (isDark) {
     root.classList.add('dark');
   } else {
     root.classList.remove('dark');
   }
+
+  // Keep the browser's used color-scheme in sync with the APP theme (the
+  // app theme is a manual light/dark/system toggle, not the OS scheme).
+  // Without this, UA-rendered widgets (<select> panes, Android date-picker
+  // dialogs, scrollbars, autofill) stay WHITE against the app's dark UI on
+  // Chromium Android + FB/IG webviews, and Chrome/Samsung "auto dark" would
+  // algorithmically invert the light theme. Complements the static
+  // <meta name="color-scheme" content="light dark"> in index.html, which
+  // covers the pre-JS first paint; this inline style then wins per-theme.
+  try { root.style.colorScheme = isDark ? 'dark' : 'light'; } catch (_) {}
+
+  // The two media-keyed theme-color metas in index.html track the OS scheme
+  // for first paint only. Once the app theme is applied, pin BOTH metas to
+  // it so the browser toolbar / installed-PWA status bar matches the in-app
+  // theme (drop the media filter; identical content on both makes
+  // duplicate-meta precedence irrelevant). Values mirror index.html's pair.
+  try {
+    const themeMetas = document.querySelectorAll('meta[name="theme-color"]');
+    for (let i = 0; i < themeMetas.length; i++) {
+      themeMetas[i].removeAttribute('media');
+      themeMetas[i].setAttribute('content', isDark ? '#020617' : '#f8fafc');
+    }
+  } catch (_) {}
 }
 
 function toggleTheme() {
@@ -250,6 +273,7 @@ function toggleTheme() {
 function toggleLanguage() {
   state.language = state.language === 'en' ? 'ar' : 'en';
   document.documentElement.setAttribute('dir', getDir());
+  document.documentElement.setAttribute('lang', state.language === 'ar' ? 'ar' : 'en');
   saveState();
   // Force a FULL re-render, not the partial (same-view) content swap: the
   // <main> wrapper's sidebar-offset margin is direction-dependent
@@ -270,12 +294,56 @@ function toggleLanguage() {
 // scrolling and flashed the background. Performance mode (body.perf-lite)
 // handles weak devices properly by turning effects off permanently.
 
-// Debounced icon refresh (batches multiple calls)
+// Strip data-lucide from the SVGs lucide creates: the library keeps the
+// attribute on the replacement SVG, so every later createIcons() pass
+// re-matched every already-converted icon and rebuilt it (createElement +
+// replaceChild across the whole page) — repeated full-page DOM churn on every
+// render tick and search keystroke. Stripping AFTER each pass makes all the
+// existing bare createIcons() calls cheap without touching them, and keeps
+// the icon-swap pattern working (14-forms.js re-sets data-lucide on a
+// converted SVG right before calling createIcons(), so that SVG re-matches
+// for exactly that one pass). Installed lazily because lucide.min.js is a
+// DEFERRED script now and arrives after script.js evaluates.
+function ensureLucideCreateIconsWrapped() {
+  if (!window.lucide || lucide.__iconsWrapped) return;
+  const _originalCreateIcons = lucide.createIcons.bind(lucide);
+  lucide.createIcons = function (opts) {
+    _originalCreateIcons(opts);
+    const root = (opts && opts.root) || document;
+    root.querySelectorAll('svg[data-lucide]').forEach(svg => svg.removeAttribute('data-lucide'));
+  };
+  lucide.__iconsWrapped = true;
+}
+ensureLucideCreateIconsWrapped();
+
+// Debounced icon refresh (batches multiple calls).
+// EXECUTION ORDER (why flush() must retry): lucide.min.js is a deferred
+// <head> script, while script.js is a CLASSIC end-of-body script — per the
+// HTML spec a classic script executes DURING parsing, BEFORE deferred
+// scripts run. So window.lucide may not exist yet when early code schedules
+// icons; the old `if (!window.lucide) return;` also left `timer` set, which
+// wedged the queue forever. flush() now keeps the queue and retries until
+// the library arrives (deferred scripts are guaranteed to run before
+// DOMContentLoaded, so this resolves within the load phase).
 const IconQueue = {
   pending: new Set(),
   timer: null,
+  retries: 0,
   flush() {
-    if (!window.lucide) return;
+    if (!window.lucide) {
+      // Retry every 50ms; give up after ~10s (blocked/404 library) so no
+      // timer spins forever. A later schedule() starts a fresh retry window.
+      IconQueue.retries++;
+      if (IconQueue.retries > 200) {
+        IconQueue.retries = 0;
+        IconQueue.timer = null;
+        return;
+      }
+      IconQueue.timer = setTimeout(() => IconQueue.flush(), 50);
+      return;
+    }
+    ensureLucideCreateIconsWrapped();
+    IconQueue.retries = 0;
     const containers = Array.from(IconQueue.pending);
     IconQueue.pending.clear();
     IconQueue.timer = null;
@@ -284,10 +352,13 @@ const IconQueue = {
         // Full scan needed
         lucide.createIcons();
       } else {
-        // Scoped scan - much faster
+        // Scoped scan — `root` is the option the bundled lucide actually
+        // supports ({icons, nameAttr, attrs, root, inTemplates}); the old
+        // `nodes:` option does not exist upstream and silently fell back to
+        // a FULL document scan once per queued container.
         for (const c of containers) {
           if (c instanceof Element) {
-            lucide.createIcons({ nodes: c.querySelectorAll('[data-lucide]') });
+            lucide.createIcons({ root: c });
           }
         }
       }
@@ -339,6 +410,36 @@ const RenderQueue = {
 // NOTIFICATIONS
 // ==========================================
 
+// Shared bilingual warning for features that in-app browsers (Facebook/
+// Instagram/Messenger webviews, bare Android WebViews) silently swallow:
+// blob <a download> clicks and window.print() are no-ops there, with no
+// error and no UI. Callers gate on Platform.isInAppBrowser and show this
+// INSTEAD of attempting the action (and instead of a false success toast).
+// kind: 'download' | 'print'.
+function notifyInAppBrowserLimitation(kind) {
+  const isAr = state.language === 'ar';
+  const openHint = isAr
+    ? 'افتح الصفحة في Safari أو Chrome (قائمة ⋯ ← «فتح في المتصفح»)'
+    : 'open this page in Safari or Chrome (menu -> "Open in browser")';
+  if (kind === 'print') {
+    showNotification(
+      isAr ? 'الطباعة غير متاحة هنا' : 'Printing unavailable here',
+      isAr
+        ? `الطباعة لا تعمل داخل متصفح فيسبوك/إنستغرام المدمج — ${openHint} ثم أعد المحاولة.`
+        : `Printing doesn't work inside the Facebook/Instagram in-app browser — ${openHint}, then try again.`,
+      'warning'
+    );
+  } else {
+    showNotification(
+      isAr ? 'التنزيل غير متاح هنا' : 'Download unavailable here',
+      isAr
+        ? `التنزيلات لا تعمل داخل متصفح فيسبوك/إنستغرام المدمج — ${openHint} ثم أعد المحاولة.`
+        : `Downloads don't work inside the Facebook/Instagram in-app browser — ${openHint}, then try again.`,
+      'warning'
+    );
+  }
+}
+
 function showNotification(title, message, type = 'info') {
   // #region agent log
   // Hypothesis H-NOLOG: user can reproduce issue but we see no NDJSON logs; capture error/warn toasts to pinpoint.
@@ -376,6 +477,9 @@ function showNotification(title, message, type = 'info') {
 
   const notification = document.createElement('div');
   notification.dataset.notifKey = notifKey;
+  notification.setAttribute('role', type === 'error' || type === 'warning' ? 'alert' : 'status');
+  notification.setAttribute('aria-live', type === 'error' || type === 'warning' ? 'assertive' : 'polite');
+  notification.setAttribute('aria-atomic', 'true');
   notification.className = `notification-enter glass-panel px-4 py-3 rounded-xl shadow-lg flex items-start space-x-3 mb-2 ${
     type === 'success' ? 'border-l-4 border-green-500' :
     type === 'error' ? 'border-l-4 border-red-500' :
@@ -400,7 +504,7 @@ function showNotification(title, message, type = 'info') {
       <div class="font-bold text-sm truncate">${safeTitle}</div>
       <div class="text-xs opacity-80 break-words">${safeMessage}</div>
     </div>
-    <button onclick="this.parentElement.remove()" class="text-slate-400 hover:text-slate-600 dark:hover:text-white transition-colors">
+    <button onclick="this.parentElement.remove()" aria-label="${state.language === 'ar' ? 'إغلاق الإشعار' : 'Close notification'}" class="text-slate-400 hover:text-slate-600 dark:hover:text-white transition-colors">
       <i data-lucide="x" class="w-4 h-4"></i>
     </button>
   `;
@@ -414,4 +518,3 @@ function showNotification(title, message, type = 'info') {
     setTimeout(() => notification.remove(), 300);
   }, 5000);
 }
-

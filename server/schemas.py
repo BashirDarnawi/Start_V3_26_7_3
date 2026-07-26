@@ -1,10 +1,13 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, StrictBool
 from typing import Any, Literal, Optional
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=256)
+    # "Remember me": STRICT JSON boolean so a stray string/number can never
+    # silently opt a login into the month-long session lifetime.
+    rememberMe: StrictBool = False
 
 
 class UserPublic(BaseModel):
@@ -17,6 +20,25 @@ class UserPublic(BaseModel):
 
 class LoginResponse(BaseModel):
     user: UserPublic
+
+
+class AppLoginHandoffRequest(BaseModel):
+    """Web -> app handoff for the system-browser app login (Phase 2).
+
+    ``challenge`` is the lowercase-hex SHA-256 of a verifier that only the
+    packaged app knows. The authenticated web session sends it here to mint
+    a one-time code; the app must later present the matching verifier to
+    exchange that code for its own session (PKCE-style binding)."""
+
+    challenge: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    platform: Optional[str] = Field(default=None, max_length=32)
+
+
+class AppLoginExchangeRequest(BaseModel):
+    """App-side exchange of a one-time handoff code + verifier for a session."""
+
+    code: str = Field(min_length=20, max_length=256)
+    verifier: str = Field(min_length=20, max_length=256)
 
 
 class PasswordResetRequest(BaseModel):
@@ -70,6 +92,16 @@ class EntityCreateRequest(BaseModel):
 class EntityUpdateRequest(BaseModel):
     data: dict[str, Any]
     expectedLastModified: Optional[int] = None
+
+
+class CustomerMergeRequest(BaseModel):
+    """Admin-confirmed consolidation of two records for the same person."""
+
+    keepCustomerId: str = Field(min_length=1, max_length=80)
+    duplicateCustomerId: str = Field(min_length=1, max_length=80)
+    expectedKeepLastModified: int = Field(ge=0)
+    expectedDuplicateLastModified: int = Field(ge=0)
+    idempotencyKey: str = Field(min_length=8, max_length=120)
 
 
 class WalletTransferRequest(BaseModel):
@@ -145,6 +177,14 @@ class ReceiptTransferRequest(BaseModel):
     note: Optional[str] = Field(default=None, max_length=500)
 
 
+class ReceiptSettlementRequest(BaseModel):
+    """Mark a receipt paid and settle every linked ad in one transaction."""
+
+    idempotencyKey: str = Field(min_length=8, max_length=120)
+    expectedLastModified: int = Field(ge=0)
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
 class AdMutationRequest(BaseModel):
     """Create/update an ad and its receipt funding in one transaction."""
 
@@ -159,8 +199,25 @@ class AdStopRequest(BaseModel):
     """Server-authoritative ad stop/re-stop request, expressed in USD cents."""
 
     spentMinorUSD: int = Field(ge=0, le=1_000_000_000)
+    customerInformed: bool = False
     idempotencyKey: str = Field(min_length=8, max_length=120)
     expectedLastModified: int = Field(ge=0)
+
+
+class AdCampaignSubmitRequest(BaseModel):
+    """Optimistic-concurrency guard for a customer campaign submission."""
+
+    expectedLastModified: int = Field(ge=0)
+    operationId: str = Field(min_length=8, max_length=120)
+
+
+class AdCampaignReviewRequest(BaseModel):
+    """Server-controlled review transition; it never publishes a Meta ad."""
+
+    expectedLastModified: int = Field(ge=0)
+    decision: Literal["Approved", "Changes Requested", "Rejected"]
+    note: Optional[str] = Field(default=None, max_length=2000)
+    operationId: str = Field(min_length=8, max_length=120)
 
 
 class AdminBulkImportRequest(BaseModel):
@@ -218,6 +275,15 @@ class EntityResponse(BaseModel):
     data: dict[str, Any]
 
 
+class CustomerMergeResponse(BaseModel):
+    customer: EntityResponse
+    updatedPages: list[EntityResponse] = Field(default_factory=list)
+    updatedReceipts: list[EntityResponse] = Field(default_factory=list)
+    updatedAds: list[EntityResponse] = Field(default_factory=list)
+    duplicate: EntityResponse
+    replayed: bool = False
+
+
 class ClothesOrderMutationResponse(BaseModel):
     order: EntityResponse
     updatedProducts: list[EntityResponse] = Field(default_factory=list)
@@ -234,6 +300,12 @@ class ReceiptTransferResponse(BaseModel):
     sourceReceipt: EntityResponse
     targetReceipt: EntityResponse
     transfer: dict[str, Any]
+    replayed: bool = False
+
+
+class ReceiptSettlementResponse(BaseModel):
+    receipt: EntityResponse
+    updatedAds: list[EntityResponse] = Field(default_factory=list)
     replayed: bool = False
 
 

@@ -19,12 +19,78 @@ const _patchChains = new Map();
 
 function serverRecordMatchesCreateRetry(serverRecord, requestedRecord) {
   if (!serverRecord || !requestedRecord || String(serverRecord.id || '') !== String(requestedRecord.id || '')) return false;
-  const ignored = new Set(['_lastModified', '_created', '_deleted', 'createdAt', 'createdBy']);
+  const ignored = new Set(['_lastModified', '_created', '_deleted', 'createdAt', 'createdBy', 'createdByName']);
   for (const [key, value] of Object.entries(requestedRecord)) {
     if (ignored.has(key) || value === undefined) continue;
     if (JSON.stringify(serverRecord[key]) !== JSON.stringify(value)) return false;
   }
   return true;
+}
+
+// ==========================================
+// CREATOR NAME RESOLUTION (survives user deletion)
+// ==========================================
+// Users are only ever soft-deleted, but deleted accounts stop syncing to
+// clients (/api/users and /api/users/public filter them out) — so records
+// they created used to render as "Created by: Unknown" forever. Resolution
+// order:
+//   1. live user in state.users (deleted users also stay here in local mode)
+//   2. server tombstone directory (id -> name of soft-deleted users)
+//   3. the createdByName stamp written onto the record at creation time
+// Privacy-anonymized accounts come back as "Deleted user" from the server and
+// have their record stamps scrubbed server-side, so a verified privacy
+// erasure is never resurrected by this chain.
+function getKnownUserNameById(userId) {
+  const uid = String(userId || '').trim();
+  if (!uid) return '';
+  const live = (state.users || []).find(u => u && String(u.id) === uid);
+  if (live && live.name) return String(live.name);
+  const tombs = state.userTombstones;
+  if (tombs && typeof tombs === 'object' && typeof tombs[uid] === 'string' && tombs[uid]) return String(tombs[uid]);
+  return '';
+}
+
+function resolveCreatorDisplayName(record, isAr) {
+  const uid = String(record?.createdBy || record?.creatorId || '').trim();
+  if (uid === 'system') return isAr ? 'النظام' : 'System';
+  const known = uid ? getKnownUserNameById(uid) : '';
+  if (known) return known;
+  const stamped = String(record?.createdByName || '').trim();
+  if (stamped) return stamped;
+  // Unresolvable creator id: ask the server for its deleted-users directory
+  // (throttled) so records created BEFORE the createdByName stamp existed
+  // regain their creator's name on the follow-up render.
+  if (uid) requestUserTombstoneRefresh();
+  return isAr ? 'غير معروف' : 'Unknown';
+}
+
+const _userTombstoneRefresh = { inFlight: false, lastAttemptAt: 0 };
+function requestUserTombstoneRefresh() {
+  if (typeof isServerModeEnabled !== 'function' || !isServerModeEnabled()) return;
+  if (typeof apiJson !== 'function') return;
+  const nowTs = Date.now();
+  if (_userTombstoneRefresh.inFlight || (nowTs - _userTombstoneRefresh.lastAttemptAt) < 60000) return;
+  _userTombstoneRefresh.inFlight = true;
+  _userTombstoneRefresh.lastAttemptAt = nowTs;
+  apiJson('/api/users/tombstones', { method: 'GET' }, { timeoutMs: 10000 })
+    .then((rows) => {
+      if (!Array.isArray(rows)) return;
+      const map = {};
+      rows.forEach((r) => {
+        if (r && r.id && typeof r.name === 'string' && r.name) map[String(r.id)] = String(r.name);
+      });
+      // REPLACE the map instead of merging: privacy anonymization renames a
+      // tombstone to "Deleted user", and a stale merged entry would
+      // resurrect the old name.
+      const next = Security.sanitizeObject(map);
+      if (JSON.stringify(state.userTombstones || {}) !== JSON.stringify(next)) {
+        state.userTombstones = next;
+        saveState();
+        RenderQueue.schedule('userTombstones');
+      }
+    })
+    .catch(() => {})
+    .finally(() => { _userTombstoneRefresh.inFlight = false; });
 }
 
 /**
@@ -73,8 +139,22 @@ function addRecord(array, record) {
   cleanRecord._deleted = false;
   if (!cleanRecord._created) cleanRecord._created = getMonotonicTime();
   if (!cleanRecord.createdBy && state.currentUser?.id) cleanRecord.createdBy = state.currentUser.id;
+  // Denormalize the creator's display name at creation time: user accounts
+  // are soft-deleted and stop syncing to clients, so this stamp is what keeps
+  // "Created by" readable forever (see resolveCreatorDisplayName). The server
+  // overrides it with the authoritative users-table name when the creator id
+  // resolves, so it cannot be spoofed in server mode.
+  if (!cleanRecord.createdByName && cleanRecord.createdBy) {
+    const _creatorName = (String(cleanRecord.createdBy) === String(state.currentUser?.id || '') && state.currentUser?.name)
+      ? String(state.currentUser.name)
+      : getKnownUserNameById(cleanRecord.createdBy);
+    if (_creatorName) cleanRecord.createdByName = _creatorName;
+  }
 
-  array.unshift(cleanRecord);
+  const localRecord = isServerModeEnabled() && collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function'
+    ? makeLightweightMediaRecord(collectionName, cleanRecord)
+    : cleanRecord;
+  array.unshift(localRecord);
   if (collectionName) markCollectionDirty(collectionName);
   saveState();
   addAuditLog('Create', cleanRecord.id || 'Unknown', `Created new ${getRecordType(cleanRecord)}`);
@@ -104,7 +184,12 @@ function addRecord(array, record) {
             const existing = await apiGetEntity(collectionName, id);
             if (existing?.data && serverRecordMatchesCreateRetry(existing.data, cleanRecord)) {
               const idx = array.findIndex(x => x && x.id === id);
-              if (idx !== -1) array[idx] = Security.sanitizeObject(existing.data);
+               if (idx !== -1) {
+                 const existingData = Security.sanitizeObject(existing.data);
+                 array[idx] = collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function'
+                   ? makeLightweightMediaRecord(collectionName, existingData)
+                   : existingData;
+               }
               markCollectionDirty(collectionName);
               saveState();
               return true;
@@ -136,6 +221,397 @@ function addRecord(array, record) {
     return Promise.resolve(false);
   }
   return Promise.resolve(true);
+}
+
+function _localFundingMinor(value) {
+  if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) return 0;
+  if (typeof value === 'boolean') throw new Error('Stored funding amount is invalid');
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) throw new Error('Stored funding amount is invalid');
+  if (parsed === 0) return 0;
+  // All local settlement math uses integer cents. Add a scale-aware epsilon
+  // before half-up rounding so values such as 1.005 do not become 100 cents
+  // because of binary floating-point representation.
+  const scaled = parsed * 100;
+  return Math.floor(scaled + 0.5 + (Number.EPSILON * Math.max(1, Math.abs(scaled)) * 4));
+}
+
+function _localFundingMap(rows) {
+  const result = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const receiptId = String(row?.receiptId || '');
+    const amount = _localFundingMinor(row?.amountUSD);
+    if (!receiptId || amount <= 0) continue;
+    result.set(receiptId, (result.get(receiptId) || 0) + amount);
+  }
+  return result;
+}
+
+function _localFundingRows(values) {
+  return [...values.entries()]
+    .filter(([, amount]) => amount > 0)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([receiptId, amount]) => ({ receiptId, amountUSD: amount / 100 }));
+}
+
+function _localLegacyDueMinor(ad) {
+  const direct = _localFundingMinor(ad?.dueAmountToUseUSD);
+  if (direct > 0) return direct;
+  const rawLocal = ad?.dueAmountToUseLYD;
+  if (rawLocal === undefined || rawLocal === null || (typeof rawLocal === 'string' && rawLocal.trim() === '')) return 0;
+  if (typeof rawLocal === 'boolean') throw new Error('Stored funding amount is invalid');
+  const lyd = Number(rawLocal);
+  if (!Number.isFinite(lyd) || lyd < 0) throw new Error('Stored funding amount is invalid');
+  if (lyd === 0) return 0;
+  if (typeof ad?.exchangeRate === 'boolean') throw new Error('Stored funding exchange rate is invalid');
+  const rate = Number(ad?.exchangeRate);
+  if (!Number.isFinite(rate) || rate <= 0) throw new Error('Stored funding exchange rate is invalid');
+  return _localFundingMinor(lyd / rate);
+}
+
+// Legacy debt rows stored the promised amount in dueAmountToUseUSD/LYD instead
+// of dueAllocations. Driver ads identify that receipt via
+// linkedDeliveryReceiptId — or, for the oldest rows that predate that field,
+// via receiptId; In-Shop ads identify it via receiptId. Settlement and the ad
+// form both honor the receiptId fallback, so the balance readers must speak
+// for the same money. A zero-amount link remains provenance only and must
+// never become money.
+function isAdLegacyDueMirrorForReceipt(ad, receiptId) {
+  const rid = String(receiptId || '');
+  if (!ad || !rid) return false;
+  if (String(ad.linkedDeliveryReceiptId || '') === rid) return true;
+  const paymentState = typeof getAdPaymentState === 'function'
+    ? getAdPaymentState(ad)
+    : (ad.isPaid === true ? 'paid' : 'not_paid');
+  if (paymentState !== 'not_paid') return false;
+  const method = String(ad.collectionMethod || '');
+  if (method === 'in_shop') return String(ad.receiptId || '') === rid;
+  return method === 'driver'
+    && String(ad.linkedDeliveryReceiptId || '') === ''
+    && String(ad.receiptId || '') === rid;
+}
+
+function getAdLegacyDueMirrorUSD(ad, receiptId, fallbackRate = 0) {
+  if (!isAdLegacyDueMirrorForReceipt(ad, receiptId)) return 0;
+  const direct = Number(ad?.dueAmountToUseUSD);
+  if (Number.isFinite(direct) && direct > 0) return Math.round(direct * 100) / 100;
+  const local = Number(ad?.dueAmountToUseLYD);
+  const rate = Number(ad?.exchangeRate) || Number(fallbackRate) || Number(state.defaultExchangeRate) || 0;
+  if (!Number.isFinite(local) || local <= 0 || !Number.isFinite(rate) || rate <= 0) return 0;
+  return Math.round((local / rate) * 100) / 100;
+}
+
+function _localAdCommittedMinor(ad, receiptId) {
+  const rid = String(receiptId || '');
+  const paid = _localFundingMap(ad?.receiptAllocations).get(rid) || 0;
+  const dueMap = _localFundingMap(ad?.dueAllocations);
+  const due = dueMap.get(rid) || 0;
+  let legacyDue = 0;
+  // The scalar mirror is standalone money ONLY for rowless ads. Once due
+  // rows exist the writers keep dueAmountToUseUSD equal to their sum, so
+  // attributing it to the linked receipt again would count the same
+  // dollars on two receipts at once.
+  if (isAdLegacyDueMirrorForReceipt(ad, rid) && due === 0 && dueMap.size === 0) {
+    legacyDue = _localLegacyDueMinor(ad);
+  }
+  const explicit = paid + due + legacyDue;
+  if (explicit > 0) return explicit;
+
+  // Once either allocation ledger exists, a missing row means this receipt
+  // committed zero. Falling back to the full ad amount would charge another
+  // receipt for money it never supplied.
+  if (Array.isArray(ad?.receiptAllocations) || Array.isArray(ad?.dueAllocations)) return 0;
+  const paymentState = typeof getAdPaymentState === 'function'
+    ? getAdPaymentState(ad)
+    : (ad?.isPaid === true ? 'paid' : 'not_paid');
+  if (paymentState === 'not_paid' && ['driver', 'in_shop'].includes(String(ad?.collectionMethod || ''))) {
+    return 0;
+  }
+  const references = new Set([
+    String(ad?.fundingReceiptId || ''),
+    String(ad?.receiptId || ''),
+    String(ad?.linkedDeliveryReceiptId || '')
+  ]);
+  if (!references.has(rid)) return 0;
+  return _localFundingMinor(ad?.spentUSD !== undefined && ad?.spentUSD !== null ? ad.spentUSD : ad?.amountUSD);
+}
+
+function _localReceiptOutgoingMinor(receipt) {
+  if (receipt?.transfers === undefined || receipt?.transfers === null) return 0;
+  if (!Array.isArray(receipt.transfers)) throw new Error('Stored receipt transfers are invalid');
+  return receipt.transfers.reduce((sum, transfer) => {
+    if (!transfer || typeof transfer !== 'object' || Array.isArray(transfer)) {
+      throw new Error('Stored receipt transfer is invalid');
+    }
+    const amount = Number(transfer.amountUSD);
+    if (!Number.isFinite(amount) || amount < 0) throw new Error('Stored receipt transfer amount is invalid');
+    return sum + _localFundingMinor(amount);
+  }, 0);
+}
+
+// Local/offline parity for the server settlement transaction. It converts only
+// explicit due money (allocation row or positive legacy dueAmount mirror); a
+// link by itself is provenance and never mints credit. Every plan is validated
+// before updateRecord changes the receipt or any ad.
+function planLocalReceiptPaidAdUpdates(receiptId, nextReceipt = null) {
+  const rid = String(receiptId || '');
+  const receipt = nextReceipt || (state.receipts || []).find(row => row && String(row.id) === rid);
+  if (!receipt || receipt._deleted) throw new Error('Receipt not found');
+  const receiptCustomerId = String(receipt.customerId || '');
+  const actorId = String(state.currentUser?.id || '');
+  const now = new Date().toISOString();
+  const plans = [];
+  const plannedById = new Map();
+  for (let index = 0; index < (state.ads || []).length; index++) {
+    const ad = state.ads[index];
+    if (!ad || ad._deleted || String(ad.recordType || '') === 'receipt') continue;
+    const paymentState = typeof getAdPaymentState === 'function'
+      ? getAdPaymentState(ad)
+      : (ad.isPaid === true ? 'paid' : 'not_paid');
+    const collectionMethod = String(ad.collectionMethod || '');
+    const isDriverLink = paymentState === 'not_paid'
+      && collectionMethod === 'driver'
+      && String(ad.linkedDeliveryReceiptId || ad.receiptId || '') === rid;
+    const isShopLink = paymentState === 'not_paid'
+      && collectionMethod === 'in_shop'
+      && String(ad.receiptId || '') === rid;
+
+    const paid = _localFundingMap(ad.receiptAllocations);
+    const due = _localFundingMap(ad.dueAllocations);
+    let moved = due.get(rid) || 0;
+    due.delete(rid);
+    // The scalar mirror converts as standalone money only for rowless ads;
+    // when due rows survive for other receipts the mirror is their sum and
+    // converting it here would mint the same dollars a second time.
+    if (moved <= 0 && (isDriverLink || isShopLink) && due.size === 0) moved = _localLegacyDueMinor(ad);
+
+    const stopBaseline = ad.stopAllocationBaseline;
+    const hasStopBaseline = !!stopBaseline && typeof stopBaseline === 'object' && !Array.isArray(stopBaseline);
+    const stopPaid = _localFundingMap(hasStopBaseline ? stopBaseline.receipt : []);
+    const stopDue = _localFundingMap(hasStopBaseline ? stopBaseline.due : []);
+    const stopMoved = stopDue.get(rid) || 0;
+    stopDue.delete(rid);
+    const stopLegacy = hasStopBaseline && stopMoved <= 0 && (isDriverLink || isShopLink)
+      ? _localFundingMinor(stopBaseline.dueLegacy)
+      : 0;
+    const refundPaid = _localFundingMap(ad.refundAllocationBaseline);
+    const refundDue = _localFundingMap(ad.refundDueBaseline);
+    const refundMoved = refundDue.get(rid) || 0;
+    refundDue.delete(rid);
+    const baselineChanged = stopMoved + stopLegacy + refundMoved > 0;
+    if (moved <= 0 && !baselineChanged) continue;
+
+    if (String(ad.customerId || '') !== receiptCustomerId) {
+      throw new Error('Linked ad and receipt belong to different customers');
+    }
+
+    const next = { ...ad };
+    let fullyFunded = false;
+    if (moved > 0) {
+      paid.set(rid, (paid.get(rid) || 0) + moved);
+      const target = _localFundingMinor(ad.spentUSD !== undefined && ad.spentUSD !== null ? ad.spentUSD : ad.amountUSD);
+      const totalAfter = [...paid.values(), ...due.values()].reduce((sum, amount) => sum + amount, 0);
+      if (totalAfter > target) throw new Error('Linked ad funding exceeds its authoritative amount');
+
+      const receiptAllocations = _localFundingRows(paid);
+      const dueAllocations = _localFundingRows(due);
+      fullyFunded = totalAfter === target && due.size === 0;
+      Object.assign(next, {
+        receiptAllocations,
+        dueAllocations,
+        dueAmountToUseUSD: [...due.values()].reduce((sum, amount) => sum + amount, 0) / 100,
+        dueAmountToUseLYD: 0,
+        receiptIds: receiptAllocations.map(row => row.receiptId),
+        fundingReceiptId: receiptAllocations[0]?.receiptId || ''
+      });
+      if (fullyFunded) {
+        Object.assign(next, {
+          paymentStatus: 'paid', isPaid: true, collectionMethod: '', collectionPayments: [],
+          paymentMethod: '', linkedDeliveryReceiptId: '', mergedPaidAllocations: [],
+          hasMergedPaidFunds: false, receiptId: receiptAllocations[0]?.receiptId || ''
+        });
+      } else {
+        next.paymentStatus = 'not_paid';
+        next.isPaid = false;
+        next.mergedPaidAllocations = collectionMethod === 'driver'
+          ? receiptAllocations.map(row => ({ ...row }))
+          : [];
+        next.hasMergedPaidFunds = collectionMethod === 'driver' && receiptAllocations.length > 0;
+        if (collectionMethod === 'in_shop' && due.size === 0) next.receiptId = '';
+      }
+    }
+
+    // Frozen stop/refund baselines move even when live funding is zero. A later
+    // reconciliation/refund reversal must never resurrect paid money as debt.
+    if (hasStopBaseline && (stopMoved > 0 || stopLegacy > 0)) {
+      stopPaid.set(rid, (stopPaid.get(rid) || 0) + stopMoved + stopLegacy);
+      const baselineReceiptRows = _localFundingRows(stopPaid);
+      const nextBaseline = {
+        ...stopBaseline,
+        receipt: baselineReceiptRows,
+        due: _localFundingRows(stopDue),
+        dueLegacy: 0
+      };
+      if (stopDue.size === 0 && [...stopPaid.values()].reduce((sum, amount) => sum + amount, 0) === _localFundingMinor(ad.amountUSD)) {
+        nextBaseline.paymentStatus = 'paid';
+      }
+      nextBaseline.merged = String(nextBaseline.paymentStatus || '') !== 'paid'
+        && getAdPaymentState(next) === 'not_paid'
+        && String(next.collectionMethod || '') === 'driver'
+          ? baselineReceiptRows.map(row => ({ ...row }))
+          : [];
+      next.stopAllocationBaseline = nextBaseline;
+    }
+    if (refundMoved > 0) {
+      refundPaid.set(rid, (refundPaid.get(rid) || 0) + refundMoved);
+      next.refundAllocationBaseline = _localFundingRows(refundPaid);
+      next.refundDueBaseline = _localFundingRows(refundDue);
+      if (refundDue.size === 0 && [...refundPaid.values()].reduce((sum, amount) => sum + amount, 0) === _localFundingMinor(ad.amountUSD)) {
+        next.refundBaselinePaymentStatus = 'paid';
+      }
+    }
+
+    // A stopped-at-zero or fully-refunded ad may have no live due row: only
+    // its frozen baseline contained the promise converted above. Align the
+    // current badge/provenance immediately when its live rows now fully cover
+    // the effective spend (including a zero-dollar effective spend).
+    const livePaid = _localFundingMap(next.receiptAllocations);
+    const liveDue = _localFundingMap(next.dueAllocations);
+    const liveTarget = _localFundingMinor(next.spentUSD !== undefined && next.spentUSD !== null ? next.spentUSD : next.amountUSD);
+    if (baselineChanged && liveDue.size === 0 && [...livePaid.values()].reduce((sum, amount) => sum + amount, 0) === liveTarget) {
+      const paidRows = _localFundingRows(livePaid);
+      const paidIds = paidRows.map(row => row.receiptId);
+      Object.assign(next, {
+        paymentStatus: 'paid',
+        isPaid: true,
+        collectionMethod: '',
+        collectionPayments: [],
+        paymentMethod: '',
+        linkedDeliveryReceiptId: '',
+        mergedPaidAllocations: [],
+        hasMergedPaidFunds: false,
+        receiptAllocations: paidRows,
+        receiptIds: paidIds,
+        fundingReceiptId: paidIds[0] || '',
+        receiptId: paidIds[0] || rid,
+        dueAmountToUseUSD: 0,
+        dueAmountToUseLYD: 0
+      });
+    }
+
+    Object.assign(next, {
+      settledReceiptId: rid,
+      receiptSettledAt: now,
+      receiptSettledBy: actorId,
+      lastUpdated: now,
+      _lastModified: getMonotonicTime()
+    });
+    const plan = { index, data: next };
+    plans.push(plan);
+    plannedById.set(String(ad.id || ''), next);
+  }
+
+  // Simulate the complete batch before changing either receipt or ads. The
+  // newly Paid receipt has one capacity: its resulting amountUSD, minus money
+  // already transferred out and every surviving paid/due ad commitment.
+  const capacity = _localFundingMinor(receipt.amountUSD);
+  let committed = _localReceiptOutgoingMinor(receipt);
+  for (const ad of state.ads || []) {
+    if (!ad || ad._deleted || String(ad.recordType || '') === 'receipt') continue;
+    const simulated = plannedById.get(String(ad.id || '')) || ad;
+    committed += _localAdCommittedMinor(simulated, rid);
+  }
+  if (committed > capacity) throw new Error('Paid receipt balance is insufficient for all linked ads');
+  return plans;
+}
+
+// Local/offline parity for the server's REVERSE settlement (/unsettle): a
+// funded PAID receipt explicitly flipped to Not Paid migrates each linked
+// ad's paid rows for THIS receipt into its due pool — conserved to the cent,
+// other receipts' rows untouched, amount/spend/status/refund untouched. The
+// blocked cases throw the SAME detail strings the server refuses with, so the
+// caller localizes them through describe409 exactly like server mode.
+function planLocalReceiptDebtAdUpdates(receiptId, nextReceipt = null) {
+  const rid = String(receiptId || '');
+  const receipt = nextReceipt || (state.receipts || []).find(row => row && String(row.id) === rid);
+  if (!receipt || receipt._deleted) throw new Error('Receipt not found');
+  if (String(receipt.receiptType || '') === 'TRANSFER_IN' || receipt.transferFromReceiptId) {
+    throw new Error('A transferred-in receipt must remain paid');
+  }
+  if (_localReceiptOutgoingMinor(receipt) > 0) {
+    throw new Error('A receipt with outgoing transfers must remain paid');
+  }
+  const receiptCustomerId = String(receipt.customerId || '');
+  const notPaidCollection = String(receipt.statusDetail?.notPaidCollection || '').trim().toLowerCase();
+  const isDelivery = notPaidCollection === 'delivery'
+    || String(receipt.deliveryStatus || '').trim() === 'Needs Delivery';
+  const method = isDelivery ? 'driver' : 'in_shop';
+  const now = new Date().toISOString();
+  const plans = [];
+  for (let index = 0; index < (state.ads || []).length; index++) {
+    const ad = state.ads[index];
+    if (!ad || ad._deleted || String(ad.recordType || '') === 'receipt') continue;
+    const paid = _localFundingMap(ad.receiptAllocations);
+    const moved = paid.get(rid) || 0;
+    if (moved <= 0) {
+      // A legacy rowless paid ad charges its whole spend by reference; there
+      // is no allocation row to migrate, so the conversion must refuse.
+      if (!Array.isArray(ad.receiptAllocations) && !Array.isArray(ad.dueAllocations)
+          && _localAdCommittedMinor(ad, rid) > 0) {
+        throw new Error('A receipt funding a legacy pre-allocation ad must remain paid');
+      }
+      continue;
+    }
+    paid.delete(rid);
+    if (String(ad.customerId || '') !== receiptCustomerId) {
+      throw new Error('Linked ad and receipt belong to different customers');
+    }
+    if (['Stopped', 'Canceled', 'Completed', 'Lost'].includes(String(ad.status || ''))
+        || (ad.refundType && String(ad.refundType) !== 'None')) {
+      throw new Error('A receipt funding a finished or refunded ad must remain paid');
+    }
+    const due = _localFundingMap(ad.dueAllocations);
+    for (const key of due.keys()) {
+      if (String(key) !== rid) throw new Error('A receipt funding an ad that owes another receipt must remain paid');
+    }
+    due.set(rid, (due.get(rid) || 0) + moved);
+
+    const receiptAllocations = _localFundingRows(paid);
+    const dueAllocations = _localFundingRows(due);
+    const next = {
+      ...ad,
+      receiptAllocations,
+      dueAllocations,
+      receiptIds: receiptAllocations.map(row => row.receiptId),
+      fundingReceiptId: receiptAllocations[0]?.receiptId || '',
+      dueAmountToUseUSD: [...due.values()].reduce((sum, amount) => sum + amount, 0) / 100,
+      dueAmountToUseLYD: 0,
+      paymentStatus: 'not_paid',
+      isPaid: false,
+      collectionMethod: method,
+      collectionPayments: [],
+      paymentMethod: '',
+      mergedPaidAllocations: method === 'driver'
+        ? receiptAllocations.map(row => ({ ...row }))
+        : [],
+      hasMergedPaidFunds: method === 'driver' && receiptAllocations.length > 0,
+      linkedDeliveryReceiptId: method === 'driver' ? rid : '',
+      receiptId: rid,
+      lastUpdated: now,
+      _lastModified: getMonotonicTime()
+    };
+    plans.push({ index, data: next });
+  }
+  return plans;
+}
+
+function applyLocalReceiptPaidAdUpdates(plans) {
+  for (const plan of Array.isArray(plans) ? plans : []) {
+    if (!Number.isInteger(plan?.index) || !plan?.data) continue;
+    state.ads[plan.index] = plan.data;
+  }
+  if (Array.isArray(plans) && plans.length > 0) markCollectionDirty('ads');
+  return Array.isArray(plans) ? plans.length : 0;
 }
 
 /**
@@ -191,8 +667,13 @@ function updateRecord(array, id, updates, expectedLastModified) {
       showNotification('Invalid Record', updatesIdCheck.error, 'error');
       return Promise.resolve(false);
     }
-    // Never allow changing protected fields
-    const protectedFields = ['id', '_created', 'createdBy', 'createdAt', 'creatorId'];
+    // Never allow changing protected fields (createdByName is the
+    // creation-time stamp that keeps "Created by" readable after the
+    // creator's account is deleted, and customerName is the creation-time
+    // customer stamp that keeps a receipts/ads-only role able to read who the
+    // record is for — edits must never rewrite either; the live customer name
+    // still wins on read whenever it is available).
+    const protectedFields = ['id', '_created', 'createdBy', 'createdByName', 'customerName', 'createdAt', 'creatorId'];
     for (const field of protectedFields) {
       if (sanitizedUpdates[field] !== undefined) delete sanitizedUpdates[field];
     }
@@ -210,15 +691,129 @@ function updateRecord(array, id, updates, expectedLastModified) {
       }
     }
 
-    array[index] = { ...array[index], ...sanitizedUpdates, _lastModified: getMonotonicTime() };
-    // Keep currentUser in sync when updating own user record (important for profile changes)
-    if (collectionName === 'users' && state.currentUser?.id === id) {
-      state.currentUser = array[index];
+    // A Not Paid -> Paid receipt is not an isolated row edit. Every linked ad
+    // must move from due/debt funding to paid funding in the SAME transaction,
+    // and the browser must install the whole authoritative result together.
+    // Keep one stable key for this updateRecord attempt so a network retry can
+    // safely replay the settlement instead of charging funding twice.
+    const _oldReceiptStatus = collectionName === 'receipts'
+      ? String(old.status || '').trim().toLowerCase()
+      : '';
+    // Keep the canonical Paid/Not Paid pair consistent even for legacy callers
+    // that supplied only one side. Canceled/Lost deliberately keep their own
+    // status because they can retain historical money without being "Paid".
+    const _requestedReceiptStatus = collectionName === 'receipts' && sanitizedUpdates.status !== undefined
+      ? String(sanitizedUpdates.status || '').trim().toLowerCase()
+      : '';
+    if (_requestedReceiptStatus === 'paid') sanitizedUpdates.isPaid = true;
+    if (_requestedReceiptStatus === 'not paid' || _requestedReceiptStatus === 'not_paid') sanitizedUpdates.isPaid = false;
+    if (collectionName === 'receipts'
+        && sanitizedUpdates.status === undefined
+        && sanitizedUpdates.isPaid === true
+        && (_oldReceiptStatus === 'not paid' || _oldReceiptStatus === 'not_paid')) {
+      sanitizedUpdates.status = 'Paid';
     }
-    if (collectionName) markCollectionDirty(collectionName);
-    saveState();
-    addAuditLog('Update', id, `Updated ${getRecordType(array[index])}`, { old, new: array[index] });
-    RenderQueue.schedule('updateRecord');
+    const _nextReceiptStatus = collectionName === 'receipts'
+      ? String(sanitizedUpdates.status ?? old.status ?? '').trim().toLowerCase()
+      : '';
+    // Route EVERY resulting Paid receipt through the cascade endpoint, not only
+    // a fresh transition. This repairs old Paid receipts whose ads still carry
+    // legacy due rows and returns those repaired ads immediately to the UI.
+    const _settlesReceipt = collectionName === 'receipts'
+      && _nextReceiptStatus === 'paid';
+    const _receiptSettlementKey = _settlesReceipt
+      ? Security.generateSecureId('receipt-settlement')
+      : '';
+    // The REVERSE transition: an edit that explicitly flips a PAID receipt to
+    // Not Paid while its PAID pool funds ads. That funding must migrate into
+    // the ads' due pool in the SAME commit (server: /unsettle cascade; local:
+    // planLocalReceiptDebtAdUpdates), conserved to the cent. Unfunded
+    // paid -> not-paid edits keep the ordinary PATCH path.
+    const _convertsReceipt = collectionName === 'receipts'
+      && !_settlesReceipt
+      && (_oldReceiptStatus === 'paid' || old.isPaid === true)
+      && (_nextReceiptStatus === 'not paid' || _nextReceiptStatus === 'not_paid')
+      && (state.ads || []).some(ad => ad && !ad._deleted
+          && String(ad.recordType || '') !== 'receipt'
+          && (_localFundingMap(ad.receiptAllocations).get(String(id)) || 0) > 0);
+    const _receiptConversionKey = _convertsReceipt
+      ? Security.generateSecureId('receipt-unsettle')
+      : '';
+    let _localReceiptAdPlans = [];
+    if (_settlesReceipt && !isServerModeEnabled()) {
+      try {
+        _localReceiptAdPlans = planLocalReceiptPaidAdUpdates(id, {
+          ...old,
+          ...sanitizedUpdates,
+          status: 'Paid',
+          isPaid: true
+        });
+      } catch (error) {
+        showNotification(
+          state.language === 'ar' ? 'تعذر تسوية الوصل' : 'Receipt settlement blocked',
+          error?.message || 'Linked ad funding is invalid.',
+          'error'
+        );
+        return Promise.resolve(false);
+      }
+    } else if (_convertsReceipt && !isServerModeEnabled()) {
+      try {
+        _localReceiptAdPlans = planLocalReceiptDebtAdUpdates(id, {
+          ...old,
+          ...sanitizedUpdates,
+          status: 'Not Paid',
+          isPaid: false
+        });
+      } catch (error) {
+        // Same refusals, same localized wording as server mode: the planner
+        // throws the server's own detail strings, describe409 translates them.
+        const _detail = String(error?.message || '');
+        const reason = typeof describe409 === 'function'
+          ? describe409({ status: 409, message: _detail }, _detail)
+          : _detail;
+        showNotification(
+          state.language === 'ar' ? 'تعذر تحويل الوصل إلى دين' : 'Receipt conversion blocked',
+          reason || 'Linked ad funding is invalid.',
+          'error'
+        );
+        return Promise.resolve(false);
+      }
+    }
+
+    // Identity of the exact object this call optimistically wrote (stays null
+    // when the settle/convert guard below skips the optimistic write). Error
+    // paths may only roll the slot back while it still holds THIS object:
+    // live-sync deltas and chained-PATCH echoes install fresh objects in the
+    // same slot, and overwriting one of those with the stale open-time
+    // snapshot would clobber a newer committed copy that the sync watermark
+    // has already consumed.
+    let _optimisticRecord = null;
+    // Ordinary records keep the established optimistic UX. Settlement and its
+    // reverse (debt conversion) are the exceptions: do not paint the receipt
+    // Paid/Not Paid before its linked ads are also committed, because that
+    // briefly presents two contradictory money states.
+    if (!((_settlesReceipt || _convertsReceipt) && isServerModeEnabled())) {
+      array[index] = { ...array[index], ...sanitizedUpdates, _lastModified: getMonotonicTime() };
+      if (isServerModeEnabled() && collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function') {
+        array[index] = makeLightweightMediaRecord(collectionName, array[index]);
+      }
+      _optimisticRecord = array[index];
+      // Keep currentUser in sync when updating own user record (important for profile changes)
+      if (collectionName === 'users' && state.currentUser?.id === id) {
+        state.currentUser = array[index];
+      }
+      if (collectionName) markCollectionDirty(collectionName);
+      const locallyUpdatedAds = applyLocalReceiptPaidAdUpdates(_localReceiptAdPlans);
+      saveState();
+      addAuditLog('Update', id, `Updated ${getRecordType(array[index])}`, {
+        old,
+        new: array[index],
+        locallySettledAdIds: locallyUpdatedAds > 0
+          ? _localReceiptAdPlans.map(plan => String(plan.data?.id || '')).filter(Boolean)
+          : []
+      });
+      RenderQueue.schedule('updateRecord');
+    }
 
     // Server write-through (always-online multi-user mode)
     if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
@@ -244,43 +839,180 @@ function updateRecord(array, id, updates, expectedLastModified) {
         } else {
           expected = _providedExpected != null ? _providedExpected : (old._lastModified || 0);
         }
-        return apiPatchEntity(collectionName, id, sanitizedUpdates, expected)
-        .then((entity) => {
-          if (entity?.data) {
+        const mutation = _settlesReceipt
+          ? apiSettleReceipt({
+              receiptId: id,
+              expectedLastModified: expected,
+              idempotencyKey: _receiptSettlementKey,
+              data: sanitizedUpdates
+            })
+          : (_convertsReceipt
+            ? apiUnsettleReceipt({
+                receiptId: id,
+                expectedLastModified: expected,
+                idempotencyKey: _receiptConversionKey,
+                data: sanitizedUpdates
+              })
+            : apiPatchEntity(collectionName, id, sanitizedUpdates, expected));
+        return mutation
+        .then((entityOrSettlement) => {
+          if (_settlesReceipt || _convertsReceipt) {
+            const settlement = entityOrSettlement;
+            const [savedReceipt] = applyValidatedServerEntityBatch([
+              { collection: 'receipts', entity: settlement.receipt },
+              ...settlement.updatedAds.map(entity => ({ collection: 'ads', entity }))
+            ], _settlesReceipt ? 'receiptSettlement' : 'receiptDebtConversion');
+            addAuditLog('Update', id, `${_settlesReceipt ? 'Settled' : 'Converted to debt'} ${getRecordType(savedReceipt || old)}`, {
+              old,
+              new: savedReceipt || settlement.receipt?.data,
+              updatedAdIds: settlement.updatedAds.map(entity => entity.id),
+              replayed: settlement.replayed === true
+            });
+          } else if (entityOrSettlement?.data) {
             const idx = array.findIndex(x => x && x.id === id);
             if (idx !== -1) {
-              array[idx] = Security.sanitizeObject(entity.data);
+              array[idx] = Security.sanitizeObject(entityOrSettlement.data);
               if (collectionName) markCollectionDirty(collectionName);
               saveState();
-              // Force full render to ensure list views update
-              forceFullRender();
             }
+          }
+          // Settle/convert skipped the optimistic paint, so this echo is the
+          // FIRST paint of the committed multi-entity state (receipt + ads +
+          // customer debt + reconciliation): keep the full render. A plain
+          // PATCH echo was already painted optimistically 100-500ms ago —
+          // schedule a normal render instead so the identical-HTML skip turns
+          // the common byte-identical echo into a no-DOM-op rather than a
+          // second full innerHTML swap (double entry-animation + icon flash
+          // on phones); when the server echo really drifted, only the view
+          // container repaints via the partial path.
+          if (_settlesReceipt || _convertsReceipt) {
+            forceFullRender();
+          } else {
+            RenderQueue.schedule('patchEcho');
           }
           return true;
         })
         .catch(async (e) => {
-          if (e?.status === 409) {
+          // Only a REAL version conflict ("Conflict: ..." detail) means someone
+          // else changed the record; reload-and-retry is the right advice there.
+          // Every other 409 is a deliberate business-rule refusal (e.g. "A
+          // settled receipt's amount cannot be increased by editing") — telling
+          // the user it "changed on another device" sent them chasing phantom
+          // editors, and refreshing could never fix it. Name the real reason.
+          const _realConflict = e?.status === 409 &&
+            (typeof isVersionConflict409 === 'function'
+              ? isVersionConflict409(e)
+              : /^conflict:/i.test(String(e?.message || '').trim()));
+          if (_realConflict) {
             try {
               const latest = await apiGetEntity(collectionName, id);
               const idx = array.findIndex(x => x && x.id === id);
+              let _latestData = null;
               if (idx !== -1 && latest?.data) {
-                array[idx] = Security.sanitizeObject(latest.data);
+                 _latestData = Security.sanitizeObject(latest.data);
+                 array[idx] = collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function'
+                   ? makeLightweightMediaRecord(collectionName, _latestData)
+                   : _latestData;
                 if (collectionName) markCollectionDirty(collectionName);
                 saveState();
               }
-              showNotification('Conflict', 'This record was changed by another user. We loaded the latest version.', 'warning');
+              // Reload the OPEN modal from the fresh copy — form fields AND
+              // baseline together. Refreshing only the version stamp under a
+              // form that still displays the stale snapshot was a silent
+              // lost-update: the next Save would pass the optimistic lock and
+              // overwrite the other user's committed change with old values.
+              // A full reload makes "We loaded the latest version" true and
+              // keeps the lock meaningful (unsaved edits are discarded — the
+              // honest cost of a real conflict).
+              if (_latestData && state.modalData && String(state.modalData.id) === String(id)
+                  && idx !== -1 && state.activeModal) {
+                state.modalData = array[idx];
+                try { if (typeof renderModal === 'function') renderModal(); } catch (_) {}
+              }
+              // A settle/unsettle whose FIRST attempt committed but whose
+              // response was lost lands here on the user's manual retry: the
+              // fresh idempotency key bypasses the server replay marker and
+              // the stale modal baseline 409s. Claim "already saved" ONLY
+              // when the stored record actually matches what THIS save
+              // intended field-by-field — the status boolean alone misfired
+              // for any concurrent edit on a Paid receipt (every paid-keeping
+              // edit routes through the settle path), showing a success toast
+              // for an edit that was never saved. Volatile server-stamped
+              // keys are excluded; a too-strict match only downgrades to the
+              // honest conflict warning, never to a false success.
+              const _volatileMatchKeys = ['_lastModified', 'lastModified', 'updatedAt', 'editHistory', 'editCount', 'collectionDate', 'deliveryHistory', 'customerName', 'createdByName'];
+              const _intentMatchesLatest = () => {
+                try {
+                  return Object.keys(sanitizedUpdates || {}).every(key => {
+                    if (_volatileMatchKeys.includes(key)) return true;
+                    const sent = sanitizedUpdates[key] === undefined ? null : sanitizedUpdates[key];
+                    const stored = _latestData[key] === undefined ? null : _latestData[key];
+                    return JSON.stringify(sent) === JSON.stringify(stored);
+                  });
+                } catch (_) { return false; }
+              };
+              const _alreadyApplied = !!_latestData && (
+                (_settlesReceipt && (String(_latestData.status || '').toLowerCase() === 'paid' || _latestData.isPaid === true)) ||
+                (_convertsReceipt && _latestData.isPaid === false)
+              ) && _intentMatchesLatest();
+              if (_alreadyApplied) {
+                showNotification(
+                  state.language === 'ar' ? 'تم الحفظ' : 'Already saved',
+                  state.language === 'ar'
+                    ? 'تم حفظ تغييرك بالفعل رغم انقطاع الشبكة. تم تحميل أحدث نسخة.'
+                    : 'Already saved: your first attempt reached the server despite the network error. Showing the latest version.',
+                  'success'
+                );
+              } else {
+                showNotification(
+                  state.language === 'ar' ? 'تعارض' : 'Conflict',
+                  state.language === 'ar'
+                    ? 'تم تغيير هذا السجل من مستخدم آخر. تم تحميل أحدث نسخة.'
+                    : 'This record was changed by another user. We loaded the latest version.',
+                  'warning'
+                );
+              }
               render();
               return false;
             } catch (err) {
               // fallthrough to rollback
             }
+          } else if (e?.status === 409) {
+            // Rule refusal: roll back the optimistic write and surface the
+            // server's actual reason (localized for the known rules).
+            // Restore only while the slot still holds this call's optimistic
+            // object — if live-sync (or a chained PATCH echo) installed a
+            // newer copy mid-flight, writing the stale open-time snapshot
+            // would clobber committed money state. Settle/convert made no
+            // optimistic write, so nothing needs restoring for them.
+            const idx = array.findIndex(x => x && x.id === id);
+            if (idx !== -1 && _optimisticRecord && array[idx] === _optimisticRecord) {
+              array[idx] = old;
+              if (collectionName) markCollectionDirty(collectionName);
+              saveState();
+            }
+            const reason = typeof describe409 === 'function'
+              ? describe409(e, String(e?.message || ''))
+              : String(e?.message || '');
+            showNotification(
+              state.language === 'ar' ? 'غير مسموح' : 'Not Allowed',
+              reason || (state.language === 'ar' ? 'رفض الخادم هذا التعديل.' : 'The server refused this change.'),
+              'warning'
+            );
+            render();
+            return false;
           }
 
-          // Rollback on failure
+          // Rollback on failure — same identity guard as the rule-refusal
+          // branch: never write the stale snapshot over a slot that live-sync
+          // or a chained echo replaced mid-flight, and settle/convert (which
+          // made no optimistic write) restores nothing.
           const idx = array.findIndex(x => x && x.id === id);
-          if (idx !== -1) array[idx] = old;
-          if (collectionName) markCollectionDirty(collectionName);
-          saveState();
+          if (idx !== -1 && _optimisticRecord && array[idx] === _optimisticRecord) {
+            array[idx] = old;
+            if (collectionName) markCollectionDirty(collectionName);
+            saveState();
+          }
           // Handle 401 - session expired, prompt re-login
           if (e?.status === 401) {
             showNotification('Session Expired', 'Your session has expired. Please log out and log back in.', 'warning');
@@ -497,6 +1229,10 @@ function getRecordType(record) {
 function redactSensitive(obj, depth = 0) {
   if (depth > 12) return null;
   if (obj === null || obj === undefined) return obj;
+  // Audit metadata must never duplicate inline image bodies. A single update
+  // previously copied every photo in both {old,new}, then persisted that copy
+  // in the local log, causing multi-megabyte saves and storage exhaustion.
+  if (typeof obj === 'string' && /^data:image\//i.test(obj.trim())) return '[media omitted]';
   if (typeof obj !== 'object') return obj;
   if (Array.isArray(obj)) return obj.map(x => redactSensitive(x, depth + 1));
 
@@ -515,6 +1251,11 @@ function redactSensitive(obj, depth = 0) {
   const out = {};
   for (const [k, v] of Object.entries(obj)) {
     if (SENSITIVE_KEYS.has(k)) continue;
+    if (/^(?:photo|photos|adPhotos|receiptImage|image|images|screenshot|screenshots)$/i.test(k)) {
+      const count = Array.isArray(v) ? v.filter(Boolean).length : (v ? 1 : 0);
+      out[k] = count ? `[media omitted: ${count}]` : '[no media]';
+      continue;
+    }
     out[k] = redactSensitive(v, depth + 1);
   }
   return out;
@@ -617,7 +1358,10 @@ const VIEW_PERMISSION_MODULES = {
   settings: 'settings',
   // Clothes System is open to non-admins holding clothesProducts view/viewOwn
   // (subscription checked inside renderClothesSystemView)
-  'clothes-system': 'clothesProducts'
+  'clothes-system': 'clothesProducts',
+  // Customer self-service portal. This view is deliberately not part of
+  // PLATFORM_ADMIN_ONLY_VIEWS; server ownership rules still isolate records.
+  'ads-studio': 'adCampaignRequests'
 };
 
 const ALBAYAN_MANAGER_VIEW_ORDER = [
@@ -631,7 +1375,8 @@ const ALBAYAN_MANAGER_VIEW_ORDER = [
   'audit',
   'settings',
   'users',
-  'clothes-system'
+  'clothes-system',
+  'ads-studio'
 ];
 
 function userCanAccessView(user, view) {
@@ -745,11 +1490,15 @@ function getReceiptUsageStats(receipt) {
       ? ad.dueAllocations.filter(a => String(a.receiptId || '') === receiptId).reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0)
       : 0;
 
-    // Legacy: check linkedDeliveryReceiptId with dueAmountToUseUSD
-    let legacyDueUsage = 0;
-    if (String(ad.linkedDeliveryReceiptId || '') === receiptId && dueAllocSum === 0) {
-      legacyDueUsage = parseFloat(ad.dueAmountToUseUSD) || 0;
-    }
+    // Legacy due mirrors belong to Driver links (linkedDeliveryReceiptId) or
+    // Not Paid In-Shop links (receiptId), but only for ROWLESS ads: once any
+    // positive due row exists, the writers keep the scalar mirror equal to the
+    // rows' sum, so reading it here would charge the same money twice.
+    const hasAnyPositiveDueRow = Array.isArray(ad.dueAllocations)
+      && ad.dueAllocations.some(a => (parseFloat(a?.amountUSD) || 0) > 0);
+    const legacyDueUsage = !hasAnyPositiveDueRow
+      ? getAdLegacyDueMirrorUSD(ad, receiptId, receiptObj.exchangeRate)
+      : 0;
 
     // Use explicit allocations if available, otherwise fall back to ad spend
     const explicitAllocations = receiptAllocSum + dueAllocSum + legacyDueUsage;
@@ -775,6 +1524,16 @@ function getReceiptUsageStats(receipt) {
       Array.isArray(ad.receiptAllocations) ||
       Array.isArray(ad.dueAllocations);
     if (hasAllocationData) {
+      return sum;
+    }
+
+    // A rowless Not Paid Driver/In-Shop reference is provenance, not proof that
+    // the receipt funded the whole ad. Only the positive legacy mirror above
+    // can turn this link into a commitment.
+    const paymentState = typeof getAdPaymentState === 'function'
+      ? getAdPaymentState(ad)
+      : (ad.isPaid === true ? 'paid' : 'not_paid');
+    if (paymentState === 'not_paid' && ['driver', 'in_shop'].includes(String(ad.collectionMethod || ''))) {
       return sum;
     }
 
@@ -808,8 +1567,8 @@ function getReceiptUsageStats(receipt) {
   };
 }
 
-// Compute usage stats for a DELIVERY receipt's due amount (Not Paid receipts)
-// This tracks how much of the debt/due amount has been used by ads linking to this receipt
+// Compute usage stats for a receipt's promised/due amount (Not Paid receipts).
+// This covers both delivery debt and unpaid In Shop receipt budgets.
 function getDeliveryReceiptDueUsage(receipt) {
   const receiptObj = typeof receipt === 'string'
     ? (state.receipts || []).find(r => r.id === receipt)
@@ -819,46 +1578,75 @@ function getDeliveryReceiptDueUsage(receipt) {
     return { totalDueUSD: 0, usedDueUSD: 0, remainingDueUSD: 0, fundedAds: [] };
   }
 
-  const receiptId = String(receiptObj.id || '');
-
-  // Total due amount in USD (convert from LYD using receipt's exchange rate)
+  // ONE POT. A receipt is a single sum of money; "delivery due" and "paid balance" are
+  // two NAMES for it at two moments in time, not two pots. This function used to keep a
+  // second, independent ledger: it counted ONLY dueAllocations and read the frozen debt
+  // as a capacity of its own. So once a driver collected a receipt, the same money was
+  // advertised twice — once as due credit here, once as paid balance by
+  // getReceiptUsageStats — and two ads could each spend it.
+  //
+  // Both readers are now views over the SAME committed total. getReceiptUsageStats
+  // already sums every commitment against a receipt (receiptAllocations + dueAllocations
+  // + the legacy mirror), so defer to it rather than maintaining a rival count.
   const exchangeRate = receiptObj.exchangeRate || state.defaultExchangeRate || 1;
   const dueAmountLocal = Number(receiptObj.debtAmountLocal ?? receiptObj.amountLocal ?? 0) || 0;
-  const totalDueUSD = exchangeRate > 0 ? dueAmountLocal / exchangeRate : 0;
+  const debtUSD = exchangeRate > 0 ? dueAmountLocal / exchangeRate : 0;
+  const statusDetail = receiptObj.statusDetail && typeof receiptObj.statusDetail === 'object'
+    ? receiptObj.statusDetail
+    : {};
+  const notPaidCollection = String(statusDetail.notPaidCollection || '').trim().toLowerCase();
 
-  // Find all ads that use this delivery receipt's due amount
-  const fundedAds = getVisibleRecords(state.ads || []).filter(ad => {
-    if (ad._deleted || ad.recordType === 'receipt') return false;
-    // Check if ad has dueAllocations pointing to this receipt
-    if (Array.isArray(ad.dueAllocations)) {
-      return ad.dueAllocations.some(a => String(a.receiptId || '') === receiptId);
+  // Capacity: before collection the receipt is worth the debt the driver will collect.
+  // Once collected it is worth what was ACTUALLY collected (amountUSD) — the debt fields
+  // survive as history and must never be read as a second capacity. Over-collecting
+  // legitimately adds real balance; re-reading the stale debt invents it.
+  const collected = receiptObj.isPaid === true || String(receiptObj.status || '') === 'Paid';
+  const isShopReceipt = ['office', 'in_shop', 'shop'].includes(notPaidCollection);
+  const totalDueUSD = (collected || isShopReceipt)
+    ? (Number(receiptObj.amountUSD) || 0)
+    : debtUSD;
+
+  // Count only EXPLICIT commitments — an allocation row in either pool, or the legacy due
+  // mirror. Deliberately NOT getReceiptUsageStats.usedUSD: that function also carries a
+  // whole-ad fallback for pre-allocation records, charging an ad's ENTIRE spend against any
+  // receipt it merely REFERENCES. A driver-collected ad references its delivery receipt but
+  // is funded by the customer's cash, not by the receipt's credit — charging it here would
+  // destroy credit the customer genuinely holds and make the server 409 their next ad.
+  const receiptId = String(receiptObj.id || '');
+  const fundedAds = [];
+  let usedDueUSD = 0;
+  for (const ad of getVisibleRecords(state.ads || [])) {
+    if (!ad || ad._deleted || ad.recordType === 'receipt') continue;
+    const sumFor = (rows) => (Array.isArray(rows) ? rows : [])
+      .filter(a => String(a.receiptId || '') === receiptId)
+      .reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0);
+
+    const paidRows = sumFor(ad.receiptAllocations);
+    const dueRows = sumFor(ad.dueAllocations);
+
+    // The legacy mirror only speaks for a ROWLESS ad: once any positive due
+    // row exists (for this receipt or another), the scalar is the rows' sum,
+    // not additional money.
+    let legacyDue = 0;
+    const hasAnyPositiveDueRow = Array.isArray(ad.dueAllocations)
+      && ad.dueAllocations.some(a => (parseFloat(a?.amountUSD) || 0) > 0);
+    if (!hasAnyPositiveDueRow) legacyDue = getAdLegacyDueMirrorUSD(ad, receiptId, exchangeRate);
+
+    const committed = paidRows + dueRows + legacyDue;
+    if (committed > 0) {
+      usedDueUSD += committed;
+      fundedAds.push(ad);
     }
-    // Legacy: check linkedDeliveryReceiptId
-    return String(ad.linkedDeliveryReceiptId || '') === receiptId && (ad.dueAmountToUseUSD > 0 || ad.dueAmountToUseLYD > 0);
-  });
-  
-  // Calculate total used from due
-  const usedDueUSD = fundedAds.reduce((sum, ad) => {
-    // First check dueAllocations (new system)
-    if (Array.isArray(ad.dueAllocations)) {
-      const allocSum = ad.dueAllocations
-        .filter(a => String(a.receiptId || '') === receiptId)
-        .reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0);
-      if (allocSum > 0) return sum + allocSum;
-    }
-    // Legacy: check dueAmountToUseUSD or convert from LYD
-    if (String(ad.linkedDeliveryReceiptId || '') === receiptId) {
-      if (ad.dueAmountToUseUSD > 0) return sum + ad.dueAmountToUseUSD;
-      if (ad.dueAmountToUseLYD > 0) {
-        const adExRate = ad.exchangeRate || exchangeRate || 1;
-        return sum + (ad.dueAmountToUseLYD / adExRate);
-      }
-    }
-    return sum;
-  }, 0);
-  
-  const remainingDueUSD = Math.max(totalDueUSD - usedDueUSD, 0);
-  
+  }
+
+  // transferredUSD depends ONLY on receiptObj.transfers (same reduce as
+  // getReceiptUsageStats). Calling getReceiptUsageStats here executed a SECOND
+  // full ads scan per receipt just to read this array-local number — a real
+  // cost inside per-keystroke renders on phones.
+  const transfers = receiptObj.transfers || [];
+  const transferredUSD = transfers.reduce((sum, t) => sum + (t.amountUSD || 0), 0) || 0;
+  const remainingDueUSD = Math.max(totalDueUSD - usedDueUSD - transferredUSD, 0);
+
   return {
     totalDueUSD,
     usedDueUSD,
@@ -868,11 +1656,79 @@ function getDeliveryReceiptDueUsage(receipt) {
   };
 }
 
+// Canonical receipt status used by filters and debt reporting. Historical
+// records contain several spellings (Pending, Unpaid, Cancelled), while new
+// records use Not Paid and Canceled. Keep that compatibility at read time so
+// old receipts immediately benefit without rewriting financial history.
+function getReceiptPaymentState(receipt) {
+  if (!receipt || receipt._deleted) return 'unknown';
+  const status = String(receipt.status || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '');
+
+  if (status === 'canceled' || status === 'cancelled') return 'canceled';
+  if (status === 'lost') return 'lost';
+  if (status === 'paid') return 'paid';
+  if (status === 'notpaid' || status === 'unpaid' || status === 'pending') return 'not_paid';
+
+  if (receipt.isPaid === true) return 'paid';
+  if (receipt.isPaid === false) return 'not_paid';
+  return 'unknown';
+}
+
+// Delivery identity is independent of whether the customer has already paid.
+// Strong persisted markers come first; deliveryPersonId is only a fallback for
+// older records that predate statusDetail/receiptType.
+function isDeliveryReceiptRecord(receipt) {
+  if (!receipt || receipt._deleted) return false;
+  const detail = receipt.statusDetail && typeof receipt.statusDetail === 'object'
+    ? receipt.statusDetail
+    : {};
+  const unpaidCollection = String(detail.notPaidCollection || '').trim().toLowerCase();
+  const paidCollection = String(detail.paidCollection || '').trim().toLowerCase();
+  const receiptType = String(receipt.receiptType || '').trim().toUpperCase();
+  const tempNo = String(receipt.tempReceiptNo || '').trim();
+  const deliveryStatus = String(receipt.deliveryStatus || '').trim().toLowerCase();
+
+  if (unpaidCollection === 'delivery' || paidCollection === 'delivery') return true;
+  if (receiptType === 'DELIVERY_TEMP') return true;
+  if (/^D\d+$/i.test(tempNo)) return true;
+  if (deliveryStatus && deliveryStatus !== 'office') return true;
+
+  const explicitShop = ['office', 'in_shop', 'shop'].includes(unpaidCollection);
+  return !explicitShop && !!String(receipt.deliveryPersonId || detail.paidDeliveryPersonId || '').trim();
+}
+
+// Returns the CURRENT customer debt source. Collection/reconciliation is a
+// separate concept and must not decide whether the customer owes this money.
+function getReceiptDebtType(receipt) {
+  if (!receipt || receipt._deleted) return 'none';
+  const receiptType = String(receipt.receiptType || '').trim().toUpperCase();
+  if (receiptType === 'TRANSFER_IN') return 'none';
+  if (getReceiptPaymentState(receipt) !== 'not_paid') return 'none';
+  // Delivery cancellation intentionally leaves the original receipt payment
+  // label/history intact, but the debt is released and will never be collected.
+  // Do not keep that canceled mission in customer-debt totals or filters.
+  const deliveryStatus = String(receipt.deliveryStatus || '').trim().toLowerCase();
+  if (deliveryStatus === 'canceled' || deliveryStatus === 'cancelled') return 'none';
+  return isDeliveryReceiptRecord(receipt) ? 'delivery' : 'shop';
+}
+
+// Locale for every user-visible date. Without an explicit locale, phones set
+// to Arabic default to ar-SA — Hijri calendar with Arabic-Indic digits — so
+// 2026-07-22 rendered as year ١٤٤٨. The -u- extension keys pin the Gregorian
+// calendar and latin digits; they are honored by every Intl implementation
+// far below the iOS 15 baseline.
+function appDateLocale() {
+  return state.language === 'ar' ? 'ar-LY-u-ca-gregory-nu-latn' : 'en-GB';
+}
+
 function formatDateShort(date) {
   const never = state.language === 'ar' ? 'أبداً' : 'Never';
   if (!date) return never;
   try {
-    return new Date(date).toLocaleString();
+    return new Date(date).toLocaleString(appDateLocale());
   } catch (e) {
     return never;
   }

@@ -49,8 +49,6 @@ html.is-rendering {
 #app.is-rendering {
   /* Lock current height during update */
   min-height: var(--app-height, 100vh);
-  /* Prevent any animations during render */
-  pointer-events: none;
 }
 
 /* DISABLE the fadeIn animation - it causes blinking */
@@ -123,7 +121,7 @@ img, svg, [data-lucide] {
 }
 
 /* Mobile: Extra anti-jump measures */
-@media (max-width: 768px) {
+@media (max-width: 900px) {
   html, body {
     /* Prevent overscroll effects */
     overscroll-behavior: none;
@@ -1092,9 +1090,21 @@ table tbody tr:hover {
   box-shadow: 0 4px 20px rgba(239, 68, 68, 0.2);
 }
 
-/* Toast notifications positioning */
+/* Toast notifications positioning. The page opts into viewport-fit=cover, so
+   in a phone browser the fixed toasts/sync pill must respect the notch and
+   rounded corners: --app-safe-* resolves to env(safe-area-inset-*, 0px) in
+   browsers (0 on desktop, keeping these identical to the Tailwind top-16 /
+   right-4 they override via ID specificity) and to the injected native vars
+   under Capacitor. */
 #notification-container {
   pointer-events: none;
+  top: calc(4rem + var(--app-safe-top));
+  right: max(1rem, var(--app-safe-right));
+}
+
+#sync-status-container {
+  top: calc(1rem + var(--app-safe-top));
+  right: max(1rem, var(--app-safe-right));
 }
 
 #notification-container > * {
@@ -1400,25 +1410,73 @@ textarea:disabled {
    MOBILE-RESPONSIVE TABLES & LAYOUTS
    ========================================== */
 
-/* On mobile, make table rows display as cards */
-@media (max-width: 768px) {
-  /* Table becomes a card stack on mobile */
-  .glass-panel table {
+:root {
+  --app-safe-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
+  --app-safe-right: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
+  --app-safe-bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+  --app-safe-left: var(--safe-area-inset-left, env(safe-area-inset-left, 0px));
+}
+
+/* The photo viewer is a primary outside-the-form action, not another tiny
+   icon. Keep it visibly button-shaped and large enough for touch screens. */
+.ad-photo-view-button {
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid rgba(6, 182, 212, 0.35);
+  border-radius: 0.65rem;
+  color: #0e7490;
+  background: rgba(207, 250, 254, 0.72);
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.ad-photo-view-button:hover {
+  color: #155e75;
+  border-color: rgba(8, 145, 178, 0.6);
+  background: rgba(165, 243, 252, 0.85);
+}
+
+.ad-photo-view-button:focus-visible {
+  outline: 3px solid rgba(6, 182, 212, 0.38);
+  outline-offset: 2px;
+}
+
+.ad-photo-view-button[aria-busy="true"] {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.dark .ad-photo-view-button {
+  color: #67e8f9;
+  border-color: rgba(34, 211, 238, 0.35);
+  background: rgba(8, 145, 178, 0.16);
+}
+
+.dark .ad-photo-view-button:hover {
+  color: #cffafe;
+  background: rgba(8, 145, 178, 0.28);
+}
+
+/* Only tables that provide data-label attributes opt into the card layout.
+   Other tables keep their headings and remain horizontally scrollable. */
+@media (max-width: 900px) {
+  .mobile-card-table {
     display: block;
+    width: 100%;
     overflow-x: visible;
   }
 
-  .glass-panel table thead {
+  .mobile-card-table thead {
     display: none; /* Hide header on mobile */
   }
 
-  .glass-panel table tbody {
+  .mobile-card-table tbody {
     display: flex;
     flex-direction: column;
     gap: 1rem;
   }
 
-  .glass-panel table tbody tr {
+  .mobile-card-table tbody tr {
     display: flex;
     flex-wrap: wrap;
     padding: 1rem;
@@ -1429,12 +1487,12 @@ textarea:disabled {
     align-items: center;
   }
 
-  .dark .glass-panel table tbody tr {
+  .dark .mobile-card-table tbody tr {
     background: rgba(15, 23, 42, 0.5);
     border-color: rgba(var(--brand-teal-rgb), 0.1);
   }
 
-  .glass-panel table tbody tr td {
+  .mobile-card-table tbody tr td {
     display: flex;
     flex-direction: column;
     padding: 0.25rem 0.5rem;
@@ -1443,8 +1501,12 @@ textarea:disabled {
     flex-shrink: 0;
   }
 
+  .mobile-card-table tbody tr td.hidden {
+    display: none !important;
+  }
+
   /* Make certain columns take full width on mobile */
-  .glass-panel table tbody tr td:first-child {
+  .mobile-card-table tbody tr td:first-child {
     flex-basis: 100%;
     font-size: 1.125rem;
     font-weight: 700;
@@ -1454,7 +1516,7 @@ textarea:disabled {
   }
 
   /* Actions column stays at the end */
-  .glass-panel table tbody tr td:last-child {
+  .mobile-card-table tbody tr td:last-child {
     flex-basis: 100%;
     margin-top: 0.5rem;
     padding-top: 0.75rem;
@@ -1462,20 +1524,31 @@ textarea:disabled {
     justify-content: center;
   }
 
-  .glass-panel table tbody tr td:last-child > div {
+  .mobile-card-table tbody tr td:last-child > div {
     justify-content: center;
     gap: 0.75rem;
   }
 
   /* Style action buttons for mobile */
-  .glass-panel table tbody tr td:last-child button {
+  .mobile-card-table tbody tr td:last-child button {
     padding: 0.5rem;
     border-radius: 0.5rem;
     background: rgba(var(--brand-blue-rgb), 0.1);
   }
 
+  .mobile-card-table tbody tr td:last-child button.ad-photo-view-button {
+    min-height: 2.75rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid rgba(6, 182, 212, 0.4);
+    background: rgba(207, 250, 254, 0.82);
+  }
+
+  .dark .mobile-card-table tbody tr td:last-child button.ad-photo-view-button {
+    background: rgba(8, 145, 178, 0.2);
+  }
+
   /* Add data labels before content on mobile (via pseudo-elements) */
-  .glass-panel table tbody tr td::before {
+  .mobile-card-table tbody tr td::before {
     content: attr(data-label);
     font-size: 0.625rem;
     font-weight: 600;
@@ -1485,35 +1558,30 @@ textarea:disabled {
     opacity: 0.7;
     margin-bottom: 0.25rem;
   }
+
+  .mobile-card-table tbody tr td:not([data-label])::before {
+    display: none;
+  }
+
+  .audit-mobile-table tbody tr td {
+    flex: 1 1 calc(50% - 0.5rem);
+  }
+
+  .audit-mobile-table tbody tr td:first-child,
+  .audit-mobile-table tbody tr td:last-child,
+  .audit-mobile-table tbody tr td.audit-description-cell {
+    flex-basis: 100%;
+  }
+
+  .audit-mobile-table .audit-description-cell p.truncate {
+    overflow: visible;
+    white-space: normal;
+    text-overflow: clip;
+  }
 }
 
 /* Mobile-responsive header sections */
 @media (max-width: 640px) {
-  /* Stack header title and buttons vertically */
-  .flex.justify-between.items-center {
-    flex-direction: column;
-    align-items: flex-start !important;
-    gap: 1rem;
-  }
-
-  /* Full-width buttons on mobile */
-  .flex.justify-between.items-center .btn-shine,
-  .flex.justify-between.items-center button {
-    width: 100%;
-    justify-content: center;
-  }
-
-  /* Stack filter dropdowns */
-  .flex.flex-wrap.gap-2 {
-    flex-direction: column;
-    width: 100%;
-  }
-
-  .flex.flex-wrap.gap-2 > select,
-  .flex.flex-wrap.gap-2 > button {
-    width: 100%;
-  }
-
   /* Reduce heading sizes on mobile */
   h1.text-3xl {
     font-size: 1.5rem;
@@ -1557,42 +1625,72 @@ textarea:disabled {
     word-wrap: break-word;
   }
 
-  /* Grid should be single column on mobile */
-  .grid.grid-cols-2,
-  .grid.grid-cols-3,
-  .grid.grid-cols-4 {
-    grid-template-columns: 1fr;
-  }
-
-  /* Exception: small stat grids can be 2 columns */
-  .grid.grid-cols-2.gap-3,
-  .grid.grid-cols-2.gap-4 {
-    grid-template-columns: repeat(2, 1fr);
-  }
 }
 
-/* Modal responsiveness */
-@media (max-width: 768px) {
-  /* Full-screen modals on mobile */
-  .fixed.inset-0 > .glass-panel,
-  .fixed.inset-0 > div > .glass-panel {
-    max-height: 95vh;
-    max-width: 95vw;
-    margin: 0.5rem;
+/* Modal responsiveness.
+   900px matches the app shell's own phone breakpoint (.app-main /
+   .mobile-bottom-nav below): landscape phones are 844-915px wide, so the old
+   768px gate reverted their modals to the desktop centered layout — clipped
+   at both ends with no scroll path. The max-height alternative catches Pro
+   Max iPhones/Pixel 8 landscape (932-956px wide but only ~400px tall) and any
+   short window, where centered tall dialogs are equally unusable. */
+@media (max-width: 900px), (max-height: 500px) {
+  /* Use the overlay as the single scrolling surface. This keeps the header,
+     form and bottom action buttons reachable when browser bars or the phone
+     keyboard reduce the visual viewport. justify-content is deliberately NOT
+     forced: the overlay is a row flex container, so the markup's
+     justify-center keeps narrow panels horizontally centered on short
+     desktop windows while align-items:flex-start provides the scroll path. */
+  .mobile-dialog-overlay {
+    align-items: flex-start !important;
+    min-height: 100dvh;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    padding-top: max(0.75rem, var(--app-safe-top)) !important;
+    padding-right: max(0.75rem, var(--app-safe-right)) !important;
+    padding-bottom: max(0.75rem, var(--app-safe-bottom)) !important;
+    padding-left: max(0.75rem, var(--app-safe-left)) !important;
+  }
+
+  .mobile-dialog-overlay > :first-child {
+    flex-shrink: 0;
+    max-height: none !important;
+    margin: 0 !important;
+  }
+
+  .mobile-dialog-overlay > .glass-panel,
+  .mobile-dialog-overlay > :first-child.overflow-y-auto,
+  .mobile-dialog-overlay > :first-child.overflow-hidden {
+    overflow: visible !important;
     border-radius: 1rem;
   }
 
-  /* Modal content scrollable */
-  .fixed.inset-0 .overflow-y-auto {
-    max-height: calc(95vh - 120px);
+  .mobile-dialog-overlay .sticky.bottom-0 {
+    padding-bottom: max(0.75rem, var(--app-safe-bottom));
   }
 
-  /* Modal form inputs full width */
-  .fixed.inset-0 input,
-  .fixed.inset-0 select,
-  .fixed.inset-0 textarea {
-    width: 100%;
+  .mobile-dialog-overlay input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+  .mobile-dialog-overlay select,
+  .mobile-dialog-overlay textarea {
+    max-width: 100%;
     font-size: 16px; /* Prevent iOS zoom */
+  }
+}
+
+/* Phone-width only: dialogs span the full width. Kept separate from the
+   combined query above so a short DESKTOP window (max-height:500px arm)
+   gets the overlay scroll path but dialogs keep their own max-w-* caps
+   and horizontal centering. */
+@media (max-width: 900px) {
+  .mobile-dialog-overlay > :first-child {
+    width: 100%;
+    max-width: 100% !important;
+  }
+
+  .mobile-dialog-overlay .glass-panel {
+    max-width: 100%;
   }
 }
 
@@ -1651,8 +1749,7 @@ textarea:disabled {
   
   /* Use active state instead of hover for touch feedback */
   .card-hover-lift:active,
-  .pipeline-stage:active,
-  .glass-panel:active {
+  .pipeline-stage:active {
     transform: scale(0.98);
     opacity: 0.9;
   }
@@ -1671,15 +1768,28 @@ body.is-touch *:hover {
   transition-delay: 0s !important;
 }
 
-/* Ensure minimum touch target sizes (44x44 as per Apple HIG) */
-body.is-mobile button,
-body.is-mobile a,
-body.is-mobile [role="button"],
-body.is-mobile input[type="checkbox"],
-body.is-mobile input[type="radio"],
-body.is-mobile select {
-  min-height: 44px;
-  min-width: 44px;
+/* Ensure controls are comfortably tappable without stretching the checkbox or
+   radio glyph itself. The label/wrapper is the touch target for those inputs. */
+@media (max-width: 768px), (pointer: coarse) {
+  button,
+  select,
+  .touch-target,
+  [role="button"] {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  label:has(> input[type="checkbox"]),
+  label:has(> input[type="radio"]),
+  label:has(input[type="file"]) {
+    min-height: 44px;
+  }
+
+  input[type="checkbox"],
+  input[type="radio"] {
+    min-height: 1rem;
+    min-width: 1rem;
+  }
 }
 
 body.is-mobile input[type="text"],
@@ -1687,11 +1797,26 @@ body.is-mobile input[type="email"],
 body.is-mobile input[type="password"],
 body.is-mobile input[type="number"],
 body.is-mobile input[type="tel"],
+body.is-mobile input[type="date"],
+body.is-mobile input[type="datetime-local"],
+body.is-mobile input[type="time"],
+body.is-mobile input[type="month"],
+body.is-mobile input[type="search"],
+body.is-mobile input[type="url"],
 body.is-mobile textarea,
 body.is-mobile select {
   /* Prevent iOS zoom on input focus (requires 16px+ font) */
   font-size: 16px !important;
 }
+
+/* iOS 15.0-15.3 fallback: dvh units parse only from WebKit 15.4. style.css
+   loads BEFORE assets/tailwind.css (see index.html), so on newer engines the
+   later same-specificity dvh declaration wins, while engines that drop dvh
+   keep these vh caps and modals stay scroll-bounded. */
+.max-h-\[42dvh\] { max-height: 42vh; }
+.max-h-\[60dvh\] { max-height: 60vh; }
+.max-h-\[90dvh\] { max-height: 90vh; }
+.max-h-\[92dvh\] { max-height: 92vh; }
 
 /* Fix for Capacitor safe areas.
    iOS: notch/home-indicator — WKWebView exposes env(safe-area-inset-*).
@@ -1700,10 +1825,10 @@ body.is-mobile select {
    so env() reads 0 there — read the variable first, fall back to env(). */
 body.platform-ios,
 body.platform-android {
-  padding-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
-  padding-bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
-  padding-left: var(--safe-area-inset-left, env(safe-area-inset-left, 0px));
-  padding-right: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
+  padding-top: var(--app-safe-top);
+  padding-bottom: var(--app-safe-bottom);
+  padding-left: var(--app-safe-left);
+  padding-right: var(--app-safe-right);
 }
 
 /* Fix for iOS momentum scrolling */
@@ -1726,17 +1851,6 @@ body.is-mobile * {
   -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
 }
 
-/* Fix for Android keyboard pushing content */
-body.platform-android {
-  height: 100%;
-  overflow: hidden;
-}
-
-body.platform-android #app {
-  height: 100%;
-  overflow-y: auto;
-}
-
 /* Reduce motion for users who prefer it */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -1749,21 +1863,162 @@ body.platform-android #app {
   }
 }
 
-/* Mobile sidebar fixes */
-@media (max-width: 768px) {
-  body.is-mobile .sidebar,
-  body.is-mobile nav {
-    /* Ensure sidebar is touchable and doesn't overlap content */
-    z-index: 1000;
+/* The semantic shell stays phone-sized in landscape too. Tailwind's md
+   desktop utilities start at 768px, which many phones exceed when rotated. */
+@media (max-width: 900px) {
+  .app-main {
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    width: 100%;
   }
-  
-  /* Increase tap targets on mobile */
-  body.is-mobile .nav-item,
-  body.is-mobile .menu-item {
-    padding: 12px 16px;
-    min-height: 48px;
-    display: flex;
-    align-items: center;
+
+  .mobile-app-header {
+    display: flex !important;
+    padding-top: 0.75rem;
+  }
+
+  body:not(.platform-ios):not(.platform-android) .mobile-app-header {
+    padding-top: max(0.75rem, var(--app-safe-top));
+    padding-right: max(0.75rem, var(--app-safe-right));
+    padding-left: max(0.75rem, var(--app-safe-left));
+  }
+
+  .app-sidebar {
+    width: min(18rem, calc(100vw - 3rem)) !important;
+    max-width: calc(100vw - 3rem);
+    padding-top: var(--app-safe-top);
+    padding-bottom: var(--app-safe-bottom);
+  }
+
+  .app-sidebar.-translate-x-full {
+    transform: translateX(-100%) !important;
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .app-sidebar.translate-x-0 {
+    transform: translateX(0) !important;
+    visibility: visible;
+    pointer-events: auto;
+  }
+
+  .mobile-menu-backdrop {
+    display: block !important;
+  }
+
+  .mobile-sidebar-close {
+    display: flex !important;
+  }
+
+  .app-content {
+    padding-right: 1rem;
+    padding-bottom: 1rem;
+    padding-left: 1rem;
+  }
+
+  body:not(.platform-ios):not(.platform-android) .app-content {
+    padding-right: max(1rem, var(--app-safe-right));
+    padding-bottom: max(1rem, var(--app-safe-bottom));
+    padding-left: max(1rem, var(--app-safe-left));
+  }
+}
+
+.receipt-photo-viewer {
+  padding-top: max(0.75rem, var(--app-safe-top)) !important;
+  padding-right: max(0.75rem, var(--app-safe-right)) !important;
+  padding-bottom: max(0.75rem, var(--app-safe-bottom)) !important;
+  padding-left: max(0.75rem, var(--app-safe-left)) !important;
+}
+
+.receipt-photo-stage,
+.receipt-photo-full {
+  touch-action: pan-x pan-y pinch-zoom;
+}
+
+.receipt-photo-full {
+  width: auto;
+  height: auto;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+/* Clothes forms use named grids instead of fixed inline widths so inputs stay
+   readable on a 320-390px phone while retaining the compact desktop layout. */
+.clothes-variant-row {
+  grid-template-columns: minmax(0, 1fr) 5.5rem 4.5rem 2.75rem;
+}
+
+.clothes-line-row {
+  grid-template-columns: minmax(0, 1fr) 2.75rem;
+}
+
+.clothes-shipment-subgrid {
+  grid-template-columns: minmax(0, 1fr) 4rem 5rem;
+}
+
+.clothes-order-subgrid {
+  grid-template-columns: minmax(0, 1fr) 4rem 4rem 5rem;
+}
+
+.clothes-new-variant-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 640px) {
+  .receipt-filter-controls {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .receipt-filter-controls > select,
+  .receipt-filter-controls > button,
+  .receipt-filter-controls > .contents > button {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .receipt-filter-controls > .receipt-sort-control {
+    grid-column: 1 / -1;
+  }
+
+  .customer-filter-controls {
+    width: 100%;
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .audit-detail-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .ad-filter-controls > input,
+  .ad-filter-controls > select,
+  .ad-filter-controls > button {
+    width: 100%;
+    max-width: none !important;
+  }
+
+  .clothes-variant-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 2.75rem;
+  }
+
+  .clothes-variant-row > input:first-child {
+    grid-column: 1 / 3;
+  }
+
+  .clothes-variant-row > button:last-child {
+    grid-column: 3;
+    grid-row: 1 / 3;
+    align-self: stretch;
+  }
+
+  .clothes-shipment-subgrid,
+  .clothes-order-subgrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .clothes-shipment-subgrid > :first-child,
+  .clothes-order-subgrid > :first-child {
+    grid-column: 1 / -1;
   }
 }
 
@@ -1846,4 +2101,481 @@ body.perf-lite .btn-shine:hover,
 body.perf-lite .glass-panel:hover {
   transform: none !important;
   box-shadow: inherit;
+}
+
+/* ==========================================
+   UNIFIED WORKSPACE EXPERIENCE
+   Simple by default, advanced without a separate application.
+   ========================================== */
+
+.workspace-topbar {
+  display: block;
+  -webkit-backdrop-filter: blur(14px) saturate(150%);
+  backdrop-filter: blur(14px) saturate(150%);
+}
+
+.workspace-global-search {
+  display: flex;
+  min-width: 16rem;
+  max-width: 38rem;
+  flex: 1 1 32rem;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 2.75rem;
+  padding: 0.55rem 0.75rem;
+  color: #64748b;
+  background: rgba(248, 250, 252, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 0.9rem;
+  text-align: start;
+}
+
+.workspace-global-search:hover,
+.workspace-global-search:focus-visible {
+  color: #334155;
+  border-color: rgba(79, 70, 229, 0.55);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+}
+
+.dark .workspace-global-search {
+  color: #94a3b8;
+  background: rgba(15, 23, 42, 0.82);
+  border-color: rgba(100, 116, 139, 0.45);
+}
+
+.workspace-global-search kbd {
+  margin-inline-start: auto;
+  flex: none;
+  padding: 0.2rem 0.45rem;
+  color: #64748b;
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.45rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.dark .workspace-global-search kbd {
+  color: #cbd5e1;
+  background: #1e293b;
+  border-color: #334155;
+}
+
+.workspace-mode-toggle,
+.workspace-sidebar-mode {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  padding: 0.55rem 0.85rem;
+  color: #4338ca;
+  background: rgba(238, 242, 255, 0.92);
+  border: 1px solid rgba(129, 140, 248, 0.35);
+  border-radius: 0.9rem;
+  font-size: 0.78rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.dark .workspace-mode-toggle,
+.dark .workspace-sidebar-mode {
+  color: #c7d2fe;
+  background: rgba(49, 46, 129, 0.3);
+  border-color: rgba(129, 140, 248, 0.3);
+}
+
+.smart-filter-panel {
+  overflow: visible;
+}
+
+.smart-filter-primary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.smart-search-field {
+  position: relative;
+  display: flex;
+  flex: 1 1 24rem;
+  min-width: min(100%, 17rem);
+  min-height: 3rem;
+  align-items: center;
+  gap: 0.7rem;
+  padding-inline: 0.9rem;
+  color: #94a3b8;
+  background: rgba(255, 255, 255, 0.9);
+  border: 2px solid #e2e8f0;
+  border-radius: 0.85rem;
+}
+
+.dark .smart-search-field {
+  background: rgba(15, 23, 42, 0.88);
+  border-color: #334155;
+}
+
+.smart-search-field:focus-within {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.13);
+}
+
+.smart-search-field > i,
+.smart-search-field > svg {
+  position: static !important;
+  flex: none;
+  transform: none !important;
+}
+
+.smart-search-field input {
+  position: static !important;
+  min-width: 0;
+  min-height: 2.7rem;
+  flex: 1 1 auto;
+  padding: 0 !important;
+  color: #0f172a;
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.dark .smart-search-field input {
+  color: #f8fafc;
+}
+
+.smart-search-field > button,
+.smart-search-field > span button {
+  position: static !important;
+  display: inline-flex;
+  width: 2.25rem;
+  height: 2.25rem;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  transform: none !important;
+  border-radius: 0.65rem;
+}
+
+.smart-filter-chips {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.45rem;
+  overflow-x: auto;
+  padding: 0.1rem;
+  scrollbar-width: none;
+}
+
+.smart-filter-chips::-webkit-scrollbar {
+  display: none;
+}
+
+.smart-filter-chip {
+  display: inline-flex;
+  min-height: 2.75rem;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.55rem 0.8rem;
+  color: #475569;
+  background: rgba(248, 250, 252, 0.88);
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.dark .smart-filter-chip {
+  color: #cbd5e1;
+  background: rgba(30, 41, 59, 0.7);
+  border-color: #334155;
+}
+
+.smart-filter-chip.is-active {
+  color: #3730a3;
+  background: #e0e7ff;
+  border-color: #818cf8;
+  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.13);
+}
+
+.smart-filter-chip.is-active.is-danger {
+  color: #be123c;
+  background: #fff1f2;
+  border-color: #fda4af;
+}
+
+.smart-filter-chip.is-active.is-warning {
+  color: #b45309;
+  background: #fffbeb;
+  border-color: #fcd34d;
+}
+
+.smart-filter-chip.is-active.is-success {
+  color: #047857;
+  background: #ecfdf5;
+  border-color: #6ee7b7;
+}
+
+.workspace-filter-toggle,
+.workspace-load-more {
+  display: inline-flex;
+  min-height: 2.75rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  padding: 0.55rem 0.85rem;
+  color: #4338ca;
+  background: rgba(238, 242, 255, 0.8);
+  border: 1px solid rgba(129, 140, 248, 0.45);
+  border-radius: 0.85rem;
+  font-size: 0.78rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.workspace-filter-toggle.is-open {
+  color: #312e81;
+  background: #e0e7ff;
+}
+
+.workspace-filter-count {
+  display: inline-flex;
+  min-width: 1.25rem;
+  height: 1.25rem;
+  align-items: center;
+  justify-content: center;
+  padding-inline: 0.25rem;
+  color: white;
+  background: #4f46e5;
+  border-radius: 999px;
+  font-size: 0.65rem;
+}
+
+.workspace-advanced-panel {
+  margin-top: 0.9rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.24);
+}
+
+.workspace-advanced-panel.hidden {
+  display: none !important;
+}
+
+.workspace-filter-grid {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10.5rem), 1fr));
+  gap: 0.6rem !important;
+  width: 100%;
+}
+
+.workspace-filter-grid > *,
+.workspace-filter-grid > .relative,
+.workspace-filter-grid > .contents > * {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: none !important;
+}
+
+.workspace-filter-grid select,
+.workspace-filter-grid input,
+.workspace-filter-grid button {
+  min-height: 2.75rem;
+}
+
+.workspace-load-more {
+  padding-inline: 1.25rem;
+}
+
+.workspace-experience-choice {
+  display: flex;
+  min-height: 4.5rem;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 0.9rem;
+  color: #334155;
+  background: rgba(248, 250, 252, 0.8);
+  border: 2px solid #e2e8f0;
+  border-radius: 1rem;
+  text-align: start;
+}
+
+.workspace-experience-choice.is-selected {
+  color: #312e81;
+  background: #eef2ff;
+  border-color: #6366f1;
+}
+
+.workspace-experience-icon,
+.command-item-icon {
+  display: inline-flex;
+  width: 2.5rem;
+  height: 2.5rem;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  color: #4f46e5;
+  background: #eef2ff;
+  border-radius: 0.8rem;
+}
+
+.command-palette-panel {
+  overflow: hidden;
+}
+
+.command-section-label {
+  padding: 0.7rem 0.85rem 0.25rem;
+  color: #94a3b8;
+  font-size: 0.66rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mobile-bottom-nav {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .workspace-topbar {
+    display: none !important;
+  }
+
+  .mobile-bottom-nav {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 38;
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    gap: 0.15rem;
+    padding: 0.35rem max(0.35rem, var(--app-safe-right)) max(0.35rem, var(--app-safe-bottom)) max(0.35rem, var(--app-safe-left));
+    background: rgba(255, 255, 255, 0.96);
+    border-top: 1px solid rgba(148, 163, 184, 0.3);
+    box-shadow: 0 -8px 24px rgba(15, 23, 42, 0.08);
+    -webkit-backdrop-filter: blur(16px);
+    backdrop-filter: blur(16px);
+  }
+
+  .dark .mobile-bottom-nav {
+    background: rgba(15, 23, 42, 0.96);
+    border-color: rgba(71, 85, 105, 0.65);
+  }
+
+  .mobile-bottom-nav-item {
+    display: flex;
+    min-width: 0;
+    min-height: 3.55rem;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.15rem;
+    padding: 0.25rem 0.1rem;
+    color: #64748b;
+    border-radius: 0.75rem;
+    font-size: 0.62rem;
+    font-weight: 800;
+  }
+
+  .mobile-bottom-nav-item span {
+    display: block;
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mobile-bottom-nav-item.is-active {
+    color: #4338ca;
+    background: #eef2ff;
+  }
+
+  .dark .mobile-bottom-nav-item.is-active {
+    color: #c7d2fe;
+    background: rgba(49, 46, 129, 0.42);
+  }
+
+  .app-content {
+    padding-bottom: calc(5.25rem + var(--app-safe-bottom)) !important;
+  }
+
+  .sync-status-indicator {
+    right: max(0.75rem, var(--app-safe-right)) !important;
+    bottom: calc(5.35rem + var(--app-safe-bottom)) !important;
+  }
+
+  /* While the phone keyboard is up (body.keyboard-open, set in src/17-init.js
+     via focusin/focusout), hide the fixed bottom nav: iOS Safari keeps fixed
+     elements anchored to the LAYOUT viewport, so with the keyboard open the
+     nav otherwise floats mid-screen over the form being typed into, and its
+     buttons still navigate away on mis-taps. Chrome Android simply hides it
+     behind the keyboard. !important beats the display:grid above. */
+  body.keyboard-open .mobile-bottom-nav {
+    display: none !important;
+  }
+
+  body.keyboard-open .sync-status-indicator {
+    bottom: calc(0.75rem + var(--app-safe-bottom)) !important;
+  }
+
+  .smart-filter-primary {
+    align-items: stretch;
+  }
+
+  .smart-search-field,
+  .smart-filter-chips {
+    flex-basis: 100%;
+    width: 100%;
+  }
+
+  .workspace-filter-toggle {
+    width: 100%;
+  }
+
+  .delivery-mobile-table tbody tr td {
+    flex: 1 1 calc(50% - 0.5rem);
+  }
+
+  .delivery-mobile-table tbody tr td:first-child,
+  .delivery-mobile-table tbody tr td:last-child {
+    flex-basis: 100%;
+  }
+}
+
+@media (min-width: 901px) {
+  .workspace-topbar {
+    display: block;
+  }
+
+  .mobile-bottom-nav {
+    display: none !important;
+  }
+}
+
+@media (max-width: 420px) {
+  .smart-filter-panel {
+    padding: 0.75rem !important;
+  }
+
+  .smart-filter-chip {
+    min-height: 2.6rem;
+    padding-inline: 0.7rem;
+  }
+}
+
+/* Dark-mode counterpart to the brand remap above (.text-indigo-600 ->
+   var(--brand-blue) !important, ~line 493): that remap is !important, so
+   Tailwind's non-!important dark:text-indigo-300 utilities can NEVER win
+   against it — adding dark: classes in templates silently does nothing for
+   indigo. One dark-scoped counter-rule lightens every indigo-600 label
+   (receipt serial lines, the driver modal's receipt number, "+ Add method")
+   to a readable tint of the brand blue (~7:1 on the dark glass surface),
+   keeping light mode and the brand remap untouched. */
+.dark .text-indigo-600 {
+  color: #8caaff !important;
 }

@@ -201,6 +201,76 @@ class TestAdminBulkImport:
         assert int(row["last_modified"]) == 1111
         assert _get_row("ads", "ad_x") is None
 
+    def test_duplicate_customer_phone_preflight_changes_nothing(self, admin_cookies):
+        sentinel_id = new_id("customer_import_sentinel")
+        _seed_entity(
+            "customers",
+            sentinel_id,
+            {"name": "Untouched Customer", "phones": ["0927001122"]},
+            last_modified=2222,
+        )
+        backup = {
+            "collections": {
+                "customers": [
+                    {
+                        "id": "import_customer_one",
+                        "name": "First",
+                        "phones": ["091 222 3344"],
+                    },
+                    {
+                        "id": "import_customer_two",
+                        "name": "Second",
+                        "phone": "+218 91 222 3344",
+                    },
+                ]
+            }
+        }
+        response = client.post(
+            "/api/admin/import", json=backup, cookies=admin_cookies
+        )
+        assert response.status_code == 409
+        assert "share a phone number" in response.json()["detail"]
+        sentinel = _get_row("customers", sentinel_id)
+        assert sentinel is not None
+        assert bool(sentinel["deleted"]) is False
+        assert int(sentinel["last_modified"]) == 2222
+        assert _get_row("customers", "import_customer_one") is None
+        assert _get_row("customers", "import_customer_two") is None
+
+    def test_cross_field_receipt_number_preflight_changes_nothing(self, admin_cookies):
+        sentinel_id = new_id("receipt_import_sentinel")
+        _seed_entity(
+            "receipts",
+            sentinel_id,
+            {"customerName": "Untouched Receipt", "serialNumber": "SAFE-77"},
+            last_modified=3333,
+        )
+        backup = {
+            "collections": {
+                "receipts": [
+                    {
+                        "id": "import_receipt_one",
+                        "serialNumber": "AB-١٢٣",
+                    },
+                    {
+                        "id": "import_receipt_two",
+                        "tempReceiptNo": "ab-123",
+                    },
+                ]
+            }
+        }
+        response = client.post(
+            "/api/admin/import", json=backup, cookies=admin_cookies
+        )
+        assert response.status_code == 409
+        assert "share a receipt number" in response.json()["detail"]
+        sentinel = _get_row("receipts", sentinel_id)
+        assert sentinel is not None
+        assert bool(sentinel["deleted"]) is False
+        assert int(sentinel["last_modified"]) == 3333
+        assert _get_row("receipts", "import_receipt_one") is None
+        assert _get_row("receipts", "import_receipt_two") is None
+
     def test_users_collection_refused(self, admin_cookies):
         r = client.post(
             "/api/admin/import",

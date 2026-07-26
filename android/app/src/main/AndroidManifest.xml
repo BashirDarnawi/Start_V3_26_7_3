@@ -18,6 +18,18 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- SYSTEM-BROWSER APP LOGIN (Phase 2): the hosted login page
+                 returns the one-time sign-in code to the app through this
+                 albayan://auth deep link. launchMode="singleTask" (above)
+                 guarantees the running activity receives it via onNewIntent
+                 instead of a second activity instance. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="albayan" android:host="auth" />
+            </intent-filter>
         </activity>
 
         <provider

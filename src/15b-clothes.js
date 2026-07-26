@@ -200,14 +200,14 @@ async function saveClothesExchangeRate() {
 function renderClothesTabBar() {
   const isAr = clothesIsAr();
   return `
-    <div class="flex flex-wrap gap-2 mb-8">
+    <div class="clothes-tab-bar grid grid-cols-2 sm:flex sm:flex-wrap gap-2 mb-8">
       ${CLOTHES_TABS.map(tab => {
         const active = _clothesActiveTab === tab.id;
         return `
           <button
             type="button"
             onclick="setClothesTab('${tab.id}')"
-            class="flex items-center gap-2 px-4 py-2.5 rounded-xl font-medium transition-all ${active
+            class="flex min-w-0 items-center justify-center gap-2 px-3 sm:px-4 py-2.5 rounded-xl font-medium transition-all ${active
               ? 'bg-gradient-to-r from-rose-500 to-pink-500 text-white shadow-lg'
               : 'glass-panel text-slate-600 dark:text-slate-300 hover:text-rose-600 dark:hover:text-rose-400'}"
           >
@@ -440,7 +440,10 @@ function _clothesCsvCell(v) {
 
 function _clothesDownloadCsv(rows, filenameBase) {
   const csv = rows.map(r => r.map(_clothesCsvCell).join(',')).join('\n');
-  downloadFile('﻿' + csv, `${filenameBase}-${getTodayDateString()}.csv`, 'text/csv;charset=utf-8');
+  // downloadFile returns false (with its own warning) inside FB/IG in-app
+  // browsers where blob downloads silently fail — no false success toast.
+  const downloaded = downloadFile('﻿' + csv, `${filenameBase}-${getTodayDateString()}.csv`, 'text/csv;charset=utf-8');
+  if (downloaded === false) return;
   showNotification(clothesIsAr() ? 'تم التصدير' : 'Exported', clothesIsAr() ? 'تم تنزيل ملف CSV.' : 'CSV file downloaded.', 'success');
 }
 
@@ -554,12 +557,12 @@ function renderClothesSystemView() {
 
       <!-- Header -->
       <div class="mb-8">
-        <div class="flex items-center gap-4 mb-4">
-          <div class="w-16 h-16 rounded-2xl bg-gradient-to-br from-rose-500 to-pink-500 flex items-center justify-center shadow-2xl">
+        <div class="flex items-start sm:items-center gap-3 sm:gap-4 mb-4">
+          <div class="w-12 h-12 sm:w-16 sm:h-16 flex-shrink-0 rounded-2xl bg-gradient-to-br from-rose-500 to-pink-500 flex items-center justify-center shadow-2xl">
             <i data-lucide="shirt" class="w-8 h-8 text-white"></i>
           </div>
-          <div>
-            <h1 class="text-3xl font-bold text-slate-800 dark:text-white">
+          <div class="min-w-0">
+            <h1 class="text-2xl sm:text-3xl font-bold text-slate-800 dark:text-white break-words">
               ${isAr ? 'نظام الملابس' : 'Clothes System'}
             </h1>
             <p class="text-slate-500 dark:text-slate-400">
@@ -597,17 +600,18 @@ function onClothesProductSearchInput(el) {
 }
 
 function getFilteredClothesProducts() {
-  const q = _clothesProductSearch.trim().toLowerCase();
+  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
+  const q = foldSearchText(_clothesProductSearch.trim());
   let items = getVisibleClothesProducts();
   if (q) {
     items = items.filter(p => {
-      const name = String(p.name || '').toLowerCase();
-      const category = String(p.category || '').toLowerCase();
+      const name = foldSearchText(p.name);
+      const category = foldSearchText(p.category);
       if (name.includes(q) || category.includes(q)) return true;
       const variants = Array.isArray(p.variants) ? p.variants : [];
       return variants.some(v =>
-        String(v?.color || '').toLowerCase().includes(q) ||
-        String(v?.size || '').toLowerCase().includes(q)
+        foldSearchText(v?.color).includes(q) ||
+        foldSearchText(v?.size).includes(q)
       );
     });
   }
@@ -761,12 +765,15 @@ function renderClothesProductCard(p) {
       : (qty <= CLOTHES_LOW_STOCK_THRESHOLD
         ? 'border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400'
         : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300');
+    // touch-action: manipulation on the +/- steppers: the page is zoomable
+    // (user-scalable=yes), so without it iOS Safari can eat a rapid second
+    // tap as double-tap smart zoom instead of a second increment.
     return `
       <span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium border ${chipClass}">
         <span>${Security.escapeHtml(label)}</span>
-        <button type="button" onclick="adjustClothesVariantQty('${p.id}', ${idx}, -1)" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-rose-200 dark:hover:bg-rose-800 flex items-center justify-center leading-none" title="-1">−</button>
+        <button type="button" onclick="adjustClothesVariantQty('${p.id}', ${idx}, -1)" style="touch-action: manipulation" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-rose-200 dark:hover:bg-rose-800 flex items-center justify-center leading-none" title="-1">−</button>
         <span class="font-bold">${qty}</span>
-        <button type="button" onclick="adjustClothesVariantQty('${p.id}', ${idx}, 1)" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-emerald-200 dark:hover:bg-emerald-800 flex items-center justify-center leading-none" title="+1">+</button>
+        <button type="button" onclick="adjustClothesVariantQty('${p.id}', ${idx}, 1)" style="touch-action: manipulation" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-emerald-200 dark:hover:bg-emerald-800 flex items-center justify-center leading-none" title="+1">+</button>
       </span>
     `;
   }).join('');
@@ -983,12 +990,10 @@ function refreshClothesVariantRows() {
   const isAr = clothesIsAr();
   const wrap = document.getElementById('clothes-variant-rows');
   if (!wrap) return;
-  // Inline grid template: width utility classes proved unreliable inside the
-  // modal in narrow webviews, so the column sizes are pinned inline.
-  const rowStyle = 'display:grid;grid-template-columns:minmax(0,1fr) 5.5rem 4.5rem 2rem;gap:0.5rem;align-items:center;';
+  const rowStyle = 'display:grid;gap:0.5rem;align-items:center;';
   const cellStyle = 'width:100%;min-width:0;';
   wrap.innerHTML = _clothesTempVariants.map((v, idx) => `
-    <div style="${rowStyle}">
+    <div style="${rowStyle}" class="clothes-variant-row">
       <input type="text" value="${Security.escapeHtml(String(v.color || ''))}" oninput="onClothesVariantField(${idx}, 'color', this.value)" placeholder="${isAr ? 'اللون' : 'Color'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
       <input type="text" value="${Security.escapeHtml(String(v.size || ''))}" oninput="onClothesVariantField(${idx}, 'size', this.value)" placeholder="${isAr ? 'المقاس' : 'Size'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
       <input type="number" min="0" step="1" value="${Math.max(0, Math.floor(Number(v.qty) || 0))}" oninput="onClothesVariantField(${idx}, 'qty', this.value)" placeholder="0" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'الكمية' : 'Quantity'}" />
@@ -1334,17 +1339,18 @@ function setClothesShipmentStatusFilter(value) {
 }
 
 function getFilteredClothesShipments() {
-  const q = _clothesShipmentSearch.trim().toLowerCase();
+  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
+  const q = foldSearchText(_clothesShipmentSearch.trim());
   let items = getVisibleClothesShipments();
   if (_clothesShipmentStatusFilter !== 'all') {
     items = items.filter(s => s.status === _clothesShipmentStatusFilter);
   }
   if (q) {
     items = items.filter(s => {
-      if (String(s.ref || '').toLowerCase().includes(q)) return true;
-      if (String(s.supplier || '').toLowerCase().includes(q)) return true;
+      if (foldSearchText(s.ref).includes(q)) return true;
+      if (foldSearchText(s.supplier).includes(q)) return true;
       const lines = Array.isArray(s.lines) ? s.lines : [];
-      return lines.some(line => clothesProductNameById(line.productId).toLowerCase().includes(q));
+      return lines.some(line => foldSearchText(clothesProductNameById(line.productId)).includes(q));
     });
   }
   return items;
@@ -1680,14 +1686,12 @@ function refreshClothesShipLines() {
   const wrap = document.getElementById('clothes-ship-lines');
   if (!wrap) return;
   const products = getVisibleClothesProducts();
-  // Inline grid template: width utility classes proved unreliable inside the
-  // modal in narrow webviews (see refreshClothesVariantRows), so the column
-  // sizes are pinned inline. Two rows per line so it stays usable on phones:
+  // Two rows per line keep these controls usable in narrow webviews:
   // row 1 = product + remove, row 2 = variant picker / qty / unit cost
   // (+ a color/size text row only when "new color/size" is chosen).
-  const rowStyle = 'display:grid;grid-template-columns:minmax(0,1fr) 2rem;gap:0.5rem;align-items:center;';
-  const subStyle = 'grid-column:1 / -1;display:grid;grid-template-columns:minmax(0,1fr) 4rem 5rem;gap:0.5rem;align-items:center;';
-  const newStyle = 'grid-column:1 / -1;display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;align-items:center;';
+  const rowStyle = 'display:grid;gap:0.5rem;align-items:center;';
+  const subStyle = 'grid-column:1 / -1;display:grid;gap:0.5rem;align-items:center;';
+  const newStyle = 'grid-column:1 / -1;display:grid;gap:0.5rem;align-items:center;';
   const cellStyle = 'width:100%;min-width:0;';
   wrap.innerHTML = _clothesTempShipLines.map((line, idx) => {
     const product = products.find(p => p.id === line.productId);
@@ -1697,7 +1701,7 @@ function refreshClothesShipLines() {
     const isNew = line._newVariant === true || (matchIdx === -1 && !!(String(line.color || '').trim() || String(line.size || '').trim()));
     const selectVal = (matchIdx >= 0 && !line._newVariant) ? `v:${matchIdx}` : (isNew ? 'new' : '');
     return `
-    <div style="${rowStyle}" class="pb-2 border-b border-slate-100 dark:border-slate-800">
+    <div style="${rowStyle}" class="clothes-line-row pb-2 border-b border-slate-100 dark:border-slate-800">
       <select oninput="onClothesShipLineField(${idx}, 'productId', this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm">
         <option value="">${isAr ? '— اختر المنتج —' : '— choose product —'}</option>
         ${products.map(p => `<option value="${p.id}" ${line.productId === p.id ? 'selected' : ''}>${Security.escapeHtml(p.name || '')}</option>`).join('')}
@@ -1705,7 +1709,7 @@ function refreshClothesShipLines() {
       <button type="button" onclick="removeClothesShipLine(${idx})" class="w-8 h-8 rounded-lg flex items-center justify-center text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20" title="${isAr ? 'إزالة' : 'Remove'}">
         <i data-lucide="x" class="w-4 h-4"></i>
       </button>
-      <div style="${subStyle}">
+      <div style="${subStyle}" class="clothes-shipment-subgrid">
         <select oninput="onClothesShipLineVariantPick(${idx}, this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" ${product ? '' : 'disabled'} title="${isAr ? 'اللون والمقاس' : 'Color & size'}">
           <option value="" ${selectVal === '' ? 'selected' : ''}>${product ? (isAr ? '— اللون والمقاس —' : '— color & size —') : (isAr ? 'اختر المنتج أولاً' : 'choose product first')}</option>
           ${variants.map((v, vi) => `<option value="v:${vi}" ${selectVal === `v:${vi}` ? 'selected' : ''}>${Security.escapeHtml(clothesVariantOptionLabel(v, false))}</option>`).join('')}
@@ -1715,7 +1719,7 @@ function refreshClothesShipLines() {
         <input type="text" inputmode="decimal" value="${Security.escapeHtml(String(line.unitCostUSD ?? ''))}" oninput="sanitizeMoneyInput(this); onClothesShipLineField(${idx}, 'unitCostUSD', this.value)" placeholder="$/1" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'تكلفة القطعة بالدولار' : 'Unit cost USD'}" />
       </div>
       ${isNew ? `
-      <div style="${newStyle}">
+      <div style="${newStyle}" class="clothes-new-variant-grid">
         <input type="text" value="${Security.escapeHtml(String(line.color || ''))}" oninput="onClothesShipLineField(${idx}, 'color', this.value)" placeholder="${isAr ? 'اللون الجديد' : 'New color'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
         <input type="text" value="${Security.escapeHtml(String(line.size || ''))}" oninput="onClothesShipLineField(${idx}, 'size', this.value)" placeholder="${isAr ? 'المقاس الجديد' : 'New size'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
       </div>` : ''}
@@ -2167,7 +2171,8 @@ function setClothesOrderPaymentFilter(value) {
 }
 
 function getFilteredClothesOrders() {
-  const q = _clothesOrderSearch.trim().toLowerCase();
+  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
+  const q = foldSearchText(_clothesOrderSearch.trim());
   let items = getVisibleClothesOrders();
   if (_clothesOrderStatusFilter !== 'all') {
     items = items.filter(o => o.status === _clothesOrderStatusFilter);
@@ -2177,10 +2182,10 @@ function getFilteredClothesOrders() {
   }
   if (q) {
     items = items.filter(o => {
-      if (String(o.customerName || '').toLowerCase().includes(q)) return true;
-      if (String(o.customerPhone || '').toLowerCase().includes(q)) return true;
+      if (foldSearchText(o.customerName).includes(q)) return true;
+      if (foldSearchText(o.customerPhone).includes(q)) return true;
       const lines = Array.isArray(o.lines) ? o.lines : [];
-      return lines.some(line => clothesProductNameById(line.productId).toLowerCase().includes(q));
+      return lines.some(line => foldSearchText(clothesProductNameById(line.productId)).includes(q));
     });
   }
   return items;
@@ -2546,17 +2551,15 @@ function refreshClothesOrderLines() {
   const wrap = document.getElementById('clothes-order-lines');
   if (!wrap) return;
   const products = getVisibleClothesProducts();
-  // Same inline-grid pattern as the shipment modal (width utility classes are
-  // unreliable inside modals in narrow webviews).
-  const rowStyle = 'display:grid;grid-template-columns:minmax(0,1fr) 2rem;gap:0.5rem;align-items:center;';
-  const subStyle = 'grid-column:1 / -1;display:grid;grid-template-columns:minmax(0,1fr) 4rem 4rem 5rem;gap:0.5rem;align-items:center;';
+  const rowStyle = 'display:grid;gap:0.5rem;align-items:center;';
+  const subStyle = 'grid-column:1 / -1;display:grid;gap:0.5rem;align-items:center;';
   const cellStyle = 'width:100%;min-width:0;';
   wrap.innerHTML = _clothesTempOrderLines.map((line, idx) => {
     const product = products.find(p => p.id === line.productId);
     const variants = Array.isArray(product?.variants) ? product.variants : [];
     const matchIdx = product ? findClothesVariantIndex(product, line.color, line.size) : -1;
     return `
-    <div style="${rowStyle}" class="pb-2 border-b border-slate-100 dark:border-slate-800">
+    <div style="${rowStyle}" class="clothes-line-row pb-2 border-b border-slate-100 dark:border-slate-800">
       <select oninput="onClothesOrderLineField(${idx}, 'productId', this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm">
         <option value="">${isAr ? '— اختر المنتج —' : '— choose product —'}</option>
         ${products.map(p => `<option value="${p.id}" ${line.productId === p.id ? 'selected' : ''}>${Security.escapeHtml(p.name || '')}</option>`).join('')}
@@ -2564,7 +2567,7 @@ function refreshClothesOrderLines() {
       <button type="button" onclick="removeClothesOrderLine(${idx})" class="w-8 h-8 rounded-lg flex items-center justify-center text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20" title="${isAr ? 'إزالة' : 'Remove'}">
         <i data-lucide="x" class="w-4 h-4"></i>
       </button>
-      <div style="${subStyle}">
+      <div style="${subStyle}" class="clothes-order-subgrid">
         <select oninput="onClothesOrderLineVariantPick(${idx}, this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" ${product && variants.length ? '' : 'disabled'} title="${isAr ? 'اللون والمقاس' : 'Color & size'}">
           <option value="" ${matchIdx < 0 ? 'selected' : ''}>${!product
             ? (isAr ? 'اختر المنتج أولاً' : 'choose product first')
@@ -2654,6 +2657,12 @@ function printClothesOrderSlip(orderId) {
   const order = getVisibleClothesOrders().find(o => o.id === orderId);
   if (!order) return;
   const isAr = clothesIsAr();
+  // FB/IG in-app browsers silently no-op window.print(); warn instead of
+  // arming print listeners that will never fire (same guard as printReceiptCard).
+  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+    if (typeof notifyInAppBrowserLimitation === 'function') notifyInAppBrowserLimitation('print');
+    return;
+  }
   const totals = getClothesOrderTotals(order);
   const lines = Array.isArray(order.lines) ? order.lines : [];
   const payMeta = clothesPaymentStatusMeta(order.paymentStatus);
@@ -2718,14 +2727,37 @@ function printClothesOrderSlip(orderId) {
   `;
   document.body.appendChild(slip);
   document.body.classList.add('print-single');
+  // Phones don't block on window.print(): the native print sheet stays open
+  // while page JS keeps running, afterprint fires during pagination (sheet
+  // still up), and WebKit/Blink re-paginate from the LIVE DOM whenever the
+  // user picks a printer or changes paper/range in that sheet. The old
+  // afterprint/3s-timer cleanup therefore tore the slip down mid-preview and
+  // a re-paginated print regressed to the full app page. Instead: re-apply
+  // the print markup on every beforeprint pass, and only tear down on the
+  // first user interaction with the page — impossible while the native sheet
+  // covers it — with a long timer as the last-resort fallback for webviews
+  // that fire no print events at all. Harmless meanwhile: every
+  // .print-single/.print-target rule lives inside @media print and the slip
+  // node is parked off-screen, so the lingering markup has zero on-screen
+  // effect.
+  const applyPrintMarkup = () => {
+    if (!slip.isConnected) document.body.appendChild(slip);
+    document.body.classList.add('print-single');
+  };
+  let cleanupTimer = 0;
   const cleanup = () => {
     document.body.classList.remove('print-single');
     slip.remove();
-    window.removeEventListener('afterprint', cleanup);
+    window.removeEventListener('beforeprint', applyPrintMarkup);
+    window.removeEventListener('pointerdown', cleanup, true);
+    window.removeEventListener('keydown', cleanup, true);
+    clearTimeout(cleanupTimer);
   };
-  window.addEventListener('afterprint', cleanup);
-  // Safety net for webviews that never fire afterprint (printReceiptCard pattern)
-  setTimeout(cleanup, 3000);
+  window.addEventListener('beforeprint', applyPrintMarkup);
+  // keydown also disarms so a follow-up Ctrl+P prints the full page again.
+  window.addEventListener('pointerdown', cleanup, { once: true, capture: true });
+  window.addEventListener('keydown', cleanup, { once: true, capture: true });
+  cleanupTimer = setTimeout(cleanup, 60000);
   window.print();
 }
 

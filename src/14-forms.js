@@ -2,7 +2,15 @@
 // CUSTOMER SEARCH / DROPDOWN UTILITIES
 // ==========================================
 
-// Click outside to close dropdown
+// Click outside to close dropdown.
+// CAPTURE phase (the `true`) is required: every suggestion dropdown lives
+// inside a modal panel that carries onclick="event.stopPropagation()" (to keep
+// inside-clicks from closing the modal), so a bubble-phase document listener
+// never fires for taps inside the form — on phones (no Esc key, no hover) the
+// open dropdown then covers the inputs below until the whole modal is lost.
+// Capture fires on the way DOWN to the target, before that stopPropagation
+// runs. Same fix as the delegated record-action listener further below.
+// Selection still works: taps inside the dropdown are skipped by contains().
 document.addEventListener('click', function(e) {
   const dropdowns = document.querySelectorAll('[id$="-dropdown"]');
   dropdowns.forEach(dropdown => {
@@ -10,7 +18,7 @@ document.addEventListener('click', function(e) {
       dropdown.classList.add('hidden');
     }
   });
-});
+}, true);
 
 // ==========================================
 // RECEIPT MODAL HELPER FUNCTIONS
@@ -19,19 +27,21 @@ document.addEventListener('click', function(e) {
 function filterReceiptPhones() {
   const searchInput = document.getElementById('receipt-phone-search');
   const dropdown = document.getElementById('receipt-phone-dropdown');
-  const searchTerm = searchInput.value.toLowerCase();
-  
-  const customers = getVisibleRecords(state.customers);
+  // foldSearchText on BOTH sides: Arabic-keyboard digits and unhamza'd
+  // spellings must match the stored ASCII phones / hamza-form names.
+  const searchTerm = foldSearchText(searchInput.value);
+
+  const customers = getCustomersVisibleToCurrentUser();
   const phoneCustomerMap = [];
   customers.forEach(c => {
     c.phones.forEach(phone => {
       phoneCustomerMap.push({ phone, customer: c });
     });
   });
-  
-  const filtered = phoneCustomerMap.filter(item => 
-    item.phone.includes(searchTerm) ||
-    item.customer.name.toLowerCase().includes(searchTerm)
+
+  const filtered = phoneCustomerMap.filter(item =>
+    foldSearchText(item.phone).includes(searchTerm) ||
+    foldSearchText(item.customer.name).includes(searchTerm)
   );
   
   if (filtered.length > 0 && searchTerm) {
@@ -346,11 +356,13 @@ function removeReceiptPaymentSplit(btn) {
 }
 
 function selectReceiptPhone(phone, customerId) {
-  const customer = state.customers.find(c => c.id === customerId);
-  if (!customer) return;
+  const normalizedCustomerId = String(customerId || '').trim();
+  const customer = getCustomersVisibleToCurrentUser()
+    .find(c => String(c?.id || '') === normalizedCustomerId);
+  if (!customer) return false;
   
   // Set customer ID
-  document.getElementById('receipt-customer-id').value = customerId;
+  document.getElementById('receipt-customer-id').value = normalizedCustomerId;
   
   // Update phone search
   document.getElementById('receipt-phone-search').value = phone;
@@ -359,7 +371,352 @@ function selectReceiptPhone(phone, customerId) {
   document.getElementById('receipt-customer-name').value = customer.name;
   
   // Hide dropdown
-  document.getElementById('receipt-phone-dropdown').classList.add('hidden');
+  document.getElementById('receipt-phone-dropdown')?.classList.add('hidden');
+
+  // Editing pre-populates this same picker. Only a genuinely NEW receipt
+  // needs the duplicate-money warning; the frozen hidden editing id is the
+  // reliable source of truth even if mutable modal state changes underneath.
+  const editingId = String(document.getElementById('receipt-editing-id')?.value || '').trim();
+  if (state.activeModal === 'receipt' && !editingId) {
+    requireReceiptCustomerRiskAcknowledgement(normalizedCustomerId);
+  }
+  return true;
+}
+
+// ==========================================
+// NEW RECEIPT: EXISTING DEBT / BALANCE WARNING
+// ==========================================
+
+let _receiptCustomerRiskAcknowledgedSignature = '';
+let _receiptCustomerRiskAcknowledgedCustomerId = '';
+let _receiptCustomerRiskCurrentSignature = '';
+let _receiptCustomerRiskCurrentCustomerId = '';
+let _receiptCustomerRiskFormModal = null;
+let _receiptCustomerRiskReturnFocus = null;
+
+function _receiptCustomerRiskMoneyCents(value) {
+  const amount = Number(value) || 0;
+  return Math.max(Math.round((amount + Number.EPSILON) * 100), 0);
+}
+
+function _receiptCustomerRiskDebtUSD(receipt) {
+  // Mirror the server's single-source debt rule. Historical records can retain
+  // several debt fields that disagree, so taking the largest value would
+  // invent money and overstate the warning.
+  if (getReceiptPaymentState(receipt) === 'paid') {
+    return Math.max(Number(receipt?.amountUSD) || 0, 0);
+  }
+
+  let own = 0;
+  const collection = String(receipt?.statusDetail?.notPaidCollection || '').trim().toLowerCase();
+  if (['office', 'in_shop', 'shop'].includes(collection)) {
+    own = Math.max(Number(receipt?.amountUSD) || 0, 0);
+  } else {
+    const localValue = receipt?.debtAmountLocal ?? receipt?.amountLocal;
+    const local = Number(localValue) || 0;
+    const rate = Number(receipt?.exchangeRate) || 0;
+    if (local > 0 && rate > 0) {
+      own = Math.max(local / rate, 0);
+    } else {
+      const usdValue = receipt?.debtAmountUSD ?? receipt?.amountUSD;
+      own = Math.max(Number(usdValue) || 0, 0);
+    }
+  }
+  if (own > 0) return own;
+
+  // Zero-value driver (D#) receipts keep the real customer debt on their
+  // linked ads, so the receipt's own fields read 0 and the warning notice was
+  // silently dropped. getReceiptCollectionTarget derives that debt from the
+  // linked ads (last resort only — the receipt's own authoritative fields
+  // above always win), so the warning shows the same debt the receipt card
+  // shows.
+  if (typeof getReceiptCollectionTarget === 'function') {
+    const target = getReceiptCollectionTarget(receipt);
+    return Math.max(Number(target?.debtUSD) || 0, 0);
+  }
+  return own;
+}
+
+// Pure, permission-scoped classifier used by both selection-time and save-time
+// guards. It intentionally warns for a fully allocated unpaid receipt: using
+// its promised credit does not mean the customer has paid the debt.
+function getReceiptCustomerRiskNotices(customerId) {
+  const cid = String(customerId || '').trim();
+  if (!Security.isValidRecordId(cid)) return [];
+
+  const notices = [];
+  for (const receipt of getReceiptsVisibleToCurrentUser()) {
+    if (getReceiptCustomerReferenceId(receipt) !== cid) continue;
+
+    const debtType = getReceiptDebtType(receipt);
+    if (debtType !== 'none') {
+      const amountUSD = _receiptCustomerRiskDebtUSD(receipt);
+      const cents = _receiptCustomerRiskMoneyCents(amountUSD);
+      if (cents < 1) continue;
+      notices.push({ receipt, kind: 'debt', debtType, amountUSD: cents / 100, cents });
+      continue;
+    }
+
+    if (getReceiptPaymentState(receipt) !== 'paid') continue;
+    const remainingUSD = Math.max(Number(getReceiptUsageStats(receipt)?.remainingUSD) || 0, 0);
+    const cents = _receiptCustomerRiskMoneyCents(remainingUSD);
+    if (cents < 1) continue;
+    notices.push({ receipt, kind: 'balance', amountUSD: cents / 100, cents });
+  }
+
+  return notices.sort((left, right) => {
+    if (left.kind !== right.kind) return left.kind === 'debt' ? -1 : 1;
+    const leftDate = new Date(left.receipt?.createdAt || left.receipt?.startDate || 0).getTime() || 0;
+    const rightDate = new Date(right.receipt?.createdAt || right.receipt?.startDate || 0).getTime() || 0;
+    return rightDate - leftDate;
+  });
+}
+
+function _getReceiptCustomerRiskSnapshot(customerId) {
+  const cid = String(customerId || '').trim();
+  const notices = getReceiptCustomerRiskNotices(cid);
+  const parts = notices
+    .map(notice => `${notice.kind}:${notice.kind === 'debt' ? notice.debtType : 'balance'}:${String(notice.receipt?.id || '')}:${notice.cents}`)
+    .sort();
+  return {
+    customerId: cid,
+    notices,
+    signature: parts.length ? `${cid}|${parts.join('|')}` : ''
+  };
+}
+
+function resetReceiptCustomerRiskWarningState() {
+  closeReceiptCustomerRiskWarning(false);
+  _receiptCustomerRiskAcknowledgedSignature = '';
+  _receiptCustomerRiskAcknowledgedCustomerId = '';
+  _receiptCustomerRiskCurrentSignature = '';
+  _receiptCustomerRiskCurrentCustomerId = '';
+  _receiptCustomerRiskFormModal = null;
+}
+
+function closeReceiptCustomerRiskWarning(restoreFocus = true) {
+  const warning = document.getElementById('receipt-customer-risk-warning');
+  if (warning) warning.remove();
+
+  const appModal = document.getElementById('app-modal');
+  if (appModal) {
+    appModal.inert = false;
+    if (typeof appModal.removeAttribute === 'function') appModal.removeAttribute('aria-hidden');
+    else appModal.setAttribute('aria-hidden', 'false');
+  }
+
+  const focusTarget = _receiptCustomerRiskReturnFocus;
+  _receiptCustomerRiskReturnFocus = null;
+  if (restoreFocus && focusTarget?.isConnected && typeof focusTarget.focus === 'function') {
+    try { focusTarget.focus({ preventScroll: true }); } catch (_) { focusTarget.focus(); }
+  }
+}
+
+function acknowledgeReceiptCustomerRiskWarning() {
+  _receiptCustomerRiskAcknowledgedSignature = _receiptCustomerRiskCurrentSignature;
+  _receiptCustomerRiskAcknowledgedCustomerId = _receiptCustomerRiskCurrentCustomerId;
+  closeReceiptCustomerRiskWarning(true);
+}
+
+// Escape, Android Back, and "Choose another" all take this safe path. They do
+// not silently accept the warning while leaving a risky customer selected.
+function cancelReceiptCustomerRiskWarning() {
+  const selectedId = String(document.getElementById('receipt-customer-id')?.value || '').trim();
+  const shouldClear = !selectedId || selectedId === _receiptCustomerRiskCurrentCustomerId;
+  closeReceiptCustomerRiskWarning(false);
+  if (shouldClear) {
+    const customerIdInput = document.getElementById('receipt-customer-id');
+    const customerNameInput = document.getElementById('receipt-customer-name');
+    const phoneInput = document.getElementById('receipt-phone-search');
+    if (customerIdInput) customerIdInput.value = '';
+    if (customerNameInput) customerNameInput.value = '';
+    if (phoneInput) phoneInput.value = '';
+    if (phoneInput && typeof phoneInput.focus === 'function') phoneInput.focus();
+  }
+  _receiptCustomerRiskAcknowledgedSignature = '';
+  _receiptCustomerRiskAcknowledgedCustomerId = '';
+  _receiptCustomerRiskCurrentSignature = '';
+  _receiptCustomerRiskCurrentCustomerId = '';
+}
+
+function viewReceiptFromCustomerRiskWarning(receiptId) {
+  const rid = String(receiptId || '').trim();
+  const visibleReceipt = Security.isValidRecordId(rid)
+    ? getReceiptsVisibleToCurrentUser().find(receipt => String(receipt?.id || '') === rid)
+    : null;
+  if (!visibleReceipt) {
+    showNotification(
+      state.language === 'ar' ? 'تعذر فتح الوصل' : 'Cannot Open Receipt',
+      state.language === 'ar' ? 'هذا الوصل غير متاح لك.' : 'This receipt is not available to you.',
+      'error'
+    );
+    return false;
+  }
+
+  closeReceiptCustomerRiskWarning(false);
+  closeModal();
+  return openReceiptRecord(rid);
+}
+
+function _receiptCustomerRiskSectionHtml(kind, notices, isAr) {
+  if (!notices.length) return '';
+  const isDebt = kind === 'debt';
+  const heading = isDebt
+    ? (isAr ? `وصولات دين غير مدفوعة (${notices.length})` : `Unpaid debt receipts (${notices.length})`)
+    : (isAr ? `وصولات مدفوعة برصيد متبقٍ (${notices.length})` : `Paid receipts with balance (${notices.length})`);
+  const sectionClasses = isDebt
+    ? 'border-rose-200 bg-rose-50/80 dark:border-rose-800 dark:bg-rose-900/20'
+    : 'border-emerald-200 bg-emerald-50/80 dark:border-emerald-800 dark:bg-emerald-900/20';
+  const headingClasses = isDebt
+    ? 'text-rose-700 dark:text-rose-300'
+    : 'text-emerald-700 dark:text-emerald-300';
+
+  return `
+    <section class="rounded-2xl border p-3 ${sectionClasses}">
+      <h3 class="mb-2 flex items-center gap-2 text-sm font-extrabold ${headingClasses}">
+        <i data-lucide="${isDebt ? 'circle-alert' : 'wallet-cards'}" class="h-4 w-4"></i>${heading}
+      </h3>
+      <div class="space-y-2">
+        ${notices.map((notice, index) => {
+          const receipt = notice.receipt || {};
+          const number = String(receipt.finalReceiptNo || receipt.serialNumber || receipt.tempReceiptNo || '').trim();
+          const numberLabel = number
+            ? `#${Security.escapeHtml(number)}`
+            : `${isAr ? 'وصل' : 'Receipt'} ${index + 1}`;
+          const rate = Number(receipt.exchangeRate || state.defaultExchangeRate || 0) || 0;
+          const amountUSD = notice.cents / 100;
+          const amountLocal = amountUSD * rate;
+          const detail = isDebt
+            ? (isAr
+              ? `${notice.debtType === 'delivery' ? 'دين توصيل' : 'دين داخل المحل'} • لم يُدفع بعد`
+              : `${notice.debtType === 'delivery' ? 'Delivery debt' : 'In-shop debt'} • Still unpaid`)
+            : (isAr ? 'رصيد متاح يمكن استخدامه' : 'Available balance can still be used');
+          return `
+            <div class="flex flex-col gap-2 rounded-xl border border-white/80 bg-white/90 p-3 shadow-sm dark:border-slate-700 dark:bg-slate-900/70 sm:flex-row sm:items-center sm:justify-between">
+              <div class="min-w-0">
+                <div class="font-extrabold text-slate-800 dark:text-white">${numberLabel}</div>
+                <div class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">${detail}</div>
+                <div class="mt-1 text-sm font-bold ${headingClasses}">$${amountUSD.toFixed(2)}${rate > 0 ? ` • ${amountLocal.toFixed(2)} LYD` : ''}</div>
+              </div>
+              <button type="button" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" onclick="viewReceiptFromCustomerRiskWarning(this.dataset.receiptId)" class="min-h-11 shrink-0 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-bold text-indigo-700 hover:bg-indigo-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:border-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-200" aria-label="${Security.escapeHtml(isAr ? `عرض الوصل ${number || index + 1}` : `View receipt ${number || index + 1}`)}">
+                ${isAr ? 'عرض الوصل' : 'View receipt'}
+              </button>
+            </div>`;
+        }).join('')}
+      </div>
+    </section>`;
+}
+
+function showReceiptCustomerRiskWarning(customerId, snapshot = null) {
+  const currentSnapshot = snapshot || _getReceiptCustomerRiskSnapshot(customerId);
+  if (!currentSnapshot.signature || !currentSnapshot.notices.length) return false;
+
+  const customer = getCustomersVisibleToCurrentUser()
+    .find(item => String(item?.id || '') === currentSnapshot.customerId);
+  if (!customer) return false;
+
+  closeReceiptCustomerRiskWarning(false);
+  _receiptCustomerRiskCurrentSignature = currentSnapshot.signature;
+  _receiptCustomerRiskCurrentCustomerId = currentSnapshot.customerId;
+  _receiptCustomerRiskReturnFocus = document.getElementById('receipt-customer-name')
+    || document.getElementById('receipt-phone-search')
+    || document.activeElement;
+
+  const isAr = state.language === 'ar';
+  const debtNotices = currentSnapshot.notices.filter(notice => notice.kind === 'debt');
+  const balanceNotices = currentSnapshot.notices.filter(notice => notice.kind === 'balance');
+  const customerName = Security.escapeHtml(String(customer.name || (isAr ? 'العميل' : 'Customer')));
+  const warning = document.createElement('div');
+  warning.id = 'receipt-customer-risk-warning';
+  warning.className = 'mobile-dialog-overlay fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/70 p-2 backdrop-blur-sm sm:p-4';
+  warning.setAttribute('role', 'alertdialog');
+  warning.setAttribute('aria-modal', 'true');
+  warning.setAttribute('aria-labelledby', 'receipt-customer-risk-title');
+  warning.setAttribute('aria-describedby', 'receipt-customer-risk-description');
+  warning.setAttribute('dir', isAr ? 'rtl' : 'ltr');
+  warning.innerHTML = `
+    <div class="flex max-h-[90dvh] w-full max-w-lg flex-col overflow-hidden rounded-3xl border border-amber-200 bg-white shadow-2xl dark:border-amber-800 dark:bg-slate-900" onclick="event.stopPropagation()">
+      <div class="shrink-0 border-b border-amber-100 bg-amber-50 p-4 dark:border-amber-900/50 dark:bg-amber-900/20 sm:p-5">
+        <div class="flex items-start gap-3">
+          <span class="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300"><i data-lucide="triangle-alert" class="h-6 w-6"></i></span>
+          <div class="min-w-0">
+            <h2 id="receipt-customer-risk-title" tabindex="-1" class="text-lg font-extrabold text-slate-900 outline-none dark:text-white">${isAr ? 'تنبيه: لدى العميل وصولات موجودة' : 'Warning: this customer has existing receipts'}</h2>
+            <p id="receipt-customer-risk-description" class="mt-1 text-sm text-slate-600 dark:text-slate-300">${isAr ? `قبل إنشاء وصل جديد للعميل <strong>${customerName}</strong>، راجع المعلومات التالية.` : `Before creating another receipt for <strong>${customerName}</strong>, review the information below.`}</p>
+          </div>
+        </div>
+        <p class="mt-3 rounded-xl bg-white/80 p-3 text-xs font-semibold text-amber-900 dark:bg-slate-900/60 dark:text-amber-200">${isAr ? 'أنشئ وصلاً جديداً فقط إذا كانت هذه دفعة جديدة فعلاً، حتى لا يُسجَّل المال مرتين.' : 'Create a new receipt only if this is genuinely new money, so the same money is not recorded twice.'}</p>
+      </div>
+      <div class="min-h-0 flex-1 space-y-3 overflow-y-auto p-4 custom-scrollbar sm:p-5">
+        ${_receiptCustomerRiskSectionHtml('debt', debtNotices, isAr)}
+        ${_receiptCustomerRiskSectionHtml('balance', balanceNotices, isAr)}
+      </div>
+      <div class="grid shrink-0 grid-cols-1 gap-3 border-t border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800/70 sm:grid-cols-2">
+        <button type="button" onclick="cancelReceiptCustomerRiskWarning()" class="min-h-11 rounded-xl bg-slate-200 px-4 py-2.5 font-bold text-slate-700 hover:bg-slate-300 focus:outline-none focus:ring-2 focus:ring-slate-500 dark:bg-slate-700 dark:text-slate-100 dark:hover:bg-slate-600">${isAr ? 'اختيار عميل آخر' : 'Choose another customer'}</button>
+        <button type="button" onclick="acknowledgeReceiptCustomerRiskWarning()" class="min-h-11 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2.5 font-extrabold text-white shadow-lg hover:from-amber-600 hover:to-orange-600 focus:outline-none focus:ring-2 focus:ring-amber-500">${isAr ? 'متابعة إنشاء الوصل' : 'Continue creating receipt'}</button>
+      </div>
+    </div>`;
+
+  warning.addEventListener('keydown', event => {
+    const isShortcut = (event.ctrlKey || event.metaKey) && String(event.key || '').toLowerCase() === 'k';
+    if (event.key === 'Escape' || isShortcut) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.key === 'Escape') cancelReceiptCustomerRiskWarning();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = Array.from(warning.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+      .filter(element => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
+    if (!focusable.length) {
+      event.preventDefault();
+      warning.querySelector('#receipt-customer-risk-title')?.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (!focusable.includes(document.activeElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }, true);
+
+  const appModal = document.getElementById('app-modal');
+  if (appModal) {
+    _receiptCustomerRiskFormModal = appModal;
+    appModal.inert = true;
+    appModal.setAttribute('aria-hidden', 'true');
+  }
+  document.body.appendChild(warning);
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => warning.querySelector('#receipt-customer-risk-title')?.focus(), 0);
+  return true;
+}
+
+// Returns true when the caller must pause. A signature includes exact receipt
+// ids, status type, and cents, so live-sync changes invalidate an old OK.
+function requireReceiptCustomerRiskAcknowledgement(customerId) {
+  const appModal = document.getElementById('app-modal');
+  if (_receiptCustomerRiskFormModal !== appModal) {
+    _receiptCustomerRiskAcknowledgedSignature = '';
+    _receiptCustomerRiskAcknowledgedCustomerId = '';
+    _receiptCustomerRiskFormModal = appModal;
+  }
+  const normalizedCustomerId = String(customerId || '').trim();
+  if (_receiptCustomerRiskAcknowledgedCustomerId && _receiptCustomerRiskAcknowledgedCustomerId !== normalizedCustomerId) {
+    _receiptCustomerRiskAcknowledgedSignature = '';
+    _receiptCustomerRiskAcknowledgedCustomerId = '';
+  }
+  const snapshot = _getReceiptCustomerRiskSnapshot(normalizedCustomerId);
+  if (!snapshot.signature) return false;
+  if (snapshot.signature === _receiptCustomerRiskAcknowledgedSignature) return false;
+  showReceiptCustomerRiskWarning(customerId, snapshot);
+  return true;
 }
 
 // ==========================================
@@ -369,14 +726,15 @@ function selectReceiptPhone(phone, customerId) {
 function filterPageCustomers() {
   const searchInput = document.getElementById('page-customer-search');
   const dropdown = document.getElementById('page-customer-dropdown');
-  const searchTerm = searchInput?.value.toLowerCase() || '';
-  
+  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
+  const searchTerm = foldSearchText(searchInput?.value || '');
+
   const customers = getVisibleRecords(state.customers);
-  
-  const filtered = customers.filter(c => 
-    c.name.toLowerCase().includes(searchTerm) ||
-    c.phones.some(p => p.includes(searchTerm)) ||
-    c.platform.toLowerCase().includes(searchTerm)
+
+  const filtered = customers.filter(c =>
+    foldSearchText(c.name).includes(searchTerm) ||
+    c.phones.some(p => foldSearchText(p).includes(searchTerm)) ||
+    foldSearchText(c.platform).includes(searchTerm)
   );
   
   if (filtered.length > 0 && searchTerm) {
@@ -500,6 +858,12 @@ function removePageCustomer(customerId) {
 
 // Delegated record actions keep untrusted ids out of executable JavaScript.
 // Dynamic dropdowns can be re-rendered freely without re-binding handlers.
+// CAPTURE phase (the `true` below) is essential: modal panels carry
+// onclick="event.stopPropagation()" to stop inside-clicks from closing the modal,
+// which also stops the click ever bubbling to document. A capture-phase listener on
+// document fires on the way DOWN to the target, before that bubble-phase
+// stopPropagation runs — so page/customer dropdown selections work inside modals
+// again. (Bubble phase silently broke every in-modal selection.)
 if (!window.__albayanSafeRecordActionsBound) {
   window.__albayanSafeRecordActionsBound = true;
   document.addEventListener('click', (event) => {
@@ -528,20 +892,23 @@ if (!window.__albayanSafeRecordActionsBound) {
         return;
     }
     event.preventDefault();
-  });
+  }, true);
 }
 
-// Close dropdowns when clicking outside
+// Close dropdowns when clicking outside. CAPTURE phase: the modal panel's
+// onclick="event.stopPropagation()" swallows bubble-phase clicks, so without
+// it this listener never fires for taps inside the form (see the comment on
+// the capture-phase listener at the top of this file).
 document.addEventListener('click', (e) => {
   const pageDropdown = document.getElementById('page-customer-dropdown');
   const pageSearch = document.getElementById('page-customer-search');
-  
-  if (pageDropdown && pageSearch && 
-      !pageDropdown.contains(e.target) && 
+
+  if (pageDropdown && pageSearch &&
+      !pageDropdown.contains(e.target) &&
       !pageSearch.contains(e.target)) {
     pageDropdown.classList.add('hidden');
   }
-});
+}, true);
 
 // Rate 1 to SHOW for a stored payment row.
 // MONEY-MATH: 0 is a REAL rate — the app itself fills Rate 1 with 0.00 for
@@ -620,10 +987,19 @@ function getNextAutoSerialNumber(paymentMethod) {
     if (!usesGroupMethod || !receipt.serialNumber) return;
     const serial = String(receipt.serialNumber).trim().toUpperCase();
 
+    // A receipt that has a MANUAL method (Cash) got a hand-typed PAPER receipt
+    // number, so its bare digits are NOT a legacy S serial and must not advance
+    // the S counter (a 5-digit paper number would otherwise hijack the whole
+    // series). Only PURE auto-serial receipts count via the legacy branch.
+    const methodsUsed = payments.length
+      ? payments.map(p => p && p.method).filter(Boolean)
+      : (receiptPaymentMethod && receiptPaymentMethod !== 'Split Payment' ? [receiptPaymentMethod] : []);
+    const hasManualMethod = methodsUsed.some(m => !getAutoSerialPrefix(m));
+
     let serialNum = 0;
     if (serial.startsWith(prefix)) {
       serialNum = parseInt(serial.substring(prefix.length), 10);
-    } else if (prefix === 'S' && /^\d+$/.test(serial)) {
+    } else if (prefix === 'S' && /^\d+$/.test(serial) && !hasManualMethod) {
       // Legacy: the S group used bare numbers before the prefix existed.
       serialNum = parseInt(serial, 10);
     } else {
@@ -725,8 +1101,23 @@ function syncReceiptSerialWithPaymentMethods({ reissue = false } = {}) {
     // The number already belongs to this method's counter — keep it.
     const inThisGroup = isAutoSerialNumber(currentUpper) && currentUpper.startsWith(prefix);
     // Legacy S receipts were numbered with bare digits before the prefix
-    // existed; a saved one keeps its number rather than being renumbered.
-    const legacySInGroup = prefix === 'S' && isEditingSaved && /^\d+$/.test(current);
+    // existed; a saved one keeps its number rather than being renumbered. But
+    // this exception must ONLY apply when the STORED receipt was already a pure
+    // S-group receipt — a manual paper number (e.g. Cash #500) switched to LTT
+    // must be REISSUED to an S-serial, not kept as "500".
+    // The SAVED record is the source of truth here — state.modalData may only
+    // carry the id, so read the stored methods off state.receipts by that id.
+    const _storedId = state.modalData?.id;
+    const _stored = (_storedId && Array.isArray(state.receipts)
+      ? state.receipts.find(r => r && r.id === _storedId)
+      : null) || state.modalData || {};
+    const _storedMethods = Array.isArray(_stored.payments) && _stored.payments.length
+      ? _stored.payments.map(p => p && p.method).filter(Boolean)
+      : (_stored.paymentMethod && _stored.paymentMethod !== 'Split Payment' ? [_stored.paymentMethod] : []);
+    const _storedWasPureSGroup = _storedMethods.length
+      && _storedMethods.some(m => getAutoSerialPrefix(m) === 'S')
+      && !_storedMethods.some(m => !getAutoSerialPrefix(m));
+    const legacySInGroup = prefix === 'S' && isEditingSaved && /^\d+$/.test(current) && _storedWasPureSGroup;
 
     if (!current || (reissue && !inThisGroup && !legacySInGroup)) {
       const nextSerial = getNextAutoSerialNumber(autoMethod);
@@ -779,6 +1170,95 @@ function receiptExchangeRate(payments, totalLYD, totalUSD) {
   }
   if (totalUSD > 0 && totalLYD > 0) return totalLYD / totalUSD;
   return state.defaultExchangeRate;
+}
+
+// A Not Paid receipt may intentionally have no money rows yet. Keep payments[]
+// empty (so it never invents received cash), while still preserving the Rate 2
+// the user entered for the debt and any ads linked to it.
+function receiptExchangeRateForSave(payments, enteredPaymentRows, totalLYD, totalUSD, status, existingRate) {
+  const savedRows = Array.isArray(payments) ? payments : [];
+  if (savedRows.length > 0) {
+    return receiptExchangeRate(savedRows, totalLYD, totalUSD);
+  }
+
+  if (status === 'Not Paid') {
+    const enteredRows = Array.isArray(enteredPaymentRows) ? enteredPaymentRows : [];
+    const enteredRate = enteredRows
+      .map(row => Number(row?.rate2))
+      .find(rate => Number.isFinite(rate) && rate > 0);
+    if (enteredRate) return enteredRate;
+
+    const previousRate = Number(existingRate);
+    if (Number.isFinite(previousRate) && previousRate > 0) return previousRate;
+  }
+
+  return state.defaultExchangeRate;
+}
+
+// Reopen an all-zero receipt with one editable form row. The row is only a UI
+// seed; saveReceiptFromModal still drops it from payments[] until money exists.
+function getReceiptFormPayments(receiptData) {
+  const data = receiptData && typeof receiptData === 'object' ? receiptData : {};
+  const savedPayments = Array.isArray(data.payments) ? data.payments : [];
+  if (savedPayments.length > 0) return savedPayments;
+
+  const savedMethod = String(data.paymentMethod || '').trim();
+  const method = savedMethod && savedMethod !== 'Split Payment'
+    ? savedMethod
+    : PAYMENT_METHODS[0];
+  const savedRate = Number(data.exchangeRate);
+  const rate2 = Number.isFinite(savedRate) && savedRate > 0
+    ? savedRate
+    : state.defaultExchangeRate;
+  const statusDetail = data.statusDetail && typeof data.statusDetail === 'object'
+    ? data.statusDetail
+    : {};
+  const isPaid = data.status === 'Paid' || data.isPaid === true;
+
+  return [{
+    method,
+    amount: 0,
+    rate: getDefaultRate1(method),
+    rate2,
+    collectionType: isPaid
+      ? (statusDetail.paidCollection || 'office')
+      : (statusDetail.notPaidCollection || 'office'),
+    deliveryPersonId: isPaid
+      ? (statusDetail.paidDeliveryPersonId || data.deliveryPersonId || '')
+      : (data.deliveryPersonId || '')
+  }];
+}
+
+// Driver debt is denominated at the linked delivery receipt's rate. Prefer the
+// live linked record over a hidden field or a stale ad/default rate.
+function resolveAdExchangeRateForSave({
+  isEdit = false,
+  ad = null,
+  isUnpaidDriver = false,
+  linkedReceipt = null,
+  driverBudgetRate = null
+} = {}) {
+  const validRate = value => {
+    const rate = Number(value);
+    return Number.isFinite(rate) && rate > 0 ? rate : 0;
+  };
+
+  if (isUnpaidDriver) {
+    const linkedRate = validRate(linkedReceipt?.exchangeRate);
+    if (linkedRate) return linkedRate;
+    const selectedRate = validRate(driverBudgetRate);
+    if (selectedRate) return selectedRate;
+  }
+
+  const existingRate = isEdit ? validRate(ad?.exchangeRate) : 0;
+  return existingRate || validRate(state.defaultExchangeRate) || 1;
+}
+
+function adAmountLocalForSave(amountUSD, exchangeRate) {
+  const amount = Number(amountUSD);
+  const rate = Number(exchangeRate);
+  if (!Number.isFinite(amount) || !Number.isFinite(rate)) return 0;
+  return Math.round(amount * rate * 100) / 100;
 }
 
 function ceilingRound(value) {
@@ -950,8 +1430,11 @@ function updateReceiptTotals() {
 }
 
 // Helper: compute totals from current payment rows (shared use)
-function getPaymentTotalsFromDom() {
-  const paymentItems = document.querySelectorAll('.payment-split-item');
+// `root` scopes which .payment-split-item rows are summed. The receipt modal has one
+// set (default = whole document); the delivery-completion form has TWO independent sets
+// (collected amount + delivery fee), so it passes each container to get its own totals.
+function getPaymentTotalsFromDom(root) {
+  const paymentItems = (root || document).querySelectorAll('.payment-split-item');
   let totalR1 = 0;
   let totalR2 = 0;
   paymentItems.forEach((item) => {
@@ -1026,16 +1509,52 @@ let _savingReceiptInFlight = false;
 async function saveReceiptFromModal() {
   if (_savingReceiptInFlight) return;
   _savingReceiptInFlight = true;
+  // Busy feedback: settle/unsettle edits are server-confirmed (no optimistic
+  // paint) and can take up to ~60s across retries on a stalled connection.
+  // Without this the Save button reads as dead — users background the tab or
+  // hardware-Back out mid-save. Mirrors delivery-complete-submit's disable.
+  // (Kept HERE, not in _saveReceiptFromModalInner, so every validation
+  // early-return restores the button through the same finally.)
+  const _saveBtn = document.getElementById('receipt-save-btn');
+  const _saveBtnHtml = _saveBtn ? _saveBtn.innerHTML : '';
+  if (_saveBtn) {
+    _saveBtn.disabled = true;
+    _saveBtn.classList.add('opacity-60');
+    _saveBtn.textContent = state.language === 'ar' ? 'جارٍ الحفظ…' : 'Saving…';
+  }
   try {
     await _saveReceiptFromModalInner();
   } finally {
     _savingReceiptInFlight = false;
+    // Restore ONLY the element captured at click time. Re-querying by id
+    // could stamp this save's captured label/state onto a DIFFERENT, later-
+    // opened receipt modal's Save button (the user can cancel and open
+    // another receipt while a 90s media save is still in flight). If the
+    // original node was removed (closeModal on success), isConnected is
+    // false and this is a safe no-op.
+    if (_saveBtn && _saveBtn.isConnected) {
+      _saveBtn.disabled = false;
+      _saveBtn.classList.remove('opacity-60');
+      _saveBtn.innerHTML = _saveBtnHtml;
+    }
   }
 }
 
 async function _saveReceiptFromModalInner() {
   const isArV = state.language === 'ar';
+  // Filled only after a NEW delivery receipt is confirmed saved. The share
+  // prompt must use the server-returned row because the server may assign the
+  // authoritative temporary D-number.
+  let newlyCreatedDeliveryReceiptId = '';
   try {
+  if (_receiptPhotoUploadsInFlight > 0) {
+    showNotification(
+      isArV ? 'جاري تجهيز الصور' : 'Preparing photos',
+      isArV ? 'انتظر لحظة حتى ينتهي تجهيز الصور، ثم احفظ الوصل.' : 'Please wait for the photos to finish preparing, then save the receipt.',
+      'info'
+    );
+    return;
+  }
   // Resolve the edit target from the FROZEN hidden field written when this form
   // was rendered — NOT from the mutable global state.modalData, which a stray
   // browser-back / refresh / URL-restore can silently repoint at a different
@@ -1052,10 +1571,19 @@ async function _saveReceiptFromModalInner() {
     showNotification(isArV ? 'خطأ' : 'Error', isArV ? 'الرجاء اختيار عميل عن طريق رقم الهاتف' : 'Please select a customer by phone', 'error');
     return;
   }
+
+  // Re-check immediately before a NEW receipt is saved. Live sync may have
+  // added debt or changed a paid balance after the customer was first chosen;
+  // an earlier acknowledgement is valid only while its exact signature stays
+  // unchanged. Editing an existing receipt never enters this warning flow.
+  if (!editTarget && requireReceiptCustomerRiskAcknowledgement(customerId)) {
+    return;
+  }
   
   // Collect all payment splits
   const paymentItems = document.querySelectorAll('.payment-split-item');
   const payments = [];
+  const enteredPaymentRows = [];
   
   paymentItems.forEach(item => {
     const method = item.querySelector('.payment-method').value;
@@ -1071,16 +1599,18 @@ async function _saveReceiptFromModalInner() {
     const collectionType = item.querySelector('.collection-type').value;
     const deliveryPersonSelect = item.querySelector('.delivery-person');
     const deliveryPersonId = deliveryPersonSelect ? deliveryPersonSelect.value : '';
+    const enteredPayment = {
+      method,
+      amount,
+      rate,
+      rate2,
+      collectionType,
+      deliveryPersonId
+    };
+    enteredPaymentRows.push(enteredPayment);
     
     if (amount > 0) {
-      payments.push({
-        method,
-        amount,
-        rate,
-        rate2,
-        collectionType,
-        deliveryPersonId
-      });
+      payments.push(enteredPayment);
     }
   });
   
@@ -1127,8 +1657,15 @@ async function _saveReceiptFromModalInner() {
   // of 9.70, because the credit total is rounded up in the customer's favour.
   // With a split (different rates per row) the effective average is the only
   // meaningful figure, so keep deriving it there.
-  const avgRate = receiptExchangeRate(payments, totalLYD, totalUSD);
   const status = document.getElementById('receipt-status').value || 'Paid';
+  const avgRate = receiptExchangeRateForSave(
+    payments,
+    enteredPaymentRows,
+    totalLYD,
+    totalUSD,
+    status,
+    editTarget?.exchangeRate
+  );
   const photos = state.tempReceiptPhotos || [];
 
   // A receipt records money that was RECEIVED. Rows with amount 0 are dropped
@@ -1401,7 +1938,13 @@ async function _saveReceiptFromModalInner() {
     serialNumber: isTempDelivery ? '' : serialFinal,
     finalReceiptNo: finalReceiptNo,
     tempReceiptNo: tempReceiptNo,
-    receiptType: tempReceiptNo ? 'DELIVERY_TEMP' : (editTarget?.receiptType || ''),
+    // A carried "existing balance" receipt is an ordinary Paid receipt that is only
+    // TAGGED so its card shows the existing-balance colour/badge; it counts as revenue
+    // and funds ads exactly like any other receipt. The tag only applies to a NEW,
+    // non-delivery receipt (an edit keeps whatever type it already had).
+    receiptType: tempReceiptNo
+      ? 'DELIVERY_TEMP'
+      : (editTarget ? (editTarget.receiptType || '') : (_newReceiptCarried ? 'CARRIED_BALANCE' : '')),
     deliveryPlaceName: isTempDelivery ? deliveryPlaceName : (editTarget?.deliveryPlaceName || deliveryPlaceName || ''),
     deliveryInstructions: isTempDelivery ? deliveryInstructions : (editTarget?.deliveryInstructions || deliveryInstructions || ''),
     quotedDeliveryFee: isTempDelivery ? quotedDeliveryFee : (editTarget?.quotedDeliveryFee ?? quotedDeliveryFee),
@@ -1416,10 +1959,36 @@ async function _saveReceiptFromModalInner() {
     officeFee: 0,
     discount: 0,
     phoneNumber: document.getElementById('receipt-phone-search').value || '',
-    collectionDate: new Date().toISOString(),
+    // When the money arrived. Stamped ONLY when the receipt is Paid: an EDIT
+    // keeps the saved date (rewriting it made every edited old receipt look
+    // newly collected, poisoning the liquidity window), an unpaid receipt
+    // carries no arrival date at all, and the save that turns it Paid stamps
+    // the true payment moment — matching the edit-modal rule in 15-modals.js.
+    collectionDate: (editTarget ? editTarget.collectionDate : '') || (receiptIsPaid ? new Date().toISOString() : ''),
     payments: payments,
     photos
   };
+
+  // Denormalize the customer's display NAME (never phone/contact) so a role
+  // that can view receipts but not load the customers collection still sees who
+  // the receipt is for — mirrors createdByName. In server mode the server
+  // re-stamps this authoritatively from the customers table (so it cannot be
+  // spoofed), and updateRecord protects it on edit; the live customer name
+  // always wins on read when available. Only stamp when a customer is linked.
+  if (customerId) {
+    const _receiptCustomer = (state.customers || []).find(c => c && String(c.id) === String(customerId));
+    if (_receiptCustomer && _receiptCustomer.name) receipt.customerName = String(_receiptCustomer.name);
+  }
+
+  // PATCH has merge semantics, so unchanged photos can stay on the server
+  // without being uploaded again. If the user intentionally removes the
+  // legacy delivery proof from the photo list, clear that field explicitly.
+  if (editTarget && !state.tempReceiptPhotosDirty) {
+    delete receipt.photos;
+  } else if (editTarget) {
+    const legacyProof = String(editTarget.receiptImage || '').trim();
+    if (legacyProof && !photos.includes(legacyProof)) receipt.receiptImage = '';
+  }
   
   // Get customer name for logging
   const linkedCustomer = state.customers.find(c => c.id === customerId);
@@ -1497,10 +2066,16 @@ async function _saveReceiptFromModalInner() {
     }
     
     receipt.updatedAt = new Date().toISOString();
-    // Pass the baseline the user actually edited (the modal snapshot) so a
-    // concurrent change (e.g. a driver completing the delivery) triggers a
-    // 409 conflict + reload instead of being silently overwritten.
-    const savedOk = await updateRecord(state.receipts, receipt.id, receipt, oldReceipt?._lastModified);
+    // Pass the baseline the user actually edited (the MODAL-OPEN snapshot) so a
+    // concurrent change (e.g. a driver completing the delivery) triggers a 409
+    // conflict + reload instead of being silently overwritten. editTarget is
+    // re-resolved fresh at save time, and live-sync REPLACES the array slot
+    // (applyServerDelta arr[idx]=clean), so editTarget._lastModified is the
+    // NEW value while state.modalData still holds the frozen open-time object.
+    const _openLastMod = (state.modalData && String(state.modalData.id) === String(receipt.id))
+      ? state.modalData._lastModified
+      : oldReceipt?._lastModified;
+    const savedOk = await updateRecord(state.receipts, receipt.id, receipt, _openLastMod);
     if (!savedOk) return; // keep the modal open; updateRecord already explained the failure
     showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث الوصل بنجاح!' : 'Receipt updated successfully!', 'success');
     addLog('update', 'receipt', receipt.id, `Updated receipt${serialNumber ? ' #' + serialNumber : ''}`);
@@ -1542,11 +2117,18 @@ async function _saveReceiptFromModalInner() {
       else state.receipts[savedIdx] = saved;
       markCollectionDirty('receipts');
       saveState();
+      if (isTempDelivery && canShareDeliveryReceiptToWhatsApp(saved)) {
+        newlyCreatedDeliveryReceiptId = String(saved.id || '');
+      }
       showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
       addLog('create', 'receipt', saved.id, `Created receipt${saved.tempReceiptNo ? ' #' + saved.tempReceiptNo : (serialNumber ? ' #' + serialNumber : '')} for ${customerName}`);
     } else {
       const savedOk = await addRecord(state.receipts, receipt);
       if (!savedOk) return;
+      const savedLocalReceipt = state.receipts.find(item => item && !item._deleted && String(item.id) === String(receipt.id)) || receipt;
+      if (isTempDelivery && canShareDeliveryReceiptToWhatsApp(savedLocalReceipt)) {
+        newlyCreatedDeliveryReceiptId = String(savedLocalReceipt.id || '');
+      }
       showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
       addLog('create', 'receipt', receipt.id, `Created receipt${serialNumber ? ' #' + serialNumber : ''} for ${customerName}`);
     }
@@ -1583,7 +2165,10 @@ async function _saveReceiptFromModalInner() {
   
   // Render immediately (don't wait)
   render();
-    lucide.createIcons();
+  lucide.createIcons();
+  if (newlyCreatedDeliveryReceiptId) {
+    setTimeout(() => showDeliveryWhatsAppPrompt(newlyCreatedDeliveryReceiptId), 0);
+  }
   
   } catch (error) {
     console.error('Error saving receipt:', error);
@@ -1617,11 +2202,15 @@ function validateReceiptNumberInput(input) {
     return;
   }
 
-  // Remove any non-digit characters
-  let value = input.value.replace(/[^0-9]/g, '');
+  // Normalize Arabic-Indic / Extended digits to ASCII FIRST so typing on an
+  // Arabic keyboard is converted (stored as ASCII) instead of visibly deleted
+  // by the [^0-9] strip, then remove any remaining non-digit characters.
+  const normalizedOriginal = normalizeDigitsAscii(originalValue);
+  let value = normalizedOriginal.replace(/[^0-9]/g, '');
 
-  // Check if user tried to enter non-digit characters
-  if (originalValue !== value && originalValue.length > 0) {
+  // Check if user tried to enter non-digit characters (compare against the
+  // digit-normalized original so Arabic digits do not trigger the shake).
+  if (normalizedOriginal !== value && originalValue.length > 0) {
     input.classList.add('animate-shake');
     setTimeout(() => input.classList.remove('animate-shake'), 300);
   }
@@ -1706,7 +2295,7 @@ function checkReceiptNumberDuplicate(input) {
 function showDuplicateReceiptWarning(receiptNumber, customerName, customerId) {
   const isArDup = state.language === 'ar';
   const warningModal = document.createElement('div');
-  warningModal.className = 'fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm';
+  warningModal.className = 'mobile-dialog-overlay fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm';
   warningModal.id = 'duplicate-receipt-warning';
   
   warningModal.innerHTML = `
@@ -1998,8 +2587,7 @@ function selectCancelOption(value) {
 // ================================
 
 function getPagesForCustomer(customerId) {
-  if (!customerId) return [];
-  return getVisibleRecords(state.pages).filter(p => Array.isArray(p.customerIds) && p.customerIds.includes(customerId));
+  return getLinkedPagesForCustomer(customerId);
 }
 
 function getReceiptsForAd(customerId, pageId) {
@@ -2007,22 +2595,26 @@ function getReceiptsForAd(customerId, pageId) {
   return getVisibleRecords(state.receipts || []).filter(r => {
     if (!r || r._deleted) return false;
     if (r.customerId !== customerId) return false;
-    if (pageId && r.pageId && r.pageId !== pageId) return false;
+    // Receipt credit belongs to the customer, not to one Facebook page. Older
+    // receipts can still carry a legacy pageId, so filtering on it hid valid
+    // replacement funds when an ad was moved to (or created for) another page.
+    // The server uses the same customer-level ownership rule.
     const statusLower = String(r.status || '').toLowerCase();
     const isPaid = (r.isPaid === true) || statusLower === 'paid';
     if (!isPaid) return false;
 
     // Funding receipts must be real paid receipts.
     // Temp delivery receipts (D#) are allowed ONLY after they are finalized:
-    // - deliveryStatus === Delivered
-    // - final receipt number exists (digits or S-prefixed) (finalReceiptNo/serialNumber)
+    // - a final receipt number exists (digits or S-prefixed)
+    // A receipt may be collected/marked Paid from the Receipts screen after its
+    // delivery workflow. Its old deliveryStatus can remain Office, but Paid plus
+    // a final number is authoritative and is also what the server accepts.
     const looksTemp = (String(r.receiptType || '').toUpperCase() === 'DELIVERY_TEMP') || isTempDeliveryReceiptNo(r.tempReceiptNo);
     if (looksTemp) {
-      const dsLower = String(r.deliveryStatus || '').toLowerCase();
       const finalNo = String(r.finalReceiptNo || r.serialNumber || '').trim();
       // Accept either digits (123) or S-prefixed (S1, S2) for LTT/Libyana/Madar
       const hasFinalNo = (/^\d+$/.test(finalNo) && !finalNo.startsWith('0')) || isAutoSerialNumber(finalNo);
-      if (!(dsLower === 'delivered' && hasFinalNo)) return false;
+      if (!hasFinalNo) return false;
     }
 
     return true;
@@ -2039,15 +2631,24 @@ function initAdFunding(adData = {}) {
   // saved ad until Save) and snap the amount to 2 decimals for display:
   // stored values can carry float residue from proportional stop-ad math
   // (e.g. 50.000000000000001), which otherwise shows raw in the input.
-  state.tempAdFunding = {
-    allocations: Array.isArray(adData.receiptAllocations)
-      ? adData.receiptAllocations.map(a => ({
+  const isUnpaidShopDebt = getAdPaymentState(adData) === 'not_paid'
+    && String(adData.collectionMethod || '').toLowerCase() === 'in_shop';
+  const sourceAllocations = isUnpaidShopDebt && Array.isArray(adData.dueAllocations)
+    ? adData.dueAllocations
+    : adData.receiptAllocations;
+  const allocations = Array.isArray(sourceAllocations)
+      ? sourceAllocations.map(a => ({
           ...a,
           amountUSD: (a && a.amountUSD !== '' && a.amountUSD !== null && isFinite(parseFloat(a.amountUSD)))
             ? Math.round(parseFloat(a.amountUSD) * 100) / 100
             : (a ? a.amountUSD : '')
         }))
-      : []
+      : [];
+  state.tempAdFunding = {
+    allocations,
+    // Frozen only for clear edit feedback. The authoritative comparison at
+    // save time remains state.modalData/server optimistic locking.
+    originalAllocations: allocations.map(row => ({ ...row }))
   };
 }
 
@@ -2060,15 +2661,34 @@ function initAdFunding(adData = {}) {
 // kind: 'receipt' (paid funding rows) | 'merged' (merged paid-funds rows).
 function getEditingAdExistingAllocationUSD(receiptId, kind = 'receipt') {
   if (!state.modalData?.id) return 0;
-  const existingAd = state.ads.find(a => a.id === state.modalData.id);
+  const existingAd = state.ads.find(a => a.id === state.modalData.id) || state.modalData;
   if (!existingAd) return 0;
-  const src = kind === 'merged'
-    ? (existingAd.mergedPaidAllocations || existingAd.receiptAllocations)
-    : existingAd.receiptAllocations;
-  if (!Array.isArray(src)) return 0;
   const rid = String(receiptId || '');
-  const total = src.filter(a => a && String(a.receiptId) === rid)
-    .reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0);
+  const savedMerged = Array.isArray(existingAd.mergedPaidAllocations)
+    && existingAd.mergedPaidAllocations.length
+    ? existingAd.mergedPaidAllocations
+    : existingAd.receiptAllocations;
+  const sources = kind === 'merged'
+    ? [savedMerged]
+    : [existingAd.receiptAllocations];
+  const collectionMethod = String(existingAd.collectionMethod || '').toLowerCase();
+  const isUnpaidReceiptDebt = getAdPaymentState(existingAd) === 'not_paid'
+    && (collectionMethod === 'driver' || collectionMethod === 'in_shop');
+  if (kind === 'receipt' && isUnpaidReceiptDebt) sources.push(existingAd.dueAllocations);
+
+  let total = sources.reduce((sum, src) => {
+    if (!Array.isArray(src)) return sum;
+    return sum + src.filter(a => a && String(a.receiptId) === rid)
+      .reduce((rowSum, a) => rowSum + (parseFloat(a.amountUSD) || 0), 0);
+  }, 0);
+  const explicitDueForReceipt = Array.isArray(existingAd.dueAllocations)
+    ? existingAd.dueAllocations
+        .filter(row => row && String(row.receiptId || '') === rid)
+        .reduce((sum, row) => sum + (parseFloat(row.amountUSD) || 0), 0)
+    : 0;
+  if (kind === 'receipt' && isUnpaidReceiptDebt && explicitDueForReceipt <= 0) {
+    total += getAdLegacyDueMirrorUSD(existingAd, rid);
+  }
   return Math.round(total * 100) / 100;
 }
 
@@ -2084,7 +2704,7 @@ function handleAdCustomerChange(customerId, preserveFunding = false) {
       pageSelect.value = '';
     }
   }
-  
+
   state.tempAdFunding = state.tempAdFunding || { allocations: [] };
   if (!preserveFunding) {
     state.tempAdFunding.allocations = [];
@@ -2100,8 +2720,110 @@ function handleAdCustomerChange(customerId, preserveFunding = false) {
 // merged-funds allocations from the previous customer must go with it.
 function clearAdMergeFunding() {
   state.tempMergeFunding = { allocations: [], enabled: false };
+  state.tempMixedReceiptTargetUSD = null;
   try { if (typeof renderAdMergedFundingList === 'function') renderAdMergedFundingList(); } catch (_) {}
   try { if (typeof reflectMergeFundingUI === 'function') reflectMergeFundingUI(); } catch (_) {}
+}
+
+function getTempMergeFundingTotalUSD() {
+  const total = (state.tempMergeFunding?.allocations || []).reduce(
+    (sum, row) => sum + (parseFloat(row?.amountUSD) || 0),
+    0
+  );
+  return Math.round(total * 100) / 100;
+}
+
+// Beginner-friendly bridge from the Paid form to the canonical mixed-debt
+// flow. Example: the user entered $5 on a paid receipt with only $4.63 left.
+// Keep $4.63 as real paid funding, then visibly switch to Not Paid + In Shop
+// so the user can choose an unpaid receipt for the exact $0.37 difference.
+function startAdMixedReceiptFunding() {
+  const isAr = state.language === 'ar';
+  const customerId = String(document.getElementById('ad-customer-id')?.value || '').trim();
+  if (!customerId) {
+    showNotification(
+      isAr ? 'تنبيه' : 'Validation',
+      isAr ? 'اختر الصفحة والعميل أولاً.' : 'Select the page and customer first.',
+      'error'
+    );
+    return;
+  }
+
+  const requestedRows = (state.tempAdFunding?.allocations || [])
+    .filter(row => row?.receiptId && (parseFloat(row.amountUSD) || 0) > 0);
+  if (!requestedRows.length) {
+    showNotification(
+      isAr ? 'تنبيه' : 'Validation',
+      isAr ? 'اختر وصلاً مدفوعاً وأدخل ميزانية الإعلان أولاً.' : 'Choose a paid receipt and enter the ad budget first.',
+      'error'
+    );
+    return;
+  }
+
+  let targetTotal = 0;
+  const paidRows = [];
+  for (const requested of requestedRows) {
+    const receipt = state.receipts.find(r => r && !r._deleted && String(r.id) === String(requested.receiptId));
+    const requestedAmount = Math.round((parseFloat(requested.amountUSD) || 0) * 100) / 100;
+    targetTotal += requestedAmount;
+    const receiptStatus = String(receipt?.status || '').toLowerCase();
+    const receiptIsPaid = !!receipt && (receipt.isPaid === true || receiptStatus === 'paid');
+    if (!receiptIsPaid || String(receipt.customerId || '') !== customerId) {
+      showNotification(
+        isAr ? 'تنبيه' : 'Validation',
+        isAr ? 'الوصل المدفوع غير صالح أو يخص عميلاً آخر.' : 'The paid receipt is invalid or belongs to another customer.',
+        'error'
+      );
+      return;
+    }
+    const usage = getReceiptUsageStats(receipt);
+    const available = Math.max(
+      Math.round(((usage.remainingUSD || 0) + getEditingAdExistingAllocationUSD(receipt.id)) * 100) / 100,
+      0
+    );
+    const paidAmount = Math.min(requestedAmount, available);
+    if (paidAmount > 0.009) {
+      paidRows.push({ receiptId: receipt.id, amountUSD: paidAmount.toFixed(2) });
+    }
+  }
+
+  targetTotal = Math.round(targetTotal * 100) / 100;
+  const paidTotal = Math.round(paidRows.reduce((sum, row) => sum + Number(row.amountUSD), 0) * 100) / 100;
+  const shortfall = Math.round(Math.max(targetTotal - paidTotal, 0) * 100) / 100;
+  if (targetTotal <= 0 || shortfall <= 0.009) {
+    showNotification(
+      isAr ? 'الرصيد كافٍ' : 'Paid Balance Is Enough',
+      isAr ? 'الوصولات المدفوعة المختارة تغطي ميزانية الإعلان بالكامل، لذلك لا يوجد فرق غير مدفوع.' : 'The selected paid receipts already cover the full ad budget, so there is no unpaid difference.',
+      'info'
+    );
+    return;
+  }
+
+  if (!getUnpaidShopReceiptsForCustomer(customerId).length) {
+    showNotification(
+      isAr ? 'لا يوجد وصل غير مدفوع' : 'No Unpaid Receipt',
+      isAr ? `أنشئ وصلاً «غير مدفوع - في المحل» لهذا العميل لتغطية الفرق $${shortfall.toFixed(2)}.` : `Create a “Not Paid - In Shop” receipt for this customer to cover the $${shortfall.toFixed(2)} difference.`,
+      'error'
+    );
+    return;
+  }
+
+  state.tempMixedReceiptTargetUSD = targetTotal;
+  state.tempMergeFunding = { allocations: paidRows, enabled: true };
+  state.tempAdFunding = { allocations: [] };
+  setAdPaymentStatus('not_paid');
+  setAdCollectionMethod('in_shop');
+  reflectMergeFundingUI();
+  showNotification(
+    isAr ? 'اختر الوصل غير المدفوع' : 'Select the Unpaid Receipt',
+    isAr
+      ? `سيُستخدم $${paidTotal.toFixed(2)} من المدفوع. اختر الآن وصلاً غير مدفوع للفرق $${shortfall.toFixed(2)}.`
+      : `$${paidTotal.toFixed(2)} will come from paid credit. Now select an unpaid receipt for the $${shortfall.toFixed(2)} difference.`,
+    'info'
+  );
+  setTimeout(() => {
+    document.getElementById('ad-temp-receipt-link')?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+  }, 0);
 }
 
 function handleAdPageChange(preserveFunding = false) {
@@ -2300,6 +3022,41 @@ function getPendingTempDeliveryReceiptsForCustomer(customerId) {
     .sort((a, b) => new Date(b.createdAt || b.startDate || 0) - new Date(a.createdAt || a.startDate || 0));
 }
 
+function isUnpaidShopReceipt(receipt, customerId = '') {
+  if (!receipt || receipt._deleted) return false;
+  if (customerId && String(receipt.customerId || '') !== String(customerId)) return false;
+  const status = String(receipt.status || '');
+  if (status !== 'Not Paid' || receipt.isPaid === true) return false;
+  const detail = receipt.statusDetail && typeof receipt.statusDetail === 'object'
+    ? receipt.statusDetail
+    : {};
+  const collection = String(detail.notPaidCollection || '').trim().toLowerCase();
+  const tempNo = String(receipt.tempReceiptNo || '').trim();
+  const receiptType = String(receipt.receiptType || '').trim().toUpperCase();
+  const deliveryStatus = String(receipt.deliveryStatus || '').trim();
+  if (collection && !['office', 'in_shop', 'shop'].includes(collection)) return false;
+  if ((tempNo.startsWith('D') && /^D\d+$/.test(tempNo)) || receiptType === 'DELIVERY_TEMP') return false;
+  if (deliveryStatus && deliveryStatus !== 'Office') return false;
+  return status !== 'Canceled' && status !== 'Lost';
+}
+
+// usageOut (optional Map) collects each candidate's due usage so callers that
+// also need it (the option-label builder below) do not recompute it — each
+// getDeliveryReceiptDueUsage call scans all ads, so doubling it made every
+// radio/select tap in the ad form visibly slow on phones with many ads.
+function getUnpaidShopReceiptsForCustomer(customerId, usageOut) {
+  const cid = String(customerId || '');
+  if (!cid) return [];
+  return getVisibleRecords(state.receipts)
+    .filter(receipt => isUnpaidShopReceipt(receipt, cid))
+    .filter(receipt => {
+      const usage = getDeliveryReceiptDueUsage(receipt);
+      if (usageOut) usageOut.set(String(receipt.id), usage);
+      return usage.remainingDueUSD > 0.009;
+    })
+    .sort((a, b) => new Date(b.createdAt || b.startDate || 0) - new Date(a.createdAt || a.startDate || 0));
+}
+
 function refreshAdTempReceiptOptions() {
   const isArT = state.language === 'ar';
   const paymentStatus = document.getElementById('ad-payment-status')?.value || '';
@@ -2309,9 +3066,16 @@ function refreshAdTempReceiptOptions() {
   const select = document.getElementById('ad-temp-receipt-id');
   const hidden = document.getElementById('ad-linked-receipt-id');
   const hint = document.getElementById('ad-temp-receipt-hint');
+  const label = document.getElementById('ad-linked-receipt-label');
+  const help = document.getElementById('ad-linked-receipt-help');
+  const dueTitle = document.getElementById('ad-due-title');
+  const dueAmountLabel = document.getElementById('ad-due-amount-label');
   if (!section || !select || !hidden) return;
 
-  const shouldShow = paymentStatus === 'not_paid' && collectionMethod === 'driver' && !!customerId;
+  const isShop = collectionMethod === 'in_shop';
+  const isDriver = collectionMethod === 'driver';
+  const isEditingSavedAd = !!state.modalData?.id;
+  const shouldShow = paymentStatus === 'not_paid' && (isDriver || isShop) && !!customerId;
   section.classList.toggle('hidden', !shouldShow);
   if (!shouldShow) {
     hidden.value = '';
@@ -2320,46 +3084,80 @@ function refreshAdTempReceiptOptions() {
     return;
   }
 
-  const receipts = getPendingTempDeliveryReceiptsForCustomer(customerId);
-  const current = String(hidden.value || '').trim() || String(state.modalData?.receiptId || '').trim();
-  const isEditingSavedAd = !!state.modalData?.id;
+  if (label) label.textContent = isShop
+    ? (isArT ? 'ربط وصل غير مدفوع في المحل' : 'Link Unpaid In-Shop Receipt')
+    : (isArT ? 'ربط وصل توصيل (D#)' : 'Link Delivery Receipt (D#)');
+  if (help) {
+    const editHelp = isEditingSavedAd
+      ? (isArT
+          ? 'يمكنك استبدال الوصل المرتبط. عند الحفظ سيعيد النظام الرصيد المحجوز إلى الوصل القديم ويستخدم الوصل الجديد معاً في عملية واحدة.'
+          : 'You can replace the linked receipt. On Save, reserved credit returns to the old receipt and the new receipt is used together in one transaction.')
+      : '';
+    const debtHelp = isShop
+      ? (isArT
+          ? 'سيظهر مبلغ الإعلان كدين (ناقص) حتى تسجيل الدفع.'
+          : 'The ad amount remains customer debt (minus) until payment is recorded.')
+      : '';
+    help.classList.toggle('hidden', !(editHelp || debtHelp));
+    help.textContent = [editHelp, debtHelp].filter(Boolean).join(' ');
+  }
+  if (dueTitle) dueTitle.textContent = isShop
+    ? (isArT ? 'ميزانية الإعلان من الوصل غير المدفوع' : 'Ad Budget from Unpaid Receipt')
+    : (isArT ? 'استخدام رصيد من الوصل المستحق' : 'Use Credit from Due Receipt');
+  if (dueAmountLabel) dueAmountLabel.textContent = isShop
+    ? (isArT ? 'ميزانية الإعلان (USD)' : 'Ad Budget (USD)')
+    : (isArT ? 'الصرف المخطط (USD)' : 'Planned Spend (USD)');
+
+  const dueUsageById = new Map();
+  const receipts = isShop
+    ? getUnpaidShopReceiptsForCustomer(customerId, dueUsageById)
+    : getPendingTempDeliveryReceiptsForCustomer(customerId);
+  let current = String(hidden.value || '').trim()
+    || String(state.modalData?.linkedDeliveryReceiptId || state.modalData?.receiptId || '').trim();
+  const editingSameMode = isEditingSavedAd
+    && String(state.modalData?.collectionMethod || '') === collectionMethod;
+  if (!receipts.some(r => String(r.id) === current) && !editingSameMode) current = '';
 
   // The list only holds PENDING delivery receipts. A saved ad whose receipt has
   // since been delivered would therefore find its own link missing from the
   // options — and the auto-suggest below would silently RE-LINK the ad to a
   // different receipt (spending another receipt's money). Keep the ad's own
   // receipt in the list, marked as no longer pending.
-  const linkedReceipt = current
+  const linkedReceipt = current && editingSameMode
     ? getVisibleRecords(state.receipts).find(r => String(r.id) === current)
     : null;
   const linkedIsListed = !!linkedReceipt && receipts.some(r => String(r.id) === current);
   const extraOption = (linkedReceipt && !linkedIsListed)
     ? (() => {
         const place = String(linkedReceipt.deliveryPlaceName || '').trim();
-        const note = isArT ? 'غير معلق' : 'no longer pending';
-        const label = `${linkedReceipt.tempReceiptNo || linkedReceipt.serialNumber || linkedReceipt.id.slice(0, 8)}${place ? ' • ' + place : ''} • (${note})`;
-        return `<option value="${linkedReceipt.id}" selected>${Security.escapeHtml(label)}</option>`;
+        const note = isShop
+          ? (isArT ? 'لم يعد غير مدفوع' : 'no longer unpaid')
+          : (isArT ? 'غير معلق' : 'no longer pending');
+        const optionLabel = `${linkedReceipt.tempReceiptNo || linkedReceipt.serialNumber || linkedReceipt.id.slice(0, 8)}${place ? ' • ' + place : ''} • (${note})`;
+        return `<option value="${linkedReceipt.id}" selected>${Security.escapeHtml(optionLabel)}</option>`;
       })()
     : '';
 
   select.innerHTML = [
-    `<option value="">${isArT ? 'اختر وصلاً معلقاً...' : 'Select pending receipt...'}</option>`,
+    `<option value="">${isShop ? (isArT ? 'اختر وصلاً غير مدفوع...' : 'Select an unpaid receipt...') : (isArT ? 'اختر وصلاً معلقاً...' : 'Select pending receipt...')}</option>`,
     extraOption,
     ...receipts.map(r => {
-      // Calculate available credit in USD
-      const dueUsage = getDeliveryReceiptDueUsage(r);
+      // Calculate available credit in USD (reuse the usage computed during the
+      // shop filter above; the driver path's map is empty, so it falls back).
+      const dueUsage = dueUsageById.get(String(r.id)) || getDeliveryReceiptDueUsage(r);
       const availableUSD = dueUsage.remainingDueUSD;
       const place = String(r.deliveryPlaceName || '').trim();
-      const label = `${r.tempReceiptNo}${place ? ' • ' + place : ''} • $${availableUSD.toFixed(2)} ${isArT ? 'متاح' : 'available'}`;
+      const receiptNumber = r.tempReceiptNo || r.serialNumber || r.finalReceiptNo || (isArT ? 'وصل بدون رقم' : 'Unnumbered receipt');
+      const optionLabel = `${receiptNumber}${place ? ' • ' + place : ''} • $${availableUSD.toFixed(2)} ${isArT ? 'متاح' : 'available'}`;
       const selected = String(r.id) === current ? 'selected' : '';
-      return `<option value="${r.id}" ${selected}>${Security.escapeHtml(label)}</option>`;
+      return `<option value="${r.id}" ${selected}>${Security.escapeHtml(optionLabel)}</option>`;
     })
   ].join('');
 
   // Auto-suggest the newest pending receipt — but ONLY for a NEW ad. Never
   // pick a receipt on the user's behalf for an ad that is already saved.
   let selectedId = String(select.value || '').trim();
-  if (!selectedId && !isEditingSavedAd && receipts.length > 0) {
+  if (!selectedId && !isEditingSavedAd && isDriver && receipts.length > 0) {
     selectedId = String(receipts[0].id);
     select.value = selectedId;
   }
@@ -2368,6 +3166,8 @@ function refreshAdTempReceiptOptions() {
 
 function onAdTempReceiptChange(receiptId) {
   const isArC = state.language === 'ar';
+  const collectionMethod = document.getElementById('ad-collection-method')?.value || '';
+  const isShop = collectionMethod === 'in_shop';
   const hidden = document.getElementById('ad-linked-receipt-id');
   const hint = document.getElementById('ad-temp-receipt-hint');
   const driverSelect = document.getElementById('ad-delivery-person');
@@ -2375,6 +3175,7 @@ function onAdTempReceiptChange(receiptId) {
   const mergeToggle = document.getElementById('ad-merge-funds-toggle');
   const dueAvailable = document.getElementById('ad-due-available');
   const dueInput = document.getElementById('ad-due-amount-to-use');
+  const unpaidFinancial = document.getElementById('ad-unpaid-financial');
   
   if (!hidden) return;
   hidden.value = String(receiptId || '');
@@ -2385,6 +3186,14 @@ function onAdTempReceiptChange(receiptId) {
     if (driverSelect) driverSelect.disabled = false;
     if (dueSection) dueSection.classList.add('hidden');
     if (mergeToggle) mergeToggle.classList.add('hidden');
+    if (dueInput) {
+      dueInput.value = '';
+      dueInput.dataset.maxDue = '0';
+      dueInput.dataset.receiptId = '';
+    }
+    if (isShop && unpaidFinancial) unpaidFinancial.classList.remove('hidden');
+    if (isShop) state.tempAdFunding = { allocations: [] };
+    renderAdDueReceiptReplacementNotice();
     return;
   }
 
@@ -2394,6 +3203,12 @@ function onAdTempReceiptChange(receiptId) {
     if (driverSelect) driverSelect.disabled = false;
     if (dueSection) dueSection.classList.add('hidden');
     if (mergeToggle) mergeToggle.classList.add('hidden');
+    if (dueInput) {
+      dueInput.value = '';
+      dueInput.dataset.maxDue = '0';
+      dueInput.dataset.receiptId = '';
+    }
+    renderAdDueReceiptReplacementNotice();
     return;
   }
 
@@ -2402,6 +3217,11 @@ function onAdTempReceiptChange(receiptId) {
     if (hint) hint.textContent = isArC ? 'عميل الوصل غير مطابق. الرجاء اختيار العميل الصحيح.' : 'Receipt customer mismatch. Please select the correct customer.';
     if (dueSection) dueSection.classList.add('hidden');
     if (mergeToggle) mergeToggle.classList.add('hidden');
+    if (dueInput) {
+      dueInput.value = '';
+      dueInput.dataset.maxDue = '0';
+      dueInput.dataset.receiptId = '';
+    }
   } else {
     const place = String(r.deliveryPlaceName || '').trim();
     const fee = Number(r.quotedDeliveryFee ?? 0) || 0;
@@ -2418,18 +3238,25 @@ function onAdTempReceiptChange(receiptId) {
     if (state.modalData?.id) {
       const existingAd = state.ads.find(a => a.id === state.modalData.id);
       if (existingAd) {
-        if (Array.isArray(existingAd.dueAllocations)) {
-          availableUSD += existingAd.dueAllocations
-            .filter(a => String(a.receiptId) === rid)
-            .reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0);
-        } else if (existingAd.dueAmountToUseUSD > 0 && String(existingAd.linkedDeliveryReceiptId) === rid) {
-          availableUSD += existingAd.dueAmountToUseUSD;
-        }
+        const explicitDueForReceipt = Array.isArray(existingAd.dueAllocations)
+          ? existingAd.dueAllocations
+              .filter(a => String(a?.receiptId || '') === rid)
+              .reduce((sum, a) => sum + (parseFloat(a?.amountUSD) || 0), 0)
+          : 0;
+        availableUSD += explicitDueForReceipt > 0
+          ? explicitDueForReceipt
+          : getAdLegacyDueMirrorUSD(existingAd, rid, r.exchangeRate);
       }
     }
     const exchangeRate = dueUsage.exchangeRate || state.defaultExchangeRate || 1;
+    const budgetRate = document.getElementById('ad-driver-budget-rate');
+    if (budgetRate) budgetRate.value = String(exchangeRate);
+    updateAdDriverBudgetSummary();
     
-    const txt = `${r.tempReceiptNo}${r.finalReceiptNo || r.serialNumber ? ` → ${r.finalReceiptNo || r.serialNumber}` : ''}${place ? ` • ${place}` : ''} • ${isArC ? 'الرسوم المتفق عليها' : 'Quoted fee'} ${fee.toFixed(0)} LYD`;
+    const receiptNumber = r.tempReceiptNo || r.serialNumber || r.finalReceiptNo || (isArC ? 'وصل بدون رقم' : 'Unnumbered receipt');
+    const txt = isShop
+      ? `${receiptNumber} • ${isArC ? 'وصل غير مدفوع في المحل' : 'Unpaid In-Shop receipt'} • $${availableUSD.toFixed(2)}`
+      : `${receiptNumber}${r.finalReceiptNo || r.serialNumber ? ` → ${r.finalReceiptNo || r.serialNumber}` : ''}${place ? ` • ${place}` : ''} • ${isArC ? 'الرسوم المتفق عليها' : 'Quoted fee'} ${fee.toFixed(0)} LYD`;
     if (hint) hint.textContent = txt;
     
     // Show due amount section if there's available credit
@@ -2443,7 +3270,7 @@ function onAdTempReceiptChange(receiptId) {
         
         // Check if editing - load existing dueAmountToUseUSD from modalData
         let prefillValue = null;
-        if (state.modalData?.linkedDeliveryReceiptId === rid) {
+        if (String(state.modalData?.linkedDeliveryReceiptId || state.modalData?.receiptId || '') === rid) {
           // Check dueAllocations first (new format)
           if (Array.isArray(state.modalData.dueAllocations)) {
             const existingAlloc = state.modalData.dueAllocations.find(a => String(a.receiptId) === rid);
@@ -2455,35 +3282,73 @@ function onAdTempReceiptChange(receiptId) {
           }
         }
         
-        // Default to existing value, or full available amount for new ads.
+        // Preserve an existing saved value, but never spend delivery receipt
+        // credit just because the receipt was selected. The user can explicitly
+        // enter an amount or press "Use Full Credit" when that is intended.
         // The field is stamped with the receipt it belongs to: switching the
         // linked receipt used to KEEP the previous receipt's amount (the
         // "Available" label updated, the amount did not), so the ad could be
         // saved spending more than the new receipt actually holds.
         const belongsToThisReceipt = dueInput.dataset.receiptId === rid;
+        const originalReceiptId = String(state.modalData?.linkedDeliveryReceiptId || state.modalData?.receiptId || '');
+        const replacingSavedReceipt = !!state.modalData?.id && !!originalReceiptId && originalReceiptId !== rid;
+        const originalDueAmount = replacingSavedReceipt ? getOriginalAdDueAllocationUSD() : 0;
         if (prefillValue !== null) {
-          dueInput.value = prefillValue.toFixed(2);
-        } else if (!dueInput.value || !belongsToThisReceipt) {
-          dueInput.value = availableUSD.toFixed(2);
+          const parsedPrefill = Number(prefillValue);
+          dueInput.value = Number.isFinite(parsedPrefill) && parsedPrefill > 0
+            ? parsedPrefill.toFixed(2)
+            : '';
+        } else if (replacingSavedReceipt && originalDueAmount > 0) {
+          // Relinking changes the SOURCE, never the ad budget/allocation. Keep
+          // the old due share exactly even if the new receipt is larger. If it
+          // is smaller, save-time capacity validation blocks and asks the user
+          // to choose/add funding instead of silently shrinking the ad.
+          dueInput.value = originalDueAmount.toFixed(2);
+          if (isShop) {
+            state.tempMixedReceiptTargetUSD = normalizeAdDriverBudgetUSD(state.modalData?.amountUSD);
+          }
+        } else if (!belongsToThisReceipt) {
+          // Selecting an office receipt is an explicit choice to use it, so
+          // start with its full remaining amount. When the user arrived from
+          // the Paid form's "use an unpaid receipt for the difference" action,
+          // prefill only the exact shortfall instead. Delivery receipts keep
+          // the safer blank default.
+          const target = normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD);
+          const paidPart = getTempMergeFundingTotalUSD();
+          const shortfall = target > 0 ? Math.max(target - paidPart, 0) : availableUSD;
+          dueInput.value = isShop ? Math.min(availableUSD, shortfall).toFixed(2) : '';
         }
         dueInput.dataset.receiptId = rid;
       }
-      // Show merge toggle to allow combining with paid receipts
+      // Both Driver and In Shop debt may combine due credit with real paid
+      // receipt funds. The saved record remains Not Paid while any due part
+      // exists, so the customer sees only the difference as debt.
       if (mergeToggle) mergeToggle.classList.remove('hidden');
-      // Initialize merge funding state
       initMergeFunding();
       reflectMergeFundingUI();
     } else {
       // No credit available - all used up
       if (dueSection) dueSection.classList.add('hidden');
-      if (mergeToggle) mergeToggle.classList.remove('hidden'); // Still allow merging paid receipts
-      initMergeFunding();
-      reflectMergeFundingUI();
+      if (dueInput) {
+        dueInput.value = '';
+        dueInput.dataset.maxDue = '0';
+        dueInput.dataset.exchangeRate = exchangeRate.toString();
+        dueInput.dataset.receiptId = rid;
+      }
+      if (mergeToggle) mergeToggle.classList.toggle('hidden', isShop);
+      if (!isShop) {
+        initMergeFunding();
+        reflectMergeFundingUI();
+      }
       // Update hint to show that credit is fully used
       if (hint) hint.textContent += isArC ? ' • ⚠️ الرصيد مستخدم بالكامل' : ' • ⚠️ Credit fully used';
     }
 
     updateAdDueSummary();
+    if (isShop) {
+      if (unpaidFinancial) unpaidFinancial.classList.add('hidden');
+      syncShopDueAllocationToFunding();
+    }
   }
 
   // Keep driver selection consistent with the receipt assignment.
@@ -2496,6 +3361,72 @@ function onAdTempReceiptChange(receiptId) {
       driverSelect.disabled = false;
     }
   }
+  renderAdDueReceiptReplacementNotice();
+}
+
+function getAdReceiptDisplayLabel(receiptId) {
+  const rid = String(receiptId || '');
+  const receipt = (state.receipts || []).find(row => row && String(row.id) === rid);
+  if (!receipt) return rid ? `#${rid.slice(0, 8)}` : '';
+  const serial = receipt.finalReceiptNo || receipt.serialNumber || receipt.tempReceiptNo || rid.slice(0, 8);
+  return `#${serial}`;
+}
+
+function getOriginalAdDueAllocationUSD() {
+  const ad = state.modalData;
+  if (!ad?.id) return 0;
+  const originalReceiptId = String(ad.linkedDeliveryReceiptId || ad.receiptId || '');
+  const explicitDueForReceipt = Array.isArray(ad.dueAllocations)
+    ? ad.dueAllocations
+      .filter(row => String(row?.receiptId || '') === originalReceiptId)
+      .reduce((sum, row) => sum + (parseFloat(row?.amountUSD) || 0), 0)
+    : 0;
+  if (explicitDueForReceipt > 0) return Math.round(explicitDueForReceipt * 100) / 100;
+  return getAdLegacyDueMirrorUSD(ad, originalReceiptId);
+}
+
+// Explain a due/debt receipt replacement before it is committed. This is
+// especially important on phones where the old option may scroll out of view.
+function renderAdDueReceiptReplacementNotice() {
+  const notice = document.getElementById('ad-linked-receipt-change');
+  if (!notice) return;
+  const ad = state.modalData;
+  const paymentStatus = document.getElementById('ad-payment-status')?.value || '';
+  const collectionMethod = document.getElementById('ad-collection-method')?.value || '';
+  const oldCollection = String(ad?.collectionMethod || '');
+  const oldReceiptId = String(ad?.linkedDeliveryReceiptId || ad?.receiptId || '');
+  const newReceiptId = String(document.getElementById('ad-linked-receipt-id')?.value || '');
+  const changed = !!ad?.id
+    && paymentStatus === 'not_paid'
+    && oldCollection === collectionMethod
+    && oldReceiptId
+    && newReceiptId
+    && oldReceiptId !== newReceiptId;
+  if (!changed) {
+    notice.classList.add('hidden');
+    notice.textContent = '';
+    return;
+  }
+  const oldAmount = getOriginalAdDueAllocationUSD();
+  const newAmount = parseFloat(document.getElementById('ad-due-amount-to-use')?.value) || 0;
+  const oldLabel = getAdReceiptDisplayLabel(oldReceiptId);
+  const newLabel = getAdReceiptDisplayLabel(newReceiptId);
+  const isAr = state.language === 'ar';
+  notice.classList.remove('hidden');
+  notice.textContent = isAr
+    ? `عند الحفظ: سيعود $${oldAmount.toFixed(2)} إلى ${oldLabel} وسيُحجز $${newAmount.toFixed(2)} من ${newLabel}. يتم التغيير معاً دون خصم مزدوج.`
+    : `On Save: $${oldAmount.toFixed(2)} returns to ${oldLabel}, and $${newAmount.toFixed(2)} is reserved from ${newLabel}. Both changes happen together with no double charge.`;
+}
+
+function syncShopDueAllocationToFunding() {
+  const paymentStatus = document.getElementById('ad-payment-status')?.value || '';
+  const collectionMethod = document.getElementById('ad-collection-method')?.value || '';
+  if (paymentStatus !== 'not_paid' || collectionMethod !== 'in_shop') return;
+  const receiptId = String(document.getElementById('ad-linked-receipt-id')?.value || '').trim();
+  const amountUSD = parseFloat(document.getElementById('ad-due-amount-to-use')?.value) || 0;
+  state.tempAdFunding = {
+    allocations: receiptId && amountUSD > 0 ? [{ receiptId, amountUSD }] : []
+  };
 }
 
 // Initialize merge funding state.
@@ -2506,12 +3437,17 @@ function onAdTempReceiptChange(receiptId) {
 function initMergeFunding() {
   if (!state.tempMergeFunding) {
     const md = state.modalData;
-    if (md?.hasMergedPaidFunds && Array.isArray(md.mergedPaidAllocations) && md.mergedPaidAllocations.length) {
+    const isMixedShopDebt = getAdPaymentState(md || {}) === 'not_paid'
+      && String(md?.collectionMethod || '').toLowerCase() === 'in_shop';
+    const savedPaidRows = isMixedShopDebt
+      ? md?.receiptAllocations
+      : (md?.mergedPaidAllocations || md?.receiptAllocations);
+    if (Array.isArray(savedPaidRows) && savedPaidRows.length) {
       state.tempMergeFunding = {
         enabled: true,
         // Snap to 2 decimals for display — stored values can carry float
         // residue from proportional stop-ad math (same as initAdFunding).
-        allocations: md.mergedPaidAllocations.map(a => ({
+        allocations: savedPaidRows.map(a => ({
           receiptId: a.receiptId,
           amountUSD: isFinite(parseFloat(a.amountUSD)) ? String(Math.round(parseFloat(a.amountUSD) * 100) / 100) : String(a.amountUSD)
         }))
@@ -2535,8 +3471,20 @@ function onAdDueAmountChange() {
     value = maxDue;
     dueInput.value = value.toFixed(2);
   }
+
+  // Once the user edits the suggested difference, treat the visible paid +
+  // unpaid total as the new intended budget. Future paid-row edits can then
+  // keep the due portion synchronized without restoring an old amount.
+  if (document.getElementById('ad-collection-method')?.value === 'in_shop'
+      && normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD) > 0) {
+    state.tempMixedReceiptTargetUSD = Math.round(
+      (getTempMergeFundingTotalUSD() + value) * 100
+    ) / 100;
+  }
   
   updateAdDueSummary();
+  syncShopDueAllocationToFunding();
+  renderAdDueReceiptReplacementNotice();
 }
 
 // Use all available due amount (USD)
@@ -2545,8 +3493,21 @@ function useAllDueAmount() {
   if (!dueInput) return;
   
   const maxDue = parseFloat(dueInput.dataset.maxDue) || 0;
-  dueInput.value = maxDue.toFixed(2);
+  const budget = normalizeAdDriverBudgetUSD(document.getElementById('ad-driver-budget-usd')?.value);
+  const mergedTotal = state.tempMergeFunding?.enabled
+    ? (state.tempMergeFunding.allocations || []).reduce((sum, row) => sum + (parseFloat(row?.amountUSD) || 0), 0)
+    : 0;
+  const budgetRemaining = budget > 0 ? Math.max(budget - mergedTotal, 0) : maxDue;
+  dueInput.value = Math.min(maxDue, budgetRemaining).toFixed(2);
+  if (document.getElementById('ad-collection-method')?.value === 'in_shop'
+      && normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD) > 0) {
+    state.tempMixedReceiptTargetUSD = Math.round(
+      (getTempMergeFundingTotalUSD() + (parseFloat(dueInput.value) || 0)) * 100
+    ) / 100;
+  }
   updateAdDueSummary();
+  syncShopDueAllocationToFunding();
+  renderAdDueReceiptReplacementNotice();
 }
 
 // Update the due amount summary (USD)
@@ -2563,10 +3524,19 @@ function updateAdDueSummary() {
   const remainingLYD = remainingUSD * exchangeRate;
   
   const isArD = state.language === 'ar';
+  const isShopDebt = document.getElementById('ad-collection-method')?.value === 'in_shop';
   if (usingUSD > 0) {
-    summary.innerHTML = isArD
+    if (isShopDebt) {
+      const paidPart = getTempMergeFundingTotalUSD();
+      const combined = Math.round((paidPart + usingUSD) * 100) / 100;
+      summary.innerHTML = isArD
+        ? `المدفوع: <span class="font-medium text-blue-700">$${paidPart.toFixed(2)}</span> + الدين: <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> = الميزانية: <strong>$${combined.toFixed(2)}</strong>. <span class="text-amber-700">الفرق فقط يبقى بالسالب حتى يدفع العميل.</span>`
+        : `Paid: <span class="font-medium text-blue-700">$${paidPart.toFixed(2)}</span> + debt: <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> = budget: <strong>$${combined.toFixed(2)}</strong>. <span class="text-amber-700">Only the difference stays minus until the customer pays.</span>`;
+    } else {
+      summary.innerHTML = isArD
       ? `سيتم استخدام <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> (${usingLYD.toFixed(0)} LYD) من المستحق. ${remainingUSD > 0 ? `<span class="text-slate-400">سيتبقى $${remainingUSD.toFixed(2)} (${remainingLYD.toFixed(0)} LYD).</span>` : '<span class="text-emerald-600">سيتم استخدام الرصيد بالكامل.</span>'}`
       : `Using <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> (${usingLYD.toFixed(0)} LYD) from due. ${remainingUSD > 0 ? `<span class="text-slate-400">$${remainingUSD.toFixed(2)} (${remainingLYD.toFixed(0)} LYD) will remain.</span>` : '<span class="text-emerald-600">Full credit will be used.</span>'}`;
+    }
   } else {
     summary.innerHTML = `<span class="text-amber-600">${isArD ? 'أدخل المبلغ المراد استخدامه من الوصل المستحق.' : 'Enter amount to use from due receipt.'}</span>`;
   }
@@ -2624,6 +3594,7 @@ function removeAdMergeFundingAllocation(idx) {
   if (!state.tempMergeFunding?.allocations) return;
   state.tempMergeFunding.allocations.splice(idx, 1);
   renderAdMergedFundingList();
+  syncMixedShopReceiptDifference();
 }
 
 // Update funding receipt in merge mode
@@ -2633,6 +3604,7 @@ function updateAdMergeFundingReceipt(idx, receiptId) {
   if (!allocation) return;
   allocation.receiptId = receiptId;
   renderAdMergedFundingList();
+  syncMixedShopReceiptDifference();
 }
 
 // Update funding amount in merge mode
@@ -2642,6 +3614,19 @@ function updateAdMergeFundingAmount(idx, value) {
   if (!allocation) return;
   allocation.amountUSD = value;
   refreshAdMergedFundingSummary();
+  syncMixedShopReceiptDifference();
+}
+
+function syncMixedShopReceiptDifference() {
+  if (document.getElementById('ad-collection-method')?.value !== 'in_shop') return;
+  const target = normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD);
+  const dueInput = document.getElementById('ad-due-amount-to-use');
+  if (!dueInput || target <= 0 || !String(dueInput.dataset.receiptId || '').trim()) return;
+  const maxDue = Math.max(parseFloat(dueInput.dataset.maxDue) || 0, 0);
+  const shortfall = Math.max(target - getTempMergeFundingTotalUSD(), 0);
+  dueInput.value = Math.min(shortfall, maxDue).toFixed(2);
+  updateAdDueSummary();
+  syncShopDueAllocationToFunding();
 }
 
 // Get paid receipts available for the current customer (for merge mode)
@@ -2649,7 +3634,8 @@ function getPaidReceiptsForMerge(customerId) {
   if (!customerId) return [];
   return getVisibleRecords(state.receipts).filter(r => {
     if (String(r.customerId || '') !== String(customerId)) return false;
-    if (r.isPaid === false) return false;
+    const statusLower = String(r.status || '').trim().toLowerCase();
+    if (!(r.isPaid === true || statusLower === 'paid')) return false;
     // Exclude temp delivery receipts that aren't finalized
     const looksTemp = (String(r.receiptType || '').toUpperCase() === 'DELIVERY_TEMP') || isTempDeliveryReceiptNo(r.tempReceiptNo);
     if (looksTemp) {
@@ -2786,10 +3772,11 @@ function openTempDeliveryReceiptFromAd() {
 }
 
 // Filter customers in multi-customer selection
+// foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
 function filterAdCustomers(searchTerm) {
-  const term = searchTerm.toLowerCase();
+  const term = foldSearchText(searchTerm);
   document.querySelectorAll('.ad-customer-btn').forEach(btn => {
-    const customerName = btn.dataset.customerName || '';
+    const customerName = foldSearchText(btn.dataset.customerName || '');
     btn.style.display = customerName.includes(term) ? '' : 'none';
   });
 }
@@ -2797,9 +3784,9 @@ function filterAdCustomers(searchTerm) {
 // Filter pages dropdown
 function filterAdPages() {
   const input = document.getElementById('ad-page-search');
-  const term = (input?.value || '').toLowerCase();
+  const term = foldSearchText(input?.value || '');
   document.querySelectorAll('#ad-page-dropdown .page-option').forEach(opt => {
-    const name = opt.dataset.name || '';
+    const name = foldSearchText(opt.dataset.name || '');
     opt.style.display = name.includes(term) ? '' : 'none';
   });
   showAdPageDropdown();
@@ -2815,14 +3802,17 @@ function hideAdPageDropdown() {
   if (dropdown) dropdown.classList.add('hidden');
 }
 
-// Hide dropdown when clicking outside
+// Hide dropdown when clicking outside. CAPTURE phase: the modal panel's
+// onclick="event.stopPropagation()" swallows bubble-phase clicks, so without
+// it this listener never fires for taps inside the form (see the comment on
+// the capture-phase listener at the top of this file).
 document.addEventListener('click', function(e) {
   const dropdown = document.getElementById('ad-page-dropdown');
   const search = document.getElementById('ad-page-search');
   if (dropdown && search && !dropdown.contains(e.target) && e.target !== search) {
     dropdown.classList.add('hidden');
   }
-});
+}, true);
 
 // Add ad link input dynamically
 function addAdLinkInput(value = '') {
@@ -2846,6 +3836,51 @@ function addAdLinkInput(value = '') {
   lucide.createIcons();
 }
 
+function normalizeAdDriverBudgetUSD(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount <= 0) return 0;
+  return Math.round(amount * 100) / 100;
+}
+
+function getOriginalUnpaidDriverBudgetUSD() {
+  const ad = state.modalData;
+  if (!ad) return 0;
+  const isDriverDebt = getAdPaymentState(ad) === 'not_paid'
+    && String(ad.collectionMethod || '').toLowerCase() === 'driver';
+  return isDriverDebt ? normalizeAdDriverBudgetUSD(ad.amountUSD) : 0;
+}
+
+function getOriginalUnpaidAdBudgetUSD() {
+  const ad = state.modalData;
+  if (!ad || getAdPaymentState(ad) !== 'not_paid') return 0;
+  // TERMINAL-aware settle target: a stopped/canceled/completed ad's unpaid
+  // budget is dead (stop already released the unspent part) — only its
+  // COMMITTED total (the stop-reduced allocation rows, e.g. $1.24 of a
+  // stopped $9.00 ad) still holds receipt money, so THAT is the amount the
+  // settle UI must ask for. A live debt still settles its full budget.
+  if (adIsTerminalForEdit(ad)) return getAdCommittedFundingTotalUSD(ad);
+  return normalizeAdDriverBudgetUSD(ad.amountUSD);
+}
+
+function updateAdDriverBudgetSummary() {
+  const input = document.getElementById('ad-driver-budget-usd');
+  const summary = document.getElementById('ad-driver-budget-summary');
+  if (!input || !summary) return;
+
+  const budget = normalizeAdDriverBudgetUSD(input.value);
+  const rate = Number(document.getElementById('ad-driver-budget-rate')?.value)
+    || Number(state.defaultExchangeRate)
+    || 1;
+  const isAr = state.language === 'ar';
+  if (budget <= 0) {
+    summary.textContent = isAr ? 'أدخل ميزانية الإعلان الموجبة.' : 'Enter the positive ad budget.';
+    return;
+  }
+  summary.textContent = isAr
+    ? `الميزانية: $${budget.toFixed(2)} ≈ ${(budget * rate).toFixed(2)} LYD`
+    : `Budget: $${budget.toFixed(2)} ≈ ${(budget * rate).toFixed(2)} LYD`;
+}
+
 // Set Ad Payment Status (Paid / Not Paid)
 function setAdPaymentStatus(status) {
   const paidBtn = document.getElementById('ad-pay-status-paid');
@@ -2855,11 +3890,41 @@ function setAdPaymentStatus(status) {
   const notPaidOptions = document.getElementById('ad-not-paid-options');
   const receiptFunding = document.getElementById('ad-receipt-funding-section');
   const unpaidFinancial = document.getElementById('ad-unpaid-financial');
+  const driverBudgetSection = document.getElementById('ad-driver-budget-section');
+  const driverSettlementHint = document.getElementById('ad-driver-settlement-hint');
   
   if (!paidBtn || !notPaidBtn || !wontPayBtn || !hiddenInput) {
     // Expected while the New Ad wizard hasn't rendered the payment section yet
     // (it appears only after a customer is selected) — not an error.
     return;
+  }
+
+  const previousStatus = hiddenInput.value;
+  const previousCollectionMethod = document.getElementById('ad-collection-method')?.value || '';
+  if (status === 'paid' && previousStatus === 'not_paid' && previousCollectionMethod === 'in_shop') {
+    // When the unpaid receipt is later collected, the user settles the whole
+    // mixed ad by switching to Paid. Bring BOTH the original paid portion and
+    // the former due portion into the normal paid funding list so the exact
+    // original total is visible and can be validated by the server.
+    initMergeFunding();
+    const totals = new Map();
+    for (const row of [
+      ...(state.tempMergeFunding?.allocations || []),
+      ...(state.tempAdFunding?.allocations || [])
+    ]) {
+      const receiptId = String(row?.receiptId || '').trim();
+      const amountUSD = parseFloat(row?.amountUSD) || 0;
+      if (!receiptId || amountUSD <= 0) continue;
+      totals.set(receiptId, (totals.get(receiptId) || 0) + amountUSD);
+    }
+    state.tempAdFunding = {
+      allocations: Array.from(totals, ([receiptId, amountUSD]) => ({
+        receiptId,
+        amountUSD: (Math.round(amountUSD * 100) / 100).toFixed(2)
+      }))
+    };
+    state.tempMergeFunding = { allocations: [], enabled: false };
+    state.tempMixedReceiptTargetUSD = null;
   }
   
   // Update hidden input
@@ -2918,6 +3983,10 @@ function setAdPaymentStatus(status) {
     if (notPaidOptions) notPaidOptions.classList.add('hidden');
     if (receiptFunding) receiptFunding.classList.remove('hidden');
     if (unpaidFinancial) unpaidFinancial.classList.add('hidden');
+    if (driverBudgetSection) driverBudgetSection.classList.add('hidden');
+    if (driverSettlementHint) {
+      driverSettlementHint.classList.toggle('hidden', getOriginalUnpaidAdBudgetUSD() <= 0);
+    }
     if (wontPaySection) wontPaySection.classList.add('hidden');
     setAdCollectionMethod('');
     // Ensure Receipt Funding list renders immediately (prevents "blank" feeling)
@@ -2942,11 +4011,14 @@ function setAdPaymentStatus(status) {
   } else if (status === 'not_paid') {
     if (notPaidOptions) notPaidOptions.classList.remove('hidden');
     if (receiptFunding) receiptFunding.classList.add('hidden');
+    if (driverSettlementHint) driverSettlementHint.classList.add('hidden');
     // Hide financial details if driver (receipt already has them)
     if (collectionMethod === 'driver') {
       if (unpaidFinancial) unpaidFinancial.classList.add('hidden');
+      if (driverBudgetSection) driverBudgetSection.classList.remove('hidden');
     } else {
-    if (unpaidFinancial) unpaidFinancial.classList.remove('hidden');
+      if (unpaidFinancial) unpaidFinancial.classList.remove('hidden');
+      if (driverBudgetSection) driverBudgetSection.classList.add('hidden');
     }
     if (wontPaySection) wontPaySection.classList.add('hidden');
   } else {
@@ -2954,6 +4026,8 @@ function setAdPaymentStatus(status) {
     if (notPaidOptions) notPaidOptions.classList.add('hidden');
     if (receiptFunding) receiptFunding.classList.add('hidden');
     if (unpaidFinancial) unpaidFinancial.classList.remove('hidden');
+    if (driverBudgetSection) driverBudgetSection.classList.add('hidden');
+    if (driverSettlementHint) driverSettlementHint.classList.add('hidden');
     if (wontPaySection) wontPaySection.classList.remove('hidden');
     setAdCollectionMethod('');
   }
@@ -2969,6 +4043,7 @@ function setAdCollectionMethod(method) {
   const hiddenInput = document.getElementById('ad-collection-method');
   const collectionDetails = document.getElementById('ad-collection-details');
   const driverSelect = document.getElementById('ad-driver-select');
+  const driverBudgetSection = document.getElementById('ad-driver-budget-section');
   
   if (!shopBtn || !driverBtn || !hiddenInput) return;
   
@@ -2992,6 +4067,7 @@ function setAdCollectionMethod(method) {
   if (!method) {
     if (collectionDetails) collectionDetails.classList.add('hidden');
     if (driverSelect) driverSelect.classList.add('hidden');
+    if (driverBudgetSection) driverBudgetSection.classList.add('hidden');
     lucide.createIcons();
     refreshAdTempReceiptOptions();
     return;
@@ -3010,6 +4086,7 @@ function setAdCollectionMethod(method) {
     if (shopSpan) shopSpan.className = 'text-[10px] font-medium text-blue-700 dark:text-blue-400';
     // Hide driver select for in shop
     if (driverSelect) driverSelect.classList.add('hidden');
+    if (driverBudgetSection) driverBudgetSection.classList.add('hidden');
     // Show financial details for in shop
     if (unpaidFinancial) unpaidFinancial.classList.remove('hidden');
   } else if (method === 'driver') {
@@ -3020,6 +4097,8 @@ function setAdCollectionMethod(method) {
     if (driverSpan) driverSpan.className = 'text-[10px] font-medium text-violet-700 dark:text-violet-400';
     // Driver select is HIDDEN (driver is assigned in the receipt)
     if (driverSelect) driverSelect.classList.add('hidden');
+    if (driverBudgetSection) driverBudgetSection.classList.remove('hidden');
+    updateAdDriverBudgetSummary();
     // Hide financial details for driver (receipt already has them)
     if (unpaidFinancial) unpaidFinancial.classList.add('hidden');
   }
@@ -3090,24 +4169,121 @@ function updateAdEndDateFromDays() {
   endInput.value = formatUTCDateForInput(end);
 }
 
+// Keep each record below the server's 10 MB request limit after JSON overhead.
+// Data-URL character length closely approximates the JSON request byte size.
+const MAX_ENTITY_PHOTO_PAYLOAD_CHARS = 7 * 1024 * 1024;
+
+function _preparedPhotoFits(existing, source) {
+  const used = (Array.isArray(existing) ? existing : [])
+    .reduce((sum, value) => sum + String(value || '').length, 0);
+  return used + String(source || '').length <= MAX_ENTITY_PHOTO_PAYLOAD_CHARS;
+}
+
+function _showPhotoPayloadLimit() {
+  showNotification(
+    state.language === 'ar' ? 'حجم الصور كبير' : 'Photos are too large',
+    state.language === 'ar' ? 'وصلت الصور إلى حد الرفع الآمن. احذف صورة أو استخدم صوراً أصغر.' : 'The safe upload limit was reached. Remove a photo or use smaller images.',
+    'warning'
+  );
+}
+
+// HEIC/HEIF (the iPhone camera default) cannot be decoded by Chrome on
+// Android: compressImageToDataUrl falls back to the raw data URL and
+// isSafeReceiptPhotoSource rejects it. Without this notice the photo just
+// silently never appears in the preview grid.
+function _showUnsupportedPhotoFormat() {
+  showNotification(
+    state.language === 'ar' ? 'صيغة صورة غير مدعومة' : 'Unsupported photo',
+    state.language === 'ar'
+      ? 'استخدم صورة PNG أو JPG أو WEBP أو GIF — صور HEIC غير مدعومة (غيّر إعداد كاميرا الآيفون إلى "الأكثر توافقاً" أو أرسلها بصيغة JPG).'
+      : 'Use a PNG, JPG, WEBP, or GIF image — HEIC photos are not supported (set the iPhone camera to "Most Compatible" or share as JPG).',
+    'error'
+  );
+}
+
+async function _compressPhotosForUpload(files, concurrency = 2) {
+  const input = Array.isArray(files) ? files : [];
+  const results = new Array(input.length).fill('');
+  let next = 0;
+  const worker = async () => {
+    while (next < input.length) {
+      const index = next++;
+      try { results[index] = await compressImageToDataUrl(input[index]); } catch (_) {}
+    }
+  };
+  const workers = Math.min(Math.max(Number(concurrency) || 1, 1), input.length);
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  return results;
+}
+
+function canModifyAdPhotosInCurrentModal() {
+  if (!can('ads', 'uploadPhotos')) return false;
+  const editingSavedAd = state.activeModal === 'ad' && Boolean(state.modalData?.id);
+  // A partial photo array must never replace saved photos the user cannot see.
+  // A new ad is safe because there are no older photos to erase.
+  return !editingSavedAd || can('ads', 'viewPhotos');
+}
+
 // Upload and preview ad photos
 function uploadAdPhotos(fileList) {
   if (!fileList || !fileList.length) return;
-  if (!can('ads', 'uploadPhotos')) {
+  if (!canModifyAdPhotosInCurrentModal()) {
     showNotification(
       state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
-      state.language === 'ar' ? 'تحتاج صلاحية رفع صور الإعلانات' : 'Requires the Upload Photos permission',
+      state.language === 'ar'
+        ? 'تحتاج صلاحية عرض ورفع الصور لتغيير صور إعلان محفوظ.'
+        : 'Viewing and Upload Photos permissions are required to change a saved ad\'s photos.',
       'error'
     );
     return;
   }
   state.tempAdPhotos = state.tempAdPhotos || [];
-  Array.from(fileList).forEach(file => {
-    compressImageToDataUrl(file).then((dataUrl) => {
-      if (!dataUrl) return;
+  const uploadGeneration = _adPhotoUploadGeneration;
+  const room = Math.max(6 - state.tempAdPhotos.length, 0);
+  const files = Array.from(fileList).slice(0, room);
+  if (!files.length) {
+    showNotification(
+      state.language === 'ar' ? 'الحد الأقصى للصور' : 'Photo limit reached',
+      state.language === 'ar' ? 'يمكن إرفاق 6 صور كحد أقصى لكل إعلان.' : 'You can attach up to 6 photos to each ad.',
+      'warning'
+    );
+    return;
+  }
+  _adPhotoUploadsInFlight += files.length;
+  _compressPhotosForUpload(files).then(results => {
+    if (uploadGeneration !== _adPhotoUploadGeneration || state.activeModal !== 'ad') return;
+    state.tempAdPhotos = state.tempAdPhotos || [];
+    let changed = false;
+    let tooLarge = false;
+    let unsupported = false;
+    results.forEach(dataUrl => {
+      // Keep the photo-cap check first so a full grid doesn't show a
+      // misleading "unsupported" message.
+      if (!dataUrl || state.tempAdPhotos.length >= 6) return;
+      if (!isSafeReceiptPhotoSource(dataUrl)) {
+        // Valid image over the 8M-char cap: say "too large", not "unsupported"
+        // (the HEIC-oriented message misdirects the retry).
+        if (isOversizedReceiptPhotoSource(dataUrl)) tooLarge = true;
+        else unsupported = true;
+        return;
+      }
+      if (!_preparedPhotoFits(state.tempAdPhotos, dataUrl)) {
+        tooLarge = true;
+        return;
+      }
       state.tempAdPhotos.push(dataUrl);
+      changed = true;
+    });
+    if (changed) {
+      state.tempAdPhotosDirty = true;
       renderAdPhotoPreviews();
-    }).catch(() => {});
+    }
+    if (tooLarge) _showPhotoPayloadLimit();
+    if (unsupported) _showUnsupportedPhotoFormat();
+  }).finally(() => {
+    if (uploadGeneration === _adPhotoUploadGeneration) {
+      _adPhotoUploadsInFlight = Math.max(0, _adPhotoUploadsInFlight - files.length);
+    }
   });
 }
 
@@ -3116,23 +4292,31 @@ function renderAdPhotoPreviews() {
   if (!container) return;
   const photos = state.tempAdPhotos || [];
   if (!photos.length) {
-    container.innerHTML = `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. اضغط "إضافة صورة" للرفع.' : 'No photos yet. Click "Add Photo" to upload.'}</div>`;
+    const hiddenCount = getAdPhotoCount(state.modalData);
+    const hiddenSavedPhotos = Boolean(state.modalData?.id) && hiddenCount > 0 && !can('ads', 'viewPhotos');
+    container.innerHTML = hiddenSavedPhotos
+      ? `<div class="text-xs text-amber-600 dark:text-amber-400 col-span-4 text-center py-2">${state.language === 'ar' ? `تم حفظ ${hiddenCount} صورة. تحتاج صلاحية عرض الصور لرؤيتها أو تغييرها.` : `${hiddenCount} saved photo${hiddenCount === 1 ? '' : 's'}. View Photos permission is required to see or change them.`}</div>`
+      : `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. اضغط "إضافة صورة" للرفع.' : 'No photos yet. Click "Add Photo" to upload.'}</div>`;
     return;
   }
   container.innerHTML = photos.map((src, idx) => `
     <div class="relative group rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700">
-      <img src="${Security.escapeHtml(src)}" class="w-full h-20 object-cover" />
-      <button type="button" onclick="removeAdPhoto(${idx})" class="absolute top-1 right-1 bg-white/80 dark:bg-slate-900/80 rounded-full p-1 shadow hover:bg-rose-100">
-        <i data-lucide="x" class="w-3 h-3 text-rose-600"></i>
+      <button type="button" onclick="openPendingAdPhotoViewer(${idx})" class="group/photo block w-full relative focus:outline-none focus:ring-2 focus:ring-indigo-500" title="${state.language === 'ar' ? 'اضغط لعرض الصورة بالحجم الكامل' : 'Click to view full size'}" aria-label="${state.language === 'ar' ? `عرض صورة الإعلان ${idx + 1}` : `View ad photo ${idx + 1}`}">
+        <img src="${Security.escapeHtml(src)}" alt="${state.language === 'ar' ? `صورة الإعلان ${idx + 1}` : `Ad photo ${idx + 1}`}" class="w-full h-20 object-cover" />
+        <span class="absolute inset-0 bg-black/0 group-hover/photo:bg-black/25 group-focus/photo:bg-black/25 transition-colors flex items-center justify-center"><i data-lucide="maximize-2" class="w-5 h-5 text-white opacity-0 group-hover/photo:opacity-100 group-focus/photo:opacity-100 drop-shadow"></i></span>
       </button>
+      ${canModifyAdPhotosInCurrentModal() ? `<button type="button" onclick="removeAdPhoto(${idx})" class="absolute top-1 right-1 bg-white/90 dark:bg-slate-900/90 rounded-full p-1 shadow hover:bg-rose-100 z-10" aria-label="${state.language === 'ar' ? `حذف صورة الإعلان ${idx + 1}` : `Remove ad photo ${idx + 1}`}">
+        <i data-lucide="x" class="w-3 h-3 text-rose-600"></i>
+      </button>` : ''}
     </div>
   `).join('');
   if (window.lucide) lucide.createIcons();
 }
 
 function removeAdPhoto(idx) {
-  if (!state.tempAdPhotos) return;
+  if (!canModifyAdPhotosInCurrentModal() || !state.tempAdPhotos) return;
   state.tempAdPhotos.splice(idx, 1);
+  state.tempAdPhotosDirty = true;
   renderAdPhotoPreviews();
 }
 
@@ -3159,12 +4343,54 @@ function updateAdUnpaidTotals() {
 function uploadReceiptPhotos(fileList) {
   if (!fileList || !fileList.length) return;
   state.tempReceiptPhotos = state.tempReceiptPhotos || [];
-  Array.from(fileList).forEach(file => {
-    compressImageToDataUrl(file).then((dataUrl) => {
-      if (!dataUrl) return;
+  const uploadGeneration = _receiptPhotoUploadGeneration;
+  const room = Math.max(6 - state.tempReceiptPhotos.length, 0);
+  const files = Array.from(fileList).slice(0, room);
+  if (!files.length) {
+    showNotification(
+      state.language === 'ar' ? 'الحد الأقصى للصور' : 'Photo limit reached',
+      state.language === 'ar' ? 'يمكن إرفاق 6 صور كحد أقصى لكل وصل.' : 'You can attach up to 6 photos to each receipt.',
+      'warning'
+    );
+    return;
+  }
+  _receiptPhotoUploadsInFlight += files.length;
+  _compressPhotosForUpload(files).then(results => {
+    // Ignore results from a cancelled/reopened form, preserve selection order,
+    // and recheck both limits after asynchronous compression.
+    if (uploadGeneration !== _receiptPhotoUploadGeneration || state.activeModal !== 'receipt') return;
+    state.tempReceiptPhotos = state.tempReceiptPhotos || [];
+    let changed = false;
+    let tooLarge = false;
+    let unsupported = false;
+    results.forEach(dataUrl => {
+      // Keep the photo-cap check first so a full grid doesn't show a
+      // misleading "unsupported" message.
+      if (!dataUrl || state.tempReceiptPhotos.length >= 6) return;
+      if (!isSafeReceiptPhotoSource(dataUrl)) {
+        // Valid image over the 8M-char cap: say "too large", not "unsupported"
+        // (the HEIC-oriented message misdirects the retry).
+        if (isOversizedReceiptPhotoSource(dataUrl)) tooLarge = true;
+        else unsupported = true;
+        return;
+      }
+      if (!_preparedPhotoFits(state.tempReceiptPhotos, dataUrl)) {
+        tooLarge = true;
+        return;
+      }
       state.tempReceiptPhotos.push(dataUrl);
+      changed = true;
+    });
+    if (changed) {
+      state.tempReceiptPhotosDirty = true;
       renderReceiptPhotoPreviews();
-    }).catch(() => {});
+    }
+    if (tooLarge) _showPhotoPayloadLimit();
+    if (unsupported) _showUnsupportedPhotoFormat();
+  }).finally(() => {
+    if (uploadGeneration === _receiptPhotoUploadGeneration) {
+      _receiptPhotoUploadsInFlight = Math.max(0, _receiptPhotoUploadsInFlight - files.length);
+    }
   });
 }
 
@@ -3178,8 +4404,13 @@ function renderReceiptPhotoPreviews() {
   }
   container.innerHTML = photos.map((src, idx) => `
     <div class="relative group rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700">
-      <img src="${Security.escapeHtml(src)}" class="w-full h-20 object-cover" />
-      <button type="button" onclick="removeReceiptPhoto(${idx})" class="absolute top-1 right-1 bg-white/80 dark:bg-slate-900/80 rounded-full p-1 shadow hover:bg-rose-100">
+      <button type="button" onclick="openPendingReceiptPhotoViewer(${idx})" class="group/photo block w-full relative focus:outline-none focus:ring-2 focus:ring-indigo-500" title="${state.language === 'ar' ? 'اضغط لعرض الصورة بالحجم الكامل' : 'Click to view full size'}" aria-label="${state.language === 'ar' ? `عرض صورة الوصل ${idx + 1}` : `View receipt photo ${idx + 1}`}">
+        <img src="${Security.escapeHtml(src)}" alt="${state.language === 'ar' ? `صورة الوصل ${idx + 1}` : `Receipt photo ${idx + 1}`}" class="w-full h-20 object-cover" />
+        <span class="absolute inset-0 bg-black/0 group-hover/photo:bg-black/25 group-focus/photo:bg-black/25 transition-colors flex items-center justify-center">
+          <i data-lucide="maximize-2" class="w-5 h-5 text-white opacity-0 group-hover/photo:opacity-100 group-focus/photo:opacity-100 drop-shadow"></i>
+        </span>
+      </button>
+      <button type="button" onclick="removeReceiptPhoto(${idx})" class="absolute top-1 right-1 bg-white/90 dark:bg-slate-900/90 rounded-full p-1 shadow hover:bg-rose-100 z-10" aria-label="${state.language === 'ar' ? `حذف صورة الوصل ${idx + 1}` : `Remove receipt photo ${idx + 1}`}">
         <i data-lucide="x" class="w-3 h-3 text-rose-600"></i>
       </button>
     </div>
@@ -3190,6 +4421,7 @@ function renderReceiptPhotoPreviews() {
 function removeReceiptPhoto(idx) {
   if (!state.tempReceiptPhotos) return;
   state.tempReceiptPhotos.splice(idx, 1);
+  state.tempReceiptPhotosDirty = true;
   renderReceiptPhotoPreviews();
 }
 
@@ -3205,7 +4437,7 @@ function updateAdLocalAmount() {
   const rate = parseFloat(rateInput.value) || 1;
   const localAmount = amount * rate;
   
-  displayEl.innerHTML = `${state.language === 'ar' ? 'بالعملة المحلية' : 'Local'}: <span class="font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(localAmount.toLocaleString())} LYD</span>`;
+  displayEl.innerHTML = `${state.language === 'ar' ? 'بالعملة المحلية' : 'Local'}: <span class="font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(localAmount.toLocaleString('en-US'))} LYD</span>`;
 }
 
 function addAdFundingAllocation() {
@@ -3224,23 +4456,71 @@ function updateAdFundingReceipt(idx, receiptId) {
   if (!state.tempAdFunding?.allocations) return;
   const allocation = state.tempAdFunding.allocations[idx];
   if (!allocation) return;
+  const selectedReceipt = state.receipts.find(r => r && !r._deleted && String(r.id) === String(receiptId || ''));
+  const customerId = String(document.getElementById('ad-customer-id')?.value || '');
+  if (selectedReceipt && customerId && String(selectedReceipt.customerId || '') !== customerId) {
+    showNotification(
+      state.language === 'ar' ? 'وصل غير صالح' : 'Invalid receipt',
+      state.language === 'ar' ? 'هذا الوصل يخص عميلاً آخر.' : 'This receipt belongs to another customer.',
+      'error'
+    );
+    allocation.receiptId = '';
+    allocation.amountUSD = 0;
+    renderAdFundingList();
+    return;
+  }
   allocation.receiptId = receiptId;
   
   // Default to 0, but cap existing values at remaining if receipt is selected
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (receipt) {
-    const remaining = getReceiptRemainingUSD(receipt);
-    // If user already entered a value, cap it at remaining; otherwise default to 0
-    if (allocation.amountUSD && parseFloat(allocation.amountUSD) > 0) {
-      allocation.amountUSD = Math.min(remaining, parseFloat(allocation.amountUSD) || 0);
+    const originalUnpaidBudget = getOriginalUnpaidAdBudgetUSD();
+    const isSettlingUnpaidAd = originalUnpaidBudget > 0
+      && String(document.getElementById('ad-payment-status')?.value || '').toLowerCase() === 'paid';
+    if (isSettlingUnpaidAd) {
+      // A stored Not Paid ad can contain only a partial due allocation. When the
+      // user changes its source while settling it, that old partial amount must
+      // not become the new Paid total (for example $1.24 of a $9.00 LIVE ad).
+      // Fill this row with the exact remaining settlement amount after all OTHER
+      // rows. getOriginalUnpaidAdBudgetUSD is terminal-aware: for a TERMINAL ad
+      // the target IS that committed $1.24, because the stop already released
+      // the rest of the budget. Capacity validation still shows a shortage and
+      // lets the user split the total across receipts; it never shrinks or
+      // erases customer debt.
+      const otherAllocated = state.tempAdFunding.allocations.reduce((sum, row, rowIndex) => {
+        if (rowIndex === idx) return sum;
+        return sum + (parseFloat(row?.amountUSD) || 0);
+      }, 0);
+      allocation.amountUSD = Math.max(
+        Math.round((originalUnpaidBudget - otherAllocated) * 100) / 100,
+        0
+      );
     } else {
-      allocation.amountUSD = 0;
+      // Relinking changes only the source receipt. Never clamp a saved $30
+      // allocation down to a new $20 balance (silently shrinking the ad), nor
+      // grow it to a larger receipt. Save-time capacity validation will block an
+      // insufficient replacement and the user can add a second receipt.
+      if (allocation.amountUSD && parseFloat(allocation.amountUSD) > 0) {
+        allocation.amountUSD = Math.round((parseFloat(allocation.amountUSD) || 0) * 100) / 100;
+      } else {
+        allocation.amountUSD = 0;
+      }
     }
   } else {
     allocation.amountUSD = 0;
   }
   renderAdFundingList();
   refreshAdFundingSummary();
+}
+
+// Shared digit normalizer: maps Arabic-Indic (U+0660-U+0669) and Extended
+// Arabic-Indic / Persian (U+06F0-U+06F9) digits to ASCII 0-9 and returns a
+// string. Used by money inputs AND receipt-number fields so Arabic-keyboard
+// typing/pastes are converted instead of silently deleted.
+function normalizeDigitsAscii(value) {
+  return String(value == null ? '' : value)
+    .replace(/[٠-٩]/g, d => String.fromCharCode(d.charCodeAt(0) - 0x0660 + 48)) // Arabic-Indic
+    .replace(/[۰-۹]/g, d => String.fromCharCode(d.charCodeAt(0) - 0x06F0 + 48)); // Extended (Persian)
 }
 
 // Money input validator (prevents multiple decimals, limits to 2 decimal places)
@@ -3251,10 +4531,11 @@ function sanitizeMoneyInput(input, maxDecimals = 2) {
   // Normalize non-ASCII numerals/separators BEFORE filtering, so an Arabic
   // keyboard entry is not corrupted: previously "12,5" (comma decimal) became
   // "125" (a 10x error) and Arabic-Indic digits were deleted entirely.
-  val = val
-    .replace(/[٠-٩]/g, d => String.fromCharCode(d.charCodeAt(0) - 0x0660 + 48)) // Arabic-Indic
-    .replace(/[۰-۹]/g, d => String.fromCharCode(d.charCodeAt(0) - 0x06F0 + 48)) // Extended (Persian)
-    .replace(/[,٫]/g, '.'); // comma / Arabic decimal separator -> dot
+  // The Arabic comma U+060C '،' (full Arabic keyboard comma key on iOS/Gboard,
+  // and amounts pasted from Arabic WhatsApp/Messenger chats) counts as a
+  // decimal separator too — dropping it turned "12،5" into "125" (10x error).
+  val = normalizeDigitsAscii(val)
+    .replace(/[,٫،]/g, '.'); // comma / Arabic decimal separator U+066B / Arabic comma U+060C -> dot
 
   // Preserve cursor position
   const cursorPos = input.selectionStart || 0;
@@ -3306,6 +4587,63 @@ function updateAdFundingAmount(idx, value) {
   // Do NOT re-render the list here; it would replace the input element and break typing focus/caret.
   refreshAdFundingRow(idx);
   refreshAdFundingSummary();
+  renderAdPaidReceiptReplacementNotice();
+}
+
+function getAdAllocationMap(rows) {
+  const result = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const receiptId = String(row?.receiptId || '');
+    const amount = parseFloat(row?.amountUSD) || 0;
+    if (!receiptId || amount <= 0) continue;
+    result.set(receiptId, Math.round(((result.get(receiptId) || 0) + amount) * 100) / 100);
+  }
+  return result;
+}
+
+// Give the user an exact preview of what a paid-receipt replacement means.
+// The actual return/use operation remains authoritative in /api/ads/mutate.
+function renderAdPaidReceiptReplacementNotice() {
+  const notice = document.getElementById('ad-funding-change-notice');
+  if (!notice) return;
+  const ad = state.modalData;
+  const paymentStatus = document.getElementById('ad-payment-status')?.value || '';
+  if (!ad?.id || getAdPaymentState(ad) !== 'paid' || paymentStatus !== 'paid') {
+    notice.classList.add('hidden');
+    notice.textContent = '';
+    return;
+  }
+  const before = getAdAllocationMap(ad.receiptAllocations);
+  const after = getAdAllocationMap(state.tempAdFunding?.allocations);
+  const allIds = new Set([...before.keys(), ...after.keys()]);
+  let returned = 0;
+  let used = 0;
+  const releasedLabels = [];
+  const addedLabels = [];
+  for (const receiptId of allIds) {
+    const oldAmount = before.get(receiptId) || 0;
+    const newAmount = after.get(receiptId) || 0;
+    if (oldAmount > newAmount + 0.005) {
+      returned += oldAmount - newAmount;
+      releasedLabels.push(getAdReceiptDisplayLabel(receiptId));
+    }
+    if (newAmount > oldAmount + 0.005) {
+      used += newAmount - oldAmount;
+      addedLabels.push(getAdReceiptDisplayLabel(receiptId));
+    }
+  }
+  if (returned <= 0.005 && used <= 0.005) {
+    notice.classList.add('hidden');
+    notice.textContent = '';
+    return;
+  }
+  const isAr = state.language === 'ar';
+  const from = releasedLabels.join(', ') || (isAr ? 'الوصل الحالي' : 'the current receipt');
+  const to = addedLabels.join(', ') || (isAr ? 'الوصل المحدد' : 'the selected receipt');
+  notice.classList.remove('hidden');
+  notice.textContent = isAr
+    ? `عند الحفظ: سيعود $${returned.toFixed(2)} إلى ${from} وسيُستخدم $${used.toFixed(2)} من ${to}. الإعلان وأرصدة الوصولات تتحدث معاً دون خصم مزدوج.`
+    : `On Save: $${returned.toFixed(2)} returns to ${from}, and $${used.toFixed(2)} is used from ${to}. The ad and both receipt balances update together with no double charge.`;
 }
 
 function refreshAdFundingRow(idx) {
@@ -3328,11 +4666,18 @@ function refreshAdFundingRow(idx) {
   const usage = getReceiptUsageStats(receipt);
   const receiptRemaining = Math.round(((usage?.remainingUSD ?? 0) + getEditingAdExistingAllocationUSD(receipt.id)) * 100) / 100;
   const plannedSpend = parseFloat(allocation.amountUSD) || 0;
-  const balance = Math.max(receiptRemaining - plannedSpend, 0);
+  const balance = Math.round((receiptRemaining - plannedSpend) * 100) / 100;
   const receiptRate = receipt?.exchangeRate || state.defaultExchangeRate || '-';
 
   if (remainingEl) remainingEl.textContent = `$${Number(receiptRemaining || 0).toFixed(2)}`;
-  if (balanceEl) balanceEl.textContent = `$${Number(balance || 0).toFixed(2)}`;
+  if (balanceEl) {
+    balanceEl.textContent = balance < -0.005
+      ? `${state.language === 'ar' ? 'عجز' : 'Short'} $${Math.abs(balance).toFixed(2)}`
+      : `$${Number(balance || 0).toFixed(2)}`;
+    balanceEl.className = balance < -0.005
+      ? 'text-rose-600 dark:text-rose-400 font-bold'
+      : 'text-blue-600 dark:text-blue-400 font-medium';
+  }
   if (rateEl) rateEl.textContent = String(receiptRate);
 }
 
@@ -3351,14 +4696,27 @@ function renderAdFundingList() {
     // Only show receipts for this customer that still have remaining balance.
     // When editing an existing ad, keep currently-selected receipts visible even if their remaining is now 0.
     let receipts = [];
+    let eligibleReceiptIds = new Set();
     try {
-      receipts = getReceiptsForAd(customerId, pageId).filter(r => {
+      const eligibleReceipts = getReceiptsForAd(customerId, pageId);
+      eligibleReceiptIds = new Set(eligibleReceipts.map(receipt => String(receipt.id)));
+      receipts = eligibleReceipts.filter(r => {
         if (!r) return false;
         if (selectedReceiptIds.has(String(r.id))) return true;
         const usage = getReceiptUsageStats(r);
-        const remaining = usage?.remainingUSD ?? 0;
+        const remaining = (usage?.remainingUSD ?? 0) + getEditingAdExistingAllocationUSD(r.id);
         return remaining > 0.0001;
       });
+      // Keep a saved current link visible even if the receipt later became
+      // unavailable. It is clearly labelled and alternatives remain listed,
+      // so editing never silently swaps or hides the old source.
+      for (const receiptId of selectedReceiptIds) {
+        if (receipts.some(receipt => String(receipt.id) === receiptId)) continue;
+        const current = (state.receipts || []).find(receipt =>
+          receipt && String(receipt.id) === receiptId && String(receipt.customerId || '') === String(customerId || '')
+        );
+        if (current) receipts.unshift(current);
+      }
     } catch (filterErr) {
       console.error('Error filtering receipts for ad:', filterErr);
       receipts = [];
@@ -3378,12 +4736,14 @@ function renderAdFundingList() {
     // In the Ad modal, customer selection depends on picking a Page first.
     list.innerHTML = `<div class="py-3 text-center text-xs text-slate-400">${isArL ? 'اختر صفحة وعميلاً أولاً' : 'Select a page & customer first'}</div>`;
     refreshAdFundingSummary();
+    renderAdPaidReceiptReplacementNotice();
     return;
   }
   
   if (receipts.length === 0) {
     list.innerHTML = `<div class="py-3 text-center text-xs text-slate-400">${isArL ? 'لا توجد وصولات برصيد متبقٍ' : 'No receipts with remaining balance'}</div>`;
     refreshAdFundingSummary();
+    renderAdPaidReceiptReplacementNotice();
     return;
   }
   
@@ -3392,7 +4752,11 @@ function renderAdFundingList() {
     // so the user can immediately choose a receipt and amount without extra clicks.
     if (String(paymentStatus || '').toLowerCase() === 'paid') {
       state.tempAdFunding = state.tempAdFunding || { allocations: [] };
-      state.tempAdFunding.allocations = [{ receiptId: '', amountUSD: '' }];
+      const originalDriverBudget = getOriginalUnpaidAdBudgetUSD();
+      state.tempAdFunding.allocations = [{
+        receiptId: '',
+        amountUSD: originalDriverBudget > 0 ? originalDriverBudget.toFixed(2) : ''
+      }];
       renderAdFundingList();
       return;
     }
@@ -3411,7 +4775,11 @@ function renderAdFundingList() {
     );
     const optionsHtml = receipts.filter(r => !usedElsewhere.has(r.id)).map(r => {
       const serial = r.serialNumber || r.finalReceiptNo || (r.receiptType === 'TRANSFER_IN' ? (state.language === 'ar' ? 'تحويل' : 'TRF') : (r.id ? String(r.id).slice(0,6) : '???'));
-      const label = `#${serial} • $${(r.amountUSD || 0).toFixed(2)}`;
+      const unavailable = !eligibleReceiptIds.has(String(r.id));
+      const staleLabel = unavailable
+        ? (isArL ? ' • الرابط الحالي غير متاح — اختر بديلاً' : ' • current link unavailable — choose a replacement')
+        : '';
+      const label = `#${serial} • $${(r.amountUSD || 0).toFixed(2)}${staleLabel}`;
       return `<option value="${r.id || ''}" ${alloc.receiptId === r.id ? 'selected' : ''}>${Security.escapeHtml(label)}</option>`;
     }).join('');
     
@@ -3428,31 +4796,34 @@ function renderAdFundingList() {
 
     // Calculate balance = Remaining - Planned Spend
     const plannedSpend = parseFloat(alloc.amountUSD) || 0;
-    const balance = Math.max(receiptRemaining - plannedSpend, 0);
+    const balance = Math.round((receiptRemaining - plannedSpend) * 100) / 100;
+    const balanceText = balance < -0.005
+      ? `${isArL ? 'عجز' : 'Short'} $${Math.abs(balance).toFixed(2)}`
+      : `$${balance.toFixed(2)}`;
     
     return `
       <div class="space-y-2">
         <div class="flex items-center justify-between">
           <span class="text-xs text-slate-500 flex items-center gap-1"><i data-lucide="receipt" class="w-3 h-3"></i>${isArL ? `تخصيص الوصل رقم ${idx + 1}` : `Receipt Allocation #${idx + 1}`}</span>
-          <button type="button" onclick="removeAdFundingAllocation(${idx})" class="text-xs text-rose-500 hover:text-rose-600">${isArL ? 'إزالة' : 'Remove'}</button>
+          <button type="button" onclick="removeAdFundingAllocation(${idx})" aria-label="${isArL ? `إزالة تخصيص الوصل رقم ${idx + 1}` : `Remove receipt allocation ${idx + 1}`}" class="min-h-11 px-2 text-xs text-rose-500 hover:text-rose-600">${isArL ? 'إزالة' : 'Remove'}</button>
         </div>
-        <div class="grid grid-cols-2 gap-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
-            <label class="block text-[10px] text-slate-400 mb-1">${isArL ? 'الوصل' : 'Receipt'}</label>
-            <select class="w-full glass-input px-2 py-1.5 rounded-lg text-sm" onchange="updateAdFundingReceipt(${idx}, this.value)">
+            <label for="ad-funding-receipt-${idx}" class="block text-[10px] text-slate-400 mb-1">${isArL ? 'الوصل' : 'Receipt'}</label>
+            <select id="ad-funding-receipt-${idx}" class="w-full min-h-11 glass-input px-3 py-2 rounded-lg text-sm" onchange="updateAdFundingReceipt(${idx}, this.value)">
               <option value="">${isArL ? 'اختر...' : 'Select...'}</option>
               ${optionsHtml}
             </select>
           </div>
           <div>
-            <label class="block text-[10px] text-slate-400 mb-1">${isArL ? 'الإنفاق المخطط (USD)' : 'Planned Spend (USD)'}</label>
-            <input type="text" inputmode="decimal" class="w-full glass-input px-2 py-1.5 rounded-lg text-sm" value="${alloc.amountUSD || ''}" oninput="sanitizeMoneyInput(this); updateAdFundingAmount(${idx}, this.value)" onfocus="this.select()" />
+            <label for="ad-funding-amount-${idx}" class="block text-[10px] text-slate-400 mb-1">${isArL ? 'الإنفاق المخطط (USD)' : 'Planned Spend (USD)'}</label>
+            <input id="ad-funding-amount-${idx}" type="text" inputmode="decimal" class="w-full min-h-11 glass-input px-3 py-2 rounded-lg text-sm" value="${alloc.amountUSD || ''}" oninput="sanitizeMoneyInput(this); updateAdFundingAmount(${idx}, this.value)" onfocus="this.select()" />
           </div>
         </div>
         ${receipt ? `
           <div class="text-[10px] text-slate-400 space-y-0.5">
             <div>${isArL ? 'المتبقي' : 'Remaining'}: <span id="ad-funding-remaining-${idx}" class="text-emerald-600 dark:text-emerald-400 font-medium">$${receiptRemaining.toFixed(2)}</span></div>
-            <div>${isArL ? 'الرصيد' : 'Balance'}: <span id="ad-funding-balance-${idx}" class="text-blue-600 dark:text-blue-400 font-medium">$${balance.toFixed(2)}</span></div>
+            <div>${isArL ? 'الرصيد' : 'Balance'}: <span id="ad-funding-balance-${idx}" class="${balance < -0.005 ? 'text-rose-600 dark:text-rose-400 font-bold' : 'text-blue-600 dark:text-blue-400 font-medium'}">${balanceText}</span></div>
             <div>${isArL ? 'السعر' : 'Rate'}: <span id="ad-funding-rate-${idx}" class="text-slate-600 dark:text-slate-300">${receiptRate}</span></div>
           </div>
         ` : ''}
@@ -3461,6 +4832,7 @@ function renderAdFundingList() {
   }).join('');
 
   refreshAdFundingSummary();
+  renderAdPaidReceiptReplacementNotice();
   if (window.lucide) lucide.createIcons();
   } catch (err) {
     console.error('Error rendering ad funding list:', err);

@@ -41,6 +41,10 @@ PERMISSION_ALLOWLIST: dict[str, frozenset[str]] = {
         "view", "viewOwn", "add", "edit", "editOwn", "delete", "deleteOwn",
     }),
     "clothesSettings": frozenset({"viewOwn", "add", "editOwn"}),
+    "adCampaignRequests": frozenset({
+        "view", "viewOwn", "add", "edit", "editOwn", "delete",
+        "deleteOwn", "submit", "submitOwn", "review",
+    }),
 }
 
 VALID_USER_ROLES = frozenset({"Admin", "Employee", "Delivery"})
@@ -112,4 +116,3 @@ def user_has_permission(user: dict[str, Any], module: str, action: str, *, recor
         return True
 
     return False
-

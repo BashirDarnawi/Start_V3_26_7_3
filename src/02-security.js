@@ -12,6 +12,133 @@ const RECORD_IDENTIFIER_FIELDS = new Set([
 ]);
 const RECORD_IDENTIFIER_LIST_FIELDS = new Set(['adReceiptIds', 'customerIds', 'linkedCustomerIds', 'receiptIds']);
 
+// ==========================================
+// PURE-JS CRYPTO FALLBACK (insecure contexts)
+// ==========================================
+// crypto.subtle only exists in secure contexts (https:// or localhost). On a
+// plain-HTTP LAN origin (e.g. a phone opening http://192.168.x.x:8000) it is
+// undefined in both iOS Safari and Android Chrome, which used to make every
+// local-mode password flow throw. These pure-JS SHA-256 / PBKDF2-HMAC-SHA256
+// implementations produce byte-identical output to the Web Crypto API and are
+// used only when crypto.subtle is unavailable.
+
+// New hashes created on the pure-JS path use fewer iterations (still recorded
+// in the stored `iterations` field, so they verify anywhere) because 310k
+// PBKDF2 iterations in plain JS would block the UI for many seconds.
+const _ALB_FALLBACK_PBKDF2_ITERATIONS = 60000;
+
+// SHA-256 round constants (FIPS 180-4)
+const _ALB_SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+]);
+
+// Pure-JS SHA-256. Takes a Uint8Array, returns a 32-byte Uint8Array digest
+// identical to crypto.subtle.digest('SHA-256', bytes).
+function _albFallbackSha256(bytes) {
+  const len = bytes.length;
+  // Pad to: message + 0x80 + zeros + 64-bit big-endian bit length, multiple of 64 bytes.
+  const padded = new Uint8Array(((len + 8) >> 6 << 6) + 64);
+  padded.set(bytes);
+  padded[len] = 0x80;
+  const dv = new DataView(padded.buffer);
+  dv.setUint32(padded.length - 8, Math.floor(len / 0x20000000)); // high 32 bits of len*8
+  dv.setUint32(padded.length - 4, (len << 3) >>> 0);             // low 32 bits of len*8
+
+  const h = new Uint32Array([
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+  ]);
+  const w = new Uint32Array(64);
+
+  for (let off = 0; off < padded.length; off += 64) {
+    for (let i = 0; i < 16; i++) w[i] = dv.getUint32(off + i * 4);
+    for (let i = 16; i < 64; i++) {
+      const w15 = w[i - 15];
+      const w2 = w[i - 2];
+      const s0 = (((w15 >>> 7) | (w15 << 25)) ^ ((w15 >>> 18) | (w15 << 14)) ^ (w15 >>> 3)) >>> 0;
+      const s1 = (((w2 >>> 17) | (w2 << 15)) ^ ((w2 >>> 19) | (w2 << 13)) ^ (w2 >>> 10)) >>> 0;
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+    }
+
+    let a = h[0], b = h[1], c = h[2], d = h[3];
+    let e = h[4], f = h[5], g = h[6], hh = h[7];
+    for (let i = 0; i < 64; i++) {
+      const S1 = (((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7))) >>> 0;
+      const ch = ((e & f) ^ (~e & g)) >>> 0;
+      const t1 = (hh + S1 + ch + _ALB_SHA256_K[i] + w[i]) >>> 0;
+      const S0 = (((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10))) >>> 0;
+      const maj = ((a & b) ^ (a & c) ^ (b & c)) >>> 0;
+      const t2 = (S0 + maj) >>> 0;
+      hh = g; g = f; f = e; e = (d + t1) >>> 0;
+      d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+    }
+    h[0] = (h[0] + a) >>> 0; h[1] = (h[1] + b) >>> 0;
+    h[2] = (h[2] + c) >>> 0; h[3] = (h[3] + d) >>> 0;
+    h[4] = (h[4] + e) >>> 0; h[5] = (h[5] + f) >>> 0;
+    h[6] = (h[6] + g) >>> 0; h[7] = (h[7] + hh) >>> 0;
+  }
+
+  const out = new Uint8Array(32);
+  const outDv = new DataView(out.buffer);
+  for (let i = 0; i < 8; i++) outDv.setUint32(i * 4, h[i]);
+  return out;
+}
+
+// Pure-JS PBKDF2-HMAC-SHA256. Takes Uint8Arrays, returns a byteLen-byte
+// Uint8Array identical to crypto.subtle.deriveBits({ name: 'PBKDF2', ... }).
+function _albFallbackPbkdf2Sha256(passwordBytes, saltBytes, iterations, byteLen) {
+  if (!Number.isFinite(iterations) || iterations < 1) throw new Error('Invalid PBKDF2 iterations');
+
+  // HMAC key: keys longer than the 64-byte SHA-256 block are hashed first.
+  let key = passwordBytes;
+  if (key.length > 64) key = _albFallbackSha256(key);
+  const ipad = new Uint8Array(64);
+  const opad = new Uint8Array(64);
+  for (let i = 0; i < 64; i++) {
+    const k = i < key.length ? key[i] : 0;
+    ipad[i] = k ^ 0x36;
+    opad[i] = k ^ 0x5c;
+  }
+  const hmac = (msg) => {
+    const innerBuf = new Uint8Array(64 + msg.length);
+    innerBuf.set(ipad);
+    innerBuf.set(msg, 64);
+    const inner = _albFallbackSha256(innerBuf);
+    const outerBuf = new Uint8Array(96);
+    outerBuf.set(opad);
+    outerBuf.set(inner, 64);
+    return _albFallbackSha256(outerBuf);
+  };
+
+  const out = new Uint8Array(byteLen);
+  const blocks = Math.ceil(byteLen / 32);
+  for (let block = 1; block <= blocks; block++) {
+    // U1 = HMAC(password, salt || INT_32_BE(block))
+    const msg = new Uint8Array(saltBytes.length + 4);
+    msg.set(saltBytes);
+    msg[saltBytes.length] = (block >>> 24) & 0xff;
+    msg[saltBytes.length + 1] = (block >>> 16) & 0xff;
+    msg[saltBytes.length + 2] = (block >>> 8) & 0xff;
+    msg[saltBytes.length + 3] = block & 0xff;
+    let u = hmac(msg);
+    const t = u.slice();
+    for (let iter = 1; iter < iterations; iter++) {
+      u = hmac(u);
+      for (let i = 0; i < 32; i++) t[i] ^= u[i];
+    }
+    const offset = (block - 1) * 32;
+    out.set(t.subarray(0, Math.min(32, byteLen - offset)), offset);
+  }
+  return out;
+}
+
 const Security = {
   // XSS Protection - Escape HTML entities
   escapeHtml: (str) => {
@@ -146,49 +273,68 @@ const Security = {
   },
 
   // Password hashing using Web Crypto API (PBKDF2 by default; legacy SHA-256 supported)
+  // Falls back to pure-JS SHA-256/PBKDF2 when crypto.subtle is unavailable
+  // (insecure http:// origins) — output is byte-identical either way.
   // Returns: { hash, salt, algo, iterations? }
   hashPassword: async (password, salt = null, options = {}) => {
     const algo = options.algo || 'pbkdf2-sha256';
     const pwd = String(password ?? '');
     const encoder = new TextEncoder();
+    // crypto.getRandomValues still works in insecure contexts; only subtle.* is gone.
+    const subtle = (globalThis.crypto && globalThis.crypto.subtle) ? globalThis.crypto.subtle : null;
 
     if (algo === 'sha256') {
       const saltHex = salt
         ? String(salt)
         : Security._bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
       const data = encoder.encode(saltHex + pwd);
-      const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-      const hash = Security._bytesToHex(new Uint8Array(hashBuffer));
+      const digest = subtle
+        ? new Uint8Array(await subtle.digest('SHA-256', data))
+        : _albFallbackSha256(data);
+      const hash = Security._bytesToHex(digest);
       return { hash, salt: saltHex, algo: 'sha256' };
     }
 
-    // PBKDF2-SHA256 (recommended)
-    const iterations = Number.isFinite(options.iterations) ? options.iterations : 310000;
+    // PBKDF2-SHA256 (recommended). New hashes made on the pure-JS path use a
+    // lower default iteration count (recorded in `iterations`, which every
+    // call site round-trips through user.passwordIterations, so the hash
+    // verifies everywhere — including later under HTTPS with native crypto).
+    // Verification always passes the stored count explicitly, so it is never
+    // affected by this default.
+    const iterations = Number.isFinite(options.iterations)
+      ? options.iterations
+      : (subtle ? 310000 : _ALB_FALLBACK_PBKDF2_ITERATIONS);
     const saltBytes = salt
       ? Security._hexToBytes(salt)
       : crypto.getRandomValues(new Uint8Array(16));
     const saltHex = typeof salt === 'string' ? String(salt) : Security._bytesToHex(saltBytes);
 
-    const keyMaterial = await crypto.subtle.importKey(
-      'raw',
-      encoder.encode(pwd),
-      { name: 'PBKDF2' },
-      false,
-      ['deriveBits']
-    );
+    let derived;
+    if (subtle) {
+      const keyMaterial = await subtle.importKey(
+        'raw',
+        encoder.encode(pwd),
+        { name: 'PBKDF2' },
+        false,
+        ['deriveBits']
+      );
 
-    const bits = await crypto.subtle.deriveBits(
-      {
-        name: 'PBKDF2',
-        salt: saltBytes,
-        iterations,
-        hash: 'SHA-256'
-      },
-      keyMaterial,
-      256
-    );
+      const bits = await subtle.deriveBits(
+        {
+          name: 'PBKDF2',
+          salt: saltBytes,
+          iterations,
+          hash: 'SHA-256'
+        },
+        keyMaterial,
+        256
+      );
+      derived = new Uint8Array(bits);
+    } else {
+      derived = _albFallbackPbkdf2Sha256(encoder.encode(pwd), saltBytes, iterations, 32);
+    }
 
-    const hash = Security._bytesToHex(new Uint8Array(bits));
+    const hash = Security._bytesToHex(derived);
     return { hash, salt: saltHex, algo: 'pbkdf2-sha256', iterations };
   },
 
@@ -512,10 +658,17 @@ const DataIsolation = {
 // SESSION MANAGEMENT - Secure session handling
 // ==========================================
 
+// iOS Safari with "Block All Cookies" (and Chrome/Android with cookies
+// blocked for the site) makes ANY window.sessionStorage access throw a
+// SecurityError. Local-mode login calls createSession AFTER the password is
+// already verified, so an unguarded throw made login impossible with a
+// misleading generic error. Fall back to a page-lifetime in-memory session.
+let _memorySession = null;
+
 const SessionManager = {
   SESSION_DURATION: 8 * 60 * 60 * 1000, // 8 hours
   SESSION_KEY: 'albayan_session',
-  
+
   createSession: (userId) => {
     const session = {
       userId,
@@ -523,26 +676,30 @@ const SessionManager = {
       expiresAt: Date.now() + SessionManager.SESSION_DURATION,
       token: Security.generateSecureId('session')
     };
-    sessionStorage.setItem(SessionManager.SESSION_KEY, JSON.stringify(session));
+    try {
+      sessionStorage.setItem(SessionManager.SESSION_KEY, JSON.stringify(session));
+    } catch (_) {
+      _memorySession = session;
+    }
     return session;
   },
 
   getSession: () => {
     try {
       const sessionStr = sessionStorage.getItem(SessionManager.SESSION_KEY);
-      if (!sessionStr) return null;
-      
-      const session = JSON.parse(sessionStr);
-      
+      const session = sessionStr ? JSON.parse(sessionStr) : _memorySession;
+      if (!session) return null;
+
       // Check if session is expired
       if (Date.now() > session.expiresAt) {
         SessionManager.destroySession();
         return null;
       }
-      
+
       return session;
     } catch (e) {
-      return null;
+      // Storage blocked (throw-on-read): honor the in-memory fallback.
+      return _memorySession && Date.now() <= _memorySession.expiresAt ? _memorySession : null;
     }
   },
 
@@ -550,12 +707,17 @@ const SessionManager = {
     const session = SessionManager.getSession();
     if (session) {
       session.expiresAt = Date.now() + SessionManager.SESSION_DURATION;
-      sessionStorage.setItem(SessionManager.SESSION_KEY, JSON.stringify(session));
+      try {
+        sessionStorage.setItem(SessionManager.SESSION_KEY, JSON.stringify(session));
+      } catch (_) {
+        _memorySession = session;
+      }
     }
   },
 
   destroySession: () => {
-    sessionStorage.removeItem(SessionManager.SESSION_KEY);
+    _memorySession = null;
+    try { sessionStorage.removeItem(SessionManager.SESSION_KEY); } catch (_) {}
   },
 
   isAuthenticated: () => {

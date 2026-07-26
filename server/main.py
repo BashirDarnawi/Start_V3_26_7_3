@@ -1,3 +1,6 @@
+import base64
+import binascii
+import io
 import json
 import hashlib
 import math
@@ -6,16 +9,19 @@ import re
 import secrets
 import threading
 import traceback
+import unicodedata
 import uuid
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from PIL import Image, UnidentifiedImageError
 
 # SQLite doesn't support row-level locking, so we use a threading lock for counter operations
 _SQLITE_COUNTER_LOCK = threading.Lock()
@@ -23,6 +29,10 @@ _SQLITE_COUNTER_LOCK = threading.Lock()
 # patches in-process; the conditional UPDATE below also detects a writer in a
 # different process instead of silently overwriting its newer version.
 _SQLITE_ENTITY_PATCH_LOCK = threading.Lock()
+# Customer identity changes must serialize across a read/check/write cycle.
+# PostgreSQL uses transaction-scoped advisory locks keyed by canonical phone;
+# SQLite uses this process-wide guard (and its own single-writer guarantee).
+_SQLITE_CUSTOMER_PHONE_LOCK = threading.RLock()
 # Clothes orders and their product stock must commit as one unit. PostgreSQL
 # uses row/advisory locks; SQLite needs a process-wide transaction guard.
 _SQLITE_CLOTHES_LOCK = threading.Lock()
@@ -38,9 +48,16 @@ _SQLITE_WALLET_LOCK = threading.Lock()
 # Receipt transfers, ad funding, ad stops and receipt capacity edits share one
 # money pool. SQLite has no row locks, so those operations need one guard too.
 _SQLITE_FINANCIAL_LOCK = threading.Lock()
+# Receipt numbers form one namespace even though older records store them in
+# three JSON fields. SQLite needs one process-wide guard around the canonical
+# read/check/write cycle; PostgreSQL uses per-number transaction advisory
+# locks below.
+_SQLITE_RECEIPT_NUMBER_LOCK = threading.RLock()
 
 # Debug mode: set ALBAYAN_DEBUG_MODE=true to enable debug endpoints
 DEBUG_MODE = os.getenv("ALBAYAN_DEBUG_MODE", "").strip().lower() in {"1", "true", "yes"}
+APP_VERSION = (os.getenv("ALBAYAN_APP_VERSION") or "1.0.0").strip()[:40]
+RELEASE_SHA = (os.getenv("ALBAYAN_RELEASE_SHA") or "development").strip()[:64]
 # Whole-backup replacement is a maintenance operation. It is disabled on a
 # live API unless an operator makes the risk explicit for an offline window.
 ENABLE_ONLINE_IMPORT = os.getenv("ALBAYAN_ENABLE_ONLINE_IMPORT", "").strip().lower() in {"1", "true", "yes"}
@@ -48,15 +65,26 @@ SETUP_TOKEN = os.getenv("ALBAYAN_SETUP_TOKEN", "")
 
 from .db import db_conn, get_engine, init_db, json_dumps, json_loads, now_ms
 from .rbac import VALID_USER_ROLES, normalize_permissions, user_has_permission
+from .entity_projection import (
+    INLINE_MEDIA_FIELDS,
+    _project_entity_media,
+    _without_inline_media,
+    can_include_entity_media,
+    project_entity_contacts,
+)
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from .schemas import (
     AdminBulkImportRequest,
     AdminRestoreEntityRequest,
+    AdCampaignReviewRequest,
+    AdCampaignSubmitRequest,
     AdMutationRequest,
     AdMutationResponse,
     AdStopRequest,
     AdStopResponse,
+    AppLoginExchangeRequest,
+    AppLoginHandoffRequest,
     BatchDeleteRequest,
     BootstrapResponse,
     ChangePasswordRequest,
@@ -65,6 +93,8 @@ from .schemas import (
     ClothesShipmentMutationRequest,
     ClothesShipmentMutationResponse,
     CreateUserRequest,
+    CustomerMergeRequest,
+    CustomerMergeResponse,
     EntityCreateRequest,
     EntityResponse,
     EntityUpdateRequest,
@@ -72,6 +102,8 @@ from .schemas import (
     LoginResponse,
     PasswordResetConfirmRequest,
     PasswordResetRequest,
+    ReceiptSettlementRequest,
+    ReceiptSettlementResponse,
     ReceiptTransferRequest,
     ReceiptTransferResponse,
     SetupAdminRequest,
@@ -92,74 +124,106 @@ from .security import (
     verify_password,
 )
 
+# A throwaway PBKDF2 hash used to spend the SAME ~verify time on a login attempt
+# for an unknown email as for a known one. Without it, the known-email path runs
+# 310k-iteration PBKDF2 while the unknown path returns instantly, and the timing
+# gap discloses which emails have accounts (enumeration oracle).
+_DUMMY_PASSWORD_HASH = hash_password("albayan-timing-equalizer")
 
-def _receipt_serial_exists(serial: str, *, exclude_id: str | None = None) -> bool:
-    """True if any non-deleted receipt already has this final receipt number."""
-    serial = sanitize_str(str(serial or ""))[:80]
-    if not serial:
-        return False
-    exclude_id = sanitize_str(str(exclude_id or ""))[:80] or None
-    dialect = str(get_engine().dialect.name or "")
-    if dialect == "postgresql":
-        # IMPORTANT: do NOT use "(:exclude_id IS NULL OR ...)" because passing NULL can trigger
-        # psycopg.errors.AmbiguousParameter in Postgres (cannot infer parameter type).
-        base_sql = """
-        SELECT 1
-        FROM entities
-        WHERE type = 'receipts'
-          AND deleted = false
-          AND (
-            (data_json::jsonb ->> 'serialNumber') = :serial
-            OR (data_json::jsonb ->> 'finalReceiptNo') = :serial
-          )
-        """
-        params: dict[str, Any] = {"serial": serial}
-        if exclude_id:
-            base_sql += " AND id <> :exclude_id"
-            params["exclude_id"] = exclude_id
-        sql = base_sql + " LIMIT 1"
-        with db_conn() as conn:
-            row = conn.execute(text(sql), params).first()
-            return row is not None
-    # Fallback (SQLite/dev): use JSON extract functions if available, else scan bounded set
-    with db_conn() as conn:
-        # SQLite 3.38+ supports json_extract, try it first
-        try:
-            sql = """
-            SELECT 1 FROM entities
-            WHERE type = 'receipts'
-              AND deleted = 0
-              AND (
-                json_extract(data_json, '$.serialNumber') = :serial
-                OR json_extract(data_json, '$.finalReceiptNo') = :serial
-              )
-            """
-            params: dict[str, Any] = {"serial": serial}
-            if exclude_id:
-                sql += " AND id <> :exclude_id"
-                params["exclude_id"] = exclude_id
-            sql += " LIMIT 1"
-            row = conn.execute(text(sql), params).first()
-            return row is not None
-        except Exception:
-            pass  # Fall back to manual scan if json_extract not supported
 
-        # Manual scan fallback - but with LIMIT to avoid loading entire table
-        rows = (
-            conn.execute(text(
-                "SELECT id, data_json FROM entities WHERE type='receipts' AND deleted = 0 LIMIT 10000"
-            ))
-            .mappings()
-            .all()
+_RECEIPT_NUMBER_FIELDS = ("serialNumber", "finalReceiptNo", "tempReceiptNo")
+_RECEIPT_DIGIT_TRANSLATION = str.maketrans(
+    "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
+    "01234567890123456789",
+)
+
+
+def _canonical_receipt_number(value: Any) -> str:
+    """Canonical key shared by final, serial and temporary receipt numbers."""
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    normalized = normalized.translate(_RECEIPT_DIGIT_TRANSLATION).strip().upper()
+    return normalized[:80]
+
+
+def _receipt_number_keys(data: Any) -> set[str]:
+    source = data if isinstance(data, dict) else {}
+    return {
+        key
+        for key in (_canonical_receipt_number(source.get(field)) for field in _RECEIPT_NUMBER_FIELDS)
+        if key
+    }
+
+
+def _normalize_receipt_number_fields(data: dict[str, Any]) -> dict[str, Any]:
+    for field in _RECEIPT_NUMBER_FIELDS:
+        if field in data:
+            data[field] = _canonical_receipt_number(data.get(field))
+    return data
+
+
+def _lock_receipt_number_keys_conn(conn: Any, keys: set[str], *, postgres: bool) -> None:
+    if not postgres:
+        return
+    for key in sorted(keys):
+        conn.execute(
+            text(
+                "SELECT pg_advisory_xact_lock("
+                "hashtextextended(CAST(:key AS text), 0)"
+                ")"
+            ),
+            {"key": f"receiptNumber:{key}"},
         )
-        for r in rows:
-            rid = str(r.get("id") or "")
-            if exclude_id and rid == exclude_id:
+
+
+def _validate_receipt_number_change_conn(
+    conn: Any,
+    receipt_id: str,
+    old_data: Any,
+    new_data: Any,
+    *,
+    postgres: bool,
+    activating: bool = False,
+) -> None:
+    """Reject newly introduced canonical collisions, preserving legacy rows."""
+    old_keys = set() if activating else _receipt_number_keys(old_data)
+    introduced = _receipt_number_keys(new_data) - old_keys
+    if not introduced:
+        return
+    _lock_receipt_number_keys_conn(conn, introduced, postgres=postgres)
+    rows = conn.execute(
+        text(
+            "SELECT id,data_json FROM entities "
+            "WHERE type='receipts' AND deleted=false AND id<>:receipt_id"
+        ),
+        {"receipt_id": receipt_id},
+    ).mappings().all()
+    for row in rows:
+        other = json_loads(row.get("data_json") or "{}") or {}
+        if introduced & _receipt_number_keys(other):
+            raise HTTPException(status_code=409, detail="Receipt number already exists")
+
+
+def _receipt_number_exists(number: str, *, exclude_id: str | None = None) -> bool:
+    key = _canonical_receipt_number(number)
+    if not key:
+        return False
+    excluded = str(exclude_id or "").strip()
+    with db_conn() as conn:
+        rows = conn.execute(
+            text("SELECT id,data_json FROM entities WHERE type='receipts' AND deleted=false")
+        ).mappings().all()
+        for row in rows:
+            if excluded and str(row.get("id") or "") == excluded:
                 continue
-            data = json_loads(r.get("data_json")) or {}
-            if str(data.get("serialNumber") or "") == serial or str(data.get("finalReceiptNo") or "") == serial:
+            data = json_loads(row.get("data_json") or "{}") or {}
+            if key in _receipt_number_keys(data):
                 return True
     return False
+
+
+def _receipt_serial_exists(serial: str, *, exclude_id: str | None = None) -> bool:
+    """Compatibility helper for preflight messages; transaction guard is authoritative."""
+    return _receipt_number_exists(serial, exclude_id=exclude_id)
 
 
 # Auto-serial prefixes issued by the app for payment methods that come with no
@@ -176,58 +240,30 @@ def _is_valid_serial_number(serial: str) -> bool:
     - Regular: digits only, no leading zeros (1, 123, 456, etc.)
     - Auto-serial: prefix + digits, no leading zeros (S1, B2, O3, E4, ...)
     """
-    serial = str(serial or "").strip()
-    if not serial:
-        return False
-    # Prefixed auto-serial (S1, B2, O3, E4...)
-    if len(serial) > 1 and serial[0].upper() in AUTO_SERIAL_PREFIXES:
-        rest = serial[1:]
-        return rest.isdigit() and not rest.startswith("0")
-    # Regular numeric serial
-    return serial.isdigit() and not serial.startswith("0")
+    serial = _canonical_receipt_number(serial)
+    return bool(re.fullmatch(r"(?:[1-9][0-9]*|[SBOE][1-9][0-9]*)", serial))
+
+
+def _validate_receipt_number_fields(data: Any) -> None:
+    source = data if isinstance(data, dict) else {}
+    for field in ("serialNumber", "finalReceiptNo"):
+        if field not in source:
+            continue
+        value = _canonical_receipt_number(source.get(field))
+        if value and not _is_valid_serial_number(value):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid {field} (must be digits or S/B/O/E-prefixed, with no leading zero)",
+            )
+    if "tempReceiptNo" in source:
+        temp_no = _canonical_receipt_number(source.get("tempReceiptNo"))
+        if temp_no and not re.fullmatch(r"D[0-9]+", temp_no):
+            raise HTTPException(status_code=400, detail="Invalid tempReceiptNo (expected D{n})")
 
 
 def _temp_receipt_no_exists(temp_no: str, *, exclude_id: str | None = None) -> bool:
-    """True if any non-deleted receipt already has this temp delivery receipt number."""
-    temp_no = sanitize_str(str(temp_no or ""))[:80]
-    if not temp_no:
-        return False
-    exclude_id = sanitize_str(str(exclude_id or ""))[:80] or None
-    dialect = str(get_engine().dialect.name or "")
-    if dialect == "postgresql":
-        # IMPORTANT: avoid NULL-typed exclude_id param ambiguity in Postgres.
-        base_sql = """
-        SELECT 1
-        FROM entities
-        WHERE type = 'receipts'
-          AND deleted = false
-          AND (data_json::jsonb ->> 'tempReceiptNo') = :temp_no
-        """
-        params: dict[str, Any] = {"temp_no": temp_no}
-        if exclude_id:
-            base_sql += " AND id <> :exclude_id"
-            params["exclude_id"] = exclude_id
-        sql = base_sql + " LIMIT 1"
-        with db_conn() as conn:
-            row = conn.execute(text(sql), params).first()
-            return row is not None
-    # Fallback (SQLite/dev): scan a bounded set
-    with db_conn() as conn:
-        rows = (
-            conn.execute(text("SELECT id, data_json, deleted FROM entities WHERE type='receipts'"))
-            .mappings()
-            .all()
-        )
-        for r in rows:
-            if bool(r.get("deleted")):
-                continue
-            rid = str(r.get("id") or "")
-            if exclude_id and rid == exclude_id:
-                continue
-            data = json_loads(r.get("data_json")) or {}
-            if str(data.get("tempReceiptNo") or "") == temp_no:
-                return True
-    return False
+    """Compatibility helper for preflight messages; transaction guard is authoritative."""
+    return _receipt_number_exists(temp_no, exclude_id=exclude_id)
 
 
 def _next_temp_delivery_receipt_no(created_by: str | None = None) -> str:
@@ -365,9 +401,31 @@ SCRIPT_MIN_PATH = PROJECT_ROOT / "script.min.js"
 STYLE_PATH = PROJECT_ROOT / "style.css"
 ASSETS_DIR = PROJECT_ROOT / "assets"
 PRIVACY_PATH = PROJECT_ROOT / "privacy.html"
+DELETE_ACCOUNT_PATH = PROJECT_ROOT / "delete-account.html"
 
 COOKIE_NAME = "albayan_session"
 SESSION_DURATION_MS = int(os.getenv("ALBAYAN_SESSION_MS", str(8 * 60 * 60 * 1000)))
+# Opt-in "Remember me" sessions: a login carrying rememberMe=true gets this
+# lifetime (session row expires_at AND cookie max-age) instead of the default.
+# Expiry is enforced server-side per session in _auth_user_from_cookie, so the
+# cookie lifetime is presentation only — the DB row is the authority.
+SESSION_REMEMBER_DURATION_MS = int(
+    os.getenv("ALBAYAN_SESSION_REMEMBER_MS", str(30 * 24 * 60 * 60 * 1000))
+)
+# System-browser app login (Phase 2): the packaged iOS/Android apps open the
+# hosted login page in the phone's real browser (passkeys/password managers
+# work there); after the user signs in, the web session mints a ONE-TIME
+# handoff code bound to a PKCE-style SHA-256 challenge and bounces back into
+# the app (albayan://auth), which exchanges code+verifier for its own session.
+# Codes are single-use, short-lived and stored hashed (like password resets).
+APP_LOGIN_CODE_TTL_MS = int(os.getenv("ALBAYAN_APP_LOGIN_CODE_MS", str(2 * 60 * 1000)))
+# Sessions minted through the app exchange default to the long "remember me"
+# lifetime: a packaged phone app is a personal device, and re-driving the
+# whole browser round-trip every 8 hours would be hostile. Operators can
+# shorten it independently of the web remember-me lifetime.
+APP_LOGIN_SESSION_MS = int(
+    os.getenv("ALBAYAN_APP_SESSION_MS", str(SESSION_REMEMBER_DURATION_MS))
+)
 # SECURITY: Default to secure cookies in production (HTTPS only)
 # In development, can be set to False via environment variable.
 # Tri-state: if the env var is set, honor its boolean value (so testing over
@@ -382,6 +440,25 @@ elif _COOKIE_SECURE_ENV in {"0", "false", "no"}:
 else:
     COOKIE_SECURE = not DEBUG_MODE
 
+
+def _cookie_secure_for(request: Request) -> bool:
+    """Secure flag for the session cookie of a plain web login.
+
+    The explicit ALBAYAN_COOKIE_SECURE env override stays authoritative. When
+    it is unset, follow the scheme the client actually used instead of the
+    static `not DEBUG_MODE` default: phones opening http://<lan-ip>:<port>
+    would otherwise receive a Secure cookie that no browser stores over plain
+    HTTP, making every login loop straight back to the sign-in screen.
+    Trusting x-forwarded-proto here is downgrade-proof: forging "https" over
+    direct HTTP only yields a Secure cookie the forger's own browser discards.
+    """
+    if _COOKIE_SECURE_ENV in {"1", "true", "yes"}:
+        return True
+    if _COOKIE_SECURE_ENV in {"0", "false", "no"}:
+        return False
+    fwd = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    return request.url.scheme == "https" or fwd == "https"
+
 # If set, ALL requests must include the origin secret header (added by Cloudflare) or they'll be blocked.
 # This protects your ALB/origin from being accessed directly if someone finds the ALB DNS name.
 ORIGIN_SECRET_HEADER = os.getenv("ALBAYAN_ORIGIN_HEADER", "X-Albayan-Origin").strip() or "X-Albayan-Origin"
@@ -391,8 +468,18 @@ ORIGIN_SECRETS = [s.strip() for s in os.getenv("ALBAYAN_ORIGIN_SECRET", "").spli
 # us through a configured proxy that overwrites them. Direct deployments must
 # default to the socket peer address so clients cannot rotate limiter buckets.
 TRUST_PROXY_HEADERS = os.getenv("ALBAYAN_TRUST_PROXY_HEADERS", "").strip().lower() in {"1", "true", "yes"}
-# ALB health checks can't send custom headers, so this path must remain reachable.
-ORIGIN_BYPASS_PATH_PREFIXES = ("/api/health",)
+# Health checks and the two Google Play policy URLs must remain reachable
+# without the private reverse-proxy header.  Use exact paths, not prefixes:
+# a prefix check such as ``/privacy...`` could accidentally expose a future API.
+ORIGIN_BYPASS_PATHS = frozenset(
+    {
+        "/api/health",
+        "/api/health/live",
+        "/api/health/ready",
+        "/privacy",
+        "/delete-account",
+    }
+)
 
 # Rate limiting configuration (supports both in-memory and Redis)
 # SECURITY: Rate limit login attempts to prevent brute force attacks
@@ -403,6 +490,11 @@ _LOGIN_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_LOGIN_MAX_ATTEMPTS", "20"))
 # per-IP cap so a shared office IP with a few users' honest mistakes never trips
 # it, but far below what brute-forcing a password would need.
 _LOGIN_EMAIL_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_LOGIN_EMAIL_MAX_ATTEMPTS", "60"))
+# Global per-IP ceiling across ALL emails. The (ip,email) bucket above does not
+# stop one IP from spreading a password guess across many distinct accounts
+# (horizontal credential stuffing). Set well above a shared office's honest
+# traffic but far below a stuffing run.
+_LOGIN_IP_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_LOGIN_IP_MAX_ATTEMPTS", "120"))
 
 PASSWORD_RESET_TOKEN_MS = int(os.getenv("ALBAYAN_PASSWORD_RESET_TOKEN_MS", str(15 * 60 * 1000)))
 PASSWORD_RESET_DEV_RETURN_CODE = os.getenv("ALBAYAN_DEV_PASSWORD_RESET_RETURN_CODE", "").strip().lower() in {"1", "true", "yes"}
@@ -413,6 +505,14 @@ _RESET_EMAIL_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_RESET_EMAIL_MAX_ATTEMPTS", "1
 _SETUP_WINDOW_MS = int(os.getenv("ALBAYAN_SETUP_WINDOW_MS", str(15 * 60 * 1000)))
 _SETUP_IP_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_SETUP_IP_MAX_ATTEMPTS", "10"))
 _SETUP_GLOBAL_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_SETUP_GLOBAL_MAX_ATTEMPTS", "100"))
+
+# System-browser app-login limiter knobs. Handoff is authenticated (per-user
+# and per-IP buckets); exchange is anonymous (per-IP bucket). Codes carry
+# 256 bits of entropy, so these limits exist to bound abuse noise, not as the
+# security boundary.
+_APP_LOGIN_WINDOW_MS = int(os.getenv("ALBAYAN_APP_LOGIN_WINDOW_MS", str(15 * 60 * 1000)))
+_APP_LOGIN_HANDOFF_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_APP_LOGIN_HANDOFF_MAX_ATTEMPTS", "10"))
+_APP_LOGIN_EXCHANGE_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_APP_LOGIN_EXCHANGE_MAX_ATTEMPTS", "30"))
 
 
 def _client_ip(request: Request) -> str:
@@ -464,6 +564,14 @@ def _rate_check(request: Request, email: str) -> tuple[bool, int]:
 
     if not is_allowed:
         return False, int(retry_after_ms or 0)
+
+    # Global per-IP ceiling across all emails: stops one IP from spreading a
+    # single password guess over many accounts (horizontal credential stuffing),
+    # which the per-(ip,email) bucket alone does not cover.
+    ip_key = f"login:ip:{_client_ip(request)}"
+    ok_ip, _left_ip, retry_ip = check_rate_limit(ip_key, _LOGIN_IP_MAX_ATTEMPTS, _LOGIN_WINDOW_MS)
+    if not ok_ip:
+        return False, int(retry_ip or 0)
 
     # Defense in depth: an IP-independent per-account bucket. Even if an
     # attacker rotates IPs (or a forged proxy header) to dodge the (ip,email)
@@ -537,7 +645,42 @@ def _setup_rate_check(request: Request) -> tuple[bool, int]:
     return bool(allowed), 0 if allowed else int(retry or 0)
 
 
+def _app_handoff_rate_check(request: Request, user_id: str) -> tuple[bool, int]:
+    """Limit app-login handoff-code minting per IP and per authenticated user."""
+    from .rate_limiter import check_rate_limit
+
+    allowed, _left, retry = check_rate_limit(
+        f"applogin-handoff:ip:{_client_ip(request)}",
+        _APP_LOGIN_HANDOFF_MAX_ATTEMPTS,
+        _APP_LOGIN_WINDOW_MS,
+    )
+    if not allowed:
+        return False, int(retry or 0)
+    allowed, _left, retry = check_rate_limit(
+        f"applogin-handoff:user:{user_id}",
+        _APP_LOGIN_HANDOFF_MAX_ATTEMPTS,
+        _APP_LOGIN_WINDOW_MS,
+    )
+    return bool(allowed), 0 if allowed else int(retry or 0)
+
+
+def _app_exchange_rate_check(request: Request) -> tuple[bool, int]:
+    """Limit anonymous app-login code exchanges per peer IP."""
+    from .rate_limiter import check_rate_limit
+
+    allowed, _left, retry = check_rate_limit(
+        f"applogin-exchange:ip:{_client_ip(request)}",
+        _APP_LOGIN_EXCHANGE_MAX_ATTEMPTS,
+        _APP_LOGIN_WINDOW_MS,
+    )
+    return bool(allowed), 0 if allowed else int(retry or 0)
+
+
 BLOCKED_KEYS = {"__proto__", "prototype", "constructor"}
+# Response-only hints used by lightweight collection sync. Never accept these
+# from a client or persist them in data_json; the server always recomputes them
+# from the authoritative inline media fields.
+TRANSPORT_ONLY_KEYS = {"_mediaOmitted", "_photoCount"}
 
 # BEST PRACTICE: Maximum input length limits to prevent DoS
 MAX_INPUT_LENGTH = 10000  # Maximum length for text inputs
@@ -550,6 +693,13 @@ MAX_JSON_DEPTH = 20  # Maximum nesting depth for JSON
 
 # Financial validation constants
 MAX_FINANCIAL_AMOUNT = 10_000_000  # $10 million max for any single amount
+# A delivery driver enters the cash actually collected. A genuine over-collection
+# (a tip or rounding) is small; an implausibly large amount — whether a fat-finger
+# or an attempt to mint spendable ad credit — must be refused and handled by the
+# office. Blocked only when BOTH the ratio and the absolute overage are exceeded,
+# so ordinary tips and legitimately large deliveries still complete.
+_DELIVERY_OVERPAY_RATIO = float(os.getenv("ALBAYAN_DELIVERY_OVERPAY_RATIO", "3.0"))
+_DELIVERY_OVERPAY_ABS_LOCAL = float(os.getenv("ALBAYAN_DELIVERY_OVERPAY_ABS_LOCAL", "10000"))
 MIN_FINANCIAL_AMOUNT = 0  # No negative amounts allowed
 MAX_EXCHANGE_RATE = 1000  # Maximum exchange rate (LYD per USD)
 MIN_EXCHANGE_RATE = 0.001  # Minimum exchange rate
@@ -740,10 +890,10 @@ def sanitize_json(obj: Any, depth: int = 0, parent_key: str = "") -> Any:
         for k, v in obj.items():
             if not isinstance(k, str):
                 continue
-            if k in BLOCKED_KEYS:
+            if k in BLOCKED_KEYS or k in TRANSPORT_ONLY_KEYS:
                 continue
             sk = sanitize_str(k)[:100]
-            if not sk or sk in BLOCKED_KEYS:
+            if not sk or sk in BLOCKED_KEYS or sk in TRANSPORT_ONLY_KEYS:
                 continue
             # Pass field name to child for validation context
             out[sk] = sanitize_json(v, depth + 1, sk)
@@ -911,12 +1061,17 @@ def _get_user_by_id_any(user_id: str) -> Optional[dict[str, Any]]:
         return dict(row) if row else None
 
 
-def _create_session(user_id: str, request: Request) -> tuple[str, str]:
+def _create_session(
+    user_id: str, request: Request, duration_ms: Optional[int] = None
+) -> tuple[str, str]:
     session_id = new_id("sess")
     token = new_id("tok")
     token_hash = hash_token(token)
     now = now_ms()
-    expires = now + SESSION_DURATION_MS
+    # duration_ms is chosen by the caller from server-side constants only
+    # (SESSION_DURATION_MS / SESSION_REMEMBER_DURATION_MS) — never client input.
+    lifetime_ms = SESSION_DURATION_MS if duration_ms is None else max(60_000, int(duration_ms))
+    expires = now + lifetime_ms
     ip = request.client.host if request.client else None
     ua = request.headers.get("user-agent")
 
@@ -1097,6 +1252,55 @@ def cleanup_old_audit_logs():
             print(f"[albayan] Audit log cleanup: deleted {deleted_by_age} by age, {deleted_by_limit} by limit")
 
 
+def _project_entity_contacts_for_user(
+    entity: dict[str, Any], user: dict[str, Any]
+) -> dict[str, Any]:
+    return project_entity_contacts(
+        entity,
+        user_has_permission(user, "customers", "viewContacts"),
+    )
+
+
+def _can_include_entity_media(
+    user: dict[str, Any], entity_type: str, requested: bool = True
+) -> bool:
+    """Apply media-specific authorization in addition to record visibility."""
+    return can_include_entity_media(
+        entity_type,
+        requested,
+        user_has_permission(user, "ads", "viewPhotos"),
+    )
+
+
+def _project_entity_media_for_user(
+    entity: dict[str, Any], user: dict[str, Any], requested: bool = True
+) -> dict[str, Any]:
+    entity_type = str(entity.get("type") or "")
+    media_projected = _project_entity_media(
+        entity, _can_include_entity_media(user, entity_type, requested)
+    )
+    return _project_entity_contacts_for_user(media_projected, user)
+
+
+def _redacted_ad_campaign_tombstone(entity: dict[str, Any]) -> dict[str, Any]:
+    """Tell a reviewer to remove an out-of-scope campaign without leaking it."""
+    entity_id = str(entity.get("id") or "")
+    last_modified = int(entity.get("lastModified") or 0)
+    return {
+        "id": entity_id,
+        "type": AD_CAMPAIGN_COLLECTION,
+        "deleted": True,
+        "createdAt": int(entity.get("createdAt") or last_modified),
+        "createdBy": None,
+        "lastModified": last_modified,
+        "data": {
+            "id": entity_id,
+            "_lastModified": last_modified,
+            "_deleted": True,
+        },
+    }
+
+
 def list_entities(
     entity_type: str,
     *,
@@ -1113,6 +1317,8 @@ def list_entities(
     before_id: str | None = None,
     after_last_modified: int | None = None,
     after_id: str | None = None,
+    include_media: bool = True,
+    ad_campaign_reviewer_scope: bool = False,
 ) -> list[dict[str, Any]]:
     entity_type = sanitize_str(entity_type)[:40]
     if not entity_type:
@@ -1134,6 +1340,25 @@ def list_entities(
 
     where = ["type = :type"]
     params: dict[str, Any] = {"type": entity_type}
+    campaign_safe_statuses = ("Submitted", "Approved", "Rejected")
+    campaign_status_expr = (
+        "COALESCE(data_json::jsonb ->> 'status', 'Draft')"
+        if dialect == "postgresql"
+        else "COALESCE(json_extract(data_json, '$.status'), 'Draft')"
+    )
+    # Reviewer accounts may inspect submitted/reviewed requests, never a
+    # customer's private Draft or in-progress Changes Requested revision.
+    # Delta reads are handled below with redacted synthetic tombstones so a
+    # status transition out of scope also removes a previously visible row.
+    if ad_campaign_reviewer_scope:
+        visible_status_sql = "'Submitted','Approved','Rejected'"
+        if updated_since is not None:
+            # Changes Requested is the only normal visible -> private-editable
+            # transition, so delta sync receives it as a redacted tombstone.
+            # Brand-new Drafts never enter the reviewer query at all (even ids
+            # and activity timestamps are private).
+            visible_status_sql += ",'Changes Requested'"
+        where.append(f"{campaign_status_expr} IN ({visible_status_sql})")
     # For delta sync (updated_since), we intentionally include deleted rows as tombstones
     # so clients can remove them without requiring a full refresh.
     if not include_deleted and updated_since is None:
@@ -1220,7 +1445,52 @@ def list_entities(
     # cause a record to be skipped or duplicated. Delta queries keep
     # last_modified ordering (they re-scan by cursor and upsert idempotently).
     order_by = "last_modified ASC, id ASC" if updated_since is not None else "created_at DESC, id DESC"
-    sql = f"SELECT * FROM entities WHERE {' AND '.join(where)} ORDER BY {order_by} LIMIT :limit OFFSET :offset"
+    # Ads Studio creatives can be several megabytes each.  Removing them only
+    # after SELECT/JSON decoding still lets a review-queue request materialize
+    # hundreds of megabytes in the API process.  Project that field out in the
+    # database and carry only its count on lightweight list/sync requests.
+    campaign_media_projected = entity_type == "adCampaignRequests" and not include_media
+    campaign_reviewer_delta = (
+        campaign_media_projected
+        and ad_campaign_reviewer_scope
+        and updated_since is not None
+    )
+    if campaign_media_projected and dialect == "postgresql":
+        campaign_json = "(data_json::jsonb - 'creativeImages')::text"
+        if campaign_reviewer_delta:
+            campaign_json = (
+                "CASE WHEN " + campaign_status_expr +
+                " IN ('Submitted','Approved','Rejected') THEN " + campaign_json +
+                " ELSE '{}' END"
+            )
+        select_clause = (
+            f"type, id, {campaign_json} AS data_json, "
+            "deleted, created_at, created_by, last_modified, "
+            "CASE WHEN jsonb_typeof(data_json::jsonb -> 'creativeImages')='array' "
+            "THEN jsonb_array_length(data_json::jsonb -> 'creativeImages') ELSE 0 END AS media_count, "
+            f"{campaign_status_expr} AS campaign_status"
+        )
+    elif campaign_media_projected:
+        campaign_json = "json_remove(data_json, '$.creativeImages')"
+        if campaign_reviewer_delta:
+            campaign_json = (
+                "CASE WHEN " + campaign_status_expr +
+                " IN ('Submitted','Approved','Rejected') THEN " + campaign_json +
+                " ELSE '{}' END"
+            )
+        select_clause = (
+            f"type, id, {campaign_json} AS data_json, "
+            "deleted, created_at, created_by, last_modified, "
+            "CASE WHEN json_type(data_json, '$.creativeImages')='array' "
+            "THEN json_array_length(data_json, '$.creativeImages') ELSE 0 END AS media_count, "
+            f"{campaign_status_expr} AS campaign_status"
+        )
+    else:
+        select_clause = "*"
+    sql = (
+        f"SELECT {select_clause} FROM entities WHERE {' AND '.join(where)} "
+        f"ORDER BY {order_by} LIMIT :limit OFFSET :offset"
+    )
     params["limit"] = limit
     params["offset"] = offset
 
@@ -1229,6 +1499,10 @@ def list_entities(
         out = []
         for r in rows:
             d = dict(r)
+            reviewer_hidden = (
+                campaign_reviewer_delta
+                and str(d.get("campaign_status") or "Draft") not in campaign_safe_statuses
+            )
             data = json_loads(d["data_json"]) or {}
             delivery_person_id = data.get("deliveryPersonId")
             # Inject server truth into record for frontend compatibility
@@ -1241,7 +1515,7 @@ def list_entities(
 
             # If caller didn't request deleted records, but we're in delta mode,
             # return a minimal tombstone payload for deleted rows (defense-in-depth).
-            if not include_deleted and bool(d["deleted"]):
+            if reviewer_hidden or (not include_deleted and bool(d["deleted"])):
                 data = {
                     "id": d["id"],
                     "_lastModified": int(d["last_modified"]),
@@ -1252,11 +1526,22 @@ def list_entities(
                     data["createdBy"] = d.get("created_by")
                 if delivery_person_id is not None:
                     data["deliveryPersonId"] = delivery_person_id
+            elif campaign_media_projected:
+                # The database projection already removed the bytes.  Preserve
+                # the same transport contract as _without_inline_media without
+                # ever loading the creativeImages array into Python memory.
+                data["_mediaOmitted"] = True
+                data["_photoCount"] = max(0, int(d.get("media_count") or 0))
+            elif not include_media:
+                # Photos remain authoritative inside data_json, but normal
+                # lists/live-sync only need a count. The full item endpoint is
+                # the on-demand hydration path used by View Photos and Edit.
+                data = _without_inline_media(entity_type, data)
             out.append(
                 {
                     "id": d["id"],
                     "type": d["type"],
-                    "deleted": bool(d["deleted"]),
+                    "deleted": bool(d["deleted"]) or reviewer_hidden,
                     "createdAt": int(d["created_at"]),
                     "createdBy": d.get("created_by"),
                     "lastModified": int(d["last_modified"]),
@@ -1294,6 +1579,12 @@ def get_entity(entity_type: str, entity_id: str) -> Optional[dict[str, Any]]:
         if not row:
             return None
         d = dict(row)
+        data = json_loads(d["data_json"]) or {}
+        # Match collection reads: the dedicated DB column is authoritative when
+        # present. Imported history may only have data.createdBy when that
+        # column is NULL, so leave the stored value intact in that case.
+        if isinstance(data, dict) and d.get("created_by") is not None:
+            data["createdBy"] = str(d["created_by"])
         return {
             "id": d["id"],
             "type": d["type"],
@@ -1301,11 +1592,196 @@ def get_entity(entity_type: str, entity_id: str) -> Optional[dict[str, Any]]:
             "createdAt": int(d["created_at"]),
             "createdBy": d.get("created_by"),
             "lastModified": int(d["last_modified"]),
-            "data": json_loads(d["data_json"]) or {},
+            "data": data,
         }
 
 
-def upsert_entity(entity_type: str, entity_id: str, data: dict[str, Any], user_id: str, *, create_if_missing: bool = True) -> dict[str, Any]:
+_PHONE_DIGIT_TRANSLATION = str.maketrans(
+    "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
+    "01234567890123456789",
+)
+
+
+def _customer_phone_display(value: Any) -> str:
+    """Read a phone from modern strings or older object-shaped entries."""
+    if isinstance(value, dict):
+        for key in ("number", "phone", "phoneNumber", "value"):
+            candidate = sanitize_str(str(value.get(key) or ""), 80).strip()
+            if candidate:
+                return candidate
+        return ""
+    return sanitize_str(str(value or ""), 80).strip()
+
+
+def _canonical_customer_phone(value: Any) -> str:
+    """Canonical identity key, including equivalent Libyan mobile formats."""
+    display = _customer_phone_display(value).translate(_PHONE_DIGIT_TRANSLATION)
+    digits = re.sub(r"[^0-9]", "", display)
+    if digits.startswith("00"):
+        digits = digits[2:]
+    if digits.startswith("218"):
+        national = digits[3:]
+        if national.startswith("0"):
+            national = national[1:]
+        digits = f"218{national}"
+    # 09XXXXXXXX, 9XXXXXXXX, +2189XXXXXXXX and 002189XXXXXXXX are one phone.
+    if len(digits) == 10 and digits.startswith("09"):
+        return f"218{digits[1:]}"
+    if len(digits) == 9 and digits.startswith("9"):
+        return f"218{digits}"
+    return digits if 7 <= len(digits) <= 15 else ""
+
+
+def _customer_phone_candidates(data: Any) -> list[Any]:
+    source = data if isinstance(data, dict) else {}
+    values: list[Any] = []
+    raw_phones = source.get("phones")
+    if isinstance(raw_phones, list):
+        values.extend(raw_phones)
+    elif raw_phones not in (None, ""):
+        values.append(raw_phones)
+    for key in ("phone", "phoneNumber"):
+        if source.get(key) not in (None, ""):
+            values.append(source.get(key))
+    return values
+
+
+def _customer_phone_keys(data: Any) -> set[str]:
+    return {
+        key
+        for key in (_canonical_customer_phone(value) for value in _customer_phone_candidates(data))
+        if key
+    }
+
+
+CUSTOMER_PHONE_FIELDS = frozenset({"phones", "phone", "phoneNumber"})
+
+
+def _collapse_customer_phone_entries(data: dict[str, Any]) -> dict[str, Any]:
+    """Collapse aliases within phones[] while preserving the first display value."""
+    raw = data.get("phones")
+    if not isinstance(raw, list):
+        return data
+    seen: set[str] = set()
+    collapsed: list[Any] = []
+    for value in raw:
+        display = _customer_phone_display(value)
+        if not display:
+            continue
+        key = _canonical_customer_phone(value) or f"display:{display.casefold()}"
+        if key in seen:
+            continue
+        seen.add(key)
+        collapsed.append(value)
+    data["phones"] = collapsed
+    return data
+
+
+def _normalize_customer_phone_storage(
+    data: dict[str, Any], *, modern_authoritative: bool = False
+) -> dict[str, Any]:
+    """Normalize phones[] and retire scalar aliases when modern data is supplied."""
+    data = _collapse_customer_phone_entries(data)
+    if modern_authoritative:
+        data.pop("phone", None)
+        data.pop("phoneNumber", None)
+    return data
+
+
+def _lock_customer_phone_keys_conn(conn: Any, keys: set[str], *, postgres: bool) -> None:
+    if not postgres:
+        return
+    for key in sorted(keys):
+        conn.execute(
+            text(
+                "SELECT pg_advisory_xact_lock("
+                "hashtextextended(CAST(:key AS text), 0)"
+                ")"
+            ),
+            {"key": f"customerPhone:{key}"},
+        )
+
+
+def _validate_customer_phone_change_conn(
+    conn: Any,
+    customer_id: str,
+    old_data: Any,
+    new_data: Any,
+    *,
+    postgres: bool,
+    activating: bool = False,
+    phone_fields_touched: bool = False,
+) -> None:
+    """Reject only newly introduced collisions, grandfathering existing dirt."""
+    old_keys = set() if activating else _customer_phone_keys(old_data)
+    new_keys = _customer_phone_keys(new_data)
+    if not new_keys and (activating or bool(old_keys) or phone_fields_touched):
+        raise HTTPException(status_code=400, detail="At least one valid phone number is required")
+    introduced = new_keys - old_keys
+    if not introduced:
+        return
+    _lock_customer_phone_keys_conn(conn, introduced, postgres=postgres)
+    rows = conn.execute(
+        text(
+            "SELECT id,data_json FROM entities "
+            "WHERE type='customers' AND deleted=false AND id<>:customer_id"
+        ),
+        {"customer_id": customer_id},
+    ).mappings().all()
+    for row in rows:
+        other = json_loads(row.get("data_json") or "{}") or {}
+        if introduced & _customer_phone_keys(other):
+            # Intentionally omit the phone, customer id and customer name. This
+            # remains safe even when the caller lacks customers.viewContacts.
+            raise HTTPException(
+                status_code=409,
+                detail="This phone number is already linked to another customer",
+            )
+
+
+# Entity collections that reference a single customer via `customerId` and whose
+# cards/lists surface the customer's name. `customerName` is denormalized onto
+# these at creation (mirrors `createdByName`) so a role with receipts/ads view
+# but WITHOUT the customers permission still sees who the record is for.
+CUSTOMER_NAME_STAMP_TYPES = frozenset({"receipts", "ads"})
+
+
+def _lookup_customer_display_name(conn: Any, customer_id: Any) -> str:
+    """Authoritative customer NAME for the customerName denormalization stamp.
+
+    Reads ONLY the display name from the customers table — never phone/contact
+    fields, which stay gated by the contact projection. This is what makes the
+    stamp spoof-proof in server mode: a client cannot label a record with an
+    arbitrary customer name. Returns '' when the id is blank or the customer is
+    absent so callers leave any existing value untouched (see createdByName).
+    """
+    cid = sanitize_str(str(customer_id or ""))[:80]
+    if not cid:
+        return ""
+    row = conn.execute(
+        text("SELECT data_json FROM entities WHERE type = 'customers' AND id = :id LIMIT 1"),
+        {"id": cid},
+    ).mappings().first()
+    if not row:
+        return ""
+    cdata = json_loads(row.get("data_json") or "{}") or {}
+    if not isinstance(cdata, dict):
+        return ""
+    name = cdata.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return ""
+    return sanitize_str(name)[:120]
+
+
+def upsert_entity(
+    entity_type: str,
+    entity_id: str,
+    data: dict[str, Any],
+    user_id: str,
+    *,
+    create_if_missing: bool = True,
+    reject_existing: bool = False,
+) -> dict[str, Any]:
     """
     Create or update an entity in the database (atomic operation).
     
@@ -1337,14 +1813,28 @@ def upsert_entity(entity_type: str, entity_id: str, data: dict[str, Any], user_i
         raise HTTPException(status_code=400, detail="Invalid entity id/type")
 
     clean = sanitize_json(data)
+    if entity_type == "customers" and isinstance(clean, dict):
+        clean = _normalize_customer_phone_storage(
+            clean, modern_authoritative="phones" in clean
+        )
+    if entity_type == "receipts" and isinstance(clean, dict):
+        clean = _normalize_receipt_number_fields(clean)
+        _validate_receipt_number_fields(clean)
     # Force server timestamps for consistency
     clean["_lastModified"] = now
 
-    with db_conn() as conn:
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    entity_guard = nullcontext()
+    if not postgres:
+        if entity_type == "customers":
+            entity_guard = _SQLITE_CUSTOMER_PHONE_LOCK
+        elif entity_type == "receipts":
+            entity_guard = _SQLITE_RECEIPT_NUMBER_LOCK
+    with entity_guard, db_conn() as conn:
         existing = (
             conn.execute(
                 text(
-                    "SELECT id, created_at, created_by, deleted FROM entities WHERE type = :type AND id = :id LIMIT 1"
+                    "SELECT id, data_json, created_at, created_by, deleted FROM entities WHERE type = :type AND id = :id LIMIT 1"
                 ),
                 {"type": entity_type, "id": entity_id},
             )
@@ -1353,6 +1843,8 @@ def upsert_entity(entity_type: str, entity_id: str, data: dict[str, Any], user_i
         )
 
         if existing:
+            if reject_existing:
+                raise HTTPException(status_code=409, detail="Record with this ID already exists")
             created_at = int(existing["created_at"])
             created_by = existing["created_by"]
             # DATA-INTEGRITY FIX: preserve the soft-delete flag on updates.
@@ -1366,6 +1858,39 @@ def upsert_entity(entity_type: str, entity_id: str, data: dict[str, Any], user_i
             clean["id"] = entity_id
             clean["_created"] = clean.get("_created") or created_at
             clean["createdBy"] = clean.get("createdBy") or created_by
+            # Denormalized creator display name: a full-document update from a
+            # client that predates the createdByName stamp must not erase it —
+            # this copy is what keeps "Created by" readable after the creator's
+            # account is soft-deleted (see GET /api/users/tombstones).
+            if not clean.get("createdByName"):
+                _prev_data = json_loads(existing.get("data_json") or "{}") or {}
+                if isinstance(_prev_data, dict) and _prev_data.get("createdByName"):
+                    clean["createdByName"] = _prev_data["createdByName"]
+            # Same protection for the denormalized customer name: a full-document
+            # update that omits customerName (older client / import) must not
+            # erase the stamp that keeps the customer readable for a role without
+            # the customers permission. The live customer name still wins on read.
+            if entity_type in CUSTOMER_NAME_STAMP_TYPES and not clean.get("customerName"):
+                _prev_cust = json_loads(existing.get("data_json") or "{}") or {}
+                if isinstance(_prev_cust, dict) and _prev_cust.get("customerName"):
+                    clean["customerName"] = _prev_cust["customerName"]
+            if entity_type == "customers":
+                _validate_customer_phone_change_conn(
+                    conn,
+                    entity_id,
+                    json_loads(existing.get("data_json") or "{}") or {},
+                    clean,
+                    postgres=postgres,
+                    phone_fields_touched=bool(CUSTOMER_PHONE_FIELDS & set(clean)),
+                )
+            if entity_type == "receipts" and not deleted:
+                _validate_receipt_number_change_conn(
+                    conn,
+                    entity_id,
+                    json_loads(existing.get("data_json") or "{}") or {},
+                    clean,
+                    postgres=postgres,
+                )
 
             try:
                 conn.execute(
@@ -1398,6 +1923,51 @@ def upsert_entity(entity_type: str, entity_id: str, data: dict[str, Any], user_i
             clean["id"] = entity_id
             clean["_created"] = clean.get("_created") or created_at
             clean["createdBy"] = clean.get("createdBy") or created_by
+            # Stamp the creator's display name so the record keeps showing who
+            # created it even after that user account is soft-deleted (deleted
+            # users stop syncing to clients). The users table is authoritative
+            # when the creator resolves to a real account — a client cannot
+            # stamp someone else's name; otherwise a client-supplied stamp
+            # (legacy import / local-mode history) is kept as-is.
+            _creator_ref = str(clean.get("createdBy") or "")
+            if _creator_ref:
+                _creator_row = conn.execute(
+                    text("SELECT name FROM users WHERE id = :id LIMIT 1"),
+                    {"id": _creator_ref},
+                ).mappings().first()
+                if _creator_row and _creator_row.get("name"):
+                    clean["createdByName"] = sanitize_str(str(_creator_row["name"]))[:120]
+            if clean.get("createdByName") is not None and not isinstance(clean.get("createdByName"), str):
+                clean.pop("createdByName", None)
+            # Denormalize the customer's NAME (never phone/contact) from the
+            # authoritative customers table so a receipts/ads-only role sees who
+            # the record is for. Resolving from the table makes this spoof-proof:
+            # a client-supplied customerName is overwritten when the customerId
+            # resolves; otherwise a valid client string (legacy import) is kept.
+            if entity_type in CUSTOMER_NAME_STAMP_TYPES:
+                _cust_name = _lookup_customer_display_name(conn, clean.get("customerId"))
+                if _cust_name:
+                    clean["customerName"] = _cust_name
+                elif clean.get("customerName") is not None and not isinstance(clean.get("customerName"), str):
+                    clean.pop("customerName", None)
+            if entity_type == "customers":
+                _validate_customer_phone_change_conn(
+                    conn,
+                    entity_id,
+                    {},
+                    clean,
+                    postgres=postgres,
+                    activating=True,
+                )
+            if entity_type == "receipts":
+                _validate_receipt_number_change_conn(
+                    conn,
+                    entity_id,
+                    {},
+                    clean,
+                    postgres=postgres,
+                    activating=True,
+                )
 
             try:
                 conn.execute(
@@ -1442,6 +2012,7 @@ def patch_entity(
     user_id: str,
     *,
     expected_last_modified: int | None = None,
+    enforce_ad_campaign_quota: bool = True,
 ) -> dict[str, Any]:
     """
     Partially update an existing entity (merge semantics).
@@ -1458,7 +2029,7 @@ def patch_entity(
     Behavior:
         - Loads existing entity from database
         - Merges updates into existing data (dict.update semantics)
-        - Protected fields (id, _created, createdBy, createdAt, creatorId) cannot be changed
+        - Protected fields (id, _created, createdBy, createdByName, customerName, createdAt, creatorId) cannot be changed
         - Raises HTTP 404 if entity doesn't exist
         - Updates last_modified timestamp automatically
     
@@ -1475,13 +2046,21 @@ def patch_entity(
     upd = sanitize_json(updates)
     if not isinstance(upd, dict):
         raise HTTPException(status_code=400, detail="Invalid update data")
-    # Protected keys
-    for k in ["id", "_created", "_lastModified", "createdBy", "createdAt", "creatorId"]:
+    # Protected keys. createdByName is the creation-time stamp that keeps
+    # "Created by" readable after the creator's account is deleted, and
+    # customerName is the creation-time customer stamp that keeps a receipts/
+    # ads-only role able to read who the record is for — a PATCH must never
+    # rewrite either to someone else's name.
+    for k in ["id", "_created", "_lastModified", "createdBy", "createdByName", "customerName", "createdAt", "creatorId"]:
         if k in upd:
             del upd[k]
 
     postgres = str(get_engine().dialect.name or "") == "postgresql"
-    guard = nullcontext() if postgres else _SQLITE_ENTITY_PATCH_LOCK
+    guard = (
+        nullcontext()
+        if postgres
+        else (_SQLITE_CUSTOMER_PHONE_LOCK if entity_type == "customers" else _SQLITE_ENTITY_PATCH_LOCK)
+    )
     with guard:
         with db_conn() as conn:
             lock_suffix = " FOR UPDATE" if postgres else ""
@@ -1494,6 +2073,11 @@ def patch_entity(
             ).mappings().first()
             if not row:
                 raise HTTPException(status_code=404, detail="Not found")
+            if bool(row["deleted"]):
+                # A late PATCH must never mutate a tombstone (or turn a
+                # submitted/deleted campaign into an inconsistent hidden row).
+                # Restoration has its own audited Admin endpoint.
+                raise HTTPException(status_code=409, detail="Cannot update a deleted record")
 
             baseline = int(row["last_modified"])
             if expected_last_modified is not None and baseline != int(expected_last_modified):
@@ -1502,7 +2086,20 @@ def patch_entity(
             data = json_loads(row["data_json"]) or {}
             if not isinstance(data, dict):
                 data = {}
+            old_data = dict(data)
             data.update(upd)
+            if entity_type == "customers":
+                data = _normalize_customer_phone_storage(
+                    data, modern_authoritative="phones" in upd
+                )
+                _validate_customer_phone_change_conn(
+                    conn,
+                    entity_id,
+                    old_data,
+                    data,
+                    postgres=postgres,
+                    phone_fields_touched=bool(CUSTOMER_PHONE_FIELDS & set(upd)),
+                )
             modified = max(now_ms(), baseline + 1)
             data["id"] = entity_id
             data["_created"] = data.get("_created") or int(row["created_at"])
@@ -1511,6 +2108,17 @@ def patch_entity(
                 data["createdBy"] = str(row["created_by"])
             else:
                 data.pop("createdBy", None)
+
+            if entity_type == "adCampaignRequests" and enforce_ad_campaign_quota:
+                owner_id = str(row.get("created_by") or data.get("createdBy") or "")
+                _ad_campaign_lock_owner_conn(conn, owner_id, postgres=postgres)
+                _enforce_ad_campaign_owner_quota_conn(
+                    conn,
+                    owner_id,
+                    data,
+                    excluding_id=entity_id,
+                    creating=False,
+                )
 
             try:
                 result = conn.execute(
@@ -1527,6 +2135,11 @@ def patch_entity(
                     },
                 )
             except IntegrityError:
+                if entity_type == "customers":
+                    raise HTTPException(
+                        status_code=409,
+                        detail="This phone number is already linked to another customer",
+                    )
                 raise HTTPException(status_code=409, detail="Receipt number already exists")
             if result.rowcount != 1:
                 raise HTTPException(status_code=409, detail="Conflict: record has changed")
@@ -1578,7 +2191,7 @@ def soft_delete_entity(entity_type: str, entity_id: str, user_id: str):
         )
 
 
-app = FastAPI(title="Albayan Server", version="1.0.0")
+app = FastAPI(title="Albayan Server", version=APP_VERSION)
 
 # PERFORMANCE: Enable gzip compression for JSON/text responses.
 # This reduces payload sizes for large collections (receipts/ads/customers) and helps under load.
@@ -1680,6 +2293,163 @@ def _bootstrap_first_admin_if_empty():
         print(f"[albayan] Bootstrap admin skipped/failed: {type(e).__name__}")
 
 
+def backfill_customer_names() -> int:
+    """Stamp customerName on legacy receipts/ads that predate the denormalization.
+
+    Records created before customerName existed still render as "Unknown" for a
+    role that can view receipts/ads but not load the customers collection. This
+    one-time-safe pass fills that gap from the authoritative customers table.
+
+    Idempotent — it only touches a record that (a) is a receipt/ad, (b) has a
+    customerId, (c) lacks a usable customerName, and (d) whose customer resolves
+    to a name — so it is a no-op on every startup after the first and safe to run
+    unconditionally. Only the NAME is copied; phone/contact are never read. The
+    record's last_modified/_lastModified are deliberately left untouched: the
+    client fetches every collection in full on load, so a limited-permission
+    role picks up the stamp on its next login/refresh without a resync storm.
+
+    Returns the number of records stamped.
+    """
+    stamped = 0
+    try:
+        with db_conn() as conn:
+            customer_names: dict[str, str] = {}
+            for row in conn.execute(
+                text("SELECT id, data_json FROM entities WHERE type = 'customers'")
+            ).mappings().all():
+                cdata = json_loads(row.get("data_json") or "{}") or {}
+                if isinstance(cdata, dict):
+                    nm = cdata.get("name")
+                    if isinstance(nm, str) and nm.strip():
+                        customer_names[str(row["id"])] = sanitize_str(nm)[:120]
+            if not customer_names:
+                return 0
+            for etype in ("receipts", "ads"):
+                rows = conn.execute(
+                    text("SELECT id, data_json FROM entities WHERE type = :t"),
+                    {"t": etype},
+                ).mappings().all()
+                for row in rows:
+                    data = json_loads(row.get("data_json") or "{}") or {}
+                    if not isinstance(data, dict):
+                        continue
+                    existing_name = data.get("customerName")
+                    if isinstance(existing_name, str) and existing_name.strip():
+                        continue
+                    cid = sanitize_str(str(data.get("customerId") or ""))[:80]
+                    if not cid:
+                        continue
+                    name = customer_names.get(cid)
+                    if not name:
+                        continue
+                    data["customerName"] = name
+                    conn.execute(
+                        text("UPDATE entities SET data_json = :d WHERE type = :t AND id = :id"),
+                        {"d": json_dumps(data), "t": etype, "id": str(row["id"])},
+                    )
+                    stamped += 1
+        if stamped:
+            print(f"[albayan] Backfilled customerName on {stamped} receipts/ads")
+    except Exception as e:
+        print(f"[albayan] customerName backfill skipped/failed: {type(e).__name__}: {e}")
+    return stamped
+
+
+def backfill_relink_baselines() -> int:
+    """Retarget stale stop/refund baselines left by pre-retarget relinks.
+
+    Ads settled/relinked before the baseline-retarget shipped still carry
+    stop/refund baselines naming the VACATED receipt. _financial_receipt_ids
+    counts baselines as live links, so those fully-freed receipts could never
+    be deleted ("linked to ad funding"). Repair rule — deliberately narrow and
+    unambiguous, mirroring _financial_apply_relink's own retarget:
+      (a) the ad has no active refund (refundType empty/None — refund undo
+          restores from baselines, so refunded ads keep theirs untouched), and
+      (b) its LIVE allocations reference exactly ONE receipt R, and
+      (c) a baseline names some other receipt X != R  ->  rewrite X to R.
+    Amounts are never changed; last_modified is left untouched (display-only
+    linkage data — the delete guard re-reads rows directly). Idempotent: after
+    the first pass no baseline names a non-live receipt, so it is a no-op on
+    every later startup.
+
+    Returns the number of ads repaired.
+    """
+    repaired = 0
+    try:
+        with db_conn() as conn:
+            rows = conn.execute(
+                text("SELECT id, data_json FROM entities WHERE type = 'ads' AND deleted = false")
+            ).mappings().all()
+            for row in rows:
+                data = json_loads(row.get("data_json") or "{}") or {}
+                if not isinstance(data, dict):
+                    continue
+                refund_type = str(data.get("refundType") or "")
+                if refund_type and refund_type != "None":
+                    continue
+                live_ids = {
+                    str(entry.get("receiptId") or "")
+                    for field in ("receiptAllocations", "dueAllocations", "mergedPaidAllocations")
+                    for entry in (data.get(field) or [])
+                    if isinstance(entry, dict) and entry.get("receiptId")
+                }
+                live_ids.discard("")
+                if len(live_ids) != 1:
+                    continue
+                replacement = next(iter(live_ids))
+
+                changed = False
+
+                def _retarget(rows_value: Any) -> Any:
+                    nonlocal changed
+                    if not isinstance(rows_value, list):
+                        return rows_value
+                    out = []
+                    for entry in rows_value:
+                        if (
+                            isinstance(entry, dict)
+                            and entry.get("receiptId")
+                            and str(entry["receiptId"]) != replacement
+                        ):
+                            changed = True
+                            out.append({**entry, "receiptId": replacement})
+                        else:
+                            out.append(entry)
+                    return out
+
+                for baseline_name in ("refundAllocationBaseline", "refundDueBaseline"):
+                    baseline = data.get(baseline_name)
+                    if isinstance(baseline, list):
+                        data[baseline_name] = _retarget(baseline)
+                    elif isinstance(baseline, dict):
+                        data[baseline_name] = {
+                            key: _retarget(value) for key, value in baseline.items()
+                        }
+                stop_baseline = data.get("stopAllocationBaseline")
+                if isinstance(stop_baseline, dict):
+                    next_baseline = dict(stop_baseline)
+                    for key, value in stop_baseline.items():
+                        if isinstance(value, list):
+                            next_baseline[key] = _retarget(value)
+                    legacy_id = str(next_baseline.get("dueLegacyReceiptId") or "")
+                    if legacy_id and legacy_id != replacement:
+                        next_baseline["dueLegacyReceiptId"] = replacement
+                        changed = True
+                    data["stopAllocationBaseline"] = next_baseline
+                if not changed:
+                    continue
+                conn.execute(
+                    text("UPDATE entities SET data_json = :d WHERE type = 'ads' AND id = :id"),
+                    {"d": json_dumps(data), "id": str(row["id"])},
+                )
+                repaired += 1
+        if repaired:
+            print(f"[albayan] Retargeted stale relink baselines on {repaired} ads")
+    except Exception as e:
+        print(f"[albayan] relink-baseline backfill skipped/failed: {type(e).__name__}: {e}")
+    return repaired
+
+
 @app.on_event("startup")
 def _startup():
     _ensure_minified_script()
@@ -1716,6 +2486,14 @@ def _startup():
         cleanup_old_audit_logs()
     except Exception as e:
         print(f"[albayan] Audit log cleanup failed: {e}")
+
+    # Denormalize customerName onto legacy receipts/ads so a receipts/ads-only
+    # role can read the customer's name. Idempotent — a no-op once complete.
+    try:
+        backfill_customer_names()
+        backfill_relink_baselines()
+    except Exception as e:
+        print(f"[albayan] customerName backfill failed: {e}")
 
 
 @app.on_event("shutdown")
@@ -1774,7 +2552,10 @@ if not CORS_ORIGINS_ENV:
         CORS_ORIGINS_ENV = "http://localhost:8000,http://127.0.0.1:8000"
     else:
         # Production safe default: no cross-origin access (same-origin works without CORS middleware)
-        print("[albayan] ⚠️  ALBAYAN_CORS_ORIGINS is not set; CORS middleware disabled (same-origin only).")
+        # Keep startup logs ASCII-safe. Some Windows service/console setups use
+        # a legacy code page and would crash the whole server while encoding
+        # the previous warning emoji.
+        print("[albayan] WARNING: ALBAYAN_CORS_ORIGINS is not set; CORS middleware disabled (same-origin only).")
         CORS_ORIGINS_ENV = ""
 
 CORS_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_ENV.split(",") if origin.strip()]
@@ -1804,7 +2585,7 @@ if CORS_ORIGINS:
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
-    if ORIGIN_SECRETS and not any(request.url.path.startswith(p) for p in ORIGIN_BYPASS_PATH_PREFIXES):
+    if ORIGIN_SECRETS and request.url.path not in ORIGIN_BYPASS_PATHS:
         provided = request.headers.get(ORIGIN_SECRET_HEADER)
         ok = bool(provided) and any(secrets.compare_digest(provided, s) for s in ORIGIN_SECRETS)
         if not ok:
@@ -1884,6 +2665,10 @@ async def request_context_and_logging(request: Request, call_next):
     # Structured access log (stdout -> CloudWatch on ECS)
     try:
         duration_ms = int((time.time() - started) * 1000)
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        from .monitoring import observe_request
+
+        observe_request(status_code, duration_ms)
         user_id = getattr(request.state, "user_id", None)
         ip = None
         try:
@@ -1904,7 +2689,7 @@ async def request_context_and_logging(request: Request, call_next):
                     "request_id": request_id,
                     "method": request.method,
                     "path": request.url.path,
-                    "status": int(getattr(response, "status_code", 0) or 0),
+                    "status": status_code,
                     "duration_ms": duration_ms,
                     "user_id": str(user_id) if user_id else None,
                     "ip": ip,
@@ -1961,8 +2746,8 @@ _NO_STORE_HEADERS = {
 }
 
 
-@app.get("/")
-def serve_index(request: Request):
+def _serve_versioned_index() -> Response:
+    """Return the SPA shell with cache-safe URLs for every entry route."""
     if not INDEX_PATH.exists():
         raise HTTPException(status_code=500, detail="index.html not found")
     # Inject cache-busting versions into the asset URLs at serve time. The file
@@ -1987,8 +2772,12 @@ def serve_index(request: Request):
         return FileResponse(str(INDEX_PATH), headers=_NO_STORE_HEADERS)
 
 
-@app.get("/api/health")
-def health():
+@app.get("/")
+def serve_index(request: Request):
+    return _serve_versioned_index()
+
+
+def _readiness_response():
     """
     Health check endpoint with database connectivity test and system metrics.
     
@@ -2008,9 +2797,11 @@ def health():
             conn.execute(text("SELECT 1")).first()
         db_status = "connected"
     except Exception as e:
-        db_status = f"error: {str(e)[:100]}"
+        # Keep connection strings, hostnames, and driver details out of the
+        # public health response. The exception type is enough in server logs.
+        print(f"[albayan] Readiness database check failed: {type(e).__name__}")
         return JSONResponse(
-            {"ok": False, "ts": now_ms(), "database": db_status},
+            {"ok": False, "ts": now_ms(), "database": "unavailable", "version": APP_VERSION},
             status_code=500
         )
     
@@ -2018,7 +2809,8 @@ def health():
         "ok": True,
         "ts": now_ms(),
         "database": db_status,
-        "version": "1.0.0"
+        "version": APP_VERSION,
+        "release": RELEASE_SHA,
     }
     
     # Include metrics if monitoring is available
@@ -2031,6 +2823,32 @@ def health():
         pass
     
     return response
+
+
+@app.get("/api/health/live")
+def liveness():
+    """Cheap process check for orchestrators; does not touch the database."""
+    return {"ok": True, "ts": now_ms(), "version": APP_VERSION, "release": RELEASE_SHA}
+
+
+@app.get("/api/health/ready")
+def readiness():
+    """Deployment readiness check including database connectivity."""
+    return _readiness_response()
+
+
+@app.get("/api/health")
+def health():
+    """Backward-compatible readiness endpoint used by existing deployments."""
+    return _readiness_response()
+
+
+@app.get("/api/admin/data-integrity")
+def admin_data_integrity(admin: dict[str, Any] = Depends(require_admin)):
+    """Run a read-only relationship/duplicate audit without returning PII."""
+    from .data_integrity import scan_database
+
+    return scan_database(issue_limit=200)
 
 
 # ==========================================
@@ -2227,6 +3045,9 @@ _ASSET_MEDIA_TYPES = {
     ".css": "text/css",
     ".js": "application/javascript",
     ".woff2": "font/woff2",
+    # PWA assets (manifest + icons) served from assets/.
+    ".png": "image/png",
+    ".webmanifest": "application/manifest+json",
 }
 
 
@@ -2253,6 +3074,18 @@ def serve_privacy():
         raise HTTPException(status_code=404, detail="Not found")
     return FileResponse(
         str(PRIVACY_PATH),
+        media_type="text/html",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@app.get("/delete-account")
+def serve_delete_account():
+    """Public, sign-in-free instructions for requesting account deletion."""
+    if not DELETE_ACCOUNT_PATH.exists():
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(
+        str(DELETE_ACCOUNT_PATH),
         media_type="text/html",
         headers={"Cache-Control": "public, max-age=3600"},
     )
@@ -2292,6 +3125,15 @@ def login(payload: LoginRequest, request: Request):
 
     user = _get_user_by_email(str(payload.email))
     if not user:
+        # SECURITY: burn the same PBKDF2 cost as the known-email path so response
+        # time does not reveal whether this email has an account.
+        verify_password(
+            str(payload.password),
+            _DUMMY_PASSWORD_HASH.hash_hex,
+            _DUMMY_PASSWORD_HASH.salt_hex,
+            _DUMMY_PASSWORD_HASH.algo,
+            _DUMMY_PASSWORD_HASH.iterations,
+        )
         # Helpful setup hint (safe, local-first): if there are ZERO users, the server isn't initialized yet.
         # Avoid leaking exact user counts; only disclose the "empty" case.
         try:
@@ -2317,7 +3159,11 @@ def login(payload: LoginRequest, request: Request):
     ):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    session_id, token = _create_session(user["id"], request)
+    # "Remember me": schema-validated strict boolean; True selects the long
+    # server-side session lifetime, anything else keeps the standard one.
+    remember_me = payload.rememberMe is True
+    session_lifetime_ms = SESSION_REMEMBER_DURATION_MS if remember_me else SESSION_DURATION_MS
+    session_id, token = _create_session(user["id"], request, duration_ms=session_lifetime_ms)
     cookie_val = new_session_cookie_value(session_id, token)
 
     resp = JSONResponse(content=LoginResponse(user=user_row_to_public(user)).model_dump())
@@ -2332,19 +3178,26 @@ def login(payload: LoginRequest, request: Request):
         COOKIE_NAME,
         cookie_val,
         httponly=True,
-        secure=True if is_mobile_app_login else COOKIE_SECURE,
+        secure=True if is_mobile_app_login else _cookie_secure_for(request),
         samesite="none" if is_mobile_app_login else "lax",
-        max_age=int(SESSION_DURATION_MS / 1000),
+        max_age=int(session_lifetime_ms / 1000),
         path="/",
     )
-    
+
     # Reset rate limit on successful login so user isn't penalized for previous failed attempts
     from .rate_limiter import reset_rate_limit
     login_email = str(payload.email).lower()
     reset_rate_limit(f"login:{_rate_key(request, login_email)}")
     reset_rate_limit(f"login:email:{login_email}")
-    
-    audit(user["id"], "login", "auth", user["id"], f"User {user['email']} logged in", {})
+
+    audit(
+        user["id"],
+        "login",
+        "auth",
+        user["id"],
+        f"User {user['email']} logged in",
+        {"rememberMe": remember_me, "sessionLifetimeMs": session_lifetime_ms},
+    )
     return resp
 
 
@@ -2485,7 +3338,7 @@ def setup_admin(payload: SetupAdminRequest, request: Request):
         COOKIE_NAME,
         cookie_val,
         httponly=True,
-        secure=True if is_mobile_app_login else COOKIE_SECURE,
+        secure=True if is_mobile_app_login else _cookie_secure_for(request),
         samesite="none" if is_mobile_app_login else "lax",
         max_age=int(SESSION_DURATION_MS / 1000),
         path="/",
@@ -2754,6 +3607,205 @@ def password_reset_confirm(body: PasswordResetConfirmRequest, request: Request):
     return {"ok": True}
 
 
+# ==========================================
+# SYSTEM-BROWSER APP LOGIN (Phase 2)
+# ==========================================
+# The packaged iOS/Android apps do not collect credentials in the WebView.
+# Instead they open the hosted login page in the phone's REAL browser with a
+# PKCE-style challenge; after the user signs in there, the authenticated web
+# session calls /handoff to mint a one-time code, redirects to
+# albayan://auth?code=...&state=..., and the app calls /exchange with the
+# original verifier to obtain its own session cookie.
+
+_APP_LOGIN_TOKEN_CHARS_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
+
+
+def _valid_app_login_token(value: str, min_len: int = 20, max_len: int = 256) -> bool:
+    return (
+        min_len <= len(value) <= max_len
+        and bool(_APP_LOGIN_TOKEN_CHARS_RE.fullmatch(value))
+    )
+
+
+@app.post("/api/auth/app-login/handoff")
+def app_login_handoff(
+    body: AppLoginHandoffRequest,
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+):
+    """Mint a one-time app-login code for the signed-in web user.
+
+    The code is returned ONCE in plaintext (it immediately leaves for the
+    app via the albayan:// deep link) and stored hashed. It is bound to the
+    SHA-256 challenge supplied by the app, so only the app holding the
+    matching verifier can redeem it — a leaked/phished code alone is useless.
+    """
+    require_same_origin(request)
+
+    allowed, wait_ms = _app_handoff_rate_check(request, str(user.get("id") or ""))
+    if not allowed:
+        wait_seconds = max(1, int(wait_ms / 1000))
+        raise HTTPException(
+            status_code=429,
+            detail="Too many app sign-in attempts. Please wait and try again.",
+            headers={"Retry-After": str(wait_seconds)},
+        )
+
+    # Schema already pins challenge to ^[0-9a-f]{64}$ (lowercase SHA-256 hex).
+    challenge_hash = str(body.challenge)
+    platform = (body.platform or "").strip()[:32] or None
+
+    code = secrets.token_urlsafe(32)
+    code_hash = hash_token(code)
+    now = now_ms()
+    ip = request.client.host if request.client else None
+    ua = request.headers.get("user-agent")
+
+    with db_conn() as conn:
+        # One live code per user, plus opportunistic cleanup of dead codes —
+        # same atomic single-statement pattern as password_resets.
+        conn.execute(
+            text(
+                "DELETE FROM app_logins WHERE expires_at <= :now "
+                "OR used_at IS NOT NULL OR user_id = :user_id"
+            ),
+            {"now": now, "user_id": user["id"]},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO app_logins (
+                  id, user_id, code_hash, challenge_hash,
+                  created_at, expires_at, used_at, ip, user_agent, platform
+                )
+                VALUES (
+                  :id, :user_id, :code_hash, :challenge_hash,
+                  :created_at, :expires_at, NULL, :ip, :user_agent, :platform
+                )
+                """
+            ),
+            {
+                "id": new_id("applogin"),
+                "user_id": user["id"],
+                "code_hash": code_hash,
+                "challenge_hash": challenge_hash,
+                "created_at": now,
+                "expires_at": now + APP_LOGIN_CODE_TTL_MS,
+                "ip": ip,
+                "user_agent": ua,
+                "platform": platform,
+            },
+        )
+
+    audit(
+        user["id"],
+        "app_login_handoff",
+        "auth",
+        user["id"],
+        f"App sign-in handoff code issued for {user['email']}",
+        {"platform": platform or "unknown"},
+    )
+    return {"code": code, "expiresInMs": APP_LOGIN_CODE_TTL_MS}
+
+
+@app.post("/api/auth/app-login/exchange", response_model=LoginResponse)
+def app_login_exchange(body: AppLoginExchangeRequest, request: Request):
+    """Redeem a one-time handoff code + PKCE verifier for an app session.
+
+    Anonymous by design (the app has no session yet). Every failure is the
+    same generic 400 so the endpoint discloses nothing about which part was
+    wrong; the code is burned on first claim regardless of the verifier
+    outcome, so an intercepted code cannot be retried against.
+    """
+    require_same_origin(request)
+
+    allowed, wait_ms = _app_exchange_rate_check(request)
+    if not allowed:
+        wait_seconds = max(1, int(wait_ms / 1000))
+        raise HTTPException(
+            status_code=429,
+            detail="Too many attempts. Please wait and try again.",
+            headers={"Retry-After": str(wait_seconds)},
+        )
+
+    invalid = HTTPException(status_code=400, detail="Invalid or expired sign-in code")
+    code = str(body.code or "").strip()
+    verifier = str(body.verifier or "").strip()
+    if not _valid_app_login_token(code) or not _valid_app_login_token(verifier):
+        raise invalid
+
+    code_hash = hash_token(code)
+    computed_challenge = hashlib.sha256(verifier.encode("utf-8")).hexdigest()
+    now = now_ms()
+
+    with db_conn() as conn:
+        row = (
+            conn.execute(
+                text(
+                    "SELECT id, user_id, challenge_hash FROM app_logins "
+                    "WHERE code_hash = :code_hash LIMIT 1"
+                ),
+                {"code_hash": code_hash},
+            )
+            .mappings()
+            .first()
+        )
+        if not row:
+            raise invalid
+
+        # Atomically claim the one-shot code BEFORE verifying the challenge:
+        # exactly one exchange can ever win, and a wrong-verifier attempt
+        # burns the code instead of leaving it retryable.
+        claimed = conn.execute(
+            text(
+                "UPDATE app_logins SET used_at = :used_at "
+                "WHERE id = :id AND used_at IS NULL AND expires_at > :now"
+            ),
+            {"used_at": now, "now": now, "id": row["id"]},
+        )
+        if claimed.rowcount != 1:
+            raise invalid
+
+    if not secrets_compare(computed_challenge, str(row.get("challenge_hash") or "")):
+        raise invalid
+
+    user = _get_user_by_id(str(row.get("user_id") or ""))
+    if not user:
+        raise invalid
+
+    session_id, token = _create_session(
+        user["id"], request, duration_ms=APP_LOGIN_SESSION_MS
+    )
+    cookie_val = new_session_cookie_value(session_id, token)
+
+    resp = JSONResponse(content=LoginResponse(user=user_row_to_public(user)).model_dump())
+    # Same cookie semantics as /api/auth/login: the packaged apps either call
+    # through Capacitor's native HTTP layer (no Origin header — the native
+    # cookie jar ignores SameSite) or from a trusted app WebView origin, which
+    # needs SameSite=None to be sent cross-site.
+    login_origin = request.headers.get("origin") or ""
+    is_mobile_app_login = login_origin in MOBILE_APP_ORIGINS
+    resp.set_cookie(
+        COOKIE_NAME,
+        cookie_val,
+        httponly=True,
+        secure=True if is_mobile_app_login else _cookie_secure_for(request),
+        samesite="none" if is_mobile_app_login else "lax",
+        max_age=int(APP_LOGIN_SESSION_MS / 1000),
+        path="/",
+    )
+
+    audit(
+        user["id"],
+        "app_login",
+        "auth",
+        user["id"],
+        f"User {user['email']} signed in via system-browser app login",
+        {"sessionLifetimeMs": APP_LOGIN_SESSION_MS},
+    )
+    return resp
+
+
 def _page_all(collection: str, **kwargs: Any) -> list[dict[str, Any]]:
     # list_entities caps a single call at 1000 rows; page through so callers
     # keep a "returns all records" contract instead of silently truncating.
@@ -2775,6 +3827,7 @@ def _bootstrap_fetch_scoped(collection: str, user: dict[str, Any]) -> list[dict[
     get_collection's delivery scoping and view/viewOwn permission checks.
     """
     role_lower = str(user.get("role") or "").lower()
+    include_media = _can_include_entity_media(user, collection, True)
 
     # Delivery users: only records assigned to them (mirror get_collection).
     if role_lower == "delivery" and collection in {"ads", "receipts", "customers"}:
@@ -2782,11 +3835,18 @@ def _bootstrap_fetch_scoped(collection: str, user: dict[str, Any]) -> list[dict[
         if not uid:
             return []
         if collection in {"ads", "receipts"}:
-            return _page_all(collection, include_deleted=False, assigned_to=uid)
+            return _page_all(
+                collection,
+                include_deleted=False,
+                assigned_to=uid,
+                include_media=include_media,
+            )
         # customers: only those referenced by the driver's assigned deliveries.
         customer_ids: set[str] = set()
         for c in ("ads", "receipts"):
-            for it in _page_all(c, include_deleted=False, assigned_to=uid):
+            for it in _page_all(
+                c, include_deleted=False, assigned_to=uid, include_media=False
+            ):
                 cid = (it.get("data") or {}).get("customerId")
                 if cid:
                     customer_ids.add(sanitize_str(str(cid))[:80])
@@ -2805,7 +3865,12 @@ def _bootstrap_fetch_scoped(collection: str, user: dict[str, Any]) -> list[dict[
         user, module, _action_for_collection(collection, "delete")
     )
     created_by_filter = None if can_view_all else str(user.get("id") or "")
-    return _page_all(collection, include_deleted=include_deleted, created_by=created_by_filter)
+    return _page_all(
+        collection,
+        include_deleted=include_deleted,
+        created_by=created_by_filter,
+        include_media=include_media,
+    )
 
 
 @app.get("/api/bootstrap", response_model=BootstrapResponse)
@@ -2824,13 +3889,27 @@ def bootstrap(user: dict[str, Any] = Depends(current_user)):
 
     return BootstrapResponse(
         user=user_row_to_public(user),
-        ads=[e["data"] for e in ads],
-        receipts=[e["data"] for e in receipts],
-        customers=[e["data"] for e in customers],
+        ads=[_project_entity_contacts_for_user(e, user)["data"] for e in ads],
+        receipts=[_project_entity_contacts_for_user(e, user)["data"] for e in receipts],
+        customers=[_project_entity_contacts_for_user(e, user)["data"] for e in customers],
         pages=[e["data"] for e in pages],
         exchangeRateHistory=[e["data"] for e in exh],
         logs=logs,
     )
+
+
+# Names that are permission MODULES (or UI views) but are NOT real generic-store
+# collections. The generic /api/collections routes must refuse them so a caller
+# holding the matching module grant cannot create/read/patch/delete isolated
+# shadow entities (e.g. a junk type="users" row that never reaches the real auth
+# users table). Real accounts, deliveries, audit logs and settings each have
+# their own dedicated, properly-gated endpoints.
+_NON_STORE_COLLECTIONS = frozenset({"users", "deliveries", "settings", "analytics", "auditLogs"})
+
+
+def _reject_non_store_collection(name: str) -> None:
+    if name in _NON_STORE_COLLECTIONS:
+        raise HTTPException(status_code=404, detail="Unknown collection")
 
 
 def _module_for_collection(name: str) -> str:
@@ -2874,6 +3953,7 @@ SERVICE_SUBSCRIPTION_CATALOG: dict[str, dict[str, Any]] = {
     "warehouse": {"priceMinor": 0, "currency": "LYD", "durationDays": 30},
     "smart_systems": {"priceMinor": 0, "currency": "LYD", "durationDays": 30},
     "clothes_system": {"priceMinor": 0, "currency": "LYD", "durationDays": 30},
+    "ad_maker": {"priceMinor": 0, "currency": "LYD", "durationDays": 30},
 }
 
 
@@ -2920,6 +4000,25 @@ def _insert_entity_in_transaction(
     clean["_lastModified"] = now
     clean["_deleted"] = False
     clean["createdBy"] = created_by
+    # Same denormalized creator-name stamp as upsert_entity: keeps "Created
+    # by" readable after the creator's account is soft-deleted.
+    if created_by:
+        _creator_row = conn.execute(
+            text("SELECT name FROM users WHERE id = :id LIMIT 1"),
+            {"id": str(created_by)},
+        ).mappings().first()
+        if _creator_row and _creator_row.get("name"):
+            clean["createdByName"] = sanitize_str(str(_creator_row["name"]))[:120]
+    # Same authoritative customer-name stamp as upsert_entity's create branch.
+    # This covers the atomic ad create and the receipt-transfer target receipt,
+    # which insert through this helper rather than upsert_entity. Only the NAME
+    # is copied — phone/contact stay gated by the contact projection.
+    if collection in CUSTOMER_NAME_STAMP_TYPES:
+        _cust_name = _lookup_customer_display_name(conn, clean.get("customerId"))
+        if _cust_name:
+            clean["customerName"] = _cust_name
+        elif clean.get("customerName") is not None and not isinstance(clean.get("customerName"), str):
+            clean.pop("customerName", None)
     conn.execute(
         text(
             """
@@ -3489,6 +4588,942 @@ def _has_active_clothes_subscription(user: dict[str, Any]) -> bool:
 def _require_clothes_subscription(user: dict[str, Any]) -> None:
     if not _has_active_clothes_subscription(user):
         raise HTTPException(status_code=403, detail="An active clothes_system subscription is required")
+
+
+AD_CAMPAIGN_COLLECTION = "adCampaignRequests"
+AD_CAMPAIGN_SERVICE_ID = "ad_maker"
+AD_CAMPAIGN_EDITABLE_STATUSES = frozenset({"Draft", "Changes Requested"})
+AD_CAMPAIGN_OPEN_STATUSES = frozenset({"Draft", "Submitted", "Changes Requested"})
+AD_CAMPAIGN_DELETABLE_STATUSES = frozenset(
+    {"Draft", "Changes Requested", "Approved", "Rejected"}
+)
+AD_CAMPAIGN_REVIEW_DECISIONS = frozenset({"Approved", "Changes Requested", "Rejected"})
+MAX_AD_CAMPAIGN_BUDGET_MINOR_USD = 100_000_000  # USD 1,000,000
+MAX_AD_CAMPAIGN_MEDIA_BYTES = 7 * 1024 * 1024
+MAX_AD_CAMPAIGN_DECODED_MEDIA_BYTES = 5 * 1024 * 1024
+MAX_AD_CAMPAIGN_DECODED_IMAGE_BYTES = 4 * 1024 * 1024
+MAX_AD_CAMPAIGN_IMAGE_DIMENSION = 8192
+MAX_AD_CAMPAIGN_IMAGE_PIXELS = 16_000_000
+MAX_AD_CAMPAIGN_TOTAL_IMAGE_PIXELS = 24_000_000
+MAX_AD_CAMPAIGN_ACTIVE_REQUESTS_PER_OWNER = 50
+# Customer content stays below this boundary, leaving ample headroom for
+# server-owned workflow/audit history so submit/review can never be bricked by
+# a few new timestamps or notes.
+MAX_AD_CAMPAIGN_OWNER_STORAGE_BYTES = 48 * 1024 * 1024
+MAX_AD_CAMPAIGN_REVIEW_HISTORY = 100
+# Full image decoding is intentionally bounded per API process. A customer can
+# upload from several phone tabs, but cannot make every worker allocate a large
+# pixel buffer at the same time.
+_AD_CAMPAIGN_MEDIA_VALIDATION_SLOTS = threading.BoundedSemaphore(2)
+AD_CAMPAIGN_BUDGET_TYPES = frozenset({"daily", "lifetime"})
+AD_CAMPAIGN_CALL_TO_ACTIONS = frozenset(
+    {
+        "Send Message",
+        "Learn More",
+        "Shop Now",
+        "Contact Us",
+        "Sign Up",
+        "Get Quote",
+        "Call Now",
+    }
+)
+AD_CAMPAIGN_CALL_TO_ACTION_ALIASES = {
+    "send_message": "Send Message",
+    "learn_more": "Learn More",
+    "shop_now": "Shop Now",
+    "contact_us": "Contact Us",
+    "sign_up": "Sign Up",
+    "get_quote": "Get Quote",
+    "call_now": "Call Now",
+}
+AD_CAMPAIGN_WORKFLOW_FIELDS = frozenset(
+    {
+        "status",
+        "submittedAt",
+        "submittedBy",
+        "reviewedAt",
+        "reviewedBy",
+        "reviewNote",
+        "reviewDecision",
+        "reviewHistory",
+        "lastSubmitOperationId",
+        "lastReviewOperationId",
+        "approvedAt",
+        "approvedBy",
+        "rejectedAt",
+        "rejectedBy",
+        "publishedAt",
+        "publishedBy",
+        "publishStatus",
+        "metaCampaignId",
+        "metaAdSetId",
+        "metaAdId",
+        "failureReason",
+        "spendMinorUSD",
+        "createdBy",
+        "creatorId",
+        "createdAt",
+        "_created",
+        "_lastModified",
+        "_deleted",
+        "id",
+    }
+)
+AD_CAMPAIGN_ALLOWED_FIELDS = frozenset(
+    {
+        "name",
+        "objective",
+        "platforms",
+        "pageName",
+        "connectedAssetId",
+        "primaryText",
+        "headline",
+        "description",
+        "callToAction",
+        "destination",
+        "locations",
+        "ageMin",
+        "ageMax",
+        "genders",
+        "languages",
+        "interests",
+        "startDate",
+        "endDate",
+        "budgetMinorUSD",
+        "budgetType",
+        "notes",
+        "creativeImages",
+        "creativeAssetIds",
+        "specialAdCategories",
+    }
+)
+
+
+def _has_active_ad_maker_subscription(user: dict[str, Any]) -> bool:
+    """Return whether this actor may use the customer Ads Studio service.
+
+    Staff reviewers operate the review queue on Albayan's behalf; they are not
+    customers buying the service and must not need a customer subscription.
+    """
+    if (
+        str(user.get("role") or "").lower() == "admin"
+        or user_has_permission(user, AD_CAMPAIGN_COLLECTION, "review")
+    ):
+        return True
+    uid = sanitize_str(str(user.get("id") or ""))[:80]
+    if not uid:
+        return False
+    dialect = str(get_engine().dialect.name or "")
+    with db_conn() as conn:
+        try:
+            if dialect == "postgresql":
+                sql = (
+                    "SELECT data_json FROM entities WHERE type='serviceSubscriptions' "
+                    "AND deleted=false AND (data_json::jsonb ->> 'userId')=:uid "
+                    "AND (data_json::jsonb ->> 'serviceId')=:service_id "
+                    "AND lower(data_json::jsonb ->> 'status')='active'"
+                )
+            else:
+                sql = (
+                    "SELECT data_json FROM entities WHERE type='serviceSubscriptions' "
+                    "AND deleted=false AND json_extract(data_json, '$.userId')=:uid "
+                    "AND json_extract(data_json, '$.serviceId')=:service_id "
+                    "AND lower(json_extract(data_json, '$.status'))='active'"
+                )
+            rows = conn.execute(
+                text(sql), {"uid": uid, "service_id": AD_CAMPAIGN_SERVICE_ID}
+            ).mappings().all()
+        except Exception:
+            # Older SQLite builds may lack JSON functions. Authorization stays
+            # correct by scanning the subscription ledger as a fallback.
+            rows = conn.execute(
+                text(
+                    "SELECT data_json FROM entities "
+                    "WHERE type='serviceSubscriptions' AND deleted=false"
+                )
+            ).mappings().all()
+    now_dt = datetime.now(timezone.utc)
+    for row in rows:
+        data = json_loads(row.get("data_json") or "{}") or {}
+        if (
+            str(data.get("userId") or "") != uid
+            or str(data.get("serviceId") or "") != AD_CAMPAIGN_SERVICE_ID
+            or str(data.get("status") or "").lower() != "active"
+        ):
+            continue
+        expiry = _parse_subscription_expiry(data.get("expiresAt"))
+        if expiry is None or expiry > now_dt:
+            return True
+    return False
+
+
+def _require_ad_maker_subscription(user: dict[str, Any]) -> None:
+    if not _has_active_ad_maker_subscription(user):
+        raise HTTPException(
+            status_code=403,
+            detail=f"An active {AD_CAMPAIGN_SERVICE_ID} subscription is required",
+        )
+
+
+def _enforce_ad_campaign_mutation_rate(user: dict[str, Any]) -> None:
+    """Bound campaign mutations per account to protect storage and reviewers."""
+    from .rate_limiter import check_rate_limit
+
+    actor_id = sanitize_str(str(user.get("id") or ""))[:80]
+    if not actor_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    allowed, _left, retry_after_ms = check_rate_limit(
+        f"ad-studio:mutations:{actor_id}", max_attempts=60, window_ms=60_000
+    )
+    if not allowed:
+        wait_seconds = max(1, math.ceil(int(retry_after_ms or 0) / 1000))
+        raise HTTPException(
+            status_code=429,
+            detail="Too many Ads Studio changes. Please wait and try again.",
+            headers={"Retry-After": str(wait_seconds)},
+        )
+
+
+@contextmanager
+def _ad_campaign_media_validation_slot(user: dict[str, Any]):
+    """Rate-limit and cap expensive creative verification before decoding."""
+    from .rate_limiter import check_rate_limit
+
+    actor_id = sanitize_str(str(user.get("id") or ""))[:80]
+    if not actor_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    allowed, _left, retry_after_ms = check_rate_limit(
+        f"ad-studio:media:{actor_id}", max_attempts=24, window_ms=60_000
+    )
+    if not allowed:
+        wait_seconds = max(1, math.ceil(int(retry_after_ms or 0) / 1000))
+        raise HTTPException(
+            status_code=429,
+            detail="Too many campaign image checks. Please wait and try again.",
+            headers={"Retry-After": str(wait_seconds)},
+        )
+    if not _AD_CAMPAIGN_MEDIA_VALIDATION_SLOTS.acquire(blocking=False):
+        raise HTTPException(
+            status_code=503,
+            detail="Campaign images are being checked. Please try again in a moment.",
+            headers={"Retry-After": "2"},
+        )
+    try:
+        yield
+    finally:
+        _AD_CAMPAIGN_MEDIA_VALIDATION_SLOTS.release()
+
+
+def _ad_campaign_lock_owner_conn(conn: Any, owner_id: str, *, postgres: bool) -> None:
+    owner_id = sanitize_str(str(owner_id or ""))[:80]
+    if not owner_id:
+        raise HTTPException(status_code=409, detail="Campaign owner is missing")
+    if postgres:
+        # Serializes quota checks across app processes for this owner while the
+        # surrounding transaction creates or updates the campaign.
+        conn.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+            {"lock_key": f"ad-studio-owner:{owner_id}"},
+        )
+
+
+def _enforce_ad_campaign_owner_quota_conn(
+    conn: Any,
+    owner_id: str,
+    proposed_data: dict[str, Any],
+    *,
+    excluding_id: str | None,
+    creating: bool,
+) -> None:
+    """Enforce active-record and stored-JSON quotas inside the write transaction."""
+    owner_id = sanitize_str(str(owner_id or ""))[:80]
+    params: dict[str, Any] = {
+        "type": AD_CAMPAIGN_COLLECTION,
+        "owner_id": owner_id,
+    }
+    where = "type=:type AND deleted=false AND created_by=:owner_id"
+    if excluding_id:
+        where += " AND id<>:excluding_id"
+        params["excluding_id"] = validate_entity_id(excluding_id)
+    dialect = str(get_engine().dialect.name or "")
+    size_expr = "octet_length(data_json)" if dialect == "postgresql" else "length(data_json)"
+    status_expr = (
+        "COALESCE(data_json::jsonb ->> 'status', 'Draft')"
+        if dialect == "postgresql"
+        else "COALESCE(json_extract(data_json, '$.status'), 'Draft')"
+    )
+    usage = conn.execute(
+        text(
+            f"SELECT COALESCE(SUM(CASE WHEN {status_expr} IN "
+            "('Draft','Submitted','Changes Requested') THEN 1 ELSE 0 END),0) AS active_count, "
+            f"COALESCE(SUM({size_expr}), 0) AS stored_bytes "
+            f"FROM entities WHERE {where}"
+        ),
+        params,
+    ).mappings().first()
+    active_count = int((usage or {}).get("active_count") or 0)
+    stored_bytes = int((usage or {}).get("stored_bytes") or 0)
+    if creating and active_count >= MAX_AD_CAMPAIGN_ACTIVE_REQUESTS_PER_OWNER:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Ads Studio allows at most {MAX_AD_CAMPAIGN_ACTIVE_REQUESTS_PER_OWNER} "
+                "open campaign requests per customer. Finish or delete an old request first."
+            ),
+        )
+    proposed_bytes = len(json_dumps(proposed_data).encode("utf-8"))
+    if stored_bytes + proposed_bytes > MAX_AD_CAMPAIGN_OWNER_STORAGE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Ads Studio storage quota reached. Remove images or archive an older reviewed campaign.",
+        )
+
+
+def _create_ad_campaign_atomic(
+    entity_id: str,
+    data: dict[str, Any],
+    user: dict[str, Any],
+) -> dict[str, Any]:
+    """Create one customer draft with a race-safe per-owner quota check."""
+    entity_id = validate_entity_id(entity_id)
+    actor_id = sanitize_str(str(user.get("id") or ""))[:80]
+    clean = sanitize_json(data)
+    if not isinstance(clean, dict):
+        raise HTTPException(status_code=400, detail="Campaign data must be an object")
+    requested_content = {
+        key: clean[key] for key in AD_CAMPAIGN_ALLOWED_FIELDS if key in clean
+    }
+    now = now_ms()
+    clean["id"] = entity_id
+    clean["_created"] = now
+    clean["_lastModified"] = now
+    clean["createdBy"] = actor_id
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_ENTITY_PATCH_LOCK
+    with guard:
+        with db_conn() as conn:
+            _ad_campaign_lock_owner_conn(conn, actor_id, postgres=postgres)
+            existing = conn.execute(
+                text(
+                    "SELECT data_json,deleted,created_at,created_by,last_modified "
+                    "FROM entities WHERE type=:type AND id=:id LIMIT 1"
+                ),
+                {"type": AD_CAMPAIGN_COLLECTION, "id": entity_id},
+            ).mappings().first()
+            if existing:
+                existing_data = json_loads(existing["data_json"]) or {}
+                existing_content = {
+                    key: existing_data[key]
+                    for key in AD_CAMPAIGN_ALLOWED_FIELDS
+                    if key in existing_data
+                }
+                if (
+                    not bool(existing["deleted"])
+                    and str(existing.get("created_by") or "") == actor_id
+                    and str(existing_data.get("status") or "Draft") == "Draft"
+                    and existing_content == requested_content
+                ):
+                    # POST uses a caller-stable campaign id and is retried on
+                    # response loss. Return the first committed draft instead
+                    # of creating a ghost record plus a misleading 409.
+                    return {
+                        "id": entity_id,
+                        "type": AD_CAMPAIGN_COLLECTION,
+                        "deleted": False,
+                        "createdAt": int(existing["created_at"]),
+                        "createdBy": existing.get("created_by"),
+                        "lastModified": int(existing["last_modified"]),
+                        "data": existing_data,
+                        "_replayed": True,
+                    }
+                raise HTTPException(status_code=409, detail="ID already exists")
+            _enforce_ad_campaign_mutation_rate(user)
+            _enforce_ad_campaign_owner_quota_conn(
+                conn,
+                actor_id,
+                clean,
+                excluding_id=None,
+                creating=True,
+            )
+            try:
+                conn.execute(
+                    text(
+                        "INSERT INTO entities "
+                        "(type,id,data_json,deleted,created_at,created_by,last_modified) "
+                        "VALUES (:type,:id,:data_json,false,:created_at,:created_by,:last_modified)"
+                    ),
+                    {
+                        "type": AD_CAMPAIGN_COLLECTION,
+                        "id": entity_id,
+                        "data_json": json_dumps(clean),
+                        "created_at": now,
+                        "created_by": actor_id,
+                        "last_modified": now,
+                    },
+                )
+            except IntegrityError:
+                raise HTTPException(status_code=409, detail="ID already exists")
+    return {
+        "id": entity_id,
+        "type": AD_CAMPAIGN_COLLECTION,
+        "deleted": False,
+        "createdAt": now,
+        "createdBy": actor_id,
+        "lastModified": now,
+        "data": clean,
+    }
+
+
+def _normalize_ad_campaign_destination(value: Any) -> str:
+    raw = _ad_campaign_string(value, "destination", 2048)
+    if not raw:
+        return ""
+    compact_phone = re.sub(r"[\s().-]", "", raw)
+    if re.fullmatch(r"\+?[1-9][0-9]{7,14}", compact_phone):
+        return compact_phone if compact_phone.startswith("+") else f"+{compact_phone}"
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        parsed = None
+    if (
+        parsed is None
+        or parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or any(ch.isspace() for ch in raw)
+        or not re.fullmatch(r"[A-Za-z0-9.-]+", parsed.hostname)
+        or "." not in parsed.hostname
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="destination must be an HTTPS website, WhatsApp/Messenger link, or international phone number",
+        )
+    return raw
+
+
+def _ad_campaign_review_history(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    history: list[dict[str, str]] = []
+    for raw in value[-MAX_AD_CAMPAIGN_REVIEW_HISTORY:]:
+        if not isinstance(raw, dict):
+            continue
+        decision = sanitize_str(str(raw.get("decision") or ""), 40)
+        if decision not in AD_CAMPAIGN_REVIEW_DECISIONS:
+            continue
+        history.append(
+            {
+                "decision": decision,
+                "note": sanitize_str(str(raw.get("note") or ""), 2000),
+                "reviewedAt": sanitize_str(str(raw.get("reviewedAt") or ""), 80),
+                "reviewedBy": sanitize_str(str(raw.get("reviewedBy") or ""), 80),
+            }
+        )
+    return history
+
+
+def _soft_delete_ad_campaign_atomic(
+    user: dict[str, Any], campaign_id: str
+) -> dict[str, Any]:
+    """Delete an editable request atomically with its workflow-state check.
+
+    Creative bytes are removed from the tombstone so soft deletion does not
+    become unbounded hidden blob storage.
+    """
+    campaign_id = validate_entity_id(campaign_id)
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_ENTITY_PATCH_LOCK
+    with guard:
+        with db_conn() as conn:
+            suffix = " FOR UPDATE" if postgres else ""
+            row = conn.execute(
+                text(
+                    "SELECT id,data_json,deleted,created_at,created_by,last_modified "
+                    "FROM entities WHERE type=:type AND id=:id LIMIT 1" + suffix
+                ),
+                {"type": AD_CAMPAIGN_COLLECTION, "id": campaign_id},
+            ).mappings().first()
+            if not row:
+                raise HTTPException(status_code=404, detail="Campaign request not found")
+            data = json_loads(row["data_json"]) or {}
+            creator = str(row.get("created_by") or data.get("createdBy") or "")
+            if not user_has_permission(
+                user,
+                AD_CAMPAIGN_COLLECTION,
+                "delete",
+                record_creator_id=creator,
+            ):
+                raise HTTPException(status_code=403, detail="Forbidden")
+            if bool(row["deleted"]):
+                # DELETE is retried on response loss. Returning the existing
+                # tombstone makes that replay idempotent without disclosing a
+                # row to anyone who did not pass the ownership check above.
+                return {
+                    "id": campaign_id,
+                    "lastModified": int(row["last_modified"]),
+                    "createdBy": row.get("created_by"),
+                    "replayed": True,
+                }
+            _enforce_ad_campaign_mutation_rate(user)
+            if (
+                str(user.get("role") or "").lower() != "admin"
+                and str(data.get("status") or "Draft") not in AD_CAMPAIGN_DELETABLE_STATUSES
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Submitted campaigns cannot be deleted while under review",
+                )
+            data.pop("creativeImages", None)
+            modified = max(now_ms(), int(row["last_modified"]) + 1)
+            data["id"] = campaign_id
+            data["_lastModified"] = modified
+            data["_deleted"] = True
+            result = conn.execute(
+                text(
+                    "UPDATE entities SET data_json=:data_json,deleted=true,last_modified=:modified "
+                    "WHERE type=:type AND id=:id AND last_modified=:baseline"
+                ),
+                {
+                    "data_json": json_dumps(data),
+                    "modified": modified,
+                    "type": AD_CAMPAIGN_COLLECTION,
+                    "id": campaign_id,
+                    "baseline": int(row["last_modified"]),
+                },
+            )
+            if result.rowcount != 1:
+                raise HTTPException(status_code=409, detail="Conflict: record has changed")
+            return {
+                "id": campaign_id,
+                "lastModified": modified,
+                "createdBy": row.get("created_by"),
+                "replayed": False,
+            }
+
+
+def _ad_campaign_string(value: Any, field: str, max_length: int) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise HTTPException(status_code=400, detail=f"{field} must be text")
+    return sanitize_str(value, max_length)
+
+
+def _ad_campaign_string_list(
+    value: Any,
+    field: str,
+    *,
+    max_items: int,
+    item_length: int = 120,
+    lower: bool = False,
+) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > max_items:
+        raise HTTPException(status_code=400, detail=f"{field} must be a list of at most {max_items} items")
+    result: list[str] = []
+    for raw in value:
+        if not isinstance(raw, str):
+            raise HTTPException(status_code=400, detail=f"{field} must contain only text")
+        item = sanitize_str(raw, item_length)
+        if lower:
+            item = item.lower()
+        if item and item not in result:
+            result.append(item)
+    return result
+
+
+def _ad_campaign_date(value: Any, field: str) -> tuple[str, datetime] | None:
+    raw = _ad_campaign_string(value, field, 40)
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"{field} must be a valid ISO date")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return raw, parsed
+
+
+def _ad_campaign_image_dimensions(decoded: bytes, mime: str) -> tuple[int, int] | None:
+    """Read dimensions from supported formats without decoding pixel buffers."""
+    if mime == "png":
+        if (
+            len(decoded) < 24
+            or not decoded.startswith(b"\x89PNG\r\n\x1a\n")
+            or decoded[12:16] != b"IHDR"
+        ):
+            return None
+        return (
+            int.from_bytes(decoded[16:20], "big"),
+            int.from_bytes(decoded[20:24], "big"),
+        )
+    if mime in {"jpg", "jpeg"}:
+        if len(decoded) < 4 or not decoded.startswith(b"\xff\xd8"):
+            return None
+        index = 2
+        sof_markers = {
+            0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+            0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF,
+        }
+        while index + 3 < len(decoded):
+            while index < len(decoded) and decoded[index] != 0xFF:
+                index += 1
+            while index < len(decoded) and decoded[index] == 0xFF:
+                index += 1
+            if index >= len(decoded):
+                break
+            marker = decoded[index]
+            index += 1
+            if marker in {0xD8, 0xD9}:
+                continue
+            if marker == 0xDA or index + 2 > len(decoded):
+                break
+            segment_length = int.from_bytes(decoded[index:index + 2], "big")
+            if segment_length < 2 or index + segment_length > len(decoded):
+                return None
+            if marker in sof_markers:
+                if segment_length < 7:
+                    return None
+                height = int.from_bytes(decoded[index + 3:index + 5], "big")
+                width = int.from_bytes(decoded[index + 5:index + 7], "big")
+                return width, height
+            index += segment_length
+        return None
+    if mime == "webp":
+        if (
+            len(decoded) < 30
+            or decoded[:4] != b"RIFF"
+            or decoded[8:12] != b"WEBP"
+        ):
+            return None
+        chunk = decoded[12:16]
+        if chunk == b"VP8X":
+            return (
+                1 + int.from_bytes(decoded[24:27], "little"),
+                1 + int.from_bytes(decoded[27:30], "little"),
+            )
+        if chunk == b"VP8 " and len(decoded) >= 30 and decoded[23:26] == b"\x9d\x01\x2a":
+            return (
+                int.from_bytes(decoded[26:28], "little") & 0x3FFF,
+                int.from_bytes(decoded[28:30], "little") & 0x3FFF,
+            )
+        if chunk == b"VP8L" and len(decoded) >= 25 and decoded[20] == 0x2F:
+            b1, b2, b3, b4 = decoded[21:25]
+            return (
+                1 + b1 + ((b2 & 0x3F) << 8),
+                1 + (b2 >> 6) + (b3 << 2) + ((b4 & 0x0F) << 10),
+            )
+    return None
+
+
+def _validate_ad_campaign_image_source(source: str) -> tuple[str, int, int]:
+    match = re.fullmatch(
+        r"data:image/(png|jpe?g|webp);base64,([A-Za-z0-9+/]+={0,2})",
+        source,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        raise HTTPException(
+            status_code=400,
+            detail="creativeImages supports valid PNG, JPEG, or WebP base64 data images",
+        )
+    mime = match.group(1).lower()
+    try:
+        decoded = base64.b64decode(match.group(2), validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="creativeImages contains invalid base64")
+    if not decoded or len(decoded) > MAX_AD_CAMPAIGN_DECODED_IMAGE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Each campaign image must be 4 MB or smaller after decoding",
+        )
+    dimensions = _ad_campaign_image_dimensions(decoded, mime)
+    if not dimensions:
+        raise HTTPException(
+            status_code=400,
+            detail="creativeImages contains an invalid or mismatched image file",
+        )
+    width, height = dimensions
+    if (
+        width <= 0
+        or height <= 0
+        or width > MAX_AD_CAMPAIGN_IMAGE_DIMENSION
+        or height > MAX_AD_CAMPAIGN_IMAGE_DIMENSION
+        or width * height > MAX_AD_CAMPAIGN_IMAGE_PIXELS
+    ):
+        raise HTTPException(
+            status_code=413,
+            detail="Campaign image dimensions are too large",
+        )
+
+    # Header inspection above lets us reject pixel bombs before allocating a
+    # pixel buffer. Pillow then verifies and fully decodes the file so a
+    # forged/truncated header cannot be stored as if it were a real image.
+    expected_format = "JPEG" if mime in {"jpg", "jpeg"} else mime.upper()
+    try:
+        with Image.open(io.BytesIO(decoded)) as image:
+            if (
+                str(image.format or "").upper() != expected_format
+                or image.size != (width, height)
+                or bool(getattr(image, "is_animated", False))
+            ):
+                raise ValueError("Image type, size, or animation is not supported")
+            image.verify()
+        # verify() checks structure without decoding pixels. Re-open and load
+        # one bounded image at a time to also catch truncated/corrupt payloads.
+        with Image.open(io.BytesIO(decoded)) as image:
+            if str(image.format or "").upper() != expected_format or image.size != (width, height):
+                raise ValueError("Image changed between verification and decode")
+            image.load()
+    except (
+        Image.DecompressionBombError,
+        UnidentifiedImageError,
+        OSError,
+        SyntaxError,
+        ValueError,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="creativeImages contains a corrupt, truncated, animated, or mismatched image file",
+        )
+    return source, len(decoded), width * height
+
+
+def _prepare_ad_campaign_fields(
+    raw_data: Any,
+    *,
+    strict: bool,
+    reject_unknown: bool = False,
+    trusted_media: bool = False,
+) -> dict[str, Any]:
+    """Sanitize the customer-editable campaign envelope.
+
+    This is a request/approval record only. It deliberately contains no Meta
+    access token, live campaign ID, internal ad, receipt, or wallet mutation.
+    """
+    if not isinstance(raw_data, dict):
+        raise HTTPException(status_code=400, detail="Campaign data must be an object")
+    if reject_unknown:
+        unknown = set(raw_data) - AD_CAMPAIGN_ALLOWED_FIELDS
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported campaign field: {sorted(unknown)[0]}",
+            )
+    sanitized = sanitize_json(raw_data) or {}
+    data = {key: sanitized[key] for key in AD_CAMPAIGN_ALLOWED_FIELDS if key in sanitized}
+    clean: dict[str, Any] = {}
+
+    string_limits = {
+        "name": 160,
+        "pageName": 160,
+        "connectedAssetId": 80,
+        "primaryText": 5000,
+        "headline": 255,
+        "description": 1000,
+        "callToAction": 80,
+        "destination": 2048,
+        "budgetType": 40,
+        "notes": 3000,
+    }
+    for field, limit in string_limits.items():
+        if field in data:
+            clean[field] = _ad_campaign_string(data.get(field), field, limit)
+
+    if "destination" in data:
+        clean["destination"] = _normalize_ad_campaign_destination(data.get("destination"))
+
+    if "callToAction" in data:
+        cta = _ad_campaign_string(data.get("callToAction"), "callToAction", 80)
+        cta = AD_CAMPAIGN_CALL_TO_ACTION_ALIASES.get(cta.lower(), cta)
+        if cta and cta not in AD_CAMPAIGN_CALL_TO_ACTIONS:
+            raise HTTPException(status_code=400, detail="Unsupported callToAction")
+        clean["callToAction"] = cta
+
+    if "budgetType" in data:
+        budget_type = _ad_campaign_string(data.get("budgetType"), "budgetType", 40).lower()
+        if budget_type and budget_type not in AD_CAMPAIGN_BUDGET_TYPES:
+            raise HTTPException(status_code=400, detail="budgetType must be daily or lifetime")
+        clean["budgetType"] = budget_type
+
+    if clean.get("connectedAssetId"):
+        try:
+            clean["connectedAssetId"] = validate_entity_id(clean["connectedAssetId"])
+        except HTTPException:
+            raise HTTPException(status_code=400, detail="connectedAssetId is invalid")
+
+    if "objective" in data:
+        objective = _ad_campaign_string(data.get("objective"), "objective", 40).lower().replace(" ", "_")
+        valid_objectives = {
+            "awareness", "traffic", "engagement", "leads", "app_promotion",
+            "sales", "messages",
+        }
+        if objective and objective not in valid_objectives:
+            raise HTTPException(status_code=400, detail="Unsupported campaign objective")
+        clean["objective"] = objective
+
+    if "platforms" in data:
+        platforms = _ad_campaign_string_list(
+            data.get("platforms"), "platforms", max_items=4, item_length=40, lower=True
+        )
+        if any(item not in {"facebook", "instagram", "messenger"} for item in platforms):
+            raise HTTPException(status_code=400, detail="Unsupported advertising platform")
+        clean["platforms"] = platforms
+
+    for field, maximum, item_length in (
+        ("locations", 25, 160),
+        ("languages", 20, 80),
+        ("interests", 50, 120),
+    ):
+        if field in data:
+            clean[field] = _ad_campaign_string_list(
+                data.get(field), field, max_items=maximum, item_length=item_length
+            )
+
+    if "genders" in data:
+        genders = _ad_campaign_string_list(
+            data.get("genders"), "genders", max_items=3, item_length=20, lower=True
+        )
+        if any(item not in {"all", "male", "female"} for item in genders):
+            raise HTTPException(status_code=400, detail="Unsupported gender targeting value")
+        clean["genders"] = genders
+
+    if "specialAdCategories" in data:
+        categories = _ad_campaign_string_list(
+            data.get("specialAdCategories"),
+            "specialAdCategories",
+            max_items=4,
+            item_length=60,
+            lower=True,
+        )
+        valid_categories = {
+            "none", "credit", "employment", "housing",
+            "social_issues_elections_politics",
+        }
+        if any(item not in valid_categories for item in categories):
+            raise HTTPException(status_code=400, detail="Unsupported special ad category")
+        if "none" in categories and len(categories) > 1:
+            raise HTTPException(status_code=400, detail="specialAdCategories cannot combine none with another category")
+        clean["specialAdCategories"] = categories
+
+    for field in ("ageMin", "ageMax"):
+        if field in data:
+            value = data.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 18 or value > 65:
+                raise HTTPException(status_code=400, detail=f"{field} must be an integer from 18 to 65")
+            clean[field] = value
+    if clean.get("ageMin") is not None and clean.get("ageMax") is not None:
+        if int(clean["ageMin"]) > int(clean["ageMax"]):
+            raise HTTPException(status_code=400, detail="ageMin cannot be greater than ageMax")
+
+    if "budgetMinorUSD" in data:
+        budget = data.get("budgetMinorUSD")
+        if (
+            isinstance(budget, bool)
+            or not isinstance(budget, int)
+            or budget < 0
+            or budget > MAX_AD_CAMPAIGN_BUDGET_MINOR_USD
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="budgetMinorUSD must be a non-negative integer within the campaign limit",
+            )
+        clean["budgetMinorUSD"] = budget
+
+    start = _ad_campaign_date(data.get("startDate"), "startDate") if "startDate" in data else None
+    end = _ad_campaign_date(data.get("endDate"), "endDate") if "endDate" in data else None
+    if start:
+        clean["startDate"] = start[0]
+    elif "startDate" in data:
+        clean["startDate"] = ""
+    if end:
+        clean["endDate"] = end[0]
+    elif "endDate" in data:
+        clean["endDate"] = ""
+    if start and end:
+        if end[1] < start[1]:
+            raise HTTPException(status_code=400, detail="endDate cannot be before startDate")
+        if (end[1] - start[1]).days > 366:
+            raise HTTPException(status_code=400, detail="Campaign duration cannot exceed 366 days")
+    if strict and start and start[1].date() < datetime.now(timezone.utc).date():
+        raise HTTPException(status_code=400, detail="startDate cannot be in the past")
+
+    if "creativeAssetIds" in data:
+        ids = _ad_campaign_string_list(
+            data.get("creativeAssetIds"), "creativeAssetIds", max_items=10, item_length=80
+        )
+        for asset_id in ids:
+            try:
+                validate_entity_id(asset_id)
+            except HTTPException:
+                raise HTTPException(status_code=400, detail="creativeAssetIds contains an invalid id")
+        clean["creativeAssetIds"] = ids
+
+    if "creativeImages" in data:
+        images = data.get("creativeImages")
+        if not isinstance(images, list) or len(images) > 3:
+            raise HTTPException(status_code=400, detail="creativeImages must contain at most 3 images")
+        clean_images: list[str] = []
+        total_size = 0
+        total_decoded_size = 0
+        total_pixels = 0
+        for image in images:
+            if not isinstance(image, str):
+                raise HTTPException(status_code=400, detail="creativeImages must contain data-image strings")
+            if len(image) > MAX_DATA_URL_LENGTH:
+                raise HTTPException(status_code=413, detail="A campaign image data URL is too large")
+            source = sanitize_str(image, MAX_DATA_URL_LENGTH)
+            if trusted_media:
+                # Internal merge-only path: both the stored creative and any
+                # incoming replacement were already decoder-verified earlier
+                # in this request. Never use this flag on raw client input.
+                encoded = source.partition(",")[2]
+                decoded_size = max(0, (len(encoded) * 3) // 4 - (len(encoded) - len(encoded.rstrip("="))))
+                image_pixels = 0
+            else:
+                source, decoded_size, image_pixels = _validate_ad_campaign_image_source(source)
+            total_size += len(source.encode("utf-8"))
+            if total_size > MAX_AD_CAMPAIGN_MEDIA_BYTES:
+                raise HTTPException(status_code=413, detail="creativeImages exceeds the 7 MB campaign limit")
+            total_decoded_size += decoded_size
+            if total_decoded_size > MAX_AD_CAMPAIGN_DECODED_MEDIA_BYTES:
+                raise HTTPException(status_code=413, detail="creativeImages exceeds the 5 MB decoded-image limit")
+            total_pixels += image_pixels
+            if total_pixels > MAX_AD_CAMPAIGN_TOTAL_IMAGE_PIXELS:
+                raise HTTPException(status_code=413, detail="Campaign images contain too many total pixels")
+            clean_images.append(source)
+        clean["creativeImages"] = clean_images
+
+    if strict:
+        required_text = (
+            "name", "objective", "primaryText", "destination",
+            "callToAction", "budgetType",
+        )
+        for field in required_text:
+            if not str(clean.get(field) or "").strip():
+                raise HTTPException(status_code=400, detail=f"{field} is required before submission")
+        if not clean.get("platforms"):
+            raise HTTPException(status_code=400, detail="At least one platform is required before submission")
+        if not (str(clean.get("pageName") or "").strip() or str(clean.get("connectedAssetId") or "").strip()):
+            raise HTTPException(status_code=400, detail="pageName or connectedAssetId is required before submission")
+        if not clean.get("locations"):
+            raise HTTPException(status_code=400, detail="At least one location is required before submission")
+        if not start or not end:
+            raise HTTPException(status_code=400, detail="startDate and endDate are required before submission")
+        if int(clean.get("budgetMinorUSD") or 0) <= 0:
+            raise HTTPException(status_code=400, detail="A positive budgetMinorUSD is required before submission")
+        if not clean.get("creativeImages"):
+            raise HTTPException(
+                status_code=400,
+                detail="At least one campaign image is required before submission",
+            )
+
+    return clean
 
 
 def _clothes_money(value: Any, field: str) -> float:
@@ -4530,13 +6565,17 @@ def _clothes_patch_shipment_atomic(
 # ---------------------------------------------------------------------------
 
 RECEIPT_TRANSFER_MUTATION_COLLECTION = "receiptTransferMutations"
+RECEIPT_SETTLEMENT_MUTATION_COLLECTION = "receiptSettlementMutations"
 AD_FUNDING_MUTATION_COLLECTION = "adFundingMutations"
 AD_STOP_MUTATION_COLLECTION = "adStopMutations"
+CUSTOMER_MERGE_MUTATION_COLLECTION = "customerMergeMutations"
 FINANCIAL_MUTATION_COLLECTIONS = frozenset(
     {
         RECEIPT_TRANSFER_MUTATION_COLLECTION,
+        RECEIPT_SETTLEMENT_MUTATION_COLLECTION,
         AD_FUNDING_MUTATION_COLLECTION,
         AD_STOP_MUTATION_COLLECTION,
+        CUSTOMER_MERGE_MUTATION_COLLECTION,
     }
 )
 
@@ -4551,6 +6590,9 @@ AD_FUNDING_FIELDS = frozenset(
         "spentUSD",
         "stoppedAt",
         "stopAllocationBaseline",
+        "remainingCustomerInformed",
+        "remainingCustomerInformedAt",
+        "remainingCustomerInformedBy",
         "receiptAllocations",
         "dueAllocations",
         "mergedPaidAllocations",
@@ -4564,6 +6606,8 @@ AD_FUNDING_FIELDS = frozenset(
         "isPaid",
         "refundAllocationBaseline",
         "refundDueBaseline",
+        "refundBaselinePaymentStatus",
+        "preRefundStatus",
         "refundType",
         "refundAmount",
         "refundStatus",
@@ -4617,6 +6661,40 @@ def _financial_usd(minor: int) -> float:
     return float((Decimal(int(minor)) / Decimal(100)).quantize(Decimal("0.01")))
 
 
+def _financial_confirmed_remaining_minor(ad: dict[str, Any] | None) -> int | None:
+    """Return the exact remainder covered by the saved customer confirmation."""
+    if not ad or ad.get("remainingCustomerInformed") is not True:
+        return None
+    # Older/broken rows may have a confirmation without the spend that it
+    # referred to. Treat that confirmation as unbound rather than silently
+    # applying it to a newly entered amount.
+    if ad.get("spentUSD") in (None, ""):
+        return None
+    amount_minor = _financial_minor(ad.get("amountUSD"), "confirmed ad amount")
+    spent_minor = _financial_minor(ad.get("spentUSD"), "confirmed ad spend")
+    return max(amount_minor - spent_minor, 0)
+
+
+def _financial_clear_changed_remaining_confirmation(
+    existing: dict[str, Any] | None, updated: dict[str, Any]
+) -> None:
+    """Clear a confirmation when an update changes the amount it described."""
+    if not existing or existing.get("remainingCustomerInformed") is not True:
+        return
+    confirmed_remaining = _financial_confirmed_remaining_minor(existing)
+    updated_amount = _financial_minor(updated.get("amountUSD"), "updated ad amount")
+    updated_spent = _financial_minor(updated.get("spentUSD"), "updated ad spend")
+    updated_remaining = max(updated_amount - updated_spent, 0)
+    if (
+        confirmed_remaining is None
+        or updated_remaining <= 0
+        or updated_remaining != confirmed_remaining
+    ):
+        updated["remainingCustomerInformed"] = False
+        updated.pop("remainingCustomerInformedAt", None)
+        updated.pop("remainingCustomerInformedBy", None)
+
+
 def _financial_rate(value: Any) -> Decimal:
     try:
         rate = Decimal(str(value))
@@ -4625,6 +6703,34 @@ def _financial_rate(value: Any) -> Decimal:
     if not rate.is_finite() or rate <= 0 or rate > Decimal(str(MAX_EXCHANGE_RATE)):
         rate = Decimal(1)
     return rate
+
+
+def _financial_ad_payment_status(ad: dict[str, Any] | None) -> str:
+    """Return the canonical payment state for current and historical ads.
+
+    ``paymentStatus`` is authoritative when it contains a recognized value.
+    Older imports used spaces, hyphens, ``unpaid`` and typographic apostrophes,
+    while still older rows only have the compatibility ``isPaid`` boolean.
+    Records predating both fields were created before unpaid ads existed, so
+    their historical default remains Paid.
+    """
+    data = ad if isinstance(ad, dict) else {}
+    raw_status = str(data.get("paymentStatus") or "").strip().lower()
+    normalized = re.sub(r"[\u2018\u2019']", "", raw_status)
+    normalized = re.sub(r"[\s-]+", "_", normalized)
+    normalized = re.sub(r"_+", "_", normalized)
+
+    if normalized == "paid":
+        return "paid"
+    if normalized in {"not_paid", "notpaid", "unpaid"}:
+        return "not_paid"
+    if normalized in {"wont_pay", "wontpay"}:
+        return "wont_pay"
+
+    is_paid = data.get("isPaid")
+    if isinstance(is_paid, bool):
+        return "paid" if is_paid else "not_paid"
+    return "paid"
 
 
 def _financial_row_data(row: Any) -> dict[str, Any]:
@@ -4744,20 +6850,31 @@ def _financial_allocation_map(raw: Any) -> dict[str, int]:
     return result
 
 
+def _financial_legacy_due_receipt_id(ad: dict[str, Any]) -> str:
+    """Receipt represented by the scalar dueAmountToUse* legacy mirror.
+
+    Delivery rows historically used linkedDeliveryReceiptId.  In-Shop rows
+    used receiptId instead, so treating the driver field as the only identity
+    loses real customer debt when old rows are stopped, refunded or restored.
+    The oldest driver rows predate linkedDeliveryReceiptId entirely and stored
+    the delivery receipt in receiptId; the settlement predicate and the ad
+    form both honor that fallback, so the due reader must speak for the same
+    money — otherwise capacity checks ignore a promise settlement converts.
+    """
+    if _financial_ad_payment_status(ad) == "not_paid":
+        method = str(ad.get("collectionMethod") or "")
+        if method == "in_shop":
+            return str(ad.get("receiptId") or "")
+        if method == "driver" and not str(ad.get("linkedDeliveryReceiptId") or ""):
+            return str(ad.get("receiptId") or "")
+    return str(ad.get("linkedDeliveryReceiptId") or "")
+
+
 def _financial_ad_general_usage(ad: dict[str, Any], receipt_id: str) -> int:
     """Mirror getReceiptUsageStats, including legacy records."""
     receipt_map = _financial_allocation_map(ad.get("receiptAllocations"))
-    due_map = _financial_allocation_map(ad.get("dueAllocations"))
     receipt_sum = receipt_map.get(receipt_id, 0)
-    due_sum = due_map.get(receipt_id, 0)
-    legacy_due = 0
-    if str(ad.get("linkedDeliveryReceiptId") or "") == receipt_id and due_sum == 0:
-        legacy_due = _financial_minor(ad.get("dueAmountToUseUSD"), "stored due allocation")
-        if legacy_due == 0 and ad.get("dueAmountToUseLYD"):
-            local_minor = _financial_minor(ad.get("dueAmountToUseLYD"), "stored due allocation")
-            rate = _financial_rate(ad.get("exchangeRate"))
-            legacy_due = int((Decimal(local_minor) / rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-    explicit = receipt_sum + due_sum + legacy_due
+    explicit = receipt_sum + _financial_ad_due_usage(ad, receipt_id)
     if explicit > 0:
         return explicit
     if isinstance(ad.get("receiptAllocations"), list) or isinstance(ad.get("dueAllocations"), list):
@@ -4774,10 +6891,17 @@ def _financial_ad_general_usage(ad: dict[str, Any], receipt_id: str) -> int:
 
 
 def _financial_ad_due_usage(ad: dict[str, Any], receipt_id: str) -> int:
-    due = _financial_allocation_map(ad.get("dueAllocations")).get(receipt_id, 0)
+    due_map = _financial_allocation_map(ad.get("dueAllocations"))
+    due = due_map.get(receipt_id, 0)
     if due > 0:
         return due
-    if str(ad.get("linkedDeliveryReceiptId") or "") != receipt_id:
+    # The scalar mirror is standalone money ONLY for rowless ads. Once due
+    # rows exist the writers keep dueAmountToUse* equal to their sum, so
+    # attributing it to the linked receipt as well would count the same
+    # dollars on two receipts at once.
+    if due_map:
+        return 0
+    if _financial_legacy_due_receipt_id(ad) != receipt_id:
         return 0
     direct = _financial_minor(ad.get("dueAmountToUseUSD"), "stored due allocation")
     if direct:
@@ -4790,6 +6914,81 @@ def _financial_ad_due_usage(ad: dict[str, Any], receipt_id: str) -> int:
             Decimal("1"), rounding=ROUND_HALF_UP
         )
     )
+
+
+def _financial_ad_explicit_usage(ad: dict[str, Any], receipt_id: str) -> int:
+    """Money this ad EXPLICITLY commits against a receipt, from either pool.
+
+    Allocation rows (paid + due) plus the legacy due mirror, which only speaks for an ad
+    that has no due row for this receipt. Unlike _financial_ad_general_usage there is NO
+    whole-ad fallback: that fallback charges a pre-allocation ad's entire spend against any
+    receipt it merely REFERENCES, and a driver-collected ad references its delivery receipt
+    while being funded by the customer's cash, not by the receipt's credit.
+    """
+    paid_rows = _financial_allocation_map(ad.get("receiptAllocations")).get(receipt_id, 0)
+    # The due reader covers modern allocation rows plus both historical debt
+    # mirrors: driver links used linkedDeliveryReceiptId, while old In-Shop
+    # rows used receiptId.  Positive legacy debt is a real commitment; a bare
+    # zero-debt link remains provenance only.
+    return paid_rows + _financial_ad_due_usage(ad, receipt_id)
+
+
+def _financial_explicit_usage(
+    ad_rows: list[Any], receipt_id: str, *, exclude_ad_id: str | None = None
+) -> int:
+    total = 0
+    for row in ad_rows:
+        if exclude_ad_id and str(row.get("id") or "") == exclude_ad_id:
+            continue
+        ad = _financial_row_data(row)
+        if str(ad.get("recordType") or "") == "receipt":
+            continue
+        total += _financial_ad_explicit_usage(ad, receipt_id)
+    return total
+
+
+def _financial_ad_committed(ad: dict[str, Any], receipt_id: str) -> int:
+    """The money this ad TRULY commits against a receipt — the number the capacity
+    check must count for every OTHER ad.
+
+    Explicit rows + due mirror first (that already covers modern and legacy-due ads).
+    Only a ROWLESS, genuinely receipt-funded ad falls back to its whole spend. A
+    not_paid/driver ad is excluded from that fallback: its receiptId points at the
+    delivery receipt for linkage, but it is funded by the customer's CASH, so charging
+    its amountUSD here would be the same phantom commitment the due reader had to drop.
+    Sits between _financial_ad_explicit_usage (misses legacy PAID ads -> lets a self-draw
+    through) and _financial_ad_general_usage (charges cash-driver ads -> false-blocks).
+    """
+    explicit = _financial_ad_explicit_usage(ad, receipt_id)
+    if explicit > 0:
+        return explicit
+    if isinstance(ad.get("receiptAllocations"), list) or isinstance(ad.get("dueAllocations"), list):
+        return 0
+    if _financial_ad_payment_status(ad) == "not_paid" and str(ad.get("collectionMethod") or "") in {"driver", "in_shop"}:
+        return 0
+    references = {
+        str(ad.get("fundingReceiptId") or ""),
+        str(ad.get("receiptId") or ""),
+        str(ad.get("linkedDeliveryReceiptId") or ""),
+    }
+    if receipt_id not in references:
+        return 0
+    fallback = ad.get("spentUSD") if ad.get("spentUSD") is not None else ad.get("amountUSD")
+    return _financial_minor(fallback, "stored legacy ad amount")
+
+
+def _financial_committed_usage(
+    ad_rows: list[Any], receipt_id: str, *, exclude_ad_id: str | None = None
+) -> int:
+    total = 0
+    for row in ad_rows:
+        if exclude_ad_id and str(row.get("id") or "") == exclude_ad_id:
+            continue
+        ad = _financial_row_data(row)
+        if str(ad.get("recordType") or "") == "receipt":
+            continue
+        total += _financial_ad_committed(ad, receipt_id)
+    return total
 
 
 def _financial_usage(
@@ -4810,6 +7009,45 @@ def _financial_usage(
     return total
 
 
+def _financial_validate_combined_capacity(
+    paid_allocations: list[dict[str, Any]],
+    due_allocations: list[dict[str, Any]],
+    *,
+    locked_receipts: dict[str, Any],
+    ad_rows: list[Any],
+    current_ad_id: str | None,
+) -> None:
+    """ONE POT across BOTH pools for THIS ad.
+
+    The per-pool validators each exclude the current ad and check only their own pool's
+    request, so an ad drawing $150 paid AND $150 due from the same $200 receipt passed
+    both (the same money, promised twice). Sum this ad's TOTAL request per receipt and
+    check it against the capacity left by every OTHER ad plus outgoing transfers. Uses the
+    unified capacity (_financial_due_total: amountUSD once collected, else the debt) and
+    explicit usage (no whole-ad fallback), so it agrees with the client's readers.
+    """
+    requested: dict[str, int] = {}
+    for alloc in list(paid_allocations) + list(due_allocations):
+        rid = str(alloc.get("receiptId") or "")
+        if rid:
+            requested[rid] = requested.get(rid, 0) + _financial_minor(
+                alloc.get("amountUSD"), "receipt allocation"
+            )
+    for rid, amount in requested.items():
+        row = locked_receipts.get(rid)
+        if not row or bool(row["deleted"]):
+            continue  # existence/eligibility already enforced by the per-pool validators
+        data = _financial_row_data(row)
+        capacity = _financial_due_total(data)
+        committed = _financial_committed_usage(
+            ad_rows, rid, exclude_ad_id=current_ad_id
+        ) + _financial_outgoing(data)
+        if committed + amount > capacity:
+            raise HTTPException(
+                status_code=409, detail=f"Insufficient balance on receipt {rid}"
+            )
+
+
 def _financial_outgoing(data: dict[str, Any]) -> int:
     transfers = data.get("transfers")
     if transfers is None:
@@ -4825,6 +7063,24 @@ def _financial_outgoing(data: dict[str, Any]) -> int:
 
 
 def _financial_due_total(data: dict[str, Any]) -> int:
+    """The receipt's capacity — ONE number, whichever pool is asking.
+
+    Before collection a delivery receipt is worth the debt the driver will collect.
+    Once collected it is worth what was ACTUALLY collected (amountUSD); the debt fields
+    survive only as history. Reading the frozen debt as a capacity of its own after
+    collection is what let one receipt advertise its money twice — once as due credit and
+    once as paid balance — so two ads could each spend the same note. Over-collecting
+    legitimately adds real balance; re-reading the stale debt invents it.
+    """
+    if bool(data.get("isPaid")) or str(data.get("status") or "") == "Paid":
+        return _financial_minor(data.get("amountUSD"), "receipt due amount")
+    status_detail = data.get("statusDetail") if isinstance(data.get("statusDetail"), dict) else {}
+    not_paid_collection = str(status_detail.get("notPaidCollection") or "").strip().lower()
+    # An office receipt already records its promised credit directly in USD.
+    # Re-deriving it through LYD can introduce a one-cent rounding difference
+    # between the receipt card and the amount the server lets an ad reserve.
+    if not_paid_collection in {"office", "in_shop", "shop"}:
+        return _financial_minor(data.get("amountUSD"), "receipt due amount")
     local_value = data.get("debtAmountLocal")
     if local_value is None:
         local_value = data.get("amountLocal")
@@ -4836,6 +7092,299 @@ def _financial_due_total(data: dict[str, Any]) -> int:
     if usd_value is None:
         usd_value = data.get("amountUSD")
     return _financial_minor(usd_value, "receipt due amount")
+
+
+def _financial_valid_rate(value: Any) -> Decimal | None:
+    """Return a real LYD/USD rate without inventing the usual ``1`` fallback."""
+    try:
+        rate = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    if (
+        not rate.is_finite()
+        or rate <= Decimal(str(MIN_EXCHANGE_RATE))
+        or rate > Decimal(str(MAX_EXCHANGE_RATE))
+    ):
+        return None
+    return rate
+
+
+def _financial_status_aware_ad_spend(ad: dict[str, Any]) -> int:
+    """Mirror the frontend's canonical current-spend calculation in cents."""
+    status = str(ad.get("status") or "").strip().lower()
+    if status in {"pending", "paused"}:
+        return 0
+    if status == "stopped" and "spentUSD" in ad:
+        return _financial_minor(ad.get("spentUSD"), "stored stopped ad spend")
+    if status in {"completed", "canceled", "lost"} and "spentUSD" in ad:
+        return _financial_minor(ad.get("spentUSD"), "stored final ad spend")
+    return _financial_minor(ad.get("amountUSD"), "stored ad amount")
+
+
+def _financial_ad_spend_rate(
+    ad: dict[str, Any], receipt: dict[str, Any]
+) -> Decimal:
+    """Resolve the linked debt rate, repairing stale historical ad mirrors."""
+    receipt_rate = _financial_valid_rate(receipt.get("exchangeRate"))
+    if receipt_rate:
+        return receipt_rate
+    amount_usd = _financial_minor(ad.get("amountUSD"), "stored ad amount")
+    amount_local = _financial_minor(ad.get("amountLocal"), "stored ad local amount")
+    if amount_usd > 0 and amount_local > 0:
+        return Decimal(amount_local) / Decimal(amount_usd)
+    return (
+        _financial_valid_rate(ad.get("exchangeRate"))
+        or Decimal(1)
+    )
+
+
+def _financial_delivery_collection_target(
+    receipt_id: str,
+    receipt: dict[str, Any],
+    ad_rows: list[Any],
+) -> dict[str, Any]:
+    """Return the cash target for one delivery receipt without minting capacity.
+
+    Most receipts carry their promised amount directly. Historical/manual
+    Driver flows can instead leave a zero-value D receipt and keep the real
+    customer debt on its current linked ads. That derived value is ONLY a
+    delivery-completion target; callers must not feed it into
+    ``_financial_due_total`` before money is physically collected.
+    """
+
+    def _complete_pair(usd_minor: int, local_minor: int) -> tuple[int, int]:
+        rate = _financial_valid_rate(receipt.get("exchangeRate"))
+        if usd_minor <= 0 and local_minor > 0 and rate:
+            usd_minor = int(
+                (Decimal(local_minor) / rate).quantize(
+                    Decimal("1"), rounding=ROUND_HALF_UP
+                )
+            )
+        if local_minor <= 0 and usd_minor > 0 and rate:
+            local_minor = int(
+                (Decimal(usd_minor) * rate).quantize(
+                    Decimal("1"), rounding=ROUND_HALF_UP
+                )
+            )
+        return max(usd_minor, 0), max(local_minor, 0)
+
+    debt_usd = _financial_minor(
+        receipt.get("debtAmountUSD"), "stored receipt debt"
+    )
+    debt_local = _financial_minor(
+        receipt.get("debtAmountLocal"), "stored receipt local debt"
+    )
+    if debt_usd > 0 or debt_local > 0:
+        debt_usd, debt_local = _complete_pair(debt_usd, debt_local)
+        return {
+            "usdMinor": debt_usd,
+            "localMinor": debt_local,
+            "source": "stored_debt",
+            "linkedAdIds": [],
+        }
+
+    amount_usd_raw = (
+        receipt.get("amountUSD")
+        if receipt.get("amountUSD") is not None
+        else receipt.get("amount")
+    )
+    amount_local_raw = (
+        receipt.get("amountLocal")
+        if receipt.get("amountLocal") is not None
+        else receipt.get("amountLYD")
+    )
+    amount_usd = _financial_minor(amount_usd_raw, "stored receipt amount")
+    amount_local = _financial_minor(
+        amount_local_raw, "stored receipt local amount"
+    )
+    if amount_usd > 0 or amount_local > 0:
+        amount_usd, amount_local = _complete_pair(amount_usd, amount_local)
+        return {
+            "usdMinor": amount_usd,
+            "localMinor": amount_local,
+            "source": "receipt_amount",
+            "linkedAdIds": [],
+        }
+
+    raw_status = str(receipt.get("status") or "").strip().lower()
+    normalized_status = re.sub(r"[\s_-]+", "", raw_status)
+    if normalized_status in {"canceled", "cancelled"}:
+        payment_state = "canceled"
+    elif normalized_status == "lost":
+        payment_state = "lost"
+    elif normalized_status == "paid":
+        payment_state = "paid"
+    elif normalized_status in {"notpaid", "unpaid", "pending"}:
+        # Explicit status is authoritative over stale historical isPaid.
+        payment_state = "not_paid"
+    elif receipt.get("isPaid") is True:
+        payment_state = "paid"
+    elif receipt.get("isPaid") is False:
+        payment_state = "not_paid"
+    else:
+        payment_state = "unknown"
+    status_detail = (
+        receipt.get("statusDetail")
+        if isinstance(receipt.get("statusDetail"), dict)
+        else {}
+    )
+    collection = str(status_detail.get("notPaidCollection") or "").strip().lower()
+    temp_number = str(receipt.get("tempReceiptNo") or "").strip()
+    receipt_type = str(receipt.get("receiptType") or "").strip().upper()
+    delivery_status = str(receipt.get("deliveryStatus") or "").strip()
+    is_delivery = (
+        collection == "delivery"
+        or receipt_type == "DELIVERY_TEMP"
+        or bool(re.fullmatch(r"D[0-9]+", temp_number))
+        or delivery_status not in {"", "Office"}
+    )
+    if (
+        payment_state != "not_paid"
+        or not is_delivery
+        or not str(receipt.get("customerId") or "")
+        or receipt_type == "TRANSFER_IN"
+        or delivery_status.lower() in {"canceled", "cancelled"}
+    ):
+        return {
+            "usdMinor": 0,
+            "localMinor": 0,
+            "source": "none",
+            "linkedAdIds": [],
+        }
+
+    customer_id = str(receipt.get("customerId") or "")
+    total_usd = 0
+    total_local = 0
+    linked_ids: list[str] = []
+    for row in ad_rows:
+        if bool(row.get("deleted")):
+            continue
+        ad = _financial_row_data(row)
+        if str(ad.get("recordType") or "") == "receipt":
+            continue
+        if str(ad.get("customerId") or ad.get("customer") or "") != customer_id:
+            continue
+        if (
+            _financial_ad_payment_status(ad) != "not_paid"
+            or str(ad.get("collectionMethod") or "").strip().lower() != "driver"
+        ):
+            continue
+        modern_link = str(ad.get("linkedDeliveryReceiptId") or "")
+        current_link = modern_link or str(ad.get("receiptId") or "")
+        if current_link != receipt_id:
+            continue
+
+        spend_minor = _financial_status_aware_ad_spend(ad)
+        paid_raw = ad.get("receiptAllocations")
+        if not (isinstance(paid_raw, list) and paid_raw):
+            paid_raw = ad.get("mergedPaidAllocations")
+        paid_minor = sum(_financial_allocation_map(paid_raw).values())
+        unpaid_minor = max(spend_minor - paid_minor, 0)
+        if unpaid_minor <= 0:
+            continue
+
+        rate = _financial_ad_spend_rate(ad, receipt)
+        total_usd += unpaid_minor
+        total_local += int(
+            (Decimal(unpaid_minor) * rate).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+        )
+        linked_ids.append(str(row.get("id") or ""))
+
+    return {
+        "usdMinor": total_usd,
+        "localMinor": total_local,
+        "source": "linked_ads" if linked_ids else "none",
+        "linkedAdIds": linked_ids,
+    }
+
+
+def _financial_apply_delivery_completion_truth(
+    receipt_id: str,
+    old: dict[str, Any],
+    merged: dict[str, Any],
+    ad_rows: list[Any],
+) -> None:
+    """Recompute delivery money from locked receipt/ad state before persistence."""
+    if (
+        str(merged.get("deliveryStatus") or "").strip() != "Delivered"
+        or str(old.get("deliveryStatus") or "").strip() == "Delivered"
+    ):
+        return
+
+    target = _financial_delivery_collection_target(receipt_id, old, ad_rows)
+    debt_usd = int(target["usdMinor"])
+    debt_local = int(target["localMinor"])
+    collected_local = _financial_minor(
+        merged.get("amountCollectedFromCustomer"),
+        "amountCollectedFromCustomer",
+    )
+
+    over_local = collected_local - debt_local
+    over_abs_minor = int(
+        (Decimal(str(_DELIVERY_OVERPAY_ABS_LOCAL)) * Decimal(100)).quantize(
+            Decimal("1"), rounding=ROUND_HALF_UP
+        )
+    )
+    debt_ceiling = int(
+        (Decimal(debt_local) * Decimal(str(_DELIVERY_OVERPAY_RATIO))).quantize(
+            Decimal("1"), rounding=ROUND_HALF_UP
+        )
+    )
+    if over_local > over_abs_minor and collected_local > debt_ceiling:
+        raise HTTPException(
+            status_code=400,
+            detail="Collected amount far exceeds the delivery debt; office confirmation required",
+        )
+
+    diff = collected_local - debt_local
+    if diff == 0:
+        payment_result = "PAID_EXACT"
+        overpaid = 0
+        remaining_due = 0
+    elif diff > 0:
+        payment_result = "OVERPAID"
+        overpaid = diff
+        remaining_due = 0
+    else:
+        payment_result = "UNDERPAID"
+        overpaid = 0
+        remaining_due = -diff
+
+    trusted_rate: Decimal | None = None
+    if target["source"] == "linked_ads" and debt_usd > 0 and debt_local > 0:
+        trusted_rate = Decimal(debt_local) / Decimal(debt_usd)
+    if trusted_rate is None:
+        trusted_rate = _financial_valid_rate(old.get("exchangeRate"))
+    if trusted_rate is None and debt_usd > 0 and debt_local > 0:
+        trusted_rate = Decimal(debt_local) / Decimal(debt_usd)
+
+    if trusted_rate:
+        collected_usd = int(
+            (Decimal(collected_local) / trusted_rate).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+        )
+    else:
+        # Preserve the historical no-rate behavior without ever treating LYD as USD.
+        collected_usd = debt_usd
+
+    merged["debtAmountUSD"] = _financial_usd(debt_usd)
+    merged["debtAmountLocal"] = _financial_usd(debt_local)
+    merged["amountUSD"] = _financial_usd(collected_usd)
+    merged["amountLocal"] = _financial_usd(collected_local)
+    if target["source"] == "linked_ads" and trusted_rate:
+        merged["exchangeRate"] = float(trusted_rate)
+    merged["paymentResult"] = payment_result
+    merged["overpaidAmount"] = _financial_usd(overpaid)
+    merged["remainingDue"] = _financial_usd(remaining_due)
+    if remaining_due == 0:
+        merged["status"] = "Paid"
+        merged["isPaid"] = True
+    else:
+        merged["status"] = "Not Paid"
+        merged["isPaid"] = False
 
 
 def _financial_receipt_ids(ad: dict[str, Any]) -> set[str]:
@@ -4857,6 +7406,10 @@ def _financial_receipt_ids(ad: dict[str, Any]) -> set[str]:
         if isinstance(baseline, list):
             baseline = {"receipt": baseline}
         if isinstance(baseline, dict):
+            if baseline_name == "stopAllocationBaseline" and baseline.get(
+                "dueLegacyReceiptId"
+            ):
+                ids.add(str(baseline["dueLegacyReceiptId"]))
             for value in baseline.values():
                 if isinstance(value, list):
                     for entry in value:
@@ -4950,7 +7503,9 @@ def _receipt_transfer_atomic(
 
             ad_rows = _financial_active_rows(conn, "ads")
             total = _financial_minor(source.get("amountUSD"), "receipt amount")
-            committed = _financial_usage(ad_rows, source_id) + _financial_outgoing(source)
+            committed = _financial_committed_usage(
+                ad_rows, source_id
+            ) + _financial_outgoing(source)
             if committed + int(body.amountMinorUSD) > total:
                 raise HTTPException(status_code=409, detail="Insufficient available receipt balance")
 
@@ -4966,6 +7521,12 @@ def _receipt_transfer_atomic(
                 )
             )
             now_iso = _iso_utc()
+            # Denormalize the destination customer's NAME onto the transfer row
+            # that lives inside the source receipt's transfers[] (rendered on the
+            # receipt card). The target receipt itself gets customerName via
+            # _insert_entity_in_transaction below; this row is written straight
+            # into the source and needs its own authoritative stamp. Name only.
+            _transfer_to_name = _lookup_customer_display_name(conn, target_customer_id)
             transfer = {
                 "id": f"transfer_{hashlib.sha256(idem.encode('utf-8')).hexdigest()[:32]}",
                 "toCustomerId": target_customer_id,
@@ -4975,6 +7536,8 @@ def _receipt_transfer_atomic(
                 "date": now_iso,
                 "note": note,
             }
+            if _transfer_to_name:
+                transfer["toCustomerName"] = _transfer_to_name
             transfers = list(source.get("transfers") or [])
             transfers.append(transfer)
             source["transfers"] = transfers
@@ -5128,7 +7691,7 @@ def _financial_validate_paid_receipts(
         if str(data.get("customerId") or "") != customer_id:
             raise HTTPException(status_code=400, detail="Funding receipt belongs to another customer")
         total = _financial_minor(data.get("amountUSD"), "receipt amount")
-        committed = _financial_usage(
+        committed = _financial_committed_usage(
             ad_rows, receipt_id, exclude_ad_id=current_ad_id
         ) + _financial_outgoing(data)
         requested = _financial_minor(allocation.get("amountUSD"), "receipt allocation")
@@ -5166,11 +7729,74 @@ def _financial_validate_due_receipt(
     requested = sum(
         _financial_minor(entry.get("amountUSD"), "due allocation") for entry in due_allocations
     )
-    committed = _financial_usage(
-        ad_rows, linked_receipt_id, due=True, exclude_ad_id=current_ad_id
-    )
+    # ONE POT: count every EXPLICIT commitment against this receipt, from EITHER pool.
+    # Counting only due rows meant that once a delivery receipt was collected, ads funded
+    # from its PAID balance were invisible here — so the same money could be handed out
+    # again as due credit. Transfers out leave the receipt too, so they are committed money.
+    #
+    # Deliberately NOT _financial_ad_general_usage: that has a whole-ad fallback for
+    # pre-allocation records which charges an ad's ENTIRE spend against any receipt it
+    # merely REFERENCES. A driver-collected ad references its delivery receipt but is
+    # funded by the customer's cash, not by the receipt's credit — charging it here would
+    # 409 the customer's next legitimate ad against credit they really hold.
+    committed = _financial_explicit_usage(
+        ad_rows, linked_receipt_id, exclude_ad_id=current_ad_id
+    ) + _financial_outgoing(data)
     if committed + requested > _financial_due_total(data):
         raise HTTPException(status_code=409, detail="Insufficient delivery due credit")
+
+
+def _financial_validate_shop_due_receipt(
+    due_allocations: list[dict[str, Any]],
+    *,
+    linked_receipt_id: str,
+    customer_id: str,
+    locked_receipts: dict[str, Any],
+    ad_rows: list[Any],
+    current_ad_id: str | None,
+    require_unpaid: bool = True,
+) -> None:
+    """Validate one unpaid office receipt used as an In Shop ad budget."""
+    if len(due_allocations) != 1 or str(due_allocations[0].get("receiptId") or "") != linked_receipt_id:
+        raise HTTPException(status_code=400, detail="In Shop debt must use one linked unpaid receipt")
+    row = locked_receipts.get(linked_receipt_id)
+    if not row or bool(row["deleted"]):
+        raise HTTPException(status_code=404, detail="Linked In Shop receipt not found")
+    data = _financial_row_data(row)
+    if str(data.get("customerId") or "") != customer_id:
+        raise HTTPException(status_code=400, detail="Linked In Shop receipt belongs to another customer")
+
+    status = str(data.get("status") or "")
+    status_detail = data.get("statusDetail") if isinstance(data.get("statusDetail"), dict) else {}
+    not_paid_collection = str(status_detail.get("notPaidCollection") or "").strip().lower()
+    temp_number = str(data.get("tempReceiptNo") or "").strip()
+    receipt_type = str(data.get("receiptType") or "").strip().upper()
+    delivery_status = str(data.get("deliveryStatus") or "").strip()
+    is_delivery_receipt = (
+        (temp_number.startswith("D") and temp_number[1:].isdigit())
+        or receipt_type == "DELIVERY_TEMP"
+        or not_paid_collection == "delivery"
+        or delivery_status not in {"", "Office"}
+    )
+    if (
+        status in {"Canceled", "Lost"}
+        or receipt_type == "TRANSFER_IN"
+        or is_delivery_receipt
+        or not_paid_collection not in {"", "office", "in_shop", "shop"}
+    ):
+        raise HTTPException(status_code=400, detail="Linked receipt is not an In Shop receipt")
+    if require_unpaid and (status != "Not Paid" or data.get("isPaid") is True):
+        raise HTTPException(status_code=400, detail="In Shop ad requires an unpaid receipt")
+
+    requested = sum(
+        _financial_minor(entry.get("amountUSD"), "shop due allocation")
+        for entry in due_allocations
+    )
+    committed = _financial_explicit_usage(
+        ad_rows, linked_receipt_id, exclude_ad_id=current_ad_id
+    ) + _financial_outgoing(data)
+    if committed + requested > _financial_due_total(data):
+        raise HTTPException(status_code=409, detail="Insufficient In Shop receipt balance")
 
 
 def _financial_derive_ad(
@@ -5185,6 +7811,13 @@ def _financial_derive_ad(
     """Merge ordinary ad edits, then replace every funding mirror."""
     base = dict(existing or {})
     clean = sanitize_json(requested or {}) or {}
+    # ``driverBudgetUSD`` is a request-only source value for a Not Paid +
+    # Driver ad. Unlike a paid receipt allocation, this budget may be only
+    # partially funded (or completely unfunded) and therefore represents real
+    # customer debt. Keep accepting the established allocation-derived shape
+    # for older clients, but never persist this transient request field.
+    driver_budget_supplied = "driverBudgetUSD" in clean
+    driver_budget_raw = clean.pop("driverBudgetUSD", None)
     for key in (
         "id",
         "_created",
@@ -5199,6 +7832,13 @@ def _financial_derive_ad(
         "spentUSD",
         "stoppedAt",
         "stopAllocationBaseline",
+        "refundAllocationBaseline",
+        "refundDueBaseline",
+        "refundBaselinePaymentStatus",
+        "preRefundStatus",
+        "remainingCustomerInformed",
+        "remainingCustomerInformedAt",
+        "remainingCustomerInformedBy",
         "receiptIds",
         "fundingReceiptId",
         "dueAmountToUseUSD",
@@ -5214,14 +7854,25 @@ def _financial_derive_ad(
     if existing and requested_status and requested_status != old_status:
         raise HTTPException(status_code=405, detail="Ad status changes require their dedicated workflow")
     base.update(clean)
+    base.pop("driverBudgetUSD", None)
     base["status"] = old_status or "Active"
     base["recordType"] = "ad"
-    base["creatorId"] = str((existing or {}).get("creatorId") or actor.get("id") or "")
+    # Creation records the authenticated actor. For an existing row, preserve
+    # only historical ownership evidence already stored on the record. Never
+    # turn the first person who edits a creatorless legacy ad into its creator.
+    if existing is None:
+        base["creatorId"] = str(actor.get("id") or "")
+    else:
+        historical_creator = str(
+            existing.get("createdBy") or existing.get("creatorId") or ""
+        ).strip()
+        if historical_creator:
+            base["creatorId"] = historical_creator
+        else:
+            base.pop("creatorId", None)
 
     customer_id = validate_entity_id(base.get("customerId"))
-    payment_status = str(base.get("paymentStatus") or "paid").lower()
-    if payment_status not in {"paid", "not_paid", "wont_pay"}:
-        raise HTTPException(status_code=400, detail="Invalid ad paymentStatus")
+    payment_status = _financial_ad_payment_status(base)
     collection_method = str(base.get("collectionMethod") or "")
     paid_request = base.get("receiptAllocations")
     due_request = base.get("dueAllocations")
@@ -5233,6 +7884,30 @@ def _financial_derive_ad(
     payments: list[dict[str, Any]] = []
     amount_minor = 0
     if payment_status == "paid":
+        if any(
+            _financial_allocations(value, name)
+            for name, value in (
+                (
+                    "dueAllocations",
+                    clean.get("dueAllocations")
+                    if "dueAllocations" in clean
+                    else None,
+                ),
+                (
+                    "mergedPaidAllocations",
+                    clean.get("mergedPaidAllocations")
+                    if "mergedPaidAllocations" in clean
+                    else None,
+                ),
+            )
+        ):
+            # A Paid ad cannot quietly carry an unpaid promise.  Without this
+            # guard a forged/stale client could label the whole ad Paid while
+            # the server silently discarded its due rows and erased the debt.
+            raise HTTPException(
+                status_code=400,
+                detail="Paid ads cannot use unpaid receipt funding",
+            )
         paid_allocations = _financial_allocations(
             paid_request, "receiptAllocations", allow_empty=False
         )
@@ -5247,6 +7922,24 @@ def _financial_derive_ad(
             _financial_minor(row["amountUSD"], "receipt allocation")
             for row in paid_allocations
         )
+        # Converting any existing unpaid debt to Paid must settle the original
+        # ad amount exactly. Otherwise a partial receipt allocation could shrink
+        # the saved ad and silently erase the customer's remaining debt.
+        existing_was_unpaid_debt = bool(existing) and (
+            _financial_ad_payment_status(existing) == "not_paid"
+        )
+        if existing_was_unpaid_debt:
+            original_budget_minor = _financial_minor(
+                existing.get("amountUSD"), "existing unpaid ad budget"
+            )
+            # Old production rows could be saved with a zero amount because the
+            # UI had no independent budget field. Do not trap those rows: their
+            # first Paid conversion is also their repair path.
+            if original_budget_minor > 0 and amount_minor != original_budget_minor:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Paid receipt funding must exactly settle the original unpaid ad amount",
+                )
         linked_id = ""
         collection_method = ""
     elif payment_status == "not_paid" and collection_method == "driver":
@@ -5276,12 +7969,157 @@ def _financial_derive_ad(
             ad_rows=ad_rows,
             current_ad_id=current_ad_id,
         )
-        amount_minor = sum(
+        # The delivery receipt defines the customer's debt currency. Never
+        # trust a stale/default rate supplied by the client for a linked Driver
+        # ad; the common calculation below will recompute amountLocal from this
+        # authoritative rate.
+        linked_row = locked_receipts.get(linked_id)
+        linked_data = _financial_row_data(linked_row) if linked_row else {}
+        base["exchangeRate"] = (
+            linked_data.get("exchangeRate") or base.get("exchangeRate")
+        )
+        # Both pools can point at the same receipt here (merged paid + linked due);
+        # cap the ad's TOTAL draw per receipt so it cannot spend the same money twice.
+        _financial_validate_combined_capacity(
+            paid_allocations,
+            due_allocations,
+            locked_receipts=locked_receipts,
+            ad_rows=ad_rows,
+            current_ad_id=current_ad_id,
+        )
+        allocated_minor = sum(
             _financial_minor(row["amountUSD"], "ad allocation")
             for row in [*paid_allocations, *due_allocations]
         )
+        if driver_budget_supplied:
+            amount_minor = _financial_minor(
+                driver_budget_raw, "driverBudgetUSD", allow_zero=False
+            )
+        elif existing and (
+            _financial_ad_payment_status(existing) == "not_paid"
+            and str(existing.get("collectionMethod") or "") == "driver"
+        ):
+            # An unrelated edit from an older client may omit the new transient
+            # input. Preserve the already-saved independent budget instead of
+            # collapsing it back to the allocation total. A legacy broken $0
+            # row can still be repaired by supplying allocation rows.
+            existing_budget_minor = _financial_minor(
+                existing.get("amountUSD"), "existing driver ad budget"
+            )
+            amount_minor = (
+                existing_budget_minor if existing_budget_minor > 0 else allocated_minor
+            )
+        else:
+            # Backward compatibility for allocation-only create requests made
+            # by clients predating driverBudgetUSD.
+            amount_minor = allocated_minor
+        if amount_minor <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="driverBudgetUSD must be greater than zero",
+            )
+        if allocated_minor > amount_minor:
+            raise HTTPException(
+                status_code=400,
+                detail="Driver ad allocations cannot exceed the ad budget",
+            )
         base["deliveryPersonId"] = ""
         base["deliveryStatus"] = "Office"
+    elif payment_status == "not_paid" and collection_method == "in_shop" and due_request:
+        # A receipt created as Not Paid + In Shop is a promise to pay, not cash.
+        # Reserve the unpaid portion through dueAllocations, while allowing
+        # already-paid receipt credit to cover the first part of the budget.
+        # Example: $4.63 paid + $0.37 due = a $5.00 ad whose remaining debt is
+        # still $0.37.  Keep mergedPaidAllocations reserved for the historical
+        # Driver mirror; In Shop paid rows live only in receiptAllocations.
+        if _financial_allocations(merged_request, "mergedPaidAllocations"):
+            raise HTTPException(
+                status_code=400,
+                detail="In Shop paid funding must use receiptAllocations",
+            )
+        paid_allocations = _financial_allocations(
+            paid_request, "receiptAllocations"
+        )
+        due_allocations = _financial_allocations(
+            due_request, "dueAllocations", allow_empty=False
+        )
+        linked_id = validate_entity_id(base.get("receiptId") or due_allocations[0]["receiptId"])
+        _financial_validate_paid_receipts(
+            paid_allocations,
+            customer_id=customer_id,
+            locked_receipts=locked_receipts,
+            ad_rows=ad_rows,
+            current_ad_id=current_ad_id,
+        )
+        _financial_validate_shop_due_receipt(
+            due_allocations,
+            linked_receipt_id=linked_id,
+            customer_id=customer_id,
+            locked_receipts=locked_receipts,
+            ad_rows=ad_rows,
+            current_ad_id=current_ad_id,
+        )
+        _financial_validate_combined_capacity(
+            paid_allocations,
+            due_allocations,
+            locked_receipts=locked_receipts,
+            ad_rows=ad_rows,
+            current_ad_id=current_ad_id,
+        )
+        amount_minor = sum(
+            _financial_minor(row["amountUSD"], "shop receipt allocation")
+            for row in [*paid_allocations, *due_allocations]
+        )
+        linked_row = locked_receipts.get(linked_id)
+        linked_data = _financial_row_data(linked_row) if linked_row else {}
+        base["exchangeRate"] = linked_data.get("exchangeRate") or base.get("exchangeRate")
+        base["deliveryPersonId"] = ""
+        base["deliveryStatus"] = "Office"
+        payments = []
+    elif (
+        payment_status == "not_paid"
+        and collection_method == "in_shop"
+        and existing
+        and _financial_ad_payment_status(existing) == "not_paid"
+        and str(existing.get("collectionMethod") or "") == "in_shop"
+        and not _financial_allocations(existing.get("dueAllocations"), "stored dueAllocations")
+        and not str(existing.get("receiptId") or "")
+    ):
+        # Canceling/loss of the linked unpaid receipt releases its due row but
+        # deliberately keeps the original ad debt.  A later ordinary edit must
+        # preserve both that debt and any already-paid receipt portion rather
+        # than rejecting the record or shrinking its amount to the paid rows.
+        if _financial_allocations(merged_request, "mergedPaidAllocations"):
+            raise HTTPException(
+                status_code=400,
+                detail="In Shop paid funding must use receiptAllocations",
+            )
+        paid_allocations = _financial_allocations(
+            paid_request, "receiptAllocations"
+        )
+        _financial_validate_paid_receipts(
+            paid_allocations,
+            customer_id=customer_id,
+            locked_receipts=locked_receipts,
+            ad_rows=ad_rows,
+            current_ad_id=current_ad_id,
+        )
+        amount_minor = _financial_minor(
+            existing.get("amountUSD"), "existing In Shop ad amount"
+        )
+        paid_minor = sum(
+            _financial_minor(row["amountUSD"], "shop receipt allocation")
+            for row in paid_allocations
+        )
+        if paid_minor > amount_minor:
+            raise HTTPException(
+                status_code=400,
+                detail="In Shop paid funding cannot exceed the ad amount",
+            )
+        linked_id = ""
+        base["deliveryPersonId"] = ""
+        base["deliveryStatus"] = "Office"
+        payments = []
     else:
         if any(
             _financial_allocations(value, name)
@@ -5293,6 +8131,21 @@ def _financial_derive_ad(
         ):
             raise HTTPException(status_code=400, detail="This unpaid ad cannot use receipt funding")
         payments, amount_minor = _financial_collection_payments(base.get("collectionPayments"))
+        # Canceling or losing a linked In Shop receipt releases its due row,
+        # but the ad is still real customer debt. A later ordinary edit may
+        # legitimately carry no manual collection rows; never collapse that
+        # saved debt to zero merely because its former receipt link is gone.
+        if (
+            amount_minor == 0
+            and existing
+            and _financial_ad_payment_status(existing) == "not_paid"
+            and str(existing.get("collectionMethod") or "") == "in_shop"
+        ):
+            existing_amount_minor = _financial_minor(
+                existing.get("amountUSD"), "existing In Shop ad amount"
+            )
+            if existing_amount_minor > 0:
+                amount_minor = existing_amount_minor
         linked_id = ""
 
     rate = _financial_rate(base.get("exchangeRate"))
@@ -5320,7 +8173,9 @@ def _financial_derive_ad(
             "dueAllocations": due_allocations,
             "receiptIds": paid_ids,
             "fundingReceiptId": paid_ids[0] if paid_ids else "",
-            "linkedDeliveryReceiptId": linked_id,
+            "linkedDeliveryReceiptId": linked_id
+            if payment_status == "not_paid" and collection_method == "driver"
+            else "",
             "receiptId": linked_id if linked_id else (paid_ids[0] if paid_ids else ""),
             "dueAmountToUseUSD": _financial_usd(due_minor),
             "hasMergedPaidFunds": bool(paid_allocations)
@@ -5354,6 +8209,9 @@ def _financial_apply_refund(
     actor: dict[str, Any], requested: dict[str, Any], existing: dict[str, Any]
 ) -> dict[str, Any]:
     result = dict(existing)
+    payment_status = _financial_ad_payment_status(result)
+    result["paymentStatus"] = payment_status
+    result["isPaid"] = payment_status == "paid"
     refund_type = str(requested.get("refundType") or "None")
     if refund_type not in {"None", "Full", "Partial"}:
         raise HTTPException(status_code=400, detail="Invalid refundType")
@@ -5368,8 +8226,22 @@ def _financial_apply_refund(
 
     current_paid = _financial_allocations(existing.get("receiptAllocations"), "receiptAllocations")
     current_due = _financial_allocations(existing.get("dueAllocations"), "dueAllocations")
-    stored_paid_baseline = existing.get("refundAllocationBaseline")
-    stored_due_baseline = existing.get("refundDueBaseline")
+    existing_refund_type = str(existing.get("refundType") or "None")
+    existing_refund_active = existing_refund_type in {"Full", "Partial"}
+    # Refund baselines are authoritative only while the row is actually in an
+    # active refund lifecycle.  Old/corrupt rows can contain stale or forged
+    # baseline metadata beside refundType=None; trusting it on an "undo" would
+    # replace the current allocations with stale/empty rows and free committed
+    # receipt money for a second spend.
+    stored_paid_baseline = (
+        existing.get("refundAllocationBaseline") if existing_refund_active else None
+    )
+    stored_due_baseline = (
+        existing.get("refundDueBaseline") if existing_refund_active else None
+    )
+    if not existing_refund_active:
+        result.pop("refundBaselinePaymentStatus", None)
+        result.pop("preRefundStatus", None)
     paid_baseline = _financial_allocations(
         stored_paid_baseline if isinstance(stored_paid_baseline, list) else current_paid,
         "refundAllocationBaseline",
@@ -5378,6 +8250,31 @@ def _financial_apply_refund(
         stored_due_baseline if isinstance(stored_due_baseline, list) else current_due,
         "refundDueBaseline",
     )
+    # An ad from before the allocation arrays holds its due usage in the dueAmountToUse*
+    # mirror with no row, so the baseline above comes back EMPTY and the refund released
+    # nothing — the delivery credit stayed locked forever. That is bug #51 on the server,
+    # for exactly the records the fix is meant to serve. Stand the mirror up as the
+    # allocation it represents so the refund has something to give back.
+    if not isinstance(stored_due_baseline, list) and not due_baseline:
+        linked_due_id = _financial_legacy_due_receipt_id(existing)
+        legacy_due_minor = 0
+        if linked_due_id:
+            legacy_due_minor = _financial_minor(
+                existing.get("dueAmountToUseUSD"), "stored due allocation"
+            )
+            if legacy_due_minor == 0 and existing.get("dueAmountToUseLYD"):
+                local_minor = _financial_minor(
+                    existing.get("dueAmountToUseLYD"), "stored due allocation"
+                )
+                rate = _financial_rate(existing.get("exchangeRate"))
+                legacy_due_minor = int(
+                    (Decimal(local_minor) / rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+                )
+        if legacy_due_minor > 0:
+            due_baseline = _financial_allocations(
+                [{"receiptId": linked_due_id, "amountUSD": _financial_usd(legacy_due_minor)}],
+                "refundDueBaseline",
+            )
     if refund_type == "None":
         result["receiptAllocations"] = paid_baseline
         result["dueAllocations"] = due_baseline
@@ -5389,11 +8286,48 @@ def _financial_apply_refund(
         result.pop("spentUSD", None)
         # Undo returns to the status that existed before the refund. Legacy
         # rows did not save it, so Active is the conservative usable default.
-        result["status"] = str(existing.get("preRefundStatus") or "Active")
+        result["status"] = str(
+            existing.get("preRefundStatus")
+            if existing_refund_active and existing.get("preRefundStatus")
+            else existing.get("status") or "Active"
+        )
         result.pop("preRefundStatus", None)
+        if (
+            existing_refund_active
+            and str(existing.get("refundBaselinePaymentStatus") or "") == "paid"
+        ):
+            payment_status = "paid"
+            result["paymentStatus"] = "paid"
+            result["isPaid"] = True
+            result["collectionMethod"] = ""
+            result["collectionPayments"] = []
+            result["paymentMethod"] = ""
+            result["linkedDeliveryReceiptId"] = ""
+        result.pop("refundBaselinePaymentStatus", None)
     else:
-        reduced_paid, remaining = _financial_reduce_allocations(paid_baseline, refund_amount)
-        reduced_due, _ = _financial_reduce_allocations(due_baseline, remaining)
+        is_mixed_shop_debt = (
+            payment_status == "not_paid"
+            and str(result.get("collectionMethod") or "") == "in_shop"
+            and bool(paid_baseline)
+            and bool(due_baseline)
+        )
+        if is_mixed_shop_debt:
+            # Return the still-unpaid promise before returning money the
+            # customer already paid.  For $4.63 paid + $0.37 due, a $0.50
+            # refund must release all $0.37 debt and only $0.13 paid credit.
+            reduced_due, remaining = _financial_reduce_allocations(
+                due_baseline, refund_amount
+            )
+            reduced_paid, _ = _financial_reduce_allocations(
+                paid_baseline, remaining
+            )
+        else:
+            reduced_paid, remaining = _financial_reduce_allocations(
+                paid_baseline, refund_amount
+            )
+            reduced_due, _ = _financial_reduce_allocations(
+                due_baseline, remaining
+            )
         result["receiptAllocations"] = reduced_paid
         result["dueAllocations"] = reduced_due
         result["refundAllocationBaseline"] = paid_baseline
@@ -5401,7 +8335,11 @@ def _financial_apply_refund(
         result["refundType"] = refund_type
         result["refundAmount"] = _financial_usd(refund_amount)
         result["refundStatus"] = sanitize_str(str(requested.get("refundStatus") or "Pending"), 40)
-        result["preRefundStatus"] = str(existing.get("preRefundStatus") or existing.get("status") or "Active")
+        result["preRefundStatus"] = str(
+            existing.get("preRefundStatus")
+            if existing_refund_active and existing.get("preRefundStatus")
+            else existing.get("status") or "Active"
+        )
         result["status"] = "Canceled"
         result["canceledBy"] = str(actor.get("id") or "")
         result["spentUSD"] = _financial_usd(ad_amount - refund_amount)
@@ -5409,14 +8347,277 @@ def _financial_apply_refund(
     due = _financial_allocations(result.get("dueAllocations"), "dueAllocations")
     result["receiptAllocations"] = paid
     result["dueAllocations"] = due
-    if str(result.get("paymentStatus") or "") == "not_paid" and str(result.get("collectionMethod") or "") == "driver":
+    if payment_status == "not_paid" and str(result.get("collectionMethod") or "") == "driver":
         result["mergedPaidAllocations"] = paid
     result["receiptIds"] = [row["receiptId"] for row in paid]
     result["fundingReceiptId"] = paid[0]["receiptId"] if paid else ""
+    if payment_status == "paid":
+        result["receiptId"] = paid[0]["receiptId"] if paid else ""
     result["dueAmountToUseUSD"] = _financial_usd(
         sum(_financial_minor(row["amountUSD"], "due allocation") for row in due)
     )
-    result["hasMergedPaidFunds"] = bool(paid) and str(result.get("paymentStatus")) == "not_paid"
+    # The usage readers fall back to the LYD half whenever the USD half is zero, so a stale
+    # value would re-lock the very credit this refund is returning. Clearing it is safe ONLY
+    # because the baseline above already folded it into a real allocation row — never zero
+    # this without folding first, or an ad's true due usage is erased and the receipt reads
+    # as free while the ad still holds it.
+    result["dueAmountToUseLYD"] = 0.0
+    result["hasMergedPaidFunds"] = bool(paid) and payment_status == "not_paid"
+    return result
+
+
+def _financial_apply_relink(
+    existing: dict[str, Any],
+    requested: dict[str, Any],
+    *,
+    actor_name: str = "",
+    receipt_labels: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Move an ad's committed funding onto a different receipt WITHOUT touching
+    its money identity.
+
+    A relink is the second — and only other — terminal-ad-capable primitive
+    beside a refund. It re-points the ad's funding allocations at the receipt(s)
+    the request supplies while preserving ``amountUSD``, ``spentUSD``,
+    ``status``, ``refundType`` and payment status exactly as stored. The OLD
+    receipt is freed purely by omission — usage is DERIVED from the allocation
+    arrays, so dropping a receipt from them returns its money. Money is
+    conserved: each funding pool's total is unchanged, only WHICH receipt backs
+    it may move. This is what makes a relink safe on a Stopped/Canceled/
+    Completed/Lost ad where every other edit is refused: it can never change how
+    much the ad spent, only where that spend is backed. walletTransactions and
+    every stop/refund baseline are left untouched (allocations are derived
+    state — there is no reversal ledger to write).
+
+    SETTLE variant: the ONE payment transition a relink may carry. When the
+    customer pays a TERMINAL ad's outstanding debt, the request may flip
+    paymentStatus not_paid -> paid TOGETHER WITH moving the committed funding
+    from the due pool onto paid receipt(s). Conservation then holds across the
+    pools as one sum (old paid + old due == new paid, to the cent) and nothing
+    may remain in the due pool — a settled ad is an ordinary paid ad. The old
+    unpaid receipt is freed by omission exactly like a plain relink, and
+    amount/spend/status stay untouched. The reverse (paid -> not_paid) and a
+    settle on a non-terminal or refund-active ad remain forbidden.
+    """
+    result = dict(existing)
+    payment_status = _financial_ad_payment_status(existing)
+    collection_method = str(existing.get("collectionMethod") or "")
+
+    # A relink may move receipts and NOTHING else. Reject any attempt to ride a
+    # money/lifecycle change in on the same request (only the funding receipt
+    # mapping is allowed to differ from the stored row).
+    for field in (
+        "amountUSD",
+        "amountLocal",
+        "spentUSD",
+        "spentLocal",
+        "initialAmountUSD",
+        "refundType",
+        "refundAmount",
+        "refundStatus",
+        "topUps",
+        "driverBudgetUSD",
+    ):
+        if field in requested:
+            raise HTTPException(
+                status_code=400,
+                detail="A receipt relink cannot change the ad amount, spend, status or refund",
+            )
+    requested_status = requested.get("status")
+    if requested_status is not None and str(requested_status) != str(
+        existing.get("status") or ""
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="A receipt relink cannot change the ad amount, spend, status or refund",
+        )
+    requested_payment = requested.get("paymentStatus")
+    new_payment_status = payment_status
+    if requested_payment is not None:
+        new_payment_status = _financial_ad_payment_status(
+            {"paymentStatus": requested_payment}
+        )
+    # SETTLE gate: the only payment transition a relink may carry is
+    # not_paid -> paid, and only on a terminal-STATUS ad with no active refund
+    # (a refund's frozen baselines must never sit beside a flipped payment
+    # status, and a live unpaid ad settles through the ordinary edit path
+    # which funds the FULL budget). Everything else keeps the rejection.
+    is_settle = new_payment_status != payment_status
+    if is_settle and (
+        payment_status != "not_paid"
+        or new_payment_status != "paid"
+        or str(existing.get("status") or "")
+        not in {"Stopped", "Canceled", "Completed", "Lost"}
+        or str(existing.get("refundType") or "None") not in {"", "None"}
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="A receipt relink cannot change the ad payment status",
+        )
+
+    old_paid = _financial_allocations(existing.get("receiptAllocations"), "receiptAllocations")
+    old_due = _financial_allocations(existing.get("dueAllocations"), "dueAllocations")
+    old_paid_minor = sum(
+        _financial_minor(row["amountUSD"], "receiptAllocations") for row in old_paid
+    )
+    old_due_minor = sum(
+        _financial_minor(row["amountUSD"], "dueAllocations") for row in old_due
+    )
+
+    new_paid = _financial_allocations(requested.get("receiptAllocations"), "receiptAllocations")
+    new_due = _financial_allocations(requested.get("dueAllocations"), "dueAllocations")
+    new_paid_minor = sum(
+        _financial_minor(row["amountUSD"], "receiptAllocations") for row in new_paid
+    )
+    new_due_minor = sum(
+        _financial_minor(row["amountUSD"], "dueAllocations") for row in new_due
+    )
+
+    # Money is conserved. A plain relink preserves EACH pool's committed total
+    # to the cent; a settle moves the committed total ACROSS the pools (due ->
+    # paid) while conserving their combined sum to the cent. Either way the
+    # old receipt is freed by omission and the new one takes the exact same
+    # amount — never more, never less.
+    if is_settle:
+        if new_due:
+            raise HTTPException(
+                status_code=400,
+                detail="A settled ad must fund its whole committed amount from paid receipts",
+            )
+        if new_paid_minor != old_paid_minor + old_due_minor:
+            raise HTTPException(
+                status_code=400,
+                detail="A receipt relink must preserve the ad's committed amount",
+            )
+    elif new_paid_minor != old_paid_minor or new_due_minor != old_due_minor:
+        raise HTTPException(
+            status_code=400,
+            detail="A receipt relink must preserve the ad's committed amount",
+        )
+    if not new_paid and not new_due:
+        raise HTTPException(
+            status_code=400,
+            detail="A receipt relink must fund the ad from a receipt",
+        )
+
+    paid_ids = [str(row["receiptId"]) for row in new_paid]
+    due_ids = [str(row["receiptId"]) for row in new_due]
+    linked_id = due_ids[0] if due_ids else ""
+
+    if is_settle:
+        # The debt is paid: the row becomes an ordinary paid ad. Collection
+        # bookkeeping belongs to unpaid ads only — blank it exactly like
+        # _financial_derive_ad and the refund-undo-to-paid path do.
+        payment_status = "paid"
+        collection_method = ""
+        result["collectionMethod"] = ""
+        result["collectionPayments"] = []
+        result["paymentMethod"] = ""
+
+    result["receiptAllocations"] = new_paid
+    result["dueAllocations"] = new_due
+    result["receiptIds"] = paid_ids
+    result["fundingReceiptId"] = paid_ids[0] if paid_ids else ""
+    result["dueAmountToUseUSD"] = _financial_usd(new_due_minor)
+    # The moved USD rows are authoritative now; a leftover LYD mirror would let
+    # the legacy due reader re-lock the receipt the relink just released.
+    result["dueAmountToUseLYD"] = 0.0
+    if payment_status == "not_paid" and collection_method == "driver":
+        result["mergedPaidAllocations"] = new_paid
+        result["hasMergedPaidFunds"] = bool(new_paid)
+        result["linkedDeliveryReceiptId"] = linked_id or str(
+            existing.get("linkedDeliveryReceiptId") or ""
+        )
+        result["receiptId"] = result["linkedDeliveryReceiptId"] or (
+            paid_ids[0] if paid_ids else ""
+        )
+    else:
+        result["mergedPaidAllocations"] = []
+        result["hasMergedPaidFunds"] = False
+        result["linkedDeliveryReceiptId"] = ""
+        result["receiptId"] = linked_id if linked_id else (paid_ids[0] if paid_ids else "")
+    result["isPaid"] = payment_status == "paid"
+    result["paymentStatus"] = payment_status
+
+    # Retarget historical baselines at the receipt that now backs the money.
+    # The stop/refund baselines still name the VACATED receipt, and
+    # _financial_receipt_ids counts baselines as live links — so the freed
+    # receipt could never be deleted ("linked to ad funding") even though its
+    # allocations were fully released. Amounts are left untouched; only the
+    # receiptId strings move, and only when the mapping is unambiguous
+    # (exactly one newly-introduced receipt). Consumers stay consistent:
+    # refunds snapshot CURRENT allocations, and a terminal ad can never be
+    # re-stopped, so no path can resurrect usage against the old receipt.
+    old_ids = {
+        str(row.get("receiptId") or "")
+        for field in ("receiptAllocations", "dueAllocations", "mergedPaidAllocations")
+        for row in (existing.get(field) or [])
+        if isinstance(row, dict) and row.get("receiptId")
+    }
+    new_ids = set(paid_ids) | set(due_ids)
+    vacated = {rid for rid in old_ids if rid and rid not in new_ids}
+    introduced = sorted(rid for rid in new_ids if rid and rid not in old_ids)
+
+    # Record the move in the ad's edit history (the ordinary edit path appends
+    # client-side; relink/settle bypass it, which left these money moves
+    # invisible in the history viewer). Same entry shape the client writes:
+    # {editedAt, editedBy, changes:[{field, from, to}]}.
+    _labels = receipt_labels or {}
+
+    def _receipt_label(rid: str) -> str:
+        return str(_labels.get(rid) or rid)
+
+    _history_changes: list[dict[str, str]] = []
+    if vacated or introduced:
+        _history_changes.append({
+            "field": "Funding Receipt",
+            "from": ", ".join(sorted(_receipt_label(r) for r in vacated)) or "—",
+            "to": ", ".join(sorted(_receipt_label(r) for r in introduced)) or "—",
+        })
+    if is_settle:
+        _history_changes.append({"field": "Payment Status", "from": "Not Paid", "to": "Paid"})
+    if _history_changes:
+        _history = list(result.get("editHistory")) if isinstance(result.get("editHistory"), list) else []
+        _history.append({
+            "editedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "editedBy": actor_name or "System",
+            "changes": _history_changes,
+        })
+        result["editHistory"] = _history
+        result["editCount"] = len(_history)
+
+    if vacated and len(introduced) == 1:
+        replacement = introduced[0]
+
+        def _retarget_rows(rows: Any) -> Any:
+            if not isinstance(rows, list):
+                return rows
+            return [
+                (
+                    {**row, "receiptId": replacement}
+                    if isinstance(row, dict) and str(row.get("receiptId") or "") in vacated
+                    else row
+                )
+                for row in rows
+            ]
+
+        for baseline_name in ("refundAllocationBaseline", "refundDueBaseline"):
+            if isinstance(result.get(baseline_name), list):
+                result[baseline_name] = _retarget_rows(result[baseline_name])
+            elif isinstance(result.get(baseline_name), dict):
+                result[baseline_name] = {
+                    key: _retarget_rows(value)
+                    for key, value in result[baseline_name].items()
+                }
+        stop_baseline = result.get("stopAllocationBaseline")
+        if isinstance(stop_baseline, dict):
+            next_baseline = dict(stop_baseline)
+            for key, value in stop_baseline.items():
+                if isinstance(value, list):
+                    next_baseline[key] = _retarget_rows(value)
+            if str(next_baseline.get("dueLegacyReceiptId") or "") in vacated:
+                next_baseline["dueLegacyReceiptId"] = replacement
+            result["stopAllocationBaseline"] = next_baseline
     return result
 
 
@@ -5437,17 +8638,47 @@ def _financial_validate_ad_plan(
         current_ad_id=current_ad_id,
     )
     due = _financial_allocations(ad.get("dueAllocations"), "dueAllocations")
-    linked = str(ad.get("linkedDeliveryReceiptId") or "")
-    if due:
-        _financial_validate_due_receipt(
-            due,
-            linked_receipt_id=validate_entity_id(linked),
-            customer_id=customer_id,
-            locked_receipts=locked_receipts,
-            ad_rows=ad_rows,
-            current_ad_id=current_ad_id,
-            require_pending=False,
+    collection_method = str(ad.get("collectionMethod") or "")
+    linked = str(
+        (
+            ad.get("linkedDeliveryReceiptId")
+            if collection_method == "driver"
+            else ad.get("receiptId")
         )
+        or ""
+    )
+    if due:
+        if collection_method == "driver":
+            _financial_validate_due_receipt(
+                due,
+                linked_receipt_id=validate_entity_id(linked),
+                customer_id=customer_id,
+                locked_receipts=locked_receipts,
+                ad_rows=ad_rows,
+                current_ad_id=current_ad_id,
+                require_pending=False,
+            )
+        elif collection_method == "in_shop":
+            _financial_validate_shop_due_receipt(
+                due,
+                linked_receipt_id=validate_entity_id(linked),
+                customer_id=customer_id,
+                locked_receipts=locked_receipts,
+                ad_rows=ad_rows,
+                current_ad_id=current_ad_id,
+                require_unpaid=False,
+            )
+        else:
+            raise HTTPException(status_code=400, detail="This ad cannot use due receipt funding")
+    # Cap the ad's TOTAL draw per receipt across both pools (refund-undo / stop rebuild
+    # allocations, so this re-take must fit what the receipt has left).
+    _financial_validate_combined_capacity(
+        paid,
+        due,
+        locked_receipts=locked_receipts,
+        ad_rows=ad_rows,
+        current_ad_id=current_ad_id,
+    )
 
 
 def _ad_mutation_atomic(
@@ -5481,6 +8712,12 @@ def _ad_mutation_atomic(
 
             initial_row = _clothes_lock_row(conn, "ads", ad_id, postgres=False)
             initial_data = _financial_row_data(initial_row) if initial_row else {}
+            # Some legacy data_json payloads lack creator fields even though
+            # the authoritative entities.created_by column is populated. Feed
+            # that DB ownership into the mutation merge so an ordinary edit
+            # cannot discard or replace it with the editor's identity.
+            if initial_row and initial_row.get("created_by") is not None:
+                initial_data["createdBy"] = str(initial_row["created_by"])
             if body.action == "create":
                 if not user_has_permission(actor, "ads", "add"):
                     raise HTTPException(status_code=403, detail="Forbidden")
@@ -5509,6 +8746,8 @@ def _ad_mutation_atomic(
                 if int(ad_row["last_modified"]) != int(body.expectedLastModified):
                     raise HTTPException(status_code=409, detail="Conflict: ad has changed")
                 existing = _financial_row_data(ad_row)
+                if ad_row.get("created_by") is not None:
+                    existing["createdBy"] = str(ad_row["created_by"])
                 creator = ad_row.get("created_by") or existing.get("creatorId")
                 if not user_has_permission(
                     actor, "ads", "edit", record_creator_id=str(creator or "")
@@ -5518,16 +8757,57 @@ def _ad_mutation_atomic(
                     raise HTTPException(status_code=409, detail="Conflict: ad funding has changed")
 
             is_refund = body.action == "update" and "refundType" in clean_request
-            if existing is not None and not is_refund and (
+            # A receipt relink is the only other terminal-ad-capable edit. It
+            # moves the ad's committed funding onto a different receipt while
+            # preserving amount/spend/status (its SETTLE variant may also flip
+            # a terminal debt not_paid -> paid while moving that committed
+            # total due -> paid, conserved — see _financial_apply_relink), so
+            # — like a refund — it is exempt from the terminal block below.
+            # The two are mutually exclusive: a request that asks for both is
+            # rejected outright rather than silently doing one of them.
+            relink_requested = (
+                body.action == "update" and clean_request.get("relinkReceiptOnly") is True
+            )
+            if relink_requested and is_refund:
+                raise HTTPException(
+                    status_code=400, detail="A receipt relink cannot also refund the ad"
+                )
+            is_relink = relink_requested and not is_refund
+            if existing is not None and not is_refund and not is_relink and (
                 str(existing.get("status") or "") in {"Stopped", "Canceled", "Completed", "Lost"}
                 or (existing.get("refundType") and str(existing.get("refundType")) != "None")
             ):
                 raise HTTPException(status_code=409, detail="A terminal or refunded ad cannot be edited")
             ad_rows = _financial_active_rows(conn, "ads")
-            is_topup = body.action == "update" and "topUps" in clean_request and not is_refund
+            is_topup = body.action == "update" and "topUps" in clean_request and not is_refund and not is_relink
             if is_refund:
                 assert existing is not None
                 saved_data = _financial_apply_refund(actor, clean_request, existing)
+                _financial_validate_ad_plan(
+                    saved_data,
+                    locked_receipts=locked_receipts,
+                    ad_rows=ad_rows,
+                    current_ad_id=ad_id,
+                )
+            elif is_relink:
+                assert existing is not None
+                _relink_labels = {}
+                for _rid, _rrow in (locked_receipts or {}).items():
+                    if not _rrow:
+                        continue
+                    _rdata = _financial_row_data(_rrow)
+                    _relink_labels[str(_rid)] = str(
+                        _rdata.get("serialNumber")
+                        or _rdata.get("finalReceiptNo")
+                        or _rdata.get("tempReceiptNo")
+                        or _rid
+                    )
+                saved_data = _financial_apply_relink(
+                    existing,
+                    clean_request,
+                    actor_name=sanitize_str(str(actor.get("name") or ""), 120),
+                    receipt_labels=_relink_labels,
+                )
                 _financial_validate_ad_plan(
                     saved_data,
                     locked_receipts=locked_receipts,
@@ -5538,7 +8818,7 @@ def _ad_mutation_atomic(
                 prepared_request = dict(clean_request)
                 if is_topup:
                     assert existing is not None
-                    if str(existing.get("paymentStatus") or "") != "paid" or str(existing.get("status") or "") in {
+                    if _financial_ad_payment_status(existing) != "paid" or str(existing.get("status") or "") in {
                         "Canceled", "Completed", "Lost", "Stopped"
                     } or (existing.get("refundType") and existing.get("refundType") != "None"):
                         raise HTTPException(status_code=409, detail="Only active paid ads can be topped up")
@@ -5590,6 +8870,11 @@ def _ad_mutation_atomic(
                 )
                 if is_topup:
                     saved_data["initialAmountUSD"] = _financial_usd(base_minor)
+
+            # A customer confirmation belongs to one exact remaining amount.
+            # Preserve it across unrelated edits, but never carry it across a
+            # changed budget/spend (including refund-derived spend changes).
+            _financial_clear_changed_remaining_confirmation(existing, saved_data)
 
             # The customer itself must be active; funding receipts were already
             # locked in deterministic order above.
@@ -5648,23 +8933,35 @@ def _financial_stop_baseline(ad: dict[str, Any]) -> dict[str, Any]:
         due = _financial_allocations(stored.get("due"), "stop baseline due")
         merged = _financial_allocations(stored.get("merged"), "stop baseline merged")
         legacy = _financial_minor(stored.get("dueLegacy"), "stop baseline legacy due")
+        legacy_receipt_id = str(
+            stored.get("dueLegacyReceiptId")
+            or _financial_legacy_due_receipt_id(ad)
+            or ""
+        )
         return {
             "receipt": receipt,
             "due": due,
             "merged": merged,
             "dueLegacy": _financial_usd(legacy),
+            "dueLegacyReceiptId": legacy_receipt_id if legacy > 0 else "",
+            "paymentStatus": str(stored.get("paymentStatus") or ""),
         }
     receipt = _financial_allocations(ad.get("receiptAllocations"), "receiptAllocations")
     due = _financial_allocations(ad.get("dueAllocations"), "dueAllocations")
     merged = _financial_allocations(ad.get("mergedPaidAllocations"), "mergedPaidAllocations")
     legacy = 0
+    legacy_receipt_id = ""
     if not due:
-        legacy = _financial_minor(ad.get("dueAmountToUseUSD"), "legacy due allocation")
+        legacy_receipt_id = _financial_legacy_due_receipt_id(ad)
+        if legacy_receipt_id:
+            legacy = _financial_ad_due_usage(ad, legacy_receipt_id)
     return {
         "receipt": receipt,
         "due": due,
         "merged": merged,
         "dueLegacy": _financial_usd(legacy),
+        "dueLegacyReceiptId": legacy_receipt_id if legacy > 0 else "",
+        "paymentStatus": _financial_ad_payment_status(ad),
     }
 
 
@@ -5676,7 +8973,11 @@ def _financial_apply_stop(ad: dict[str, Any], spent_minor: int) -> dict[str, Any
     receipt_map = _financial_allocation_map(baseline.get("receipt"))
     due_map = _financial_allocation_map(baseline.get("due"))
     legacy_minor = _financial_minor(baseline.get("dueLegacy"), "stop baseline legacy due")
-    linked_id = str(ad.get("linkedDeliveryReceiptId") or "")
+    linked_id = str(
+        baseline.get("dueLegacyReceiptId")
+        or _financial_legacy_due_receipt_id(ad)
+        or ""
+    )
     entries: list[tuple[str, str, int]] = [
         *(('receipt', receipt_id, amount) for receipt_id, amount in sorted(receipt_map.items())),
         *(('due', receipt_id, amount) for receipt_id, amount in sorted(due_map.items())),
@@ -5686,20 +8987,60 @@ def _financial_apply_stop(ad: dict[str, Any], spent_minor: int) -> dict[str, Any
     pool_total = sum(entry[2] for entry in entries)
     if pool_total > 0 and spent_minor > pool_total:
         raise HTTPException(status_code=409, detail="Spent amount exceeds the ad's funding baseline")
-    plan = _financial_proportional_plan(entries, spent_minor)
+    is_mixed_shop_debt = (
+        _financial_ad_payment_status(ad) == "not_paid"
+        and str(ad.get("collectionMethod") or "") == "in_shop"
+        and bool(receipt_map)
+        and bool(due_map or (legacy_minor and linked_id))
+    )
+    if is_mixed_shop_debt:
+        # Spend already-paid money first.  Only the part Facebook spent above
+        # that paid portion remains promised on the unpaid receipt.  A
+        # proportional split would unnecessarily keep customer debt locked.
+        plan: dict[tuple[str, str], int] = {}
+        remaining_spent = spent_minor
+        for kind, receipt_id, capacity in entries:
+            if kind != "receipt":
+                continue
+            used = min(capacity, remaining_spent)
+            plan[(kind, receipt_id)] = used
+            remaining_spent -= used
+        for kind, receipt_id, capacity in entries:
+            if kind == "receipt":
+                continue
+            used = min(capacity, remaining_spent)
+            plan[(kind, receipt_id)] = used
+            remaining_spent -= used
+        if remaining_spent > 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Spent amount exceeds the ad's funding baseline",
+            )
+    else:
+        plan = _financial_proportional_plan(entries, spent_minor)
     receipt_plan = [
         {"receiptId": receipt_id, "amountUSD": _financial_usd(plan[("receipt", receipt_id)])}
         for receipt_id in sorted(receipt_map)
+        if plan[("receipt", receipt_id)] > 0
     ]
     due_plan = [
         {"receiptId": receipt_id, "amountUSD": _financial_usd(plan[("due", receipt_id)])}
         for receipt_id in sorted(due_map)
+        if plan[("due", receipt_id)] > 0
     ]
     result = dict(ad)
+    baseline_payment = str(baseline.get("paymentStatus") or "")
+    payment_status = (
+        baseline_payment
+        if baseline_payment in {"paid", "not_paid", "wont_pay"}
+        else _financial_ad_payment_status(result)
+    )
+    result["paymentStatus"] = payment_status
+    result["isPaid"] = payment_status == "paid"
     result["stopAllocationBaseline"] = baseline
     result["receiptAllocations"] = receipt_plan
     result["dueAllocations"] = due_plan
-    if str(result.get("paymentStatus") or "") == "not_paid" and str(result.get("collectionMethod") or "") == "driver":
+    if payment_status == "not_paid" and str(result.get("collectionMethod") or "") == "driver":
         result["mergedPaidAllocations"] = [dict(row) for row in receipt_plan]
     else:
         result["mergedPaidAllocations"] = []
@@ -5707,15 +9048,38 @@ def _financial_apply_stop(ad: dict[str, Any], spent_minor: int) -> dict[str, Any
     if legacy_minor and linked_id:
         due_total += plan[("legacyDue", linked_id)]
     result["dueAmountToUseUSD"] = _financial_usd(due_total)
+    # Any LYD-only mirror has now been folded into the exact USD baseline.
+    # Leaving it behind would make a zero-spend re-stop fall back to the stale
+    # original LYD debt and lock the receipt again.
+    result["dueAmountToUseLYD"] = 0.0
     result["receiptIds"] = [row["receiptId"] for row in receipt_plan]
     result["fundingReceiptId"] = receipt_plan[0]["receiptId"] if receipt_plan else ""
-    result["hasMergedPaidFunds"] = bool(receipt_plan) and str(result.get("paymentStatus")) == "not_paid"
+    result["hasMergedPaidFunds"] = bool(receipt_plan) and payment_status == "not_paid"
+    if payment_status == "paid":
+        result["collectionMethod"] = ""
+        result["collectionPayments"] = []
+        result["paymentMethod"] = ""
+        result["linkedDeliveryReceiptId"] = ""
+        result["receiptId"] = receipt_plan[0]["receiptId"] if receipt_plan else ""
     result["status"] = "Stopped"
     result["spentUSD"] = _financial_usd(spent_minor)
     if not result.get("stoppedAt"):
         result["stoppedAt"] = _iso_utc()
     result["lastUpdated"] = _iso_utc()
     return result
+
+
+def _financial_ad_reconciliation_ready(ad: dict[str, Any]) -> bool:
+    """True from the Libyan calendar day after the stored ad end date."""
+    raw = str(ad.get("endDate") or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:.*)?", raw):
+        return False
+    try:
+        end_day = datetime.strptime(raw[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    tripoli_today = (datetime.now(timezone.utc) + timedelta(hours=2)).date()
+    return tripoli_today > end_day
 
 
 def _ad_stop_atomic(
@@ -5726,13 +9090,16 @@ def _ad_stop_atomic(
     if not user_has_permission(actor, "ads", "stopAd"):
         raise HTTPException(status_code=403, detail="Forbidden")
     idem = sanitize_str(body.idempotencyKey, 120)
-    request_hash = _financial_request_hash(
-        {
-            "adId": ad_id,
-            "spentMinorUSD": body.spentMinorUSD,
-            "expectedLastModified": body.expectedLastModified,
-        }
-    )
+    request_identity = {
+        "adId": ad_id,
+        "spentMinorUSD": body.spentMinorUSD,
+        "expectedLastModified": body.expectedLastModified,
+    }
+    # Keep false/omitted requests compatible with stop markers written by the
+    # previous release; only the new affirmative confirmation changes identity.
+    if body.customerInformed:
+        request_identity["customerInformed"] = True
+    request_hash = _financial_request_hash(request_identity)
     postgres = str(get_engine().dialect.name or "") == "postgresql"
     guard = nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK
     with guard:
@@ -5760,11 +9127,41 @@ def _ad_stop_atomic(
             ad = _financial_row_data(ad_row)
             if _financial_receipt_ids(ad) - set(locked_receipts):
                 raise HTTPException(status_code=409, detail="Conflict: ad funding has changed")
-            if str(ad.get("status") or "") in {"Canceled", "Completed", "Lost"} or (
+            status = str(ad.get("status") or "")
+            completed_too_early = status == "Completed" and not _financial_ad_reconciliation_ready(ad)
+            if status in {"Canceled", "Lost"} or completed_too_early or (
                 ad.get("refundType") and str(ad.get("refundType")) != "None"
             ):
                 raise HTTPException(status_code=409, detail="A terminal or refunded ad cannot be stopped")
             plan = _financial_apply_stop(ad, int(body.spentMinorUSD))
+            amount_minor = _financial_minor(plan.get("amountUSD"), "ad amount")
+            new_remaining_minor = max(amount_minor - int(body.spentMinorUSD), 0)
+            confirmed_remaining_minor = _financial_confirmed_remaining_minor(ad)
+            existing_confirmation_applies = (
+                new_remaining_minor > 0
+                and confirmed_remaining_minor is not None
+                and confirmed_remaining_minor == new_remaining_minor
+            )
+            fresh_confirmation = (
+                body.customerInformed is True and new_remaining_minor > 0
+            )
+            informed = existing_confirmation_applies or fresh_confirmation
+            plan["remainingCustomerInformed"] = informed
+            if existing_confirmation_applies:
+                plan["remainingCustomerInformedAt"] = (
+                    ad.get("remainingCustomerInformedAt") or _iso_utc()
+                )
+                plan["remainingCustomerInformedBy"] = (
+                    ad.get("remainingCustomerInformedBy") or actor_id
+                )
+            elif fresh_confirmation:
+                # The remainder changed, so this is a new confirmation. Do not
+                # reuse the timestamp/person from the amount confirmed before.
+                plan["remainingCustomerInformedAt"] = _iso_utc()
+                plan["remainingCustomerInformedBy"] = actor_id
+            else:
+                plan.pop("remainingCustomerInformedAt", None)
+                plan.pop("remainingCustomerInformedBy", None)
             _financial_validate_ad_plan(
                 plan,
                 locked_receipts=locked_receipts,
@@ -5812,15 +9209,26 @@ def _financial_release_canceled_due(
         if not ad_row or bool(ad_row["deleted"]):
             continue
         ad = _financial_row_data(ad_row)
+        is_shop_link = (
+            _financial_ad_payment_status(ad) == "not_paid"
+            and str(ad.get("collectionMethod") or "") == "in_shop"
+            and str(ad.get("receiptId") or "") == receipt_id
+        )
+        legacy_due_receipt_id = _financial_legacy_due_receipt_id(ad)
         due = [
             dict(entry)
             for entry in (ad.get("dueAllocations") or [])
             if isinstance(entry, dict) and str(entry.get("receiptId") or "") != receipt_id
         ]
         ad["dueAllocations"] = due
-        if str(ad.get("linkedDeliveryReceiptId") or "") == receipt_id:
+        # Zero the mirror for every identity the due reader recognizes —
+        # including the oldest driver rows linked only via receiptId —
+        # so a canceled receipt never keeps backing an ad budget.
+        if legacy_due_receipt_id == receipt_id or is_shop_link:
             ad["dueAmountToUseUSD"] = 0.0
             ad["dueAmountToUseLYD"] = 0.0
+        if is_shop_link:
+            ad["receiptId"] = ""
         baseline = ad.get("stopAllocationBaseline")
         if isinstance(baseline, dict):
             next_baseline = dict(baseline)
@@ -5829,8 +9237,14 @@ def _financial_release_canceled_due(
                 for entry in (baseline.get("due") or [])
                 if isinstance(entry, dict) and str(entry.get("receiptId") or "") != receipt_id
             ]
-            if str(ad.get("linkedDeliveryReceiptId") or "") == receipt_id:
+            baseline_legacy_receipt_id = str(
+                baseline.get("dueLegacyReceiptId")
+                or legacy_due_receipt_id
+                or ""
+            )
+            if baseline_legacy_receipt_id == receipt_id:
                 next_baseline["dueLegacy"] = 0.0
+                next_baseline["dueLegacyReceiptId"] = ""
             ad["stopAllocationBaseline"] = next_baseline
         if isinstance(ad.get("refundDueBaseline"), list):
             ad["refundDueBaseline"] = [
@@ -5842,26 +9256,626 @@ def _financial_release_canceled_due(
     return saved
 
 
+def _financial_rows_from_allocation_map(values: dict[str, int]) -> list[dict[str, Any]]:
+    """Return deterministic, exact-cent allocation rows from a minor-unit map."""
+    return [
+        {"receiptId": receipt_id, "amountUSD": _financial_usd(amount)}
+        for receipt_id, amount in sorted(values.items())
+        if amount > 0
+    ]
+
+
+def _financial_ad_effective_amount(ad: dict[str, Any]) -> int:
+    """Amount that still needs funding after stop/refund reconciliation."""
+    value = ad.get("spentUSD") if ad.get("spentUSD") is not None else ad.get("amountUSD")
+    return _financial_minor(value, "ad settlement amount")
+
+
+def _financial_reclassify_ad_for_paid_receipt(
+    ad: dict[str, Any], receipt_id: str, *, actor_id: str
+) -> dict[str, Any] | None:
+    """Move one receipt's due promise into paid funding without changing value.
+
+    Older ads can store explicit due money in a legacy dueAmount mirror instead
+    of an allocation row. Capacity is checked for the complete batch before
+    any row is written. A receipt reference with zero due remains provenance
+    only and never mints an allocation.
+    """
+    payment_status = _financial_ad_payment_status(ad)
+    collection_method = str(ad.get("collectionMethod") or "")
+    is_driver_link = (
+        payment_status == "not_paid"
+        and collection_method == "driver"
+        and str(ad.get("linkedDeliveryReceiptId") or ad.get("receiptId") or "")
+        == receipt_id
+    )
+    is_shop_link = (
+        payment_status == "not_paid"
+        and collection_method == "in_shop"
+        and str(ad.get("receiptId") or "") == receipt_id
+    )
+
+    paid_map = _financial_allocation_map(ad.get("receiptAllocations"))
+    due_map = _financial_allocation_map(ad.get("dueAllocations"))
+    moved_minor = due_map.pop(receipt_id, 0)
+    if moved_minor == 0 and (is_driver_link or is_shop_link):
+        moved_minor = _financial_ad_due_usage(ad, receipt_id)
+    # The direct mirror fallback likewise only speaks for rowless ads: with
+    # due rows surviving for other receipts, the scalar is their sum and
+    # converting it would mint the same money a second time.
+    if moved_minor == 0 and is_shop_link and not due_map:
+        moved_minor = _financial_minor(
+            ad.get("dueAmountToUseUSD"), "stored legacy shop due allocation"
+        )
+        if moved_minor == 0 and ad.get("dueAmountToUseLYD"):
+            local_minor = _financial_minor(
+                ad.get("dueAmountToUseLYD"), "stored legacy shop due allocation"
+            )
+            moved_minor = int(
+                (Decimal(local_minor) / _financial_rate(ad.get("exchangeRate"))).quantize(
+                    Decimal("1"), rounding=ROUND_HALF_UP
+                )
+            )
+
+    stop_baseline = ad.get("stopAllocationBaseline")
+    stop_paid: dict[str, int] = {}
+    stop_due: dict[str, int] = {}
+    stop_moved = 0
+    stop_legacy = 0
+    if isinstance(stop_baseline, dict):
+        stop_paid = _financial_allocation_map(stop_baseline.get("receipt"))
+        stop_due = _financial_allocation_map(stop_baseline.get("due"))
+        stop_moved = stop_due.pop(receipt_id, 0)
+        stop_legacy_receipt_id = str(
+            stop_baseline.get("dueLegacyReceiptId")
+            or _financial_legacy_due_receipt_id(ad)
+            or ""
+        )
+        if stop_legacy_receipt_id == receipt_id and stop_moved == 0:
+            stop_legacy = _financial_minor(
+                stop_baseline.get("dueLegacy"), "stop baseline legacy due"
+            )
+
+    refund_paid = _financial_allocation_map(ad.get("refundAllocationBaseline"))
+    refund_due = _financial_allocation_map(ad.get("refundDueBaseline"))
+    refund_moved = refund_due.pop(receipt_id, 0)
+    baseline_changed = (stop_moved + stop_legacy + refund_moved) > 0
+    if moved_minor <= 0 and not baseline_changed:
+        return None
+
+    result = dict(ad)
+    fully_funded = False
+    if moved_minor > 0:
+        # A delivery/shop link is provenance, not money by itself. Only an
+        # explicit due allocation (or legacy mirror) can become paid funding.
+        next_paid = dict(paid_map)
+        next_paid[receipt_id] = next_paid.get(receipt_id, 0) + moved_minor
+        total_after = sum(next_paid.values()) + sum(due_map.values())
+        target_minor = _financial_ad_effective_amount(ad)
+        if total_after > target_minor:
+            raise HTTPException(
+                status_code=409,
+                detail="Linked ad funding exceeds its authoritative amount",
+            )
+
+        result["receiptAllocations"] = _financial_rows_from_allocation_map(next_paid)
+        result["dueAllocations"] = _financial_rows_from_allocation_map(due_map)
+        result["dueAmountToUseUSD"] = _financial_usd(sum(due_map.values()))
+        result["dueAmountToUseLYD"] = 0.0
+        fully_funded = total_after == target_minor and not due_map
+        if fully_funded:
+            result["paymentStatus"] = "paid"
+            result["isPaid"] = True
+            result["collectionMethod"] = ""
+            result["collectionPayments"] = []
+            result["paymentMethod"] = ""
+            result["linkedDeliveryReceiptId"] = ""
+            result["mergedPaidAllocations"] = []
+            result["hasMergedPaidFunds"] = False
+        else:
+            result["paymentStatus"] = "not_paid"
+            result["isPaid"] = False
+            result["mergedPaidAllocations"] = (
+                [dict(row) for row in result["receiptAllocations"]]
+                if collection_method == "driver"
+                else []
+            )
+            result["hasMergedPaidFunds"] = (
+                bool(result["receiptAllocations"])
+                if collection_method == "driver"
+                else False
+            )
+            if collection_method == "in_shop" and not due_map:
+                result["receiptId"] = ""
+
+        paid_ids = [str(row["receiptId"]) for row in result["receiptAllocations"]]
+        result["receiptIds"] = paid_ids
+        result["fundingReceiptId"] = paid_ids[0] if paid_ids else ""
+        if fully_funded:
+            result["receiptId"] = paid_ids[0] if paid_ids else ""
+
+    # Frozen reconciliation/refund baselines move even if the live allocation
+    # is currently zero (stopped-at-zero or fully refunded). Otherwise a later
+    # re-stop/refund undo would resurrect unpaid debt against a paid receipt.
+    if isinstance(stop_baseline, dict) and (stop_moved or stop_legacy):
+        stop_paid[receipt_id] = (
+            stop_paid.get(receipt_id, 0) + stop_moved + stop_legacy
+        )
+        next_baseline = dict(stop_baseline)
+        next_baseline["receipt"] = _financial_rows_from_allocation_map(stop_paid)
+        next_baseline["due"] = _financial_rows_from_allocation_map(stop_due)
+        next_baseline["dueLegacy"] = 0.0
+        next_baseline["dueLegacyReceiptId"] = ""
+        if (
+            not stop_due
+            and sum(stop_paid.values()) == _financial_minor(ad.get("amountUSD"), "ad amount")
+        ):
+            next_baseline["paymentStatus"] = "paid"
+        next_baseline["merged"] = (
+            [dict(row) for row in next_baseline["receipt"]]
+            if str(next_baseline.get("paymentStatus") or "") != "paid"
+            and _financial_ad_payment_status(result) == "not_paid"
+            and str(result.get("collectionMethod") or "") == "driver"
+            else []
+        )
+        result["stopAllocationBaseline"] = next_baseline
+
+    if refund_moved:
+        refund_paid[receipt_id] = refund_paid.get(receipt_id, 0) + refund_moved
+        result["refundAllocationBaseline"] = _financial_rows_from_allocation_map(refund_paid)
+        result["refundDueBaseline"] = _financial_rows_from_allocation_map(refund_due)
+        if (
+            not refund_due
+            and sum(refund_paid.values()) == _financial_minor(ad.get("amountUSD"), "ad amount")
+        ):
+            result["refundBaselinePaymentStatus"] = "paid"
+
+    # A stopped/refunded row can have no live due allocation while its frozen
+    # baseline carried the promise we just converted. If its live paid rows
+    # already cover the effective current spend (including a zero-spend stop
+    # or full refund), its current badge must become Paid now—not only after a
+    # later re-stop/refund undo.
+    live_paid = _financial_allocation_map(result.get("receiptAllocations"))
+    live_due = _financial_allocation_map(result.get("dueAllocations"))
+    live_target = _financial_ad_effective_amount(result)
+    if baseline_changed and not live_due and sum(live_paid.values()) == live_target:
+        result["paymentStatus"] = "paid"
+        result["isPaid"] = True
+        result["collectionMethod"] = ""
+        result["collectionPayments"] = []
+        result["paymentMethod"] = ""
+        result["linkedDeliveryReceiptId"] = ""
+        result["mergedPaidAllocations"] = []
+        result["hasMergedPaidFunds"] = False
+        paid_rows = _financial_rows_from_allocation_map(live_paid)
+        paid_ids = [str(row["receiptId"]) for row in paid_rows]
+        result["receiptAllocations"] = paid_rows
+        result["receiptIds"] = paid_ids
+        result["fundingReceiptId"] = paid_ids[0] if paid_ids else ""
+        result["receiptId"] = paid_ids[0] if paid_ids else receipt_id
+        result["dueAmountToUseUSD"] = 0.0
+        result["dueAmountToUseLYD"] = 0.0
+
+    result["settledReceiptId"] = receipt_id
+    result["receiptSettledAt"] = _iso_utc()
+    result["receiptSettledBy"] = actor_id
+    result["lastUpdated"] = _iso_utc()
+    return result
+
+
+def _financial_prepare_paid_receipt_ad_updates(
+    conn: Any,
+    receipt_id: str,
+    receipt: dict[str, Any],
+    ad_rows: list[Any],
+    *,
+    actor_id: str,
+    postgres: bool,
+) -> list[tuple[Any, dict[str, Any]]]:
+    """Lock, plan and validate every linked ad before the first write."""
+    customer_id = str(receipt.get("customerId") or "")
+    discovered: list[Any] = []
+    for row in ad_rows:
+        ad = _financial_row_data(row)
+        due_link = _financial_ad_due_usage(ad, receipt_id) > 0
+        legacy_shop_due = 0
+        if (
+            _financial_ad_payment_status(ad) == "not_paid"
+            and str(ad.get("collectionMethod") or "") == "in_shop"
+            and str(ad.get("receiptId") or "") == receipt_id
+        ):
+            legacy_shop_due = _financial_minor(
+                ad.get("dueAmountToUseUSD"), "stored legacy shop due allocation"
+            )
+            if legacy_shop_due == 0 and ad.get("dueAmountToUseLYD"):
+                local_minor = _financial_minor(
+                    ad.get("dueAmountToUseLYD"), "stored legacy shop due allocation"
+                )
+                legacy_shop_due = int(
+                    (
+                        Decimal(local_minor)
+                        / _financial_rate(ad.get("exchangeRate"))
+                    ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+                )
+        stop_baseline = ad.get("stopAllocationBaseline")
+        stop_baseline_due = 0
+        if isinstance(stop_baseline, dict):
+            stop_baseline_due = _financial_allocation_map(
+                stop_baseline.get("due")
+            ).get(receipt_id, 0)
+            stop_legacy_receipt_id = str(
+                stop_baseline.get("dueLegacyReceiptId")
+                or _financial_legacy_due_receipt_id(ad)
+                or ""
+            )
+            if stop_baseline_due == 0 and stop_legacy_receipt_id == receipt_id:
+                stop_baseline_due = _financial_minor(
+                    stop_baseline.get("dueLegacy"), "stop baseline legacy due"
+                )
+        refund_baseline_due = _financial_allocation_map(
+            ad.get("refundDueBaseline")
+        ).get(receipt_id, 0)
+        if (
+            due_link
+            or legacy_shop_due > 0
+            or stop_baseline_due > 0
+            or refund_baseline_due > 0
+        ):
+            discovered.append(row)
+
+    plans: list[tuple[Any, dict[str, Any]]] = []
+    planned_by_id: dict[str, dict[str, Any]] = {}
+    for discovered_row in sorted(discovered, key=lambda item: str(item.get("id") or "")):
+        ad_id = str(discovered_row.get("id") or "")
+        ad_row = _clothes_lock_row(conn, "ads", ad_id, postgres=postgres)
+        if not ad_row or bool(ad_row["deleted"]):
+            continue
+        ad = _financial_row_data(ad_row)
+        plan = _financial_reclassify_ad_for_paid_receipt(
+            ad, receipt_id, actor_id=actor_id
+        )
+        if plan is None:
+            continue
+        if str(plan.get("customerId") or "") != customer_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Linked ad and receipt belong to different customers",
+            )
+        planned_by_id[ad_id] = plan
+        plans.append((ad_row, plan))
+
+    committed = _financial_outgoing(receipt)
+    for row in ad_rows:
+        ad_id = str(row.get("id") or "")
+        data = planned_by_id.get(ad_id) or _financial_row_data(row)
+        if str(data.get("recordType") or "") != "receipt":
+            committed += _financial_ad_committed(data, receipt_id)
+    if committed > _financial_due_total(receipt):
+        raise HTTPException(
+            status_code=409,
+            detail="Paid receipt balance is insufficient for all linked ads",
+        )
+    return plans
+
+
+def _financial_prepare_unpaid_receipt_ad_updates(
+    conn: Any,
+    receipt_id: str,
+    receipt: dict[str, Any],
+    ad_rows: list[Any],
+    *,
+    actor_id: str,
+    actor_name: str = "",
+    postgres: bool,
+) -> list[tuple[Any, dict[str, Any]]]:
+    """Lock, plan and validate the REVERSE settlement before the first write.
+
+    The receipt in ``receipt`` is the post-edit (Not Paid) state. Every ad
+    funded from this receipt's PAID pool moves EXACTLY this receipt's paid
+    rows into its due pool — conserved to the cent, other receipts' rows
+    untouched, spentUSD/amountUSD/status/refund untouched (the exact mirror
+    of _financial_reclassify_ad_for_paid_receipt / the relink settle branch).
+    The ads take whichever not_paid collection shape matches the receipt's
+    new collection type: DRIVER (dueAllocations + linkedDeliveryReceiptId +
+    mergedPaidAllocations mirroring the surviving paid rows) or IN-SHOP
+    (dueAllocations + receiptId). Cases whose money history must not be
+    rewritten refuse the whole conversion with an honest 409:
+      * a terminal (Stopped/Canceled/Completed/Lost) or refunded linked ad,
+      * an ad that already owes debt on ANOTHER receipt (both due validators
+        accept exactly one linked debt receipt), and
+      * a legacy rowless ad whose whole spend is charged by reference — there
+        is no allocation row to migrate, so converting would strand its money.
+    """
+    customer_id = str(receipt.get("customerId") or "")
+    status_detail = (
+        receipt.get("statusDetail")
+        if isinstance(receipt.get("statusDetail"), dict)
+        else {}
+    )
+    not_paid_collection = str(
+        (status_detail or {}).get("notPaidCollection") or ""
+    ).strip().lower()
+    is_delivery = (
+        not_paid_collection == "delivery"
+        or str(receipt.get("deliveryStatus") or "").strip() == "Needs Delivery"
+    )
+    collection_method = "driver" if is_delivery else "in_shop"
+
+    discovered: list[Any] = []
+    for row in ad_rows:
+        ad = _financial_row_data(row)
+        if str(ad.get("recordType") or "") == "receipt":
+            continue
+        if _financial_allocation_map(ad.get("receiptAllocations")).get(receipt_id, 0) > 0:
+            discovered.append(row)
+            continue
+        if (
+            not isinstance(ad.get("receiptAllocations"), list)
+            and not isinstance(ad.get("dueAllocations"), list)
+            and _financial_ad_committed(ad, receipt_id) > 0
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="A receipt funding a legacy pre-allocation ad must remain paid",
+            )
+
+    # The due-side validators read the linked receipt from a locked map. The
+    # stored row still holds the PRE-edit (Paid) shape, so hand them the
+    # post-edit state instead — same shape _financial_row_data expects.
+    validation_receipts: dict[str, Any] = {
+        receipt_id: {"deleted": False, "data_json": json_dumps(receipt)}
+    }
+
+    plans: list[tuple[Any, dict[str, Any]]] = []
+    planned_by_id: dict[str, dict[str, Any]] = {}
+    for discovered_row in sorted(discovered, key=lambda item: str(item.get("id") or "")):
+        ad_id = str(discovered_row.get("id") or "")
+        ad_row = _clothes_lock_row(conn, "ads", ad_id, postgres=postgres)
+        if not ad_row or bool(ad_row["deleted"]):
+            continue
+        ad = _financial_row_data(ad_row)
+        paid_map = _financial_allocation_map(ad.get("receiptAllocations"))
+        moved_minor = paid_map.pop(receipt_id, 0)
+        if moved_minor <= 0:
+            continue
+        if str(ad.get("customerId") or "") != customer_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Linked ad and receipt belong to different customers",
+            )
+        if str(ad.get("status") or "") in {"Stopped", "Canceled", "Completed", "Lost"} or (
+            ad.get("refundType") and str(ad.get("refundType")) != "None"
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="A receipt funding a finished or refunded ad must remain paid",
+            )
+        due_map = _financial_allocation_map(ad.get("dueAllocations"))
+        if any(rid != receipt_id for rid in due_map):
+            raise HTTPException(
+                status_code=409,
+                detail="A receipt funding an ad that owes another receipt must remain paid",
+            )
+        due_map[receipt_id] = due_map.get(receipt_id, 0) + moved_minor
+
+        plan = dict(ad)
+        paid_rows = _financial_rows_from_allocation_map(paid_map)
+        due_rows = _financial_rows_from_allocation_map(due_map)
+        paid_ids = [str(entry["receiptId"]) for entry in paid_rows]
+        plan["receiptAllocations"] = paid_rows
+        plan["dueAllocations"] = due_rows
+        plan["receiptIds"] = paid_ids
+        plan["fundingReceiptId"] = paid_ids[0] if paid_ids else ""
+        plan["dueAmountToUseUSD"] = _financial_usd(sum(due_map.values()))
+        # The moved USD rows are authoritative; a stale LYD mirror would let
+        # the legacy due reader double-count the debt (same rule as relink).
+        plan["dueAmountToUseLYD"] = 0.0
+        plan["paymentStatus"] = "not_paid"
+        plan["isPaid"] = False
+        plan["collectionMethod"] = collection_method
+        plan["collectionPayments"] = []
+        plan["paymentMethod"] = ""
+        if collection_method == "driver":
+            plan["mergedPaidAllocations"] = [dict(entry) for entry in paid_rows]
+            plan["hasMergedPaidFunds"] = bool(paid_rows)
+            plan["linkedDeliveryReceiptId"] = receipt_id
+            plan["receiptId"] = receipt_id
+        else:
+            plan["mergedPaidAllocations"] = []
+            plan["hasMergedPaidFunds"] = False
+            plan["linkedDeliveryReceiptId"] = ""
+            plan["receiptId"] = receipt_id
+        # Same history entry shape the relink/settle primitives append, so the
+        # money move stays visible in the ad's edit-history viewer.
+        _history = (
+            list(plan.get("editHistory"))
+            if isinstance(plan.get("editHistory"), list)
+            else []
+        )
+        _history.append(
+            {
+                "editedAt": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "editedBy": actor_name or "System",
+                "changes": [
+                    {"field": "Payment Status", "from": "Paid", "to": "Not Paid"}
+                ],
+            }
+        )
+        plan["editHistory"] = _history
+        plan["editCount"] = len(_history)
+        plan["lastUpdated"] = _iso_utc()
+
+        # SAME per-pool validators the relink path uses for the pool that
+        # changed (the due side). The surviving paid rows on OTHER receipts
+        # are byte-identical to the stored state, so their capacity is
+        # unchanged by construction.
+        if collection_method == "driver":
+            _financial_validate_due_receipt(
+                due_rows,
+                linked_receipt_id=receipt_id,
+                customer_id=customer_id,
+                locked_receipts=validation_receipts,
+                ad_rows=ad_rows,
+                current_ad_id=ad_id,
+                require_pending=False,
+            )
+        else:
+            _financial_validate_shop_due_receipt(
+                due_rows,
+                linked_receipt_id=receipt_id,
+                customer_id=customer_id,
+                locked_receipts=validation_receipts,
+                ad_rows=ad_rows,
+                current_ad_id=ad_id,
+                require_unpaid=False,
+            )
+        planned_by_id[ad_id] = plan
+        plans.append((ad_row, plan))
+
+    # Batch conservation check, mirroring _financial_prepare_paid_receipt_ad_updates:
+    # after every plan, the receipt's ONE capacity (the debt basis, since it is
+    # Not Paid now) must still cover every surviving commitment.
+    committed = _financial_outgoing(receipt)
+    for row in ad_rows:
+        ad_id = str(row.get("id") or "")
+        data = planned_by_id.get(ad_id) or _financial_row_data(row)
+        if str(data.get("recordType") or "") != "receipt":
+            committed += _financial_ad_committed(data, receipt_id)
+    if committed > _financial_due_total(receipt):
+        raise HTTPException(
+            status_code=409,
+            detail="Receipt debt balance is insufficient for all linked ads",
+        )
+    return plans
+
+
+def _financial_normalize_receipt_paid_pair(
+    old: dict[str, Any], updates: dict[str, Any]
+) -> None:
+    """Keep receipt status/isPaid canonical for every generic and dedicated path."""
+    explicit_status = "status" in updates
+    explicit_paid = "isPaid" in updates
+    requested_status = str(updates.get("status") or "") if explicit_status else ""
+    requested_paid = updates.get("isPaid") if explicit_paid else None
+    if explicit_paid and not isinstance(requested_paid, bool):
+        raise HTTPException(status_code=400, detail="Receipt isPaid must be true or false")
+    if explicit_status and explicit_paid:
+        contradictory = (
+            (requested_status == "Paid" and requested_paid is not True)
+            or (requested_status == "Not Paid" and requested_paid is not False)
+        )
+        if contradictory:
+            raise HTTPException(
+                status_code=400,
+                detail="Receipt status and isPaid must agree",
+            )
+    if explicit_status:
+        if requested_status == "Paid":
+            updates["isPaid"] = True
+        elif requested_status == "Not Paid":
+            updates["isPaid"] = False
+    elif explicit_paid:
+        if requested_paid is True:
+            updates["status"] = "Paid"
+        else:
+            old_status = str(old.get("status") or "")
+            updates["status"] = (
+                old_status if old_status in {"Not Paid", "Canceled", "Lost"} else "Not Paid"
+            )
+
+
 def _financial_patch_receipt_atomic(
     actor: dict[str, Any],
     receipt_id_raw: str,
     updates: dict[str, Any],
     expected_last_modified: int | None,
-) -> dict[str, Any]:
+    *,
+    idempotency_key: str | None = None,
+    convert_funding_to_debt: bool = False,
+) -> tuple[dict[str, Any], list[dict[str, Any]], bool]:
     receipt_id = validate_entity_id(receipt_id_raw)
+    actor_id = validate_entity_id(actor.get("id"))
     clean = sanitize_json(updates or {}) or {}
+    validate_relationship_ids(clean, "receipt settlement data")
+    clean = _normalize_receipt_number_fields(clean)
+    _validate_receipt_number_fields(clean)
     if set(clean) & (RECEIPT_TRANSFER_FIELDS - {"receiptType"}):
         raise HTTPException(status_code=405, detail="Receipt transfer fields are server-controlled")
+    idem = sanitize_str(str(idempotency_key or ""), 120)
+    _hash_payload: dict[str, Any] = {
+        "receiptId": receipt_id,
+        "expectedLastModified": expected_last_modified,
+        "data": clean,
+    }
+    # Only stamped when set so pre-existing settle markers keep replaying with
+    # their original hashes.
+    if convert_funding_to_debt:
+        _hash_payload["convertFundingToDebt"] = True
+    request_hash = _financial_request_hash(_hash_payload)
     postgres = str(get_engine().dialect.name or "") == "postgresql"
-    guard = nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK
-    with guard:
+    receipt_number_guard = nullcontext() if postgres else _SQLITE_RECEIPT_NUMBER_LOCK
+    financial_guard = nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK
+    with receipt_number_guard, financial_guard:
         with db_conn() as conn:
+            if idem:
+                _lock_idempotency_key(
+                    conn, idem, postgres=postgres, namespace="receiptSettlement"
+                )
+                prior = _financial_check_marker(
+                    _financial_get_marker(
+                        conn,
+                        RECEIPT_SETTLEMENT_MUTATION_COLLECTION,
+                        "receiptSettlement",
+                        idem,
+                    ),
+                    actor_id,
+                    request_hash,
+                )
+                if prior:
+                    receipt_result = _financial_entity_result(
+                        conn, "receipts", str(prior.get("receiptId") or receipt_id)
+                    )
+                    ad_results = [
+                        _financial_entity_result(conn, "ads", str(ad_id))
+                        for ad_id in prior.get("updatedAdIds", [])
+                    ]
+                    return receipt_result, ad_results, True
             row = _clothes_lock_row(conn, "receipts", receipt_id, postgres=postgres)
             if not row or bool(row["deleted"]):
                 raise HTTPException(status_code=404, detail="Receipt not found")
             if expected_last_modified is not None and int(row["last_modified"]) != int(expected_last_modified):
                 raise HTTPException(status_code=409, detail="Conflict: receipt has changed")
             old = _financial_row_data(row)
+            _financial_normalize_receipt_paid_pair(old, clean)
+            if convert_funding_to_debt:
+                # Explicit paid -> not_paid conversion (the exact REVERSE of the
+                # settle cascade). Refuse the cases whose money history must not
+                # be rewritten BEFORE any planning:
+                #   * a TRANSFER_IN receipt or one with outgoing transfers —
+                #     transfer chains must stay paid-backed, and
+                #   * a receipt that is not actually paid — there is no paid
+                #     funding to convert.
+                if str(old.get("receiptType") or "") == "TRANSFER_IN" or old.get(
+                    "transferFromReceiptId"
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="A transferred-in receipt must remain paid",
+                    )
+                if _financial_outgoing(old) > 0:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="A receipt with outgoing transfers must remain paid",
+                    )
+                if not (
+                    str(old.get("status") or "") == "Paid" or old.get("isPaid") is True
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Only a paid receipt can convert its funding to customer debt",
+                    )
             if "receiptType" in clean:
                 requested_type = str(clean.get("receiptType") or "")
                 old_type = str(old.get("receiptType") or "")
@@ -5871,31 +9885,206 @@ def _financial_patch_receipt_atomic(
             if str(old.get("receiptType") or "") == "TRANSFER_IN" and set(clean) & RECEIPT_CAPACITY_FIELDS:
                 raise HTTPException(status_code=405, detail="Transferred-in receipt money fields are immutable")
             merged = dict(old)
-            for key in ("id", "_created", "_lastModified", "_deleted", "createdBy", "createdAt", "creatorId"):
+            # customerName is the creation-time customer stamp (mirrors
+            # createdByName): a receipt PATCH must never rewrite or clear it, so
+            # it stays readable for a receipts-only role. Dropping it from the
+            # incoming payload keeps the stored stamp (merged starts from old);
+            # the live customer name still wins on read whenever available.
+            for key in ("id", "_created", "_lastModified", "_deleted", "createdBy", "createdAt", "creatorId", "customerName"):
                 clean.pop(key, None)
             merged.update(clean)
+            merged_status = str(merged.get("status") or "")
+            if merged_status == "Paid":
+                merged["isPaid"] = True
+            elif merged_status == "Not Paid":
+                merged["isPaid"] = False
+            if convert_funding_to_debt and (
+                merged_status != "Not Paid" or merged.get("isPaid") is not False
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Receipt debt conversion must set the receipt Not Paid",
+                )
+            _validate_receipt_number_change_conn(
+                conn,
+                receipt_id,
+                old,
+                merged,
+                postgres=postgres,
+            )
             ad_rows = _financial_active_rows(conn, "ads")
-            if str(merged.get("deliveryStatus") or "") == "Canceled" and str(old.get("deliveryStatus") or "") != "Canceled":
+            # Delivery completion money is authoritative only here, after the
+            # receipt row is locked and after taking the current ad snapshot.
+            # In particular, a historical zero-value D receipt may derive its
+            # cash target from linked unpaid Driver ads, but that target never
+            # enters _financial_due_total before collection.
+            _financial_apply_delivery_completion_truth(
+                receipt_id, old, merged, ad_rows
+            )
+            canceled_due_source = (
+                (
+                    str(merged.get("deliveryStatus") or "") == "Canceled"
+                    and str(old.get("deliveryStatus") or "") != "Canceled"
+                )
+                or (
+                    str(merged.get("status") or "") in {"Canceled", "Lost"}
+                    and str(old.get("status") or "") not in {"Canceled", "Lost"}
+                )
+            )
+            if canceled_due_source:
                 _financial_release_canceled_due(
                     conn, receipt_id, ad_rows, postgres=postgres
                 )
                 ad_rows = _financial_active_rows(conn, "ads")
-            general_used = _financial_usage(ad_rows, receipt_id)
+            # Use the canonical commitment reader, not the broad historical UI
+            # usage fallback.  A rowless Not-Paid driver/shop ad may reference
+            # this receipt solely for collection provenance; charging its whole
+            # budget here falsely blocks settlement even when its due mirror is
+            # zero.  Positive legacy due mirrors remain commitments through
+            # _financial_ad_due_usage.
+            general_used = _financial_committed_usage(ad_rows, receipt_id)
             due_used = _financial_usage(ad_rows, receipt_id, due=True)
             primary_used = max(general_used - due_used, 0)
             outgoing = _financial_outgoing(old)
-            new_total = _financial_minor(merged.get("amountUSD"), "receipt amount")
-            if new_total < general_used + outgoing:
+            # ONE capacity, same function the readers use: amountUSD once collected, else the
+            # debt the driver will collect (_financial_due_total). Measuring commitments
+            # against the raw amountUSD instead used the *collected cash* as the cap on a
+            # still-uncollected delivery receipt — so an underpaid completion (amountUSD drops
+            # to the low collected amount while the debt-backed due credit is still fully
+            # committed) and every later benign PATCH on it (office handover, corrections)
+            # 409'd, stranding the receipt. The debt basis keeps the committed credit backed;
+            # the shortfall lives only as remainingDue and is never spendable.
+            capacity = _financial_due_total(merged)
+            if capacity < general_used + outgoing:
                 raise HTTPException(status_code=409, detail="Receipt amount is below committed ads and transfers")
-            if _financial_due_total(merged) < due_used:
+            if capacity < due_used:
                 raise HTTPException(status_code=409, detail="Receipt due amount is below committed ads")
-            if (primary_used > 0 or outgoing > 0) and not _financial_receipt_transferable(merged):
-                raise HTTPException(status_code=409, detail="A funded or transferred receipt must remain paid")
-            if str(merged.get("customerId") or "") != str(old.get("customerId") or "") and (
-                general_used > 0 or outgoing > 0
+            # The debt conversion is the ONE legitimate way a funded paid
+            # receipt may stop being paid: its paid ad funding migrates into
+            # the ads' due pool in this same transaction (planned below).
+            # Outgoing transfers were already refused above, so the guard only
+            # steps aside for the funding it is about to migrate.
+            if (
+                (primary_used > 0 or outgoing > 0)
+                and not _financial_receipt_transferable(merged)
+                and not convert_funding_to_debt
             ):
-                raise HTTPException(status_code=409, detail="A committed receipt cannot change customer")
-            return _clothes_write_row(conn, row, merged)
+                raise HTTPException(status_code=409, detail="A funded or transferred receipt must remain paid")
+            old_is_paid = str(old.get("status") or "") == "Paid" or old.get("isPaid") is True
+            new_is_paid = str(merged.get("status") or "") == "Paid" or merged.get("isPaid") is True
+            # SECURITY: a receipt that holds (or is about to hold) spendable credit
+            # must never be reassigned to another customer by a plain edit — that
+            # would silently move the business's liability and let an accomplice
+            # customer spend a victim's stored credit, bypassing the dedicated,
+            # more-guarded /api/receipts/transfers flow. Correcting the customer is
+            # still allowed on an unpaid receipt that carries no credit.
+            if str(merged.get("customerId") or "") != str(old.get("customerId") or "") and (
+                general_used > 0 or outgoing > 0 or old_is_paid or new_is_paid
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Reassign a paid receipt's customer through the receipt transfer endpoint",
+                )
+            # SECURITY: a settled receipt's spendable capacity is fixed. Raising
+            # amountUSD/amountLocal/exchangeRate on an already-Paid receipt through a
+            # BARE edit would mint credit the customer never paid. Legitimate
+            # over-collection is a Not Paid -> Paid delivery completion (old is not
+            # yet Paid here), and lowering below committed usage is already blocked
+            # above. One upward path IS legitimate: the split-payments editor
+            # recording the real collected money — every credit cent is then
+            # backed by an itemized payment line, so nothing is minted. Allow the
+            # raise only when the new amount is fully covered by the recorded
+            # payment breakdown (same per-line ceiling rounding as the client,
+            # plus its one "house cent" snap on fractional totals).
+            if old_is_paid and _financial_due_total(merged) > _financial_due_total(old):
+                backed_minor = _receipt_payments_credit_minor(merged.get("payments"))
+                amount_minor = _financial_minor(merged.get("amountUSD"), "receipt amount")
+                if backed_minor is None or amount_minor > backed_minor + 1:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="A settled receipt's amount cannot be increased by editing",
+                    )
+            ad_plans: list[tuple[Any, dict[str, Any]]] = []
+            if _financial_receipt_transferable(merged):
+                ad_plans = _financial_prepare_paid_receipt_ad_updates(
+                    conn,
+                    receipt_id,
+                    merged,
+                    ad_rows,
+                    actor_id=actor_id,
+                    postgres=postgres,
+                )
+            elif convert_funding_to_debt:
+                ad_plans = _financial_prepare_unpaid_receipt_ad_updates(
+                    conn,
+                    receipt_id,
+                    merged,
+                    ad_rows,
+                    actor_id=actor_id,
+                    actor_name=sanitize_str(str(actor.get("name") or ""), 120),
+                    postgres=postgres,
+                )
+
+            saved_receipt = _clothes_write_row(conn, row, merged)
+            saved_ads = [
+                _clothes_write_row(conn, ad_row, ad_plan)
+                for ad_row, ad_plan in ad_plans
+            ]
+            if idem:
+                _financial_insert_marker(
+                    conn,
+                    RECEIPT_SETTLEMENT_MUTATION_COLLECTION,
+                    "receiptSettlement",
+                    idem,
+                    actor_id,
+                    request_hash,
+                    {
+                        "receiptId": receipt_id,
+                        "updatedAdIds": [item["id"] for item in saved_ads],
+                    },
+                )
+            return saved_receipt, saved_ads, False
+
+
+# Methods whose typed amount is USD; their ads-credit line converts the LYD
+# value (amount*rate) back through rate2. Mirrors saveSplitPayments/saveReceipt.
+_USD_BASED_PAYMENT_METHODS = {"USDT", "Bank Transfer (USD)", "Cash (USD)"}
+
+
+def _receipt_payments_credit_minor(payments: Any) -> int | None:
+    """Ads credit (in cents) that a receipt's itemized payments justify.
+
+    Reimplements the client's split-payment math exactly (src/13-filters-helpers
+    saveSplitPayments / src/14-forms ceilingRound): per line, R1 = amount*rate;
+    credit = R1/rate2 for USD-based methods else amount/rate2, rounded UP to the
+    cent (with the client's epsilon on exact-cent values). Returns None when
+    there is no usable itemized breakdown — the caller then refuses an upward
+    edit, because unbacked credit would be minted from nothing.
+    """
+    if not isinstance(payments, list) or not payments:
+        return None
+    total = 0
+    saw_line = False
+    for entry in payments:
+        if not isinstance(entry, dict):
+            return None
+        try:
+            amount = float(entry.get("amount") or 0)
+            rate = float(entry.get("rate") or 0)
+            rate2 = float(entry.get("rate2") or 0)
+        except (TypeError, ValueError):
+            return None
+        if amount <= 0:
+            continue
+        saw_line = True
+        if rate2 <= 0:
+            continue
+        r1 = amount * rate
+        base = (r1 / rate2) if str(entry.get("method") or "") in _USD_BASED_PAYMENT_METHODS else (amount / rate2)
+        cents = base * 100
+        nearest = round(cents)
+        total += int(nearest) if abs(cents - nearest) < 1e-6 else int(math.ceil(cents))
+    return total if saw_line else None
 
 
 def _financial_receipt_reference_reason(
@@ -5969,6 +10158,7 @@ def _financial_delete_customer_atomic(customer_id_raw: str) -> dict[str, Any]:
 def transfer_receipt_balance(
     body: ReceiptTransferRequest,
     request: Request,
+    include_media: bool = True,
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
@@ -5983,9 +10173,248 @@ def transfer_receipt_balance(
             {"targetReceiptId": target["id"], "amountUSD": transfer.get("amountUSD")},
         )
     return ReceiptTransferResponse(
-        sourceReceipt=EntityResponse(**source),
-        targetReceipt=EntityResponse(**target),
+        sourceReceipt=EntityResponse(**_project_entity_media_for_user(source, user, include_media)),
+        targetReceipt=EntityResponse(**_project_entity_media_for_user(target, user, include_media)),
         transfer=transfer,
+        replayed=replayed,
+    )
+
+
+@app.post(
+    "/api/receipts/{receipt_id}/settle",
+    response_model=ReceiptSettlementResponse,
+)
+def settle_receipt_and_linked_ads(
+    receipt_id: str,
+    body: ReceiptSettlementRequest,
+    request: Request,
+    include_media: bool = True,
+    user: dict[str, Any] = Depends(current_user),
+):
+    """Turn receipt debt into paid ad funding as one idempotent commit."""
+    require_same_origin(request)
+    # Delivery users must complete a temporary receipt through the generic
+    # PATCH route.  That path verifies assignment, transition order, final
+    # receipt number, proof photo and collected amounts before it computes any
+    # payment fields.  A custom receipts.edit grant must never turn this
+    # convenience endpoint into a way around that proof workflow.
+    if str(user.get("role") or "").strip().lower() == "delivery":
+        raise HTTPException(
+            status_code=403,
+            detail="Delivery users must use the verified delivery completion workflow",
+        )
+    existing = get_entity("receipts", validate_entity_id(receipt_id))
+    if not existing or existing.get("deleted"):
+        raise HTTPException(status_code=404, detail="Receipt not found")
+    existing_data = existing.get("data") if isinstance(existing.get("data"), dict) else {}
+    creator = (
+        existing.get("createdBy")
+        or existing_data.get("createdBy")
+        or existing_data.get("creatorId")
+    )
+    if not user_has_permission(
+        user, "receipts", "edit", record_creator_id=str(creator or "")
+    ):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    updates = sanitize_json(body.data or {}) or {}
+    current_delivery_status = str(existing_data.get("deliveryStatus") or "").strip()
+    requested_delivery_status = str(updates.get("deliveryStatus") or "").strip()
+    if (
+        str(existing_data.get("tempReceiptNo") or "").strip()
+        and current_delivery_status != "Delivered"
+        and requested_delivery_status == "Delivered"
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the verified delivery completion workflow can mark this receipt delivered",
+        )
+    if "status" in updates and str(updates.get("status") or "") != "Paid":
+        raise HTTPException(status_code=400, detail="Receipt settlement status must be Paid")
+    if "isPaid" in updates and updates.get("isPaid") is not True:
+        raise HTTPException(status_code=400, detail="Receipt settlement must mark isPaid true")
+    updates["status"] = "Paid"
+    updates["isPaid"] = True
+    receipt, updated_ads, replayed = _financial_patch_receipt_atomic(
+        user,
+        receipt_id,
+        updates,
+        body.expectedLastModified,
+        idempotency_key=body.idempotencyKey,
+    )
+    if not replayed:
+        audit(
+            str(user.get("id") or ""),
+            "settle",
+            "receipts",
+            receipt["id"],
+            "Settled receipt and linked ads",
+            {"updatedAdIds": [item["id"] for item in updated_ads]},
+        )
+    # Settlement is authorized by receipts.edit, but the transaction may touch
+    # ads the caller is not allowed to read.  Preserve the all-or-nothing money
+    # update while applying the normal ads.view / ads.viewOwn scope to the
+    # response so this endpoint cannot become an ad-record disclosure channel.
+    visible_ads: list[dict[str, Any]] = []
+    for item in updated_ads:
+        item_data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        item_creator = (
+            item.get("createdBy")
+            or item_data.get("createdBy")
+            or item_data.get("creatorId")
+        )
+        if user_has_permission(user, "ads", "view") or user_has_permission(
+            user,
+            "ads",
+            "view",
+            record_creator_id=str(item_creator or ""),
+        ):
+            visible_ads.append(item)
+    return ReceiptSettlementResponse(
+        receipt=EntityResponse(
+            **_project_entity_media_for_user(receipt, user, include_media)
+        ),
+        updatedAds=[
+            EntityResponse(**_project_entity_media_for_user(item, user, include_media))
+            for item in visible_ads
+        ],
+        replayed=replayed,
+    )
+
+
+@app.post(
+    "/api/receipts/{receipt_id}/unsettle",
+    response_model=ReceiptSettlementResponse,
+)
+def unsettle_receipt_and_linked_ads(
+    receipt_id: str,
+    body: ReceiptSettlementRequest,
+    request: Request,
+    include_media: bool = True,
+    user: dict[str, Any] = Depends(current_user),
+):
+    """Turn a funded PAID receipt back into customer debt in one idempotent
+    commit — the exact reverse of the settle cascade. Each linked ad's paid
+    rows for THIS receipt move into its due pool, conserved to the cent."""
+    require_same_origin(request)
+    # Mirrors the settle endpoint's rule: a delivery-role grant must never
+    # reclassify money. Drivers only complete deliveries through the verified
+    # PATCH workflow.
+    if str(user.get("role") or "").strip().lower() == "delivery":
+        raise HTTPException(
+            status_code=403,
+            detail="Delivery users cannot convert receipts to customer debt",
+        )
+    existing = get_entity("receipts", validate_entity_id(receipt_id))
+    if not existing or existing.get("deleted"):
+        raise HTTPException(status_code=404, detail="Receipt not found")
+    existing_data = existing.get("data") if isinstance(existing.get("data"), dict) else {}
+    creator = (
+        existing.get("createdBy")
+        or existing_data.get("createdBy")
+        or existing_data.get("creatorId")
+    )
+    if not user_has_permission(
+        user, "receipts", "edit", record_creator_id=str(creator or "")
+    ):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    updates = sanitize_json(body.data or {}) or {}
+    if "status" in updates and str(updates.get("status") or "") != "Not Paid":
+        raise HTTPException(
+            status_code=400, detail="Receipt debt conversion status must be Not Paid"
+        )
+    if "isPaid" in updates and updates.get("isPaid") is not False:
+        raise HTTPException(
+            status_code=400, detail="Receipt debt conversion must mark isPaid false"
+        )
+    if str(updates.get("deliveryStatus") or "").strip() == "Delivered":
+        raise HTTPException(
+            status_code=400,
+            detail="Receipt debt conversion cannot mark a delivery completed",
+        )
+    updates["status"] = "Not Paid"
+    updates["isPaid"] = False
+    # A delivery-debt conversion produces a REAL pending delivery receipt, so
+    # mirror the create path's provisioning: a driver must be assigned and the
+    # receipt needs its temporary D-number. The number is derived stably (the
+    # stored one wins once assigned) so an idempotent response-loss retry
+    # replays instead of hashing differently.
+    _status_detail = (
+        updates.get("statusDetail")
+        if isinstance(updates.get("statusDetail"), dict)
+        else (
+            existing_data.get("statusDetail")
+            if isinstance(existing_data.get("statusDetail"), dict)
+            else {}
+        )
+    )
+    _not_paid_collection = str(
+        (_status_detail or {}).get("notPaidCollection") or ""
+    ).strip().lower()
+    _delivery_status = str(
+        updates.get("deliveryStatus")
+        if updates.get("deliveryStatus") is not None
+        else existing_data.get("deliveryStatus") or ""
+    ).strip()
+    if _not_paid_collection == "delivery" or _delivery_status == "Needs Delivery":
+        _person = str(
+            updates.get("deliveryPersonId")
+            if updates.get("deliveryPersonId") is not None
+            else existing_data.get("deliveryPersonId") or ""
+        ).strip()
+        if not _person:
+            raise HTTPException(
+                status_code=400,
+                detail="deliveryPersonId is required for delivery receipts",
+            )
+        _temp_no = _canonical_receipt_number(
+            updates.get("tempReceiptNo")
+        ) or _canonical_receipt_number(existing_data.get("tempReceiptNo"))
+        updates["tempReceiptNo"] = _temp_no or _next_temp_delivery_receipt_no(
+            str(user.get("id") or "system")
+        )
+    receipt, updated_ads, replayed = _financial_patch_receipt_atomic(
+        user,
+        receipt_id,
+        updates,
+        body.expectedLastModified,
+        idempotency_key=body.idempotencyKey,
+        convert_funding_to_debt=True,
+    )
+    if not replayed:
+        audit(
+            str(user.get("id") or ""),
+            "unsettle",
+            "receipts",
+            receipt["id"],
+            "Converted paid receipt funding to customer debt",
+            {"updatedAdIds": [item["id"] for item in updated_ads]},
+        )
+    # Same ads.view / ads.viewOwn response scoping as the settle endpoint.
+    visible_ads: list[dict[str, Any]] = []
+    for item in updated_ads:
+        item_data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        item_creator = (
+            item.get("createdBy")
+            or item_data.get("createdBy")
+            or item_data.get("creatorId")
+        )
+        if user_has_permission(user, "ads", "view") or user_has_permission(
+            user,
+            "ads",
+            "view",
+            record_creator_id=str(item_creator or ""),
+        ):
+            visible_ads.append(item)
+    return ReceiptSettlementResponse(
+        receipt=EntityResponse(
+            **_project_entity_media_for_user(receipt, user, include_media)
+        ),
+        updatedAds=[
+            EntityResponse(**_project_entity_media_for_user(item, user, include_media))
+            for item in visible_ads
+        ],
         replayed=replayed,
     )
 
@@ -5994,6 +10423,7 @@ def transfer_receipt_balance(
 def mutate_ad_funding(
     body: AdMutationRequest,
     request: Request,
+    include_media: bool = True,
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
@@ -6002,7 +10432,9 @@ def mutate_ad_funding(
         audit(
             str(user.get("id")), body.action, "ads", ad["id"], f"Ad {body.action}", {}
         )
-    return AdMutationResponse(ad=EntityResponse(**ad), replayed=replayed)
+    return AdMutationResponse(
+        ad=EntityResponse(**_project_entity_media_for_user(ad, user, include_media)), replayed=replayed
+    )
 
 
 @app.post("/api/ads/{ad_id}/stop", response_model=AdStopResponse)
@@ -6010,13 +10442,30 @@ def stop_ad_atomic(
     ad_id: str,
     body: AdStopRequest,
     request: Request,
+    include_media: bool = True,
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
     ad, replayed = _ad_stop_atomic(user, ad_id, body)
     if not replayed:
-        audit(str(user.get("id")), "stop", "ads", ad["id"], "Stopped ad", {})
-    return AdStopResponse(ad=EntityResponse(**ad), replayed=replayed)
+        saved_data = ad.get("data") if isinstance(ad.get("data"), dict) else {}
+        saved_spent = _financial_minor(saved_data.get("spentUSD"), "saved ad spend")
+        saved_amount = _financial_minor(saved_data.get("amountUSD"), "saved ad amount")
+        audit(
+            str(user.get("id")),
+            "stop",
+            "ads",
+            ad["id"],
+            "Reconciled ad spend",
+            {
+                "spentUSD": _financial_usd(saved_spent),
+                "remainingUSD": _financial_usd(max(saved_amount - saved_spent, 0)),
+                "customerInformed": saved_data.get("remainingCustomerInformed") is True,
+            },
+        )
+    return AdStopResponse(
+        ad=EntityResponse(**_project_entity_media_for_user(ad, user, include_media)), replayed=replayed
+    )
 
 
 @app.post(
@@ -6148,13 +10597,29 @@ _DELIVERY_WORKFLOW_FIELDS = {
     "deliveryNotes", "_lastModified",
 }
 
+# Descriptive fields a receipts PATCH may touch under receipts.markCollected
+# (the client offers a standalone "Mark Collected" capability). These record
+# HOW MUCH was collected; they never touch status/isPaid/amountUSD/amountLocal,
+# so this bypass cannot fabricate money — it only authorizes recording/undoing a
+# collection, mirroring how deliveries.* authorizes the delivery-workflow fields.
+_RECEIPT_COLLECTION_FIELDS = {
+    "collected", "collectedAmount", "collectedPayments",
+    "collectedMatchesReceipt", "collectedAt", "collectedBy", "_lastModified",
+}
+
 _DELIVERY_PAYMENT_FIELDS = {
     "isPaid", "status", "collectionDate", "paymentResult", "overpaidAmount",
     "remainingDue", "feeDifferenceStatus", "feeDiff", "debtAmountLocal",
     "debtAmountUSD", "amountLocal", "amountUSD", "amountCollectedFromCustomer",
-    "actualDeliveryFeeCollected", "deliveryFeeCollected", "finalReceiptNo",
-    "serialNumber", "receiptImage", "photos",
+    "actualDeliveryFeeCollected", "deliveryFeeCollected", "deliveryFeePaidBy",
+    "finalReceiptNo", "serialNumber", "receiptImage", "photos",
 }
+
+# Who paid the delivery fee. 'customer' is the historical/implicit default;
+# 'shop' means the owner covered it (free delivery / paid from shop cash) and
+# the fee is a tracked loss. The fee itself stays LYD-only and NEVER feeds the
+# receipt's amountUSD / ads-credit math.
+_DELIVERY_FEE_PAYERS = {"customer", "shop"}
 
 _DELIVERY_TRANSITIONS: dict[str, set[str]] = {
     "": {"Needs Delivery", "In Progress", "Office"},
@@ -6247,6 +10712,222 @@ def _delivery_patch_allowed(user: dict[str, Any], existing: dict[str, Any], upda
     return has("accept") or has("assign") or has("reassign") or has("markCollected")
 
 
+@app.post(
+    "/api/ad-studio/campaigns/{campaign_id}/submit",
+    response_model=EntityResponse,
+)
+def submit_ad_campaign_request(
+    campaign_id: str,
+    body: AdCampaignSubmitRequest,
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+):
+    """Submit a complete request for human review; never publish a live ad."""
+    require_same_origin(request)
+    _require_ad_maker_subscription(user)
+    campaign = get_entity(AD_CAMPAIGN_COLLECTION, campaign_id)
+    if not campaign or campaign.get("deleted"):
+        raise HTTPException(status_code=404, detail="Campaign request not found")
+    creator = campaign.get("createdBy") or (campaign.get("data") or {}).get("createdBy")
+    if not user_has_permission(
+        user,
+        AD_CAMPAIGN_COLLECTION,
+        "submit",
+        record_creator_id=str(creator or ""),
+    ):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    current = campaign.get("data") or {}
+    operation_id = sanitize_str(str(body.operationId or ""), 120)
+    if operation_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,119}", operation_id):
+        raise HTTPException(status_code=400, detail="Invalid operationId")
+    if operation_id and str(current.get("lastSubmitOperationId") or "") == operation_id:
+        # The first response may have been lost after commit. Replaying the
+        # same operation returns authoritative current state instead of a
+        # misleading 409/failure notification.
+        return EntityResponse(
+            **_project_entity_media_for_user(campaign, user, False)
+        )
+    _enforce_ad_campaign_mutation_rate(user)
+    current_status = str(current.get("status") or "Draft")
+    if current_status not in AD_CAMPAIGN_EDITABLE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail="Only Draft or Changes Requested campaigns can be submitted",
+        )
+    with _ad_campaign_media_validation_slot(user):
+        _prepare_ad_campaign_fields(current, strict=True)
+
+    actor_id = str(user.get("id") or "system")
+    replayed_after_conflict = False
+    try:
+        saved = patch_entity(
+            AD_CAMPAIGN_COLLECTION,
+            campaign_id,
+            {
+                "status": "Submitted",
+                "submittedAt": _iso_utc(),
+                "submittedBy": actor_id,
+                "reviewedAt": None,
+                "reviewedBy": None,
+                "reviewNote": "",
+                "reviewDecision": "",
+                "lastSubmitOperationId": operation_id,
+            },
+            actor_id,
+            expected_last_modified=body.expectedLastModified,
+            enforce_ad_campaign_quota=False,
+        )
+    except HTTPException as error:
+        if error.status_code != 409:
+            raise
+        latest = get_entity(AD_CAMPAIGN_COLLECTION, campaign_id)
+        latest_data = (latest or {}).get("data") or {}
+        if (
+            not latest
+            or latest.get("deleted")
+            or str(latest_data.get("lastSubmitOperationId") or "") != operation_id
+        ):
+            raise
+        # A matching operation won the row-lock race while this identical
+        # request was waiting. Treat the optimistic conflict as the same
+        # committed success and do not duplicate its audit entry.
+        saved = latest
+        replayed_after_conflict = True
+    if not replayed_after_conflict:
+        audit(
+            actor_id,
+            "submit",
+            AD_CAMPAIGN_COLLECTION,
+            campaign_id,
+            f"Submitted campaign request {campaign_id} for review",
+            {"operationId": operation_id},
+        )
+    return EntityResponse(**_project_entity_media_for_user(saved, user, False))
+
+
+@app.post(
+    "/api/ad-studio/campaigns/{campaign_id}/review",
+    response_model=EntityResponse,
+)
+def review_ad_campaign_request(
+    campaign_id: str,
+    body: AdCampaignReviewRequest,
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+):
+    """Record a human decision without creating an internal or Meta ad."""
+    require_same_origin(request)
+    _require_ad_maker_subscription(user)
+    if not user_has_permission(user, AD_CAMPAIGN_COLLECTION, "review"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    campaign = get_entity(AD_CAMPAIGN_COLLECTION, campaign_id)
+    if not campaign or campaign.get("deleted"):
+        raise HTTPException(status_code=404, detail="Campaign request not found")
+    decision = str(body.decision)
+    if decision not in AD_CAMPAIGN_REVIEW_DECISIONS:
+        # Pydantic rejects this first; keep a defense-in-depth check if the
+        # schema is ever widened independently.
+        raise HTTPException(status_code=400, detail="Invalid review decision")
+    current = campaign.get("data") or {}
+    operation_id = sanitize_str(str(body.operationId or ""), 120)
+    if operation_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,119}", operation_id):
+        raise HTTPException(status_code=400, detail="Invalid operationId")
+    note = sanitize_str(str(body.note or ""), 2000)
+    if operation_id and str(current.get("lastReviewOperationId") or "") == operation_id:
+        if (
+            str(current.get("reviewDecision") or "") != decision
+            or str(current.get("reviewNote") or "") != note
+        ):
+            raise HTTPException(status_code=409, detail="operationId was already used for another review")
+        if str(current.get("status") or "Draft") not in {"Submitted", "Approved", "Rejected"}:
+            # A repeated review request may arrive after the customer has
+            # already edited a Changes Requested draft. Never return those
+            # newer private revisions to the reviewer through idempotency.
+            return EntityResponse(**_redacted_ad_campaign_tombstone(campaign))
+        return EntityResponse(
+            **_project_entity_media_for_user(campaign, user, False)
+        )
+    _enforce_ad_campaign_mutation_rate(user)
+    current_status = str(current.get("status") or "Draft")
+    if current_status != "Submitted":
+        raise HTTPException(status_code=409, detail="Only Submitted campaigns can be reviewed")
+    if decision == "Approved":
+        # Approval means launch-ready. Revalidate server-side so older clients
+        # and legacy drafts cannot bypass today's targeting/link rules.
+        with _ad_campaign_media_validation_slot(user):
+            _prepare_ad_campaign_fields(current, strict=True)
+    actor_id = str(user.get("id") or "system")
+    if decision in {"Changes Requested", "Rejected"} and not note:
+        raise HTTPException(
+            status_code=400,
+            detail="A review note is required when requesting changes or rejecting a campaign",
+        )
+    reviewed_at = _iso_utc()
+    history = _ad_campaign_review_history(current.get("reviewHistory"))
+    history.append(
+        {
+            "decision": decision,
+            "note": note,
+            "reviewedAt": reviewed_at,
+            "reviewedBy": actor_id,
+        }
+    )
+    history = history[-MAX_AD_CAMPAIGN_REVIEW_HISTORY:]
+    transition_fields: dict[str, Any] = {
+        "status": decision,
+        "reviewDecision": decision,
+        "reviewedAt": reviewed_at,
+        "reviewedBy": actor_id,
+        "reviewNote": note,
+        "reviewHistory": history,
+        "lastReviewOperationId": operation_id,
+    }
+    if decision == "Approved":
+        transition_fields.update({"approvedAt": reviewed_at, "approvedBy": actor_id})
+    elif decision == "Rejected":
+        transition_fields.update({"rejectedAt": reviewed_at, "rejectedBy": actor_id})
+    replayed_after_conflict = False
+    try:
+        saved = patch_entity(
+            AD_CAMPAIGN_COLLECTION,
+            campaign_id,
+            transition_fields,
+            actor_id,
+            expected_last_modified=body.expectedLastModified,
+            enforce_ad_campaign_quota=False,
+        )
+    except HTTPException as error:
+        if error.status_code != 409:
+            raise
+        latest = get_entity(AD_CAMPAIGN_COLLECTION, campaign_id)
+        latest_data = (latest or {}).get("data") or {}
+        if (
+            not latest
+            or latest.get("deleted")
+            or str(latest_data.get("lastReviewOperationId") or "") != operation_id
+            or str(latest_data.get("reviewDecision") or "") != decision
+            or str(latest_data.get("reviewNote") or "") != note
+        ):
+            raise
+        saved = latest
+        replayed_after_conflict = True
+    if not replayed_after_conflict:
+        audit(
+            actor_id,
+            "review",
+            AD_CAMPAIGN_COLLECTION,
+            campaign_id,
+            f"Reviewed campaign request {campaign_id}: {decision}",
+            {"decision": decision, "note": note, "operationId": operation_id},
+        )
+    if replayed_after_conflict and str((saved.get("data") or {}).get("status") or "Draft") not in {
+        "Submitted", "Approved", "Rejected"
+    }:
+        return EntityResponse(**_redacted_ad_campaign_tombstone(saved))
+    return EntityResponse(**_project_entity_media_for_user(saved, user, False))
+
+
 SYNC_WATERMARK_COLLECTIONS = (
     "ads",
     "receipts",
@@ -6259,7 +10940,397 @@ SYNC_WATERMARK_COLLECTIONS = (
     "clothesSettings",
     "walletTransactions",
     "serviceSubscriptions",
+    AD_CAMPAIGN_COLLECTION,
+    # Admin-only app configuration (liquidity tracking start etc.). The name
+    # maps to no permission module, so non-admin watermark/read/write access
+    # is denied by the generic permission path and only Admins sync it.
+    "appSettings",
 )
+
+
+def _customer_merge_request_hash(actor_id: str, body: CustomerMergeRequest) -> str:
+    payload = {
+        "actorId": actor_id,
+        "keepCustomerId": body.keepCustomerId,
+        "duplicateCustomerId": body.duplicateCustomerId,
+        "expectedKeepLastModified": body.expectedKeepLastModified,
+        "expectedDuplicateLastModified": body.expectedDuplicateLastModified,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _customer_merge_marker_id(idempotency_key: str) -> str:
+    digest = hashlib.sha256(f"customerMerge\0{idempotency_key}".encode("utf-8")).hexdigest()
+    return f"customer_merge_{digest[:48]}"
+
+
+def _customer_merge_row(conn: Any, collection: str, entity_id: str) -> Any:
+    return conn.execute(
+        text(
+            "SELECT type,id,data_json,deleted,created_at,created_by,last_modified "
+            "FROM entities WHERE type=:type AND id=:id LIMIT 1"
+        ),
+        {"type": collection, "id": entity_id},
+    ).mappings().first()
+
+
+def _customer_merge_replay(conn: Any, marker_data: dict[str, Any]) -> dict[str, Any]:
+    def load(collection: str, entity_id: str) -> dict[str, Any]:
+        row = _customer_merge_row(conn, collection, entity_id)
+        if not row:
+            raise HTTPException(status_code=409, detail="Stored customer merge result is incomplete")
+        return _entity_from_db_row(row)
+
+    keep_id = str(marker_data.get("keepCustomerId") or "")
+    duplicate_id = str(marker_data.get("duplicateCustomerId") or "")
+    return {
+        "customer": load("customers", keep_id),
+        "updatedPages": [load("pages", str(value)) for value in marker_data.get("updatedPageIds", [])],
+        "updatedReceipts": [load("receipts", str(value)) for value in marker_data.get("updatedReceiptIds", [])],
+        "updatedAds": [load("ads", str(value)) for value in marker_data.get("updatedAdIds", [])],
+        "duplicate": load("customers", duplicate_id),
+        "replayed": True,
+    }
+
+
+def _stable_union_values(first: Any, second: Any) -> list[Any]:
+    values: list[Any] = []
+    seen: set[str] = set()
+    for source in (first, second):
+        if not isinstance(source, list):
+            continue
+        for value in source:
+            try:
+                key = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            except (TypeError, ValueError):
+                key = repr(value)
+            if key in seen:
+                continue
+            seen.add(key)
+            values.append(value)
+    return values
+
+
+def _stable_union_scalar_or_list(first: Any, second: Any) -> list[Any]:
+    def as_list(value: Any) -> list[Any]:
+        if isinstance(value, list):
+            return value
+        return [] if value in (None, "") else [value]
+
+    return _stable_union_values(as_list(first), as_list(second))
+
+
+CUSTOMER_SCALAR_REFERENCE_FIELDS = frozenset(
+    {
+        "customerId",
+        "customer",
+        "transferFromCustomerId",
+        "sourceCustomerId",
+        "targetCustomerId",
+        "toCustomerId",
+    }
+)
+CUSTOMER_LIST_REFERENCE_FIELDS = frozenset({"customerIds", "linkedCustomerIds"})
+
+
+def _rewrite_customer_references(value: Any, duplicate_id: str, keep_id: str) -> tuple[Any, bool]:
+    """Recursively rewrite only known relationship keys, including history lists."""
+    if isinstance(value, list):
+        output: list[Any] = []
+        changed = False
+        for child in value:
+            rewritten, child_changed = _rewrite_customer_references(
+                child, duplicate_id, keep_id
+            )
+            output.append(rewritten)
+            changed = changed or child_changed
+        return output, changed
+    if not isinstance(value, dict):
+        return value, False
+
+    output: dict[str, Any] = {}
+    changed = False
+    for key, child in value.items():
+        if key in CUSTOMER_SCALAR_REFERENCE_FIELDS and str(child or "") == duplicate_id:
+            output[key] = keep_id
+            changed = True
+            continue
+        if key in CUSTOMER_LIST_REFERENCE_FIELDS and isinstance(child, list):
+            rewritten_ids: list[Any] = []
+            seen_ids: set[str] = set()
+            list_changed = False
+            for raw_id in child:
+                rewritten = keep_id if str(raw_id) == duplicate_id else raw_id
+                if rewritten != raw_id:
+                    list_changed = True
+                fingerprint = str(rewritten)
+                if fingerprint in seen_ids:
+                    list_changed = True
+                    continue
+                seen_ids.add(fingerprint)
+                nested, nested_changed = _rewrite_customer_references(
+                    rewritten, duplicate_id, keep_id
+                )
+                rewritten_ids.append(nested)
+                list_changed = list_changed or nested_changed
+            output[key] = rewritten_ids
+            changed = changed or list_changed
+            continue
+        rewritten, child_changed = _rewrite_customer_references(
+            child, duplicate_id, keep_id
+        )
+        output[key] = rewritten
+        changed = changed or child_changed
+    return output, changed
+
+
+def _merge_customer_data(keep: dict[str, Any], duplicate: dict[str, Any]) -> dict[str, Any]:
+    """Keep the chosen identity while retaining non-conflicting duplicate data."""
+
+    def combine(preferred: Any, fallback: Any) -> Any:
+        if isinstance(preferred, dict) and isinstance(fallback, dict):
+            result = dict(fallback)
+            for key, value in preferred.items():
+                result[key] = combine(value, fallback.get(key)) if key in fallback else value
+            return result
+        if isinstance(preferred, list) and isinstance(fallback, list):
+            return _stable_union_values(preferred, fallback)
+        if preferred in (None, "") and fallback not in (None, ""):
+            return fallback
+        return preferred
+
+    merged = combine(keep, duplicate)
+    if not isinstance(merged, dict):
+        merged = dict(keep)
+
+    phones: list[Any] = []
+    seen_phones: set[str] = set()
+    for value in [*_customer_phone_candidates(keep), *_customer_phone_candidates(duplicate)]:
+        display = _customer_phone_display(value)
+        if not display:
+            continue
+        key = _canonical_customer_phone(value) or f"display:{display.casefold()}"
+        if key in seen_phones:
+            continue
+        seen_phones.add(key)
+        # Preserve object entries (label and other metadata), not only display.
+        phones.append(value)
+    if phones:
+        merged["phones"] = phones
+    # The modern phones[] collection is authoritative after a merge. Keeping
+    # scalar aliases would make exports show the same contact more than once.
+    merged.pop("phone", None)
+    merged.pop("phoneNumber", None)
+
+    merged["profileLinks"] = _stable_union_scalar_or_list(
+        keep.get("profileLinks"), duplicate.get("profileLinks")
+    )
+    return _normalize_customer_phone_storage(merged, modern_authoritative=True)
+
+
+def _customer_merge_write_row(
+    conn: Any, row: Any, data: dict[str, Any], *, deleted: bool | None = None
+) -> dict[str, Any]:
+    baseline = int(row["last_modified"])
+    modified = max(now_ms(), baseline + 1)
+    clean = sanitize_json(data or {}) or {}
+    clean["id"] = str(row["id"])
+    clean["_created"] = clean.get("_created") or int(row["created_at"])
+    clean["_lastModified"] = modified
+    if row.get("created_by") is not None:
+        clean["createdBy"] = str(row["created_by"])
+    else:
+        clean.pop("createdBy", None)
+    is_deleted = bool(row["deleted"]) if deleted is None else bool(deleted)
+    clean["_deleted"] = is_deleted
+    result = conn.execute(
+        text(
+            "UPDATE entities SET data_json=:data,last_modified=:modified,deleted=:deleted "
+            "WHERE type=:type AND id=:id AND last_modified=:baseline"
+        ),
+        {
+            "data": json_dumps(clean),
+            "modified": modified,
+            "deleted": is_deleted,
+            "type": str(row["type"]),
+            "id": str(row["id"]),
+            "baseline": baseline,
+        },
+    )
+    if result.rowcount != 1:
+        raise HTTPException(status_code=409, detail="Conflict: linked record has changed")
+    return {
+        "id": str(row["id"]),
+        "type": str(row["type"]),
+        "deleted": is_deleted,
+        "createdAt": int(row["created_at"]),
+        "createdBy": row.get("created_by"),
+        "lastModified": modified,
+        "data": clean,
+    }
+
+
+def _merge_customers_atomic(
+    actor: dict[str, Any], body: CustomerMergeRequest
+) -> dict[str, Any]:
+    actor_id = sanitize_str(str(actor.get("id") or ""), 80)
+    keep_id = validate_entity_id(body.keepCustomerId)
+    duplicate_id = validate_entity_id(body.duplicateCustomerId)
+    if keep_id == duplicate_id:
+        raise HTTPException(status_code=400, detail="Choose two different customers to merge")
+    idem = sanitize_str(body.idempotencyKey, 120)
+    request_hash = _customer_merge_request_hash(actor_id, body)
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_CUSTOMER_PHONE_LOCK
+
+    with guard:
+        with db_conn() as conn:
+            _lock_idempotency_key(
+                conn, idem, postgres=postgres, namespace="customerMerge"
+            )
+            marker_id = _customer_merge_marker_id(idem)
+            marker_row = _customer_merge_row(
+                conn, CUSTOMER_MERGE_MUTATION_COLLECTION, marker_id
+            )
+            if marker_row:
+                marker_data = json_loads(marker_row.get("data_json") or "{}") or {}
+                if (
+                    str(marker_data.get("actorId") or "") != actor_id
+                    or str(marker_data.get("requestHash") or "") != request_hash
+                ):
+                    raise HTTPException(status_code=409, detail="Idempotency key was already used")
+                return _customer_merge_replay(conn, marker_data)
+
+            # Stable order prevents deadlocks when two admins choose opposite sides.
+            locked_customers: dict[str, Any] = {}
+            lock_suffix = " FOR UPDATE" if postgres else ""
+            for customer_id in sorted((keep_id, duplicate_id)):
+                row = conn.execute(
+                    text(
+                        "SELECT type,id,data_json,deleted,created_at,created_by,last_modified "
+                        "FROM entities WHERE type='customers' AND id=:id LIMIT 1" + lock_suffix
+                    ),
+                    {"id": customer_id},
+                ).mappings().first()
+                if not row or bool(row["deleted"]):
+                    raise HTTPException(status_code=404, detail="Customer not found")
+                locked_customers[customer_id] = row
+
+            keep_row = locked_customers[keep_id]
+            duplicate_row = locked_customers[duplicate_id]
+            if int(keep_row["last_modified"]) != int(body.expectedKeepLastModified):
+                raise HTTPException(status_code=409, detail="Conflict: customer to keep has changed")
+            if int(duplicate_row["last_modified"]) != int(body.expectedDuplicateLastModified):
+                raise HTTPException(status_code=409, detail="Conflict: duplicate customer has changed")
+
+            keep_data = json_loads(keep_row.get("data_json") or "{}") or {}
+            duplicate_data = json_loads(duplicate_row.get("data_json") or "{}") or {}
+            if not (_customer_phone_keys(keep_data) & _customer_phone_keys(duplicate_data)):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Customers can only be merged when they share a phone number",
+                )
+
+            merged_customer_data = _merge_customer_data(keep_data, duplicate_data)
+            merged_customer_data["id"] = keep_id
+
+            linked_rows = conn.execute(
+                text(
+                    "SELECT type,id,data_json,deleted,created_at,created_by,last_modified "
+                    "FROM entities WHERE type IN ('pages','receipts','ads') "
+                    "ORDER BY type,id"
+                )
+            ).mappings().all()
+            updated: dict[str, list[dict[str, Any]]] = {
+                "pages": [], "receipts": [], "ads": []
+            }
+            for row in linked_rows:
+                data = json_loads(row.get("data_json") or "{}") or {}
+                if not isinstance(data, dict):
+                    continue
+                data, changed = _rewrite_customer_references(
+                    data, duplicate_id, keep_id
+                )
+                if changed:
+                    updated[str(row["type"])].append(
+                        _customer_merge_write_row(conn, row, data)
+                    )
+
+            customer = _customer_merge_write_row(conn, keep_row, merged_customer_data)
+            duplicate_data = dict(duplicate_data)
+            duplicate_data["mergedIntoCustomerId"] = keep_id
+            duplicate_data["mergedAt"] = now_ms()
+            duplicate_data["mergedBy"] = actor_id
+            duplicate = _customer_merge_write_row(
+                conn, duplicate_row, duplicate_data, deleted=True
+            )
+
+            marker_data = {
+                "actorId": actor_id,
+                "requestHash": request_hash,
+                "idempotencyKey": idem,
+                "keepCustomerId": keep_id,
+                "duplicateCustomerId": duplicate_id,
+                "updatedPageIds": [item["id"] for item in updated["pages"]],
+                "updatedReceiptIds": [item["id"] for item in updated["receipts"]],
+                "updatedAdIds": [item["id"] for item in updated["ads"]],
+            }
+            _insert_entity_in_transaction(
+                conn,
+                CUSTOMER_MERGE_MUTATION_COLLECTION,
+                marker_id,
+                marker_data,
+                actor_id,
+            )
+            return {
+                "customer": customer,
+                "updatedPages": updated["pages"],
+                "updatedReceipts": updated["receipts"],
+                "updatedAds": updated["ads"],
+                "duplicate": duplicate,
+                "replayed": False,
+            }
+
+
+@app.post("/api/customers/merge", response_model=CustomerMergeResponse)
+def merge_customers(
+    body: CustomerMergeRequest,
+    request: Request,
+    include_media: bool = True,
+    admin: dict[str, Any] = Depends(require_admin),
+):
+    """Deliberately consolidate two same-phone customers without deleting history."""
+    require_same_origin(request)
+    result = _merge_customers_atomic(admin, body)
+    if not result.get("replayed"):
+        audit(
+            str(admin.get("id") or ""),
+            "merge",
+            "customers",
+            result["customer"]["id"],
+            "Merged a duplicate customer and reassigned linked records",
+            {
+                "duplicateCustomerId": result["duplicate"]["id"],
+                "updatedPages": len(result["updatedPages"]),
+                "updatedReceipts": len(result["updatedReceipts"]),
+                "updatedAds": len(result["updatedAds"]),
+            },
+        )
+    response_result = dict(result)
+    response_result["customer"] = _project_entity_media_for_user(
+        result["customer"], admin, include_media
+    )
+    response_result["duplicate"] = _project_entity_media_for_user(
+        result["duplicate"], admin, include_media
+    )
+    for key in ("updatedPages", "updatedReceipts", "updatedAds"):
+        response_result[key] = [
+            _project_entity_media_for_user(entity, admin, include_media)
+            for entity in result[key]
+        ]
+    return CustomerMergeResponse(**response_result)
 
 
 def _sync_watermark_max(
@@ -6316,6 +11387,7 @@ def get_sync_watermarks(user: dict[str, Any] = Depends(current_user)):
     role_lower = str(user.get("role") or "").lower()
     uid = sanitize_str(str(user.get("id") or ""))[:80]
     clothes_entitled = _has_active_clothes_subscription(user)
+    ad_maker_entitled = _has_active_ad_maker_subscription(user)
     watermarks: dict[str, int] = {}
     with db_conn() as conn:
         if str(get_engine().dialect.name or "") == "postgresql":
@@ -6324,6 +11396,8 @@ def get_sync_watermarks(user: dict[str, Any] = Depends(current_user)):
             conn.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
         for collection in SYNC_WATERMARK_COLLECTIONS:
             if collection in CLOTHES_BUSINESS_COLLECTIONS and not clothes_entitled:
+                continue
+            if collection == AD_CAMPAIGN_COLLECTION and not ad_maker_entitled:
                 continue
             if collection in PERSONAL_SCOPED_COLLECTIONS and role_lower != "admin":
                 if uid:
@@ -6367,15 +11441,23 @@ def get_collection(
     limit: int = 500,
     offset: int = 0,
     include_deleted: bool = False,
+    include_media: bool = True,
     before_created_at: Optional[int] = None,
     before_id: Optional[str] = None,
     after_last_modified: Optional[int] = None,
     after_id: Optional[str] = None,
     user: dict[str, Any] = Depends(current_user),
 ):
+    _reject_non_store_collection(collection)
     role_lower = str(user.get("role") or "").lower()
+    include_media = _can_include_entity_media(user, collection, include_media)
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
         _require_clothes_subscription(user)
+    if collection == AD_CAMPAIGN_COLLECTION:
+        _require_ad_maker_subscription(user)
+        # Campaign thumbnails must not make every sync/list response carry
+        # megabytes of base64. GET-by-id remains the hydration path.
+        include_media = False
 
     full_pair = before_created_at is not None or before_id is not None
     delta_pair = after_last_modified is not None or after_id is not None
@@ -6412,8 +11494,12 @@ def get_collection(
             before_id=before_id,
             after_last_modified=after_last_modified,
             after_id=after_id,
+            include_media=include_media,
         )
-        return [EntityResponse(**i) for i in rows]
+        return [
+            EntityResponse(**_project_entity_contacts_for_user(i, user))
+            for i in rows
+        ]
 
     # Delivery users should only see records assigned to them (deliveryPersonId == user.id).
     # This avoids leaking the full Ads/Receipts/Customers database to drivers.
@@ -6434,8 +11520,12 @@ def get_collection(
                 before_id=before_id,
                 after_last_modified=after_last_modified,
                 after_id=after_id,
+                include_media=include_media,
             )
-            return [EntityResponse(**i) for i in items]
+            return [
+                EntityResponse(**_project_entity_contacts_for_user(i, user))
+                for i in items
+            ]
 
         if collection == "customers":
             items = list_entities(
@@ -6449,8 +11539,12 @@ def get_collection(
                 before_id=before_id,
                 after_last_modified=after_last_modified,
                 after_id=after_id,
+                include_media=include_media,
             )
-            return [EntityResponse(**i) for i in items]
+            return [
+                EntityResponse(**_project_entity_contacts_for_user(i, user))
+                for i in items
+            ]
 
     module = _module_for_collection(collection)
     action = _action_for_collection(collection, "view")
@@ -6470,6 +11564,11 @@ def get_collection(
         include_deleted = False
 
     created_by_filter = None if can_view_all else str(user.get("id") or "")
+    ad_campaign_reviewer_scope = (
+        collection == AD_CAMPAIGN_COLLECTION
+        and role_lower != "admin"
+        and user_has_permission(user, AD_CAMPAIGN_COLLECTION, "review")
+    )
     items = list_entities(
         collection,
         updated_since=updated_since,
@@ -6481,8 +11580,13 @@ def get_collection(
         before_id=before_id,
         after_last_modified=after_last_modified,
         after_id=after_id,
+        include_media=include_media,
+        ad_campaign_reviewer_scope=ad_campaign_reviewer_scope,
     )
-    return [EntityResponse(**i) for i in items]
+    return [
+        EntityResponse(**_project_entity_contacts_for_user(i, user))
+        for i in items
+    ]
 
 
 def _delivery_customer_is_referenced(customer_id: str, delivery_user_id: str) -> bool:
@@ -6536,9 +11640,12 @@ def get_collection_item(
     entity_id: str,
     user: dict[str, Any] = Depends(current_user),
 ):
+    _reject_non_store_collection(collection)
     role_lower = str(user.get("role") or "").lower()
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
         _require_clothes_subscription(user)
+    if collection == AD_CAMPAIGN_COLLECTION:
+        _require_ad_maker_subscription(user)
     if role_lower == "delivery":
         if collection in {"ads", "receipts"}:
             item = get_entity(collection, entity_id)
@@ -6547,14 +11654,14 @@ def get_collection_item(
             data = item.get("data") or {}
             if str(data.get("deliveryPersonId") or "") != str(user.get("id") or ""):
                 raise HTTPException(status_code=403, detail="Forbidden")
-            return EntityResponse(**item)
+            return EntityResponse(**_project_entity_media_for_user(item, user))
         if collection == "customers":
             item = get_entity(collection, entity_id)
             if not item or item.get("deleted"):
                 raise HTTPException(status_code=404, detail="Not found")
             if not _delivery_customer_is_referenced(entity_id, str(user.get("id") or "")):
                 raise HTTPException(status_code=403, detail="Forbidden")
-            return EntityResponse(**item)
+            return EntityResponse(**_project_entity_media_for_user(item, user))
         # Exchange-rate history is intentionally public to all authenticated
         # roles; every other direct collection lookup is outside a driver's
         # assigned-delivery scope.
@@ -6568,7 +11675,7 @@ def get_collection_item(
             raise HTTPException(status_code=404, detail="Not found")
         if not _owns_personal_record(collection, item.get("data"), str(user.get("id") or "")):
             raise HTTPException(status_code=403, detail="Forbidden")
-        return EntityResponse(**item)
+        return EntityResponse(**_project_entity_media_for_user(item, user))
 
     module = _module_for_collection(collection)
     action = _action_for_collection(collection, "view")
@@ -6583,14 +11690,24 @@ def get_collection_item(
     if not item or item.get("deleted"):
         raise HTTPException(status_code=404, detail="Not found")
 
+    if (
+        collection == AD_CAMPAIGN_COLLECTION
+        and role_lower != "admin"
+        and user_has_permission(user, AD_CAMPAIGN_COLLECTION, "review")
+        and str((item.get("data") or {}).get("status") or "Draft")
+        not in {"Submitted", "Approved", "Rejected"}
+    ):
+        # Do not reveal whether a customer's private editable draft exists.
+        raise HTTPException(status_code=404, detail="Not found")
+
     # If user only has viewOwn, enforce creator ownership
     creator = item.get("createdBy") or (item.get("data") or {}).get("createdBy") or (item.get("data") or {}).get("creatorId")
     if collection == "exchangeRateHistory":
-        return EntityResponse(**item)
+        return EntityResponse(**_project_entity_media_for_user(item, user))
     if user_has_permission(user, module, action):
-        return EntityResponse(**item)
+        return EntityResponse(**_project_entity_media_for_user(item, user))
     if user_has_permission(user, module, action, record_creator_id=str(creator or "")):
-        return EntityResponse(**item)
+        return EntityResponse(**_project_entity_media_for_user(item, user))
 
     raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -6600,11 +11717,15 @@ def create_collection_item(
     collection: str,
     body: EntityCreateRequest,
     request: Request,
+    include_media: bool = True,
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
+    _reject_non_store_collection(collection)
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
         _require_clothes_subscription(user)
+    if collection == AD_CAMPAIGN_COLLECTION:
+        _require_ad_maker_subscription(user)
     validate_relationship_ids(body.data)
     if collection in CLOTHES_ORDER_SERVER_CONTROLLED_COLLECTIONS:
         raise HTTPException(
@@ -6695,7 +11816,7 @@ def create_collection_item(
     entity_id = validate_entity_id(body.id or new_id(collection[:10] or "id"))
 
     # Create must not overwrite existing records
-    if get_entity_meta(collection, entity_id):
+    if collection != AD_CAMPAIGN_COLLECTION and get_entity_meta(collection, entity_id):
         raise HTTPException(status_code=409, detail="ID already exists")
 
     # Normalize/validate certain flows server-side (multi-user safe).
@@ -6704,6 +11825,13 @@ def create_collection_item(
         body_data["variants"] = _clothes_validate_variants(
             body_data.get("variants", [])
         )
+    elif collection == AD_CAMPAIGN_COLLECTION:
+        # A generic create can only make a draft. All workflow identity,
+        # review, publishing and live-Meta fields are server-controlled.
+        with _ad_campaign_media_validation_slot(user):
+            body_data = _prepare_ad_campaign_fields(body.data or {}, strict=False)
+        body_data["schemaVersion"] = 1
+        body_data["status"] = "Draft"
     elif collection == "ads":
         data_in = sanitize_json(body.data or {}) or {}
         payment_status = sanitize_str(str(data_in.get("paymentStatus") or ""))[:40]
@@ -6733,7 +11861,7 @@ def create_collection_item(
         if is_temp_delivery and not delivery_person_id_in:
             raise HTTPException(status_code=400, detail="deliveryPersonId is required for delivery receipts")
 
-        temp_in = sanitize_str(str(data_in.get("tempReceiptNo") or ""))[:80]
+        temp_in = _canonical_receipt_number(data_in.get("tempReceiptNo"))
 
         # Server-generated temp receipt number (preferred): if not provided, generate D{n} safely.
         if is_temp_delivery and not temp_in:
@@ -6746,8 +11874,9 @@ def create_collection_item(
             data_in["receiptType"] = sanitize_str(str(data_in.get("receiptType") or ""))[:40] or "DELIVERY_TEMP"
 
         if temp_in:
+            data_in["tempReceiptNo"] = temp_in
             # Temp delivery receipt format: D{n}
-            if not (temp_in.startswith("D") and temp_in[1:].isdigit()):
+            if not re.fullmatch(r"D[0-9]+", temp_in):
                 raise HTTPException(status_code=400, detail="Invalid tempReceiptNo (expected D{n})")
             if _temp_receipt_no_exists(temp_in):
                 raise HTTPException(status_code=409, detail="tempReceiptNo already exists")
@@ -6758,8 +11887,12 @@ def create_collection_item(
         # the bad serial without any format or uniqueness check. Read fresh from
         # data_in so the temp-delivery block above (which may clear serialNumber)
         # is respected.
-        _final_no = sanitize_str(str(data_in.get("finalReceiptNo") or ""))[:80]
-        _serial_no = sanitize_str(str(data_in.get("serialNumber") or ""))[:80]
+        _final_no = _canonical_receipt_number(data_in.get("finalReceiptNo"))
+        _serial_no = _canonical_receipt_number(data_in.get("serialNumber"))
+        if "finalReceiptNo" in data_in:
+            data_in["finalReceiptNo"] = _final_no
+        if "serialNumber" in data_in:
+            data_in["serialNumber"] = _serial_no
         _serials_to_check = [_final_no]
         if _serial_no and _serial_no != _final_no:
             _serials_to_check.append(_serial_no)
@@ -6783,14 +11916,25 @@ def create_collection_item(
     else:
         body_data = body.data
 
-    if collection in {"clothesProducts", "clothesShipments"}:
+    if collection == AD_CAMPAIGN_COLLECTION:
+        saved = _create_ad_campaign_atomic(entity_id, body_data, user)
+    elif collection in {"clothesProducts", "clothesShipments"}:
         saved = _clothes_create_inventory_entity_atomic(
             user, collection, entity_id, body_data
         )
     else:
-        saved = upsert_entity(collection, entity_id, body_data, str(user.get("id") or "system"), create_if_missing=True)
-    audit(str(user.get("id")), "create", collection, entity_id, f"Created {collection} {entity_id}", {})
-    return EntityResponse(**saved)
+        saved = upsert_entity(
+            collection,
+            entity_id,
+            body_data,
+            str(user.get("id") or "system"),
+            create_if_missing=True,
+            reject_existing=True,
+        )
+    replayed_create = bool(saved.pop("_replayed", False))
+    if not replayed_create:
+        audit(str(user.get("id")), "create", collection, entity_id, f"Created {collection} {entity_id}", {})
+    return EntityResponse(**_project_entity_media_for_user(saved, user, include_media))
 
 
 @app.patch("/api/collections/{collection}/{entity_id}", response_model=EntityResponse)
@@ -6799,11 +11943,15 @@ def update_collection_item(
     entity_id: str,
     body: EntityUpdateRequest,
     request: Request,
+    include_media: bool = True,
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
+    _reject_non_store_collection(collection)
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
         _require_clothes_subscription(user)
+    if collection == AD_CAMPAIGN_COLLECTION:
+        _require_ad_maker_subscription(user)
     validate_relationship_ids(body.data)
     if collection in CLOTHES_ORDER_SERVER_CONTROLLED_COLLECTIONS:
         raise HTTPException(
@@ -6817,6 +11965,21 @@ def update_collection_item(
     existing = get_entity(collection, entity_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Not found")
+
+    campaign_updates: dict[str, Any] | None = None
+    if collection == AD_CAMPAIGN_COLLECTION:
+        raw_campaign_keys = set((body.data or {}).keys()) if isinstance(body.data, dict) else set()
+        if raw_campaign_keys & AD_CAMPAIGN_WORKFLOW_FIELDS:
+            raise HTTPException(status_code=403, detail="Campaign workflow fields are server-controlled")
+        media_guard = (
+            _ad_campaign_media_validation_slot(user)
+            if "creativeImages" in raw_campaign_keys
+            else nullcontext()
+        )
+        with media_guard:
+            campaign_updates = _prepare_ad_campaign_fields(
+                body.data or {}, strict=False, reject_unknown=True
+            )
 
     financial_updates = sanitize_json(body.data or {}) or {}
     if collection == "ads":
@@ -6832,10 +11995,32 @@ def update_collection_item(
             existing_status == "Stopped" and requested_status and requested_status != "Stopped"
         ):
             raise HTTPException(status_code=405, detail="Ad funding and stopping require the transactional ad API")
+        # SECURITY: paymentStatus/collectionMethod are what the capacity readers
+        # branch on. Rewriting them on a funded ad via a generic edit (with no
+        # transactional capacity re-check) can zero the ad's committed receipt
+        # credit, letting the same receipt money be spent twice. Any CHANGE to
+        # these classification fields must go through /api/ads/mutate; an
+        # unchanged echo from an ordinary edit is still allowed.
+        existing_ad_data = existing.get("data") or {}
+        for _classification in ("paymentStatus", "collectionMethod"):
+            if _classification in financial_updates and str(
+                financial_updates.get(_classification) or ""
+            ) != str(existing_ad_data.get(_classification) or ""):
+                raise HTTPException(
+                    status_code=405,
+                    detail="Ad payment classification requires the transactional ad API",
+                )
     if collection == "receipts":
         old_receipt_type = str((existing.get("data") or {}).get("receiptType") or "")
         if set(financial_updates) & (RECEIPT_TRANSFER_FIELDS - {"receiptType"}):
             raise HTTPException(status_code=405, detail="Receipt transfer fields are server-controlled")
+        # Any role writing the fee payer must use a valid value; readers treat
+        # everything except 'shop' as the customer, so garbage would silently
+        # hide a real shop-covered loss.
+        if "deliveryFeePaidBy" in financial_updates:
+            _fee_payer_in = str(financial_updates.get("deliveryFeePaidBy") or "").strip().lower()
+            if _fee_payer_in not in _DELIVERY_FEE_PAYERS:
+                raise HTTPException(status_code=400, detail="deliveryFeePaidBy must be 'customer' or 'shop'")
         if "receiptType" in financial_updates and (
             old_receipt_type == "TRANSFER_IN"
             or str(financial_updates.get("receiptType") or "") != old_receipt_type
@@ -6893,6 +12078,9 @@ def update_collection_item(
 
             desired = str(updates.get("deliveryStatus") or "").strip()
             now = now_ms()
+            current_status = str(data.get("deliveryStatus") or "").strip()
+            if desired and desired == current_status:
+                raise HTTPException(status_code=409, detail=f"Delivery is already '{current_status}'")
             if "acceptedDate" in submitted_keys and desired != "In Progress":
                 raise HTTPException(status_code=403, detail="acceptedDate is server-controlled")
             if submitted_keys & {"deliveryCancelReason", "deliveryCancelledAt", "deliveryCancelledBy"} and desired != "Canceled":
@@ -6907,7 +12095,6 @@ def update_collection_item(
             # an ad OUT of 'Delivered' or 'Canceled' (the receipts branch already
             # enforces this). This blocks re-opening a completed/cancelled ad
             # delivery without touching any legitimate forward flow.
-            current_status = str(data.get("deliveryStatus") or "").strip()
             if desired and desired != current_status and current_status in {"Delivered", "Canceled"}:
                 raise HTTPException(
                     status_code=400,
@@ -6962,7 +12149,17 @@ def update_collection_item(
                 "amountCollectedFromCustomer",
                 "actualDeliveryFeeCollected",
                 "deliveryFeeCollected",
+                # Who paid the fee: 'customer' (default) or 'shop' (owner-covered
+                # loss). Validated + defaulted in the Delivered computation below.
+                "deliveryFeePaidBy",
                 "driverNotes",
+                # How the collected money + fee were paid (split-payment rows, same shape
+                # a receipt stores). Descriptive only: the authoritative amount is still
+                # computed server-side from amountCollectedFromCustomer, so these cannot
+                # forge money. Gated to the Delivered transition via SETTLEMENT_FIELDS.
+                "payments",
+                "deliveryFeePayments",
+                "paymentMethod",
                 # cancellation
                 "deliveryCancelReason",
                 "deliveryCancelledAt",
@@ -7007,6 +12204,8 @@ def update_collection_item(
             desired = str(updates.get("deliveryStatus") or "").strip()
             now = now_ms()
             current_status = str(data.get("deliveryStatus") or "").strip()
+            if desired and desired == current_status:
+                raise HTTPException(status_code=409, detail=f"Delivery is already '{current_status}'")
             if "acceptedDate" in submitted_keys and desired != "In Progress":
                 raise HTTPException(status_code=403, detail="acceptedDate is server-controlled")
             if submitted_keys & {"deliveryCancelReason", "deliveryCancelledAt", "deliveryCancelledBy"} and desired != "Canceled":
@@ -7037,8 +12236,13 @@ def update_collection_item(
                 "amountCollectedFromCustomer",
                 "actualDeliveryFeeCollected",
                 "deliveryFeeCollected",
+                "deliveryFeePaidBy",
                 "receiptImage",
                 "photos",
+                # The payment-method breakdown is settlement evidence too.
+                "payments",
+                "deliveryFeePayments",
+                "paymentMethod",
             }
             if desired != "Delivered":
                 for _f in SETTLEMENT_FIELDS:
@@ -7085,9 +12289,9 @@ def update_collection_item(
                         detail=f"Receipt delivery is already finalized ('{current_status}') and cannot be re-settled",
                     )
                 # Required fields (driver must confirm)
-                final_no = sanitize_str(
-                    str(updates.get("finalReceiptNo") or updates.get("serialNumber") or "")
-                )[:80]
+                final_no = _canonical_receipt_number(
+                    updates.get("finalReceiptNo") or updates.get("serialNumber")
+                )
                 if not final_no:
                     raise HTTPException(status_code=400, detail="finalReceiptNo is required")
                 # Allow S-prefixed auto-serial (S1, S2, S3) for LTT/Libyana/Madar, or regular digits
@@ -7114,6 +12318,17 @@ def update_collection_item(
                 if fee_collected < 0:
                     raise HTTPException(status_code=400, detail="actualDeliveryFeeCollected must be >= 0")
 
+                # Who paid the fee. Absent/blank (old clients) defaults to
+                # 'customer' — the historical implicit behaviour; anything else
+                # must be exactly 'customer' or 'shop'.
+                fee_paid_by_raw = updates.get("deliveryFeePaidBy")
+                if fee_paid_by_raw is None or str(fee_paid_by_raw).strip() == "":
+                    fee_paid_by = str(data.get("deliveryFeePaidBy") or "").strip().lower() or "customer"
+                else:
+                    fee_paid_by = str(fee_paid_by_raw).strip().lower()
+                if fee_paid_by not in _DELIVERY_FEE_PAYERS:
+                    raise HTTPException(status_code=400, detail="deliveryFeePaidBy must be 'customer' or 'shop'")
+
                 # Preserve debt baseline (what customer SHOULD pay)
                 debt_local = _as_float(data.get("debtAmountLocal"))
                 if debt_local is None:
@@ -7123,6 +12338,12 @@ def update_collection_item(
                 if debt_usd is None:
                     debt_usd = _as_float(data.get("amountUSD")) or 0.0
                     updates["debtAmountUSD"] = float(debt_usd)
+
+                # The authoritative overpayment guard runs again inside
+                # _financial_patch_receipt_atomic after locking the receipt and
+                # deriving any zero-value D-receipt target from current linked
+                # ads. A pre-lock check against the stored zero would reject a
+                # legitimate large collection before that target can be seen.
 
                 # Compute debt comparison
                 diff = float(amt_collected) - float(debt_local or 0.0)
@@ -7156,6 +12377,7 @@ def update_collection_item(
                 updates["amountCollectedFromCustomer"] = float(amt_collected)
                 updates["actualDeliveryFeeCollected"] = float(fee_collected)
                 updates["deliveryFeeCollected"] = float(fee_collected)
+                updates["deliveryFeePaidBy"] = fee_paid_by
                 updates["paymentResult"] = payment_result
                 updates["overpaidAmount"] = overpaid
                 updates["remainingDue"] = remaining_due
@@ -7202,7 +12424,7 @@ def update_collection_item(
                 )[:80]
 
         if collection == "receipts":
-            saved = _financial_patch_receipt_atomic(
+            saved, _updated_ads, _replayed = _financial_patch_receipt_atomic(
                 user, entity_id, updates, body.expectedLastModified
             )
         else:
@@ -7214,7 +12436,7 @@ def update_collection_item(
                 expected_last_modified=body.expectedLastModified,
             )
         audit(str(user.get("id")), "update", collection, entity_id, f"Updated {collection} {entity_id} (delivery)", {})
-        return EntityResponse(**saved)
+        return EntityResponse(**_project_entity_media_for_user(saved, user, include_media))
 
     # Subscription history is server-controlled.  Every role, including
     # Admin, may only perform an active -> canceled transition; identity,
@@ -7232,12 +12454,68 @@ def update_collection_item(
     creator = existing.get("createdBy") or (existing.get("data") or {}).get("createdBy") or (existing.get("data") or {}).get("creatorId")
     delivery_grant_patch = False
     if not user_has_permission(user, module, _action_for_collection(collection, "edit"), record_creator_id=str(creator or "")):
+        _dw_updates = sanitize_json(body.data or {}) or {}
+        _dw_keys = set(_dw_updates.keys())
+        # A receipts PATCH that touches ONLY the collection-tracking fields is
+        # authorized by receipts.markCollected (the client offers a standalone
+        # "Mark Collected" capability), mirroring the deliveries.* bypass. It
+        # flows through the normal receipts path (delivery_grant_patch stays
+        # False), which persists collected* the same as a full receipts.edit.
+        _mark_collected_patch = (
+            collection == "receipts"
+            and bool(_dw_keys - {"_lastModified"})
+            and _dw_keys.issubset(_RECEIPT_COLLECTION_FIELDS)
+            and user_has_permission(user, "receipts", "markCollected", record_creator_id=str(creator or ""))
+        )
         # Delivery-workflow PATCHes (assign/accept/complete/collect) are also
         # authorized by the deliveries.* permission group.
-        _dw_updates = sanitize_json(body.data or {}) or {}
-        if not (collection in {"ads", "receipts"} and _delivery_patch_allowed(user, existing, _dw_updates)):
+        _delivery_ok = collection in {"ads", "receipts"} and _delivery_patch_allowed(user, existing, _dw_updates)
+        if not _mark_collected_patch and not _delivery_ok:
             raise HTTPException(status_code=403, detail="Forbidden")
-        delivery_grant_patch = True
+        delivery_grant_patch = _delivery_ok
+
+    if collection == AD_CAMPAIGN_COLLECTION:
+        # Ads Studio uses a status machine (Draft -> Submitted -> Reviewed).
+        # Requiring the version makes the later atomic patch_entity check close
+        # the race where a draft could be submitted/reviewed after this status
+        # read but before its content update was written.
+        if body.expectedLastModified is None:
+            raise HTTPException(
+                status_code=409,
+                detail="expectedLastModified is required for campaign updates",
+            )
+        current_campaign = existing.get("data") or {}
+        current_version = int(existing.get("lastModified") or current_campaign.get("_lastModified") or 0)
+        if (
+            body.expectedLastModified is not None
+            and current_version != int(body.expectedLastModified)
+            and campaign_updates
+            and all(current_campaign.get(key) == value for key, value in campaign_updates.items())
+        ):
+            # PATCH is retried after response loss. If every requested field is
+            # already authoritative, return the current row instead of telling
+            # the user that their successfully-saved draft failed.
+            return EntityResponse(
+                **_project_entity_media_for_user(existing, user, False)
+            )
+        _enforce_ad_campaign_mutation_rate(user)
+        current_status = str(current_campaign.get("status") or "Draft")
+        if current_status not in AD_CAMPAIGN_EDITABLE_STATUSES:
+            raise HTTPException(
+                status_code=409,
+                detail="Only Draft or Changes Requested campaigns can be edited",
+            )
+        merged_campaign = {
+            key: current_campaign[key]
+            for key in AD_CAMPAIGN_ALLOWED_FIELDS
+            if key in current_campaign
+        }
+        merged_campaign.update(campaign_updates or {})
+        validated_campaign = _prepare_ad_campaign_fields(
+            merged_campaign, strict=False, trusted_media=True
+        )
+        body.data.clear()
+        body.data.update(validated_campaign)
 
     if delivery_grant_patch:
         # Client clocks/identities are not authoritative workflow evidence.
@@ -7245,6 +12523,9 @@ def update_collection_item(
         normalized_delivery_updates = sanitize_json(body.data or {}) or {}
         normalized_delivery_updates.pop("_lastModified", None)
         target_status = str(normalized_delivery_updates.get("deliveryStatus") or "").strip()
+        current_status = str((existing.get("data") or {}).get("deliveryStatus") or "").strip()
+        if target_status and target_status == current_status:
+            raise HTTPException(status_code=409, detail=f"Delivery is already '{current_status}'")
         now_iso = _iso_utc()
         if target_status == "In Progress":
             normalized_delivery_updates["acceptedDate"] = now_iso
@@ -7280,17 +12561,17 @@ def update_collection_item(
     # Receipt number uniqueness enforcement (server-side, multi-user safe)
     if collection == "receipts":
         updates_in = sanitize_json(body.data or {}) or {}
-        temp_in = sanitize_str(str(updates_in.get("tempReceiptNo") or ""))[:80]
+        temp_in = _canonical_receipt_number(updates_in.get("tempReceiptNo"))
 
         if temp_in:
-            if not (temp_in.startswith("D") and temp_in[1:].isdigit()):
+            if not re.fullmatch(r"D[0-9]+", temp_in):
                 raise HTTPException(status_code=400, detail="Invalid tempReceiptNo (expected D{n})")
             if _temp_receipt_no_exists(temp_in, exclude_id=entity_id):
                 raise HTTPException(status_code=409, detail="tempReceiptNo already exists")
 
         # Validate finalReceiptNo AND serialNumber independently (see create path).
-        _final_no = sanitize_str(str(updates_in.get("finalReceiptNo") or ""))[:80]
-        _serial_no = sanitize_str(str(updates_in.get("serialNumber") or ""))[:80]
+        _final_no = _canonical_receipt_number(updates_in.get("finalReceiptNo"))
+        _serial_no = _canonical_receipt_number(updates_in.get("serialNumber"))
         _serials_to_check = [_final_no]
         if _serial_no and _serial_no != _final_no:
             _serials_to_check.append(_serial_no)
@@ -7329,7 +12610,7 @@ def update_collection_item(
             user, entity_id, updates_to_save, body.expectedLastModified
         )
     elif collection == "receipts":
-        saved = _financial_patch_receipt_atomic(
+        saved, _updated_ads, _replayed = _financial_patch_receipt_atomic(
             user, entity_id, updates_to_save, body.expectedLastModified
         )
     else:
@@ -7341,7 +12622,7 @@ def update_collection_item(
             expected_last_modified=body.expectedLastModified,
         )
     audit(str(user.get("id")), "update", collection, entity_id, f"Updated {collection} {entity_id}", {})
-    return EntityResponse(**saved)
+    return EntityResponse(**_project_entity_media_for_user(saved, user, include_media))
 
 
 @app.put("/api/admin/collections/{collection}/{entity_id}/restore", response_model=EntityResponse)
@@ -7398,6 +12679,10 @@ def admin_restore_collection_item(
 
     # Sanitize record body
     data = sanitize_json(body.data or {}) or {}
+    if entity_type == "customers":
+        data = _normalize_customer_phone_storage(
+            data, modern_authoritative="phones" in data
+        )
     data["id"] = ent_id
 
     def _as_int(v: Any) -> Optional[int]:
@@ -7410,11 +12695,17 @@ def admin_restore_collection_item(
 
     created_at_in_i = _as_int(created_at_in)
 
-    with db_conn() as conn:
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    customer_guard = (
+        _SQLITE_CUSTOMER_PHONE_LOCK
+        if entity_type == "customers" and not postgres
+        else nullcontext()
+    )
+    with customer_guard, db_conn() as conn:
         existing = (
             conn.execute(
                 text(
-                    "SELECT deleted, created_at, created_by, last_modified FROM entities WHERE type = :type AND id = :id LIMIT 1"
+                    "SELECT data_json, deleted, created_at, created_by, last_modified FROM entities WHERE type = :type AND id = :id LIMIT 1"
                 ),
                 {"type": entity_type, "id": ent_id},
             )
@@ -7466,6 +12757,23 @@ def admin_restore_collection_item(
             "last_modified": int(last_modified),
         }
 
+        if entity_type == "customers" and not deleted:
+            # A deterministic restore may contain a genuinely old, phone-less
+            # customer. Keep that backup contract grandfathered, while still
+            # treating any supplied valid phone as a fresh activation so it
+            # cannot collide with an active customer.
+            restored_phone_keys = _customer_phone_keys(data)
+            _validate_customer_phone_change_conn(
+                conn,
+                ent_id,
+                json_loads(existing.get("data_json") or "{}") if existing else {},
+                data,
+                postgres=postgres,
+                activating=(not existing or bool(existing.get("deleted")))
+                and bool(restored_phone_keys),
+                phone_fields_touched=bool(CUSTOMER_PHONE_FIELDS & set(data)),
+            )
+
         if existing:
             conn.execute(
                 text(
@@ -7502,6 +12810,52 @@ def admin_restore_collection_item(
         lastModified=int(last_modified),
         data=data,
     )
+
+
+def _preflight_import_unique_identities(
+    prepared: list[
+        tuple[
+            str,
+            set[str],
+            list[tuple[str, dict[str, Any], Optional[int], Optional[str]]],
+        ]
+    ]
+) -> None:
+    """Reject duplicate identity keys before an import opens a transaction."""
+    for name, _seen_ids, active in prepared:
+        if name == "customers":
+            owners: dict[str, str] = {}
+            for record_id, data, _created_at, _created_by in active:
+                for key in _customer_phone_keys(data):
+                    owner = owners.get(key)
+                    if owner and owner != record_id:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                "Import conflict in 'customers': active records "
+                                f"'{owner}' and '{record_id}' share a phone number. "
+                                "No data was changed."
+                            ),
+                        )
+                    owners[key] = record_id
+        elif name == "receipts":
+            owners = {}
+            for record_id, data, _created_at, _created_by in active:
+                # A receipt may intentionally mirror the same number in two of
+                # its own fields. Only a collision with a different receipt is
+                # a duplicate identity.
+                for key in _receipt_number_keys(data):
+                    owner = owners.get(key)
+                    if owner and owner != record_id:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                "Import conflict in 'receipts': active records "
+                                f"'{owner}' and '{record_id}' share a receipt number "
+                                "across serial/final/temp fields. No data was changed."
+                            ),
+                        )
+                    owners[key] = record_id
 
 
 @app.post("/api/admin/import")
@@ -7596,6 +12950,8 @@ def admin_bulk_import(
             created_by = sanitize_str(str(data.get("createdBy") or ""))[:80] or None
             active.append((rid, data, created_at, created_by))
         prepared.append((name, seen_ids, active))
+
+    _preflight_import_unique_identities(prepared)
 
     summary: dict[str, dict[str, int]] = {}
     with db_conn() as conn:
@@ -7722,6 +13078,15 @@ def batch_delete_entities(
             raise HTTPException(status_code=400, detail="Invalid collection/id in batch")
         if col in CLOTHES_BUSINESS_COLLECTIONS:
             _require_clothes_subscription(user)
+        if col == AD_CAMPAIGN_COLLECTION:
+            _require_ad_maker_subscription(user)
+            # Campaign workflow status and ownership must be checked under the
+            # same row lock as deletion. Use the dedicated single-item route.
+            raise HTTPException(
+                status_code=405,
+                detail="Campaign requests must be deleted individually",
+            )
+        campaign_existing = None
         if col == "users":
             raise HTTPException(status_code=400, detail="Users cannot be deleted through this endpoint")
         if col in PERSONAL_SCOPED_COLLECTIONS:
@@ -7741,7 +13106,7 @@ def batch_delete_entities(
         module = _module_for_collection(col)
         delete_action = _action_for_collection(col, "delete")
         if not user_has_permission(user, module, delete_action):
-            existing = get_entity(col, eid)
+            existing = campaign_existing or get_entity(col, eid)
             if not existing:
                 # Missing records are skipped later; nothing to authorize.
                 normalized.append((col, eid))
@@ -7749,6 +13114,17 @@ def batch_delete_entities(
             creator = existing.get("createdBy") or (existing.get("data") or {}).get("createdBy") or (existing.get("data") or {}).get("creatorId")
             if not user_has_permission(user, module, delete_action, record_creator_id=str(creator or "")):
                 raise HTTPException(status_code=403, detail=f"Forbidden: {col}/{eid}")
+        if (
+            col == AD_CAMPAIGN_COLLECTION
+            and campaign_existing
+            and str(user.get("role") or "").lower() != "admin"
+            and str((campaign_existing.get("data") or {}).get("status") or "Draft")
+            not in AD_CAMPAIGN_DELETABLE_STATUSES
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Submitted campaigns cannot be deleted while under review",
+            )
         normalized.append((col, eid))
 
     now = now_ms()
@@ -7781,6 +13157,24 @@ def batch_delete_entities(
                         )
                 for customer_id in sorted(customer_ids):
                     _clothes_lock_row(conn, "customers", customer_id, postgres=postgres)
+                # SECURITY/INTEGRITY: match the single-delete atomic guard so the
+                # batch path cannot orphan a customer's receipts/ads. A customer
+                # may only be deleted if every active record that references them
+                # is being deleted in this same batch; otherwise refuse (409),
+                # exactly like _financial_delete_customer_atomic.
+                if customer_ids:
+                    batch_ids = {eid for _c, eid in normalized}
+                    for linked_collection in ("receipts", "ads"):
+                        for linked_row in _financial_active_rows(conn, linked_collection):
+                            linked = _financial_row_data(linked_row)
+                            if (
+                                str(linked.get("customerId") or "") in customer_ids
+                                and str(linked_row["id"]) not in batch_ids
+                            ):
+                                raise HTTPException(
+                                    status_code=409,
+                                    detail="Customer cannot be deleted while linked records exist",
+                                )
 
             for (col, eid) in normalized:
                 exists = (
@@ -7813,8 +13207,22 @@ def delete_collection_item(
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
+    _reject_non_store_collection(collection)
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
         _require_clothes_subscription(user)
+    if collection == AD_CAMPAIGN_COLLECTION:
+        _require_ad_maker_subscription(user)
+        deleted_campaign = _soft_delete_ad_campaign_atomic(user, entity_id)
+        if not deleted_campaign.get("replayed"):
+            audit(
+                str(user.get("id")),
+                "delete",
+                collection,
+                entity_id,
+                f"Deleted {collection} {entity_id}",
+                {},
+            )
+        return {"ok": True, "lastModified": deleted_campaign["lastModified"]}
     if collection in PERSONAL_SCOPED_COLLECTIONS:
         raise HTTPException(status_code=405, detail="Wallet and subscription history cannot be deleted")
     if collection in CLOTHES_ORDER_SERVER_CONTROLLED_COLLECTIONS:
@@ -7842,6 +13250,16 @@ def delete_collection_item(
         creator = existing.get("createdBy") or (existing.get("data") or {}).get("createdBy") or (existing.get("data") or {}).get("creatorId")
         if not user_has_permission(user, module, delete_action, record_creator_id=str(creator or "")):
             raise HTTPException(status_code=403, detail="Forbidden")
+
+    if collection == AD_CAMPAIGN_COLLECTION and str(user.get("role") or "").lower() != "admin":
+        campaign = get_entity(collection, entity_id)
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Not found")
+        if str((campaign.get("data") or {}).get("status") or "Draft") not in AD_CAMPAIGN_DELETABLE_STATUSES:
+            raise HTTPException(
+                status_code=409,
+                detail="Submitted campaigns cannot be deleted while under review",
+            )
 
     if collection == "customers":
         deleted_customer = _financial_delete_customer_atomic(entity_id)
@@ -8113,17 +13531,74 @@ def list_users(user: dict[str, Any] = Depends(current_user)):
     return [user_row_to_public(r) for r in rows]
 
 
+# Permissions that grant the cross-user name directory (assignee/creator
+# dropdowns and creator-name resolution). Shared by /api/users/public and
+# /api/users/tombstones — own-only/customer accounts get no directory.
+USER_DIRECTORY_PERMISSIONS = (
+    ("users", "view"),
+    ("users", "managePermissions"),
+    ("ads", "view"),
+    ("ads", "assignDelivery"),
+    ("receipts", "view"),
+    ("deliveries", "view"),
+    ("deliveries", "assign"),
+    ("deliveries", "reassign"),
+    ("deliveries", "viewStats"),
+    ("auditLogs", "view"),
+    ("adCampaignRequests", "view"),
+    ("adCampaignRequests", "review"),
+)
+
+
 @app.get("/api/users/public")
 def list_users_public(user: dict[str, Any] = Depends(current_user)):
-    # Minimal user list for UI dropdowns (delivery assignment, etc.)
+    # This endpoint feeds internal assignee/creator dropdowns, but it is also
+    # called by narrow customer portals.  Those customers use the existing
+    # Employee role, so role alone cannot distinguish them from staff.  Grant
+    # the directory only to permissions that operate across users' records;
+    # own-only/customer accounts receive a single self row instead.
+    can_browse_directory = any(
+        user_has_permission(user, module, action)
+        for module, action in USER_DIRECTORY_PERMISSIONS
+    )
+
     with db_conn() as conn:
-        rows = (
-            conn.execute(text("SELECT id, name, role FROM users WHERE deleted = false ORDER BY name ASC"))
-            .mappings()
-            .all()
-        )
+        if can_browse_directory:
+            query = "SELECT id, name, role FROM users WHERE deleted = false ORDER BY name ASC"
+            params: dict[str, Any] = {}
+        else:
+            query = "SELECT id, name, role FROM users WHERE id = :id AND deleted = false"
+            params = {"id": str(user.get("id") or "")}
+        rows = conn.execute(text(query), params).mappings().all()
         rows = [dict(r) for r in rows]
     return rows
+
+
+@app.get("/api/users/tombstones")
+def list_user_tombstones(user: dict[str, Any] = Depends(current_user)):
+    """id -> name directory of soft-deleted users, for display resolution.
+
+    User deletion is a soft delete (the row is retained forever for audit and
+    financial referential integrity), but /api/users and /api/users/public
+    filter deleted rows — so every record a deleted user created rendered as
+    "Created by: Unknown". Expose ONLY id + name of deleted accounts so
+    clients can keep resolving creator names on historical records.
+
+    Privacy semantics: a verified erasure request goes through
+    _privacy_anonymize_deleted_user_atomic, which replaces the stored name
+    with "Deleted user" — so this endpoint can never resurrect the identity
+    of a privacy-anonymized account.
+    """
+    if not any(
+        user_has_permission(user, module, action)
+        for module, action in USER_DIRECTORY_PERMISSIONS
+    ):
+        return []
+    with db_conn() as conn:
+        rows = conn.execute(
+            text("SELECT id, name FROM users WHERE deleted = true ORDER BY name ASC")
+        ).mappings().all()
+    return [{"id": str(r["id"]), "name": str(r["name"] or "")} for r in rows]
 
 
 def _free_email_if_soft_deleted(email: str, now: int) -> bool:
@@ -8148,6 +13623,145 @@ def _free_email_if_soft_deleted(email: str, now: int) -> bool:
             {"new_e": f"deleted{now}.{e}", "now": now, "id": str(row["id"])},
         )
     return True
+
+
+def _privacy_anonymized_email(user_id: str) -> str:
+    """Stable, non-identifying address for a retained user tombstone."""
+    opaque_id = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:24]
+    # Use an application-owned domain because UserPublic validates addresses
+    # and intentionally rejects reserved ``.invalid`` domains.
+    return f"deleted-{opaque_id}@privacy.albayanhub.com"
+
+
+def _privacy_anonymize_deleted_user_atomic(user_id: str) -> dict[str, Any]:
+    """Remove eligible account PII while retaining the user's stable id.
+
+    Financial and business rows refer to ``users.id`` through ``created_by``
+    and audit references.  Deleting that row would break their history, so a
+    verified deletion request is fulfilled by retaining an inert tombstone and
+    replacing personal fields and credentials.  The account must already have
+    been soft-deleted through the normal user-management flow.
+    """
+    user_id = validate_entity_id(user_id)
+    replacement_email = _privacy_anonymized_email(user_id)
+    replacement_password = hash_password(
+        secrets.token_urlsafe(48), iterations=PBKDF2_ITERATIONS_DEFAULT
+    )
+    now = now_ms()
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    suffix = " FOR UPDATE" if postgres else ""
+
+    with db_conn() as conn:
+        existing = conn.execute(
+            text(f"SELECT * FROM users WHERE id=:id LIMIT 1{suffix}"),
+            {"id": user_id},
+        ).mappings().first()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Not found")
+        if not bool(existing.get("deleted")):
+            raise HTTPException(
+                status_code=409,
+                detail="Disable this account first, then run privacy anonymization",
+            )
+
+        conn.execute(
+            text(
+                """
+                UPDATE users
+                SET name=:name,
+                    email=:email,
+                    role='Employee',
+                    permissions_json=:permissions_json,
+                    password_hash=:password_hash,
+                    password_salt=:password_salt,
+                    password_algo=:password_algo,
+                    password_iterations=:password_iterations,
+                    deleted=true,
+                    last_modified=:last_modified
+                WHERE id=:id
+                """
+            ),
+            {
+                "id": user_id,
+                "name": "Deleted user",
+                "email": replacement_email,
+                "permissions_json": json_dumps({}),
+                "password_hash": replacement_password.hash_hex,
+                "password_salt": replacement_password.salt_hex,
+                "password_algo": replacement_password.algo,
+                "password_iterations": replacement_password.iterations,
+                "last_modified": now,
+            },
+        )
+
+        # Remove authentication artifacts that can contain device/IP details.
+        conn.execute(text("DELETE FROM sessions WHERE user_id=:id"), {"id": user_id})
+        conn.execute(text("DELETE FROM password_resets WHERE user_id=:id"), {"id": user_id})
+
+        # Keep action/resource/user identifiers for accountability and financial
+        # referential integrity, but remove free-text and metadata that may
+        # contain the person's former name, email address, IP, or user agent.
+        conn.execute(
+            text(
+                """
+                UPDATE audit_logs
+                SET message=:message, metadata_json=:metadata_json
+                WHERE user_id=:id
+                   OR (resource_type='users' AND resource_id=:id)
+                """
+            ),
+            {
+                "id": user_id,
+                "message": "Activity retained after account privacy anonymization",
+                "metadata_json": json_dumps({}),
+            },
+        )
+
+        # Records stamp the creator's display name (createdByName) at creation
+        # so ordinary deletion keeps history readable. A verified privacy
+        # request must scrub that denormalized copy too: the record ids and the
+        # created_by linkage stay for financial integrity, only the human name
+        # goes. last_modified is bumped so synced clients replace their cached
+        # copies with the scrubbed version. The LIKE branch catches imported
+        # legacy rows whose creator lives only inside data_json.
+        stamped_rows = conn.execute(
+            text(
+                "SELECT type, id, data_json, created_by FROM entities "
+                "WHERE created_by = :id "
+                "   OR (created_by IS NULL AND data_json LIKE :pat)"
+            ),
+            {"id": user_id, "pat": f"%{user_id}%"},
+        ).mappings().all()
+        for row in stamped_rows:
+            data = json_loads(row.get("data_json") or "{}") or {}
+            if not isinstance(data, dict) or not data.get("createdByName"):
+                continue
+            if row.get("created_by") is None and user_id not in (
+                str(data.get("createdBy") or ""),
+                str(data.get("creatorId") or ""),
+            ):
+                continue
+            data.pop("createdByName", None)
+            conn.execute(
+                text(
+                    "UPDATE entities SET data_json = :data_json, last_modified = :now "
+                    "WHERE type = :type AND id = :id"
+                ),
+                {
+                    "data_json": json_dumps(data),
+                    "now": now,
+                    "type": row["type"],
+                    "id": row["id"],
+                },
+            )
+
+        updated = conn.execute(
+            text("SELECT * FROM users WHERE id=:id LIMIT 1"),
+            {"id": user_id},
+        ).mappings().first()
+        if not updated:
+            raise HTTPException(status_code=500, detail="Failed to anonymize account")
+        return dict(updated)
 
 
 def _validated_role(raw_role: Any) -> str:
@@ -8448,6 +14062,46 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
     return user_row_to_public(updated)
 
 
+@app.post("/api/users/{user_id}/privacy-anonymize", response_model=UserPublic)
+def privacy_anonymize_user(
+    user_id: str,
+    request: Request,
+    body: dict[str, Any] = Body(...),
+    admin: dict[str, Any] = Depends(current_user),
+):
+    """Fulfil a verified account-deletion request without breaking records.
+
+    This is intentionally separate from ordinary soft deletion.  Only an
+    Admin may use it, the target must already be disabled, and the caller must
+    type an account-specific confirmation phrase.
+    """
+    require_same_origin(request)
+    user_id = validate_entity_id(user_id)
+    if str(admin.get("role") or "").lower() != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    if str(admin.get("id") or "") == user_id:
+        raise HTTPException(status_code=400, detail="You cannot anonymize your own account")
+
+    expected_confirmation = f"ANONYMIZE {user_id}"
+    supplied_confirmation = str((body or {}).get("confirmation") or "").strip()
+    if not secrets.compare_digest(supplied_confirmation, expected_confirmation):
+        raise HTTPException(
+            status_code=400,
+            detail=f'Type "{expected_confirmation}" to confirm privacy anonymization',
+        )
+
+    updated = _privacy_anonymize_deleted_user_atomic(user_id)
+    audit(
+        str(admin.get("id")),
+        "privacy_anonymize",
+        "users",
+        user_id,
+        "Anonymized a deleted user after a verified privacy request",
+        {},
+    )
+    return user_row_to_public(updated)
+
+
 # ==========================================
 # SPA CATCH-ALL ROUTE (Must be LAST)
 # ==========================================
@@ -8471,6 +14125,7 @@ FRONTEND_ROUTES = {
     "/no-access",
     "/smart-systems",
     "/clothes-system",
+    "/ads-studio",
     "/service",
     "/wallet",
     "/account",
@@ -8486,16 +14141,7 @@ def spa_catch_all(path: str, request: Request):
     
     # Serve index.html for known frontend routes
     if full_path in FRONTEND_ROUTES:
-        if not INDEX_PATH.exists():
-            raise HTTPException(status_code=500, detail="index.html not found")
-        return FileResponse(
-            str(INDEX_PATH),
-            headers={
-                "Cache-Control": "no-store, max-age=0",
-                "Pragma": "no-cache",
-                "Expires": "0",
-            },
-        )
+        return _serve_versioned_index()
     
     # Return 404 for unknown paths (not a frontend route and not an API route)
     raise HTTPException(status_code=404, detail="Not found")

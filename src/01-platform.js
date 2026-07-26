@@ -45,10 +45,13 @@ const Platform = {
     const ua = navigator.userAgent || '';
     const uaLower = ua.toLowerCase();
     
-    // Check for Capacitor (mobile app)
+    // Check for Capacitor (mobile app). document.URL is read defensively:
+    // headless test sandboxes stub document without it, and detect() is now
+    // reachable from routing paths (browser Back/overlay history model).
+    const docUrl = String((typeof document !== 'undefined' && document.URL) || '');
     const isCapacitor = typeof window.Capacitor !== 'undefined' ||
-                        document.URL.startsWith('capacitor://') ||
-                        document.URL.startsWith('ionic://');
+                        docUrl.startsWith('capacitor://') ||
+                        docUrl.startsWith('ionic://');
     
     // Detect specific platform
     let platform = 'web';
@@ -77,13 +80,55 @@ const Platform = {
       /iphone|ipad|ipod|android|blackberry|windows phone/i.test(ua) ||
       (isTouch && window.innerWidth < 768)
     );
-    
+
+    // Detect in-app browsers (webviews embedded inside other apps). Users
+    // arrive from Facebook ads, so the FB/IG/Messenger in-app browsers are a
+    // primary environment — and they silently break blob downloads,
+    // window.print() and target=_blank handoffs. Detection is deliberately
+    // token-based (explicit app UA markers only): NO generic "iOS without a
+    // Safari/ token" heuristic, because the installed PWA also drops the
+    // Safari/ token and would be misclassified. Capacitor is excluded first:
+    // its Android shell UA carries the same '; wv)' WebView marker.
+    let isInAppBrowser = false;
+    let inAppBrowserKind = null;
+    if (!isCapacitor) {
+      try {
+        if (/FBAN|FBAV|FB_IAB|FBIOS/i.test(ua)) {
+          // Facebook family. Messenger ships the same FB tokens plus its own
+          // app names (MessengerForiOS / Orca-Android), so the sub-check is
+          // safe — it only runs once an FB token already matched.
+          isInAppBrowser = true;
+          inAppBrowserKind = /messenger|orca/i.test(ua) ? 'messenger' : 'facebook';
+        } else if (/instagram/i.test(ua)) {
+          isInAppBrowser = true;
+          inAppBrowserKind = 'instagram';
+        } else if (/android/i.test(ua) && /; wv\)/.test(ua)) {
+          // Stock Android WebView marker (Chrome's "; wv)" token) — covers
+          // FB Lite, Gmail, and any other app hosting a bare WebView.
+          isInAppBrowser = true;
+          inAppBrowserKind = 'android-webview';
+        } else if (/\bLine\/|MicroMessenger|Snapchat|TikTok|musical_ly|BytedanceWebview|\bGSA\//i.test(ua)) {
+          // Other well-known in-app shells (LINE, WeChat, Snapchat, TikTok,
+          // the Google app). Same degraded capabilities; no finer branding
+          // is needed by any consumer.
+          isInAppBrowser = true;
+          inAppBrowserKind = 'other';
+        }
+      } catch (_) {
+        // Never let UA sniffing break platform detection.
+        isInAppBrowser = false;
+        inAppBrowserKind = null;
+      }
+    }
+
     this._cache = {
       isCapacitor,
       platform,
       isTouch,
       supportsHover,
       isMobileBrowser,
+      isInAppBrowser,
+      inAppBrowserKind,
       isMobile: isCapacitor || isMobileBrowser,
       isWeb: !isCapacitor,
       isIOS: platform === 'ios',
@@ -105,6 +150,12 @@ const Platform = {
   get supportsHover() { return this.detect().supportsHover; },
   get isMobile() { return this.detect().isMobile; },
   get isMobileBrowser() { return this.detect().isMobileBrowser; },
+  // In-app webview shells (Facebook/Instagram/Messenger, bare Android
+  // WebViews, other known app browsers). Consumers use this to degrade
+  // gracefully where those shells silently break downloads/printing.
+  get isInAppBrowser() { return this.detect().isInAppBrowser; },
+  // 'facebook' | 'instagram' | 'messenger' | 'android-webview' | 'other' | null
+  get inAppBrowserKind() { return this.detect().inAppBrowserKind; },
   get isWeb() { return this.detect().isWeb; },
   get isIOS() { return this.detect().isIOS; },
   get isAndroid() { return this.detect().isAndroid; },
@@ -117,14 +168,15 @@ const Platform = {
     if (!body) return;
     
     // Remove old classes
-    body.classList.remove('platform-web', 'platform-ios', 'platform-android', 'platform-harmony', 'platform-capacitor', 'is-touch', 'no-hover', 'is-mobile');
-    
+    body.classList.remove('platform-web', 'platform-ios', 'platform-android', 'platform-harmony', 'platform-capacitor', 'platform-inapp', 'is-touch', 'no-hover', 'is-mobile');
+
     // Add new classes
     if (p.isCapacitor) body.classList.add('platform-capacitor');
     body.classList.add(`platform-${p.platform}`);
     if (p.isTouch) body.classList.add('is-touch');
     if (!p.supportsHover) body.classList.add('no-hover');
     if (p.isMobile) body.classList.add('is-mobile');
+    if (p.isInAppBrowser) body.classList.add('platform-inapp');
   }
 };
 
@@ -208,3 +260,66 @@ function togglePerformanceMode(on) {
 // exists) — before the first render, so there is no styled->lite flash.
 applyPerformanceMode();
 
+// ==========================================
+// WORKSPACE EXPERIENCE MODE
+// ==========================================
+// The same business system serves beginners and power users. "Simple" keeps
+// the everyday search and quick filters visible while advanced filters stay
+// one tap away. "Advanced" keeps every filter expanded. This is deliberately
+// a per-device UI preference: it never changes or migrates business data.
+const ALBAYAN_EXPERIENCE_MODE_KEY = 'albayan_experience_mode';
+
+function getWorkspaceExperienceMode() {
+  let preference = null;
+  try { preference = localStorage.getItem(ALBAYAN_EXPERIENCE_MODE_KEY); } catch (_) {}
+  return preference === 'advanced' ? 'advanced' : 'simple';
+}
+
+function isAdvancedWorkspaceMode() {
+  return getWorkspaceExperienceMode() === 'advanced';
+}
+
+function applyWorkspaceExperienceMode() {
+  const advanced = isAdvancedWorkspaceMode();
+  try {
+    if (document.body) {
+      document.body.classList.toggle('workspace-advanced', advanced);
+      document.body.classList.toggle('workspace-simple', !advanced);
+    }
+  } catch (_) {}
+  return advanced ? 'advanced' : 'simple';
+}
+
+function setWorkspaceExperienceMode(mode, options = {}) {
+  const next = mode === 'advanced' ? 'advanced' : 'simple';
+  try { localStorage.setItem(ALBAYAN_EXPERIENCE_MODE_KEY, next); } catch (_) {}
+  applyWorkspaceExperienceMode();
+
+  // A full shell render refreshes the global header, navigation and every
+  // progressive filter panel. Guard the calls because this module loads before
+  // the renderer is declared in the generated bundle.
+  if (options.render !== false) {
+    if (typeof forceFullRender === 'function') forceFullRender();
+    else if (typeof render === 'function') render();
+  }
+
+  if (options.notify !== false && typeof showNotification === 'function' && typeof state !== 'undefined') {
+    const isAr = state.language === 'ar';
+    showNotification(
+      isAr ? 'طريقة عرض مساحة العمل' : 'Workspace View',
+      next === 'advanced'
+        ? (isAr ? 'تم إظهار جميع الأدوات والفلاتر المتقدمة.' : 'All advanced tools and filters are now visible.')
+        : (isAr ? 'تم تفعيل العرض البسيط. الأدوات المتقدمة ما زالت على بُعد ضغطة واحدة.' : 'Simple view is on. Advanced tools remain one tap away.'),
+      'success'
+    );
+  }
+  return next;
+}
+
+function toggleWorkspaceExperienceMode() {
+  return setWorkspaceExperienceMode(isAdvancedWorkspaceMode() ? 'simple' : 'advanced');
+}
+
+// Apply before the first app render to avoid controls flashing open and then
+// collapsing on startup.
+applyWorkspaceExperienceMode();

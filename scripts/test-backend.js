@@ -12,6 +12,8 @@ const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
 const PYTEST_ARGS = ['-m', 'pytest', '-q', '-p', 'no:cacheprovider'];
+const LOCAL_PYTEST_BASETEMP = '.pytest_tmp_backend';
+const DOCKER_PYTEST_BASETEMP = '/tmp/albayan-pytest';
 
 function run(command, args, options = {}) {
   const { quiet = false, ...spawnOptions } = options;
@@ -30,11 +32,14 @@ function available(command, args) {
 
 function findPython() {
   const configured = process.env.PYTHON;
+  const projectVenvPython = process.platform === 'win32'
+    ? path.join(ROOT, '.venv', 'Scripts', 'python.exe')
+    : path.join(ROOT, '.venv', 'bin', 'python');
   const candidates = configured
     ? [[configured, []]]
     : process.platform === 'win32'
-      ? [['py', ['-3']], ['python', []], ['python3', []]]
-      : [['python3', []], ['python', []]];
+      ? [[projectVenvPython, []], ['py', ['-3']], ['python', []], ['python3', []]]
+      : [[projectVenvPython, []], ['python3', []], ['python', []]];
 
   for (const [command, prefix] of candidates) {
     if (!available(command, [...prefix, '--version'])) continue;
@@ -48,7 +53,14 @@ function testWithPython() {
   const python = findPython();
   if (!python) return null;
   console.log(`Running backend tests with ${python.command}...`);
-  return run(python.command, [...python.prefix, ...PYTEST_ARGS]).status;
+  // Some Windows installations deny access to the shared %TEMP% pytest
+  // directory after another test process has used it. Keep pytest's scratch
+  // files inside this workspace so the release check is deterministic.
+  return run(python.command, [
+    ...python.prefix,
+    ...PYTEST_ARGS,
+    '--basetemp', LOCAL_PYTEST_BASETEMP,
+  ]).status;
 }
 
 function testWithDocker() {
@@ -65,7 +77,7 @@ function testWithDocker() {
     '--env', 'ALBAYAN_COOKIE_SECURE=false',
     '--env', 'ALBAYAN_DB_PATH=/tmp/albayan-tests.db',
     image,
-    'python', ...PYTEST_ARGS,
+    'python', ...PYTEST_ARGS, '--basetemp', DOCKER_PYTEST_BASETEMP,
   ]).status;
 }
 
@@ -81,7 +93,7 @@ if (status === null && requested !== 'python') status = testWithDocker();
 
 if (status === null) {
   console.error(
-    'Backend tests could not start. Install Python 3.12 plus server/requirements.txt, ' +
+    'Backend tests could not start. Create .venv and install server/requirements.txt, ' +
     'or start Docker Desktop, then run npm run test:backend again.'
   );
   process.exit(1);
