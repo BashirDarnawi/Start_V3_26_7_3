@@ -12,6 +12,7 @@ async function init() {
   applyTheme();
   document.documentElement.setAttribute('dir', getDir());
   document.documentElement.setAttribute('lang', state.language === 'ar' ? 'ar' : 'en');
+  if (typeof setupPhotoPasteSupport === 'function') setupPhotoPasteSupport();
   setupMobileRuntime().catch((error) => {
     console.warn('[MobileRuntime] Setup failed:', error?.message || error);
   });

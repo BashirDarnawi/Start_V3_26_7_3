@@ -3111,6 +3111,66 @@ check('saved ad photos cannot be replaced without permission to view them', () =
   S.modalData = null;
 });
 
+check('clipboard photo extraction keeps images only and removes duplicates', () => {
+  const png = { name: 'copied.png', type: 'image/png', size: 123 };
+  const text = { name: 'notes.txt', type: 'text/plain', size: 20 };
+  const files = sandbox.getClipboardImageFiles({
+    items: [
+      { kind: 'file', type: 'image/png', getAsFile: () => png },
+      { kind: 'file', type: 'text/plain', getAsFile: () => text }
+    ],
+    files: [png, text]
+  });
+  assert(files.length === 1 && files[0] === png, 'clipboard extraction accepted a non-image or duplicated the image');
+});
+
+check('photo clipboard handling never hijacks normal text fields', () => {
+  const image = { name: 'copied.png', type: 'image/png', size: 123 };
+  let prevented = false;
+  const textInput = { tagName: 'INPUT', type: 'text', isContentEditable: false, closest: () => null };
+  assert(sandbox.isPhotoPasteTextEntry(textInput), 'text input is not recognized as text entry');
+  const handled = sandbox.handlePhotoPasteEvent({
+    target: textInput,
+    clipboardData: { files: [image] },
+    preventDefault: () => { prevented = true; }
+  });
+  assert(handled === false && !prevented, 'image clipboard handling blocked paste inside a text field');
+  assert(!sandbox.isPhotoPasteTextEntry({ tagName: 'BUTTON', type: 'button', closest: () => null }), 'paste button is incorrectly treated as text entry');
+});
+
+checkAsync('Paste photo button reads a clipboard image through the normal ad upload handler', async () => {
+  const originalGetElementById = sandbox.document.getElementById;
+  const originalQuerySelector = sandbox.document.querySelector;
+  const originalRead = sandbox.navigator.clipboard.read;
+  const originalUploadAdPhotos = sandbox.uploadAdPhotos;
+  const originalActiveModal = S.activeModal;
+  const originalModalData = S.modalData;
+  let uploaded = null;
+  try {
+    loginAs(ADMIN);
+    S.activeModal = 'ad';
+    S.modalData = null;
+    const marker = makeElement();
+    sandbox.document.getElementById = id => (id === 'ad-photo-previews' ? marker : null);
+    sandbox.document.querySelector = selector => (selector === '[data-photo-paste-target="ad"]' ? marker : null);
+    const imageBlob = { type: 'image/png', size: 123 };
+    sandbox.navigator.clipboard.read = async () => [{
+      types: ['image/png'],
+      getType: async () => imageBlob
+    }];
+    sandbox.uploadAdPhotos = files => { uploaded = Array.from(files || []); };
+    await sandbox.pastePhotoFromClipboard('ad');
+    assert(uploaded?.length === 1 && uploaded[0] === imageBlob, 'clipboard image did not reach uploadAdPhotos');
+  } finally {
+    sandbox.document.getElementById = originalGetElementById;
+    sandbox.document.querySelector = originalQuerySelector;
+    sandbox.navigator.clipboard.read = originalRead;
+    sandbox.uploadAdPhotos = originalUploadAdPhotos;
+    S.activeModal = originalActiveModal;
+    S.modalData = originalModalData;
+  }
+});
+
 check('audit logs omit all inline photo bodies', () => {
   const redacted = sandbox.redactSensitive({
     old: { photos: [SAFE_RECEIPT_PNG], nested: ['data:image/png;base64,BBBB'] },

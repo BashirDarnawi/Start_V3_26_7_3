@@ -4296,7 +4296,7 @@ function renderAdPhotoPreviews() {
     const hiddenSavedPhotos = Boolean(state.modalData?.id) && hiddenCount > 0 && !can('ads', 'viewPhotos');
     container.innerHTML = hiddenSavedPhotos
       ? `<div class="text-xs text-amber-600 dark:text-amber-400 col-span-4 text-center py-2">${state.language === 'ar' ? `تم حفظ ${hiddenCount} صورة. تحتاج صلاحية عرض الصور لرؤيتها أو تغييرها.` : `${hiddenCount} saved photo${hiddenCount === 1 ? '' : 's'}. View Photos permission is required to see or change them.`}</div>`
-      : `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. اضغط "إضافة صورة" للرفع.' : 'No photos yet. Click "Add Photo" to upload.'}</div>`;
+      : `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. استخدم «رفع» أو «لصق صورة».' : 'No photos yet. Use Upload or Paste photo.'}</div>`;
     return;
   }
   container.innerHTML = photos.map((src, idx) => `
@@ -4399,7 +4399,7 @@ function renderReceiptPhotoPreviews() {
   if (!container) return;
   const photos = state.tempReceiptPhotos || [];
   if (!photos.length) {
-    container.innerHTML = `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. اضغط "إضافة صورة" للرفع.' : 'No photos yet. Click "Add Photo" to upload.'}</div>`;
+    container.innerHTML = `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. استخدم «رفع» أو «لصق صورة».' : 'No photos yet. Use Upload or Paste photo.'}</div>`;
     return;
   }
   container.innerHTML = photos.map((src, idx) => `

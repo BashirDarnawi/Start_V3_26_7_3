@@ -37,6 +37,7 @@ const adEditHistoryViewer = helpers.slice(
 const clothes = read('src/15b-clothes.js');
 const adsStudio = read('src/15c-ads-studio.js');
 const metaAds = read('src/15d-meta-ads.js');
+const photoPaste = read('src/15e-photo-paste.js');
 const actionsIo = read('src/16-actions-io.js');
 const css = read('style.css');
 
@@ -545,6 +546,23 @@ check('Ads Studio phone picker rejects unsupported image formats before compress
   adsStudio.includes('adsStudioDataUrlDecodedBytes(src)') &&
   adsStudio.includes('Use PNG, JPEG or WebP images only.') &&
   adsStudio.includes('On iPhone, choose JPEG / Most Compatible; HEIC is not supported yet.'));
+check('all photo forms offer clipboard paste without bypassing their upload pipelines',
+  ['ad', 'receipt'].every(target => modals.includes(`data-photo-paste-target="${target}"`) && modals.includes(`pastePhotoFromClipboard('${target}')`)) &&
+  helpers.includes('data-photo-paste-target="delivery"') && helpers.includes("pastePhotoFromClipboard('delivery')") &&
+  clothes.includes('data-photo-paste-target="clothes-product"') && clothes.includes("pastePhotoFromClipboard('clothes-product')") &&
+  adsStudio.includes('data-photo-paste-target="ads-studio"') && adsStudio.includes("pastePhotoFromClipboard('ads-studio')") &&
+  photoPaste.includes("uploadAdPhotos(images)") &&
+  photoPaste.includes("uploadReceiptPhotos(images)") &&
+  photoPaste.includes("handleDeliveryReceiptPhotoUpload(images)") &&
+  photoPaste.includes("uploadAdsStudioCreativeFiles(images)") &&
+  photoPaste.includes("uploadClothesProductPhotoFiles(images)"));
+check('photo paste is installed once and preserves normal text paste',
+  init.includes("typeof setupPhotoPasteSupport === 'function'") &&
+  photoPaste.includes('if (_photoPasteListenerInstalled) return;') &&
+  photoPaste.includes("document.addEventListener('paste', handlePhotoPasteEvent)") &&
+  photoPaste.includes('pasteContext !== capturePhotoPasteContext(target)') &&
+  photoPaste.includes('isPhotoPasteTextEntry(event?.target)') &&
+  photoPaste.includes('isPhotoPasteTextEntry(document.activeElement)'));
 check('Ads Studio clears private drafts and blocks late photo callbacks across sessions',
   adsStudio.includes('function resetAdsStudioSessionState()') &&
   adsStudio.includes('_adsStudioDraft !== draftRef') &&

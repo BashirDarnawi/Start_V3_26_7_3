@@ -97,6 +97,62 @@ test('receipt photos open from the outside card action', async ({ page }, testIn
   await expect(page.locator('#receipt-photo-viewer')).toHaveCount(0);
 });
 
+test('copied photos paste into an ad while text fields keep normal paste', async ({ page }) => {
+  await signIn(page);
+  await page.goto('/ads');
+  // Render the real ad form directly so this focused clipboard regression does
+  // not depend on a page/customer fixture created by a different test.
+  await page.evaluate(() => {
+    stopServerLiveSync();
+    const customerId = generateId('cust');
+    state.customers.push({
+      id: customerId,
+      name: 'Clipboard Photo Customer',
+      phones: ['0950000001'],
+      platform: 'Facebook',
+      joinDate: new Date().toISOString(),
+      profileLinks: []
+    });
+    state.pages.push({
+      id: generateId('page'),
+      name: 'Clipboard Photo Page',
+      category: 'E2E',
+      customerIds: [customerId],
+      createdAt: new Date().toISOString(),
+      _deleted: false
+    });
+    state.activeModal = 'ad';
+    state.modalData = null;
+    updateUrlParams({ modal: 'ad', id: 'new' });
+    renderModal();
+  });
+  await expect(page.locator('#app-modal')).toBeVisible();
+  await expect(page.getByRole('button', { name: /paste photo/i })).toBeVisible();
+
+  const textPasteResult = await page.evaluate(() => {
+    const bytes = Uint8Array.from([137, 80, 78, 71]);
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([bytes], 'also-an-image.png', { type: 'image/png' }));
+    const event = new ClipboardEvent('paste', { clipboardData: transfer, bubbles: true, cancelable: true });
+    document.getElementById('ad-page-search').dispatchEvent(event);
+    return { prevented: event.defaultPrevented };
+  });
+  expect(textPasteResult.prevented).toBe(false);
+
+  const pasteResult = await page.evaluate(() => {
+    const bytes = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), char => char.charCodeAt(0));
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([bytes], 'copied.png', { type: 'image/png' }));
+    const event = new ClipboardEvent('paste', { clipboardData: transfer, bubbles: true, cancelable: true });
+    const zone = document.querySelector('[data-photo-paste-target="ad"]');
+    zone.focus();
+    zone.dispatchEvent(event);
+    return { prevented: event.defaultPrevented };
+  });
+  expect(pasteResult.prevented).toBe(true);
+  await expect(page.locator('#ad-photo-previews img')).toHaveCount(1);
+});
+
 test('critical workspace routes fit the viewport and forms open', async ({ page }) => {
   await signIn(page);
 

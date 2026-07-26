@@ -23646,13 +23646,18 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
           </div>
         </div>
 
-        <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
-          <div class="flex items-center justify-between mb-2">
+        <div data-photo-paste-target="delivery" tabindex="0" class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+          <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
             <div class="text-xs font-bold text-slate-600 dark:text-slate-400">${isArD ? 'صورة الوصل *' : 'Receipt photo *'}</div>
-            <label class="text-xs font-bold text-indigo-600 hover:text-indigo-700 cursor-pointer">
-              ${isArD ? 'رفع صورة' : 'Upload'}
-              <input type="file" accept="image/*" class="hidden" onchange="handleDeliveryReceiptPhotoUpload(this.files); this.value=''" />
-            </label>
+            <div class="flex flex-wrap items-center gap-2">
+              <button type="button" onclick="pastePhotoFromClipboard('delivery')" class="min-h-11 px-3 rounded-lg border border-indigo-200 dark:border-indigo-800 text-xs font-bold text-indigo-600 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 flex items-center gap-1.5">
+                <i data-lucide="clipboard-paste" class="w-3.5 h-3.5"></i>${isArD ? 'لصق صورة' : 'Paste photo'}
+              </button>
+              <label class="min-h-11 px-3 rounded-lg bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 cursor-pointer flex items-center gap-1.5">
+                <i data-lucide="upload" class="w-3.5 h-3.5"></i>${isArD ? 'رفع' : 'Upload'}
+                <input type="file" accept="image/*" class="hidden" onchange="handleDeliveryReceiptPhotoUpload(this.files); this.value=''" />
+              </label>
+            </div>
           </div>
           <input type="hidden" id="delivery-receipt-image-data" data-image-data="${Security.escapeHtml(deliveryReceiptPhoto)}" />
           <button id="delivery-receipt-image-button" type="button" onclick="openDeliveryReceiptPhotoViewer()" class="${deliveryReceiptPhoto ? '' : 'hidden'} group relative w-full rounded-lg overflow-hidden" title="${isArD ? 'اضغط لعرض الصورة بالحجم الكامل' : 'Click to view full size'}">
@@ -23662,6 +23667,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
             </span>
           </button>
           <div id="delivery-receipt-image-empty" class="${deliveryReceiptPhoto ? 'hidden' : ''} text-xs text-slate-400">${isArD ? 'لا توجد صورة بعد.' : 'No photo yet.'}</div>
+          <p class="mt-2 text-[11px] text-slate-500">${isArD ? 'يمكنك أيضاً نسخ صورة والضغط على Ctrl+V داخل النافذة.' : 'You can also copy an image and press Ctrl+V in this window.'}</p>
         </div>
 
         <div>
@@ -30347,7 +30353,7 @@ function renderAdPhotoPreviews() {
     const hiddenSavedPhotos = Boolean(state.modalData?.id) && hiddenCount > 0 && !can('ads', 'viewPhotos');
     container.innerHTML = hiddenSavedPhotos
       ? `<div class="text-xs text-amber-600 dark:text-amber-400 col-span-4 text-center py-2">${state.language === 'ar' ? `تم حفظ ${hiddenCount} صورة. تحتاج صلاحية عرض الصور لرؤيتها أو تغييرها.` : `${hiddenCount} saved photo${hiddenCount === 1 ? '' : 's'}. View Photos permission is required to see or change them.`}</div>`
-      : `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. اضغط "إضافة صورة" للرفع.' : 'No photos yet. Click "Add Photo" to upload.'}</div>`;
+      : `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. استخدم «رفع» أو «لصق صورة».' : 'No photos yet. Use Upload or Paste photo.'}</div>`;
     return;
   }
   container.innerHTML = photos.map((src, idx) => `
@@ -30450,7 +30456,7 @@ function renderReceiptPhotoPreviews() {
   if (!container) return;
   const photos = state.tempReceiptPhotos || [];
   if (!photos.length) {
-    container.innerHTML = `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. اضغط "إضافة صورة" للرفع.' : 'No photos yet. Click "Add Photo" to upload.'}</div>`;
+    container.innerHTML = `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. استخدم «رفع» أو «لصق صورة».' : 'No photos yet. Use Upload or Paste photo.'}</div>`;
     return;
   }
   container.innerHTML = photos.map((src, idx) => `
@@ -31963,20 +31969,26 @@ function renderModal() {
             </div>
 
             <!-- SECTION 5: Photos -->
-            <div class="bg-gradient-to-r from-orange-50 to-amber-50 dark:from-orange-900/20 dark:to-amber-900/20 rounded-xl p-4 space-y-3 border border-orange-200 dark:border-orange-800">
-              <div class="flex items-center justify-between">
+            <div data-photo-paste-target="ad" tabindex="0" class="bg-gradient-to-r from-orange-50 to-amber-50 dark:from-orange-900/20 dark:to-amber-900/20 rounded-xl p-4 space-y-3 border border-orange-200 dark:border-orange-800 focus:outline-none focus:ring-2 focus:ring-orange-500">
+              <div class="flex flex-wrap items-center justify-between gap-2">
                 <div class="text-xs font-bold text-orange-700 dark:text-orange-400 uppercase tracking-wider flex items-center gap-2">
                   <span class="w-5 h-5 rounded-full bg-orange-600 text-white flex items-center justify-center text-[10px]">5</span>
                   ${isArAd ? 'الصور' : 'Photos'}
                 </div>
-                ${canModifyAdPhotosInCurrentModal() ? `<label class="text-xs bg-orange-600 text-white px-2 py-1 rounded-lg font-medium cursor-pointer hover:bg-orange-700">
-                  ${isArAd ? '+ رفع' : '+ Upload'}
-                  <input type="file" accept="image/*" multiple class="hidden" onchange="uploadAdPhotos(this.files); this.value=''" />
-                </label>` : ''}
+                ${canModifyAdPhotosInCurrentModal() ? `<div class="flex flex-wrap items-center gap-2">
+                  <button type="button" onclick="pastePhotoFromClipboard('ad')" class="min-h-11 px-3 rounded-lg border border-orange-300 dark:border-orange-700 text-xs font-bold text-orange-700 dark:text-orange-300 hover:bg-orange-100 dark:hover:bg-orange-900/30 flex items-center gap-1.5">
+                    <i data-lucide="clipboard-paste" class="w-3.5 h-3.5"></i>${isArAd ? 'لصق صورة' : 'Paste photo'}
+                  </button>
+                  <label class="min-h-11 px-3 rounded-lg bg-orange-600 text-white text-xs font-bold cursor-pointer hover:bg-orange-700 flex items-center gap-1.5">
+                    <i data-lucide="upload" class="w-3.5 h-3.5"></i>${isArAd ? 'رفع' : 'Upload'}
+                    <input type="file" accept="image/*" multiple class="hidden" onchange="uploadAdPhotos(this.files); this.value=''" />
+                  </label>
+                </div>` : ''}
               </div>
               <div id="ad-photo-previews" class="grid grid-cols-4 gap-2 min-h-[40px] bg-white dark:bg-slate-900 rounded-lg p-2">
                 <div class="text-xs text-slate-400 col-span-4 text-center py-2">${isArAd ? 'لا توجد صور بعد' : 'No photos yet'}</div>
               </div>
+              ${canModifyAdPhotosInCurrentModal() ? `<p class="text-[11px] text-orange-700/80 dark:text-orange-300/80">${isArAd ? 'يمكنك أيضاً نسخ صورة والضغط على Ctrl+V داخل النموذج.' : 'You can also copy an image and press Ctrl+V in this form.'}</p>` : ''}
             </div>
 
             <!-- SECTION 6: Links -->
@@ -32664,18 +32676,24 @@ function renderModal() {
 
             <!-- Photos -->
             <div class="px-1">
-              <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 space-y-2">
-                <div class="flex items-center justify-between">
+              <div data-photo-paste-target="receipt" tabindex="0" class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 space-y-2 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                <div class="flex flex-wrap items-center justify-between gap-2">
                   <label class="text-xs font-bold text-slate-600 dark:text-slate-400 flex items-center space-x-1">
                     <i data-lucide="image" class="w-3 h-3"></i>
                     <span>${isArR ? 'الصور' : 'Photos'}</span>
                   </label>
-                  <label class="text-xs text-indigo-600 hover:text-indigo-700 font-medium flex items-center space-x-1 cursor-pointer">
-                    <i data-lucide="upload" class="w-3 h-3"></i><span>${isArR ? 'إضافة صورة' : 'Add Photo'}</span>
-                    <input type="file" accept="image/*" multiple class="hidden" onchange="uploadReceiptPhotos(this.files); this.value=''" />
-                  </label>
+                  <div class="flex flex-wrap items-center gap-2">
+                    <button type="button" onclick="pastePhotoFromClipboard('receipt')" class="min-h-11 px-3 rounded-lg border border-indigo-200 dark:border-indigo-800 text-xs text-indigo-600 dark:text-indigo-300 font-bold flex items-center gap-1.5 hover:bg-indigo-50 dark:hover:bg-indigo-900/20">
+                      <i data-lucide="clipboard-paste" class="w-3.5 h-3.5"></i><span>${isArR ? 'لصق صورة' : 'Paste photo'}</span>
+                    </button>
+                    <label class="min-h-11 px-3 rounded-lg text-xs text-white bg-indigo-600 hover:bg-indigo-700 font-bold flex items-center gap-1.5 cursor-pointer">
+                      <i data-lucide="upload" class="w-3.5 h-3.5"></i><span>${isArR ? 'رفع' : 'Upload'}</span>
+                      <input type="file" accept="image/*" multiple class="hidden" onchange="uploadReceiptPhotos(this.files); this.value=''" />
+                    </label>
+                  </div>
                 </div>
                 <div id="receipt-photo-previews" class="grid grid-cols-4 gap-2"></div>
+                <p class="text-[11px] text-slate-500">${isArR ? 'يمكنك أيضاً نسخ صورة والضغط على Ctrl+V داخل النموذج.' : 'You can also copy an image and press Ctrl+V in this form.'}</p>
               </div>
             </div>
 
@@ -36797,9 +36815,10 @@ function renderClothesProductModal() {
         </button>
       </div>
 
-      <div>
+      <div data-photo-paste-target="clothes-product" tabindex="0" class="rounded-2xl border border-slate-200 dark:border-slate-700 p-3 focus:outline-none focus:ring-2 focus:ring-rose-500">
         <label class="block text-sm font-medium mb-2">${isAr ? 'صورة (اختياري)' : 'Photo (optional)'}</label>
         <div id="clothes-photo-preview-wrap"></div>
+        <p class="mt-2 text-xs text-slate-500">${isAr ? 'انسخ صورة واضغط Ctrl+V هنا، أو استخدم زر الرفع.' : 'Copy an image and press Ctrl+V here, or use Upload.'}</p>
         <input type="file" id="clothes-product-photo-input" accept="image/*" class="hidden" onchange="onClothesProductPhotoSelected(this)" />
       </div>
 
@@ -36868,7 +36887,7 @@ function refreshClothesPhotoPreview() {
   if (!wrap) return;
   if (_clothesTempPhoto) {
     wrap.innerHTML = `
-      <div class="flex items-center gap-3">
+      <div class="flex flex-wrap items-center gap-3">
         <img src="${Security.escapeHtml(_clothesTempPhoto)}" alt="" class="w-16 h-16 rounded-xl object-cover border border-slate-200 dark:border-slate-700" />
         <button type="button" onclick="removeClothesProductPhoto()" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20">
           <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>${isAr ? 'إزالة الصورة' : 'Remove photo'}
@@ -36876,29 +36895,44 @@ function refreshClothesPhotoPreview() {
       </div>
     `;
   } else {
-    wrap.innerHTML = `
-      <button type="button" onclick="document.getElementById('clothes-product-photo-input').click()" class="flex items-center gap-2 px-4 py-2 rounded-xl border-2 border-dashed border-slate-300 dark:border-slate-600 text-sm font-medium text-slate-500 dark:text-slate-400 hover:border-rose-400 hover:text-rose-500">
-        <i data-lucide="image-plus" class="w-4 h-4"></i>${isAr ? 'اختر صورة' : 'Choose photo'}
-      </button>
-    `;
+    wrap.innerHTML = '';
   }
+  wrap.insertAdjacentHTML('beforeend', `
+    <div class="mt-2 flex flex-wrap gap-2">
+      <button type="button" onclick="document.getElementById('clothes-product-photo-input').click()" class="min-h-11 flex items-center gap-2 px-4 py-2 rounded-xl border-2 border-dashed border-slate-300 dark:border-slate-600 text-sm font-medium text-slate-500 dark:text-slate-400 hover:border-rose-400 hover:text-rose-500">
+        <i data-lucide="${_clothesTempPhoto ? 'refresh-cw' : 'image-plus'}" class="w-4 h-4"></i>${_clothesTempPhoto ? (isAr ? 'تغيير الصورة' : 'Change photo') : (isAr ? 'رفع صورة' : 'Upload photo')}
+      </button>
+      <button type="button" onclick="pastePhotoFromClipboard('clothes-product')" class="min-h-11 flex items-center gap-2 px-4 py-2 rounded-xl border border-rose-200 dark:border-rose-800 text-sm font-bold text-rose-600 dark:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-900/20">
+        <i data-lucide="clipboard-paste" class="w-4 h-4"></i>${isAr ? 'لصق صورة' : 'Paste photo'}
+      </button>
+    </div>
+  `);
   if (typeof IconQueue !== 'undefined') IconQueue.schedule(wrap);
 }
 
 function onClothesProductPhotoSelected(input) {
-  const file = input?.files && input.files[0];
+  const files = Array.from(input?.files || []);
+  if (input) input.value = '';
+  return uploadClothesProductPhotoFiles(files);
+}
+
+function uploadClothesProductPhotoFiles(fileList) {
+  const file = Array.from(fileList || [])[0];
   if (!file) return;
   const myToken = ++_clothesPhotoToken;
   compressImageToDataUrl(file).then((dataUrl) => {
     if (myToken !== _clothesPhotoToken || state.activeModal !== 'clothes-product') return; // modal changed — discard
+    if (!isSafeReceiptPhotoSource(dataUrl)) {
+      if (isOversizedReceiptPhotoSource(dataUrl)) _showPhotoPayloadLimit();
+      else _showUnsupportedPhotoFormat();
+      return;
+    }
     _clothesTempPhoto = dataUrl;
     refreshClothesPhotoPreview();
   }).catch(() => {
     if (myToken !== _clothesPhotoToken) return;
     showNotification('Error', clothesIsAr() ? 'تعذر قراءة الصورة' : 'Could not read the image', 'error');
   });
-  // Allow re-selecting the same file later
-  input.value = '';
 }
 
 function removeClothesProductPhoto() {
@@ -39417,7 +39451,7 @@ function renderAdsStudioCreativeStep() {
     <div class="grid gap-4 sm:grid-cols-2"><div><label class="block text-sm font-bold mb-2">${isAr ? 'العنوان' : 'Headline'}</label><input type="text" maxlength="255" value="${Security.escapeHtml(d.headline || '')}" oninput="adsStudioSetDraftField('headline', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" /></div><div><label class="block text-sm font-bold mb-2">${isAr ? 'زر الدعوة' : 'Call-to-action'}</label><select onchange="adsStudioSetDraftField('callToAction', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4">${ADS_STUDIO_CTA.map(([en, ar]) => `<option value="${en}" ${d.callToAction === en ? 'selected' : ''}>${isAr ? ar : en}</option>`).join('')}</select></div></div>
     <div><label class="block text-sm font-bold mb-2">${isAr ? 'الوصف القصير' : 'Short description'}</label><input type="text" maxlength="500" value="${Security.escapeHtml(d.description || '')}" oninput="adsStudioSetDraftField('description', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" /></div>
     <div><label class="block text-sm font-bold mb-2">${isAr ? 'الرابط أو رقم واتساب *' : 'Website, WhatsApp or Messenger destination *'}</label><input type="text" maxlength="500" value="${Security.escapeHtml(d.destination || '')}" oninput="adsStudioSetDraftField('destination', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" placeholder="https://... or +218..." /><p class="mt-2 text-xs text-slate-500">${isAr ? 'سنراجع الرابط قبل إطلاق الإعلان.' : 'The destination is checked during review.'}</p></div>
-    <div><div class="flex items-center justify-between gap-3 mb-2"><label class="block text-sm font-bold">${isAr ? 'الصور (حتى 3)' : 'Images (up to 3)'}</label><span class="text-xs text-slate-500">${(d.creativeImages || []).length}/3</span></div><div id="ads-studio-creative-preview">${renderAdsStudioCreativePreview()}</div><p class="mt-2 text-xs text-slate-500">${isAr ? 'على iPhone اختر JPEG أو إعداد «الأكثر توافقاً»؛ صور HEIC غير مدعومة حالياً.' : 'On iPhone, choose JPEG / Most Compatible; HEIC is not supported yet.'}</p><input id="ads-studio-image-input" type="file" accept="image/png,image/jpeg,image/webp" multiple class="hidden" onchange="onAdsStudioCreativeSelected(this)" /></div>
+    <div data-photo-paste-target="ads-studio" tabindex="0" class="rounded-2xl border border-slate-200 dark:border-slate-700 p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"><div class="flex flex-wrap items-center justify-between gap-3 mb-2"><label class="block text-sm font-bold">${isAr ? 'الصور (حتى 3)' : 'Images (up to 3)'}</label><div class="flex items-center gap-2"><span class="text-xs text-slate-500">${(d.creativeImages || []).length}/3</span><button type="button" onclick="pastePhotoFromClipboard('ads-studio')" class="min-h-11 px-3 rounded-xl border border-blue-200 dark:border-blue-800 text-xs font-bold text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/20 flex items-center gap-1.5"><i data-lucide="clipboard-paste" class="w-3.5 h-3.5"></i>${isAr ? 'لصق صورة' : 'Paste photo'}</button></div></div><div id="ads-studio-creative-preview">${renderAdsStudioCreativePreview()}</div><p class="mt-2 text-xs text-slate-500">${isAr ? 'انسخ صورة واضغط Ctrl+V هنا. على iPhone اختر JPEG أو إعداد «الأكثر توافقاً»؛ صور HEIC غير مدعومة حالياً.' : 'Copy an image and press Ctrl+V here. On iPhone, choose JPEG / Most Compatible; HEIC is not supported yet.'}</p><input id="ads-studio-image-input" type="file" accept="image/png,image/jpeg,image/webp" multiple class="hidden" onchange="onAdsStudioCreativeSelected(this)" /></div>
   </div>`;
 }
 
@@ -39432,8 +39466,14 @@ function renderAdsStudioCreativePreview() {
   return `<div class="grid grid-cols-2 gap-3 sm:grid-cols-3">${images.map((src, index) => `<div class="relative aspect-square overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-100"><button type="button" onclick="openReceiptPhotoViewerSources(_adsStudioDraft.creativeImages, ${index}, '${isAr ? 'معاينة الإعلان' : 'Creative preview'}')" class="absolute inset-0"><img src="${Security.escapeHtml(src)}" alt="${isAr ? 'صورة الإعلان' : 'Ad creative'} ${index + 1}" class="w-full h-full object-cover" /></button><button type="button" onclick="removeAdsStudioCreative(${index})" class="touch-target absolute top-1 ${isAr ? 'left-1' : 'right-1'} w-11 h-11 rounded-full bg-slate-950/75 text-white flex items-center justify-center" aria-label="${isAr ? 'حذف الصورة' : 'Remove image'}"><i data-lucide="trash-2" class="w-4 h-4"></i></button></div>`).join('')}${images.length < 3 ? `<button type="button" onclick="document.getElementById('ads-studio-image-input').click()" class="aspect-square min-h-32 rounded-2xl border-2 border-dashed border-blue-200 dark:border-blue-800 bg-blue-50/60 dark:bg-blue-900/10 text-blue-700 dark:text-blue-300 flex flex-col items-center justify-center gap-2 font-bold"><i data-lucide="image-plus" class="w-8 h-8"></i><span>${isAr ? 'إضافة صور' : 'Add images'}</span></button>` : ''}</div>`;
 }
 
-async function onAdsStudioCreativeSelected(input) {
-  const candidates = Array.from(input?.files || []);
+function onAdsStudioCreativeSelected(input) {
+  const files = Array.from(input?.files || []);
+  if (input) input.value = '';
+  return uploadAdsStudioCreativeFiles(files);
+}
+
+async function uploadAdsStudioCreativeFiles(fileList) {
+  const candidates = Array.from(fileList || []);
   // Blank/generic MIME types are real JPEG/PNGs from Android SAF pickers —
   // let compressImageToDataUrl sniff the magic bytes instead of rejecting
   // here; isSafeAdsStudioCreativeSource still gates the OUTPUT to normalized
@@ -39443,7 +39483,6 @@ async function onAdsStudioCreativeSelected(input) {
     return !t || t === 'application/octet-stream' || ADS_STUDIO_ALLOWED_IMAGE_MIME_TYPES.has(t);
   });
   const rejectedCount = candidates.length - formatFiles.length;
-  input.value = '';
   if (rejectedCount > 0) {
     showNotification(
       adsStudioText('Unsupported image', 'صيغة صورة غير مدعومة'),
@@ -40296,6 +40335,206 @@ async function metaAdsSyncAllDue() {
     metaAdsUi.busyAction = '';
     metaAdsRenderModal();
   }
+}
+
+// ==========================================
+// PHOTO CLIPBOARD SUPPORT
+// ==========================================
+// Clipboard images always flow through the existing feature upload handlers.
+// This is important: pasted photos must receive the same compression, format
+// checks, payload limits, permission checks and stale-modal protection as files
+// selected with the picker.
+
+const PHOTO_PASTE_TARGETS = new Set(['ad', 'receipt', 'delivery', 'ads-studio', 'clothes-product']);
+let _photoPasteListenerInstalled = false;
+let _photoClipboardReadInProgress = false;
+
+function isPhotoPasteTextEntry(element) {
+  if (!element) return false;
+  try {
+    if (element.isContentEditable || element.closest?.('[contenteditable="true"], [role="textbox"]')) return true;
+  } catch (_) {}
+  const tag = String(element.tagName || '').toUpperCase();
+  if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  if (tag !== 'INPUT') return false;
+  const type = String(element.type || 'text').toLowerCase();
+  return !['button', 'submit', 'reset', 'checkbox', 'radio', 'range', 'file', 'color', 'image'].includes(type);
+}
+
+function _looksLikeClipboardImageFile(file) {
+  const type = String(file?.type || '').toLowerCase();
+  if (type.startsWith('image/')) return true;
+  const name = String(file?.name || '').toLowerCase();
+  return /\.(?:png|jpe?g|webp|gif)$/i.test(name);
+}
+
+function getClipboardImageFiles(clipboardData) {
+  if (!clipboardData) return [];
+  const images = [];
+  const seen = new Set();
+  const fingerprints = new Set();
+  const add = (file) => {
+    if (!file || !_looksLikeClipboardImageFile(file) || seen.has(file)) return;
+    const fingerprint = [file.name, file.type, file.size, file.lastModified]
+      .map(value => String(value ?? '')).join('\u0000');
+    if (fingerprint !== '\u0000\u0000\u0000' && fingerprints.has(fingerprint)) return;
+    seen.add(file);
+    fingerprints.add(fingerprint);
+    images.push(file);
+  };
+
+  try {
+    for (const item of Array.from(clipboardData.items || [])) {
+      if (String(item?.kind || '').toLowerCase() !== 'file') continue;
+      const itemType = String(item?.type || '').toLowerCase();
+      if (itemType && !itemType.startsWith('image/')) continue;
+      add(item.getAsFile?.());
+    }
+  } catch (_) {}
+
+  // Some Android/WebView clipboard implementations expose only files, not
+  // DataTransferItem objects. Keep this fallback without duplicating entries.
+  try { Array.from(clipboardData.files || []).forEach(add); } catch (_) {}
+  return images;
+}
+
+function _photoPasteTargetIsAvailable(target) {
+  if (!PHOTO_PASTE_TARGETS.has(target)) return false;
+  if (target === 'delivery') {
+    return Boolean(document.getElementById('delivery-complete-modal') && document.getElementById('delivery-receipt-image-data'));
+  }
+  if (target === 'ad') {
+    return state.activeModal === 'ad' && Boolean(document.getElementById('ad-photo-previews')) && canModifyAdPhotosInCurrentModal();
+  }
+  if (target === 'receipt') {
+    return state.activeModal === 'receipt' && Boolean(document.getElementById('receipt-photo-previews'));
+  }
+  if (target === 'clothes-product') {
+    return state.activeModal === 'clothes-product' && Boolean(document.getElementById('clothes-product-photo-input'));
+  }
+  return state.currentView === 'ads-studio'
+    && Boolean(document.getElementById('ads-studio-image-input'))
+    && (typeof _adsStudioActiveTab === 'undefined' || _adsStudioActiveTab === 'builder');
+}
+
+function resolvePhotoPasteTarget(origin = null, requestedTarget = '') {
+  const requested = String(requestedTarget || '').trim();
+  if (requested && _photoPasteTargetIsAvailable(requested)) return requested;
+
+  try {
+    const marked = origin?.closest?.('[data-photo-paste-target]')?.dataset?.photoPasteTarget || '';
+    if (_photoPasteTargetIsAvailable(marked)) return marked;
+  } catch (_) {}
+
+  // A delivery dialog can sit above the main page, so it has first priority.
+  if (_photoPasteTargetIsAvailable('delivery')) return 'delivery';
+  if (state.activeModal === 'ad' && _photoPasteTargetIsAvailable('ad')) return 'ad';
+  if (state.activeModal === 'receipt' && _photoPasteTargetIsAvailable('receipt')) return 'receipt';
+  if (state.activeModal === 'clothes-product' && _photoPasteTargetIsAvailable('clothes-product')) return 'clothes-product';
+  if (_photoPasteTargetIsAvailable('ads-studio')) return 'ads-studio';
+  return '';
+}
+
+function _routePastedPhotoFiles(target, files) {
+  const images = Array.from(files || []).filter(_looksLikeClipboardImageFile);
+  if (!images.length || !_photoPasteTargetIsAvailable(target)) return false;
+  if (target === 'ad') uploadAdPhotos(images);
+  else if (target === 'receipt') uploadReceiptPhotos(images);
+  else if (target === 'delivery') handleDeliveryReceiptPhotoUpload(images);
+  else if (target === 'ads-studio') uploadAdsStudioCreativeFiles(images);
+  else if (target === 'clothes-product') uploadClothesProductPhotoFiles(images);
+  else return false;
+  return true;
+}
+
+function _focusPhotoPasteZone(target) {
+  try {
+    const zone = document.querySelector(`[data-photo-paste-target="${target}"]`);
+    zone?.focus?.({ preventScroll: true });
+  } catch (_) {}
+}
+
+function capturePhotoPasteContext(target) {
+  if (target === 'ad') return `${state.activeModal}|${_adPhotoUploadGeneration}`;
+  if (target === 'receipt') return `${state.activeModal}|${_receiptPhotoUploadGeneration}`;
+  if (target === 'delivery') return document.getElementById('delivery-complete-modal');
+  if (target === 'ads-studio') return _adsStudioDraft;
+  if (target === 'clothes-product') return `${state.activeModal}|${_clothesPhotoToken}`;
+  return null;
+}
+
+function _showPhotoPasteInstruction(titleKind = 'ready') {
+  const isAr = state.language === 'ar';
+  showNotification(
+    isAr ? (titleKind === 'blocked' ? 'الصق الصورة يدوياً' : 'جاهز للصق') : (titleKind === 'blocked' ? 'Paste manually' : 'Ready to paste'),
+    isAr
+      ? 'انسخ صورة، ثم اضغط Ctrl+V هنا. على الهاتف اضغط مطولاً واختر «لصق». ويمكنك دائماً استخدام زر الرفع.'
+      : 'Copy an image, then press Ctrl+V here. On a phone, long-press and choose Paste. You can always use Upload too.',
+    titleKind === 'blocked' ? 'warning' : 'info'
+  );
+}
+
+async function pastePhotoFromClipboard(requestedTarget = '') {
+  const target = resolvePhotoPasteTarget(document.activeElement, requestedTarget);
+  if (!target) return;
+  const pasteContext = capturePhotoPasteContext(target);
+  _focusPhotoPasteZone(target);
+
+  if (!navigator?.clipboard || typeof navigator.clipboard.read !== 'function') {
+    _showPhotoPasteInstruction('ready');
+    return;
+  }
+  if (_photoClipboardReadInProgress) return;
+  _photoClipboardReadInProgress = true;
+  try {
+    const clipboardItems = await navigator.clipboard.read();
+    const images = [];
+    for (const item of Array.from(clipboardItems || [])) {
+      const imageType = Array.from(item?.types || []).find(type => String(type || '').toLowerCase().startsWith('image/'));
+      if (!imageType) continue;
+      try {
+        const blob = await item.getType(imageType);
+        if (blob) images.push(blob);
+      } catch (_) {}
+    }
+    if (!images.length) {
+      showNotification(
+        state.language === 'ar' ? 'لا توجد صورة منسوخة' : 'No copied image',
+        state.language === 'ar' ? 'انسخ صورة أولاً ثم حاول مرة أخرى.' : 'Copy an image first, then try again.',
+        'warning'
+      );
+      return;
+    }
+    // A clipboard permission prompt can remain open while the user closes one
+    // form and opens another. Never deliver its late result into that new form.
+    if (pasteContext !== capturePhotoPasteContext(target)) return;
+    _routePastedPhotoFiles(target, images);
+  } catch (_) {
+    // Permission prompts and WebView clipboard restrictions vary by platform.
+    // Keep the keyboard paste event available as a reliable fallback.
+    _focusPhotoPasteZone(target);
+    _showPhotoPasteInstruction('blocked');
+  } finally {
+    _photoClipboardReadInProgress = false;
+  }
+}
+
+function handlePhotoPasteEvent(event) {
+  // Never steal ordinary text paste from names, phone numbers, notes or money
+  // fields, even if that field lives inside a photo-enabled form.
+  if (isPhotoPasteTextEntry(event?.target) || isPhotoPasteTextEntry(document.activeElement)) return false;
+  const images = getClipboardImageFiles(event?.clipboardData);
+  if (!images.length) return false;
+  const target = resolvePhotoPasteTarget(event?.target);
+  if (!target) return false;
+  event.preventDefault?.();
+  return _routePastedPhotoFiles(target, images);
+}
+
+function setupPhotoPasteSupport() {
+  if (_photoPasteListenerInstalled) return;
+  _photoPasteListenerInstalled = true;
+  document.addEventListener('paste', handlePhotoPasteEvent);
 }
 function getAdCustomerConfirmationState(ad, spentValue, amountValue = ad?.amountUSD) {
   const amount = Number(amountValue);
@@ -41871,6 +42110,7 @@ async function init() {
   applyTheme();
   document.documentElement.setAttribute('dir', getDir());
   document.documentElement.setAttribute('lang', state.language === 'ar' ? 'ar' : 'en');
+  if (typeof setupPhotoPasteSupport === 'function') setupPhotoPasteSupport();
   setupMobileRuntime().catch((error) => {
     console.warn('[MobileRuntime] Setup failed:', error?.message || error);
   });

@@ -961,9 +961,10 @@ function renderClothesProductModal() {
         </button>
       </div>
 
-      <div>
+      <div data-photo-paste-target="clothes-product" tabindex="0" class="rounded-2xl border border-slate-200 dark:border-slate-700 p-3 focus:outline-none focus:ring-2 focus:ring-rose-500">
         <label class="block text-sm font-medium mb-2">${isAr ? 'صورة (اختياري)' : 'Photo (optional)'}</label>
         <div id="clothes-photo-preview-wrap"></div>
+        <p class="mt-2 text-xs text-slate-500">${isAr ? 'انسخ صورة واضغط Ctrl+V هنا، أو استخدم زر الرفع.' : 'Copy an image and press Ctrl+V here, or use Upload.'}</p>
         <input type="file" id="clothes-product-photo-input" accept="image/*" class="hidden" onchange="onClothesProductPhotoSelected(this)" />
       </div>
 
@@ -1032,7 +1033,7 @@ function refreshClothesPhotoPreview() {
   if (!wrap) return;
   if (_clothesTempPhoto) {
     wrap.innerHTML = `
-      <div class="flex items-center gap-3">
+      <div class="flex flex-wrap items-center gap-3">
         <img src="${Security.escapeHtml(_clothesTempPhoto)}" alt="" class="w-16 h-16 rounded-xl object-cover border border-slate-200 dark:border-slate-700" />
         <button type="button" onclick="removeClothesProductPhoto()" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20">
           <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>${isAr ? 'إزالة الصورة' : 'Remove photo'}
@@ -1040,29 +1041,44 @@ function refreshClothesPhotoPreview() {
       </div>
     `;
   } else {
-    wrap.innerHTML = `
-      <button type="button" onclick="document.getElementById('clothes-product-photo-input').click()" class="flex items-center gap-2 px-4 py-2 rounded-xl border-2 border-dashed border-slate-300 dark:border-slate-600 text-sm font-medium text-slate-500 dark:text-slate-400 hover:border-rose-400 hover:text-rose-500">
-        <i data-lucide="image-plus" class="w-4 h-4"></i>${isAr ? 'اختر صورة' : 'Choose photo'}
-      </button>
-    `;
+    wrap.innerHTML = '';
   }
+  wrap.insertAdjacentHTML('beforeend', `
+    <div class="mt-2 flex flex-wrap gap-2">
+      <button type="button" onclick="document.getElementById('clothes-product-photo-input').click()" class="min-h-11 flex items-center gap-2 px-4 py-2 rounded-xl border-2 border-dashed border-slate-300 dark:border-slate-600 text-sm font-medium text-slate-500 dark:text-slate-400 hover:border-rose-400 hover:text-rose-500">
+        <i data-lucide="${_clothesTempPhoto ? 'refresh-cw' : 'image-plus'}" class="w-4 h-4"></i>${_clothesTempPhoto ? (isAr ? 'تغيير الصورة' : 'Change photo') : (isAr ? 'رفع صورة' : 'Upload photo')}
+      </button>
+      <button type="button" onclick="pastePhotoFromClipboard('clothes-product')" class="min-h-11 flex items-center gap-2 px-4 py-2 rounded-xl border border-rose-200 dark:border-rose-800 text-sm font-bold text-rose-600 dark:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-900/20">
+        <i data-lucide="clipboard-paste" class="w-4 h-4"></i>${isAr ? 'لصق صورة' : 'Paste photo'}
+      </button>
+    </div>
+  `);
   if (typeof IconQueue !== 'undefined') IconQueue.schedule(wrap);
 }
 
 function onClothesProductPhotoSelected(input) {
-  const file = input?.files && input.files[0];
+  const files = Array.from(input?.files || []);
+  if (input) input.value = '';
+  return uploadClothesProductPhotoFiles(files);
+}
+
+function uploadClothesProductPhotoFiles(fileList) {
+  const file = Array.from(fileList || [])[0];
   if (!file) return;
   const myToken = ++_clothesPhotoToken;
   compressImageToDataUrl(file).then((dataUrl) => {
     if (myToken !== _clothesPhotoToken || state.activeModal !== 'clothes-product') return; // modal changed — discard
+    if (!isSafeReceiptPhotoSource(dataUrl)) {
+      if (isOversizedReceiptPhotoSource(dataUrl)) _showPhotoPayloadLimit();
+      else _showUnsupportedPhotoFormat();
+      return;
+    }
     _clothesTempPhoto = dataUrl;
     refreshClothesPhotoPreview();
   }).catch(() => {
     if (myToken !== _clothesPhotoToken) return;
     showNotification('Error', clothesIsAr() ? 'تعذر قراءة الصورة' : 'Could not read the image', 'error');
   });
-  // Allow re-selecting the same file later
-  input.value = '';
 }
 
 function removeClothesProductPhoto() {

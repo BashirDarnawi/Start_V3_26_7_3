@@ -711,20 +711,26 @@ function renderModal() {
             </div>
 
             <!-- SECTION 5: Photos -->
-            <div class="bg-gradient-to-r from-orange-50 to-amber-50 dark:from-orange-900/20 dark:to-amber-900/20 rounded-xl p-4 space-y-3 border border-orange-200 dark:border-orange-800">
-              <div class="flex items-center justify-between">
+            <div data-photo-paste-target="ad" tabindex="0" class="bg-gradient-to-r from-orange-50 to-amber-50 dark:from-orange-900/20 dark:to-amber-900/20 rounded-xl p-4 space-y-3 border border-orange-200 dark:border-orange-800 focus:outline-none focus:ring-2 focus:ring-orange-500">
+              <div class="flex flex-wrap items-center justify-between gap-2">
                 <div class="text-xs font-bold text-orange-700 dark:text-orange-400 uppercase tracking-wider flex items-center gap-2">
                   <span class="w-5 h-5 rounded-full bg-orange-600 text-white flex items-center justify-center text-[10px]">5</span>
                   ${isArAd ? 'الصور' : 'Photos'}
                 </div>
-                ${canModifyAdPhotosInCurrentModal() ? `<label class="text-xs bg-orange-600 text-white px-2 py-1 rounded-lg font-medium cursor-pointer hover:bg-orange-700">
-                  ${isArAd ? '+ رفع' : '+ Upload'}
-                  <input type="file" accept="image/*" multiple class="hidden" onchange="uploadAdPhotos(this.files); this.value=''" />
-                </label>` : ''}
+                ${canModifyAdPhotosInCurrentModal() ? `<div class="flex flex-wrap items-center gap-2">
+                  <button type="button" onclick="pastePhotoFromClipboard('ad')" class="min-h-11 px-3 rounded-lg border border-orange-300 dark:border-orange-700 text-xs font-bold text-orange-700 dark:text-orange-300 hover:bg-orange-100 dark:hover:bg-orange-900/30 flex items-center gap-1.5">
+                    <i data-lucide="clipboard-paste" class="w-3.5 h-3.5"></i>${isArAd ? 'لصق صورة' : 'Paste photo'}
+                  </button>
+                  <label class="min-h-11 px-3 rounded-lg bg-orange-600 text-white text-xs font-bold cursor-pointer hover:bg-orange-700 flex items-center gap-1.5">
+                    <i data-lucide="upload" class="w-3.5 h-3.5"></i>${isArAd ? 'رفع' : 'Upload'}
+                    <input type="file" accept="image/*" multiple class="hidden" onchange="uploadAdPhotos(this.files); this.value=''" />
+                  </label>
+                </div>` : ''}
               </div>
               <div id="ad-photo-previews" class="grid grid-cols-4 gap-2 min-h-[40px] bg-white dark:bg-slate-900 rounded-lg p-2">
                 <div class="text-xs text-slate-400 col-span-4 text-center py-2">${isArAd ? 'لا توجد صور بعد' : 'No photos yet'}</div>
               </div>
+              ${canModifyAdPhotosInCurrentModal() ? `<p class="text-[11px] text-orange-700/80 dark:text-orange-300/80">${isArAd ? 'يمكنك أيضاً نسخ صورة والضغط على Ctrl+V داخل النموذج.' : 'You can also copy an image and press Ctrl+V in this form.'}</p>` : ''}
             </div>
 
             <!-- SECTION 6: Links -->
@@ -1412,18 +1418,24 @@ function renderModal() {
 
             <!-- Photos -->
             <div class="px-1">
-              <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 space-y-2">
-                <div class="flex items-center justify-between">
+              <div data-photo-paste-target="receipt" tabindex="0" class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 space-y-2 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                <div class="flex flex-wrap items-center justify-between gap-2">
                   <label class="text-xs font-bold text-slate-600 dark:text-slate-400 flex items-center space-x-1">
                     <i data-lucide="image" class="w-3 h-3"></i>
                     <span>${isArR ? 'الصور' : 'Photos'}</span>
                   </label>
-                  <label class="text-xs text-indigo-600 hover:text-indigo-700 font-medium flex items-center space-x-1 cursor-pointer">
-                    <i data-lucide="upload" class="w-3 h-3"></i><span>${isArR ? 'إضافة صورة' : 'Add Photo'}</span>
-                    <input type="file" accept="image/*" multiple class="hidden" onchange="uploadReceiptPhotos(this.files); this.value=''" />
-                  </label>
+                  <div class="flex flex-wrap items-center gap-2">
+                    <button type="button" onclick="pastePhotoFromClipboard('receipt')" class="min-h-11 px-3 rounded-lg border border-indigo-200 dark:border-indigo-800 text-xs text-indigo-600 dark:text-indigo-300 font-bold flex items-center gap-1.5 hover:bg-indigo-50 dark:hover:bg-indigo-900/20">
+                      <i data-lucide="clipboard-paste" class="w-3.5 h-3.5"></i><span>${isArR ? 'لصق صورة' : 'Paste photo'}</span>
+                    </button>
+                    <label class="min-h-11 px-3 rounded-lg text-xs text-white bg-indigo-600 hover:bg-indigo-700 font-bold flex items-center gap-1.5 cursor-pointer">
+                      <i data-lucide="upload" class="w-3.5 h-3.5"></i><span>${isArR ? 'رفع' : 'Upload'}</span>
+                      <input type="file" accept="image/*" multiple class="hidden" onchange="uploadReceiptPhotos(this.files); this.value=''" />
+                    </label>
+                  </div>
                 </div>
                 <div id="receipt-photo-previews" class="grid grid-cols-4 gap-2"></div>
+                <p class="text-[11px] text-slate-500">${isArR ? 'يمكنك أيضاً نسخ صورة والضغط على Ctrl+V داخل النموذج.' : 'You can also copy an image and press Ctrl+V in this form.'}</p>
               </div>
             </div>
 

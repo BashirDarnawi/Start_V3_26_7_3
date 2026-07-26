@@ -3302,13 +3302,18 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
           </div>
         </div>
 
-        <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
-          <div class="flex items-center justify-between mb-2">
+        <div data-photo-paste-target="delivery" tabindex="0" class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+          <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
             <div class="text-xs font-bold text-slate-600 dark:text-slate-400">${isArD ? 'صورة الوصل *' : 'Receipt photo *'}</div>
-            <label class="text-xs font-bold text-indigo-600 hover:text-indigo-700 cursor-pointer">
-              ${isArD ? 'رفع صورة' : 'Upload'}
-              <input type="file" accept="image/*" class="hidden" onchange="handleDeliveryReceiptPhotoUpload(this.files); this.value=''" />
-            </label>
+            <div class="flex flex-wrap items-center gap-2">
+              <button type="button" onclick="pastePhotoFromClipboard('delivery')" class="min-h-11 px-3 rounded-lg border border-indigo-200 dark:border-indigo-800 text-xs font-bold text-indigo-600 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 flex items-center gap-1.5">
+                <i data-lucide="clipboard-paste" class="w-3.5 h-3.5"></i>${isArD ? 'لصق صورة' : 'Paste photo'}
+              </button>
+              <label class="min-h-11 px-3 rounded-lg bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 cursor-pointer flex items-center gap-1.5">
+                <i data-lucide="upload" class="w-3.5 h-3.5"></i>${isArD ? 'رفع' : 'Upload'}
+                <input type="file" accept="image/*" class="hidden" onchange="handleDeliveryReceiptPhotoUpload(this.files); this.value=''" />
+              </label>
+            </div>
           </div>
           <input type="hidden" id="delivery-receipt-image-data" data-image-data="${Security.escapeHtml(deliveryReceiptPhoto)}" />
           <button id="delivery-receipt-image-button" type="button" onclick="openDeliveryReceiptPhotoViewer()" class="${deliveryReceiptPhoto ? '' : 'hidden'} group relative w-full rounded-lg overflow-hidden" title="${isArD ? 'اضغط لعرض الصورة بالحجم الكامل' : 'Click to view full size'}">
@@ -3318,6 +3323,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
             </span>
           </button>
           <div id="delivery-receipt-image-empty" class="${deliveryReceiptPhoto ? 'hidden' : ''} text-xs text-slate-400">${isArD ? 'لا توجد صورة بعد.' : 'No photo yet.'}</div>
+          <p class="mt-2 text-[11px] text-slate-500">${isArD ? 'يمكنك أيضاً نسخ صورة والضغط على Ctrl+V داخل النافذة.' : 'You can also copy an image and press Ctrl+V in this window.'}</p>
         </div>
 
         <div>
