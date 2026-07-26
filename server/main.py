@@ -56,6 +56,8 @@ _SQLITE_RECEIPT_NUMBER_LOCK = threading.RLock()
 
 # Debug mode: set ALBAYAN_DEBUG_MODE=true to enable debug endpoints
 DEBUG_MODE = os.getenv("ALBAYAN_DEBUG_MODE", "").strip().lower() in {"1", "true", "yes"}
+APP_VERSION = (os.getenv("ALBAYAN_APP_VERSION") or "1.0.0").strip()[:40]
+RELEASE_SHA = (os.getenv("ALBAYAN_RELEASE_SHA") or "development").strip()[:64]
 # Whole-backup replacement is a maintenance operation. It is disabled on a
 # live API unless an operator makes the risk explicit for an offline window.
 ENABLE_ONLINE_IMPORT = os.getenv("ALBAYAN_ENABLE_ONLINE_IMPORT", "").strip().lower() in {"1", "true", "yes"}
@@ -63,6 +65,13 @@ SETUP_TOKEN = os.getenv("ALBAYAN_SETUP_TOKEN", "")
 
 from .db import db_conn, get_engine, init_db, json_dumps, json_loads, now_ms
 from .rbac import VALID_USER_ROLES, normalize_permissions, user_has_permission
+from .entity_projection import (
+    INLINE_MEDIA_FIELDS,
+    _project_entity_media,
+    _without_inline_media,
+    can_include_entity_media,
+    project_entity_contacts,
+)
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from .schemas import (
@@ -462,7 +471,15 @@ TRUST_PROXY_HEADERS = os.getenv("ALBAYAN_TRUST_PROXY_HEADERS", "").strip().lower
 # Health checks and the two Google Play policy URLs must remain reachable
 # without the private reverse-proxy header.  Use exact paths, not prefixes:
 # a prefix check such as ``/privacy...`` could accidentally expose a future API.
-ORIGIN_BYPASS_PATHS = frozenset({"/api/health", "/privacy", "/delete-account"})
+ORIGIN_BYPASS_PATHS = frozenset(
+    {
+        "/api/health",
+        "/api/health/live",
+        "/api/health/ready",
+        "/privacy",
+        "/delete-account",
+    }
+)
 
 # Rate limiting configuration (supports both in-memory and Redis)
 # SECURITY: Rate limit login attempts to prevent brute force attacks
@@ -1235,100 +1252,24 @@ def cleanup_old_audit_logs():
             print(f"[albayan] Audit log cleanup: deleted {deleted_by_age} by age, {deleted_by_limit} by limit")
 
 
-INLINE_MEDIA_FIELDS: dict[str, tuple[str, ...]] = {
-    "receipts": ("photos", "receiptImage"),
-    "ads": ("adPhotos", "photos"),
-    "adCampaignRequests": ("creativeImages",),
-}
-
-# Customer contact details are sometimes copied onto an ad/receipt so a
-# delivery can retain the historical phone/address used at creation time.
-# ``customers.viewContacts`` governs every copy, not only the customer row.
-CONTACT_REDACTED_ENTITY_TYPES = frozenset({"customers", "receipts", "ads"})
-CONTACT_FIELD_MARKERS = (
-    "phone",
-    "profile",
-    "address",
-    "contact",
-    "email",
-    "whatsapp",
-)
-CONTACT_FIELD_ALIASES = frozenset({"deliveryplace", "deliveryplacename"})
-
-
-def _is_customer_contact_field(key: Any) -> bool:
-    normalized = re.sub(r"[^a-z0-9]", "", str(key or "").lower())
-    return normalized in CONTACT_FIELD_ALIASES or any(
-        marker in normalized for marker in CONTACT_FIELD_MARKERS
-    )
-
-
-def _without_customer_contacts(value: Any) -> Any:
-    """Copy a JSON value while removing contact-bearing keys at any depth."""
-    if isinstance(value, dict):
-        return {
-            key: _without_customer_contacts(child)
-            for key, child in value.items()
-            if not _is_customer_contact_field(key)
-        }
-    if isinstance(value, list):
-        return [_without_customer_contacts(child) for child in value]
-    return value
-
-
 def _project_entity_contacts_for_user(
     entity: dict[str, Any], user: dict[str, Any]
 ) -> dict[str, Any]:
-    entity_type = str(entity.get("type") or "")
-    if (
-        entity_type not in CONTACT_REDACTED_ENTITY_TYPES
-        or user_has_permission(user, "customers", "viewContacts")
-    ):
-        return entity
-    projected = dict(entity)
-    data = projected.get("data")
-    if isinstance(data, dict):
-        projected["data"] = _without_customer_contacts(data)
-    return projected
-
-
-def _without_inline_media(entity_type: str, data: dict[str, Any]) -> dict[str, Any]:
-    """Return a lightweight response copy plus a trustworthy photo count."""
-    fields = INLINE_MEDIA_FIELDS.get(entity_type)
-    if not fields:
-        return data
-    lean = dict(data)
-    seen: set[str] = set()
-    for field in fields:
-        value = lean.pop(field, None)
-        values = value if isinstance(value, list) else [value]
-        for source in values:
-            if isinstance(source, str) and source.strip():
-                seen.add(source.strip())
-    lean["_mediaOmitted"] = True
-    lean["_photoCount"] = len(seen)
-    return lean
-
-
-def _project_entity_media(entity: dict[str, Any], include_media: bool) -> dict[str, Any]:
-    if include_media:
-        return entity
-    projected = dict(entity)
-    data = projected.get("data")
-    if isinstance(data, dict):
-        projected["data"] = _without_inline_media(str(projected.get("type") or ""), data)
-    return projected
+    return project_entity_contacts(
+        entity,
+        user_has_permission(user, "customers", "viewContacts"),
+    )
 
 
 def _can_include_entity_media(
     user: dict[str, Any], entity_type: str, requested: bool = True
 ) -> bool:
     """Apply media-specific authorization in addition to record visibility."""
-    if not requested:
-        return False
-    if entity_type == "ads":
-        return user_has_permission(user, "ads", "viewPhotos")
-    return True
+    return can_include_entity_media(
+        entity_type,
+        requested,
+        user_has_permission(user, "ads", "viewPhotos"),
+    )
 
 
 def _project_entity_media_for_user(
@@ -2250,7 +2191,7 @@ def soft_delete_entity(entity_type: str, entity_id: str, user_id: str):
         )
 
 
-app = FastAPI(title="Albayan Server", version="1.0.0")
+app = FastAPI(title="Albayan Server", version=APP_VERSION)
 
 # PERFORMANCE: Enable gzip compression for JSON/text responses.
 # This reduces payload sizes for large collections (receipts/ads/customers) and helps under load.
@@ -2611,7 +2552,10 @@ if not CORS_ORIGINS_ENV:
         CORS_ORIGINS_ENV = "http://localhost:8000,http://127.0.0.1:8000"
     else:
         # Production safe default: no cross-origin access (same-origin works without CORS middleware)
-        print("[albayan] ⚠️  ALBAYAN_CORS_ORIGINS is not set; CORS middleware disabled (same-origin only).")
+        # Keep startup logs ASCII-safe. Some Windows service/console setups use
+        # a legacy code page and would crash the whole server while encoding
+        # the previous warning emoji.
+        print("[albayan] WARNING: ALBAYAN_CORS_ORIGINS is not set; CORS middleware disabled (same-origin only).")
         CORS_ORIGINS_ENV = ""
 
 CORS_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_ENV.split(",") if origin.strip()]
@@ -2721,6 +2665,10 @@ async def request_context_and_logging(request: Request, call_next):
     # Structured access log (stdout -> CloudWatch on ECS)
     try:
         duration_ms = int((time.time() - started) * 1000)
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        from .monitoring import observe_request
+
+        observe_request(status_code, duration_ms)
         user_id = getattr(request.state, "user_id", None)
         ip = None
         try:
@@ -2741,7 +2689,7 @@ async def request_context_and_logging(request: Request, call_next):
                     "request_id": request_id,
                     "method": request.method,
                     "path": request.url.path,
-                    "status": int(getattr(response, "status_code", 0) or 0),
+                    "status": status_code,
                     "duration_ms": duration_ms,
                     "user_id": str(user_id) if user_id else None,
                     "ip": ip,
@@ -2798,8 +2746,8 @@ _NO_STORE_HEADERS = {
 }
 
 
-@app.get("/")
-def serve_index(request: Request):
+def _serve_versioned_index() -> Response:
+    """Return the SPA shell with cache-safe URLs for every entry route."""
     if not INDEX_PATH.exists():
         raise HTTPException(status_code=500, detail="index.html not found")
     # Inject cache-busting versions into the asset URLs at serve time. The file
@@ -2824,8 +2772,12 @@ def serve_index(request: Request):
         return FileResponse(str(INDEX_PATH), headers=_NO_STORE_HEADERS)
 
 
-@app.get("/api/health")
-def health():
+@app.get("/")
+def serve_index(request: Request):
+    return _serve_versioned_index()
+
+
+def _readiness_response():
     """
     Health check endpoint with database connectivity test and system metrics.
     
@@ -2845,9 +2797,11 @@ def health():
             conn.execute(text("SELECT 1")).first()
         db_status = "connected"
     except Exception as e:
-        db_status = f"error: {str(e)[:100]}"
+        # Keep connection strings, hostnames, and driver details out of the
+        # public health response. The exception type is enough in server logs.
+        print(f"[albayan] Readiness database check failed: {type(e).__name__}")
         return JSONResponse(
-            {"ok": False, "ts": now_ms(), "database": db_status},
+            {"ok": False, "ts": now_ms(), "database": "unavailable", "version": APP_VERSION},
             status_code=500
         )
     
@@ -2855,7 +2809,8 @@ def health():
         "ok": True,
         "ts": now_ms(),
         "database": db_status,
-        "version": "1.0.0"
+        "version": APP_VERSION,
+        "release": RELEASE_SHA,
     }
     
     # Include metrics if monitoring is available
@@ -2868,6 +2823,32 @@ def health():
         pass
     
     return response
+
+
+@app.get("/api/health/live")
+def liveness():
+    """Cheap process check for orchestrators; does not touch the database."""
+    return {"ok": True, "ts": now_ms(), "version": APP_VERSION, "release": RELEASE_SHA}
+
+
+@app.get("/api/health/ready")
+def readiness():
+    """Deployment readiness check including database connectivity."""
+    return _readiness_response()
+
+
+@app.get("/api/health")
+def health():
+    """Backward-compatible readiness endpoint used by existing deployments."""
+    return _readiness_response()
+
+
+@app.get("/api/admin/data-integrity")
+def admin_data_integrity(admin: dict[str, Any] = Depends(require_admin)):
+    """Run a read-only relationship/duplicate audit without returning PII."""
+    from .data_integrity import scan_database
+
+    return scan_database(issue_limit=200)
 
 
 # ==========================================
@@ -14160,16 +14141,7 @@ def spa_catch_all(path: str, request: Request):
     
     # Serve index.html for known frontend routes
     if full_path in FRONTEND_ROUTES:
-        if not INDEX_PATH.exists():
-            raise HTTPException(status_code=500, detail="index.html not found")
-        return FileResponse(
-            str(INDEX_PATH),
-            headers={
-                "Cache-Control": "no-store, max-age=0",
-                "Pragma": "no-cache",
-                "Expires": "0",
-            },
-        )
+        return _serve_versioned_index()
     
     # Return 404 for unknown paths (not a frontend route and not an API route)
     raise HTTPException(status_code=404, detail="Not found")

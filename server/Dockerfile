@@ -4,6 +4,9 @@
 
 FROM python:3.12-slim-bookworm
 
+ARG ALBAYAN_BUILD_SHA=development
+ENV ALBAYAN_RELEASE_SHA=${ALBAYAN_BUILD_SHA}
+
 WORKDIR /app
 
 # Install dependencies first (better layer caching)
@@ -40,7 +43,7 @@ RUN groupadd --system albayan \
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).read()"]
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/ready', timeout=3).read()"]
 
 USER albayan
 

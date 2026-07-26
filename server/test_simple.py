@@ -32,6 +32,17 @@ def test_health_endpoint():
     assert "database" in data
 
 
+def test_liveness_and_readiness_endpoints():
+    live = client.get("/api/health/live")
+    assert live.status_code == 200
+    assert live.json()["ok"] is True
+    assert "release" in live.json()
+
+    ready = client.get("/api/health/ready")
+    assert ready.status_code == 200
+    assert ready.json()["database"] == "connected"
+
+
 def test_serve_index():
     """Should serve index.html"""
     response = client.get("/")
@@ -81,6 +92,8 @@ def test_public_policy_routes_bypass_origin_secret_exactly(monkeypatch):
     monkeypatch.setattr(main_module, "ORIGIN_SECRETS", ["unit-test-origin-secret"])
 
     assert client.get("/api/health").status_code == 200
+    assert client.get("/api/health/live").status_code == 200
+    assert client.get("/api/health/ready").status_code == 200
     assert client.get("/privacy").status_code == 200
     assert client.get("/delete-account").status_code == 200
 
@@ -298,6 +311,16 @@ def test_index_references_versioned_assets():
     assert 'src="assets/lucide.min.js?v=' in html
 
 
+def test_spa_routes_use_the_same_versioned_no_store_shell():
+    """Direct links must not load stale JavaScript after a deployment."""
+    for route in ("/ads", "/receipts", "/customers"):
+        response = client.get(route)
+        assert response.status_code == 200, route
+        assert response.headers["cache-control"] == "no-store, max-age=0", route
+        assert 'src="script.js?v=' in response.text, route
+        assert 'href="style.css?v=' in response.text, route
+
+
 def test_assets_reject_traversal_and_unknown_types():
     """Asset routes must not serve arbitrary files"""
     # Encoded traversal (starlette decodes %2e%2e%2f into ../)
@@ -329,6 +352,11 @@ def test_collections_require_auth():
 def test_users_list_requires_admin():
     """Users list should require admin role"""
     response = client.get("/api/users")
+    assert response.status_code == 401
+
+
+def test_data_integrity_audit_requires_admin():
+    response = client.get("/api/admin/data-integrity")
     assert response.status_code == 401
 
 

@@ -36,6 +36,35 @@ jobs:
       - name: Dependencies must have no known high-severity vulnerability
         run: npm audit --audit-level=high
 
+  browser-e2e:
+    name: Real browser critical flows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: server/requirements.txt
+      - run: npm ci
+      - run: python -m pip install -r server/requirements.txt
+      - name: Install browser engines
+        run: npx playwright install --with-deps chromium webkit
+      - name: Exercise desktop Chrome, Android Chrome, and iPhone Safari behavior
+        run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-failure-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+
   backend:
     name: FastAPI tests
     runs-on: ubuntu-latest
@@ -85,6 +114,31 @@ jobs:
       - run: python -m alembic current
       - name: Query migrated PostgreSQL database
         run: python -c "from sqlalchemy import text; from server.db import get_engine; c=get_engine().connect(); print(c.execute(text('SELECT 1')).scalar_one()); c.close()"
+      - name: Prove a PostgreSQL backup can be restored
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PWD/.tmp/postgres-restore"
+          docker run --rm --network host \
+            -e PGPASSWORD=ci-only-password \
+            -v "$PWD/.tmp/postgres-restore:/backup" \
+            postgres:16-alpine \
+            pg_dump --host 127.0.0.1 --username albayan --dbname albayan_ci \
+              --format custom --no-owner --no-acl --file /backup/albayan.dump
+          docker run --rm --network host \
+            -e PGPASSWORD=ci-only-password postgres:16-alpine \
+            createdb --host 127.0.0.1 --username albayan albayan_restore
+          docker run --rm --network host \
+            -e PGPASSWORD=ci-only-password \
+            -v "$PWD/.tmp/postgres-restore:/backup:ro" \
+            postgres:16-alpine \
+            pg_restore --host 127.0.0.1 --username albayan --dbname albayan_restore \
+              --exit-on-error --no-owner --no-acl /backup/albayan.dump
+          docker run --rm --network host \
+            -e PGPASSWORD=ci-only-password postgres:16-alpine \
+            psql --host 127.0.0.1 --username albayan --dbname albayan_restore \
+              --set ON_ERROR_STOP=1 --tuples-only \
+              --command "SELECT COUNT(*) FROM alembic_version;"
 
   container:
     name: Docker production smoke test

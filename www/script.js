@@ -12351,6 +12351,10 @@ const MODAL_URL_HANDLERS = {
   'collect-receipt':  { open: (id) => openCollectReceiptModal(id) },
   'permissions':      { open: (id) => showPermissionsModal(id) },
   'wallet-topup':     { open: (id) => showWalletTopupModal(id) },
+  // Integrity reports are ephemeral and intentionally contain no restorable
+  // form state. While one is open the URL protects it from delayed startup
+  // restoration; revisiting that URL later simply returns to Settings.
+  'data-integrity':   { open: () => updateUrlForView(state.currentView, true) },
   'clothes-product':  { newOpen: () => showClothesProductModal(),  open: (id) => editClothesProduct(id) },
   'clothes-shipment': { newOpen: () => showClothesShipmentModal(), open: (id) => editClothesShipment(id) },
   'clothes-order':    { newOpen: () => showClothesOrderModal(),    open: (id) => editClothesOrder(id) }
@@ -12377,6 +12381,21 @@ function restoreModalFromUrl() {
   if (params.modal) {
     const handler = MODAL_URL_HANDLERS[params.modal];
     if (!handler || !params.id) return;
+
+    // The authoritative startup load can finish after a user has already
+    // opened and started typing in a modal (especially Safari/WebKit on a
+    // phone). Re-running the opener for the same active modal recreates its
+    // DOM and silently erases every unsaved field. If the URL already
+    // describes the modal that is visibly open, restoration is complete.
+    const activeModalElement = document.getElementById('app-modal');
+    const activeModalId = state.modalData?.id == null ? 'new' : String(state.modalData.id);
+    if (
+      activeModalElement
+      && state.activeModal === params.modal
+      && activeModalId === String(params.id)
+    ) {
+      return;
+    }
 
     // A blank create form must never be resurrected from the boot URL. Every
     // showXModal() stamps ?modal=X&id=new, so that param survives a refresh and
@@ -13984,8 +14003,8 @@ function renderNativeAppLogin(bannersHTML, isRTL) {
             <span>${isRTL ? 'تسجيل الدخول' : 'Sign in'}</span>
           </button>
           <p class="mt-3 text-xs text-slate-500 dark:text-slate-400 text-center leading-5">${isRTL
-            ? 'يفتح المتصفح لتسجيل الدخول بأمان — كلمات المرور المحفوظة ومفاتيح المرور تعمل هناك.'
-            : 'Opens your browser to sign in securely — saved passwords and passkeys work there.'}</p>
+            ? 'يفتح المتصفح لتسجيل الدخول بأمان — كلمات المرور المحفوظة تعمل هناك.'
+            : 'Opens your browser to sign in securely — saved passwords work there.'}</p>
           <button type="button" onclick="nativeLoginUseForm()" class="mt-4 text-xs text-slate-400 alb-hover-brand mx-auto block min-h-11">
             ${isRTL ? 'تسجيل الدخول داخل التطبيق بدلاً من ذلك' : 'Sign in inside the app instead'}
           </button>`;
@@ -14014,20 +14033,26 @@ function renderLogin() {
   if (window.__albayanAppLoginReturn && typeof _renderAppLoginReturnHTML === 'function') {
     return _renderAppLoginReturnHTML();
   }
-  const passkeySupported = !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext);
+  // Local mode can verify its locally stored WebAuthn credentials. Production
+  // server mode must not advertise passkeys until server-side challenge and
+  // credential endpoints exist.
+  const passkeySupported = !isServerModeEnabled()
+    && !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext);
   // Insecure origins (plain http:// on a LAN IP) hide crypto.subtle and
   // clipboard/passkey APIs. Login still works via the pure-JS crypto fallback
   // (02-security.js), but tell the user why security features are degraded.
   const webCryptoOk = !!(globalThis.crypto && globalThis.crypto.subtle);
-  const passkeyHint = passkeySupported
+  const passkeyHint = isServerModeEnabled()
+    ? (isRTL ? 'تسجيل الدخول بمفتاح المرور غير مفعّل بعد في وضع السيرفر.' : 'Passkey sign-in is not enabled in server mode yet.')
+    : passkeySupported
     ? (isRTL ? 'يمكنك استخدام بصمة/Face ID (Passkey) إذا تم إعدادها مسبقاً.' : 'You can use a Passkey (Face ID / Touch ID) if you already set one up.')
     : (isRTL ? 'Passkey يتطلب HTTPS أو localhost. افتح التطبيق عبر localhost لاستخدامه.' : 'Passkeys require HTTPS or localhost. Open the app via localhost to use it.');
 
   const bannersHTML = _renderLoginBanners(isRTL, webCryptoOk);
 
   // SYSTEM-BROWSER APP LOGIN, native side (Sabil-style): the packaged app
-  // signs in through the phone's real browser by default — passkeys and
-  // saved passwords work there. The classic in-app form stays one explicit
+  // signs in through the phone's real browser by default, where saved password
+  // managers work. The classic in-app form stays one explicit
   // tap away as a fallback (nativeLoginUseForm).
   if (typeof isSystemBrowserLoginEnabled === 'function' && isSystemBrowserLoginEnabled()
       && (typeof _nativeLoginMode === 'undefined' || _nativeLoginMode !== 'form')) {
@@ -19979,7 +20004,7 @@ function renderSettingsView() {
             </button>
           ` : ''}
         </div>
-        <div class="mt-3">
+        ${!isServerModeEnabled() ? `<div class="mt-3">
           <button onclick="passkeyRegisterCurrentUser()" class="w-full glass-panel rounded-xl px-4 py-3 font-bold flex items-center justify-center space-x-2 hover:shadow-xl">
             <i data-lucide="key-round" class="w-5 h-5"></i>
             <span>${state.language === 'ar' ? 'إضافة Passkey (Face ID / Touch ID)' : 'Add a Passkey (Face ID / Touch ID)'}</span>
@@ -20012,7 +20037,7 @@ function renderSettingsView() {
               `;
             })()}
           </div>
-        </div>
+        </div>` : ''}
         ${!isServerModeEnabled() ? `
           <div class="mt-3 p-3 rounded-xl bg-white/60 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-xs text-slate-500">
             ${state.localRecovery?.createdAt
@@ -20144,7 +20169,7 @@ function renderSettingsView() {
           <i data-lucide="database" class="w-5 h-5 mr-2 text-blue-600"></i>
           ${isAr ? 'إدارة البيانات' : 'Data Management'}
         </h2>
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
           ${isCurrentUserAdmin() ? `
           <button onclick="exportData()" class="btn-shine bg-blue-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-blue-700">
             <i data-lucide="download" class="w-5 h-5"></i>
@@ -20158,6 +20183,12 @@ function renderSettingsView() {
             <i data-lucide="trash-2" class="w-5 h-5"></i>
             <span>${isAr ? 'مسح كل البيانات' : 'Clear All Data'}</span>
           </button>
+          ${isServerModeEnabled() ? `
+          <button onclick="runDataIntegrityAudit()" class="btn-shine bg-violet-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-violet-700">
+            <i data-lucide="shield-check" class="w-5 h-5"></i>
+            <span>${isAr ? 'فحص سلامة البيانات' : 'Check Data Integrity'}</span>
+          </button>
+          ` : ''}
           ` : ''}
         </div>
         <div class="mt-4 p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl">
@@ -33087,6 +33118,51 @@ function renderModal() {
       `;
       break;
 
+    case 'data-integrity': {
+      const isArIntegrity = state.language === 'ar';
+      const report = state.modalData && typeof state.modalData === 'object' ? state.modalData : {};
+      const issues = Array.isArray(report.issues) ? report.issues : [];
+      const healthy = report.ok === true;
+      modalContent = `
+        <div class="max-h-[80dvh] overflow-y-auto custom-scrollbar pr-1">
+          <div class="text-center mb-5">
+            <div class="w-14 h-14 rounded-2xl ${healthy ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' : 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300'} flex items-center justify-center mx-auto mb-3">
+              <i data-lucide="${healthy ? 'shield-check' : 'shield-alert'}" class="w-7 h-7"></i>
+            </div>
+            <h2 class="text-2xl font-bold">${isArIntegrity ? 'فحص سلامة البيانات' : 'Data Integrity Check'}</h2>
+            <p class="mt-2 text-sm ${healthy ? 'text-emerald-700 dark:text-emerald-300' : 'text-rose-700 dark:text-rose-300'} font-bold">
+              ${healthy
+                ? (isArIntegrity ? 'لم يتم العثور على مشاكل في الروابط أو التكرار.' : 'No duplicate or broken-link problems were found.')
+                : (isArIntegrity ? `تم العثور على ${Number(report.issueCount || 0)} مشكلة تحتاج إلى مراجعة.` : `${Number(report.issueCount || 0)} problem(s) need review.`)}
+            </p>
+          </div>
+          <div class="grid grid-cols-2 gap-3 mb-4">
+            <div class="rounded-xl bg-slate-50 dark:bg-slate-900/50 p-3 text-center">
+              <div class="text-2xl font-bold">${Number(report.recordsChecked || 0).toLocaleString()}</div>
+              <div class="text-xs text-slate-500">${isArIntegrity ? 'سجل تم فحصه' : 'Records checked'}</div>
+            </div>
+            <div class="rounded-xl bg-slate-50 dark:bg-slate-900/50 p-3 text-center">
+              <div class="text-2xl font-bold ${healthy ? 'text-emerald-600' : 'text-rose-600'}">${Number(report.issueCount || 0).toLocaleString()}</div>
+              <div class="text-xs text-slate-500">${isArIntegrity ? 'مشكلة' : 'Issues'}</div>
+            </div>
+          </div>
+          ${issues.length ? `<div class="space-y-2">
+            ${issues.map(item => `<div class="rounded-xl border border-rose-200 dark:border-rose-900/60 bg-rose-50/60 dark:bg-rose-950/20 p-3">
+              <div class="flex flex-wrap items-center gap-2 text-xs">
+                <span class="font-bold text-rose-700 dark:text-rose-300">${Security.escapeHtml(String(item.code || 'issue'))}</span>
+                <span class="text-slate-500">${Security.escapeHtml(String(item.entityType || ''))} · ${Security.escapeHtml(String(item.entityId || ''))}</span>
+              </div>
+              <div class="mt-1 text-sm text-slate-700 dark:text-slate-200">${Security.escapeHtml(String(item.message || ''))}</div>
+            </div>`).join('')}
+            ${Number(report.hiddenIssueCount || 0) > 0 ? `<p class="text-xs text-slate-500 text-center">+${Number(report.hiddenIssueCount)} ${isArIntegrity ? 'مشكلة إضافية' : 'more issues'}</p>` : ''}
+          </div>` : ''}
+          <button type="button" onclick="closeModal()" class="mt-5 w-full min-h-12 rounded-xl bg-slate-200 dark:bg-slate-700 px-5 py-3 font-bold hover:bg-slate-300 dark:hover:bg-slate-600">
+            ${isArIntegrity ? 'إغلاق' : 'Close'}
+          </button>
+        </div>`;
+      break;
+    }
+
     case 'clothes-product':
       modalContent = renderClothesProductModal();
       break;
@@ -41246,6 +41322,35 @@ async function clearAllData() {
     saveState();
     showNotification(state.language === 'ar' ? 'تم المسح' : 'Cleared', state.language === 'ar' ? 'تم مسح جميع البيانات' : 'All data cleared', 'success');
     render();
+  }
+}
+let _dataIntegrityAuditInFlight = false;
+
+async function runDataIntegrityAudit() {
+  const isAr = state.language === 'ar';
+  if (!isCurrentUserAdmin()) {
+    showNotification(isAr ? 'غير مسموح' : 'Not Allowed', isAr ? 'هذا الفحص للمدير فقط.' : 'Only an administrator can run this check.', 'error');
+    return;
+  }
+  if (!isServerModeEnabled()) {
+    showNotification(isAr ? 'وضع محلي' : 'Local Mode', isAr ? 'فحص الخادم متاح عند الاتصال بالخادم.' : 'The server audit is available in server mode.', 'info');
+    return;
+  }
+  if (_dataIntegrityAuditInFlight) return;
+  _dataIntegrityAuditInFlight = true;
+  showNotification(isAr ? 'جارٍ الفحص' : 'Checking', isAr ? 'يتم فحص الروابط والتكرار بدون تغيير البيانات.' : 'Checking links and duplicates without changing data.', 'info');
+  try {
+    const response = await apiFetch('/api/admin/data-integrity', {}, { timeoutMs: 120000 });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload?.detail || `Request failed (${response.status})`);
+    state.activeModal = 'data-integrity';
+    state.modalData = { ...payload, id: 'report' };
+    updateUrlParams({ modal: 'data-integrity', id: 'report' });
+    renderModal();
+  } catch (error) {
+    showNotification(isAr ? 'فشل الفحص' : 'Check Failed', error?.message || (isAr ? 'تعذر فحص البيانات.' : 'Could not check the data.'), 'error');
+  } finally {
+    _dataIntegrityAuditInFlight = false;
   }
 }
 

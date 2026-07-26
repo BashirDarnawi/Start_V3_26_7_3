@@ -1,7 +1,8 @@
 import json
 import os
+import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Optional
 
@@ -101,6 +102,11 @@ def get_database_url() -> str | URL:
 
 _ENGINE: Optional[Engine] = None
 _ENGINE_URL: Optional[str | URL] = None
+# An in-memory SQLite engine uses one DBAPI connection (StaticPool) so every
+# thread sees the same database. SQLite cannot safely execute overlapping
+# transactions on that one connection; serialize the connection context to
+# prevent intermittent missing-session reads and cross-request rollbacks.
+_SQLITE_STATIC_POOL_LOCK = threading.RLock()
 
 
 def get_engine() -> Engine:
@@ -185,8 +191,10 @@ def db_conn() -> Connection:
     Commits on success; rolls back on exception.
     """
     engine = get_engine()
-    with engine.begin() as conn:
-        yield conn
+    guard = _SQLITE_STATIC_POOL_LOCK if isinstance(engine.pool, StaticPool) else nullcontext()
+    with guard:
+        with engine.begin() as conn:
+            yield conn
 
 
 def define_schema():
@@ -328,4 +336,3 @@ def init_db():
     engine = get_engine()
     define_schema()
     METADATA.create_all(engine)
-

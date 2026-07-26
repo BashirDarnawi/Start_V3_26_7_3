@@ -919,8 +919,8 @@ function renderNativeAppLogin(bannersHTML, isRTL) {
             <span>${isRTL ? 'تسجيل الدخول' : 'Sign in'}</span>
           </button>
           <p class="mt-3 text-xs text-slate-500 dark:text-slate-400 text-center leading-5">${isRTL
-            ? 'يفتح المتصفح لتسجيل الدخول بأمان — كلمات المرور المحفوظة ومفاتيح المرور تعمل هناك.'
-            : 'Opens your browser to sign in securely — saved passwords and passkeys work there.'}</p>
+            ? 'يفتح المتصفح لتسجيل الدخول بأمان — كلمات المرور المحفوظة تعمل هناك.'
+            : 'Opens your browser to sign in securely — saved passwords work there.'}</p>
           <button type="button" onclick="nativeLoginUseForm()" class="mt-4 text-xs text-slate-400 alb-hover-brand mx-auto block min-h-11">
             ${isRTL ? 'تسجيل الدخول داخل التطبيق بدلاً من ذلك' : 'Sign in inside the app instead'}
           </button>`;
@@ -949,20 +949,26 @@ function renderLogin() {
   if (window.__albayanAppLoginReturn && typeof _renderAppLoginReturnHTML === 'function') {
     return _renderAppLoginReturnHTML();
   }
-  const passkeySupported = !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext);
+  // Local mode can verify its locally stored WebAuthn credentials. Production
+  // server mode must not advertise passkeys until server-side challenge and
+  // credential endpoints exist.
+  const passkeySupported = !isServerModeEnabled()
+    && !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext);
   // Insecure origins (plain http:// on a LAN IP) hide crypto.subtle and
   // clipboard/passkey APIs. Login still works via the pure-JS crypto fallback
   // (02-security.js), but tell the user why security features are degraded.
   const webCryptoOk = !!(globalThis.crypto && globalThis.crypto.subtle);
-  const passkeyHint = passkeySupported
+  const passkeyHint = isServerModeEnabled()
+    ? (isRTL ? 'تسجيل الدخول بمفتاح المرور غير مفعّل بعد في وضع السيرفر.' : 'Passkey sign-in is not enabled in server mode yet.')
+    : passkeySupported
     ? (isRTL ? 'يمكنك استخدام بصمة/Face ID (Passkey) إذا تم إعدادها مسبقاً.' : 'You can use a Passkey (Face ID / Touch ID) if you already set one up.')
     : (isRTL ? 'Passkey يتطلب HTTPS أو localhost. افتح التطبيق عبر localhost لاستخدامه.' : 'Passkeys require HTTPS or localhost. Open the app via localhost to use it.');
 
   const bannersHTML = _renderLoginBanners(isRTL, webCryptoOk);
 
   // SYSTEM-BROWSER APP LOGIN, native side (Sabil-style): the packaged app
-  // signs in through the phone's real browser by default — passkeys and
-  // saved passwords work there. The classic in-app form stays one explicit
+  // signs in through the phone's real browser by default, where saved password
+  // managers work. The classic in-app form stays one explicit
   // tap away as a fallback (nativeLoginUseForm).
   if (typeof isSystemBrowserLoginEnabled === 'function' && isSystemBrowserLoginEnabled()
       && (typeof _nativeLoginMode === 'undefined' || _nativeLoginMode !== 'form')) {
@@ -6914,7 +6920,7 @@ function renderSettingsView() {
             </button>
           ` : ''}
         </div>
-        <div class="mt-3">
+        ${!isServerModeEnabled() ? `<div class="mt-3">
           <button onclick="passkeyRegisterCurrentUser()" class="w-full glass-panel rounded-xl px-4 py-3 font-bold flex items-center justify-center space-x-2 hover:shadow-xl">
             <i data-lucide="key-round" class="w-5 h-5"></i>
             <span>${state.language === 'ar' ? 'إضافة Passkey (Face ID / Touch ID)' : 'Add a Passkey (Face ID / Touch ID)'}</span>
@@ -6947,7 +6953,7 @@ function renderSettingsView() {
               `;
             })()}
           </div>
-        </div>
+        </div>` : ''}
         ${!isServerModeEnabled() ? `
           <div class="mt-3 p-3 rounded-xl bg-white/60 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-xs text-slate-500">
             ${state.localRecovery?.createdAt
@@ -7079,7 +7085,7 @@ function renderSettingsView() {
           <i data-lucide="database" class="w-5 h-5 mr-2 text-blue-600"></i>
           ${isAr ? 'إدارة البيانات' : 'Data Management'}
         </h2>
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
           ${isCurrentUserAdmin() ? `
           <button onclick="exportData()" class="btn-shine bg-blue-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-blue-700">
             <i data-lucide="download" class="w-5 h-5"></i>
@@ -7093,6 +7099,12 @@ function renderSettingsView() {
             <i data-lucide="trash-2" class="w-5 h-5"></i>
             <span>${isAr ? 'مسح كل البيانات' : 'Clear All Data'}</span>
           </button>
+          ${isServerModeEnabled() ? `
+          <button onclick="runDataIntegrityAudit()" class="btn-shine bg-violet-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-violet-700">
+            <i data-lucide="shield-check" class="w-5 h-5"></i>
+            <span>${isAr ? 'فحص سلامة البيانات' : 'Check Data Integrity'}</span>
+          </button>
+          ` : ''}
           ` : ''}
         </div>
         <div class="mt-4 p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl">

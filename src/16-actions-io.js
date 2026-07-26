@@ -1529,3 +1529,32 @@ async function clearAllData() {
     render();
   }
 }
+let _dataIntegrityAuditInFlight = false;
+
+async function runDataIntegrityAudit() {
+  const isAr = state.language === 'ar';
+  if (!isCurrentUserAdmin()) {
+    showNotification(isAr ? 'غير مسموح' : 'Not Allowed', isAr ? 'هذا الفحص للمدير فقط.' : 'Only an administrator can run this check.', 'error');
+    return;
+  }
+  if (!isServerModeEnabled()) {
+    showNotification(isAr ? 'وضع محلي' : 'Local Mode', isAr ? 'فحص الخادم متاح عند الاتصال بالخادم.' : 'The server audit is available in server mode.', 'info');
+    return;
+  }
+  if (_dataIntegrityAuditInFlight) return;
+  _dataIntegrityAuditInFlight = true;
+  showNotification(isAr ? 'جارٍ الفحص' : 'Checking', isAr ? 'يتم فحص الروابط والتكرار بدون تغيير البيانات.' : 'Checking links and duplicates without changing data.', 'info');
+  try {
+    const response = await apiFetch('/api/admin/data-integrity', {}, { timeoutMs: 120000 });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload?.detail || `Request failed (${response.status})`);
+    state.activeModal = 'data-integrity';
+    state.modalData = { ...payload, id: 'report' };
+    updateUrlParams({ modal: 'data-integrity', id: 'report' });
+    renderModal();
+  } catch (error) {
+    showNotification(isAr ? 'فشل الفحص' : 'Check Failed', error?.message || (isAr ? 'تعذر فحص البيانات.' : 'Could not check the data.'), 'error');
+  } finally {
+    _dataIntegrityAuditInFlight = false;
+  }
+}

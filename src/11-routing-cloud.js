@@ -279,6 +279,10 @@ const MODAL_URL_HANDLERS = {
   'collect-receipt':  { open: (id) => openCollectReceiptModal(id) },
   'permissions':      { open: (id) => showPermissionsModal(id) },
   'wallet-topup':     { open: (id) => showWalletTopupModal(id) },
+  // Integrity reports are ephemeral and intentionally contain no restorable
+  // form state. While one is open the URL protects it from delayed startup
+  // restoration; revisiting that URL later simply returns to Settings.
+  'data-integrity':   { open: () => updateUrlForView(state.currentView, true) },
   'clothes-product':  { newOpen: () => showClothesProductModal(),  open: (id) => editClothesProduct(id) },
   'clothes-shipment': { newOpen: () => showClothesShipmentModal(), open: (id) => editClothesShipment(id) },
   'clothes-order':    { newOpen: () => showClothesOrderModal(),    open: (id) => editClothesOrder(id) }
@@ -305,6 +309,21 @@ function restoreModalFromUrl() {
   if (params.modal) {
     const handler = MODAL_URL_HANDLERS[params.modal];
     if (!handler || !params.id) return;
+
+    // The authoritative startup load can finish after a user has already
+    // opened and started typing in a modal (especially Safari/WebKit on a
+    // phone). Re-running the opener for the same active modal recreates its
+    // DOM and silently erases every unsaved field. If the URL already
+    // describes the modal that is visibly open, restoration is complete.
+    const activeModalElement = document.getElementById('app-modal');
+    const activeModalId = state.modalData?.id == null ? 'new' : String(state.modalData.id);
+    if (
+      activeModalElement
+      && state.activeModal === params.modal
+      && activeModalId === String(params.id)
+    ) {
+      return;
+    }
 
     // A blank create form must never be resurrected from the boot URL. Every
     // showXModal() stamps ?modal=X&id=new, so that param survives a refresh and

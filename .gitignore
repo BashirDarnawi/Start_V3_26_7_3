@@ -17,6 +17,10 @@ __pycache__/
 .pycache_tmp/
 .pytest_cache/
 .pytest_tmp*/
+.tmp/
+playwright-report/
+test-results/
+backups/
 server/data/
 *.db
 

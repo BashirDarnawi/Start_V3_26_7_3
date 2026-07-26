@@ -1970,6 +1970,51 @@ function renderModal() {
       `;
       break;
 
+    case 'data-integrity': {
+      const isArIntegrity = state.language === 'ar';
+      const report = state.modalData && typeof state.modalData === 'object' ? state.modalData : {};
+      const issues = Array.isArray(report.issues) ? report.issues : [];
+      const healthy = report.ok === true;
+      modalContent = `
+        <div class="max-h-[80dvh] overflow-y-auto custom-scrollbar pr-1">
+          <div class="text-center mb-5">
+            <div class="w-14 h-14 rounded-2xl ${healthy ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' : 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300'} flex items-center justify-center mx-auto mb-3">
+              <i data-lucide="${healthy ? 'shield-check' : 'shield-alert'}" class="w-7 h-7"></i>
+            </div>
+            <h2 class="text-2xl font-bold">${isArIntegrity ? 'فحص سلامة البيانات' : 'Data Integrity Check'}</h2>
+            <p class="mt-2 text-sm ${healthy ? 'text-emerald-700 dark:text-emerald-300' : 'text-rose-700 dark:text-rose-300'} font-bold">
+              ${healthy
+                ? (isArIntegrity ? 'لم يتم العثور على مشاكل في الروابط أو التكرار.' : 'No duplicate or broken-link problems were found.')
+                : (isArIntegrity ? `تم العثور على ${Number(report.issueCount || 0)} مشكلة تحتاج إلى مراجعة.` : `${Number(report.issueCount || 0)} problem(s) need review.`)}
+            </p>
+          </div>
+          <div class="grid grid-cols-2 gap-3 mb-4">
+            <div class="rounded-xl bg-slate-50 dark:bg-slate-900/50 p-3 text-center">
+              <div class="text-2xl font-bold">${Number(report.recordsChecked || 0).toLocaleString()}</div>
+              <div class="text-xs text-slate-500">${isArIntegrity ? 'سجل تم فحصه' : 'Records checked'}</div>
+            </div>
+            <div class="rounded-xl bg-slate-50 dark:bg-slate-900/50 p-3 text-center">
+              <div class="text-2xl font-bold ${healthy ? 'text-emerald-600' : 'text-rose-600'}">${Number(report.issueCount || 0).toLocaleString()}</div>
+              <div class="text-xs text-slate-500">${isArIntegrity ? 'مشكلة' : 'Issues'}</div>
+            </div>
+          </div>
+          ${issues.length ? `<div class="space-y-2">
+            ${issues.map(item => `<div class="rounded-xl border border-rose-200 dark:border-rose-900/60 bg-rose-50/60 dark:bg-rose-950/20 p-3">
+              <div class="flex flex-wrap items-center gap-2 text-xs">
+                <span class="font-bold text-rose-700 dark:text-rose-300">${Security.escapeHtml(String(item.code || 'issue'))}</span>
+                <span class="text-slate-500">${Security.escapeHtml(String(item.entityType || ''))} · ${Security.escapeHtml(String(item.entityId || ''))}</span>
+              </div>
+              <div class="mt-1 text-sm text-slate-700 dark:text-slate-200">${Security.escapeHtml(String(item.message || ''))}</div>
+            </div>`).join('')}
+            ${Number(report.hiddenIssueCount || 0) > 0 ? `<p class="text-xs text-slate-500 text-center">+${Number(report.hiddenIssueCount)} ${isArIntegrity ? 'مشكلة إضافية' : 'more issues'}</p>` : ''}
+          </div>` : ''}
+          <button type="button" onclick="closeModal()" class="mt-5 w-full min-h-12 rounded-xl bg-slate-200 dark:bg-slate-700 px-5 py-3 font-bold hover:bg-slate-300 dark:hover:bg-slate-600">
+            ${isArIntegrity ? 'إغلاق' : 'Close'}
+          </button>
+        </div>`;
+      break;
+    }
+
     case 'clothes-product':
       modalContent = renderClothesProductModal();
       break;

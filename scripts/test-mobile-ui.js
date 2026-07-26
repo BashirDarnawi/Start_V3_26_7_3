@@ -36,6 +36,7 @@ const adEditHistoryViewer = helpers.slice(
 );
 const clothes = read('src/15b-clothes.js');
 const adsStudio = read('src/15c-ads-studio.js');
+const actionsIo = read('src/16-actions-io.js');
 const css = read('style.css');
 
 let passed = 0;
@@ -618,6 +619,10 @@ const whatsAppShareBody = helpers.slice(
   helpers.indexOf('function openDeliveryReceiptWhatsAppShare'),
   helpers.indexOf('function showDeliveryWhatsAppPrompt')
 );
+check('startup URL restoration never rebuilds an active form and erases unsaved phone input',
+  routing.includes("const activeModalElement = document.getElementById('app-modal');") &&
+  routing.includes("state.activeModal === params.modal") &&
+  routing.includes("activeModalId === String(params.id)"));
 check('in-app browsers keep the WhatsApp share dialog open instead of faking success',
   /Platform\.isInAppBrowser/.test(whatsAppShareBody) &&
   whatsAppShareBody.indexOf('Platform.isInAppBrowser') < whatsAppShareBody.indexOf('closeDeliveryWhatsAppPrompt(false)') &&
@@ -658,6 +663,18 @@ check('remember-me is opt-in and wired into the server login payload',
 check('password and passkey logins both upsert the device account list',
   (liveSync.match(/rememberLoginAccount\(user\);/g) || []).length >= 2 &&
   permissionsSrc.includes('rememberLoginAccount(user);'));
+check('server login does not advertise unfinished passkey authentication',
+  views.includes('const passkeySupported = !isServerModeEnabled()') &&
+  views.includes('Passkey sign-in is not enabled in server mode yet.') &&
+  views.includes("${!isServerModeEnabled() ? `<div class=\"mt-3\">") &&
+  !views.includes('saved passwords and passkeys work there.'));
+check('admin data integrity check is read-only, phone-safe, and server-backed',
+  views.includes('onclick="runDataIntegrityAudit()"') &&
+  actionsIo.includes("apiFetch('/api/admin/data-integrity'") &&
+  actionsIo.includes("if (!isCurrentUserAdmin())") &&
+  actionsIo.includes("updateUrlParams({ modal: 'data-integrity', id: 'report' })") &&
+  modals.includes("case 'data-integrity':") &&
+  modals.includes('max-h-[80dvh] overflow-y-auto'));
 
 // Phase 2 — SYSTEM-BROWSER app login for the packaged Capacitor apps:
 // the app opens the hosted login page in the real browser and receives a
