@@ -142,6 +142,17 @@ async function pastePhotoFromClipboard(requestedTarget = '') {
   const pasteContext = capturePhotoPasteContext(target);
   _focusPhotoPasteZone(target);
 
+  if (isPackagedMobileApp() && typeof readNativeClipboardImage === 'function') {
+    const nativeImage = await readNativeClipboardImage();
+    if (nativeImage) {
+      if (pasteContext === capturePhotoPasteContext(target)) {
+        _routePastedPhotoFiles(target, [nativeImage]);
+        if (typeof nativeHaptic === 'function') nativeHaptic('success');
+      }
+      return;
+    }
+  }
+
   if (!navigator?.clipboard || typeof navigator.clipboard.read !== 'function') {
     _showPhotoPasteInstruction('ready');
     return;

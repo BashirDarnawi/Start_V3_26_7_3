@@ -13,6 +13,20 @@
     },
     "CapacitorCookies": {
       "enabled": true
+    },
+    "SystemBars": {
+      "insetsHandling": "css",
+      "style": "DEFAULT",
+      "hidden": false,
+      "animation": "NONE"
+    },
+    "Keyboard": {
+      "resize": "body",
+      "resizeOnFullScreen": true,
+      "autoBackdropColor": "auto"
+    },
+    "LocalNotifications": {
+      "sound": "default"
     }
   }
 }

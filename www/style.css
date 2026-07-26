@@ -85,7 +85,7 @@ nav, aside, .sidebar {
   /* Prevent reflow */
   contain: layout style paint;
   /* Fixed positioning already prevents jumps, reinforce it */
-  will-change: transform;
+  will-change: auto;
 }
 
 /* Prevent all layout shifts during sync */
@@ -1100,6 +1100,9 @@ table tbody tr:hover {
   pointer-events: none;
   top: calc(4rem + var(--app-safe-top));
   right: max(1rem, var(--app-safe-right));
+  left: max(1rem, var(--app-safe-left));
+  width: auto;
+  max-width: min(24rem, calc(100vw - var(--app-safe-left) - var(--app-safe-right) - 2rem));
 }
 
 #sync-status-container {
@@ -1132,7 +1135,10 @@ a,
 input,
 select,
 textarea {
-  transition: all 0.2s ease;
+  /* Avoid animating layout dimensions/position during live-sync renders. */
+  transition-property: color, background-color, border-color, box-shadow, opacity, transform;
+  transition-duration: 160ms;
+  transition-timing-function: ease;
 }
 
 /* Focus visible for accessibility */
@@ -1415,6 +1421,10 @@ textarea:disabled {
   --app-safe-right: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
   --app-safe-bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
   --app-safe-left: var(--safe-area-inset-left, env(safe-area-inset-left, 0px));
+  --app-visual-height: 100dvh;
+  --app-visual-width: 100vw;
+  --app-visual-offset-top: 0px;
+  --app-keyboard-height: 0px;
 }
 
 /* The photo viewer is a primary outside-the-form action, not another tiny
@@ -1643,7 +1653,8 @@ textarea:disabled {
      desktop windows while align-items:flex-start provides the scroll path. */
   .mobile-dialog-overlay {
     align-items: flex-start !important;
-    min-height: 100dvh;
+    min-height: var(--app-visual-height, 100dvh);
+    height: var(--app-visual-height, 100dvh);
     overflow-x: hidden !important;
     overflow-y: auto !important;
     overscroll-behavior: contain;
@@ -1652,6 +1663,10 @@ textarea:disabled {
     padding-right: max(0.75rem, var(--app-safe-right)) !important;
     padding-bottom: max(0.75rem, var(--app-safe-bottom)) !important;
     padding-left: max(0.75rem, var(--app-safe-left)) !important;
+  }
+
+  body.keyboard-open .mobile-dialog-overlay {
+    padding-bottom: max(0.5rem, var(--app-safe-bottom)) !important;
   }
 
   .mobile-dialog-overlay > :first-child {
@@ -2562,9 +2577,19 @@ body.perf-lite .glass-panel:hover {
     padding: 0.75rem !important;
   }
 
+  .smart-filter-chips {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    overflow-x: visible;
+  }
+
   .smart-filter-chip {
+    width: 100%;
+    min-width: 0;
     min-height: 2.6rem;
     padding-inline: 0.7rem;
+    line-height: 1.15;
+    white-space: normal;
   }
 }
 
@@ -2578,4 +2603,75 @@ body.perf-lite .glass-panel:hover {
    keeping light mode and the brand remap untouched. */
 .dark .text-indigo-600 {
   color: #8caaff !important;
+}
+
+/* Native privacy screen. It lives outside #app so a background data render
+   cannot remove it, and it respects notches plus short landscape screens. */
+.native-app-lock {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  min-width: 0;
+  min-height: var(--app-visual-height, 100dvh);
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: max(1rem, var(--app-safe-top)) max(1rem, var(--app-safe-right)) max(1rem, var(--app-safe-bottom)) max(1rem, var(--app-safe-left));
+  background: #f8fafc;
+}
+
+.dark .native-app-lock { background: #020617; }
+body.native-app-locked { overflow: hidden !important; }
+
+.native-app-lock-card {
+  width: min(100%, 24rem);
+  padding: 1.5rem;
+  text-align: center;
+  color: #0f172a;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 1.5rem;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.18);
+}
+
+.dark .native-app-lock-card {
+  color: #f8fafc;
+  background: #0f172a;
+  border-color: #334155;
+}
+
+.native-app-lock-icon {
+  display: flex;
+  width: 4.5rem;
+  height: 4.5rem;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 1rem;
+  color: #fff;
+  background: linear-gradient(135deg, #2563eb, #14b8a6);
+  border-radius: 1.25rem;
+}
+
+.native-app-lock-card h1 { font-size: 1.5rem; font-weight: 900; }
+.native-app-lock-card p { margin-top: 0.65rem; color: #64748b; font-size: 0.9rem; line-height: 1.6; }
+.dark .native-app-lock-card p { color: #cbd5e1; }
+
+.native-app-lock-button {
+  width: 100%;
+  min-height: 3rem;
+  margin-top: 1.25rem;
+  padding: 0.75rem 1rem;
+  color: #fff;
+  background: #2563eb;
+  border-radius: 0.8rem;
+  font-weight: 800;
+}
+
+@media (max-height: 420px) and (orientation: landscape) {
+  .native-app-lock { align-items: flex-start; }
+  .native-app-lock-card { padding: 1rem; }
+  .native-app-lock-icon { width: 3.25rem; height: 3.25rem; margin-bottom: 0.6rem; }
+  .native-app-lock-card p { margin-top: 0.35rem; }
+  .native-app-lock-button { margin-top: 0.75rem; }
 }

@@ -39,6 +39,20 @@ if (!Number.isInteger(Number(androidCode)) || Number(androidCode) < 1) failures.
 if (!androidManifest.includes('android:scheme="albayan"') || !androidManifest.includes('android:host="auth"')) failures.push('Android app-login deep link is missing.');
 if (!iosPlist.includes('<string>albayan</string>')) failures.push('iOS app-login URL scheme is missing.');
 
+const requiredNativeDependencies = [
+  '@capacitor/browser', '@capacitor/camera', '@capacitor/clipboard',
+  '@capacitor/haptics', '@capacitor/keyboard', '@capacitor/local-notifications',
+  '@capacitor/network', '@capacitor/share',
+  '@aparajita/capacitor-biometric-auth', '@aparajita/capacitor-secure-storage'
+];
+for (const dependency of requiredNativeDependencies) {
+  if (!packageJson.dependencies?.[dependency]) failures.push(`Missing native dependency: ${dependency}.`);
+}
+if (capacitor.plugins?.SystemBars?.insetsHandling !== 'css') failures.push('SystemBars must expose CSS safe-area insets.');
+if (capacitor.plugins?.Keyboard?.resize !== 'body') failures.push('Keyboard must resize the body to keep forms visible.');
+if (!iosPlist.includes('<key>NSFaceIDUsageDescription</key>')) failures.push('iOS Face ID privacy explanation is missing.');
+if (!iosPlist.includes('<key>NSCameraUsageDescription</key>')) failures.push('iOS camera privacy explanation is missing.');
+
 if (failures.length) {
   console.error(`Mobile configuration failed (${failures.length} problem${failures.length === 1 ? '' : 's'}):`);
   failures.forEach(problem => console.error(`  - ${problem}`));

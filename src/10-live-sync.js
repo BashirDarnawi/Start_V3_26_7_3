@@ -734,7 +734,10 @@ async function serverLiveSyncOnce() {
     state.serverLastSyncErrorAt = null;
   }
   if (customerPagesDataChanged) _closeCustomerPagesDialogForStateChange();
-  if (changed) RenderQueue.schedule('liveSync(delta)');
+  if (changed) {
+    RenderQueue.schedule('liveSync(delta)');
+    if (typeof queueNativeReminderSync === 'function') queueNativeReminderSync();
+  }
   return { ok: !anyFetchFailed };
 }
 

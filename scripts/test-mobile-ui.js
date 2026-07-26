@@ -13,6 +13,7 @@ const read = file => fs.readFileSync(path.join(ROOT, file), 'utf8');
 const platform = read('src/01-platform.js');
 const stateServices = read('src/05-state-services.js');
 const mobileRuntime = read('src/01b-mobile-runtime.js');
+const nativeServices = read('src/01c-native-services.js');
 const dataAudit = read('src/08-data-audit.js');
 const serverApi = read('src/09-api-auth.js');
 const init = read('src/17-init.js');
@@ -723,9 +724,9 @@ check('Meta Ads API wrapper never accepts a token from browser code',
   !serverApi.includes('metaAccessToken') &&
   !serverApi.includes('access_token'));
 
-// Phase 2 — SYSTEM-BROWSER app login for the packaged Capacitor apps:
-// the app opens the hosted login page in the real browser and receives a
-// one-time code back through the albayan://auth deep link (PKCE-bound).
+// Optional system-browser app login for packaged Capacitor apps: the app can
+// open the hosted login page and receive a one-time code through the
+// albayan://auth deep link (PKCE-bound).
 const androidManifest = read('android/app/src/main/AndroidManifest.xml');
 const iosPlist = read('ios/App/App/Info.plist');
 const appLoginStartBody = serverApi.slice(
@@ -733,7 +734,8 @@ const appLoginStartBody = serverApi.slice(
   serverApi.indexOf('function cancelAppBrowserLogin(')
 );
 
-check('packaged app defaults to the system-browser sign-in with an in-app fallback',
+check('packaged app defaults to its own login surface with a secure-browser option',
+  serverApi.includes("let _nativeLoginMode = 'form';") &&
   views.includes('function renderNativeAppLogin(') &&
   views.includes('return renderNativeAppLogin(bannersHTML, isRTL);') &&
   views.includes('onclick="startAppBrowserLogin()"') &&
@@ -741,6 +743,40 @@ check('packaged app defaults to the system-browser sign-in with an in-app fallba
   views.includes('onclick="nativeLoginUseBrowser()"') &&
   views.includes('onclick="cancelAppBrowserLogin()"') &&
   serverApi.includes('Platform.isCapacitor && isServerModeEnabled()'));
+
+check('native PKCE verifier and device preferences use encrypted platform storage',
+  nativeServices.includes("getCapacitorPlugin('SecureStorage')") &&
+  nativeServices.includes('internalSetItem') &&
+  nativeServices.includes('whenUnlockedThisDeviceOnly') &&
+  serverApi.includes('nativeSecureSet(APP_LOGIN_PENDING_KEY') &&
+  serverApi.includes('nativeSecureGet(APP_LOGIN_PENDING_KEY') &&
+  serverApi.includes('localStorage.removeItem(APP_LOGIN_PENDING_KEY)'));
+
+check('native camera, clipboard and sharing reuse guarded app workflows',
+  nativeServices.includes("getCapacitorPlugin('Camera')") &&
+  nativeServices.includes("getCapacitorPlugin('Clipboard')") &&
+  nativeServices.includes("getCapacitorPlugin('Share')") &&
+  nativeServices.includes('_routePastedPhotoFiles(resolvedTarget, [file])') &&
+  photoPaste.includes('readNativeClipboardImage()') &&
+  helpers.includes('nativeShareContent({') &&
+  ['ad', 'receipt'].every(target => modals.includes(`takeNativePhoto('${target}')`)) &&
+  helpers.includes("takeNativePhoto('delivery')") &&
+  clothes.includes("takeNativePhoto('clothes-product')") &&
+  adsStudio.includes("takeNativePhoto('ads-studio')"));
+
+check('native biometric lock, reminders and phone viewport protections are wired',
+  nativeServices.includes("getCapacitorPlugin('BiometricAuthNative')") &&
+  nativeServices.includes('allowDeviceCredential: true') &&
+  nativeServices.includes("getCapacitorPlugin('LocalNotifications')") &&
+  nativeServices.includes("navigateToInternal('reconciliation')") &&
+  nativeServices.includes('window.visualViewport') &&
+  nativeServices.includes("_addNativeListener(keyboard, 'keyboardWillShow'") &&
+  nativeServices.includes('const protectedSession = _nativePrefs.biometricEnabled && state?.currentUser;') &&
+  nativeServices.includes('Date.now() - _nativeBackgroundedAt >= NATIVE_APP_LOCK_AFTER_MS') &&
+  nativeServices.includes('removeNativeAppLock();') &&
+  views.includes('data-native-device-settings') &&
+  css.includes('.native-app-lock') &&
+  css.includes('var(--app-visual-height, 100dvh)'));
 
 check('browser login sends only the SHA-256 challenge — the verifier never leaves the device',
   appLoginStartBody.includes('_appLoginSha256Hex(verifier)') &&

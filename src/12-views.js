@@ -966,10 +966,8 @@ function renderLogin() {
 
   const bannersHTML = _renderLoginBanners(isRTL, webCryptoOk);
 
-  // SYSTEM-BROWSER APP LOGIN, native side (Sabil-style): the packaged app
-  // signs in through the phone's real browser by default, where saved password
-  // managers work. The classic in-app form stays one explicit
-  // tap away as a fallback (nativeLoginUseForm).
+  // Packaged apps open directly on the app-owned form. Secure browser sign-in
+  // remains optional for password-manager, passkey, or SSO flows.
   if (typeof isSystemBrowserLoginEnabled === 'function' && isSystemBrowserLoginEnabled()
       && (typeof _nativeLoginMode === 'undefined' || _nativeLoginMode !== 'form')) {
     return renderNativeAppLogin(bannersHTML, isRTL);
@@ -1063,7 +1061,7 @@ function renderLogin() {
           </div>
           ${(typeof isSystemBrowserLoginEnabled === 'function' && isSystemBrowserLoginEnabled()) ? `
           <button type="button" onclick="nativeLoginUseBrowser()" class="mt-3 text-xs font-bold alb-link mx-auto block min-h-11">
-            ${isRTL ? 'تسجيل الدخول عبر المتصفح (مستحسن)' : 'Sign in with the browser (recommended)'}
+            ${isRTL ? 'استخدام تسجيل الدخول عبر المتصفح المحمي' : 'Use secure browser sign-in'}
           </button>
           ` : ''}
           ${savedAccounts.length > 0 ? `
@@ -6890,6 +6888,9 @@ async function cleanupAuditLogs() {
 function renderSettingsView() {
   const isAr = state.language === 'ar';
   const history = state.exchangeRateHistory || [];
+  const nativeStatus = typeof nativeSecuritySettingsStatus === 'function'
+    ? nativeSecuritySettingsStatus()
+    : { isNative: false, ready: true, biometricEnabled: false, remindersEnabled: false, biometricAvailable: false };
   
   return `
     <div class="space-y-6 animate-fade-in-up">
@@ -6971,6 +6972,36 @@ function renderSettingsView() {
           </div>
         ` : ''}
       </div>
+
+      ${nativeStatus.isNative ? `
+      <!-- Protection and reminders for this physical phone only -->
+      <div class="glass-panel rounded-2xl p-4 sm:p-6" data-native-device-settings>
+        <h2 class="text-xl font-bold mb-2 flex items-center gap-2">
+          <i data-lucide="smartphone" class="w-5 h-5 text-indigo-600"></i>
+          ${isAr ? 'حماية هذا الهاتف' : 'This phone'}
+        </h2>
+        <p class="text-sm text-slate-500 mb-4">${isAr ? 'هذه الإعدادات محفوظة بأمان على هذا الهاتف فقط، ولا تغيّر أجهزة المستخدمين الآخرين.' : 'These settings are encrypted on this phone only and do not change other users’ devices.'}</p>
+        <div class="space-y-3">
+          <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3 sm:p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div class="min-w-0">
+              <div class="font-bold flex items-center gap-2"><i data-lucide="scan-face" class="w-5 h-5 text-emerald-600"></i>${isAr ? 'قفل بالبصمة أو Face ID' : 'Biometric app lock'}</div>
+              <p class="mt-1 text-xs text-slate-500">${isAr ? 'عند مغادرة البيان، استخدم بصمة الهاتف أو Face ID أو رمز قفل الهاتف لفتحه.' : 'After leaving Albayan, unlock it with biometrics or the phone’s device credential.'}</p>
+            </div>
+            <button type="button" onclick="setNativeBiometricLockEnabled(${nativeStatus.biometricEnabled ? 'false' : 'true'})" class="min-h-11 shrink-0 rounded-xl px-4 py-2 font-bold ${nativeStatus.biometricEnabled ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200' : 'bg-indigo-600 text-white'}">
+              ${nativeStatus.biometricEnabled ? (isAr ? 'مفعّل - إيقاف' : 'On - turn off') : (isAr ? 'تفعيل' : 'Enable')}
+            </button>
+          </div>
+          <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3 sm:p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div class="min-w-0">
+              <div class="font-bold flex items-center gap-2"><i data-lucide="bell-ring" class="w-5 h-5 text-amber-600"></i>${isAr ? 'تذكيرات تسوية الإعلانات' : 'Ad reconciliation reminders'}</div>
+              <p class="mt-1 text-xs text-slate-500">${isAr ? 'يرسل الهاتف تذكيراً في اليوم التالي لانتهاء الإعلان أو إيقافه.' : 'Your phone reminds you the day after an ad ends or is stopped.'}</p>
+            </div>
+            <button type="button" onclick="setNativeRemindersEnabled(${nativeStatus.remindersEnabled ? 'false' : 'true'})" class="min-h-11 shrink-0 rounded-xl px-4 py-2 font-bold ${nativeStatus.remindersEnabled ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200' : 'bg-indigo-600 text-white'}">
+              ${nativeStatus.remindersEnabled ? (isAr ? 'مفعّل - إيقاف' : 'On - turn off') : (isAr ? 'تفعيل' : 'Enable')}
+            </button>
+          </div>
+        </div>
+      </div>` : ''}
 
       <!-- Privacy and account deletion -->
       <div class="glass-panel rounded-2xl p-6">

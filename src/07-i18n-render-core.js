@@ -259,6 +259,10 @@ function applyTheme() {
       themeMetas[i].setAttribute('content', isDark ? '#020617' : '#f8fafc');
     }
   } catch (_) {}
+
+  if (typeof syncNativeSystemBarsTheme === 'function') {
+    syncNativeSystemBarsTheme().catch(() => {});
+  }
 }
 
 function toggleTheme() {

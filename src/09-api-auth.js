@@ -2014,19 +2014,19 @@ async function serverLoadAllData() {
   // Let callers (login flow) distinguish a clean load from a partial one so
   // they don't show "All data synchronized successfully" over missing data.
   if (loadAborted()) return abortedResult();
+  if (typeof queueNativeReminderSync === 'function') queueNativeReminderSync();
   return { failed, forbidden };
 }
 
 // ==========================================
 // SYSTEM-BROWSER APP LOGIN (Phase 2)
 // ==========================================
-// Sabil-style sign-in for the packaged Capacitor iOS/Android apps: the app
-// never collects credentials in its WebView. Instead it opens the hosted
-// login page in the phone's REAL browser (Safari/Chrome — where passkeys and
-// saved passwords actually work), the user signs in there, and the web page
-// bounces back into the app via the albayan://auth deep link carrying a
-// ONE-TIME code. The app exchanges code+verifier (PKCE-style: the verifier
-// never leaves the device; only its SHA-256 travels) for its own session.
+// Optional secure-browser sign-in for packaged Capacitor iOS/Android apps.
+// The normal app-owned form uses the same HttpOnly server session as the web
+// app. This alternative opens the hosted login page in Safari/Chrome for
+// password-manager, passkey, or SSO use, then returns via the albayan://auth
+// deep link carrying a ONE-TIME code. The app exchanges code+verifier
+// (PKCE-style: only the verifier's SHA-256 leaves the device) for its session.
 //
 // Two sides live here because both run from this same bundle:
 //   NATIVE side (Capacitor): startAppBrowserLogin / deep-link handling.
@@ -2034,11 +2034,9 @@ async function serverLoadAllData() {
 //   handoff code after login, renders the "return to app" screen.
 
 const APP_LOGIN_DEEP_LINK = 'albayan://auth';
-// Native app: the pending {state, verifier} while the browser round-trip is
-// in flight. localStorage (not memory) because Android may kill the activity
-// while the browser is foregrounded. The verifier is useless on its own —
-// redeeming it also requires the one-time code that only ever travels
-// browser -> app via the deep link on this same device.
+// Native app: the pending {state, verifier} is kept in Keychain/Keystore so
+// Android can restore the activity without exposing it to web storage. The
+// browser build retains a localStorage fallback for its non-native flow.
 const APP_LOGIN_PENDING_KEY = 'albayan_app_login_pending';
 // Web page: the app's sign-in request {state, challenge} while the user
 // authenticates. sessionStorage: tab-scoped and gone when the tab closes.
@@ -2048,12 +2046,14 @@ const APP_LOGIN_REQUEST_TTL_MS = 10 * 60 * 1000;
 let _appLoginCallbackQueue = '';
 let _appLoginDrainAttempts = 0;
 let _appLoginExchangeBusy = false;
-// Native login screen mode: 'browser' (default, Sabil-style) or 'form'
-// (classic in-app email+password, kept as an explicit fallback).
-let _nativeLoginMode = 'browser';
+let _appLoginPendingCache = null;
+let _appLoginPendingHydrated = false;
+// Start with the app-owned form so Albayan opens like a normal native app.
+// The system-browser flow remains available for password managers and SSO.
+let _nativeLoginMode = 'form';
 
-// The packaged app signs in through the system browser only in server mode
-// (a local-only override has no server to sign in to).
+// Secure-browser sign-in is available only in server mode (a local-only
+// override has no server to sign in to).
 function isSystemBrowserLoginEnabled() {
   return !!(typeof Platform !== 'undefined' && Platform.isCapacitor && isServerModeEnabled());
 }
@@ -2096,11 +2096,9 @@ async function _appLoginSha256Hex(value) {
 
 // ---------- NATIVE SIDE (packaged app) ----------
 
-function _readAppLoginPending() {
+function _validateAppLoginPending(value) {
   try {
-    const raw = localStorage.getItem(APP_LOGIN_PENDING_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
     const stateToken = String((parsed && parsed.state) || '');
     const verifier = String((parsed && parsed.verifier) || '');
     const createdAt = Number(parsed && parsed.createdAt) || 0;
@@ -2112,7 +2110,66 @@ function _readAppLoginPending() {
   }
 }
 
+function _readAppLoginPending() {
+  if (isPackagedMobileApp()) return _appLoginPendingCache;
+  try { return _validateAppLoginPending(localStorage.getItem(APP_LOGIN_PENDING_KEY)); }
+  catch (_) { return null; }
+}
+
+async function readAppLoginPendingAsync() {
+  if (!isPackagedMobileApp()) return _readAppLoginPending();
+  if (_appLoginPendingHydrated) return _appLoginPendingCache;
+  _appLoginPendingHydrated = true;
+  let pending = null;
+  if (typeof nativeSecureGet === 'function') {
+    pending = _validateAppLoginPending(await nativeSecureGet(APP_LOGIN_PENDING_KEY));
+  }
+  // Migrate a request created by an older release, then erase the web copy.
+  if (!pending) {
+    try { pending = _validateAppLoginPending(localStorage.getItem(APP_LOGIN_PENDING_KEY)); } catch (_) {}
+    if (pending && typeof nativeSecureSet === 'function') {
+      const migrated = await nativeSecureSet(APP_LOGIN_PENDING_KEY, pending);
+      if (!migrated) pending = null;
+    }
+  }
+  try { localStorage.removeItem(APP_LOGIN_PENDING_KEY); } catch (_) {}
+  _appLoginPendingCache = pending;
+  return pending;
+}
+
+async function hydrateAppLoginPendingFromSecureStorage() {
+  const before = _appLoginPendingCache;
+  await readAppLoginPendingAsync();
+  if (before !== _appLoginPendingCache && typeof render === 'function') {
+    try { render(); } catch (_) {}
+  }
+}
+
+async function _storeAppLoginPending(pending) {
+  const validated = _validateAppLoginPending(pending);
+  if (!validated) return false;
+  if (isPackagedMobileApp()) {
+    if (typeof nativeSecureSet !== 'function') return false;
+    const saved = await nativeSecureSet(APP_LOGIN_PENDING_KEY, validated);
+    if (saved) {
+      _appLoginPendingCache = validated;
+      _appLoginPendingHydrated = true;
+      try { localStorage.removeItem(APP_LOGIN_PENDING_KEY); } catch (_) {}
+    }
+    return saved;
+  }
+  try {
+    localStorage.setItem(APP_LOGIN_PENDING_KEY, JSON.stringify(validated));
+    return true;
+  } catch (_) { return false; }
+}
+
 function clearAppBrowserLoginPending() {
+  _appLoginPendingCache = null;
+  _appLoginPendingHydrated = true;
+  if (isPackagedMobileApp() && typeof nativeSecureRemove === 'function') {
+    nativeSecureRemove(APP_LOGIN_PENDING_KEY).catch(() => {});
+  }
   try { localStorage.removeItem(APP_LOGIN_PENDING_KEY); } catch (_) {}
 }
 
@@ -2125,7 +2182,10 @@ function isAppBrowserLoginExchanging() {
   return _appLoginExchangeBusy === true;
 }
 
-function _openInSystemBrowser(url) {
+async function _openInSystemBrowser(url) {
+  if (isPackagedMobileApp() && typeof openNativeBrowser === 'function') {
+    return await openNativeBrowser(url);
+  }
   // Capacitor routes external-origin _blank navigations to the real system
   // browser (Safari / Chrome) — the same mechanism the login screen's
   // privacy-policy links already rely on in the packaged app.
@@ -2152,7 +2212,7 @@ function _openInSystemBrowser(url) {
 async function startAppBrowserLogin() {
   if (!isSystemBrowserLoginEnabled()) return false;
   try {
-    const existing = _readAppLoginPending();
+    const existing = await readAppLoginPendingAsync();
     let stateToken;
     let verifier;
     if (existing) {
@@ -2163,13 +2223,12 @@ async function startAppBrowserLogin() {
     } else {
       stateToken = _appLoginRandomHex(16);
       verifier = _appLoginRandomHex(32);
-      try {
-        localStorage.setItem(APP_LOGIN_PENDING_KEY, JSON.stringify({
-          state: stateToken,
-          verifier: verifier,
-          createdAt: Date.now()
-        }));
-      } catch (_) {
+      const stored = await _storeAppLoginPending({
+        state: stateToken,
+        verifier: verifier,
+        createdAt: Date.now()
+      });
+      if (!stored) {
         showNotification(
           state.language === 'ar' ? 'التخزين غير متاح' : 'Storage Unavailable',
           state.language === 'ar'
@@ -2186,7 +2245,7 @@ async function startAppBrowserLogin() {
       + '&app_state=' + encodeURIComponent(stateToken)
       + '&app_challenge=' + encodeURIComponent(challenge)
       + '&app_platform=' + encodeURIComponent((typeof Platform !== 'undefined' && Platform.platform) || 'app');
-    const opened = _openInSystemBrowser(url);
+    const opened = await _openInSystemBrowser(url);
     if (!opened) {
       clearAppBrowserLoginPending();
       showNotification(
@@ -2270,10 +2329,11 @@ async function _processAppLoginCallback(url) {
   if (typeof state !== 'undefined' && state.currentUser) {
     // Already signed in (e.g. stale link re-opened) — nothing to do.
     clearAppBrowserLoginPending();
+    if (typeof closeNativeBrowser === 'function') closeNativeBrowser();
     return;
   }
   const parsed = _parseAppLoginCallback(url);
-  const pending = _readAppLoginPending();
+  const pending = await readAppLoginPendingAsync();
   const isAr = typeof state !== 'undefined' && state.language === 'ar';
   if (!parsed || !pending || parsed.state !== pending.state) {
     // Unknown/expired/foreign link: never exchange a code this app did not
@@ -2288,6 +2348,7 @@ async function _processAppLoginCallback(url) {
     return;
   }
   _appLoginExchangeBusy = true;
+  if (typeof closeNativeBrowser === 'function') closeNativeBrowser();
   try { if (typeof render === 'function') render(); } catch (_) {}
   try {
     await completeAppBrowserLogin(parsed.code, pending.verifier);

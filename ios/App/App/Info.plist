@@ -37,6 +37,10 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Albayan uses the camera to photograph receipts, ads, and delivery proof.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Albayan uses Face ID to protect your signed-in business workspace on this device.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Albayan can save a receipt or ad image to your photo library when you choose to do so.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Albayan lets you attach photos of receipts, ads, and delivery proof from your photo library.</string>
 	<key>UILaunchStoryboardName</key>

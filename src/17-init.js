@@ -513,6 +513,13 @@ async function init() {
     if (document.visibilityState === 'visible') runDailyBackupIfDue();
   });
 
+  // Native-only device protection is deliberately last in startup: the
+  // authenticated user and their data scope are known, but the app is not yet
+  // marked settled for queued deep links. Browser/PWA builds return at once.
+  if (typeof initializeNativeSessionProtection === 'function') {
+    await initializeNativeSessionProtection();
+  }
+
   // Startup fully settled: queued app-login deep links (cold start via
   // albayan://auth) may now run the exchange + post-login pipeline.
   window.__albayanInitSettled = true;

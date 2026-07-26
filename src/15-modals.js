@@ -495,7 +495,7 @@ function renderModal() {
                 <span class="w-5 h-5 rounded-full bg-emerald-600 text-white flex items-center justify-center text-[10px]">2</span>
                 ${isArAd ? 'حالة الدفع' : 'Payment Status'}
               </div>
-              <div class="grid grid-cols-3 gap-2">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <button type="button" onclick="setAdPaymentStatus('paid')" id="ad-pay-status-paid"
                   class="p-2 rounded-lg border-2 transition-all flex flex-col items-center ${adPaymentState === 'paid' ? 'border-emerald-500 bg-emerald-100 dark:bg-emerald-900/40' : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800'}">
                   <i data-lucide="check-circle" class="w-5 h-5 ${adPaymentState === 'paid' ? 'text-emerald-600' : 'text-slate-400'}"></i>
@@ -694,7 +694,7 @@ function renderModal() {
                 <span class="w-5 h-5 rounded-full bg-purple-600 text-white flex items-center justify-center text-[10px]">4</span>
                 ${isArAd ? 'مدة الإعلان' : 'Ad Duration'}
               </div>
-              <div class="grid grid-cols-3 gap-2">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <div>
                   <label class="block text-xs text-slate-500 mb-1">${isArAd ? 'البداية' : 'Start'}</label>
                   <input type="date" id="ad-start-date" value="${Security.escapeHtml(adData.startDate ? adData.startDate.split('T')[0] : getTodayDateString())}" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-2 py-2 rounded-lg text-sm" onchange="updateAdDays()" />
@@ -718,6 +718,9 @@ function renderModal() {
                   ${isArAd ? 'الصور' : 'Photos'}
                 </div>
                 ${canModifyAdPhotosInCurrentModal() ? `<div class="flex flex-wrap items-center gap-2">
+                  <button type="button" onclick="takeNativePhoto('ad')" class="min-h-11 px-3 rounded-lg border border-orange-300 dark:border-orange-700 text-xs font-bold text-orange-700 dark:text-orange-300 hover:bg-orange-100 dark:hover:bg-orange-900/30 flex items-center gap-1.5">
+                    <i data-lucide="camera" class="w-3.5 h-3.5"></i>${isArAd ? 'الكاميرا' : 'Camera'}
+                  </button>
                   <button type="button" onclick="pastePhotoFromClipboard('ad')" class="min-h-11 px-3 rounded-lg border border-orange-300 dark:border-orange-700 text-xs font-bold text-orange-700 dark:text-orange-300 hover:bg-orange-100 dark:hover:bg-orange-900/30 flex items-center gap-1.5">
                     <i data-lucide="clipboard-paste" class="w-3.5 h-3.5"></i>${isArAd ? 'لصق صورة' : 'Paste photo'}
                   </button>
@@ -1425,6 +1428,9 @@ function renderModal() {
                     <span>${isArR ? 'الصور' : 'Photos'}</span>
                   </label>
                   <div class="flex flex-wrap items-center gap-2">
+                    <button type="button" onclick="takeNativePhoto('receipt')" class="min-h-11 px-3 rounded-lg border border-indigo-200 dark:border-indigo-800 text-xs text-indigo-600 dark:text-indigo-300 font-bold flex items-center gap-1.5 hover:bg-indigo-50 dark:hover:bg-indigo-900/20">
+                      <i data-lucide="camera" class="w-3.5 h-3.5"></i><span>${isArR ? 'الكاميرا' : 'Camera'}</span>
+                    </button>
                     <button type="button" onclick="pastePhotoFromClipboard('receipt')" class="min-h-11 px-3 rounded-lg border border-indigo-200 dark:border-indigo-800 text-xs text-indigo-600 dark:text-indigo-300 font-bold flex items-center gap-1.5 hover:bg-indigo-50 dark:hover:bg-indigo-900/20">
                       <i data-lucide="clipboard-paste" class="w-3.5 h-3.5"></i><span>${isArR ? 'لصق صورة' : 'Paste photo'}</span>
                     </button>
@@ -1652,7 +1658,7 @@ function renderModal() {
 
           <div class="p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl space-y-3">
             <h4 class="text-sm font-medium">${isArTU ? 'إضافة شحنة جديدة' : 'Add New Top-up'}</h4>
-            <div class="grid grid-cols-3 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
                 <label class="block text-xs mb-1">${isArTU ? 'المبلغ (USD)' : 'Amount (USD)'}</label>
                 <input type="text" inputmode="decimal" id="topup-amount" class="w-full glass-input px-3 py-2 rounded-lg" placeholder="0.00" oninput="sanitizeMoneyInput(this); _refreshTopUpPreview()" />

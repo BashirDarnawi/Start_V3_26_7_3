@@ -1045,6 +1045,9 @@ function refreshClothesPhotoPreview() {
   }
   wrap.insertAdjacentHTML('beforeend', `
     <div class="mt-2 flex flex-wrap gap-2">
+      <button type="button" onclick="takeNativePhoto('clothes-product')" class="min-h-11 flex items-center gap-2 px-4 py-2 rounded-xl border border-rose-200 dark:border-rose-800 text-sm font-bold text-rose-600 dark:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-900/20">
+        <i data-lucide="camera" class="w-4 h-4"></i>${isAr ? 'الكاميرا' : 'Camera'}
+      </button>
       <button type="button" onclick="document.getElementById('clothes-product-photo-input').click()" class="min-h-11 flex items-center gap-2 px-4 py-2 rounded-xl border-2 border-dashed border-slate-300 dark:border-slate-600 text-sm font-medium text-slate-500 dark:text-slate-400 hover:border-rose-400 hover:text-rose-500">
         <i data-lucide="${_clothesTempPhoto ? 'refresh-cw' : 'image-plus'}" class="w-4 h-4"></i>${_clothesTempPhoto ? (isAr ? 'تغيير الصورة' : 'Change photo') : (isAr ? 'رفع صورة' : 'Upload photo')}
       </button>

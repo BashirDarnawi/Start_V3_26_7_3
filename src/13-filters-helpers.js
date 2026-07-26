@@ -2271,14 +2271,27 @@ async function copyDeliveryReceiptWhatsAppMessage(receiptId) {
   );
 }
 
-function openDeliveryReceiptWhatsAppShare(receiptId) {
+function closeNativeDeliverySharePrompt() {
+  closeDeliveryWhatsAppPrompt(false);
+}
+
+async function openDeliveryReceiptWhatsAppShare(receiptId) {
   const receipt = _getDeliveryReceiptForWhatsApp(receiptId);
   const isAr = state.language === 'ar';
   if (!receipt) {
     showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'لا يمكنك مشاركة معلومات هذا التوصيل.' : 'You cannot share this delivery information.', 'error');
     return;
   }
-  const url = buildWhatsAppShareLink(buildDeliveryReceiptWhatsAppMessage(receipt));
+  const message = buildDeliveryReceiptWhatsAppMessage(receipt);
+  if (isPackagedMobileApp() && typeof nativeShareContent === 'function') {
+    const shared = await nativeShareContent({
+      title: isAr ? 'توصيل جديد - البيان' : 'New Albayan delivery',
+      text: message
+    });
+    if (shared) closeNativeDeliverySharePrompt();
+    return;
+  }
+  const url = buildWhatsAppShareLink(message);
   if (!url) return;
 
   const link = document.createElement('a');
@@ -3306,6 +3319,9 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
           <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
             <div class="text-xs font-bold text-slate-600 dark:text-slate-400">${isArD ? 'صورة الوصل *' : 'Receipt photo *'}</div>
             <div class="flex flex-wrap items-center gap-2">
+              <button type="button" onclick="takeNativePhoto('delivery')" class="min-h-11 px-3 rounded-lg border border-indigo-200 dark:border-indigo-800 text-xs font-bold text-indigo-600 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 flex items-center gap-1.5">
+                <i data-lucide="camera" class="w-3.5 h-3.5"></i>${isArD ? 'الكاميرا' : 'Camera'}
+              </button>
               <button type="button" onclick="pastePhotoFromClipboard('delivery')" class="min-h-11 px-3 rounded-lg border border-indigo-200 dark:border-indigo-800 text-xs font-bold text-indigo-600 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 flex items-center gap-1.5">
                 <i data-lucide="clipboard-paste" class="w-3.5 h-3.5"></i>${isArD ? 'لصق صورة' : 'Paste photo'}
               </button>

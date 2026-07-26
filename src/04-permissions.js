@@ -683,6 +683,9 @@ function generateRecoveryKeyPlain() {
 
 async function copyTextToClipboard(text) {
   const value = String(text ?? '');
+  if (isPackagedMobileApp() && typeof nativeWriteClipboardText === 'function') {
+    if (await nativeWriteClipboardText(value)) return true;
+  }
   try {
     if (navigator?.clipboard?.writeText) {
       await navigator.clipboard.writeText(value);

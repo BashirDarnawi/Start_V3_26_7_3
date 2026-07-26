@@ -194,6 +194,49 @@ test('critical workspace routes fit the viewport and forms open', async ({ page 
   expect(modalFits).toBe(true);
 });
 
+test('workspace stays usable across small phones, tablets, and landscape screens', async ({ page }) => {
+  await signIn(page);
+
+  const viewports = [
+    { name: 'small phone portrait', width: 320, height: 568 },
+    { name: 'common Android portrait', width: 360, height: 640 },
+    { name: 'modern phone portrait', width: 390, height: 844 },
+    { name: 'small phone landscape', width: 667, height: 375 },
+    { name: 'large phone landscape', width: 932, height: 430 },
+    { name: 'tablet portrait', width: 768, height: 1024 }
+  ];
+
+  for (const viewport of viewports) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+
+    for (const route of ['/customers', '/receipts', '/ads']) {
+      await page.goto(route);
+      await expect(page.locator('#app-sidebar')).toBeAttached();
+
+      const layout = await page.evaluate(() => {
+        const viewportWidth = window.innerWidth;
+        const visibleControls = [...document.querySelectorAll('button, a, input, select, textarea')]
+          .filter(element => {
+            const style = getComputedStyle(element);
+            const box = element.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0;
+          });
+        const outsideControls = visibleControls.filter(element => {
+          const box = element.getBoundingClientRect();
+          return box.left < -1 || box.right > viewportWidth + 1;
+        });
+        return {
+          overflow: document.documentElement.scrollWidth - viewportWidth,
+          outsideControls: outsideControls.map(element => element.getAttribute('aria-label') || element.textContent?.trim() || element.tagName).slice(0, 5)
+        };
+      });
+
+      expect(layout.overflow, `${route} overflows on ${viewport.name}`).toBeLessThanOrEqual(1);
+      expect(layout.outsideControls, `${route} has unreachable controls on ${viewport.name}`).toEqual([]);
+    }
+  }
+});
+
 test('administrator can run the read-only data integrity check', async ({ page }) => {
   await signIn(page);
   await page.goto('/settings');

@@ -334,6 +334,12 @@ async function setupMobileRuntime() {
   if (_mobileRuntimeReady || !connectivityUiEnabled()) return;
   _mobileRuntimeReady = true;
 
+  // Install viewport/keyboard handling for phone browsers and the secure
+  // native bridges for packaged iOS/Android before registering deep links.
+  if (typeof setupNativeServices === 'function') {
+    await setupNativeServices();
+  }
+
   window.addEventListener('offline', () => showMobileConnectivityNotice({ serverReachable: false }));
   window.addEventListener('online', () => {
     // Browser connectivity returned; verify Albayan itself before hiding the
