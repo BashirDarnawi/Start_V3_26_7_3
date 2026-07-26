@@ -72,6 +72,7 @@ from .entity_projection import (
     can_include_entity_media,
     project_entity_contacts,
 )
+from .meta_ads import META_AD_SERVER_FIELDS, create_meta_ads_router
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from .schemas import (
@@ -8688,6 +8689,8 @@ def _ad_mutation_atomic(
     ad_id = validate_entity_id(body.adId)
     idem = sanitize_str(body.idempotencyKey, 120)
     clean_request = sanitize_json(body.data or {}) or {}
+    if set(clean_request) & META_AD_SERVER_FIELDS:
+        raise HTTPException(status_code=403, detail="Meta synchronization fields are server-controlled")
     validate_relationship_ids(clean_request, "ad data")
     request_hash = _financial_request_hash(
         {
@@ -11802,6 +11805,8 @@ def create_collection_item(
         raise HTTPException(status_code=403, detail="Forbidden")
 
     generic_data = sanitize_json(body.data or {}) or {}
+    if collection == "ads" and set(generic_data) & META_AD_SERVER_FIELDS:
+        raise HTTPException(status_code=403, detail="Meta synchronization fields are server-controlled")
     if collection == "ads" and (
         set(generic_data) & AD_FUNDING_FIELDS
         or str(generic_data.get("status") or "") == "Stopped"
@@ -11983,6 +11988,8 @@ def update_collection_item(
 
     financial_updates = sanitize_json(body.data or {}) or {}
     if collection == "ads":
+        if set(financial_updates) & META_AD_SERVER_FIELDS:
+            raise HTTPException(status_code=403, detail="Meta synchronization fields are server-controlled")
         existing_status = str((existing.get("data") or {}).get("status") or "")
         requested_status = str(financial_updates.get("status") or "")
         collection_completion = (
@@ -14100,6 +14107,15 @@ def privacy_anonymize_user(
         {},
     )
     return user_row_to_public(updated)
+
+
+# Register the focused read-only Meta Ads integration before the SPA catch-all.
+app.include_router(
+    create_meta_ads_router(
+        current_user_dependency=current_user,
+        require_same_origin=require_same_origin,
+    )
+)
 
 
 # ==========================================

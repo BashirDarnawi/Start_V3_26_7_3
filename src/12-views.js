@@ -3943,6 +3943,7 @@ function renderAdsView() {
           <p id="ads-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allAds.length} إجمالي الإعلانات` : `${allAds.length} total ads`}</p>
         </div>
         <div class="flex flex-wrap gap-2">
+          ${renderMetaAdsHeaderButton(isAr)}
           <button onclick="showAdModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
             <i data-lucide="plus" class="w-4 h-4"></i>
             <span>${t('addAd')}</span>
@@ -3958,7 +3959,7 @@ function renderAdsView() {
           <div class="smart-search-field">
             <label for="ad-search" class="sr-only">${isAr ? 'بحث في الإعلانات' : 'Search ads'}</label>
             <i data-lucide="search" class="h-5 w-5"></i>
-            <input type="search" id="ad-search" placeholder="${isAr ? (canSearchAdContacts ? 'ابحث بالعميل أو الهاتف أو الرقم أو الصفحة...' : 'ابحث بالعميل أو الرقم أو الصفحة...') : (canSearchAdContacts ? 'Search customer, phone, serial or page...' : 'Search customer, serial or page...')}" value="${Security.escapeHtml(state.adSearch || '')}" oninput="onAdSearchInput(this.value)" autocomplete="off" />
+            <input type="search" id="ad-search" placeholder="${isAr ? (canSearchAdContacts ? 'ابحث بالعميل أو الهاتف أو الرقم أو الصفحة أو Meta...' : 'ابحث بالعميل أو الرقم أو الصفحة أو Meta...') : (canSearchAdContacts ? 'Search customer, phone, serial, page or Meta...' : 'Search customer, serial, page or Meta...')}" value="${Security.escapeHtml(state.adSearch || '')}" oninput="onAdSearchInput(this.value)" autocomplete="off" />
           </div>
           <div class="smart-filter-chips" aria-label="${isAr ? 'فلاتر إعلانات سريعة' : 'Quick ad filters'}">
             <button type="button" onclick="applyAdQuickFilter('all')" class="smart-filter-chip ${adQuickMode === 'all' ? 'is-active' : ''}">${isAr ? 'الكل' : 'All'}</button>
@@ -4103,6 +4104,7 @@ function renderAdsView() {
                     <td class="py-3 px-2 font-bold ${amountColorClass}" data-label="Amount" data-payment-state="${isAdPaid ? 'paid' : 'unpaid'}" title="${isAdPaid ? (isAr ? 'مبلغ مدفوع' : 'Paid amount') : (isAr ? 'دين غير مدفوع على العميل' : 'Unpaid customer debt')}">
                       <span>$${(Number(ad.amountUSD) || 0).toFixed(2)}</span>
                       ${!isAdPaid ? `<span class="text-[10px] font-semibold mt-0.5">${isAr ? 'دين غير مدفوع' : 'Unpaid debt'}</span>` : ''}
+                      ${renderMetaAdBudgetSummary(ad, isAr)}
                     </td>
                     <td class="py-3 px-2" data-label="Rate">${receiptExchangeRate?.toFixed(2) || ad.exchangeRate?.toFixed(2) || '0.00'}</td>
                     <td class="py-3 px-2 font-medium ${amountColorClass}" data-label="Local">${adAmountLocalForDisplay.toFixed(2)} LYD</td>
@@ -4134,6 +4136,7 @@ function renderAdsView() {
                           <div class="text-emerald-600">${isAr ? 'المتبقي' : 'Remaining'}: $${((ad.amountUSD || 0) - ad.spentUSD).toFixed(2)}</div>
                         </div>
                       ` : ''}
+                      ${renderMetaAdStatusSummary(ad, isAr)}
                     </td>
                     <td class="py-3 px-2" data-label="Delivery">
                       <!-- Read-only (user request, same as Status): delivery
@@ -4171,9 +4174,11 @@ function renderAdsView() {
                         }
                         return endLine + upLine;
                       })()}
+                      ${renderMetaAdScheduleSummary(ad, isAr)}
                     </td>
                     <td class="py-3 px-2" data-label="Actions">
                       <div class="flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
+                        ${renderMetaAdActionButton(ad, isAr)}
                         ${can('ads', 'viewPhotos') && adPhotoCount > 0 ? `
                         <button type="button" data-action="view-ad-photos" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openAdPhotoViewer(this.dataset.adId, 0, this)" class="ad-photo-view-button inline-flex items-center justify-center gap-1.5 font-bold" title="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}" aria-label="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}">
                           <i data-lucide="images" class="w-4 h-4 shrink-0"></i><span class="text-xs whitespace-nowrap">${isAr ? `عرض الصور (${adPhotoCount})` : `View Photos (${adPhotoCount})`}</span>
