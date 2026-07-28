@@ -72,7 +72,11 @@ from .entity_projection import (
     can_include_entity_media,
     project_entity_contacts,
 )
-from .meta_ads import META_AD_SERVER_FIELDS, create_meta_ads_router
+from .meta_ads import (
+    META_AD_SERVER_FIELDS,
+    META_PAGE_SERVER_FIELDS,
+    create_meta_ads_router,
+)
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from .schemas import (
@@ -8879,6 +8883,15 @@ def _ad_mutation_atomic(
             # changed budget/spend (including refund-derived spend changes).
             _financial_clear_changed_remaining_confirmation(existing, saved_data)
 
+            # A Meta-first row starts as an accounting-neutral draft. Only a
+            # successful transactional edit with a real customer and funding
+            # plan completes it; browser payloads cannot forge this transition.
+            if existing is not None and str(
+                existing.get("metaImportState") or ""
+            ) == "needs_completion":
+                saved_data["metaImportState"] = "complete"
+                saved_data["metaImportCompletedAt"] = _iso_utc()
+
             # The customer itself must be active; funding receipts were already
             # locked in deterministic order above.
             customer_id = validate_entity_id(saved_data.get("customerId"))
@@ -11807,6 +11820,8 @@ def create_collection_item(
     generic_data = sanitize_json(body.data or {}) or {}
     if collection == "ads" and set(generic_data) & META_AD_SERVER_FIELDS:
         raise HTTPException(status_code=403, detail="Meta synchronization fields are server-controlled")
+    if collection == "pages" and set(generic_data) & META_PAGE_SERVER_FIELDS:
+        raise HTTPException(status_code=403, detail="Meta page identity fields are server-controlled")
     if collection == "ads" and (
         set(generic_data) & AD_FUNDING_FIELDS
         or str(generic_data.get("status") or "") == "Stopped"
@@ -11987,6 +12002,8 @@ def update_collection_item(
             )
 
     financial_updates = sanitize_json(body.data or {}) or {}
+    if collection == "pages" and set(financial_updates) & META_PAGE_SERVER_FIELDS:
+        raise HTTPException(status_code=403, detail="Meta page identity fields are server-controlled")
     if collection == "ads":
         if set(financial_updates) & META_AD_SERVER_FIELDS:
             raise HTTPException(status_code=403, detail="Meta synchronization fields are server-controlled")

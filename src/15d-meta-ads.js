@@ -52,6 +52,112 @@ function metaAdsFormatDate(value, withTime = false) {
   }
 }
 
+function metaAdsDurationDays(ad) {
+  const stored = Number(ad?.metaDurationDays);
+  if (Number.isSafeInteger(stored) && stored > 0) return stored;
+  const start = ad?.metaStartTime ? new Date(ad.metaStartTime) : null;
+  const end = ad?.metaEndTime ? new Date(ad.metaEndTime) : null;
+  if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 0;
+  const milliseconds = end.getTime() - start.getTime();
+  return milliseconds > 0 ? Math.max(1, Math.ceil(milliseconds / 86400000)) : 0;
+}
+
+function metaAdsPlannedTotalMinor(ad) {
+  const stored = Number(ad?.metaTotalBudgetMinor) || 0;
+  if (stored > 0) return Math.round(stored);
+  const lifetime = Number(ad?.metaLifetimeBudgetMinor) || 0;
+  if (lifetime > 0) return Math.round(lifetime);
+  const daily = Number(ad?.metaDailyBudgetMinor) || 0;
+  const days = metaAdsDurationDays(ad);
+  return daily > 0 && days > 0 ? Math.round(daily * days) : 0;
+}
+
+function metaAdsTotalRemainingMinor(ad) {
+  const stored = Number(ad?.metaTotalRemainingBudgetMinor);
+  if (Number.isFinite(stored) && stored >= 0) return Math.round(stored);
+  const total = metaAdsPlannedTotalMinor(ad);
+  const spent = Math.max(0, Number(ad?.metaSpendMinor) || 0);
+  return total > 0 ? Math.max(Math.round(total - spent), 0) : 0;
+}
+
+function metaAdsIsPlaceholderPageName(value, pageId) {
+  const name = String(value || '').trim().toLocaleLowerCase();
+  const id = String(pageId || '').trim().toLocaleLowerCase();
+  return !name || name === id || name === 'facebook page' || name === `facebook page ${id}` || name === `page ${id}`;
+}
+
+function renderMetaAdPageSummary(ad, adPage, adPageDeleted, isAr) {
+  const pageId = String(ad?.metaPageId || adPage?.metaPageId || '').trim();
+  const localName = String(adPage?.name || '').trim();
+  const metaName = String(ad?.metaPageName || adPage?.metaPageName || '').trim();
+  // Never display the imported placeholder ("Facebook Page 123…") as if it
+  // were the page's name: it just repeats the page ID a second time.
+  const realLocalName = metaAdsIsPlaceholderPageName(localName, pageId) ? '' : localName;
+  const realMetaName = metaAdsIsPlaceholderPageName(metaName, pageId) ? '' : metaName;
+  const pageName = realLocalName || realMetaName;
+  const genericLabel = isAr ? 'صفحة فيسبوك' : 'Facebook Page';
+  const displayName = pageName || genericLabel;
+  const category = String(adPage?.category || ad?.metaPageCategory || '').trim();
+  const displayCategory = category && category.toLocaleLowerCase() !== displayName.toLocaleLowerCase() ? category : '';
+  if (!pageName && !pageId && !localName) return '<span class="text-xs text-slate-400">-</span>';
+  // Layout (user request): the Facebook page ID first, the page NAME directly
+  // below it — the ID must appear exactly once.
+  return `<div data-role="meta-page-summary">
+    ${pageId ? `<div class="break-all font-mono text-[11px] font-semibold text-slate-500 dark:text-slate-400" title="${isAr ? 'معرف صفحة فيسبوك' : 'Facebook Page ID'}">#${Security.escapeHtml(pageId)}</div>` : ''}
+    <div class="${pageId ? 'mt-0.5 ' : ''}break-words text-sm font-semibold ${adPageDeleted ? 'text-slate-500 dark:text-slate-400' : 'text-indigo-700 dark:text-indigo-300'}" ${pageName ? '' : `title="${isAr ? 'اسم الصفحة يُحمَّل من Meta تلقائياً' : 'The page name is loading automatically from Meta'}"`}>${Security.escapeHtml(displayName)}</div>
+    ${adPageDeleted ? `<div class="mt-0.5 inline-block rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">${isAr ? 'محذوفة' : 'Deleted'}</div>` : ''}
+    ${displayCategory ? `<div class="text-xs text-slate-500">${Security.escapeHtml(displayCategory)}</div>` : ''}
+  </div>`;
+}
+
+function renderMetaAdThumbnail(ad, isAr) {
+  if (!ad?.metaAdId) return '';
+  if (!ad.metaThumbnailUrl) {
+    // A linked ad whose real photo has not been resolved yet: show an honest
+    // "photo loading" tile instead of nothing (and never the page logo).
+    const pending = isAr ? 'صورة الإعلان قيد التحميل من Meta' : 'Ad photo is loading from Meta';
+    return `<div class="meta-ad-thumbnail-button meta-ad-thumbnail-placeholder" role="img" title="${pending}" aria-label="${pending}"><i data-lucide="image" class="h-5 w-5"></i></div>`;
+  }
+  const label = isAr ? 'عرض صورة إعلان Meta' : 'View Meta ad image';
+  return `<button type="button" data-meta-preview-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openMetaAdPreview(this.dataset.metaPreviewAdId)" class="meta-ad-thumbnail-button" title="${label}" aria-label="${label}">
+    <img src="${Security.escapeHtml(String(ad.metaThumbnailUrl))}" alt="${label}" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="metaAdsThumbnailError(this)">
+    <span class="meta-ad-thumbnail-badge"><i data-lucide="maximize-2" class="h-3 w-3"></i></span>
+  </button>`;
+}
+
+function metaAdsThumbnailError(img) {
+  // Meta photo URLs are signed and expire. When one dies before the next
+  // sync refreshes it, degrade to the same "photo loading" tile instead of
+  // hiding the tile (which silently removed the photo column for that ad).
+  const button = img?.closest?.('.meta-ad-thumbnail-button');
+  if (!button || button.classList.contains('meta-ad-thumbnail-placeholder')) return;
+  const pending = metaAdsIsArabic() ? 'صورة الإعلان قيد التحميل من Meta' : 'Ad photo is loading from Meta';
+  button.classList.add('meta-ad-thumbnail-placeholder');
+  button.disabled = true;
+  button.title = pending;
+  button.setAttribute('aria-label', pending);
+  button.innerHTML = '<i data-lucide="image" class="h-5 w-5"></i>';
+  IconQueue.schedule(button);
+}
+
+function openMetaAdPreview(adId) {
+  const ad = metaAdsFindLocalAd(adId);
+  if (!ad?.metaThumbnailUrl) return;
+  const isAr = metaAdsIsArabic();
+  document.getElementById('meta-ad-preview-modal')?.remove();
+  const title = ad.metaAdName || (isAr ? 'صورة إعلان Meta' : 'Meta ad image');
+  document.body.insertAdjacentHTML('beforeend', `<div id="meta-ad-preview-modal" role="dialog" aria-modal="true" aria-labelledby="meta-ad-preview-title" class="mobile-dialog-overlay fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/80 p-3 backdrop-blur-sm" onclick="if(event.target === this) this.remove()">
+    <div class="w-full max-w-3xl overflow-hidden rounded-2xl bg-white shadow-2xl dark:bg-slate-900" onclick="event.stopPropagation()">
+      <div class="flex items-center justify-between gap-3 border-b border-slate-200 p-3 dark:border-slate-700 sm:p-4">
+        <div class="min-w-0"><h2 id="meta-ad-preview-title" class="truncate font-black text-slate-800 dark:text-white">${Security.escapeHtml(title)}</h2><p class="truncate text-xs text-slate-500">${Security.escapeHtml(ad.metaAdAccountName || '')}</p></div>
+        <button type="button" onclick="document.getElementById('meta-ad-preview-modal').remove()" class="touch-target inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${isAr ? 'إغلاق' : 'Close'}"><i data-lucide="x" class="h-5 w-5"></i></button>
+      </div>
+      <div class="flex max-h-[75dvh] items-center justify-center overflow-auto bg-slate-100 p-2 dark:bg-slate-950 sm:p-4"><img src="${Security.escapeHtml(String(ad.metaThumbnailUrl))}" alt="${Security.escapeHtml(title)}" class="max-h-[70dvh] max-w-full rounded-xl object-contain" referrerpolicy="no-referrer"></div>
+    </div>
+  </div>`);
+  lucide.createIcons();
+}
+
 function metaAdsStatusTone(value) {
   const status = String(value || '').toUpperCase();
   if (['ACTIVE'].includes(status)) return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300';
@@ -70,10 +176,15 @@ function renderMetaAdStatusSummary(ad, isAr) {
   const liveStatus = String(ad.metaEffectiveStatus || ad.metaConfiguredStatus || 'UNKNOWN');
   const synced = metaAdsFormatDate(ad.metaSyncedAt, true);
   const error = String(ad.metaSyncError || '');
+  const accountName = String(ad.metaAdAccountName || '').trim();
+  const accountId = String(ad.metaAdAccountId || '').trim();
+  const historyCount = typeof getMetaAdHistoryCount === 'function' ? getMetaAdHistoryCount(ad) : (Number(ad.metaChangeCount) || 0);
   return `<div data-role="meta-ad-status" class="mt-2 max-w-[15rem] rounded-lg border border-blue-100 bg-blue-50/70 p-2 text-[10px] leading-4 dark:border-blue-900 dark:bg-blue-950/30">
     <div class="flex flex-wrap items-center gap-1"><span class="font-bold text-blue-700 dark:text-blue-300">Meta</span><span class="rounded-full px-1.5 py-0.5 font-bold ${metaAdsStatusTone(liveStatus)}">${Security.escapeHtml(liveStatus)}</span></div>
     ${ad.metaAdName ? `<div class="mt-1 truncate font-medium text-slate-700 dark:text-slate-200" title="${Security.escapeHtml(ad.metaAdName)}">${Security.escapeHtml(ad.metaAdName)}</div>` : ''}
+    ${(accountName || accountId) ? `<div data-role="meta-ad-account" class="mt-1 flex items-start gap-1 text-slate-600 dark:text-slate-300" title="${Security.escapeHtml(accountName || `Ad account ${accountId}`)}"><i data-lucide="briefcase-business" class="mt-0.5 h-3 w-3 shrink-0"></i><span class="min-w-0 break-words"><strong>${isAr ? 'حساب الإعلانات' : 'Ad account'}:</strong> ${Security.escapeHtml(accountName || `#${accountId}`)}${accountName && accountId ? ` <span class="text-slate-400">#${Security.escapeHtml(accountId)}</span>` : ''}</span></div>` : ''}
     ${synced ? `<div class="text-slate-500">${isAr ? 'آخر مزامنة' : 'Last sync'}: ${Security.escapeHtml(synced)}</div>` : ''}
+    <button type="button" data-meta-history-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="showMetaAdHistory(this.dataset.metaHistoryAdId)" class="meta-ad-history-button" title="${isAr ? 'عرض سجل تغييرات Meta' : 'View Meta change history'}" aria-label="${isAr ? 'عرض سجل تغييرات Meta' : 'View Meta change history'}"><i data-lucide="history" class="h-3.5 w-3.5"></i><span>${isAr ? 'سجل Meta' : 'Meta history'}</span><strong>${historyCount}</strong></button>
     ${error ? `<div class="mt-1 text-rose-600 dark:text-rose-300" title="${Security.escapeHtml(error)}">${Security.escapeHtml(error)}</div>` : ''}
   </div>`;
 }
@@ -83,11 +194,14 @@ function renderMetaAdBudgetSummary(ad, isAr) {
   const currency = ad.metaCurrency || 'USD';
   const daily = Number(ad.metaDailyBudgetMinor) || 0;
   const lifetime = Number(ad.metaLifetimeBudgetMinor) || 0;
-  const budget = lifetime || daily;
-  const budgetLabel = lifetime ? (isAr ? 'ميزانية Meta الكلية' : 'Meta lifetime') : (isAr ? 'ميزانية Meta اليومية' : 'Meta daily');
+  const total = metaAdsPlannedTotalMinor(ad);
+  const remaining = metaAdsTotalRemainingMinor(ad);
+  const totalKind = lifetime > 0 || ad.metaTotalBudgetKind === 'lifetime' ? 'lifetime' : (total > 0 ? 'estimated_daily' : 'open_ended');
   return `<div data-role="meta-ad-budget" class="mt-1 text-[10px] font-medium text-blue-600 dark:text-blue-300">
-    ${budget ? `<div>${budgetLabel}: ${Security.escapeHtml(metaAdsFormatMoney(budget, currency))}</div>` : ''}
+    ${daily ? `<div>${isAr ? 'ميزانية Meta اليومية' : 'Meta daily'}: ${Security.escapeHtml(metaAdsFormatMoney(daily, currency))}</div>` : ''}
+    ${total ? `<div class="font-bold">${totalKind === 'lifetime' ? (isAr ? 'ميزانية Meta الكلية' : 'Meta total') : (isAr ? 'الإجمالي المخطط' : 'Planned total')}: ${Security.escapeHtml(metaAdsFormatMoney(total, currency))}</div>` : (daily ? `<div>${isAr ? 'الإجمالي' : 'Total'}: ${isAr ? 'مفتوح بدون تاريخ انتهاء' : 'Open-ended (no end date)'}</div>` : '')}
     <div>${isAr ? 'مصروف Meta' : 'Meta spent'}: ${Security.escapeHtml(metaAdsFormatMoney(ad.metaSpendMinor, currency))}</div>
+    ${total ? `<div class="font-bold text-emerald-700 dark:text-emerald-300">${isAr ? 'المتبقي من الميزانية الكلية' : 'Total remaining'}: ${Security.escapeHtml(metaAdsFormatMoney(remaining, currency))}</div>` : ''}
   </div>`;
 }
 
@@ -95,9 +209,11 @@ function renderMetaAdScheduleSummary(ad, isAr) {
   if (!ad || !ad.metaAdId) return '';
   const start = metaAdsFormatDate(ad.metaStartTime);
   const end = metaAdsFormatDate(ad.metaEndTime);
+  const days = metaAdsDurationDays(ad);
   if (!start && !end) return '';
   return `<div data-role="meta-ad-schedule" class="mt-2 border-t border-blue-100 pt-1 text-[10px] text-blue-600 dark:border-blue-900 dark:text-blue-300">
     <div class="font-bold">Meta</div>
+    ${days ? `<div class="font-bold">${isAr ? 'المدة' : 'Duration'}: ${days} ${isAr ? 'يوم' : `day${days === 1 ? '' : 's'}`}</div>` : ''}
     ${start ? `<div>${isAr ? 'بدء' : 'Start'}: ${Security.escapeHtml(start)}</div>` : ''}
     ${end ? `<div>${isAr ? 'انتهاء' : 'End'}: ${Security.escapeHtml(end)}</div>` : ''}
   </div>`;
@@ -201,6 +317,8 @@ function metaAdsRenderModal() {
   }
   const status = metaAdsUi.status;
   const configured = status?.configured === true;
+  const importState = status?.importState && typeof status.importState === 'object' ? status.importState : {};
+  const lastDiscoveryText = metaAdsFormatDate(importState.lastDiscoveryAt, true);
   // iOS Safari's CSS vh/dvh can describe the layout viewport while the address
   // bar leaves a shorter interactive viewport. A measured pixel cap keeps the
   // close button and the panel's own scrollbar inside what the user can touch.
@@ -231,6 +349,18 @@ function metaAdsRenderModal() {
       <div class="rounded-xl border border-slate-200 p-3 dark:border-slate-700"><div class="text-xs text-slate-500">${isAr ? 'المزامنة التلقائية' : 'Automatic sync'}</div><div class="mt-1 font-bold">${status.backgroundSync ? `${Number(status.syncIntervalMinutes) || 15} ${isAr ? 'دقيقة' : 'minutes'}` : (isAr ? 'متوقفة' : 'Off')}</div></div>
     </div>` : ''}
 
+    ${!metaAdsUi.loading && configured ? `<div class="mt-3 rounded-xl border border-emerald-200 bg-emerald-50/70 p-4 dark:border-emerald-800 dark:bg-emerald-950/20">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div class="flex items-center gap-2 font-black text-emerald-800 dark:text-emerald-200"><i data-lucide="sparkles" class="h-4 w-4"></i>${isAr ? 'الاستيراد التلقائي للإعلانات والصفحات' : 'Automatic ad and page import'}</div>
+          <div class="mt-1 text-xs text-emerald-700 dark:text-emerald-300">${status.autoImport ? (isAr ? `يعمل كل ${Number(status.discoveryIntervalSeconds) || 60} ثانية` : `Runs every ${Number(status.discoveryIntervalSeconds) || 60} seconds`) : (isAr ? 'متوقف' : 'Off')} · ${isAr ? 'الحسابات' : 'Accounts'}: ${Number(importState.accountCount || status.allowedAccountCount) || 0}</div>
+          <div class="mt-1 text-xs text-slate-500">${lastDiscoveryText ? `${isAr ? 'آخر فحص' : 'Last check'}: ${Security.escapeHtml(lastDiscoveryText)} · ` : ''}${isAr ? 'تم استيراد' : 'Imported'}: ${Number(importState.totalImported) || 0}${Number(importState.lastImportedCount) ? ` (${isAr ? 'آخر فحص' : 'last check'}: ${Number(importState.lastImportedCount)})` : ''}</div>
+          ${importState.lastError ? `<div class="mt-1 text-xs font-medium text-rose-600 dark:text-rose-300">${Security.escapeHtml(importState.lastError)}</div>` : ''}
+        </div>
+        <button type="button" onclick="metaAdsCheckForNewAds()" ${metaAdsUi.busyAction ? 'disabled' : ''} class="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-60"><i data-lucide="${metaAdsUi.busyAction === 'discover' ? 'loader-circle' : 'radar'}" class="h-4 w-4 ${metaAdsUi.busyAction === 'discover' ? 'animate-spin' : ''}"></i>${isAr ? 'فحص الإعلانات الجديدة الآن' : 'Check for new ads now'}</button>
+      </div>
+    </div>` : ''}
+
     ${!metaAdsUi.loading && status && !configured ? `<div class="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-100"><div class="font-black">${isAr ? 'أضف هذه المتغيرات في Jelastic ثم أعد تشغيل الحاوية:' : 'Add these environment variables in Jelastic, then restart the container:'}</div><code class="mt-2 block select-all whitespace-pre-wrap rounded-lg bg-slate-950 p-3 text-xs text-emerald-300" dir="ltr">ALBAYAN_META_ACCESS_TOKEN=your_token\nALBAYAN_META_APP_SECRET=your_app_secret\nALBAYAN_META_AD_ACCOUNT_IDS=123456789</code><p class="mt-2">${isAr ? 'لا تكتب رمز الدخول في Albayan أو في المحادثة. ضعه فقط داخل إعدادات Jelastic.' : 'Never type the access token into Albayan or chat. Put it only in Jelastic settings.'}</p></div>` : ''}
 
     ${target ? `<div class="mt-4 rounded-xl border border-indigo-200 bg-indigo-50/60 p-4 dark:border-indigo-800 dark:bg-indigo-950/20"><div class="text-xs font-bold text-indigo-600">${isAr ? 'إعلان Albayan المحدد' : 'Selected Albayan ad'}</div><div class="mt-1 font-black text-slate-800 dark:text-white">#${Security.escapeHtml(String(target.id))} · ${Security.escapeHtml(target.customerName || target.pageName || (isAr ? 'إعلان' : 'Ad'))}</div>${target.metaAdId ? `<div class="mt-2 text-sm text-slate-600 dark:text-slate-300">${isAr ? 'مرتبط بـ' : 'Linked to'}: <strong>${Security.escapeHtml(currentName)}</strong> (#${Security.escapeHtml(String(target.metaAdId))})</div><div class="mt-3 flex flex-wrap gap-2"><button type="button" onclick="metaAdsSyncCurrent()" ${metaAdsUi.busyAction ? 'disabled' : ''} class="inline-flex min-h-11 items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 font-bold text-white disabled:opacity-60"><i data-lucide="refresh-cw" class="h-4 w-4 ${metaAdsUi.busyAction === 'sync' ? 'animate-spin' : ''}"></i>${isAr ? 'مزامنة الآن' : 'Sync now'}</button><button type="button" onclick="metaAdsUnlinkCurrent()" ${metaAdsUi.busyAction ? 'disabled' : ''} class="inline-flex min-h-11 items-center gap-2 rounded-xl border border-rose-200 px-4 py-2 font-bold text-rose-600 disabled:opacity-60"><i data-lucide="unlink" class="h-4 w-4"></i>${isAr ? 'إلغاء الربط' : 'Unlink'}</button></div>` : `<div class="mt-2 text-sm text-slate-500">${isAr ? 'غير مرتبط حتى الآن.' : 'Not linked yet.'}</div>`}</div>` : `<div class="mt-4 rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-200">${isAr ? 'لفتح الربط: أغلق هذه النافذة واضغط زر «ربط» الصغير بجانب إعلان Albayan.' : 'To link an ad: close this window and press the small Link button beside an Albayan ad.'}</div>`}
@@ -243,7 +373,7 @@ function metaAdsRenderModal() {
       <div class="rounded-xl border border-dashed border-slate-300 p-3 dark:border-slate-700"><label for="meta-direct-ad-id" class="block text-xs font-bold text-slate-500">${isAr ? 'أو الصق رقم إعلان Meta مباشرة' : 'Or paste the numeric Meta ad ID'}</label><div class="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]"><input id="meta-direct-ad-id" inputmode="numeric" pattern="[0-9]*" placeholder="123456789012345" class="glass-input min-h-11 w-full rounded-xl px-3" dir="ltr"><button type="button" onclick="metaAdsLinkDirect()" ${metaAdsUi.busyAction ? 'disabled' : ''} class="min-h-11 rounded-xl bg-blue-600 px-4 font-bold text-white disabled:opacity-60">${isAr ? 'ربط' : 'Link'}</button></div></div>
     </div>` : ''}
 
-    ${configured && !metaAdsUi.loading ? `<div class="mt-5 flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 pt-4 dark:border-slate-700"><p class="text-xs text-slate-500">${isAr ? 'المزامنة التلقائية تعمل في السيرفر حتى عندما تغلق هذه الصفحة.' : 'Automatic sync runs on the server even when this page is closed.'}</p><button type="button" onclick="metaAdsSyncAllDue()" ${metaAdsUi.busyAction ? 'disabled' : ''} class="min-h-11 rounded-xl border border-blue-200 px-3 text-sm font-bold text-blue-700 disabled:opacity-60 dark:border-blue-800 dark:text-blue-200">${isAr ? 'مزامنة المستحق الآن' : 'Sync due now'}</button></div>` : ''}
+    ${configured && !metaAdsUi.loading ? `<div class="mt-5 flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 pt-4 dark:border-slate-700"><p class="text-xs text-slate-500">${isAr ? 'يعمل الاستيراد والمزامنة في السيرفر حتى عندما تغلق هذه الصفحة.' : 'Automatic import and sync run on the server even when this page is closed.'}</p><button type="button" onclick="metaAdsSyncAllDue()" ${metaAdsUi.busyAction ? 'disabled' : ''} class="min-h-11 rounded-xl border border-blue-200 px-3 text-sm font-bold text-blue-700 disabled:opacity-60 dark:border-blue-800 dark:text-blue-200">${isAr ? 'مزامنة المستحق الآن' : 'Sync due now'}</button></div>` : ''}
   </div>`;
   metaAdsFitModalToViewport();
   window.requestAnimationFrame(() => metaAdsFitModalToViewport());
@@ -381,6 +511,34 @@ function metaAdsUnlinkCurrent() {
   metaAdsRunMutation('unlink');
 }
 
+async function metaAdsCheckForNewAds() {
+  if (metaAdsUi.busyAction) return;
+  const isAr = metaAdsIsArabic();
+  metaAdsUi.busyAction = 'discover';
+  metaAdsUi.error = '';
+  metaAdsRenderModal();
+  try {
+    const result = await apiRunMetaAutoImport();
+    if (result.imported.length) {
+      applyValidatedServerEntityBatch(result.imported.map(entity => ({ collection: 'ads', entity })), 'metaAutoImport');
+    }
+    if (metaAdsUi.status) metaAdsUi.status.importState = result.state;
+    const count = result.imported.length;
+    showNotification(
+      isAr ? 'اكتمل فحص Meta' : 'Meta check complete',
+      count
+        ? (isAr ? `تم إنشاء ${count} إعلان جديد كمسودة آمنة تحتاج إكمال.` : `${count} new ad(s) were created as safe drafts that need completion.`)
+        : (isAr ? 'لا توجد إعلانات جديدة الآن.' : 'There are no new ads right now.'),
+      'success'
+    );
+  } catch (error) {
+    metaAdsUi.error = metaAdsErrorMessage(error);
+  } finally {
+    metaAdsUi.busyAction = '';
+    metaAdsRenderModal();
+  }
+}
+
 async function metaAdsSyncAllDue() {
   if (metaAdsUi.busyAction) return;
   const isAr = metaAdsIsArabic();
@@ -388,9 +546,11 @@ async function metaAdsSyncAllDue() {
   metaAdsUi.error = '';
   metaAdsRenderModal();
   try {
-    const entities = await apiSyncDueMetaAds(20);
+    const result = await apiSyncDueMetaAds(4);
+    const entities = [...result.ads, ...result.imported];
     if (entities.length) applyValidatedServerEntityBatch(entities.map(entity => ({ collection: 'ads', entity })), 'metaSyncDue');
-    showNotification(isAr ? 'اكتملت المزامنة' : 'Sync complete', isAr ? `تم فحص وتحديث ${entities.length} إعلان.` : `Checked and updated ${entities.length} ad(s).`, 'success');
+    if (metaAdsUi.status) metaAdsUi.status.importState = result.importState;
+    showNotification(isAr ? 'اكتملت المزامنة' : 'Sync complete', isAr ? `تم تحديث ${result.ads.length} واستيراد ${result.imported.length} إعلان.` : `Updated ${result.ads.length} and imported ${result.imported.length} ad(s).`, 'success');
   } catch (error) {
     metaAdsUi.error = metaAdsErrorMessage(error);
   } finally {

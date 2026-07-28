@@ -382,6 +382,8 @@ function renderModal() {
       // creator, so it gracefully falls back to the "USER" badge.
       const creatorIsAdmin = isAdminRole(adCreator?.role);
       const isArAd = state.language === 'ar';
+      const isImportedMetaDraft = isEdit && isMetaAdSetupPending(adData);
+      const adCreatorDisplayName = adCreator?.name || adData.createdByName || (isImportedMetaDraft ? (isArAd ? 'استيراد Meta التلقائي' : 'Meta automatic import') : (isArAd ? 'غير معروف' : 'Unknown'));
       const adHistoryCount = getAdEditHistoryCount(adData);
       const adPaymentState = getAdPaymentState(adData);
       const hasLinkedShopReceipt = adPaymentState === 'not_paid'
@@ -443,6 +445,17 @@ function renderModal() {
 
           <!-- SCROLLABLE FORM BODY -->
           <form id="modal-form" class="flex-1 overflow-y-auto py-4 space-y-4" style="max-height: calc(85vh - 140px);">
+            ${isImportedMetaDraft ? `
+              <div role="status" class="rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-900 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-100">
+                <div class="flex items-start gap-3">
+                  <i data-lucide="wand-sparkles" class="mt-0.5 h-5 w-5 shrink-0"></i>
+                  <div>
+                    <div class="font-bold">${isArAd ? 'تم استيراد هذا الإعلان تلقائياً من Meta' : 'This ad was imported automatically from Meta'}</div>
+                    <p class="mt-1 text-xs leading-relaxed">${isArAd ? 'معلومات Meta والصفحة جاهزة. اختر العميل والدفع والوصل والمبلغ ثم اضغط حفظ. لا يوجد دين على أي عميل حتى تحفظ هذه التفاصيل.' : 'The Meta and page details are ready. Choose the customer, payment, receipt and amount, then Save. No customer debt exists until these details are saved.'}</p>
+                  </div>
+                </div>
+              </div>
+            ` : ''}
             
             <!-- SECTION 1: Basic Info -->
             <div class="bg-gradient-to-r from-slate-50 to-slate-100 dark:from-slate-800/50 dark:to-slate-800/30 rounded-xl p-4 space-y-3 border border-slate-200 dark:border-slate-700">
@@ -455,12 +468,12 @@ function renderModal() {
               <div class="flex items-center justify-between p-2 bg-white dark:bg-slate-900 rounded-lg">
                 <div class="flex items-center space-x-2">
                   <div class="w-7 h-7 rounded-full bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center text-indigo-600 font-bold text-xs">
-                    ${adCreator?.name?.charAt(0) || 'U'}
+                    ${Security.escapeHtml(adCreatorDisplayName.charAt(0) || 'M')}
                   </div>
-                  <span class="text-sm text-slate-600 dark:text-slate-300">${Security.escapeHtml(adCreator?.name || (isArAd ? 'غير معروف' : 'Unknown'))}</span>
+                  <span class="text-sm text-slate-600 dark:text-slate-300">${Security.escapeHtml(adCreatorDisplayName)}</span>
                 </div>
-                <span class="px-2 py-0.5 rounded-full text-[9px] font-bold ${creatorIsAdmin ? 'bg-amber-100 text-amber-600' : 'bg-slate-200 text-slate-500'}">
-                  ${creatorIsAdmin ? (isArAd ? 'أدمن' : 'ADMIN') : (isArAd ? 'مستخدم' : 'USER')}
+                <span class="px-2 py-0.5 rounded-full text-[9px] font-bold ${isImportedMetaDraft ? 'bg-blue-100 text-blue-700' : (creatorIsAdmin ? 'bg-amber-100 text-amber-600' : 'bg-slate-200 text-slate-500')}">
+                  ${isImportedMetaDraft ? 'META' : (creatorIsAdmin ? (isArAd ? 'أدمن' : 'ADMIN') : (isArAd ? 'مستخدم' : 'USER'))}
                 </span>
               </div>
               <input type="hidden" id="ad-creator-id" value="${adCreator?.id || state.currentUser?.id || ''}" />

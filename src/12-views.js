@@ -3716,7 +3716,7 @@ function renderPagesView() {
         const ownerNames = getPageCustomerIds(page)
           .map(customerId => customersById.get(String(customerId))?.name || '')
           .join(' ');
-        return [page.name, page.category, ownerNames, page.id]
+        return [page.name, page.category, ownerNames, page.id, page.metaPageId, page.metaPageName]
           .some(value => foldSearchText(value).includes(pageSearch));
       })
     : allPages;
@@ -3752,6 +3752,8 @@ function renderPagesView() {
           const linkedCustomers = getPageCustomerIds(p)
             .map(cid => state.customers.find(c => String(c.id) === String(cid)))
             .filter(Boolean);
+          const isMetaImportedPage = !!String(p.metaPageId || '').trim();
+          const needsPageOwner = isMetaImportedPage && linkedCustomers.length === 0;
           // Page activity is only authoritative for accounts that can see all
           // ads. Money additionally needs the business financial permission.
           const pageStats = canSeePageAds ? getPageSpendSummary(p.id) : null;
@@ -3768,6 +3770,8 @@ function renderPagesView() {
                 <div class="flex-1">
                   <div class="flex items-center gap-2 mb-1">
                     <span class="px-2 py-0.5 rounded-md bg-amber-100 dark:bg-amber-900/50 text-amber-600 dark:text-amber-400 text-xs font-bold">#${pageDisplayNum}</span>
+                    ${isMetaImportedPage ? `<span class="px-2 py-0.5 rounded-md bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 text-[10px] font-bold">Meta</span>` : ''}
+                    ${needsPageOwner ? `<span class="px-2 py-0.5 rounded-md bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 text-[10px] font-bold">${isAr ? 'يحتاج مالك' : 'Needs owner'}</span>` : ''}
                   </div>
                   <h3 class="font-bold text-lg text-slate-800 dark:text-white flex items-center">
                     <i data-lucide="facebook" class="w-4 h-4 mr-2 text-blue-600"></i>
@@ -3802,7 +3806,10 @@ function renderPagesView() {
                       `).join('')}
                       ${linkedCustomers.length > 2 ? `<div class="text-xs text-slate-500 ml-3.5">+${linkedCustomers.length - 2} ${isAr ? 'آخرون' : 'more'}</div>` : ''}
                     </div>
-                  ` : `<div class="text-sm text-slate-400 ml-4">${isAr ? 'لا يوجد مالك' : 'No owner'}</div>`}
+                  ` : `<div class="space-y-2 ml-4">
+                    <div class="text-sm ${needsPageOwner ? 'text-amber-600 dark:text-amber-400 font-semibold' : 'text-slate-400'}">${isAr ? 'لا يوجد مالك' : 'No owner'}</div>
+                    ${needsPageOwner && can('pages', 'edit') ? `<button type="button" onclick="editPage('${Security.escapeHtml(String(p.id))}')" class="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-amber-100 px-3 py-1.5 text-xs font-bold text-amber-800 hover:bg-amber-200 dark:bg-amber-900/30 dark:text-amber-200"><i data-lucide="user-plus" class="h-3.5 w-3.5"></i>${isAr ? 'ربط بعميل' : 'Assign owner'}</button>` : ''}
+                  </div>`}
                   </div>
 
                 <!-- Last Ad Time (requires full ads.view) -->
@@ -3850,8 +3857,26 @@ function loadMoreAds() {
   updateAdsViewFiltered();
 }
 
+function completeMetaImportedAd(adId) {
+  const ad = (state.ads || []).find(item => String(item.id) === String(adId));
+  if (!ad) return;
+  const page = (state.pages || []).find(item => String(item.id) === String(ad.pageId));
+  if (page && getPageCustomerIds(page).length === 0) {
+    showNotification(
+      state.language === 'ar'
+        ? 'اربط صفحة Meta بعميل أولاً، ثم أكمل الدفع والوصل في الإعلان.'
+        : 'First assign the imported Meta page to a customer, then complete payment and receipt details in the ad.',
+      'warning'
+    );
+    editPage(page.id);
+    return;
+  }
+  editAd(ad.id);
+}
+
 function applyAdQuickFilter(mode) {
   state.adFilters = { status: 'all', payment: 'all', page: 'all' };
+  if (mode === 'setup') state.adFilters.payment = 'pending_setup';
   if (mode === 'unpaid') state.adFilters.payment = 'not_paid';
   if (mode === 'stopped') state.adFilters.status = 'Stopped';
   render();
@@ -3924,7 +3949,7 @@ function renderAdsView() {
     (adF.page || 'all') !== 'all'
   ].filter(Boolean).length;
   const adAdvancedFiltersOpen = isWorkspaceFilterPanelExpanded('ads');
-  const adQuickMode = adF.payment === 'not_paid' ? 'unpaid' : (adF.status === 'Stopped' ? 'stopped' : 'all');
+  const adQuickMode = adF.payment === 'pending_setup' ? 'setup' : (adF.payment === 'not_paid' ? 'unpaid' : (adF.status === 'Stopped' ? 'stopped' : 'all'));
   const adFilterFingerprint = JSON.stringify([adReceiptFilter, state.adSearch, adF.status || 'all', adF.payment || 'all', adF.page || 'all']);
   if (adFilterFingerprint !== _adsFilterFingerprint) {
     _adsFilterFingerprint = adFilterFingerprint;
@@ -3961,6 +3986,7 @@ function renderAdsView() {
           </div>
           <div class="smart-filter-chips" aria-label="${isAr ? 'فلاتر إعلانات سريعة' : 'Quick ad filters'}">
             <button type="button" onclick="applyAdQuickFilter('all')" class="smart-filter-chip ${adQuickMode === 'all' ? 'is-active' : ''}">${isAr ? 'الكل' : 'All'}</button>
+            <button type="button" onclick="applyAdQuickFilter('setup')" class="smart-filter-chip ${adQuickMode === 'setup' ? 'is-active is-warning' : ''}"><i data-lucide="wand-sparkles" class="h-4 w-4"></i>${isAr ? 'يحتاج إكمال' : 'Needs setup'}</button>
             <button type="button" onclick="applyAdQuickFilter('unpaid')" class="smart-filter-chip ${adQuickMode === 'unpaid' ? 'is-active is-danger' : ''}"><i data-lucide="circle-dollar-sign" class="h-4 w-4"></i>${isAr ? 'غير مدفوع' : 'Unpaid'}</button>
             <button type="button" onclick="applyAdQuickFilter('stopped')" class="smart-filter-chip ${adQuickMode === 'stopped' ? 'is-active is-warning' : ''}"><i data-lucide="square" class="h-4 w-4"></i>${isAr ? 'متوقف' : 'Stopped'}</button>
           </div>
@@ -3978,6 +4004,7 @@ function renderAdsView() {
           </select>
           <select onchange="updateAdFilter('payment', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
             <option value="all" ${(adF.payment || 'all') === 'all' ? 'selected' : ''}>${isAr ? 'كل طرق الدفع' : 'All Payments'}</option>
+            <option value="pending_setup" ${adF.payment === 'pending_setup' ? 'selected' : ''}>${isAr ? 'يحتاج إكمال' : 'Needs setup'}</option>
             <option value="paid" ${adF.payment === 'paid' ? 'selected' : ''}>${isAr ? 'مدفوع' : 'Paid'}</option>
             <option value="not_paid" ${adF.payment === 'not_paid' ? 'selected' : ''}>${isAr ? 'غير مدفوع' : 'Not Paid'}</option>
             <option value="wont_pay" ${adF.payment === 'wont_pay' ? 'selected' : ''}>${isAr ? 'لن يدفع' : "Won't Pay"}</option>
@@ -3990,16 +4017,26 @@ function renderAdsView() {
         </div>
       </div>
 
-      <div id="ads-table-container" class="glass-panel rounded-2xl p-6 overflow-x-auto">
+      <div id="ads-table-container" class="ads-table-container glass-panel rounded-2xl p-6 overflow-x-auto">
         ${allAds.length === 0 ? `<div class="text-center py-12"><i data-lucide="inbox" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${adReceiptFilter ? (isAr ? 'لا توجد إعلانات مرتبطة بهذا الوصل' : 'No ads are linked to this receipt') : (isAr ? 'لا توجد إعلانات بعد' : 'No ads yet')}</p></div>` : `
-          <table class="mobile-card-table w-full text-sm">
+          <table class="ads-summary-table mobile-card-table w-full text-sm">
+            <colgroup>
+              <col class="ads-col-customer">
+              <col class="ads-col-page">
+              <col class="ads-col-amount">
+              <col class="ads-col-local">
+              <col class="ads-col-payment">
+              <col class="ads-col-status">
+              <col class="ads-col-delivery">
+              <col class="ads-col-serial">
+              <col class="ads-col-date">
+              <col class="ads-col-actions">
+            </colgroup>
             <thead>
               <tr class="border-b-2 border-indigo-200 dark:border-indigo-800">
-                <th class="text-left py-3 px-2 w-12">#</th>
-                <th class="text-left py-3 px-2">${isAr ? 'العميل' : 'Customer'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'الإعلان / العميل' : 'Ad / Customer'}</th>
                 <th class="text-left py-3 px-2">${isAr ? 'الصفحة' : 'Page'}</th>
                 <th class="text-left py-3 px-2">${isAr ? 'المبلغ' : 'Amount'}</th>
-                <th class="text-left py-3 px-2">${isAr ? 'السعر' : 'Rate'}</th>
                 <th class="text-left py-3 px-2">${isAr ? 'بالعملة المحلية' : 'Local'}</th>
                 <th class="text-left py-3 px-2">${isAr ? 'الدفع' : 'Payment'}</th>
                 <th class="text-left py-3 px-2">${isAr ? 'الحالة' : 'Status'}</th>
@@ -4018,8 +4055,11 @@ function renderAdsView() {
                 const canDeleteThisAd = canActOnRecord('ads', 'delete', ad.creatorId);
                 const adPhotoCount = getAdPhotoCount(ad);
                 const paymentState = getAdPaymentState(ad);
-                const isAdPaid = paymentState === 'paid';
-                const amountColorClass = isAdPaid
+                const needsSetup = isMetaAdSetupPending(ad);
+                const isAdPaid = !needsSetup && paymentState === 'paid';
+                const amountColorClass = needsSetup
+                  ? 'text-amber-600 dark:text-amber-400'
+                  : isAdPaid
                   ? 'text-emerald-600 dark:text-emerald-400'
                   : 'text-rose-600 dark:text-rose-400';
                 // createdBy is immutable server ownership metadata; creatorId
@@ -4080,39 +4120,39 @@ function renderAdsView() {
                 const paymentMethods = [..._methods];
                 return `
                   <tr class="border-b border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50">
-                    <td class="py-3 px-2" data-label="#">
-                      <div class="font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || ad.customerName || (isAr ? 'غير معروف' : 'Unknown'))}</div>
-                      ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
-                      <div data-role="ad-creator" class="inline-flex items-center gap-1 mt-1 text-[11px] leading-tight font-normal text-slate-500 dark:text-slate-400" title="${isAr ? 'تم الإنشاء بواسطة' : 'Created by'}">
-                        <i data-lucide="user" class="w-3 h-3 shrink-0"></i>
-                        <span>${isAr ? 'تم الإنشاء بواسطة' : 'Created by'}: <span class="font-semibold text-slate-700 dark:text-slate-200">${creatorName}</span></span>
+                    <td class="py-3 px-2" data-label="${isAr ? 'الإعلان / العميل' : 'Ad / Customer'}">
+                      <div class="ad-primary-summary">
+                        ${renderMetaAdThumbnail(ad, isAr)}
+                        <div class="min-w-0 flex-1">
+                          <div class="break-words font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || ad.customerName || (needsSetup ? (ad.metaAdName || (isAr ? 'إعلان Meta جديد' : 'New Meta ad')) : (isAr ? 'غير معروف' : 'Unknown')))}</div>
+                          ${needsSetup ? `<div class="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"><i data-lucide="wand-sparkles" class="h-3 w-3"></i>${isAr ? 'يحتاج العميل والدفع والوصل' : 'Needs customer, payment and receipt'}</div>` : ''}
+                          ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
+                          <div data-role="ad-creator" class="mt-1 inline-flex items-center gap-1 text-[11px] font-normal leading-tight text-slate-500 dark:text-slate-400" title="${isAr ? 'تم الإنشاء بواسطة' : 'Created by'}">
+                            <i data-lucide="user" class="h-3 w-3 shrink-0"></i>
+                            <span>${isAr ? 'تم الإنشاء بواسطة' : 'Created by'}: <span class="font-semibold text-slate-700 dark:text-slate-200">${creatorName}</span></span>
+                          </div>
+                        </div>
                       </div>
                     </td>
-                    <td class="py-3 px-2 hidden md:table-cell">
-                      <div class="font-medium">${Security.escapeHtml(customer?.name || ad.customerName || (isAr ? 'غير معروف' : 'Unknown'))}</div>
-                      ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
-                    </td>
                     <td class="py-3 px-2" data-label="Page">
-                      ${adPage ? `
-                        <div class="text-sm font-medium ${adPageDeleted ? 'text-slate-500 dark:text-slate-400' : 'text-indigo-700 dark:text-indigo-300'}">${Security.escapeHtml(adPage.name || '')}</div>
-                        ${adPageDeleted ? `<div class="text-[10px] mt-0.5 inline-block px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">${isAr ? 'محذوفة' : 'Deleted'}</div>` : ''}
-                        ${adPage.category ? `<div class="text-xs text-slate-500">${Security.escapeHtml(adPage.category)}</div>` : ''}
-                      ` : '<span class="text-xs text-slate-400">-</span>'}
+                      ${renderMetaAdPageSummary(ad, adPage, adPageDeleted, isAr)}
                     </td>
-                    <td class="py-3 px-2 font-bold ${amountColorClass}" data-label="Amount" data-payment-state="${isAdPaid ? 'paid' : 'unpaid'}" title="${isAdPaid ? (isAr ? 'مبلغ مدفوع' : 'Paid amount') : (isAr ? 'دين غير مدفوع على العميل' : 'Unpaid customer debt')}">
-                      <span>$${(Number(ad.amountUSD) || 0).toFixed(2)}</span>
-                      ${!isAdPaid ? `<span class="text-[10px] font-semibold mt-0.5">${isAr ? 'دين غير مدفوع' : 'Unpaid debt'}</span>` : ''}
+                    <td class="py-3 px-2 font-bold ${amountColorClass}" data-label="Amount" data-payment-state="${needsSetup ? 'pending-setup' : (isAdPaid ? 'paid' : 'unpaid')}" title="${needsSetup ? (isAr ? 'لم يتم إدخال المبلغ بعد' : 'Amount has not been entered yet') : (isAdPaid ? (isAr ? 'مبلغ مدفوع' : 'Paid amount') : (isAr ? 'دين غير مدفوع على العميل' : 'Unpaid customer debt'))}">
+                      <span>${needsSetup ? (isAr ? 'غير محدد' : 'Not set') : `$${(Number(ad.amountUSD) || 0).toFixed(2)}`}</span>
+                      ${needsSetup ? `<span class="text-[10px] font-semibold mt-0.5">${isAr ? 'لا يوجد دين بعد' : 'No debt yet'}</span>` : (!isAdPaid ? `<span class="text-[10px] font-semibold mt-0.5">${isAr ? 'دين غير مدفوع' : 'Unpaid debt'}</span>` : '')}
                       ${renderMetaAdBudgetSummary(ad, isAr)}
                     </td>
-                    <td class="py-3 px-2" data-label="Rate">${receiptExchangeRate?.toFixed(2) || ad.exchangeRate?.toFixed(2) || '0.00'}</td>
-                    <td class="py-3 px-2 font-medium ${amountColorClass}" data-label="Local">${adAmountLocalForDisplay.toFixed(2)} LYD</td>
+                    <td class="py-3 px-2 font-medium ${amountColorClass}" data-label="Local">
+                      <div>${needsSetup ? (isAr ? 'غير محدد' : 'Not set') : `${adAmountLocalForDisplay.toFixed(2)} LYD`}</div>
+                      ${needsSetup ? '' : `<div class="mt-1 text-[10px] font-normal text-slate-500 dark:text-slate-400">${isAr ? 'السعر' : 'Rate'}: ${receiptExchangeRate?.toFixed(2) || ad.exchangeRate?.toFixed(2) || '0.00'}</div>`}
+                    </td>
                     <td class="py-3 px-2" data-label="Payment">
-                      ${paymentMethods.length ? `
+                      ${needsSetup ? `<span class="inline-flex items-center gap-1 rounded-lg bg-amber-100 px-2 py-1 text-xs font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"><i data-lucide="clock-3" class="h-3.5 w-3.5"></i>${isAr ? 'غير محدد' : 'Not set'}</span>` : (paymentMethods.length ? `
                         <div class="flex flex-wrap gap-1">
                           ${paymentMethods.slice(0, 3).map(m => `<span class="payment-badge text-xs">${Security.escapeHtml(trMethod(m))}</span>`).join('')}
                           ${paymentMethods.length > 3 ? `<span class="text-xs text-slate-500" title="${Security.escapeHtml(paymentMethods.slice(3).map(m => trMethod(m)).join(', '))}">+${paymentMethods.length - 3}</span>` : ''}
                         </div>
-                      ` : '<span class="text-xs text-slate-400">-</span>'}
+                      ` : '<span class="text-xs text-slate-400">-</span>')}
                     </td>
                     <td class="py-3 px-2" data-label="Status">
                       <!-- Read-only badge (user request): status changes only via the
@@ -4127,7 +4167,7 @@ function renderAdsView() {
                         'Lost': 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
                         'Stopped': 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
                       })[ad.status] || 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300'}">${Security.escapeHtml(trStatus(ad.status || 'Active'))}</span>
-                      ${isAdPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isAr ? 'مدفوع' : 'Paid'}</div>` : ''}
+                      ${needsSetup ? `<div class="mt-1 text-xs font-bold text-amber-600 dark:text-amber-400">${isAr ? 'يحتاج إكمال' : 'Needs setup'}</div>` : (isAdPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isAr ? 'مدفوع' : 'Paid'}</div>` : '')}
                       ${ad.status === 'Stopped' && ad.spentUSD !== undefined ? `
                         <div class="text-xs mt-1 space-y-0.5">
                           <div class="text-orange-600">${isAr ? 'المصروف' : 'Spent'}: $${ad.spentUSD.toFixed(2)}</div>
@@ -4149,7 +4189,7 @@ function renderAdsView() {
                     <td class="py-3 px-2" data-label="Serial">
                       ${serialDisplay ? `<span class="font-mono text-xs">${Security.escapeHtml(serialDisplay)}</span>` : '-'}
                       ${(() => {
-                        const n = (Array.isArray(ad.editHistory) ? ad.editHistory.length : 0) || Number(ad.editCount || 0);
+                        const n = getAdEditHistoryCount(ad);
                         return n ? `<button onclick="showAdEditHistory('${ad.id}')" class="block mt-1 text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium">${isAr ? `${n} تعديل` : `${n} edit${n > 1 ? 's' : ''}`}</button>` : '';
                       })()}
                     </td>
@@ -4175,25 +4215,26 @@ function renderAdsView() {
                       ${renderMetaAdScheduleSummary(ad, isAr)}
                     </td>
                     <td class="py-3 px-2" data-label="Actions">
-                      <div class="flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
+                      <div class="ads-table-actions flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
                         ${renderMetaAdActionButton(ad, isAr)}
+                        ${needsSetup && canEditThisAd ? `<button type="button" onclick="completeMetaImportedAd('${Security.escapeHtml(String(ad.id))}')" class="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-lg bg-amber-100 px-3 py-2 text-xs font-bold text-amber-800 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-200" title="${isAr ? 'إكمال العميل والدفع والوصل' : 'Complete customer, payment and receipt details'}"><i data-lucide="clipboard-check" class="h-4 w-4"></i><span>${isAr ? 'إكمال' : 'Complete'}</span></button>` : ''}
                         ${can('ads', 'viewPhotos') && adPhotoCount > 0 ? `
                         <button type="button" data-action="view-ad-photos" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openAdPhotoViewer(this.dataset.adId, 0, this)" class="ad-photo-view-button inline-flex items-center justify-center gap-1.5 font-bold" title="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}" aria-label="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}">
                           <i data-lucide="images" class="w-4 h-4 shrink-0"></i><span class="text-xs whitespace-nowrap">${isAr ? `عرض الصور (${adPhotoCount})` : `View Photos (${adPhotoCount})`}</span>
                         </button>` : ''}
-                        ${_isAdToppable(ad) && (!isServerModeEnabled() || isAdPaid) ? `
+                        ${!needsSetup && _isAdToppable(ad) && (!isServerModeEnabled() || isAdPaid) ? `
                         <button onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="${isAr ? 'عمليات الشحن' : 'Top-ups'}">
                           <i data-lucide="trending-up" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.topUps && ad.topUps.length > 0 ? `<span class="text-xs">${ad.topUps.length}</span>` : ''}
                         </button>` : ''}
-                        <button onclick="manageRefund('${ad.id}')" class="text-amber-600 hover:text-amber-700 p-2 md:p-0" title="${isAr ? 'استرجاع' : 'Refund'}">
+                        ${!needsSetup ? `<button onclick="manageRefund('${ad.id}')" class="text-amber-600 hover:text-amber-700 p-2 md:p-0" title="${isAr ? 'استرجاع' : 'Refund'}">
                           <i data-lucide="arrow-left-circle" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.refundType && ad.refundType !== 'None' ? `<span class="text-xs">!</span>` : ''}
                         </button>
                         <button onclick="stopAd('${ad.id}')" class="text-orange-600 hover:text-orange-700 p-2 md:p-0" title="${ad.status === 'Stopped' ? (isAr ? 'تعديل تفاصيل الإيقاف' : 'Edit Stop Details') : (isAr ? 'إيقاف الإعلان' : 'Stop Ad')}">
                           <i data-lucide="${ad.status === 'Stopped' ? 'edit' : 'square'}" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.status === 'Stopped' ? '<span class="text-xs">!</span>' : ''}
-                        </button>
+                        </button>` : ''}
                         ${canEditThisAd ? `<button onclick="editAd('${ad.id}')" class="text-indigo-600 hover:text-indigo-700 p-2 md:p-0" title="${t('edit')}"><i data-lucide="edit" class="w-5 h-5 md:w-4 md:h-4"></i></button>` : ''}
                         ${canDeleteThisAd ? `<button onclick="deleteAd('${ad.id}')" class="text-rose-600 hover:text-rose-700 p-2 md:p-0" title="${t('delete')}"><i data-lucide="trash-2" class="w-5 h-5 md:w-4 md:h-4"></i></button>` : ''}
                       </div>

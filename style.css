@@ -1156,6 +1156,103 @@ textarea:disabled {
   cursor: not-allowed;
 }
 
+.ad-primary-summary {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.meta-ad-thumbnail-button {
+  position: relative;
+  display: block;
+  width: 3.5rem;
+  height: 3.5rem;
+  flex: 0 0 3.5rem;
+  overflow: hidden;
+  border: 1px solid rgba(99, 102, 241, 0.22);
+  border-radius: 0.75rem;
+  background: rgba(238, 242, 255, 0.9);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.1);
+  transition: transform 150ms ease, box-shadow 150ms ease;
+}
+
+.meta-ad-thumbnail-button:hover,
+.meta-ad-thumbnail-button:focus-visible {
+  transform: translateY(-1px);
+  box-shadow: 0 5px 14px rgba(79, 70, 229, 0.18);
+}
+
+.meta-ad-thumbnail-button img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* Linked Meta ad whose real photo has not been resolved yet (or whose signed
+   photo URL expired): an honest "loading" tile keeps the row layout stable
+   and never shows the page logo. */
+.meta-ad-thumbnail-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgb(148, 163, 184);
+  background: rgba(241, 245, 249, 0.9);
+  border-style: dashed;
+}
+
+.meta-ad-thumbnail-placeholder:hover,
+.meta-ad-thumbnail-placeholder:focus-visible {
+  transform: none;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.1);
+}
+
+.dark .meta-ad-thumbnail-placeholder {
+  color: rgb(100, 116, 139);
+  background: rgba(15, 23, 42, 0.55);
+  border-color: rgba(99, 102, 241, 0.35);
+}
+
+.meta-ad-thumbnail-badge {
+  position: absolute;
+  right: 0.2rem;
+  bottom: 0.2rem;
+  display: inline-flex;
+  width: 1.15rem;
+  height: 1.15rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  color: white;
+  background: rgba(15, 23, 42, 0.82);
+}
+
+.meta-ad-history-button {
+  display: inline-flex;
+  min-height: 2rem;
+  max-width: 100%;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.4rem;
+  padding: 0.25rem 0.45rem;
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  border-radius: 0.5rem;
+  color: rgb(29, 78, 216);
+  background: rgba(255, 255, 255, 0.72);
+  font-weight: 700;
+  line-height: 1;
+}
+
+.meta-ad-history-button:hover,
+.meta-ad-history-button:focus-visible {
+  background: rgb(219, 234, 254);
+}
+
+.dark .meta-ad-history-button {
+  color: rgb(147, 197, 253);
+  background: rgba(15, 23, 42, 0.55);
+}
+
 /* Selection color */
 ::selection {
   background: var(--brand-blue);
@@ -1467,9 +1564,82 @@ textarea:disabled {
   background: rgba(8, 145, 178, 0.28);
 }
 
+/* The desktop Ads table keeps every action visible without horizontal
+   dragging. Related information is grouped in the same cell, and fixed
+   column proportions stop long Meta details from widening the whole table. */
+@media (min-width: 901px) {
+  #ads-table-container.ads-table-container {
+    padding: 1rem;
+    overflow-x: hidden;
+  }
+
+  .ads-summary-table {
+    width: 100%;
+    table-layout: fixed;
+  }
+
+  .ads-summary-table .ads-col-customer { width: 13%; }
+  .ads-summary-table .ads-col-page { width: 8%; }
+  .ads-summary-table .ads-col-amount { width: 10%; }
+  .ads-summary-table .ads-col-local { width: 7%; }
+  .ads-summary-table .ads-col-payment { width: 8%; }
+  .ads-summary-table .ads-col-status { width: 18%; }
+  .ads-summary-table .ads-col-delivery { width: 7%; }
+  .ads-summary-table .ads-col-serial { width: 6%; }
+  .ads-summary-table .ads-col-date { width: 11%; }
+  .ads-summary-table .ads-col-actions { width: 12%; }
+
+  .ads-summary-table th,
+  .ads-summary-table td {
+    min-width: 0;
+    padding-left: 0.35rem !important;
+    padding-right: 0.35rem !important;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+  }
+
+  .ads-summary-table th {
+    font-size: 0.68rem;
+    line-height: 1rem;
+    letter-spacing: 0.015em;
+  }
+
+  .ads-summary-table td {
+    font-size: 0.75rem;
+  }
+
+  .ads-summary-table [data-role="meta-ad-status"] {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .ads-summary-table .ads-table-actions {
+    gap: 0.25rem;
+  }
+
+  .ads-summary-table .ads-table-actions > [data-action="meta-ad-link"],
+  .ads-summary-table .ads-table-actions > .ad-photo-view-button {
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 0;
+    padding-left: 0.35rem;
+    padding-right: 0.35rem;
+  }
+
+  .ads-summary-table .ads-table-actions > .ad-photo-view-button span {
+    white-space: normal;
+    line-height: 1.1;
+  }
+}
+
 /* Only tables that provide data-label attributes opt into the card layout.
    Other tables keep their headings and remain horizontally scrollable. */
 @media (max-width: 900px) {
+  #ads-table-container.ads-table-container {
+    padding: 0.75rem;
+    overflow-x: hidden;
+  }
+
   .mobile-card-table {
     display: block;
     width: 100%;
@@ -1571,6 +1741,33 @@ textarea:disabled {
 
   .mobile-card-table tbody tr td:not([data-label])::before {
     display: none;
+  }
+
+  /* Ads become readable cards on phones. Every value is allowed to wrap,
+     so a long customer or page name is never cut off at the card edge. */
+  .ads-summary-table tbody tr td {
+    flex: 1 1 calc(50% - 0.5rem);
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+
+  .ads-summary-table tbody tr td:first-child,
+  .ads-summary-table tbody tr td:nth-child(2),
+  .ads-summary-table tbody tr td:nth-child(6),
+  .ads-summary-table tbody tr td:last-child {
+    flex-basis: 100%;
+  }
+
+  .meta-ad-thumbnail-button {
+    width: 5rem;
+    height: 5rem;
+    flex-basis: 5rem;
+  }
+
+  .meta-ad-history-button {
+    min-height: 2.75rem;
+    padding: 0.45rem 0.65rem;
   }
 
   .audit-mobile-table tbody tr td {

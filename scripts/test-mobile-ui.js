@@ -464,6 +464,17 @@ check('ad photo viewer is a clear phone-sized action',
   views.includes('data-role="ad-creator"') &&
   css.includes('button.ad-photo-view-button') &&
   css.includes('min-height: 2.75rem'));
+check('desktop ad summary fits all information without horizontal dragging',
+  views.includes('ads-table-container glass-panel') &&
+  views.includes('ads-summary-table mobile-card-table') &&
+  views.includes('ads-col-actions') &&
+  views.includes("${isAr ? 'السعر' : 'Rate'}:") &&
+  !views.includes('data-label="Rate"') &&
+  css.includes('#ads-table-container.ads-table-container') &&
+  css.includes('table-layout: fixed') &&
+  css.includes('overflow-x: hidden') &&
+  css.includes('.ads-summary-table tbody tr td {') &&
+  css.includes('overflow-wrap: anywhere'));
 check('receipt photo viewer allows native pan and pinch zoom',
   helpers.includes('receipt-photo-stage') && css.includes('touch-action: pan-x pan-y pinch-zoom'));
 check('packaged Android handles Back in UI order before exiting',
@@ -718,11 +729,49 @@ check('Meta Ads controls are reachable outside edit and fit phone dialogs',
   metaAds.includes('w-full max-w-3xl overflow-y-auto') &&
   metaAds.includes('min-h-11') &&
   metaAds.includes('sm:grid-cols'));
+check('Meta ad rows expose photo, total budget, duration, account and separate history',
+  views.includes('renderMetaAdThumbnail(ad, isAr)') &&
+  views.includes('renderMetaAdPageSummary(ad, adPage, adPageDeleted, isAr)') &&
+  views.includes('getAdEditHistoryCount(ad)') &&
+  metaAds.includes('function openMetaAdPreview(adId)') &&
+  metaAds.includes('metaTotalBudgetMinor') &&
+  metaAds.includes('function metaAdsTotalRemainingMinor(ad)') &&
+  metaAds.includes("'Total remaining'") &&
+  !metaAds.includes("totalKind === 'estimated_daily' && days") &&
+  metaAds.includes("'Duration'") &&
+  metaAds.includes("'Ad account'") &&
+  metaAds.includes('showMetaAdHistory(this.dataset.metaHistoryAdId)') &&
+  helpers.includes('function getMetaAdHistoryEntries(ad)') &&
+  helpers.includes('function showMetaAdHistory(adId)') &&
+  css.includes('.meta-ad-thumbnail-button') &&
+  css.includes('.meta-ad-thumbnail-placeholder') &&
+  metaAds.includes('meta-ad-thumbnail-placeholder') &&
+  css.includes('.meta-ad-history-button'));
+check('Meta page cell shows the page ID once with the real name below it',
+  metaAds.includes("name === 'facebook page'") &&
+  metaAds.includes('#${Security.escapeHtml(pageId)}') &&
+  metaAds.split('#${Security.escapeHtml(pageId)}').length === 2 &&
+  metaAds.includes('const pageName = realLocalName || realMetaName;') &&
+  !metaAds.includes('realMetaName || localName ||'));
 check('Meta Ads API wrapper never accepts a token from browser code',
   serverApi.includes("apiJson('/api/meta-ads/status'") &&
   serverApi.includes("'/api/meta-ads/sync-due'") &&
   !serverApi.includes('metaAccessToken') &&
   !serverApi.includes('access_token'));
+check('Meta-first imports stay distinct from real unpaid customer debt',
+  helpers.includes('function isMetaAdSetupPending(ad)') &&
+  helpers.includes("f.payment === 'pending_setup'") &&
+  views.includes("applyAdQuickFilter('setup')") &&
+  views.includes("'No debt yet'") &&
+  views.includes('completeMetaImportedAd') &&
+  modals.includes('This ad was imported automatically from Meta') &&
+  modals.includes('No customer debt exists until these details are saved.'));
+check('Meta-first automatic discovery is visible and never bulk-imports history from the browser',
+  serverApi.includes("'/api/meta-ads/auto-import/run'") &&
+  serverApi.includes('body: { includeExisting: false }') &&
+  metaAds.includes('Automatic ad and page import') &&
+  metaAds.includes('metaAdsCheckForNewAds()') &&
+  metaAds.includes('safe drafts that need completion'));
 
 // Optional system-browser app login for packaged Capacitor apps: the app can
 // open the hosted login page and receive a one-time code through the

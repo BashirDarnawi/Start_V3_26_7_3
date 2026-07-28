@@ -10111,20 +10111,46 @@ async function apiUnlinkMetaAd(adId, expectedLastModified, operationId) {
   return validateMetaAdMutationResponse(response, 'metaUnlink.ad', localAd);
 }
 
-async function apiSyncDueMetaAds(limit = 20) {
+async function apiSyncDueMetaAds(limit = 4) {
   const identity = getServerSessionIdentity();
   const response = await apiJson('/api/meta-ads/sync-due', {
     method: 'POST',
     body: { limit: Math.max(1, Math.min(100, Number(limit) || 20)) }
   }, { timeoutMs: 120000 });
   if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
-  const rows = Array.isArray(response?.ads) ? response.ads : [];
-  return rows.map((entity, index) => {
-    const validated = validateServerEntityResponse('ads', entity, `metaSyncDue.ads[${index}]`);
+  const validateRows = (rows, context) => (Array.isArray(rows) ? rows : []).map((entity, index) => {
+    const validated = validateServerEntityResponse('ads', entity, `${context}[${index}]`);
     const localAd = (state.ads || []).find(row => row && String(row.id) === String(validated.id));
     validated.data = mergeMutationInlineMedia('ads', validated.data, localAd);
     return validated;
   });
+  return {
+    ads: validateRows(response?.ads, 'metaSyncDue.ads'),
+    imported: validateRows(response?.imported, 'metaSyncDue.imported'),
+    importState: response?.importState && typeof response.importState === 'object' ? response.importState : {}
+  };
+}
+
+async function apiRunMetaAutoImport() {
+  const identity = getServerSessionIdentity();
+  const response = await apiJson('/api/meta-ads/auto-import/run', {
+    method: 'POST',
+    // Historical Meta ads are deliberately not imported. This button checks
+    // only for ads that appeared after Albayan established its safe baseline.
+    body: { includeExisting: false }
+  }, { timeoutMs: 120000 });
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  const rows = Array.isArray(response?.imported) ? response.imported : [];
+  return {
+    imported: rows.map((entity, index) => {
+      const validated = validateServerEntityResponse('ads', entity, `metaAutoImport.imported[${index}]`);
+      const localAd = (state.ads || []).find(row => row && String(row.id) === String(validated.id));
+      validated.data = mergeMutationInlineMedia('ads', validated.data, localAd);
+      return validated;
+    }),
+    busy: response?.busy === true,
+    state: response?.state && typeof response.state === 'object' ? response.state : {}
+  };
 }
 
 // Merge two duplicate customers and every relationship that points at the
@@ -17595,7 +17621,7 @@ function renderPagesView() {
         const ownerNames = getPageCustomerIds(page)
           .map(customerId => customersById.get(String(customerId))?.name || '')
           .join(' ');
-        return [page.name, page.category, ownerNames, page.id]
+        return [page.name, page.category, ownerNames, page.id, page.metaPageId, page.metaPageName]
           .some(value => foldSearchText(value).includes(pageSearch));
       })
     : allPages;
@@ -17631,6 +17657,8 @@ function renderPagesView() {
           const linkedCustomers = getPageCustomerIds(p)
             .map(cid => state.customers.find(c => String(c.id) === String(cid)))
             .filter(Boolean);
+          const isMetaImportedPage = !!String(p.metaPageId || '').trim();
+          const needsPageOwner = isMetaImportedPage && linkedCustomers.length === 0;
           // Page activity is only authoritative for accounts that can see all
           // ads. Money additionally needs the business financial permission.
           const pageStats = canSeePageAds ? getPageSpendSummary(p.id) : null;
@@ -17647,6 +17675,8 @@ function renderPagesView() {
                 <div class="flex-1">
                   <div class="flex items-center gap-2 mb-1">
                     <span class="px-2 py-0.5 rounded-md bg-amber-100 dark:bg-amber-900/50 text-amber-600 dark:text-amber-400 text-xs font-bold">#${pageDisplayNum}</span>
+                    ${isMetaImportedPage ? `<span class="px-2 py-0.5 rounded-md bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 text-[10px] font-bold">Meta</span>` : ''}
+                    ${needsPageOwner ? `<span class="px-2 py-0.5 rounded-md bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 text-[10px] font-bold">${isAr ? 'يحتاج مالك' : 'Needs owner'}</span>` : ''}
                   </div>
                   <h3 class="font-bold text-lg text-slate-800 dark:text-white flex items-center">
                     <i data-lucide="facebook" class="w-4 h-4 mr-2 text-blue-600"></i>
@@ -17681,7 +17711,10 @@ function renderPagesView() {
                       `).join('')}
                       ${linkedCustomers.length > 2 ? `<div class="text-xs text-slate-500 ml-3.5">+${linkedCustomers.length - 2} ${isAr ? 'آخرون' : 'more'}</div>` : ''}
                     </div>
-                  ` : `<div class="text-sm text-slate-400 ml-4">${isAr ? 'لا يوجد مالك' : 'No owner'}</div>`}
+                  ` : `<div class="space-y-2 ml-4">
+                    <div class="text-sm ${needsPageOwner ? 'text-amber-600 dark:text-amber-400 font-semibold' : 'text-slate-400'}">${isAr ? 'لا يوجد مالك' : 'No owner'}</div>
+                    ${needsPageOwner && can('pages', 'edit') ? `<button type="button" onclick="editPage('${Security.escapeHtml(String(p.id))}')" class="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-amber-100 px-3 py-1.5 text-xs font-bold text-amber-800 hover:bg-amber-200 dark:bg-amber-900/30 dark:text-amber-200"><i data-lucide="user-plus" class="h-3.5 w-3.5"></i>${isAr ? 'ربط بعميل' : 'Assign owner'}</button>` : ''}
+                  </div>`}
                   </div>
 
                 <!-- Last Ad Time (requires full ads.view) -->
@@ -17729,8 +17762,26 @@ function loadMoreAds() {
   updateAdsViewFiltered();
 }
 
+function completeMetaImportedAd(adId) {
+  const ad = (state.ads || []).find(item => String(item.id) === String(adId));
+  if (!ad) return;
+  const page = (state.pages || []).find(item => String(item.id) === String(ad.pageId));
+  if (page && getPageCustomerIds(page).length === 0) {
+    showNotification(
+      state.language === 'ar'
+        ? 'اربط صفحة Meta بعميل أولاً، ثم أكمل الدفع والوصل في الإعلان.'
+        : 'First assign the imported Meta page to a customer, then complete payment and receipt details in the ad.',
+      'warning'
+    );
+    editPage(page.id);
+    return;
+  }
+  editAd(ad.id);
+}
+
 function applyAdQuickFilter(mode) {
   state.adFilters = { status: 'all', payment: 'all', page: 'all' };
+  if (mode === 'setup') state.adFilters.payment = 'pending_setup';
   if (mode === 'unpaid') state.adFilters.payment = 'not_paid';
   if (mode === 'stopped') state.adFilters.status = 'Stopped';
   render();
@@ -17803,7 +17854,7 @@ function renderAdsView() {
     (adF.page || 'all') !== 'all'
   ].filter(Boolean).length;
   const adAdvancedFiltersOpen = isWorkspaceFilterPanelExpanded('ads');
-  const adQuickMode = adF.payment === 'not_paid' ? 'unpaid' : (adF.status === 'Stopped' ? 'stopped' : 'all');
+  const adQuickMode = adF.payment === 'pending_setup' ? 'setup' : (adF.payment === 'not_paid' ? 'unpaid' : (adF.status === 'Stopped' ? 'stopped' : 'all'));
   const adFilterFingerprint = JSON.stringify([adReceiptFilter, state.adSearch, adF.status || 'all', adF.payment || 'all', adF.page || 'all']);
   if (adFilterFingerprint !== _adsFilterFingerprint) {
     _adsFilterFingerprint = adFilterFingerprint;
@@ -17840,6 +17891,7 @@ function renderAdsView() {
           </div>
           <div class="smart-filter-chips" aria-label="${isAr ? 'فلاتر إعلانات سريعة' : 'Quick ad filters'}">
             <button type="button" onclick="applyAdQuickFilter('all')" class="smart-filter-chip ${adQuickMode === 'all' ? 'is-active' : ''}">${isAr ? 'الكل' : 'All'}</button>
+            <button type="button" onclick="applyAdQuickFilter('setup')" class="smart-filter-chip ${adQuickMode === 'setup' ? 'is-active is-warning' : ''}"><i data-lucide="wand-sparkles" class="h-4 w-4"></i>${isAr ? 'يحتاج إكمال' : 'Needs setup'}</button>
             <button type="button" onclick="applyAdQuickFilter('unpaid')" class="smart-filter-chip ${adQuickMode === 'unpaid' ? 'is-active is-danger' : ''}"><i data-lucide="circle-dollar-sign" class="h-4 w-4"></i>${isAr ? 'غير مدفوع' : 'Unpaid'}</button>
             <button type="button" onclick="applyAdQuickFilter('stopped')" class="smart-filter-chip ${adQuickMode === 'stopped' ? 'is-active is-warning' : ''}"><i data-lucide="square" class="h-4 w-4"></i>${isAr ? 'متوقف' : 'Stopped'}</button>
           </div>
@@ -17857,6 +17909,7 @@ function renderAdsView() {
           </select>
           <select onchange="updateAdFilter('payment', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
             <option value="all" ${(adF.payment || 'all') === 'all' ? 'selected' : ''}>${isAr ? 'كل طرق الدفع' : 'All Payments'}</option>
+            <option value="pending_setup" ${adF.payment === 'pending_setup' ? 'selected' : ''}>${isAr ? 'يحتاج إكمال' : 'Needs setup'}</option>
             <option value="paid" ${adF.payment === 'paid' ? 'selected' : ''}>${isAr ? 'مدفوع' : 'Paid'}</option>
             <option value="not_paid" ${adF.payment === 'not_paid' ? 'selected' : ''}>${isAr ? 'غير مدفوع' : 'Not Paid'}</option>
             <option value="wont_pay" ${adF.payment === 'wont_pay' ? 'selected' : ''}>${isAr ? 'لن يدفع' : "Won't Pay"}</option>
@@ -17869,16 +17922,26 @@ function renderAdsView() {
         </div>
       </div>
 
-      <div id="ads-table-container" class="glass-panel rounded-2xl p-6 overflow-x-auto">
+      <div id="ads-table-container" class="ads-table-container glass-panel rounded-2xl p-6 overflow-x-auto">
         ${allAds.length === 0 ? `<div class="text-center py-12"><i data-lucide="inbox" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${adReceiptFilter ? (isAr ? 'لا توجد إعلانات مرتبطة بهذا الوصل' : 'No ads are linked to this receipt') : (isAr ? 'لا توجد إعلانات بعد' : 'No ads yet')}</p></div>` : `
-          <table class="mobile-card-table w-full text-sm">
+          <table class="ads-summary-table mobile-card-table w-full text-sm">
+            <colgroup>
+              <col class="ads-col-customer">
+              <col class="ads-col-page">
+              <col class="ads-col-amount">
+              <col class="ads-col-local">
+              <col class="ads-col-payment">
+              <col class="ads-col-status">
+              <col class="ads-col-delivery">
+              <col class="ads-col-serial">
+              <col class="ads-col-date">
+              <col class="ads-col-actions">
+            </colgroup>
             <thead>
               <tr class="border-b-2 border-indigo-200 dark:border-indigo-800">
-                <th class="text-left py-3 px-2 w-12">#</th>
-                <th class="text-left py-3 px-2">${isAr ? 'العميل' : 'Customer'}</th>
+                <th class="text-left py-3 px-2">${isAr ? 'الإعلان / العميل' : 'Ad / Customer'}</th>
                 <th class="text-left py-3 px-2">${isAr ? 'الصفحة' : 'Page'}</th>
                 <th class="text-left py-3 px-2">${isAr ? 'المبلغ' : 'Amount'}</th>
-                <th class="text-left py-3 px-2">${isAr ? 'السعر' : 'Rate'}</th>
                 <th class="text-left py-3 px-2">${isAr ? 'بالعملة المحلية' : 'Local'}</th>
                 <th class="text-left py-3 px-2">${isAr ? 'الدفع' : 'Payment'}</th>
                 <th class="text-left py-3 px-2">${isAr ? 'الحالة' : 'Status'}</th>
@@ -17897,8 +17960,11 @@ function renderAdsView() {
                 const canDeleteThisAd = canActOnRecord('ads', 'delete', ad.creatorId);
                 const adPhotoCount = getAdPhotoCount(ad);
                 const paymentState = getAdPaymentState(ad);
-                const isAdPaid = paymentState === 'paid';
-                const amountColorClass = isAdPaid
+                const needsSetup = isMetaAdSetupPending(ad);
+                const isAdPaid = !needsSetup && paymentState === 'paid';
+                const amountColorClass = needsSetup
+                  ? 'text-amber-600 dark:text-amber-400'
+                  : isAdPaid
                   ? 'text-emerald-600 dark:text-emerald-400'
                   : 'text-rose-600 dark:text-rose-400';
                 // createdBy is immutable server ownership metadata; creatorId
@@ -17959,39 +18025,39 @@ function renderAdsView() {
                 const paymentMethods = [..._methods];
                 return `
                   <tr class="border-b border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50">
-                    <td class="py-3 px-2" data-label="#">
-                      <div class="font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || ad.customerName || (isAr ? 'غير معروف' : 'Unknown'))}</div>
-                      ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
-                      <div data-role="ad-creator" class="inline-flex items-center gap-1 mt-1 text-[11px] leading-tight font-normal text-slate-500 dark:text-slate-400" title="${isAr ? 'تم الإنشاء بواسطة' : 'Created by'}">
-                        <i data-lucide="user" class="w-3 h-3 shrink-0"></i>
-                        <span>${isAr ? 'تم الإنشاء بواسطة' : 'Created by'}: <span class="font-semibold text-slate-700 dark:text-slate-200">${creatorName}</span></span>
+                    <td class="py-3 px-2" data-label="${isAr ? 'الإعلان / العميل' : 'Ad / Customer'}">
+                      <div class="ad-primary-summary">
+                        ${renderMetaAdThumbnail(ad, isAr)}
+                        <div class="min-w-0 flex-1">
+                          <div class="break-words font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || ad.customerName || (needsSetup ? (ad.metaAdName || (isAr ? 'إعلان Meta جديد' : 'New Meta ad')) : (isAr ? 'غير معروف' : 'Unknown')))}</div>
+                          ${needsSetup ? `<div class="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"><i data-lucide="wand-sparkles" class="h-3 w-3"></i>${isAr ? 'يحتاج العميل والدفع والوصل' : 'Needs customer, payment and receipt'}</div>` : ''}
+                          ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
+                          <div data-role="ad-creator" class="mt-1 inline-flex items-center gap-1 text-[11px] font-normal leading-tight text-slate-500 dark:text-slate-400" title="${isAr ? 'تم الإنشاء بواسطة' : 'Created by'}">
+                            <i data-lucide="user" class="h-3 w-3 shrink-0"></i>
+                            <span>${isAr ? 'تم الإنشاء بواسطة' : 'Created by'}: <span class="font-semibold text-slate-700 dark:text-slate-200">${creatorName}</span></span>
+                          </div>
+                        </div>
                       </div>
                     </td>
-                    <td class="py-3 px-2 hidden md:table-cell">
-                      <div class="font-medium">${Security.escapeHtml(customer?.name || ad.customerName || (isAr ? 'غير معروف' : 'Unknown'))}</div>
-                      ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
-                    </td>
                     <td class="py-3 px-2" data-label="Page">
-                      ${adPage ? `
-                        <div class="text-sm font-medium ${adPageDeleted ? 'text-slate-500 dark:text-slate-400' : 'text-indigo-700 dark:text-indigo-300'}">${Security.escapeHtml(adPage.name || '')}</div>
-                        ${adPageDeleted ? `<div class="text-[10px] mt-0.5 inline-block px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">${isAr ? 'محذوفة' : 'Deleted'}</div>` : ''}
-                        ${adPage.category ? `<div class="text-xs text-slate-500">${Security.escapeHtml(adPage.category)}</div>` : ''}
-                      ` : '<span class="text-xs text-slate-400">-</span>'}
+                      ${renderMetaAdPageSummary(ad, adPage, adPageDeleted, isAr)}
                     </td>
-                    <td class="py-3 px-2 font-bold ${amountColorClass}" data-label="Amount" data-payment-state="${isAdPaid ? 'paid' : 'unpaid'}" title="${isAdPaid ? (isAr ? 'مبلغ مدفوع' : 'Paid amount') : (isAr ? 'دين غير مدفوع على العميل' : 'Unpaid customer debt')}">
-                      <span>$${(Number(ad.amountUSD) || 0).toFixed(2)}</span>
-                      ${!isAdPaid ? `<span class="text-[10px] font-semibold mt-0.5">${isAr ? 'دين غير مدفوع' : 'Unpaid debt'}</span>` : ''}
+                    <td class="py-3 px-2 font-bold ${amountColorClass}" data-label="Amount" data-payment-state="${needsSetup ? 'pending-setup' : (isAdPaid ? 'paid' : 'unpaid')}" title="${needsSetup ? (isAr ? 'لم يتم إدخال المبلغ بعد' : 'Amount has not been entered yet') : (isAdPaid ? (isAr ? 'مبلغ مدفوع' : 'Paid amount') : (isAr ? 'دين غير مدفوع على العميل' : 'Unpaid customer debt'))}">
+                      <span>${needsSetup ? (isAr ? 'غير محدد' : 'Not set') : `$${(Number(ad.amountUSD) || 0).toFixed(2)}`}</span>
+                      ${needsSetup ? `<span class="text-[10px] font-semibold mt-0.5">${isAr ? 'لا يوجد دين بعد' : 'No debt yet'}</span>` : (!isAdPaid ? `<span class="text-[10px] font-semibold mt-0.5">${isAr ? 'دين غير مدفوع' : 'Unpaid debt'}</span>` : '')}
                       ${renderMetaAdBudgetSummary(ad, isAr)}
                     </td>
-                    <td class="py-3 px-2" data-label="Rate">${receiptExchangeRate?.toFixed(2) || ad.exchangeRate?.toFixed(2) || '0.00'}</td>
-                    <td class="py-3 px-2 font-medium ${amountColorClass}" data-label="Local">${adAmountLocalForDisplay.toFixed(2)} LYD</td>
+                    <td class="py-3 px-2 font-medium ${amountColorClass}" data-label="Local">
+                      <div>${needsSetup ? (isAr ? 'غير محدد' : 'Not set') : `${adAmountLocalForDisplay.toFixed(2)} LYD`}</div>
+                      ${needsSetup ? '' : `<div class="mt-1 text-[10px] font-normal text-slate-500 dark:text-slate-400">${isAr ? 'السعر' : 'Rate'}: ${receiptExchangeRate?.toFixed(2) || ad.exchangeRate?.toFixed(2) || '0.00'}</div>`}
+                    </td>
                     <td class="py-3 px-2" data-label="Payment">
-                      ${paymentMethods.length ? `
+                      ${needsSetup ? `<span class="inline-flex items-center gap-1 rounded-lg bg-amber-100 px-2 py-1 text-xs font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"><i data-lucide="clock-3" class="h-3.5 w-3.5"></i>${isAr ? 'غير محدد' : 'Not set'}</span>` : (paymentMethods.length ? `
                         <div class="flex flex-wrap gap-1">
                           ${paymentMethods.slice(0, 3).map(m => `<span class="payment-badge text-xs">${Security.escapeHtml(trMethod(m))}</span>`).join('')}
                           ${paymentMethods.length > 3 ? `<span class="text-xs text-slate-500" title="${Security.escapeHtml(paymentMethods.slice(3).map(m => trMethod(m)).join(', '))}">+${paymentMethods.length - 3}</span>` : ''}
                         </div>
-                      ` : '<span class="text-xs text-slate-400">-</span>'}
+                      ` : '<span class="text-xs text-slate-400">-</span>')}
                     </td>
                     <td class="py-3 px-2" data-label="Status">
                       <!-- Read-only badge (user request): status changes only via the
@@ -18006,7 +18072,7 @@ function renderAdsView() {
                         'Lost': 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
                         'Stopped': 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
                       })[ad.status] || 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300'}">${Security.escapeHtml(trStatus(ad.status || 'Active'))}</span>
-                      ${isAdPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isAr ? 'مدفوع' : 'Paid'}</div>` : ''}
+                      ${needsSetup ? `<div class="mt-1 text-xs font-bold text-amber-600 dark:text-amber-400">${isAr ? 'يحتاج إكمال' : 'Needs setup'}</div>` : (isAdPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isAr ? 'مدفوع' : 'Paid'}</div>` : '')}
                       ${ad.status === 'Stopped' && ad.spentUSD !== undefined ? `
                         <div class="text-xs mt-1 space-y-0.5">
                           <div class="text-orange-600">${isAr ? 'المصروف' : 'Spent'}: $${ad.spentUSD.toFixed(2)}</div>
@@ -18028,7 +18094,7 @@ function renderAdsView() {
                     <td class="py-3 px-2" data-label="Serial">
                       ${serialDisplay ? `<span class="font-mono text-xs">${Security.escapeHtml(serialDisplay)}</span>` : '-'}
                       ${(() => {
-                        const n = (Array.isArray(ad.editHistory) ? ad.editHistory.length : 0) || Number(ad.editCount || 0);
+                        const n = getAdEditHistoryCount(ad);
                         return n ? `<button onclick="showAdEditHistory('${ad.id}')" class="block mt-1 text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium">${isAr ? `${n} تعديل` : `${n} edit${n > 1 ? 's' : ''}`}</button>` : '';
                       })()}
                     </td>
@@ -18054,25 +18120,26 @@ function renderAdsView() {
                       ${renderMetaAdScheduleSummary(ad, isAr)}
                     </td>
                     <td class="py-3 px-2" data-label="Actions">
-                      <div class="flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
+                      <div class="ads-table-actions flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
                         ${renderMetaAdActionButton(ad, isAr)}
+                        ${needsSetup && canEditThisAd ? `<button type="button" onclick="completeMetaImportedAd('${Security.escapeHtml(String(ad.id))}')" class="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-lg bg-amber-100 px-3 py-2 text-xs font-bold text-amber-800 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-200" title="${isAr ? 'إكمال العميل والدفع والوصل' : 'Complete customer, payment and receipt details'}"><i data-lucide="clipboard-check" class="h-4 w-4"></i><span>${isAr ? 'إكمال' : 'Complete'}</span></button>` : ''}
                         ${can('ads', 'viewPhotos') && adPhotoCount > 0 ? `
                         <button type="button" data-action="view-ad-photos" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openAdPhotoViewer(this.dataset.adId, 0, this)" class="ad-photo-view-button inline-flex items-center justify-center gap-1.5 font-bold" title="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}" aria-label="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}">
                           <i data-lucide="images" class="w-4 h-4 shrink-0"></i><span class="text-xs whitespace-nowrap">${isAr ? `عرض الصور (${adPhotoCount})` : `View Photos (${adPhotoCount})`}</span>
                         </button>` : ''}
-                        ${_isAdToppable(ad) && (!isServerModeEnabled() || isAdPaid) ? `
+                        ${!needsSetup && _isAdToppable(ad) && (!isServerModeEnabled() || isAdPaid) ? `
                         <button onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="${isAr ? 'عمليات الشحن' : 'Top-ups'}">
                           <i data-lucide="trending-up" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.topUps && ad.topUps.length > 0 ? `<span class="text-xs">${ad.topUps.length}</span>` : ''}
                         </button>` : ''}
-                        <button onclick="manageRefund('${ad.id}')" class="text-amber-600 hover:text-amber-700 p-2 md:p-0" title="${isAr ? 'استرجاع' : 'Refund'}">
+                        ${!needsSetup ? `<button onclick="manageRefund('${ad.id}')" class="text-amber-600 hover:text-amber-700 p-2 md:p-0" title="${isAr ? 'استرجاع' : 'Refund'}">
                           <i data-lucide="arrow-left-circle" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.refundType && ad.refundType !== 'None' ? `<span class="text-xs">!</span>` : ''}
                         </button>
                         <button onclick="stopAd('${ad.id}')" class="text-orange-600 hover:text-orange-700 p-2 md:p-0" title="${ad.status === 'Stopped' ? (isAr ? 'تعديل تفاصيل الإيقاف' : 'Edit Stop Details') : (isAr ? 'إيقاف الإعلان' : 'Stop Ad')}">
                           <i data-lucide="${ad.status === 'Stopped' ? 'edit' : 'square'}" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.status === 'Stopped' ? '<span class="text-xs">!</span>' : ''}
-                        </button>
+                        </button>` : ''}
                         ${canEditThisAd ? `<button onclick="editAd('${ad.id}')" class="text-indigo-600 hover:text-indigo-700 p-2 md:p-0" title="${t('edit')}"><i data-lucide="edit" class="w-5 h-5 md:w-4 md:h-4"></i></button>` : ''}
                         ${canDeleteThisAd ? `<button onclick="deleteAd('${ad.id}')" class="text-rose-600 hover:text-rose-700 p-2 md:p-0" title="${t('delete')}"><i data-lucide="trash-2" class="w-5 h-5 md:w-4 md:h-4"></i></button>` : ''}
                       </div>
@@ -21274,6 +21341,15 @@ function clearAdReceiptFilter() {
   render();
 }
 
+// Meta-first automation creates a financially neutral draft. Keep that state
+// separate from "not paid": a draft has no customer debt until a person opens
+// it, chooses the customer/payment/receipt details, and successfully saves it.
+function isMetaAdSetupPending(ad) {
+  if (!ad || typeof ad !== 'object') return false;
+  return String(ad.metaImportState || '').toLowerCase() === 'needs_completion'
+    || String(ad.paymentStatus || '').toLowerCase() === 'pending_setup';
+}
+
 function getFilteredAds(customersById = null) {
   let filtered = getAdsVisibleToCurrentUser();
 
@@ -21290,10 +21366,12 @@ function getFilteredAds(customersById = null) {
   }
   if (f.payment && f.payment !== 'all') {
     filtered = filtered.filter(ad => {
+      const needsSetup = isMetaAdSetupPending(ad);
+      if (f.payment === 'pending_setup') return needsSetup;
       const paymentState = getAdPaymentState(ad);
-      if (f.payment === 'paid') return paymentState === 'paid';
-      if (f.payment === 'wont_pay') return paymentState === 'wont_pay';
-      return paymentState === 'not_paid';
+      if (f.payment === 'paid') return !needsSetup && paymentState === 'paid';
+      if (f.payment === 'wont_pay') return !needsSetup && paymentState === 'wont_pay';
+      return !needsSetup && paymentState === 'not_paid';
     });
   }
   if (f.page && f.page !== 'all') {
@@ -21314,6 +21392,10 @@ function getFilteredAds(customersById = null) {
     const custMap = customersById || new Map(state.customers.map(c => [c.id, c]));
     const pageMap = new Map((state.pages || []).map(p => [p.id, p]));
     const canSearchContacts = can('customers', 'viewContacts');
+    // The table renders Meta page/ad IDs with a leading '#'; a copied
+    // "#123456" search must still match the stored bare digits. A lone "#"
+    // must not match everything, so keep the original term as fallback.
+    const idTerm = searchTerm.replace(/^#/, '') || searchTerm;
     filtered = filtered.filter(ad => {
       const customer = custMap.get(ad.customerId);
       const page = ad.pageId ? pageMap.get(ad.pageId) : null;
@@ -21323,10 +21405,14 @@ function getFilteredAds(customersById = null) {
         (canSearchContacts && foldSearchText(ad.phoneNumber).includes(searchTerm)) ||
         foldSearchText(ad.serialNumber).includes(searchTerm) ||
         foldSearchText(page?.name).includes(searchTerm) ||
-        foldSearchText(ad.metaAdId).includes(searchTerm) ||
+        foldSearchText(ad.metaAdId).includes(idTerm) ||
         foldSearchText(ad.metaAdName).includes(searchTerm) ||
         foldSearchText(ad.metaCampaignName).includes(searchTerm) ||
-        foldSearchText(ad.metaAdSetName).includes(searchTerm)
+        foldSearchText(ad.metaAdSetName).includes(searchTerm) ||
+        // The Page column shows the Meta page ID and name even when no local
+        // page record exists — what is visible must be searchable.
+        foldSearchText(ad.metaPageId || page?.metaPageId).includes(idTerm) ||
+        foldSearchText(ad.metaPageName || page?.metaPageName).includes(searchTerm)
       );
     });
   }
@@ -25700,9 +25786,13 @@ function _adEditHistoryText(value, fallback = '—') {
 // Normalize legacy/imported rows before rendering. Older data can use
 // date/userName/oldValue/newValue, and a malformed row must never break the
 // whole Ads screen.
-function getAdEditHistoryEntries(ad) {
-  const rows = Array.isArray(ad?.editHistory) ? ad.editHistory : [];
-  return rows
+function _isLegacyMetaSyncHistoryRow(row) {
+  const actor = String(row?.editedBy || row?.userName || row?.actorName || '').trim().toLowerCase();
+  return actor.startsWith('meta automatic') || String(row?.source || '').toLowerCase().startsWith('meta_');
+}
+
+function _normalizeAdHistoryRows(rows) {
+  return (Array.isArray(rows) ? rows : [])
     .filter(row => row && typeof row === 'object' && !Array.isArray(row))
     .map(row => {
       const rawChanges = Array.isArray(row.changes) ? row.changes : [];
@@ -25723,15 +25813,52 @@ function getAdEditHistoryEntries(ad) {
       return {
         editedAt: row.editedAt || row.date || row.updatedAt || '',
         editedBy: _adEditHistoryText(row.editedBy || row.userName || row.actorName, 'Unknown'),
-        changes
+        changes,
+        source: _adEditHistoryText(row.source, ''),
+        eventId: _adEditHistoryText(row.eventId, ''),
+        eventType: _adEditHistoryText(row.eventType, ''),
+        objectId: _adEditHistoryText(row.objectId, ''),
+        objectType: _adEditHistoryText(row.objectType, ''),
+        tool: _adEditHistoryText(row.tool, '')
       };
+    });
+}
+
+function getAdEditHistoryEntries(ad) {
+  const rows = Array.isArray(ad?.editHistory) ? ad.editHistory : [];
+  return _normalizeAdHistoryRows(rows.filter(row => !_isLegacyMetaSyncHistoryRow(row)));
+}
+
+function getMetaAdHistoryEntries(ad) {
+  const dedicated = Array.isArray(ad?.metaChangeHistory) ? ad.metaChangeHistory : [];
+  const legacy = (Array.isArray(ad?.editHistory) ? ad.editHistory : []).filter(_isLegacyMetaSyncHistoryRow);
+  const seen = new Set();
+  return _normalizeAdHistoryRows([...dedicated, ...legacy])
+    .filter(row => {
+      const key = row.eventId || `${row.editedAt}|${row.editedBy}|${JSON.stringify(row.changes)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((left, right) => {
+      const a = new Date(left.editedAt).getTime();
+      const b = new Date(right.editedAt).getTime();
+      return (Number.isFinite(a) ? a : 0) - (Number.isFinite(b) ? b : 0);
     });
 }
 
 function getAdEditHistoryCount(ad) {
   const detailedCount = getAdEditHistoryEntries(ad).length;
   if (detailedCount > 0) return detailedCount;
+  if (Array.isArray(ad?.editHistory) && ad.editHistory.length > 0) return 0;
   const storedCount = Number(ad?.editCount);
+  return Number.isSafeInteger(storedCount) && storedCount > 0 ? storedCount : 0;
+}
+
+function getMetaAdHistoryCount(ad) {
+  const detailedCount = getMetaAdHistoryEntries(ad).length;
+  if (detailedCount > 0) return detailedCount;
+  const storedCount = Number(ad?.metaChangeCount);
   return Number.isSafeInteger(storedCount) && storedCount > 0 ? storedCount : 0;
 }
 
@@ -25830,6 +25957,42 @@ function showAdEditHistory(adId) {
 
   document.getElementById('edit-history-modal')?.remove();
   document.body.insertAdjacentHTML('beforeend', modalHTML);
+  lucide.createIcons();
+}
+
+function showMetaAdHistory(adId) {
+  const ad = state.ads.find(a => String(a.id || '') === String(adId || ''));
+  if (!ad) return;
+  const isAr = state.language === 'ar';
+  const history = getMetaAdHistoryEntries(ad);
+  const account = String(ad.metaAdAccountName || '').trim() || (ad.metaAdAccountId ? `#${ad.metaAdAccountId}` : (isAr ? 'حساب Meta' : 'Meta account'));
+  const emptyText = isAr
+    ? 'لا توجد تغييرات Meta محفوظة بعد. ستظهر التغييرات هنا بعد اكتشافها في المزامنة.'
+    : 'No Meta changes are saved yet. Changes will appear here after synchronization detects them.';
+  const rows = history.length ? history.slice().reverse().map((entry, index) => {
+    const exactActivity = entry.source === 'meta_activity';
+    const sourceLabel = exactActivity
+      ? (isAr ? 'سجل نشاط Meta' : 'Meta activity')
+      : (entry.source === 'meta_import' ? (isAr ? 'استيراد Meta' : 'Meta import') : (isAr ? 'اكتشفته المزامنة' : 'Detected by sync'));
+    const eventLabel = entry.eventType ? entry.eventType.replaceAll('_', ' ') : '';
+    return `<article class="rounded-xl border border-blue-100 bg-blue-50/40 p-3 dark:border-blue-900 dark:bg-blue-950/20 sm:p-4">
+      <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div class="min-w-0"><div class="flex flex-wrap items-center gap-2"><span class="rounded-full bg-blue-600 px-2 py-1 text-[10px] font-black text-white">${isAr ? 'تغيير' : 'Change'} #${history.length - index}</span><span class="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">${sourceLabel}</span></div><p class="mt-2 break-words text-xs font-bold text-slate-700 dark:text-slate-200">${Security.escapeHtml(entry.editedBy)}</p></div>
+        <time class="text-xs text-slate-500">${Security.escapeHtml(_formatAdEditHistoryDate(entry.editedAt, isAr))}</time>
+      </div>
+      ${(eventLabel || entry.tool) ? `<div class="mt-2 flex flex-wrap gap-2 text-[10px] text-slate-500">${eventLabel ? `<span>${Security.escapeHtml(eventLabel)}</span>` : ''}${entry.tool ? `<span>• ${Security.escapeHtml(entry.tool)}</span>` : ''}</div>` : ''}
+      <div class="mt-3 space-y-2">${entry.changes.length ? entry.changes.map(change => `<div class="rounded-lg border border-slate-200 bg-white p-3 text-sm dark:border-slate-700 dark:bg-slate-900"><div class="font-bold text-slate-700 dark:text-slate-200">${Security.escapeHtml(change.field)}</div><div class="mt-2 flex flex-wrap items-center gap-2 text-xs"><span class="max-w-full break-words rounded bg-rose-100 px-2 py-1 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300">${Security.escapeHtml(change.from)}</span><i data-lucide="arrow-right" class="h-3 w-3 shrink-0 text-slate-400"></i><span class="max-w-full break-words rounded bg-emerald-100 px-2 py-1 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">${Security.escapeHtml(change.to)}</span></div></div>`).join('') : `<p class="text-xs text-slate-500">${isAr ? 'تفاصيل هذا التغيير القديم غير متاحة.' : 'Details for this older change are unavailable.'}</p>`}</div>
+    </article>`;
+  }).join('') : `<div class="rounded-xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500 dark:border-slate-700">${emptyText}</div>`;
+
+  document.getElementById('meta-history-modal')?.remove();
+  document.body.insertAdjacentHTML('beforeend', `<div id="meta-history-modal" role="dialog" aria-modal="true" aria-labelledby="meta-history-title" class="mobile-dialog-overlay fixed inset-0 z-[70] flex items-center justify-center bg-black/55 p-3 backdrop-blur-sm sm:p-4" onclick="if(event.target === this) this.remove()">
+    <div class="flex max-h-[88dvh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl dark:bg-slate-900" onclick="event.stopPropagation()" dir="${isAr ? 'rtl' : 'ltr'}">
+      <header class="flex items-start justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-700 sm:p-5"><div class="min-w-0"><h2 id="meta-history-title" class="flex items-center gap-2 text-xl font-black text-slate-800 dark:text-white"><i data-lucide="history" class="h-5 w-5 text-blue-600"></i>${isAr ? 'سجل تغييرات Meta' : 'Meta Change History'}</h2><p class="mt-1 break-words text-sm text-slate-500">${Security.escapeHtml(ad.metaAdName || `Meta #${ad.metaAdId || ''}`)} • ${Security.escapeHtml(account)}</p></div><button type="button" onclick="document.getElementById('meta-history-modal').remove()" class="touch-target inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${isAr ? 'إغلاق' : 'Close'}"><i data-lucide="x" class="h-5 w-5"></i></button></header>
+      <div class="overflow-y-auto p-3 sm:p-5"><div class="mb-3 rounded-xl bg-slate-50 p-3 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300"><strong>${isAr ? 'مهم:' : 'Important:'}</strong> ${isAr ? 'يعرض هذا السجل نشاط Meta الدقيق عندما تسمح به الصلاحيات، ويستخدم مقارنة المزامنة كنسخة احتياطية.' : 'This history uses exact Meta activity when permissions allow it, with synchronization comparison as a safe fallback.'}</div><div class="space-y-3">${rows}</div></div>
+      <footer class="border-t border-slate-200 bg-slate-50 px-4 py-3 text-center text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-950/50">${isAr ? 'الإجمالي' : 'Total'}: ${history.length}</footer>
+    </div>
+  </div>`);
   lucide.createIcons();
 }
 
@@ -32387,6 +32550,8 @@ function renderModal() {
       // creator, so it gracefully falls back to the "USER" badge.
       const creatorIsAdmin = isAdminRole(adCreator?.role);
       const isArAd = state.language === 'ar';
+      const isImportedMetaDraft = isEdit && isMetaAdSetupPending(adData);
+      const adCreatorDisplayName = adCreator?.name || adData.createdByName || (isImportedMetaDraft ? (isArAd ? 'استيراد Meta التلقائي' : 'Meta automatic import') : (isArAd ? 'غير معروف' : 'Unknown'));
       const adHistoryCount = getAdEditHistoryCount(adData);
       const adPaymentState = getAdPaymentState(adData);
       const hasLinkedShopReceipt = adPaymentState === 'not_paid'
@@ -32448,6 +32613,17 @@ function renderModal() {
 
           <!-- SCROLLABLE FORM BODY -->
           <form id="modal-form" class="flex-1 overflow-y-auto py-4 space-y-4" style="max-height: calc(85vh - 140px);">
+            ${isImportedMetaDraft ? `
+              <div role="status" class="rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-900 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-100">
+                <div class="flex items-start gap-3">
+                  <i data-lucide="wand-sparkles" class="mt-0.5 h-5 w-5 shrink-0"></i>
+                  <div>
+                    <div class="font-bold">${isArAd ? 'تم استيراد هذا الإعلان تلقائياً من Meta' : 'This ad was imported automatically from Meta'}</div>
+                    <p class="mt-1 text-xs leading-relaxed">${isArAd ? 'معلومات Meta والصفحة جاهزة. اختر العميل والدفع والوصل والمبلغ ثم اضغط حفظ. لا يوجد دين على أي عميل حتى تحفظ هذه التفاصيل.' : 'The Meta and page details are ready. Choose the customer, payment, receipt and amount, then Save. No customer debt exists until these details are saved.'}</p>
+                  </div>
+                </div>
+              </div>
+            ` : ''}
             
             <!-- SECTION 1: Basic Info -->
             <div class="bg-gradient-to-r from-slate-50 to-slate-100 dark:from-slate-800/50 dark:to-slate-800/30 rounded-xl p-4 space-y-3 border border-slate-200 dark:border-slate-700">
@@ -32460,12 +32636,12 @@ function renderModal() {
               <div class="flex items-center justify-between p-2 bg-white dark:bg-slate-900 rounded-lg">
                 <div class="flex items-center space-x-2">
                   <div class="w-7 h-7 rounded-full bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center text-indigo-600 font-bold text-xs">
-                    ${adCreator?.name?.charAt(0) || 'U'}
+                    ${Security.escapeHtml(adCreatorDisplayName.charAt(0) || 'M')}
                   </div>
-                  <span class="text-sm text-slate-600 dark:text-slate-300">${Security.escapeHtml(adCreator?.name || (isArAd ? 'غير معروف' : 'Unknown'))}</span>
+                  <span class="text-sm text-slate-600 dark:text-slate-300">${Security.escapeHtml(adCreatorDisplayName)}</span>
                 </div>
-                <span class="px-2 py-0.5 rounded-full text-[9px] font-bold ${creatorIsAdmin ? 'bg-amber-100 text-amber-600' : 'bg-slate-200 text-slate-500'}">
-                  ${creatorIsAdmin ? (isArAd ? 'أدمن' : 'ADMIN') : (isArAd ? 'مستخدم' : 'USER')}
+                <span class="px-2 py-0.5 rounded-full text-[9px] font-bold ${isImportedMetaDraft ? 'bg-blue-100 text-blue-700' : (creatorIsAdmin ? 'bg-amber-100 text-amber-600' : 'bg-slate-200 text-slate-500')}">
+                  ${isImportedMetaDraft ? 'META' : (creatorIsAdmin ? (isArAd ? 'أدمن' : 'ADMIN') : (isArAd ? 'مستخدم' : 'USER'))}
                 </span>
               </div>
               <input type="hidden" id="ad-creator-id" value="${adCreator?.id || state.currentUser?.id || ''}" />
@@ -40746,6 +40922,112 @@ function metaAdsFormatDate(value, withTime = false) {
   }
 }
 
+function metaAdsDurationDays(ad) {
+  const stored = Number(ad?.metaDurationDays);
+  if (Number.isSafeInteger(stored) && stored > 0) return stored;
+  const start = ad?.metaStartTime ? new Date(ad.metaStartTime) : null;
+  const end = ad?.metaEndTime ? new Date(ad.metaEndTime) : null;
+  if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 0;
+  const milliseconds = end.getTime() - start.getTime();
+  return milliseconds > 0 ? Math.max(1, Math.ceil(milliseconds / 86400000)) : 0;
+}
+
+function metaAdsPlannedTotalMinor(ad) {
+  const stored = Number(ad?.metaTotalBudgetMinor) || 0;
+  if (stored > 0) return Math.round(stored);
+  const lifetime = Number(ad?.metaLifetimeBudgetMinor) || 0;
+  if (lifetime > 0) return Math.round(lifetime);
+  const daily = Number(ad?.metaDailyBudgetMinor) || 0;
+  const days = metaAdsDurationDays(ad);
+  return daily > 0 && days > 0 ? Math.round(daily * days) : 0;
+}
+
+function metaAdsTotalRemainingMinor(ad) {
+  const stored = Number(ad?.metaTotalRemainingBudgetMinor);
+  if (Number.isFinite(stored) && stored >= 0) return Math.round(stored);
+  const total = metaAdsPlannedTotalMinor(ad);
+  const spent = Math.max(0, Number(ad?.metaSpendMinor) || 0);
+  return total > 0 ? Math.max(Math.round(total - spent), 0) : 0;
+}
+
+function metaAdsIsPlaceholderPageName(value, pageId) {
+  const name = String(value || '').trim().toLocaleLowerCase();
+  const id = String(pageId || '').trim().toLocaleLowerCase();
+  return !name || name === id || name === 'facebook page' || name === `facebook page ${id}` || name === `page ${id}`;
+}
+
+function renderMetaAdPageSummary(ad, adPage, adPageDeleted, isAr) {
+  const pageId = String(ad?.metaPageId || adPage?.metaPageId || '').trim();
+  const localName = String(adPage?.name || '').trim();
+  const metaName = String(ad?.metaPageName || adPage?.metaPageName || '').trim();
+  // Never display the imported placeholder ("Facebook Page 123…") as if it
+  // were the page's name: it just repeats the page ID a second time.
+  const realLocalName = metaAdsIsPlaceholderPageName(localName, pageId) ? '' : localName;
+  const realMetaName = metaAdsIsPlaceholderPageName(metaName, pageId) ? '' : metaName;
+  const pageName = realLocalName || realMetaName;
+  const genericLabel = isAr ? 'صفحة فيسبوك' : 'Facebook Page';
+  const displayName = pageName || genericLabel;
+  const category = String(adPage?.category || ad?.metaPageCategory || '').trim();
+  const displayCategory = category && category.toLocaleLowerCase() !== displayName.toLocaleLowerCase() ? category : '';
+  if (!pageName && !pageId && !localName) return '<span class="text-xs text-slate-400">-</span>';
+  // Layout (user request): the Facebook page ID first, the page NAME directly
+  // below it — the ID must appear exactly once.
+  return `<div data-role="meta-page-summary">
+    ${pageId ? `<div class="break-all font-mono text-[11px] font-semibold text-slate-500 dark:text-slate-400" title="${isAr ? 'معرف صفحة فيسبوك' : 'Facebook Page ID'}">#${Security.escapeHtml(pageId)}</div>` : ''}
+    <div class="${pageId ? 'mt-0.5 ' : ''}break-words text-sm font-semibold ${adPageDeleted ? 'text-slate-500 dark:text-slate-400' : 'text-indigo-700 dark:text-indigo-300'}" ${pageName ? '' : `title="${isAr ? 'اسم الصفحة يُحمَّل من Meta تلقائياً' : 'The page name is loading automatically from Meta'}"`}>${Security.escapeHtml(displayName)}</div>
+    ${adPageDeleted ? `<div class="mt-0.5 inline-block rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">${isAr ? 'محذوفة' : 'Deleted'}</div>` : ''}
+    ${displayCategory ? `<div class="text-xs text-slate-500">${Security.escapeHtml(displayCategory)}</div>` : ''}
+  </div>`;
+}
+
+function renderMetaAdThumbnail(ad, isAr) {
+  if (!ad?.metaAdId) return '';
+  if (!ad.metaThumbnailUrl) {
+    // A linked ad whose real photo has not been resolved yet: show an honest
+    // "photo loading" tile instead of nothing (and never the page logo).
+    const pending = isAr ? 'صورة الإعلان قيد التحميل من Meta' : 'Ad photo is loading from Meta';
+    return `<div class="meta-ad-thumbnail-button meta-ad-thumbnail-placeholder" role="img" title="${pending}" aria-label="${pending}"><i data-lucide="image" class="h-5 w-5"></i></div>`;
+  }
+  const label = isAr ? 'عرض صورة إعلان Meta' : 'View Meta ad image';
+  return `<button type="button" data-meta-preview-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openMetaAdPreview(this.dataset.metaPreviewAdId)" class="meta-ad-thumbnail-button" title="${label}" aria-label="${label}">
+    <img src="${Security.escapeHtml(String(ad.metaThumbnailUrl))}" alt="${label}" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="metaAdsThumbnailError(this)">
+    <span class="meta-ad-thumbnail-badge"><i data-lucide="maximize-2" class="h-3 w-3"></i></span>
+  </button>`;
+}
+
+function metaAdsThumbnailError(img) {
+  // Meta photo URLs are signed and expire. When one dies before the next
+  // sync refreshes it, degrade to the same "photo loading" tile instead of
+  // hiding the tile (which silently removed the photo column for that ad).
+  const button = img?.closest?.('.meta-ad-thumbnail-button');
+  if (!button || button.classList.contains('meta-ad-thumbnail-placeholder')) return;
+  const pending = metaAdsIsArabic() ? 'صورة الإعلان قيد التحميل من Meta' : 'Ad photo is loading from Meta';
+  button.classList.add('meta-ad-thumbnail-placeholder');
+  button.disabled = true;
+  button.title = pending;
+  button.setAttribute('aria-label', pending);
+  button.innerHTML = '<i data-lucide="image" class="h-5 w-5"></i>';
+  IconQueue.schedule(button);
+}
+
+function openMetaAdPreview(adId) {
+  const ad = metaAdsFindLocalAd(adId);
+  if (!ad?.metaThumbnailUrl) return;
+  const isAr = metaAdsIsArabic();
+  document.getElementById('meta-ad-preview-modal')?.remove();
+  const title = ad.metaAdName || (isAr ? 'صورة إعلان Meta' : 'Meta ad image');
+  document.body.insertAdjacentHTML('beforeend', `<div id="meta-ad-preview-modal" role="dialog" aria-modal="true" aria-labelledby="meta-ad-preview-title" class="mobile-dialog-overlay fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/80 p-3 backdrop-blur-sm" onclick="if(event.target === this) this.remove()">
+    <div class="w-full max-w-3xl overflow-hidden rounded-2xl bg-white shadow-2xl dark:bg-slate-900" onclick="event.stopPropagation()">
+      <div class="flex items-center justify-between gap-3 border-b border-slate-200 p-3 dark:border-slate-700 sm:p-4">
+        <div class="min-w-0"><h2 id="meta-ad-preview-title" class="truncate font-black text-slate-800 dark:text-white">${Security.escapeHtml(title)}</h2><p class="truncate text-xs text-slate-500">${Security.escapeHtml(ad.metaAdAccountName || '')}</p></div>
+        <button type="button" onclick="document.getElementById('meta-ad-preview-modal').remove()" class="touch-target inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${isAr ? 'إغلاق' : 'Close'}"><i data-lucide="x" class="h-5 w-5"></i></button>
+      </div>
+      <div class="flex max-h-[75dvh] items-center justify-center overflow-auto bg-slate-100 p-2 dark:bg-slate-950 sm:p-4"><img src="${Security.escapeHtml(String(ad.metaThumbnailUrl))}" alt="${Security.escapeHtml(title)}" class="max-h-[70dvh] max-w-full rounded-xl object-contain" referrerpolicy="no-referrer"></div>
+    </div>
+  </div>`);
+  lucide.createIcons();
+}
+
 function metaAdsStatusTone(value) {
   const status = String(value || '').toUpperCase();
   if (['ACTIVE'].includes(status)) return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300';
@@ -40764,10 +41046,15 @@ function renderMetaAdStatusSummary(ad, isAr) {
   const liveStatus = String(ad.metaEffectiveStatus || ad.metaConfiguredStatus || 'UNKNOWN');
   const synced = metaAdsFormatDate(ad.metaSyncedAt, true);
   const error = String(ad.metaSyncError || '');
+  const accountName = String(ad.metaAdAccountName || '').trim();
+  const accountId = String(ad.metaAdAccountId || '').trim();
+  const historyCount = typeof getMetaAdHistoryCount === 'function' ? getMetaAdHistoryCount(ad) : (Number(ad.metaChangeCount) || 0);
   return `<div data-role="meta-ad-status" class="mt-2 max-w-[15rem] rounded-lg border border-blue-100 bg-blue-50/70 p-2 text-[10px] leading-4 dark:border-blue-900 dark:bg-blue-950/30">
     <div class="flex flex-wrap items-center gap-1"><span class="font-bold text-blue-700 dark:text-blue-300">Meta</span><span class="rounded-full px-1.5 py-0.5 font-bold ${metaAdsStatusTone(liveStatus)}">${Security.escapeHtml(liveStatus)}</span></div>
     ${ad.metaAdName ? `<div class="mt-1 truncate font-medium text-slate-700 dark:text-slate-200" title="${Security.escapeHtml(ad.metaAdName)}">${Security.escapeHtml(ad.metaAdName)}</div>` : ''}
+    ${(accountName || accountId) ? `<div data-role="meta-ad-account" class="mt-1 flex items-start gap-1 text-slate-600 dark:text-slate-300" title="${Security.escapeHtml(accountName || `Ad account ${accountId}`)}"><i data-lucide="briefcase-business" class="mt-0.5 h-3 w-3 shrink-0"></i><span class="min-w-0 break-words"><strong>${isAr ? 'حساب الإعلانات' : 'Ad account'}:</strong> ${Security.escapeHtml(accountName || `#${accountId}`)}${accountName && accountId ? ` <span class="text-slate-400">#${Security.escapeHtml(accountId)}</span>` : ''}</span></div>` : ''}
     ${synced ? `<div class="text-slate-500">${isAr ? 'آخر مزامنة' : 'Last sync'}: ${Security.escapeHtml(synced)}</div>` : ''}
+    <button type="button" data-meta-history-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="showMetaAdHistory(this.dataset.metaHistoryAdId)" class="meta-ad-history-button" title="${isAr ? 'عرض سجل تغييرات Meta' : 'View Meta change history'}" aria-label="${isAr ? 'عرض سجل تغييرات Meta' : 'View Meta change history'}"><i data-lucide="history" class="h-3.5 w-3.5"></i><span>${isAr ? 'سجل Meta' : 'Meta history'}</span><strong>${historyCount}</strong></button>
     ${error ? `<div class="mt-1 text-rose-600 dark:text-rose-300" title="${Security.escapeHtml(error)}">${Security.escapeHtml(error)}</div>` : ''}
   </div>`;
 }
@@ -40777,11 +41064,14 @@ function renderMetaAdBudgetSummary(ad, isAr) {
   const currency = ad.metaCurrency || 'USD';
   const daily = Number(ad.metaDailyBudgetMinor) || 0;
   const lifetime = Number(ad.metaLifetimeBudgetMinor) || 0;
-  const budget = lifetime || daily;
-  const budgetLabel = lifetime ? (isAr ? 'ميزانية Meta الكلية' : 'Meta lifetime') : (isAr ? 'ميزانية Meta اليومية' : 'Meta daily');
+  const total = metaAdsPlannedTotalMinor(ad);
+  const remaining = metaAdsTotalRemainingMinor(ad);
+  const totalKind = lifetime > 0 || ad.metaTotalBudgetKind === 'lifetime' ? 'lifetime' : (total > 0 ? 'estimated_daily' : 'open_ended');
   return `<div data-role="meta-ad-budget" class="mt-1 text-[10px] font-medium text-blue-600 dark:text-blue-300">
-    ${budget ? `<div>${budgetLabel}: ${Security.escapeHtml(metaAdsFormatMoney(budget, currency))}</div>` : ''}
+    ${daily ? `<div>${isAr ? 'ميزانية Meta اليومية' : 'Meta daily'}: ${Security.escapeHtml(metaAdsFormatMoney(daily, currency))}</div>` : ''}
+    ${total ? `<div class="font-bold">${totalKind === 'lifetime' ? (isAr ? 'ميزانية Meta الكلية' : 'Meta total') : (isAr ? 'الإجمالي المخطط' : 'Planned total')}: ${Security.escapeHtml(metaAdsFormatMoney(total, currency))}</div>` : (daily ? `<div>${isAr ? 'الإجمالي' : 'Total'}: ${isAr ? 'مفتوح بدون تاريخ انتهاء' : 'Open-ended (no end date)'}</div>` : '')}
     <div>${isAr ? 'مصروف Meta' : 'Meta spent'}: ${Security.escapeHtml(metaAdsFormatMoney(ad.metaSpendMinor, currency))}</div>
+    ${total ? `<div class="font-bold text-emerald-700 dark:text-emerald-300">${isAr ? 'المتبقي من الميزانية الكلية' : 'Total remaining'}: ${Security.escapeHtml(metaAdsFormatMoney(remaining, currency))}</div>` : ''}
   </div>`;
 }
 
@@ -40789,9 +41079,11 @@ function renderMetaAdScheduleSummary(ad, isAr) {
   if (!ad || !ad.metaAdId) return '';
   const start = metaAdsFormatDate(ad.metaStartTime);
   const end = metaAdsFormatDate(ad.metaEndTime);
+  const days = metaAdsDurationDays(ad);
   if (!start && !end) return '';
   return `<div data-role="meta-ad-schedule" class="mt-2 border-t border-blue-100 pt-1 text-[10px] text-blue-600 dark:border-blue-900 dark:text-blue-300">
     <div class="font-bold">Meta</div>
+    ${days ? `<div class="font-bold">${isAr ? 'المدة' : 'Duration'}: ${days} ${isAr ? 'يوم' : `day${days === 1 ? '' : 's'}`}</div>` : ''}
     ${start ? `<div>${isAr ? 'بدء' : 'Start'}: ${Security.escapeHtml(start)}</div>` : ''}
     ${end ? `<div>${isAr ? 'انتهاء' : 'End'}: ${Security.escapeHtml(end)}</div>` : ''}
   </div>`;
@@ -40895,6 +41187,8 @@ function metaAdsRenderModal() {
   }
   const status = metaAdsUi.status;
   const configured = status?.configured === true;
+  const importState = status?.importState && typeof status.importState === 'object' ? status.importState : {};
+  const lastDiscoveryText = metaAdsFormatDate(importState.lastDiscoveryAt, true);
   // iOS Safari's CSS vh/dvh can describe the layout viewport while the address
   // bar leaves a shorter interactive viewport. A measured pixel cap keeps the
   // close button and the panel's own scrollbar inside what the user can touch.
@@ -40925,6 +41219,18 @@ function metaAdsRenderModal() {
       <div class="rounded-xl border border-slate-200 p-3 dark:border-slate-700"><div class="text-xs text-slate-500">${isAr ? 'المزامنة التلقائية' : 'Automatic sync'}</div><div class="mt-1 font-bold">${status.backgroundSync ? `${Number(status.syncIntervalMinutes) || 15} ${isAr ? 'دقيقة' : 'minutes'}` : (isAr ? 'متوقفة' : 'Off')}</div></div>
     </div>` : ''}
 
+    ${!metaAdsUi.loading && configured ? `<div class="mt-3 rounded-xl border border-emerald-200 bg-emerald-50/70 p-4 dark:border-emerald-800 dark:bg-emerald-950/20">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div class="flex items-center gap-2 font-black text-emerald-800 dark:text-emerald-200"><i data-lucide="sparkles" class="h-4 w-4"></i>${isAr ? 'الاستيراد التلقائي للإعلانات والصفحات' : 'Automatic ad and page import'}</div>
+          <div class="mt-1 text-xs text-emerald-700 dark:text-emerald-300">${status.autoImport ? (isAr ? `يعمل كل ${Number(status.discoveryIntervalSeconds) || 60} ثانية` : `Runs every ${Number(status.discoveryIntervalSeconds) || 60} seconds`) : (isAr ? 'متوقف' : 'Off')} · ${isAr ? 'الحسابات' : 'Accounts'}: ${Number(importState.accountCount || status.allowedAccountCount) || 0}</div>
+          <div class="mt-1 text-xs text-slate-500">${lastDiscoveryText ? `${isAr ? 'آخر فحص' : 'Last check'}: ${Security.escapeHtml(lastDiscoveryText)} · ` : ''}${isAr ? 'تم استيراد' : 'Imported'}: ${Number(importState.totalImported) || 0}${Number(importState.lastImportedCount) ? ` (${isAr ? 'آخر فحص' : 'last check'}: ${Number(importState.lastImportedCount)})` : ''}</div>
+          ${importState.lastError ? `<div class="mt-1 text-xs font-medium text-rose-600 dark:text-rose-300">${Security.escapeHtml(importState.lastError)}</div>` : ''}
+        </div>
+        <button type="button" onclick="metaAdsCheckForNewAds()" ${metaAdsUi.busyAction ? 'disabled' : ''} class="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-60"><i data-lucide="${metaAdsUi.busyAction === 'discover' ? 'loader-circle' : 'radar'}" class="h-4 w-4 ${metaAdsUi.busyAction === 'discover' ? 'animate-spin' : ''}"></i>${isAr ? 'فحص الإعلانات الجديدة الآن' : 'Check for new ads now'}</button>
+      </div>
+    </div>` : ''}
+
     ${!metaAdsUi.loading && status && !configured ? `<div class="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-100"><div class="font-black">${isAr ? 'أضف هذه المتغيرات في Jelastic ثم أعد تشغيل الحاوية:' : 'Add these environment variables in Jelastic, then restart the container:'}</div><code class="mt-2 block select-all whitespace-pre-wrap rounded-lg bg-slate-950 p-3 text-xs text-emerald-300" dir="ltr">ALBAYAN_META_ACCESS_TOKEN=your_token\nALBAYAN_META_APP_SECRET=your_app_secret\nALBAYAN_META_AD_ACCOUNT_IDS=123456789</code><p class="mt-2">${isAr ? 'لا تكتب رمز الدخول في Albayan أو في المحادثة. ضعه فقط داخل إعدادات Jelastic.' : 'Never type the access token into Albayan or chat. Put it only in Jelastic settings.'}</p></div>` : ''}
 
     ${target ? `<div class="mt-4 rounded-xl border border-indigo-200 bg-indigo-50/60 p-4 dark:border-indigo-800 dark:bg-indigo-950/20"><div class="text-xs font-bold text-indigo-600">${isAr ? 'إعلان Albayan المحدد' : 'Selected Albayan ad'}</div><div class="mt-1 font-black text-slate-800 dark:text-white">#${Security.escapeHtml(String(target.id))} · ${Security.escapeHtml(target.customerName || target.pageName || (isAr ? 'إعلان' : 'Ad'))}</div>${target.metaAdId ? `<div class="mt-2 text-sm text-slate-600 dark:text-slate-300">${isAr ? 'مرتبط بـ' : 'Linked to'}: <strong>${Security.escapeHtml(currentName)}</strong> (#${Security.escapeHtml(String(target.metaAdId))})</div><div class="mt-3 flex flex-wrap gap-2"><button type="button" onclick="metaAdsSyncCurrent()" ${metaAdsUi.busyAction ? 'disabled' : ''} class="inline-flex min-h-11 items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 font-bold text-white disabled:opacity-60"><i data-lucide="refresh-cw" class="h-4 w-4 ${metaAdsUi.busyAction === 'sync' ? 'animate-spin' : ''}"></i>${isAr ? 'مزامنة الآن' : 'Sync now'}</button><button type="button" onclick="metaAdsUnlinkCurrent()" ${metaAdsUi.busyAction ? 'disabled' : ''} class="inline-flex min-h-11 items-center gap-2 rounded-xl border border-rose-200 px-4 py-2 font-bold text-rose-600 disabled:opacity-60"><i data-lucide="unlink" class="h-4 w-4"></i>${isAr ? 'إلغاء الربط' : 'Unlink'}</button></div>` : `<div class="mt-2 text-sm text-slate-500">${isAr ? 'غير مرتبط حتى الآن.' : 'Not linked yet.'}</div>`}</div>` : `<div class="mt-4 rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-200">${isAr ? 'لفتح الربط: أغلق هذه النافذة واضغط زر «ربط» الصغير بجانب إعلان Albayan.' : 'To link an ad: close this window and press the small Link button beside an Albayan ad.'}</div>`}
@@ -40937,7 +41243,7 @@ function metaAdsRenderModal() {
       <div class="rounded-xl border border-dashed border-slate-300 p-3 dark:border-slate-700"><label for="meta-direct-ad-id" class="block text-xs font-bold text-slate-500">${isAr ? 'أو الصق رقم إعلان Meta مباشرة' : 'Or paste the numeric Meta ad ID'}</label><div class="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]"><input id="meta-direct-ad-id" inputmode="numeric" pattern="[0-9]*" placeholder="123456789012345" class="glass-input min-h-11 w-full rounded-xl px-3" dir="ltr"><button type="button" onclick="metaAdsLinkDirect()" ${metaAdsUi.busyAction ? 'disabled' : ''} class="min-h-11 rounded-xl bg-blue-600 px-4 font-bold text-white disabled:opacity-60">${isAr ? 'ربط' : 'Link'}</button></div></div>
     </div>` : ''}
 
-    ${configured && !metaAdsUi.loading ? `<div class="mt-5 flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 pt-4 dark:border-slate-700"><p class="text-xs text-slate-500">${isAr ? 'المزامنة التلقائية تعمل في السيرفر حتى عندما تغلق هذه الصفحة.' : 'Automatic sync runs on the server even when this page is closed.'}</p><button type="button" onclick="metaAdsSyncAllDue()" ${metaAdsUi.busyAction ? 'disabled' : ''} class="min-h-11 rounded-xl border border-blue-200 px-3 text-sm font-bold text-blue-700 disabled:opacity-60 dark:border-blue-800 dark:text-blue-200">${isAr ? 'مزامنة المستحق الآن' : 'Sync due now'}</button></div>` : ''}
+    ${configured && !metaAdsUi.loading ? `<div class="mt-5 flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 pt-4 dark:border-slate-700"><p class="text-xs text-slate-500">${isAr ? 'يعمل الاستيراد والمزامنة في السيرفر حتى عندما تغلق هذه الصفحة.' : 'Automatic import and sync run on the server even when this page is closed.'}</p><button type="button" onclick="metaAdsSyncAllDue()" ${metaAdsUi.busyAction ? 'disabled' : ''} class="min-h-11 rounded-xl border border-blue-200 px-3 text-sm font-bold text-blue-700 disabled:opacity-60 dark:border-blue-800 dark:text-blue-200">${isAr ? 'مزامنة المستحق الآن' : 'Sync due now'}</button></div>` : ''}
   </div>`;
   metaAdsFitModalToViewport();
   window.requestAnimationFrame(() => metaAdsFitModalToViewport());
@@ -41075,6 +41381,34 @@ function metaAdsUnlinkCurrent() {
   metaAdsRunMutation('unlink');
 }
 
+async function metaAdsCheckForNewAds() {
+  if (metaAdsUi.busyAction) return;
+  const isAr = metaAdsIsArabic();
+  metaAdsUi.busyAction = 'discover';
+  metaAdsUi.error = '';
+  metaAdsRenderModal();
+  try {
+    const result = await apiRunMetaAutoImport();
+    if (result.imported.length) {
+      applyValidatedServerEntityBatch(result.imported.map(entity => ({ collection: 'ads', entity })), 'metaAutoImport');
+    }
+    if (metaAdsUi.status) metaAdsUi.status.importState = result.state;
+    const count = result.imported.length;
+    showNotification(
+      isAr ? 'اكتمل فحص Meta' : 'Meta check complete',
+      count
+        ? (isAr ? `تم إنشاء ${count} إعلان جديد كمسودة آمنة تحتاج إكمال.` : `${count} new ad(s) were created as safe drafts that need completion.`)
+        : (isAr ? 'لا توجد إعلانات جديدة الآن.' : 'There are no new ads right now.'),
+      'success'
+    );
+  } catch (error) {
+    metaAdsUi.error = metaAdsErrorMessage(error);
+  } finally {
+    metaAdsUi.busyAction = '';
+    metaAdsRenderModal();
+  }
+}
+
 async function metaAdsSyncAllDue() {
   if (metaAdsUi.busyAction) return;
   const isAr = metaAdsIsArabic();
@@ -41082,9 +41416,11 @@ async function metaAdsSyncAllDue() {
   metaAdsUi.error = '';
   metaAdsRenderModal();
   try {
-    const entities = await apiSyncDueMetaAds(20);
+    const result = await apiSyncDueMetaAds(4);
+    const entities = [...result.ads, ...result.imported];
     if (entities.length) applyValidatedServerEntityBatch(entities.map(entity => ({ collection: 'ads', entity })), 'metaSyncDue');
-    showNotification(isAr ? 'اكتملت المزامنة' : 'Sync complete', isAr ? `تم فحص وتحديث ${entities.length} إعلان.` : `Checked and updated ${entities.length} ad(s).`, 'success');
+    if (metaAdsUi.status) metaAdsUi.status.importState = result.importState;
+    showNotification(isAr ? 'اكتملت المزامنة' : 'Sync complete', isAr ? `تم تحديث ${result.ads.length} واستيراد ${result.imported.length} إعلان.` : `Updated ${result.ads.length} and imported ${result.imported.length} ad(s).`, 'success');
   } catch (error) {
     metaAdsUi.error = metaAdsErrorMessage(error);
   } finally {

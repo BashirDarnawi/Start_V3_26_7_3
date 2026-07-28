@@ -199,6 +199,15 @@ function clearAdReceiptFilter() {
   render();
 }
 
+// Meta-first automation creates a financially neutral draft. Keep that state
+// separate from "not paid": a draft has no customer debt until a person opens
+// it, chooses the customer/payment/receipt details, and successfully saves it.
+function isMetaAdSetupPending(ad) {
+  if (!ad || typeof ad !== 'object') return false;
+  return String(ad.metaImportState || '').toLowerCase() === 'needs_completion'
+    || String(ad.paymentStatus || '').toLowerCase() === 'pending_setup';
+}
+
 function getFilteredAds(customersById = null) {
   let filtered = getAdsVisibleToCurrentUser();
 
@@ -215,10 +224,12 @@ function getFilteredAds(customersById = null) {
   }
   if (f.payment && f.payment !== 'all') {
     filtered = filtered.filter(ad => {
+      const needsSetup = isMetaAdSetupPending(ad);
+      if (f.payment === 'pending_setup') return needsSetup;
       const paymentState = getAdPaymentState(ad);
-      if (f.payment === 'paid') return paymentState === 'paid';
-      if (f.payment === 'wont_pay') return paymentState === 'wont_pay';
-      return paymentState === 'not_paid';
+      if (f.payment === 'paid') return !needsSetup && paymentState === 'paid';
+      if (f.payment === 'wont_pay') return !needsSetup && paymentState === 'wont_pay';
+      return !needsSetup && paymentState === 'not_paid';
     });
   }
   if (f.page && f.page !== 'all') {
@@ -239,6 +250,10 @@ function getFilteredAds(customersById = null) {
     const custMap = customersById || new Map(state.customers.map(c => [c.id, c]));
     const pageMap = new Map((state.pages || []).map(p => [p.id, p]));
     const canSearchContacts = can('customers', 'viewContacts');
+    // The table renders Meta page/ad IDs with a leading '#'; a copied
+    // "#123456" search must still match the stored bare digits. A lone "#"
+    // must not match everything, so keep the original term as fallback.
+    const idTerm = searchTerm.replace(/^#/, '') || searchTerm;
     filtered = filtered.filter(ad => {
       const customer = custMap.get(ad.customerId);
       const page = ad.pageId ? pageMap.get(ad.pageId) : null;
@@ -248,10 +263,14 @@ function getFilteredAds(customersById = null) {
         (canSearchContacts && foldSearchText(ad.phoneNumber).includes(searchTerm)) ||
         foldSearchText(ad.serialNumber).includes(searchTerm) ||
         foldSearchText(page?.name).includes(searchTerm) ||
-        foldSearchText(ad.metaAdId).includes(searchTerm) ||
+        foldSearchText(ad.metaAdId).includes(idTerm) ||
         foldSearchText(ad.metaAdName).includes(searchTerm) ||
         foldSearchText(ad.metaCampaignName).includes(searchTerm) ||
-        foldSearchText(ad.metaAdSetName).includes(searchTerm)
+        foldSearchText(ad.metaAdSetName).includes(searchTerm) ||
+        // The Page column shows the Meta page ID and name even when no local
+        // page record exists — what is visible must be searchable.
+        foldSearchText(ad.metaPageId || page?.metaPageId).includes(idTerm) ||
+        foldSearchText(ad.metaPageName || page?.metaPageName).includes(searchTerm)
       );
     });
   }
@@ -4625,9 +4644,13 @@ function _adEditHistoryText(value, fallback = '—') {
 // Normalize legacy/imported rows before rendering. Older data can use
 // date/userName/oldValue/newValue, and a malformed row must never break the
 // whole Ads screen.
-function getAdEditHistoryEntries(ad) {
-  const rows = Array.isArray(ad?.editHistory) ? ad.editHistory : [];
-  return rows
+function _isLegacyMetaSyncHistoryRow(row) {
+  const actor = String(row?.editedBy || row?.userName || row?.actorName || '').trim().toLowerCase();
+  return actor.startsWith('meta automatic') || String(row?.source || '').toLowerCase().startsWith('meta_');
+}
+
+function _normalizeAdHistoryRows(rows) {
+  return (Array.isArray(rows) ? rows : [])
     .filter(row => row && typeof row === 'object' && !Array.isArray(row))
     .map(row => {
       const rawChanges = Array.isArray(row.changes) ? row.changes : [];
@@ -4648,15 +4671,52 @@ function getAdEditHistoryEntries(ad) {
       return {
         editedAt: row.editedAt || row.date || row.updatedAt || '',
         editedBy: _adEditHistoryText(row.editedBy || row.userName || row.actorName, 'Unknown'),
-        changes
+        changes,
+        source: _adEditHistoryText(row.source, ''),
+        eventId: _adEditHistoryText(row.eventId, ''),
+        eventType: _adEditHistoryText(row.eventType, ''),
+        objectId: _adEditHistoryText(row.objectId, ''),
+        objectType: _adEditHistoryText(row.objectType, ''),
+        tool: _adEditHistoryText(row.tool, '')
       };
+    });
+}
+
+function getAdEditHistoryEntries(ad) {
+  const rows = Array.isArray(ad?.editHistory) ? ad.editHistory : [];
+  return _normalizeAdHistoryRows(rows.filter(row => !_isLegacyMetaSyncHistoryRow(row)));
+}
+
+function getMetaAdHistoryEntries(ad) {
+  const dedicated = Array.isArray(ad?.metaChangeHistory) ? ad.metaChangeHistory : [];
+  const legacy = (Array.isArray(ad?.editHistory) ? ad.editHistory : []).filter(_isLegacyMetaSyncHistoryRow);
+  const seen = new Set();
+  return _normalizeAdHistoryRows([...dedicated, ...legacy])
+    .filter(row => {
+      const key = row.eventId || `${row.editedAt}|${row.editedBy}|${JSON.stringify(row.changes)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((left, right) => {
+      const a = new Date(left.editedAt).getTime();
+      const b = new Date(right.editedAt).getTime();
+      return (Number.isFinite(a) ? a : 0) - (Number.isFinite(b) ? b : 0);
     });
 }
 
 function getAdEditHistoryCount(ad) {
   const detailedCount = getAdEditHistoryEntries(ad).length;
   if (detailedCount > 0) return detailedCount;
+  if (Array.isArray(ad?.editHistory) && ad.editHistory.length > 0) return 0;
   const storedCount = Number(ad?.editCount);
+  return Number.isSafeInteger(storedCount) && storedCount > 0 ? storedCount : 0;
+}
+
+function getMetaAdHistoryCount(ad) {
+  const detailedCount = getMetaAdHistoryEntries(ad).length;
+  if (detailedCount > 0) return detailedCount;
+  const storedCount = Number(ad?.metaChangeCount);
   return Number.isSafeInteger(storedCount) && storedCount > 0 ? storedCount : 0;
 }
 
@@ -4755,6 +4815,42 @@ function showAdEditHistory(adId) {
 
   document.getElementById('edit-history-modal')?.remove();
   document.body.insertAdjacentHTML('beforeend', modalHTML);
+  lucide.createIcons();
+}
+
+function showMetaAdHistory(adId) {
+  const ad = state.ads.find(a => String(a.id || '') === String(adId || ''));
+  if (!ad) return;
+  const isAr = state.language === 'ar';
+  const history = getMetaAdHistoryEntries(ad);
+  const account = String(ad.metaAdAccountName || '').trim() || (ad.metaAdAccountId ? `#${ad.metaAdAccountId}` : (isAr ? 'حساب Meta' : 'Meta account'));
+  const emptyText = isAr
+    ? 'لا توجد تغييرات Meta محفوظة بعد. ستظهر التغييرات هنا بعد اكتشافها في المزامنة.'
+    : 'No Meta changes are saved yet. Changes will appear here after synchronization detects them.';
+  const rows = history.length ? history.slice().reverse().map((entry, index) => {
+    const exactActivity = entry.source === 'meta_activity';
+    const sourceLabel = exactActivity
+      ? (isAr ? 'سجل نشاط Meta' : 'Meta activity')
+      : (entry.source === 'meta_import' ? (isAr ? 'استيراد Meta' : 'Meta import') : (isAr ? 'اكتشفته المزامنة' : 'Detected by sync'));
+    const eventLabel = entry.eventType ? entry.eventType.replaceAll('_', ' ') : '';
+    return `<article class="rounded-xl border border-blue-100 bg-blue-50/40 p-3 dark:border-blue-900 dark:bg-blue-950/20 sm:p-4">
+      <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div class="min-w-0"><div class="flex flex-wrap items-center gap-2"><span class="rounded-full bg-blue-600 px-2 py-1 text-[10px] font-black text-white">${isAr ? 'تغيير' : 'Change'} #${history.length - index}</span><span class="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">${sourceLabel}</span></div><p class="mt-2 break-words text-xs font-bold text-slate-700 dark:text-slate-200">${Security.escapeHtml(entry.editedBy)}</p></div>
+        <time class="text-xs text-slate-500">${Security.escapeHtml(_formatAdEditHistoryDate(entry.editedAt, isAr))}</time>
+      </div>
+      ${(eventLabel || entry.tool) ? `<div class="mt-2 flex flex-wrap gap-2 text-[10px] text-slate-500">${eventLabel ? `<span>${Security.escapeHtml(eventLabel)}</span>` : ''}${entry.tool ? `<span>• ${Security.escapeHtml(entry.tool)}</span>` : ''}</div>` : ''}
+      <div class="mt-3 space-y-2">${entry.changes.length ? entry.changes.map(change => `<div class="rounded-lg border border-slate-200 bg-white p-3 text-sm dark:border-slate-700 dark:bg-slate-900"><div class="font-bold text-slate-700 dark:text-slate-200">${Security.escapeHtml(change.field)}</div><div class="mt-2 flex flex-wrap items-center gap-2 text-xs"><span class="max-w-full break-words rounded bg-rose-100 px-2 py-1 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300">${Security.escapeHtml(change.from)}</span><i data-lucide="arrow-right" class="h-3 w-3 shrink-0 text-slate-400"></i><span class="max-w-full break-words rounded bg-emerald-100 px-2 py-1 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">${Security.escapeHtml(change.to)}</span></div></div>`).join('') : `<p class="text-xs text-slate-500">${isAr ? 'تفاصيل هذا التغيير القديم غير متاحة.' : 'Details for this older change are unavailable.'}</p>`}</div>
+    </article>`;
+  }).join('') : `<div class="rounded-xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500 dark:border-slate-700">${emptyText}</div>`;
+
+  document.getElementById('meta-history-modal')?.remove();
+  document.body.insertAdjacentHTML('beforeend', `<div id="meta-history-modal" role="dialog" aria-modal="true" aria-labelledby="meta-history-title" class="mobile-dialog-overlay fixed inset-0 z-[70] flex items-center justify-center bg-black/55 p-3 backdrop-blur-sm sm:p-4" onclick="if(event.target === this) this.remove()">
+    <div class="flex max-h-[88dvh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl dark:bg-slate-900" onclick="event.stopPropagation()" dir="${isAr ? 'rtl' : 'ltr'}">
+      <header class="flex items-start justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-700 sm:p-5"><div class="min-w-0"><h2 id="meta-history-title" class="flex items-center gap-2 text-xl font-black text-slate-800 dark:text-white"><i data-lucide="history" class="h-5 w-5 text-blue-600"></i>${isAr ? 'سجل تغييرات Meta' : 'Meta Change History'}</h2><p class="mt-1 break-words text-sm text-slate-500">${Security.escapeHtml(ad.metaAdName || `Meta #${ad.metaAdId || ''}`)} • ${Security.escapeHtml(account)}</p></div><button type="button" onclick="document.getElementById('meta-history-modal').remove()" class="touch-target inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${isAr ? 'إغلاق' : 'Close'}"><i data-lucide="x" class="h-5 w-5"></i></button></header>
+      <div class="overflow-y-auto p-3 sm:p-5"><div class="mb-3 rounded-xl bg-slate-50 p-3 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300"><strong>${isAr ? 'مهم:' : 'Important:'}</strong> ${isAr ? 'يعرض هذا السجل نشاط Meta الدقيق عندما تسمح به الصلاحيات، ويستخدم مقارنة المزامنة كنسخة احتياطية.' : 'This history uses exact Meta activity when permissions allow it, with synchronization comparison as a safe fallback.'}</div><div class="space-y-3">${rows}</div></div>
+      <footer class="border-t border-slate-200 bg-slate-50 px-4 py-3 text-center text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-950/50">${isAr ? 'الإجمالي' : 'Total'}: ${history.length}</footer>
+    </div>
+  </div>`);
   lucide.createIcons();
 }
 

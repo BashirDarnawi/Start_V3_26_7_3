@@ -1485,20 +1485,46 @@ async function apiUnlinkMetaAd(adId, expectedLastModified, operationId) {
   return validateMetaAdMutationResponse(response, 'metaUnlink.ad', localAd);
 }
 
-async function apiSyncDueMetaAds(limit = 20) {
+async function apiSyncDueMetaAds(limit = 4) {
   const identity = getServerSessionIdentity();
   const response = await apiJson('/api/meta-ads/sync-due', {
     method: 'POST',
     body: { limit: Math.max(1, Math.min(100, Number(limit) || 20)) }
   }, { timeoutMs: 120000 });
   if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
-  const rows = Array.isArray(response?.ads) ? response.ads : [];
-  return rows.map((entity, index) => {
-    const validated = validateServerEntityResponse('ads', entity, `metaSyncDue.ads[${index}]`);
+  const validateRows = (rows, context) => (Array.isArray(rows) ? rows : []).map((entity, index) => {
+    const validated = validateServerEntityResponse('ads', entity, `${context}[${index}]`);
     const localAd = (state.ads || []).find(row => row && String(row.id) === String(validated.id));
     validated.data = mergeMutationInlineMedia('ads', validated.data, localAd);
     return validated;
   });
+  return {
+    ads: validateRows(response?.ads, 'metaSyncDue.ads'),
+    imported: validateRows(response?.imported, 'metaSyncDue.imported'),
+    importState: response?.importState && typeof response.importState === 'object' ? response.importState : {}
+  };
+}
+
+async function apiRunMetaAutoImport() {
+  const identity = getServerSessionIdentity();
+  const response = await apiJson('/api/meta-ads/auto-import/run', {
+    method: 'POST',
+    // Historical Meta ads are deliberately not imported. This button checks
+    // only for ads that appeared after Albayan established its safe baseline.
+    body: { includeExisting: false }
+  }, { timeoutMs: 120000 });
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  const rows = Array.isArray(response?.imported) ? response.imported : [];
+  return {
+    imported: rows.map((entity, index) => {
+      const validated = validateServerEntityResponse('ads', entity, `metaAutoImport.imported[${index}]`);
+      const localAd = (state.ads || []).find(row => row && String(row.id) === String(validated.id));
+      validated.data = mergeMutationInlineMedia('ads', validated.data, localAd);
+      return validated;
+    }),
+    busy: response?.busy === true,
+    state: response?.state && typeof response.state === 'object' ? response.state : {}
+  };
 }
 
 // Merge two duplicate customers and every relationship that points at the

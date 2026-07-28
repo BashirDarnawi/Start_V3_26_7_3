@@ -201,6 +201,34 @@ history. Then open `http://127.0.0.1:8000`.
 Do not expose a fresh, uninitialized server to the internet. For production,
 use HTTPS, set `ALBAYAN_COOKIE_SECURE=true`, and follow `deploy/README.md`.
 
+### Meta-first automatic ad workflow
+
+When the read-only Meta credentials are configured, Albayan can discover new
+ads in the allowed ad accounts and create them automatically:
+
+- The first discovery records the existing Meta ads as a baseline; it does not
+  copy the full historical account into Albayan.
+- Every newly discovered Meta ad is created once as a **Needs setup** draft.
+- Its Facebook Page is matched by Meta Page ID first and normalized exact name
+  second. A missing page is created once and reused by later ads.
+- Automatic drafts have no customer, receipt, payment or Albayan amount. They
+  create **no debt and consume no receipt balance** until an authorized user
+  completes and saves those details.
+- Manual **Add Ad** and **Add Page** remain available.
+
+Polling is the reliable fallback and defaults to 60 seconds. For a faster
+signed wake-up, set `ALBAYAN_META_WEBHOOK_VERIFY_TOKEN` to a long random secret
+and configure this HTTPS callback in the Meta app:
+
+```text
+https://YOUR_DOMAIN/api/meta-ads/webhook
+```
+
+Use the same verify token in Meta and on the server. Meta requests are accepted
+only when their `X-Hub-Signature-256` matches the configured app secret; the
+payload is treated only as a wake-up signal and Albayan reads authoritative ad
+data from Meta before saving anything.
+
 ### Test and prepare a mobile release
 
 ```bash
