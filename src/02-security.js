@@ -23,9 +23,12 @@ const RECORD_IDENTIFIER_LIST_FIELDS = new Set(['adReceiptIds', 'customerIds', 'l
 // used only when crypto.subtle is unavailable.
 
 // New hashes created on the pure-JS path use fewer iterations (still recorded
-// in the stored `iterations` field, so they verify anywhere) because 310k
+// in the stored `iterations` field, so they verify anywhere) because 600k
 // PBKDF2 iterations in plain JS would block the UI for many seconds.
 const _ALB_FALLBACK_PBKDF2_ITERATIONS = 60000;
+// Web Crypto runs off the UI thread and can use OWASP's current
+// PBKDF2-HMAC-SHA256 work factor without freezing the browser.
+const _ALB_NATIVE_PBKDF2_ITERATIONS = 600000;
 
 // SHA-256 round constants (FIPS 180-4)
 const _ALB_SHA256_K = new Uint32Array([
@@ -221,7 +224,10 @@ const Security = {
 
   // Sanitize object recursively
   sanitizeObject: (obj, depth = 0) => {
-    if (depth > 10) return obj; // Prevent infinite recursion
+    // Never return unsanitized attacker-controlled data when the nesting limit
+    // is exceeded. Dropping an over-deep branch fails closed and still protects
+    // the UI from recursion/stack exhaustion.
+    if (depth > 10) return null;
     if (obj === null || obj === undefined) return obj;
     if (typeof obj === 'string') return Security.sanitizeInput(obj);
     if (typeof obj !== 'object') return obj;
@@ -262,7 +268,9 @@ const Security = {
   _bytesToHex: (bytes) => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join(''),
   _hexToBytes: (hex) => {
     const clean = String(hex || '').trim();
-    if (!clean || clean.length % 2 !== 0) throw new Error('Invalid hex salt');
+    if (!clean || clean.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(clean)) {
+      throw new Error('Invalid hex salt');
+    }
     const bytes = new Uint8Array(clean.length / 2);
     for (let i = 0; i < bytes.length; i++) {
       const byte = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
@@ -303,10 +311,16 @@ const Security = {
     // affected by this default.
     const iterations = Number.isFinite(options.iterations)
       ? options.iterations
-      : (subtle ? 310000 : _ALB_FALLBACK_PBKDF2_ITERATIONS);
+      : (subtle ? _ALB_NATIVE_PBKDF2_ITERATIONS : _ALB_FALLBACK_PBKDF2_ITERATIONS);
+    if (!Number.isSafeInteger(iterations) || iterations < 1 || iterations > 10000000) {
+      throw new Error('PBKDF2 iterations are outside the supported range');
+    }
     const saltBytes = salt
       ? Security._hexToBytes(salt)
       : crypto.getRandomValues(new Uint8Array(16));
+    if (saltBytes.length < 8 || saltBytes.length > 128) {
+      throw new Error('Password salt is outside the supported range');
+    }
     const saltHex = typeof salt === 'string' ? String(salt) : Security._bytesToHex(saltBytes);
 
     let derived;
@@ -340,6 +354,9 @@ const Security = {
 
   // Verify password against stored hash (supports legacy + PBKDF2)
   verifyPassword: async (password, storedHash, salt, algo = 'sha256', iterations = null) => {
+    if (algo !== 'sha256' && algo !== 'pbkdf2-sha256') return false;
+    const normalizedHash = String(storedHash || '').trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(normalizedHash)) return false;
     // Backwards compatibility: some backups may store iterations as a numeric string.
     // Example: "310000" instead of 310000. Treat digit-only strings as numbers.
     let iters = iterations;
@@ -350,11 +367,27 @@ const Security = {
         if (Number.isFinite(n)) iters = n;
       }
     }
-    const opts = algo === 'pbkdf2-sha256'
-      ? { algo: 'pbkdf2-sha256', iterations: Number.isFinite(iters) ? iters : 310000 }
-      : { algo: 'sha256' };
-    const { hash } = await Security.hashPassword(password, salt, opts);
-    return hash === storedHash;
+    // Old local backups created before iteration metadata was added used
+    // 310,000 rounds. Preserve that exact verification path, then upgrade the
+    // hash to the current work factor after a successful login.
+    if (algo === 'pbkdf2-sha256' && !Number.isFinite(iters)) iters = 310000;
+    if (algo === 'pbkdf2-sha256' && (
+      !Number.isSafeInteger(iters) || iters < 1 || iters > 10000000
+    )) return false;
+    try {
+      const opts = algo === 'pbkdf2-sha256'
+        ? { algo: 'pbkdf2-sha256', iterations: iters }
+        : { algo: 'sha256' };
+      const { hash } = await Security.hashPassword(password, salt, opts);
+      // Compare every character to avoid an early-exit password-hash oracle.
+      let difference = 0;
+      for (let i = 0; i < 64; i++) {
+        difference |= hash.charCodeAt(i) ^ normalizedHash.charCodeAt(i);
+      }
+      return difference === 0;
+    } catch (_) {
+      return false;
+    }
   },
 
   // Generate secure random ID
@@ -518,12 +551,16 @@ const Security = {
 // ==========================================
 // DEBUG MODE: Conditional debug telemetry (disabled in production)
 // ==========================================
-// Debug mode is controlled by the server returning a debug flag, or by URL parameter ?debug=1
-// In production (ALBAYAN_DEBUG_MODE=false), debug endpoints return 404 and this code is a no-op.
+// Debug telemetry can only be enabled from a local development origin. A
+// production URL parameter must never make customer/accounting data eligible
+// for diagnostic logging.
 
 const ALBAYAN_DEBUG_MODE = (() => {
   try {
-    // Check URL param for explicit debug mode
+    const host = String(window.location.hostname || '').toLowerCase();
+    const isLocalDevelopment = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+    if (!isLocalDevelopment) return false;
+    // Check URL param for explicit local debug mode
     const urlParams = new URLSearchParams(window.location.search);
     if (urlParams.get('debug') === '1') return true;
     // Default: debug mode is off in production

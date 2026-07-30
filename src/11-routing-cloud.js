@@ -5,6 +5,7 @@
 // Map view names to URL paths
 const VIEW_TO_PATH = {
   'services-hub': '/',
+  'control-center': '/control-center',
   'analytics': '/analytics',
   'ads': '/ads',
   'customers': '/customers',
@@ -368,6 +369,8 @@ function restoreModalFromUrl() {
       state.tempAdFunding = null;
       state.tempMergeFunding = null;
       state.tempAdPhotos = [];
+      state.tempAdPrimaryPhotoIndex = 0;
+      state.tempAdPrimaryPhotoDirty = false;
       state.tempReceiptPhotos = [];
       state.tempAdPhotosDirty = false;
       state.tempReceiptPhotosDirty = false;

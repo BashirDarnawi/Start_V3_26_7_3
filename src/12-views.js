@@ -1374,6 +1374,7 @@ function renderAlwaysAvailableAccountLinks() {
 function renderSidebar() {
   // Map nav items to their permission modules
   const navItemPermissions = {
+    'control-center': 'analytics',
     'analytics': 'analytics',
     'customers': 'customers',
     'receipts': 'receipts',
@@ -1388,6 +1389,7 @@ function renderSidebar() {
   };
 
   const allNavItems = [
+    { id: 'control-center', icon: 'gauge', label: 'Control Center' },
     { id: 'analytics', icon: 'layout-dashboard', label: 'analytics' },
     { id: 'customers', icon: 'smile', label: 'customers' },
     { id: 'receipts', icon: 'receipt', label: 'receipts' },
@@ -1533,6 +1535,7 @@ function renderSidebar() {
 function renderView() {
   switch (state.currentView) {
     case 'services-hub': return renderServicesHub();
+    case 'control-center': return renderControlCenterView();
     case 'smart-systems': return renderSmartSystems();
     case 'clothes-system': return renderClothesSystemView();
     case 'ads-studio': return renderAdsStudioView();
@@ -2233,6 +2236,9 @@ function renderAnalyticsView() {
   // read carve-out for the config collection.
   const canViewLiquidity = isCurrentUserAdmin();
   const liquidity = canViewLiquidity ? getLiquiditySnapshot() : null;
+  const profitability = canViewFinancials && isCurrentUserAdmin()
+    ? getCurrentProfitabilitySnapshot(ads)
+    : null;
 
   // Calculate ad revenue - separate paid vs pending/unpaid for clarity.
   // Uses the SAME status-aware spend rule as the customer cards
@@ -2388,7 +2394,7 @@ function renderAnalyticsView() {
         ${renderStatCard(isAr ? 'حالة التحصيل' : 'Collection Status', `${collectedReceipts.length}/${revenueReceipts.length}`, 'wallet', 'from-amber-500 to-orange-600')}
         ` : `
         <!-- Show paid ad revenue separately for clarity -->
-        <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform">
+        <button type="button" onclick="openAnalyticsBreakdown('ad-revenue')" class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform text-left w-full">
           <div class="absolute inset-0 bg-gradient-to-br from-emerald-500 to-teal-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
           <div class="flex items-start justify-between relative">
             <div>
@@ -2400,8 +2406,8 @@ function renderAnalyticsView() {
               <i data-lucide="dollar-sign" class="w-6 h-6 text-white"></i>
             </div>
           </div>
-        </div>
-        ${renderStatCard(isAr ? 'حجم الوصولات' : 'Receipts Volume', '$' + totalReceiptsUSD.toFixed(2), 'file-text', 'from-indigo-500 to-purple-600')}
+        </button>
+        ${renderStatCard(isAr ? 'حجم الوصولات' : 'Receipts Volume', '$' + totalReceiptsUSD.toFixed(2), 'file-text', 'from-indigo-500 to-purple-600', "openAnalyticsBreakdown('receipts-volume')")}
         <!-- Show available balance (paid receipts - used) -->
         <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform">
           <div class="absolute inset-0 bg-gradient-to-br from-blue-500 to-cyan-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
@@ -2418,7 +2424,7 @@ function renderAnalyticsView() {
         </div>
 
         <!-- Collection Status Card -->
-        <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform cursor-pointer" onclick="state.receiptCollectedFilter='not-collected';navigateTo('receipts');">
+        <button type="button" class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform cursor-pointer text-left w-full" onclick="openAnalyticsBreakdown('collection-status')">
           <div class="absolute inset-0 bg-gradient-to-br from-amber-500 to-orange-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
           <div class="flex items-start justify-between relative">
             <div>
@@ -2442,9 +2448,11 @@ function renderAnalyticsView() {
           <div class="mt-3 w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
             <div class="h-full bg-gradient-to-r from-emerald-500 to-teal-500 rounded-full transition-all duration-500" style="width: ${collectionRate}%"></div>
           </div>
-        </div>
+        </button>
         `}
       </div>
+
+      ${profitability ? renderProfitabilityPanel(profitability, isAr) : ''}
 
       ${canViewLiquidity && liquidity ? (() => {
         const covered = liquidity.coveragePercent >= 100;
@@ -2654,7 +2662,9 @@ function renderStatCard(title, value, icon, gradient, onClick = '', isActive = f
   const clickable = !!onClick;
   const activeClass = isActive ? ' ring-2 ring-indigo-400/70' : '';
   const clickClass = clickable ? ' cursor-pointer' : '';
-  const clickAttr = clickable ? ` onclick="${onClick}"` : '';
+  const clickAttr = clickable
+    ? ` role="button" tabindex="0" onclick="${onClick}" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();${onClick}}"`
+    : '';
   return `
     <div class="glass-panel rounded-xl md:rounded-2xl p-3 md:p-6 hover:scale-105 transition-transform${clickClass}${activeClass}"${clickAttr}>
       <div class="flex items-start justify-between">
@@ -2860,17 +2870,20 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                   <div class="mb-2">
                     <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">${isAr ? 'إجمالي المدفوع (LYD)' : 'Total Paid (LYD)'}</div>
                     <div class="grid grid-cols-3 gap-1 text-xs">
+                      <!-- Exact to the cent (user request): rounding to whole
+                           LYD hid real debt — 5019.10 + 1392.00 showed as a
+                           6411 balance while 6411.10 was actually owed. -->
                       <div class="text-center p-1.5 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
                         <div class="text-[10px] text-slate-400">${isAr ? 'المصروف' : 'Spent'}</div>
-                        <div class="font-bold text-slate-700 dark:text-slate-300">${stats.totalSpentLYD.toFixed(0)}</div>
+                        <div class="font-bold text-slate-700 dark:text-slate-300">${stats.totalSpentLYD.toFixed(2)}</div>
                       </div>
                       <div class="text-center p-1.5 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg">
                         <div class="text-[10px] text-emerald-600">${isAr ? 'المدفوع' : 'Paid'}</div>
-                        <div class="font-bold text-emerald-600">${stats.totalPaidLYD.toFixed(0)}</div>
+                        <div class="font-bold text-emerald-600">${stats.totalPaidLYD.toFixed(2)}</div>
                       </div>
                       <div class="text-center p-1.5 ${stats.balanceLYD >= 0 ? 'bg-blue-50 dark:bg-blue-900/20' : 'bg-rose-50 dark:bg-rose-900/20'} rounded-lg">
                         <div class="text-[10px] ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${isAr ? 'الرصيد' : 'Balance'}</div>
-                        <div class="font-bold ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceLYD >= 0 ? '+' : ''}${stats.balanceLYD.toFixed(0)}</div>
+                        <div class="font-bold ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceLYD >= 0 ? '+' : ''}${stats.balanceLYD.toFixed(2)}</div>
                       </div>
                     </div>
                   </div>
@@ -2896,7 +2909,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                   <!-- Uncommitted Not Paid receipt debt (already inside Balance; Spent stays ads-only) -->
                   <div class="mt-2 flex items-center justify-between gap-2 text-[11px] font-bold text-rose-600 dark:text-rose-400">
                     <span class="inline-flex items-center gap-1"><i data-lucide="receipt" class="w-3 h-3"></i>${isAr ? 'دين وصولات غير مدفوعة' : 'Unpaid receipt debt'}</span>
-                    <span dir="ltr">${stats.receiptDebtLYD.toFixed(0)} LYD · $${stats.receiptDebtUSD.toFixed(2)}</span>
+                    <span dir="ltr">${stats.receiptDebtLYD.toFixed(2)} LYD · $${stats.receiptDebtUSD.toFixed(2)}</span>
                   </div>
                   ` : ''}
                 </div>
@@ -3966,6 +3979,7 @@ function renderAdsView() {
           <p id="ads-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allAds.length} إجمالي الإعلانات` : `${allAds.length} total ads`}</p>
         </div>
         <div class="flex flex-wrap gap-2">
+          ${renderMetaInsightsHeaderButton(isAr)}
           ${renderMetaAdsHeaderButton(isAr)}
           <button onclick="showAdModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
             <i data-lucide="plus" class="w-4 h-4"></i>
@@ -4118,11 +4132,17 @@ function renderAdsView() {
                 });
                 if (_methods.size > 1) _methods.delete('Split Payment');
                 const paymentMethods = [..._methods];
+                // Rendered ahead of the template so the page avatar knows
+                // whether a photo tile actually renders beside it (manual ads
+                // without uploads produce no tile and need the solo layout).
+                const adPrimaryTile = renderAdPrimaryThumbnail(ad, isAr);
+                const adPageAvatarTile = renderAdPageAvatar(ad, adPage, isAr, !!adPrimaryTile);
                 return `
                   <tr class="border-b border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50">
                     <td class="py-3 px-2" data-label="${isAr ? 'الإعلان / العميل' : 'Ad / Customer'}">
                       <div class="ad-primary-summary">
-                        ${renderMetaAdThumbnail(ad, isAr)}
+                        ${adPageAvatarTile}
+                        ${adPrimaryTile}
                         <div class="min-w-0 flex-1">
                           <div class="break-words font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || ad.customerName || (needsSetup ? (ad.metaAdName || (isAr ? 'إعلان Meta جديد' : 'New Meta ad')) : (isAr ? 'غير معروف' : 'Unknown')))}</div>
                           ${needsSetup ? `<div class="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"><i data-lucide="wand-sparkles" class="h-3 w-3"></i>${isAr ? 'يحتاج العميل والدفع والوصل' : 'Needs customer, payment and receipt'}</div>` : ''}
@@ -4220,7 +4240,11 @@ function renderAdsView() {
                         ${needsSetup && canEditThisAd ? `<button type="button" onclick="completeMetaImportedAd('${Security.escapeHtml(String(ad.id))}')" class="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-lg bg-amber-100 px-3 py-2 text-xs font-bold text-amber-800 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-200" title="${isAr ? 'إكمال العميل والدفع والوصل' : 'Complete customer, payment and receipt details'}"><i data-lucide="clipboard-check" class="h-4 w-4"></i><span>${isAr ? 'إكمال' : 'Complete'}</span></button>` : ''}
                         ${can('ads', 'viewPhotos') && adPhotoCount > 0 ? `
                         <button type="button" data-action="view-ad-photos" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openAdPhotoViewer(this.dataset.adId, 0, this)" class="ad-photo-view-button inline-flex items-center justify-center gap-1.5 font-bold" title="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}" aria-label="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}">
-                          <i data-lucide="images" class="w-4 h-4 shrink-0"></i><span class="text-xs whitespace-nowrap">${isAr ? `عرض الصور (${adPhotoCount})` : `View Photos (${adPhotoCount})`}</span>
+                          <i data-lucide="images" class="w-4 h-4 shrink-0"></i><span data-photo-loading-label class="text-xs whitespace-nowrap">${isAr ? `عرض الصور (${adPhotoCount})` : `View Photos (${adPhotoCount})`}</span>
+                        </button>` : ''}
+                        ${canEditThisAd && can('ads', 'viewPhotos') && adPhotoCount > 1 ? `
+                        <button type="button" data-action="choose-ad-main-photo" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openAdPrimaryPhotoPicker(this.dataset.adId, this)" class="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200" title="${isAr ? 'اختيار الصورة الرئيسية التي تظهر خارج الإعلان' : 'Choose the main photo shown outside the ad'}" aria-label="${isAr ? 'اختيار الصورة الرئيسية' : 'Choose main photo'}">
+                          <i data-lucide="image-up" class="h-4 w-4 shrink-0"></i><span>${isAr ? 'الرئيسية' : 'Main photo'}</span>
                         </button>` : ''}
                         ${!needsSetup && _isAdToppable(ad) && (!isServerModeEnabled() || isAdPaid) ? `
                         <button onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="${isAr ? 'عمليات الشحن' : 'Top-ups'}">
@@ -5763,12 +5787,41 @@ function isAdReadyForReconciliation(ad, now = new Date()) {
   return today.getTime() >= available.getTime();
 }
 
+// One source of truth for the numbers a reconciliation card SHOWS. A linked ad
+// reconciles against Meta's own synced spend, so the "customer informed" state
+// must be judged against THAT remainder: a confirmation saved for a different
+// remainder is stale, and the ad still needs attention (it must not be badged
+// as done, nor sorted to the bottom, nor lock its checkbox — the readonly Meta
+// input means the input listener can never reset the control by itself).
+function getAdReconciliationDisplayState(ad) {
+  const amountUSD = Math.max(Number(ad?.amountUSD) || 0, 0);
+  const parsedSpent = Number(ad?.spentUSD);
+  const hasSavedSpend = ad?.spentUSD !== undefined && ad?.spentUSD !== null && Number.isFinite(parsedSpent);
+  const savedSpentUSD = hasSavedSpend ? Math.max(parsedSpent, 0) : 0;
+  const metaSpendUSD = metaAdRealSpendUSD(ad);
+  const metaSpendAuto = metaSpendUSD !== null && metaSpendUSD <= amountUSD + 0.005;
+  const displaySpentUSD = metaSpendAuto ? metaSpendUSD : (hasSavedSpend ? savedSpentUSD : null);
+  const informedApplies = displaySpentUSD !== null
+    && getAdCustomerConfirmationState(ad, displaySpentUSD, amountUSD).existingConfirmationApplies === true;
+  return {
+    amountUSD,
+    hasSavedSpend,
+    savedSpentUSD,
+    metaSpendAuto,
+    displaySpentUSD,
+    remainingUSD: displaySpentUSD === null ? null : Math.max(amountUSD - displaySpentUSD, 0),
+    informedApplies,
+    staleConfirmation: ad?.remainingCustomerInformed === true && !informedApplies
+  };
+}
+
 function renderReconciliationView() {
   const isAr = state.language === 'ar';
   const visibleAds = getVisibleRecords(state.ads)
     .filter(ad => isAdReadyForReconciliation(ad))
     .sort((a, b) => {
-      const informedOrder = Number(a.remainingCustomerInformed === true) - Number(b.remainingCustomerInformed === true);
+      const informedOrder = Number(getAdReconciliationDisplayState(a).informedApplies)
+        - Number(getAdReconciliationDisplayState(b).informedApplies);
       if (informedOrder !== 0) return informedOrder;
       return (getAdReconciliationTriggerDay(a)?.getTime() || 0) - (getAdReconciliationTriggerDay(b)?.getTime() || 0);
     });
@@ -5789,12 +5842,15 @@ function renderReconciliationView() {
               const safeId = Security.escapeHtml(id);
               const customer = state.customers.find(c => String(c.id) === String(ad.customerId));
               const page = state.pages.find(p => String(p.id) === String(ad.pageId || ad.page));
-              const amountUSD = Math.max(Number(ad.amountUSD) || 0, 0);
-              const parsedSpent = Number(ad.spentUSD);
-              const hasSavedSpend = ad.spentUSD !== undefined && ad.spentUSD !== null && Number.isFinite(parsedSpent);
-              const spentUSD = hasSavedSpend ? Math.max(parsedSpent, 0) : 0;
-              const remainingUSD = hasSavedSpend ? Math.max(amountUSD - spentUSD, 0) : null;
-              const informed = ad.remainingCustomerInformed === true;
+              // A Meta-linked ad reconciles with Meta's own synced spend —
+              // prefilled and locked, remaining computed automatically.
+              // Manual entry remains for unlinked ads or when Meta reports
+              // more than the recorded budget (a mismatch to fix in the ad).
+              const {
+                amountUSD, hasSavedSpend, metaSpendAuto,
+                displaySpentUSD, remainingUSD,
+                informedApplies: informed, staleConfirmation
+              } = getAdReconciliationDisplayState(ad);
               const canReconcile = canActOnRecord('ads', 'stopAd', ad.creatorId || ad.createdBy);
               const adStatus = String(ad.status || '').trim().toLowerCase();
               const startDay = getAdReconciliationStartDay(ad);
@@ -5852,7 +5908,8 @@ function renderReconciliationView() {
                 <div class="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-end">
                   <div>
                     <label for="reconciliation-spent-${safeId}" class="mb-1.5 block text-sm font-bold text-slate-700 dark:text-slate-200">${isAr ? 'المصروف الفعلي على فيسبوك (USD)' : 'Actual Facebook spend (USD)'}</label>
-                    <input id="reconciliation-spent-${safeId}" type="text" inputmode="decimal" value="${hasSavedSpend ? spentUSD.toFixed(2) : ''}" placeholder="0.00" oninput="sanitizeMoneyInput(this); updateReconciliationPreview('${safeId}')" class="glass-input min-h-12 w-full rounded-xl px-4 text-lg font-bold" ${canReconcile ? '' : 'disabled'} />
+                    <input id="reconciliation-spent-${safeId}" type="text" inputmode="decimal" value="${displaySpentUSD === null ? '' : displaySpentUSD.toFixed(2)}" placeholder="0.00" ${metaSpendAuto ? 'readonly ' : ''}oninput="sanitizeMoneyInput(this); updateReconciliationPreview('${safeId}')" class="glass-input min-h-12 w-full rounded-xl px-4 text-lg font-bold${metaSpendAuto ? ' opacity-80 cursor-not-allowed' : ''}" ${canReconcile ? '' : 'disabled'} />
+                    ${metaSpendAuto ? `<div class="mt-1 flex items-center gap-1 text-[11px] font-bold text-blue-700 dark:text-blue-300"><i data-lucide="refresh-cw" class="h-3 w-3 shrink-0"></i><span>${isAr ? `تلقائي من Meta — المصروف الفعلي (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)})` : `Automatic from Meta — the real spend (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)})`}</span></div>` : ''}
                   </div>
                   <div class="rounded-xl bg-white/70 p-3 dark:bg-slate-900/50">
                     <div class="text-xs text-slate-500">${isAr ? 'المتبقي الذي سيعود للعميل' : 'Remaining returned to customer'}</div>
@@ -5867,7 +5924,11 @@ function renderReconciliationView() {
                   <input id="reconciliation-informed-${safeId}" type="checkbox" class="mt-0.5 h-5 w-5 shrink-0 accent-emerald-600" ${informed ? 'checked disabled' : ''} ${!informed && (remainingUSD === null || remainingUSD <= 0 || !canReconcile) ? 'disabled' : ''} />
                   <span class="min-w-0">
                     <span class="block text-sm font-bold text-slate-800 dark:text-slate-100">${isAr ? 'أؤكد أنني أبلغت العميل بالمبلغ المتبقي' : 'I confirm that I told the customer about the remaining amount'}</span>
-                    <span id="reconciliation-informed-help-${safeId}" class="block text-xs text-slate-500">${informedDetails ? Security.escapeHtml(informedDetails) : (isAr ? 'يمكن تحديد هذا بعد إدخال مصروف فعلي أقل من الميزانية. وإذا تغيّر المصروف يجب تأكيد المبلغ الجديد.' : 'Check this after entering spend below the budget. If the spend changes, confirm the new amount again.')}</span>
+                    <span id="reconciliation-informed-help-${safeId}" class="block text-xs ${staleConfirmation ? 'font-bold text-amber-700 dark:text-amber-300' : 'text-slate-500'}">${staleConfirmation
+                      ? (isAr
+                          ? `تغيّر المبلغ المتبقي${remainingUSD === null ? '' : ` إلى $${remainingUSD.toFixed(2)}`} بعد تأكيدك السابق. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع.`
+                          : `The remaining amount changed${remainingUSD === null ? '' : ` to $${remainingUSD.toFixed(2)}`} since your earlier confirmation. Tell the customer the new amount, then check this box.`)
+                      : (informedDetails ? Security.escapeHtml(informedDetails) : (isAr ? 'يمكن تحديد هذا بعد إدخال مصروف فعلي أقل من الميزانية. وإذا تغيّر المصروف يجب تأكيد المبلغ الجديد.' : 'Check this after entering spend below the budget. If the spend changes, confirm the new amount again.'))}</span>
                   </span>
                 </label>
                 ${!canReconcile ? `<p class="mt-2 text-xs text-rose-600">${isAr ? 'ليس لديك صلاحية تسوية هذا الإعلان.' : 'You do not have permission to reconcile this ad.'}</p>` : ''}

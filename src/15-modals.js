@@ -374,6 +374,8 @@ function renderModal() {
       _adPhotoUploadsInFlight = 0;
       state.tempAdPhotos = (!isEdit || can('ads', 'viewPhotos')) ? getAdPhotoSources(adData) : [];
       state.tempAdPhotosDirty = false;
+      state.tempAdPrimaryPhotoIndex = getAdPrimaryPhotoIndex(adData, state.tempAdPhotos.length);
+      state.tempAdPrimaryPhotoDirty = false;
       const durationDaysDefault = (adData.days !== undefined ? adData.days : (adData.startDate && adData.endDate ? Math.max(0, Math.round((new Date(adData.endDate) - new Date(adData.startDate)) / (1000 * 60 * 60 * 24))) : ''));
       const adCreator = isEdit && adData.creatorId ? state.users.find(u => u.id === adData.creatorId) : state.currentUser;
       // Badge describes the ad's CREATOR, not the viewer. Driving it from the
@@ -548,16 +550,38 @@ function renderModal() {
                 <div id="ad-collection-details" class="${adData.collectionMethod ? '' : 'hidden'} pt-2 border-t border-amber-200">
                   <div id="ad-driver-budget-section" class="${adData.collectionMethod === 'driver' ? '' : 'hidden'} mb-3 p-3 bg-violet-50 dark:bg-violet-900/20 rounded-lg border border-violet-200 dark:border-violet-800 space-y-2">
                     <label for="ad-driver-budget-usd" class="block text-xs font-bold text-violet-700 dark:text-violet-300">${isArAd ? 'ميزانية الإعلان (USD) *' : 'Ad Budget (USD) *'}</label>
-                    <input
+                    ${(() => {
+                      // A Meta-linked ad takes its budget straight from Meta's
+                      // real planned total (read-only) so the recorded customer
+                      // debt can never drift from what Meta actually runs.
+                      const metaBudgetRaw = metaAdAutoBudgetUSD(adData);
+                      // ...EXCEPT when Meta's total is below money already
+                      // reserved on this ad's receipts. Locking a lower budget
+                      // would make the funding<=budget guard reject EVERY save
+                      // (even a photo-only edit) with no way to raise the field
+                      // again, and the only escape would be silently releasing
+                      // reserved receipt credit. Stay manual and say why.
+                      const committedUSD = getAdCommittedFundingTotalUSD(adData);
+                      const metaBudgetBlocked = metaBudgetRaw > 0 && committedUSD > metaBudgetRaw + 0.005;
+                      const metaBudget = metaBudgetBlocked ? 0 : metaBudgetRaw;
+                      const budgetValue = metaBudget > 0
+                        ? metaBudget.toFixed(2)
+                        : (Number(adData.amountUSD || 0) > 0 ? Number(adData.amountUSD).toFixed(2) : '');
+                      return `<input
                       type="text"
                       inputmode="decimal"
                       id="ad-driver-budget-usd"
-                      value="${Security.escapeHtml(Number(adData.amountUSD || 0) > 0 ? Number(adData.amountUSD).toFixed(2) : '')}"
-                      class="w-full border border-violet-300 dark:border-violet-700 bg-white dark:bg-slate-900 px-3 py-2 rounded-lg text-sm font-bold"
+                      value="${Security.escapeHtml(budgetValue)}"
+                      class="w-full border border-violet-300 dark:border-violet-700 bg-white dark:bg-slate-900 px-3 py-2 rounded-lg text-sm font-bold${metaBudget > 0 ? ' opacity-80 cursor-not-allowed' : ''}"
                       placeholder="0.00"
-                      oninput="sanitizeMoneyInput(this); updateAdDriverBudgetSummary()"
+                      ${metaBudget > 0 ? 'readonly ' : ''}oninput="sanitizeMoneyInput(this); updateAdDriverBudgetSummary()"
                       onfocus="this.select()"
                     />
+                    ${metaBudget > 0 ? `<div class="mt-1 flex items-center gap-1 text-[11px] font-bold text-blue-700 dark:text-blue-300"><i data-lucide="refresh-cw" class="h-3 w-3 shrink-0"></i><span>${isArAd ? 'تلقائي من Meta — نفس الميزانية المخططة الحقيقية للإعلان' : "Automatic from Meta — the ad's real planned budget"}</span></div>` : ''}
+                    ${metaBudgetBlocked ? `<div class="mt-1 flex items-start gap-1 rounded-lg bg-amber-100 p-2 text-[11px] font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"><i data-lucide="alert-triangle" class="h-3 w-3 shrink-0 mt-0.5"></i><span>${isArAd
+                      ? `ميزانية Meta ($${metaBudgetRaw.toFixed(2)}) أقل من المبلغ المحجوز على وصولات هذا الإعلان ($${committedUSD.toFixed(2)})، لذلك تُترك الميزانية للتعديل اليدوي. صحّح مبلغ الوصل أو الميزانية في Meta.`
+                      : `Meta's budget ($${metaBudgetRaw.toFixed(2)}) is lower than the money already reserved on this ad's receipts ($${committedUSD.toFixed(2)}), so the budget stays editable. Fix the receipt amount or the budget in Meta.`}</span></div>` : ''}`;
+                    })()}
                     <input type="hidden" id="ad-driver-budget-rate" value="${Security.escapeHtml(String(adData.exchangeRate || state.defaultExchangeRate || 1))}" />
                     <div id="ad-driver-budget-summary" class="text-[11px] text-violet-600 dark:text-violet-300"></div>
                     <div class="text-[11px] text-amber-700 dark:text-amber-300">
@@ -945,23 +969,23 @@ function renderModal() {
               <label class="block text-sm font-medium mb-2">${isArP ? 'اسم الصفحة *' : 'Page Name *'}</label>
             <input type="text" id="page-name" value="${Security.escapeHtml(pageData.name || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" />
           </div>
+          <!-- Category picker: same combobox pattern as the customer search
+               below, plus one-tap chips for the most-used categories. -->
           <div>
-              <label class="block text-sm font-medium mb-2">${isArP ? 'الفئة *' : 'Category *'}</label>
-            <input type="text" id="page-category" list="page-category-suggestions" autocomplete="off" value="${Security.escapeHtml(pageData.category || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" />
-            <!-- Suggest previously-used categories while typing (user request):
-                 picking an existing one avoids near-duplicate categories like
-                 "cars" / "car". Deduped case-insensitively, first spelling wins. -->
-            <datalist id="page-category-suggestions">
-              ${(() => {
-                const seen = new Map();
-                getVisibleRecords(state.pages || []).forEach(p => {
-                  const c = String(p.category || '').trim();
-                  if (c && !seen.has(c.toLowerCase())) seen.set(c.toLowerCase(), c);
-                });
-                return [...seen.values()].sort((a, b) => a.localeCompare(b))
-                  .map(c => `<option value="${Security.escapeHtml(c)}"></option>`).join('');
-              })()}
-            </datalist>
+              <label for="page-category" class="block text-sm font-medium mb-2">${isArP ? 'الفئة *' : 'Category *'}</label>
+            ${(() => {
+              const suggestions = getPageCategorySuggestions();
+              const currentKey = pageCategoryKey(pageData.category || '');
+              const chips = suggestions.slice(0, 6);
+              return `
+            ${chips.length ? `<div class="smart-filter-chips mb-2" aria-label="${isArP ? 'الفئات الأكثر استخداماً' : 'Most used categories'}">
+              ${chips.map(item => `<button type="button" class="smart-filter-chip ${pageCategoryKey(item.label) === currentKey ? 'is-active' : ''}" aria-pressed="${pageCategoryKey(item.label) === currentKey}" data-category-action="pick" data-category-value="${Security.escapeHtml(item.label)}">${Security.escapeHtml(item.label)}</button>`).join('')}
+            </div>` : ''}
+            <div class="relative">
+              <input type="text" id="page-category" role="combobox" aria-expanded="false" aria-controls="page-category-dropdown" aria-autocomplete="list" autocomplete="off" maxlength="80" enterkeyhint="done" value="${Security.escapeHtml(pageData.category || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isArP ? 'اكتب أو اختر فئة...' : 'Type or choose a category...'}" oninput="filterPageCategories()" onfocus="showPageCategoryDropdown()" />
+              <div id="page-category-dropdown" role="listbox" class="absolute z-20 mt-1 w-full max-w-[calc(100vw-2rem)] glass-panel rounded-lg shadow-xl max-h-60 overflow-y-auto hidden"></div>
+            </div>`;
+            })()}
           </div>
             
             <!-- Customer Linking Section -->
@@ -3418,6 +3442,10 @@ async function handleModalSubmit() {
         adLinks: adLinkInputs,
         adLink: adLinkInputs[0] || '',
         adPhotos: state.tempAdPhotos || [],
+        primaryAdPhotoIndex: getAdPrimaryPhotoIndex(
+          { primaryAdPhotoIndex: state.tempAdPrimaryPhotoIndex },
+          (state.tempAdPhotos || []).length
+        ),
         collectionPayments: (paymentStatus === 'paid') ? [] : collectionPayments,
         days,
         isPaid,
@@ -3457,6 +3485,9 @@ async function handleModalSubmit() {
         delete adUpdates.adPhotos;
       } else if (isEdit) {
         adUpdates.photos = []; // clear the legacy field after an intentional edit
+      }
+      if (isEdit && !state.tempAdPhotosDirty && !state.tempAdPrimaryPhotoDirty) {
+        delete adUpdates.primaryAdPhotoIndex;
       }
 
       // Re-baseline the top-up arithmetic. saveTopUps derives the ad's amount
@@ -3561,6 +3592,8 @@ async function handleModalSubmit() {
           : 'Relinked ad funding receipt');
         state.tempAdFunding = { allocations: [] };
         state.tempAdPhotos = [];
+        state.tempAdPrimaryPhotoIndex = 0;
+        state.tempAdPrimaryPhotoDirty = false;
         closeModal();
         return;
       }
@@ -3677,9 +3710,16 @@ async function handleModalSubmit() {
       // Clear temp state
       state.tempAdFunding = { allocations: [] };
       state.tempAdPhotos = [];
+      state.tempAdPrimaryPhotoIndex = 0;
+      state.tempAdPrimaryPhotoDirty = false;
       
-      // Close modal
+      // RETURN, not break: `break` falls into the shared `closeModal();
+      // render();` tail, and a SECOND closeModal rewinds a second history entry
+      // (traversal is async, so history.state still shows the ?modal entry) —
+      // which jumped the user out of the view they were working in.
       closeModal();
+      render();
+      return;
       } catch (error) {
         console.error('Error saving ad:', error);
         // "Changed on another device" is reserved for real version conflicts
@@ -3931,7 +3971,14 @@ async function handleModalSubmit() {
       const isArPage = state.language === 'ar';
       // Whitespace-only input satisfies `required` — trim + check both fields.
       const pageName = document.getElementById('page-name').value.trim();
-      const pageCategory = document.getElementById('page-category').value.trim();
+      // Collapse internal whitespace and cap the length: a category is a short
+      // label, and the raw field used to accept a 10,000-character paste that
+      // would permanently wreck the picker for everyone. Double spaces also
+      // used to create a second copy of an existing category.
+      const pageCategory = Security.sanitizeInput(
+        String(document.getElementById('page-category').value || '').replace(/\s+/g, ' ').trim(),
+        { maxLength: 80 }
+      ).trim();
       if (!pageName || !pageCategory) {
         showNotification(
           isArPage ? 'خطأ في الإدخال' : 'Validation Error',
@@ -4132,6 +4179,8 @@ function closeModal() {
   // into the next ad/receipt created in this session.
   state.tempAdPhotos = [];
   state.tempReceiptPhotos = [];
+  state.tempAdPrimaryPhotoIndex = 0;
+  state.tempAdPrimaryPhotoDirty = false;
   state.tempAdPhotosDirty = false;
   state.tempReceiptPhotosDirty = false;
   _adPhotoUploadGeneration++;
@@ -4159,8 +4208,14 @@ function closeModal() {
   // entry may be a previous ?modal entry that must survive for back/forward
   // restore. Openers that never pushed (boot deep-link error paths) fall
   // through to the old replaceState behaviour.
+  // Defence in depth for the same double-close hazard: if a bookkeeping pop
+  // from a closeModal earlier in this tick has not landed yet, history.state
+  // still shows the ?modal entry even though it is already being popped.
+  // Consuming again would rewind a REAL view entry and move the user.
+  const consumeAlreadyPending = typeof _overlayHistoryConsumePending === 'function'
+    && _overlayHistoryConsumePending();
   let consumedModalHistoryEntry = false;
-  if (typeof consumeOverlayHistoryEntry === 'function' && !_closingSurfaceFromPopstate) {
+  if (typeof consumeOverlayHistoryEntry === 'function' && !_closingSurfaceFromPopstate && !consumeAlreadyPending) {
     const topHistoryEntry = window.history.state;
     if (topHistoryEntry && topHistoryEntry.albayanModal) {
       consumedModalHistoryEntry = consumeOverlayHistoryEntry();
@@ -4184,6 +4239,10 @@ function closeModal() {
       }
     }
   }
+  // Always clean the URL when this call did not consume an entry: if a pending
+  // pop somehow never lands, ?modal= must not survive a closed dialog (a
+  // refresh would reopen it). Rewriting an entry that is about to be popped is
+  // harmless.
   if (!consumedModalHistoryEntry) clearUrlParams(['modal', 'id']);
   
   // Force remove ALL modals - be very aggressive

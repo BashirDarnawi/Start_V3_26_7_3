@@ -109,7 +109,8 @@ function computeServerCursorFromState() {
     _maxLastModifiedFromArray(state.adCampaignRequests),
     _maxLastModifiedFromArray(state.walletTransactions),
     _maxLastModifiedFromArray(state.serviceSubscriptions),
-    _maxLastModifiedFromArray(state.appSettings)
+    _maxLastModifiedFromArray(state.appSettings),
+    _maxLastModifiedFromArray(state.dollarPurchases)
   );
 }
 
@@ -120,7 +121,7 @@ function getServerCollectionVisibilityScope(user, collection) {
   if (name === 'exchangeRateHistory') return 'all';
   // Admin-only configuration records: never fetched (or retained) for
   // non-admin sessions.
-  if (name === 'appSettings') return role === 'admin' ? 'all' : 'none';
+  if (name === 'appSettings' || name === 'dollarPurchases') return role === 'admin' ? 'all' : 'none';
   if (name === 'walletTransactions' || name === 'serviceSubscriptions') {
     return role === 'admin' ? 'all' : 'own';
   }
@@ -544,6 +545,7 @@ async function serverLiveSyncOnce() {
   const walletTxDelta = recordsFor('walletTransactions');
   const subsDelta = recordsFor('serviceSubscriptions');
   const appSettingsDelta = recordsFor('appSettings');
+  const dollarPurchasesDelta = recordsFor('dollarPurchases');
 
   // Logged out (or a new session started) while these fetches were in flight?
   // Drop the result — applying it would re-fill the just-wiped state.
@@ -598,6 +600,7 @@ async function serverLiveSyncOnce() {
   changed = applyServerDelta('walletTransactions', walletTxDelta) || changed;
   changed = applyServerDelta('serviceSubscriptions', subsDelta) || changed;
   changed = applyServerDelta('appSettings', appSettingsDelta) || changed;
+  changed = applyServerDelta('dollarPurchases', dollarPurchasesDelta) || changed;
 
   const entitlementAfter = getServerServiceEntitlementSnapshot();
   const revokedServices = getRevokedServerServiceEntitlements(entitlementBefore, entitlementAfter);
@@ -1394,7 +1397,7 @@ async function _handleLocalLoginOnce(email, password, loginGeneration) {
     const _subtleAvailable = !!(globalThis.crypto && globalThis.crypto.subtle);
     const _needsAlgoUpgrade = (user.passwordAlgo || 'sha256') !== 'pbkdf2-sha256';
     const _needsIterationUpgrade = !_needsAlgoUpgrade && _subtleAvailable &&
-      (Number(user.passwordIterations) || 0) < 310000;
+      (Number(user.passwordIterations) || 0) < _ALB_NATIVE_PBKDF2_ITERATIONS;
     if (_needsAlgoUpgrade || _needsIterationUpgrade) {
       try {
         const upgraded = await Security.hashPassword(sanitizedPassword, null, { algo: 'pbkdf2-sha256' });
@@ -1478,6 +1481,17 @@ function resetAuthenticatedServerCaches() {
   // them with every auth transition so one customer can never inherit another
   // customer's unfinished work after logout or session expiry.
   if (typeof resetAdsStudioSessionState === 'function') resetAdsStudioSessionState();
+  // Meta insights (partner pages / spend statistics) are admin-only server
+  // data: never let them survive logout or a session switch.
+  if (typeof closeMetaInsightsModal === 'function') closeMetaInsightsModal();
+  if (typeof metaInsightsUi === 'object' && metaInsightsUi) {
+    metaInsightsUi.stats = null;
+    metaInsightsUi.error = '';
+    metaInsightsUi.loading = false;
+    metaInsightsUi.refreshing = false;
+    metaInsightsUi.loadedAtMs = 0;
+    metaInsightsUi.requestSeq += 1;
+  }
 }
 
 function discardPendingServerUserUpdates() {

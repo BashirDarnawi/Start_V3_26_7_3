@@ -4,6 +4,7 @@ import json
 import hashlib
 import os
 import sys
+from datetime import date
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote
@@ -33,7 +34,13 @@ from server.main import (
 )
 from server.schemas import AdMutationRequest
 from server import rate_limiter
-from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, hash_token, new_id
+from server.security import (
+    PBKDF2_ITERATIONS_DEFAULT,
+    hash_password,
+    hash_token,
+    new_id,
+    verify_password,
+)
 
 
 client = TestClient(app, headers={"Origin": "http://testserver"})
@@ -176,6 +183,62 @@ def actors():
         "concurrent_user": concurrent_user,
         "concurrent_cookies": concurrent_cookies,
     }
+
+
+class TestDollarPurchaseLedgerBoundary:
+    def test_cost_lots_are_admin_only_normalized_and_immutable(self, actors):
+        entity_id = f"security_dollar_purchase_{now_ms()}"
+        payload = {
+            "id": entity_id,
+            "data": {
+                "purchaseDate": date.today().isoformat(),
+                "amountUSD": "10.126",
+                "rateLYD": "9.71234",
+                "totalLYD": 1,
+                "source": "  Cash   market  ",
+                "unexpectedSecret": "must-not-persist",
+            },
+        }
+
+        denied = client.post(
+            "/api/collections/dollarPurchases",
+            json=payload,
+            cookies=actors["wallet_cookies"],
+        )
+        assert denied.status_code == 403, denied.text
+
+        created = client.post(
+            "/api/collections/dollarPurchases",
+            json=payload,
+            cookies=actors["admin"],
+        )
+        assert created.status_code == 200, created.text
+        data = created.json()["data"]
+        assert data["amountUSD"] == 10.13
+        assert data["rateLYD"] == 9.7123
+        assert data["totalLYD"] == 98.39
+        assert data["source"] == "Cash market"
+        assert "unexpectedSecret" not in data
+
+        changed = client.patch(
+            f"/api/collections/dollarPurchases/{entity_id}",
+            json={"data": {"amountUSD": 999}},
+            cookies=actors["admin"],
+        )
+        assert changed.status_code == 405, changed.text
+
+        unchanged = client.get(
+            f"/api/collections/dollarPurchases/{entity_id}",
+            cookies=actors["admin"],
+        )
+        assert unchanged.status_code == 200, unchanged.text
+        assert unchanged.json()["data"]["amountUSD"] == 10.13
+
+        removed = client.delete(
+            f"/api/collections/dollarPurchases/{entity_id}",
+            cookies=actors["admin"],
+        )
+        assert removed.status_code == 200, removed.text
 
 
 class TestPermissionGrantBoundary:
@@ -448,6 +511,62 @@ class TestAuthenticationRateLimitReset:
         monkeypatch.setattr(main_module, "TRUST_PROXY_HEADERS", True)
         assert _client_ip(request) == "198.51.100.2"
 
+    def test_successful_login_upgrades_legacy_password_hash(self, actors):
+        email = "legacy-work-factor@tests.albayanhub.com"
+        password_text = "LegacyWorkFactor123!"
+        legacy = hash_password(password_text, iterations=310_000)
+        user_id = new_id("user")
+        stamp = now_ms()
+        with db_conn() as conn:
+            conn.execute(
+                text("DELETE FROM users WHERE lower(email)=lower(:email)"),
+                {"email": email},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO users (id,name,email,role,permissions_json,password_hash,password_salt,"
+                    "password_algo,password_iterations,deleted,created_at,created_by,last_modified) "
+                    "VALUES (:id,'Legacy Hash',:email,'Employee',:permissions,:password_hash,"
+                    ":password_salt,:password_algo,:password_iterations,false,:stamp,NULL,:stamp)"
+                ),
+                {
+                    "id": user_id,
+                    "email": email,
+                    "permissions": json_dumps({}),
+                    "password_hash": legacy.hash_hex,
+                    "password_salt": legacy.salt_hex,
+                    "password_algo": legacy.algo,
+                    "password_iterations": legacy.iterations,
+                    "stamp": stamp,
+                },
+            )
+
+        response = client.post(
+            "/api/auth/login",
+            json={"email": email, "password": password_text},
+        )
+        assert response.status_code == 200, response.text
+        client.cookies.clear()
+        with db_conn() as conn:
+            upgraded = conn.execute(
+                text(
+                    "SELECT password_hash,password_salt,password_algo,password_iterations "
+                    "FROM users WHERE id=:id"
+                ),
+                {"id": user_id},
+            ).mappings().first()
+        assert upgraded is not None
+        assert int(upgraded["password_iterations"]) == PBKDF2_ITERATIONS_DEFAULT
+        assert upgraded["password_hash"] != legacy.hash_hex
+        assert verify_password(
+            password_text,
+            str(upgraded["password_hash"]),
+            str(upgraded["password_salt"]),
+            str(upgraded["password_algo"]),
+            int(upgraded["password_iterations"]),
+        )
+
+
     def test_reset_confirm_uses_per_ip_and_one_way_token_buckets(self, monkeypatch):
         keys: list[str] = []
 
@@ -549,6 +668,80 @@ class TestAuthenticationRateLimitReset:
         )
         assert response.status_code == 400
         assert called is False
+
+
+class TestResponseSecurityHeaders:
+    def test_browser_security_headers_are_strict(self):
+        response = client.get("/")
+        assert response.status_code == 200
+        assert response.headers["x-frame-options"] == "DENY"
+        assert response.headers["x-xss-protection"] == "0"
+        policy = response.headers["content-security-policy"]
+        for directive in (
+            "object-src 'none'",
+            "frame-src 'none'",
+            "frame-ancestors 'none'",
+            "base-uri 'self'",
+            "form-action 'self'",
+        ):
+            assert directive in policy
+
+    def test_sensitive_api_defaults_to_no_store(self):
+        response = client.get("/api/health")
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store, max-age=0"
+        assert response.headers["pragma"] == "no-cache"
+
+    def test_origin_secret_rejection_still_receives_security_headers(self, monkeypatch):
+        monkeypatch.setattr(main_module, "ORIGIN_SECRETS", ["expected-secret"])
+        response = client.get("/")
+        assert response.status_code == 403
+        assert response.headers["x-frame-options"] == "DENY"
+        assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
+
+
+class TestPasswordHashValidation:
+    def test_corrupt_hash_values_fail_closed(self):
+        assert not verify_password(
+            "password", "not-hex", "00" * 16, "pbkdf2-sha256", 600_000
+        )
+        assert not verify_password(
+            "password", "00" * 32, "not-hex", "pbkdf2-sha256", 600_000
+        )
+        assert not verify_password(
+            "password", "00" * 32, "00" * 16, "pbkdf2-sha256", 10_000_001
+        )
+
+    def test_corrupt_database_hash_returns_unauthorized(self, actors):
+        email = "corrupt-hash@tests.albayanhub.com"
+        user_id = new_id("user")
+        stamp = now_ms()
+        with db_conn() as conn:
+            conn.execute(
+                text("DELETE FROM users WHERE lower(email)=lower(:email)"),
+                {"email": email},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO users (id,name,email,role,permissions_json,password_hash,password_salt,"
+                    "password_algo,password_iterations,deleted,created_at,created_by,last_modified) "
+                    "VALUES (:id,'Corrupt Hash',:email,'Employee','{}',:password_hash,:password_salt,"
+                    "'pbkdf2-sha256',:password_iterations,false,:stamp,NULL,:stamp)"
+                ),
+                {
+                    "id": user_id,
+                    "email": email,
+                    "password_hash": "00" * 32,
+                    "password_salt": "not-hex",
+                    "password_iterations": 600_000,
+                    "stamp": stamp,
+                },
+            )
+        response = client.post(
+            "/api/auth/login",
+            json={"email": email, "password": "AnyPassword123!"},
+        )
+        assert response.status_code == 401
 
 
 class TestAtomicAdminMembership:

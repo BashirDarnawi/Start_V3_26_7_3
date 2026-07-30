@@ -127,6 +127,7 @@ def _snapshot(meta_ad_id="111111111111111", *, live_status="ACTIVE", daily=2000,
         "metaPageId": "777777777777777",
         "metaPageName": "Existing Meta Page",
         "metaPageCategory": "Business service",
+        "metaPagePictureUrl": "https://scontent.xx.fbcdn.net/v/t39.30808-1/111111111_222222222333333_n.jpg?oh=aaa&oe=bbb",
         "metaAdAccountId": "444444444444444",
         "metaAdAccountName": "Albayan Business",
         "metaCurrency": "USD",
@@ -171,6 +172,14 @@ class FakeMetaClient:
         self.snapshots = {}
         self.snapshot_calls = []
         self.list_calls = []
+        self.spend_rows = []
+        self.spend_calls = []
+        self.spend_error = None
+        self.page_identities = {}
+        self.page_identity_calls = []
+        self.account_calls = []
+        self.account_currency = "USD"
+        self.account_error = None
         self.rows = [
             {
                 "id": "111111111111111",
@@ -188,11 +197,29 @@ class FakeMetaClient:
     def list_accounts(self):
         return [{"id": "444444444444444", "name": "Albayan Business", "currency": "USD", "timezone": "Africa/Tripoli", "status": 1}]
 
+    def _get_account(self, account_id):
+        # The real client caches this; discovery relies on that so the currency
+        # costs one request per account, not one per imported ad.
+        self.account_calls.append(str(account_id))
+        if self.account_error is not None:
+            raise self.account_error
+        return {"id": str(account_id), "name": "Albayan Business", "currency": self.account_currency}
+
     def list_ads(self, account_id, search="", *, max_pages=5):
         self.list_calls.append((str(account_id), int(max_pages)))
         rows = list(self.rows)
         needle = str(search or "").casefold()
         return [row for row in rows if not needle or needle in str(row).casefold()]
+
+    def get_ad_spend_rows_90d(self, account_id, *, max_pages=8):
+        self.spend_calls.append(str(account_id))
+        if self.spend_error is not None:
+            raise self.spend_error
+        return [dict(row) for row in self.spend_rows]
+
+    def get_ad_page_identity(self, meta_ad_id):
+        self.page_identity_calls.append(str(meta_ad_id))
+        return dict(self.page_identities.get(str(meta_ad_id)) or {})
 
 
 def test_meta_display_helpers_are_bounded_and_reject_private_thumbnail_urls():
@@ -291,6 +318,83 @@ def test_process_wide_meta_backoff_prevents_more_provider_calls(monkeypatch):
     assert client_calls == []
 
 
+def test_success_usage_headers_pause_before_meta_rejects_requests(monkeypatch):
+    monkeypatch.setenv("ALBAYAN_META_ACCESS_TOKEN", "test-token")
+    monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", 0.0)
+    monkeypatch.setattr(meta_ads, "_META_REMOTE_USAGE_PERCENT", 0)
+    persisted = []
+    monkeypatch.setattr(
+        meta_ads, "_persist_meta_provider_state", lambda: persisted.append(True)
+    )
+    config = meta_ads.MetaAdsConfig(
+        access_token="test-token",
+        app_secret="",
+        graph_version="v25.0",
+        allowed_account_ids=("444444444444444",),
+        background_sync=False,
+        sync_interval_minutes=15,
+        sync_batch_size=2,
+        request_timeout_seconds=15,
+    )
+    usage = json.dumps(
+        {
+            "444444444444444": [
+                {
+                    "type": "ads_management",
+                    "call_count": 93,
+                    "total_cputime": 40,
+                    "total_time": 55,
+                }
+            ]
+        }
+    )
+    meta_ads._observe_meta_response(
+        httpx.Response(200, headers={"x-business-use-case-usage": usage}),
+        config,
+    )
+    assert meta_ads._meta_remote_backoff_remaining() >= 400
+    assert meta_ads._public_meta_provider_state()["usagePercent"] == 93
+    assert persisted == [True]
+    monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", 0.0)
+
+
+def test_provider_cooldown_restores_after_process_restart(monkeypatch):
+    monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", 0.0)
+    monkeypatch.setattr(meta_ads, "_META_PROVIDER_STATE_REFRESHED_AT", 0.0)
+    monkeypatch.setattr(
+        meta_ads,
+        "_load_meta_provider_state",
+        lambda: {
+            "backoffUntilMs": meta_ads.now_ms() + 120_000,
+            "backoffReason": "meta_80004",
+            "usagePercent": 100,
+        },
+    )
+    meta_ads._refresh_meta_provider_state(force=True)
+    state = meta_ads._public_meta_provider_state()
+    assert state["paused"] is True
+    assert state["retryAfterSeconds"] >= 100
+    assert state["reason"] == "meta_80004"
+    assert state["usagePercent"] == 100
+    monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", 0.0)
+
+
+def test_rate_limit_is_provider_state_not_per_ad_failure():
+    throttled = meta_ads.MetaAdsError(
+        "rate_limited",
+        "Meta synchronization is paused safely.",
+        retryable=True,
+    )
+    assert (
+        meta_ads.record_meta_sync_failure(
+            "ad-safe-provider-pause",
+            throttled,
+            expected_last_modified=None,
+        )
+        is None
+    )
+
+
 def test_meta_activity_history_is_separate_and_deduplicated():
     data = {"metaChangeHistory": [], "metaChangeCount": 0}
     activity = {
@@ -347,7 +451,7 @@ def _clear_auto_import_rows():
         ).mappings().all()
         for row in rows:
             data = json_loads(row.get("data_json") or "{}") or {}
-            if row["type"] == "metaImportState" or (
+            if row["type"] in ("metaImportState", "metaPartnerState") or (
                 isinstance(data, dict) and data.get("metaImportSource") == "meta_ads"
             ):
                 conn.execute(
@@ -619,6 +723,7 @@ def test_transient_meta_data_errors_are_retryable_and_cdn_keys_are_stable():
     )
     assert reduced.code == "temporary"
     assert reduced.retryable is True
+    assert reduced.provider_code == "1"
 
     avatar = "https://scontent.xx.fbcdn.net/v/t39.30808-1/123456789_987654321012345_n.jpg"
     assert meta_ads._cdn_asset_key(f"{avatar}?stp=dst-jpg_p64x64&oh=aaa") == (
@@ -627,6 +732,51 @@ def test_transient_meta_data_errors_are_retryable_and_cdn_keys_are_stable():
     # Generic path names must never match anything.
     assert meta_ads._cdn_asset_key("https://scontent.xx.fbcdn.net/picture") == ""
     assert meta_ads._cdn_asset_key("http://scontent.xx.fbcdn.net/a_b_c_long_name.jpg") == ""
+
+
+def test_ad_account_throttling_is_retryable_and_respects_regain_time(monkeypatch):
+    monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", 0.0)
+    probe = meta_ads.MetaAdsClient(
+        meta_ads.MetaAdsConfig(
+            access_token="test-token",
+            app_secret="",
+            graph_version="v25.0",
+            allowed_account_ids=("444444444444444",),
+            background_sync=False,
+            sync_interval_minutes=15,
+            sync_batch_size=2,
+            request_timeout_seconds=15,
+        )
+    )
+    # Marketing API ad-account throttling arrives as HTTP 400 code 80004 —
+    # it must be treated as "wait and retry", never as a permanent failure.
+    usage = json.dumps(
+        {
+            "1613934299308344": [
+                {
+                    "type": "ads_management",
+                    "call_count": 100,
+                    "total_cputime": 90,
+                    "total_time": 95,
+                    "estimated_time_to_regain_access": 4,
+                }
+            ]
+        }
+    )
+    throttled = probe._safe_error(
+        httpx.Response(400, headers={"x-business-use-case-usage": usage}),
+        {"error": {"code": 80004, "message": "There have been too many calls to this ad-account."}},
+    )
+    assert throttled.code == "rate_limited"
+    assert throttled.retryable is True
+    assert throttled.provider_code == "80004"
+    # The regain estimate (minutes) arms the process-wide pause.
+    assert meta_ads._meta_remote_backoff_remaining() >= 200
+
+    assert meta_ads._estimated_backoff_seconds(
+        httpx.Response(400, headers={"Retry-After": "90"})
+    ) == 90
+    assert meta_ads._estimated_backoff_seconds(httpx.Response(400)) == 60
 
 
 def test_ads_edge_falls_back_to_slim_fields_when_meta_rejects_expansion(monkeypatch):
@@ -758,11 +908,17 @@ def test_snapshot_decomposes_failed_mega_read_and_rejects_page_avatar_photo(monk
     assert snapshot["metaPageId"] == page_id
     assert snapshot["metaPageName"] == "Real Client Page"
     assert snapshot["metaPageCategory"] == "Clothing store"
-    # The generic creative thumbnail was the Page profile picture: it must be
-    # rejected instead of being displayed as the ad's photo.
-    assert snapshot["metaThumbnailUrl"] == ""
-    assert snapshot["metaThumbnailSource"] == ""
+    # The generic creative thumbnail IS the Page profile picture. The user
+    # prefers a picture over an empty tile, so it is shown — but labelled
+    # page_avatar so the UI can say it is a substitute, and any later real
+    # photo replaces it.
+    assert avatar_asset in snapshot["metaThumbnailUrl"]
+    assert snapshot["metaThumbnailSource"] == "page_avatar"
+    assert snapshot["metaMediaTrace"] == ""
     assert snapshot["metaMediaVersion"] == meta_ads._META_MEDIA_VERSION
+    # The Page profile picture also travels on its own dedicated field, so
+    # the UI can show it beside the ad photo for every ad of the page.
+    assert avatar_asset in snapshot["metaPagePictureUrl"]
 
 
 def test_avatar_check_fails_closed_when_page_picture_is_unreadable(monkeypatch):
@@ -820,11 +976,312 @@ def test_avatar_check_fails_closed_when_page_picture_is_unreadable(monkeypatch):
 
     real = _real_client(monkeypatch, handler)
     snapshot = real.get_ad_snapshot(ad_id)
-    # The only candidate photo is the untrusted generic thumbnail of a boosted
-    # Page post and the avatar could not be checked: fail CLOSED (no photo,
-    # the UI shows its loading tile) instead of risking the page logo.
-    assert snapshot["metaThumbnailUrl"] == ""
-    assert snapshot["metaThumbnailSource"] == ""
+    # The only candidate photo is the generic creative thumbnail and the
+    # avatar could not be checked. The user prefers a picture over an empty
+    # tile, so it is shown under the generic fallback label.
+    assert avatar_asset in snapshot["metaThumbnailUrl"]
+    assert snapshot["metaThumbnailSource"] == "meta_fallback"
+    # An unreadable avatar leaves the dedicated field empty instead of
+    # failing the snapshot; apply_meta_snapshot keeps any earlier value.
+    assert snapshot["metaPagePictureUrl"] == ""
+
+
+def test_adcreatives_edge_recovers_photo_when_creative_node_is_denied(monkeypatch):
+    ad_id = "999999999999996"
+    creative_id = "666666666666667"
+    adset_id = "888888888888886"
+    campaign_id = "777777777777776"
+
+    def handler(request):
+        path = request.url.path
+        if path.endswith(f"/{ad_id}/insights"):
+            return httpx.Response(400, json={"error": {"code": 100}})
+        if path.endswith(f"/{ad_id}/adcreatives"):
+            assert request.url.params.get("thumbnail_width") == "512"
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": creative_id,
+                            "image_url": "https://lookaside.fbsbx.com/real-ad-media-edge.jpg",
+                        }
+                    ]
+                },
+            )
+        if path.endswith(f"/{ad_id}"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": ad_id,
+                    "name": "Edge ad",
+                    "status": "ACTIVE",
+                    "effective_status": "ACTIVE",
+                    "account_id": "444444444444444",
+                    "adset_id": adset_id,
+                    "campaign_id": campaign_id,
+                    "creative": {"id": creative_id},
+                    "created_time": "2026-07-28T01:00:00+0000",
+                },
+            )
+        if path.endswith(f"/{creative_id}"):
+            return httpx.Response(400, json={"error": {"code": 10, "message": "denied"}})
+        if path.endswith(f"/{adset_id}"):
+            return httpx.Response(200, json={"id": adset_id, "name": "Set", "status": "ACTIVE", "effective_status": "ACTIVE"})
+        if path.endswith(f"/{campaign_id}"):
+            return httpx.Response(200, json={"id": campaign_id, "name": "Camp", "status": "ACTIVE", "effective_status": "ACTIVE"})
+        if path.endswith("/act_444444444444444"):
+            return httpx.Response(200, json={"id": "act_444444444444444", "account_id": "444444444444444", "name": "Albayan Business", "currency": "USD", "account_status": 1})
+        return httpx.Response(404, json={"error": {"code": 100}})
+
+    real = _real_client(monkeypatch, handler)
+    snapshot = real.get_ad_snapshot(ad_id)
+    assert snapshot["metaThumbnailUrl"] == "https://lookaside.fbsbx.com/real-ad-media-edge.jpg"
+    assert snapshot["metaThumbnailSource"] == "creative"
+
+
+def test_ad_preview_recovers_photo_for_boosted_client_page_posts(monkeypatch):
+    ad_id = "999999999999997"
+    adset_id = "888888888888887"
+    campaign_id = "777777777777779"
+    creative_id = "666666666666668"
+    page_id = "777777777777782"
+    story_id = f"{page_id}_123456789012402"
+    avatar_asset = "123456789_987654321012345_n.jpg"
+    real_asset = "555666777_888999000111222_n.jpg"
+    preview_url = "https://www.facebook.com/ads/api/preview_iframe.php?d=signed&t=token"
+
+    def handler(request):
+        path = request.url.path
+        host = request.url.host
+        if host == "www.facebook.com" and path.endswith("/ads/api/preview_iframe.php"):
+            assert "Authorization" not in request.headers
+            # The preview is a JS-rendered shell: the real creative URL only
+            # exists JSON-escaped inside a script, never as a plain <img>.
+            return httpx.Response(
+                200,
+                html=(
+                    "<html><body>"
+                    f'<img src="https://scontent.xx.fbcdn.net/v/t39.30808-1/{avatar_asset}?stp=dst-jpg_p64x64&oh=x">'
+                    '<script>window.__d = {"media":{"image":{"uri":'
+                    f'"https:\\/\\/scontent.xx.fbcdn.net\\/v\\/t39.30808-6\\/{real_asset}?stp=dst-jpg_p720x720\\u0026oh=y"'
+                    "}}};</script>"
+                    '<img src="https://static.xx.fbcdn.net/rsrc.php/ui.png">'
+                    "</body></html>"
+                ),
+            )
+        if path.endswith(f"/{ad_id}/insights"):
+            return httpx.Response(400, json={"error": {"code": 100}})
+        if path.endswith(f"/{ad_id}/previews"):
+            assert request.url.params.get("ad_format") in {
+                "DESKTOP_FEED_STANDARD",
+                "MOBILE_FEED_STANDARD",
+            }
+            return httpx.Response(
+                200,
+                json={"data": [{"body": f'<iframe src="{preview_url}&amp;extra=1" width="320"></iframe>'}]},
+            )
+        if path.endswith(f"/{ad_id}"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": ad_id,
+                    "name": "Boosted client post",
+                    "status": "ACTIVE",
+                    "effective_status": "ACTIVE",
+                    "account_id": "444444444444444",
+                    "adset_id": adset_id,
+                    "campaign_id": campaign_id,
+                    "creative": {"id": creative_id},
+                    "created_time": "2026-07-28T02:00:00+0000",
+                },
+            )
+        if path.endswith(f"/{creative_id}"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": creative_id,
+                    "thumbnail_url": f"https://scontent.xx.fbcdn.net/v/t39.30808-1/{avatar_asset}?stp=dst-jpg_p64x64",
+                    "effective_object_story_id": story_id,
+                },
+            )
+        if path.endswith(f"/{story_id}"):
+            return httpx.Response(400, json={"error": {"code": 10}})
+        if path.endswith(f"/{page_id}/picture"):
+            return httpx.Response(
+                200,
+                json={"data": {"url": f"https://scontent.xx.fbcdn.net/v/t39.30808-1/{avatar_asset}?oh=z"}},
+            )
+        if path.endswith("/act_444444444444444/promote_pages"):
+            return httpx.Response(200, json={"data": []})
+        if path.endswith(f"/{page_id}"):
+            return httpx.Response(400, json={"error": {"code": 100}})
+        if path.endswith(f"/{adset_id}"):
+            return httpx.Response(200, json={"id": adset_id, "name": "Set", "status": "ACTIVE", "effective_status": "ACTIVE"})
+        if path.endswith(f"/{campaign_id}"):
+            return httpx.Response(200, json={"id": campaign_id, "name": "Camp", "status": "ACTIVE", "effective_status": "ACTIVE"})
+        if path.endswith("/act_444444444444444"):
+            return httpx.Response(200, json={"id": "act_444444444444444", "account_id": "444444444444444", "name": "Albayan Business", "currency": "USD", "account_status": 1})
+        return httpx.Response(404, json={"error": {"code": 100}})
+
+    real = _real_client(monkeypatch, handler)
+    snapshot = real.get_ad_snapshot(ad_id)
+    # The real rendered creative wins; the page avatar and static resources
+    # in the preview document are filtered out.
+    assert real_asset in snapshot["metaThumbnailUrl"]
+    assert snapshot["metaThumbnailSource"] == "preview"
+
+
+def test_ad_preview_revalidates_every_redirect(monkeypatch):
+    ad_id = "999999999999996"
+    preview_url = "https://www.facebook.com/ads/api/preview_iframe.php?d=signed"
+    requested_hosts = []
+
+    def handler(request):
+        requested_hosts.append(request.url.host)
+        if request.url.host == "graph.facebook.com":
+            assert request.url.path.endswith(f"/{ad_id}/previews")
+            return httpx.Response(
+                200,
+                json={"data": [{"body": f'<iframe src="{preview_url}"></iframe>'}]},
+            )
+        if request.url.host == "www.facebook.com":
+            return httpx.Response(302, headers={"location": "https://127.0.0.1/private"})
+        raise AssertionError(f"unsafe redirect was requested: {request.url}")
+
+    real = _real_client(monkeypatch, handler)
+    trace = []
+    assert real.get_ad_preview_media_url(ad_id, trace=trace) == ""
+    assert "preview:redirect_host" in trace
+    assert "127.0.0.1" not in requested_hosts
+
+
+def test_ad_preview_allows_bounded_facebook_redirects(monkeypatch):
+    ad_id = "999999999999995"
+    creative_url = "https://scontent.xx.fbcdn.net/v/t39.30808-6/creative.jpg?stp=dst-jpg_p720x720"
+
+    def handler(request):
+        if request.url.host == "graph.facebook.com":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "body": (
+                                '<iframe src="https://www.facebook.com/preview/start">'
+                                "</iframe>"
+                            )
+                        }
+                    ]
+                },
+            )
+        if request.url.host == "www.facebook.com" and request.url.path == "/preview/start":
+            return httpx.Response(302, headers={"location": "/preview/final"})
+        if request.url.host == "www.facebook.com" and request.url.path == "/preview/final":
+            return httpx.Response(200, html=f'<img src="{creative_url}">')
+        return httpx.Response(404)
+
+    real = _real_client(monkeypatch, handler)
+    assert real.get_ad_preview_media_url(ad_id) == creative_url
+
+
+def test_bulk_ad_page_map_covers_archived_history(monkeypatch):
+    page_id = "777777777777783"
+
+    def handler(request):
+        path = request.url.path
+        if path.endswith("/act_444444444444444/ads"):
+            statuses = json.loads(request.url.params.get("effective_status") or "[]")
+            assert "ARCHIVED" in statuses
+            assert "DELETED" in statuses
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "900000000000010",
+                            "creative": {"effective_object_story_id": f"{page_id}_1"},
+                        },
+                        {
+                            "id": "900000000000011",
+                            "creative": {"object_story_spec": {"page_id": page_id}},
+                        },
+                        {"id": "900000000000012", "creative": {}},
+                    ]
+                },
+            )
+        return httpx.Response(404, json={"error": {"code": 100}})
+
+    real = _real_client(monkeypatch, handler)
+    mapping = real.get_account_ad_page_map("444444444444444")
+    assert mapping == {
+        "900000000000010": page_id,
+        "900000000000011": page_id,
+    }
+
+
+def test_page_profile_picture_is_final_fallback_when_no_media_route_works(monkeypatch):
+    ad_id = "999999999999998"
+    adset_id = "888888888888888"
+    campaign_id = "777777777777791"
+    creative_id = "666666666666669"
+    page_id = "777777777777784"
+    story_id = f"{page_id}_123456789012403"
+    avatar_asset = "123456789_987654321012345_n.jpg"
+
+    def handler(request):
+        path = request.url.path
+        if path.endswith(f"/{ad_id}/insights"):
+            return httpx.Response(400, json={"error": {"code": 100}})
+        if path.endswith(f"/{ad_id}/adcreatives"):
+            return httpx.Response(400, json={"error": {"code": 10}})
+        if path.endswith(f"/{ad_id}/previews"):
+            return httpx.Response(400, json={"error": {"code": 10}})
+        if path.endswith(f"/{ad_id}"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": ad_id,
+                    "name": "Locked-down ad",
+                    "status": "ACTIVE",
+                    "effective_status": "ACTIVE",
+                    "account_id": "444444444444444",
+                    "adset_id": adset_id,
+                    "campaign_id": campaign_id,
+                    "creative": {
+                        "id": creative_id,
+                        "effective_object_story_id": story_id,
+                        "object_story_spec": {"page_id": page_id},
+                    },
+                    "created_time": "2026-07-28T03:00:00+0000",
+                },
+            )
+        if path.endswith(f"/{creative_id}"):
+            return httpx.Response(400, json={"error": {"code": 10}})
+        if path.endswith(f"/{story_id}"):
+            return httpx.Response(400, json={"error": {"code": 10}})
+        if path.endswith(f"/{page_id}/picture"):
+            return httpx.Response(
+                200,
+                json={"data": {"url": f"https://scontent.xx.fbcdn.net/v/t39.30808-1/{avatar_asset}?oh=large512"}},
+            )
+        if path.endswith("/act_444444444444444/promote_pages"):
+            return httpx.Response(200, json={"data": [{"id": page_id, "name": "Client Page", "category": "Shopping"}]})
+        if path.endswith(f"/{adset_id}"):
+            return httpx.Response(200, json={"id": adset_id, "name": "Set", "status": "ACTIVE", "effective_status": "ACTIVE"})
+        if path.endswith(f"/{campaign_id}"):
+            return httpx.Response(200, json={"id": campaign_id, "name": "Camp", "status": "ACTIVE", "effective_status": "ACTIVE"})
+        if path.endswith("/act_444444444444444"):
+            return httpx.Response(200, json={"id": "act_444444444444444", "account_id": "444444444444444", "name": "Albayan Business", "currency": "USD", "account_status": 1})
+        return httpx.Response(404, json={"error": {"code": 100}})
+
+    real = _real_client(monkeypatch, handler)
+    snapshot = real.get_ad_snapshot(ad_id)
+    # Every media door is closed; the Page profile picture is shown as the
+    # clearly-labelled substitute instead of an empty tile (user request).
+    assert avatar_asset in snapshot["metaThumbnailUrl"]
+    assert snapshot["metaThumbnailSource"] == "page_avatar"
+    assert snapshot["metaPageName"] == "Client Page"
 
 
 def test_discovery_rows_carry_real_page_names_for_instant_import(monkeypatch):
@@ -918,7 +1375,9 @@ def test_status_is_admin_only_and_never_reveals_secrets(actors, configured_meta)
     assert response.json()["readOnly"] is True
     assert response.json()["allowedAccountCount"] == 1
     assert response.json()["syncBatchSize"] == 2
-    assert response.json()["workerSyncIntervalSeconds"] == 10
+    assert response.json()["workerSyncIntervalSeconds"] == 20
+    assert response.json()["providerState"]["state"] in {"ready", "paused"}
+    assert response.json()["providerState"]["minimumRequestIntervalMs"] == 750
     assert response.json()["discoveryFastPages"] == 1
     assert "secret-token" not in response.text
     assert "secret-app" not in response.text
@@ -1086,6 +1545,9 @@ def test_auto_import_baselines_then_creates_one_neutral_draft_and_reuses_page(
         assert stored["metaMediaVersion"] == 0
         assert stored["metaDurationDays"] == 5
         assert stored["metaTotalBudgetMinor"] == 10000
+        # A draft that carries budget minors must say which currency they are
+        # in, otherwise the browser cannot tell $100 from EUR 100.
+        assert stored["metaCurrency"] == "USD"
         assert stored["pageId"] == ""
         assert configured_meta.snapshot_calls == []
         assert configured_meta.list_calls[-1][1] == 1
@@ -1140,6 +1602,76 @@ def test_auto_import_baselines_then_creates_one_neutral_draft_and_reuses_page(
                 text("DELETE FROM entities WHERE type='pages' AND id=:id"),
                 {"id": page_id},
             )
+        _clear_auto_import_rows()
+
+
+def _discovery_row(meta_id: str, created: str) -> dict:
+    return {
+        "id": meta_id,
+        "name": f"Draft {meta_id}",
+        "effectiveStatus": "ACTIVE",
+        "campaignName": "Automatic campaign",
+        "pageId": "777777777777777",
+        "dailyBudgetMinor": 1000,
+        "totalBudgetMinor": 3000,
+        "totalBudgetKind": "estimated_daily",
+        "startTime": "2026-07-25T00:00:00Z",
+        "endTime": "2026-07-28T00:00:00Z",
+        "durationDays": 3,
+        "createdTime": created,
+    }
+
+
+def test_imported_drafts_carry_the_ad_accounts_real_currency(actors, configured_meta):
+    """A draft ships Meta's budget minors, so it must ship the currency too.
+
+    Without it the browser could not tell EUR 30 from $30 and would lock the
+    foreign amount into the read-only Ad Budget (USD) field as customer debt.
+    """
+    _clear_auto_import_rows()
+    try:
+        assert meta_ads.discover_meta_ads(force=True)["imported"] == []
+
+        configured_meta.account_currency = "eur"
+        configured_meta.rows.insert(0, _discovery_row("888888888888890", "2026-07-27T04:00:00Z"))
+        configured_meta.rows.insert(0, _discovery_row("888888888888891", "2026-07-27T05:00:00Z"))
+        configured_meta.account_calls.clear()
+
+        discovered = meta_ads.discover_meta_ads(force=True)
+        assert len(discovered["imported"]) == 2
+        for entry in discovered["imported"]:
+            stored, _ = _stored_ad(entry["id"])
+            assert stored["metaCurrency"] == "EUR"
+            assert stored["metaTotalBudgetMinor"] == 3000
+        # Cached per pass: two new ads on one account must not cost two reads.
+        assert configured_meta.account_calls == ["444444444444444"]
+    finally:
+        configured_meta.account_currency = "USD"
+        configured_meta.account_error = None
+        _clear_auto_import_rows()
+
+
+def test_unreadable_account_currency_never_sinks_an_import(actors, configured_meta):
+    """A throttled account read must leave the currency blank, not guess USD."""
+    _clear_auto_import_rows()
+    try:
+        assert meta_ads.discover_meta_ads(force=True)["imported"] == []
+
+        configured_meta.account_error = meta_ads.MetaAdsError(
+            "rate_limited", "Meta is limiting requests.", retryable=True
+        )
+        configured_meta.rows.insert(0, _discovery_row("888888888888892", "2026-07-27T06:00:00Z"))
+
+        discovered = meta_ads.discover_meta_ads(force=True)
+        assert len(discovered["imported"]) == 1
+        stored, _ = _stored_ad(discovered["imported"][0]["id"])
+        # Imported anyway, just without a currency — the budget field stays
+        # manual until a later pass learns it.
+        assert stored["metaAdId"] == "888888888888892"
+        assert stored["metaCurrency"] == ""
+        assert stored["metaTotalBudgetMinor"] == 3000
+    finally:
+        configured_meta.account_error = None
         _clear_auto_import_rows()
 
 
@@ -1208,21 +1740,36 @@ def test_old_wrong_thumbnail_is_prioritized_for_one_safe_repair(actors):
     try:
         assert ad_id in {row["adId"] for row in meta_ads._due_meta_ads(limit=1000)}
 
-        # If Meta rejects the repair, the normal retry clock must be respected
-        # instead of repeatedly calling Meta for the same image.
+        # A failed repair under THIS resolver version stamps the row and hands
+        # it back to the normal retry clock: Meta is never hammered.
+        failed = meta_ads.record_meta_sync_failure(
+            ad_id,
+            meta_ads.MetaAdsError("request_failed", "Meta could not return the requested ad information."),
+            expected_last_modified=None,
+        )
+        assert failed is not None
+        stored, _ = _stored_ad(ad_id)
+        assert stored["metaMediaRepairVersion"] == meta_ads._META_MEDIA_VERSION
+        assert stored["metaSyncFailureCount"] == 1
+        assert ad_id not in {row["adId"] for row in meta_ads._due_meta_ads(limit=1000)}
+
+        # But a row that failed under an OLDER resolver (no repair stamp for
+        # the current version) gets exactly ONE fresh prioritized attempt —
+        # otherwise a deployment that fixes the resolver would leave photos
+        # waiting out a multi-hour backoff from the previous version.
         with db_conn() as conn:
             row = conn.execute(
                 text("SELECT data_json FROM entities WHERE type='ads' AND id=:id"),
                 {"id": ad_id},
             ).mappings().first()
             data = json_loads(row["data_json"])
-            data["metaSyncFailureCount"] = 1
+            data.pop("metaMediaRepairVersion", None)
             data["metaNextSyncAt"] = now_ms() + 900_000
             conn.execute(
                 text("UPDATE entities SET data_json=:data WHERE type='ads' AND id=:id"),
                 {"data": json_dumps(data), "id": ad_id},
             )
-        assert ad_id not in {row["adId"] for row in meta_ads._due_meta_ads(limit=1000)}
+        assert ad_id in {row["adId"] for row in meta_ads._due_meta_ads(limit=1000)}
     finally:
         with db_conn() as conn:
             conn.execute(
@@ -1260,26 +1807,184 @@ def test_resync_never_erases_resolved_photo_or_page_name(actors):
     degraded["metaPageId"] = ""
     degraded["metaPageName"] = ""
     degraded["metaPageCategory"] = ""
+    degraded["metaPagePictureUrl"] = ""
     _apply(degraded)
     stored, _ = _stored_ad(ad_id)
     assert stored["metaThumbnailUrl"] == "https://lookaside.fbsbx.com/real-ad-photo.jpg"
     assert stored["metaThumbnailSource"] == "story"
     assert stored["metaPageId"] == "777777777777777"
     assert stored["metaPageName"] == "Existing Meta Page"
+    assert "111111111_222222222333333_n.jpg" in stored["metaPagePictureUrl"]
 
-    # A weak generic thumbnail (possibly the Page avatar) may still be
-    # retired by an empty resolution so wrong photos do not stick forever.
+    # A degraded pass that could not read the ad set/campaign must not wipe
+    # the budget picture either; the remaining money is recomputed from the
+    # preserved total and the still-updating spend.
+    no_budget = _snapshot(meta_id, spend=4.0)
+    for key in ("metaDailyBudgetMinor", "metaLifetimeBudgetMinor", "metaTotalBudgetMinor",
+                "metaBudgetRemainingMinor", "metaTotalRemainingBudgetMinor", "metaDurationDays"):
+        no_budget[key] = 0
+    for key in ("metaTotalBudgetKind", "metaBudgetSource", "metaAdSetName",
+                "metaCampaignName", "metaStartTime", "metaEndTime"):
+        no_budget[key] = ""
+    _apply(no_budget)
+    stored, _ = _stored_ad(ad_id)
+    assert stored["metaDailyBudgetMinor"] == 2000
+    assert stored["metaTotalBudgetMinor"] == 10000
+    assert stored["metaAdSetName"] == "Tripoli Messages"
+    assert stored["metaCampaignName"] == "Summer Campaign"
+    assert stored["metaStartTime"] == "2026-07-25T00:00:00Z"
+    assert stored["metaSpendMinor"] == 400
+    assert stored["metaTotalRemainingBudgetMinor"] == 10000 - 400
+
+    # The user prefers SOME picture over an empty tile: even a fallback
+    # picture survives a later pass that resolved nothing, while any better
+    # non-empty source still replaces it.
     weak = _snapshot(meta_id)
     weak["metaThumbnailUrl"] = "https://lookaside.fbsbx.com/page-logo.jpg"
-    weak["metaThumbnailSource"] = "meta_fallback"
+    weak["metaThumbnailSource"] = "page_avatar"
     _apply(weak)
     cleared = _snapshot(meta_id)
     cleared["metaThumbnailUrl"] = ""
     cleared["metaThumbnailSource"] = ""
     _apply(cleared)
     stored, _ = _stored_ad(ad_id)
-    assert stored["metaThumbnailUrl"] == ""
-    assert stored["metaThumbnailSource"] == ""
+    assert stored["metaThumbnailUrl"] == "https://lookaside.fbsbx.com/page-logo.jpg"
+    assert stored["metaThumbnailSource"] == "page_avatar"
+
+    better = _snapshot(meta_id)
+    better["metaThumbnailUrl"] = "https://lookaside.fbsbx.com/real-photo-late.jpg"
+    better["metaThumbnailSource"] = "preview"
+    _apply(better)
+    stored, _ = _stored_ad(ad_id)
+    assert stored["metaThumbnailUrl"] == "https://lookaside.fbsbx.com/real-photo-late.jpg"
+    assert stored["metaThumbnailSource"] == "preview"
+
+
+def test_import_page_stores_picture_and_ignores_signature_rotation():
+    page_meta_id = "777777777777900"
+    base = "https://scontent.xx.fbcdn.net/v/t39.30808-1/999999999_888888888777777_n.jpg"
+    snapshot = {
+        "metaPageId": page_meta_id,
+        "metaPageName": "Avatar Churn Test Page",
+        "metaPageCategory": "Clothing store",
+        "metaPagePictureUrl": f"{base}?oh=aaa&oe=bbb",
+    }
+    created_page_id = ""
+
+    def _stored_page():
+        with db_conn() as conn:
+            row = conn.execute(
+                text("SELECT data_json,last_modified FROM entities WHERE type='pages' AND id=:id"),
+                {"id": created_page_id},
+            ).mappings().first()
+        assert row
+        return json_loads(row["data_json"]), int(row["last_modified"])
+
+    try:
+        with db_conn() as conn:
+            created_page_id, _, created = meta_ads._ensure_import_page(conn, snapshot)
+        assert created is True
+        stored, version = _stored_page()
+        assert stored["metaPagePictureUrl"] == f"{base}?oh=aaa&oe=bbb"
+
+        # The same photo behind rotated signing parameters must NOT rewrite
+        # the page: the routine 15-minute ad sync would otherwise bump every
+        # page's version (re-downloading it to every client) each pass.
+        rotated = dict(snapshot, metaPagePictureUrl=f"{base}?oh=ccc&oe=ddd")
+        with db_conn() as conn:
+            meta_ads._ensure_import_page(conn, rotated)
+        stored, unchanged_version = _stored_page()
+        assert stored["metaPagePictureUrl"] == f"{base}?oh=aaa&oe=bbb"
+        assert unchanged_version == version
+
+        # A genuinely new profile picture (different CDN asset) replaces it.
+        new_asset = (
+            "https://scontent.xx.fbcdn.net/v/t39.30808-1/"
+            "121212121_343434343565656_n.jpg?oh=eee"
+        )
+        with db_conn() as conn:
+            meta_ads._ensure_import_page(
+                conn, dict(snapshot, metaPagePictureUrl=new_asset)
+            )
+        stored, bumped_version = _stored_page()
+        assert stored["metaPagePictureUrl"] == new_asset
+        assert bumped_version > version
+    finally:
+        if created_page_id:
+            with db_conn() as conn:
+                conn.execute(
+                    text("DELETE FROM entities WHERE type='pages' AND id=:id"),
+                    {"id": created_page_id},
+                )
+
+
+def test_degraded_resync_never_writes_stale_page_picture_back(actors):
+    """A pass whose avatar read failed must not regress the page's picture.
+
+    Ads of one page sync on independent schedules, so an ad row can hold an
+    OLDER page picture than the page entity (another ad already stored the
+    new one). The merge keeps the old URL on the AD row, but only a picture
+    freshly resolved by the current pass may be written to the shared page.
+    """
+    ad_id = "meta_test_stale_avatar"
+    meta_id = "777000111222555"
+    new_picture = (
+        "https://scontent.xx.fbcdn.net/v/t39.30808-1/"
+        "555555555_666666666777777_n.jpg?oh=new&oe=new"
+    )
+    _insert_ad(ad_id, actors["admin_id"], metaImportSource="meta_ads")
+    try:
+        def _apply(snapshot):
+            meta_ads.apply_meta_snapshot(
+                ad_id,
+                snapshot,
+                actor_id=None,
+                actor_name="Meta automatic sync",
+                expected_last_modified=None,
+                operation_id=None,
+                action="automatic_sync",
+            )
+
+        # Pass 1: this ad learns the (older) default picture; the page too.
+        _apply(_snapshot(meta_id))
+        stored, _ = _stored_ad(ad_id)
+        page_id = stored["pageId"]
+        assert page_id
+
+        # Another ad of the same page later stores a NEWER profile picture.
+        with db_conn() as conn:
+            meta_ads._ensure_import_page(
+                conn,
+                {
+                    "metaPageId": "777777777777777",
+                    "metaPageName": "Existing Meta Page",
+                    "metaPageCategory": "Business service",
+                    "metaPagePictureUrl": new_picture,
+                },
+            )
+
+        # Pass 2 for THIS ad: the avatar read failed transiently (empty), so
+        # the merge restores the ad's own older URL. The ad keeps it...
+        degraded = _snapshot(meta_id)
+        degraded["metaPagePictureUrl"] = ""
+        _apply(degraded)
+        stored, _ = _stored_ad(ad_id)
+        assert "111111111_222222222333333_n.jpg" in stored["metaPagePictureUrl"]
+
+        # ...but the shared page must KEEP the newer photo.
+        with db_conn() as conn:
+            row = conn.execute(
+                text("SELECT data_json FROM entities WHERE type='pages' AND id=:id"),
+                {"id": page_id},
+            ).mappings().first()
+        assert row
+        assert json_loads(row["data_json"])["metaPagePictureUrl"] == new_picture
+    finally:
+        with db_conn() as conn:
+            conn.execute(
+                text("DELETE FROM entities WHERE type='ads' AND id=:id"),
+                {"id": ad_id},
+            )
 
 
 def test_enrichment_respects_manual_page_choice_and_avoids_noop_page_writes(actors):
@@ -1341,6 +2046,100 @@ def test_enrichment_respects_manual_page_choice_and_avoids_noop_page_writes(acto
         assert stored["pageName"] == "Manual page"
     finally:
         _clear_auto_import_rows()
+
+
+def test_partner_active_pages_metric_is_admin_only_cached_and_lists_pages(
+    actors, configured_meta
+):
+    _clear_auto_import_rows()
+    ad_a = "meta_test_partner_a"
+    ad_b = "meta_test_partner_b"
+    _insert_ad(
+        ad_a,
+        actors["admin_id"],
+        metaAdId="900000000000001",
+        metaPageId="777000000000001",
+        metaPageName="Qualified Page",
+    )
+    _insert_ad(
+        ad_b,
+        actors["admin_id"],
+        metaAdId="900000000000002",
+        metaPageId="777000000000002",
+        metaPageName="Small Page",
+    )
+    configured_meta.spend_rows = [
+        {"adId": "900000000000001", "spendMinor": 9_000},
+        {"adId": "900000000000001", "spendMinor": 6_000},
+        {"adId": "900000000000002", "spendMinor": 2_500},
+        # Spend from ads older than Albayan: one resolvable, one not.
+        {"adId": "900000000000003", "spendMinor": 30_000},
+        {"adId": "900000000000004", "spendMinor": 1_000},
+    ]
+    configured_meta.page_identities = {
+        "900000000000003": {"pageId": "777000000000003"}
+    }
+    try:
+        denied = client.get("/api/meta-ads/partner-pages", cookies=actors["employee"])
+        assert denied.status_code == 403
+
+        response = client.get("/api/meta-ads/partner-pages", cookies=actors["admin"])
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["thresholdMinor"] == 10_000
+        assert body["targetCount"] == 500
+        assert body["windowDays"] == 90
+        assert body["qualifiedCount"] == 2
+        by_id = {row["pageId"]: row for row in body["pages"]}
+        assert by_id["777000000000001"]["qualified"] is True
+        assert by_id["777000000000001"]["spendMinor"] == 15_000
+        assert by_id["777000000000001"]["pageName"] == "Qualified Page"
+        assert by_id["777000000000002"]["qualified"] is False
+        assert by_id["777000000000003"]["qualified"] is True
+        assert body["unmatchedAdCount"] == 1
+        assert "secret-token" not in response.text
+        first_calls = len(configured_meta.spend_calls)
+        assert first_calls == 1
+
+        # Cached: a second read must not call Meta again.
+        cached = client.get("/api/meta-ads/partner-pages", cookies=actors["admin"])
+        assert cached.status_code == 200
+        assert len(configured_meta.spend_calls) == first_calls
+
+        # Manual refresh is a same-origin POST. It recomputes, and both the
+        # page mapping learned for the pre-Albayan ad AND the definitive
+        # "no page found" miss are remembered instead of asking Meta again.
+        refreshed = client.post(
+            "/api/meta-ads/partner-pages/refresh", json={}, cookies=actors["admin"]
+        )
+        assert refreshed.status_code == 200, refreshed.text
+        assert len(configured_meta.spend_calls) == first_calls + 1
+        assert configured_meta.page_identity_calls.count("900000000000003") == 1
+        assert configured_meta.page_identity_calls.count("900000000000004") == 1
+        assert refreshed.json()["qualifiedCount"] == 2
+
+        # A scan that Meta rate-limits must NEVER wipe the last good numbers.
+        configured_meta.spend_error = meta_ads.MetaAdsError(
+            "rate_limited", "Meta is temporarily limiting synchronization.", retryable=True
+        )
+        try:
+            limited = meta_ads.get_meta_partner_page_stats(refresh=True)
+        finally:
+            configured_meta.spend_error = None
+        assert limited["qualifiedCount"] == 2
+        assert len(limited["pages"]) >= 3
+        assert limited["accountErrors"]
+        # And the stored state still serves the good numbers afterwards.
+        after = client.get("/api/meta-ads/partner-pages", cookies=actors["admin"])
+        assert after.status_code == 200
+        assert after.json()["qualifiedCount"] == 2
+    finally:
+        _clear_auto_import_rows()
+        with db_conn() as conn:
+            conn.execute(
+                text("DELETE FROM entities WHERE type='ads' AND id IN (:a,:b)"),
+                {"a": ad_a, "b": ad_b},
+            )
 
 
 def test_meta_page_identity_cannot_be_forged_through_ordinary_routes(

@@ -9,6 +9,7 @@ Or locally:
   cd /path/to/Start_V3
   PYTHONPATH=. pytest server/test_main.py -v
 """
+import base64
 import sys
 import os
 from pathlib import Path
@@ -342,15 +343,40 @@ class TestReceipts:
 
     def test_ad_media_requires_view_photos_permission(self, admin_session):
         """Ad view permission alone must not expose inline photo bodies."""
-        png = "data:image/png;base64,ADPHOTO"
+        png_payload = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        png = f"data:image/png;base64,{png_payload}"
+        second_png = "data:image/png;base64,U0VDT05E"
         ad_id = "test_ad_media_permission"
         created = client.post(
             "/api/collections/ads",
-            json={"id": ad_id, "data": {"status": "Active", "adPhotos": [png]}},
+            json={
+                "id": ad_id,
+                "data": {
+                    "status": "Active",
+                    "adPhotos": [png, second_png],
+                    "primaryAdPhotoIndex": 1,
+                },
+            },
             cookies={"albayan_session": admin_session},
         )
         assert created.status_code == 200
-        assert created.json()["data"]["adPhotos"] == [png]
+        assert created.json()["data"]["adPhotos"] == [png, second_png]
+
+        selected_photo = client.get(
+            f"/api/collections/ads/{ad_id}/primary-photo",
+            cookies={"albayan_session": admin_session},
+        )
+        assert selected_photo.status_code == 200
+        assert selected_photo.headers["content-type"].startswith("image/png")
+        assert selected_photo.headers["cache-control"] == "private, max-age=300"
+        assert selected_photo.content == base64.b64decode("U0VDT05E")
+        first_photo = client.get(
+            f"/api/collections/ads/{ad_id}/primary-photo",
+            params={"index": 0},
+            cookies={"albayan_session": admin_session},
+        )
+        assert first_photo.status_code == 200
+        assert first_photo.content == base64.b64decode(png_payload)
 
         email = "media-view-only@tests.albayanhub.com"
         password = "MediaPermission123!"
@@ -381,18 +407,24 @@ class TestReceipts:
         listed_ad = next(row["data"] for row in listed.json() if row["id"] == ad_id)
         assert "adPhotos" not in listed_ad
         assert listed_ad["_mediaOmitted"] is True
-        assert listed_ad["_photoCount"] == 1
+        assert listed_ad["_photoCount"] == 2
 
         direct = client.get(f"/api/collections/ads/{ad_id}", cookies=cookies)
         assert direct.status_code == 200
         assert "adPhotos" not in direct.json()["data"]
-        assert direct.json()["data"]["_photoCount"] == 1
+        assert direct.json()["data"]["_photoCount"] == 2
+
+        protected_photo = client.get(
+            f"/api/collections/ads/{ad_id}/primary-photo",
+            cookies=cookies,
+        )
+        assert protected_photo.status_code == 403
 
         bootstrap = client.get("/api/bootstrap", cookies=cookies)
         assert bootstrap.status_code == 200
         bootstrap_ad = next(row for row in bootstrap.json()["ads"] if row["id"] == ad_id)
         assert "adPhotos" not in bootstrap_ad
-        assert bootstrap_ad["_photoCount"] == 1
+        assert bootstrap_ad["_photoCount"] == 2
 
 
 class TestDeliveryOperations:

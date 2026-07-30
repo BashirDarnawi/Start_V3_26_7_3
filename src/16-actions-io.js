@@ -56,8 +56,25 @@ function stopAd(id) {
   const customer = state.customers.find(c => c.id === ad.customerId);
   const adAmountUSD = ad.amountUSD || 0;
   const currentSpentUSD = ad.spentUSD || 0;
+  // A Meta-linked ad's spend comes straight from Meta's own synced numbers —
+  // no typing, no guessing; the remaining amount follows automatically. Falls
+  // back to manual entry when the ad is not linked, never synced, uses a
+  // non-USD account, or Meta reports MORE than the recorded budget (that
+  // mismatch must be resolved by editing the ad, not hidden here).
+  const metaSpendUSD = metaAdRealSpendUSD(ad);
+  const metaSpendAuto = metaSpendUSD !== null && metaSpendUSD <= adAmountUSD + 0.005;
+  const initialSpentUSD = metaSpendAuto ? metaSpendUSD : currentSpentUSD;
   const isAlreadyStopped = ad.status === 'Stopped';
   const alreadyInformed = ad.remainingCustomerInformed === true;
+  // The checkbox must describe the remainder ACTUALLY on screen. A saved
+  // confirmation for a DIFFERENT remainder (a later Meta sync reported more
+  // spend) must not render as "already informed" — and because the Meta value
+  // makes the spend input readonly, the input listener that normally resets
+  // this control can never fire. So decide the honest state up front, exactly
+  // as syncAdCustomerInformedControl would.
+  const initialConfirmation = getAdCustomerConfirmationState(ad, initialSpentUSD, adAmountUSD);
+  const informedApplies = initialConfirmation.existingConfirmationApplies;
+  const staleConfirmation = alreadyInformed && !informedApplies;
   const previousRemaining = isAlreadyStopped ? (adAmountUSD - currentSpentUSD) : 0;
   
   // Calculate current remaining from receipt allocations
@@ -105,17 +122,19 @@ function stopAd(id) {
             <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
               ${isAr ? 'المبلغ المصروف (دولار) *' : 'Amount Spent (USD) *'}
             </label>
-            <input 
-              type="text" 
+            <input
+              type="text"
               inputmode="decimal"
-              id="stop-ad-spent" 
-              value="${currentSpentUSD}" 
+              id="stop-ad-spent"
+              value="${initialSpentUSD.toFixed(2)}"
               max="${adAmountUSD}"
-              oninput="sanitizeMoneyInput(this)"
-              class="w-full glass-input px-4 py-2 rounded-xl text-lg font-bold focus:ring-2 focus:ring-orange-500"
+              ${metaSpendAuto ? 'readonly ' : ''}oninput="sanitizeMoneyInput(this)"
+              class="w-full glass-input px-4 py-2 rounded-xl text-lg font-bold focus:ring-2 focus:ring-orange-500${metaSpendAuto ? ' opacity-80 cursor-not-allowed' : ''}"
               placeholder="0.00"
             />
-            <p class="text-xs text-slate-500 mt-1">${isAlreadyStopped ? (isAr ? 'عدّل المبلغ المصروف لتحديث الرصيد المتبقي' : 'Edit the amount spent to update the remaining balance') : (isAr ? 'أدخل المبلغ الذي تم صرفه فعلياً على هذا الإعلان' : 'Enter how much was actually spent on this ad')}</p>
+            <p class="text-xs mt-1 ${metaSpendAuto ? 'font-bold text-blue-700 dark:text-blue-300' : 'text-slate-500'}">${metaSpendAuto
+              ? (isAr ? `تلقائي من Meta — المصروف الفعلي (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)})` : `Automatic from Meta — the real spend (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)})`)
+              : (isAlreadyStopped ? (isAr ? 'عدّل المبلغ المصروف لتحديث الرصيد المتبقي' : 'Edit the amount spent to update the remaining balance') : (isAr ? 'أدخل المبلغ الذي تم صرفه فعلياً على هذا الإعلان' : 'Enter how much was actually spent on this ad'))}</p>
           </div>
           
           <div id="stop-ad-calculations" class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-4 space-y-2">
@@ -125,25 +144,31 @@ function stopAd(id) {
             </div>
             <div class="flex justify-between text-sm">
               <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ المصروف:' : 'Amount Spent:'}</span>
-              <span class="font-bold text-orange-600" id="stop-ad-spent-display">$${currentSpentUSD.toFixed(2)}</span>
+              <span class="font-bold text-orange-600" id="stop-ad-spent-display">$${initialSpentUSD.toFixed(2)}</span>
             </div>
             <div class="border-t border-slate-200 dark:border-slate-700 pt-2 flex justify-between">
               <span class="text-sm font-medium text-emerald-600">${isAr ? 'المتبقي' : 'Remaining'} ${isAlreadyStopped ? (isAr ? '(سيتم تحديثه)' : '(will be updated)') : (isAr ? '(سيتم إرجاعه)' : '(will be returned)')}:</span>
-              <span class="text-sm font-bold text-emerald-600" id="stop-ad-remaining">$${(adAmountUSD - currentSpentUSD).toFixed(2)}</span>
+              <span class="text-sm font-bold text-emerald-600" id="stop-ad-remaining">$${(adAmountUSD - initialSpentUSD).toFixed(2)}</span>
             </div>
           </div>
 
-          <label class="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-900/50 ${alreadyInformed ? 'cursor-default' : 'cursor-pointer'}">
+          <label class="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-900/50 ${informedApplies ? 'cursor-default' : 'cursor-pointer'}">
             <input
               id="stop-ad-customer-informed"
               type="checkbox"
               class="mt-0.5 h-5 w-5 shrink-0 accent-emerald-600"
-              ${alreadyInformed ? 'checked disabled' : ''}
-              ${!alreadyInformed && adAmountUSD - currentSpentUSD <= 0 ? 'disabled' : ''}
+              ${informedApplies ? 'checked disabled' : ''}
+              ${!informedApplies && adAmountUSD - initialSpentUSD <= 0 ? 'disabled' : ''}
             />
             <span>
               <span class="block text-sm font-bold text-slate-800 dark:text-slate-100">${isAr ? 'أؤكد أنني أبلغت العميل بالمبلغ المتبقي' : 'I confirm that I told the customer about the remaining amount'}</span>
-              <span id="stop-ad-customer-informed-help" class="block text-xs text-slate-500">${alreadyInformed && ad.remainingCustomerInformedAt ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale()) : (isAr ? 'إذا تغيّر المصروف، أبلغ العميل بالمبلغ المتبقي الجديد ثم حدّد هذا المربع مرة أخرى.' : 'If the spend changes, tell the customer the new remaining amount and check this again.')}</span>
+              <span id="stop-ad-customer-informed-help" class="block text-xs ${staleConfirmation ? 'font-bold text-amber-700 dark:text-amber-300' : 'text-slate-500'}">${staleConfirmation
+                ? (isAr
+                    ? `تغيّر المبلغ المتبقي إلى $${(adAmountUSD - initialSpentUSD).toFixed(2)} بعد تأكيدك السابق. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع.`
+                    : `The remaining amount changed to $${(adAmountUSD - initialSpentUSD).toFixed(2)} since your earlier confirmation. Tell the customer the new amount, then check this box.`)
+                : (informedApplies && ad.remainingCustomerInformedAt
+                    ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale())
+                    : (isAr ? 'إذا تغيّر المصروف، أبلغ العميل بالمبلغ المتبقي الجديد ثم حدّد هذا المربع مرة أخرى.' : 'If the spend changes, tell the customer the new remaining amount and check this again.'))}</span>
             </span>
           </label>
           
@@ -294,8 +319,12 @@ async function confirmStopAd(id, source = 'modal') {
   };
   
   const isReconciliation = source === 'reconciliation';
-  const inputPrefix = isReconciliation ? `reconciliation-${id}` : 'stop-ad';
-  const spentInput = document.getElementById(`${inputPrefix}-spent`);
+  // The reconciliation card renders its input as `reconciliation-spent-<id>`
+  // (see renderReconciliationView) — the old `reconciliation-<id>-spent`
+  // lookup never matched, so the Save button silently did nothing.
+  const spentInput = document.getElementById(
+    isReconciliation ? `reconciliation-spent-${id}` : 'stop-ad-spent'
+  );
   if (!spentInput) return;
 
   const rawSpent = String(spentInput.value || '').trim();

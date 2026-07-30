@@ -47,7 +47,7 @@ _SQLITE_PASSWORD_RESET_LOCK = threading.Lock()
 _SQLITE_WALLET_LOCK = threading.Lock()
 # Receipt transfers, ad funding, ad stops and receipt capacity edits share one
 # money pool. SQLite has no row locks, so those operations need one guard too.
-_SQLITE_FINANCIAL_LOCK = threading.Lock()
+_SQLITE_FINANCIAL_LOCK = threading.RLock()
 # Receipt numbers form one namespace even though older records store them in
 # three JSON fields. SQLite needs one process-wide guard around the canonical
 # read/check/write cycle; PostgreSQL uses per-number transaction advisory
@@ -77,6 +77,7 @@ from .meta_ads import (
     META_PAGE_SERVER_FIELDS,
     create_meta_ads_router,
 )
+from .ad_media import create_ad_media_router
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from .schemas import (
@@ -120,18 +121,16 @@ from .schemas import (
     WalletTransferRequest,
 )
 from .security import (
-    PBKDF2_ITERATIONS_DEFAULT,
-    hash_password,
-    hash_token,
-    new_id,
-    new_session_cookie_value,
-    parse_session_cookie_value,
-    verify_password,
+    PBKDF2_ITERATIONS_DEFAULT, hash_password, hash_token, new_id,
+    new_session_cookie_value, parse_session_cookie_value, verify_password,
 )
-
+from .auth_security import upgrade_password_hash_after_login
+from .http_security import apply_security_headers
+from .profitability import validate_dollar_purchase
+from .operations import FINANCIAL_CLOSE_COLLECTION, create_operations_router, assert_financial_bulk_import_open, assert_financial_period_open, financial_period_is_closed, lock_financial_period_for_redaction
 # A throwaway PBKDF2 hash used to spend the SAME ~verify time on a login attempt
 # for an unknown email as for a known one. Without it, the known-email path runs
-# 310k-iteration PBKDF2 while the unknown path returns instantly, and the timing
+# full-work-factor PBKDF2 while the unknown path returns instantly, and the timing
 # gap discloses which emails have accounts (enumeration oracle).
 _DUMMY_PASSWORD_HASH = hash_password("albayan-timing-equalizer")
 
@@ -1835,11 +1834,11 @@ def upsert_entity(
             entity_guard = _SQLITE_CUSTOMER_PHONE_LOCK
         elif entity_type == "receipts":
             entity_guard = _SQLITE_RECEIPT_NUMBER_LOCK
-    with entity_guard, db_conn() as conn:
+    with entity_guard, (nullcontext() if postgres or entity_type not in {"receipts", "ads", "dollarPurchases"} else _SQLITE_FINANCIAL_LOCK), db_conn() as conn:
         existing = (
             conn.execute(
                 text(
-                    "SELECT id, data_json, created_at, created_by, deleted FROM entities WHERE type = :type AND id = :id LIMIT 1"
+                    "SELECT id, data_json, created_at, created_by, deleted FROM entities WHERE type = :type AND id = :id LIMIT 1" + (" FOR UPDATE" if postgres else "")
                 ),
                 {"type": entity_type, "id": entity_id},
             )
@@ -1859,6 +1858,14 @@ def upsert_entity(
             # restore endpoint, and POST create refuses existing ids, so
             # nothing legitimate relied on this resurrection.
             deleted = bool(existing["deleted"])
+            previous_data = json_loads(existing.get("data_json") or "{}") or {}
+            if not isinstance(previous_data, dict):
+                previous_data = {}
+            # A closed accounting month is immutable. Check both the stored
+            # business date and the replacement date so a full-document write
+            # cannot move money into or out of a closed period.
+            assert_financial_period_open(entity_type, previous_data, conn=conn)
+            assert_financial_period_open(entity_type, clean, conn=conn)
             # Protected fields
             clean["id"] = entity_id
             clean["_created"] = clean.get("_created") or created_at
@@ -1928,6 +1935,7 @@ def upsert_entity(
             clean["id"] = entity_id
             clean["_created"] = clean.get("_created") or created_at
             clean["createdBy"] = clean.get("createdBy") or created_by
+            assert_financial_period_open(entity_type, clean, conn=conn)
             # Stamp the creator's display name so the record keeps showing who
             # created it even after that user account is soft-deleted (deleted
             # users stop syncing to clients). The users table is authoritative
@@ -2067,7 +2075,7 @@ def patch_entity(
         else (_SQLITE_CUSTOMER_PHONE_LOCK if entity_type == "customers" else _SQLITE_ENTITY_PATCH_LOCK)
     )
     with guard:
-        with db_conn() as conn:
+        with (nullcontext() if postgres or entity_type not in {"receipts", "ads", "dollarPurchases"} else _SQLITE_FINANCIAL_LOCK), db_conn() as conn:
             lock_suffix = " FOR UPDATE" if postgres else ""
             row = conn.execute(
                 text(
@@ -2105,6 +2113,10 @@ def patch_entity(
                     postgres=postgres,
                     phone_fields_touched=bool(CUSTOMER_PHONE_FIELDS & set(upd)),
                 )
+            # Reject edits to a closed month, including attempts to change the
+            # record date to escape (or enter) that month.
+            assert_financial_period_open(entity_type, old_data, conn=conn)
+            assert_financial_period_open(entity_type, data, conn=conn)
             modified = max(now_ms(), baseline + 1)
             data["id"] = entity_id
             data["_created"] = data.get("_created") or int(row["created_at"])
@@ -2182,7 +2194,7 @@ def soft_delete_entity(entity_type: str, entity_id: str, user_id: str):
     with db_conn() as conn:
         exists = (
             conn.execute(
-                text("SELECT id FROM entities WHERE type = :type AND id = :id LIMIT 1"),
+                text("SELECT id,data_json,deleted FROM entities WHERE type = :type AND id = :id LIMIT 1" + (" FOR UPDATE" if str(get_engine().dialect.name or "") == "postgresql" else "")),
                 {"type": entity_type, "id": entity_id},
             )
             .mappings()
@@ -2190,6 +2202,8 @@ def soft_delete_entity(entity_type: str, entity_id: str, user_id: str):
         )
         if not exists:
             raise HTTPException(status_code=404, detail="Not found")
+        if not bool(exists["deleted"]):
+            assert_financial_period_open(entity_type, json_loads(exists.get("data_json") or "{}") or {}, conn=conn)
         conn.execute(
             text("UPDATE entities SET deleted = true, last_modified = :ts WHERE type = :type AND id = :id"),
             {"ts": now, "type": entity_type, "id": entity_id},
@@ -2317,7 +2331,7 @@ def backfill_customer_names() -> int:
     """
     stamped = 0
     try:
-        with db_conn() as conn:
+        with (nullcontext() if str(get_engine().dialect.name or "") == "postgresql" else _SQLITE_FINANCIAL_LOCK), db_conn() as conn:
             customer_names: dict[str, str] = {}
             for row in conn.execute(
                 text("SELECT id, data_json FROM entities WHERE type = 'customers'")
@@ -2331,7 +2345,7 @@ def backfill_customer_names() -> int:
                 return 0
             for etype in ("receipts", "ads"):
                 rows = conn.execute(
-                    text("SELECT id, data_json FROM entities WHERE type = :t"),
+                    text("SELECT id, data_json FROM entities WHERE type = :t" + (" FOR UPDATE" if str(conn.engine.dialect.name or "") == "postgresql" else "")),
                     {"t": etype},
                 ).mappings().all()
                 for row in rows:
@@ -2347,6 +2361,7 @@ def backfill_customer_names() -> int:
                     name = customer_names.get(cid)
                     if not name:
                         continue
+                    if financial_period_is_closed(etype, data, conn=conn): continue
                     data["customerName"] = name
                     conn.execute(
                         text("UPDATE entities SET data_json = :d WHERE type = :t AND id = :id"),
@@ -2381,14 +2396,15 @@ def backfill_relink_baselines() -> int:
     """
     repaired = 0
     try:
-        with db_conn() as conn:
+        with (nullcontext() if str(get_engine().dialect.name or "") == "postgresql" else _SQLITE_FINANCIAL_LOCK), db_conn() as conn:
             rows = conn.execute(
-                text("SELECT id, data_json FROM entities WHERE type = 'ads' AND deleted = false")
+                text("SELECT id, data_json FROM entities WHERE type = 'ads' AND deleted = false" + (" FOR UPDATE" if str(conn.engine.dialect.name or "") == "postgresql" else ""))
             ).mappings().all()
             for row in rows:
                 data = json_loads(row.get("data_json") or "{}") or {}
                 if not isinstance(data, dict):
                     continue
+                if financial_period_is_closed("ads", data, conn=conn): continue
                 refund_type = str(data.get("refundType") or "")
                 if refund_type and refund_type != "None":
                     continue
@@ -2472,7 +2488,6 @@ def _startup():
         add_jsonb_indexes()
     except Exception as e:
         print(f"[albayan] Index creation skipped/failed: {type(e).__name__}: {e}")
-
 
     # BEST PRACTICE: Clean up expired sessions on startup
     try:
@@ -2590,53 +2605,10 @@ if CORS_ORIGINS:
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
-    if ORIGIN_SECRETS and request.url.path not in ORIGIN_BYPASS_PATHS:
-        provided = request.headers.get(ORIGIN_SECRET_HEADER)
-        ok = bool(provided) and any(secrets.compare_digest(provided, s) for s in ORIGIN_SECRETS)
-        if not ok:
-            resp: Response = JSONResponse({"detail": "Forbidden"}, status_code=403)
-            resp.headers["X-Content-Type-Options"] = "nosniff"
-            resp.headers["X-Frame-Options"] = "SAMEORIGIN"
-            resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-            resp.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
-            resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
-            return resp
-    resp: Response = await call_next(request)
-    # Core security headers
-    resp.headers["X-Content-Type-Options"] = "nosniff"
-    resp.headers["X-Frame-Options"] = "SAMEORIGIN"
-    resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    resp.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
-    resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
-    # SECURITY FIX: Additional defense-in-depth headers
-    resp.headers["X-Permitted-Cross-Domain-Policies"] = "none"
-    # Content Security Policy. All styling/icons/fonts are bundled locally under
-    # /assets (no CDNs, no 'unsafe-eval'). 'unsafe-inline' is still required by
-    # the app's inline onclick handlers.
-    # Note: CSP is also set in index.html meta tag for first load before server responds
-    resp.headers["Content-Security-Policy"] = (
-        "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline'; "
-        "font-src 'self' data:; "
-        "img-src 'self' data: blob: https:; "
-        "connect-src 'self' https:; "
-        "frame-ancestors 'self'; "
-        "form-action 'self'; "
-        "base-uri 'self';"
+    return await apply_security_headers(
+        request, call_next, origin_secrets=ORIGIN_SECRETS,
+        origin_bypass_paths=ORIGIN_BYPASS_PATHS, origin_secret_header=ORIGIN_SECRET_HEADER,
     )
-    # NOTE:
-    # Cross-origin isolation headers (COEP/COOP/CORP) can BREAK loading third-party CDN assets
-    # (Tailwind CDN, icon CDNs, Google Fonts) unless every cross-origin resource is CORS-enabled.
-    # Albayan serves frontend + API from the same origin by default, so these headers are optional.
-    #
-    # If you need crossOriginIsolation (e.g., SharedArrayBuffer), enable it explicitly:
-    #   ALBAYAN_CROSS_ORIGIN_ISOLATION=true
-    if os.getenv("ALBAYAN_CROSS_ORIGIN_ISOLATION", "").strip().lower() in {"1", "true", "yes"}:
-        resp.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
-        resp.headers["Cross-Origin-Opener-Policy"] = "same-origin"
-        # Do NOT set CORP here; it is best configured per-resource and can cause unexpected breakage.
-    return resp
 
 
 # OBSERVABILITY: Request ID + access logging (outermost user middleware).
@@ -2675,16 +2647,9 @@ async def request_context_and_logging(request: Request, call_next):
 
         observe_request(status_code, duration_ms)
         user_id = getattr(request.state, "user_id", None)
-        ip = None
-        try:
-            # Prefer X-Forwarded-For when behind ALB/Cloudflare
-            xff = request.headers.get("x-forwarded-for")
-            if xff:
-                ip = xff.split(",")[0].strip()
-            else:
-                ip = request.client.host if request.client else None
-        except Exception:
-            ip = None
+        # Use the same hardened trust boundary as authentication rate limits.
+        # Forwarded headers are ignored unless proxy trust is explicitly on.
+        ip = _client_ip(request)
 
         print(
             json.dumps(
@@ -3160,9 +3125,16 @@ def login(payload: LoginRequest, request: Request):
         user["password_hash"],
         user["password_salt"],
         user["password_algo"],
-        int(user["password_iterations"]),
+        user["password_iterations"],
     ):
         raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    # Keep existing accounts compatible while raising their password work
+    # factor after the next successful authentication.
+    if not upgrade_password_hash_after_login(user, str(payload.password)):
+        # Another request changed the password after we verified it. Do not
+        # create a fresh session from credentials that may just have been reset.
+        raise HTTPException(status_code=409, detail="Account changed during login. Please try again.")
 
     # "Remember me": schema-validated strict boolean; True selects the long
     # server-side session lifetime, anything else keeps the standard one.
@@ -4024,6 +3996,7 @@ def _insert_entity_in_transaction(
             clean["customerName"] = _cust_name
         elif clean.get("customerName") is not None and not isinstance(clean.get("customerName"), str):
             clean.pop("customerName", None)
+    assert_financial_period_open(collection, clean, conn=conn)
     conn.execute(
         text(
             """
@@ -4525,7 +4498,7 @@ CLOTHES_INVENTORY_RESTORE_BLOCKED_COLLECTIONS = frozenset(
     {*CLOTHES_ORDER_SERVER_CONTROLLED_COLLECTIONS, "clothesProducts", "clothesShipments"}
 )
 GENERIC_RESTORE_BLOCKED_COLLECTIONS = frozenset(
-    {*CLOTHES_INVENTORY_RESTORE_BLOCKED_COLLECTIONS, "ads", "receipts"}
+    {*CLOTHES_INVENTORY_RESTORE_BLOCKED_COLLECTIONS, "ads", "receipts", "dollarPurchases", FINANCIAL_CLOSE_COLLECTION}
 )
 CLOTHES_BUSINESS_COLLECTIONS = frozenset(
     {"clothesProducts", "clothesShipments", "clothesOrders", "clothesSettings"}
@@ -6581,6 +6554,7 @@ FINANCIAL_MUTATION_COLLECTIONS = frozenset(
         AD_FUNDING_MUTATION_COLLECTION,
         AD_STOP_MUTATION_COLLECTION,
         CUSTOMER_MERGE_MUTATION_COLLECTION,
+        FINANCIAL_CLOSE_COLLECTION,
     }
 )
 
@@ -7485,6 +7459,7 @@ def _receipt_transfer_atomic(
             if int(source_row["last_modified"]) != int(body.expectedSourceLastModified):
                 raise HTTPException(status_code=409, detail="Conflict: source receipt has changed")
             source = _financial_row_data(source_row)
+            assert_financial_period_open("receipts", source, conn=conn)
             source_status = str(source.get("status") or "")
             if source_status in {"Canceled", "Lost"} or not (
                 source_status == "Paid" or source.get("isPaid") is True
@@ -8788,7 +8763,8 @@ def _ad_mutation_atomic(
             ad_rows = _financial_active_rows(conn, "ads")
             is_topup = body.action == "update" and "topUps" in clean_request and not is_refund and not is_relink
             if is_refund:
-                assert existing is not None
+                if existing is None:
+                    raise HTTPException(status_code=409, detail="Conflict: ad has changed")
                 saved_data = _financial_apply_refund(actor, clean_request, existing)
                 _financial_validate_ad_plan(
                     saved_data,
@@ -8797,7 +8773,8 @@ def _ad_mutation_atomic(
                     current_ad_id=ad_id,
                 )
             elif is_relink:
-                assert existing is not None
+                if existing is None:
+                    raise HTTPException(status_code=409, detail="Conflict: ad has changed")
                 _relink_labels = {}
                 for _rid, _rrow in (locked_receipts or {}).items():
                     if not _rrow:
@@ -8824,7 +8801,8 @@ def _ad_mutation_atomic(
             else:
                 prepared_request = dict(clean_request)
                 if is_topup:
-                    assert existing is not None
+                    if existing is None:
+                        raise HTTPException(status_code=409, detail="Conflict: ad has changed")
                     if _financial_ad_payment_status(existing) != "paid" or str(existing.get("status") or "") in {
                         "Canceled", "Completed", "Lost", "Stopped"
                     } or (existing.get("refundType") and existing.get("refundType") != "None"):
@@ -8882,6 +8860,8 @@ def _ad_mutation_atomic(
             # Preserve it across unrelated edits, but never carry it across a
             # changed budget/spend (including refund-derived spend changes).
             _financial_clear_changed_remaining_confirmation(existing, saved_data)
+            assert_financial_period_open("ads", existing, conn=conn)
+            assert_financial_period_open("ads", saved_data, conn=conn)
 
             # A Meta-first row starts as an accounting-neutral draft. Only a
             # successful transactional edit with a real customer and funding
@@ -8902,7 +8882,8 @@ def _ad_mutation_atomic(
             if body.action == "create":
                 saved = _insert_entity_in_transaction(conn, "ads", ad_id, saved_data, actor_id)
             else:
-                assert ad_row is not None
+                if ad_row is None:
+                    raise HTTPException(status_code=409, detail="Conflict: ad has changed")
                 saved = _clothes_write_row(conn, ad_row, saved_data)
             _financial_insert_marker(
                 conn,
@@ -9132,6 +9113,7 @@ def _ad_stop_atomic(
             if not initial or bool(initial["deleted"]):
                 raise HTTPException(status_code=404, detail="Ad not found")
             initial_data = _financial_row_data(initial)
+            assert_financial_period_open("ads", initial_data, conn=conn)
             locked_receipts = _financial_lock_receipts(
                 conn, _financial_receipt_ids(initial_data), postgres=postgres
             )
@@ -9909,6 +9891,8 @@ def _financial_patch_receipt_atomic(
             for key in ("id", "_created", "_lastModified", "_deleted", "createdBy", "createdAt", "creatorId", "customerName"):
                 clean.pop(key, None)
             merged.update(clean)
+            assert_financial_period_open("receipts", old, conn=conn)
+            assert_financial_period_open("receipts", merged, conn=conn)
             merged_status = str(merged.get("status") or "")
             if merged_status == "Paid":
                 merged["isPaid"] = True
@@ -10041,6 +10025,9 @@ def _financial_patch_receipt_atomic(
                     postgres=postgres,
                 )
 
+            for ad_row, ad_plan in ad_plans:
+                assert_financial_period_open("ads", _financial_row_data(ad_row), conn=conn)
+                assert_financial_period_open("ads", ad_plan, conn=conn)
             saved_receipt = _clothes_write_row(conn, row, merged)
             saved_ads = [
                 _clothes_write_row(conn, ad_row, ad_plan)
@@ -10141,6 +10128,7 @@ def _financial_delete_receipt_atomic(receipt_id_raw: str) -> dict[str, Any]:
             if not row or bool(row["deleted"]):
                 raise HTTPException(status_code=404, detail="Not found")
             data = _financial_row_data(row)
+            assert_financial_period_open("receipts", data, conn=conn)
             reason = _financial_receipt_reference_reason(conn, receipt_id, data)
             if reason:
                 raise HTTPException(status_code=409, detail=f"Receipt cannot be deleted while linked to {reason}")
@@ -10957,13 +10945,10 @@ SYNC_WATERMARK_COLLECTIONS = (
     "walletTransactions",
     "serviceSubscriptions",
     AD_CAMPAIGN_COLLECTION,
-    # Admin-only app configuration (liquidity tracking start etc.). The name
-    # maps to no permission module, so non-admin watermark/read/write access
-    # is denied by the generic permission path and only Admins sync it.
+    # Admin-only configuration and USD cost ledger.
     "appSettings",
+    "dollarPurchases",
 )
-
-
 def _customer_merge_request_hash(actor_id: str, body: CustomerMergeRequest) -> str:
     payload = {
         "actorId": actor_id,
@@ -11270,6 +11255,8 @@ def _merge_customers_atomic(
                     data, duplicate_id, keep_id
                 )
                 if changed:
+                    if str(row["type"]) in {"receipts", "ads"}:
+                        assert_financial_period_open(str(row["type"]), data, conn=conn)
                     updated[str(row["type"])].append(
                         _customer_merge_write_row(conn, row, data)
                     )
@@ -11933,6 +11920,8 @@ def create_collection_item(
         body_data["status"] = "Ordered"
         body_data["stockApplied"] = False
         body_data["receivedAt"] = None
+    elif collection == "dollarPurchases":
+        body_data = validate_dollar_purchase(body.data)
     else:
         body_data = body.data
 
@@ -11980,6 +11969,8 @@ def update_collection_item(
         )
     if collection in FINANCIAL_MUTATION_COLLECTIONS:
         raise HTTPException(status_code=405, detail="Financial mutation records are server-controlled")
+    if collection == "dollarPurchases":
+        raise HTTPException(status_code=405, detail="Dollar purchases are immutable; delete and re-create the record")
     module = _module_for_collection(collection)
 
     existing = get_entity(collection, entity_id)
@@ -12945,7 +12936,7 @@ def admin_bulk_import(
         if name in CLOTHES_INVENTORY_RESTORE_BLOCKED_COLLECTIONS:
             raise HTTPException(
                 status_code=405,
-                detail="Clothes order state cannot be imported through the online API",
+                detail="This collection requires a dedicated transactional restore",
             )
         if name in FINANCIAL_MUTATION_COLLECTIONS:
             raise HTTPException(status_code=405, detail="Financial idempotency records cannot be imported")
@@ -12978,7 +12969,7 @@ def admin_bulk_import(
     _preflight_import_unique_identities(prepared)
 
     summary: dict[str, dict[str, int]] = {}
-    with db_conn() as conn:
+    with (nullcontext() if str(get_engine().dialect.name or "") == "postgresql" else _SQLITE_FINANCIAL_LOCK), db_conn() as conn:
         # createdBy FK safety: the entities.created_by column references
         # users.id, so it may only hold ids that actually exist (deleted
         # users included — history stays attributed). Unknown creators get a
@@ -12988,9 +12979,10 @@ def admin_bulk_import(
 
         for (name, _seen_ids, active) in prepared:
             existing_rows = conn.execute(
-                text("SELECT id, deleted, created_at FROM entities WHERE type = :type"),
+                text("SELECT id, deleted, created_at, data_json FROM entities WHERE type = :type" + (" FOR UPDATE" if str(conn.engine.dialect.name or "") == "postgresql" else "")),
                 {"type": name},
             ).mappings().all()
+            assert_financial_bulk_import_open(name, existing_rows, active, conn=conn)
             existing_meta = {str(r["id"]): r for r in existing_rows}
             active_ids = {rid for (rid, _d, _c, _cb) in active}
 
@@ -13149,6 +13141,10 @@ def batch_delete_entities(
                 status_code=409,
                 detail="Submitted campaigns cannot be deleted while under review",
             )
+        if col in {"receipts", "ads", "dollarPurchases"}:
+            financial_existing = get_entity(col, eid)
+            if financial_existing and not financial_existing.get("deleted"):
+                assert_financial_period_open(col, financial_existing.get("data"))
         normalized.append((col, eid))
 
     now = now_ms()
@@ -13203,7 +13199,7 @@ def batch_delete_entities(
             for (col, eid) in normalized:
                 exists = (
                     conn.execute(
-                        text("SELECT id FROM entities WHERE type = :type AND id = :id LIMIT 1"),
+                        text("SELECT id,data_json,deleted FROM entities WHERE type = :type AND id = :id LIMIT 1" + (" FOR UPDATE" if postgres else "")),
                         {"type": col, "id": eid},
                     )
                     .mappings()
@@ -13212,6 +13208,8 @@ def batch_delete_entities(
                 if not exists:
                     skipped += 1
                     continue
+                if not bool(exists["deleted"]):
+                    assert_financial_period_open(col, json_loads(exists.get("data_json") or "{}") or {}, conn=conn)
                 conn.execute(
                     text("UPDATE entities SET deleted = true, last_modified = :ts WHERE type = :type AND id = :id"),
                     {"ts": now, "type": col, "id": eid},
@@ -13284,6 +13282,11 @@ def delete_collection_item(
                 status_code=409,
                 detail="Submitted campaigns cannot be deleted while under review",
             )
+
+    if collection in {"receipts", "ads", "dollarPurchases"}:
+        financial_existing = get_entity(collection, entity_id)
+        if financial_existing and not financial_existing.get("deleted"):
+            assert_financial_period_open(collection, financial_existing.get("data"))
 
     if collection == "customers":
         deleted_customer = _financial_delete_customer_atomic(entity_id)
@@ -13675,7 +13678,7 @@ def _privacy_anonymize_deleted_user_atomic(user_id: str) -> dict[str, Any]:
     postgres = str(get_engine().dialect.name or "") == "postgresql"
     suffix = " FOR UPDATE" if postgres else ""
 
-    with db_conn() as conn:
+    with (nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK), db_conn() as conn:
         existing = conn.execute(
             text(f"SELECT * FROM users WHERE id=:id LIMIT 1{suffix}"),
             {"id": user_id},
@@ -13752,7 +13755,7 @@ def _privacy_anonymize_deleted_user_atomic(user_id: str) -> dict[str, Any]:
             text(
                 "SELECT type, id, data_json, created_by FROM entities "
                 "WHERE created_by = :id "
-                "   OR (created_by IS NULL AND data_json LIKE :pat)"
+                "   OR (created_by IS NULL AND data_json LIKE :pat)" + suffix
             ),
             {"id": user_id, "pat": f"%{user_id}%"},
         ).mappings().all()
@@ -13765,6 +13768,7 @@ def _privacy_anonymize_deleted_user_atomic(user_id: str) -> dict[str, Any]:
                 str(data.get("creatorId") or ""),
             ):
                 continue
+            lock_financial_period_for_redaction(str(row["type"]), data, conn=conn)
             data.pop("createdByName", None)
             conn.execute(
                 text(
@@ -14125,12 +14129,26 @@ def privacy_anonymize_user(
     )
     return user_row_to_public(updated)
 
-
 # Register the focused read-only Meta Ads integration before the SPA catch-all.
+app.include_router(
+    create_ad_media_router(
+        current_user_dependency=current_user,
+        get_entity_fn=get_entity,
+        user_has_permission_fn=user_has_permission,
+        max_data_url_length=MAX_DATA_URL_LENGTH,
+    )
+)
 app.include_router(
     create_meta_ads_router(
         current_user_dependency=current_user,
         require_same_origin=require_same_origin,
+    )
+)
+app.include_router(
+    create_operations_router(
+        current_user_dependency=current_user,
+        require_same_origin=require_same_origin,
+        audit_fn=audit,
     )
 )
 
@@ -14143,6 +14161,7 @@ app.include_router(
 # Must stay in sync with VIEW_TO_PATH in src/11-routing-cloud.js — every view
 # needs a real URL that survives a refresh / a shared link.
 FRONTEND_ROUTES = {
+    "/control-center",
     "/analytics",
     "/ads",
     "/customers",

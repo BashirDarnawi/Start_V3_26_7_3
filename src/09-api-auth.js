@@ -434,7 +434,7 @@ const SERVER_SYNC_COLLECTIONS = Object.freeze([
   'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings',
   'adCampaignRequests',
   'walletTransactions', 'serviceSubscriptions',
-  'appSettings'
+  'appSettings', 'dollarPurchases'
 ]);
 
 // Receipt/ad photos are large base64 strings. Normal lists and live deltas
@@ -1412,6 +1412,38 @@ async function apiMetaAdsStatus() {
   return await apiJson('/api/meta-ads/status', { method: 'GET' }, { timeoutMs: 15000 });
 }
 
+// Admin operations. Backup keys, Meta secrets, and off-site credentials never
+// enter the browser; these endpoints expose only readiness and safe results.
+async function apiOperationsStatus() {
+  return await apiJson('/api/admin/operations/status', { method: 'GET' }, { timeoutMs: 20000 });
+}
+
+async function apiPreviewFinancialPeriod(period) {
+  const safe = String(period || '').trim();
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(safe)) throw new Error('Choose a valid month');
+  return await apiJson(`/api/admin/operations/financial-periods/${encodeURIComponent(safe)}/preview`, { method: 'GET' }, { timeoutMs: 30000 });
+}
+
+async function apiCloseFinancialPeriod(period, forceReason = '') {
+  return await apiJson('/api/admin/operations/financial-periods/close', {
+    method: 'POST',
+    body: { period: String(period || '').trim(), forceReason: String(forceReason || '').trim() }
+  }, { timeoutMs: 30000 });
+}
+
+async function apiUnlockFinancialPeriod(period, reason) {
+  const safe = String(period || '').trim();
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(safe)) throw new Error('Choose a valid month');
+  return await apiJson(`/api/admin/operations/financial-periods/${encodeURIComponent(safe)}/unlock`, {
+    method: 'POST',
+    body: { reason: String(reason || '').trim() }
+  }, { timeoutMs: 30000 });
+}
+
+async function apiRunEncryptedBackup() {
+  return await apiJson('/api/admin/operations/backups/run', { method: 'POST', body: {} }, { timeoutMs: 120000 });
+}
+
 async function apiMetaAdsAccounts() {
   const response = await apiJson('/api/meta-ads/accounts', { method: 'GET' }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
   return Array.isArray(response?.accounts) ? response.accounts : [];
@@ -1525,6 +1557,16 @@ async function apiRunMetaAutoImport() {
     busy: response?.busy === true,
     state: response?.state && typeof response.state === 'object' ? response.state : {}
   };
+}
+
+async function apiMetaPartnerPages(refresh = false) {
+  // Meta Business Partner "active pages" metric: pages with over 100 USD ad
+  // spend in the last 90 days. A plain GET serves the cached statistics; a
+  // refresh re-scans the accounts server-side, so it is a same-origin POST.
+  const response = refresh
+    ? await apiJson('/api/meta-ads/partner-pages/refresh', { method: 'POST', body: {} }, { timeoutMs: 120000 })
+    : await apiJson('/api/meta-ads/partner-pages', { method: 'GET' }, { timeoutMs: 120000 });
+  return response && typeof response === 'object' ? response : {};
 }
 
 // Merge two duplicate customers and every relationship that points at the

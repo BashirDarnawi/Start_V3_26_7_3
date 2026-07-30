@@ -24,7 +24,9 @@ const PERSISTED_COLLECTIONS = [
   // Customer-facing Ads Studio requests (never the internal ads ledger)
   'adCampaignRequests',
   // Admin-only app configuration (liquidity tracking start etc.)
-  'appSettings'
+  'appSettings',
+  // Admin-only USD acquisition cost ledger used by profit analytics.
+  'dollarPurchases'
 ];
 
 // Debounced IndexedDB sync (avoid writing huge arrays on every keystroke)
@@ -200,6 +202,7 @@ function getCollectionNameFromArray(array) {
   if (array === state.clothesSettings) return 'clothesSettings';
   if (array === state.adCampaignRequests) return 'adCampaignRequests';
   if (array === state.appSettings) return 'appSettings';
+  if (array === state.dollarPurchases) return 'dollarPurchases';
   return null;
 }
 
@@ -390,6 +393,8 @@ function saveState() {
     delete toSave.modalData;
     delete toSave.tempAdFunding;
     delete toSave.tempAdPhotos;
+    delete toSave.tempAdPrimaryPhotoIndex;
+    delete toSave.tempAdPrimaryPhotoDirty;
     delete toSave.tempReceiptPhotos;
     delete toSave.tempAdPhotosDirty;
     delete toSave.tempReceiptPhotosDirty;
@@ -526,6 +531,7 @@ function loadState() {
       if (!Array.isArray(state.clothesOrders)) state.clothesOrders = [];
       if (!Array.isArray(state.clothesSettings)) state.clothesSettings = [];
       if (!Array.isArray(state.appSettings)) state.appSettings = [];
+      if (!Array.isArray(state.dollarPurchases)) state.dollarPurchases = [];
 
       // Validate language (must be 'en' or 'ar')
       if (state.language !== 'en' && state.language !== 'ar') {

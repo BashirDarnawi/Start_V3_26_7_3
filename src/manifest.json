@@ -14,6 +14,8 @@
     "10-live-sync.js",
     "11-routing-cloud.js",
     "12-views.js",
+    "12a-analytics-profit.js",
+    "12b-control-center.js",
     "13-filters-helpers.js",
     "14-forms.js",
     "15-modals.js",

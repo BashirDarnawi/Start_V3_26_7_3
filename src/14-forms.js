@@ -720,6 +720,138 @@ function requireReceiptCustomerRiskAcknowledgement(customerId) {
 }
 
 // ==========================================
+// PAGE CATEGORY PICKER
+// ==========================================
+// Replaces the native <datalist>, which rendered an unstyled OS popup that ran
+// off the screen on phones and listed every raw spelling. Shows how many pages
+// use each category so the popular spelling is the obvious pick, and keeps free
+// text allowed because categories are genuinely open-ended.
+const PAGE_CATEGORY_ROW = 'touch-target block w-full min-h-11 text-start px-4 py-3 rounded-lg border-b border-slate-100 dark:border-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-900/30';
+
+function pageCategoryRow(value, title, subtitle, extraClass = '') {
+  return `<button type="button" role="option" class="${PAGE_CATEGORY_ROW} ${extraClass}" data-category-action="pick" data-category-value="${Security.escapeHtml(value)}">
+    <span class="block min-w-0 break-words text-sm font-medium text-slate-800 dark:text-white">${title}</span>
+    <span class="block text-xs text-slate-500 mt-0.5">${subtitle}</span>
+  </button>`;
+}
+
+function renderPageCategoryOptions(query) {
+  const isAr = state.language === 'ar';
+  const typed = String(query || '').replace(/\s+/g, ' ').trim();
+  const typedKey = pageCategoryKey(typed);
+  const term = foldSearchText(typed);
+  const all = getPageCategorySuggestions();
+  const shown = all.filter(item => !term || foldSearchText(item.label).includes(term)).slice(0, 30);
+  // Same category, different spelling: offer the established one so a
+  // near-duplicate is not created — but never refuse what was typed.
+  const exact = all.find(item => item.key === typedKey);
+  const rows = [];
+  const uses = count => isAr ? `مستخدمة في ${count} صفحة` : `Used on ${count} page${count === 1 ? '' : 's'}`;
+
+  if (typed && exact && exact.label !== typed) {
+    rows.push(pageCategoryRow(
+      exact.label,
+      `${isAr ? 'استخدم التسمية الموجودة' : 'Use the existing spelling'}: ${Security.escapeHtml(exact.label)}`,
+      uses(exact.count),
+      'bg-amber-50 dark:bg-amber-900/30'
+    ));
+  } else if (typed && !exact) {
+    rows.push(pageCategoryRow(
+      typed,
+      `${isAr ? 'استخدام' : 'Use'} "${Security.escapeHtml(typed)}"`,
+      isAr ? 'فئة جديدة' : 'New category'
+    ));
+  }
+  shown.forEach(item => {
+    if (item.key === typedKey && rows.length) return; // already offered above
+    rows.push(pageCategoryRow(item.label, Security.escapeHtml(item.label), uses(item.count)));
+  });
+  if (!rows.length) {
+    rows.push(`<div class="px-4 py-6 text-center text-sm text-slate-500">${isAr ? 'اكتب اسم الفئة لإضافتها' : 'Type a category name to add it'}</div>`);
+  }
+  return rows.join('');
+}
+
+// Set only while selectPageCategory() restores focus: focus() re-fires the
+// field's inline onfocus, which would re-open the list it just closed.
+let _suppressPageCategoryDropdown = false;
+
+function showPageCategoryDropdown() {
+  if (_suppressPageCategoryDropdown) return;
+  const input = document.getElementById('page-category');
+  const dropdown = document.getElementById('page-category-dropdown');
+  if (!input || !dropdown) return;
+  dropdown.innerHTML = renderPageCategoryOptions(input.value);
+  dropdown.classList.remove('hidden');
+  input.setAttribute('aria-expanded', 'true');
+}
+
+function filterPageCategories() {
+  showPageCategoryDropdown();
+}
+
+function hidePageCategoryDropdown() {
+  const dropdown = document.getElementById('page-category-dropdown');
+  const input = document.getElementById('page-category');
+  if (dropdown) dropdown.classList.add('hidden');
+  if (input) input.setAttribute('aria-expanded', 'false');
+}
+
+function selectPageCategory(value) {
+  const input = document.getElementById('page-category');
+  if (!input) return;
+  // Same ceiling the save path enforces, so what is committed is what was shown.
+  input.value = Security.sanitizeInput(String(value || ''), { maxLength: 80 }).replace(/\s+/g, ' ').trim();
+  // Reclaim focus only when it was already inside the picker: a clicked row is
+  // about to be hidden, so the field must take it or focus falls to the body.
+  // A chip sits outside, and stealing focus there only opens the phone keyboard.
+  const dropdown = document.getElementById('page-category-dropdown');
+  const focused = document.activeElement;
+  const restoreFocus = focused === input || !!(dropdown && focused && dropdown.contains(focused));
+  hidePageCategoryDropdown();
+  document.querySelectorAll('.smart-filter-chips [data-category-action="pick"]').forEach(button => {
+    const active = pageCategoryKey(button.dataset.categoryValue || '') === pageCategoryKey(input.value);
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  if (!restoreFocus) return;
+  _suppressPageCategoryDropdown = true;
+  try {
+    input.focus({ preventScroll: true });
+  } finally {
+    _suppressPageCategoryDropdown = false;
+  }
+}
+
+// CAPTURE phase, like every other in-modal picker here: the modal panel's
+// onclick="event.stopPropagation()" swallows bubble-phase clicks.
+document.addEventListener('click', (e) => {
+  const trigger = e.target?.closest?.('[data-category-action="pick"]');
+  if (trigger) {
+    e.preventDefault();
+    e.stopPropagation();
+    selectPageCategory(trigger.dataset.categoryValue || '');
+    return;
+  }
+  const dropdown = document.getElementById('page-category-dropdown');
+  const input = document.getElementById('page-category');
+  if (dropdown && input && !dropdown.contains(e.target) && !input.contains(e.target)) {
+    hidePageCategoryDropdown();
+  }
+}, true);
+
+// Escape closes the picker before the dialog, so one press does not throw away
+// a half-filled page form.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const dropdown = document.getElementById('page-category-dropdown');
+  if (dropdown && !dropdown.classList.contains('hidden')) {
+    e.stopImmediatePropagation();
+    hidePageCategoryDropdown();
+  }
+}, true);
+
+// ==========================================
 // PAGE CUSTOMER SELECTION HELPERS
 // ==========================================
 
@@ -4275,6 +4407,10 @@ function uploadAdPhotos(fileList) {
       changed = true;
     });
     if (changed) {
+      state.tempAdPrimaryPhotoIndex = getAdPrimaryPhotoIndex(
+        { primaryAdPhotoIndex: state.tempAdPrimaryPhotoIndex },
+        state.tempAdPhotos.length
+      );
       state.tempAdPhotosDirty = true;
       renderAdPhotoPreviews();
     }
@@ -4299,12 +4435,17 @@ function renderAdPhotoPreviews() {
       : `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. استخدم «رفع» أو «لصق صورة».' : 'No photos yet. Use Upload or Paste photo.'}</div>`;
     return;
   }
+  const primaryIndex = getAdPrimaryPhotoIndex(
+    { primaryAdPhotoIndex: state.tempAdPrimaryPhotoIndex },
+    photos.length
+  );
   container.innerHTML = photos.map((src, idx) => `
-    <div class="relative group rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700">
+    <div class="relative group rounded-lg overflow-hidden border-2 ${idx === primaryIndex ? 'border-emerald-500 ring-2 ring-emerald-100 dark:ring-emerald-900' : 'border-slate-200 dark:border-slate-700'}">
       <button type="button" onclick="openPendingAdPhotoViewer(${idx})" class="group/photo block w-full relative focus:outline-none focus:ring-2 focus:ring-indigo-500" title="${state.language === 'ar' ? 'اضغط لعرض الصورة بالحجم الكامل' : 'Click to view full size'}" aria-label="${state.language === 'ar' ? `عرض صورة الإعلان ${idx + 1}` : `View ad photo ${idx + 1}`}">
         <img src="${Security.escapeHtml(src)}" alt="${state.language === 'ar' ? `صورة الإعلان ${idx + 1}` : `Ad photo ${idx + 1}`}" class="w-full h-20 object-cover" />
         <span class="absolute inset-0 bg-black/0 group-hover/photo:bg-black/25 group-focus/photo:bg-black/25 transition-colors flex items-center justify-center"><i data-lucide="maximize-2" class="w-5 h-5 text-white opacity-0 group-hover/photo:opacity-100 group-focus/photo:opacity-100 drop-shadow"></i></span>
       </button>
+      ${idx === primaryIndex ? `<span class="absolute bottom-1 left-1 z-10 inline-flex items-center gap-1 rounded-md bg-emerald-600 px-1.5 py-1 text-[10px] font-bold text-white"><i data-lucide="check" class="h-3 w-3"></i>${state.language === 'ar' ? 'الرئيسية' : 'Main'}</span>` : (canModifyAdPhotosInCurrentModal() ? `<button type="button" onclick="setPendingAdPrimaryPhoto(${idx})" class="absolute bottom-1 left-1 z-10 rounded-md bg-white/95 px-1.5 py-1 text-[10px] font-bold text-emerald-700 shadow hover:bg-emerald-50 dark:bg-slate-900/95 dark:text-emerald-300" aria-label="${state.language === 'ar' ? `اختيار الصورة ${idx + 1} كرئيسية` : `Choose photo ${idx + 1} as main`}">${state.language === 'ar' ? 'اجعلها الرئيسية' : 'Make main'}</button>` : '')}
       ${canModifyAdPhotosInCurrentModal() ? `<button type="button" onclick="removeAdPhoto(${idx})" class="absolute top-1 right-1 bg-white/90 dark:bg-slate-900/90 rounded-full p-1 shadow hover:bg-rose-100 z-10" aria-label="${state.language === 'ar' ? `حذف صورة الإعلان ${idx + 1}` : `Remove ad photo ${idx + 1}`}">
         <i data-lucide="x" class="w-3 h-3 text-rose-600"></i>
       </button>` : ''}
@@ -4315,8 +4456,27 @@ function renderAdPhotoPreviews() {
 
 function removeAdPhoto(idx) {
   if (!canModifyAdPhotosInCurrentModal() || !state.tempAdPhotos) return;
+  const previousPrimary = getAdPrimaryPhotoIndex(
+    { primaryAdPhotoIndex: state.tempAdPrimaryPhotoIndex },
+    state.tempAdPhotos.length
+  );
   state.tempAdPhotos.splice(idx, 1);
+  if (!state.tempAdPhotos.length) state.tempAdPrimaryPhotoIndex = 0;
+  else if (idx < previousPrimary) state.tempAdPrimaryPhotoIndex = previousPrimary - 1;
+  else if (idx === previousPrimary) state.tempAdPrimaryPhotoIndex = Math.min(idx, state.tempAdPhotos.length - 1);
+  else state.tempAdPrimaryPhotoIndex = previousPrimary;
   state.tempAdPhotosDirty = true;
+  state.tempAdPrimaryPhotoDirty = true;
+  renderAdPhotoPreviews();
+}
+
+function setPendingAdPrimaryPhoto(idx) {
+  if (!canModifyAdPhotosInCurrentModal()) return;
+  const photos = state.tempAdPhotos || [];
+  const index = Number(idx);
+  if (!Number.isSafeInteger(index) || index < 0 || index >= photos.length) return;
+  state.tempAdPrimaryPhotoIndex = index;
+  state.tempAdPrimaryPhotoDirty = true;
   renderAdPhotoPreviews();
 }
 

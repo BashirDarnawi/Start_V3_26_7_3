@@ -494,6 +494,166 @@ check('with viewBalance, balances are shown', () => {
   assert(html.includes('Ads Credit (USD)'), 'financial grid missing for permitted user');
 });
 
+check('saving an ad closes its dialog once and never rewinds an extra history step', () => {
+  // `break` fell into the shared `closeModal(); render();` tail, so every ad
+  // save closed the modal TWICE and each close consumed one history entry —
+  // the second one popped the user out of the view they were working in.
+  const modalSource = fs.readFileSync(path.join(__dirname, '..', 'src', '15-modals.js'), 'utf8');
+  // Pinned to the ad save path by its own catch block, so this cannot drift to
+  // some other closeModal call in the file.
+  assert(/closeModal\(\);\s*render\(\);\s*return;\s*\}\s*catch \(error\) \{\s*console\.error\('Error saving ad:'/.test(modalSource),
+    'the ad save path still falls through to the shared closeModal tail');
+  // Defence in depth for any other double-close path.
+  assert(modalSource.includes('const consumeAlreadyPending = typeof _overlayHistoryConsumePending === \'function\''), 'closeModal can still consume two history entries in one tick');
+  assert(modalSource.includes('!_closingSurfaceFromPopstate && !consumeAlreadyPending'), 'the history-consume guard is not applied');
+  // A closed dialog must never leave ?modal= in the URL (a refresh would
+  // reopen it), even if a pending pop never lands.
+  assert(modalSource.includes('if (!consumedModalHistoryEntry) clearUrlParams'), 'a closed dialog can leave ?modal= in the URL');
+});
+
+check('picking a page category closes the list instead of re-opening it', () => {
+  // selectPageCategory ended with input.focus(), and the field carries an inline
+  // onfocus="showPageCategoryDropdown()". So choosing a category instantly
+  // re-opened the list it had just closed: the 30-row panel then sat on top of
+  // the "Link to Customer" box below it, and a one-tap chip popped the phone
+  // keyboard. Focus is now claimed back only when it was already in the picker.
+  loginAs(ADMIN);
+  S.language = 'en';
+  const originalGetElementById = sandbox.document.getElementById;
+  const originalQuerySelectorAll = sandbox.document.querySelectorAll;
+  const hadActiveElement = Object.prototype.hasOwnProperty.call(sandbox.document, 'activeElement');
+  const originalActiveElement = sandbox.document.activeElement;
+  try {
+    const dropdownClasses = new Set();
+    let focusCount = 0;
+    const input = {
+      value: '',
+      setAttribute() {},
+      focus() {
+        focusCount += 1;
+        sandbox.document.activeElement = input;
+        // Exactly what the field's inline onfocus does in the real modal.
+        sandbox.showPageCategoryDropdown();
+      }
+    };
+    const dropdown = {
+      innerHTML: '',
+      classList: {
+        add: name => dropdownClasses.add(name),
+        remove: name => dropdownClasses.delete(name),
+        contains: name => dropdownClasses.has(name)
+      },
+      // Stands in for a row button living inside the panel.
+      contains: node => node === dropdown
+    };
+    sandbox.document.getElementById = id => {
+      if (id === 'page-category') return input;
+      if (id === 'page-category-dropdown') return dropdown;
+      return null;
+    };
+    sandbox.document.querySelectorAll = () => [];
+
+    // A chip is tapped: it sits OUTSIDE the picker, so focus was never in the
+    // field and must not be stolen (that is what opens the phone keyboard).
+    sandbox.document.activeElement = null;
+    sandbox.showPageCategoryDropdown();
+    assert(!dropdownClasses.has('hidden'), 'the category picker did not open');
+    sandbox.selectPageCategory('حج وعمرة');
+    assert(input.value === 'حج وعمرة', 'the tapped category was not written into the field');
+    assert(dropdownClasses.has('hidden'), 'the list stayed open after a chip was tapped');
+    assert(focusCount === 0, 'tapping a chip stole focus and would open the phone keyboard');
+
+    // A row is clicked with the mouse: focus IS inside the panel that is about
+    // to be hidden, so the field takes it back — and the list still stays shut.
+    sandbox.showPageCategoryDropdown();
+    assert(!dropdownClasses.has('hidden'), 'the picker did not re-open for the second case');
+    sandbox.document.activeElement = dropdown;
+    sandbox.selectPageCategory('Design');
+    assert(input.value === 'Design', 'the clicked row was not written into the field');
+    assert(focusCount === 1, 'focus was not returned to the category field, so it would fall to the body');
+    assert(dropdownClasses.has('hidden'), 'restoring focus re-opened the list it had just closed');
+  } finally {
+    sandbox.document.getElementById = originalGetElementById;
+    sandbox.document.querySelectorAll = originalQuerySelectorAll;
+    if (hadActiveElement) sandbox.document.activeElement = originalActiveElement;
+    else delete sandbox.document.activeElement;
+  }
+});
+
+check('the page category picker replaces the native datalist and teaches one spelling', () => {
+  const modalSource = fs.readFileSync(path.join(__dirname, '..', 'src', '15-modals.js'), 'utf8');
+  assert(!modalSource.includes('page-category-suggestions'), 'the unstyled native datalist is still used');
+  assert(modalSource.includes('id="page-category" role="combobox"'), 'the category field is not an accessible combobox');
+  assert(modalSource.includes('id="page-category-dropdown" role="listbox"'), 'the styled category popover is missing');
+  assert(modalSource.includes('max-w-[calc(100vw-2rem)]'), 'the category popover is not clamped to the phone viewport');
+  assert(modalSource.includes('maxlength="80"'), 'the category field accepts an unbounded paste');
+  assert(modalSource.includes("{ maxLength: 80 }"), 'the category save path does not cap the stored value');
+  assert(modalSource.includes("replace(/\\s+/g, ' ').trim()"), 'the category save path does not collapse whitespace');
+
+  const formsSource = fs.readFileSync(path.join(__dirname, '..', 'src', '14-forms.js'), 'utf8');
+  assert(formsSource.includes('min-h-11'), 'category rows are not touch-sized');
+  assert(formsSource.includes('text-start'), 'category rows are not RTL-safe');
+  assert(/document\.addEventListener\('click',[\s\S]{0,400}?data-category-action="pick"[\s\S]{0,900}?\}, true\);/.test(formsSource),
+    'the category picker does not close/select in capture phase (the modal panel stops bubbling)');
+
+  // Arabic spelling variants collapse into ONE entry, and the spelling used on
+  // the most pages wins over a one-off typo.
+  loginAs(ADMIN);
+  S.language = 'en';
+  S.pages = [
+    { id: 'cat_p1', name: 'P1', category: 'حج وعمرة', customerIds: [] },
+    { id: 'cat_p2', name: 'P2', category: 'حج وعمره', customerIds: [] },
+    { id: 'cat_p3', name: 'P3', category: 'حج  وعمرة', customerIds: [] },
+    { id: 'cat_p4', name: 'P4', category: 'Design', customerIds: [] },
+    { id: 'cat_p5', name: 'P5', category: 'Design', customerIds: [] },
+    { id: 'cat_p6', name: 'P6', category: 'Desgin', customerIds: [] },
+    { id: 'cat_p7', name: 'P7', category: 'Facebook Page', customerIds: [] },
+    { id: 'cat_p8', name: 'P8', category: '   ', customerIds: [] }
+  ];
+  const suggestions = sandbox.getPageCategorySuggestions();
+  const hajj = suggestions.filter(s => s.label.startsWith('حج'));
+  assert(hajj.length === 1, `Arabic spelling variants were not merged (${hajj.length} entries)`);
+  assert(hajj[0].count === 3, 'the merged category does not count every page that uses it');
+  assert(hajj[0].label === 'حج وعمرة', 'the most-used Arabic spelling did not win');
+  const design = suggestions.filter(s => s.label.toLowerCase().startsWith('des'));
+  assert(design.length === 2, 'a real typo was silently merged into the correct word');
+  assert(design[0].label === 'Design' && design[0].count === 2, 'the popular spelling is not offered first');
+  assert(!suggestions.some(s => s.label === 'Facebook Page'), "the importer's placeholder category is still offered");
+  assert(!suggestions.some(s => !s.label.trim()), 'a blank category is offered');
+  assert(suggestions[0].count >= suggestions[suggestions.length - 1].count, 'suggestions are not ordered by how often they are used');
+
+  // Typing an existing category in another spelling offers the established one.
+  const optionsHtml = sandbox.renderPageCategoryOptions('حج وعمره');
+  assert(optionsHtml.includes('Use the existing spelling'), 'a near-duplicate spelling is not steered to the existing one');
+  assert(optionsHtml.includes('حج وعمرة'), 'the canonical spelling is not offered');
+  // A genuinely new category is never refused.
+  const freshHtml = sandbox.renderPageCategoryOptions('Bakery');
+  assert(freshHtml.includes('Use') && freshHtml.includes('Bakery'), 'free text is no longer allowed');
+  assert(freshHtml.includes('New category'), 'a new category is not labelled as new');
+});
+
+check('customer card LYD debt is exact to the cent (no whole-number rounding)', () => {
+  // Rounding to whole LYD hid real debt: receipts of 5019.10 + 1392.00
+  // rendered as a 6411 balance while 6411.10 was actually owed.
+  const viewsSource = fs.readFileSync(path.join(__dirname, '..', 'src', '12-views.js'), 'utf8');
+  assert(viewsSource.includes('stats.totalSpentLYD.toFixed(2)'), 'card Spent rounds LYD to whole numbers');
+  assert(viewsSource.includes('stats.totalPaidLYD.toFixed(2)'), 'card Paid rounds LYD to whole numbers');
+  assert(viewsSource.includes('stats.balanceLYD.toFixed(2)'), 'card Balance rounds LYD to whole numbers');
+  assert(viewsSource.includes('stats.receiptDebtLYD.toFixed(2)'), 'the unpaid receipt debt line rounds LYD');
+
+  loginAs(employee({ customers: ['view', 'viewBalance'] }));
+  S.language = 'en';
+  S.customers = [{ id: 'cent-debt-customer', name: 'Cent Debt Customer', phones: ['0910000000'] }];
+  S.ads = [];
+  S.receipts = [
+    { id: 'cent-debt-r1', recordType: 'receipt', customerId: 'cent-debt-customer', amountUSD: 530, amountLocal: 5019.10, exchangeRate: 9.47, status: 'Not Paid', isPaid: false, deliveryStatus: 'Needs Delivery', transfers: [] },
+    { id: 'cent-debt-r2', recordType: 'receipt', customerId: 'cent-debt-customer', amountUSD: 150, amountLocal: 1392.00, exchangeRate: 9.28, status: 'Not Paid', isPaid: false, deliveryStatus: 'Needs Delivery', transfers: [] }
+  ];
+  const html = visible(sandbox.renderCustomersGrid(S.customers));
+  assert(html.includes('6411.10'), 'the 0.10 LYD of real debt is still hidden by rounding');
+  assert(html.includes('-6411.10'), 'the balance does not show the exact debt owed');
+});
+
 check('smart search never matches or displays contact data without viewContacts', () => {
   seedBusinessData();
   S.customers[0].phones = ['0919876543'];
@@ -1623,6 +1783,27 @@ check('opaque nested ids remain compatible while explicit relationships stay str
   assert(!badRelationship.valid, 'nested explicit relationship id was accepted');
 });
 
+check('over-deep objects fail closed instead of returning unsanitized data', () => {
+  const Security = bridged.Security;
+  let nested = { dangerous: '<img src=x onerror=alert(1)>' };
+  for (let i = 0; i < 12; i++) nested = { child: nested };
+  const sanitized = Security.sanitizeObject(nested);
+  let cursor = sanitized;
+  for (let i = 0; i < 11 && cursor; i++) cursor = cursor.child;
+  assert(cursor === null, 'over-deep branch was retained instead of dropped');
+});
+
+checkAsync('local password verification rejects unknown algorithms and hostile work factors', async () => {
+  const hash = '00'.repeat(32);
+  const salt = '00'.repeat(16);
+  assert(await bridged.Security.verifyPassword('password', hash, salt, 'unknown', 1) === false,
+    'an unknown password algorithm must fail closed');
+  assert(await bridged.Security.verifyPassword('password', hash, salt, 'pbkdf2-sha256', 10000001) === false,
+    'an excessive PBKDF2 work factor must be rejected before hashing');
+  assert(await bridged.Security.verifyPassword('password', hash, '0g'.repeat(16), 'pbkdf2-sha256', 60000) === false,
+    'a malformed hex salt must fail closed');
+});
+
 check('every entity response path rejects poisoned relationship ids', () => {
   const safe = {
     id: 'receipt_safe', type: 'receipts', deleted: false,
@@ -2019,6 +2200,124 @@ check('reconciliation waits one day after an ad ends or is stopped and shows onl
   assert(html.includes('bg-violet-100') && html.includes('Paused'), 'paused ad does not have its purple status treatment');
   assert(html.includes('I confirm that I told the customer'), 'customer-informed checkbox is missing');
   assert(html.includes('Save &amp; return remaining') || html.includes('Save & return remaining'), 'return-to-customer action is missing');
+});
+
+check('Meta-linked ads take budget, spend and remaining automatically from Meta', () => {
+  // Helpers: only a linked USD ad with a known total / synced spend is automatic.
+  const linked = {
+    metaAdId: '111111111111111', metaCurrency: 'USD',
+    metaSyncedAt: '2026-07-29T12:00:00Z', metaTotalBudgetMinor: 3000, metaSpendMinor: 468
+  };
+  assert(sandbox.metaAdAutoBudgetUSD(linked) === 30, 'planned total did not become the automatic budget');
+  assert(sandbox.metaAdRealSpendUSD(linked) === 4.68, 'Meta spend did not become the automatic spent amount');
+  assert(sandbox.metaAdAutoBudgetUSD({ ...linked, metaCurrency: 'EUR' }) === 0, 'a non-USD account must stay manual');
+  // An UNKNOWN currency is not USD. A freshly discovered draft carries Meta's
+  // budget minors before the ad account's currency has been read, so guessing
+  // dollars there would lock a EUR 30 ad in as $30 of customer debt.
+  assert(sandbox.metaAdAutoBudgetUSD({ ...linked, metaCurrency: undefined }) === 0, 'a missing currency must stay manual');
+  assert(sandbox.metaAdAutoBudgetUSD({ ...linked, metaCurrency: '' }) === 0, 'an empty currency must stay manual');
+  assert(sandbox.metaAdRealSpendUSD({ ...linked, metaCurrency: undefined }) === null, 'a missing currency must not present Meta spend as dollars');
+  assert(sandbox.metaAdAutoBudgetUSD({ ...linked, metaCurrency: ' usd ' }) === 30, 'a padded USD currency should still be automatic');
+  assert(sandbox.metaAdAutoBudgetUSD({ ...linked, metaAdId: '' }) === 0, 'an unlinked ad must stay manual');
+  assert(sandbox.metaAdAutoBudgetUSD({ ...linked, metaTotalBudgetMinor: 0 }) === 0, 'an open-ended ad without a total must stay manual');
+  assert(sandbox.metaAdRealSpendUSD({ ...linked, metaSyncedAt: '' }) === null, 'a never-synced ad must not pretend zero spend');
+
+  // The Edit Ad budget input becomes read-only with the Meta value.
+  const modalSource = fs.readFileSync(path.join(__dirname, '..', 'src', '15-modals.js'), 'utf8');
+  assert(modalSource.includes('const metaBudgetRaw = metaAdAutoBudgetUSD(adData);'), 'the ad modal budget does not consult Meta');
+  assert(modalSource.includes("${metaBudget > 0 ? 'readonly ' : ''}"), 'the Meta budget is not read-only in the ad modal');
+
+  // The Stop Ad dialog prefills the real Meta spend read-only, and keeps
+  // manual entry when Meta reports more than the recorded budget.
+  const stopSource = fs.readFileSync(path.join(__dirname, '..', 'src', '16-actions-io.js'), 'utf8');
+  assert(stopSource.includes('const metaSpendUSD = metaAdRealSpendUSD(ad);'), 'the stop dialog does not consult Meta spend');
+  assert(stopSource.includes('metaSpendUSD !== null && metaSpendUSD <= adAmountUSD + 0.005'), 'the stop dialog lacks the budget-mismatch guard');
+  assert(stopSource.includes("${metaSpendAuto ? 'readonly ' : ''}"), 'the Meta spend is not read-only in the stop dialog');
+
+  // The reconciliation Save button reads the input id the view actually
+  // renders (the old `reconciliation-<id>-spent` lookup never matched, so
+  // the button silently did nothing).
+  assert(stopSource.includes('`reconciliation-spent-${id}`'), 'reconciliation submit reads the wrong input id');
+  assert(!stopSource.includes('${inputPrefix}-spent'), 'the broken reconciliation input prefix is back');
+
+  // Reconciliation cards prefill the Meta spend locked, with the remaining
+  // derived from it before any typing.
+  loginAs(ADMIN);
+  S.language = 'en';
+  S.customers = [{ id: 'meta-recon-customer', name: 'Meta Customer' }];
+  S.pages = [{ id: 'meta-recon-page', name: 'Meta Page' }];
+  S.ads = [{
+    id: 'meta-recon-ad', customerId: 'meta-recon-customer', pageId: 'meta-recon-page',
+    creatorId: ADMIN.id, status: 'Active', amountUSD: 30,
+    startDate: '1999-12-20T00:00:00.000Z', endDate: '2000-01-01T00:00:00.000Z',
+    metaAdId: '222222222222222', metaCurrency: 'USD',
+    metaSyncedAt: '2000-01-01T09:00:00Z', metaTotalBudgetMinor: 3000, metaSpendMinor: 468
+  }];
+  const metaHtml = sandbox.renderReconciliationView();
+  assert(metaHtml.includes('value="4.68"'), 'Meta spend was not prefilled in reconciliation');
+  assert(metaHtml.includes('readonly'), 'the prefilled Meta spend is not locked');
+  assert(metaHtml.includes('Automatic from Meta'), 'reconciliation does not say the value came from Meta');
+  assert(metaHtml.includes('$25.32'), 'the remaining was not derived from the Meta spend');
+});
+
+check('an automatic Meta budget never traps an ad whose receipts reserve more', () => {
+  // Locking a Meta budget BELOW money already reserved on the ad's receipts
+  // made every save fail the funding<=budget guard with no way to raise the
+  // locked field — the only escape was releasing reserved receipt credit.
+  const modalSource = fs.readFileSync(path.join(__dirname, '..', 'src', '15-modals.js'), 'utf8');
+  assert(modalSource.includes('const committedUSD = getAdCommittedFundingTotalUSD(adData);'), 'the ad budget ignores already-reserved receipt money');
+  assert(modalSource.includes('const metaBudgetBlocked = metaBudgetRaw > 0 && committedUSD > metaBudgetRaw + 0.005;'), 'the budget lock has no reserved-funding escape hatch');
+  assert(modalSource.includes('const metaBudget = metaBudgetBlocked ? 0 : metaBudgetRaw;'), 'a conflicting Meta budget still locks the field');
+  assert(modalSource.includes('is lower than the money already reserved'), 'the conflict is not explained to the user');
+});
+
+check('a stale customer confirmation never looks current beside new Meta numbers', () => {
+  // The spend input is readonly for Meta-linked ads, so the 'input' listener
+  // that normally resets this checkbox can never fire. The INITIAL state must
+  // therefore already judge the confirmation against the displayed remainder.
+  const stopSource = fs.readFileSync(path.join(__dirname, '..', 'src', '16-actions-io.js'), 'utf8');
+  assert(stopSource.includes('const initialConfirmation = getAdCustomerConfirmationState(ad, initialSpentUSD, adAmountUSD);'), 'the stop dialog checkbox ignores the displayed spend');
+  assert(stopSource.includes('${informedApplies ? \'checked disabled\' : \'\'}'), 'the stop checkbox still keys off the raw stored flag');
+  assert(stopSource.includes('const staleConfirmation = alreadyInformed && !informedApplies;'), 'a stale confirmation is not detected');
+
+  // The reconciliation view judges the same way, through one shared helper
+  // that its SORTING also uses (a stale ad must not sink to the bottom).
+  const viewsSource = fs.readFileSync(path.join(__dirname, '..', 'src', '12-views.js'), 'utf8');
+  assert(viewsSource.includes('function getAdReconciliationDisplayState(ad)'), 'the reconciliation display state helper is missing');
+  assert(viewsSource.includes('Number(getAdReconciliationDisplayState(a).informedApplies)'), 'reconciliation sorting still trusts the raw stored flag');
+
+  // A confirmed $10 remainder, then Meta reports MORE spend => remainder $5:
+  // the old confirmation must not render as checked/done.
+  const confirmedAd = {
+    id: 'stale-confirm-ad', amountUSD: 30, spentUSD: 20,
+    remainingCustomerInformed: true, remainingCustomerInformedAt: '2026-07-20T10:00:00Z',
+    metaAdId: '333333333333333', metaCurrency: 'USD',
+    metaSyncedAt: '2026-07-29T12:00:00Z', metaTotalBudgetMinor: 3000, metaSpendMinor: 2500
+  };
+  const stale = sandbox.getAdReconciliationDisplayState(confirmedAd);
+  assert(stale.displaySpentUSD === 25, 'the Meta spend is not what the card shows');
+  assert(stale.remainingUSD === 5, 'the remaining does not follow the Meta spend');
+  assert(stale.informedApplies === false, 'a confirmation for a different remainder still counts as informed');
+  assert(stale.staleConfirmation === true, 'the stale confirmation was not flagged');
+
+  // The matching case still counts as informed (no false alarms).
+  const matchingAd = { ...confirmedAd, metaSpendMinor: 2000 };
+  const fresh = sandbox.getAdReconciliationDisplayState(matchingAd);
+  assert(fresh.informedApplies === true, 'a still-valid confirmation was wrongly invalidated');
+  assert(fresh.staleConfirmation === false, 'a valid confirmation was flagged stale');
+
+  loginAs(ADMIN);
+  S.language = 'en';
+  S.customers = [{ id: 'stale-customer', name: 'Stale Customer' }];
+  S.pages = [{ id: 'stale-page', name: 'Stale Page' }];
+  S.users = [ADMIN];
+  S.ads = [{
+    ...confirmedAd, customerId: 'stale-customer', pageId: 'stale-page', creatorId: ADMIN.id,
+    status: 'Active', startDate: '1999-12-20T00:00:00.000Z', endDate: '2000-01-01T00:00:00.000Z'
+  }];
+  const html = sandbox.renderReconciliationView();
+  assert(html.includes('The remaining amount changed to $5.00'), 'the card does not tell the user to re-confirm the new amount');
+  assert(!html.includes('Customer informed'), 'a stale confirmation still badges the ad as fully handled');
 });
 
 check('multi-entity server apply validates the whole batch before changing state', () => {
@@ -2894,8 +3193,11 @@ check('ad photo normalization and outside button support current and legacy fiel
     photos: [SAFE_RECEIPT_JPEG, 'javascript:alert(1)']
   });
   assert(adSources.length === 2, `expected two safe unique ad photos, got ${adSources.length}`);
+  assert(sandbox.getAdPrimaryPhotoIndex({ primaryAdPhotoIndex: 1 }, adSources.length) === 1, 'saved main ad photo is not selected');
+  assert(sandbox.getAdPrimaryPhotoIndex({ primaryAdPhotoIndex: 99 }, adSources.length) === 0, 'invalid main ad photo does not safely fall back to the first');
   loginAs(ADMIN);
   seedBusinessData();
+  S.serverMode = true;
   S.language = 'en';
   S.adSearch = '';
   S.adFilters = {};
@@ -2903,14 +3205,17 @@ check('ad photo normalization and outside button support current and legacy fiel
   Object.assign(S.ads[0], {
     pageId: 'p1', recordType: 'ad', status: 'Active', startDate: '2026-07-15T00:00:00Z',
     endDate: '2026-07-20T00:00:00Z', exchangeRate: 9.5, amountLocal: 475,
-    adPhotos: [SAFE_RECEIPT_PNG]
+    adPhotos: [SAFE_RECEIPT_PNG, SAFE_RECEIPT_JPEG], primaryAdPhotoIndex: 1
   });
   const html = visible(sandbox.renderAdsView());
   assert(html.includes('data-ad-id="a1"'), 'ad photo button does not use a safe data id');
   assert(html.includes('data-action="view-ad-photos"'), 'ad photo viewer is not exposed as a clear outside action');
   assert(html.includes('openAdPhotoViewer(this.dataset.adId, 0, this)'), 'ad has no outside photo viewer action or loading trigger');
-  assert(html.includes('View Photos (1)'), 'ad outside photo button or count is missing');
+  assert(html.includes('View Photos (2)'), 'ad outside photo button or count is missing');
   assert(html.includes('ad-photo-view-button'), 'ad photo action is still an easy-to-miss icon/link');
+  assert(html.includes('data-action="choose-ad-main-photo"'), 'multiple ad photos have no outside main-photo chooser');
+  assert(html.includes('openAdPrimaryPhotoPicker(this.dataset.adId, this)'), 'main-photo chooser does not use a safe outside action');
+  assert(html.includes('/api/collections/ads/a1/primary-photo?index=1'), 'outside thumbnail does not use the protected selected-photo endpoint');
   assert(!html.includes(`src="${SAFE_RECEIPT_PNG}"`), 'ads list embeds the full photo body');
 
   delete S.ads[0].adPhotos;
@@ -2925,6 +3230,7 @@ check('ad photo normalization and outside button support current and legacy fiel
   loginAs(employee({ ads: ['view'] }));
   const deniedHtml = visible(sandbox.renderAdsView());
   assert(!deniedHtml.includes('openAdPhotoViewer('), 'ads.viewPhotos permission is not gating the outside button');
+  S.serverMode = false;
 });
 
 check('ad rows show their creator and color unpaid debt red', () => {
@@ -3187,9 +3493,11 @@ check('unchanged edits omit photo payloads and ad uploads have receipt-grade saf
   const modalSource = fs.readFileSync(path.join(__dirname, '..', 'src', '15-modals.js'), 'utf8');
   assert(formsSource.includes('delete receipt.photos;'), 'unchanged receipt edits still upload photos');
   assert(modalSource.includes('delete adUpdates.adPhotos;'), 'unchanged ad edits still upload photos');
+  assert(modalSource.includes('delete adUpdates.primaryAdPhotoIndex;'), 'unchanged ad edits still rewrite the main-photo choice');
   assert(formsSource.includes('uploadGeneration !== _adPhotoUploadGeneration'), 'late ad upload callback can leak into another modal');
   assert(formsSource.includes('Math.max(6 - state.tempAdPhotos.length, 0)'), 'ads have no six-photo cap');
   assert(formsSource.includes('openPendingAdPhotoViewer(${idx})'), 'pending ad thumbnails cannot open full-size');
+  assert(formsSource.includes('function setPendingAdPrimaryPhoto(idx)'), 'ad editor cannot choose its main photo');
   assert(formsSource.includes('MAX_ENTITY_PHOTO_PAYLOAD_CHARS'), 'photo uploads do not enforce a total request-size budget');
   assert(formsSource.includes('_compressPhotosForUpload(files, concurrency = 2)'), 'large photo batches are not concurrency-bounded');
   assert(modalSource.includes('state.tempReceiptPhotosDirty = false;'), 'receipt photo dirty tracking is not initialized');

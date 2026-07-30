@@ -346,6 +346,52 @@ function foldSearchText(value) {
     .replace(/[ً-ٰٕـ]/g, '');
 }
 
+// ==========================================
+// PAGE CATEGORY VOCABULARY
+// ==========================================
+// Categories are free text from staff AND the Meta importer, so raw values
+// drift: Arabic spelling variants of one word ("حج وعمرة"/"حج وعمره"), double
+// spaces, typos that spread once suggested. One key per real category with the
+// MOST-USED spelling winning, so the picker teaches the right spelling.
+function pageCategoryKey(value) {
+  return foldSearchText(value).replace(/\s+/g, ' ').trim();
+}
+
+// "Facebook Page" is what the importer stores when Meta exposes no category —
+// the server itself treats that exact string as a non-value. Never offer it.
+function isPlaceholderPageCategory(value) {
+  const key = pageCategoryKey(value);
+  return !key || key === 'facebook page' || key === 'صفحه فيسبوك' || key === 'صفحة فيسبوك';
+}
+
+// Suggestions for the category picker, most-used first. Scoped to pages the
+// user may see, so category text never leaks from pages they cannot open.
+function getPageCategorySuggestions() {
+  const groups = new Map();
+  getPagesVisibleToCurrentUser().forEach(page => {
+    const raw = String(page?.category || '').replace(/\s+/g, ' ').trim();
+    if (!raw || isPlaceholderPageCategory(raw)) return;
+    const key = pageCategoryKey(raw);
+    const group = groups.get(key) || { key, count: 0, spellings: new Map() };
+    group.count += 1;
+    group.spellings.set(raw, (group.spellings.get(raw) || 0) + 1);
+    groups.set(key, group);
+  });
+  const locale = state.language === 'ar' ? 'ar' : 'en';
+  return [...groups.values()]
+    .map(group => {
+      // The spelling used on the most pages becomes the canonical label, so a
+      // one-off typo can never outrank the real word.
+      let label = '';
+      let best = -1;
+      group.spellings.forEach((uses, spelling) => {
+        if (uses > best) { best = uses; label = spelling; }
+      });
+      return { key: group.key, label, count: group.count };
+    })
+    .sort((a, b) => (b.count - a.count) || a.label.localeCompare(b.label, locale));
+}
+
 function getCustomerPhoneEntries(customer) {
   if (!customer || typeof customer !== 'object') return [];
   const source = [
@@ -2598,6 +2644,18 @@ function getAdPhotoCount(ad) {
   return loaded || getEntityPhotoCountHint('ads', ad);
 }
 
+// Only the small index is stored on the ad. The actual uploaded photos remain
+// in adPhotos/photos and are fetched on demand, so choosing a main photo does
+// not re-upload several megabytes of images.
+function getAdPrimaryPhotoIndex(ad, sourceCount = getAdPhotoCount(ad)) {
+  const count = Array.isArray(sourceCount)
+    ? sourceCount.length
+    : Math.max(0, Number(sourceCount) || 0);
+  if (!count) return 0;
+  const index = Number(ad?.primaryAdPhotoIndex);
+  return Number.isSafeInteger(index) && index >= 0 && index < count ? index : 0;
+}
+
 // In delivery completion, receiptImage is the driver's proof photo and must
 // win over older/general attachments in photos[]. Otherwise simply re-saving
 // a delivery could replace the proof with photos[0].
@@ -2611,6 +2669,7 @@ let _receiptPhotoViewerSources = [];
 let _receiptPhotoViewerIndex = 0;
 let _receiptPhotoViewerLabel = '';
 let _receiptPhotoViewerReturnFocus = null;
+let _adPrimaryPhotoPickerReturnFocus = null;
 let _receiptPhotoUploadGeneration = 0;
 let _adPhotoUploadGeneration = 0;
 let _receiptPhotoUploadsInFlight = 0;
@@ -2649,7 +2708,7 @@ async function openAdPhotoViewer(adId, index = 0, triggerButton = null) {
   }
   let ad = (state.ads || []).find(item => item && !item._deleted && String(item.id) === String(adId));
   if (!ad) return;
-  const busyLabel = triggerButton?.querySelector?.('span') || null;
+  const busyLabel = triggerButton?.querySelector?.('[data-photo-loading-label]') || null;
   const originalLabel = busyLabel?.textContent || '';
   if (triggerButton) {
     triggerButton.disabled = true;
@@ -2678,6 +2737,126 @@ async function openAdPhotoViewer(adId, index = 0, triggerButton = null) {
     index,
     state.language === 'ar' ? 'صور الإعلان' : 'Ad photos'
   );
+}
+
+async function openAdPrimaryPhotoPicker(adId, triggerButton = null) {
+  if (!can('ads', 'viewPhotos')) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تحتاج صلاحية عرض صور الإعلانات.' : 'Requires the View Photos permission.',
+      'error'
+    );
+    return;
+  }
+  let ad = (state.ads || []).find(item => item && !item._deleted && String(item.id) === String(adId));
+  if (!ad || !canActOnRecord('ads', 'edit', ad.creatorId || ad.createdBy)) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'لا يمكنك تغيير الصورة الرئيسية لهذا الإعلان.' : 'You cannot change this ad\'s main photo.',
+      'error'
+    );
+    return;
+  }
+
+  if (triggerButton) {
+    triggerButton.disabled = true;
+    triggerButton.setAttribute('aria-busy', 'true');
+  }
+  try {
+    ad = await ensureEntityMediaLoaded('ads', adId);
+  } catch (_) {
+    showNotification(
+      state.language === 'ar' ? 'تعذر تحميل الصور' : 'Photos unavailable',
+      state.language === 'ar' ? 'تحقق من الاتصال ثم حاول مرة أخرى.' : 'Check the connection and try again.',
+      'error'
+    );
+    return;
+  } finally {
+    if (triggerButton) {
+      triggerButton.disabled = false;
+      triggerButton.removeAttribute('aria-busy');
+    }
+  }
+
+  const photos = getAdPhotoSources(ad);
+  if (photos.length < 2) {
+    if (photos.length === 1) openAdPhotoViewer(adId, 0, triggerButton);
+    return;
+  }
+
+  closeAdPrimaryPhotoPicker(false);
+  _adPrimaryPhotoPickerReturnFocus = triggerButton || document.activeElement;
+  const isAr = state.language === 'ar';
+  const selectedIndex = getAdPrimaryPhotoIndex(ad, photos.length);
+  const picker = document.createElement('div');
+  picker.id = 'ad-primary-photo-picker';
+  picker.className = 'mobile-dialog-overlay fixed inset-0 z-[95] flex items-center justify-center bg-slate-950/70 p-3 backdrop-blur-sm';
+  picker.setAttribute('role', 'dialog');
+  picker.setAttribute('aria-modal', 'true');
+  picker.setAttribute('aria-labelledby', 'ad-primary-photo-picker-title');
+  picker.tabIndex = -1;
+  picker.innerHTML = `
+    <div class="w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-2xl dark:bg-slate-900" onclick="event.stopPropagation()">
+      <div class="flex items-start justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-700">
+        <div>
+          <h2 id="ad-primary-photo-picker-title" class="text-lg font-black text-slate-900 dark:text-white">${isAr ? 'اختر الصورة الرئيسية' : 'Choose the main photo'}</h2>
+          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">${isAr ? 'ستظهر الصورة المختارة مباشرة في قائمة الإعلانات.' : 'The selected photo will appear directly in the Ads list.'}</p>
+        </div>
+        <button type="button" onclick="closeAdPrimaryPhotoPicker()" class="touch-target inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${isAr ? 'إغلاق' : 'Close'}"><i data-lucide="x" class="h-5 w-5"></i></button>
+      </div>
+      <div class="max-h-[70dvh] overflow-y-auto p-4">
+        <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          ${photos.map((source, index) => {
+            const selected = index === selectedIndex;
+            const label = isAr ? `اختيار الصورة ${index + 1} كرئيسية` : `Choose photo ${index + 1} as main`;
+            return `<button type="button" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" data-primary-photo-index="${index}" onclick="setAdPrimaryPhoto(this.dataset.adId, Number(this.dataset.primaryPhotoIndex), this)" class="group relative overflow-hidden rounded-xl border-2 ${selected ? 'border-emerald-500 ring-2 ring-emerald-200 dark:ring-emerald-900' : 'border-slate-200 hover:border-indigo-400 dark:border-slate-700'} bg-slate-100 text-left transition" aria-label="${label}" ${selected ? 'aria-current="true"' : ''}>
+              <img src="${Security.escapeHtml(source)}" alt="${isAr ? `صورة الإعلان ${index + 1}` : `Ad photo ${index + 1}`}" class="aspect-square w-full object-cover" loading="lazy" decoding="async">
+              <span class="absolute inset-x-0 bottom-0 flex items-center justify-between gap-1 bg-slate-950/75 px-2 py-1.5 text-[11px] font-bold text-white"><span>${isAr ? `صورة ${index + 1}` : `Photo ${index + 1}`}</span>${selected ? `<span class="inline-flex items-center gap-1 text-emerald-300"><i data-lucide="check-circle-2" class="h-3.5 w-3.5"></i>${isAr ? 'الرئيسية' : 'Main'}</span>` : `<span>${isAr ? 'اختيار' : 'Choose'}</span>`}</span>
+            </button>`;
+          }).join('')}
+        </div>
+      </div>
+    </div>`;
+  picker.addEventListener('click', event => {
+    if (event.target === picker) closeAdPrimaryPhotoPicker();
+  });
+  picker.addEventListener('keydown', event => {
+    if (event.key === 'Escape') closeAdPrimaryPhotoPicker();
+  });
+  document.body.appendChild(picker);
+  IconQueue.schedule(picker);
+  picker.focus();
+}
+
+async function setAdPrimaryPhoto(adId, index, button = null) {
+  const ad = (state.ads || []).find(item => item && !item._deleted && String(item.id) === String(adId));
+  const photos = getAdPhotoSources(ad);
+  if (!ad || !can('ads', 'viewPhotos') || !canActOnRecord('ads', 'edit', ad.creatorId || ad.createdBy)) return;
+  if (!Number.isSafeInteger(index) || index < 0 || index >= photos.length) return;
+  const picker = document.getElementById('ad-primary-photo-picker');
+  picker?.querySelectorAll('button').forEach(item => { item.disabled = true; });
+  button?.setAttribute('aria-busy', 'true');
+  const saved = await updateRecord(state.ads, ad.id, { primaryAdPhotoIndex: index }, ad._lastModified);
+  if (!saved) {
+    picker?.querySelectorAll('button').forEach(item => { item.disabled = false; });
+    button?.removeAttribute('aria-busy');
+    return;
+  }
+  closeAdPrimaryPhotoPicker();
+  showNotification(
+    state.language === 'ar' ? 'تم اختيار الصورة الرئيسية' : 'Main photo selected',
+    state.language === 'ar' ? 'ستظهر هذه الصورة الآن من خارج الإعلان.' : 'This photo now appears on the Ads list.',
+    'success'
+  );
+}
+
+function closeAdPrimaryPhotoPicker(restoreFocus = true) {
+  document.getElementById('ad-primary-photo-picker')?.remove();
+  if (restoreFocus) {
+    const returnFocus = _adPrimaryPhotoPickerReturnFocus;
+    _adPrimaryPhotoPickerReturnFocus = null;
+    setTimeout(() => returnFocus?.focus?.(), 0);
+  }
 }
 
 function openPendingReceiptPhotoViewer(index = 0) {

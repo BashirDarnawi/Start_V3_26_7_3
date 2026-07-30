@@ -278,3 +278,41 @@ test('Meta Ads connection manager is safe, readable, and phone-sized', async ({ 
   await modal.getByRole('button', { name: /close/i }).click();
   await expect(modal).toHaveCount(0);
 });
+
+test('analytics cards open daily, weekly, monthly details and the private cost ledger', async ({ page }) => {
+  await signIn(page);
+  await page.goto('/analytics');
+
+  await page.getByRole('button', { name: /ad revenue \(paid\)/i }).click();
+  const breakdownRoot = page.locator('#analytics-breakdown-dialog');
+  const breakdown = breakdownRoot.getByRole('dialog');
+  await expect(breakdown).toBeVisible();
+  await expect(breakdown.getByRole('heading', { name: /paid ad revenue breakdown/i })).toBeVisible();
+  await breakdown.getByRole('button', { name: /weekly/i }).click();
+  await expect(breakdown.getByRole('button', { name: /weekly/i })).toHaveClass(/bg-white/);
+  await breakdown.getByRole('button', { name: /monthly/i }).click();
+  await expect(breakdown.getByRole('button', { name: /monthly/i })).toHaveClass(/bg-white/);
+  await breakdown.getByRole('button', { name: /close/i }).click();
+  await expect(breakdownRoot).toHaveCount(0);
+
+  await page.getByRole('button', { name: /receipts volume/i }).click();
+  await expect(page.getByRole('heading', { name: /receipts volume breakdown/i })).toBeVisible();
+  await page.locator('#analytics-breakdown-dialog').getByRole('dialog').getByRole('button', { name: /close/i }).click();
+
+  await page.getByRole('button', { name: /collection status/i }).click();
+  await expect(page.getByRole('heading', { name: /collection status breakdown/i })).toBeVisible();
+  await page.locator('#analytics-breakdown-dialog').getByRole('dialog').getByRole('button', { name: /close/i }).click();
+
+  await page.getByRole('button', { name: /record dollar purchase/i }).click();
+  const ledger = page.locator('#dollar-purchase-dialog');
+  await expect(ledger).toBeVisible();
+  await expect(ledger.getByRole('heading', { name: /facebook dollar purchase ledger/i })).toBeVisible();
+  const bounds = await ledger.locator('section').evaluate(element => {
+    const box = element.getBoundingClientRect();
+    return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: innerWidth, height: innerHeight };
+  });
+  expect(bounds.left).toBeGreaterThanOrEqual(-1);
+  expect(bounds.right).toBeLessThanOrEqual(bounds.width + 1);
+  expect(bounds.top).toBeGreaterThanOrEqual(-1);
+  expect(bounds.bottom).toBeLessThanOrEqual(bounds.height + 1);
+});

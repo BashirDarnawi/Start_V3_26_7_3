@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Callable
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
@@ -31,6 +31,7 @@ from sqlalchemy import text
 
 from .db import db_conn, get_engine, json_dumps, json_loads, now_ms
 from .entity_projection import _without_inline_media
+from .operations import assert_financial_period_open
 from .rate_limiter import check_rate_limit
 from .security import new_id
 
@@ -42,11 +43,37 @@ _TRUE_VALUES = {"1", "true", "yes", "on"}
 _META_WRITE_LOCK = threading.RLock()
 _META_DISCOVERY_LOCK = threading.Lock()
 _META_REMOTE_BACKOFF_LOCK = threading.Lock()
+_META_REMOTE_REQUEST_LOCK = threading.Lock()
 _META_REMOTE_BACKOFF_UNTIL = 0.0
+_META_REMOTE_BACKOFF_REASON = ""
+_META_REMOTE_USAGE_PERCENT = 0
+_META_LAST_REMOTE_REQUEST_MONOTONIC = 0.0
+_META_LAST_REMOTE_REQUEST_AT = ""
+_META_PROVIDER_STATE_REFRESH_LOCK = threading.Lock()
+_META_PROVIDER_STATE_REFRESHED_AT = 0.0
 _META_IMPORT_STATE_TYPE = "metaImportState"
 _META_IMPORT_STATE_ID = "automatic"
+_META_PROVIDER_STATE_TYPE = "metaProviderState"
+_META_PROVIDER_STATE_ID = "global"
 _META_IMPORT_MAX_KNOWN_IDS = 100_000
-_META_MEDIA_VERSION = 4
+# Meta Business Partner "active pages" qualification (Partner Center Path C):
+# pages connected to the ad accounts with more than 100 USD spend in the last
+# 90 days, measured against Meta's 500-page target tier.
+_META_PARTNER_STATE_TYPE = "metaPartnerState"
+_META_PARTNER_STATE_ID = "activePages"
+_PARTNER_PAGE_SPEND_THRESHOLD_MINOR = 10_000
+_PARTNER_ACTIVE_PAGES_TARGET = 500
+_PARTNER_STATS_TTL_MS = 3 * 60 * 60 * 1000
+# A scan that Meta limited or partially failed may be retried much sooner.
+_PARTNER_STATS_PARTIAL_TTL_MS = 10 * 60 * 1000
+_PARTNER_UNMATCHED_RESOLVE_LIMIT = 40
+_PARTNER_AD_PAGE_MAP_LIMIT = 5_000
+# Ads whose page could not be determined are remembered and not retried for a
+# day, so unresolvable history can never exhaust the per-refresh budget.
+_PARTNER_AD_PAGE_MISS_LIMIT = 2_000
+_PARTNER_MISS_RETRY_MS = 24 * 60 * 60 * 1000
+_META_PARTNER_LOCK = threading.Lock()
+_META_MEDIA_VERSION = 7
 _META_DISCOVERABLE_EFFECTIVE_STATUSES = (
     "ACTIVE",
     "PAUSED",
@@ -61,22 +88,163 @@ _META_DISCOVERABLE_EFFECTIVE_STATUSES = (
 )
 
 
+def _find_regain_minutes(node: Any, depth: int = 0) -> int:
+    """Largest estimated_time_to_regain_access (minutes) in a usage header."""
+    if depth > 4:
+        return 0
+    best = 0
+    if isinstance(node, dict):
+        for key, value in list(node.items())[:50]:
+            if key == "estimated_time_to_regain_access":
+                try:
+                    best = max(best, int(float(value or 0)))
+                except (TypeError, ValueError, OverflowError):
+                    pass
+            else:
+                best = max(best, _find_regain_minutes(value, depth + 1))
+    elif isinstance(node, list):
+        for value in node[:50]:
+            best = max(best, _find_regain_minutes(value, depth + 1))
+    return best
+
+
+def _find_usage_percent(node: Any, depth: int = 0) -> int:
+    """Largest Meta usage percentage in any supported usage-header shape."""
+    if depth > 5:
+        return 0
+    best = 0
+    usage_keys = {"call_count", "total_cputime", "total_time", "acc_id_util_pct"}
+    if isinstance(node, dict):
+        for key, value in list(node.items())[:80]:
+            if key in usage_keys:
+                try:
+                    best = max(best, int(math.ceil(float(value or 0))))
+                except (TypeError, ValueError, OverflowError):
+                    pass
+            else:
+                best = max(best, _find_usage_percent(value, depth + 1))
+    elif isinstance(node, list):
+        for value in node[:80]:
+            best = max(best, _find_usage_percent(value, depth + 1))
+    return min(max(best, 0), 100)
+
+
+def _response_usage(response: Any) -> tuple[int, int]:
+    """Return (highest usage percent, regain seconds) from Meta headers."""
+    usage_percent = 0
+    regain_minutes = 0
+    for header in ("x-business-use-case-usage", "x-ad-account-usage", "x-app-usage"):
+        raw = response.headers.get(header)
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        usage_percent = max(usage_percent, _find_usage_percent(payload))
+        regain_minutes = max(regain_minutes, _find_regain_minutes(payload))
+    return usage_percent, regain_minutes * 60
+
+
+def _estimated_backoff_seconds(response: Any) -> int:
+    """How long Meta wants us to wait, from Retry-After or usage headers."""
+    try:
+        retry_after = int(float(response.headers.get("Retry-After") or 0))
+    except (TypeError, ValueError, OverflowError):
+        retry_after = 0
+    if retry_after > 0:
+        return retry_after
+    for header in ("x-business-use-case-usage", "x-ad-account-usage", "x-app-usage"):
+        raw = response.headers.get(header)
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        minutes = _find_regain_minutes(payload)
+        if minutes > 0:
+            return minutes * 60
+    return 60
+
+
 def _meta_remote_backoff_remaining() -> int:
     with _META_REMOTE_BACKOFF_LOCK:
         remaining = _META_REMOTE_BACKOFF_UNTIL - time.monotonic()
     return max(0, int(math.ceil(remaining)))
 
 
-def _set_meta_remote_backoff(seconds: Any = 60) -> None:
-    global _META_REMOTE_BACKOFF_UNTIL
+def _server_token_matches(config: "MetaAdsConfig") -> bool:
+    configured = (os.getenv("ALBAYAN_META_ACCESS_TOKEN") or "").strip()
+    return bool(configured and hmac.compare_digest(configured, config.access_token))
+
+
+def _set_meta_remote_backoff(
+    seconds: Any = 60,
+    *,
+    reason: str = "rate_limited",
+    usage_percent: Any = 0,
+    persist: bool = False,
+) -> None:
+    global _META_REMOTE_BACKOFF_UNTIL, _META_REMOTE_BACKOFF_REASON
+    global _META_REMOTE_USAGE_PERCENT
     try:
-        delay = min(max(int(float(seconds or 60)), 30), 15 * 60)
+        # Meta can explicitly ask for more than fifteen minutes. Retrying before
+        # that time only extends the throttle, so respect up to one hour.
+        delay = min(max(int(float(seconds or 60)), 30), 60 * 60)
     except (TypeError, ValueError, OverflowError):
         delay = 60
+    try:
+        parsed_usage = min(max(int(float(usage_percent or 0)), 0), 100)
+    except (TypeError, ValueError, OverflowError):
+        parsed_usage = 0
     with _META_REMOTE_BACKOFF_LOCK:
         _META_REMOTE_BACKOFF_UNTIL = max(
             _META_REMOTE_BACKOFF_UNTIL, time.monotonic() + delay
         )
+        _META_REMOTE_BACKOFF_REASON = _clean_text(reason, 80) or "rate_limited"
+        _META_REMOTE_USAGE_PERCENT = max(_META_REMOTE_USAGE_PERCENT, parsed_usage)
+    if persist:
+        _persist_meta_provider_state()
+
+
+def _meta_request_interval_seconds() -> float:
+    try:
+        milliseconds = int(float(os.getenv("ALBAYAN_META_MIN_REQUEST_INTERVAL_MS") or 750))
+    except (TypeError, ValueError, OverflowError):
+        milliseconds = 750
+    return min(max(milliseconds, 100), 5_000) / 1000.0
+
+
+def _observe_meta_response(response: Any, config: "MetaAdsConfig") -> None:
+    """Slow down before Meta has to reject a request."""
+    global _META_REMOTE_USAGE_PERCENT
+    usage_percent, regain_seconds = _response_usage(response)
+    if usage_percent <= 0:
+        return
+    with _META_REMOTE_BACKOFF_LOCK:
+        _META_REMOTE_USAGE_PERCENT = usage_percent
+    try:
+        threshold = int(float(os.getenv("ALBAYAN_META_USAGE_PAUSE_PERCENT") or 85))
+    except (TypeError, ValueError, OverflowError):
+        threshold = 85
+    threshold = min(max(threshold, 60), 99)
+    if usage_percent < threshold:
+        return
+    if regain_seconds > 0:
+        pause_seconds = regain_seconds
+    elif usage_percent >= 98:
+        pause_seconds = 15 * 60
+    elif usage_percent >= 92:
+        pause_seconds = 8 * 60
+    else:
+        pause_seconds = 3 * 60
+    _set_meta_remote_backoff(
+        pause_seconds,
+        reason="usage_high",
+        usage_percent=usage_percent,
+        persist=_server_token_matches(config),
+    )
 
 
 META_AD_LINK_FIELDS = frozenset(
@@ -94,9 +262,11 @@ META_AD_LINK_FIELDS = frozenset(
         "metaThumbnailSource",
         "metaMediaVersion",
         "metaMediaResolvedAt",
+        "metaMediaTrace",
         "metaPageId",
         "metaPageName",
         "metaPageCategory",
+        "metaPagePictureUrl",
         "metaAdAccountId",
         "metaAdAccountName",
         "metaCurrency",
@@ -151,6 +321,7 @@ META_AD_SERVER_FIELDS = frozenset(
         "metaChangeCount",
         "metaActivityCursorAt",
         "metaActivityLastCheckedAt",
+        "metaMediaRepairVersion",
     }
 )
 
@@ -162,6 +333,7 @@ META_PAGE_SERVER_FIELDS = frozenset(
         "metaPageId",
         "metaPageName",
         "metaPageCategory",
+        "metaPagePictureUrl",
         "metaImportState",
         "metaImportedAt",
         "metaImportSource",
@@ -255,6 +427,97 @@ def _clean_https_url(value: Any) -> str:
     return candidate
 
 
+def _clean_facebook_preview_url(value: Any) -> str:
+    """Allow only public HTTPS Facebook documents used by Meta previews."""
+    candidate = _clean_https_url(value)
+    if not candidate:
+        return ""
+    try:
+        hostname = str(urlsplit(candidate).hostname or "").lower()
+    except ValueError:
+        return ""
+    if hostname != "facebook.com" and not hostname.endswith(".facebook.com"):
+        return ""
+    return candidate
+
+
+_PREVIEW_IFRAME_SRC_RE = re.compile(r'<iframe[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+_PREVIEW_IMG_SRC_RE = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+_STP_DIMENSION_RE = re.compile(r"[sp](\d{2,4})x(\d{2,4})")
+
+
+def _html_attr_unescape(value: Any) -> str:
+    return (
+        str(value or "")
+        .replace("&amp;", "&")
+        .replace("&#038;", "&")
+        .replace("&quot;", '"')
+        .replace("&#34;", '"')
+    )
+
+
+def _preview_image_score(url: str) -> int:
+    """Rank preview images: full-size creative media above tiny renditions."""
+    dimensions = [
+        max(int(width), int(height))
+        for width, height in _STP_DIMENSION_RE.findall(url)
+    ]
+    if not dimensions:
+        # No size hint usually means the original rendition.
+        return 100_000
+    return max(dimensions)
+
+
+_PREVIEW_MEDIA_URL_RE = re.compile(
+    r"https://[A-Za-z0-9.-]*fbcdn\.net/[^\s\"'<>\\)\]}]+"
+)
+
+
+def _preview_image_candidates(html_text: str) -> list[str]:
+    """Creative-image candidates from Meta's rendered ad preview document.
+
+    The preview is usually a JavaScript-rendered shell: the creative URLs sit
+    JSON-escaped inside <script> blocks rather than in plain <img> tags, so
+    the document is unescaped first and scanned for ANY fbcdn image URL.
+    """
+    normalized = (
+        str(html_text or "")
+        .replace("\\/", "/")
+        .replace("\\u002F", "/")
+        .replace("\\u002f", "/")
+        .replace("\\u0025", "%")
+        .replace("\\u0026", "&")
+        .replace("&amp;", "&")
+    )
+    seen: set[str] = set()
+    scored: list[tuple[int, str]] = []
+    for raw in _PREVIEW_MEDIA_URL_RE.findall(normalized)[:200]:
+        url = _clean_https_url(raw)
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            continue
+        host = str(parts.hostname or "").lower()
+        path = str(parts.path or "").lower()
+        if host.startswith("static") or "/rsrc.php" in path or "/emoji" in path:
+            continue
+        if (
+            not path.endswith((".jpg", ".jpeg", ".png", ".webp"))
+            and "safe_image" not in path
+        ):
+            continue
+        score = _preview_image_score(url)
+        if score < 100:
+            # Profile-picture/reaction-sized renditions are never the creative.
+            continue
+        scored.append((score, url))
+    scored.sort(key=lambda item: -item[0])
+    return [url for _, url in scored]
+
+
 def _cdn_asset_key(value: Any) -> str:
     """Stable media-file key of an fbcdn URL, ignoring signing/size params.
 
@@ -318,6 +581,24 @@ def _story_object_id(creative: dict[str, Any]) -> str:
     for key in ("effective_object_story_id", "object_story_id"):
         candidate = _clean_text(creative.get(key), 100)
         if re.fullmatch(r"[0-9]{1,40}_[0-9]{1,40}", candidate):
+            return candidate
+    return ""
+
+
+def _creative_page_id(creative: dict[str, Any]) -> str:
+    """Facebook Page ID promoted by a creative (spec first, then story ID)."""
+    story_spec = (
+        creative.get("object_story_spec")
+        if isinstance(creative.get("object_story_spec"), dict)
+        else {}
+    )
+    page_id = _clean_text(story_spec.get("page_id"), 40)
+    if _META_ID_RE.fullmatch(page_id):
+        return page_id
+    for key in ("effective_object_story_id", "object_story_id"):
+        story_id = _clean_text(creative.get(key), 100)
+        candidate = story_id.split("_", 1)[0] if "_" in story_id else ""
+        if _META_ID_RE.fullmatch(candidate):
             return candidate
     return ""
 
@@ -560,7 +841,7 @@ class MetaAdsConfig:
     discovery_interval_seconds: int = 60
     discovery_fast_pages: int = 1
     discovery_baseline_pages: int = 25
-    worker_sync_interval_seconds: int = 10
+    worker_sync_interval_seconds: int = 20
     webhook_verify_token: str = field(default="", repr=False)
 
     @property
@@ -616,7 +897,7 @@ def load_meta_ads_config() -> MetaAdsConfig:
             os.getenv("ALBAYAN_META_DISCOVERY_BASELINE_PAGES"), 25, 5, 100
         ),
         worker_sync_interval_seconds=_bounded_int(
-            os.getenv("ALBAYAN_META_WORKER_SYNC_INTERVAL_SECONDS"), 10, 5, 60
+            os.getenv("ALBAYAN_META_WORKER_SYNC_INTERVAL_SECONDS"), 20, 10, 120
         ),
         webhook_verify_token=(
             os.getenv("ALBAYAN_META_WEBHOOK_VERIFY_TOKEN") or ""
@@ -625,11 +906,22 @@ def load_meta_ads_config() -> MetaAdsConfig:
 
 
 class MetaAdsError(RuntimeError):
-    def __init__(self, code: str, public_message: str, *, retryable: bool = False):
+    def __init__(
+        self,
+        code: str,
+        public_message: str,
+        *,
+        retryable: bool = False,
+        provider_code: str = "",
+    ):
         super().__init__(public_message)
         self.code = _clean_text(code, 40) or "meta_error"
         self.public_message = _clean_text(public_message, 240) or "Meta synchronization failed"
         self.retryable = bool(retryable)
+        # Meta's own numeric error code (e.g. "10", "80004", "100.33").
+        # Displayed beside the public message so a stuck ad can be diagnosed
+        # from a screenshot without guessing which request Meta rejected.
+        self.provider_code = _clean_text(provider_code, 20)
 
 
 class MetaAdsClient:
@@ -641,7 +933,7 @@ class MetaAdsClient:
         self.config = config
         self._account_cache: dict[str, dict[str, Any]] = {}
         self._account_page_cache: dict[str, dict[str, dict[str, str]]] = {}
-        self._page_avatar_key_cache: dict[str, str] = {}
+        self._page_avatar_cache: dict[str, str] = {}
 
     def _ensure_allowed_account(self, account_id: Any) -> str:
         normalized = _account_id(account_id)
@@ -654,13 +946,30 @@ class MetaAdsClient:
         status = int(response.status_code or 0)
         error = payload.get("error") if isinstance(payload, dict) else {}
         code = str(error.get("code") or status or "meta_error") if isinstance(error, dict) else str(status)
+        subcode = str(error.get("error_subcode") or "") if isinstance(error, dict) else ""
+        provider_code = f"{code}.{subcode}" if subcode else code
         if status in {401, 403} or code == "190":
-            return MetaAdsError("authorization", "Meta authorization failed. Reconnect the access token.")
+            return MetaAdsError("authorization", "Meta authorization failed. Reconnect the access token.", provider_code=provider_code)
         if status == 404 or code in {"100", "803"}:
-            return MetaAdsError("not_found", "The selected Meta ad was not found or is no longer accessible.")
-        if status == 429 or code in {"4", "17", "32", "613"}:
-            _set_meta_remote_backoff(response.headers.get("Retry-After") or 60)
-            return MetaAdsError("rate_limited", "Meta is temporarily limiting synchronization. Albayan will retry.", retryable=True)
+            return MetaAdsError("not_found", "The selected Meta ad was not found or is no longer accessible.", provider_code=provider_code)
+        # 4/17/32/613 are classic Graph throttling; the 80xxx family is the
+        # Marketing API's per-ad-account/business throttling, which arrives as
+        # a plain HTTP 400. Both mean "wait, then continue" — treating them as
+        # permanent failures is what used to freeze photos and budgets behind
+        # multi-hour backoffs whenever an account was busy.
+        if status == 429 or code in {
+            "4", "17", "32", "613",
+            "80000", "80001", "80002", "80003", "80004",
+            "80005", "80006", "80008", "80009", "80014",
+        }:
+            usage_percent, regain_seconds = _response_usage(response)
+            _set_meta_remote_backoff(
+                max(_estimated_backoff_seconds(response), regain_seconds),
+                reason=f"meta_{provider_code}",
+                usage_percent=usage_percent,
+                persist=_server_token_matches(self.config),
+            )
+            return MetaAdsError("rate_limited", "Meta is temporarily limiting synchronization. Albayan will retry.", retryable=True, provider_code=provider_code)
         # Graph codes 1 ("unknown"/"please reduce the amount of data") and 2
         # ("service temporarily unavailable") are transient in practice. They
         # must keep the short retry clock, otherwise one hiccup parks an ad's
@@ -670,16 +979,10 @@ class MetaAdsClient:
             or code in {"1", "2"}
             or (isinstance(error, dict) and error.get("is_transient") is True)
         ):
-            return MetaAdsError("temporary", "Meta is temporarily unavailable. Albayan will retry.", retryable=True)
-        return MetaAdsError("request_failed", "Meta could not return the requested ad information.")
+            return MetaAdsError("temporary", "Meta is temporarily unavailable. Albayan will retry.", retryable=True, provider_code=provider_code)
+        return MetaAdsError("request_failed", "Meta could not return the requested ad information.", provider_code=provider_code)
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        if _meta_remote_backoff_remaining():
-            raise MetaAdsError(
-                "rate_limited",
-                "Meta is temporarily limiting synchronization. Albayan will retry.",
-                retryable=True,
-            )
         safe_path = str(path or "").strip("/")
         if not safe_path or ".." in safe_path or not re.fullmatch(r"[A-Za-z0-9_/-]+", safe_path):
             raise MetaAdsError("invalid_path", "Invalid Meta API request")
@@ -691,30 +994,54 @@ class MetaAdsClient:
                 hashlib.sha256,
             ).hexdigest()
         url = f"https://graph.facebook.com/{self.config.graph_version}/{safe_path}"
-        try:
-            with httpx.Client(
-                timeout=float(self.config.request_timeout_seconds),
-                follow_redirects=False,
-                headers={
-                    "Authorization": f"Bearer {self.config.access_token}",
-                    "Accept": "application/json",
-                    "User-Agent": "Albayan-Meta-Read-Sync/1.0",
-                },
-            ) as client:
-                response = client.get(url, params=query)
-        except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError):
-            raise MetaAdsError("network", "Meta could not be reached. Albayan will retry.", retryable=True)
-        if len(response.content or b"") > 6 * 1024 * 1024:
-            raise MetaAdsError("response_too_large", "Meta returned too much data for one synchronization.")
-        try:
-            payload = response.json()
-        except ValueError:
-            payload = {}
-        if not 200 <= response.status_code < 300 or (isinstance(payload, dict) and payload.get("error")):
-            raise self._safe_error(response, payload)
-        if not isinstance(payload, dict):
-            raise MetaAdsError("invalid_response", "Meta returned an invalid response.")
-        return payload
+        # Every Meta caller (background import, details refresh, manual action,
+        # webhook wake-up and partner statistics) shares this one request lane.
+        # That prevents separate jobs from unknowingly exhausting the same
+        # business-use-case allowance at the same time.
+        with _META_REMOTE_REQUEST_LOCK:
+            server_config = _server_token_matches(self.config)
+            if server_config:
+                _refresh_meta_provider_state()
+            if _meta_remote_backoff_remaining():
+                raise MetaAdsError(
+                    "rate_limited",
+                    "Meta synchronization is paused safely and will resume automatically.",
+                    retryable=True,
+                )
+            global _META_LAST_REMOTE_REQUEST_MONOTONIC, _META_LAST_REMOTE_REQUEST_AT
+            elapsed = time.monotonic() - _META_LAST_REMOTE_REQUEST_MONOTONIC
+            wait_seconds = _meta_request_interval_seconds() - elapsed
+            if server_config and _META_LAST_REMOTE_REQUEST_MONOTONIC and wait_seconds > 0:
+                time.sleep(wait_seconds)
+            try:
+                with httpx.Client(
+                    timeout=float(self.config.request_timeout_seconds),
+                    follow_redirects=False,
+                    headers={
+                        "Authorization": f"Bearer {self.config.access_token}",
+                        "Accept": "application/json",
+                        "User-Agent": "Albayan-Meta-Read-Sync/1.0",
+                    },
+                ) as client:
+                    response = client.get(url, params=query)
+            except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError):
+                _META_LAST_REMOTE_REQUEST_MONOTONIC = time.monotonic()
+                _META_LAST_REMOTE_REQUEST_AT = _iso_now()
+                raise MetaAdsError("network", "Meta could not be reached. Albayan will retry.", retryable=True)
+            _META_LAST_REMOTE_REQUEST_MONOTONIC = time.monotonic()
+            _META_LAST_REMOTE_REQUEST_AT = _iso_now()
+            if len(response.content or b"") > 6 * 1024 * 1024:
+                raise MetaAdsError("response_too_large", "Meta returned too much data for one synchronization.")
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {}
+            if not 200 <= response.status_code < 300 or (isinstance(payload, dict) and payload.get("error")):
+                raise self._safe_error(response, payload)
+            _observe_meta_response(response, self.config)
+            if not isinstance(payload, dict):
+                raise MetaAdsError("invalid_response", "Meta returned an invalid response.")
+            return payload
 
     def _paged(self, path: str, params: dict[str, Any], *, max_pages: int = 5) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -1143,30 +1470,227 @@ class MetaAdsClient:
                 best, best_area = safe, area
         return best or _clean_https_url(node.get("picture"))
 
-    def _get_page_avatar_key(self, page_id: Any) -> str | None:
-        """CDN asset key of the Page profile picture, cached per page.
+    def _get_page_avatar_url(self, page_id: Any) -> str | None:
+        """Display-quality Page profile picture URL, cached per page.
 
         Returns ``None`` when the avatar could not be read. Failures are
         deliberately NOT cached: one transient Meta limit must not poison the
-        avatar check for every other ad of the same page in this batch.
+        avatar lookup for every other ad of the same page in this batch.
         """
         candidate = _clean_text(page_id, 40)
         if not _META_ID_RE.fullmatch(candidate):
             return None
-        if candidate in self._page_avatar_key_cache:
-            return self._page_avatar_key_cache[candidate]
+        if candidate in self._page_avatar_cache:
+            return self._page_avatar_cache[candidate]
         try:
             payload = self._get(
-                f"{candidate}/picture", {"redirect": "0", "type": "normal"}
+                f"{candidate}/picture",
+                {"redirect": "0", "width": 512, "height": 512},
             )
         except MetaAdsError:
             return None
         data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
-        key = _cdn_asset_key(data.get("url"))
-        if not key:
+        url = _clean_https_url(data.get("url"))
+        if not url:
             return None
-        self._page_avatar_key_cache[candidate] = key
-        return key
+        self._page_avatar_cache[candidate] = url
+        return url
+
+    def _get_page_avatar_key(self, page_id: Any) -> str | None:
+        """CDN asset key of the Page profile picture (``None`` if unknown)."""
+        url = self._get_page_avatar_url(page_id)
+        return _cdn_asset_key(url) if url else None
+
+    def get_ad_spend_rows_90d(
+        self, account_id: Any, *, max_pages: int = 8
+    ) -> list[dict[str, Any]]:
+        """Per-ad spend over the last 90 days (partner 'active pages' metric)."""
+        normalized_account = self._ensure_allowed_account(account_id)
+        rows = self._paged(
+            f"act_{normalized_account}/insights",
+            {
+                "level": "ad",
+                "fields": "ad_id,spend,account_currency",
+                "date_preset": "last_90d",
+                "limit": 250,
+            },
+            max_pages=min(max(int(max_pages or 8), 1), 20),
+        )
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            ad_id = _clean_text(row.get("ad_id"), 40)
+            if not _META_ID_RE.fullmatch(ad_id):
+                continue
+            _, spend_minor = _decimal_amount(row.get("spend"))
+            result.append(
+                {
+                    "adId": ad_id,
+                    "spendMinor": spend_minor,
+                    "currency": _clean_text(row.get("account_currency"), 12).upper(),
+                }
+            )
+        return result
+
+    def get_ad_page_identity(self, meta_ad_id: Any) -> dict[str, str]:
+        """Best-effort Page ID of one Meta ad (history older than Albayan)."""
+        try:
+            ad = self._get(
+                _meta_id(meta_ad_id, "Meta ad"),
+                {
+                    "fields": (
+                        "id,creative{effective_object_story_id,object_story_id,"
+                        "object_story_spec{page_id}}"
+                    )
+                },
+            )
+        except MetaAdsError:
+            return {}
+        creative = ad.get("creative") if isinstance(ad.get("creative"), dict) else {}
+        page_id = _creative_page_id(creative)
+        return {"pageId": page_id} if page_id else {}
+
+    def get_account_ad_page_map(
+        self, account_id: Any, *, max_pages: int = 10
+    ) -> dict[str, str]:
+        """Bulk ad -> Page mapping straight from the ads edge (100 per request).
+
+        Includes archived/deleted ads so that spend rows from the 90-day
+        window can be attributed even when the ad no longer runs. This is how
+        thousands of pre-Albayan history ads are mapped in a handful of
+        requests instead of one request per ad.
+        """
+        normalized_account = self._ensure_allowed_account(account_id)
+        params = {
+            "fields": (
+                "id,creative{effective_object_story_id,object_story_id,"
+                "object_story_spec{page_id}}"
+            ),
+            "limit": 100,
+        }
+        wide_statuses = list(_META_DISCOVERABLE_EFFECTIVE_STATUSES) + [
+            "ARCHIVED",
+            "DELETED",
+            "CAMPAIGN_GROUP_PAUSED",
+        ]
+        pages = min(max(int(max_pages or 10), 1), 30)
+        try:
+            rows = self._paged(
+                f"act_{normalized_account}/ads",
+                {
+                    **params,
+                    "effective_status": json.dumps(
+                        wide_statuses, separators=(",", ":")
+                    ),
+                },
+                max_pages=pages,
+            )
+        except MetaAdsError as error:
+            if error.code == "rate_limited":
+                raise
+            try:
+                rows = self._paged(
+                    f"act_{normalized_account}/ads", dict(params), max_pages=pages
+                )
+            except MetaAdsError:
+                return {}
+        result: dict[str, str] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            ad_id = _clean_text(row.get("id"), 40)
+            if not _META_ID_RE.fullmatch(ad_id):
+                continue
+            creative = row.get("creative") if isinstance(row.get("creative"), dict) else {}
+            page_id = _creative_page_id(creative)
+            if page_id:
+                result[ad_id] = page_id
+        return result
+
+    def get_ad_preview_media_url(
+        self, ad_id: Any, page_id: Any = "", trace: list[str] | None = None
+    ) -> str:
+        """Extract the rendered creative image from Meta's official ad preview.
+
+        The previews edge renders the ad exactly as Ads Manager displays it,
+        even when the underlying Page post/photo nodes are not readable with
+        an ads_read token — this is the of-last-resort source for boosted
+        client-page posts. The iframe URL is a signed public document; it is
+        fetched WITHOUT the access token and scanned for creative images
+        (plain tags AND script-embedded URLs), with the Page avatar filtered
+        out. Every dead end is recorded in ``trace`` for diagnosis.
+        """
+        log = trace if isinstance(trace, list) else []
+        ad_id = _meta_id(ad_id, "Meta ad")
+        avatar_key = self._get_page_avatar_key(page_id) if page_id else None
+        for ad_format in ("DESKTOP_FEED_STANDARD", "MOBILE_FEED_STANDARD"):
+            try:
+                payload = self._get(
+                    f"{ad_id}/previews", {"ad_format": ad_format}
+                )
+            except MetaAdsError as error:
+                log.append(f"preview:{error.provider_code or error.code}")
+                if error.code == "rate_limited":
+                    break
+                continue
+            rows = payload.get("data") if isinstance(payload.get("data"), list) else []
+            body = rows[0].get("body") if rows and isinstance(rows[0], dict) else ""
+            match = _PREVIEW_IFRAME_SRC_RE.search(str(body or ""))
+            if not match:
+                log.append("preview:no_iframe")
+                continue
+            iframe_url = _clean_facebook_preview_url(
+                _html_attr_unescape(match.group(1))
+            )
+            if not iframe_url:
+                log.append("preview:host")
+                continue
+            try:
+                with httpx.Client(
+                    timeout=float(self.config.request_timeout_seconds),
+                    follow_redirects=False,
+                    headers={
+                        "User-Agent": "Albayan-Meta-Read-Sync/1.0",
+                        "Accept": "text/html",
+                    },
+                ) as web:
+                    current_url = iframe_url
+                    response = None
+                    for redirect_count in range(4):
+                        response = web.get(current_url)
+                        if response.status_code not in {301, 302, 303, 307, 308}:
+                            break
+                        if redirect_count >= 3:
+                            log.append("preview:redirects")
+                            response = None
+                            break
+                        location = str(response.headers.get("location") or "")
+                        next_url = _clean_facebook_preview_url(
+                            urljoin(current_url, location)
+                        )
+                        if not next_url:
+                            log.append("preview:redirect_host")
+                            response = None
+                            break
+                        current_url = next_url
+            except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError):
+                log.append("preview:network")
+                continue
+            if response is None:
+                continue
+            if response.status_code != 200:
+                log.append(f"preview:http{int(response.status_code)}")
+                continue
+            if len(response.content or b"") > 3 * 1024 * 1024:
+                log.append("preview:too_large")
+                continue
+            candidates = _preview_image_candidates(response.text)
+            for candidate in candidates:
+                candidate_key = _cdn_asset_key(candidate)
+                if avatar_key and candidate_key and candidate_key == avatar_key:
+                    continue
+                return candidate
+            log.append("preview:no_media" if not candidates else "preview:only_avatar")
+        return ""
 
     def get_ad_snapshot(self, ad_id: Any) -> dict[str, Any]:
         ad_id = _meta_id(ad_id, "Meta ad")
@@ -1205,7 +1729,13 @@ class MetaAdsClient:
                 },
             )
         account_id = self._ensure_allowed_account(ad.get("account_id"))
-        account = self._get_account(account_id)
+        try:
+            account = self._get_account(account_id)
+        except MetaAdsError:
+            # Account metadata is cosmetic here; a throttled read must not
+            # sink the snapshot. apply_meta_snapshot preserves the previously
+            # known account name and currency.
+            account = {"name": "", "currency": ""}
         embedded_adset = ad.get("adset") if isinstance(ad.get("adset"), dict) else {}
         embedded_campaign = (
             ad.get("campaign") if isinstance(ad.get("campaign"), dict) else {}
@@ -1218,20 +1748,30 @@ class MetaAdsClient:
         )
         adset = embedded_adset
         if not adset.get("name"):
-            adset = self._get(
-                adset_id,
-                {
-                    "fields": "id,name,status,effective_status,daily_budget,lifetime_budget,budget_remaining,start_time,end_time,optimization_goal,billing_event"
-                },
-            )
+            # Budget/schedule details are important but must never sink the
+            # whole snapshot (which also carries the photo and page identity).
+            # apply_meta_snapshot preserves the previous budget block when a
+            # degraded pass could not read it.
+            try:
+                adset = self._get(
+                    adset_id,
+                    {
+                        "fields": "id,name,status,effective_status,daily_budget,lifetime_budget,budget_remaining,start_time,end_time,optimization_goal,billing_event"
+                    },
+                )
+            except MetaAdsError:
+                adset = embedded_adset
         campaign = embedded_campaign
         if not campaign.get("name"):
-            campaign = self._get(
-                campaign_id,
-                {
-                    "fields": "id,name,status,effective_status,daily_budget,lifetime_budget,budget_remaining,start_time,stop_time,objective,buying_type"
-                },
-            )
+            try:
+                campaign = self._get(
+                    campaign_id,
+                    {
+                        "fields": "id,name,status,effective_status,daily_budget,lifetime_budget,budget_remaining,start_time,stop_time,objective,buying_type"
+                    },
+                )
+            except MetaAdsError:
+                campaign = embedded_campaign
         creative = ad.get("creative") if isinstance(ad.get("creative"), dict) else {}
         creative_id = ""
         try:
@@ -1252,22 +1792,40 @@ class MetaAdsClient:
             # Meta's creative node exposes the same thumbnail used in Ads
             # Manager. It is optional and must never make core ad sync fail.
             creative_details_attempted = True
+            creative_fields = (
+                "id,name,thumbnail_url,image_url,image_hash,video_id,object_id,"
+                "object_story_id,effective_object_story_id,object_story_spec,"
+                "asset_feed_spec"
+            )
             try:
                 creative_details = self._get(
                     creative_id,
                     {
-                        "fields": (
-                            "id,name,thumbnail_url,image_url,image_hash,video_id,object_id,"
-                            "object_story_id,effective_object_story_id,object_story_spec,"
-                            "asset_feed_spec"
-                        ),
+                        "fields": creative_fields,
                         "thumbnail_width": 512,
                         "thumbnail_height": 512,
                     },
                 )
                 creative = {**creative, **creative_details}
             except MetaAdsError:
-                pass
+                # Some tokens can read the ad's adcreatives edge even when the
+                # creative node itself is denied. One more best-effort route to
+                # the real photo before giving up.
+                try:
+                    edge = self._get(
+                        f"{ad_id}/adcreatives",
+                        {
+                            "fields": creative_fields,
+                            "thumbnail_width": 512,
+                            "thumbnail_height": 512,
+                            "limit": 1,
+                        },
+                    )
+                    edge_rows = edge.get("data") if isinstance(edge.get("data"), list) else []
+                    if edge_rows and isinstance(edge_rows[0], dict):
+                        creative = {**creative, **edge_rows[0]}
+                except MetaAdsError:
+                    pass
         story_spec = (
             creative.get("object_story_spec")
             if isinstance(creative.get("object_story_spec"), dict)
@@ -1277,6 +1835,10 @@ class MetaAdsClient:
         story_media_url = ""
         story_page_id = ""
         story_page_name = ""
+        # Every dead end on the way to the photo is recorded here and stored
+        # on the ad when no photo could be resolved, so a stuck ad can be
+        # diagnosed from its tooltip instead of guessing.
+        media_trace: list[str] = []
         if story_object_id:
             # For an existing Page post this is the authoritative displayed
             # media. Meta's creative.thumbnail_url can instead be the Page
@@ -1294,8 +1856,8 @@ class MetaAdsClient:
                 )
                 story_media_url = _story_media_url(post)
                 story_page_id, story_page_name = _story_page_identity(post)
-            except MetaAdsError:
-                pass
+            except MetaAdsError as error:
+                media_trace.append(f"post:{error.provider_code or error.code}")
         page_id = _clean_text(story_spec.get("page_id"), 40)
         if not _META_ID_RE.fullmatch(page_id):
             page_id = ""
@@ -1330,6 +1892,13 @@ class MetaAdsClient:
                         page_category = direct_page_category
                 except MetaAdsError:
                     pass
+        # The Page profile picture is shown beside (never instead of) the ad's
+        # own photo in the ads table. Cached per page for this client's
+        # lifetime and best-effort: an unreadable avatar must never fail the
+        # snapshot, and apply_meta_snapshot keeps the previously known one.
+        page_picture_url = (
+            (self._get_page_avatar_url(page_id) or "") if page_id else ""
+        )
 
         thumbnail_url = story_media_url
         thumbnail_source = "story" if thumbnail_url else ""
@@ -1361,12 +1930,19 @@ class MetaAdsClient:
             if thumbnail_url:
                 thumbnail_source = "video"
         if not thumbnail_url:
-            # Some existing-post ads expose no post/image edge to an ads_read
-            # system user. Keep Meta's rendered creative thumbnail as the last
-            # fallback so the UI does not become permanently blank — unless it
-            # is the Page profile picture, which is exactly the wrong photo:
-            # showing nothing (with a clear "loading" tile in the UI) is more
-            # honest than showing the page logo as if it were the ad.
+            # Boosted client-page posts often deny every direct media route to
+            # an ads_read token. Meta's own ad preview still renders the real
+            # creative, so extract the picture from there.
+            thumbnail_url = self.get_ad_preview_media_url(ad_id, page_id, media_trace)
+            if thumbnail_url:
+                thumbnail_source = "preview"
+        if not thumbnail_url:
+            # Some existing-post ads expose no media route at all to an
+            # ads_read token. The user prefers SOME honest picture over an
+            # empty tile: keep Meta's rendered creative thumbnail even when it
+            # is (or may be) the Page profile picture — labelled as such so
+            # the UI can say what it is — and fall back to the Page profile
+            # picture itself when even that thumbnail is missing.
             if creative_id and not creative_details_attempted:
                 # The inline expansion carries Meta's tiny 64px default
                 # thumbnail. Before accepting it as the displayed photo, ask
@@ -1387,18 +1963,25 @@ class MetaAdsClient:
             candidate = _creative_thumbnail_url(
                 creative, story_spec, include_generic_thumbnail=True
             )
-            if candidate and story_object_id and page_id:
-                # For a boosted Page post the generic thumbnail is only
-                # trustworthy when it is verifiably NOT the page avatar. If
-                # the avatar cannot be checked right now, fail closed: the UI
-                # shows its loading tile and the next sync retries.
-                candidate_key = _cdn_asset_key(candidate)
-                avatar_key = self._get_page_avatar_key(page_id)
-                if not candidate_key or not avatar_key or candidate_key == avatar_key:
-                    candidate = ""
-            thumbnail_url = candidate
-            if thumbnail_url:
+            if candidate:
+                thumbnail_url = candidate
                 thumbnail_source = "meta_fallback"
+                if story_object_id and page_id:
+                    candidate_key = _cdn_asset_key(candidate)
+                    avatar_key = self._get_page_avatar_key(page_id)
+                    if candidate_key and avatar_key and candidate_key == avatar_key:
+                        thumbnail_source = "page_avatar"
+            else:
+                media_trace.append("fallback:none")
+        if not thumbnail_url and page_id:
+            # Final fallback (explicit user request): the Page profile
+            # picture, clearly labelled as a substitute for the ad photo.
+            avatar_url = self._get_page_avatar_url(page_id)
+            if avatar_url:
+                thumbnail_url = avatar_url
+                thumbnail_source = "page_avatar"
+            else:
+                media_trace.append("avatar:unavailable")
         # Insights are optional during import. A newly published ad can be
         # visible on the Ads edge while Meta is still reviewing it and before
         # an Insights row exists. That normal delay must never block creation
@@ -1471,9 +2054,13 @@ class MetaAdsClient:
             # thumbnail (which can be the Facebook Page/profile picture).
             "metaMediaVersion": _META_MEDIA_VERSION,
             "metaMediaResolvedAt": synced_at,
+            # Only kept while no photo could be resolved: the list of doors
+            # Meta closed, e.g. "post:10,preview:http302,fallback:avatar".
+            "metaMediaTrace": "" if thumbnail_url else ",".join(media_trace)[:200],
             "metaPageId": page_id,
             "metaPageName": page_name,
             "metaPageCategory": page_category,
+            "metaPagePictureUrl": page_picture_url,
             "metaAdAccountId": account_id,
             "metaAdAccountName": _clean_text(account.get("name"), 160),
             "metaCurrency": _clean_text(account.get("currency"), 12).upper(),
@@ -1709,6 +2296,9 @@ def _write_ad_data(conn: Any, row: Any, data: dict[str, Any]) -> dict[str, Any]:
     clean["_deleted"] = bool(row["deleted"])
     if row.get("created_by") is not None:
         clean["createdBy"] = str(row["created_by"])
+    previous = json_loads(row.get("data_json") or "{}") or {}
+    assert_financial_period_open("ads", previous, conn=conn)
+    assert_financial_period_open("ads", clean, conn=conn)
     result = conn.execute(
         text(
             "UPDATE entities SET data_json=:data,last_modified=:modified "
@@ -1798,6 +2388,9 @@ def _write_entity_data(conn: Any, row: Any, data: dict[str, Any]) -> dict[str, A
     clean["_deleted"] = False
     if row.get("created_by") is not None:
         clean["createdBy"] = str(row["created_by"])
+    if str(row["type"]) == "ads":
+        assert_financial_period_open("ads", json_loads(row.get("data_json") or "{}") or {}, conn=conn)
+        assert_financial_period_open("ads", clean, conn=conn)
     result = conn.execute(
         text(
             "UPDATE entities SET data_json=:data,last_modified=:modified "
@@ -1834,6 +2427,7 @@ def _insert_internal_entity(
             "_deleted": False,
         }
     )
+    assert_financial_period_open(entity_type, clean, conn=conn)
     conn.execute(
         text(
             "INSERT INTO entities "
@@ -1911,6 +2505,21 @@ def _ensure_import_page(
         updated["metaPageId"] = meta_page_id
         updated["metaPageName"] = meta_name
         updated["metaPageCategory"] = meta_category
+        meta_picture = _clean_https_url(snapshot.get("metaPagePictureUrl"))
+        existing_picture = _clean_https_url(updated.get("metaPagePictureUrl"))
+        # Signed avatar URLs rotate their query parameters on every Graph
+        # read. Rewrite the stored one only when the underlying photo really
+        # changed (or none is stored yet), so the routine 15-minute ad sync
+        # does not bump the page's version — and re-download it to every
+        # client — each pass.
+        if meta_picture and (
+            not existing_picture
+            or (
+                _cdn_asset_key(meta_picture)
+                and _cdn_asset_key(meta_picture) != _cdn_asset_key(existing_picture)
+            )
+        ):
+            updated["metaPagePictureUrl"] = meta_picture
         updated["metaImportSource"] = "meta_ads"
         updated.setdefault("metaImportedAt", _iso_now())
         if not updated.get("customerIds"):
@@ -1941,6 +2550,7 @@ def _ensure_import_page(
         "metaPageId": meta_page_id,
         "metaPageName": meta_name,
         "metaPageCategory": meta_category,
+        "metaPagePictureUrl": _clean_https_url(snapshot.get("metaPagePictureUrl")),
         "metaImportState": "needs_owner",
         "metaImportedAt": _iso_now(),
         "metaImportSource": "meta_ads",
@@ -2102,6 +2712,108 @@ def _save_import_state(data: dict[str, Any]) -> dict[str, Any]:
     return clean
 
 
+def _load_meta_provider_state() -> dict[str, Any]:
+    with db_conn() as conn:
+        row = conn.execute(
+            text(
+                "SELECT data_json FROM entities "
+                "WHERE type=:type AND id=:id AND deleted=false LIMIT 1"
+            ),
+            {"type": _META_PROVIDER_STATE_TYPE, "id": _META_PROVIDER_STATE_ID},
+        ).mappings().first()
+    data = json_loads(row.get("data_json") or "{}") if row else {}
+    return data if isinstance(data, dict) else {}
+
+
+def _persist_meta_provider_state() -> None:
+    """Best-effort cooldown checkpoint shared across restarts/processes."""
+    with _META_REMOTE_BACKOFF_LOCK:
+        remaining = max(0, int(math.ceil(_META_REMOTE_BACKOFF_UNTIL - time.monotonic())))
+        reason = _META_REMOTE_BACKOFF_REASON
+        usage_percent = _META_REMOTE_USAGE_PERCENT
+        last_request_at = _META_LAST_REMOTE_REQUEST_AT
+    clean = {
+        "recordType": _META_PROVIDER_STATE_TYPE,
+        "backoffUntilMs": now_ms() + remaining * 1000,
+        "backoffReason": _clean_text(reason, 80),
+        "usagePercent": min(max(int(usage_percent or 0), 0), 100),
+        "lastRequestAt": _clean_time(last_request_at),
+        "updatedAt": _iso_now(),
+    }
+    try:
+        with db_conn() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT id,type,data_json,deleted,created_at,created_by,last_modified "
+                    "FROM entities WHERE type=:type AND id=:id AND deleted=false LIMIT 1"
+                ),
+                {"type": _META_PROVIDER_STATE_TYPE, "id": _META_PROVIDER_STATE_ID},
+            ).mappings().first()
+            if row:
+                _write_entity_data(conn, row, clean)
+            else:
+                _insert_internal_entity(
+                    conn, _META_PROVIDER_STATE_TYPE, _META_PROVIDER_STATE_ID, clean
+                )
+    except Exception:
+        # A database outage must never replace the original Meta response with
+        # a second failure. The in-process cooldown still remains active.
+        return
+
+
+def _refresh_meta_provider_state(*, force: bool = False) -> None:
+    """Restore a provider cooldown at most once every five seconds."""
+    global _META_PROVIDER_STATE_REFRESHED_AT, _META_REMOTE_BACKOFF_UNTIL
+    global _META_REMOTE_BACKOFF_REASON, _META_REMOTE_USAGE_PERCENT
+    current_monotonic = time.monotonic()
+    if not force and current_monotonic - _META_PROVIDER_STATE_REFRESHED_AT < 5:
+        return
+    if not _META_PROVIDER_STATE_REFRESH_LOCK.acquire(blocking=False):
+        return
+    try:
+        _META_PROVIDER_STATE_REFRESHED_AT = current_monotonic
+        try:
+            state = _load_meta_provider_state()
+        except Exception:
+            return
+        remaining_ms = _metric_int(state.get("backoffUntilMs")) - now_ms()
+        if remaining_ms <= 0:
+            return
+        with _META_REMOTE_BACKOFF_LOCK:
+            _META_REMOTE_BACKOFF_UNTIL = max(
+                _META_REMOTE_BACKOFF_UNTIL,
+                time.monotonic() + math.ceil(remaining_ms / 1000),
+            )
+            _META_REMOTE_BACKOFF_REASON = (
+                _clean_text(state.get("backoffReason"), 80) or "rate_limited"
+            )
+            _META_REMOTE_USAGE_PERCENT = max(
+                _META_REMOTE_USAGE_PERCENT,
+                min(_metric_int(state.get("usagePercent")), 100),
+            )
+    finally:
+        _META_PROVIDER_STATE_REFRESH_LOCK.release()
+
+
+def _public_meta_provider_state(*, refresh: bool = False) -> dict[str, Any]:
+    if refresh:
+        _refresh_meta_provider_state(force=True)
+    remaining = _meta_remote_backoff_remaining()
+    with _META_REMOTE_BACKOFF_LOCK:
+        reason = _META_REMOTE_BACKOFF_REASON
+        usage_percent = _META_REMOTE_USAGE_PERCENT
+        last_request_at = _META_LAST_REMOTE_REQUEST_AT
+    return {
+        "state": "paused" if remaining else "ready",
+        "paused": bool(remaining),
+        "retryAfterSeconds": remaining,
+        "reason": _clean_text(reason, 80) if remaining else "",
+        "usagePercent": min(max(int(usage_percent or 0), 0), 100),
+        "lastRequestAt": _clean_time(last_request_at),
+        "minimumRequestIntervalMs": int(_meta_request_interval_seconds() * 1000),
+    }
+
+
 def _public_import_state(state: dict[str, Any] | None = None) -> dict[str, Any]:
     source = state if isinstance(state, dict) else _load_import_state()
     return {
@@ -2115,6 +2827,370 @@ def _public_import_state(state: dict[str, Any] | None = None) -> dict[str, Any]:
         "knownAdCount": _metric_int(source.get("knownAdCount")),
         "accountCount": _metric_int(source.get("accountCount")),
     }
+
+
+def _load_partner_state() -> dict[str, Any]:
+    with db_conn() as conn:
+        row = conn.execute(
+            text(
+                "SELECT data_json FROM entities "
+                "WHERE type=:type AND id=:id AND deleted=false LIMIT 1"
+            ),
+            {"type": _META_PARTNER_STATE_TYPE, "id": _META_PARTNER_STATE_ID},
+        ).mappings().first()
+    data = json_loads(row.get("data_json") or "{}") if row else {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_partner_state(data: dict[str, Any]) -> dict[str, Any]:
+    clean = dict(data)
+    clean["recordType"] = _META_PARTNER_STATE_TYPE
+    clean["updatedAt"] = _iso_now()
+    with db_conn() as conn:
+        row = conn.execute(
+            text(
+                "SELECT id,type,data_json,deleted,created_at,created_by,last_modified "
+                "FROM entities WHERE type=:type AND id=:id AND deleted=false LIMIT 1"
+            ),
+            {"type": _META_PARTNER_STATE_TYPE, "id": _META_PARTNER_STATE_ID},
+        ).mappings().first()
+        if row:
+            _write_entity_data(conn, row, clean)
+        else:
+            _insert_internal_entity(
+                conn, _META_PARTNER_STATE_TYPE, _META_PARTNER_STATE_ID, clean
+            )
+    return clean
+
+
+def _public_partner_stats(state: dict[str, Any]) -> dict[str, Any]:
+    rows = state.get("pages") if isinstance(state.get("pages"), list) else []
+    pages: list[dict[str, Any]] = []
+    for row in rows[:600]:
+        if not isinstance(row, dict):
+            continue
+        page_id = _clean_text(row.get("pageId"), 40)
+        if not _META_ID_RE.fullmatch(page_id):
+            continue
+        spend_minor = _minor_units(row.get("spendMinor"))
+        pages.append(
+            {
+                "pageId": page_id,
+                "pageName": _clean_text(row.get("pageName"), 240) or f"Page {page_id}",
+                "spendMinor": spend_minor,
+                "spend": spend_minor / 100,
+                "qualified": spend_minor >= _PARTNER_PAGE_SPEND_THRESHOLD_MINOR,
+            }
+        )
+    return {
+        "computedAt": _clean_time(state.get("computedAt")),
+        "windowDays": 90,
+        "currency": "USD",
+        "thresholdMinor": _PARTNER_PAGE_SPEND_THRESHOLD_MINOR,
+        "targetCount": _PARTNER_ACTIVE_PAGES_TARGET,
+        "qualifiedCount": sum(1 for page in pages if page["qualified"]),
+        "pages": pages,
+        "unmatchedAdCount": _metric_int(state.get("unmatchedAdCount")),
+        "unmatchedSpendMinor": _minor_units(state.get("unmatchedSpendMinor")),
+        "accountErrors": [
+            _clean_text(value, 240)
+            for value in (state.get("accountErrors") or [])[:5]
+            if _clean_text(value, 240)
+        ],
+        "notes": [
+            _clean_text(value, 240)
+            for value in (state.get("notes") or [])[:5]
+            if _clean_text(value, 240)
+        ],
+        "accountsScanned": _metric_int(state.get("accountsScanned")),
+    }
+
+
+def get_meta_partner_page_stats(*, refresh: bool = False) -> dict[str, Any]:
+    """Compute Meta's partner 'active pages' metric with the page list.
+
+    An active page has more than 100 USD ad spend across the allowed ad
+    accounts in the last 90 days. Spend rows come from one paged insights
+    read per account; ads are mapped to their pages through Albayan's own
+    records first, then through a bounded, persisted lookup for history that
+    predates Albayan. The result is cached for a few hours. The lock keeps
+    two concurrent admins from running the same scan twice; the second
+    caller simply gets the fresh cache.
+    """
+    config = load_meta_ads_config()
+    if not config.configured:
+        raise MetaAdsError("not_configured", "Meta Ads connection is not configured")
+    with _META_PARTNER_LOCK:
+        return _compute_partner_page_stats(config, refresh=refresh)
+
+
+def _compute_partner_page_stats(
+    config: MetaAdsConfig, *, refresh: bool
+) -> dict[str, Any]:
+    state = _load_partner_state()
+    computed_at_ms = _metric_int(state.get("computedAtMs"))
+    ttl_ms = _metric_int(state.get("ttlMs")) or _PARTNER_STATS_TTL_MS
+    if (
+        not refresh
+        and isinstance(state.get("pages"), list)
+        and now_ms() - computed_at_ms < ttl_ms
+    ):
+        return _public_partner_stats(state)
+
+    client = get_meta_ads_client()
+
+    # Mapping learned in earlier passes for history that predates Albayan.
+    # Only these entries are persisted — Albayan's own ads are re-read from
+    # the database every pass, so they must never crowd out this cache.
+    resolved_map: dict[str, dict[str, str]] = {}
+    cached_map = state.get("adPageMap") if isinstance(state.get("adPageMap"), dict) else {}
+    for meta_ad_id, row in cached_map.items():
+        cleaned_id = _clean_text(meta_ad_id, 40)
+        if _META_ID_RE.fullmatch(cleaned_id) and isinstance(row, dict):
+            page_id = _clean_text(row.get("pageId"), 40)
+            if _META_ID_RE.fullmatch(page_id):
+                resolved_map[cleaned_id] = {"pageId": page_id}
+    # Ads whose page could not be determined recently: skip for a day.
+    misses: dict[str, int] = {}
+    cached_misses = (
+        state.get("adPageMisses") if isinstance(state.get("adPageMisses"), dict) else {}
+    )
+    for meta_ad_id, failed_at in cached_misses.items():
+        cleaned_id = _clean_text(meta_ad_id, 40)
+        stamp = _metric_int(failed_at)
+        if _META_ID_RE.fullmatch(cleaned_id) and stamp > 0:
+            misses[cleaned_id] = stamp
+
+    ad_page_map: dict[str, dict[str, str]] = dict(resolved_map)
+    page_names: dict[str, str] = {}
+    cached_names = (
+        state.get("pageNames") if isinstance(state.get("pageNames"), dict) else {}
+    )
+    for page_id, name in cached_names.items():
+        cleaned_id = _clean_text(page_id, 40)
+        cleaned_name = _clean_text(name, 240)
+        if _META_ID_RE.fullmatch(cleaned_id) and cleaned_name:
+            page_names[cleaned_id] = cleaned_name
+    with db_conn() as conn:
+        ad_rows = conn.execute(
+            text("SELECT data_json FROM entities WHERE type='ads' AND deleted=false")
+        ).mappings().all()
+        page_rows = conn.execute(
+            text("SELECT data_json FROM entities WHERE type='pages' AND deleted=false")
+        ).mappings().all()
+    for row in page_rows:
+        data = json_loads(row.get("data_json") or "{}") or {}
+        if not isinstance(data, dict):
+            continue
+        page_id = str(data.get("metaPageId") or "")
+        if _META_ID_RE.fullmatch(page_id):
+            name = _clean_text(data.get("name") or data.get("metaPageName"), 240)
+            if name:
+                page_names[page_id] = name
+    for row in ad_rows:
+        data = json_loads(row.get("data_json") or "{}") or {}
+        if not isinstance(data, dict):
+            continue
+        meta_ad_id = str(data.get("metaAdId") or "")
+        page_id = str(data.get("metaPageId") or "")
+        if _META_ID_RE.fullmatch(meta_ad_id) and _META_ID_RE.fullmatch(page_id):
+            ad_page_map[meta_ad_id] = {"pageId": page_id}
+            if page_id not in page_names:
+                name = _clean_text(data.get("metaPageName"), 240)
+                if name:
+                    page_names[page_id] = name
+
+    spend_by_ad: dict[str, int] = {}
+    account_errors: list[str] = []
+    notes: list[str] = []
+    accounts_scanned = 0
+    rate_limited_scan = False
+    foreign_currencies: set[str] = set()
+    for account_id in config.allowed_account_ids:
+        try:
+            for row in client.get_ad_spend_rows_90d(account_id):
+                ad_id = str(row.get("adId") or "")
+                currency = _clean_text(row.get("currency"), 12).upper()
+                if currency and currency != "USD":
+                    # Meta's badge metric is USD-based. Foreign-currency spend
+                    # is skipped instead of being silently counted as dollars.
+                    foreign_currencies.add(currency)
+                    continue
+                spend_by_ad[ad_id] = spend_by_ad.get(ad_id, 0) + _minor_units(
+                    row.get("spendMinor")
+                )
+            accounts_scanned += 1
+        except MetaAdsError as error:
+            account_errors.append(error.public_message)
+            if error.code == "rate_limited":
+                rate_limited_scan = True
+                break
+
+    if accounts_scanned == 0:
+        # Nothing could be scanned (e.g. Meta is rate limiting right now).
+        # NEVER destroy the last good statistics with an empty result — keep
+        # them, surface the error, and let the caller retry later.
+        fallback = dict(state) if isinstance(state.get("pages"), list) else {}
+        fallback["accountErrors"] = account_errors[:5]
+        return _public_partner_stats(fallback)
+    if foreign_currencies:
+        notes.append(
+            "Spend in "
+            + ", ".join(sorted(foreign_currencies))
+            + " was excluded (the Meta partner metric counts USD)."
+        )
+
+    # History that predates Albayan: when many spend rows are unmapped, one
+    # paged ads-edge sweep per account (including archived/deleted ads) maps
+    # hundreds of them per request instead of one request per ad.
+    unknown_spenders = [
+        meta_ad_id
+        for meta_ad_id, spend_minor in spend_by_ad.items()
+        if spend_minor > 0 and meta_ad_id not in ad_page_map
+    ]
+    if (
+        not rate_limited_scan
+        and len(unknown_spenders) > _PARTNER_UNMATCHED_RESOLVE_LIMIT
+        and hasattr(client, "get_account_ad_page_map")
+    ):
+        for account_id in config.allowed_account_ids:
+            try:
+                bulk_map = client.get_account_ad_page_map(account_id)
+            except MetaAdsError as error:
+                account_errors.append(error.public_message)
+                if error.code == "rate_limited":
+                    rate_limited_scan = True
+                    break
+                continue
+            for meta_ad_id, page_id in bulk_map.items():
+                if meta_ad_id not in ad_page_map and _META_ID_RE.fullmatch(page_id):
+                    resolved_map[meta_ad_id] = {"pageId": page_id}
+                    ad_page_map[meta_ad_id] = {"pageId": page_id}
+                    misses.pop(meta_ad_id, None)
+
+    # Whatever remains: resolve a bounded number of unknown ads per refresh
+    # and remember both hits and definitive misses, so the metric converges
+    # to Meta's own number without ever bursting the API. Skipped entirely
+    # while Meta is limiting the token.
+    resolved_now = 0
+    if not rate_limited_scan and hasattr(client, "get_ad_page_identity"):
+        current = now_ms()
+        for meta_ad_id, spend_minor in sorted(
+            spend_by_ad.items(), key=lambda item: -item[1]
+        ):
+            if resolved_now >= _PARTNER_UNMATCHED_RESOLVE_LIMIT:
+                break
+            if spend_minor <= 0 or meta_ad_id in ad_page_map:
+                continue
+            if current - misses.get(meta_ad_id, 0) < _PARTNER_MISS_RETRY_MS:
+                continue
+            identity = client.get_ad_page_identity(meta_ad_id)
+            resolved_now += 1
+            page_id = _clean_text(identity.get("pageId"), 40) if identity else ""
+            if _META_ID_RE.fullmatch(page_id):
+                resolved_map[meta_ad_id] = {"pageId": page_id}
+                ad_page_map[meta_ad_id] = {"pageId": page_id}
+                misses.pop(meta_ad_id, None)
+            else:
+                misses[meta_ad_id] = current
+
+    totals: dict[str, int] = {}
+    unmatched_ads = 0
+    unmatched_spend = 0
+    for meta_ad_id, spend_minor in spend_by_ad.items():
+        mapping = ad_page_map.get(meta_ad_id)
+        if mapping:
+            totals[mapping["pageId"]] = totals.get(mapping["pageId"], 0) + spend_minor
+        elif spend_minor > 0:
+            unmatched_ads += 1
+            unmatched_spend += spend_minor
+
+    # Resolve missing page names: the accounts' promoted-pages directory
+    # first, then a bounded number of direct public Page reads. Learned names
+    # are persisted so they are fetched at most once.
+    direct_name_lookups = 0
+    for page_id, _spend in sorted(totals.items(), key=lambda item: -item[1]):
+        if page_names.get(page_id):
+            continue
+        if hasattr(client, "_get_account_page_identity"):
+            for account_id in config.allowed_account_ids:
+                identity = client._get_account_page_identity(account_id, page_id)
+                if identity.get("name"):
+                    page_names[page_id] = _clean_text(identity.get("name"), 240)
+                    break
+        if (
+            not page_names.get(page_id)
+            and not rate_limited_scan
+            and direct_name_lookups < 25
+            and hasattr(client, "_get")
+        ):
+            direct_name_lookups += 1
+            try:
+                node = client._get(page_id, {"fields": "id,name"})
+                name = _clean_text(node.get("name"), 240)
+                if name:
+                    page_names[page_id] = name
+            except MetaAdsError:
+                pass
+
+    pages: list[dict[str, Any]] = []
+    for page_id, spend_minor in totals.items():
+        pages.append(
+            {
+                "pageId": page_id,
+                "pageName": page_names.get(page_id, "") or f"Page {page_id}",
+                "spendMinor": spend_minor,
+                "qualified": spend_minor >= _PARTNER_PAGE_SPEND_THRESHOLD_MINOR,
+            }
+        )
+    pages.sort(key=lambda row: (-row["spendMinor"], row["pageId"]))
+
+    # Persist only pre-Albayan mappings. On a fully clean scan, drop entries
+    # that left the 90-day window; always keep the NEWEST entries when the
+    # cap applies (they were just paid for with real Graph requests).
+    clean_full_scan = (
+        accounts_scanned == len(config.allowed_account_ids) and not account_errors
+    )
+    if clean_full_scan:
+        resolved_map = {
+            key: value for key, value in resolved_map.items() if key in spend_by_ad
+        }
+    bounded_map = dict(list(resolved_map.items())[-_PARTNER_AD_PAGE_MAP_LIMIT:])
+    current = now_ms()
+    fresh_misses = {
+        key: stamp
+        for key, stamp in misses.items()
+        if current - stamp < _PARTNER_MISS_RETRY_MS
+    }
+    bounded_misses = dict(
+        sorted(fresh_misses.items(), key=lambda item: -item[1])[
+            :_PARTNER_AD_PAGE_MISS_LIMIT
+        ]
+    )
+    bounded_names = dict(
+        [
+            (page_id, name)
+            for page_id, name in page_names.items()
+            if _META_ID_RE.fullmatch(str(page_id)) and name
+        ][:1000]
+    )
+    next_state = {
+        "computedAtMs": current,
+        "computedAt": _iso_now(),
+        # A limited/partial scan may be replaced much sooner than a clean one.
+        "ttlMs": _PARTNER_STATS_TTL_MS if clean_full_scan else _PARTNER_STATS_PARTIAL_TTL_MS,
+        "pages": pages[:600],
+        "unmatchedAdCount": unmatched_ads,
+        "unmatchedSpendMinor": unmatched_spend,
+        "accountErrors": account_errors[:5],
+        "notes": notes[:5],
+        "accountsScanned": accounts_scanned,
+        "adPageMap": bounded_map,
+        "adPageMisses": bounded_misses,
+        "pageNames": bounded_names,
+    }
+    _save_partner_state(next_state)
+    return _public_partner_stats(next_state)
 
 
 def _existing_meta_ad_ids() -> set[str]:
@@ -2147,7 +3223,7 @@ def _created_after_cutoff(value: Any, cutoff: str | None) -> bool:
 
 
 def _pending_meta_snapshot(
-    row: dict[str, Any], account_id: str, error: MetaAdsError
+    row: dict[str, Any], account_id: str, error: MetaAdsError, currency: str = ""
 ) -> dict[str, Any]:
     """Build a retryable, accounting-neutral snapshot from the Ads edge.
 
@@ -2182,6 +3258,11 @@ def _pending_meta_snapshot(
         "metaPageName": _clean_text(row.get("pageName"), 240),
         "metaPageCategory": _clean_text(row.get("pageCategory"), 160),
         "metaAdAccountId": _account_id(account_id),
+        # The draft carries Meta's budget minors, so it must also say which
+        # currency they are in. Without it the browser cannot tell a $30 ad from
+        # a EUR 30 ad, and metaAdCurrencyIsKnownUSD keeps the budget field manual
+        # until a later pass supplies it.
+        "metaCurrency": _clean_text(currency, 12).upper(),
         "metaConfiguredStatus": _clean_text(row.get("status"), 40),
         "metaEffectiveStatus": _clean_text(row.get("effectiveStatus"), 40),
         "metaAdSetStatus": _clean_text(row.get("adSetStatus"), 40),
@@ -2237,6 +3318,14 @@ def discover_meta_ads(
     config = load_meta_ads_config()
     if not config.configured:
         raise MetaAdsError("not_configured", "Meta Ads connection is not configured")
+    if _server_token_matches(config):
+        _refresh_meta_provider_state()
+    if _meta_remote_backoff_remaining():
+        raise MetaAdsError(
+            "rate_limited",
+            "Meta synchronization is paused safely and will resume automatically.",
+            retryable=True,
+        )
     if not config.auto_import and not force:
         return {"imported": [], "busy": False, "disabled": True, "state": _public_import_state()}
     if not _META_DISCOVERY_LOCK.acquire(blocking=False):
@@ -2272,6 +3361,7 @@ def discover_meta_ads(
         already_linked = _existing_meta_ad_ids()
         found: dict[str, tuple[str, dict[str, Any]]] = {}
         account_errors: list[str] = []
+        rate_limited_scan = False
         for account_id in requested:
             try:
                 for row in client.list_ads(account_id, max_pages=scan_pages):
@@ -2286,9 +3376,16 @@ def discover_meta_ads(
                 # the same pass only extend the problem. Preserve partial
                 # results and let the paced worker retry the remaining account.
                 if error.code == "rate_limited":
+                    rate_limited_scan = True
                     break
 
         if not found and account_errors and len(account_errors) == len(requested):
+            if rate_limited_scan:
+                raise MetaAdsError(
+                    "rate_limited",
+                    "Meta synchronization is paused safely and will resume automatically.",
+                    retryable=True,
+                )
             raise MetaAdsError("discovery_failed", account_errors[0], retryable=True)
 
         if include_existing:
@@ -2302,6 +3399,26 @@ def discover_meta_ads(
                 if meta_id not in already_linked
                 and _created_after_cutoff(row.get("createdTime"), startup_cutoff)
             )
+
+        # Which currency an account bills in decides whether the browser may
+        # treat Meta's planned budget as dollars. _get_account is cached on the
+        # client, so this costs at most one request per account for the whole
+        # pass, never one per ad — discovery stays cheap. A failure is not fatal:
+        # the draft simply carries no currency, its budget field stays manual,
+        # and the paced detail pass fills it in seconds later.
+        currency_by_account: dict[str, str] = {}
+
+        def _discovery_account_currency(account: str) -> str:
+            if account not in currency_by_account:
+                currency = ""
+                getter = getattr(client, "_get_account", None)
+                if callable(getter):
+                    try:
+                        currency = _clean_text(getter(account).get("currency"), 12).upper()
+                    except Exception:
+                        currency = ""
+                currency_by_account[account] = currency
+            return currency_by_account[account]
 
         imported: list[dict[str, Any]] = []
         failed: set[str] = set()
@@ -2321,6 +3438,7 @@ def discover_meta_ads(
                     "Albayan is loading the remaining Meta details.",
                     retryable=True,
                 ),
+                currency=_discovery_account_currency(account_id),
             )
             try:
                 imported.append(import_meta_ad_draft(snapshot))
@@ -2352,7 +3470,9 @@ def discover_meta_ads(
             "baselineAt": state.get("baselineAt") or stamp,
             "lastDiscoveryAt": stamp,
             "lastSuccessAt": stamp if not account_errors and not failed else state.get("lastSuccessAt"),
-            "lastError": last_error or (account_errors[0] if account_errors else ""),
+            # Provider throttling is a shared temporary pause, not a broken ad
+            # or broken import. It is displayed once in the connection status.
+            "lastError": "" if rate_limited_scan else (last_error or (account_errors[0] if account_errors else "")),
             "lastImportedCount": len(imported),
             "totalImported": _metric_int(state.get("totalImported")) + len(imported),
             "knownAdCount": len(known),
@@ -2408,6 +3528,14 @@ def apply_meta_snapshot(
         previous_meta_ad_id = str(data.get("metaAdId") or "")
         was_linked = bool(previous_meta_ad_id)
         previous = dict(data)
+        # Captured BEFORE the degraded-pass merge below: only a page picture
+        # the CURRENT pass actually resolved may be written to the shared page
+        # record. A value merely restored from this ad's own row can be older
+        # than what another ad already stored on the page (ads sync on
+        # independent schedules), and writing it back would flip the page's
+        # avatar backwards — and bump its version — every time this ad's
+        # avatar read fails transiently.
+        fresh_page_picture = _clean_https_url(snapshot.get("metaPagePictureUrl"))
         if previous_meta_ad_id == meta_ad_id:
             # Re-syncing the same Meta ad: a pass that could not resolve the
             # photo or page identity this time must not erase values an
@@ -2416,24 +3544,58 @@ def apply_meta_snapshot(
             # preview) may still be replaced by empty so the repaired
             # resolver can retire wrong photos.
             merged = dict(snapshot)
-            if (
-                not merged.get("metaThumbnailUrl")
-                and data.get("metaThumbnailUrl")
-                and str(data.get("metaThumbnailSource") or "")
-                in {"story", "creative", "ad_image", "object_media", "video"}
-            ):
+            # The user prefers SOME picture over an empty tile: any known
+            # photo survives a pass that resolved nothing. Better sources
+            # still replace worse ones because non-empty values always win.
+            if not merged.get("metaThumbnailUrl") and data.get("metaThumbnailUrl"):
                 merged["metaThumbnailUrl"] = data["metaThumbnailUrl"]
-                merged["metaThumbnailSource"] = data["metaThumbnailSource"]
-            for preserved_key in ("metaPageId", "metaPageName", "metaPageCategory"):
+                merged["metaThumbnailSource"] = data.get("metaThumbnailSource") or ""
+            for preserved_key in (
+                "metaPageId",
+                "metaPageName",
+                "metaPageCategory",
+                "metaPagePictureUrl",
+                "metaAdSetName",
+                "metaCampaignName",
+                "metaObjective",
+                "metaStartTime",
+                "metaEndTime",
+                "metaAdAccountName",
+                "metaCurrency",
+            ):
                 if not merged.get(preserved_key) and data.get(preserved_key):
                     merged[preserved_key] = data[preserved_key]
+            # A degraded pass that could not read the ad set/campaign must not
+            # wipe the known budget picture. The budget block is preserved as
+            # a unit, and the remaining money is recomputed against the
+            # (still updating) spend so it can genuinely reach zero.
+            if (
+                not _minor_units(merged.get("metaTotalBudgetMinor"))
+                and _minor_units(data.get("metaTotalBudgetMinor"))
+            ):
+                for budget_key in (
+                    "metaDailyBudgetMinor",
+                    "metaLifetimeBudgetMinor",
+                    "metaTotalBudgetMinor",
+                    "metaTotalBudgetKind",
+                    "metaBudgetRemainingMinor",
+                    "metaBudgetSource",
+                    "metaDurationDays",
+                ):
+                    if data.get(budget_key) not in (None, "", 0):
+                        merged[budget_key] = data[budget_key]
+                merged["metaTotalRemainingBudgetMinor"] = _total_remaining_budget(
+                    merged.get("metaTotalBudgetMinor"), merged.get("metaSpendMinor")
+                )
             snapshot = merged
         if (
             data.get("metaImportSource") == "meta_ads"
             and snapshot.get("metaPageId")
             and (not data.get("pageId") or snapshot.get("metaPageName"))
         ):
-            page_id, page_name, page_created = _ensure_import_page(conn, snapshot)
+            page_id, page_name, page_created = _ensure_import_page(
+                conn, {**snapshot, "metaPagePictureUrl": fresh_page_picture}
+            )
             if page_id:
                 imported_page_id = page_id
                 imported_page_created = page_created
@@ -2586,6 +3748,11 @@ def record_meta_sync_failure(
     *,
     expected_last_modified: int | None,
 ) -> dict[str, Any] | None:
+    # A provider-wide throttle does not belong to this ad. Saving it on every
+    # row creates hundreds of alarming red errors and needless database writes.
+    # The shared provider state owns the pause and retries the same row later.
+    if error.code == "rate_limited":
+        return None
     ad_id = _local_id(ad_id)
     config = load_meta_ads_config()
     postgres = str(get_engine().dialect.name or "") == "postgresql"
@@ -2599,21 +3766,32 @@ def record_meta_sync_failure(
             return None
         failures = min(max(int(data.get("metaSyncFailureCount") or 0) + 1, 1), 100)
         attempted_at = _iso_now()
+        provider_code = getattr(error, "provider_code", "")
         data.update(
             {
                 "metaLastAttemptAt": attempted_at,
                 "metaSyncError": error.public_message,
-                "metaSyncErrorCode": error.code,
+                "metaSyncErrorCode": _clean_text(
+                    f"{error.code}:{provider_code}" if provider_code else error.code, 40
+                ),
                 "metaSyncFailureCount": failures,
                 "metaNextSyncAt": now_ms()
                 + _sync_failure_delay_ms(config, failures, error),
             }
         )
+        if not error.retryable:
+            # This resolver version had its one prioritized repair try;
+            # further retries follow the normal backoff clock. A transient
+            # throttle must NOT consume that single priority attempt.
+            data["metaMediaRepairVersion"] = _META_MEDIA_VERSION
         return _thin_ad_entity(_write_ad_data(conn, row, data))
 
 
 def _due_meta_ads(limit: int) -> list[dict[str, Any]]:
     current = now_ms()
+    # While Meta's cooldown is armed every call would fail instantly; pausing
+    # the priority repair lane keeps it from burning its one-shot retries.
+    backoff_active = _meta_remote_backoff_remaining() > 0
     candidates: list[tuple[int, int, str, dict[str, Any]]] = []
     with db_conn() as conn:
         rows = conn.execute(
@@ -2638,7 +3816,20 @@ def _due_meta_ads(limit: int) -> list[dict[str, Any]]:
             failure_count = int(data.get("metaSyncFailureCount") or 0)
         except (TypeError, ValueError, OverflowError):
             failure_count = 0
-        needs_media_repair = media_version < _META_MEDIA_VERSION and failure_count == 0
+        try:
+            repair_version = int(data.get("metaMediaRepairVersion") or 0)
+        except (TypeError, ValueError, OverflowError):
+            repair_version = 0
+        # Every resolver upgrade grants ONE immediate repair attempt even to
+        # rows that were failing under the previous resolver (their multi-hour
+        # backoff would otherwise keep photos/names missing long after the
+        # deployment that fixes them). A failed attempt stamps
+        # metaMediaRepairVersion, so the priority lane never hammers Meta.
+        needs_media_repair = (
+            not backoff_active
+            and media_version < _META_MEDIA_VERSION
+            and (failure_count == 0 or repair_version < _META_MEDIA_VERSION)
+        )
         if next_sync > current and not needs_media_repair:
             continue
         priority = 0 if needs_media_repair else 1
@@ -2660,13 +3851,28 @@ def _due_meta_ads(limit: int) -> list[dict[str, Any]]:
                     "metaCampaignId": _clean_text(data.get("metaCampaignId"), 40),
                     "metaCreativeId": _clean_text(data.get("metaCreativeId"), 40),
                     "metaActivityCursorAt": _clean_time(data.get("metaActivityCursorAt")),
+                    "metaActivityLastCheckedAt": _clean_time(data.get("metaActivityLastCheckedAt")),
                     "metaSyncedAt": _clean_time(data.get("metaSyncedAt")),
                     "metaAdCreatedTime": _clean_time(data.get("metaAdCreatedTime")),
+                    "needsMediaRepair": needs_media_repair,
                 },
             )
         )
     candidates.sort(key=lambda item: (item[0], item[1], item[2]))
-    return [candidate for _, _, _, candidate in candidates[: max(1, limit)]]
+    # Media resolver upgrades can make hundreds of old rows eligible at once.
+    # Repair only one per pass, then spend the rest of the batch on genuinely
+    # due ads. This prevents an upgrade from creating an API traffic burst.
+    selected: list[dict[str, Any]] = []
+    repair_added = False
+    for _, _, _, candidate in candidates:
+        if candidate.get("needsMediaRepair"):
+            if repair_added:
+                continue
+            repair_added = True
+        selected.append(candidate)
+        if len(selected) >= max(1, limit):
+            break
+    return selected
 
 
 def _activity_since(rows: list[dict[str, Any]], fetched_at: str) -> str:
@@ -2700,7 +3906,10 @@ def _account_activity_batches(
     for row in rows:
         # A freshly imported draft has no previous Meta state to compare. Do
         # not spend an activities request before its first details snapshot.
-        if not (row.get("metaSyncedAt") or row.get("metaActivityCursorAt")):
+        if (
+            row.get("needsMediaRepair")
+            or not (row.get("metaSyncedAt") or row.get("metaActivityCursorAt"))
+        ):
             continue
         account_id = _clean_text(row.get("metaAdAccountId"), 40)
         if _META_ID_RE.fullmatch(account_id):
@@ -2726,9 +3935,11 @@ def _account_activity_batches(
                 max_pages=5,
             )
             cursors[account_id] = fetched_at
-        except MetaAdsError:
+        except MetaAdsError as error:
             # The activity edge can require more access than core ads_read in
             # some Meta configurations. Snapshot history remains the fallback.
+            if error.code == "rate_limited":
+                break
             continue
     return activities, cursors
 
@@ -2762,6 +3973,10 @@ def sync_due_meta_ads(limit: int | None = None) -> list[dict[str, Any]]:
     config = load_meta_ads_config()
     if not config.configured:
         return []
+    if _server_token_matches(config):
+        _refresh_meta_provider_state()
+    if _meta_remote_backoff_remaining():
+        return []
     client = get_meta_ads_client()
     updated: list[dict[str, Any]] = []
     due_rows = _due_meta_ads(limit or config.sync_batch_size)
@@ -2789,11 +4004,11 @@ def sync_due_meta_ads(limit: int | None = None) -> list[dict[str, Any]]:
             if error.status_code != 409:
                 continue
         except MetaAdsError as error:
+            if error.code == "rate_limited":
+                break
             failed = record_meta_sync_failure(ad_id, error, expected_last_modified=version)
             if failed:
                 updated.append(failed)
-            if error.code == "rate_limited":
-                break
         except Exception:
             # Never leak third-party exception text into logs or ad data.
             failed = record_meta_sync_failure(
@@ -2821,7 +4036,14 @@ def _worker_loop() -> None:
     while not _WORKER_STOP.is_set():
         try:
             config = load_meta_ads_config()
+            if _server_token_matches(config):
+                _refresh_meta_provider_state()
+            remote_pause = _meta_remote_backoff_remaining()
+            if remote_pause:
+                _WORKER_STOP.wait(min(max(remote_pause, 2), 60))
+                continue
             current = time.monotonic()
+            discovery_ran = False
             if config.auto_import and (
                 not last_discovery_monotonic
                 or current - last_discovery_monotonic
@@ -2829,7 +4051,8 @@ def _worker_loop() -> None:
             ):
                 discover_meta_ads(startup_cutoff=_WORKER_STARTED_AT)
                 last_discovery_monotonic = current
-            if (
+                discovery_ran = True
+            if not discovery_ran and (
                 not last_sync_monotonic
                 or current - last_sync_monotonic
                 >= config.worker_sync_interval_seconds
@@ -2846,6 +4069,8 @@ def start_meta_ads_worker() -> None:
     config = load_meta_ads_config()
     if not config.configured or not config.background_sync:
         return
+    if _server_token_matches(config):
+        _refresh_meta_provider_state(force=True)
     with _WORKER_CONTROL_LOCK:
         if _WORKER_THREAD and _WORKER_THREAD.is_alive():
             return
@@ -2933,6 +4158,11 @@ def create_meta_ads_router(
     @router.get("/status")
     def meta_status(admin: dict[str, Any] = Depends(require_meta_admin)):
         config = load_meta_ads_config()
+        provider_state = (
+            _public_meta_provider_state(refresh=True)
+            if config.configured and _server_token_matches(config)
+            else _public_meta_provider_state()
+        )
         return {
             "configured": config.configured,
             "readOnly": True,
@@ -2945,7 +4175,8 @@ def create_meta_ads_router(
             "autoImport": config.auto_import and config.configured,
             "discoveryIntervalSeconds": config.discovery_interval_seconds,
             "discoveryFastPages": config.discovery_fast_pages,
-            "remoteBackoffSeconds": _meta_remote_backoff_remaining(),
+            "remoteBackoffSeconds": provider_state["retryAfterSeconds"],
+            "providerState": provider_state,
             "webhookConfigured": bool(
                 config.webhook_verify_token and config.app_secret
             ),
@@ -3024,6 +4255,39 @@ def create_meta_ads_router(
         except MetaAdsError as error:
             raise HTTPException(status_code=502 if error.retryable else 400, detail=error.public_message)
 
+    def _partner_error(error: MetaAdsError) -> HTTPException:
+        if error.code == "not_configured":
+            return HTTPException(status_code=503, detail=error.public_message)
+        return HTTPException(
+            status_code=502 if error.retryable else 400,
+            detail=error.public_message,
+        )
+
+    @router.get("/partner-pages")
+    def partner_pages(admin: dict[str, Any] = Depends(require_meta_admin)):
+        # Plain reads are served from the cached statistics — cheap, so they
+        # get a generous bucket that opening the dialog can never exhaust.
+        _rate_limit_or_429(f"meta-partner:{admin.get('id')}", 30, 60_000)
+        try:
+            return get_meta_partner_page_stats(refresh=False)
+        except MetaAdsError as error:
+            raise _partner_error(error)
+
+    @router.post("/partner-pages/refresh")
+    def partner_pages_refresh(
+        request: Request,
+        admin: dict[str, Any] = Depends(require_meta_admin),
+    ):
+        # A refresh performs one paged insights read per ad account plus a
+        # bounded number of history lookups. It changes server state, so it is
+        # a same-origin POST (a cross-site GET must never trigger Meta scans).
+        require_same_origin(request)
+        _rate_limit_or_429(f"meta-partner-refresh:{admin.get('id')}", 6, 60_000)
+        try:
+            return get_meta_partner_page_stats(refresh=True)
+        except MetaAdsError as error:
+            raise _partner_error(error)
+
     @router.post("/ads/{ad_id}/link")
     def link_ad(
         ad_id: str,
@@ -3087,7 +4351,12 @@ def create_meta_ads_router(
             )
             return {"ad": entity, "replayed": replayed, "changes": changes}
         except MetaAdsError as error:
-            record_meta_sync_failure(local_id, error, expected_last_modified=body.expectedLastModified)
+            if error.code != "rate_limited":
+                record_meta_sync_failure(
+                    local_id,
+                    error,
+                    expected_last_modified=body.expectedLastModified,
+                )
             raise HTTPException(status_code=502 if error.retryable else 400, detail=error.public_message)
 
     @router.post("/ads/{ad_id}/unlink")

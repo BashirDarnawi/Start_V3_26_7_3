@@ -730,7 +730,10 @@ check('Meta Ads controls are reachable outside edit and fit phone dialogs',
   metaAds.includes('min-h-11') &&
   metaAds.includes('sm:grid-cols'));
 check('Meta ad rows expose photo, total budget, duration, account and separate history',
-  views.includes('renderMetaAdThumbnail(ad, isAr)') &&
+  views.includes('renderAdPrimaryThumbnail(ad, isAr)') &&
+  metaAds.includes('function renderAdPrimaryThumbnail(ad, isAr)') &&
+  metaAds.includes("return renderMetaAdThumbnail(ad, isAr)") &&
+  metaAds.includes('/api/collections/ads/${encodeURIComponent(String(ad.id || \'\'))}/primary-photo') &&
   views.includes('renderMetaAdPageSummary(ad, adPage, adPageDeleted, isAr)') &&
   views.includes('getAdEditHistoryCount(ad)') &&
   metaAds.includes('function openMetaAdPreview(adId)') &&
@@ -747,6 +750,16 @@ check('Meta ad rows expose photo, total budget, duration, account and separate h
   css.includes('.meta-ad-thumbnail-placeholder') &&
   metaAds.includes('meta-ad-thumbnail-placeholder') &&
   css.includes('.meta-ad-history-button'));
+check('Meta insights tracker exposes active pages and combined remaining budget',
+  views.includes('renderMetaInsightsHeaderButton(isAr)') &&
+  metaAds.includes('function metaAdsActiveRemainingSummary()') &&
+  metaAds.includes('function openMetaInsightsModal()') &&
+  metaAds.includes('apiMetaPartnerPages(') &&
+  metaAds.includes("'Active pages (Meta partner metric)'") &&
+  metaAds.includes("'Total remaining budget — all active ads combined'") &&
+  metaAds.includes('metaInsightsLoad(true)') &&
+  serverApi.includes('/api/meta-ads/partner-pages') &&
+  metaAds.includes('if (!isCurrentUserAdmin() || !isServerModeEnabled())'));
 check('Meta page cell shows the page ID once with the real name below it',
   metaAds.includes("name === 'facebook page'") &&
   metaAds.includes('#${Security.escapeHtml(pageId)}') &&
@@ -772,6 +785,13 @@ check('Meta-first automatic discovery is visible and never bulk-imports history 
   metaAds.includes('Automatic ad and page import') &&
   metaAds.includes('metaAdsCheckForNewAds()') &&
   metaAds.includes('safe drafts that need completion'));
+check('Meta rate limits are shown once as a safe automatic pause',
+  metaAds.includes('status?.providerState') &&
+  metaAds.includes('Paused safely') &&
+  metaAds.includes('Albayan is protecting the Meta connection') &&
+  metaAds.includes('Automatic retry pending') &&
+  metaAds.includes("errorCode.toLowerCase().includes('rate_limited')") &&
+  metaAds.includes('providerThrottle ? \'\' :'));
 
 // Optional system-browser app login for packaged Capacitor apps: the app can
 // open the hosted login page and receive a one-time code through the

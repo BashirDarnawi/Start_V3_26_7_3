@@ -1544,9 +1544,12 @@ const RECORD_IDENTIFIER_LIST_FIELDS = new Set(['adReceiptIds', 'customerIds', 'l
 // used only when crypto.subtle is unavailable.
 
 // New hashes created on the pure-JS path use fewer iterations (still recorded
-// in the stored `iterations` field, so they verify anywhere) because 310k
+// in the stored `iterations` field, so they verify anywhere) because 600k
 // PBKDF2 iterations in plain JS would block the UI for many seconds.
 const _ALB_FALLBACK_PBKDF2_ITERATIONS = 60000;
+// Web Crypto runs off the UI thread and can use OWASP's current
+// PBKDF2-HMAC-SHA256 work factor without freezing the browser.
+const _ALB_NATIVE_PBKDF2_ITERATIONS = 600000;
 
 // SHA-256 round constants (FIPS 180-4)
 const _ALB_SHA256_K = new Uint32Array([
@@ -1742,7 +1745,10 @@ const Security = {
 
   // Sanitize object recursively
   sanitizeObject: (obj, depth = 0) => {
-    if (depth > 10) return obj; // Prevent infinite recursion
+    // Never return unsanitized attacker-controlled data when the nesting limit
+    // is exceeded. Dropping an over-deep branch fails closed and still protects
+    // the UI from recursion/stack exhaustion.
+    if (depth > 10) return null;
     if (obj === null || obj === undefined) return obj;
     if (typeof obj === 'string') return Security.sanitizeInput(obj);
     if (typeof obj !== 'object') return obj;
@@ -1783,7 +1789,9 @@ const Security = {
   _bytesToHex: (bytes) => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join(''),
   _hexToBytes: (hex) => {
     const clean = String(hex || '').trim();
-    if (!clean || clean.length % 2 !== 0) throw new Error('Invalid hex salt');
+    if (!clean || clean.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(clean)) {
+      throw new Error('Invalid hex salt');
+    }
     const bytes = new Uint8Array(clean.length / 2);
     for (let i = 0; i < bytes.length; i++) {
       const byte = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
@@ -1824,10 +1832,16 @@ const Security = {
     // affected by this default.
     const iterations = Number.isFinite(options.iterations)
       ? options.iterations
-      : (subtle ? 310000 : _ALB_FALLBACK_PBKDF2_ITERATIONS);
+      : (subtle ? _ALB_NATIVE_PBKDF2_ITERATIONS : _ALB_FALLBACK_PBKDF2_ITERATIONS);
+    if (!Number.isSafeInteger(iterations) || iterations < 1 || iterations > 10000000) {
+      throw new Error('PBKDF2 iterations are outside the supported range');
+    }
     const saltBytes = salt
       ? Security._hexToBytes(salt)
       : crypto.getRandomValues(new Uint8Array(16));
+    if (saltBytes.length < 8 || saltBytes.length > 128) {
+      throw new Error('Password salt is outside the supported range');
+    }
     const saltHex = typeof salt === 'string' ? String(salt) : Security._bytesToHex(saltBytes);
 
     let derived;
@@ -1861,6 +1875,9 @@ const Security = {
 
   // Verify password against stored hash (supports legacy + PBKDF2)
   verifyPassword: async (password, storedHash, salt, algo = 'sha256', iterations = null) => {
+    if (algo !== 'sha256' && algo !== 'pbkdf2-sha256') return false;
+    const normalizedHash = String(storedHash || '').trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(normalizedHash)) return false;
     // Backwards compatibility: some backups may store iterations as a numeric string.
     // Example: "310000" instead of 310000. Treat digit-only strings as numbers.
     let iters = iterations;
@@ -1871,11 +1888,27 @@ const Security = {
         if (Number.isFinite(n)) iters = n;
       }
     }
-    const opts = algo === 'pbkdf2-sha256'
-      ? { algo: 'pbkdf2-sha256', iterations: Number.isFinite(iters) ? iters : 310000 }
-      : { algo: 'sha256' };
-    const { hash } = await Security.hashPassword(password, salt, opts);
-    return hash === storedHash;
+    // Old local backups created before iteration metadata was added used
+    // 310,000 rounds. Preserve that exact verification path, then upgrade the
+    // hash to the current work factor after a successful login.
+    if (algo === 'pbkdf2-sha256' && !Number.isFinite(iters)) iters = 310000;
+    if (algo === 'pbkdf2-sha256' && (
+      !Number.isSafeInteger(iters) || iters < 1 || iters > 10000000
+    )) return false;
+    try {
+      const opts = algo === 'pbkdf2-sha256'
+        ? { algo: 'pbkdf2-sha256', iterations: iters }
+        : { algo: 'sha256' };
+      const { hash } = await Security.hashPassword(password, salt, opts);
+      // Compare every character to avoid an early-exit password-hash oracle.
+      let difference = 0;
+      for (let i = 0; i < 64; i++) {
+        difference |= hash.charCodeAt(i) ^ normalizedHash.charCodeAt(i);
+      }
+      return difference === 0;
+    } catch (_) {
+      return false;
+    }
   },
 
   // Generate secure random ID
@@ -2039,12 +2072,16 @@ const Security = {
 // ==========================================
 // DEBUG MODE: Conditional debug telemetry (disabled in production)
 // ==========================================
-// Debug mode is controlled by the server returning a debug flag, or by URL parameter ?debug=1
-// In production (ALBAYAN_DEBUG_MODE=false), debug endpoints return 404 and this code is a no-op.
+// Debug telemetry can only be enabled from a local development origin. A
+// production URL parameter must never make customer/accounting data eligible
+// for diagnostic logging.
 
 const ALBAYAN_DEBUG_MODE = (() => {
   try {
-    // Check URL param for explicit debug mode
+    const host = String(window.location.hostname || '').toLowerCase();
+    const isLocalDevelopment = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+    if (!isLocalDevelopment) return false;
+    // Check URL param for explicit local debug mode
     const urlParams = new URLSearchParams(window.location.search);
     if (urlParams.get('debug') === '1') return true;
     // Default: debug mode is off in production
@@ -5107,6 +5144,11 @@ const state = {
   // module, so only the Admin role can read or write it.
   appSettings: [],
 
+  // Admin-only, append-only record of USD acquired to fund Meta ads. Profit
+  // reporting consumes these cost lots oldest-first (FIFO); existing ad and
+  // receipt money fields remain untouched.
+  dollarPurchases: [],
+
   // Settings
   defaultExchangeRate: 0,
   exchangeRateHistory: [],
@@ -5196,7 +5238,9 @@ const PERSISTED_COLLECTIONS = [
   // Customer-facing Ads Studio requests (never the internal ads ledger)
   'adCampaignRequests',
   // Admin-only app configuration (liquidity tracking start etc.)
-  'appSettings'
+  'appSettings',
+  // Admin-only USD acquisition cost ledger used by profit analytics.
+  'dollarPurchases'
 ];
 
 // Debounced IndexedDB sync (avoid writing huge arrays on every keystroke)
@@ -5372,6 +5416,7 @@ function getCollectionNameFromArray(array) {
   if (array === state.clothesSettings) return 'clothesSettings';
   if (array === state.adCampaignRequests) return 'adCampaignRequests';
   if (array === state.appSettings) return 'appSettings';
+  if (array === state.dollarPurchases) return 'dollarPurchases';
   return null;
 }
 
@@ -5562,6 +5607,8 @@ function saveState() {
     delete toSave.modalData;
     delete toSave.tempAdFunding;
     delete toSave.tempAdPhotos;
+    delete toSave.tempAdPrimaryPhotoIndex;
+    delete toSave.tempAdPrimaryPhotoDirty;
     delete toSave.tempReceiptPhotos;
     delete toSave.tempAdPhotosDirty;
     delete toSave.tempReceiptPhotosDirty;
@@ -5698,6 +5745,7 @@ function loadState() {
       if (!Array.isArray(state.clothesOrders)) state.clothesOrders = [];
       if (!Array.isArray(state.clothesSettings)) state.clothesSettings = [];
       if (!Array.isArray(state.appSettings)) state.appSettings = [];
+      if (!Array.isArray(state.dollarPurchases)) state.dollarPurchases = [];
 
       // Validate language (must be 'en' or 'ar')
       if (state.language !== 'en' && state.language !== 'ar') {
@@ -8150,10 +8198,11 @@ function isCurrentUserAdmin() {
 }
 
 // "Secret ideas" gating (UI only). Non-admin users are kept inside Albayan Manager for now.
-const PLATFORM_ADMIN_ONLY_VIEWS = new Set(['services-hub', 'smart-systems', 'service-placeholder', 'wallet']);
+const PLATFORM_ADMIN_ONLY_VIEWS = new Set(['services-hub', 'control-center', 'smart-systems', 'service-placeholder', 'wallet']);
 
 // View -> permission module mapping (used for landing + access checks)
 const VIEW_PERMISSION_MODULES = {
+  'control-center': 'analytics',
   analytics: 'analytics',
   customers: 'customers',
   receipts: 'receipts',
@@ -8173,6 +8222,7 @@ const VIEW_PERMISSION_MODULES = {
 };
 
 const ALBAYAN_MANAGER_VIEW_ORDER = [
+  'control-center',
   'analytics',
   'customers',
   'receipts',
@@ -9060,7 +9110,7 @@ const SERVER_SYNC_COLLECTIONS = Object.freeze([
   'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings',
   'adCampaignRequests',
   'walletTransactions', 'serviceSubscriptions',
-  'appSettings'
+  'appSettings', 'dollarPurchases'
 ]);
 
 // Receipt/ad photos are large base64 strings. Normal lists and live deltas
@@ -10038,6 +10088,38 @@ async function apiMetaAdsStatus() {
   return await apiJson('/api/meta-ads/status', { method: 'GET' }, { timeoutMs: 15000 });
 }
 
+// Admin operations. Backup keys, Meta secrets, and off-site credentials never
+// enter the browser; these endpoints expose only readiness and safe results.
+async function apiOperationsStatus() {
+  return await apiJson('/api/admin/operations/status', { method: 'GET' }, { timeoutMs: 20000 });
+}
+
+async function apiPreviewFinancialPeriod(period) {
+  const safe = String(period || '').trim();
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(safe)) throw new Error('Choose a valid month');
+  return await apiJson(`/api/admin/operations/financial-periods/${encodeURIComponent(safe)}/preview`, { method: 'GET' }, { timeoutMs: 30000 });
+}
+
+async function apiCloseFinancialPeriod(period, forceReason = '') {
+  return await apiJson('/api/admin/operations/financial-periods/close', {
+    method: 'POST',
+    body: { period: String(period || '').trim(), forceReason: String(forceReason || '').trim() }
+  }, { timeoutMs: 30000 });
+}
+
+async function apiUnlockFinancialPeriod(period, reason) {
+  const safe = String(period || '').trim();
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(safe)) throw new Error('Choose a valid month');
+  return await apiJson(`/api/admin/operations/financial-periods/${encodeURIComponent(safe)}/unlock`, {
+    method: 'POST',
+    body: { reason: String(reason || '').trim() }
+  }, { timeoutMs: 30000 });
+}
+
+async function apiRunEncryptedBackup() {
+  return await apiJson('/api/admin/operations/backups/run', { method: 'POST', body: {} }, { timeoutMs: 120000 });
+}
+
 async function apiMetaAdsAccounts() {
   const response = await apiJson('/api/meta-ads/accounts', { method: 'GET' }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
   return Array.isArray(response?.accounts) ? response.accounts : [];
@@ -10151,6 +10233,16 @@ async function apiRunMetaAutoImport() {
     busy: response?.busy === true,
     state: response?.state && typeof response.state === 'object' ? response.state : {}
   };
+}
+
+async function apiMetaPartnerPages(refresh = false) {
+  // Meta Business Partner "active pages" metric: pages with over 100 USD ad
+  // spend in the last 90 days. A plain GET serves the cached statistics; a
+  // refresh re-scans the accounts server-side, so it is a same-origin POST.
+  const response = refresh
+    ? await apiJson('/api/meta-ads/partner-pages/refresh', { method: 'POST', body: {} }, { timeoutMs: 120000 })
+    : await apiJson('/api/meta-ads/partner-pages', { method: 'GET' }, { timeoutMs: 120000 });
+  return response && typeof response === 'object' ? response : {};
 }
 
 // Merge two duplicate customers and every relationship that points at the
@@ -11372,7 +11464,8 @@ function computeServerCursorFromState() {
     _maxLastModifiedFromArray(state.adCampaignRequests),
     _maxLastModifiedFromArray(state.walletTransactions),
     _maxLastModifiedFromArray(state.serviceSubscriptions),
-    _maxLastModifiedFromArray(state.appSettings)
+    _maxLastModifiedFromArray(state.appSettings),
+    _maxLastModifiedFromArray(state.dollarPurchases)
   );
 }
 
@@ -11383,7 +11476,7 @@ function getServerCollectionVisibilityScope(user, collection) {
   if (name === 'exchangeRateHistory') return 'all';
   // Admin-only configuration records: never fetched (or retained) for
   // non-admin sessions.
-  if (name === 'appSettings') return role === 'admin' ? 'all' : 'none';
+  if (name === 'appSettings' || name === 'dollarPurchases') return role === 'admin' ? 'all' : 'none';
   if (name === 'walletTransactions' || name === 'serviceSubscriptions') {
     return role === 'admin' ? 'all' : 'own';
   }
@@ -11807,6 +11900,7 @@ async function serverLiveSyncOnce() {
   const walletTxDelta = recordsFor('walletTransactions');
   const subsDelta = recordsFor('serviceSubscriptions');
   const appSettingsDelta = recordsFor('appSettings');
+  const dollarPurchasesDelta = recordsFor('dollarPurchases');
 
   // Logged out (or a new session started) while these fetches were in flight?
   // Drop the result — applying it would re-fill the just-wiped state.
@@ -11861,6 +11955,7 @@ async function serverLiveSyncOnce() {
   changed = applyServerDelta('walletTransactions', walletTxDelta) || changed;
   changed = applyServerDelta('serviceSubscriptions', subsDelta) || changed;
   changed = applyServerDelta('appSettings', appSettingsDelta) || changed;
+  changed = applyServerDelta('dollarPurchases', dollarPurchasesDelta) || changed;
 
   const entitlementAfter = getServerServiceEntitlementSnapshot();
   const revokedServices = getRevokedServerServiceEntitlements(entitlementBefore, entitlementAfter);
@@ -12657,7 +12752,7 @@ async function _handleLocalLoginOnce(email, password, loginGeneration) {
     const _subtleAvailable = !!(globalThis.crypto && globalThis.crypto.subtle);
     const _needsAlgoUpgrade = (user.passwordAlgo || 'sha256') !== 'pbkdf2-sha256';
     const _needsIterationUpgrade = !_needsAlgoUpgrade && _subtleAvailable &&
-      (Number(user.passwordIterations) || 0) < 310000;
+      (Number(user.passwordIterations) || 0) < _ALB_NATIVE_PBKDF2_ITERATIONS;
     if (_needsAlgoUpgrade || _needsIterationUpgrade) {
       try {
         const upgraded = await Security.hashPassword(sanitizedPassword, null, { algo: 'pbkdf2-sha256' });
@@ -12741,6 +12836,17 @@ function resetAuthenticatedServerCaches() {
   // them with every auth transition so one customer can never inherit another
   // customer's unfinished work after logout or session expiry.
   if (typeof resetAdsStudioSessionState === 'function') resetAdsStudioSessionState();
+  // Meta insights (partner pages / spend statistics) are admin-only server
+  // data: never let them survive logout or a session switch.
+  if (typeof closeMetaInsightsModal === 'function') closeMetaInsightsModal();
+  if (typeof metaInsightsUi === 'object' && metaInsightsUi) {
+    metaInsightsUi.stats = null;
+    metaInsightsUi.error = '';
+    metaInsightsUi.loading = false;
+    metaInsightsUi.refreshing = false;
+    metaInsightsUi.loadedAtMs = 0;
+    metaInsightsUi.requestSeq += 1;
+  }
 }
 
 function discardPendingServerUserUpdates() {
@@ -12898,6 +13004,7 @@ function handleServerAuthExpired(requestIdentity) {
 // Map view names to URL paths
 const VIEW_TO_PATH = {
   'services-hub': '/',
+  'control-center': '/control-center',
   'analytics': '/analytics',
   'ads': '/ads',
   'customers': '/customers',
@@ -13261,6 +13368,8 @@ function restoreModalFromUrl() {
       state.tempAdFunding = null;
       state.tempMergeFunding = null;
       state.tempAdPhotos = [];
+      state.tempAdPrimaryPhotoIndex = 0;
+      state.tempAdPrimaryPhotoDirty = false;
       state.tempReceiptPhotos = [];
       state.tempAdPhotosDirty = false;
       state.tempReceiptPhotosDirty = false;
@@ -15279,6 +15388,7 @@ function renderAlwaysAvailableAccountLinks() {
 function renderSidebar() {
   // Map nav items to their permission modules
   const navItemPermissions = {
+    'control-center': 'analytics',
     'analytics': 'analytics',
     'customers': 'customers',
     'receipts': 'receipts',
@@ -15293,6 +15403,7 @@ function renderSidebar() {
   };
 
   const allNavItems = [
+    { id: 'control-center', icon: 'gauge', label: 'Control Center' },
     { id: 'analytics', icon: 'layout-dashboard', label: 'analytics' },
     { id: 'customers', icon: 'smile', label: 'customers' },
     { id: 'receipts', icon: 'receipt', label: 'receipts' },
@@ -15438,6 +15549,7 @@ function renderSidebar() {
 function renderView() {
   switch (state.currentView) {
     case 'services-hub': return renderServicesHub();
+    case 'control-center': return renderControlCenterView();
     case 'smart-systems': return renderSmartSystems();
     case 'clothes-system': return renderClothesSystemView();
     case 'ads-studio': return renderAdsStudioView();
@@ -16138,6 +16250,9 @@ function renderAnalyticsView() {
   // read carve-out for the config collection.
   const canViewLiquidity = isCurrentUserAdmin();
   const liquidity = canViewLiquidity ? getLiquiditySnapshot() : null;
+  const profitability = canViewFinancials && isCurrentUserAdmin()
+    ? getCurrentProfitabilitySnapshot(ads)
+    : null;
 
   // Calculate ad revenue - separate paid vs pending/unpaid for clarity.
   // Uses the SAME status-aware spend rule as the customer cards
@@ -16293,7 +16408,7 @@ function renderAnalyticsView() {
         ${renderStatCard(isAr ? 'حالة التحصيل' : 'Collection Status', `${collectedReceipts.length}/${revenueReceipts.length}`, 'wallet', 'from-amber-500 to-orange-600')}
         ` : `
         <!-- Show paid ad revenue separately for clarity -->
-        <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform">
+        <button type="button" onclick="openAnalyticsBreakdown('ad-revenue')" class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform text-left w-full">
           <div class="absolute inset-0 bg-gradient-to-br from-emerald-500 to-teal-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
           <div class="flex items-start justify-between relative">
             <div>
@@ -16305,8 +16420,8 @@ function renderAnalyticsView() {
               <i data-lucide="dollar-sign" class="w-6 h-6 text-white"></i>
             </div>
           </div>
-        </div>
-        ${renderStatCard(isAr ? 'حجم الوصولات' : 'Receipts Volume', '$' + totalReceiptsUSD.toFixed(2), 'file-text', 'from-indigo-500 to-purple-600')}
+        </button>
+        ${renderStatCard(isAr ? 'حجم الوصولات' : 'Receipts Volume', '$' + totalReceiptsUSD.toFixed(2), 'file-text', 'from-indigo-500 to-purple-600', "openAnalyticsBreakdown('receipts-volume')")}
         <!-- Show available balance (paid receipts - used) -->
         <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform">
           <div class="absolute inset-0 bg-gradient-to-br from-blue-500 to-cyan-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
@@ -16323,7 +16438,7 @@ function renderAnalyticsView() {
         </div>
 
         <!-- Collection Status Card -->
-        <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform cursor-pointer" onclick="state.receiptCollectedFilter='not-collected';navigateTo('receipts');">
+        <button type="button" class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform cursor-pointer text-left w-full" onclick="openAnalyticsBreakdown('collection-status')">
           <div class="absolute inset-0 bg-gradient-to-br from-amber-500 to-orange-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
           <div class="flex items-start justify-between relative">
             <div>
@@ -16347,9 +16462,11 @@ function renderAnalyticsView() {
           <div class="mt-3 w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
             <div class="h-full bg-gradient-to-r from-emerald-500 to-teal-500 rounded-full transition-all duration-500" style="width: ${collectionRate}%"></div>
           </div>
-        </div>
+        </button>
         `}
       </div>
+
+      ${profitability ? renderProfitabilityPanel(profitability, isAr) : ''}
 
       ${canViewLiquidity && liquidity ? (() => {
         const covered = liquidity.coveragePercent >= 100;
@@ -16559,7 +16676,9 @@ function renderStatCard(title, value, icon, gradient, onClick = '', isActive = f
   const clickable = !!onClick;
   const activeClass = isActive ? ' ring-2 ring-indigo-400/70' : '';
   const clickClass = clickable ? ' cursor-pointer' : '';
-  const clickAttr = clickable ? ` onclick="${onClick}"` : '';
+  const clickAttr = clickable
+    ? ` role="button" tabindex="0" onclick="${onClick}" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();${onClick}}"`
+    : '';
   return `
     <div class="glass-panel rounded-xl md:rounded-2xl p-3 md:p-6 hover:scale-105 transition-transform${clickClass}${activeClass}"${clickAttr}>
       <div class="flex items-start justify-between">
@@ -16765,17 +16884,20 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                   <div class="mb-2">
                     <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">${isAr ? 'إجمالي المدفوع (LYD)' : 'Total Paid (LYD)'}</div>
                     <div class="grid grid-cols-3 gap-1 text-xs">
+                      <!-- Exact to the cent (user request): rounding to whole
+                           LYD hid real debt — 5019.10 + 1392.00 showed as a
+                           6411 balance while 6411.10 was actually owed. -->
                       <div class="text-center p-1.5 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
                         <div class="text-[10px] text-slate-400">${isAr ? 'المصروف' : 'Spent'}</div>
-                        <div class="font-bold text-slate-700 dark:text-slate-300">${stats.totalSpentLYD.toFixed(0)}</div>
+                        <div class="font-bold text-slate-700 dark:text-slate-300">${stats.totalSpentLYD.toFixed(2)}</div>
                       </div>
                       <div class="text-center p-1.5 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg">
                         <div class="text-[10px] text-emerald-600">${isAr ? 'المدفوع' : 'Paid'}</div>
-                        <div class="font-bold text-emerald-600">${stats.totalPaidLYD.toFixed(0)}</div>
+                        <div class="font-bold text-emerald-600">${stats.totalPaidLYD.toFixed(2)}</div>
                       </div>
                       <div class="text-center p-1.5 ${stats.balanceLYD >= 0 ? 'bg-blue-50 dark:bg-blue-900/20' : 'bg-rose-50 dark:bg-rose-900/20'} rounded-lg">
                         <div class="text-[10px] ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${isAr ? 'الرصيد' : 'Balance'}</div>
-                        <div class="font-bold ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceLYD >= 0 ? '+' : ''}${stats.balanceLYD.toFixed(0)}</div>
+                        <div class="font-bold ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceLYD >= 0 ? '+' : ''}${stats.balanceLYD.toFixed(2)}</div>
                       </div>
                     </div>
                   </div>
@@ -16801,7 +16923,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                   <!-- Uncommitted Not Paid receipt debt (already inside Balance; Spent stays ads-only) -->
                   <div class="mt-2 flex items-center justify-between gap-2 text-[11px] font-bold text-rose-600 dark:text-rose-400">
                     <span class="inline-flex items-center gap-1"><i data-lucide="receipt" class="w-3 h-3"></i>${isAr ? 'دين وصولات غير مدفوعة' : 'Unpaid receipt debt'}</span>
-                    <span dir="ltr">${stats.receiptDebtLYD.toFixed(0)} LYD · $${stats.receiptDebtUSD.toFixed(2)}</span>
+                    <span dir="ltr">${stats.receiptDebtLYD.toFixed(2)} LYD · $${stats.receiptDebtUSD.toFixed(2)}</span>
                   </div>
                   ` : ''}
                 </div>
@@ -17871,6 +17993,7 @@ function renderAdsView() {
           <p id="ads-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allAds.length} إجمالي الإعلانات` : `${allAds.length} total ads`}</p>
         </div>
         <div class="flex flex-wrap gap-2">
+          ${renderMetaInsightsHeaderButton(isAr)}
           ${renderMetaAdsHeaderButton(isAr)}
           <button onclick="showAdModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
             <i data-lucide="plus" class="w-4 h-4"></i>
@@ -18023,11 +18146,17 @@ function renderAdsView() {
                 });
                 if (_methods.size > 1) _methods.delete('Split Payment');
                 const paymentMethods = [..._methods];
+                // Rendered ahead of the template so the page avatar knows
+                // whether a photo tile actually renders beside it (manual ads
+                // without uploads produce no tile and need the solo layout).
+                const adPrimaryTile = renderAdPrimaryThumbnail(ad, isAr);
+                const adPageAvatarTile = renderAdPageAvatar(ad, adPage, isAr, !!adPrimaryTile);
                 return `
                   <tr class="border-b border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50">
                     <td class="py-3 px-2" data-label="${isAr ? 'الإعلان / العميل' : 'Ad / Customer'}">
                       <div class="ad-primary-summary">
-                        ${renderMetaAdThumbnail(ad, isAr)}
+                        ${adPageAvatarTile}
+                        ${adPrimaryTile}
                         <div class="min-w-0 flex-1">
                           <div class="break-words font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || ad.customerName || (needsSetup ? (ad.metaAdName || (isAr ? 'إعلان Meta جديد' : 'New Meta ad')) : (isAr ? 'غير معروف' : 'Unknown')))}</div>
                           ${needsSetup ? `<div class="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"><i data-lucide="wand-sparkles" class="h-3 w-3"></i>${isAr ? 'يحتاج العميل والدفع والوصل' : 'Needs customer, payment and receipt'}</div>` : ''}
@@ -18125,7 +18254,11 @@ function renderAdsView() {
                         ${needsSetup && canEditThisAd ? `<button type="button" onclick="completeMetaImportedAd('${Security.escapeHtml(String(ad.id))}')" class="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-lg bg-amber-100 px-3 py-2 text-xs font-bold text-amber-800 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-200" title="${isAr ? 'إكمال العميل والدفع والوصل' : 'Complete customer, payment and receipt details'}"><i data-lucide="clipboard-check" class="h-4 w-4"></i><span>${isAr ? 'إكمال' : 'Complete'}</span></button>` : ''}
                         ${can('ads', 'viewPhotos') && adPhotoCount > 0 ? `
                         <button type="button" data-action="view-ad-photos" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openAdPhotoViewer(this.dataset.adId, 0, this)" class="ad-photo-view-button inline-flex items-center justify-center gap-1.5 font-bold" title="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}" aria-label="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}">
-                          <i data-lucide="images" class="w-4 h-4 shrink-0"></i><span class="text-xs whitespace-nowrap">${isAr ? `عرض الصور (${adPhotoCount})` : `View Photos (${adPhotoCount})`}</span>
+                          <i data-lucide="images" class="w-4 h-4 shrink-0"></i><span data-photo-loading-label class="text-xs whitespace-nowrap">${isAr ? `عرض الصور (${adPhotoCount})` : `View Photos (${adPhotoCount})`}</span>
+                        </button>` : ''}
+                        ${canEditThisAd && can('ads', 'viewPhotos') && adPhotoCount > 1 ? `
+                        <button type="button" data-action="choose-ad-main-photo" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openAdPrimaryPhotoPicker(this.dataset.adId, this)" class="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200" title="${isAr ? 'اختيار الصورة الرئيسية التي تظهر خارج الإعلان' : 'Choose the main photo shown outside the ad'}" aria-label="${isAr ? 'اختيار الصورة الرئيسية' : 'Choose main photo'}">
+                          <i data-lucide="image-up" class="h-4 w-4 shrink-0"></i><span>${isAr ? 'الرئيسية' : 'Main photo'}</span>
                         </button>` : ''}
                         ${!needsSetup && _isAdToppable(ad) && (!isServerModeEnabled() || isAdPaid) ? `
                         <button onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="${isAr ? 'عمليات الشحن' : 'Top-ups'}">
@@ -19668,12 +19801,41 @@ function isAdReadyForReconciliation(ad, now = new Date()) {
   return today.getTime() >= available.getTime();
 }
 
+// One source of truth for the numbers a reconciliation card SHOWS. A linked ad
+// reconciles against Meta's own synced spend, so the "customer informed" state
+// must be judged against THAT remainder: a confirmation saved for a different
+// remainder is stale, and the ad still needs attention (it must not be badged
+// as done, nor sorted to the bottom, nor lock its checkbox — the readonly Meta
+// input means the input listener can never reset the control by itself).
+function getAdReconciliationDisplayState(ad) {
+  const amountUSD = Math.max(Number(ad?.amountUSD) || 0, 0);
+  const parsedSpent = Number(ad?.spentUSD);
+  const hasSavedSpend = ad?.spentUSD !== undefined && ad?.spentUSD !== null && Number.isFinite(parsedSpent);
+  const savedSpentUSD = hasSavedSpend ? Math.max(parsedSpent, 0) : 0;
+  const metaSpendUSD = metaAdRealSpendUSD(ad);
+  const metaSpendAuto = metaSpendUSD !== null && metaSpendUSD <= amountUSD + 0.005;
+  const displaySpentUSD = metaSpendAuto ? metaSpendUSD : (hasSavedSpend ? savedSpentUSD : null);
+  const informedApplies = displaySpentUSD !== null
+    && getAdCustomerConfirmationState(ad, displaySpentUSD, amountUSD).existingConfirmationApplies === true;
+  return {
+    amountUSD,
+    hasSavedSpend,
+    savedSpentUSD,
+    metaSpendAuto,
+    displaySpentUSD,
+    remainingUSD: displaySpentUSD === null ? null : Math.max(amountUSD - displaySpentUSD, 0),
+    informedApplies,
+    staleConfirmation: ad?.remainingCustomerInformed === true && !informedApplies
+  };
+}
+
 function renderReconciliationView() {
   const isAr = state.language === 'ar';
   const visibleAds = getVisibleRecords(state.ads)
     .filter(ad => isAdReadyForReconciliation(ad))
     .sort((a, b) => {
-      const informedOrder = Number(a.remainingCustomerInformed === true) - Number(b.remainingCustomerInformed === true);
+      const informedOrder = Number(getAdReconciliationDisplayState(a).informedApplies)
+        - Number(getAdReconciliationDisplayState(b).informedApplies);
       if (informedOrder !== 0) return informedOrder;
       return (getAdReconciliationTriggerDay(a)?.getTime() || 0) - (getAdReconciliationTriggerDay(b)?.getTime() || 0);
     });
@@ -19694,12 +19856,15 @@ function renderReconciliationView() {
               const safeId = Security.escapeHtml(id);
               const customer = state.customers.find(c => String(c.id) === String(ad.customerId));
               const page = state.pages.find(p => String(p.id) === String(ad.pageId || ad.page));
-              const amountUSD = Math.max(Number(ad.amountUSD) || 0, 0);
-              const parsedSpent = Number(ad.spentUSD);
-              const hasSavedSpend = ad.spentUSD !== undefined && ad.spentUSD !== null && Number.isFinite(parsedSpent);
-              const spentUSD = hasSavedSpend ? Math.max(parsedSpent, 0) : 0;
-              const remainingUSD = hasSavedSpend ? Math.max(amountUSD - spentUSD, 0) : null;
-              const informed = ad.remainingCustomerInformed === true;
+              // A Meta-linked ad reconciles with Meta's own synced spend —
+              // prefilled and locked, remaining computed automatically.
+              // Manual entry remains for unlinked ads or when Meta reports
+              // more than the recorded budget (a mismatch to fix in the ad).
+              const {
+                amountUSD, hasSavedSpend, metaSpendAuto,
+                displaySpentUSD, remainingUSD,
+                informedApplies: informed, staleConfirmation
+              } = getAdReconciliationDisplayState(ad);
               const canReconcile = canActOnRecord('ads', 'stopAd', ad.creatorId || ad.createdBy);
               const adStatus = String(ad.status || '').trim().toLowerCase();
               const startDay = getAdReconciliationStartDay(ad);
@@ -19757,7 +19922,8 @@ function renderReconciliationView() {
                 <div class="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-end">
                   <div>
                     <label for="reconciliation-spent-${safeId}" class="mb-1.5 block text-sm font-bold text-slate-700 dark:text-slate-200">${isAr ? 'المصروف الفعلي على فيسبوك (USD)' : 'Actual Facebook spend (USD)'}</label>
-                    <input id="reconciliation-spent-${safeId}" type="text" inputmode="decimal" value="${hasSavedSpend ? spentUSD.toFixed(2) : ''}" placeholder="0.00" oninput="sanitizeMoneyInput(this); updateReconciliationPreview('${safeId}')" class="glass-input min-h-12 w-full rounded-xl px-4 text-lg font-bold" ${canReconcile ? '' : 'disabled'} />
+                    <input id="reconciliation-spent-${safeId}" type="text" inputmode="decimal" value="${displaySpentUSD === null ? '' : displaySpentUSD.toFixed(2)}" placeholder="0.00" ${metaSpendAuto ? 'readonly ' : ''}oninput="sanitizeMoneyInput(this); updateReconciliationPreview('${safeId}')" class="glass-input min-h-12 w-full rounded-xl px-4 text-lg font-bold${metaSpendAuto ? ' opacity-80 cursor-not-allowed' : ''}" ${canReconcile ? '' : 'disabled'} />
+                    ${metaSpendAuto ? `<div class="mt-1 flex items-center gap-1 text-[11px] font-bold text-blue-700 dark:text-blue-300"><i data-lucide="refresh-cw" class="h-3 w-3 shrink-0"></i><span>${isAr ? `تلقائي من Meta — المصروف الفعلي (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)})` : `Automatic from Meta — the real spend (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)})`}</span></div>` : ''}
                   </div>
                   <div class="rounded-xl bg-white/70 p-3 dark:bg-slate-900/50">
                     <div class="text-xs text-slate-500">${isAr ? 'المتبقي الذي سيعود للعميل' : 'Remaining returned to customer'}</div>
@@ -19772,7 +19938,11 @@ function renderReconciliationView() {
                   <input id="reconciliation-informed-${safeId}" type="checkbox" class="mt-0.5 h-5 w-5 shrink-0 accent-emerald-600" ${informed ? 'checked disabled' : ''} ${!informed && (remainingUSD === null || remainingUSD <= 0 || !canReconcile) ? 'disabled' : ''} />
                   <span class="min-w-0">
                     <span class="block text-sm font-bold text-slate-800 dark:text-slate-100">${isAr ? 'أؤكد أنني أبلغت العميل بالمبلغ المتبقي' : 'I confirm that I told the customer about the remaining amount'}</span>
-                    <span id="reconciliation-informed-help-${safeId}" class="block text-xs text-slate-500">${informedDetails ? Security.escapeHtml(informedDetails) : (isAr ? 'يمكن تحديد هذا بعد إدخال مصروف فعلي أقل من الميزانية. وإذا تغيّر المصروف يجب تأكيد المبلغ الجديد.' : 'Check this after entering spend below the budget. If the spend changes, confirm the new amount again.')}</span>
+                    <span id="reconciliation-informed-help-${safeId}" class="block text-xs ${staleConfirmation ? 'font-bold text-amber-700 dark:text-amber-300' : 'text-slate-500'}">${staleConfirmation
+                      ? (isAr
+                          ? `تغيّر المبلغ المتبقي${remainingUSD === null ? '' : ` إلى $${remainingUSD.toFixed(2)}`} بعد تأكيدك السابق. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع.`
+                          : `The remaining amount changed${remainingUSD === null ? '' : ` to $${remainingUSD.toFixed(2)}`} since your earlier confirmation. Tell the customer the new amount, then check this box.`)
+                      : (informedDetails ? Security.escapeHtml(informedDetails) : (isAr ? 'يمكن تحديد هذا بعد إدخال مصروف فعلي أقل من الميزانية. وإذا تغيّر المصروف يجب تأكيد المبلغ الجديد.' : 'Check this after entering spend below the budget. If the spend changes, confirm the new amount again.'))}</span>
                   </span>
                 </label>
                 ${!canReconcile ? `<p class="mt-2 text-xs text-rose-600">${isAr ? 'ليس لديك صلاحية تسوية هذا الإعلان.' : 'You do not have permission to reconcile this ad.'}</p>` : ''}
@@ -21141,6 +21311,773 @@ function renderSettingsView() {
   `;
 }
 // ==========================================
+// ANALYTICS BREAKDOWNS + META PROFIT LEDGER
+// ==========================================
+
+const ANALYTICS_PERIOD_COUNTS = Object.freeze({ day: 30, week: 12, month: 12 });
+let _analyticsBreakdownState = { metric: '', granularity: 'day', trigger: null };
+let _dollarPurchaseTrigger = null;
+
+function analyticsNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function analyticsMoney(value, digits = 2) {
+  return analyticsNumber(value).toLocaleString('en-US', {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits
+  });
+}
+
+function analyticsEscape(value) {
+  return Security.escapeHtml(String(value === null || value === undefined ? '' : value));
+}
+
+function analyticsDateValue(value) {
+  const time = new Date(value || 0).getTime();
+  return Number.isFinite(time) && time > 0 ? time : 0;
+}
+
+function analyticsLocalDateISO(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) return '';
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 10);
+}
+
+function getAdActualSpendUSD(ad) {
+  if (!ad || ad._deleted) return 0;
+  const metaMinor = Number(ad.metaSpendMinor);
+  if (ad.metaAdId && Number.isFinite(metaMinor) && metaMinor >= 0) {
+    return Math.max(0, metaMinor / 100);
+  }
+  const recorded = Number(ad.spentUSD);
+  if (Number.isFinite(recorded) && recorded >= 0) return recorded;
+  const status = String(ad.status || '').toLowerCase();
+  if (['stopped', 'completed', 'canceled', 'cancelled', 'lost'].includes(status)) {
+    return Math.max(0, analyticsNumber(getAdSpendUSD(ad)));
+  }
+  // An active manual ad has only a planned budget, not verified spend. Treating
+  // that plan as cost would overstate expenses and consume dollar inventory.
+  return 0;
+}
+
+function getAdProfitEventTime(ad) {
+  const status = String(ad?.status || ad?.metaEffectiveStatus || '').toLowerCase();
+  const isFinal = ['stopped', 'completed', 'canceled', 'cancelled', 'lost', 'archived'].includes(status);
+  // A completed ad is priced at the date its spend finished, not the date a
+  // later sync happened to read it. Active ads use the latest spend snapshot.
+  const values = isFinal
+    ? [ad?.stoppedAt, ad?.endDate, ad?.metaLastSyncedAt, ad?.startDate, ad?.createdAt, ad?._created]
+    : [ad?.metaLastSyncedAt, ad?.stoppedAt, ad?.endDate, ad?.startDate, ad?.createdAt, ad?._created];
+  for (const value of values) {
+    const time = analyticsDateValue(value);
+    if (time) return time;
+  }
+  return Date.now();
+}
+
+function getAdSaleRateLYD(ad) {
+  const helperRate = typeof getAdSpendExchangeRate === 'function'
+    ? analyticsNumber(getAdSpendExchangeRate(ad))
+    : 0;
+  if (helperRate > 0) return helperRate;
+  const explicit = analyticsNumber(ad?.exchangeRate || ad?.rate);
+  if (explicit > 0) return explicit;
+  const amount = analyticsNumber(ad?.amountUSD);
+  const local = analyticsNumber(ad?.amountLocal);
+  return amount > 0 && local > 0 ? local / amount : 0;
+}
+
+/**
+ * Build a conservative FIFO profit snapshot. Each USD purchase is a cost lot;
+ * spend can only consume lots that existed on/before the ad's observation date.
+ * This prevents a newly-entered purchase from silently pricing old spend.
+ */
+function buildAdProfitabilitySnapshot(purchases, ads) {
+  const lots = (Array.isArray(purchases) ? purchases : [])
+    .filter(row => row && !row._deleted && analyticsNumber(row.amountUSD) > 0 && analyticsNumber(row.rateLYD) > 0)
+    .map(row => {
+      const amountCents = Math.max(0, Math.round(analyticsNumber(row.amountUSD) * 100));
+      const dateMs = analyticsDateValue(`${String(row.purchaseDate || '').slice(0, 10)}T00:00:00`) || analyticsDateValue(row.createdAt || row._created);
+      return {
+        id: String(row.id || ''),
+        dateMs,
+        purchaseDate: String(row.purchaseDate || '').slice(0, 10),
+        amountCents,
+        remainingCents: amountCents,
+        rateLYD: analyticsNumber(row.rateLYD),
+        source: String(row.source || '')
+      };
+    })
+    .sort((a, b) => a.dateMs - b.dateMs || a.id.localeCompare(b.id));
+
+  const adEvents = (Array.isArray(ads) ? ads : [])
+    .filter(ad => ad && !ad._deleted && ad.recordType !== 'receipt')
+    .map(ad => ({ ad, time: getAdProfitEventTime(ad), spendCents: Math.max(0, Math.round(getAdActualSpendUSD(ad) * 100)) }))
+    .sort((a, b) => a.time - b.time || String(a.ad.id || '').localeCompare(String(b.ad.id || '')));
+
+  let nextLot = 0;
+  const available = [];
+  const rows = [];
+  for (const event of adEvents) {
+    while (nextLot < lots.length && lots[nextLot].dateMs <= event.time) available.push(lots[nextLot++]);
+    let neededCents = event.spendCents;
+    let costLYD = 0;
+    const allocations = [];
+    for (const lot of available) {
+      if (neededCents <= 0) break;
+      if (lot.remainingCents <= 0) continue;
+      const usedCents = Math.min(neededCents, lot.remainingCents);
+      lot.remainingCents -= usedCents;
+      neededCents -= usedCents;
+      const usedUSD = usedCents / 100;
+      const lotCost = usedUSD * lot.rateLYD;
+      costLYD += lotCost;
+      allocations.push({ purchaseId: lot.id, amountUSD: usedUSD, rateLYD: lot.rateLYD, costLYD: lotCost });
+    }
+    const coveredCents = event.spendCents - neededCents;
+    const paid = typeof getAdPaymentState === 'function'
+      ? getAdPaymentState(event.ad) === 'paid'
+      : !!event.ad.isPaid;
+    const saleRateLYD = getAdSaleRateLYD(event.ad);
+    const recognizedRevenueLYD = paid && saleRateLYD > 0 ? (coveredCents / 100) * saleRateLYD : 0;
+    rows.push({
+      ad: event.ad,
+      adId: String(event.ad.id || ''),
+      eventTime: event.time,
+      paid,
+      soldBudgetUSD: Math.max(0, analyticsNumber(event.ad.amountUSD)),
+      soldBudgetLYD: Math.max(0, analyticsNumber(event.ad.amountLocal)) || Math.max(0, analyticsNumber(event.ad.amountUSD)) * saleRateLYD,
+      actualSpendUSD: event.spendCents / 100,
+      coveredUSD: coveredCents / 100,
+      unpricedUSD: neededCents / 100,
+      saleRateLYD,
+      costLYD,
+      recognizedRevenueLYD,
+      knownProfitLYD: recognizedRevenueLYD - costLYD,
+      allocations
+    });
+  }
+
+  while (nextLot < lots.length) available.push(lots[nextLot++]);
+  const visibleLots = lots.map(lot => ({ ...lot, remainingUSD: lot.remainingCents / 100 }));
+  const totalPurchasedUSD = visibleLots.reduce((sum, lot) => sum + lot.amountCents / 100, 0);
+  const totalPurchaseCostLYD = visibleLots.reduce((sum, lot) => sum + (lot.amountCents / 100) * lot.rateLYD, 0);
+  const inventoryUSD = visibleLots.reduce((sum, lot) => sum + lot.remainingUSD, 0);
+  const inventoryCostLYD = visibleLots.reduce((sum, lot) => sum + lot.remainingUSD * lot.rateLYD, 0);
+  const paidRows = rows.filter(row => row.paid);
+  return {
+    lots: visibleLots,
+    rows,
+    rowsByAdId: new Map(rows.map(row => [row.adId, row])),
+    totalPurchasedUSD,
+    totalPurchaseCostLYD,
+    inventoryUSD,
+    inventoryCostLYD,
+    soldBudgetUSD: rows.reduce((sum, row) => sum + row.soldBudgetUSD, 0),
+    actualSpendUSD: rows.reduce((sum, row) => sum + row.actualSpendUSD, 0),
+    paidActualSpendUSD: paidRows.reduce((sum, row) => sum + row.actualSpendUSD, 0),
+    paidRevenueLYD: paidRows.reduce((sum, row) => sum + row.recognizedRevenueLYD, 0),
+    paidCostLYD: paidRows.reduce((sum, row) => sum + row.costLYD, 0),
+    knownGrossProfitLYD: paidRows.reduce((sum, row) => sum + row.knownProfitLYD, 0),
+    unpricedSpendUSD: rows.reduce((sum, row) => sum + row.unpricedUSD, 0),
+    unpaidSpendUSD: rows.filter(row => !row.paid).reduce((sum, row) => sum + row.actualSpendUSD, 0),
+    missingSaleRateUSD: paidRows.filter(row => row.saleRateLYD <= 0).reduce((sum, row) => sum + row.coveredUSD, 0)
+  };
+}
+
+function getCurrentProfitabilitySnapshot(adsOverride) {
+  return buildAdProfitabilitySnapshot(
+    getVisibleRecords(state.dollarPurchases || []),
+    Array.isArray(adsOverride) ? adsOverride : getVisibleRecords(state.ads || [])
+  );
+}
+
+function analyticsStartOfDay(value) {
+  const date = new Date(value);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function analyticsPeriods(granularity, nowValue) {
+  const kind = ANALYTICS_PERIOD_COUNTS[granularity] ? granularity : 'day';
+  const count = ANALYTICS_PERIOD_COUNTS[kind];
+  const now = analyticsStartOfDay(nowValue || Date.now());
+  let current;
+  if (kind === 'week') {
+    current = new Date(now);
+    const day = current.getDay() || 7;
+    current.setDate(current.getDate() - day + 1);
+  } else if (kind === 'month') {
+    current = new Date(now.getFullYear(), now.getMonth(), 1);
+  } else current = now;
+
+  const periods = [];
+  for (let offset = count - 1; offset >= 0; offset -= 1) {
+    let start;
+    if (kind === 'month') start = new Date(current.getFullYear(), current.getMonth() - offset, 1);
+    else {
+      start = new Date(current);
+      start.setDate(start.getDate() - offset * (kind === 'week' ? 7 : 1));
+    }
+    let end;
+    if (kind === 'month') end = new Date(start.getFullYear(), start.getMonth() + 1, 1);
+    else {
+      end = new Date(start);
+      end.setDate(end.getDate() + (kind === 'week' ? 7 : 1));
+    }
+    const label = kind === 'month'
+      ? start.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' })
+      : kind === 'week'
+        ? `${start.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}`
+        : start.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
+    periods.push({ start: start.getTime(), end: end.getTime(), label, count: 0, primaryUSD: 0, secondaryUSD: 0, profitLYD: 0 });
+  }
+  return periods;
+}
+
+function analyticsRecordTime(record, type) {
+  const candidates = type === 'receipt'
+    ? [record?.receiptDate, record?.date, record?.createdAt, record?._created]
+    : [record?.startDate, record?.createdAt, record?._created];
+  for (const value of candidates) {
+    const time = analyticsDateValue(value);
+    if (time) return time;
+  }
+  return 0;
+}
+
+function buildAnalyticsBreakdown(metric, granularity, options = {}) {
+  const periods = analyticsPeriods(granularity, options.now || Date.now());
+  const ads = Array.isArray(options.ads) ? options.ads : getVisibleRecords(state.ads || []);
+  const receipts = (Array.isArray(options.receipts) ? options.receipts : getVisibleRecords(state.receipts || []))
+    .filter(row => row && !row._deleted && (typeof isTransferInReceipt !== 'function' || !isTransferInReceipt(row)));
+  const profit = options.profitSnapshot || buildAdProfitabilitySnapshot(options.purchases || state.dollarPurchases || [], ads);
+  const findPeriod = time => periods.find(period => time >= period.start && time < period.end);
+
+  if (metric === 'ad-revenue') {
+    for (const ad of ads) {
+      if (!ad || ad._deleted || ad.recordType === 'receipt') continue;
+      const paid = typeof getAdPaymentState === 'function' ? getAdPaymentState(ad) === 'paid' : !!ad.isPaid;
+      if (!paid) continue;
+      const period = findPeriod(analyticsRecordTime(ad, 'ad'));
+      if (!period) continue;
+      const profitRow = profit.rowsByAdId.get(String(ad.id || ''));
+      period.count += 1;
+      period.primaryUSD += Math.max(0, analyticsNumber(getAdSpendUSD(ad)));
+      period.secondaryUSD += profitRow?.actualSpendUSD || 0;
+      period.profitLYD += profitRow?.knownProfitLYD || 0;
+    }
+  } else {
+    for (const receipt of receipts) {
+      const period = findPeriod(analyticsRecordTime(receipt, 'receipt'));
+      if (!period) continue;
+      const amount = Math.max(0, analyticsNumber(receipt.amountUSD));
+      period.count += 1;
+      if (metric === 'collection-status') {
+        if (receipt.collected) period.primaryUSD += amount;
+        else period.secondaryUSD += amount;
+      } else period.primaryUSD += amount;
+    }
+  }
+  return { metric, granularity: ANALYTICS_PERIOD_COUNTS[granularity] ? granularity : 'day', periods };
+}
+
+function analyticsMetricTitle(metric, isAr) {
+  const titles = {
+    'ad-revenue': isAr ? 'تفصيل إيراد الإعلانات المدفوعة' : 'Paid Ad Revenue Breakdown',
+    'receipts-volume': isAr ? 'تفصيل حجم الوصولات' : 'Receipts Volume Breakdown',
+    'collection-status': isAr ? 'تفصيل حالة التحصيل' : 'Collection Status Breakdown'
+  };
+  return titles[metric] || titles['ad-revenue'];
+}
+
+function renderAnalyticsBreakdownDialog() {
+  const root = document.getElementById('analytics-breakdown-dialog');
+  if (!root) return;
+  if (typeof can !== 'function' || !can('analytics', 'viewFinancials')) {
+    closeAnalyticsBreakdown(false);
+    return;
+  }
+  const isAr = state.language === 'ar';
+  const data = buildAnalyticsBreakdown(_analyticsBreakdownState.metric, _analyticsBreakdownState.granularity);
+  const maxValue = Math.max(1, ...data.periods.map(row => row.primaryUSD + row.secondaryUSD));
+  const showProfit = isCurrentUserAdmin() && _analyticsBreakdownState.metric === 'ad-revenue';
+  const metric = _analyticsBreakdownState.metric;
+  const labels = metric === 'collection-status'
+    ? { primary: isAr ? 'محصل' : 'Collected', secondary: isAr ? 'غير محصل' : 'Outstanding' }
+    : metric === 'ad-revenue'
+      ? { primary: isAr ? 'إيراد مسجل' : 'Booked revenue', secondary: isAr ? 'إنفاق فعلي' : 'Actual spend' }
+      : { primary: isAr ? 'قيمة الوصولات' : 'Receipt value', secondary: '' };
+  const totals = data.periods.reduce((acc, row) => ({
+    count: acc.count + row.count,
+    primary: acc.primary + row.primaryUSD,
+    secondary: acc.secondary + row.secondaryUSD,
+    profit: acc.profit + row.profitLYD
+  }), { count: 0, primary: 0, secondary: 0, profit: 0 });
+
+  root.innerHTML = `
+    <div class="fixed inset-0 bg-slate-950/60 backdrop-blur-sm" onclick="closeAnalyticsBreakdown()"></div>
+    <section role="dialog" aria-modal="true" aria-labelledby="analytics-breakdown-title" dir="${isAr ? 'rtl' : 'ltr'}"
+      class="fixed inset-x-3 top-4 bottom-4 sm:inset-x-[8%] lg:inset-x-[16%] glass-panel rounded-3xl shadow-2xl overflow-hidden flex flex-col">
+      <header class="p-4 sm:p-6 border-b border-slate-200/70 dark:border-slate-700 flex items-start justify-between gap-4">
+        <div>
+          <h2 id="analytics-breakdown-title" class="text-xl font-bold text-slate-900 dark:text-white">${analyticsMetricTitle(metric, isAr)}</h2>
+          <p class="text-sm text-slate-500 mt-1">${isAr ? 'اختر يومي أو أسبوعي أو شهري لفهم التغيرات بوضوح.' : 'Switch between daily, weekly, and monthly views to understand the trend.'}</p>
+        </div>
+        <button type="button" onclick="closeAnalyticsBreakdown()" aria-label="Close" class="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </header>
+      <div class="p-4 sm:p-6 overflow-y-auto flex-1">
+        <div class="grid grid-cols-3 gap-2 p-1 bg-slate-100 dark:bg-slate-800 rounded-xl mb-5">
+          ${['day', 'week', 'month'].map(kind => `<button type="button" onclick="setAnalyticsBreakdownGranularity('${kind}')" class="px-3 py-2 rounded-lg text-sm font-semibold ${data.granularity === kind ? 'bg-white dark:bg-slate-700 text-indigo-600 shadow-sm' : 'text-slate-500'}">${kind === 'day' ? (isAr ? 'يومي' : 'Daily') : kind === 'week' ? (isAr ? 'أسبوعي' : 'Weekly') : (isAr ? 'شهري' : 'Monthly')}</button>`).join('')}
+        </div>
+        <div class="grid grid-cols-2 ${showProfit ? 'sm:grid-cols-4' : 'sm:grid-cols-3'} gap-3 mb-6">
+          <div class="rounded-2xl bg-indigo-50 dark:bg-indigo-950/40 p-4"><p class="text-xs text-slate-500">${isAr ? 'السجلات' : 'Records'}</p><p class="text-xl font-bold">${totals.count}</p></div>
+          <div class="rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 p-4"><p class="text-xs text-slate-500">${labels.primary}</p><p class="text-xl font-bold">$${analyticsMoney(totals.primary)}</p></div>
+          ${labels.secondary ? `<div class="rounded-2xl bg-amber-50 dark:bg-amber-950/40 p-4"><p class="text-xs text-slate-500">${labels.secondary}</p><p class="text-xl font-bold">$${analyticsMoney(totals.secondary)}</p></div>` : ''}
+          ${showProfit ? `<div class="rounded-2xl bg-cyan-50 dark:bg-cyan-950/40 p-4"><p class="text-xs text-slate-500">${isAr ? 'ربح معروف' : 'Known profit'}</p><p class="text-xl font-bold">${analyticsMoney(totals.profit)} LYD</p></div>` : ''}
+        </div>
+        <div class="space-y-2 mb-6" aria-label="Trend chart">
+          ${data.periods.map(row => `<div class="grid grid-cols-[64px_1fr_90px] sm:grid-cols-[90px_1fr_120px] items-center gap-3 text-xs">
+            <span class="text-slate-500">${analyticsEscape(row.label)}</span>
+            <div class="h-5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden flex">
+              <div class="h-full bg-indigo-500" style="width:${Math.max(0, row.primaryUSD / maxValue * 100)}%"></div>
+              ${row.secondaryUSD ? `<div class="h-full bg-amber-400" style="width:${Math.max(0, row.secondaryUSD / maxValue * 100)}%"></div>` : ''}
+            </div>
+            <span class="font-semibold text-right">$${analyticsMoney(row.primaryUSD)}</span>
+          </div>`).join('')}
+        </div>
+        <div class="overflow-x-auto rounded-2xl border border-slate-200 dark:border-slate-700">
+          <table class="w-full min-w-[620px] text-sm">
+            <thead class="bg-slate-50 dark:bg-slate-800"><tr><th class="p-3 text-left">${isAr ? 'الفترة' : 'Period'}</th><th class="p-3 text-right">${isAr ? 'العدد' : 'Count'}</th><th class="p-3 text-right">${labels.primary}</th>${labels.secondary ? `<th class="p-3 text-right">${labels.secondary}</th>` : ''}${showProfit ? `<th class="p-3 text-right">${isAr ? 'الربح المعروف' : 'Known profit'}</th>` : ''}</tr></thead>
+            <tbody>${data.periods.slice().reverse().map(row => `<tr class="border-t border-slate-100 dark:border-slate-800"><td class="p-3 font-medium">${analyticsEscape(row.label)}</td><td class="p-3 text-right">${row.count}</td><td class="p-3 text-right">$${analyticsMoney(row.primaryUSD)}</td>${labels.secondary ? `<td class="p-3 text-right">$${analyticsMoney(row.secondaryUSD)}</td>` : ''}${showProfit ? `<td class="p-3 text-right ${row.profitLYD >= 0 ? 'text-emerald-600' : 'text-rose-600'}">${analyticsMoney(row.profitLYD)} LYD</td>` : ''}</tr>`).join('')}</tbody>
+          </table>
+        </div>
+        ${metric === 'collection-status' ? `<button type="button" onclick="openOutstandingReceiptsFromAnalytics()" class="mt-5 w-full sm:w-auto px-5 py-3 rounded-xl bg-amber-500 hover:bg-amber-600 text-white font-semibold">${isAr ? 'عرض الوصولات غير المحصلة' : 'View outstanding receipts'}</button>` : ''}
+      </div>
+    </section>`;
+  if (window.lucide) lucide.createIcons({ nodes: [root] });
+}
+
+function openAnalyticsBreakdown(metric, granularity = 'day') {
+  if (!['ad-revenue', 'receipts-volume', 'collection-status'].includes(metric)) return;
+  if (typeof can !== 'function' || !can('analytics', 'viewFinancials')) {
+    showNotification(
+      state.language === 'ar' ? 'غير مسموح' : 'Permission required',
+      state.language === 'ar' ? 'هذه التفاصيل المالية متاحة للمستخدمين المصرح لهم فقط.' : 'These financial details are available only to authorized users.',
+      'error'
+    );
+    return;
+  }
+  closeAnalyticsBreakdown(false);
+  _analyticsBreakdownState = { metric, granularity, trigger: document.activeElement };
+  const root = document.createElement('div');
+  root.id = 'analytics-breakdown-dialog';
+  root.style.position = 'fixed';
+  root.style.inset = '0';
+  root.style.zIndex = '10000';
+  document.body.appendChild(root);
+  document.body.classList.add('overflow-hidden');
+  renderAnalyticsBreakdownDialog();
+  setTimeout(() => document.querySelector('#analytics-breakdown-dialog button')?.focus(), 0);
+}
+
+function setAnalyticsBreakdownGranularity(granularity) {
+  if (!ANALYTICS_PERIOD_COUNTS[granularity]) return;
+  _analyticsBreakdownState.granularity = granularity;
+  renderAnalyticsBreakdownDialog();
+}
+
+function closeAnalyticsBreakdown(restoreFocus = true) {
+  document.getElementById('analytics-breakdown-dialog')?.remove();
+  if (!document.getElementById('dollar-purchase-dialog')) document.body.classList.remove('overflow-hidden');
+  if (restoreFocus && _analyticsBreakdownState.trigger?.focus) _analyticsBreakdownState.trigger.focus();
+}
+
+function openOutstandingReceiptsFromAnalytics() {
+  closeAnalyticsBreakdown(false);
+  state.receiptCollectedFilter = 'not-collected';
+  navigateTo('receipts');
+}
+
+function renderProfitabilityPanel(snapshot, isAr) {
+  if (!isCurrentUserAdmin()) return '';
+  const profitPositive = snapshot.knownGrossProfitLYD >= 0;
+  return `
+    <section class="glass-panel rounded-3xl p-5 sm:p-6" aria-labelledby="profitability-title">
+      <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-5">
+        <div>
+          <div class="flex items-center gap-2"><i data-lucide="chart-no-axes-combined" class="w-5 h-5 text-indigo-600"></i><h2 id="profitability-title" class="text-xl font-bold text-slate-900 dark:text-white">${isAr ? 'ربحية إعلانات ميتا' : 'Meta Ads Profitability'}</h2></div>
+          <p class="text-sm text-slate-500 mt-1 max-w-3xl">${isAr ? 'يحسب النظام تكلفة الدولارات بطريقة الأقدم أولاً. لا يظهر الربح إلا للإنفاق الفعلي المدفوع الذي نعرف تكلفة دولاراته.' : 'Dollar purchase lots are consumed oldest-first (FIFO). Profit is recognized only for paid, actual ad spend whose dollar cost is known.'}</p>
+        </div>
+        <button type="button" onclick="openDollarPurchaseManager()" class="w-full lg:w-auto px-5 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold shadow-lg flex items-center justify-center gap-2"><i data-lucide="badge-dollar-sign" class="w-5 h-5"></i>${isAr ? 'تسجيل شراء دولارات' : 'Record Dollar Purchase'}</button>
+      </div>
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div class="rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 p-4"><p class="text-xs text-slate-500">${isAr ? 'إيراد معترف به' : 'Recognized revenue'}</p><p class="text-xl font-bold text-emerald-700">${analyticsMoney(snapshot.paidRevenueLYD)} LYD</p><p class="text-xs text-slate-500 mt-1">$${analyticsMoney(snapshot.paidActualSpendUSD)} ${isAr ? 'إنفاق مدفوع' : 'paid spend'}</p></div>
+        <div class="rounded-2xl bg-rose-50 dark:bg-rose-950/30 p-4"><p class="text-xs text-slate-500">${isAr ? 'تكلفة فيسبوك' : 'Facebook cost'}</p><p class="text-xl font-bold text-rose-700">${analyticsMoney(snapshot.paidCostLYD)} LYD</p><p class="text-xs text-slate-500 mt-1">${isAr ? 'من دفعات الدولار المسجلة' : 'from recorded USD lots'}</p></div>
+        <div class="rounded-2xl ${profitPositive ? 'bg-cyan-50 dark:bg-cyan-950/30' : 'bg-rose-50 dark:bg-rose-950/30'} p-4"><p class="text-xs text-slate-500">${isAr ? 'الربح الإجمالي المعروف' : 'Known gross profit'}</p><p class="text-xl font-bold ${profitPositive ? 'text-cyan-700' : 'text-rose-700'}">${analyticsMoney(snapshot.knownGrossProfitLYD)} LYD</p><p class="text-xs text-slate-500 mt-1">${isAr ? 'الإيراد ناقص تكلفة الدولار' : 'revenue minus dollar cost'}</p></div>
+        <div class="rounded-2xl bg-indigo-50 dark:bg-indigo-950/30 p-4"><p class="text-xs text-slate-500">${isAr ? 'مخزون الدولار المتبقي' : 'Remaining USD inventory'}</p><p class="text-xl font-bold text-indigo-700">$${analyticsMoney(snapshot.inventoryUSD)}</p><p class="text-xs text-slate-500 mt-1">${analyticsMoney(snapshot.inventoryCostLYD)} LYD ${isAr ? 'تكلفة' : 'cost'}</p></div>
+      </div>
+      ${(snapshot.unpricedSpendUSD > 0 || snapshot.missingSaleRateUSD > 0) ? `<div class="mt-4 p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-sm text-amber-800 dark:text-amber-200">
+        <strong>${isAr ? 'يحتاج إكمال:' : 'Needs attention:'}</strong>
+        ${snapshot.unpricedSpendUSD > 0 ? `${isAr ? 'إنفاق بلا تكلفة دولار' : 'spend without a recorded dollar cost'}: $${analyticsMoney(snapshot.unpricedSpendUSD)}.` : ''}
+        ${snapshot.missingSaleRateUSD > 0 ? `${isAr ? 'إنفاق مدفوع بلا سعر بيع' : 'paid spend without a sale rate'}: $${analyticsMoney(snapshot.missingSaleRateUSD)}.` : ''}
+        ${isAr ? 'هذه المبالغ مستبعدة من الربح حتى تكتمل البيانات.' : 'These amounts stay out of profit until their data is complete.'}
+      </div>` : ''}
+    </section>`;
+}
+
+function dollarPurchaseRemainingById(snapshot) {
+  return new Map(snapshot.lots.map(lot => [lot.id, lot.remainingUSD]));
+}
+
+function renderDollarPurchaseDialog() {
+  const root = document.getElementById('dollar-purchase-dialog');
+  if (!root) return;
+  if (!isCurrentUserAdmin()) { closeDollarPurchaseManager(); return; }
+  const isAr = state.language === 'ar';
+  const snapshot = getCurrentProfitabilitySnapshot();
+  const remaining = dollarPurchaseRemainingById(snapshot);
+  const purchases = getVisibleRecords(state.dollarPurchases || []).slice().sort((a, b) => String(b.purchaseDate || '').localeCompare(String(a.purchaseDate || '')) || analyticsDateValue(b.createdAt || b._created) - analyticsDateValue(a.createdAt || a._created));
+  const today = analyticsLocalDateISO();
+  root.innerHTML = `
+    <div class="fixed inset-0 bg-slate-950/60 backdrop-blur-sm" onclick="closeDollarPurchaseManager()"></div>
+    <section role="dialog" aria-modal="true" aria-labelledby="dollar-purchase-title" dir="${isAr ? 'rtl' : 'ltr'}" class="fixed inset-x-3 top-4 bottom-4 sm:inset-x-[7%] lg:inset-x-[14%] glass-panel rounded-3xl shadow-2xl overflow-hidden flex flex-col">
+      <header class="p-4 sm:p-6 border-b border-slate-200/70 dark:border-slate-700 flex items-start justify-between gap-4"><div><h2 id="dollar-purchase-title" class="text-xl font-bold">${isAr ? 'سجل شراء دولارات فيسبوك' : 'Facebook Dollar Purchase Ledger'}</h2><p class="text-sm text-slate-500 mt-1">${isAr ? 'سجل كل مرة تشتري فيها دولارات مع السعر الحقيقي في السوق.' : 'Record every USD purchase at the real market rate you paid.'}</p></div><button type="button" onclick="closeDollarPurchaseManager()" aria-label="Close" class="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800"><i data-lucide="x" class="w-5 h-5"></i></button></header>
+      <div class="p-4 sm:p-6 overflow-y-auto flex-1 space-y-6">
+        <form id="dollar-purchase-form" onsubmit="saveDollarPurchase(event)" class="rounded-2xl bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-100 dark:border-indigo-800 p-4 sm:p-5">
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <label class="text-sm font-medium">${isAr ? 'تاريخ الشراء' : 'Purchase date'}<input name="purchaseDate" type="date" value="${today}" max="${today}" required class="glass-input mt-1 w-full px-3 py-2.5 rounded-xl"></label>
+            <label class="text-sm font-medium">${isAr ? 'المبلغ بالدولار' : 'USD amount'}<input name="amountUSD" type="number" min="0.01" max="1000000" step="0.01" inputmode="decimal" required oninput="updateDollarPurchasePreview()" class="glass-input mt-1 w-full px-3 py-2.5 rounded-xl" placeholder="100.00"></label>
+            <label class="text-sm font-medium">${isAr ? 'سعر 1 دولار بالدينار' : 'LYD paid per $1'}<input name="rateLYD" type="number" min="0.0001" max="1000" step="0.0001" inputmode="decimal" required oninput="updateDollarPurchasePreview()" class="glass-input mt-1 w-full px-3 py-2.5 rounded-xl" placeholder="9.7000"></label>
+            <div class="rounded-xl bg-white dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'إجمالي ما دفعته' : 'Total paid'}</p><p id="dollar-purchase-total" class="text-xl font-bold text-indigo-700 mt-1">0.00 LYD</p></div>
+            <label class="text-sm font-medium sm:col-span-2">${isAr ? 'المصدر أو الحساب (اختياري)' : 'Source/account (optional)'}<input name="source" maxlength="120" class="glass-input mt-1 w-full px-3 py-2.5 rounded-xl" placeholder="${isAr ? 'مثال: السوق / الحساب المسبق 1' : 'Example: Market / Prepaid Balance 1'}"></label>
+            <label class="text-sm font-medium sm:col-span-2">${isAr ? 'ملاحظة (اختياري)' : 'Note (optional)'}<input name="note" maxlength="240" class="glass-input mt-1 w-full px-3 py-2.5 rounded-xl"></label>
+          </div>
+          <div class="mt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"><p class="text-xs text-slate-500">${isAr ? 'السجل غير قابل للتعديل. لتصحيح خطأ، احذفه وأنشئه من جديد.' : 'Records are immutable. To correct a mistake, delete it and create it again.'}</p><button type="submit" class="px-5 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold">${isAr ? 'حفظ شراء الدولار' : 'Save Dollar Purchase'}</button></div>
+        </form>
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3"><div class="rounded-xl bg-slate-50 dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'إجمالي المشترى' : 'Total purchased'}</p><p class="font-bold">$${analyticsMoney(snapshot.totalPurchasedUSD)}</p></div><div class="rounded-xl bg-slate-50 dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'إجمالي التكلفة' : 'Total cost'}</p><p class="font-bold">${analyticsMoney(snapshot.totalPurchaseCostLYD)} LYD</p></div><div class="rounded-xl bg-slate-50 dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'المتبقي' : 'Inventory'}</p><p class="font-bold">$${analyticsMoney(snapshot.inventoryUSD)}</p></div><div class="rounded-xl bg-slate-50 dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'إنفاق بلا تكلفة' : 'Unpriced spend'}</p><p class="font-bold ${snapshot.unpricedSpendUSD ? 'text-amber-600' : 'text-emerald-600'}">$${analyticsMoney(snapshot.unpricedSpendUSD)}</p></div></div>
+        <div class="overflow-x-auto rounded-2xl border border-slate-200 dark:border-slate-700"><table class="w-full min-w-[720px] text-sm"><thead class="bg-slate-50 dark:bg-slate-800"><tr><th class="p-3 text-left">${isAr ? 'التاريخ' : 'Date'}</th><th class="p-3 text-right">USD</th><th class="p-3 text-right">${isAr ? 'السعر' : 'Rate'}</th><th class="p-3 text-right">${isAr ? 'التكلفة' : 'Cost'}</th><th class="p-3 text-right">${isAr ? 'المتبقي' : 'Remaining'}</th><th class="p-3 text-left">${isAr ? 'المصدر / الملاحظة' : 'Source / note'}</th><th class="p-3"></th></tr></thead><tbody>${purchases.length ? purchases.map(row => `<tr class="border-t border-slate-100 dark:border-slate-800"><td class="p-3 font-medium">${analyticsEscape(row.purchaseDate)}</td><td class="p-3 text-right">$${analyticsMoney(row.amountUSD)}</td><td class="p-3 text-right">${analyticsMoney(row.rateLYD, 4)}</td><td class="p-3 text-right">${analyticsMoney(row.totalLYD || analyticsNumber(row.amountUSD) * analyticsNumber(row.rateLYD))} LYD</td><td class="p-3 text-right">$${analyticsMoney(remaining.get(String(row.id || '')) || 0)}</td><td class="p-3"><div class="font-medium">${analyticsEscape(row.source || '—')}</div><div class="text-xs text-slate-500">${analyticsEscape(row.note || '')}</div></td><td class="p-3 text-right"><button type="button" onclick="deleteDollarPurchase('${analyticsEscape(row.id)}')" class="p-2 rounded-lg text-rose-600 hover:bg-rose-50" aria-label="Delete"><i data-lucide="trash-2" class="w-4 h-4"></i></button></td></tr>`).join('') : `<tr><td colspan="7" class="p-8 text-center text-slate-500">${isAr ? 'لم تسجل أي عملية شراء دولارات بعد.' : 'No dollar purchases recorded yet.'}</td></tr>`}</tbody></table></div>
+      </div>
+    </section>`;
+  if (window.lucide) lucide.createIcons({ nodes: [root] });
+}
+
+function openDollarPurchaseManager() {
+  if (!isCurrentUserAdmin()) { showNotification('Not Allowed', 'Only an Admin can manage dollar purchase costs.', 'error'); return; }
+  closeDollarPurchaseManager(false);
+  _dollarPurchaseTrigger = document.activeElement;
+  const root = document.createElement('div');
+  root.id = 'dollar-purchase-dialog';
+  root.style.position = 'fixed';
+  root.style.inset = '0';
+  root.style.zIndex = '10001';
+  document.body.appendChild(root);
+  document.body.classList.add('overflow-hidden');
+  renderDollarPurchaseDialog();
+  setTimeout(() => document.querySelector('#dollar-purchase-form input')?.focus(), 0);
+}
+
+function closeDollarPurchaseManager(restoreFocus = true) {
+  document.getElementById('dollar-purchase-dialog')?.remove();
+  if (!document.getElementById('analytics-breakdown-dialog')) document.body.classList.remove('overflow-hidden');
+  if (restoreFocus && _dollarPurchaseTrigger?.focus) _dollarPurchaseTrigger.focus();
+}
+
+function updateDollarPurchasePreview() {
+  const form = document.getElementById('dollar-purchase-form');
+  const output = document.getElementById('dollar-purchase-total');
+  if (!form || !output) return;
+  output.textContent = `${analyticsMoney(analyticsNumber(form.amountUSD?.value) * analyticsNumber(form.rateLYD?.value))} LYD`;
+}
+
+async function saveDollarPurchase(event) {
+  event?.preventDefault();
+  if (!isCurrentUserAdmin()) return;
+  const form = event?.currentTarget || document.getElementById('dollar-purchase-form');
+  if (!form || !form.reportValidity()) return;
+  const amountUSD = analyticsNumber(form.amountUSD.value);
+  const rateLYD = analyticsNumber(form.rateLYD.value);
+  const purchaseDate = String(form.purchaseDate.value || '');
+  const today = analyticsLocalDateISO();
+  if (amountUSD <= 0 || rateLYD <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(purchaseDate) || purchaseDate > today) {
+    showNotification('Check the values', 'Enter a valid past or current date, USD amount, and market rate.', 'error');
+    return;
+  }
+  const submit = form.querySelector('button[type="submit"]');
+  if (submit) submit.disabled = true;
+  const ok = await addRecord(state.dollarPurchases, {
+    purchaseDate,
+    amountUSD: Math.round(amountUSD * 100) / 100,
+    rateLYD: Math.round(rateLYD * 10000) / 10000,
+    totalLYD: Math.round(amountUSD * rateLYD * 100) / 100,
+    source: String(form.source.value || '').trim(),
+    note: String(form.note.value || '').trim(),
+    createdAt: new Date().toISOString()
+  });
+  if (ok) {
+    showNotification('Dollar purchase saved', 'Profit and inventory were recalculated.', 'success');
+    renderDollarPurchaseDialog();
+    if (state.currentView === 'analytics') RenderQueue.schedule('profitability-purchase');
+  } else if (submit) submit.disabled = false;
+}
+
+async function deleteDollarPurchase(id) {
+  if (!isCurrentUserAdmin() || !Security.isValidRecordId(id)) return;
+  if (!confirm('Delete this dollar purchase? Profit and inventory will be recalculated.')) return;
+  const ok = await deleteRecord(state.dollarPurchases, id);
+  if (ok) {
+    showNotification('Dollar purchase deleted', 'Profit and inventory were recalculated.', 'success');
+    renderDollarPurchaseDialog();
+  }
+}
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    if (document.getElementById('dollar-purchase-dialog')) closeDollarPurchaseManager();
+    else if (document.getElementById('analytics-breakdown-dialog')) closeAnalyticsBreakdown();
+  });
+}
+// ==========================================
+// DAILY CONTROL CENTER (ADMIN)
+// ==========================================
+// A small operational cockpit: it does not change accounting automatically.
+// It points the owner to incomplete work, verifies infrastructure readiness,
+// and exposes the audited month-close / encrypted-backup controls.
+
+let _controlCenter = {
+  loading: false,
+  loadedAt: 0,
+  operations: null,
+  meta: null,
+  error: '',
+  period: ''
+};
+
+function controlCenterPreviousMonth() {
+  const now = new Date();
+  const value = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function controlCenterMoney(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? number.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0.00';
+}
+
+function controlCenterTimestamp(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number) || number <= 0) return 'Never';
+  try { return new Date(number).toLocaleString(); } catch (_) { return 'Never'; }
+}
+
+function getControlCenterFacts() {
+  const ads = getVisibleRecords(state.ads || []);
+  const receipts = getVisibleRecords(state.receipts || []);
+  const setupAds = ads.filter(ad => {
+    if (typeof isMetaAdSetupPending === 'function' && isMetaAdSetupPending(ad)) return true;
+    return !String(ad.customerId || '').trim() || Number(ad.amountUSD || 0) <= 0 || !String(ad.paymentStatus || '').trim();
+  });
+  const unpaidReceipts = receipts.filter(receipt => {
+    if (String(receipt.receiptType || '').toUpperCase() === 'TRANSFER_IN') return false;
+    return receipt.isPaid !== true && String(receipt.status || '').toLowerCase() !== 'paid';
+  });
+  const metaFailures = ads.filter(ad => String(ad.metaSyncErrorCode || ad.metaLastErrorCode || '').trim());
+  let snapshot = null;
+  try { snapshot = typeof getCurrentProfitabilitySnapshot === 'function' ? getCurrentProfitabilitySnapshot(ads) : null; } catch (_) {}
+  return {
+    ads,
+    receipts,
+    setupAds,
+    unpaidReceipts,
+    metaFailures,
+    snapshot,
+    attentionCount: setupAds.length + unpaidReceipts.length + metaFailures.length + ((snapshot?.unpricedSpendUSD || 0) > 0.005 ? 1 : 0)
+  };
+}
+
+async function loadControlCenterStatus(force = false) {
+  if (_controlCenter.loading) return;
+  if (!force && _controlCenter.loadedAt && Date.now() - _controlCenter.loadedAt < 60000) return;
+  _controlCenter.loading = true;
+  _controlCenter.error = '';
+  if (state.currentView === 'control-center') RenderQueue.schedule('control-center-loading');
+  try {
+    const [operations, meta] = await Promise.allSettled([apiOperationsStatus(), apiMetaAdsStatus()]);
+    const errors = [];
+    if (operations.status === 'fulfilled') _controlCenter.operations = operations.value;
+    else errors.push(`Operations: ${String(operations.reason?.message || 'unavailable')}`);
+    if (meta.status === 'fulfilled') _controlCenter.meta = meta.value;
+    else errors.push(`Meta: ${String(meta.reason?.message || 'unavailable')}`);
+    _controlCenter.error = errors.join(' | ');
+    _controlCenter.loadedAt = Date.now();
+  } catch (error) {
+    _controlCenter.error = String(error?.message || 'Could not load the server checks');
+  } finally {
+    _controlCenter.loading = false;
+    if (state.currentView === 'control-center') RenderQueue.schedule('control-center-loaded');
+  }
+}
+
+function refreshControlCenter() {
+  _controlCenter.loadedAt = 0;
+  loadControlCenterStatus(true);
+}
+
+function controlCenterOpenAds(mode) {
+  state.adFilters = { status: 'all', payment: 'all', page: 'all' };
+  if (mode === 'setup') state.adFilters.payment = 'pending_setup';
+  if (mode === 'unpaid') state.adFilters.payment = 'not_paid';
+  navigateTo('ads');
+}
+
+function controlCenterOpenReceipts() {
+  state.receiptStatusFilter = 'unpaid';
+  state.receiptPaymentFilter = 'all';
+  navigateTo('receipts');
+}
+
+async function previewControlCenterMonth() {
+  const input = document.getElementById('control-center-period');
+  const period = String(input?.value || _controlCenter.period || controlCenterPreviousMonth());
+  try {
+    const preview = await apiPreviewFinancialPeriod(period);
+    const totals = preview?.totals || {};
+    const blockers = Array.isArray(preview?.blockers) ? preview.blockers : [];
+    const message = [
+      `Receipts: $${controlCenterMoney(totals.receiptVolumeUSD)}`,
+      `Ad sales: $${controlCenterMoney(totals.adSalesUSD)}`,
+      `Meta spend: $${controlCenterMoney(totals.metaSpendUSD)}`,
+      blockers.length ? `Problems to review: ${blockers.map(item => `${item.message} (${item.count})`).join(', ')}` : 'No closing problems found.'
+    ].join('\n');
+    window.alert(message);
+  } catch (error) {
+    showNotification('Month check failed', String(error?.message || error), 'error');
+  }
+}
+
+async function closeControlCenterMonth() {
+  const period = String(document.getElementById('control-center-period')?.value || controlCenterPreviousMonth());
+  try {
+    const preview = await apiPreviewFinancialPeriod(period);
+    const blockers = Array.isArray(preview?.blockers) ? preview.blockers : [];
+    let forceReason = '';
+    if (blockers.length) {
+      const blockerText = blockers.map(item => `${item.message} (${item.count})`).join('\n');
+      forceReason = window.prompt(`This month has items to review:\n${blockerText}\n\nFix them first, or type a clear reason (at least 10 characters) to close anyway:`) || '';
+      if (forceReason.trim().length < 10) return;
+    } else if (!window.confirm(`Close ${period}? After closing, its receipts, ads, and dollar purchases cannot be changed.`)) return;
+    await apiCloseFinancialPeriod(period, forceReason);
+    showNotification('Month closed safely', `${period} is now protected from changes.`, 'success');
+    await loadControlCenterStatus(true);
+  } catch (error) {
+    showNotification('Could not close month', String(error?.message || error), 'error');
+  }
+}
+
+async function unlockControlCenterMonth(period) {
+  const reason = window.prompt(`Why must ${period} be unlocked? This action is recorded in the audit log.`) || '';
+  if (reason.trim().length < 10) {
+    showNotification('Reason required', 'Please write at least 10 characters.', 'warning');
+    return;
+  }
+  try {
+    await apiUnlockFinancialPeriod(period, reason);
+    showNotification('Month unlocked', `${period} can be corrected now. Close it again when finished.`, 'success');
+    await loadControlCenterStatus(true);
+  } catch (error) {
+    showNotification('Could not unlock month', String(error?.message || error), 'error');
+  }
+}
+
+async function runControlCenterBackup() {
+  try {
+    showNotification('Backup started', 'Please keep this page open while the server creates the encrypted copy.', 'info');
+    const response = await apiRunEncryptedBackup();
+    showNotification('Backup complete', response?.backup?.offsite ? 'Encrypted backup saved locally and off-site.' : 'Encrypted backup saved.', 'success');
+    await loadControlCenterStatus(true);
+  } catch (error) {
+    showNotification('Backup failed', String(error?.message || error), 'error');
+  }
+}
+
+function renderControlCenterTask(icon, color, title, detail, actionHtml = '') {
+  return `
+    <div class="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white/70 p-4 dark:border-slate-700 dark:bg-slate-900/50 sm:flex-row sm:items-center">
+      <div class="flex min-w-0 flex-1 items-start gap-3">
+        <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${color}"><i data-lucide="${icon}" class="h-5 w-5"></i></span>
+        <div class="min-w-0"><div class="font-bold text-slate-900 dark:text-white">${Security.escapeHtml(title)}</div><div class="mt-1 text-sm text-slate-500 dark:text-slate-400">${Security.escapeHtml(detail)}</div></div>
+      </div>
+      ${actionHtml}
+    </div>`;
+}
+
+function renderControlCenterView() {
+  if (!isAdminRole(state.currentUser?.role)) return renderNoAccessView();
+  if (!_controlCenter.period) _controlCenter.period = controlCenterPreviousMonth();
+  if (!_controlCenter.loading && (!_controlCenter.loadedAt || Date.now() - _controlCenter.loadedAt > 60000)) {
+    setTimeout(() => loadControlCenterStatus(false), 0);
+  }
+  const facts = getControlCenterFacts();
+  const operations = _controlCenter.operations || {};
+  const backup = operations.backup || {};
+  const monitoring = operations.monitoring || {};
+  const meta = _controlCenter.meta || {};
+  const periods = Array.isArray(operations.financialPeriods) ? operations.financialPeriods : [];
+  const closedPeriods = periods.filter(row => String(row.status || '').toLowerCase() === 'closed');
+  const tasks = [];
+  if (facts.setupAds.length) tasks.push(renderControlCenterTask('wand-sparkles', 'bg-amber-100 text-amber-700', `${facts.setupAds.length} ads need setup`, 'Add the customer, selling amount, payment, and receipt.', '<button type="button" onclick="controlCenterOpenAds(\'setup\')" class="min-h-11 rounded-xl bg-amber-500 px-4 py-2 text-sm font-bold text-white">Open ads</button>'));
+  if (facts.unpaidReceipts.length) tasks.push(renderControlCenterTask('receipt', 'bg-rose-100 text-rose-700', `${facts.unpaidReceipts.length} receipts are unpaid`, 'Review money that customers still owe.', '<button type="button" onclick="controlCenterOpenReceipts()" class="min-h-11 rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white">Open receipts</button>'));
+  if ((facts.snapshot?.unpricedSpendUSD || 0) > 0.005) tasks.push(renderControlCenterTask('circle-dollar-sign', 'bg-rose-100 text-rose-700', `$${controlCenterMoney(facts.snapshot.unpricedSpendUSD)} Meta spend has no purchase cost`, 'Record the real dollar purchase so profit is not guessed.', '<button type="button" onclick="navigateTo(\'analytics\')" class="min-h-11 rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white">Fix profit data</button>'));
+  if (facts.metaFailures.length) tasks.push(renderControlCenterTask('refresh-cw-off', 'bg-rose-100 text-rose-700', `${facts.metaFailures.length} Meta sync items need retry`, 'The server keeps retrying; open Ads to inspect the affected rows.', '<button type="button" onclick="navigateTo(\'ads\')" class="min-h-11 rounded-xl border border-rose-300 px-4 py-2 text-sm font-bold text-rose-700">Review</button>'));
+  if (!meta.webhookConfigured) tasks.push(renderControlCenterTask('webhook', 'bg-violet-100 text-violet-700', 'Meta instant notifications need setup', 'Add ALBAYAN_META_WEBHOOK_VERIFY_TOKEN in Jelastic, then subscribe Meta to /api/meta-ads/webhook. Polling remains active until then.'));
+  if (Number(monitoring.error_rate || 0) >= 0.05 && Number(monitoring.total_requests || 0) >= 50) tasks.push(renderControlCenterTask('server-crash', 'bg-rose-100 text-rose-700', 'Server errors need attention', `${(Number(monitoring.error_rate || 0) * 100).toFixed(1)}% of requests failed in this server process. Check Jelastic logs.`));
+  if (Number(monitoring.response_ms_p95 || 0) >= 3000 && Number(monitoring.total_requests || 0) >= 50) tasks.push(renderControlCenterTask('timer-off', 'bg-amber-100 text-amber-700', 'Server responses are slow', `The slowest normal requests take about ${Math.round(Number(monitoring.response_ms_p95 || 0))} ms. Check database and container resources.`));
+  (operations.setupTasks || []).forEach(task => tasks.push(renderControlCenterTask('shield-alert', 'bg-sky-100 text-sky-700', task, 'This protection needs one server setting in Jelastic. No secret is shown in Albayan.')));
+  if (!tasks.length && !_controlCenter.loading) tasks.push(renderControlCenterTask('badge-check', 'bg-emerald-100 text-emerald-700', 'Everything important is ready', 'No unfinished ads, profit gaps, sync failures, or operations setup problems were found.'));
+
+  return `
+    <div class="space-y-6">
+      <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div><div class="text-xs font-bold uppercase tracking-[0.2em] text-indigo-600">Owner workspace</div><h1 class="mt-1 text-3xl font-black text-slate-900 dark:text-white">Daily Control Center</h1><p class="mt-1 text-slate-500 dark:text-slate-400">One page shows what needs your attention today.</p></div>
+        <button type="button" onclick="refreshControlCenter()" class="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-indigo-200 bg-white px-4 py-2 font-bold text-indigo-700 dark:border-indigo-800 dark:bg-slate-900 dark:text-indigo-300"><i data-lucide="refresh-cw" class="h-4 w-4 ${_controlCenter.loading ? 'animate-spin' : ''}"></i>Refresh checks</button>
+      </div>
+
+      ${_controlCenter.error ? `<div class="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm font-semibold text-rose-700">${Security.escapeHtml(_controlCenter.error)}</div>` : ''}
+
+      <section class="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <button type="button" onclick="controlCenterOpenAds('setup')" class="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-left dark:border-amber-900 dark:bg-amber-950/30"><div class="text-sm text-amber-700">Ads to finish</div><div class="mt-1 text-3xl font-black text-amber-900 dark:text-amber-200">${facts.setupAds.length}</div></button>
+        <button type="button" onclick="controlCenterOpenReceipts()" class="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-left dark:border-rose-900 dark:bg-rose-950/30"><div class="text-sm text-rose-700">Unpaid receipts</div><div class="mt-1 text-3xl font-black text-rose-900 dark:text-rose-200">${facts.unpaidReceipts.length}</div></button>
+        <button type="button" onclick="navigateTo('analytics')" class="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-left dark:border-emerald-900 dark:bg-emerald-950/30"><div class="text-sm text-emerald-700">Known gross profit</div><div class="mt-1 text-xl font-black text-emerald-900 dark:text-emerald-200">${controlCenterMoney(facts.snapshot?.knownGrossProfitLYD)} LYD</div></button>
+        <div class="rounded-2xl border border-indigo-200 bg-indigo-50 p-4 dark:border-indigo-900 dark:bg-indigo-950/30"><div class="text-sm text-indigo-700">Protection state</div><div class="mt-1 text-lg font-black text-indigo-900 dark:text-indigo-200">${backup.enabled && backup.encryptionReady && backup.offsiteConfigured ? 'Protected' : 'Setup needed'}</div></div>
+      </section>
+
+      <section class="glass-panel rounded-3xl p-5 sm:p-6"><div class="mb-4 flex items-center justify-between"><div><h2 class="text-xl font-black text-slate-900 dark:text-white">Today’s work</h2><p class="text-sm text-slate-500">Do the first item, then continue downward.</p></div><span class="rounded-full px-3 py-1 text-sm font-bold ${facts.attentionCount ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}">${facts.attentionCount || 0} data items</span></div><div class="space-y-3">${tasks.join('')}</div></section>
+
+      <div class="grid gap-6 lg:grid-cols-2">
+        <section class="glass-panel rounded-3xl p-5 sm:p-6">
+          <div class="flex items-center gap-2"><i data-lucide="archive-restore" class="h-5 w-5 text-sky-600"></i><h2 class="text-xl font-black text-slate-900 dark:text-white">Encrypted backup</h2></div>
+          <div class="mt-4 grid grid-cols-2 gap-3 text-sm"><div class="rounded-xl bg-slate-100 p-3 dark:bg-slate-800"><div class="text-slate-500">Last backup</div><div class="mt-1 font-bold">${Security.escapeHtml(controlCenterTimestamp(backup.lastBackupAt))}</div></div><div class="rounded-xl bg-slate-100 p-3 dark:bg-slate-800"><div class="text-slate-500">Off-site copy</div><div class="mt-1 font-bold">${backup.offsiteConfigured ? 'Connected' : 'Not connected'}</div></div></div>
+          ${backup.lastBackupError ? `<div class="mt-3 rounded-xl bg-rose-50 p-3 text-sm text-rose-700">${Security.escapeHtml(backup.lastBackupError)}</div>` : ''}
+          <button type="button" onclick="runControlCenterBackup()" ${backup.enabled && backup.encryptionReady ? '' : 'disabled'} class="mt-4 min-h-11 w-full rounded-xl bg-sky-600 px-4 py-2 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">Create encrypted backup now</button>
+        </section>
+
+        <section class="glass-panel rounded-3xl p-5 sm:p-6">
+          <div class="flex items-center gap-2"><i data-lucide="lock-keyhole" class="h-5 w-5 text-indigo-600"></i><h2 class="text-xl font-black text-slate-900 dark:text-white">Monthly financial close</h2></div>
+          <p class="mt-2 text-sm text-slate-500">Check a finished month, then lock it so old money cannot change by mistake.</p>
+          <label class="mt-4 block text-sm font-bold text-slate-700 dark:text-slate-300">Month</label><input id="control-center-period" type="month" max="${controlCenterPreviousMonth()}" value="${Security.escapeHtml(_controlCenter.period)}" onchange="_controlCenter.period=this.value" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-white px-3 dark:border-slate-700 dark:bg-slate-900">
+          <div class="mt-3 grid grid-cols-2 gap-3"><button type="button" onclick="previewControlCenterMonth()" class="min-h-11 rounded-xl border border-indigo-300 px-3 font-bold text-indigo-700">Check month</button><button type="button" onclick="closeControlCenterMonth()" class="min-h-11 rounded-xl bg-indigo-600 px-3 font-bold text-white">Close month</button></div>
+          <div class="mt-4 space-y-2">${closedPeriods.slice(0, 4).map(row => `<div class="flex items-center justify-between rounded-xl bg-slate-100 p-3 text-sm dark:bg-slate-800"><span><strong>${Security.escapeHtml(row.period || '')}</strong> · Closed</span><button type="button" onclick="unlockControlCenterMonth('${Security.escapeHtml(String(row.period || ''))}')" class="min-h-10 rounded-lg px-3 font-bold text-amber-700">Unlock</button></div>`).join('') || '<div class="text-sm text-slate-500">No months have been closed yet.</div>'}</div>
+        </section>
+      </div>
+
+      <section class="glass-panel rounded-3xl p-5 sm:p-6"><h2 class="text-xl font-black text-slate-900 dark:text-white">Live connections</h2><div class="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><div class="rounded-2xl bg-slate-100 p-4 dark:bg-slate-800"><div class="text-sm text-slate-500">Meta read connection</div><div class="mt-1 font-black ${meta.configured ? 'text-emerald-600' : 'text-amber-600'}">${meta.configured ? 'Ready' : 'Needs setup'}</div></div><div class="rounded-2xl bg-slate-100 p-4 dark:bg-slate-800"><div class="text-sm text-slate-500">Instant Meta webhook</div><div class="mt-1 font-black ${meta.webhookConfigured ? 'text-emerald-600' : 'text-amber-600'}">${meta.webhookConfigured ? 'Ready' : 'Polling fallback'}</div></div><div class="rounded-2xl bg-slate-100 p-4 dark:bg-slate-800"><div class="text-sm text-slate-500">Backup worker</div><div class="mt-1 font-black ${backup.workerRunning ? 'text-emerald-600' : 'text-amber-600'}">${backup.workerRunning ? 'Running' : 'Not running'}</div></div><div class="rounded-2xl bg-slate-100 p-4 dark:bg-slate-800"><div class="text-sm text-slate-500">Server health</div><div class="mt-1 font-black ${Number(monitoring.error_rate || 0) < 0.05 ? 'text-emerald-600' : 'text-rose-600'}">${Number(monitoring.total_requests || 0) ? `${(Number(monitoring.error_rate || 0) * 100).toFixed(1)}% errors` : 'Collecting data'}</div><div class="mt-1 text-xs text-slate-500">P95 ${Math.round(Number(monitoring.response_ms_p95 || 0))} ms</div></div></div></section>
+    </div>`;
+}
+// ==========================================
 // SEARCH & FILTER FUNCTIONS
 // ==========================================
 
@@ -21486,6 +22423,52 @@ function foldSearchText(value) {
     .replace(/ة/g, 'ه')
     .replace(/ى/g, 'ي')
     .replace(/[ً-ٰٕـ]/g, '');
+}
+
+// ==========================================
+// PAGE CATEGORY VOCABULARY
+// ==========================================
+// Categories are free text from staff AND the Meta importer, so raw values
+// drift: Arabic spelling variants of one word ("حج وعمرة"/"حج وعمره"), double
+// spaces, typos that spread once suggested. One key per real category with the
+// MOST-USED spelling winning, so the picker teaches the right spelling.
+function pageCategoryKey(value) {
+  return foldSearchText(value).replace(/\s+/g, ' ').trim();
+}
+
+// "Facebook Page" is what the importer stores when Meta exposes no category —
+// the server itself treats that exact string as a non-value. Never offer it.
+function isPlaceholderPageCategory(value) {
+  const key = pageCategoryKey(value);
+  return !key || key === 'facebook page' || key === 'صفحه فيسبوك' || key === 'صفحة فيسبوك';
+}
+
+// Suggestions for the category picker, most-used first. Scoped to pages the
+// user may see, so category text never leaks from pages they cannot open.
+function getPageCategorySuggestions() {
+  const groups = new Map();
+  getPagesVisibleToCurrentUser().forEach(page => {
+    const raw = String(page?.category || '').replace(/\s+/g, ' ').trim();
+    if (!raw || isPlaceholderPageCategory(raw)) return;
+    const key = pageCategoryKey(raw);
+    const group = groups.get(key) || { key, count: 0, spellings: new Map() };
+    group.count += 1;
+    group.spellings.set(raw, (group.spellings.get(raw) || 0) + 1);
+    groups.set(key, group);
+  });
+  const locale = state.language === 'ar' ? 'ar' : 'en';
+  return [...groups.values()]
+    .map(group => {
+      // The spelling used on the most pages becomes the canonical label, so a
+      // one-off typo can never outrank the real word.
+      let label = '';
+      let best = -1;
+      group.spellings.forEach((uses, spelling) => {
+        if (uses > best) { best = uses; label = spelling; }
+      });
+      return { key: group.key, label, count: group.count };
+    })
+    .sort((a, b) => (b.count - a.count) || a.label.localeCompare(b.label, locale));
 }
 
 function getCustomerPhoneEntries(customer) {
@@ -23740,6 +24723,18 @@ function getAdPhotoCount(ad) {
   return loaded || getEntityPhotoCountHint('ads', ad);
 }
 
+// Only the small index is stored on the ad. The actual uploaded photos remain
+// in adPhotos/photos and are fetched on demand, so choosing a main photo does
+// not re-upload several megabytes of images.
+function getAdPrimaryPhotoIndex(ad, sourceCount = getAdPhotoCount(ad)) {
+  const count = Array.isArray(sourceCount)
+    ? sourceCount.length
+    : Math.max(0, Number(sourceCount) || 0);
+  if (!count) return 0;
+  const index = Number(ad?.primaryAdPhotoIndex);
+  return Number.isSafeInteger(index) && index >= 0 && index < count ? index : 0;
+}
+
 // In delivery completion, receiptImage is the driver's proof photo and must
 // win over older/general attachments in photos[]. Otherwise simply re-saving
 // a delivery could replace the proof with photos[0].
@@ -23753,6 +24748,7 @@ let _receiptPhotoViewerSources = [];
 let _receiptPhotoViewerIndex = 0;
 let _receiptPhotoViewerLabel = '';
 let _receiptPhotoViewerReturnFocus = null;
+let _adPrimaryPhotoPickerReturnFocus = null;
 let _receiptPhotoUploadGeneration = 0;
 let _adPhotoUploadGeneration = 0;
 let _receiptPhotoUploadsInFlight = 0;
@@ -23791,7 +24787,7 @@ async function openAdPhotoViewer(adId, index = 0, triggerButton = null) {
   }
   let ad = (state.ads || []).find(item => item && !item._deleted && String(item.id) === String(adId));
   if (!ad) return;
-  const busyLabel = triggerButton?.querySelector?.('span') || null;
+  const busyLabel = triggerButton?.querySelector?.('[data-photo-loading-label]') || null;
   const originalLabel = busyLabel?.textContent || '';
   if (triggerButton) {
     triggerButton.disabled = true;
@@ -23820,6 +24816,126 @@ async function openAdPhotoViewer(adId, index = 0, triggerButton = null) {
     index,
     state.language === 'ar' ? 'صور الإعلان' : 'Ad photos'
   );
+}
+
+async function openAdPrimaryPhotoPicker(adId, triggerButton = null) {
+  if (!can('ads', 'viewPhotos')) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'تحتاج صلاحية عرض صور الإعلانات.' : 'Requires the View Photos permission.',
+      'error'
+    );
+    return;
+  }
+  let ad = (state.ads || []).find(item => item && !item._deleted && String(item.id) === String(adId));
+  if (!ad || !canActOnRecord('ads', 'edit', ad.creatorId || ad.createdBy)) {
+    showNotification(
+      state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
+      state.language === 'ar' ? 'لا يمكنك تغيير الصورة الرئيسية لهذا الإعلان.' : 'You cannot change this ad\'s main photo.',
+      'error'
+    );
+    return;
+  }
+
+  if (triggerButton) {
+    triggerButton.disabled = true;
+    triggerButton.setAttribute('aria-busy', 'true');
+  }
+  try {
+    ad = await ensureEntityMediaLoaded('ads', adId);
+  } catch (_) {
+    showNotification(
+      state.language === 'ar' ? 'تعذر تحميل الصور' : 'Photos unavailable',
+      state.language === 'ar' ? 'تحقق من الاتصال ثم حاول مرة أخرى.' : 'Check the connection and try again.',
+      'error'
+    );
+    return;
+  } finally {
+    if (triggerButton) {
+      triggerButton.disabled = false;
+      triggerButton.removeAttribute('aria-busy');
+    }
+  }
+
+  const photos = getAdPhotoSources(ad);
+  if (photos.length < 2) {
+    if (photos.length === 1) openAdPhotoViewer(adId, 0, triggerButton);
+    return;
+  }
+
+  closeAdPrimaryPhotoPicker(false);
+  _adPrimaryPhotoPickerReturnFocus = triggerButton || document.activeElement;
+  const isAr = state.language === 'ar';
+  const selectedIndex = getAdPrimaryPhotoIndex(ad, photos.length);
+  const picker = document.createElement('div');
+  picker.id = 'ad-primary-photo-picker';
+  picker.className = 'mobile-dialog-overlay fixed inset-0 z-[95] flex items-center justify-center bg-slate-950/70 p-3 backdrop-blur-sm';
+  picker.setAttribute('role', 'dialog');
+  picker.setAttribute('aria-modal', 'true');
+  picker.setAttribute('aria-labelledby', 'ad-primary-photo-picker-title');
+  picker.tabIndex = -1;
+  picker.innerHTML = `
+    <div class="w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-2xl dark:bg-slate-900" onclick="event.stopPropagation()">
+      <div class="flex items-start justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-700">
+        <div>
+          <h2 id="ad-primary-photo-picker-title" class="text-lg font-black text-slate-900 dark:text-white">${isAr ? 'اختر الصورة الرئيسية' : 'Choose the main photo'}</h2>
+          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">${isAr ? 'ستظهر الصورة المختارة مباشرة في قائمة الإعلانات.' : 'The selected photo will appear directly in the Ads list.'}</p>
+        </div>
+        <button type="button" onclick="closeAdPrimaryPhotoPicker()" class="touch-target inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${isAr ? 'إغلاق' : 'Close'}"><i data-lucide="x" class="h-5 w-5"></i></button>
+      </div>
+      <div class="max-h-[70dvh] overflow-y-auto p-4">
+        <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          ${photos.map((source, index) => {
+            const selected = index === selectedIndex;
+            const label = isAr ? `اختيار الصورة ${index + 1} كرئيسية` : `Choose photo ${index + 1} as main`;
+            return `<button type="button" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" data-primary-photo-index="${index}" onclick="setAdPrimaryPhoto(this.dataset.adId, Number(this.dataset.primaryPhotoIndex), this)" class="group relative overflow-hidden rounded-xl border-2 ${selected ? 'border-emerald-500 ring-2 ring-emerald-200 dark:ring-emerald-900' : 'border-slate-200 hover:border-indigo-400 dark:border-slate-700'} bg-slate-100 text-left transition" aria-label="${label}" ${selected ? 'aria-current="true"' : ''}>
+              <img src="${Security.escapeHtml(source)}" alt="${isAr ? `صورة الإعلان ${index + 1}` : `Ad photo ${index + 1}`}" class="aspect-square w-full object-cover" loading="lazy" decoding="async">
+              <span class="absolute inset-x-0 bottom-0 flex items-center justify-between gap-1 bg-slate-950/75 px-2 py-1.5 text-[11px] font-bold text-white"><span>${isAr ? `صورة ${index + 1}` : `Photo ${index + 1}`}</span>${selected ? `<span class="inline-flex items-center gap-1 text-emerald-300"><i data-lucide="check-circle-2" class="h-3.5 w-3.5"></i>${isAr ? 'الرئيسية' : 'Main'}</span>` : `<span>${isAr ? 'اختيار' : 'Choose'}</span>`}</span>
+            </button>`;
+          }).join('')}
+        </div>
+      </div>
+    </div>`;
+  picker.addEventListener('click', event => {
+    if (event.target === picker) closeAdPrimaryPhotoPicker();
+  });
+  picker.addEventListener('keydown', event => {
+    if (event.key === 'Escape') closeAdPrimaryPhotoPicker();
+  });
+  document.body.appendChild(picker);
+  IconQueue.schedule(picker);
+  picker.focus();
+}
+
+async function setAdPrimaryPhoto(adId, index, button = null) {
+  const ad = (state.ads || []).find(item => item && !item._deleted && String(item.id) === String(adId));
+  const photos = getAdPhotoSources(ad);
+  if (!ad || !can('ads', 'viewPhotos') || !canActOnRecord('ads', 'edit', ad.creatorId || ad.createdBy)) return;
+  if (!Number.isSafeInteger(index) || index < 0 || index >= photos.length) return;
+  const picker = document.getElementById('ad-primary-photo-picker');
+  picker?.querySelectorAll('button').forEach(item => { item.disabled = true; });
+  button?.setAttribute('aria-busy', 'true');
+  const saved = await updateRecord(state.ads, ad.id, { primaryAdPhotoIndex: index }, ad._lastModified);
+  if (!saved) {
+    picker?.querySelectorAll('button').forEach(item => { item.disabled = false; });
+    button?.removeAttribute('aria-busy');
+    return;
+  }
+  closeAdPrimaryPhotoPicker();
+  showNotification(
+    state.language === 'ar' ? 'تم اختيار الصورة الرئيسية' : 'Main photo selected',
+    state.language === 'ar' ? 'ستظهر هذه الصورة الآن من خارج الإعلان.' : 'This photo now appears on the Ads list.',
+    'success'
+  );
+}
+
+function closeAdPrimaryPhotoPicker(restoreFocus = true) {
+  document.getElementById('ad-primary-photo-picker')?.remove();
+  if (restoreFocus) {
+    const returnFocus = _adPrimaryPhotoPickerReturnFocus;
+    _adPrimaryPhotoPickerReturnFocus = null;
+    setTimeout(() => returnFocus?.focus?.(), 0);
+  }
 }
 
 function openPendingReceiptPhotoViewer(index = 0) {
@@ -27687,6 +28803,138 @@ function requireReceiptCustomerRiskAcknowledgement(customerId) {
 }
 
 // ==========================================
+// PAGE CATEGORY PICKER
+// ==========================================
+// Replaces the native <datalist>, which rendered an unstyled OS popup that ran
+// off the screen on phones and listed every raw spelling. Shows how many pages
+// use each category so the popular spelling is the obvious pick, and keeps free
+// text allowed because categories are genuinely open-ended.
+const PAGE_CATEGORY_ROW = 'touch-target block w-full min-h-11 text-start px-4 py-3 rounded-lg border-b border-slate-100 dark:border-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-900/30';
+
+function pageCategoryRow(value, title, subtitle, extraClass = '') {
+  return `<button type="button" role="option" class="${PAGE_CATEGORY_ROW} ${extraClass}" data-category-action="pick" data-category-value="${Security.escapeHtml(value)}">
+    <span class="block min-w-0 break-words text-sm font-medium text-slate-800 dark:text-white">${title}</span>
+    <span class="block text-xs text-slate-500 mt-0.5">${subtitle}</span>
+  </button>`;
+}
+
+function renderPageCategoryOptions(query) {
+  const isAr = state.language === 'ar';
+  const typed = String(query || '').replace(/\s+/g, ' ').trim();
+  const typedKey = pageCategoryKey(typed);
+  const term = foldSearchText(typed);
+  const all = getPageCategorySuggestions();
+  const shown = all.filter(item => !term || foldSearchText(item.label).includes(term)).slice(0, 30);
+  // Same category, different spelling: offer the established one so a
+  // near-duplicate is not created — but never refuse what was typed.
+  const exact = all.find(item => item.key === typedKey);
+  const rows = [];
+  const uses = count => isAr ? `مستخدمة في ${count} صفحة` : `Used on ${count} page${count === 1 ? '' : 's'}`;
+
+  if (typed && exact && exact.label !== typed) {
+    rows.push(pageCategoryRow(
+      exact.label,
+      `${isAr ? 'استخدم التسمية الموجودة' : 'Use the existing spelling'}: ${Security.escapeHtml(exact.label)}`,
+      uses(exact.count),
+      'bg-amber-50 dark:bg-amber-900/30'
+    ));
+  } else if (typed && !exact) {
+    rows.push(pageCategoryRow(
+      typed,
+      `${isAr ? 'استخدام' : 'Use'} "${Security.escapeHtml(typed)}"`,
+      isAr ? 'فئة جديدة' : 'New category'
+    ));
+  }
+  shown.forEach(item => {
+    if (item.key === typedKey && rows.length) return; // already offered above
+    rows.push(pageCategoryRow(item.label, Security.escapeHtml(item.label), uses(item.count)));
+  });
+  if (!rows.length) {
+    rows.push(`<div class="px-4 py-6 text-center text-sm text-slate-500">${isAr ? 'اكتب اسم الفئة لإضافتها' : 'Type a category name to add it'}</div>`);
+  }
+  return rows.join('');
+}
+
+// Set only while selectPageCategory() restores focus: focus() re-fires the
+// field's inline onfocus, which would re-open the list it just closed.
+let _suppressPageCategoryDropdown = false;
+
+function showPageCategoryDropdown() {
+  if (_suppressPageCategoryDropdown) return;
+  const input = document.getElementById('page-category');
+  const dropdown = document.getElementById('page-category-dropdown');
+  if (!input || !dropdown) return;
+  dropdown.innerHTML = renderPageCategoryOptions(input.value);
+  dropdown.classList.remove('hidden');
+  input.setAttribute('aria-expanded', 'true');
+}
+
+function filterPageCategories() {
+  showPageCategoryDropdown();
+}
+
+function hidePageCategoryDropdown() {
+  const dropdown = document.getElementById('page-category-dropdown');
+  const input = document.getElementById('page-category');
+  if (dropdown) dropdown.classList.add('hidden');
+  if (input) input.setAttribute('aria-expanded', 'false');
+}
+
+function selectPageCategory(value) {
+  const input = document.getElementById('page-category');
+  if (!input) return;
+  // Same ceiling the save path enforces, so what is committed is what was shown.
+  input.value = Security.sanitizeInput(String(value || ''), { maxLength: 80 }).replace(/\s+/g, ' ').trim();
+  // Reclaim focus only when it was already inside the picker: a clicked row is
+  // about to be hidden, so the field must take it or focus falls to the body.
+  // A chip sits outside, and stealing focus there only opens the phone keyboard.
+  const dropdown = document.getElementById('page-category-dropdown');
+  const focused = document.activeElement;
+  const restoreFocus = focused === input || !!(dropdown && focused && dropdown.contains(focused));
+  hidePageCategoryDropdown();
+  document.querySelectorAll('.smart-filter-chips [data-category-action="pick"]').forEach(button => {
+    const active = pageCategoryKey(button.dataset.categoryValue || '') === pageCategoryKey(input.value);
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  if (!restoreFocus) return;
+  _suppressPageCategoryDropdown = true;
+  try {
+    input.focus({ preventScroll: true });
+  } finally {
+    _suppressPageCategoryDropdown = false;
+  }
+}
+
+// CAPTURE phase, like every other in-modal picker here: the modal panel's
+// onclick="event.stopPropagation()" swallows bubble-phase clicks.
+document.addEventListener('click', (e) => {
+  const trigger = e.target?.closest?.('[data-category-action="pick"]');
+  if (trigger) {
+    e.preventDefault();
+    e.stopPropagation();
+    selectPageCategory(trigger.dataset.categoryValue || '');
+    return;
+  }
+  const dropdown = document.getElementById('page-category-dropdown');
+  const input = document.getElementById('page-category');
+  if (dropdown && input && !dropdown.contains(e.target) && !input.contains(e.target)) {
+    hidePageCategoryDropdown();
+  }
+}, true);
+
+// Escape closes the picker before the dialog, so one press does not throw away
+// a half-filled page form.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const dropdown = document.getElementById('page-category-dropdown');
+  if (dropdown && !dropdown.classList.contains('hidden')) {
+    e.stopImmediatePropagation();
+    hidePageCategoryDropdown();
+  }
+}, true);
+
+// ==========================================
 // PAGE CUSTOMER SELECTION HELPERS
 // ==========================================
 
@@ -31242,6 +32490,10 @@ function uploadAdPhotos(fileList) {
       changed = true;
     });
     if (changed) {
+      state.tempAdPrimaryPhotoIndex = getAdPrimaryPhotoIndex(
+        { primaryAdPhotoIndex: state.tempAdPrimaryPhotoIndex },
+        state.tempAdPhotos.length
+      );
       state.tempAdPhotosDirty = true;
       renderAdPhotoPreviews();
     }
@@ -31266,12 +32518,17 @@ function renderAdPhotoPreviews() {
       : `<div class="text-xs text-slate-400 col-span-4">${state.language === 'ar' ? 'لا توجد صور بعد. استخدم «رفع» أو «لصق صورة».' : 'No photos yet. Use Upload or Paste photo.'}</div>`;
     return;
   }
+  const primaryIndex = getAdPrimaryPhotoIndex(
+    { primaryAdPhotoIndex: state.tempAdPrimaryPhotoIndex },
+    photos.length
+  );
   container.innerHTML = photos.map((src, idx) => `
-    <div class="relative group rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700">
+    <div class="relative group rounded-lg overflow-hidden border-2 ${idx === primaryIndex ? 'border-emerald-500 ring-2 ring-emerald-100 dark:ring-emerald-900' : 'border-slate-200 dark:border-slate-700'}">
       <button type="button" onclick="openPendingAdPhotoViewer(${idx})" class="group/photo block w-full relative focus:outline-none focus:ring-2 focus:ring-indigo-500" title="${state.language === 'ar' ? 'اضغط لعرض الصورة بالحجم الكامل' : 'Click to view full size'}" aria-label="${state.language === 'ar' ? `عرض صورة الإعلان ${idx + 1}` : `View ad photo ${idx + 1}`}">
         <img src="${Security.escapeHtml(src)}" alt="${state.language === 'ar' ? `صورة الإعلان ${idx + 1}` : `Ad photo ${idx + 1}`}" class="w-full h-20 object-cover" />
         <span class="absolute inset-0 bg-black/0 group-hover/photo:bg-black/25 group-focus/photo:bg-black/25 transition-colors flex items-center justify-center"><i data-lucide="maximize-2" class="w-5 h-5 text-white opacity-0 group-hover/photo:opacity-100 group-focus/photo:opacity-100 drop-shadow"></i></span>
       </button>
+      ${idx === primaryIndex ? `<span class="absolute bottom-1 left-1 z-10 inline-flex items-center gap-1 rounded-md bg-emerald-600 px-1.5 py-1 text-[10px] font-bold text-white"><i data-lucide="check" class="h-3 w-3"></i>${state.language === 'ar' ? 'الرئيسية' : 'Main'}</span>` : (canModifyAdPhotosInCurrentModal() ? `<button type="button" onclick="setPendingAdPrimaryPhoto(${idx})" class="absolute bottom-1 left-1 z-10 rounded-md bg-white/95 px-1.5 py-1 text-[10px] font-bold text-emerald-700 shadow hover:bg-emerald-50 dark:bg-slate-900/95 dark:text-emerald-300" aria-label="${state.language === 'ar' ? `اختيار الصورة ${idx + 1} كرئيسية` : `Choose photo ${idx + 1} as main`}">${state.language === 'ar' ? 'اجعلها الرئيسية' : 'Make main'}</button>` : '')}
       ${canModifyAdPhotosInCurrentModal() ? `<button type="button" onclick="removeAdPhoto(${idx})" class="absolute top-1 right-1 bg-white/90 dark:bg-slate-900/90 rounded-full p-1 shadow hover:bg-rose-100 z-10" aria-label="${state.language === 'ar' ? `حذف صورة الإعلان ${idx + 1}` : `Remove ad photo ${idx + 1}`}">
         <i data-lucide="x" class="w-3 h-3 text-rose-600"></i>
       </button>` : ''}
@@ -31282,8 +32539,27 @@ function renderAdPhotoPreviews() {
 
 function removeAdPhoto(idx) {
   if (!canModifyAdPhotosInCurrentModal() || !state.tempAdPhotos) return;
+  const previousPrimary = getAdPrimaryPhotoIndex(
+    { primaryAdPhotoIndex: state.tempAdPrimaryPhotoIndex },
+    state.tempAdPhotos.length
+  );
   state.tempAdPhotos.splice(idx, 1);
+  if (!state.tempAdPhotos.length) state.tempAdPrimaryPhotoIndex = 0;
+  else if (idx < previousPrimary) state.tempAdPrimaryPhotoIndex = previousPrimary - 1;
+  else if (idx === previousPrimary) state.tempAdPrimaryPhotoIndex = Math.min(idx, state.tempAdPhotos.length - 1);
+  else state.tempAdPrimaryPhotoIndex = previousPrimary;
   state.tempAdPhotosDirty = true;
+  state.tempAdPrimaryPhotoDirty = true;
+  renderAdPhotoPreviews();
+}
+
+function setPendingAdPrimaryPhoto(idx) {
+  if (!canModifyAdPhotosInCurrentModal()) return;
+  const photos = state.tempAdPhotos || [];
+  const index = Number(idx);
+  if (!Number.isSafeInteger(index) || index < 0 || index >= photos.length) return;
+  state.tempAdPrimaryPhotoIndex = index;
+  state.tempAdPrimaryPhotoDirty = true;
   renderAdPhotoPreviews();
 }
 
@@ -32542,6 +33818,8 @@ function renderModal() {
       _adPhotoUploadsInFlight = 0;
       state.tempAdPhotos = (!isEdit || can('ads', 'viewPhotos')) ? getAdPhotoSources(adData) : [];
       state.tempAdPhotosDirty = false;
+      state.tempAdPrimaryPhotoIndex = getAdPrimaryPhotoIndex(adData, state.tempAdPhotos.length);
+      state.tempAdPrimaryPhotoDirty = false;
       const durationDaysDefault = (adData.days !== undefined ? adData.days : (adData.startDate && adData.endDate ? Math.max(0, Math.round((new Date(adData.endDate) - new Date(adData.startDate)) / (1000 * 60 * 60 * 24))) : ''));
       const adCreator = isEdit && adData.creatorId ? state.users.find(u => u.id === adData.creatorId) : state.currentUser;
       // Badge describes the ad's CREATOR, not the viewer. Driving it from the
@@ -32716,16 +33994,38 @@ function renderModal() {
                 <div id="ad-collection-details" class="${adData.collectionMethod ? '' : 'hidden'} pt-2 border-t border-amber-200">
                   <div id="ad-driver-budget-section" class="${adData.collectionMethod === 'driver' ? '' : 'hidden'} mb-3 p-3 bg-violet-50 dark:bg-violet-900/20 rounded-lg border border-violet-200 dark:border-violet-800 space-y-2">
                     <label for="ad-driver-budget-usd" class="block text-xs font-bold text-violet-700 dark:text-violet-300">${isArAd ? 'ميزانية الإعلان (USD) *' : 'Ad Budget (USD) *'}</label>
-                    <input
+                    ${(() => {
+                      // A Meta-linked ad takes its budget straight from Meta's
+                      // real planned total (read-only) so the recorded customer
+                      // debt can never drift from what Meta actually runs.
+                      const metaBudgetRaw = metaAdAutoBudgetUSD(adData);
+                      // ...EXCEPT when Meta's total is below money already
+                      // reserved on this ad's receipts. Locking a lower budget
+                      // would make the funding<=budget guard reject EVERY save
+                      // (even a photo-only edit) with no way to raise the field
+                      // again, and the only escape would be silently releasing
+                      // reserved receipt credit. Stay manual and say why.
+                      const committedUSD = getAdCommittedFundingTotalUSD(adData);
+                      const metaBudgetBlocked = metaBudgetRaw > 0 && committedUSD > metaBudgetRaw + 0.005;
+                      const metaBudget = metaBudgetBlocked ? 0 : metaBudgetRaw;
+                      const budgetValue = metaBudget > 0
+                        ? metaBudget.toFixed(2)
+                        : (Number(adData.amountUSD || 0) > 0 ? Number(adData.amountUSD).toFixed(2) : '');
+                      return `<input
                       type="text"
                       inputmode="decimal"
                       id="ad-driver-budget-usd"
-                      value="${Security.escapeHtml(Number(adData.amountUSD || 0) > 0 ? Number(adData.amountUSD).toFixed(2) : '')}"
-                      class="w-full border border-violet-300 dark:border-violet-700 bg-white dark:bg-slate-900 px-3 py-2 rounded-lg text-sm font-bold"
+                      value="${Security.escapeHtml(budgetValue)}"
+                      class="w-full border border-violet-300 dark:border-violet-700 bg-white dark:bg-slate-900 px-3 py-2 rounded-lg text-sm font-bold${metaBudget > 0 ? ' opacity-80 cursor-not-allowed' : ''}"
                       placeholder="0.00"
-                      oninput="sanitizeMoneyInput(this); updateAdDriverBudgetSummary()"
+                      ${metaBudget > 0 ? 'readonly ' : ''}oninput="sanitizeMoneyInput(this); updateAdDriverBudgetSummary()"
                       onfocus="this.select()"
                     />
+                    ${metaBudget > 0 ? `<div class="mt-1 flex items-center gap-1 text-[11px] font-bold text-blue-700 dark:text-blue-300"><i data-lucide="refresh-cw" class="h-3 w-3 shrink-0"></i><span>${isArAd ? 'تلقائي من Meta — نفس الميزانية المخططة الحقيقية للإعلان' : "Automatic from Meta — the ad's real planned budget"}</span></div>` : ''}
+                    ${metaBudgetBlocked ? `<div class="mt-1 flex items-start gap-1 rounded-lg bg-amber-100 p-2 text-[11px] font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"><i data-lucide="alert-triangle" class="h-3 w-3 shrink-0 mt-0.5"></i><span>${isArAd
+                      ? `ميزانية Meta ($${metaBudgetRaw.toFixed(2)}) أقل من المبلغ المحجوز على وصولات هذا الإعلان ($${committedUSD.toFixed(2)})، لذلك تُترك الميزانية للتعديل اليدوي. صحّح مبلغ الوصل أو الميزانية في Meta.`
+                      : `Meta's budget ($${metaBudgetRaw.toFixed(2)}) is lower than the money already reserved on this ad's receipts ($${committedUSD.toFixed(2)}), so the budget stays editable. Fix the receipt amount or the budget in Meta.`}</span></div>` : ''}`;
+                    })()}
                     <input type="hidden" id="ad-driver-budget-rate" value="${Security.escapeHtml(String(adData.exchangeRate || state.defaultExchangeRate || 1))}" />
                     <div id="ad-driver-budget-summary" class="text-[11px] text-violet-600 dark:text-violet-300"></div>
                     <div class="text-[11px] text-amber-700 dark:text-amber-300">
@@ -33113,23 +34413,23 @@ function renderModal() {
               <label class="block text-sm font-medium mb-2">${isArP ? 'اسم الصفحة *' : 'Page Name *'}</label>
             <input type="text" id="page-name" value="${Security.escapeHtml(pageData.name || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" />
           </div>
+          <!-- Category picker: same combobox pattern as the customer search
+               below, plus one-tap chips for the most-used categories. -->
           <div>
-              <label class="block text-sm font-medium mb-2">${isArP ? 'الفئة *' : 'Category *'}</label>
-            <input type="text" id="page-category" list="page-category-suggestions" autocomplete="off" value="${Security.escapeHtml(pageData.category || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" />
-            <!-- Suggest previously-used categories while typing (user request):
-                 picking an existing one avoids near-duplicate categories like
-                 "cars" / "car". Deduped case-insensitively, first spelling wins. -->
-            <datalist id="page-category-suggestions">
-              ${(() => {
-                const seen = new Map();
-                getVisibleRecords(state.pages || []).forEach(p => {
-                  const c = String(p.category || '').trim();
-                  if (c && !seen.has(c.toLowerCase())) seen.set(c.toLowerCase(), c);
-                });
-                return [...seen.values()].sort((a, b) => a.localeCompare(b))
-                  .map(c => `<option value="${Security.escapeHtml(c)}"></option>`).join('');
-              })()}
-            </datalist>
+              <label for="page-category" class="block text-sm font-medium mb-2">${isArP ? 'الفئة *' : 'Category *'}</label>
+            ${(() => {
+              const suggestions = getPageCategorySuggestions();
+              const currentKey = pageCategoryKey(pageData.category || '');
+              const chips = suggestions.slice(0, 6);
+              return `
+            ${chips.length ? `<div class="smart-filter-chips mb-2" aria-label="${isArP ? 'الفئات الأكثر استخداماً' : 'Most used categories'}">
+              ${chips.map(item => `<button type="button" class="smart-filter-chip ${pageCategoryKey(item.label) === currentKey ? 'is-active' : ''}" aria-pressed="${pageCategoryKey(item.label) === currentKey}" data-category-action="pick" data-category-value="${Security.escapeHtml(item.label)}">${Security.escapeHtml(item.label)}</button>`).join('')}
+            </div>` : ''}
+            <div class="relative">
+              <input type="text" id="page-category" role="combobox" aria-expanded="false" aria-controls="page-category-dropdown" aria-autocomplete="list" autocomplete="off" maxlength="80" enterkeyhint="done" value="${Security.escapeHtml(pageData.category || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isArP ? 'اكتب أو اختر فئة...' : 'Type or choose a category...'}" oninput="filterPageCategories()" onfocus="showPageCategoryDropdown()" />
+              <div id="page-category-dropdown" role="listbox" class="absolute z-20 mt-1 w-full max-w-[calc(100vw-2rem)] glass-panel rounded-lg shadow-xl max-h-60 overflow-y-auto hidden"></div>
+            </div>`;
+            })()}
           </div>
             
             <!-- Customer Linking Section -->
@@ -35586,6 +36886,10 @@ async function handleModalSubmit() {
         adLinks: adLinkInputs,
         adLink: adLinkInputs[0] || '',
         adPhotos: state.tempAdPhotos || [],
+        primaryAdPhotoIndex: getAdPrimaryPhotoIndex(
+          { primaryAdPhotoIndex: state.tempAdPrimaryPhotoIndex },
+          (state.tempAdPhotos || []).length
+        ),
         collectionPayments: (paymentStatus === 'paid') ? [] : collectionPayments,
         days,
         isPaid,
@@ -35625,6 +36929,9 @@ async function handleModalSubmit() {
         delete adUpdates.adPhotos;
       } else if (isEdit) {
         adUpdates.photos = []; // clear the legacy field after an intentional edit
+      }
+      if (isEdit && !state.tempAdPhotosDirty && !state.tempAdPrimaryPhotoDirty) {
+        delete adUpdates.primaryAdPhotoIndex;
       }
 
       // Re-baseline the top-up arithmetic. saveTopUps derives the ad's amount
@@ -35729,6 +37036,8 @@ async function handleModalSubmit() {
           : 'Relinked ad funding receipt');
         state.tempAdFunding = { allocations: [] };
         state.tempAdPhotos = [];
+        state.tempAdPrimaryPhotoIndex = 0;
+        state.tempAdPrimaryPhotoDirty = false;
         closeModal();
         return;
       }
@@ -35845,9 +37154,16 @@ async function handleModalSubmit() {
       // Clear temp state
       state.tempAdFunding = { allocations: [] };
       state.tempAdPhotos = [];
+      state.tempAdPrimaryPhotoIndex = 0;
+      state.tempAdPrimaryPhotoDirty = false;
       
-      // Close modal
+      // RETURN, not break: `break` falls into the shared `closeModal();
+      // render();` tail, and a SECOND closeModal rewinds a second history entry
+      // (traversal is async, so history.state still shows the ?modal entry) —
+      // which jumped the user out of the view they were working in.
       closeModal();
+      render();
+      return;
       } catch (error) {
         console.error('Error saving ad:', error);
         // "Changed on another device" is reserved for real version conflicts
@@ -36099,7 +37415,14 @@ async function handleModalSubmit() {
       const isArPage = state.language === 'ar';
       // Whitespace-only input satisfies `required` — trim + check both fields.
       const pageName = document.getElementById('page-name').value.trim();
-      const pageCategory = document.getElementById('page-category').value.trim();
+      // Collapse internal whitespace and cap the length: a category is a short
+      // label, and the raw field used to accept a 10,000-character paste that
+      // would permanently wreck the picker for everyone. Double spaces also
+      // used to create a second copy of an existing category.
+      const pageCategory = Security.sanitizeInput(
+        String(document.getElementById('page-category').value || '').replace(/\s+/g, ' ').trim(),
+        { maxLength: 80 }
+      ).trim();
       if (!pageName || !pageCategory) {
         showNotification(
           isArPage ? 'خطأ في الإدخال' : 'Validation Error',
@@ -36300,6 +37623,8 @@ function closeModal() {
   // into the next ad/receipt created in this session.
   state.tempAdPhotos = [];
   state.tempReceiptPhotos = [];
+  state.tempAdPrimaryPhotoIndex = 0;
+  state.tempAdPrimaryPhotoDirty = false;
   state.tempAdPhotosDirty = false;
   state.tempReceiptPhotosDirty = false;
   _adPhotoUploadGeneration++;
@@ -36327,8 +37652,14 @@ function closeModal() {
   // entry may be a previous ?modal entry that must survive for back/forward
   // restore. Openers that never pushed (boot deep-link error paths) fall
   // through to the old replaceState behaviour.
+  // Defence in depth for the same double-close hazard: if a bookkeeping pop
+  // from a closeModal earlier in this tick has not landed yet, history.state
+  // still shows the ?modal entry even though it is already being popped.
+  // Consuming again would rewind a REAL view entry and move the user.
+  const consumeAlreadyPending = typeof _overlayHistoryConsumePending === 'function'
+    && _overlayHistoryConsumePending();
   let consumedModalHistoryEntry = false;
-  if (typeof consumeOverlayHistoryEntry === 'function' && !_closingSurfaceFromPopstate) {
+  if (typeof consumeOverlayHistoryEntry === 'function' && !_closingSurfaceFromPopstate && !consumeAlreadyPending) {
     const topHistoryEntry = window.history.state;
     if (topHistoryEntry && topHistoryEntry.albayanModal) {
       consumedModalHistoryEntry = consumeOverlayHistoryEntry();
@@ -36352,6 +37683,10 @@ function closeModal() {
       }
     }
   }
+  // Always clean the URL when this call did not consume an entry: if a pending
+  // pop somehow never lands, ?modal= must not survive a closed dialog (a
+  // refresh would reopen it). Rewriting an entry that is about to be popped is
+  // harmless.
   if (!consumedModalHistoryEntry) clearUrlParams(['modal', 'id']);
   
   // Force remove ALL modals - be very aggressive
@@ -40950,6 +42285,35 @@ function metaAdsTotalRemainingMinor(ad) {
   return total > 0 ? Math.max(Math.round(total - spent), 0) : 0;
 }
 
+function metaAdCurrencyIsKnownUSD(ad) {
+  // Must be KNOWN dollars. A draft carries Meta's budget minors before the ad
+  // account's currency is read, so guessing USD would lock EUR 30 in as $30 of
+  // customer debt. Unknown stays manual until a later sync learns it.
+  return String(ad?.metaCurrency || '').trim().toUpperCase() === 'USD';
+}
+
+function metaAdAutoBudgetUSD(ad) {
+  // The ad's REAL planned total from Meta, in dollars — used as the automatic
+  // ad budget for a linked ad so the typed budget can never drift from what
+  // Meta actually runs (e.g. $50 entered for a $30 ad). Returns 0 when the
+  // budget cannot be known: not Meta-linked, an ad account that is not known to
+  // be in USD, or an open-ended ad (daily budget with no end date has no total).
+  if (!ad?.metaAdId) return 0;
+  if (!metaAdCurrencyIsKnownUSD(ad)) return 0;
+  const minor = metaAdsPlannedTotalMinor(ad);
+  return minor > 0 ? Math.round(minor) / 100 : 0;
+}
+
+function metaAdRealSpendUSD(ad) {
+  // Meta's actual spend in dollars, or null when it cannot be trusted: not
+  // linked, never synced (a 0 before the first sync would wrongly promise
+  // "nothing was spent"), or an ad account that is not known to be in USD.
+  if (!ad?.metaAdId || !ad.metaSyncedAt) return null;
+  if (!metaAdCurrencyIsKnownUSD(ad)) return null;
+  const minor = Number(ad.metaSpendMinor);
+  return Number.isFinite(minor) && minor >= 0 ? Math.round(minor) / 100 : null;
+}
+
 function metaAdsIsPlaceholderPageName(value, pageId) {
   const name = String(value || '').trim().toLocaleLowerCase();
   const id = String(pageId || '').trim().toLocaleLowerCase();
@@ -40980,19 +42344,106 @@ function renderMetaAdPageSummary(ad, adPage, adPageDeleted, isAr) {
   </div>`;
 }
 
+function adPagePictureUrl(ad, adPage) {
+  // Server-synced Facebook Page profile picture: the ad's own copy first
+  // (refreshed by every Meta sync pass, so its signed URL stays fresh), then
+  // the linked page record's copy for ads the sync has not revisited yet.
+  const url = String(ad?.metaPagePictureUrl || adPage?.metaPagePictureUrl || '').trim();
+  return /^https:\/\//i.test(url) ? url : '';
+}
+
+function renderAdPageAvatar(ad, adPage, isAr, besideTile = true) {
+  const url = adPagePictureUrl(ad, adPage);
+  if (!url) return '';
+  // When the main tile already shows the page picture standing in for the ad
+  // photo (page_avatar substitute, no uploaded photos visible), a second copy
+  // of the same image beside it would be pure noise.
+  const photoCount = getAdPhotoCount(ad);
+  const uploadedVisible = photoCount > 0 && can('ads', 'viewPhotos');
+  if (!uploadedVisible && String(ad?.metaThumbnailSource || '') === 'page_avatar') return '';
+  const pageName = String(adPage?.name || ad?.metaPageName || '').trim();
+  const label = pageName
+    ? (isAr ? `صورة صفحة ${pageName}` : `${pageName} page picture`)
+    : (isAr ? 'صورة صفحة فيسبوك' : 'Facebook Page picture');
+  // is-solo: no photo tile renders beside the avatar (manual ad without
+  // uploads), so the tile-centering offset would just push it out of line.
+  return `<span class="ad-page-avatar${besideTile ? '' : ' is-solo'}" role="img" title="${Security.escapeHtml(label)}" aria-label="${Security.escapeHtml(label)}">
+    <img src="${Security.escapeHtml(url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="adPageAvatarError(this)">
+  </span>`;
+}
+
+function adPageAvatarError(img) {
+  // Signed avatar URLs expire between syncs. A dead one disappears quietly
+  // instead of leaving a broken-image circle beside the ad photo; the next
+  // sync pass stores a fresh URL.
+  img?.closest?.('.ad-page-avatar')?.remove();
+}
+
 function renderMetaAdThumbnail(ad, isAr) {
   if (!ad?.metaAdId) return '';
   if (!ad.metaThumbnailUrl) {
     // A linked ad whose real photo has not been resolved yet: show an honest
     // "photo loading" tile instead of nothing (and never the page logo).
+    // Admins see the technical trace (which Meta doors were closed) in the
+    // tooltip so a stuck photo can be diagnosed from a screenshot.
     const pending = isAr ? 'صورة الإعلان قيد التحميل من Meta' : 'Ad photo is loading from Meta';
-    return `<div class="meta-ad-thumbnail-button meta-ad-thumbnail-placeholder" role="img" title="${pending}" aria-label="${pending}"><i data-lucide="image" class="h-5 w-5"></i></div>`;
+    const trace = isCurrentUserAdmin() && ad.metaMediaTrace ? ` · ${String(ad.metaMediaTrace)}` : '';
+    return `<div class="meta-ad-thumbnail-button meta-ad-thumbnail-placeholder" role="img" title="${Security.escapeHtml(pending + trace)}" aria-label="${Security.escapeHtml(pending)}"><i data-lucide="image" class="h-5 w-5"></i></div>`;
   }
-  const label = isAr ? 'عرض صورة إعلان Meta' : 'View Meta ad image';
-  return `<button type="button" data-meta-preview-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openMetaAdPreview(this.dataset.metaPreviewAdId)" class="meta-ad-thumbnail-button" title="${label}" aria-label="${label}">
+  // A page_avatar photo is the Facebook page's picture standing in for the
+  // real ad photo (which Meta refuses to expose to the read-only key).
+  const isPageAvatar = String(ad.metaThumbnailSource || '') === 'page_avatar';
+  const label = isPageAvatar
+    ? (isAr ? 'صورة الصفحة — صورة الإعلان الأصلية غير متاحة من Meta' : "Page picture — Meta does not expose this ad's original photo")
+    : (isAr ? 'عرض صورة إعلان Meta' : 'View Meta ad image');
+  return `<button type="button" data-meta-preview-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openMetaAdPreview(this.dataset.metaPreviewAdId)" class="meta-ad-thumbnail-button" title="${Security.escapeHtml(label)}" aria-label="${Security.escapeHtml(label)}">
     <img src="${Security.escapeHtml(String(ad.metaThumbnailUrl))}" alt="${label}" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="metaAdsThumbnailError(this)">
     <span class="meta-ad-thumbnail-badge"><i data-lucide="maximize-2" class="h-3 w-3"></i></span>
   </button>`;
+}
+
+function renderAdPrimaryThumbnail(ad, isAr) {
+  const photoCount = getAdPhotoCount(ad);
+  // Albayan uploads are private business documents. Show them only to users
+  // who already have the same View Photos permission used by the full viewer.
+  if (!photoCount || !can('ads', 'viewPhotos')) return renderMetaAdThumbnail(ad, isAr);
+
+  const primaryIndex = getAdPrimaryPhotoIndex(ad, photoCount);
+  let source = '';
+  let credentialAttribute = '';
+  if (isServerModeEnabled()) {
+    const version = Math.max(0, Number(ad?._lastModified) || 0);
+    source = `${getServerBaseUrl()}/api/collections/ads/${encodeURIComponent(String(ad.id || ''))}/primary-photo?index=${primaryIndex}&v=${version}`;
+    // Required by the packaged iOS/Android app because its WebView origin is
+    // different from albayanhub.com and the protected image uses the session.
+    if (getServerBaseUrl()) credentialAttribute = ' crossorigin="use-credentials"';
+  } else {
+    source = getAdPhotoSources(ad)[primaryIndex] || '';
+  }
+  if (!source) return renderMetaAdThumbnail(ad, isAr);
+
+  const label = isAr
+    ? `عرض الصورة الرئيسية المرفوعة (${primaryIndex + 1} من ${photoCount})`
+    : `View uploaded main photo (${primaryIndex + 1} of ${photoCount})`;
+  return `<button type="button" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" data-photo-index="${primaryIndex}" onclick="openAdPhotoViewer(this.dataset.adId, Number(this.dataset.photoIndex), this)" class="meta-ad-thumbnail-button" title="${Security.escapeHtml(label)}" aria-label="${Security.escapeHtml(label)}">
+    <img src="${Security.escapeHtml(source)}" alt="${Security.escapeHtml(label)}" loading="lazy" decoding="async"${credentialAttribute} onerror="adUploadedThumbnailError(this)">
+    <span class="meta-ad-thumbnail-badge" aria-hidden="true"><i data-lucide="maximize-2" class="h-3 w-3"></i></span>
+    <span class="absolute bottom-0 left-0 rounded-tr-md bg-emerald-600/90 px-1 py-0.5 text-[9px] font-black leading-none text-white">${primaryIndex + 1}/${photoCount}</span>
+  </button>`;
+}
+
+function adUploadedThumbnailError(img) {
+  // Never replace a failed Albayan upload with a Meta/page picture: that can
+  // show a believable but wrong image. Keep the failure explicit and retryable
+  // through View Photos / Choose main photo.
+  const button = img?.closest?.('.meta-ad-thumbnail-button');
+  if (!button || button.classList.contains('meta-ad-thumbnail-placeholder')) return;
+  const unavailable = metaAdsIsArabic() ? 'الصورة المرفوعة غير متاحة' : 'Uploaded photo unavailable';
+  button.classList.add('meta-ad-thumbnail-placeholder');
+  button.title = unavailable;
+  button.setAttribute('aria-label', unavailable);
+  button.innerHTML = '<i data-lucide="image-off" class="h-5 w-5"></i>';
+  IconQueue.schedule(button);
 }
 
 function metaAdsThumbnailError(img) {
@@ -41041,11 +42492,214 @@ function renderMetaAdsHeaderButton(isAr) {
   return `<button type="button" onclick="openMetaAdsConnectionModal()" class="btn-shine inline-flex min-h-11 items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 font-bold text-blue-700 hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-900/30 dark:text-blue-200" title="${isAr ? 'اتصال آمن للقراءة فقط مع إعلانات Meta' : 'Secure read-only Meta Ads connection'}"><i data-lucide="facebook" class="h-4 w-4"></i><span>${isAr ? 'ربط Meta' : 'Meta Sync'}</span></button>`;
 }
 
+// ==========================================
+// META INSIGHTS — ACTIVE PAGES & REMAINING BUDGET TRACKERS
+// ==========================================
+
+const metaInsightsUi = {
+  open: false,
+  loading: false,
+  refreshing: false,
+  error: '',
+  stats: null,
+  loadedAtMs: 0,
+  requestSeq: 0
+};
+const META_INSIGHTS_CLIENT_CACHE_MS = 5 * 60 * 1000;
+
+function metaAdsActiveRemainingSummary() {
+  // Combined remaining budget of every Albayan ad whose linked Meta ad is
+  // currently ACTIVE, grouped per ad account. Pure local computation.
+  // Open-ended ads (daily budget, no end date) have no total budget, so they
+  // are reported separately instead of silently contributing 0.
+  const byAccount = new Map();
+  let totalMinor = 0;
+  let count = 0;
+  let openEnded = 0;
+  let currency = 'USD';
+  let currencySet = false;
+  (state.ads || []).forEach(ad => {
+    if (!ad || ad._deleted || ad.recordType === 'receipt' || !ad.metaAdId) return;
+    if (String(ad.metaEffectiveStatus || '').toUpperCase() !== 'ACTIVE') return;
+    if (!currencySet && ad.metaCurrency) { currency = String(ad.metaCurrency); currencySet = true; }
+    if (metaAdsPlannedTotalMinor(ad) <= 0) {
+      openEnded += 1;
+      return;
+    }
+    const remaining = metaAdsTotalRemainingMinor(ad);
+    totalMinor += remaining;
+    count += 1;
+    const key = String(ad.metaAdAccountId || ad.metaAdAccountName || 'unknown');
+    const row = byAccount.get(key) || {
+      name: String(ad.metaAdAccountName || '').trim() || `#${key}`,
+      totalMinor: 0,
+      count: 0
+    };
+    row.totalMinor += remaining;
+    row.count += 1;
+    byAccount.set(key, row);
+  });
+  return {
+    totalMinor,
+    count,
+    openEnded,
+    currency,
+    byAccount: [...byAccount.values()].sort((a, b) => b.totalMinor - a.totalMinor)
+  };
+}
+
+function renderMetaInsightsHeaderButton(isAr) {
+  if (!isCurrentUserAdmin() || !isServerModeEnabled()) return '';
+  const summary = metaAdsActiveRemainingSummary();
+  return `<button type="button" onclick="openMetaInsightsModal()" class="btn-shine inline-flex min-h-11 items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 font-bold text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200" title="${isAr ? 'الصفحات النشطة (100$ / 90 يوم) والميزانية المتبقية للإعلانات النشطة' : 'Active pages ($100 / 90 days) and remaining budget of active ads'}">
+    <i data-lucide="gauge" class="h-4 w-4"></i>
+    <span>${isAr ? 'مؤشرات Meta' : 'Meta Insights'}</span>
+    <span class="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-black text-white" title="${isAr ? `المتبقي لـ ${summary.count} إعلان نشط` : `Remaining for ${summary.count} active ad(s)`}">${Security.escapeHtml(metaAdsFormatMoney(summary.totalMinor, summary.currency))}</span>
+  </button>`;
+}
+
+function closeMetaInsightsModal() {
+  metaInsightsUi.open = false;
+  document.getElementById('meta-insights-modal')?.remove();
+}
+
+function openMetaInsightsModal() {
+  const isAr = metaAdsIsArabic();
+  if (!isCurrentUserAdmin() || !isServerModeEnabled()) {
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access denied', isAr ? 'مؤشرات Meta متاحة للمدير فقط.' : 'Meta insights are available to administrators only.', 'error');
+    return;
+  }
+  metaInsightsUi.open = true;
+  metaInsightsUi.error = '';
+  metaInsightsRenderModal();
+  // The server already caches the statistics; do not spend a request (or the
+  // rate budget) when this browser fetched them moments ago.
+  if (metaInsightsUi.stats && Date.now() - metaInsightsUi.loadedAtMs < META_INSIGHTS_CLIENT_CACHE_MS) return;
+  metaInsightsLoad(false);
+}
+
+async function metaInsightsLoad(refresh) {
+  // Single flight: one request at a time, and a response that was overtaken
+  // by a newer request (e.g. Refresh clicked during a slow load) is dropped.
+  if (metaInsightsUi.loading || metaInsightsUi.refreshing) return;
+  const seq = ++metaInsightsUi.requestSeq;
+  if (refresh || metaInsightsUi.stats) metaInsightsUi.refreshing = true;
+  else metaInsightsUi.loading = true;
+  metaInsightsUi.error = '';
+  metaInsightsRenderModal();
+  try {
+    const stats = await apiMetaPartnerPages(refresh === true);
+    if (seq !== metaInsightsUi.requestSeq) return;
+    metaInsightsUi.stats = stats;
+    metaInsightsUi.loadedAtMs = Date.now();
+  } catch (error) {
+    if (seq === metaInsightsUi.requestSeq) metaInsightsUi.error = metaAdsErrorMessage(error);
+  } finally {
+    if (seq === metaInsightsUi.requestSeq) {
+      metaInsightsUi.loading = false;
+      metaInsightsUi.refreshing = false;
+      metaInsightsRenderModal();
+    }
+  }
+}
+
+function metaInsightsPageRow(page, isAr, currency) {
+  const spendText = metaAdsFormatMoney(Number(page.spendMinor) || 0, currency || 'USD');
+  return `<div class="flex items-center justify-between gap-3 rounded-xl border p-2.5 ${page.qualified ? 'border-emerald-200 bg-emerald-50/60 dark:border-emerald-800 dark:bg-emerald-950/20' : 'border-slate-200 dark:border-slate-700'}">
+    <div class="min-w-0">
+      <div class="break-words text-sm font-bold text-slate-800 dark:text-white">${Security.escapeHtml(String(page.pageName || ''))}</div>
+      <div class="break-all font-mono text-[10px] text-slate-500">#${Security.escapeHtml(String(page.pageId || ''))}</div>
+    </div>
+    <div class="shrink-0 text-end">
+      <div class="text-sm font-black ${page.qualified ? 'text-emerald-700 dark:text-emerald-300' : 'text-slate-600 dark:text-slate-300'}">${Security.escapeHtml(spendText)}</div>
+      ${page.qualified
+        ? `<div class="inline-flex items-center gap-1 rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-bold text-white"><i data-lucide="check" class="h-3 w-3"></i>${isAr ? 'مؤهلة' : 'Qualified'}</div>`
+        : `<div class="text-[10px] font-medium text-slate-400">${isAr ? 'أقل من 100$' : 'Under $100'}</div>`}
+    </div>
+  </div>`;
+}
+
+function metaInsightsRenderModal() {
+  // Never re-create the dialog after the user closed it: an in-flight load
+  // finishing later must not resurrect a dismissed overlay.
+  if (!metaInsightsUi.open) return;
+  const isAr = metaAdsIsArabic();
+  let modal = document.getElementById('meta-insights-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'meta-insights-modal';
+    modal.className = 'mobile-dialog-overlay fixed inset-0 z-[60] flex items-start justify-center overflow-hidden bg-slate-900/60 p-2 backdrop-blur-sm sm:items-center sm:p-4';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.onclick = event => { if (event.target === modal) closeMetaInsightsModal(); };
+    document.body.appendChild(modal);
+  }
+  const summary = metaAdsActiveRemainingSummary();
+  const stats = metaInsightsUi.stats;
+  const pages = Array.isArray(stats?.pages) ? stats.pages : [];
+  const qualifiedPages = pages.filter(page => page && page.qualified);
+  const otherPages = pages.filter(page => page && !page.qualified);
+  const targetCount = Number(stats?.targetCount) || 500;
+  const qualifiedCount = Number(stats?.qualifiedCount) || qualifiedPages.length;
+  const progressPercent = Math.max(0, Math.min(100, (qualifiedCount / targetCount) * 100));
+  const computedText = stats?.computedAt ? metaAdsFormatDate(stats.computedAt, true) : '';
+  const shownOthers = otherPages.slice(0, 15);
+  const accountErrors = Array.isArray(stats?.accountErrors) ? stats.accountErrors : [];
+
+  modal.innerHTML = `<div class="glass-panel w-full max-w-2xl overflow-y-auto rounded-2xl p-4 shadow-2xl custom-scrollbar sm:p-6" style="max-height:85dvh" dir="${isAr ? 'rtl' : 'ltr'}" onclick="event.stopPropagation()">
+    <div class="flex items-start justify-between gap-3">
+      <div>
+        <h2 class="flex items-center gap-2 text-xl font-black text-slate-800 dark:text-white"><i data-lucide="gauge" class="h-6 w-6 text-emerald-600"></i>${isAr ? 'مؤشرات Meta' : 'Meta Insights'}</h2>
+        <p class="mt-1 text-sm text-slate-500">${isAr ? 'قراءة فقط — من حسابات الإعلانات المرتبطة.' : 'Read-only — from the connected ad accounts.'}</p>
+      </div>
+      <button type="button" onclick="closeMetaInsightsModal()" class="touch-target rounded-xl p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${isAr ? 'إغلاق' : 'Close'}"><i data-lucide="x" class="h-5 w-5"></i></button>
+    </div>
+
+    <div data-role="meta-active-remaining" class="mt-4 rounded-xl border border-emerald-200 bg-emerald-50/60 p-4 dark:border-emerald-800 dark:bg-emerald-950/20">
+      <div class="flex items-center gap-2 font-black text-emerald-800 dark:text-emerald-200"><i data-lucide="wallet" class="h-4 w-4"></i>${isAr ? 'الميزانية المتبقية — كل الإعلانات النشطة معاً' : 'Total remaining budget — all active ads combined'}</div>
+      <div class="mt-2 text-3xl font-black text-emerald-700 dark:text-emerald-300">${Security.escapeHtml(metaAdsFormatMoney(summary.totalMinor, summary.currency))}</div>
+      <div class="mt-1 text-xs text-slate-500">${isAr ? `${summary.count} إعلان نشط على Meta الآن (المستوردة تلقائياً + المربوطة يدوياً)` : `${summary.count} ad(s) currently ACTIVE on Meta (auto-imported + manually linked)`}${summary.openEnded ? ` · ${isAr ? `${summary.openEnded} إعلان مفتوح بدون ميزانية إجمالية (غير محسوب)` : `${summary.openEnded} open-ended ad(s) without a total budget (not counted)`}` : ''}</div>
+      ${summary.byAccount.length ? `<div class="mt-3 space-y-1.5">${summary.byAccount.map(account => `<div class="flex items-center justify-between gap-2 rounded-lg bg-white/70 px-3 py-1.5 text-xs dark:bg-slate-900/40"><span class="min-w-0 break-words font-bold text-slate-700 dark:text-slate-200">${Security.escapeHtml(account.name)} <span class="font-normal text-slate-400">(${account.count})</span></span><span class="shrink-0 font-black text-emerald-700 dark:text-emerald-300">${Security.escapeHtml(metaAdsFormatMoney(account.totalMinor, summary.currency))}</span></div>`).join('')}</div>` : ''}
+    </div>
+
+    <div data-role="meta-active-pages" class="mt-4 rounded-xl border border-indigo-200 bg-indigo-50/50 p-4 dark:border-indigo-800 dark:bg-indigo-950/20">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div class="flex items-center gap-2 font-black text-indigo-800 dark:text-indigo-200"><i data-lucide="files" class="h-4 w-4"></i>${isAr ? 'الصفحات النشطة (معيار شريك Meta)' : 'Active pages (Meta partner metric)'}</div>
+        <button type="button" onclick="metaInsightsLoad(true)" ${metaInsightsUi.refreshing || metaInsightsUi.loading ? 'disabled' : ''} class="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-indigo-200 px-2.5 text-xs font-bold text-indigo-700 disabled:opacity-60 dark:border-indigo-700 dark:text-indigo-200"><i data-lucide="${metaInsightsUi.refreshing ? 'loader-circle' : 'refresh-cw'}" class="h-3.5 w-3.5 ${metaInsightsUi.refreshing ? 'animate-spin' : ''}"></i>${isAr ? 'تحديث' : 'Refresh'}</button>
+      </div>
+      <p class="mt-1 text-xs text-slate-500">${isAr ? 'عدد الصفحات المرتبطة بحسابات الإعلانات التي تجاوز إنفاقها 100$ خلال آخر 90 يوماً.' : 'Pages connected to the ad accounts with over $100 in spend over the last 90 days.'}</p>
+      ${metaInsightsUi.error ? `<div role="alert" class="mt-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-200">${Security.escapeHtml(metaInsightsUi.error)}</div>` : ''}
+      ${metaInsightsUi.loading ? `<div class="mt-4 flex items-center justify-center gap-2 rounded-xl bg-white/60 p-6 text-slate-500 dark:bg-slate-900/40"><i data-lucide="loader-circle" class="h-5 w-5 animate-spin"></i>${isAr ? 'حساب الصفحات النشطة...' : 'Calculating active pages...'}</div>` : ''}
+      ${!metaInsightsUi.loading && stats ? `
+        <div class="mt-3 flex items-end gap-2"><span class="text-3xl font-black text-indigo-700 dark:text-indigo-300">${qualifiedCount}</span><span class="pb-1 text-sm font-bold text-slate-500">/ ${targetCount} ${isAr ? 'هدف الشارة' : 'badge target'}</span></div>
+        <div class="mt-2 h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700"><div class="h-full rounded-full bg-indigo-600" style="width:${progressPercent.toFixed(1)}%"></div></div>
+        ${computedText ? `<div class="mt-1 text-[10px] text-slate-400">${isAr ? 'آخر حساب' : 'Last calculated'}: ${Security.escapeHtml(computedText)}</div>` : ''}
+        ${accountErrors.length ? `<div class="mt-2 rounded-lg bg-amber-50 p-2 text-xs text-amber-800 dark:bg-amber-900/20 dark:text-amber-200">${Security.escapeHtml(accountErrors[0])}</div>` : ''}
+        ${Array.isArray(stats.notes) && stats.notes.length ? `<div class="mt-2 text-xs text-slate-500">${Security.escapeHtml(stats.notes[0])}</div>` : ''}
+        ${Number(stats.unmatchedAdCount) ? `<div class="mt-2 text-xs text-slate-500">${isAr ? `لا يزال ${Number(stats.unmatchedAdCount)} إعلان قديم قيد التحليل — الرقم يقترب من رقم Meta مع كل تحديث.` : `${Number(stats.unmatchedAdCount)} older ad(s) still being analyzed — the number converges to Meta's with each refresh.`}</div>` : ''}
+        <div class="mt-3 space-y-2">
+          ${qualifiedPages.length ? `<div class="text-xs font-black text-emerald-700 dark:text-emerald-300">${isAr ? `الصفحات المؤهلة (${qualifiedPages.length})` : `Qualified pages (${qualifiedPages.length})`}</div>` : `<div class="rounded-xl bg-white/60 p-4 text-center text-sm text-slate-500 dark:bg-slate-900/40">${isAr ? 'لا توجد صفحات مؤهلة بعد.' : 'No qualified pages yet.'}</div>`}
+          ${qualifiedPages.map(page => metaInsightsPageRow(page, isAr, stats.currency)).join('')}
+          ${shownOthers.length ? `<div class="pt-1 text-xs font-black text-slate-500">${isAr ? 'الأقرب إلى التأهل' : 'Closest to qualifying'}</div>` : ''}
+          ${shownOthers.map(page => metaInsightsPageRow(page, isAr, stats.currency)).join('')}
+          ${otherPages.length > shownOthers.length ? `<div class="text-center text-[10px] text-slate-400">${isAr ? `و${otherPages.length - shownOthers.length} صفحة أخرى أقل إنفاقاً` : `and ${otherPages.length - shownOthers.length} more lower-spend page(s)`}</div>` : ''}
+        </div>
+      ` : ''}
+    </div>
+  </div>`;
+  IconQueue.schedule(modal);
+}
+
 function renderMetaAdStatusSummary(ad, isAr) {
   if (!ad || !ad.metaAdId) return '';
   const liveStatus = String(ad.metaEffectiveStatus || ad.metaConfiguredStatus || 'UNKNOWN');
   const synced = metaAdsFormatDate(ad.metaSyncedAt, true);
-  const error = String(ad.metaSyncError || '');
+  const errorCode = String(ad.metaSyncErrorCode || '');
+  // Meta throttling is one shared provider pause, not a failure of this ad.
+  // Older rows may still contain the previous per-ad error; hide it here and
+  // show the single safe retry state in the Meta Sync dialog instead.
+  const providerThrottle = errorCode.toLowerCase().includes('rate_limited');
+  const error = providerThrottle ? '' : String(ad.metaSyncError || '');
   const accountName = String(ad.metaAdAccountName || '').trim();
   const accountId = String(ad.metaAdAccountId || '').trim();
   const historyCount = typeof getMetaAdHistoryCount === 'function' ? getMetaAdHistoryCount(ad) : (Number(ad.metaChangeCount) || 0);
@@ -41055,7 +42709,7 @@ function renderMetaAdStatusSummary(ad, isAr) {
     ${(accountName || accountId) ? `<div data-role="meta-ad-account" class="mt-1 flex items-start gap-1 text-slate-600 dark:text-slate-300" title="${Security.escapeHtml(accountName || `Ad account ${accountId}`)}"><i data-lucide="briefcase-business" class="mt-0.5 h-3 w-3 shrink-0"></i><span class="min-w-0 break-words"><strong>${isAr ? 'حساب الإعلانات' : 'Ad account'}:</strong> ${Security.escapeHtml(accountName || `#${accountId}`)}${accountName && accountId ? ` <span class="text-slate-400">#${Security.escapeHtml(accountId)}</span>` : ''}</span></div>` : ''}
     ${synced ? `<div class="text-slate-500">${isAr ? 'آخر مزامنة' : 'Last sync'}: ${Security.escapeHtml(synced)}</div>` : ''}
     <button type="button" data-meta-history-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="showMetaAdHistory(this.dataset.metaHistoryAdId)" class="meta-ad-history-button" title="${isAr ? 'عرض سجل تغييرات Meta' : 'View Meta change history'}" aria-label="${isAr ? 'عرض سجل تغييرات Meta' : 'View Meta change history'}"><i data-lucide="history" class="h-3.5 w-3.5"></i><span>${isAr ? 'سجل Meta' : 'Meta history'}</span><strong>${historyCount}</strong></button>
-    ${error ? `<div class="mt-1 text-rose-600 dark:text-rose-300" title="${Security.escapeHtml(error)}">${Security.escapeHtml(error)}</div>` : ''}
+    ${error ? `<div class="mt-1 text-rose-600 dark:text-rose-300" title="${Security.escapeHtml(error)}">${Security.escapeHtml(error)}${errorCode ? ` <span class="font-mono opacity-70">[${Security.escapeHtml(errorCode)}]</span>` : ''}</div>` : ''}
   </div>`;
 }
 
@@ -41188,6 +42842,11 @@ function metaAdsRenderModal() {
   const status = metaAdsUi.status;
   const configured = status?.configured === true;
   const importState = status?.importState && typeof status.importState === 'object' ? status.importState : {};
+  const providerState = status?.providerState && typeof status.providerState === 'object' ? status.providerState : {};
+  const retryAfterSeconds = Math.max(0, Number(providerState.retryAfterSeconds || status?.remoteBackoffSeconds) || 0);
+  const providerPaused = providerState.paused === true || retryAfterSeconds > 0;
+  const retryMinutes = Math.max(1, Math.ceil(retryAfterSeconds / 60));
+  const importError = /temporarily limiting|paused safely|rate.?limit/i.test(String(importState.lastError || '')) ? '' : String(importState.lastError || '');
   const lastDiscoveryText = metaAdsFormatDate(importState.lastDiscoveryAt, true);
   // iOS Safari's CSS vh/dvh can describe the layout viewport while the address
   // bar leaves a shorter interactive viewport. A measured pixel cap keeps the
@@ -41216,18 +42875,20 @@ function metaAdsRenderModal() {
     ${!metaAdsUi.loading && status ? `<div class="mt-4 grid gap-3 sm:grid-cols-3">
       <div class="rounded-xl border border-slate-200 p-3 dark:border-slate-700"><div class="text-xs text-slate-500">${isAr ? 'الاتصال' : 'Connection'}</div><div class="mt-1 font-bold ${configured ? 'text-emerald-600' : 'text-amber-600'}">${configured ? (isAr ? 'جاهز' : 'Ready') : (isAr ? 'يحتاج إعداد' : 'Setup needed')}</div></div>
       <div class="rounded-xl border border-slate-200 p-3 dark:border-slate-700"><div class="text-xs text-slate-500">Meta Graph API</div><div class="mt-1 font-bold">${Security.escapeHtml(status.graphApiVersion || '—')}</div></div>
-      <div class="rounded-xl border border-slate-200 p-3 dark:border-slate-700"><div class="text-xs text-slate-500">${isAr ? 'المزامنة التلقائية' : 'Automatic sync'}</div><div class="mt-1 font-bold">${status.backgroundSync ? `${Number(status.syncIntervalMinutes) || 15} ${isAr ? 'دقيقة' : 'minutes'}` : (isAr ? 'متوقفة' : 'Off')}</div></div>
+      <div class="rounded-xl border ${providerPaused ? 'border-amber-300 bg-amber-50/60 dark:border-amber-800 dark:bg-amber-950/20' : 'border-slate-200 dark:border-slate-700'} p-3"><div class="text-xs text-slate-500">${isAr ? 'المزامنة التلقائية' : 'Automatic sync'}</div><div class="mt-1 font-bold ${providerPaused ? 'text-amber-700 dark:text-amber-300' : ''}">${providerPaused ? (isAr ? `متوقفة بأمان · إعادة المحاولة خلال ${retryMinutes} دقيقة` : `Paused safely · retry in ${retryMinutes} min`) : (status.backgroundSync ? `${Number(status.syncIntervalMinutes) || 15} ${isAr ? 'دقيقة' : 'minutes'}` : (isAr ? 'متوقفة' : 'Off'))}</div></div>
     </div>` : ''}
 
-    ${!metaAdsUi.loading && configured ? `<div class="mt-3 rounded-xl border border-emerald-200 bg-emerald-50/70 p-4 dark:border-emerald-800 dark:bg-emerald-950/20">
+    ${!metaAdsUi.loading && configured && providerPaused ? `<div role="status" class="mt-3 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100"><div class="flex items-start gap-2"><i data-lucide="shield-check" class="mt-0.5 h-5 w-5 shrink-0"></i><div><div class="font-black">${isAr ? 'Albayan يحمي اتصال Meta' : 'Albayan is protecting the Meta connection'}</div><div class="mt-1">${isAr ? `وصل الاستخدام إلى ${Number(providerState.usagePercent) || 0}٪، لذلك توقفت الطلبات مؤقتاً وستستأنف تلقائياً خلال حوالي ${retryMinutes} دقيقة. لا تحتاج إلى فعل شيء.` : `Usage reached ${Number(providerState.usagePercent) || 0}%, so requests are paused temporarily and will resume automatically in about ${retryMinutes} minute(s). You do not need to do anything.`}</div></div></div></div>` : ''}
+
+    ${!metaAdsUi.loading && configured ? `<div class="mt-3 rounded-xl border ${providerPaused ? 'border-amber-200 bg-amber-50/50 dark:border-amber-800 dark:bg-amber-950/20' : 'border-emerald-200 bg-emerald-50/70 dark:border-emerald-800 dark:bg-emerald-950/20'} p-4">
       <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <div class="flex items-center gap-2 font-black text-emerald-800 dark:text-emerald-200"><i data-lucide="sparkles" class="h-4 w-4"></i>${isAr ? 'الاستيراد التلقائي للإعلانات والصفحات' : 'Automatic ad and page import'}</div>
           <div class="mt-1 text-xs text-emerald-700 dark:text-emerald-300">${status.autoImport ? (isAr ? `يعمل كل ${Number(status.discoveryIntervalSeconds) || 60} ثانية` : `Runs every ${Number(status.discoveryIntervalSeconds) || 60} seconds`) : (isAr ? 'متوقف' : 'Off')} · ${isAr ? 'الحسابات' : 'Accounts'}: ${Number(importState.accountCount || status.allowedAccountCount) || 0}</div>
           <div class="mt-1 text-xs text-slate-500">${lastDiscoveryText ? `${isAr ? 'آخر فحص' : 'Last check'}: ${Security.escapeHtml(lastDiscoveryText)} · ` : ''}${isAr ? 'تم استيراد' : 'Imported'}: ${Number(importState.totalImported) || 0}${Number(importState.lastImportedCount) ? ` (${isAr ? 'آخر فحص' : 'last check'}: ${Number(importState.lastImportedCount)})` : ''}</div>
-          ${importState.lastError ? `<div class="mt-1 text-xs font-medium text-rose-600 dark:text-rose-300">${Security.escapeHtml(importState.lastError)}</div>` : ''}
+          ${importError ? `<div class="mt-1 text-xs font-medium text-rose-600 dark:text-rose-300">${Security.escapeHtml(importError)}</div>` : ''}
         </div>
-        <button type="button" onclick="metaAdsCheckForNewAds()" ${metaAdsUi.busyAction ? 'disabled' : ''} class="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-60"><i data-lucide="${metaAdsUi.busyAction === 'discover' ? 'loader-circle' : 'radar'}" class="h-4 w-4 ${metaAdsUi.busyAction === 'discover' ? 'animate-spin' : ''}"></i>${isAr ? 'فحص الإعلانات الجديدة الآن' : 'Check for new ads now'}</button>
+        <button type="button" onclick="metaAdsCheckForNewAds()" ${metaAdsUi.busyAction || providerPaused ? 'disabled' : ''} class="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-60"><i data-lucide="${metaAdsUi.busyAction === 'discover' ? 'loader-circle' : 'radar'}" class="h-4 w-4 ${metaAdsUi.busyAction === 'discover' ? 'animate-spin' : ''}"></i>${providerPaused ? (isAr ? 'سيستأنف تلقائياً' : 'Resumes automatically') : (isAr ? 'فحص الإعلانات الجديدة الآن' : 'Check for new ads now')}</button>
       </div>
     </div>` : ''}
 
@@ -41243,7 +42904,7 @@ function metaAdsRenderModal() {
       <div class="rounded-xl border border-dashed border-slate-300 p-3 dark:border-slate-700"><label for="meta-direct-ad-id" class="block text-xs font-bold text-slate-500">${isAr ? 'أو الصق رقم إعلان Meta مباشرة' : 'Or paste the numeric Meta ad ID'}</label><div class="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]"><input id="meta-direct-ad-id" inputmode="numeric" pattern="[0-9]*" placeholder="123456789012345" class="glass-input min-h-11 w-full rounded-xl px-3" dir="ltr"><button type="button" onclick="metaAdsLinkDirect()" ${metaAdsUi.busyAction ? 'disabled' : ''} class="min-h-11 rounded-xl bg-blue-600 px-4 font-bold text-white disabled:opacity-60">${isAr ? 'ربط' : 'Link'}</button></div></div>
     </div>` : ''}
 
-    ${configured && !metaAdsUi.loading ? `<div class="mt-5 flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 pt-4 dark:border-slate-700"><p class="text-xs text-slate-500">${isAr ? 'يعمل الاستيراد والمزامنة في السيرفر حتى عندما تغلق هذه الصفحة.' : 'Automatic import and sync run on the server even when this page is closed.'}</p><button type="button" onclick="metaAdsSyncAllDue()" ${metaAdsUi.busyAction ? 'disabled' : ''} class="min-h-11 rounded-xl border border-blue-200 px-3 text-sm font-bold text-blue-700 disabled:opacity-60 dark:border-blue-800 dark:text-blue-200">${isAr ? 'مزامنة المستحق الآن' : 'Sync due now'}</button></div>` : ''}
+    ${configured && !metaAdsUi.loading ? `<div class="mt-5 flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 pt-4 dark:border-slate-700"><p class="text-xs text-slate-500">${isAr ? 'يعمل الاستيراد والمزامنة في السيرفر حتى عندما تغلق هذه الصفحة.' : 'Automatic import and sync run on the server even when this page is closed.'}</p><button type="button" onclick="metaAdsSyncAllDue()" ${metaAdsUi.busyAction || providerPaused ? 'disabled' : ''} class="min-h-11 rounded-xl border border-blue-200 px-3 text-sm font-bold text-blue-700 disabled:opacity-60 dark:border-blue-800 dark:text-blue-200">${providerPaused ? (isAr ? 'إعادة المحاولة تلقائياً' : 'Automatic retry pending') : (isAr ? 'مزامنة المستحق الآن' : 'Sync due now')}</button></div>` : ''}
   </div>`;
   metaAdsFitModalToViewport();
   window.requestAnimationFrame(() => metaAdsFitModalToViewport());
@@ -41697,8 +43358,25 @@ function stopAd(id) {
   const customer = state.customers.find(c => c.id === ad.customerId);
   const adAmountUSD = ad.amountUSD || 0;
   const currentSpentUSD = ad.spentUSD || 0;
+  // A Meta-linked ad's spend comes straight from Meta's own synced numbers —
+  // no typing, no guessing; the remaining amount follows automatically. Falls
+  // back to manual entry when the ad is not linked, never synced, uses a
+  // non-USD account, or Meta reports MORE than the recorded budget (that
+  // mismatch must be resolved by editing the ad, not hidden here).
+  const metaSpendUSD = metaAdRealSpendUSD(ad);
+  const metaSpendAuto = metaSpendUSD !== null && metaSpendUSD <= adAmountUSD + 0.005;
+  const initialSpentUSD = metaSpendAuto ? metaSpendUSD : currentSpentUSD;
   const isAlreadyStopped = ad.status === 'Stopped';
   const alreadyInformed = ad.remainingCustomerInformed === true;
+  // The checkbox must describe the remainder ACTUALLY on screen. A saved
+  // confirmation for a DIFFERENT remainder (a later Meta sync reported more
+  // spend) must not render as "already informed" — and because the Meta value
+  // makes the spend input readonly, the input listener that normally resets
+  // this control can never fire. So decide the honest state up front, exactly
+  // as syncAdCustomerInformedControl would.
+  const initialConfirmation = getAdCustomerConfirmationState(ad, initialSpentUSD, adAmountUSD);
+  const informedApplies = initialConfirmation.existingConfirmationApplies;
+  const staleConfirmation = alreadyInformed && !informedApplies;
   const previousRemaining = isAlreadyStopped ? (adAmountUSD - currentSpentUSD) : 0;
   
   // Calculate current remaining from receipt allocations
@@ -41746,17 +43424,19 @@ function stopAd(id) {
             <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
               ${isAr ? 'المبلغ المصروف (دولار) *' : 'Amount Spent (USD) *'}
             </label>
-            <input 
-              type="text" 
+            <input
+              type="text"
               inputmode="decimal"
-              id="stop-ad-spent" 
-              value="${currentSpentUSD}" 
+              id="stop-ad-spent"
+              value="${initialSpentUSD.toFixed(2)}"
               max="${adAmountUSD}"
-              oninput="sanitizeMoneyInput(this)"
-              class="w-full glass-input px-4 py-2 rounded-xl text-lg font-bold focus:ring-2 focus:ring-orange-500"
+              ${metaSpendAuto ? 'readonly ' : ''}oninput="sanitizeMoneyInput(this)"
+              class="w-full glass-input px-4 py-2 rounded-xl text-lg font-bold focus:ring-2 focus:ring-orange-500${metaSpendAuto ? ' opacity-80 cursor-not-allowed' : ''}"
               placeholder="0.00"
             />
-            <p class="text-xs text-slate-500 mt-1">${isAlreadyStopped ? (isAr ? 'عدّل المبلغ المصروف لتحديث الرصيد المتبقي' : 'Edit the amount spent to update the remaining balance') : (isAr ? 'أدخل المبلغ الذي تم صرفه فعلياً على هذا الإعلان' : 'Enter how much was actually spent on this ad')}</p>
+            <p class="text-xs mt-1 ${metaSpendAuto ? 'font-bold text-blue-700 dark:text-blue-300' : 'text-slate-500'}">${metaSpendAuto
+              ? (isAr ? `تلقائي من Meta — المصروف الفعلي (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)})` : `Automatic from Meta — the real spend (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)})`)
+              : (isAlreadyStopped ? (isAr ? 'عدّل المبلغ المصروف لتحديث الرصيد المتبقي' : 'Edit the amount spent to update the remaining balance') : (isAr ? 'أدخل المبلغ الذي تم صرفه فعلياً على هذا الإعلان' : 'Enter how much was actually spent on this ad'))}</p>
           </div>
           
           <div id="stop-ad-calculations" class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-4 space-y-2">
@@ -41766,25 +43446,31 @@ function stopAd(id) {
             </div>
             <div class="flex justify-between text-sm">
               <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ المصروف:' : 'Amount Spent:'}</span>
-              <span class="font-bold text-orange-600" id="stop-ad-spent-display">$${currentSpentUSD.toFixed(2)}</span>
+              <span class="font-bold text-orange-600" id="stop-ad-spent-display">$${initialSpentUSD.toFixed(2)}</span>
             </div>
             <div class="border-t border-slate-200 dark:border-slate-700 pt-2 flex justify-between">
               <span class="text-sm font-medium text-emerald-600">${isAr ? 'المتبقي' : 'Remaining'} ${isAlreadyStopped ? (isAr ? '(سيتم تحديثه)' : '(will be updated)') : (isAr ? '(سيتم إرجاعه)' : '(will be returned)')}:</span>
-              <span class="text-sm font-bold text-emerald-600" id="stop-ad-remaining">$${(adAmountUSD - currentSpentUSD).toFixed(2)}</span>
+              <span class="text-sm font-bold text-emerald-600" id="stop-ad-remaining">$${(adAmountUSD - initialSpentUSD).toFixed(2)}</span>
             </div>
           </div>
 
-          <label class="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-900/50 ${alreadyInformed ? 'cursor-default' : 'cursor-pointer'}">
+          <label class="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-900/50 ${informedApplies ? 'cursor-default' : 'cursor-pointer'}">
             <input
               id="stop-ad-customer-informed"
               type="checkbox"
               class="mt-0.5 h-5 w-5 shrink-0 accent-emerald-600"
-              ${alreadyInformed ? 'checked disabled' : ''}
-              ${!alreadyInformed && adAmountUSD - currentSpentUSD <= 0 ? 'disabled' : ''}
+              ${informedApplies ? 'checked disabled' : ''}
+              ${!informedApplies && adAmountUSD - initialSpentUSD <= 0 ? 'disabled' : ''}
             />
             <span>
               <span class="block text-sm font-bold text-slate-800 dark:text-slate-100">${isAr ? 'أؤكد أنني أبلغت العميل بالمبلغ المتبقي' : 'I confirm that I told the customer about the remaining amount'}</span>
-              <span id="stop-ad-customer-informed-help" class="block text-xs text-slate-500">${alreadyInformed && ad.remainingCustomerInformedAt ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale()) : (isAr ? 'إذا تغيّر المصروف، أبلغ العميل بالمبلغ المتبقي الجديد ثم حدّد هذا المربع مرة أخرى.' : 'If the spend changes, tell the customer the new remaining amount and check this again.')}</span>
+              <span id="stop-ad-customer-informed-help" class="block text-xs ${staleConfirmation ? 'font-bold text-amber-700 dark:text-amber-300' : 'text-slate-500'}">${staleConfirmation
+                ? (isAr
+                    ? `تغيّر المبلغ المتبقي إلى $${(adAmountUSD - initialSpentUSD).toFixed(2)} بعد تأكيدك السابق. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع.`
+                    : `The remaining amount changed to $${(adAmountUSD - initialSpentUSD).toFixed(2)} since your earlier confirmation. Tell the customer the new amount, then check this box.`)
+                : (informedApplies && ad.remainingCustomerInformedAt
+                    ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale())
+                    : (isAr ? 'إذا تغيّر المصروف، أبلغ العميل بالمبلغ المتبقي الجديد ثم حدّد هذا المربع مرة أخرى.' : 'If the spend changes, tell the customer the new remaining amount and check this again.'))}</span>
             </span>
           </label>
           
@@ -41935,8 +43621,12 @@ async function confirmStopAd(id, source = 'modal') {
   };
   
   const isReconciliation = source === 'reconciliation';
-  const inputPrefix = isReconciliation ? `reconciliation-${id}` : 'stop-ad';
-  const spentInput = document.getElementById(`${inputPrefix}-spent`);
+  // The reconciliation card renders its input as `reconciliation-spent-<id>`
+  // (see renderReconciliationView) — the old `reconciliation-<id>-spent`
+  // lookup never matched, so the Save button silently did nothing.
+  const spentInput = document.getElementById(
+    isReconciliation ? `reconciliation-spent-${id}` : 'stop-ad-spent'
+  );
   if (!spentInput) return;
 
   const rawSpent = String(spentInput.value || '').trim();

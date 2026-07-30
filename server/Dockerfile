@@ -9,6 +9,12 @@ ENV ALBAYAN_RELEASE_SHA=${ALBAYAN_BUILD_SHA}
 
 WORKDIR /app
 
+# pg_dump is required for consistent PostgreSQL backups. Installing the
+# matching Debian client also keeps the runtime image small and predictable.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies first (better layer caching)
 COPY server/requirements.txt /app/server/requirements.txt
 RUN pip install --no-cache-dir -r /app/server/requirements.txt
@@ -48,4 +54,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 USER albayan
 
 # Use exec form for proper signal handling
-CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header"]

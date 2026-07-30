@@ -692,6 +692,11 @@ const state = {
   // module, so only the Admin role can read or write it.
   appSettings: [],
 
+  // Admin-only, append-only record of USD acquired to fund Meta ads. Profit
+  // reporting consumes these cost lots oldest-first (FIFO); existing ad and
+  // receipt money fields remain untouched.
+  dollarPurchases: [],
+
   // Settings
   defaultExchangeRate: 0,
   exchangeRateHistory: [],
