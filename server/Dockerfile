@@ -17,7 +17,12 @@ RUN apt-get update \
 
 # Install dependencies first (better layer caching)
 COPY server/requirements.txt /app/server/requirements.txt
-RUN pip install --no-cache-dir -r /app/server/requirements.txt
+# pip's default 15s socket timeout is too short on a slow link: a timed-out
+# metadata fetch makes a package look like it has NO candidates, so the resolver
+# backtracks through every release and dies with a misleading
+# "ResolutionImpossible" instead of a network error. Seen 2026-07-30 on
+# pydantic-core, which the previous image had installed without trouble.
+RUN pip install --no-cache-dir --timeout 120 --retries 10 -r /app/server/requirements.txt
 
 # Copy application code
 COPY server /app/server
