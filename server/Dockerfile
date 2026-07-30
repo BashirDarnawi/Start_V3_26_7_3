@@ -22,7 +22,13 @@ COPY server/requirements.txt /app/server/requirements.txt
 # backtracks through every release and dies with a misleading
 # "ResolutionImpossible" instead of a network error. Seen 2026-07-30 on
 # pydantic-core, which the previous image had installed without trouble.
-RUN pip install --no-cache-dir --timeout 120 --retries 10 -r /app/server/requirements.txt
+#
+# The BuildKit cache mount keeps already-downloaded wheels on the build host
+# between attempts, so a dropped connection resumes instead of re-pulling the
+# whole ~200 MB. The mount is not a layer, so the image does not grow — which is
+# why --no-cache-dir is no longer needed here.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --timeout 120 --retries 10 -r /app/server/requirements.txt
 
 # Copy application code
 COPY server /app/server
