@@ -24,7 +24,7 @@
     "release:prepare": "npm run build && npm test && npm run sync:mobile && npm run verify:mobile",
     "release:check": "npm test && npm run verify:mobile",
     "release:image": "npm run build && npm test && docker build -t bashird/albayan:latest -f server/Dockerfile .",
-    "release:image:push": "npm run release:image && docker push bashird/albayan:latest"
+    "release:image:push": "npm run build && npm run sync:www && npm test && node scripts/publish-image.js"
   },
   "keywords": [],
   "author": "",
