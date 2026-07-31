@@ -4,9 +4,6 @@
 
 FROM python:3.12-slim-bookworm
 
-ARG ALBAYAN_BUILD_SHA=development
-ENV ALBAYAN_RELEASE_SHA=${ALBAYAN_BUILD_SHA}
-
 WORKDIR /app
 
 # pg_dump is required for consistent PostgreSQL backups. Installing the
@@ -29,6 +26,13 @@ COPY server/requirements.txt /app/server/requirements.txt
 # why --no-cache-dir is no longer needed here.
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --timeout 120 --retries 10 -r /app/server/requirements.txt
+
+# The release stamp changes on every publish. It MUST stay below the apt and
+# pip layers: declared any earlier it invalidates their cache, forcing every
+# release to rebuild and re-upload ~200 MB of unchanged dependencies — and
+# forcing the Jelastic node to re-download all of it on redeploy.
+ARG ALBAYAN_BUILD_SHA=development
+ENV ALBAYAN_RELEASE_SHA=${ALBAYAN_BUILD_SHA}
 
 # Copy application code
 COPY server /app/server
