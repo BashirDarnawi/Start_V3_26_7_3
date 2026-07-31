@@ -4884,6 +4884,40 @@ function getMetaAdHistoryEntries(ad) {
     });
 }
 
+// Who turned a Meta-imported draft into a real ad, for showing on the ads list
+// without opening the ad. An imported row is created by the automation, so its
+// "Created by" is the importer, never a person — this answers "who did the
+// setup?".
+//
+// The server stamps metaImportCompletedBy inside the guarded
+// needs_completion -> complete transition. Ads completed BEFORE that stamp
+// existed fall back to their own history: the first human edit of a draft IS
+// the completion. Meta's sync rows are excluded, so an automatic budget or
+// spend update is never mistaken for a person.
+function getAdCompletedByName(ad) {
+  if (!ad || typeof ad !== 'object') return '';
+  const stampedId = String(ad.metaImportCompletedBy || '').trim();
+  if (stampedId) {
+    const user = (state.users || []).find(item => String(item?.id || '') === stampedId);
+    if (user?.name) return String(user.name).trim();
+  }
+  const stampedName = String(ad.metaImportCompletedByName || '').trim();
+  if (stampedName) return stampedName;
+  // Only imported rows have a completion step worth naming.
+  const wasImported = !!ad.metaImportState || !!ad.metaImportedAt
+    || String(ad.metaImportSource || '').trim() !== '';
+  if (!wasImported) return '';
+  let earliest = null;
+  for (const entry of getAdEditHistoryEntries(ad)) {
+    const by = String(entry?.editedBy || '').trim();
+    if (!by || by.toLowerCase() === 'unknown') continue;
+    const at = new Date(entry?.editedAt).getTime();
+    const rank = Number.isFinite(at) ? at : Number.MAX_SAFE_INTEGER;
+    if (!earliest || rank < earliest.rank) earliest = { by, rank };
+  }
+  return earliest ? earliest.by : '';
+}
+
 function getAdEditHistoryCount(ad) {
   const detailedCount = getAdEditHistoryEntries(ad).length;
   if (detailedCount > 0) return detailedCount;

@@ -316,6 +316,10 @@ META_AD_SERVER_FIELDS = frozenset(
         "metaImportState",
         "metaImportedAt",
         "metaImportCompletedAt",
+        # Who completed the draft. Server-controlled like the timestamp beside
+        # it: a browser that could write these could credit anyone.
+        "metaImportCompletedBy",
+        "metaImportCompletedByName",
         "metaImportSource",
         "metaChangeHistory",
         "metaChangeCount",
@@ -3220,6 +3224,33 @@ def _created_after_cutoff(value: Any, cutoff: str | None) -> bool:
     except ValueError:
         return False
     return created_at >= cutoff_at
+
+
+def stamp_import_completion(
+    existing: dict[str, Any] | None, saved_data: dict[str, Any], actor_id: str, conn
+) -> None:
+    """Record that a Meta draft became a real ad, and WHO did it.
+
+    A Meta-first row starts as an accounting-neutral draft. Only a successful
+    transactional edit with a real customer and funding plan completes it, so
+    this is called from inside that guarded transaction — browser payloads
+    cannot forge the transition or claim someone else's work.
+
+    The display name is denormalized from the users table for the same reason
+    as createdByName: a soft-deleted account stops syncing to clients, and the
+    ads list must still show who completed the setup.
+    """
+    if not existing or str(existing.get("metaImportState") or "") != "needs_completion":
+        return
+    saved_data["metaImportState"] = "complete"
+    saved_data["metaImportCompletedAt"] = _iso_now()
+    saved_data["metaImportCompletedBy"] = actor_id
+    row = conn.execute(
+        text("SELECT name FROM users WHERE id = :id LIMIT 1"),
+        {"id": actor_id},
+    ).mappings().first()
+    if row and row.get("name"):
+        saved_data["metaImportCompletedByName"] = _clean_text(row["name"], 120)
 
 
 def _pending_meta_snapshot(

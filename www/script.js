@@ -18096,6 +18096,13 @@ function renderAdsView() {
                 // record's own createdByName stamp so the creator's name
                 // survives account deletion (see resolveCreatorDisplayName).
                 const creatorName = Security.escapeHtml(String(resolveCreatorDisplayName(ad, isAr)));
+                // An imported ad is "created by" the automation, so name the
+                // person who actually did the setup. Hidden when it would only
+                // repeat the creator.
+                const completedByRaw = String(getAdCompletedByName(ad) || '');
+                const completedByName = completedByRaw && completedByRaw !== String(resolveCreatorDisplayName(ad, isAr))
+                  ? Security.escapeHtml(completedByRaw)
+                  : '';
                 // Deleting a page keeps its ads (history) but leaves their pageId
                 // pointing at the deleted page, whose name a NEW page may reuse.
                 // Keep resolving the name (the ad really did run on it) but mark
@@ -18165,6 +18172,10 @@ function renderAdsView() {
                             <i data-lucide="user" class="h-3 w-3 shrink-0"></i>
                             <span>${isAr ? 'تم الإنشاء بواسطة' : 'Created by'}: <span class="font-semibold text-slate-700 dark:text-slate-200">${creatorName}</span></span>
                           </div>
+                          ${completedByName ? `<div data-role="ad-completed-by" class="mt-0.5 flex items-center gap-1 text-[11px] font-normal leading-tight text-emerald-700 dark:text-emerald-300" title="${isAr ? 'الشخص الذي أكمل بيانات الإعلان' : 'The person who completed this ad'}">
+                            <i data-lucide="clipboard-check" class="h-3 w-3 shrink-0"></i>
+                            <span>${isAr ? 'أكمله' : 'Completed by'}: <span class="font-semibold">${completedByName}</span></span>
+                          </div>` : ''}
                         </div>
                       </div>
                     </td>
@@ -26961,6 +26972,40 @@ function getMetaAdHistoryEntries(ad) {
       const b = new Date(right.editedAt).getTime();
       return (Number.isFinite(a) ? a : 0) - (Number.isFinite(b) ? b : 0);
     });
+}
+
+// Who turned a Meta-imported draft into a real ad, for showing on the ads list
+// without opening the ad. An imported row is created by the automation, so its
+// "Created by" is the importer, never a person — this answers "who did the
+// setup?".
+//
+// The server stamps metaImportCompletedBy inside the guarded
+// needs_completion -> complete transition. Ads completed BEFORE that stamp
+// existed fall back to their own history: the first human edit of a draft IS
+// the completion. Meta's sync rows are excluded, so an automatic budget or
+// spend update is never mistaken for a person.
+function getAdCompletedByName(ad) {
+  if (!ad || typeof ad !== 'object') return '';
+  const stampedId = String(ad.metaImportCompletedBy || '').trim();
+  if (stampedId) {
+    const user = (state.users || []).find(item => String(item?.id || '') === stampedId);
+    if (user?.name) return String(user.name).trim();
+  }
+  const stampedName = String(ad.metaImportCompletedByName || '').trim();
+  if (stampedName) return stampedName;
+  // Only imported rows have a completion step worth naming.
+  const wasImported = !!ad.metaImportState || !!ad.metaImportedAt
+    || String(ad.metaImportSource || '').trim() !== '';
+  if (!wasImported) return '';
+  let earliest = null;
+  for (const entry of getAdEditHistoryEntries(ad)) {
+    const by = String(entry?.editedBy || '').trim();
+    if (!by || by.toLowerCase() === 'unknown') continue;
+    const at = new Date(entry?.editedAt).getTime();
+    const rank = Number.isFinite(at) ? at : Number.MAX_SAFE_INTEGER;
+    if (!earliest || rank < earliest.rank) earliest = { by, rank };
+  }
+  return earliest ? earliest.by : '';
 }
 
 function getAdEditHistoryCount(ad) {

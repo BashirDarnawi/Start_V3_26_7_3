@@ -511,6 +511,65 @@ check('saving an ad closes its dialog once and never rewinds an extra history st
   assert(modalSource.includes('if (!consumedModalHistoryEntry) clearUrlParams'), 'a closed dialog can leave ?modal= in the URL');
 });
 
+check('the ads list names the person who completed an imported Meta ad', () => {
+  // A Meta-imported row is "Created by" the automation, so the list showed only
+  // "System" and there was no way to see who actually did the setup.
+  loginAs(ADMIN);
+  S.language = 'en';
+  const originalUsers = S.users;
+  try {
+    S.users = [{ id: 'u_sara', name: 'Sara' }, { id: 'u_ali', name: 'Ali' }];
+
+    // 1. The server stamp wins, and resolves to the CURRENT account name.
+    assert(sandbox.getAdCompletedByName({
+      metaImportState: 'complete', metaImportCompletedBy: 'u_sara', metaImportCompletedByName: 'Old Name'
+    }) === 'Sara', 'the stamped completer did not resolve to the live user name');
+
+    // 2. A deleted account stops syncing, so the stored name must survive.
+    assert(sandbox.getAdCompletedByName({
+      metaImportState: 'complete', metaImportCompletedBy: 'u_gone', metaImportCompletedByName: 'Mahmoud'
+    }) === 'Mahmoud', 'the stored name did not survive a deleted account');
+
+    // 3. Ads completed BEFORE the stamp existed fall back to their own history:
+    //    the earliest human edit is the completion. Meta's own sync rows must
+    //    never be mistaken for a person, and order must not be trusted blindly.
+    assert(sandbox.getAdCompletedByName({
+      metaImportSource: 'meta_ads',
+      editHistory: [
+        { editedAt: '2026-07-29T10:00:00Z', editedBy: 'Meta automatic import', changes: [] },
+        { editedAt: '2026-07-29T12:00:00Z', editedBy: 'Ali', changes: [] },
+        { editedAt: '2026-07-29T11:00:00Z', editedBy: 'Sara', changes: [] }
+      ]
+    }) === 'Sara', 'the fallback did not pick the earliest human edit');
+
+    assert(sandbox.getAdCompletedByName({
+      metaImportSource: 'meta_ads',
+      editHistory: [{ editedAt: '2026-07-29T10:00:00Z', editedBy: 'Meta automatic sync', changes: [] }]
+    }) === '', 'a Meta sync row was mistaken for a person');
+
+    // 4. A normal hand-made ad has no separate completion step to name.
+    assert(sandbox.getAdCompletedByName({
+      editHistory: [{ editedAt: '2026-07-29T10:00:00Z', editedBy: 'Ali', changes: [] }]
+    }) === '', 'a manually created ad must not claim a completer');
+    assert(sandbox.getAdCompletedByName(null) === '', 'a missing ad must not throw');
+  } finally {
+    S.users = originalUsers;
+  }
+
+  // The name reaches the list itself, not just the helper.
+  const viewsSource = fs.readFileSync(path.join(__dirname, '..', 'src', '12-views.js'), 'utf8');
+  assert(viewsSource.includes('const completedByRaw = String(getAdCompletedByName(ad)'), 'the ads list does not look up the completer');
+  assert(viewsSource.includes('data-role="ad-completed-by"'), 'the ads list does not show who completed the ad');
+  assert(/completedByRaw !== String\(resolveCreatorDisplayName\(ad, isAr\)\)/.test(viewsSource),
+    'the completer is shown even when it only repeats the creator');
+
+  // The stamp must stay server-controlled: a browser that could write it could
+  // credit anyone with someone else's work.
+  const metaServerSource = fs.readFileSync(path.join(__dirname, '..', 'server', 'meta_ads.py'), 'utf8');
+  assert(metaServerSource.includes('"metaImportCompletedBy",'), 'metaImportCompletedBy is forgeable from a browser');
+  assert(metaServerSource.includes('"metaImportCompletedByName",'), 'metaImportCompletedByName is forgeable from a browser');
+});
+
 check('picking a page category closes the list instead of re-opening it', () => {
   // selectPageCategory ended with input.focus(), and the field carries an inline
   // onfocus="showPageCategoryDropdown()". So choosing a category instantly

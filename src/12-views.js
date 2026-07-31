@@ -4082,6 +4082,13 @@ function renderAdsView() {
                 // record's own createdByName stamp so the creator's name
                 // survives account deletion (see resolveCreatorDisplayName).
                 const creatorName = Security.escapeHtml(String(resolveCreatorDisplayName(ad, isAr)));
+                // An imported ad is "created by" the automation, so name the
+                // person who actually did the setup. Hidden when it would only
+                // repeat the creator.
+                const completedByRaw = String(getAdCompletedByName(ad) || '');
+                const completedByName = completedByRaw && completedByRaw !== String(resolveCreatorDisplayName(ad, isAr))
+                  ? Security.escapeHtml(completedByRaw)
+                  : '';
                 // Deleting a page keeps its ads (history) but leaves their pageId
                 // pointing at the deleted page, whose name a NEW page may reuse.
                 // Keep resolving the name (the ad really did run on it) but mark
@@ -4151,6 +4158,10 @@ function renderAdsView() {
                             <i data-lucide="user" class="h-3 w-3 shrink-0"></i>
                             <span>${isAr ? 'تم الإنشاء بواسطة' : 'Created by'}: <span class="font-semibold text-slate-700 dark:text-slate-200">${creatorName}</span></span>
                           </div>
+                          ${completedByName ? `<div data-role="ad-completed-by" class="mt-0.5 flex items-center gap-1 text-[11px] font-normal leading-tight text-emerald-700 dark:text-emerald-300" title="${isAr ? 'الشخص الذي أكمل بيانات الإعلان' : 'The person who completed this ad'}">
+                            <i data-lucide="clipboard-check" class="h-3 w-3 shrink-0"></i>
+                            <span>${isAr ? 'أكمله' : 'Completed by'}: <span class="font-semibold">${completedByName}</span></span>
+                          </div>` : ''}
                         </div>
                       </div>
                     </td>

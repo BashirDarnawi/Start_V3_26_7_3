@@ -76,6 +76,7 @@ from .meta_ads import (
     META_AD_SERVER_FIELDS,
     META_PAGE_SERVER_FIELDS,
     create_meta_ads_router,
+    stamp_import_completion,
 )
 from .ad_media import create_ad_media_router
 from sqlalchemy import text
@@ -8863,14 +8864,8 @@ def _ad_mutation_atomic(
             assert_financial_period_open("ads", existing, conn=conn)
             assert_financial_period_open("ads", saved_data, conn=conn)
 
-            # A Meta-first row starts as an accounting-neutral draft. Only a
-            # successful transactional edit with a real customer and funding
-            # plan completes it; browser payloads cannot forge this transition.
-            if existing is not None and str(
-                existing.get("metaImportState") or ""
-            ) == "needs_completion":
-                saved_data["metaImportState"] = "complete"
-                saved_data["metaImportCompletedAt"] = _iso_utc()
+            # Completes an accounting-neutral Meta draft and records who did it.
+            stamp_import_completion(existing, saved_data, actor_id, conn)
 
             # The customer itself must be active; funding receipts were already
             # locked in deterministic order above.

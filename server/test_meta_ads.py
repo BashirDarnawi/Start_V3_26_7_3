@@ -1498,6 +1498,110 @@ def test_ordinary_mutation_routes_cannot_forge_meta_state(actors, configured_met
     assert unchanged_version == version
 
 
+def _insert_customer(customer_id, creator_id, name="Completion Customer"):
+    stamp = now_ms()
+    data = {
+        "id": customer_id,
+        "name": name,
+        "phones": ["0910000001"],
+        "platform": "Facebook",
+        "_created": stamp,
+        "_lastModified": stamp,
+        "_deleted": False,
+    }
+    with db_conn() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO entities (type,id,data_json,deleted,created_at,created_by,last_modified) "
+                "VALUES ('customers',:id,:data,false,:stamp,:creator,:stamp)"
+            ),
+            {"id": customer_id, "data": json_dumps(data), "stamp": stamp, "creator": creator_id},
+        )
+    return stamp
+
+
+def test_completing_an_imported_draft_records_who_did_it(actors, configured_meta):
+    """An imported ad is created by the automation, so name the real person.
+
+    Without this the ads list can only ever say "Created by: System" and there
+    is no way to see who chose the customer, payment and receipt.
+    """
+    customer_id = "meta_completion_customer"
+    ad_id = "meta_completion_ad"
+    _insert_customer(customer_id, actors["admin_id"])
+    version = _insert_ad(
+        ad_id,
+        actors["admin_id"],
+        customerId=customer_id,
+        metaImportState="needs_completion",
+        # A plain unpaid ad: the customer owes the money, so the ad is complete
+        # without any receipt or funding attached yet.
+        paymentStatus="not_paid",
+        status="Active",
+        amountUSD=10,
+        amountLocal=97,
+        exchangeRate=9.7,
+        receiptId="",
+        receiptAllocations=[],
+        dueAllocations=[],
+    )
+    try:
+        before, _ = _stored_ad(ad_id)
+        assert "metaImportCompletedBy" not in before
+
+        done = client.post(
+            "/api/ads/mutate",
+            json={
+                "action": "update",
+                "adId": ad_id,
+                "idempotencyKey": "meta-completion-stamp-1",
+                "expectedLastModified": version,
+                "data": {"notes": "customer and payment chosen"},
+            },
+            cookies=actors["employee"],
+        )
+        assert done.status_code == 200, done.text
+
+        stored, _ = _stored_ad(ad_id)
+        assert stored["metaImportState"] == "complete"
+        assert stored["metaImportCompletedAt"]
+        # The employee who did the work, not the admin who owns the row.
+        assert stored["metaImportCompletedBy"] == actors["employee_id"]
+        assert stored["metaImportCompletedByName"] == "Meta Employee"
+    finally:
+        with db_conn() as conn:
+            conn.execute(
+                text("DELETE FROM entities WHERE type IN ('ads','customers') AND id IN (:a,:c)"),
+                {"a": ad_id, "c": customer_id},
+            )
+
+
+def test_a_browser_cannot_claim_it_completed_an_imported_draft(actors, configured_meta):
+    """Whoever can write this field can credit anyone with someone else's work."""
+    ad_id = "meta_completion_forgery"
+    version = _insert_ad(ad_id, actors["admin_id"], metaImportState="needs_completion")
+    try:
+        for field in ("metaImportCompletedBy", "metaImportCompletedByName"):
+            forged = client.post(
+                "/api/ads/mutate",
+                json={
+                    "action": "update",
+                    "adId": ad_id,
+                    "idempotencyKey": f"meta-completion-forge-{field}",
+                    "expectedLastModified": version,
+                    "data": {field: "somebody-else"},
+                },
+                cookies=actors["admin"],
+            )
+            assert forged.status_code == 403, f"{field} was accepted from a browser"
+        stored, unchanged = _stored_ad(ad_id)
+        assert "metaImportCompletedBy" not in stored
+        assert unchanged == version
+    finally:
+        with db_conn() as conn:
+            conn.execute(text("DELETE FROM entities WHERE type='ads' AND id=:id"), {"id": ad_id})
+
+
 def test_auto_import_baselines_then_creates_one_neutral_draft_and_reuses_page(
     actors, configured_meta
 ):
