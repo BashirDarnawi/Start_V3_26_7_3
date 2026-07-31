@@ -1335,6 +1335,197 @@ function closeCustomerPagesDialog(restoreFocus = true) {
   if (restoreFocus && focusTarget?.focus) focusTarget.focus();
 }
 
+// Every ad that ran on one page, newest first. Role scoping and deleted rows
+// are handled by getAdsVisibleToCurrentUser, so this never leaks an ad the
+// current user is not allowed to see.
+function getAdsForPage(pageId) {
+  const wanted = String(pageId || '').trim();
+  if (!wanted) return [];
+  const when = ad => {
+    const value = new Date(ad?.startDate || ad?._created || 0).getTime();
+    return Number.isFinite(value) ? value : 0;
+  };
+  return getAdsVisibleToCurrentUser()
+    .filter(ad => String(ad?.pageId || '') === wanted)
+    .sort((left, right) => when(right) - when(left));
+}
+
+let _pageAdsReturnFocus = null;
+
+function closePageAdsDialog(restoreFocus = true) {
+  document.getElementById('page-ads-dialog')?.remove();
+  const target = _pageAdsReturnFocus?.isConnected === false ? null : _pageAdsReturnFocus;
+  _pageAdsReturnFocus = null;
+  if (restoreFocus && target?.focus) target.focus();
+}
+
+// Jump to the Ads screen already filtered to this page, for the full table with
+// its own search and filters.
+function openAdsFilteredByPage(pageId) {
+  closePageAdsDialog(false);
+  state.adFilters = { status: 'all', payment: 'all', page: String(pageId || '') };
+  state.adSearch = '';
+  state.adReceiptFilter = '';
+  navigateTo('ads');
+}
+
+function showPageAdsDialog(pageId, triggerButton) {
+  const isAr = state.language === 'ar';
+  const page = (state.pages || []).find(item => String(item?.id) === String(pageId));
+  if (!page) return;
+  if (!can('ads', 'view')) {
+    showNotification(
+      isAr ? 'تم رفض الوصول' : 'Access Denied',
+      isAr ? 'لا توجد صلاحية لعرض الإعلانات.' : 'You do not have permission to view ads.',
+      'error'
+    );
+    return;
+  }
+  const ads = getAdsForPage(page.id);
+  const customersById = new Map((state.customers || []).map(c => [String(c.id), c]));
+  closePageAdsDialog(false);
+  _pageAdsReturnFocus = triggerButton || document.activeElement;
+
+  const dialog = document.createElement('div');
+  dialog.id = 'page-ads-dialog';
+  dialog.className = 'mobile-dialog-overlay fixed inset-0 z-[90] flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
+  dialog.setAttribute('aria-labelledby', 'page-ads-dialog-title');
+  dialog.setAttribute('dir', isAr ? 'rtl' : 'ltr');
+  dialog.tabIndex = -1;
+  dialog.innerHTML = `
+    <div class="glass-panel w-full max-w-3xl max-h-[90dvh] overflow-hidden rounded-2xl shadow-2xl flex flex-col animate-slide-up">
+      <div class="sticky top-0 z-10 bg-white dark:bg-slate-900 flex items-center justify-between gap-3 p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700">
+        <div class="min-w-0">
+          <h2 id="page-ads-dialog-title" class="text-xl font-bold text-slate-800 dark:text-white truncate">${isAr ? 'إعلانات هذه الصفحة' : 'Ads on this page'}</h2>
+          <p class="text-sm text-slate-500 truncate">${Security.escapeHtml(page.name || '')} • ${ads.length}</p>
+        </div>
+        <button type="button" onclick="closePageAdsDialog()" class="min-w-11 min-h-11 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center flex-shrink-0" aria-label="${isAr ? 'إغلاق' : 'Close'}">
+          <span class="text-2xl leading-none" aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-2">
+        ${ads.length ? ads.map(ad => {
+          const customer = customersById.get(String(ad.customerId || ''));
+          const pending = isMetaAdSetupPending(ad);
+          const amount = Number(ad.amountUSD || 0);
+          return `<div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <span class="font-semibold text-slate-800 dark:text-white break-words">#${Security.escapeHtml(String(ad.displayNumber || ad.id || ''))} — ${Security.escapeHtml(customer?.name || ad.customerName || (isAr ? 'غير معروف' : 'Unknown'))}</span>
+              <span class="text-sm font-bold ${pending ? 'text-amber-600' : 'text-emerald-600'}">${pending ? (isAr ? 'يحتاج إكمال' : 'Needs setup') : `$${amount.toFixed(2)}`}</span>
+            </div>
+            <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
+              <span>${trStatus(ad.status || '')}</span>
+              <span aria-hidden="true">•</span>
+              <span>${formatDateShort(ad.startDate)}</span>
+              ${ad.metaAdId ? `<span aria-hidden="true">•</span><span class="font-bold text-blue-600 dark:text-blue-300">Meta</span>` : ''}
+            </div>
+          </div>`;
+        }).join('') : `<div class="rounded-xl bg-slate-50 dark:bg-slate-800/60 p-6 text-sm text-slate-500 text-center">${isAr ? 'لا توجد إعلانات على هذه الصفحة.' : 'No ads have run on this page yet.'}</div>`}
+      </div>
+      ${ads.length ? `<div class="border-t border-slate-200 dark:border-slate-700 p-3 sm:p-4">
+        <button type="button" onclick="openAdsFilteredByPage('${Security.escapeHtml(String(page.id))}')" class="w-full min-h-11 rounded-xl bg-indigo-600 px-4 py-2 font-bold text-white hover:bg-indigo-700">${isAr ? 'فتح في شاشة الإعلانات' : 'Open in the Ads screen'}</button>
+      </div>` : ''}
+    </div>`;
+  dialog.addEventListener('click', event => { if (event.target === dialog) closePageAdsDialog(); });
+  document.body.appendChild(dialog);
+  dialog.focus();
+}
+
+// The same page added twice — usually a hand-made row beside a Meta import, or
+// two spellings of one name. Grouped by the Arabic-aware key the category
+// picker already uses, so حج وعمرة / حج وعمره / extra spaces collapse into one
+// group. Meta page ids are already de-duplicated by the server on import, so
+// name is the case a person has to resolve.
+function findDuplicatePageGroups(pages = state.pages) {
+  const active = getVisibleRecords(Array.isArray(pages) ? pages : [])
+    .filter(page => page && !page._deleted && page.id);
+  const groups = new Map();
+  for (const page of active) {
+    const key = pageCategoryKey(page.name);
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(page);
+  }
+  return Array.from(groups.values())
+    .filter(group => group.length > 1)
+    .sort((a, b) => String(a[0]?.name || '').localeCompare(String(b[0]?.name || '')));
+}
+
+let _pageDuplicatesReturnFocus = null;
+
+function closePageDuplicatesDialog(restoreFocus = true) {
+  document.getElementById('page-duplicates-dialog')?.remove();
+  const target = _pageDuplicatesReturnFocus?.isConnected === false ? null : _pageDuplicatesReturnFocus;
+  _pageDuplicatesReturnFocus = null;
+  if (restoreFocus && target?.focus) target.focus();
+}
+
+// Read-only on purpose: it shows what repeats and lets you open each page, but
+// never merges or deletes. Ads carry money and point at a pageId, so combining
+// two pages is a decision a person makes one at a time.
+function showPageDuplicates(focusPageId, triggerButton) {
+  const isAr = state.language === 'ar';
+  const wanted = String(focusPageId || '');
+  let groups = findDuplicatePageGroups();
+  if (wanted) groups = groups.filter(group => group.some(page => String(page.id) === wanted));
+  closePageDuplicatesDialog(false);
+  _pageDuplicatesReturnFocus = triggerButton || document.activeElement;
+
+  const customersById = new Map((state.customers || []).map(c => [String(c.id), c]));
+  const dialog = document.createElement('div');
+  dialog.id = 'page-duplicates-dialog';
+  dialog.className = 'mobile-dialog-overlay fixed inset-0 z-[90] flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
+  dialog.setAttribute('aria-labelledby', 'page-duplicates-dialog-title');
+  dialog.setAttribute('dir', isAr ? 'rtl' : 'ltr');
+  dialog.tabIndex = -1;
+  dialog.innerHTML = `
+    <div class="glass-panel w-full max-w-3xl max-h-[90dvh] overflow-hidden rounded-2xl shadow-2xl flex flex-col animate-slide-up">
+      <div class="sticky top-0 z-10 bg-white dark:bg-slate-900 flex items-center justify-between gap-3 p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700">
+        <div class="min-w-0">
+          <h2 id="page-duplicates-dialog-title" class="text-xl font-bold text-slate-800 dark:text-white truncate">${isAr ? 'صفحات مكررة' : 'Duplicate pages'}</h2>
+          <p class="text-sm text-slate-500 truncate">${groups.length ? (isAr ? `${groups.length} مجموعة متطابقة بالاسم` : `${groups.length} group${groups.length > 1 ? 's' : ''} with the same name`) : (isAr ? 'لا يوجد تكرار' : 'Nothing repeated')}</p>
+        </div>
+        <button type="button" onclick="closePageDuplicatesDialog()" class="min-w-11 min-h-11 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center flex-shrink-0" aria-label="${isAr ? 'إغلاق' : 'Close'}">
+          <span class="text-2xl leading-none" aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-4">
+        ${groups.length ? groups.map(group => `
+          <section class="rounded-xl border border-amber-300 dark:border-amber-700 bg-amber-50/60 dark:bg-amber-900/20 p-3">
+            <h3 class="font-bold text-slate-800 dark:text-white break-words mb-2">${Security.escapeHtml(group[0]?.name || '')} <span class="text-xs font-normal text-slate-500">(${group.length})</span></h3>
+            <div class="space-y-2">
+              ${group.map(page => {
+                const owners = getPageCustomerIds(page)
+                  .map(id => customersById.get(String(id))?.name || '')
+                  .filter(Boolean).join(', ');
+                const adCount = can('ads', 'view') ? getAdsForPage(page.id).length : null;
+                return `<div class="rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 p-2.5 flex flex-wrap items-center justify-between gap-2">
+                  <div class="min-w-0">
+                    <div class="text-sm font-semibold text-slate-800 dark:text-white break-words">${Security.escapeHtml(page.name || '')}</div>
+                    <div class="text-xs text-slate-500 break-words">
+                      ${Security.escapeHtml(page.category || (isAr ? 'بدون فئة' : 'No category'))}
+                      ${owners ? ` • ${Security.escapeHtml(owners)}` : ` • ${isAr ? 'بدون مالك' : 'No owner'}`}
+                      ${adCount === null ? '' : ` • ${isAr ? `${adCount} إعلان` : `${adCount} ad${adCount === 1 ? '' : 's'}`}`}
+                      ${page.metaPageId ? ' • Meta' : ''}
+                    </div>
+                  </div>
+                  ${can('pages', 'edit') ? `<button type="button" onclick="closePageDuplicatesDialog(false);editPage('${Security.escapeHtml(String(page.id))}')" class="min-h-10 rounded-lg border border-slate-200 dark:border-slate-700 px-3 py-1.5 text-xs font-bold hover:bg-slate-100 dark:hover:bg-slate-800">${isAr ? 'فتح' : 'Open'}</button>` : ''}
+                </div>`;
+              }).join('')}
+            </div>
+          </section>
+        `).join('') : `<div class="rounded-xl bg-slate-50 dark:bg-slate-800/60 p-6 text-sm text-slate-500 text-center">${isAr ? 'لا توجد صفحات بنفس الاسم.' : 'No two pages share the same name.'}</div>`}
+      </div>
+    </div>`;
+  dialog.addEventListener('click', event => { if (event.target === dialog) closePageDuplicatesDialog(); });
+  document.body.appendChild(dialog);
+  dialog.focus();
+}
+
 function getCustomerSortValue(customer, sortType, statsIndex = null) {
   // Date sorts never touch stats — skip the expensive computation entirely.
   if (sortType === 'newest') return new Date(customer.joinDate).getTime();

@@ -3733,6 +3733,10 @@ function renderPagesView() {
           .some(value => foldSearchText(value).includes(pageSearch));
       })
     : allPages;
+  // Pages repeat when a Meta import lands beside a hand-made row, or the same
+  // name is typed two ways. Flag them so they can be resolved by hand.
+  const duplicatePageGroups = findDuplicatePageGroups(allPages);
+  const duplicatePageIds = new Set(duplicatePageGroups.flatMap(group => group.map(page => String(page.id))));
   const canSeePageAds = can('ads', 'view');
   const canSeePageFinancials = canSeePageAds
     && can('analytics', 'viewFinancials')
@@ -3745,10 +3749,16 @@ function renderPagesView() {
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('pages')}</h1>
           <p id="pages-count" class="text-sm text-slate-500 mt-1">${isAr ? `${visiblePages.length}${pageSearch ? ` من ${allPages.length}` : ''} صفحة فيسبوك` : `${visiblePages.length}${pageSearch ? ` of ${allPages.length}` : ''} Facebook pages`}</p>
         </div>
-        <button onclick="showPageModal()" class="btn-shine w-full sm:w-auto bg-blue-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
-          <i data-lucide="file-plus" class="w-4 h-4"></i>
-          <span>${t('addPage')}</span>
-        </button>
+        <div class="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+          <button type="button" onclick="showPageDuplicates('', this)" class="w-full sm:w-auto min-h-11 border ${duplicatePageGroups.length > 0 ? 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-300' : 'border-slate-200 bg-white/60 text-slate-600 dark:border-slate-700 dark:bg-slate-900/30 dark:text-slate-300'} px-4 py-2 rounded-xl font-bold flex items-center justify-center gap-2" aria-haspopup="dialog">
+            <i data-lucide="copy" class="w-4 h-4"></i>
+            <span>${isAr ? 'الصفحات المكررة' : 'Duplicate pages'}${duplicatePageGroups.length > 0 ? ` (${duplicatePageGroups.length})` : ''}</span>
+          </button>
+          <button onclick="showPageModal()" class="btn-shine w-full sm:w-auto bg-blue-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
+            <i data-lucide="file-plus" class="w-4 h-4"></i>
+            <span>${t('addPage')}</span>
+          </button>
+        </div>
       </div>
 
       <div class="smart-filter-panel glass-panel rounded-2xl p-4">
@@ -3785,6 +3795,7 @@ function renderPagesView() {
                     <span class="px-2 py-0.5 rounded-md bg-amber-100 dark:bg-amber-900/50 text-amber-600 dark:text-amber-400 text-xs font-bold">#${pageDisplayNum}</span>
                     ${isMetaImportedPage ? `<span class="px-2 py-0.5 rounded-md bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 text-[10px] font-bold">Meta</span>` : ''}
                     ${needsPageOwner ? `<span class="px-2 py-0.5 rounded-md bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 text-[10px] font-bold">${isAr ? 'يحتاج مالك' : 'Needs owner'}</span>` : ''}
+                    ${duplicatePageIds.has(String(p.id)) ? `<button type="button" data-action="view-page-duplicates" data-page-id="${Security.escapeHtml(String(p.id))}" onclick="showPageDuplicates(this.dataset.pageId, this)" class="px-2 py-0.5 rounded-md bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 text-[10px] font-bold inline-flex items-center gap-1 hover:bg-amber-200 dark:hover:bg-amber-900/60" aria-haspopup="dialog" title="${isAr ? 'توجد صفحة أخرى بنفس الاسم' : 'Another page has the same name'}"><i data-lucide="copy" class="w-3 h-3"></i>${isAr ? 'مكرر' : 'Duplicate'}</button>` : ''}
                   </div>
                   <h3 class="font-bold text-lg text-slate-800 dark:text-white flex items-center">
                     <i data-lucide="facebook" class="w-4 h-4 mr-2 text-blue-600"></i>
@@ -3792,14 +3803,17 @@ function renderPagesView() {
                   </h3>
                   <p class="text-sm text-slate-500 mt-1">${Security.escapeHtml(p.category || '')}</p>
                 </div>
-                ${(can('pages', 'edit') || can('pages', 'delete')) ? `<div class="flex space-x-1">
+                <div class="flex space-x-1">
+                  ${canSeePageAds ? `<button type="button" data-action="view-page-ads" data-page-id="${Security.escapeHtml(String(p.id))}" onclick="showPageAdsDialog(this.dataset.pageId, this)" class="text-indigo-600 hover:text-indigo-700 p-1" aria-haspopup="dialog" title="${isAr ? 'عرض إعلانات هذه الصفحة' : 'See the ads on this page'}">
+                    <i data-lucide="megaphone" class="w-4 h-4"></i>
+                  </button>` : ''}
                   ${can('pages', 'edit') ? `<button onclick="editPage('${p.id}')" class="text-blue-600 hover:text-blue-700 p-1" title="${t('edit')}">
                     <i data-lucide="edit" class="w-4 h-4"></i>
                   </button>` : ''}
                   ${can('pages', 'delete') ? `<button onclick="deletePage('${p.id}')" class="text-rose-600 hover:text-rose-700 p-1" title="${t('delete')}">
                     <i data-lucide="trash-2" class="w-4 h-4"></i>
                   </button>` : ''}
-                </div>` : ''}
+                </div>
               </div>
 
               <div class="space-y-2 border-t border-slate-200 dark:border-slate-700 pt-3">

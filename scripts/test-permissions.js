@@ -511,6 +511,71 @@ check('saving an ad closes its dialog once and never rewinds an extra history st
   assert(modalSource.includes('if (!consumedModalHistoryEntry) clearUrlParams'), 'a closed dialog can leave ?modal= in the URL');
 });
 
+check('a page lists the ads that ran on it, newest first and role-scoped', () => {
+  loginAs(ADMIN);
+  S.language = 'en';
+  const originalAds = S.ads;
+  const originalPages = S.pages;
+  try {
+    S.pages = [{ id: 'pg_ads', name: 'Ad Page', customerIds: [] }];
+    S.ads = [
+      { id: 'a_old', pageId: 'pg_ads', creatorId: ADMIN.id, startDate: '2026-07-01T00:00:00Z', amountUSD: 10 },
+      { id: 'a_new', pageId: 'pg_ads', creatorId: ADMIN.id, startDate: '2026-07-20T00:00:00Z', amountUSD: 20 },
+      { id: 'a_other', pageId: 'pg_somewhere_else', creatorId: ADMIN.id, startDate: '2026-07-25T00:00:00Z' },
+      { id: 'a_gone', pageId: 'pg_ads', creatorId: ADMIN.id, startDate: '2026-07-30T00:00:00Z', _deleted: true }
+    ];
+    const found = sandbox.getAdsForPage('pg_ads').map(ad => ad.id);
+    assert(found.join(',') === 'a_new,a_old', `wrong ads for the page: ${found.join(',')}`);
+    assert(!found.includes('a_other'), 'an ad from another page leaked in');
+    assert(!found.includes('a_gone'), 'a deleted ad leaked in');
+    assert(sandbox.getAdsForPage('').length === 0, 'a blank page id must match nothing');
+
+    const viewsSource = fs.readFileSync(path.join(__dirname, '..', 'src', '12-views.js'), 'utf8');
+    assert(viewsSource.includes('data-action="view-page-ads"'), 'the page card has no ads button');
+    assert(/canSeePageAds \? `<button type="button" data-action="view-page-ads"/.test(viewsSource),
+      'the ads button is shown to roles that cannot view ads');
+  } finally {
+    S.ads = originalAds;
+    S.pages = originalPages;
+  }
+});
+
+check('duplicate pages are found across Arabic spellings and never merged automatically', () => {
+  loginAs(ADMIN);
+  S.language = 'en';
+  const originalPages = S.pages;
+  try {
+    S.pages = [
+      { id: 'dp1', name: 'حج وعمرة', customerIds: [] },
+      { id: 'dp2', name: 'حج وعمره', customerIds: [] },     // different hamza
+      { id: 'dp3', name: '  حج   وعمرة ', customerIds: [] }, // stray spaces
+      { id: 'dp4', name: 'Design', customerIds: [] },
+      { id: 'dp5', name: 'design', customerIds: [] },        // different case
+      { id: 'dp6', name: 'Unique Page', customerIds: [] },
+      { id: 'dp7', name: '   ', customerIds: [] },           // blank never groups
+      { id: 'dp8', name: 'Deleted Twin', customerIds: [], _deleted: true },
+      { id: 'dp9', name: 'Deleted Twin', customerIds: [] }
+    ];
+    const groups = sandbox.findDuplicatePageGroups();
+    const ids = groups.map(group => group.map(page => page.id).sort().join('+')).sort();
+    assert(ids.length === 2, `expected 2 duplicate groups, got ${ids.length}: ${ids.join(' | ')}`);
+    assert(ids.includes('dp1+dp2+dp3'), 'Arabic spelling variants were not grouped together');
+    assert(ids.includes('dp4+dp5'), 'case-different names were not grouped together');
+    assert(!ids.some(key => key.includes('dp6')), 'a unique page was reported as duplicate');
+    assert(!ids.some(key => key.includes('dp7')), 'a blank name was grouped');
+    assert(!ids.some(key => key.includes('dp8')), 'a deleted page was grouped');
+
+    // Read-only by design: ads carry money and point at a pageId, so nothing
+    // here may merge or delete a page.
+    const helpers = fs.readFileSync(path.join(__dirname, '..', 'src', '13-filters-helpers.js'), 'utf8');
+    const dialog = helpers.slice(helpers.indexOf('function showPageDuplicates('));
+    const body = dialog.slice(0, dialog.indexOf('\nfunction '));
+    assert(!/deletePage\(|deleteRecord\(|mergePage/.test(body), 'the duplicate view can destroy or merge pages');
+  } finally {
+    S.pages = originalPages;
+  }
+});
+
 check('the ads list names the person who completed an imported Meta ad', () => {
   // A Meta-imported row is "Created by" the automation, so the list showed only
   // "System" and there was no way to see who actually did the setup.
