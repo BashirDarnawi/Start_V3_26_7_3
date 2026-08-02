@@ -636,6 +636,31 @@ check('only a hand-made page may be merged, and only into the single Meta page o
   }
 });
 
+check('a page card shows the real Facebook Page ID under its name and category', () => {
+  loginAs(ADMIN);
+  S.language = 'en';
+  const originalPages = S.pages;
+  try {
+    S.pages = [
+      { id: 'pid_meta', name: 'Libya Kids', category: 'Facebook Page', customerIds: [], metaPageId: '174186555772754' },
+      { id: 'pid_manual', name: 'Hand Made', category: 'Shop', customerIds: [] }
+    ];
+    const html = visible(sandbox.renderPagesView());
+    assert(html.includes('data-role="page-meta-id"'), 'the page card does not show the Facebook Page ID');
+    assert(html.includes('#174186555772754'), 'the Facebook Page ID value is missing from the card');
+    // It must sit UNDER the name and category, which is what was asked for.
+    assert(html.indexOf('Libya Kids') < html.indexOf('#174186555772754'), 'the page ID is rendered above the name');
+    assert(html.indexOf('>Facebook Page<') < html.indexOf('#174186555772754'), 'the page ID is rendered above the category');
+    // A hand-made page has no Facebook ID, so it must not grow an empty "#".
+    const manualCard = html.slice(html.indexOf('Hand Made'));
+    assert(!manualCard.includes('data-role="page-meta-id"'), 'a page with no Meta identity was given an empty ID line');
+    // The #N badge is Albayan's own card number and must stay distinct from it.
+    assert(/>#\d+<\/span>/.test(html), 'the card number badge disappeared');
+  } finally {
+    S.pages = originalPages;
+  }
+});
+
 check('every duplicate can be merged in one run, and one bad page never blocks the rest', () => {
   loginAs(ADMIN);
   S.language = 'en';

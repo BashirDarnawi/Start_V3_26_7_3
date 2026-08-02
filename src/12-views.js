@@ -3343,6 +3343,12 @@ function renderPagesView() {
                     ${Security.escapeHtml(p.name || '')}
                   </h3>
                   <p class="text-sm text-slate-500 mt-1">${Security.escapeHtml(p.category || '')}</p>
+                  <!-- The real Facebook Page ID, under the name and category.
+                       The #N badge above is only Albayan's own card number, so
+                       without this the card never showed which Facebook page it
+                       actually is. Same small mono treatment as the ads table's
+                       page cell, and select-all so one click copies it. -->
+                  ${isMetaImportedPage ? `<p data-role="page-meta-id" class="mt-1 break-all select-all font-mono text-[11px] font-semibold text-slate-500 dark:text-slate-400" title="${isAr ? 'معرف صفحة فيسبوك' : 'Facebook Page ID'}">#${Security.escapeHtml(String(p.metaPageId || '').trim())}</p>` : ''}
                 </div>
                 <div class="flex space-x-1">
                   ${canSeePageAds ? `<button type="button" data-action="view-page-ads" data-page-id="${Security.escapeHtml(String(p.id))}" onclick="showPageAdsDialog(this.dataset.pageId, this)" class="text-indigo-600 hover:text-indigo-700 p-1" aria-haspopup="dialog" title="${isAr ? 'عرض إعلانات هذه الصفحة' : 'See the ads on this page'}">
