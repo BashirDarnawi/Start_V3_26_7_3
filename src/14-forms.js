@@ -1116,7 +1116,10 @@ function getNextAutoSerialNumber(paymentMethod) {
     const usesGroupMethod = groupMethods.includes(receiptPaymentMethod)
       || payments.some(p => groupMethods.includes(p && p.method));
 
-    if (!usesGroupMethod || !receipt.serialNumber) return;
+    // Destroyed receipts' LOCKED numbers must advance the counter, or the
+    // generator proposes them forever; their bare digits skip the S branch.
+    const isDestroyedRow = String(receipt.status || '') === 'Destroyed';
+    if ((!usesGroupMethod && !isDestroyedRow) || !receipt.serialNumber) return;
     const serial = String(receipt.serialNumber).trim().toUpperCase();
 
     // A receipt that has a MANUAL method (Cash) got a hand-typed PAPER receipt
@@ -1131,7 +1134,7 @@ function getNextAutoSerialNumber(paymentMethod) {
     let serialNum = 0;
     if (serial.startsWith(prefix)) {
       serialNum = parseInt(serial.substring(prefix.length), 10);
-    } else if (prefix === 'S' && /^\d+$/.test(serial) && !hasManualMethod) {
+    } else if (prefix === 'S' && /^\d+$/.test(serial) && !hasManualMethod && !isDestroyedRow) {
       // Legacy: the S group used bare numbers before the prefix existed.
       serialNum = parseInt(serial, 10);
     } else {
@@ -1697,6 +1700,8 @@ async function _saveReceiptFromModalInner() {
   const editTarget = _editingId
     ? (state.receipts.find(r => r && !r._deleted && String(r.id) === _editingId) || null)
     : null;
+  // Deep-linked form on a destroyed receipt: refuse at save time too.
+  if (editTarget && _blockDestroyedReceiptEdit(editTarget)) return;
 
   const customerId = document.getElementById('receipt-customer-id').value;
   if (!customerId) {
@@ -1968,10 +1973,10 @@ async function _saveReceiptFromModalInner() {
   let receiptIsPaid = true;
   let receiptIsReceivedInOffice = true;
 
-  if (status === 'Canceled' || status === 'Lost') {
+  if (status === 'Canceled' || status === 'Lost' || status === 'Destroyed') {
     const heldMoneyBefore = !!(editTarget && (editTarget.isPaid === true || String(editTarget.status || '') === 'Paid'));
     const lostPaid = status === 'Lost' && String(statusDetail.lostResolution || '') === 'paid';
-    receiptIsPaid = heldMoneyBefore || lostPaid;
+    receiptIsPaid = status === 'Destroyed' ? false : (heldMoneyBefore || lostPaid);
     receiptIsReceivedInOffice = receiptIsPaid;
   }
 
@@ -2024,6 +2029,26 @@ async function _saveReceiptFromModalInner() {
       showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'رسوم التوصيل المتفق عليها مطلوبة.' : 'Quoted delivery fee is required.', 'error');
       return;
     }
+  }
+
+  // Setting a not-yet-delivered temp delivery receipt to "Paid - By Delivery"
+  // IS a delivery completion, and the server only accepts completions through
+  // the verified flow (unique final number + proof photo + collected amounts).
+  // Route there instead of letting the save die with a raw server error:
+  // admins may complete it themselves, everyone else needs the driver.
+  if (status === 'Paid' && (statusDetail.paidCollection || 'office') === 'delivery' && editTarget
+      && isTempDeliveryReceiptNo(editTarget.tempReceiptNo)
+      && editTarget.deliveryStatus !== 'Delivered' && editTarget.deliveryStatus !== 'Canceled') {
+    if (isCurrentUserAdmin()) {
+      showNotification(isArV ? 'أكمل التوصيل' : 'Complete the delivery',
+        isArV ? 'هذا وصل توصيل لم يكتمل بعد. سجِّل الرقم النهائي وصورة الوصل والمبلغ المُحصَّل في نافذة الإكمال.' : 'This delivery receipt is not completed yet. Record the final number, receipt photo and collected amount in the completion window.', 'info');
+      closeModal();
+      openReceiptDeliveryCompletionModal(editTarget.id);
+    } else {
+      showNotification(isArV ? 'غير مسموح' : 'Not Allowed',
+        isArV ? 'فقط سائق التوصيل المعيَّن أو المدير يمكنه إكمال هذا التوصيل.' : 'Only the assigned delivery driver or an admin can complete this delivery.', 'warning');
+    }
+    return;
   }
   
   // Temp delivery receipts: send tempReceiptNo (D#) only; serialNumber stays empty until delivery completion.
@@ -3169,7 +3194,7 @@ function isUnpaidShopReceipt(receipt, customerId = '') {
   if (collection && !['office', 'in_shop', 'shop'].includes(collection)) return false;
   if ((tempNo.startsWith('D') && /^D\d+$/.test(tempNo)) || receiptType === 'DELIVERY_TEMP') return false;
   if (deliveryStatus && deliveryStatus !== 'Office') return false;
-  return status !== 'Canceled' && status !== 'Lost';
+  return status !== 'Canceled' && status !== 'Lost' && status !== 'Destroyed';
 }
 
 // usageOut (optional Map) collects each candidate's due usage so callers that
@@ -4939,7 +4964,11 @@ function renderAdFundingList() {
       const staleLabel = unavailable
         ? (isArL ? ' • الرابط الحالي غير متاح — اختر بديلاً' : ' • current link unavailable — choose a replacement')
         : '';
-      const label = `#${serial} • $${(r.amountUSD || 0).toFixed(2)}${staleLabel}`;
+      // Offer what is actually SPENDABLE (remaining + this ad's own saved
+      // share), never the receipt's face value: a paid receipt whose credit
+      // already funded other ads must not read as fresh money.
+      const rSpendable = Math.round((Math.max(Number(getReceiptUsageStats(r)?.remainingUSD) || 0, 0) + getEditingAdExistingAllocationUSD(r.id)) * 100) / 100;
+      const label = `#${serial} • $${rSpendable.toFixed(2)}${staleLabel}`;
       return `<option value="${r.id || ''}" ${alloc.receiptId === r.id ? 'selected' : ''}>${Security.escapeHtml(label)}</option>`;
     }).join('');
     
@@ -5265,6 +5294,22 @@ function showCustomerModal() {
 }
 
 function showPageModal() {
+  // TEMPORARY (owner request, Aug 2026): manual page creation is paused so the
+  // team works with Meta-imported pages (blue Meta badge), which arrive linked
+  // to their ads automatically. Set to false to allow manual pages again.
+  // Editing existing pages (editPage) is NOT affected — assigning owners to
+  // imported pages keeps working.
+  const PAGE_MANUAL_CREATE_PAUSED = true;
+  if (PAGE_MANUAL_CREATE_PAUSED) {
+    showNotification(
+      state.language === 'ar' ? 'موقوف مؤقتاً' : 'Temporarily off',
+      state.language === 'ar'
+        ? 'إضافة الصفحات يدوياً موقوفة مؤقتاً — الصفحات تأتي الآن من استيراد ميتا وترتبط بإعلاناتها تلقائياً.'
+        : 'Manual page creation is temporarily off — pages now come from the Meta import and are linked to their ads automatically.',
+      'warning'
+    );
+    return;
+  }
   // Permission check for creating pages
   if (!currentUserHasPermission('pages', 'add')) {
     showNotification(state.language === 'ar' ? 'رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإضافة صفحات' : 'You do not have permission to add pages', 'error');

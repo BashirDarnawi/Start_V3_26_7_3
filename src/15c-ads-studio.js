@@ -46,13 +46,14 @@ function resetAdsStudioSessionState() {
   _adsStudioReviewPromises.clear();
   _adsStudioDeletePromises.clear();
   for (const id of Object.keys(_adsStudioReviewNotes)) delete _adsStudioReviewNotes[id];
+  if (typeof resetAdsStudioWalletCache === 'function') resetAdsStudioWalletCache();
 }
 
+// Wallet + Meta Connection live INSIDE the Overview (owner decision): no tabs.
 const ADS_STUDIO_TABS = [
   { id: 'dashboard', icon: 'layout-dashboard', label: 'Overview', labelAr: 'نظرة عامة' },
   { id: 'campaigns', icon: 'megaphone', label: 'My Campaigns', labelAr: 'حملاتي' },
-  { id: 'builder', icon: 'wand-sparkles', label: 'Create Campaign', labelAr: 'إنشاء حملة' },
-  { id: 'connections', icon: 'link-2', label: 'Meta Connection', labelAr: 'ربط ميتا' }
+  { id: 'builder', icon: 'wand-sparkles', label: 'Create Campaign', labelAr: 'إنشاء حملة' }
 ];
 
 const ADS_STUDIO_OBJECTIVES = [
@@ -220,6 +221,8 @@ function adsStudioFormatDate(value) {
 }
 
 function adsStudioBackTarget() {
+  // The standalone studio site has nowhere to go "back" to.
+  if (IS_STUDIO_SHELL) return '';
   if (isCurrentUserAdmin()) return 'smart-systems';
   const landing = getAlbayanManagerLandingViewForUser(state.currentUser);
   if (!landing || landing === 'ads-studio' || landing === 'no-access') return '';
@@ -296,7 +299,6 @@ function renderAdsStudioView() {
   let content = '';
   if (_adsStudioActiveTab === 'campaigns') content = renderAdsStudioCampaigns();
   else if (_adsStudioActiveTab === 'builder') content = renderAdsStudioBuilder();
-  else if (_adsStudioActiveTab === 'connections') content = renderAdsStudioConnections();
   else if (_adsStudioActiveTab === 'review') content = renderAdsStudioReviewQueue();
   else content = renderAdsStudioDashboard();
 
@@ -368,6 +370,16 @@ function renderAdsStudioDashboard() {
           </div>
           <div class="mt-5 flex items-start gap-3 rounded-xl bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-200"><i data-lucide="info" class="w-5 h-5 flex-shrink-0"></i><span>${isAr ? 'الميزانية هنا للتخطيط فقط. الدفع وإطلاق الإعلان يتمان بعد موافقة الإدارة وربط حساب ميتا.' : 'Budgets here are planning values. Payment and launch happen only after staff approval and Meta connection.'}</span></div>
         </div>
+      </div>
+
+      <div>
+        <h3 class="font-black text-xl text-slate-900 dark:text-white mb-4 flex items-center gap-2"><i data-lucide="wallet" class="w-5 h-5"></i>${isAr ? 'المحفظة' : 'Wallet'}</h3>
+        ${renderAdsStudioWallet()}
+      </div>
+
+      <div>
+        <h3 class="font-black text-xl text-slate-900 dark:text-white mb-4 flex items-center gap-2"><i data-lucide="link-2" class="w-5 h-5"></i>${isAr ? 'ربط ميتا' : 'Meta Connection'}</h3>
+        ${renderAdsStudioConnections()}
       </div>
     </section>
   `;
@@ -975,14 +987,33 @@ async function submitAdsStudioCampaignOnce(id) {
     await startAdsStudioCampaign(id);
     return false;
   }
+  // Client mirror of the server money gate.
+  const _budgetMinor = Math.max(parseInt(campaign.budgetMinorUSD, 10) || 0, 0);
+  if (String(campaign.createdBy || '') === String(state.currentUser?.id || '')
+      && adsStudioWalletAvailableMinor() < _budgetMinor) {
+    showNotification(
+      adsStudioText('Not enough wallet balance', 'رصيد المحفظة غير كافٍ'),
+      adsStudioText('Charge your wallet first — the budget is held from it when you submit.', 'اشحن محفظتك أولاً — الميزانية تُحجز منها عند الإرسال.'),
+      'error'
+    );
+    _adsStudioActiveTab = 'dashboard';
+    try { updateUrlParams({ tab: 'dashboard' }, true); } catch (_) {}
+    render();
+    return false;
+  }
   try {
     if (isServerModeEnabled()) {
       const operationId = Security.generateSecureId('campaign-submit');
       const entity = await apiSubmitAdCampaignRequest(campaign.id, Number(campaign._lastModified), operationId);
       upsertAdsStudioEntity(entity);
     } else {
-      const saved = await updateRecord(state.adCampaignRequests, campaign.id, { status: 'Submitted', submittedAt: new Date().toISOString(), submittedBy: state.currentUser?.id }, campaign._lastModified);
-      if (!saved) return false;
+      // No server -> no wallet holds/captures: refuse instead of pretending.
+      showNotification(
+        adsStudioText('Server connection required', 'يتطلب اتصال الخادم'),
+        adsStudioText('Campaign budgets are held from the wallet, which needs the server connection.', 'ميزانية الحملة تُحجز من المحفظة، وهذا يتطلب اتصال الخادم.'),
+        'error'
+      );
+      return false;
     }
     showNotification(adsStudioText('Sent for review', 'تم الإرسال للمراجعة'), adsStudioText('Your team can now review this campaign.', 'يمكن للفريق الآن مراجعة هذه الحملة.'), 'success');
     _adsStudioDraft = null;
@@ -1100,6 +1131,207 @@ async function reviewAdsStudioCampaignOnce(id, decision) {
   } catch (error) {
     showNotification(adsStudioText('Review failed', 'تعذر حفظ المراجعة'), error?.message || adsStudioText('Refresh and try again.', 'حدّث الصفحة وحاول مرة أخرى.'), 'error');
   }
+}
+
+// ---- Wallet ----
+let _adsStudioWalletMine = null;
+let _adsStudioWalletPendingAll = null;
+let _adsStudioWalletBusy = false;
+let _adsStudioWalletForUser = '';
+
+function resetAdsStudioWalletCache() {
+  _adsStudioWalletMine = null;
+  _adsStudioWalletPendingAll = null;
+  _adsStudioWalletForUser = '';
+}
+
+function adsStudioWalletHeldMinor() {
+  const uid = String(state.currentUser?.id || '');
+  return (Array.isArray(state.adCampaignRequests) ? state.adCampaignRequests : [])
+    .filter(c => c && !c._deleted && String(c.createdBy || '') === uid && String(c.status || '') === 'Submitted')
+    .reduce((sum, c) => sum + Math.max(parseInt(c.budgetMinorUSD, 10) || 0, 0), 0);
+}
+
+function adsStudioWalletBalanceMinor() {
+  return WALLET.getBalanceMinor(String(state.currentUser?.id || ''), 'USD');
+}
+
+function adsStudioWalletAvailableMinor() {
+  return adsStudioWalletBalanceMinor() - adsStudioWalletHeldMinor();
+}
+
+async function refreshAdsStudioWallet() {
+  if (_adsStudioWalletBusy) return;
+  _adsStudioWalletBusy = true;
+  const forUser = String(state.currentUser?.id || '');
+  try {
+    const mine = await apiWalletPaymentRequestList('mine');
+    let pendingAll = null;
+    if (isCurrentUserAdmin()) {
+      const pending = await apiWalletPaymentRequestList('pending');
+      pendingAll = Array.isArray(pending?.requests) ? pending.requests : [];
+    }
+    // Never show one account's wallet rows to another after a user switch.
+    if (forUser === String(state.currentUser?.id || '')) {
+      _adsStudioWalletMine = Array.isArray(mine?.requests) ? mine.requests : [];
+      _adsStudioWalletPendingAll = pendingAll;
+      _adsStudioWalletForUser = forUser;
+    }
+  } catch (_) {
+    if (forUser === String(state.currentUser?.id || '')) {
+      _adsStudioWalletMine = _adsStudioWalletMine || [];
+    }
+  } finally {
+    _adsStudioWalletBusy = false;
+  }
+  if (state.currentView === 'ads-studio') render();
+}
+
+async function adsStudioCreateWalletCharge() {
+  const input = document.getElementById('ads-studio-charge-amount');
+  const method = String(document.querySelector('input[name="ads-studio-charge-method"]:checked')?.value || 'bank_transfer');
+  const amountUSD = parseFloat(input?.value || '0');
+  const amountMinor = Math.round((Number.isFinite(amountUSD) ? amountUSD : 0) * 100);
+  if (amountMinor < 100) {
+    showNotification(adsStudioText('Invalid amount', 'مبلغ غير صالح'), adsStudioText('Minimum charge is $1.00', 'أقل مبلغ للشحن هو 1 دولار'), 'error');
+    return;
+  }
+  try {
+    const created = await apiWalletPaymentRequestCreate(amountMinor, method, `paycreate-${state.currentUser?.id || 'me'}-${Date.now()}`);
+    showNotification(
+      adsStudioText('Charge request created', 'تم إنشاء طلب الشحن'),
+      adsStudioText(
+        `Pay with reference ${created?.data?.reference || ''} — the wallet fills up as soon as the payment is confirmed.`,
+        `ادفع بذكر الرمز ${created?.data?.reference || ''} — تتعبأ المحفظة فور تأكيد الدفع.`
+      ),
+      'success'
+    );
+  } catch (e) {
+    const detail = (e?.payload && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
+    showNotification(adsStudioText('Could not create the charge', 'تعذر إنشاء طلب الشحن'), String(detail), 'error');
+  }
+  refreshAdsStudioWallet();
+}
+
+async function adsStudioDecideWalletCharge(requestId, action) {
+  try {
+    await apiWalletPaymentRequestDecide(requestId, action);
+    showNotification(
+      adsStudioText(action === 'confirm' ? 'Payment confirmed' : 'Request canceled', action === 'confirm' ? 'تم تأكيد الدفع' : 'تم إلغاء الطلب'),
+      adsStudioText(action === 'confirm' ? 'The wallet has been credited.' : 'The charge request was canceled.', action === 'confirm' ? 'تمت تعبئة المحفظة.' : 'تم إلغاء طلب الشحن.'),
+      'success'
+    );
+  } catch (e) {
+    const detail = (e?.payload && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
+    showNotification(adsStudioText('Action failed', 'فشل الإجراء'), String(detail), 'error');
+  }
+  refreshAdsStudioWallet();
+}
+
+// JS mirror of has-[:checked] for old WebViews without :has().
+function adsStudioMarkWalletMethod(input) {
+  document.querySelectorAll('label.ads-studio-method-label').forEach(l => {
+    l.classList.remove('border-purple-500', 'bg-purple-50', 'dark:bg-purple-900/20');
+    l.classList.add('border-slate-200', 'dark:border-slate-700');
+  });
+  const label = input && input.closest ? input.closest('label') : null;
+  if (label) {
+    label.classList.remove('border-slate-200', 'dark:border-slate-700');
+    label.classList.add('border-purple-500', 'bg-purple-50', 'dark:bg-purple-900/20');
+  }
+}
+
+function _adsStudioWalletMethodLabel(method) {
+  if (method === 'card') return adsStudioText('Libyan card', 'بطاقة ليبية');
+  if (method === 'qr') return adsStudioText('QR payment', 'دفع QR');
+  return adsStudioText('Bank transfer', 'حوالة مصرفية');
+}
+
+function _adsStudioWalletRequestRow(entity, adminView) {
+  const d = entity?.data || {};
+  const isPending = String(d.status || '') === 'pending';
+  const statusColor = isPending ? 'text-amber-600' : (String(d.status) === 'confirmed' ? 'text-emerald-600' : 'text-slate-400');
+  return `
+    <div class="flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40">
+      <div class="min-w-0">
+        <div class="font-mono font-bold text-slate-800 dark:text-white">${Security.escapeHtml(String(d.reference || ''))}</div>
+        <div class="text-xs text-slate-500">${adsStudioMoney(parseInt(d.amountMinor, 10) || 0)} • ${_adsStudioWalletMethodLabel(String(d.method || ''))}</div>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="text-xs font-bold ${statusColor}">${Security.escapeHtml(String(d.status || ''))}</span>
+        ${isPending && adminView ? `<button onclick="adsStudioDecideWalletCharge('${Security.escapeHtml(String(entity.id))}', 'confirm')" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-100 hover:bg-emerald-200 text-emerald-700">${adsStudioText('Confirm received', 'تأكيد الاستلام')}</button>` : ''}
+        ${isPending ? `<button onclick="adsStudioDecideWalletCharge('${Security.escapeHtml(String(entity.id))}', 'cancel')" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300">${adsStudioText('Cancel', 'إلغاء')}</button>` : ''}
+      </div>
+    </div>`;
+}
+
+function renderAdsStudioWallet() {
+  if (_adsStudioWalletForUser !== String(state.currentUser?.id || '')) resetAdsStudioWalletCache();
+  if (_adsStudioWalletMine === null) refreshAdsStudioWallet();
+  const balance = adsStudioWalletBalanceMinor();
+  const held = adsStudioWalletHeldMinor();
+  const available = balance - held;
+  const mine = Array.isArray(_adsStudioWalletMine) ? _adsStudioWalletMine : [];
+  const pendingAll = Array.isArray(_adsStudioWalletPendingAll) ? _adsStudioWalletPendingAll : [];
+  const uid = String(state.currentUser?.id || '');
+  const history = (Array.isArray(state.walletTransactions) ? state.walletTransactions : [])
+    .filter(tx => tx && !tx._deleted && String(tx.currency || '').toUpperCase() === 'USD'
+      && (String(tx.toUserId || '') === uid || String(tx.fromUserId || '') === uid))
+    .slice(-8).reverse();
+  return `
+    <div class="space-y-6">
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div class="glass-panel rounded-2xl p-5"><div class="text-xs text-slate-500 mb-1">${adsStudioText('Wallet balance', 'رصيد المحفظة')}</div><div class="text-2xl font-bold text-slate-800 dark:text-white">${adsStudioMoney(balance)}</div></div>
+        <div class="glass-panel rounded-2xl p-5"><div class="text-xs text-slate-500 mb-1">${adsStudioText('Held for submitted campaigns', 'محجوز للحملات المُرسلة')}</div><div class="text-2xl font-bold text-amber-600">${adsStudioMoney(held)}</div></div>
+        <div class="glass-panel rounded-2xl p-5"><div class="text-xs text-slate-500 mb-1">${adsStudioText('Available to spend', 'متاح للصرف')}</div><div class="text-2xl font-bold text-emerald-600">${adsStudioMoney(available)}</div></div>
+      </div>
+
+      <div class="glass-panel rounded-2xl p-6">
+        <h3 class="font-bold text-slate-800 dark:text-white mb-1">${adsStudioText('Add money', 'إضافة رصيد')}</h3>
+        <p class="text-xs text-slate-500 mb-4">${adsStudioText('Choose how you pay. You get a reference code; the wallet fills up the moment the payment is confirmed — automatically once the payment company is connected.', 'اختر طريقة الدفع. ستحصل على رمز مرجعي، وتتعبأ المحفظة فور تأكيد الدفع — تلقائياً بعد ربط شركة الدفع.')}</p>
+        <div class="flex flex-wrap items-end gap-3">
+          <div>
+            <label class="text-xs text-slate-500 block mb-1">${adsStudioText('Amount (USD)', 'المبلغ (دولار)')}</label>
+            <input id="ads-studio-charge-amount" type="number" min="1" step="0.01" placeholder="50.00"
+              class="w-36 px-3 py-2.5 rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-white font-mono" />
+          </div>
+          ${[['bank_transfer', 'landmark'], ['card', 'credit-card'], ['qr', 'qr-code']].map(([m, icon], i) => `
+            <label class="ads-studio-method-label flex items-center gap-2 px-3 py-2.5 rounded-xl border-2 cursor-pointer has-[:checked]:border-purple-500 has-[:checked]:bg-purple-50 dark:has-[:checked]:bg-purple-900/20 ${i === 0 ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : 'border-slate-200 dark:border-slate-700'}">
+              <input type="radio" name="ads-studio-charge-method" value="${m}" ${i === 0 ? 'checked' : ''} class="accent-purple-600" onchange="adsStudioMarkWalletMethod(this)" />
+              <i data-lucide="${icon}" class="w-4 h-4"></i>
+              <span class="text-sm font-medium">${_adsStudioWalletMethodLabel(m)}</span>
+            </label>`).join('')}
+          <button onclick="adsStudioCreateWalletCharge()" class="px-5 py-2.5 rounded-xl font-bold text-white bg-purple-600 hover:bg-purple-700 transition-all">${adsStudioText('Create charge request', 'إنشاء طلب شحن')}</button>
+        </div>
+      </div>
+
+      ${isCurrentUserAdmin() && pendingAll.length ? `
+      <div class="glass-panel rounded-2xl p-6">
+        <h3 class="font-bold text-slate-800 dark:text-white mb-3">${adsStudioText('Payments waiting for confirmation (all customers)', 'مدفوعات بانتظار التأكيد (كل العملاء)')}</h3>
+        <div class="space-y-2">${pendingAll.map(r => _adsStudioWalletRequestRow(r, true)).join('')}</div>
+      </div>` : ''}
+
+      <div class="glass-panel rounded-2xl p-6">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="font-bold text-slate-800 dark:text-white">${adsStudioText('My charge requests', 'طلبات الشحن الخاصة بي')}</h3>
+          <button onclick="resetAdsStudioWalletCache(); refreshAdsStudioWallet();" class="inline-flex items-center gap-1 text-xs font-bold text-purple-600 hover:text-purple-700"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>${adsStudioText('Refresh', 'تحديث')}</button>
+        </div>
+        ${mine.length ? `<div class="space-y-2">${mine.map(r => _adsStudioWalletRequestRow(r, false)).join('')}</div>`
+          : `<p class="text-sm text-slate-500">${adsStudioText('No charge requests yet.', 'لا توجد طلبات شحن بعد.')}</p>`}
+      </div>
+
+      <div class="glass-panel rounded-2xl p-6">
+        <h3 class="font-bold text-slate-800 dark:text-white mb-3">${adsStudioText('Recent wallet activity', 'آخر حركات المحفظة')}</h3>
+        ${history.length ? `<div class="space-y-1">${history.map(tx => {
+          const incoming = String(tx.toUserId || '') === uid;
+          return `<div class="flex justify-between text-sm py-1.5 border-b border-slate-100 dark:border-slate-800 last:border-0">
+            <span class="text-slate-600 dark:text-slate-300">${Security.escapeHtml(String(tx.memo || tx.type || ''))}</span>
+            <span class="font-mono font-bold ${incoming ? 'text-emerald-600' : 'text-rose-600'}">${incoming ? '+' : '−'}${adsStudioMoney(Math.abs(parseInt(tx.amountMinor, 10) || 0))}</span>
+          </div>`;
+        }).join('')}</div>`
+          : `<p class="text-sm text-slate-500">${adsStudioText('No wallet activity yet.', 'لا توجد حركات بعد.')}</p>`}
+      </div>
+    </div>`;
 }
 
 function renderAdsStudioConnections() {

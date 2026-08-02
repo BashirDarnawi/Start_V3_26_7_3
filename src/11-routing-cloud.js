@@ -34,6 +34,7 @@ const PATH_TO_VIEW = Object.fromEntries(
 
 // Get current view from URL path
 function getViewFromUrl() {
+  if (IS_STUDIO_SHELL) return 'ads-studio';
   const path = window.location.pathname || '/';
   // Try exact match first
   if (PATH_TO_VIEW[path]) {
@@ -191,7 +192,10 @@ function clearUrlParams(keys) {
 // Update browser URL without reload. Carries the view's sub-state (Clothes
 // tab, service id) so the address always reproduces the screen you are on.
 function updateUrlForView(view, replace = false) {
-  const path = VIEW_TO_PATH[view] || '/';
+  // The studio shell lives at ONE address: never rewrite to manager paths.
+  const path = IS_STUDIO_SHELL
+    ? (window.location.pathname || '/studio')
+    : (VIEW_TO_PATH[view] || '/');
   const sub = viewUrlParamsFor(view);
   const search = new URLSearchParams();
   for (const [k, v] of Object.entries(sub)) {
@@ -300,6 +304,8 @@ let _bootModalParams = (() => {
 })();
 
 function restoreModalFromUrl() {
+  // A crafted ?modal= link must not open manager dialogs inside the shell.
+  if (IS_STUDIO_SHELL) { _bootModalParams = null; return; }
   let params = getUrlParams();
   // On first load the boot URL was already rewritten by updateUrlForView, so
   // fall back to the captured boot params (one-shot).
@@ -416,7 +422,10 @@ function _pushViewUrlAfterHistoryConsume(view) {
 function navigateToInternal(view, pushHistory = true) {
   // Cancel any in-flight requests from previous view
   cancelPendingRequests();
-  
+
+  // The studio shell has exactly one page.
+  if (IS_STUDIO_SHELL) view = 'ads-studio';
+
   // Secret ideas gating: only Admin can access the platform hub pages
   if (!isCurrentUserAdmin() && PLATFORM_ADMIN_ONLY_VIEWS.has(String(view || ''))) {
     showNotification(state.language === 'ar' ? 'غير متاح' : 'Restricted', state.language === 'ar' ? 'هذه الميزات مخفية حالياً' : 'These features are hidden for now', 'info');
@@ -513,6 +522,8 @@ function toggleMobileMenu() {
 let _commandPaletteSearchTimer = null;
 
 function toggleCommandPalette() {
+  // The manager's quick-jump palette has no place in the standalone studio.
+  if (IS_STUDIO_SHELL) return;
   state.commandPaletteOpen = !state.commandPaletteOpen;
   renderCommandPalette();
   if (state.commandPaletteOpen) {

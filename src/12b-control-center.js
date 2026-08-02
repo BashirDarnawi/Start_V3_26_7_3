@@ -40,7 +40,10 @@ function getControlCenterFacts() {
   });
   const unpaidReceipts = receipts.filter(receipt => {
     if (String(receipt.receiptType || '').toUpperCase() === 'TRANSFER_IN') return false;
-    return receipt.isPaid !== true && String(receipt.status || '').toLowerCase() !== 'paid';
+    // Canceled/Lost/Destroyed receipts are settled history, not money the
+    // owner still needs to chase — they must not inflate the attention count.
+    if (getReceiptPaymentState(receipt) !== 'not_paid') return false;
+    return true;
   });
   const metaFailures = ads.filter(ad => String(ad.metaSyncErrorCode || ad.metaLastErrorCode || '').trim());
   let snapshot = null;

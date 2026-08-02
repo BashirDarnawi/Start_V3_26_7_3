@@ -2282,3 +2282,308 @@ def test_webhook_rejects_unsigned_payload_and_accepts_valid_signature(
     )
     assert accepted.status_code == 200, accepted.text
     assert accepted.json() == {"received": True}
+
+
+# ---------------------------------------------------------------------------
+# Placeholder page-name backfill (owner request 2026-08-01): pages created as
+# "Facebook Page <id>" must receive their real Facebook name from ANY source
+# the read-only token can reach, without ever touching a manual rename.
+# ---------------------------------------------------------------------------
+
+
+def _stored_page_by_meta_id(meta_page_id):
+    with db_conn() as conn:
+        rows = conn.execute(
+            text("SELECT id,data_json,last_modified FROM entities WHERE type='pages' AND deleted=false")
+        ).mappings().all()
+    for row in rows:
+        data = json_loads(row["data_json"]) or {}
+        if str(data.get("metaPageId") or "") == str(meta_page_id):
+            return data, int(row["last_modified"])
+    return None, 0
+
+
+def test_page_name_backfill_uses_locally_known_name(actors, configured_meta, monkeypatch):
+    # Placeholder page + a synced ad that already learned the real name:
+    # the backfill must rename the page WITHOUT any Meta call.
+    with db_conn() as conn:
+        page_id, _, created = meta_ads._ensure_import_page(
+            conn, {"metaPageId": "556600000000001", "metaPageName": ""}
+        )
+    assert created
+    stored, _ = _stored_page_by_meta_id("556600000000001")
+    assert stored["name"] == "Facebook Page 556600000000001"
+
+    ad_id = new_id("ad")
+    with db_conn() as conn:
+        meta_ads._insert_internal_entity(
+            conn,
+            "ads",
+            ad_id,
+            {
+                "recordType": "ad",
+                "customerId": "",
+                "metaPageId": "556600000000001",
+                "metaPageName": "متجر الاختبار الحقيقي",
+                "metaPageCategory": "Shopping mall",
+                "metaImportSource": "meta_ads",
+            },
+        )
+
+    # Remote sources must not be needed: poison them to prove locality.
+    monkeypatch.setattr(
+        meta_ads, "get_meta_ads_client", lambda: (_ for _ in ()).throw(AssertionError("remote used"))
+    )
+    renamed = meta_ads.backfill_placeholder_page_names()
+    assert renamed >= 1
+    healed, _ = _stored_page_by_meta_id("556600000000001")
+    assert healed["name"] == "متجر الاختبار الحقيقي"
+    assert healed["metaPageName"] == "متجر الاختبار الحقيقي"
+    assert healed["category"] == "Shopping mall"
+    # Idempotent: nothing left to rename.
+    assert meta_ads.backfill_placeholder_page_names() == 0
+
+
+def test_page_name_backfill_uses_direct_page_read(actors, configured_meta, monkeypatch):
+    # No local source knows the name: the backfill must fall back to the
+    # bounded direct GET /{page-id} read.
+    with db_conn() as conn:
+        meta_ads._ensure_import_page(
+            conn, {"metaPageId": "556600000000002", "metaPageName": ""}
+        )
+
+    class _NameClient:
+        def _get_account_page_identity(self, account_id, page_id):
+            return {}
+
+        def _get(self, path, params):
+            assert str(path) == "556600000000002"
+            assert "name" in str(params.get("fields"))
+            return {"id": "556600000000002", "name": "Real Direct Name", "category": "Retail"}
+
+    monkeypatch.setattr(meta_ads, "get_meta_ads_client", lambda: _NameClient())
+    renamed = meta_ads.backfill_placeholder_page_names()
+    assert renamed >= 1
+    healed, _ = _stored_page_by_meta_id("556600000000002")
+    assert healed["name"] == "Real Direct Name"
+    assert healed["category"] == "Retail"
+
+
+def test_page_name_backfill_never_touches_manual_names(actors, configured_meta, monkeypatch):
+    # A page the owner renamed by hand is not a placeholder: the backfill
+    # must not select it, and a same-named manual page must not be merged.
+    with db_conn() as conn:
+        meta_ads._ensure_import_page(
+            conn,
+            {"metaPageId": "556600000000003", "metaPageName": "اسم يدوي مخصص"},
+        )
+    before, version_before = _stored_page_by_meta_id("556600000000003")
+    assert before["name"] == "اسم يدوي مخصص"
+
+    monkeypatch.setattr(
+        meta_ads, "get_meta_ads_client", lambda: (_ for _ in ()).throw(AssertionError("remote used"))
+    )
+    assert meta_ads.backfill_placeholder_page_names() == 0
+    after, version_after = _stored_page_by_meta_id("556600000000003")
+    assert after["name"] == "اسم يدوي مخصص"
+    assert version_after == version_before
+
+
+def test_page_name_backfill_remembers_denied_lookups(actors, configured_meta, monkeypatch):
+    # A page Meta refuses to name (deleted, permission denied) must not
+    # re-spend Graph requests on every periodic pass: the failed attempt is
+    # remembered and retried only after the cooldown expires.
+    meta_ads._PAGE_NAME_FAILURE_UNTIL.clear()
+    with db_conn() as conn:
+        meta_ads._ensure_import_page(
+            conn, {"metaPageId": "556600000000004", "metaPageName": ""}
+        )
+
+    calls = {"identity": [], "direct": []}
+
+    class _DeniedClient:
+        def _get_account_page_identity(self, account_id, page_id):
+            calls["identity"].append(str(page_id))
+            return {}
+
+        def _get(self, path, params):
+            calls["direct"].append(str(path))
+            raise meta_ads.MetaAdsError("not_found", "Page is not readable")
+
+    monkeypatch.setattr(meta_ads, "get_meta_ads_client", lambda: _DeniedClient())
+    meta_ads.backfill_placeholder_page_names()
+    assert calls["direct"].count("556600000000004") == 1
+    assert "556600000000004" in meta_ads._PAGE_NAME_FAILURE_UNTIL
+    identity_spent = calls["identity"].count("556600000000004")
+
+    # Second pass inside the cooldown: zero remote spend for this page.
+    meta_ads.backfill_placeholder_page_names()
+    assert calls["direct"].count("556600000000004") == 1
+    assert calls["identity"].count("556600000000004") == identity_spent
+
+    # Cooldown over: the page is retried — and this time Meta answers.
+    meta_ads._PAGE_NAME_FAILURE_UNTIL["556600000000004"] = 0.0
+
+    class _HealedClient(_DeniedClient):
+        def _get(self, path, params):
+            calls["direct"].append(str(path))
+            if str(path) == "556600000000004":
+                return {"id": "556600000000004", "name": "Named After Retry", "category": ""}
+            raise meta_ads.MetaAdsError("not_found", "Page is not readable")
+
+    monkeypatch.setattr(meta_ads, "get_meta_ads_client", lambda: _HealedClient())
+    assert meta_ads.backfill_placeholder_page_names() >= 1
+    assert calls["direct"].count("556600000000004") == 2
+    healed, _ = _stored_page_by_meta_id("556600000000004")
+    assert healed["name"] == "Named After Retry"
+    assert "556600000000004" not in meta_ads._PAGE_NAME_FAILURE_UNTIL
+
+
+def test_preview_page_name_extraction_accepts_only_json_identity_pairs():
+    # The preview scraper must only accept a JSON identity pair anchored to
+    # the page id itself. Rendered link/button text is NEVER trusted: it
+    # mixes UI labels ("Like Page") and undecoded HTML entities into the
+    # name, and a wrong auto-name would afterwards be protected as a manual
+    # rename by the import guards.
+    pid = "556600000000005"
+    json_doc = (
+        '<script>x={"__typename":"Page","id":"' + pid + '",'
+        '"name":"\\u0647\\u0646\\u0642\\u0631 \\u0627\\u0644\\u0647\\u0644\\u0627\\u0644\\u064a 4",'
+        '"category":"Shopping"};</script>'
+    )
+    assert meta_ads._preview_page_name_candidates(json_doc, pid) == ["هنقر الهلالي 4"]
+
+    reversed_doc = '<script>y={"name":"Real Shop","id":"' + pid + '"};</script>'
+    assert meta_ads._preview_page_name_candidates(reversed_doc, pid) == ["Real Shop"]
+
+    # Anchors that target the page still never qualify — not the real name
+    # link, not CTA labels, not entity-mangled text.
+    anchor_doc = (
+        '<div><a class="_x" href="https://www.facebook.com/' + pid + '/">'
+        "<span>متجر المعاينة</span></a>"
+        '<a role="button" href="https://www.facebook.com/' + pid + '/">Like Page</a>'
+        '<a href="https://www.facebook.com/' + pid + '/">Sarah&#x27;s Bakery</a></div>'
+    )
+    assert meta_ads._preview_page_name_candidates(anchor_doc, pid) == []
+
+    # Unanchored pairs, placeholder names, markup and broken surrogate
+    # escapes never qualify either.
+    noise_doc = (
+        '<script>z={"id":"123","name":"Other Entity"};</script>'
+        '<script>p={"id":"' + pid + '","name":"' + pid + '"};</script>'
+        '<script>q={"id":"' + pid + '","name":"<b>Bold</b>"};</script>'
+        '<script>s={"id":"' + pid + '","name":"\\ud83d"};</script>'
+    )
+    assert meta_ads._preview_page_name_candidates(noise_doc, pid) == []
+
+
+def test_page_name_backfill_reads_the_ad_preview_as_last_resort(
+    actors, configured_meta, monkeypatch
+):
+    # Meta denies the directory read AND the direct page read (the brand-new
+    # client page whose ad is still PENDING_REVIEW): the backfill must fall
+    # back to the page header rendered in the imported ad's official preview.
+    meta_ads._PAGE_NAME_FAILURE_UNTIL.clear()
+    with db_conn() as conn:
+        meta_ads._ensure_import_page(
+            conn, {"metaPageId": "556600000000006", "metaPageName": ""}
+        )
+        meta_ads._insert_internal_entity(
+            conn,
+            "ads",
+            new_id("ad"),
+            {
+                "recordType": "ad",
+                "customerId": "",
+                "metaPageId": "556600000000006",
+                "metaPageName": "",
+                "metaAdId": "120200000000001",
+                "metaImportSource": "meta_ads",
+            },
+        )
+
+    class _PreviewOnlyClient:
+        def _get_account_page_identity(self, account_id, page_id):
+            return {}
+
+        def _get(self, path, params):
+            raise meta_ads.MetaAdsError("not_found", "Page is not readable")
+
+        def get_ad_preview_page_name(self, ad_id, page_id, trace=None):
+            assert str(ad_id) == "120200000000001"
+            assert str(page_id) == "556600000000006"
+            return "هنقر المعاينة الجديد"
+
+    monkeypatch.setattr(meta_ads, "get_meta_ads_client", lambda: _PreviewOnlyClient())
+    assert meta_ads.backfill_placeholder_page_names() >= 1
+    healed, _ = _stored_page_by_meta_id("556600000000006")
+    assert healed["name"] == "هنقر المعاينة الجديد"
+    assert healed["metaPageName"] == "هنقر المعاينة الجديد"
+    assert "556600000000006" not in meta_ads._PAGE_NAME_FAILURE_UNTIL
+
+
+def test_page_name_probe_reports_every_source_and_applies_a_found_name(
+    actors, configured_meta, monkeypatch
+):
+    # The admin diagnostic must show WHY a page has no name (per-source
+    # outcome incl. Meta's error code) and, when a source does answer,
+    # apply the name on the spot through the normal import guards.
+    meta_ads._PAGE_NAME_FAILURE_UNTIL.clear()
+    with db_conn() as conn:
+        meta_ads._ensure_import_page(
+            conn, {"metaPageId": "556600000000007", "metaPageName": ""}
+        )
+        meta_ads._insert_internal_entity(
+            conn,
+            "ads",
+            new_id("ad"),
+            {
+                "recordType": "ad",
+                "customerId": "",
+                "metaPageId": "556600000000007",
+                "metaPageName": "",
+                "metaAdId": "120200000000002",
+                "metaImportSource": "meta_ads",
+            },
+        )
+
+    class _ProbeClient:
+        def _get_account_page_identity(self, account_id, page_id):
+            raise meta_ads.MetaAdsError(
+                "permission_denied", "Not allowed", provider_code="(#10)"
+            )
+
+        def _get(self, path, params):
+            raise meta_ads.MetaAdsError(
+                "permission_denied", "Not allowed", provider_code="(#10)"
+            )
+
+        def get_ad_preview_page_name(self, ad_id, page_id, trace=None):
+            assert str(ad_id) == "120200000000002"
+            if isinstance(trace, list):
+                trace.append("preview:ok")
+            return "اسم من المعاينة"
+
+    monkeypatch.setattr(meta_ads, "get_meta_ads_client", lambda: _ProbeClient())
+    denied = client.get(
+        "/api/meta-ads/pages/556600000000007/name-probe", cookies=actors["employee"]
+    )
+    assert denied.status_code == 403
+
+    response = client.get(
+        "/api/meta-ads/pages/556600000000007/name-probe", cookies=actors["admin"]
+    )
+    assert response.status_code == 200, response.text
+    report = response.json()
+    assert report["pageId"] == "556600000000007"
+    assert report["sources"]["directRead"] == {"error": "(#10)"}
+    assert report["sources"]["adPreview"]["name"] == "اسم من المعاينة"
+    assert report["applied"] is True
+    assert report["appliedName"] == "اسم من المعاينة"
+    healed, _ = _stored_page_by_meta_id("556600000000007")
+    assert healed["name"] == "اسم من المعاينة"
+
+    bad = client.get(
+        "/api/meta-ads/pages/not-a-page-id/name-probe", cookies=actors["admin"]
+    )
+    assert bad.status_code == 400

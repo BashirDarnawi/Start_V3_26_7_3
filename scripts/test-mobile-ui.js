@@ -160,6 +160,11 @@ check('phone dialogs use one safe scrolling overlay',
   views.includes('mobile-dialog-overlay fixed inset-0') &&
   helpers.includes('mobile-dialog-overlay fixed inset-0') &&
   modals.includes('mobile-dialog-overlay fixed inset-0'));
+check('dialogs taller than a desktop window scroll instead of clipping',
+  css.split('align-items: flex-start !important').length >= 3 &&
+  css.includes('margin-top: auto') &&
+  css.includes('margin-bottom: auto') &&
+  css.indexOf('.mobile-dialog-overlay {') < css.indexOf('@media (max-width: 900px), (max-height: 500px)'));
 check('Edit Ad keeps an always-visible phone-sized history action in its fixed header',
   adEditModal.includes('data-action="view-ad-edit-history"') &&
   adEditModal.includes('data-ad-id="${Security.escapeHtml(String(adData.id || \'\'))}"') &&
@@ -167,6 +172,35 @@ check('Edit Ad keeps an always-visible phone-sized history action in its fixed h
   adEditModal.includes('class="min-h-11 inline-flex') &&
   adEditModal.includes("const adHistoryCount = getAdEditHistoryCount(adData);") &&
   adEditModal.includes("${isEdit ? `"));
+check('the temporary manual-page-creation pause stays a one-line flag and never blocks editing',
+  forms.includes('const PAGE_MANUAL_CREATE_PAUSED = ') &&
+  forms.includes('if (PAGE_MANUAL_CREATE_PAUSED) {') &&
+  !helpers.includes('PAGE_MANUAL_CREATE_PAUSED'));
+check('the temporary Meta-only ad-page switch stays a one-line flag',
+  adEditModal.includes('const AD_PAGES_META_ONLY_FOR_ADMIN = ') &&
+  adEditModal.includes('AD_PAGES_META_ONLY_FOR_ADMIN && isCurrentUserAdmin()') &&
+  adEditModal.includes(".filter(p => String(p.metaPageId || '').trim())"));
+check('a Meta-linked ad locks its page field instead of offering the picker',
+  adEditModal.includes('const metaPageLocked = isEdit && !!adLinkedPage') &&
+  adEditModal.includes("String(adData.metaAdId || '').trim() !== '' || String(adData.metaImportSource || '').trim() !== ''") &&
+  adEditModal.includes('${metaPageLocked ? `') &&
+  adEditModal.includes('data-lucide="lock"'));
+check('ad page dropdown marks Meta-imported pages with a Meta badge',
+  adEditModal.includes("String(p.metaPageId || '').trim() ?") &&
+  adEditModal.includes('>Meta</span>') &&
+  adEditModal.includes('dark:bg-blue-900/40 dark:text-blue-300') &&
+  adEditModal.includes('data-record-action="select-ad-page"'));
+check('admins can record a verified delivery completion, others stay blocked',
+  helpers.includes('const isAdminCompletion = isCurrentUserAdmin();') &&
+  helpers.includes("!isAdminCompletion && String(state.currentUser?.role || '').toLowerCase() !== 'delivery'") &&
+  helpers.includes("!isAdminCompletion && String(receipt.deliveryPersonId || '') !== String(state.currentUser?.id || '')") &&
+  views.includes("isCurrentUserAdmin() && isTempDeliveryReceiptNo(receipt.tempReceiptNo) && receipt.deliveryStatus !== 'Delivered'") &&
+  views.includes(`onclick="openReceiptDeliveryCompletionModal('\${receipt.id}')"`));
+check('editing a temp receipt to Paid-by-delivery routes to the completion flow instead of a raw server error',
+  forms.includes("(statusDetail.paidCollection || 'office') === 'delivery' && editTarget") &&
+  forms.includes('isTempDeliveryReceiptNo(editTarget.tempReceiptNo)') &&
+  forms.includes('openReceiptDeliveryCompletionModal(editTarget.id);') &&
+  forms.includes('Only the assigned delivery driver or an admin can complete this delivery.'));
 check('ad history rendering is defensive, escaped and accessible',
   adEditHistoryViewer.includes("Array.isArray(ad?.editHistory)") &&
   adEditHistoryViewer.includes("Security.escapeHtml(edit.editedBy)") &&
@@ -890,6 +924,79 @@ check('an already-signed-in web session never hands off to the app without an ex
   serverApi.includes('albayanConfirmAppHandoff()') &&
   serverApi.includes('albayanDeclineAppHandoff()') &&
   serverApi.includes('clearPendingAppLoginRequest();'));
+
+check('destroyed receipt is a third RED chooser option that records only the number',
+  helpers.includes("_pickNewReceipt('destroyed')") &&
+  helpers.includes('border-color:#dc2626') &&
+  helpers.includes("isAr ? 'وصل تالف' : 'Destroyed Receipt'") &&
+  helpers.includes('function showDestroyedReceiptModal') &&
+  helpers.includes("status: 'Destroyed'") &&
+  helpers.includes('isPaid: false'));
+
+check('destroyed receipt number is validated and pre-checked before the server lock',
+  helpers.includes('/^(?:[1-9][0-9]*|[SBOE][1-9][0-9]*)$/') &&
+  helpers.includes('destroyed-receipt-number'));
+
+check('destroyed receipts are excluded from every client money reader',
+  helpers.includes("status === 'Canceled' || status === 'Lost' || status === 'Destroyed'") &&
+  helpers.includes("st === 'Canceled' || st === 'Lost' || st === 'Destroyed'") &&
+  forms.includes("status !== 'Canceled' && status !== 'Lost' && status !== 'Destroyed'") &&
+  dataAudit.includes("if (status === 'destroyed') return 'canceled';") &&
+  read('src/12b-control-center.js').includes("getReceiptPaymentState(receipt) !== 'not_paid'"));
+
+check('destroyed receipt lock is enforced on every client edit door, bilingually',
+  helpers.includes('function _blockDestroyedReceiptEdit') &&
+  helpers.includes('_blockDestroyedReceiptEdit(receipt)') &&
+  forms.includes('_blockDestroyedReceiptEdit(editTarget)') &&
+  helpers.includes('/destroyed receipt is locked/i'));
+
+check('destroying an auto-serial number still advances the client counter',
+  forms.includes("const isDestroyedRow = String(receipt.status || '') === 'Destroyed';") &&
+  forms.includes('!usesGroupMethod && !isDestroyedRow') &&
+  forms.includes('!hasManualMethod && !isDestroyedRow'));
+
+check('destroyed record carries createdAt so sorting and date filters stay sane',
+  helpers.includes('createdAt: new Date().toISOString()'));
+
+check('destroyed receipt card is a minimal red locked-number card',
+  views.includes("String(receipt.status || '') === 'Destroyed'") &&
+  views.includes('status-badge status-destroyed') &&
+  views.includes('border-inline-start:5px solid #dc2626'));
+
+check('destroyed status badge has its red style and Arabic name',
+  css.includes('.status-destroyed') &&
+  read('src/07-i18n-render-core.js').includes("'Destroyed': 'تالف'"));
+
+check('ads studio wallet and Meta connection live inside the Overview, not tabs',
+  adsStudio.includes('${renderAdsStudioWallet()}') &&
+  adsStudio.includes('${renderAdsStudioConnections()}') &&
+  !adsStudio.includes("{ id: 'wallet',") &&
+  !adsStudio.includes("{ id: 'connections',") &&
+  adsStudio.includes('function adsStudioWalletHeldMinor') &&
+  adsStudio.includes("String(c.status || '') === 'Submitted'") &&
+  serverApi.includes("apiJson('/api/wallet/payment-requests'"));
+
+check('ads studio submit is wallet-gated with a bilingual escape hatch',
+  adsStudio.includes('adsStudioWalletAvailableMinor() < _budgetMinor') &&
+  adsStudio.includes('اشحن محفظتك أولاً'));
+
+check('the ads studio has its own standalone front door at /studio',
+  platform.includes('const IS_STUDIO_SHELL') &&
+  platform.includes("/^\\/studio(\\/|$)/.test(window.location.pathname") &&
+  routing.includes("if (IS_STUDIO_SHELL) return 'ads-studio';") &&
+  routing.includes("if (IS_STUDIO_SHELL) view = 'ads-studio';") &&
+  read('server/main.py').includes('"/studio",'));
+
+check('the studio shell wears its own brand and never leads back to the manager',
+  views.includes("'استوديو إعلانات البيان' : 'Albayan Ads Studio'") &&
+  adsStudio.includes("if (IS_STUDIO_SHELL) return '';") &&
+  routing.includes('if (IS_STUDIO_SHELL) return;') &&
+  dataAudit.includes("if (IS_STUDIO_SHELL) return 'ads-studio';"));
+
+check('the studio shell cannot resurrect manager dialogs or rewrite the manager saved page',
+  routing.includes('if (IS_STUDIO_SHELL) { _bootModalParams = null; return; }') &&
+  read('src/06-persistence.js').includes('if (prior && prior.currentView) toSave.currentView = prior.currentView;') &&
+  read('server/main.py').includes('"/studio/",'));
 
 const openBraces = (css.match(/\{/g) || []).length;
 const closeBraces = (css.match(/\}/g) || []).length;

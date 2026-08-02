@@ -34,6 +34,12 @@
 // ==========================================
 // Detects platform (web, iOS, Android, HarmonyOS) and capabilities
 
+// /studio (or a studio. subdomain) boots the standalone Ads Studio shell.
+const IS_STUDIO_SHELL = (
+  /^\/studio(\/|$)/.test(window.location.pathname || '')
+  || /^studio\./i.test(window.location.hostname || '')
+);
+
 const Platform = {
   // Cache detection results for performance
   _cache: null,

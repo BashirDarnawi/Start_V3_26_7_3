@@ -669,7 +669,7 @@ function getLiquiditySnapshot() {
     const refundOwed = status === 'Canceled' && r.isPaid === true
       && ['full', 'partial'].includes(String(detail.refundAction || ''))
       && String(detail.refundStatus || '') !== 'refunded';
-    if ((status === 'Canceled' || status === 'Lost') && !refundOwed) continue;
+    if ((status === 'Canceled' || status === 'Lost' || status === 'Destroyed') && !refundOwed) continue;
     // Cash-bearing receipts: Paid ones, plus UNDERPAID delivery completions —
     // there the completion flow rewrote amountUSD to the actually-collected
     // cash and stamped deliveredAt, even though the status stays Not Paid.
@@ -995,7 +995,7 @@ function getCustomerStats(customerId, statsIndex = null) {
   // IMPORTANT: Unpaid receipts (status "Not Paid") should NOT be counted as revenue.
   const paidReceipts = customerReceipts.filter(r => {
     const st = String(r.status || '');
-    if (st === 'Canceled' || st === 'Lost') return false;
+    if (st === 'Canceled' || st === 'Lost' || st === 'Destroyed') return false;
     return st === 'Paid' || r.isPaid === true;
   });
   // Money transferred OUT to another customer is no longer this customer's
@@ -1702,6 +1702,7 @@ async function editReceipt(id) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
     return;
   }
+  if (_blockDestroyedReceiptEdit(receipt)) return;
   if (_blockTransferInEdit(receipt)) return;
   if (getReceiptPhotoCount(receipt) > 0 && !isEntityMediaHydrated('receipts', receipt)) {
     try {
@@ -2268,12 +2269,16 @@ async function updateDeliveryStatus(itemId, status) {
     removeDeliveryMission(itemId);
     return;
   }
-  if (s === 'Delivered' && String(state.currentUser?.role || '').toLowerCase() !== 'delivery') {
-    showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'فقط سائق التوصيل المعيَّن يمكنه تحديد التوصيل كـ"تم التوصيل".' : 'Only the assigned delivery driver can mark a delivery as Delivered.', 'warning');
+  // An admin may complete a TEMP delivery RECEIPT (D#): the completion modal +
+  // server hold them to the driver's proof rules. Ad deliveries and normal
+  // receipts stay driver-only, so a mis-tap cannot silently settle money.
+  const _adminDeliversReceipt = isCurrentUserAdmin() && state.receipts.some(r => r && !r._deleted && String(r.id) === String(itemId) && isTempDeliveryReceiptNo(r.tempReceiptNo));
+  if (s === 'Delivered' && !_adminDeliversReceipt && String(state.currentUser?.role || '').toLowerCase() !== 'delivery') {
+    showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'فقط سائق التوصيل المعيَّن يمكنه تحديد هذا التوصيل كـ"تم التوصيل".' : 'Only the assigned delivery driver can mark this delivery as Delivered.', 'warning');
     return;
   }
   if (s === 'Delivered') {
-    // Defense in depth (only a driver reaches here): route through the validated
+    // Defense in depth (only a driver or admin reaches here): route through the validated
     // collection flow instead of a bare status write. For a temp D# receipt
     // markAsCollected opens the proof modal (final receipt no. + photo +
     // collected amount); a direct deliveryStatus write skipped that and left
@@ -3542,11 +3547,14 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
     showNotification(isArD ? 'خطأ' : 'Error', isArD ? 'الوصل غير موجود' : 'Receipt not found', 'error');
     return;
   }
-  if (String(state.currentUser?.role || '').toLowerCase() !== 'delivery') {
-    showNotification(isArD ? 'تم رفض الوصول' : 'Access Denied', isArD ? 'لمستخدمي التوصيل فقط' : 'Delivery users only', 'error');
+  // Admins may record a completion themselves; the server holds them to the
+  // same proof rules as the assigned driver (final number, photo, amounts).
+  const isAdminCompletion = isCurrentUserAdmin();
+  if (!isAdminCompletion && String(state.currentUser?.role || '').toLowerCase() !== 'delivery') {
+    showNotification(isArD ? 'تم رفض الوصول' : 'Access Denied', isArD ? 'لمستخدمي التوصيل أو المدير فقط' : 'Delivery users or admins only', 'error');
     return;
   }
-  if (String(receipt.deliveryPersonId || '') !== String(state.currentUser?.id || '')) {
+  if (!isAdminCompletion && String(receipt.deliveryPersonId || '') !== String(state.currentUser?.id || '')) {
     showNotification(isArD ? 'تم رفض الوصول' : 'Access Denied', isArD ? 'هذا الوصل غير معيَّن لك' : 'This receipt is not assigned to you', 'error');
     return;
   }
@@ -3565,7 +3573,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
       );
       return;
     }
-    if (!receipt || String(receipt.deliveryPersonId || '') !== String(state.currentUser?.id || '')) return;
+    if (!receipt || (!isAdminCompletion && String(receipt.deliveryPersonId || '') !== String(state.currentUser?.id || ''))) return;
   }
 
   // Freeze the receipt's _lastModified at modal-open time. submitReceipt-
@@ -3742,9 +3750,10 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
         </div>
 
         <div class="flex space-x-2 pt-2 border-t border-slate-200 dark:border-slate-700">
+          ${isAdminCompletion ? '' : `
           <button type="button" onclick="openReceiptDeliveryCancelModal('${receipt.id}')" class="flex-1 btn-shine bg-rose-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold">
             <i data-lucide="x-circle" class="w-4 h-4 inline mr-1"></i>${isArD ? 'إلغاء التوصيل' : 'Cancel Delivery'}
-          </button>
+          </button>`}
           <button type="button" id="delivery-complete-submit" onclick="submitReceiptDeliveryCompletion('${receipt.id}')" class="flex-1 btn-shine bg-emerald-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold disabled:opacity-50 disabled:cursor-not-allowed">
             <i data-lucide="check" class="w-4 h-4 inline mr-1"></i>${isArD ? 'تم التوصيل' : 'Mark Delivered'}
           </button>
@@ -4477,10 +4486,24 @@ function _receiptCollectionBreakdown(receipt) {
   return [{ method: receipt.paymentMethod || 'Cash (LYD)', amount: target }];
 }
 
+// Every edit door on a destroyed receipt shows the same bilingual message.
+function _blockDestroyedReceiptEdit(receipt) {
+  if (String(receipt?.status || '') !== 'Destroyed') return false;
+  showNotification(
+    state.language === 'ar' ? 'وصل تالف' : 'Destroyed receipt',
+    state.language === 'ar'
+      ? 'هذا الوصل تالف ورقمه مقفول — لا يمكن تعديله. احذفه إذا أردت تحرير الرقم.'
+      : 'This receipt is destroyed and its number is locked — it cannot be edited. Delete it to free the number.',
+    'error'
+  );
+  return true;
+}
+
 function openCollectReceiptModal(receiptId) {
   if (!_canMarkCollected()) return;
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
+  if (_blockDestroyedReceiptEdit(receipt)) return;
   const isAr = state.language === 'ar';
   const targetLYD = _receiptCashCollectionTargetLocal(receipt);
   const serialTxt = receipt.serialNumber || receipt.tempReceiptNo || receipt.finalReceiptNo || receiptId.slice(0, 8);
@@ -4735,7 +4758,7 @@ function showNewReceiptChooser() {
         <h2 class="text-xl font-bold text-slate-800 dark:text-white">${isAr ? 'اختر نوع الوصل' : 'Choose receipt type'}</h2>
         <button onclick="document.getElementById('new-receipt-chooser')?.remove()" class="text-slate-400 hover:text-slate-600 p-1"><i data-lucide="x" class="w-5 h-5"></i></button>
       </div>
-      <p class="text-xs text-slate-500 mb-5">${isAr ? 'اختر بعناية — النوعان مختلفان.' : 'Choose carefully — the two are different.'}</p>
+      <p class="text-xs text-slate-500 mb-5">${isAr ? 'اختر بعناية — الأنواع مختلفة.' : 'Choose carefully — the types are different.'}</p>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <button type="button" onclick="_pickNewReceipt('normal')"
           class="text-start p-5 rounded-2xl border-2 transition-all hover:shadow-lg"
@@ -4751,6 +4774,13 @@ function showNewReceiptChooser() {
           <div class="font-extrabold" style="color:#92400e">${isAr ? 'رصيد سابق' : 'Existing Balance'}</div>
           <div class="text-xs mt-1" style="color:#b45309">${isAr ? 'عميل استهلك جزءاً — سجّل المتبقي فقط' : 'Customer already used part — record what is left'}</div>
         </button>
+        <button type="button" onclick="_pickNewReceipt('destroyed')"
+          class="text-start p-5 rounded-2xl border-2 transition-all hover:shadow-lg sm:col-span-2"
+          style="border-color:#dc2626;background:#fef2f2">
+          <div class="w-12 h-12 rounded-xl flex items-center justify-center mb-3" style="background:#dc2626;color:#fff"><i data-lucide="file-x" class="w-6 h-6"></i></div>
+          <div class="font-extrabold" style="color:#991b1b">${isAr ? 'وصل تالف' : 'Destroyed Receipt'}</div>
+          <div class="text-xs mt-1" style="color:#b91c1c">${isAr ? 'ورقة ممزقة لم تُستخدم أبداً — سجّل رقمها فقط حتى لا يدفع أحد بهذا الرقم' : 'Torn paper, never used — record only its number so nobody can ever pay with it'}</div>
+        </button>
       </div>
     </div>`;
   document.body.appendChild(wrap);
@@ -4759,8 +4789,106 @@ function showNewReceiptChooser() {
 
 function _pickNewReceipt(kind) {
   document.getElementById('new-receipt-chooser')?.remove();
-  // Both open the SAME full receipt form; the carried one is tagged on save.
+  if (kind === 'destroyed') {
+    showDestroyedReceiptModal();
+    return;
+  }
+  // Both remaining kinds open the SAME full receipt form; carried is tagged on save.
   showReceiptModal(kind === 'carried');
+}
+
+// ---- Destroyed receipt: locks the torn paper's number forever ------------
+function showDestroyedReceiptModal() {
+  if (!currentUserHasPermission('receipts', 'add')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإنشاء وصولات' : 'You do not have permission to create receipts', 'error');
+    return;
+  }
+  const isAr = state.language === 'ar';
+  document.getElementById('destroyed-receipt-dialog')?.remove();
+  const wrap = document.createElement('div');
+  wrap.id = 'destroyed-receipt-dialog';
+  wrap.className = 'mobile-dialog-overlay fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  wrap.onclick = (e) => { if (e.target === wrap) wrap.remove(); };
+  wrap.innerHTML = `
+    <div class="glass-panel w-full max-w-md p-6 rounded-3xl" onclick="event.stopPropagation()">
+      <div class="flex justify-between items-start mb-1">
+        <h2 class="text-xl font-bold" style="color:#991b1b">${isAr ? 'وصل تالف' : 'Destroyed Receipt'}</h2>
+        <button onclick="document.getElementById('destroyed-receipt-dialog')?.remove()" class="text-slate-400 hover:text-slate-600 p-1"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+      <p class="text-xs text-slate-500 mb-4">${isAr ? 'اكتب رقم الوصل الممزق. سيُقفل الرقم للأبد ولن يستطيع أحد الدفع به.' : 'Write the torn receipt’s number. The number is locked forever and nobody can ever pay with it.'}</p>
+      <input id="destroyed-receipt-number" type="text" inputmode="text" autocomplete="off"
+        class="w-full px-4 py-3 rounded-xl border-2 bg-white dark:bg-slate-800 text-slate-800 dark:text-white font-mono text-lg"
+        style="border-color:#dc2626" placeholder="${isAr ? 'رقم الوصل' : 'Receipt number'}" />
+      <div class="flex gap-3 mt-5">
+        <button type="button" onclick="_saveDestroyedReceipt(this)"
+          class="flex-1 px-4 py-3 rounded-xl font-bold text-white transition-all hover:shadow-lg"
+          style="background:#dc2626">${isAr ? 'قفل الرقم' : 'Lock the number'}</button>
+        <button type="button" onclick="document.getElementById('destroyed-receipt-dialog')?.remove()"
+          class="px-4 py-3 rounded-xl font-bold bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-200">${isAr ? 'إلغاء' : 'Cancel'}</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => document.getElementById('destroyed-receipt-number')?.focus(), 50);
+}
+
+async function _saveDestroyedReceipt(buttonEl) {
+  const isAr = state.language === 'ar';
+  const input = document.getElementById('destroyed-receipt-number');
+  const arabicDigits = '٠١٢٣٤٥٦٧٨٩';
+  const persianDigits = '۰۱۲۳۴۵۶۷۸۹';
+  const number = String(input?.value || '')
+    .replace(/[٠-٩]/g, (d) => String(arabicDigits.indexOf(d)))
+    .replace(/[۰-۹]/g, (d) => String(persianDigits.indexOf(d)))
+    .trim().toUpperCase();
+  if (!/^(?:[1-9][0-9]*|[SBOE][1-9][0-9]*)$/.test(number)) {
+    showNotification(isAr ? 'رقم غير صالح' : 'Invalid number', isAr ? 'اكتب أرقاماً فقط (أو S/B/O/E ثم أرقام)' : 'Digits only (or S/B/O/E followed by digits)', 'error');
+    return;
+  }
+  const taken = getVisibleRecords(state.receipts).some(r =>
+    [r.serialNumber, r.finalReceiptNo, r.tempReceiptNo]
+      .some(v => String(v || '').trim().toUpperCase() === number));
+  if (taken) {
+    showNotification(isAr ? 'الرقم مستخدم' : 'Number already used', isAr ? 'يوجد وصل بهذا الرقم بالفعل' : 'A receipt with this number already exists', 'error');
+    return;
+  }
+  const record = {
+    id: generateId('receipt'),
+    recordType: 'receipt',
+    status: 'Destroyed',
+    isPaid: false,
+    finalReceiptNo: number,
+    serialNumber: number,
+    amountUSD: 0,
+    amountLocal: 0,
+    customerId: '',
+    date: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+  };
+  if (buttonEl) buttonEl.disabled = true;
+  try {
+    if (isServerModeEnabled()) {
+      const created = await apiCreateEntity('receipts', record);
+      const saved = created?.data ? Security.sanitizeObject(created.data) : null;
+      if (!saved || !saved.id) throw new Error('invalid server response');
+      const savedIdx = state.receipts.findIndex(r => r && String(r.id) === String(saved.id));
+      if (savedIdx === -1) state.receipts.unshift(saved); else state.receipts[savedIdx] = saved;
+      markCollectionDirty('receipts');
+      saveState();
+    } else {
+      const savedOk = await addRecord(state.receipts, record);
+      if (!savedOk) { if (buttonEl) buttonEl.disabled = false; return; }
+    }
+  } catch (e) {
+    if (buttonEl) buttonEl.disabled = false;
+    const detail = (e?.payload && typeof e.payload === 'object' && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
+    showNotification(isAr ? 'فشل الحفظ' : 'Save failed', String(detail), 'error');
+    return;
+  }
+  document.getElementById('destroyed-receipt-dialog')?.remove();
+  addLog('create', 'receipt', record.id, `Destroyed receipt #${number} recorded`);
+  showNotification(isAr ? 'تم قفل الرقم' : 'Number locked', isAr ? `الوصل ${number} مسجل كتالف — لا يمكن الدفع به أبداً` : `Receipt ${number} is recorded as destroyed — it can never be paid with`, 'success');
+  render();
 }
 
 
@@ -4859,7 +4987,7 @@ function manageRefund(adId) {
 // target customer — money invented out of nothing.
 function _isTransferableReceipt(r) {
   const st = String(r?.status || '');
-  if (st === 'Canceled' || st === 'Lost') return false;
+  if (st === 'Canceled' || st === 'Lost' || st === 'Destroyed') return false;
   return st === 'Paid' || r?.isPaid === true;
 }
 
@@ -5236,7 +5364,7 @@ function showMetaAdHistory(adId) {
     const sourceLabel = exactActivity
       ? (isAr ? 'سجل نشاط Meta' : 'Meta activity')
       : (entry.source === 'meta_import' ? (isAr ? 'استيراد Meta' : 'Meta import') : (isAr ? 'اكتشفته المزامنة' : 'Detected by sync'));
-    const eventLabel = entry.eventType ? entry.eventType.replaceAll('_', ' ') : '';
+    const eventLabel = entry.eventType ? entry.eventType.split('_').join(' ') : '';
     return `<article class="rounded-xl border border-blue-100 bg-blue-50/40 p-3 dark:border-blue-900 dark:bg-blue-950/20 sm:p-4">
       <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div class="min-w-0"><div class="flex flex-wrap items-center gap-2"><span class="rounded-full bg-blue-600 px-2 py-1 text-[10px] font-black text-white">${isAr ? 'تغيير' : 'Change'} #${history.length - index}</span><span class="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">${sourceLabel}</span></div><p class="mt-2 break-words text-xs font-bold text-slate-700 dark:text-slate-200">${Security.escapeHtml(entry.editedBy)}</p></div>
@@ -5865,6 +5993,11 @@ function isVersionConflict409(error) {
 function describe409(error, conflictText) {
   if (isVersionConflict409(error)) return conflictText;
   const detail = String(error?.message || '');
+  if (/destroyed receipt is locked/i.test(detail)) {
+    return state.language === 'ar'
+      ? 'هذا الوصل تالف ورقمه مقفول — لا يمكن تغييره. احذف السجل إذا أردت تحرير الرقم.'
+      : 'This receipt is destroyed and its number is locked — it cannot be changed. Delete the record to free the number.';
+  }
   if (/terminal or refunded ad/i.test(detail)) {
     return state.language === 'ar'
       ? 'هذا الإعلان منتهٍ أو مُسترجَع، لذا لم يعد هذا التغيير ممكناً. استخدم الاسترجاع لتعديل أمواله.'

@@ -383,6 +383,14 @@ function saveState() {
         delete toSave[key];
       }
     }
+    // The studio shell must never rewrite the manager's remembered page.
+    if (typeof IS_STUDIO_SHELL !== 'undefined' && IS_STUDIO_SHELL) {
+      try {
+        const prior = JSON.parse(localStorage.getItem('albayan_complete_state') || 'null');
+        if (prior && prior.currentView) toSave.currentView = prior.currentView;
+        else delete toSave.currentView;
+      } catch (_) { delete toSave.currentView; }
+    }
     // Mark metadata for migration/debugging
     toSave._storageVersion = 2;
     toSave._persistedAt = new Date().toISOString();

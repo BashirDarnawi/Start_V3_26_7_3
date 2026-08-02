@@ -737,6 +737,18 @@ function _savedAccountInitial(acc) {
 
 // Shared header (brand mark + bilingual title) for both pre-login surfaces.
 function _renderLoginBrandHeader(subtitle) {
+  if (IS_STUDIO_SHELL) {
+    // The studio front door wears its own brand.
+    const isAr = state.language === 'ar';
+    return `
+          <div class="text-center mb-8">
+            <div class="w-16 h-16 rounded-3xl mx-auto mb-4 bg-gradient-to-br from-blue-600 to-cyan-500 shadow-lg shadow-blue-500/20 flex items-center justify-center">
+              <i data-lucide="rocket" class="w-8 h-8 text-white"></i>
+            </div>
+            <h1 class="text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">${isAr ? 'استوديو إعلانات البيان' : 'Albayan Ads Studio'}</h1>
+            <p class="text-slate-500 mt-2">${isAr ? 'سجّل الدخول لإدارة حملاتك ومحفظتك' : 'Sign in to manage your campaigns and wallet'}</p>
+          </div>`;
+  }
   return `
           <div class="text-center mb-8">
             <div class="w-16 h-16 rounded-3xl mx-auto mb-4 alb-mark alb-mark-dot flex items-center justify-center">
@@ -3413,6 +3425,28 @@ function renderReceiptsView() {
           // colours). border-inline-start keeps the stripe on the leading edge
           // in both LTR and RTL.
           const _typeAccent = receipt.receiptType === 'CARRIED_BALANCE' ? '#d97706' : '#7c3aed';
+          if (String(receipt.status || '') === 'Destroyed') {
+            // Destroyed = a locked number: minimal red card, delete-only.
+            return `
+            <div data-receipt-card="true" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" class="glass-panel rounded-2xl p-6 ${receiptRecordFilter === String(receipt.id || '') ? 'ring-2 ring-amber-400 ring-offset-2 dark:ring-offset-slate-950' : ''}" style="border-inline-start:5px solid #dc2626">
+              <div class="flex justify-between items-start">
+                <div>
+                  <div class="flex items-center gap-2">
+                    <span class="px-2 py-0.5 rounded-md bg-rose-100 dark:bg-rose-900/40 text-rose-700 dark:text-rose-300 text-xs font-bold">#${receiptDisplayNum}</span>
+                    <h3 class="text-lg font-bold text-rose-700 dark:text-rose-300">${isArV ? 'وصل تالف' : 'Destroyed Receipt'}</h3>
+                  </div>
+                  ${displayFinalNo ? `<p class="text-sm font-mono font-bold text-slate-700 dark:text-slate-200 mt-1">${isArV ? 'الرقم المقفول' : 'Locked number'}: ${Security.escapeHtml(String(displayFinalNo))}</p>` : ''}
+                  <p class="text-xs text-slate-400 mt-1">${new Date(receipt.createdAt || receipt.date || receipt.startDate || Date.now()).toLocaleString(appDateLocale())}</p>
+                  <p class="text-[10px] text-slate-500 mt-1">${isArV ? 'تم الإنشاء بواسطة' : 'Created by'}: <span class="font-medium">${creatorName}</span></p>
+                  <p class="text-xs mt-2 text-rose-600 dark:text-rose-400 font-medium">${isArV ? 'ورقة ممزقة لم تُستخدم — لا يمكن الدفع بهذا الرقم أبداً' : 'Torn paper, never used — nobody can ever pay with this number'}</p>
+                </div>
+                <div class="flex flex-col items-end gap-2">
+                  <span class="status-badge status-destroyed">${trStatus('Destroyed')}</span>
+                  ${canDeleteThisReceipt ? `<button onclick="deleteReceipt('${receipt.id}')" class="text-rose-600 hover:text-rose-700" title="${t('delete')}"><i data-lucide="trash-2" class="w-4 h-4"></i></button>` : ''}
+                </div>
+              </div>
+            </div>`;
+          }
           return `
             <div data-receipt-card="true" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" class="glass-panel rounded-2xl p-6 hover:scale-[1.01] transition-transform ${receiptRecordFilter === String(receipt.id || '') ? 'ring-2 ring-amber-400 ring-offset-2 dark:ring-offset-slate-950' : ''}" style="border-inline-start:5px solid ${_typeAccent}">
               <div class="flex justify-between items-start mb-4">
@@ -3597,6 +3631,7 @@ function renderReceiptsView() {
                     ${receipt.collectedBy ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">${Security.escapeHtml(state.users.find(u => u.id === receipt.collectedBy)?.name || (isArV ? 'مدير' : 'Admin'))}</span>` : ''}
                   </div>
                   <div class="flex items-center gap-2 flex-shrink-0">
+                    ${(isCurrentUserAdmin() && isTempDeliveryReceiptNo(receipt.tempReceiptNo) && receipt.deliveryStatus !== 'Delivered' && receipt.deliveryStatus !== 'Canceled') ? `<button onclick="openReceiptDeliveryCompletionModal('${receipt.id}')" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all bg-cyan-100 hover:bg-cyan-200 text-cyan-700 dark:bg-cyan-900/40 dark:hover:bg-cyan-900/60 dark:text-cyan-300">${isAr ? 'تم التوصيل' : 'Mark Delivered'}</button>` : ''}
                     ${receipt.collected ? `<button onclick="uncollectReceipt('${receipt.id}')" class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-300 transition-all" title="${isAr ? 'إلغاء التحصيل' : 'Undo collection'}">${isAr ? 'إلغاء' : 'Undo'}</button>` : ''}
                     <button onclick="openCollectReceiptModal('${receipt.id}')" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all bg-emerald-100 hover:bg-emerald-200 text-emerald-700 dark:bg-emerald-900/40 dark:hover:bg-emerald-900/60 dark:text-emerald-300">
                       ${!receipt.collected ? (isAr ? 'تسجيل التحصيل' : 'Mark Collected') : (isAr ? 'تعديل المبلغ' : 'Edit Amount')}
@@ -4179,19 +4214,19 @@ function renderAdsView() {
                         </div>
                       </div>
                     </td>
-                    <td class="py-3 px-2" data-label="Page">
+                    <td class="py-3 px-2" data-label="${isAr ? 'الصفحة' : 'Page'}">
                       ${renderMetaAdPageSummary(ad, adPage, adPageDeleted, isAr)}
                     </td>
-                    <td class="py-3 px-2 font-bold ${amountColorClass}" data-label="Amount" data-payment-state="${needsSetup ? 'pending-setup' : (isAdPaid ? 'paid' : 'unpaid')}" title="${needsSetup ? (isAr ? 'لم يتم إدخال المبلغ بعد' : 'Amount has not been entered yet') : (isAdPaid ? (isAr ? 'مبلغ مدفوع' : 'Paid amount') : (isAr ? 'دين غير مدفوع على العميل' : 'Unpaid customer debt'))}">
+                    <td class="py-3 px-2 font-bold ${amountColorClass}" data-label="${isAr ? 'المبلغ' : 'Amount'}" data-payment-state="${needsSetup ? 'pending-setup' : (isAdPaid ? 'paid' : 'unpaid')}" title="${needsSetup ? (isAr ? 'لم يتم إدخال المبلغ بعد' : 'Amount has not been entered yet') : (isAdPaid ? (isAr ? 'مبلغ مدفوع' : 'Paid amount') : (isAr ? 'دين غير مدفوع على العميل' : 'Unpaid customer debt'))}">
                       <span>${needsSetup ? (isAr ? 'غير محدد' : 'Not set') : `$${(Number(ad.amountUSD) || 0).toFixed(2)}`}</span>
                       ${needsSetup ? `<span class="text-[10px] font-semibold mt-0.5">${isAr ? 'لا يوجد دين بعد' : 'No debt yet'}</span>` : (!isAdPaid ? `<span class="text-[10px] font-semibold mt-0.5">${isAr ? 'دين غير مدفوع' : 'Unpaid debt'}</span>` : '')}
                       ${renderMetaAdBudgetSummary(ad, isAr)}
                     </td>
-                    <td class="py-3 px-2 font-medium ${amountColorClass}" data-label="Local">
+                    <td class="py-3 px-2 font-medium ${amountColorClass}" data-label="${isAr ? 'بالدينار' : 'Local'}">
                       <div>${needsSetup ? (isAr ? 'غير محدد' : 'Not set') : `${adAmountLocalForDisplay.toFixed(2)} LYD`}</div>
                       ${needsSetup ? '' : `<div class="mt-1 text-[10px] font-normal text-slate-500 dark:text-slate-400">${isAr ? 'السعر' : 'Rate'}: ${receiptExchangeRate?.toFixed(2) || ad.exchangeRate?.toFixed(2) || '0.00'}</div>`}
                     </td>
-                    <td class="py-3 px-2" data-label="Payment">
+                    <td class="py-3 px-2" data-label="${isAr ? 'الدفع' : 'Payment'}">
                       ${needsSetup ? `<span class="inline-flex items-center gap-1 rounded-lg bg-amber-100 px-2 py-1 text-xs font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"><i data-lucide="clock-3" class="h-3.5 w-3.5"></i>${isAr ? 'غير محدد' : 'Not set'}</span>` : (paymentMethods.length ? `
                         <div class="flex flex-wrap gap-1">
                           ${paymentMethods.slice(0, 3).map(m => `<span class="payment-badge text-xs">${Security.escapeHtml(trMethod(m))}</span>`).join('')}
@@ -4199,7 +4234,7 @@ function renderAdsView() {
                         </div>
                       ` : '<span class="text-xs text-slate-400">-</span>')}
                     </td>
-                    <td class="py-3 px-2" data-label="Status">
+                    <td class="py-3 px-2" data-label="${isAr ? 'الحالة' : 'Status'}">
                       <!-- Read-only badge (user request): status changes only via the
                            Actions buttons. The old inline dropdown also let "Stopped"
                            be set WITHOUT the stop-ad money flow, skipping the return
@@ -4221,7 +4256,7 @@ function renderAdsView() {
                       ` : ''}
                       ${renderMetaAdStatusSummary(ad, isAr)}
                     </td>
-                    <td class="py-3 px-2" data-label="Delivery">
+                    <td class="py-3 px-2" data-label="${isAr ? 'التوصيل' : 'Delivery'}">
                       <!-- Read-only (user request, same as Status): delivery
                            changes happen via the Deliveries page / delivery
                            dashboard flows, not inline in this table. -->
@@ -4231,14 +4266,14 @@ function renderAdsView() {
                       </div>
                       ${deliveryPerson ? `<div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(deliveryPerson.name || '')}</div>` : ''}
                     </td>
-                    <td class="py-3 px-2" data-label="Serial">
+                    <td class="py-3 px-2" data-label="${isAr ? 'الرقم' : 'Serial'}">
                       ${serialDisplay ? `<span class="font-mono text-xs">${Security.escapeHtml(serialDisplay)}</span>` : '-'}
                       ${(() => {
                         const n = getAdEditHistoryCount(ad);
                         return n ? `<button onclick="showAdEditHistory('${ad.id}')" class="block mt-1 text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium">${isAr ? `${n} تعديل` : `${n} edit${n > 1 ? 's' : ''}`}</button>` : '';
                       })()}
                     </td>
-                    <td class="py-3 px-2 text-xs" data-label="Date">
+                    <td class="py-3 px-2 text-xs" data-label="${isAr ? 'التاريخ' : 'Date'}">
                       <div class="text-slate-500">${(() => { const d = new Date(ad.startDate); return isNaN(d) ? '-' : d.toLocaleDateString(appDateLocale()); })()}</div>
                       ${(() => {
                         // End date (+extra time) and, when topped up, the date
@@ -4259,7 +4294,7 @@ function renderAdsView() {
                       })()}
                       ${renderMetaAdScheduleSummary(ad, isAr)}
                     </td>
-                    <td class="py-3 px-2" data-label="Actions">
+                    <td class="py-3 px-2" data-label="${isAr ? 'إجراءات' : 'Actions'}">
                       <div class="ads-table-actions flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
                         ${renderMetaAdActionButton(ad, isAr)}
                         ${needsSetup && canEditThisAd ? `<button type="button" onclick="completeMetaImportedAd('${Security.escapeHtml(String(ad.id))}')" class="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-lg bg-amber-100 px-3 py-2 text-xs font-bold text-amber-800 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-200" title="${isAr ? 'إكمال العميل والدفع والوصل' : 'Complete customer, payment and receipt details'}"><i data-lucide="clipboard-check" class="h-4 w-4"></i><span>${isAr ? 'إكمال' : 'Complete'}</span></button>` : ''}

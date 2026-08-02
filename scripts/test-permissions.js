@@ -4018,11 +4018,13 @@ check('Ads Studio campaign builder uses integer budget cents and no live-publish
 });
 
 check('Ads Studio routing restores a directly linked tab', () => {
+  // Wallet/Meta Connection merged into the Overview (owner decision): the
+  // deep-linkable tabs are dashboard/campaigns/builder(/review).
   sandbox.window.location.pathname = '/ads-studio';
-  sandbox.window.location.search = '?tab=connections';
+  sandbox.window.location.search = '?tab=campaigns';
   assert(sandbox.getViewFromUrl() === 'ads-studio', 'Ads Studio URL does not resolve to its view');
   sandbox.restoreAdsStudioTabFromUrl();
-  assert(vm.runInContext('_adsStudioActiveTab', sandbox) === 'connections', 'Ads Studio tab was not restored from URL');
+  assert(vm.runInContext('_adsStudioActiveTab', sandbox) === 'campaigns', 'Ads Studio tab was not restored from URL');
   sandbox.window.location.pathname = '/';
   sandbox.window.location.search = '';
 });

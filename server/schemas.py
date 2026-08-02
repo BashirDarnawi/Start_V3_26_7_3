@@ -220,6 +220,22 @@ class AdCampaignReviewRequest(BaseModel):
     operationId: str = Field(min_length=8, max_length=120)
 
 
+class WalletPaymentRequestCreate(BaseModel):
+    """Customer-initiated wallet charge; credited only when the payment is
+    confirmed (admin today, payment-gateway callback tomorrow)."""
+
+    amountMinor: int = Field(ge=1, le=1_000_000_000)
+    currency: str = Field(min_length=3, max_length=3)
+    method: Literal["card", "bank_transfer", "qr"]
+    idempotencyKey: str = Field(min_length=8, max_length=120)
+
+
+class WalletPaymentRequestDecision(BaseModel):
+    """Confirmation payload; providerRef is the bank/gateway's own id."""
+
+    providerRef: Optional[str] = Field(default=None, max_length=120)
+
+
 class AdminBulkImportRequest(BaseModel):
     """
     Transactional whole-backup import (admin only).

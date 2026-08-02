@@ -364,7 +364,13 @@ function renderModal() {
     }
     case 'ad':
       const visibleCustomers = getVisibleRecords(state.customers);
-      const visiblePages = getVisibleRecords(state.pages);
+      // TEMPORARY (owner request, Aug 2026): while the duplicate-page cleanup
+      // runs, admins may only link ads to Meta-imported pages (the ones with
+      // the blue Meta badge). Set the flag to false to restore every page.
+      const AD_PAGES_META_ONLY_FOR_ADMIN = true;
+      const visiblePages = (AD_PAGES_META_ONLY_FOR_ADMIN && isCurrentUserAdmin())
+        ? getVisibleRecords(state.pages).filter(p => String(p.metaPageId || '').trim())
+        : getVisibleRecords(state.pages);
       const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
       const adData = state.modalData || {};
       // Copy (not alias) the live record's photos — the receipt modal already
@@ -385,6 +391,11 @@ function renderModal() {
       const creatorIsAdmin = isAdminRole(adCreator?.role);
       const isArAd = state.language === 'ar';
       const isImportedMetaDraft = isEdit && isMetaAdSetupPending(adData);
+      // A Meta-linked ad already knows its page (the import linked it). Offering
+      // the page picker there only invites a wrong change, so the field locks.
+      const adLinkedPage = state.pages.find(p => p && !p._deleted && String(p.id) === String(adData.pageId || ''));
+      const metaPageLocked = isEdit && !!adLinkedPage
+        && (String(adData.metaAdId || '').trim() !== '' || String(adData.metaImportSource || '').trim() !== '');
       const adCreatorDisplayName = adCreator?.name || adData.createdByName || (isImportedMetaDraft ? (isArAd ? 'استيراد Meta التلقائي' : 'Meta automatic import') : (isArAd ? 'غير معروف' : 'Unknown'));
       const adHistoryCount = getAdEditHistoryCount(adData);
       const adPaymentState = getAdPaymentState(adData);
@@ -483,17 +494,30 @@ function renderModal() {
               <!-- Page Selection -->
               <div>
                 <label class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">${isArAd ? 'الصفحة *' : 'Page *'}</label>
+                ${metaPageLocked ? `
+                <div class="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-600 px-3 py-2 rounded-lg text-sm flex items-center justify-between gap-2">
+                  <span class="truncate">${Security.escapeHtml(adLinkedPage.name || '')}</span>
+                  <span class="shrink-0 flex items-center gap-1.5">
+                    ${String(adLinkedPage.metaPageId || '').trim() ? '<span class="px-2 py-0.5 rounded-md bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 text-[10px] font-bold">Meta</span>' : ''}
+                    <i data-lucide="lock" class="w-3.5 h-3.5 text-slate-400"></i>
+                  </span>
+                </div>
+                <p class="text-[11px] text-slate-500 mt-1">${isArAd ? 'الصفحة مرتبطة تلقائياً من استيراد ميتا ولا يمكن تغييرها.' : 'This page was linked automatically by the Meta import and cannot be changed.'}</p>
+                <input type="hidden" id="ad-page" value="${Security.escapeHtml(String(adData.pageId || ''))}" required />
+                ` : `
                 <div class="relative">
                   <input type="text" id="ad-page-search" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-3 py-2 rounded-lg text-sm" placeholder="${isArAd ? 'ابحث في الصفحات...' : 'Search pages...'}" oninput="filterAdPages()" onfocus="showAdPageDropdown()" value="${Security.escapeHtml((state.pages.find(p => p.id === adData.pageId)?.name) || '')}" autocomplete="off" />
                   <div id="ad-page-dropdown" class="absolute z-20 mt-1 w-full bg-white dark:bg-slate-800 rounded-lg shadow-xl max-h-48 overflow-y-auto hidden border border-slate-200 dark:border-slate-600">
                     ${visiblePages.map(p => `
-                      <div class="page-option px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer text-sm" data-name="${Security.escapeHtml((p.name || '').toLowerCase())}" data-record-action="select-ad-page" data-record-id="${Security.escapeHtml(String(p.id || ''))}">
-                        ${Security.escapeHtml(p.name || '')}
+                      <div class="page-option px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer text-sm flex items-center justify-between gap-2" data-name="${Security.escapeHtml((p.name || '').toLowerCase())}" data-record-action="select-ad-page" data-record-id="${Security.escapeHtml(String(p.id || ''))}">
+                        <span class="truncate">${Security.escapeHtml(p.name || '')}</span>
+                        ${String(p.metaPageId || '').trim() ? '<span class="shrink-0 px-2 py-0.5 rounded-md bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 text-[10px] font-bold">Meta</span>' : ''}
                       </div>
                     `).join('')}
                   </div>
                   <input type="hidden" id="ad-page" value="${adData.pageId || ''}" required />
                 </div>
+                `}
               </div>
               
               <!-- Customer -->

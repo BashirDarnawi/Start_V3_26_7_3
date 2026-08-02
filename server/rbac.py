@@ -100,6 +100,26 @@ def _load_permissions(permissions_json: str | None) -> dict[str, list[str]]:
     return {}
 
 
+def is_admin_receipt_completion(role_lower: str, collection: str, updates: dict[str, Any], existing: dict[str, Any]) -> bool:
+    """True when an admin is recording a temp delivery receipt's completion.
+
+    Admins go through the SAME verified delivery-completion branch as the
+    assigned driver — identical proof requirements (unique final receipt
+    number, proof photo, collected amounts) and the same server-computed
+    settlement — so an office-recorded completion can never fabricate money
+    the workflow would not accept from the driver.  Everything else about the
+    admin's PATCH authority is unchanged; this only routes the Delivered
+    request of a temp delivery receipt into the verified branch instead of
+    the flat "assigned delivery user only" refusal.
+    """
+    if role_lower != "admin" or collection != "receipts":
+        return False
+    if str((updates or {}).get("deliveryStatus") or "").strip() != "Delivered":
+        return False
+    data = (existing or {}).get("data") or {}
+    return bool(str(data.get("tempReceiptNo") or "").strip())
+
+
 def user_has_permission(user: dict[str, Any], module: str, action: str, *, record_creator_id: str | None = None) -> bool:
     role = str(user.get("role") or "")
     if role.lower() == "admin":

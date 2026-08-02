@@ -130,7 +130,8 @@ img, svg, [data-lucide] {
   }
 
   #app {
-    /* Use dynamic viewport height */
+    /* Use dynamic viewport height (vh first: iOS 15.0-15.3 drops dvh) */
+    min-height: 100vh;
     min-height: 100dvh;
   }
 
@@ -261,6 +262,7 @@ body::before {
   background: linear-gradient(180deg, rgba(var(--brand-blue-rgb), 0.65), rgba(var(--brand-teal-rgb), 0.65));
   border-radius: 100vh;
   backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
   border: 2px solid rgba(255, 255, 255, 0.5);
 }
 
@@ -277,7 +279,9 @@ body::before {
   transition: transform 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 0.4s ease;
 }
 
-@supports (backdrop-filter: blur(20px)) {
+/* Safari honors only -webkit-backdrop-filter below Safari 18: the gate must
+   accept either form or every older iPhone loses the glass entirely. */
+@supports (backdrop-filter: blur(20px)) or (-webkit-backdrop-filter: blur(20px)) {
   .glass-panel {
     backdrop-filter: blur(14px) saturate(160%);
     -webkit-backdrop-filter: blur(14px) saturate(160%);
@@ -292,7 +296,7 @@ body::before {
   }
 }
 
-@supports not (backdrop-filter: blur(20px)) {
+@supports (not (backdrop-filter: blur(20px))) and (not (-webkit-backdrop-filter: blur(20px))) {
   .glass-panel {
     background: rgba(255, 255, 255, 0.95);
   }
@@ -382,9 +386,10 @@ input[type="number"] {
   appearance: textfield;
 }
 
-@supports (backdrop-filter: blur(10px)) {
+@supports (backdrop-filter: blur(10px)) or (-webkit-backdrop-filter: blur(10px)) {
   .glass-input {
     backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
   }
 }
 
@@ -732,6 +737,13 @@ table tbody tr:hover {
   background: linear-gradient(135deg, rgba(107, 114, 128, 0.2), rgba(75, 85, 99, 0.15));
   color: rgb(55, 65, 81);
   border: 1px solid rgba(107, 114, 128, 0.4);
+}
+
+/* A destroyed (torn, never-used) receipt: its number is locked forever. */
+.status-destroyed {
+  background: linear-gradient(135deg, rgba(220, 38, 38, 0.25), rgba(153, 27, 27, 0.2));
+  color: rgb(153, 27, 27);
+  border: 1px solid rgba(220, 38, 38, 0.5);
 }
 
 /* Delivery Status Badges */
@@ -1158,9 +1170,17 @@ textarea:disabled {
 
 .ad-primary-summary {
   display: flex;
-  min-width: 0;
+  /* A real floor, not 0: without it the table crushes this cell until
+     "Created by: System" wraps one letter per line. The ads table scrolls
+     horizontally, so claiming this width is safe on every phone. */
+  min-width: 15rem;
   align-items: flex-start;
   gap: 0.5rem;
+}
+
+.ad-primary-summary [data-role="ad-creator"] span,
+.ad-primary-summary [data-role="ad-completed-by"] span {
+  white-space: nowrap;
 }
 
 /* Facebook Page profile picture shown beside (before) the ad's own photo so
@@ -1392,7 +1412,7 @@ textarea:disabled {
   transition: all 0.3s ease;
 }
 
-@supports (backdrop-filter: blur(12px)) {
+@supports (backdrop-filter: blur(12px)) or (-webkit-backdrop-filter: blur(12px)) {
   .glass-panel-sm {
     backdrop-filter: blur(12px) saturate(150%);
     -webkit-backdrop-filter: blur(12px) saturate(150%);
@@ -1869,6 +1889,24 @@ textarea:disabled {
 
 }
 
+/* Every viewport: the overlay is the scroll surface. A dialog taller than
+   the window (the delivery completion form clears 1080p once its photo
+   preview loads) must scroll instead of clipping at both ends. items-center
+   cannot do that — a flex child taller than its container overflows above
+   the scroll start — so cross-axis auto margins take its place: they center
+   a short dialog exactly like items-center did, and collapse to 0 when the
+   dialog is taller, top-aligning it so every part is reachable by scroll. */
+.mobile-dialog-overlay {
+  align-items: flex-start !important;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.mobile-dialog-overlay > :first-child {
+  margin-top: auto;
+  margin-bottom: auto;
+}
+
 /* Modal responsiveness.
    900px matches the app shell's own phone breakpoint (.app-main /
    .mobile-bottom-nav below): landscape phones are 844-915px wide, so the old
@@ -2026,6 +2064,11 @@ body.is-touch *:hover {
     min-width: 44px;
   }
 
+  /* Plain fallback first — old engines drop every :has() selector list. */
+  label.flex,
+  label.inline-flex {
+    min-height: 44px;
+  }
   label:has(> input[type="checkbox"]),
   label:has(> input[type="radio"]),
   label:has(input[type="file"]) {
@@ -2039,6 +2082,7 @@ body.is-touch *:hover {
   }
 }
 
+body.is-mobile input:not([type]),
 body.is-mobile input[type="text"],
 body.is-mobile input[type="email"],
 body.is-mobile input[type="password"],
@@ -2062,8 +2106,19 @@ body.is-mobile select {
    keep these vh caps and modals stay scroll-bounded. */
 .max-h-\[42dvh\] { max-height: 42vh; }
 .max-h-\[60dvh\] { max-height: 60vh; }
+.max-h-\[70dvh\] { max-height: 70vh; }
+.max-h-\[75dvh\] { max-height: 75vh; }
+.max-h-\[80dvh\] { max-height: 80vh; }
+.max-h-\[88dvh\] { max-height: 88vh; }
 .max-h-\[90dvh\] { max-height: 90vh; }
 .max-h-\[92dvh\] { max-height: 92vh; }
+
+/* Square creative tiles on engines without aspect-ratio (old WebViews): the
+   tiles' children are absolutely positioned, so 100% bottom padding rebuilds
+   the square box. Modern engines never apply this. */
+@supports not (aspect-ratio: 1 / 1) {
+  div.aspect-square { height: 0; padding-bottom: 100%; }
+}
 
 /* Fix for Capacitor safe areas.
    iOS: notch/home-indicator — WKWebView exposes env(safe-area-inset-*).
@@ -2186,6 +2241,8 @@ body.is-mobile * {
   width: auto;
   height: auto;
   user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
   -webkit-user-drag: none;
 }
 
@@ -2309,6 +2366,7 @@ body.perf-lite .bg-noise {
 /* 2. Kill backdrop blur everywhere (every glass panel/input pays it on each
    repaint, plus modal overlays via backdrop-blur-* utility classes). */
 body.perf-lite .glass-panel,
+body.perf-lite .glass-panel-sm,
 body.perf-lite .glass-input,
 body.perf-lite [class*="backdrop-blur"] {
   backdrop-filter: none !important;

@@ -522,6 +522,46 @@ def _preview_image_candidates(html_text: str) -> list[str]:
     return [url for _, url in scored]
 
 
+def _preview_page_name_candidates(html_text: str, page_id: str) -> list[str]:
+    """Page-name candidates from Meta's rendered ad preview document.
+
+    ONLY a JSON identity pair — "id" and "name" adjacent inside the same
+    script/data object — is accepted, never rendered link or button text:
+    anchor text mixes UI labels ("Like Page") and undecoded HTML entities
+    into the name, and a WRONG auto-name would afterwards be protected as a
+    manual rename. Anchoring on the exact page id bounds the forgery
+    surface: ad copy would have to embed its own page id in this literal
+    JSON shape to plant a name, and the only party able to do that is the
+    page's own advertiser. The bounded lazy windows keep matching linear on
+    the size-capped document (no catastrophic backtracking).
+    """
+    page_id = _clean_text(page_id, 40)
+    if not _META_ID_RE.fullmatch(page_id):
+        return []
+    # &quot;-decoding exposes JSON that Facebook serializes into HTML data
+    # attributes; escaped slashes are normalized as the media extractor does.
+    document = _html_attr_unescape(str(html_text or "").replace("\\/", "/"))
+    names: list[str] = []
+    for pattern in (
+        rf'"id"\s*:\s*"{page_id}"[^{{}}]{{0,160}}?"name"\s*:\s*"((?:[^"\\]|\\.)+)"',
+        rf'"name"\s*:\s*"((?:[^"\\]|\\.)+)"[^{{}}]{{0,160}}?"id"\s*:\s*"{page_id}"',
+    ):
+        for raw in re.findall(pattern, document)[:5]:
+            try:
+                value = str(json.loads(f'"{raw}"'))
+                # A split surrogate escape survives json.loads but cannot be
+                # stored or sent as UTF-8: reject instead of corrupting.
+                value.encode("utf-8")
+            except Exception:
+                continue
+            value = _clean_text(value, 240)
+            if "<" in value or ">" in value:
+                continue
+            if value and not _is_placeholder_page_name(value, page_id) and value not in names:
+                names.append(value)
+    return names
+
+
 def _cdn_asset_key(value: Any) -> str:
     """Stable media-file key of an fbcdn URL, ignoring signing/size params.
 
@@ -938,6 +978,10 @@ class MetaAdsClient:
         self._account_cache: dict[str, dict[str, Any]] = {}
         self._account_page_cache: dict[str, dict[str, dict[str, str]]] = {}
         self._page_avatar_cache: dict[str, str] = {}
+        # Most-recent ad's rendered preview documents, keyed by (ad_id,
+        # [(ad_format, html)]): the snapshot builder reads the same documents
+        # twice (page-name pass, then media pass) and must not pay Meta twice.
+        self._preview_doc_cache: tuple[str, list[tuple[str, str]]] = ("", [])
 
     def _ensure_allowed_account(self, account_id: Any) -> str:
         normalized = _account_id(account_id)
@@ -1626,7 +1670,55 @@ class MetaAdsClient:
         log = trace if isinstance(trace, list) else []
         ad_id = _meta_id(ad_id, "Meta ad")
         avatar_key = self._get_page_avatar_key(page_id) if page_id else None
+        for html_text in self._iter_ad_preview_documents(ad_id, log):
+            candidates = _preview_image_candidates(html_text)
+            for candidate in candidates:
+                candidate_key = _cdn_asset_key(candidate)
+                if avatar_key and candidate_key and candidate_key == avatar_key:
+                    continue
+                return candidate
+            log.append("preview:no_media" if not candidates else "preview:only_avatar")
+        return ""
+
+    def get_ad_preview_page_name(
+        self, ad_id: Any, page_id: Any, trace: list[str] | None = None
+    ) -> str:
+        """The page's rendered display name from Meta's official ad preview.
+
+        The preview document renders the page header even while the ad is
+        still PENDING_REVIEW and the Page node itself is unreadable to a
+        read-only token — the of-last-resort name source for brand-new client
+        pages. Only candidates anchored to the page id are accepted (never
+        arbitrary preview text), so a wrong name cannot be minted.
+        """
+        log = trace if isinstance(trace, list) else []
+        ad_id = _meta_id(ad_id, "Meta ad")
+        normalized_page = _clean_text(page_id, 40)
+        if not _META_ID_RE.fullmatch(normalized_page):
+            return ""
+        for html_text in self._iter_ad_preview_documents(ad_id, log):
+            for name in _preview_page_name_candidates(html_text, normalized_page):
+                return name
+            log.append("preview:no_page_name")
+        return ""
+
+    def _iter_ad_preview_documents(self, ad_id: str, log: list[str]):
+        """Yield rendered preview documents for an ad, one per ad format.
+
+        Successfully fetched documents are cached for the most recent ad so
+        a second reader (name pass, then media pass, of the same snapshot)
+        replays them without new requests; failed formats are not cached.
+        """
+        cached_id, cached_docs = self._preview_doc_cache
+        if cached_id != ad_id:
+            cached_docs = []
+            self._preview_doc_cache = (ad_id, cached_docs)
+        for _cached_format, cached_text in list(cached_docs):
+            yield cached_text
+        done_formats = {fmt for fmt, _ in cached_docs}
         for ad_format in ("DESKTOP_FEED_STANDARD", "MOBILE_FEED_STANDARD"):
+            if ad_format in done_formats:
+                continue
             try:
                 payload = self._get(
                     f"{ad_id}/previews", {"ad_format": ad_format}
@@ -1676,7 +1768,10 @@ class MetaAdsClient:
                             response = None
                             break
                         current_url = next_url
-            except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError):
+            except httpx.HTTPError:
+                # Timeouts, network drops AND decoding errors: any transport
+                # failure just skips this format — it must never abort the
+                # caller's whole sync/backfill pass.
                 log.append("preview:network")
                 continue
             if response is None:
@@ -1687,14 +1782,8 @@ class MetaAdsClient:
             if len(response.content or b"") > 3 * 1024 * 1024:
                 log.append("preview:too_large")
                 continue
-            candidates = _preview_image_candidates(response.text)
-            for candidate in candidates:
-                candidate_key = _cdn_asset_key(candidate)
-                if avatar_key and candidate_key and candidate_key == avatar_key:
-                    continue
-                return candidate
-            log.append("preview:no_media" if not candidates else "preview:only_avatar")
-        return ""
+            cached_docs.append((ad_format, response.text))
+            yield response.text
 
     def get_ad_snapshot(self, ad_id: Any) -> dict[str, Any]:
         ad_id = _meta_id(ad_id, "Meta ad")
@@ -1896,6 +1985,29 @@ class MetaAdsClient:
                         page_category = direct_page_category
                 except MetaAdsError:
                     pass
+            if (
+                not page_name
+                and _PAGE_NAME_FAILURE_UNTIL.get(page_id, 0.0) <= time.monotonic()
+            ):
+                # Meta hides a brand-new client page from every direct route
+                # while its ad is still in review; the rendered ad preview
+                # already shows the page header, so read the name from there.
+                # Failures share the backfill's cooldown so an unnameable
+                # page cannot re-spend preview requests on every sync pass.
+                # Best-effort like every page-metadata read here: no failure
+                # of the preview route may ever sink the ad snapshot.
+                try:
+                    page_name = self.get_ad_preview_page_name(
+                        ad_id, page_id, media_trace
+                    )
+                except Exception:
+                    page_name = ""
+                if page_name:
+                    _PAGE_NAME_FAILURE_UNTIL.pop(page_id, None)
+                else:
+                    _PAGE_NAME_FAILURE_UNTIL[page_id] = (
+                        time.monotonic() + _PAGE_NAME_FAILURE_COOLDOWN_SECONDS
+                    )
         # The Page profile picture is shown beside (never instead of) the ad's
         # own photo in the ads table. Cached per page for this client's
         # lifetime and best-effort: an unreadable avatar must never fail the
@@ -4052,6 +4164,202 @@ def sync_due_meta_ads(limit: int | None = None) -> list[dict[str, Any]]:
     return updated
 
 
+def _is_placeholder_page_name(name: Any, meta_page_id: str) -> bool:
+    """Mirror the client's placeholder detector (src/15d-meta-ads.js):
+    an empty name, the bare numeric id, or any 'Facebook Page …' variant is
+    not a real page name."""
+    text_value = _clean_text(name, 240)
+    if not text_value:
+        return True
+    canonical = _canonical_page_name(text_value)
+    return canonical in {
+        _canonical_page_name(meta_page_id),
+        _canonical_page_name("Facebook Page"),
+        _canonical_page_name(f"Facebook Page {meta_page_id}"),
+        _canonical_page_name(f"Page {meta_page_id}"),
+    }
+
+
+# Pages Meta would not name (deleted at Facebook, permission denied, network
+# failure): remember the failed attempt so the periodic pass stops re-spending
+# the same Graph requests on them every 10 minutes forever. One hour balances
+# throttle budget against the common "brand-new ad still in review" case,
+# where Meta reveals the name shortly after approving the ad. Monotonic
+# deadlines; local sources are still consulted every pass, so a name learned
+# any other way heals the page immediately.
+_PAGE_NAME_FAILURE_COOLDOWN_SECONDS = 3600
+_PAGE_NAME_FAILURE_UNTIL: dict[str, float] = {}
+
+
+def backfill_placeholder_page_names(direct_lookup_limit: int = 25) -> int:
+    """Give placeholder-named Meta import pages their real Facebook name.
+
+    Ads Manager shows the page name in several places; this pass tries every
+    source the read-only token can reach, cheapest first:
+      1. a name already stored locally (another page row, or any synced ad's
+         metaPageName, for the same Meta page id),
+      2. the partner-stats job's learned name cache,
+      3. the ad account's promoted-pages directory,
+      4. a bounded direct GET /{page-id}?fields=id,name,category,
+      5. the page header rendered inside one of its ads' official previews
+         (works even while the ad is still in review).
+    Every write goes through _ensure_import_page, so the naming guards keep
+    applying: manual renames survive, no-op writes are skipped, and a real
+    name landing next to a same-named manual page surfaces in the existing
+    Duplicate-pages dialog instead of merging. Returns pages renamed.
+    """
+    placeholder_ids: list[str] = []
+    local_names: dict[str, tuple[str, str]] = {}
+    ad_meta_ids: dict[str, str] = {}
+    with db_conn() as conn:
+        for row in _entity_rows(conn, "pages"):
+            data = json_loads(row.get("data_json") or "{}") or {}
+            if not isinstance(data, dict):
+                continue
+            meta_id = _clean_text(data.get("metaPageId"), 40)
+            if not _META_ID_RE.fullmatch(meta_id):
+                continue
+            name = _clean_text(data.get("name"), 240)
+            meta_name = _clean_text(data.get("metaPageName"), 240)
+            if not _is_placeholder_page_name(name, meta_id):
+                local_names.setdefault(meta_id, (name, _clean_text(data.get("category"), 160)))
+            elif meta_name and not _is_placeholder_page_name(meta_name, meta_id):
+                local_names.setdefault(
+                    meta_id, (meta_name, _clean_text(data.get("metaPageCategory"), 160))
+                )
+            if _is_placeholder_page_name(name, meta_id):
+                placeholder_ids.append(meta_id)
+        if placeholder_ids:
+            wanted = set(placeholder_ids)
+            for row in _entity_rows(conn, "ads"):
+                data = json_loads(row.get("data_json") or "{}") or {}
+                if not isinstance(data, dict):
+                    continue
+                meta_id = _clean_text(data.get("metaPageId"), 40)
+                if meta_id not in wanted:
+                    continue
+                ad_ref = _clean_text(data.get("metaAdId"), 40)
+                if _META_ID_RE.fullmatch(ad_ref):
+                    ad_meta_ids.setdefault(meta_id, ad_ref)
+                if meta_id in local_names:
+                    continue
+                meta_name = _clean_text(data.get("metaPageName"), 240)
+                if meta_name and not _is_placeholder_page_name(meta_name, meta_id):
+                    local_names[meta_id] = (
+                        meta_name,
+                        _clean_text(data.get("metaPageCategory"), 160),
+                    )
+    if not placeholder_ids:
+        return 0
+
+    pending = list(dict.fromkeys(placeholder_ids))
+    resolved: dict[str, tuple[str, str]] = {
+        mid: local_names[mid] for mid in pending if mid in local_names
+    }
+
+    missing = [mid for mid in pending if mid not in resolved]
+    if missing:
+        cached_names = _load_partner_state().get("pageNames")
+        if isinstance(cached_names, dict):
+            for mid in missing:
+                name = _clean_text(cached_names.get(mid), 240)
+                if name and not _is_placeholder_page_name(name, mid):
+                    resolved[mid] = (name, "")
+            missing = [mid for mid in pending if mid not in resolved]
+
+    # Only spend remote requests on pages that did not ALREADY fail recently:
+    # a page Meta will never let this token read must not drain the shared
+    # throttle budget on every periodic pass.
+    now_monotonic = time.monotonic()
+    attemptable = [
+        mid for mid in missing if _PAGE_NAME_FAILURE_UNTIL.get(mid, 0.0) <= now_monotonic
+    ]
+    if attemptable:
+        config = load_meta_ads_config()
+        client = None
+        if config.configured and not _meta_remote_backoff_remaining():
+            try:
+                client = get_meta_ads_client()
+            except Exception:
+                client = None
+        if client is not None:
+            direct_lookups = 0
+            for mid in attemptable:
+                identity: dict[str, Any] = {}
+                budget_blocked = False
+                if hasattr(client, "_get_account_page_identity"):
+                    for account_id in config.allowed_account_ids:
+                        try:
+                            found = client._get_account_page_identity(account_id, mid)
+                        except MetaAdsError:
+                            continue
+                        if isinstance(found, dict) and found.get("name"):
+                            identity = found
+                            break
+                if not identity.get("name") and hasattr(client, "_get"):
+                    if direct_lookups < direct_lookup_limit:
+                        direct_lookups += 1
+                        try:
+                            identity = client._get(mid, {"fields": "id,name,category"}) or {}
+                        except MetaAdsError:
+                            identity = {}
+                    else:
+                        budget_blocked = True
+                if (
+                    not identity.get("name")
+                    and ad_meta_ids.get(mid)
+                    and hasattr(client, "get_ad_preview_page_name")
+                ):
+                    # Of-last-resort: the rendered ad preview shows the page
+                    # header even while Meta denies every direct name route
+                    # (the brand-new client page whose ad is still in review).
+                    if direct_lookups < direct_lookup_limit:
+                        direct_lookups += 1
+                        try:
+                            preview_name = client.get_ad_preview_page_name(
+                                ad_meta_ids[mid], mid
+                            )
+                        except MetaAdsError:
+                            preview_name = ""
+                        if preview_name:
+                            identity = {"name": preview_name}
+                    else:
+                        budget_blocked = True
+                name = _clean_text(identity.get("name"), 240)
+                if name and not _is_placeholder_page_name(name, mid):
+                    resolved[mid] = (name, _clean_text(identity.get("category"), 160))
+                elif not budget_blocked:
+                    # Only a page whose sources were genuinely tried earns a
+                    # cooldown — running out of per-pass budget must not
+                    # silence untried pages for an hour.
+                    _PAGE_NAME_FAILURE_UNTIL[mid] = (
+                        now_monotonic + _PAGE_NAME_FAILURE_COOLDOWN_SECONDS
+                    )
+
+    if not resolved:
+        return 0
+    renamed = 0
+    with _META_WRITE_LOCK:
+        for mid, (name, category) in resolved.items():
+            try:
+                with db_conn() as conn:
+                    _, local_name, _created = _ensure_import_page(
+                        conn,
+                        {"metaPageId": mid, "metaPageName": name, "metaPageCategory": category},
+                    )
+            except Exception as e:
+                # One conflicting row must not abort the rest of the batch
+                # (each page gets its own transaction for the same reason).
+                print(f"[albayan] page-name write skipped for {mid}: {type(e).__name__}")
+                continue
+            _PAGE_NAME_FAILURE_UNTIL.pop(mid, None)
+            if local_name == name:
+                renamed += 1
+    if renamed:
+        print(f"[albayan] Resolved real names for {renamed} Meta page(s)")
+    return renamed
+
+
 _WORKER_STOP = threading.Event()
 _WORKER_THREAD: threading.Thread | None = None
 _WORKER_CONTROL_LOCK = threading.Lock()
@@ -4064,6 +4372,9 @@ def _worker_loop() -> None:
         return
     last_discovery_monotonic = 0.0
     last_sync_monotonic = 0.0
+    # Startup already runs the page-name pass on its own thread; the worker's
+    # first periodic pass waits a full interval instead of duplicating it.
+    last_page_names_monotonic = time.monotonic()
     while not _WORKER_STOP.is_set():
         try:
             config = load_meta_ads_config()
@@ -4090,6 +4401,11 @@ def _worker_loop() -> None:
             ):
                 sync_due_meta_ads()
                 last_sync_monotonic = current
+            # Placeholder pages get their real name filled in periodically —
+            # cheap when there is nothing to do (one local pages scan).
+            if current - last_page_names_monotonic >= 600:
+                backfill_placeholder_page_names()
+                last_page_names_monotonic = current
         except Exception:
             print("[albayan] Meta Ads background pass failed; it will retry.")
         _WORKER_STOP.wait(2)
@@ -4214,6 +4530,113 @@ def create_meta_ads_router(
             "importState": _public_import_state(),
             "message": "Meta Ads read-only synchronization is ready" if config.configured else "Add the Meta server credentials in Jelastic to enable synchronization",
         }
+
+    @router.get("/pages/{page_id}/name-probe")
+    def meta_page_name_probe(
+        page_id: str,
+        admin: dict[str, Any] = Depends(require_meta_admin),
+    ):
+        """Diagnose why a Meta page still has no real name: try every source
+        the read-only token can reach and report each outcome (including
+        Meta's error code per source). If ANY source yields a name, it is
+        applied on the spot through the normal import guards. Admin-only,
+        read-only toward Meta, never returns credentials.
+        """
+        _rate_limit_or_429(f"meta-name-probe:{admin.get('id')}", 10, 60_000)
+        mid = _clean_text(page_id, 40)
+        if not _META_ID_RE.fullmatch(mid):
+            raise HTTPException(status_code=400, detail="Invalid Meta page id")
+        sources: dict[str, Any] = {}
+        report: dict[str, Any] = {"pageId": mid, "sources": sources}
+
+        local_name = ""
+        ad_ref = ""
+        with db_conn() as conn:
+            for entity_type in ("pages", "ads"):
+                for row in _entity_rows(conn, entity_type):
+                    data = json_loads(row.get("data_json") or "{}") or {}
+                    if not isinstance(data, dict):
+                        continue
+                    if _clean_text(data.get("metaPageId"), 40) != mid:
+                        continue
+                    for key in ("name", "metaPageName"):
+                        candidate = _clean_text(data.get(key), 240)
+                        if candidate and not _is_placeholder_page_name(candidate, mid):
+                            local_name = local_name or candidate
+                    if entity_type == "ads":
+                        candidate_ad = _clean_text(data.get("metaAdId"), 40)
+                        if _META_ID_RE.fullmatch(candidate_ad):
+                            ad_ref = ad_ref or candidate_ad
+        sources["localRows"] = {"name": local_name or None}
+
+        cached = _load_partner_state().get("pageNames")
+        partner_name = _clean_text(cached.get(mid), 240) if isinstance(cached, dict) else ""
+        if partner_name and _is_placeholder_page_name(partner_name, mid):
+            partner_name = ""
+        sources["partnerCache"] = {"name": partner_name or None}
+
+        directory_name = ""
+        direct_name = ""
+        preview_name = ""
+        config = load_meta_ads_config()
+        if not config.configured:
+            report["remote"] = "not_configured"
+        elif _meta_remote_backoff_remaining():
+            report["remote"] = (
+                f"backoff:{math.ceil(_meta_remote_backoff_remaining())}s"
+            )
+        else:
+            client = configured_client()
+            directory: dict[str, Any] = {}
+            for account_id in config.allowed_account_ids:
+                try:
+                    found = client._get_account_page_identity(account_id, mid)
+                except MetaAdsError as error:
+                    directory[account_id] = f"error:{error.provider_code or error.code}"
+                    continue
+                found_name = _clean_text(found.get("name"), 240)
+                directory[account_id] = found_name or "not_listed"
+                directory_name = directory_name or found_name
+            sources["accountDirectory"] = directory
+
+            try:
+                direct = client._get(mid, {"fields": "id,name,category"}) or {}
+                direct_name = _clean_text(direct.get("name"), 240)
+                sources["directRead"] = {"name": direct_name or None}
+            except MetaAdsError as error:
+                sources["directRead"] = {"error": error.provider_code or error.code}
+
+            if ad_ref:
+                trace: list[str] = []
+                preview_name = client.get_ad_preview_page_name(ad_ref, mid, trace)
+                sources["adPreview"] = {
+                    "adId": ad_ref,
+                    "name": preview_name or None,
+                    "trace": trace[:12],
+                }
+            else:
+                sources["adPreview"] = {"error": "no_imported_ad_for_page"}
+
+        report["cooldownActive"] = (
+            _PAGE_NAME_FAILURE_UNTIL.get(mid, 0.0) > time.monotonic()
+        )
+        applied = ""
+        for candidate in (local_name, partner_name, directory_name, direct_name, preview_name):
+            candidate = _clean_text(candidate, 240)
+            if candidate and not _is_placeholder_page_name(candidate, mid):
+                applied = candidate
+                break
+        if applied:
+            with _META_WRITE_LOCK, db_conn() as conn:
+                _, stored_name, _created = _ensure_import_page(
+                    conn, {"metaPageId": mid, "metaPageName": applied}
+                )
+            _PAGE_NAME_FAILURE_UNTIL.pop(mid, None)
+            report["applied"] = stored_name == applied
+            report["appliedName"] = applied
+        else:
+            report["applied"] = False
+        return report
 
     @router.get("/webhook")
     def verify_webhook(

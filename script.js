@@ -34,6 +34,12 @@
 // ==========================================
 // Detects platform (web, iOS, Android, HarmonyOS) and capabilities
 
+// /studio (or a studio. subdomain) boots the standalone Ads Studio shell.
+const IS_STUDIO_SHELL = (
+  /^\/studio(\/|$)/.test(window.location.pathname || '')
+  || /^studio\./i.test(window.location.hostname || '')
+);
+
 const Platform = {
   // Cache detection results for performance
   _cache: null,
@@ -5597,6 +5603,14 @@ function saveState() {
         delete toSave[key];
       }
     }
+    // The studio shell must never rewrite the manager's remembered page.
+    if (typeof IS_STUDIO_SHELL !== 'undefined' && IS_STUDIO_SHELL) {
+      try {
+        const prior = JSON.parse(localStorage.getItem('albayan_complete_state') || 'null');
+        if (prior && prior.currentView) toSave.currentView = prior.currentView;
+        else delete toSave.currentView;
+      } catch (_) { delete toSave.currentView; }
+    }
     // Mark metadata for migration/debugging
     toSave._storageVersion = 2;
     toSave._persistedAt = new Date().toISOString();
@@ -6497,6 +6511,7 @@ const STATUS_TRANSLATIONS_AR = {
   'Canceled': 'ملغي',
   'Cancelled': 'ملغي',
   'Lost': 'ضائع',
+  'Destroyed': 'تالف',
   'Stopped': 'موقوف',
   'posted': 'منشور',
   // Delivery pipeline
@@ -8259,6 +8274,8 @@ function getAlbayanManagerLandingViewForUser(user) {
 }
 
 function getPostLoginLandingViewForUser(user) {
+  // The studio door leads only into the studio — admins included.
+  if (IS_STUDIO_SHELL) return 'ads-studio';
   const roleLower = String(user?.role || '').toLowerCase();
   if (roleLower === 'admin') return 'services-hub';
   return getAlbayanManagerLandingViewForUser(user);
@@ -8267,6 +8284,15 @@ function getPostLoginLandingViewForUser(user) {
 function enforceSecretFeaturesGate() {
   // If not logged in, no gating needed.
   if (!state.currentUser) return;
+  // The studio shell renders the studio view and nothing else.
+  if (IS_STUDIO_SHELL) {
+    if (state.currentView !== 'ads-studio') {
+      state.currentView = 'ads-studio';
+      state.viewData = null;
+      saveState();
+    }
+    return;
+  }
   // Admin can access everything.
   if (isCurrentUserAdmin()) return;
   // Non-admin: block secret platform views.
@@ -8526,6 +8552,9 @@ function getReceiptPaymentState(receipt) {
     .replace(/[\s_-]+/g, '');
 
   if (status === 'canceled' || status === 'cancelled') return 'canceled';
+  // A destroyed (torn, never-used) receipt behaves like a canceled one for
+  // every reader: never unpaid debt, never revenue, never needs attention.
+  if (status === 'destroyed') return 'canceled';
   if (status === 'lost') return 'lost';
   if (status === 'paid') return 'paid';
   if (status === 'notpaid' || status === 'unpaid' || status === 'pending') return 'not_paid';
@@ -10380,6 +10409,26 @@ async function apiReviewAdCampaignRequest(campaignId, expectedLastModified, deci
   );
   if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
   return entity;
+}
+
+// Wallet payment requests (server-authoritative; confirm is admin/gateway).
+async function apiWalletPaymentRequestCreate(amountMinor, method, idempotencyKey) {
+  return withRetry(() => apiJson('/api/wallet/payment-requests', {
+    method: 'POST',
+    body: { amountMinor, currency: 'USD', method, idempotencyKey }
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 2, 500);
+}
+
+async function apiWalletPaymentRequestList(scope) {
+  const suffix = scope === 'pending' ? '?scope=pending' : '';
+  return apiJson(`/api/wallet/payment-requests${suffix}`, { method: 'GET' });
+}
+
+async function apiWalletPaymentRequestDecide(requestId, action, providerRef) {
+  return apiJson(`/api/wallet/payment-requests/${encodeURIComponent(requestId)}/${encodeURIComponent(action)}`, {
+    method: 'POST',
+    body: action === 'confirm' ? { providerRef: providerRef || null } : {}
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
 }
 
 async function apiPatchEntity(collection, id, updates, expectedLastModified) {
@@ -13033,6 +13082,7 @@ const PATH_TO_VIEW = Object.fromEntries(
 
 // Get current view from URL path
 function getViewFromUrl() {
+  if (IS_STUDIO_SHELL) return 'ads-studio';
   const path = window.location.pathname || '/';
   // Try exact match first
   if (PATH_TO_VIEW[path]) {
@@ -13190,7 +13240,10 @@ function clearUrlParams(keys) {
 // Update browser URL without reload. Carries the view's sub-state (Clothes
 // tab, service id) so the address always reproduces the screen you are on.
 function updateUrlForView(view, replace = false) {
-  const path = VIEW_TO_PATH[view] || '/';
+  // The studio shell lives at ONE address: never rewrite to manager paths.
+  const path = IS_STUDIO_SHELL
+    ? (window.location.pathname || '/studio')
+    : (VIEW_TO_PATH[view] || '/');
   const sub = viewUrlParamsFor(view);
   const search = new URLSearchParams();
   for (const [k, v] of Object.entries(sub)) {
@@ -13299,6 +13352,8 @@ let _bootModalParams = (() => {
 })();
 
 function restoreModalFromUrl() {
+  // A crafted ?modal= link must not open manager dialogs inside the shell.
+  if (IS_STUDIO_SHELL) { _bootModalParams = null; return; }
   let params = getUrlParams();
   // On first load the boot URL was already rewritten by updateUrlForView, so
   // fall back to the captured boot params (one-shot).
@@ -13415,7 +13470,10 @@ function _pushViewUrlAfterHistoryConsume(view) {
 function navigateToInternal(view, pushHistory = true) {
   // Cancel any in-flight requests from previous view
   cancelPendingRequests();
-  
+
+  // The studio shell has exactly one page.
+  if (IS_STUDIO_SHELL) view = 'ads-studio';
+
   // Secret ideas gating: only Admin can access the platform hub pages
   if (!isCurrentUserAdmin() && PLATFORM_ADMIN_ONLY_VIEWS.has(String(view || ''))) {
     showNotification(state.language === 'ar' ? 'غير متاح' : 'Restricted', state.language === 'ar' ? 'هذه الميزات مخفية حالياً' : 'These features are hidden for now', 'info');
@@ -13512,6 +13570,8 @@ function toggleMobileMenu() {
 let _commandPaletteSearchTimer = null;
 
 function toggleCommandPalette() {
+  // The manager's quick-jump palette has no place in the standalone studio.
+  if (IS_STUDIO_SHELL) return;
   state.commandPaletteOpen = !state.commandPaletteOpen;
   renderCommandPalette();
   if (state.commandPaletteOpen) {
@@ -14751,6 +14811,18 @@ function _savedAccountInitial(acc) {
 
 // Shared header (brand mark + bilingual title) for both pre-login surfaces.
 function _renderLoginBrandHeader(subtitle) {
+  if (IS_STUDIO_SHELL) {
+    // The studio front door wears its own brand.
+    const isAr = state.language === 'ar';
+    return `
+          <div class="text-center mb-8">
+            <div class="w-16 h-16 rounded-3xl mx-auto mb-4 bg-gradient-to-br from-blue-600 to-cyan-500 shadow-lg shadow-blue-500/20 flex items-center justify-center">
+              <i data-lucide="rocket" class="w-8 h-8 text-white"></i>
+            </div>
+            <h1 class="text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">${isAr ? 'استوديو إعلانات البيان' : 'Albayan Ads Studio'}</h1>
+            <p class="text-slate-500 mt-2">${isAr ? 'سجّل الدخول لإدارة حملاتك ومحفظتك' : 'Sign in to manage your campaigns and wallet'}</p>
+          </div>`;
+  }
   return `
           <div class="text-center mb-8">
             <div class="w-16 h-16 rounded-3xl mx-auto mb-4 alb-mark alb-mark-dot flex items-center justify-center">
@@ -17427,6 +17499,28 @@ function renderReceiptsView() {
           // colours). border-inline-start keeps the stripe on the leading edge
           // in both LTR and RTL.
           const _typeAccent = receipt.receiptType === 'CARRIED_BALANCE' ? '#d97706' : '#7c3aed';
+          if (String(receipt.status || '') === 'Destroyed') {
+            // Destroyed = a locked number: minimal red card, delete-only.
+            return `
+            <div data-receipt-card="true" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" class="glass-panel rounded-2xl p-6 ${receiptRecordFilter === String(receipt.id || '') ? 'ring-2 ring-amber-400 ring-offset-2 dark:ring-offset-slate-950' : ''}" style="border-inline-start:5px solid #dc2626">
+              <div class="flex justify-between items-start">
+                <div>
+                  <div class="flex items-center gap-2">
+                    <span class="px-2 py-0.5 rounded-md bg-rose-100 dark:bg-rose-900/40 text-rose-700 dark:text-rose-300 text-xs font-bold">#${receiptDisplayNum}</span>
+                    <h3 class="text-lg font-bold text-rose-700 dark:text-rose-300">${isArV ? 'وصل تالف' : 'Destroyed Receipt'}</h3>
+                  </div>
+                  ${displayFinalNo ? `<p class="text-sm font-mono font-bold text-slate-700 dark:text-slate-200 mt-1">${isArV ? 'الرقم المقفول' : 'Locked number'}: ${Security.escapeHtml(String(displayFinalNo))}</p>` : ''}
+                  <p class="text-xs text-slate-400 mt-1">${new Date(receipt.createdAt || receipt.date || receipt.startDate || Date.now()).toLocaleString(appDateLocale())}</p>
+                  <p class="text-[10px] text-slate-500 mt-1">${isArV ? 'تم الإنشاء بواسطة' : 'Created by'}: <span class="font-medium">${creatorName}</span></p>
+                  <p class="text-xs mt-2 text-rose-600 dark:text-rose-400 font-medium">${isArV ? 'ورقة ممزقة لم تُستخدم — لا يمكن الدفع بهذا الرقم أبداً' : 'Torn paper, never used — nobody can ever pay with this number'}</p>
+                </div>
+                <div class="flex flex-col items-end gap-2">
+                  <span class="status-badge status-destroyed">${trStatus('Destroyed')}</span>
+                  ${canDeleteThisReceipt ? `<button onclick="deleteReceipt('${receipt.id}')" class="text-rose-600 hover:text-rose-700" title="${t('delete')}"><i data-lucide="trash-2" class="w-4 h-4"></i></button>` : ''}
+                </div>
+              </div>
+            </div>`;
+          }
           return `
             <div data-receipt-card="true" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" class="glass-panel rounded-2xl p-6 hover:scale-[1.01] transition-transform ${receiptRecordFilter === String(receipt.id || '') ? 'ring-2 ring-amber-400 ring-offset-2 dark:ring-offset-slate-950' : ''}" style="border-inline-start:5px solid ${_typeAccent}">
               <div class="flex justify-between items-start mb-4">
@@ -17611,6 +17705,7 @@ function renderReceiptsView() {
                     ${receipt.collectedBy ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">${Security.escapeHtml(state.users.find(u => u.id === receipt.collectedBy)?.name || (isArV ? 'مدير' : 'Admin'))}</span>` : ''}
                   </div>
                   <div class="flex items-center gap-2 flex-shrink-0">
+                    ${(isCurrentUserAdmin() && isTempDeliveryReceiptNo(receipt.tempReceiptNo) && receipt.deliveryStatus !== 'Delivered' && receipt.deliveryStatus !== 'Canceled') ? `<button onclick="openReceiptDeliveryCompletionModal('${receipt.id}')" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all bg-cyan-100 hover:bg-cyan-200 text-cyan-700 dark:bg-cyan-900/40 dark:hover:bg-cyan-900/60 dark:text-cyan-300">${isAr ? 'تم التوصيل' : 'Mark Delivered'}</button>` : ''}
                     ${receipt.collected ? `<button onclick="uncollectReceipt('${receipt.id}')" class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-300 transition-all" title="${isAr ? 'إلغاء التحصيل' : 'Undo collection'}">${isAr ? 'إلغاء' : 'Undo'}</button>` : ''}
                     <button onclick="openCollectReceiptModal('${receipt.id}')" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all bg-emerald-100 hover:bg-emerald-200 text-emerald-700 dark:bg-emerald-900/40 dark:hover:bg-emerald-900/60 dark:text-emerald-300">
                       ${!receipt.collected ? (isAr ? 'تسجيل التحصيل' : 'Mark Collected') : (isAr ? 'تعديل المبلغ' : 'Edit Amount')}
@@ -18193,19 +18288,19 @@ function renderAdsView() {
                         </div>
                       </div>
                     </td>
-                    <td class="py-3 px-2" data-label="Page">
+                    <td class="py-3 px-2" data-label="${isAr ? 'الصفحة' : 'Page'}">
                       ${renderMetaAdPageSummary(ad, adPage, adPageDeleted, isAr)}
                     </td>
-                    <td class="py-3 px-2 font-bold ${amountColorClass}" data-label="Amount" data-payment-state="${needsSetup ? 'pending-setup' : (isAdPaid ? 'paid' : 'unpaid')}" title="${needsSetup ? (isAr ? 'لم يتم إدخال المبلغ بعد' : 'Amount has not been entered yet') : (isAdPaid ? (isAr ? 'مبلغ مدفوع' : 'Paid amount') : (isAr ? 'دين غير مدفوع على العميل' : 'Unpaid customer debt'))}">
+                    <td class="py-3 px-2 font-bold ${amountColorClass}" data-label="${isAr ? 'المبلغ' : 'Amount'}" data-payment-state="${needsSetup ? 'pending-setup' : (isAdPaid ? 'paid' : 'unpaid')}" title="${needsSetup ? (isAr ? 'لم يتم إدخال المبلغ بعد' : 'Amount has not been entered yet') : (isAdPaid ? (isAr ? 'مبلغ مدفوع' : 'Paid amount') : (isAr ? 'دين غير مدفوع على العميل' : 'Unpaid customer debt'))}">
                       <span>${needsSetup ? (isAr ? 'غير محدد' : 'Not set') : `$${(Number(ad.amountUSD) || 0).toFixed(2)}`}</span>
                       ${needsSetup ? `<span class="text-[10px] font-semibold mt-0.5">${isAr ? 'لا يوجد دين بعد' : 'No debt yet'}</span>` : (!isAdPaid ? `<span class="text-[10px] font-semibold mt-0.5">${isAr ? 'دين غير مدفوع' : 'Unpaid debt'}</span>` : '')}
                       ${renderMetaAdBudgetSummary(ad, isAr)}
                     </td>
-                    <td class="py-3 px-2 font-medium ${amountColorClass}" data-label="Local">
+                    <td class="py-3 px-2 font-medium ${amountColorClass}" data-label="${isAr ? 'بالدينار' : 'Local'}">
                       <div>${needsSetup ? (isAr ? 'غير محدد' : 'Not set') : `${adAmountLocalForDisplay.toFixed(2)} LYD`}</div>
                       ${needsSetup ? '' : `<div class="mt-1 text-[10px] font-normal text-slate-500 dark:text-slate-400">${isAr ? 'السعر' : 'Rate'}: ${receiptExchangeRate?.toFixed(2) || ad.exchangeRate?.toFixed(2) || '0.00'}</div>`}
                     </td>
-                    <td class="py-3 px-2" data-label="Payment">
+                    <td class="py-3 px-2" data-label="${isAr ? 'الدفع' : 'Payment'}">
                       ${needsSetup ? `<span class="inline-flex items-center gap-1 rounded-lg bg-amber-100 px-2 py-1 text-xs font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"><i data-lucide="clock-3" class="h-3.5 w-3.5"></i>${isAr ? 'غير محدد' : 'Not set'}</span>` : (paymentMethods.length ? `
                         <div class="flex flex-wrap gap-1">
                           ${paymentMethods.slice(0, 3).map(m => `<span class="payment-badge text-xs">${Security.escapeHtml(trMethod(m))}</span>`).join('')}
@@ -18213,7 +18308,7 @@ function renderAdsView() {
                         </div>
                       ` : '<span class="text-xs text-slate-400">-</span>')}
                     </td>
-                    <td class="py-3 px-2" data-label="Status">
+                    <td class="py-3 px-2" data-label="${isAr ? 'الحالة' : 'Status'}">
                       <!-- Read-only badge (user request): status changes only via the
                            Actions buttons. The old inline dropdown also let "Stopped"
                            be set WITHOUT the stop-ad money flow, skipping the return
@@ -18235,7 +18330,7 @@ function renderAdsView() {
                       ` : ''}
                       ${renderMetaAdStatusSummary(ad, isAr)}
                     </td>
-                    <td class="py-3 px-2" data-label="Delivery">
+                    <td class="py-3 px-2" data-label="${isAr ? 'التوصيل' : 'Delivery'}">
                       <!-- Read-only (user request, same as Status): delivery
                            changes happen via the Deliveries page / delivery
                            dashboard flows, not inline in this table. -->
@@ -18245,14 +18340,14 @@ function renderAdsView() {
                       </div>
                       ${deliveryPerson ? `<div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(deliveryPerson.name || '')}</div>` : ''}
                     </td>
-                    <td class="py-3 px-2" data-label="Serial">
+                    <td class="py-3 px-2" data-label="${isAr ? 'الرقم' : 'Serial'}">
                       ${serialDisplay ? `<span class="font-mono text-xs">${Security.escapeHtml(serialDisplay)}</span>` : '-'}
                       ${(() => {
                         const n = getAdEditHistoryCount(ad);
                         return n ? `<button onclick="showAdEditHistory('${ad.id}')" class="block mt-1 text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium">${isAr ? `${n} تعديل` : `${n} edit${n > 1 ? 's' : ''}`}</button>` : '';
                       })()}
                     </td>
-                    <td class="py-3 px-2 text-xs" data-label="Date">
+                    <td class="py-3 px-2 text-xs" data-label="${isAr ? 'التاريخ' : 'Date'}">
                       <div class="text-slate-500">${(() => { const d = new Date(ad.startDate); return isNaN(d) ? '-' : d.toLocaleDateString(appDateLocale()); })()}</div>
                       ${(() => {
                         // End date (+extra time) and, when topped up, the date
@@ -18273,7 +18368,7 @@ function renderAdsView() {
                       })()}
                       ${renderMetaAdScheduleSummary(ad, isAr)}
                     </td>
-                    <td class="py-3 px-2" data-label="Actions">
+                    <td class="py-3 px-2" data-label="${isAr ? 'إجراءات' : 'Actions'}">
                       <div class="ads-table-actions flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
                         ${renderMetaAdActionButton(ad, isAr)}
                         ${needsSetup && canEditThisAd ? `<button type="button" onclick="completeMetaImportedAd('${Security.escapeHtml(String(ad.id))}')" class="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-lg bg-amber-100 px-3 py-2 text-xs font-bold text-amber-800 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-200" title="${isAr ? 'إكمال العميل والدفع والوصل' : 'Complete customer, payment and receipt details'}"><i data-lucide="clipboard-check" class="h-4 w-4"></i><span>${isAr ? 'إكمال' : 'Complete'}</span></button>` : ''}
@@ -21908,7 +22003,10 @@ function getControlCenterFacts() {
   });
   const unpaidReceipts = receipts.filter(receipt => {
     if (String(receipt.receiptType || '').toUpperCase() === 'TRANSFER_IN') return false;
-    return receipt.isPaid !== true && String(receipt.status || '').toLowerCase() !== 'paid';
+    // Canceled/Lost/Destroyed receipts are settled history, not money the
+    // owner still needs to chase — they must not inflate the attention count.
+    if (getReceiptPaymentState(receipt) !== 'not_paid') return false;
+    return true;
   });
   const metaFailures = ads.filter(ad => String(ad.metaSyncErrorCode || ad.metaLastErrorCode || '').trim());
   let snapshot = null;
@@ -22773,7 +22871,7 @@ function getLiquiditySnapshot() {
     const refundOwed = status === 'Canceled' && r.isPaid === true
       && ['full', 'partial'].includes(String(detail.refundAction || ''))
       && String(detail.refundStatus || '') !== 'refunded';
-    if ((status === 'Canceled' || status === 'Lost') && !refundOwed) continue;
+    if ((status === 'Canceled' || status === 'Lost' || status === 'Destroyed') && !refundOwed) continue;
     // Cash-bearing receipts: Paid ones, plus UNDERPAID delivery completions —
     // there the completion flow rewrote amountUSD to the actually-collected
     // cash and stamped deliveredAt, even though the status stays Not Paid.
@@ -23099,7 +23197,7 @@ function getCustomerStats(customerId, statsIndex = null) {
   // IMPORTANT: Unpaid receipts (status "Not Paid") should NOT be counted as revenue.
   const paidReceipts = customerReceipts.filter(r => {
     const st = String(r.status || '');
-    if (st === 'Canceled' || st === 'Lost') return false;
+    if (st === 'Canceled' || st === 'Lost' || st === 'Destroyed') return false;
     return st === 'Paid' || r.isPaid === true;
   });
   // Money transferred OUT to another customer is no longer this customer's
@@ -23806,6 +23904,7 @@ async function editReceipt(id) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
     return;
   }
+  if (_blockDestroyedReceiptEdit(receipt)) return;
   if (_blockTransferInEdit(receipt)) return;
   if (getReceiptPhotoCount(receipt) > 0 && !isEntityMediaHydrated('receipts', receipt)) {
     try {
@@ -24372,12 +24471,16 @@ async function updateDeliveryStatus(itemId, status) {
     removeDeliveryMission(itemId);
     return;
   }
-  if (s === 'Delivered' && String(state.currentUser?.role || '').toLowerCase() !== 'delivery') {
-    showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'فقط سائق التوصيل المعيَّن يمكنه تحديد التوصيل كـ"تم التوصيل".' : 'Only the assigned delivery driver can mark a delivery as Delivered.', 'warning');
+  // An admin may complete a TEMP delivery RECEIPT (D#): the completion modal +
+  // server hold them to the driver's proof rules. Ad deliveries and normal
+  // receipts stay driver-only, so a mis-tap cannot silently settle money.
+  const _adminDeliversReceipt = isCurrentUserAdmin() && state.receipts.some(r => r && !r._deleted && String(r.id) === String(itemId) && isTempDeliveryReceiptNo(r.tempReceiptNo));
+  if (s === 'Delivered' && !_adminDeliversReceipt && String(state.currentUser?.role || '').toLowerCase() !== 'delivery') {
+    showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'فقط سائق التوصيل المعيَّن يمكنه تحديد هذا التوصيل كـ"تم التوصيل".' : 'Only the assigned delivery driver can mark this delivery as Delivered.', 'warning');
     return;
   }
   if (s === 'Delivered') {
-    // Defense in depth (only a driver reaches here): route through the validated
+    // Defense in depth (only a driver or admin reaches here): route through the validated
     // collection flow instead of a bare status write. For a temp D# receipt
     // markAsCollected opens the proof modal (final receipt no. + photo +
     // collected amount); a direct deliveryStatus write skipped that and left
@@ -25646,11 +25749,14 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
     showNotification(isArD ? 'خطأ' : 'Error', isArD ? 'الوصل غير موجود' : 'Receipt not found', 'error');
     return;
   }
-  if (String(state.currentUser?.role || '').toLowerCase() !== 'delivery') {
-    showNotification(isArD ? 'تم رفض الوصول' : 'Access Denied', isArD ? 'لمستخدمي التوصيل فقط' : 'Delivery users only', 'error');
+  // Admins may record a completion themselves; the server holds them to the
+  // same proof rules as the assigned driver (final number, photo, amounts).
+  const isAdminCompletion = isCurrentUserAdmin();
+  if (!isAdminCompletion && String(state.currentUser?.role || '').toLowerCase() !== 'delivery') {
+    showNotification(isArD ? 'تم رفض الوصول' : 'Access Denied', isArD ? 'لمستخدمي التوصيل أو المدير فقط' : 'Delivery users or admins only', 'error');
     return;
   }
-  if (String(receipt.deliveryPersonId || '') !== String(state.currentUser?.id || '')) {
+  if (!isAdminCompletion && String(receipt.deliveryPersonId || '') !== String(state.currentUser?.id || '')) {
     showNotification(isArD ? 'تم رفض الوصول' : 'Access Denied', isArD ? 'هذا الوصل غير معيَّن لك' : 'This receipt is not assigned to you', 'error');
     return;
   }
@@ -25669,7 +25775,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
       );
       return;
     }
-    if (!receipt || String(receipt.deliveryPersonId || '') !== String(state.currentUser?.id || '')) return;
+    if (!receipt || (!isAdminCompletion && String(receipt.deliveryPersonId || '') !== String(state.currentUser?.id || ''))) return;
   }
 
   // Freeze the receipt's _lastModified at modal-open time. submitReceipt-
@@ -25846,9 +25952,10 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
         </div>
 
         <div class="flex space-x-2 pt-2 border-t border-slate-200 dark:border-slate-700">
+          ${isAdminCompletion ? '' : `
           <button type="button" onclick="openReceiptDeliveryCancelModal('${receipt.id}')" class="flex-1 btn-shine bg-rose-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold">
             <i data-lucide="x-circle" class="w-4 h-4 inline mr-1"></i>${isArD ? 'إلغاء التوصيل' : 'Cancel Delivery'}
-          </button>
+          </button>`}
           <button type="button" id="delivery-complete-submit" onclick="submitReceiptDeliveryCompletion('${receipt.id}')" class="flex-1 btn-shine bg-emerald-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold disabled:opacity-50 disabled:cursor-not-allowed">
             <i data-lucide="check" class="w-4 h-4 inline mr-1"></i>${isArD ? 'تم التوصيل' : 'Mark Delivered'}
           </button>
@@ -26581,10 +26688,24 @@ function _receiptCollectionBreakdown(receipt) {
   return [{ method: receipt.paymentMethod || 'Cash (LYD)', amount: target }];
 }
 
+// Every edit door on a destroyed receipt shows the same bilingual message.
+function _blockDestroyedReceiptEdit(receipt) {
+  if (String(receipt?.status || '') !== 'Destroyed') return false;
+  showNotification(
+    state.language === 'ar' ? 'وصل تالف' : 'Destroyed receipt',
+    state.language === 'ar'
+      ? 'هذا الوصل تالف ورقمه مقفول — لا يمكن تعديله. احذفه إذا أردت تحرير الرقم.'
+      : 'This receipt is destroyed and its number is locked — it cannot be edited. Delete it to free the number.',
+    'error'
+  );
+  return true;
+}
+
 function openCollectReceiptModal(receiptId) {
   if (!_canMarkCollected()) return;
   const receipt = state.receipts.find(r => r.id === receiptId);
   if (!receipt) return;
+  if (_blockDestroyedReceiptEdit(receipt)) return;
   const isAr = state.language === 'ar';
   const targetLYD = _receiptCashCollectionTargetLocal(receipt);
   const serialTxt = receipt.serialNumber || receipt.tempReceiptNo || receipt.finalReceiptNo || receiptId.slice(0, 8);
@@ -26839,7 +26960,7 @@ function showNewReceiptChooser() {
         <h2 class="text-xl font-bold text-slate-800 dark:text-white">${isAr ? 'اختر نوع الوصل' : 'Choose receipt type'}</h2>
         <button onclick="document.getElementById('new-receipt-chooser')?.remove()" class="text-slate-400 hover:text-slate-600 p-1"><i data-lucide="x" class="w-5 h-5"></i></button>
       </div>
-      <p class="text-xs text-slate-500 mb-5">${isAr ? 'اختر بعناية — النوعان مختلفان.' : 'Choose carefully — the two are different.'}</p>
+      <p class="text-xs text-slate-500 mb-5">${isAr ? 'اختر بعناية — الأنواع مختلفة.' : 'Choose carefully — the types are different.'}</p>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <button type="button" onclick="_pickNewReceipt('normal')"
           class="text-start p-5 rounded-2xl border-2 transition-all hover:shadow-lg"
@@ -26855,6 +26976,13 @@ function showNewReceiptChooser() {
           <div class="font-extrabold" style="color:#92400e">${isAr ? 'رصيد سابق' : 'Existing Balance'}</div>
           <div class="text-xs mt-1" style="color:#b45309">${isAr ? 'عميل استهلك جزءاً — سجّل المتبقي فقط' : 'Customer already used part — record what is left'}</div>
         </button>
+        <button type="button" onclick="_pickNewReceipt('destroyed')"
+          class="text-start p-5 rounded-2xl border-2 transition-all hover:shadow-lg sm:col-span-2"
+          style="border-color:#dc2626;background:#fef2f2">
+          <div class="w-12 h-12 rounded-xl flex items-center justify-center mb-3" style="background:#dc2626;color:#fff"><i data-lucide="file-x" class="w-6 h-6"></i></div>
+          <div class="font-extrabold" style="color:#991b1b">${isAr ? 'وصل تالف' : 'Destroyed Receipt'}</div>
+          <div class="text-xs mt-1" style="color:#b91c1c">${isAr ? 'ورقة ممزقة لم تُستخدم أبداً — سجّل رقمها فقط حتى لا يدفع أحد بهذا الرقم' : 'Torn paper, never used — record only its number so nobody can ever pay with it'}</div>
+        </button>
       </div>
     </div>`;
   document.body.appendChild(wrap);
@@ -26863,8 +26991,106 @@ function showNewReceiptChooser() {
 
 function _pickNewReceipt(kind) {
   document.getElementById('new-receipt-chooser')?.remove();
-  // Both open the SAME full receipt form; the carried one is tagged on save.
+  if (kind === 'destroyed') {
+    showDestroyedReceiptModal();
+    return;
+  }
+  // Both remaining kinds open the SAME full receipt form; carried is tagged on save.
   showReceiptModal(kind === 'carried');
+}
+
+// ---- Destroyed receipt: locks the torn paper's number forever ------------
+function showDestroyedReceiptModal() {
+  if (!currentUserHasPermission('receipts', 'add')) {
+    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإنشاء وصولات' : 'You do not have permission to create receipts', 'error');
+    return;
+  }
+  const isAr = state.language === 'ar';
+  document.getElementById('destroyed-receipt-dialog')?.remove();
+  const wrap = document.createElement('div');
+  wrap.id = 'destroyed-receipt-dialog';
+  wrap.className = 'mobile-dialog-overlay fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  wrap.onclick = (e) => { if (e.target === wrap) wrap.remove(); };
+  wrap.innerHTML = `
+    <div class="glass-panel w-full max-w-md p-6 rounded-3xl" onclick="event.stopPropagation()">
+      <div class="flex justify-between items-start mb-1">
+        <h2 class="text-xl font-bold" style="color:#991b1b">${isAr ? 'وصل تالف' : 'Destroyed Receipt'}</h2>
+        <button onclick="document.getElementById('destroyed-receipt-dialog')?.remove()" class="text-slate-400 hover:text-slate-600 p-1"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+      <p class="text-xs text-slate-500 mb-4">${isAr ? 'اكتب رقم الوصل الممزق. سيُقفل الرقم للأبد ولن يستطيع أحد الدفع به.' : 'Write the torn receipt’s number. The number is locked forever and nobody can ever pay with it.'}</p>
+      <input id="destroyed-receipt-number" type="text" inputmode="text" autocomplete="off"
+        class="w-full px-4 py-3 rounded-xl border-2 bg-white dark:bg-slate-800 text-slate-800 dark:text-white font-mono text-lg"
+        style="border-color:#dc2626" placeholder="${isAr ? 'رقم الوصل' : 'Receipt number'}" />
+      <div class="flex gap-3 mt-5">
+        <button type="button" onclick="_saveDestroyedReceipt(this)"
+          class="flex-1 px-4 py-3 rounded-xl font-bold text-white transition-all hover:shadow-lg"
+          style="background:#dc2626">${isAr ? 'قفل الرقم' : 'Lock the number'}</button>
+        <button type="button" onclick="document.getElementById('destroyed-receipt-dialog')?.remove()"
+          class="px-4 py-3 rounded-xl font-bold bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-200">${isAr ? 'إلغاء' : 'Cancel'}</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => document.getElementById('destroyed-receipt-number')?.focus(), 50);
+}
+
+async function _saveDestroyedReceipt(buttonEl) {
+  const isAr = state.language === 'ar';
+  const input = document.getElementById('destroyed-receipt-number');
+  const arabicDigits = '٠١٢٣٤٥٦٧٨٩';
+  const persianDigits = '۰۱۲۳۴۵۶۷۸۹';
+  const number = String(input?.value || '')
+    .replace(/[٠-٩]/g, (d) => String(arabicDigits.indexOf(d)))
+    .replace(/[۰-۹]/g, (d) => String(persianDigits.indexOf(d)))
+    .trim().toUpperCase();
+  if (!/^(?:[1-9][0-9]*|[SBOE][1-9][0-9]*)$/.test(number)) {
+    showNotification(isAr ? 'رقم غير صالح' : 'Invalid number', isAr ? 'اكتب أرقاماً فقط (أو S/B/O/E ثم أرقام)' : 'Digits only (or S/B/O/E followed by digits)', 'error');
+    return;
+  }
+  const taken = getVisibleRecords(state.receipts).some(r =>
+    [r.serialNumber, r.finalReceiptNo, r.tempReceiptNo]
+      .some(v => String(v || '').trim().toUpperCase() === number));
+  if (taken) {
+    showNotification(isAr ? 'الرقم مستخدم' : 'Number already used', isAr ? 'يوجد وصل بهذا الرقم بالفعل' : 'A receipt with this number already exists', 'error');
+    return;
+  }
+  const record = {
+    id: generateId('receipt'),
+    recordType: 'receipt',
+    status: 'Destroyed',
+    isPaid: false,
+    finalReceiptNo: number,
+    serialNumber: number,
+    amountUSD: 0,
+    amountLocal: 0,
+    customerId: '',
+    date: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+  };
+  if (buttonEl) buttonEl.disabled = true;
+  try {
+    if (isServerModeEnabled()) {
+      const created = await apiCreateEntity('receipts', record);
+      const saved = created?.data ? Security.sanitizeObject(created.data) : null;
+      if (!saved || !saved.id) throw new Error('invalid server response');
+      const savedIdx = state.receipts.findIndex(r => r && String(r.id) === String(saved.id));
+      if (savedIdx === -1) state.receipts.unshift(saved); else state.receipts[savedIdx] = saved;
+      markCollectionDirty('receipts');
+      saveState();
+    } else {
+      const savedOk = await addRecord(state.receipts, record);
+      if (!savedOk) { if (buttonEl) buttonEl.disabled = false; return; }
+    }
+  } catch (e) {
+    if (buttonEl) buttonEl.disabled = false;
+    const detail = (e?.payload && typeof e.payload === 'object' && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
+    showNotification(isAr ? 'فشل الحفظ' : 'Save failed', String(detail), 'error');
+    return;
+  }
+  document.getElementById('destroyed-receipt-dialog')?.remove();
+  addLog('create', 'receipt', record.id, `Destroyed receipt #${number} recorded`);
+  showNotification(isAr ? 'تم قفل الرقم' : 'Number locked', isAr ? `الوصل ${number} مسجل كتالف — لا يمكن الدفع به أبداً` : `Receipt ${number} is recorded as destroyed — it can never be paid with`, 'success');
+  render();
 }
 
 
@@ -26963,7 +27189,7 @@ function manageRefund(adId) {
 // target customer — money invented out of nothing.
 function _isTransferableReceipt(r) {
   const st = String(r?.status || '');
-  if (st === 'Canceled' || st === 'Lost') return false;
+  if (st === 'Canceled' || st === 'Lost' || st === 'Destroyed') return false;
   return st === 'Paid' || r?.isPaid === true;
 }
 
@@ -27340,7 +27566,7 @@ function showMetaAdHistory(adId) {
     const sourceLabel = exactActivity
       ? (isAr ? 'سجل نشاط Meta' : 'Meta activity')
       : (entry.source === 'meta_import' ? (isAr ? 'استيراد Meta' : 'Meta import') : (isAr ? 'اكتشفته المزامنة' : 'Detected by sync'));
-    const eventLabel = entry.eventType ? entry.eventType.replaceAll('_', ' ') : '';
+    const eventLabel = entry.eventType ? entry.eventType.split('_').join(' ') : '';
     return `<article class="rounded-xl border border-blue-100 bg-blue-50/40 p-3 dark:border-blue-900 dark:bg-blue-950/20 sm:p-4">
       <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div class="min-w-0"><div class="flex flex-wrap items-center gap-2"><span class="rounded-full bg-blue-600 px-2 py-1 text-[10px] font-black text-white">${isAr ? 'تغيير' : 'Change'} #${history.length - index}</span><span class="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">${sourceLabel}</span></div><p class="mt-2 break-words text-xs font-bold text-slate-700 dark:text-slate-200">${Security.escapeHtml(entry.editedBy)}</p></div>
@@ -27969,6 +28195,11 @@ function isVersionConflict409(error) {
 function describe409(error, conflictText) {
   if (isVersionConflict409(error)) return conflictText;
   const detail = String(error?.message || '');
+  if (/destroyed receipt is locked/i.test(detail)) {
+    return state.language === 'ar'
+      ? 'هذا الوصل تالف ورقمه مقفول — لا يمكن تغييره. احذف السجل إذا أردت تحرير الرقم.'
+      : 'This receipt is destroyed and its number is locked — it cannot be changed. Delete the record to free the number.';
+  }
   if (/terminal or refunded ad/i.test(detail)) {
     return state.language === 'ar'
       ? 'هذا الإعلان منتهٍ أو مُسترجَع، لذا لم يعد هذا التغيير ممكناً. استخدم الاسترجاع لتعديل أمواله.'
@@ -29449,7 +29680,10 @@ function getNextAutoSerialNumber(paymentMethod) {
     const usesGroupMethod = groupMethods.includes(receiptPaymentMethod)
       || payments.some(p => groupMethods.includes(p && p.method));
 
-    if (!usesGroupMethod || !receipt.serialNumber) return;
+    // Destroyed receipts' LOCKED numbers must advance the counter, or the
+    // generator proposes them forever; their bare digits skip the S branch.
+    const isDestroyedRow = String(receipt.status || '') === 'Destroyed';
+    if ((!usesGroupMethod && !isDestroyedRow) || !receipt.serialNumber) return;
     const serial = String(receipt.serialNumber).trim().toUpperCase();
 
     // A receipt that has a MANUAL method (Cash) got a hand-typed PAPER receipt
@@ -29464,7 +29698,7 @@ function getNextAutoSerialNumber(paymentMethod) {
     let serialNum = 0;
     if (serial.startsWith(prefix)) {
       serialNum = parseInt(serial.substring(prefix.length), 10);
-    } else if (prefix === 'S' && /^\d+$/.test(serial) && !hasManualMethod) {
+    } else if (prefix === 'S' && /^\d+$/.test(serial) && !hasManualMethod && !isDestroyedRow) {
       // Legacy: the S group used bare numbers before the prefix existed.
       serialNum = parseInt(serial, 10);
     } else {
@@ -30030,6 +30264,8 @@ async function _saveReceiptFromModalInner() {
   const editTarget = _editingId
     ? (state.receipts.find(r => r && !r._deleted && String(r.id) === _editingId) || null)
     : null;
+  // Deep-linked form on a destroyed receipt: refuse at save time too.
+  if (editTarget && _blockDestroyedReceiptEdit(editTarget)) return;
 
   const customerId = document.getElementById('receipt-customer-id').value;
   if (!customerId) {
@@ -30301,10 +30537,10 @@ async function _saveReceiptFromModalInner() {
   let receiptIsPaid = true;
   let receiptIsReceivedInOffice = true;
 
-  if (status === 'Canceled' || status === 'Lost') {
+  if (status === 'Canceled' || status === 'Lost' || status === 'Destroyed') {
     const heldMoneyBefore = !!(editTarget && (editTarget.isPaid === true || String(editTarget.status || '') === 'Paid'));
     const lostPaid = status === 'Lost' && String(statusDetail.lostResolution || '') === 'paid';
-    receiptIsPaid = heldMoneyBefore || lostPaid;
+    receiptIsPaid = status === 'Destroyed' ? false : (heldMoneyBefore || lostPaid);
     receiptIsReceivedInOffice = receiptIsPaid;
   }
 
@@ -30357,6 +30593,26 @@ async function _saveReceiptFromModalInner() {
       showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'رسوم التوصيل المتفق عليها مطلوبة.' : 'Quoted delivery fee is required.', 'error');
       return;
     }
+  }
+
+  // Setting a not-yet-delivered temp delivery receipt to "Paid - By Delivery"
+  // IS a delivery completion, and the server only accepts completions through
+  // the verified flow (unique final number + proof photo + collected amounts).
+  // Route there instead of letting the save die with a raw server error:
+  // admins may complete it themselves, everyone else needs the driver.
+  if (status === 'Paid' && (statusDetail.paidCollection || 'office') === 'delivery' && editTarget
+      && isTempDeliveryReceiptNo(editTarget.tempReceiptNo)
+      && editTarget.deliveryStatus !== 'Delivered' && editTarget.deliveryStatus !== 'Canceled') {
+    if (isCurrentUserAdmin()) {
+      showNotification(isArV ? 'أكمل التوصيل' : 'Complete the delivery',
+        isArV ? 'هذا وصل توصيل لم يكتمل بعد. سجِّل الرقم النهائي وصورة الوصل والمبلغ المُحصَّل في نافذة الإكمال.' : 'This delivery receipt is not completed yet. Record the final number, receipt photo and collected amount in the completion window.', 'info');
+      closeModal();
+      openReceiptDeliveryCompletionModal(editTarget.id);
+    } else {
+      showNotification(isArV ? 'غير مسموح' : 'Not Allowed',
+        isArV ? 'فقط سائق التوصيل المعيَّن أو المدير يمكنه إكمال هذا التوصيل.' : 'Only the assigned delivery driver or an admin can complete this delivery.', 'warning');
+    }
+    return;
   }
   
   // Temp delivery receipts: send tempReceiptNo (D#) only; serialNumber stays empty until delivery completion.
@@ -31502,7 +31758,7 @@ function isUnpaidShopReceipt(receipt, customerId = '') {
   if (collection && !['office', 'in_shop', 'shop'].includes(collection)) return false;
   if ((tempNo.startsWith('D') && /^D\d+$/.test(tempNo)) || receiptType === 'DELIVERY_TEMP') return false;
   if (deliveryStatus && deliveryStatus !== 'Office') return false;
-  return status !== 'Canceled' && status !== 'Lost';
+  return status !== 'Canceled' && status !== 'Lost' && status !== 'Destroyed';
 }
 
 // usageOut (optional Map) collects each candidate's due usage so callers that
@@ -33272,7 +33528,11 @@ function renderAdFundingList() {
       const staleLabel = unavailable
         ? (isArL ? ' • الرابط الحالي غير متاح — اختر بديلاً' : ' • current link unavailable — choose a replacement')
         : '';
-      const label = `#${serial} • $${(r.amountUSD || 0).toFixed(2)}${staleLabel}`;
+      // Offer what is actually SPENDABLE (remaining + this ad's own saved
+      // share), never the receipt's face value: a paid receipt whose credit
+      // already funded other ads must not read as fresh money.
+      const rSpendable = Math.round((Math.max(Number(getReceiptUsageStats(r)?.remainingUSD) || 0, 0) + getEditingAdExistingAllocationUSD(r.id)) * 100) / 100;
+      const label = `#${serial} • $${rSpendable.toFixed(2)}${staleLabel}`;
       return `<option value="${r.id || ''}" ${alloc.receiptId === r.id ? 'selected' : ''}>${Security.escapeHtml(label)}</option>`;
     }).join('');
     
@@ -33598,6 +33858,22 @@ function showCustomerModal() {
 }
 
 function showPageModal() {
+  // TEMPORARY (owner request, Aug 2026): manual page creation is paused so the
+  // team works with Meta-imported pages (blue Meta badge), which arrive linked
+  // to their ads automatically. Set to false to allow manual pages again.
+  // Editing existing pages (editPage) is NOT affected — assigning owners to
+  // imported pages keeps working.
+  const PAGE_MANUAL_CREATE_PAUSED = true;
+  if (PAGE_MANUAL_CREATE_PAUSED) {
+    showNotification(
+      state.language === 'ar' ? 'موقوف مؤقتاً' : 'Temporarily off',
+      state.language === 'ar'
+        ? 'إضافة الصفحات يدوياً موقوفة مؤقتاً — الصفحات تأتي الآن من استيراد ميتا وترتبط بإعلاناتها تلقائياً.'
+        : 'Manual page creation is temporarily off — pages now come from the Meta import and are linked to their ads automatically.',
+      'warning'
+    );
+    return;
+  }
   // Permission check for creating pages
   if (!currentUserHasPermission('pages', 'add')) {
     showNotification(state.language === 'ar' ? 'رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإضافة صفحات' : 'You do not have permission to add pages', 'error');
@@ -34058,7 +34334,13 @@ function renderModal() {
     }
     case 'ad':
       const visibleCustomers = getVisibleRecords(state.customers);
-      const visiblePages = getVisibleRecords(state.pages);
+      // TEMPORARY (owner request, Aug 2026): while the duplicate-page cleanup
+      // runs, admins may only link ads to Meta-imported pages (the ones with
+      // the blue Meta badge). Set the flag to false to restore every page.
+      const AD_PAGES_META_ONLY_FOR_ADMIN = true;
+      const visiblePages = (AD_PAGES_META_ONLY_FOR_ADMIN && isCurrentUserAdmin())
+        ? getVisibleRecords(state.pages).filter(p => String(p.metaPageId || '').trim())
+        : getVisibleRecords(state.pages);
       const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
       const adData = state.modalData || {};
       // Copy (not alias) the live record's photos — the receipt modal already
@@ -34079,6 +34361,11 @@ function renderModal() {
       const creatorIsAdmin = isAdminRole(adCreator?.role);
       const isArAd = state.language === 'ar';
       const isImportedMetaDraft = isEdit && isMetaAdSetupPending(adData);
+      // A Meta-linked ad already knows its page (the import linked it). Offering
+      // the page picker there only invites a wrong change, so the field locks.
+      const adLinkedPage = state.pages.find(p => p && !p._deleted && String(p.id) === String(adData.pageId || ''));
+      const metaPageLocked = isEdit && !!adLinkedPage
+        && (String(adData.metaAdId || '').trim() !== '' || String(adData.metaImportSource || '').trim() !== '');
       const adCreatorDisplayName = adCreator?.name || adData.createdByName || (isImportedMetaDraft ? (isArAd ? 'استيراد Meta التلقائي' : 'Meta automatic import') : (isArAd ? 'غير معروف' : 'Unknown'));
       const adHistoryCount = getAdEditHistoryCount(adData);
       const adPaymentState = getAdPaymentState(adData);
@@ -34177,17 +34464,30 @@ function renderModal() {
               <!-- Page Selection -->
               <div>
                 <label class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">${isArAd ? 'الصفحة *' : 'Page *'}</label>
+                ${metaPageLocked ? `
+                <div class="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-600 px-3 py-2 rounded-lg text-sm flex items-center justify-between gap-2">
+                  <span class="truncate">${Security.escapeHtml(adLinkedPage.name || '')}</span>
+                  <span class="shrink-0 flex items-center gap-1.5">
+                    ${String(adLinkedPage.metaPageId || '').trim() ? '<span class="px-2 py-0.5 rounded-md bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 text-[10px] font-bold">Meta</span>' : ''}
+                    <i data-lucide="lock" class="w-3.5 h-3.5 text-slate-400"></i>
+                  </span>
+                </div>
+                <p class="text-[11px] text-slate-500 mt-1">${isArAd ? 'الصفحة مرتبطة تلقائياً من استيراد ميتا ولا يمكن تغييرها.' : 'This page was linked automatically by the Meta import and cannot be changed.'}</p>
+                <input type="hidden" id="ad-page" value="${Security.escapeHtml(String(adData.pageId || ''))}" required />
+                ` : `
                 <div class="relative">
                   <input type="text" id="ad-page-search" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-3 py-2 rounded-lg text-sm" placeholder="${isArAd ? 'ابحث في الصفحات...' : 'Search pages...'}" oninput="filterAdPages()" onfocus="showAdPageDropdown()" value="${Security.escapeHtml((state.pages.find(p => p.id === adData.pageId)?.name) || '')}" autocomplete="off" />
                   <div id="ad-page-dropdown" class="absolute z-20 mt-1 w-full bg-white dark:bg-slate-800 rounded-lg shadow-xl max-h-48 overflow-y-auto hidden border border-slate-200 dark:border-slate-600">
                     ${visiblePages.map(p => `
-                      <div class="page-option px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer text-sm" data-name="${Security.escapeHtml((p.name || '').toLowerCase())}" data-record-action="select-ad-page" data-record-id="${Security.escapeHtml(String(p.id || ''))}">
-                        ${Security.escapeHtml(p.name || '')}
+                      <div class="page-option px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer text-sm flex items-center justify-between gap-2" data-name="${Security.escapeHtml((p.name || '').toLowerCase())}" data-record-action="select-ad-page" data-record-id="${Security.escapeHtml(String(p.id || ''))}">
+                        <span class="truncate">${Security.escapeHtml(p.name || '')}</span>
+                        ${String(p.metaPageId || '').trim() ? '<span class="shrink-0 px-2 py-0.5 rounded-md bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 text-[10px] font-bold">Meta</span>' : ''}
                       </div>
                     `).join('')}
                   </div>
                   <input type="hidden" id="ad-page" value="${adData.pageId || ''}" required />
                 </div>
+                `}
               </div>
               
               <!-- Customer -->
@@ -41385,13 +41685,14 @@ function resetAdsStudioSessionState() {
   _adsStudioReviewPromises.clear();
   _adsStudioDeletePromises.clear();
   for (const id of Object.keys(_adsStudioReviewNotes)) delete _adsStudioReviewNotes[id];
+  if (typeof resetAdsStudioWalletCache === 'function') resetAdsStudioWalletCache();
 }
 
+// Wallet + Meta Connection live INSIDE the Overview (owner decision): no tabs.
 const ADS_STUDIO_TABS = [
   { id: 'dashboard', icon: 'layout-dashboard', label: 'Overview', labelAr: 'نظرة عامة' },
   { id: 'campaigns', icon: 'megaphone', label: 'My Campaigns', labelAr: 'حملاتي' },
-  { id: 'builder', icon: 'wand-sparkles', label: 'Create Campaign', labelAr: 'إنشاء حملة' },
-  { id: 'connections', icon: 'link-2', label: 'Meta Connection', labelAr: 'ربط ميتا' }
+  { id: 'builder', icon: 'wand-sparkles', label: 'Create Campaign', labelAr: 'إنشاء حملة' }
 ];
 
 const ADS_STUDIO_OBJECTIVES = [
@@ -41559,6 +41860,8 @@ function adsStudioFormatDate(value) {
 }
 
 function adsStudioBackTarget() {
+  // The standalone studio site has nowhere to go "back" to.
+  if (IS_STUDIO_SHELL) return '';
   if (isCurrentUserAdmin()) return 'smart-systems';
   const landing = getAlbayanManagerLandingViewForUser(state.currentUser);
   if (!landing || landing === 'ads-studio' || landing === 'no-access') return '';
@@ -41635,7 +41938,6 @@ function renderAdsStudioView() {
   let content = '';
   if (_adsStudioActiveTab === 'campaigns') content = renderAdsStudioCampaigns();
   else if (_adsStudioActiveTab === 'builder') content = renderAdsStudioBuilder();
-  else if (_adsStudioActiveTab === 'connections') content = renderAdsStudioConnections();
   else if (_adsStudioActiveTab === 'review') content = renderAdsStudioReviewQueue();
   else content = renderAdsStudioDashboard();
 
@@ -41707,6 +42009,16 @@ function renderAdsStudioDashboard() {
           </div>
           <div class="mt-5 flex items-start gap-3 rounded-xl bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-200"><i data-lucide="info" class="w-5 h-5 flex-shrink-0"></i><span>${isAr ? 'الميزانية هنا للتخطيط فقط. الدفع وإطلاق الإعلان يتمان بعد موافقة الإدارة وربط حساب ميتا.' : 'Budgets here are planning values. Payment and launch happen only after staff approval and Meta connection.'}</span></div>
         </div>
+      </div>
+
+      <div>
+        <h3 class="font-black text-xl text-slate-900 dark:text-white mb-4 flex items-center gap-2"><i data-lucide="wallet" class="w-5 h-5"></i>${isAr ? 'المحفظة' : 'Wallet'}</h3>
+        ${renderAdsStudioWallet()}
+      </div>
+
+      <div>
+        <h3 class="font-black text-xl text-slate-900 dark:text-white mb-4 flex items-center gap-2"><i data-lucide="link-2" class="w-5 h-5"></i>${isAr ? 'ربط ميتا' : 'Meta Connection'}</h3>
+        ${renderAdsStudioConnections()}
       </div>
     </section>
   `;
@@ -42314,14 +42626,33 @@ async function submitAdsStudioCampaignOnce(id) {
     await startAdsStudioCampaign(id);
     return false;
   }
+  // Client mirror of the server money gate.
+  const _budgetMinor = Math.max(parseInt(campaign.budgetMinorUSD, 10) || 0, 0);
+  if (String(campaign.createdBy || '') === String(state.currentUser?.id || '')
+      && adsStudioWalletAvailableMinor() < _budgetMinor) {
+    showNotification(
+      adsStudioText('Not enough wallet balance', 'رصيد المحفظة غير كافٍ'),
+      adsStudioText('Charge your wallet first — the budget is held from it when you submit.', 'اشحن محفظتك أولاً — الميزانية تُحجز منها عند الإرسال.'),
+      'error'
+    );
+    _adsStudioActiveTab = 'dashboard';
+    try { updateUrlParams({ tab: 'dashboard' }, true); } catch (_) {}
+    render();
+    return false;
+  }
   try {
     if (isServerModeEnabled()) {
       const operationId = Security.generateSecureId('campaign-submit');
       const entity = await apiSubmitAdCampaignRequest(campaign.id, Number(campaign._lastModified), operationId);
       upsertAdsStudioEntity(entity);
     } else {
-      const saved = await updateRecord(state.adCampaignRequests, campaign.id, { status: 'Submitted', submittedAt: new Date().toISOString(), submittedBy: state.currentUser?.id }, campaign._lastModified);
-      if (!saved) return false;
+      // No server -> no wallet holds/captures: refuse instead of pretending.
+      showNotification(
+        adsStudioText('Server connection required', 'يتطلب اتصال الخادم'),
+        adsStudioText('Campaign budgets are held from the wallet, which needs the server connection.', 'ميزانية الحملة تُحجز من المحفظة، وهذا يتطلب اتصال الخادم.'),
+        'error'
+      );
+      return false;
     }
     showNotification(adsStudioText('Sent for review', 'تم الإرسال للمراجعة'), adsStudioText('Your team can now review this campaign.', 'يمكن للفريق الآن مراجعة هذه الحملة.'), 'success');
     _adsStudioDraft = null;
@@ -42439,6 +42770,207 @@ async function reviewAdsStudioCampaignOnce(id, decision) {
   } catch (error) {
     showNotification(adsStudioText('Review failed', 'تعذر حفظ المراجعة'), error?.message || adsStudioText('Refresh and try again.', 'حدّث الصفحة وحاول مرة أخرى.'), 'error');
   }
+}
+
+// ---- Wallet ----
+let _adsStudioWalletMine = null;
+let _adsStudioWalletPendingAll = null;
+let _adsStudioWalletBusy = false;
+let _adsStudioWalletForUser = '';
+
+function resetAdsStudioWalletCache() {
+  _adsStudioWalletMine = null;
+  _adsStudioWalletPendingAll = null;
+  _adsStudioWalletForUser = '';
+}
+
+function adsStudioWalletHeldMinor() {
+  const uid = String(state.currentUser?.id || '');
+  return (Array.isArray(state.adCampaignRequests) ? state.adCampaignRequests : [])
+    .filter(c => c && !c._deleted && String(c.createdBy || '') === uid && String(c.status || '') === 'Submitted')
+    .reduce((sum, c) => sum + Math.max(parseInt(c.budgetMinorUSD, 10) || 0, 0), 0);
+}
+
+function adsStudioWalletBalanceMinor() {
+  return WALLET.getBalanceMinor(String(state.currentUser?.id || ''), 'USD');
+}
+
+function adsStudioWalletAvailableMinor() {
+  return adsStudioWalletBalanceMinor() - adsStudioWalletHeldMinor();
+}
+
+async function refreshAdsStudioWallet() {
+  if (_adsStudioWalletBusy) return;
+  _adsStudioWalletBusy = true;
+  const forUser = String(state.currentUser?.id || '');
+  try {
+    const mine = await apiWalletPaymentRequestList('mine');
+    let pendingAll = null;
+    if (isCurrentUserAdmin()) {
+      const pending = await apiWalletPaymentRequestList('pending');
+      pendingAll = Array.isArray(pending?.requests) ? pending.requests : [];
+    }
+    // Never show one account's wallet rows to another after a user switch.
+    if (forUser === String(state.currentUser?.id || '')) {
+      _adsStudioWalletMine = Array.isArray(mine?.requests) ? mine.requests : [];
+      _adsStudioWalletPendingAll = pendingAll;
+      _adsStudioWalletForUser = forUser;
+    }
+  } catch (_) {
+    if (forUser === String(state.currentUser?.id || '')) {
+      _adsStudioWalletMine = _adsStudioWalletMine || [];
+    }
+  } finally {
+    _adsStudioWalletBusy = false;
+  }
+  if (state.currentView === 'ads-studio') render();
+}
+
+async function adsStudioCreateWalletCharge() {
+  const input = document.getElementById('ads-studio-charge-amount');
+  const method = String(document.querySelector('input[name="ads-studio-charge-method"]:checked')?.value || 'bank_transfer');
+  const amountUSD = parseFloat(input?.value || '0');
+  const amountMinor = Math.round((Number.isFinite(amountUSD) ? amountUSD : 0) * 100);
+  if (amountMinor < 100) {
+    showNotification(adsStudioText('Invalid amount', 'مبلغ غير صالح'), adsStudioText('Minimum charge is $1.00', 'أقل مبلغ للشحن هو 1 دولار'), 'error');
+    return;
+  }
+  try {
+    const created = await apiWalletPaymentRequestCreate(amountMinor, method, `paycreate-${state.currentUser?.id || 'me'}-${Date.now()}`);
+    showNotification(
+      adsStudioText('Charge request created', 'تم إنشاء طلب الشحن'),
+      adsStudioText(
+        `Pay with reference ${created?.data?.reference || ''} — the wallet fills up as soon as the payment is confirmed.`,
+        `ادفع بذكر الرمز ${created?.data?.reference || ''} — تتعبأ المحفظة فور تأكيد الدفع.`
+      ),
+      'success'
+    );
+  } catch (e) {
+    const detail = (e?.payload && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
+    showNotification(adsStudioText('Could not create the charge', 'تعذر إنشاء طلب الشحن'), String(detail), 'error');
+  }
+  refreshAdsStudioWallet();
+}
+
+async function adsStudioDecideWalletCharge(requestId, action) {
+  try {
+    await apiWalletPaymentRequestDecide(requestId, action);
+    showNotification(
+      adsStudioText(action === 'confirm' ? 'Payment confirmed' : 'Request canceled', action === 'confirm' ? 'تم تأكيد الدفع' : 'تم إلغاء الطلب'),
+      adsStudioText(action === 'confirm' ? 'The wallet has been credited.' : 'The charge request was canceled.', action === 'confirm' ? 'تمت تعبئة المحفظة.' : 'تم إلغاء طلب الشحن.'),
+      'success'
+    );
+  } catch (e) {
+    const detail = (e?.payload && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
+    showNotification(adsStudioText('Action failed', 'فشل الإجراء'), String(detail), 'error');
+  }
+  refreshAdsStudioWallet();
+}
+
+// JS mirror of has-[:checked] for old WebViews without :has().
+function adsStudioMarkWalletMethod(input) {
+  document.querySelectorAll('label.ads-studio-method-label').forEach(l => {
+    l.classList.remove('border-purple-500', 'bg-purple-50', 'dark:bg-purple-900/20');
+    l.classList.add('border-slate-200', 'dark:border-slate-700');
+  });
+  const label = input && input.closest ? input.closest('label') : null;
+  if (label) {
+    label.classList.remove('border-slate-200', 'dark:border-slate-700');
+    label.classList.add('border-purple-500', 'bg-purple-50', 'dark:bg-purple-900/20');
+  }
+}
+
+function _adsStudioWalletMethodLabel(method) {
+  if (method === 'card') return adsStudioText('Libyan card', 'بطاقة ليبية');
+  if (method === 'qr') return adsStudioText('QR payment', 'دفع QR');
+  return adsStudioText('Bank transfer', 'حوالة مصرفية');
+}
+
+function _adsStudioWalletRequestRow(entity, adminView) {
+  const d = entity?.data || {};
+  const isPending = String(d.status || '') === 'pending';
+  const statusColor = isPending ? 'text-amber-600' : (String(d.status) === 'confirmed' ? 'text-emerald-600' : 'text-slate-400');
+  return `
+    <div class="flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40">
+      <div class="min-w-0">
+        <div class="font-mono font-bold text-slate-800 dark:text-white">${Security.escapeHtml(String(d.reference || ''))}</div>
+        <div class="text-xs text-slate-500">${adsStudioMoney(parseInt(d.amountMinor, 10) || 0)} • ${_adsStudioWalletMethodLabel(String(d.method || ''))}</div>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="text-xs font-bold ${statusColor}">${Security.escapeHtml(String(d.status || ''))}</span>
+        ${isPending && adminView ? `<button onclick="adsStudioDecideWalletCharge('${Security.escapeHtml(String(entity.id))}', 'confirm')" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-100 hover:bg-emerald-200 text-emerald-700">${adsStudioText('Confirm received', 'تأكيد الاستلام')}</button>` : ''}
+        ${isPending ? `<button onclick="adsStudioDecideWalletCharge('${Security.escapeHtml(String(entity.id))}', 'cancel')" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300">${adsStudioText('Cancel', 'إلغاء')}</button>` : ''}
+      </div>
+    </div>`;
+}
+
+function renderAdsStudioWallet() {
+  if (_adsStudioWalletForUser !== String(state.currentUser?.id || '')) resetAdsStudioWalletCache();
+  if (_adsStudioWalletMine === null) refreshAdsStudioWallet();
+  const balance = adsStudioWalletBalanceMinor();
+  const held = adsStudioWalletHeldMinor();
+  const available = balance - held;
+  const mine = Array.isArray(_adsStudioWalletMine) ? _adsStudioWalletMine : [];
+  const pendingAll = Array.isArray(_adsStudioWalletPendingAll) ? _adsStudioWalletPendingAll : [];
+  const uid = String(state.currentUser?.id || '');
+  const history = (Array.isArray(state.walletTransactions) ? state.walletTransactions : [])
+    .filter(tx => tx && !tx._deleted && String(tx.currency || '').toUpperCase() === 'USD'
+      && (String(tx.toUserId || '') === uid || String(tx.fromUserId || '') === uid))
+    .slice(-8).reverse();
+  return `
+    <div class="space-y-6">
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div class="glass-panel rounded-2xl p-5"><div class="text-xs text-slate-500 mb-1">${adsStudioText('Wallet balance', 'رصيد المحفظة')}</div><div class="text-2xl font-bold text-slate-800 dark:text-white">${adsStudioMoney(balance)}</div></div>
+        <div class="glass-panel rounded-2xl p-5"><div class="text-xs text-slate-500 mb-1">${adsStudioText('Held for submitted campaigns', 'محجوز للحملات المُرسلة')}</div><div class="text-2xl font-bold text-amber-600">${adsStudioMoney(held)}</div></div>
+        <div class="glass-panel rounded-2xl p-5"><div class="text-xs text-slate-500 mb-1">${adsStudioText('Available to spend', 'متاح للصرف')}</div><div class="text-2xl font-bold text-emerald-600">${adsStudioMoney(available)}</div></div>
+      </div>
+
+      <div class="glass-panel rounded-2xl p-6">
+        <h3 class="font-bold text-slate-800 dark:text-white mb-1">${adsStudioText('Add money', 'إضافة رصيد')}</h3>
+        <p class="text-xs text-slate-500 mb-4">${adsStudioText('Choose how you pay. You get a reference code; the wallet fills up the moment the payment is confirmed — automatically once the payment company is connected.', 'اختر طريقة الدفع. ستحصل على رمز مرجعي، وتتعبأ المحفظة فور تأكيد الدفع — تلقائياً بعد ربط شركة الدفع.')}</p>
+        <div class="flex flex-wrap items-end gap-3">
+          <div>
+            <label class="text-xs text-slate-500 block mb-1">${adsStudioText('Amount (USD)', 'المبلغ (دولار)')}</label>
+            <input id="ads-studio-charge-amount" type="number" min="1" step="0.01" placeholder="50.00"
+              class="w-36 px-3 py-2.5 rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-white font-mono" />
+          </div>
+          ${[['bank_transfer', 'landmark'], ['card', 'credit-card'], ['qr', 'qr-code']].map(([m, icon], i) => `
+            <label class="ads-studio-method-label flex items-center gap-2 px-3 py-2.5 rounded-xl border-2 cursor-pointer has-[:checked]:border-purple-500 has-[:checked]:bg-purple-50 dark:has-[:checked]:bg-purple-900/20 ${i === 0 ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : 'border-slate-200 dark:border-slate-700'}">
+              <input type="radio" name="ads-studio-charge-method" value="${m}" ${i === 0 ? 'checked' : ''} class="accent-purple-600" onchange="adsStudioMarkWalletMethod(this)" />
+              <i data-lucide="${icon}" class="w-4 h-4"></i>
+              <span class="text-sm font-medium">${_adsStudioWalletMethodLabel(m)}</span>
+            </label>`).join('')}
+          <button onclick="adsStudioCreateWalletCharge()" class="px-5 py-2.5 rounded-xl font-bold text-white bg-purple-600 hover:bg-purple-700 transition-all">${adsStudioText('Create charge request', 'إنشاء طلب شحن')}</button>
+        </div>
+      </div>
+
+      ${isCurrentUserAdmin() && pendingAll.length ? `
+      <div class="glass-panel rounded-2xl p-6">
+        <h3 class="font-bold text-slate-800 dark:text-white mb-3">${adsStudioText('Payments waiting for confirmation (all customers)', 'مدفوعات بانتظار التأكيد (كل العملاء)')}</h3>
+        <div class="space-y-2">${pendingAll.map(r => _adsStudioWalletRequestRow(r, true)).join('')}</div>
+      </div>` : ''}
+
+      <div class="glass-panel rounded-2xl p-6">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="font-bold text-slate-800 dark:text-white">${adsStudioText('My charge requests', 'طلبات الشحن الخاصة بي')}</h3>
+          <button onclick="resetAdsStudioWalletCache(); refreshAdsStudioWallet();" class="inline-flex items-center gap-1 text-xs font-bold text-purple-600 hover:text-purple-700"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>${adsStudioText('Refresh', 'تحديث')}</button>
+        </div>
+        ${mine.length ? `<div class="space-y-2">${mine.map(r => _adsStudioWalletRequestRow(r, false)).join('')}</div>`
+          : `<p class="text-sm text-slate-500">${adsStudioText('No charge requests yet.', 'لا توجد طلبات شحن بعد.')}</p>`}
+      </div>
+
+      <div class="glass-panel rounded-2xl p-6">
+        <h3 class="font-bold text-slate-800 dark:text-white mb-3">${adsStudioText('Recent wallet activity', 'آخر حركات المحفظة')}</h3>
+        ${history.length ? `<div class="space-y-1">${history.map(tx => {
+          const incoming = String(tx.toUserId || '') === uid;
+          return `<div class="flex justify-between text-sm py-1.5 border-b border-slate-100 dark:border-slate-800 last:border-0">
+            <span class="text-slate-600 dark:text-slate-300">${Security.escapeHtml(String(tx.memo || tx.type || ''))}</span>
+            <span class="font-mono font-bold ${incoming ? 'text-emerald-600' : 'text-rose-600'}">${incoming ? '+' : '−'}${adsStudioMoney(Math.abs(parseInt(tx.amountMinor, 10) || 0))}</span>
+          </div>`;
+        }).join('')}</div>`
+          : `<p class="text-sm text-slate-500">${adsStudioText('No wallet activity yet.', 'لا توجد حركات بعد.')}</p>`}
+      </div>
+    </div>`;
 }
 
 function renderAdsStudioConnections() {

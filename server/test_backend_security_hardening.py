@@ -6294,3 +6294,1067 @@ class TestSecurityAuditRegression:
         )
         assert together.status_code == 200, together.text
         assert together.json()["deleted"] == 2
+
+
+class TestAdminDeliveryCompletion:
+    """Admins may record a temp delivery receipt's completion through the SAME
+    verified branch as the assigned driver: identical proof requirements and
+    the same server-computed settlement.  Everyone else stays blocked, and the
+    /settle mark-paid shortcut stays blocked for every role (see
+    test_settlement_cannot_bypass_temp_delivery_proof_workflow)."""
+
+    tx = TestReceiptAndAdTransactions
+
+    def _delivery_receipt(self, receipt_id, customer_id, actors, driver_id, delivery_status):
+        return self.tx._receipt(
+            receipt_id,
+            customer_id,
+            20,
+            actors,
+            status="Not Paid",
+            isPaid=False,
+            amountLocal=100,
+            debtAmountLocal=100,
+            debtAmountUSD=20,
+            tempReceiptNo="D" + receipt_id[-5:],
+            deliveryStatus=delivery_status,
+            deliveryPersonId=driver_id,
+        )
+
+    @staticmethod
+    def _completion_payload(final_no, collected=100, fee=0):
+        return {
+            "deliveryStatus": "Delivered",
+            "finalReceiptNo": final_no,
+            "serialNumber": final_no,
+            "receiptImage": "data:image/jpeg;base64,YQ==",
+            "amountCollectedFromCustomer": collected,
+            "actualDeliveryFeeCollected": fee,
+            "deliveryFeePaidBy": "customer",
+        }
+
+    def test_admin_completes_with_proof_from_needs_delivery(self, actors):
+        self.tx._customer("adm_dc_customer_1", actors)
+        driver, _ = _create_user(
+            actors["admin"],
+            email="adm-dc-driver-1@tests.albayanhub.com",
+            role="Delivery",
+        )
+        receipt = self._delivery_receipt(
+            "adm_dc_rcpt_66601", "adm_dc_customer_1", actors, driver["id"], "Needs Delivery"
+        )
+        completed = client.patch(
+            "/api/collections/receipts/adm_dc_rcpt_66601",
+            json={
+                "data": self._completion_payload("88771"),
+                "expectedLastModified": receipt["lastModified"],
+            },
+            cookies=actors["admin"],
+        )
+        assert completed.status_code == 200, completed.text
+        saved = completed.json()["data"]
+        assert saved["deliveryStatus"] == "Delivered"
+        assert saved["status"] == "Paid"
+        assert saved["isPaid"] is True
+        assert saved["finalReceiptNo"] == "88771"
+        assert saved["paymentResult"] == "PAID_EXACT"
+        assert float(saved["amountLocal"]) == 100.0
+        # 100 LYD collected at the receipt's rate of 5 => exactly the 20 USD debt.
+        assert abs(float(saved["amountUSD"]) - 20.0) < 1e-9
+        assert saved["deliveredAt"]
+        # The receipt records WHO completed it when it was not the driver.
+        assert saved["deliveryCompletionRecordedBy"] == actors["admin_user"]["id"]
+
+    def test_admin_completes_with_proof_from_in_progress(self, actors):
+        self.tx._customer("adm_dc_customer_2", actors)
+        driver, _ = _create_user(
+            actors["admin"],
+            email="adm-dc-driver-2@tests.albayanhub.com",
+            role="Delivery",
+        )
+        receipt = self._delivery_receipt(
+            "adm_dc_rcpt_66602", "adm_dc_customer_2", actors, driver["id"], "In Progress"
+        )
+        completed = client.patch(
+            "/api/collections/receipts/adm_dc_rcpt_66602",
+            json={
+                "data": self._completion_payload("88772", collected=40),
+                "expectedLastModified": receipt["lastModified"],
+            },
+            cookies=actors["admin"],
+        )
+        assert completed.status_code == 200, completed.text
+        saved = completed.json()["data"]
+        assert saved["deliveryStatus"] == "Delivered"
+        # Underpaid: 40 of 100 LYD collected -> stays Not Paid with remaining due.
+        assert saved["paymentResult"] == "UNDERPAID"
+        assert saved["isPaid"] is False
+        assert abs(float(saved["remainingDue"]) - 60.0) < 1e-9
+
+    def test_admin_completion_still_requires_every_proof(self, actors):
+        self.tx._customer("adm_dc_customer_3", actors)
+        driver, _ = _create_user(
+            actors["admin"],
+            email="adm-dc-driver-3@tests.albayanhub.com",
+            role="Delivery",
+        )
+        receipt = self._delivery_receipt(
+            "adm_dc_rcpt_66603", "adm_dc_customer_3", actors, driver["id"], "Needs Delivery"
+        )
+        for missing in ("finalReceiptNo", "receiptImage", "amountCollectedFromCustomer"):
+            payload = self._completion_payload("88773")
+            payload.pop(missing)
+            if missing == "finalReceiptNo":
+                payload.pop("serialNumber")
+            rejected = client.patch(
+                "/api/collections/receipts/adm_dc_rcpt_66603",
+                json={"data": payload, "expectedLastModified": receipt["lastModified"]},
+                cookies=actors["admin"],
+            )
+            assert rejected.status_code == 400, missing + ": " + rejected.text
+        stored = client.get(
+            "/api/collections/receipts/adm_dc_rcpt_66603", cookies=actors["admin"]
+        )
+        assert stored.json()["data"]["deliveryStatus"] == "Needs Delivery"
+        assert stored.json()["data"]["status"] == "Not Paid"
+        assert stored.json()["lastModified"] == receipt["lastModified"]
+
+    def test_employee_with_edit_grant_still_cannot_mark_delivered(self, actors):
+        self.tx._customer("adm_dc_customer_4", actors)
+        driver, _ = _create_user(
+            actors["admin"],
+            email="adm-dc-driver-4@tests.albayanhub.com",
+            role="Delivery",
+        )
+        _, editor_cookies = _create_user(
+            actors["admin"],
+            email="adm-dc-editor@tests.albayanhub.com",
+            permissions={
+                "receipts": ["view", "edit"],
+                "deliveries": ["view", "assign", "accept", "complete", "markCollected"],
+            },
+        )
+        receipt = self._delivery_receipt(
+            "adm_dc_rcpt_66604", "adm_dc_customer_4", actors, driver["id"], "Needs Delivery"
+        )
+        rejected = client.patch(
+            "/api/collections/receipts/adm_dc_rcpt_66604",
+            json={
+                "data": self._completion_payload("88774"),
+                "expectedLastModified": receipt["lastModified"],
+            },
+            cookies=editor_cookies,
+        )
+        assert rejected.status_code == 403, rejected.text
+        stored = client.get(
+            "/api/collections/receipts/adm_dc_rcpt_66604", cookies=actors["admin"]
+        )
+        assert stored.json()["data"]["deliveryStatus"] == "Needs Delivery"
+        assert not stored.json()["data"].get("finalReceiptNo")
+
+    def test_admin_cannot_resettle_a_completed_delivery(self, actors):
+        self.tx._customer("adm_dc_customer_5", actors)
+        driver, _ = _create_user(
+            actors["admin"],
+            email="adm-dc-driver-5@tests.albayanhub.com",
+            role="Delivery",
+        )
+        receipt = self._delivery_receipt(
+            "adm_dc_rcpt_66605", "adm_dc_customer_5", actors, driver["id"], "Needs Delivery"
+        )
+        completed = client.patch(
+            "/api/collections/receipts/adm_dc_rcpt_66605",
+            json={
+                "data": self._completion_payload("88775"),
+                "expectedLastModified": receipt["lastModified"],
+            },
+            cookies=actors["admin"],
+        )
+        assert completed.status_code == 200, completed.text
+        again = client.patch(
+            "/api/collections/receipts/adm_dc_rcpt_66605",
+            json={
+                "data": self._completion_payload("88776", collected=1),
+                "expectedLastModified": completed.json()["lastModified"],
+            },
+            cookies=actors["admin"],
+        )
+        # Delivered is terminal for admins too: the money cannot be rewritten.
+        assert again.status_code in (400, 409), again.text
+        stored = client.get(
+            "/api/collections/receipts/adm_dc_rcpt_66605", cookies=actors["admin"]
+        )
+        assert stored.json()["data"]["finalReceiptNo"] == "88775"
+        assert float(stored.json()["data"]["amountLocal"]) == 100.0
+
+    def test_admin_completes_office_status_with_overpaid_math(self, actors):
+        # A temp receipt whose mission was removed sits in 'Office'; the admin
+        # must still be able to record the real completion.
+        self.tx._customer("adm_dc_customer_6", actors)
+        driver, _ = _create_user(
+            actors["admin"],
+            email="adm-dc-driver-6@tests.albayanhub.com",
+            role="Delivery",
+        )
+        receipt = self._delivery_receipt(
+            "adm_dc_rcpt_66606", "adm_dc_customer_6", actors, driver["id"], "Office"
+        )
+        completed = client.patch(
+            "/api/collections/receipts/adm_dc_rcpt_66606",
+            json={
+                "data": self._completion_payload("88777", collected=110),
+                "expectedLastModified": receipt["lastModified"],
+            },
+            cookies=actors["admin"],
+        )
+        assert completed.status_code == 200, completed.text
+        saved = completed.json()["data"]
+        assert saved["deliveryStatus"] == "Delivered"
+        assert saved["paymentResult"] == "OVERPAID"
+        assert abs(float(saved["overpaidAmount"]) - 10.0) < 1e-9
+        assert saved["isPaid"] is True
+        assert float(saved["amountLocal"]) == 110.0
+        # 110 LYD at the receipt's rate of 5 -> 22 USD.
+        assert abs(float(saved["amountUSD"]) - 22.0) < 1e-9
+
+    def test_completion_recorded_by_stamp_cannot_be_forged(self, actors):
+        self.tx._customer("adm_dc_customer_7", actors)
+        _, editor_cookies = _create_user(
+            actors["admin"],
+            email="adm-dc-stamp-editor@tests.albayanhub.com",
+            permissions={"receipts": ["view", "edit"]},
+        )
+        receipt = self.tx._receipt(
+            "adm_dc_rcpt_66607",
+            "adm_dc_customer_7",
+            20,
+            actors,
+            status="Not Paid",
+            isPaid=False,
+            amountLocal=100,
+        )
+        forged = client.patch(
+            "/api/collections/receipts/adm_dc_rcpt_66607",
+            json={
+                "data": {"deliveryCompletionRecordedBy": "user_forged", "note": "x"},
+                "expectedLastModified": receipt["lastModified"],
+            },
+            cookies=editor_cookies,
+        )
+        assert forged.status_code == 200, forged.text
+        assert "deliveryCompletionRecordedBy" not in (forged.json()["data"] or {})
+
+    def test_admin_completion_converts_meta_mixed_debt_ads_and_blocks_redraw(self, actors):
+        # Reproduces the live D19 report: Meta-imported ads funded as customer
+        # debt against an unpaid temp delivery receipt (one mixed in_shop ad
+        # also drawing from a separate paid receipt, one driver-linked ad).
+        # After the ADMIN completes the delivery, every due row must convert
+        # into a paid allocation on the SAME receipt so the receipt reads
+        # fully used, and any new draw from it must be refused.
+        self.tx._customer("adm_dc_customer_8", actors)
+        driver, _ = _create_user(
+            actors["admin"],
+            email="adm-dc-driver-8@tests.albayanhub.com",
+            role="Delivery",
+        )
+        paid_receipt = self.tx._receipt(
+            "adm_dc_paid_66609",
+            "adm_dc_customer_8",
+            40,
+            actors,
+            amountLocal=200,
+            exchangeRate=5,
+        )
+        receipt = self.tx._receipt(
+            "adm_dc_rcpt_66608",
+            "adm_dc_customer_8",
+            100,
+            actors,
+            status="Not Paid",
+            isPaid=False,
+            amountLocal=500,
+            exchangeRate=5,
+            debtAmountLocal=500,
+            debtAmountUSD=100,
+            tempReceiptNo="D66608",
+            deliveryStatus="Needs Delivery",
+            deliveryPersonId=driver["id"],
+        )
+        mixed = self.tx._mutate_ad(
+            "adm_dc_meta_mixed_ad",
+            "adm-dc-meta-mixed-create-001",
+            {
+                "customerId": "adm_dc_customer_8",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "driver",
+                "exchangeRate": 5,
+                "amountUSD": 100,
+                "spentUSD": 100,
+                "driverBudgetUSD": 100,
+                "linkedDeliveryReceiptId": "adm_dc_rcpt_66608",
+                "receiptId": "adm_dc_rcpt_66608",
+                "receiptAllocations": [
+                    {"receiptId": "adm_dc_paid_66609", "amountUSD": 40}
+                ],
+                "dueAllocations": [
+                    {"receiptId": "adm_dc_rcpt_66608", "amountUSD": 60}
+                ],
+            },
+            actors,
+        )
+        assert mixed.status_code == 200, mixed.text
+        driver_ad = self.tx._mutate_ad(
+            "adm_dc_meta_driver_ad",
+            "adm-dc-meta-driver-create-001",
+            {
+                "customerId": "adm_dc_customer_8",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "driver",
+                "exchangeRate": 5,
+                "driverBudgetUSD": 40,
+                "linkedDeliveryReceiptId": "adm_dc_rcpt_66608",
+                "receiptId": "adm_dc_rcpt_66608",
+                "dueAllocations": [
+                    {"receiptId": "adm_dc_rcpt_66608", "amountUSD": 40}
+                ],
+            },
+            actors,
+        )
+        assert driver_ad.status_code == 200, driver_ad.text
+
+        completed = client.patch(
+            "/api/collections/receipts/adm_dc_rcpt_66608",
+            json={
+                "data": self._completion_payload("88778", collected=500),
+                "expectedLastModified": receipt["lastModified"],
+            },
+            cookies=actors["admin"],
+        )
+        assert completed.status_code == 200, completed.text
+        saved = completed.json()["data"]
+        assert saved["status"] == "Paid"
+        assert abs(float(saved["amountUSD"]) - 100.0) < 1e-9
+
+        # Every due row must have converted into a paid allocation on the SAME
+        # receipt — the money stays visibly spent, never silently released.
+        stored_mixed = client.get(
+            "/api/collections/ads/adm_dc_meta_mixed_ad", cookies=actors["admin"]
+        ).json()["data"]
+        mixed_paid = {
+            str(row.get("receiptId")): float(row.get("amountUSD") or 0)
+            for row in (stored_mixed.get("receiptAllocations") or [])
+        }
+        assert abs(mixed_paid.get("adm_dc_rcpt_66608", 0) - 60.0) < 1e-9, stored_mixed
+        assert abs(mixed_paid.get("adm_dc_paid_66609", 0) - 40.0) < 1e-9, stored_mixed
+        assert not [
+            row
+            for row in (stored_mixed.get("dueAllocations") or [])
+            if str(row.get("receiptId")) == "adm_dc_rcpt_66608"
+        ], stored_mixed
+
+        stored_driver = client.get(
+            "/api/collections/ads/adm_dc_meta_driver_ad", cookies=actors["admin"]
+        ).json()["data"]
+        driver_paid = {
+            str(row.get("receiptId")): float(row.get("amountUSD") or 0)
+            for row in (stored_driver.get("receiptAllocations") or [])
+        }
+        assert abs(driver_paid.get("adm_dc_rcpt_66608", 0) - 40.0) < 1e-9, stored_driver
+        assert not [
+            row
+            for row in (stored_driver.get("dueAllocations") or [])
+            if str(row.get("receiptId")) == "adm_dc_rcpt_66608"
+        ], stored_driver
+
+        # The pot is fully committed (60 + 40 = the $100 collected): a new ad
+        # drawing even $1 of paid funding from this receipt must be refused.
+        redraw = self.tx._mutate_ad(
+            "adm_dc_meta_redraw_ad",
+            "adm-dc-meta-redraw-create-001",
+            {
+                "customerId": "adm_dc_customer_8",
+                "paymentStatus": "paid",
+                "exchangeRate": 5,
+                "amountUSD": 1,
+                "spentUSD": 1,
+                "receiptAllocations": [
+                    {"receiptId": "adm_dc_rcpt_66608", "amountUSD": 1}
+                ],
+            },
+            actors,
+        )
+        assert redraw.status_code in (400, 409), redraw.text
+
+    def test_paid_delivery_receipt_counts_and_settles_rowless_driver_ads(self, actors):
+        # The LIVE shape (owner's receipts #13/#19): Meta-imported ads completed
+        # as "Not Paid - driver" write NO allocation rows at all — just
+        # linkedDeliveryReceiptId + driverBudgetUSD. The receipt's debt is the
+        # sum of those ads. After the receipt is collected and Paid, that money
+        # is the settlement of those ads: it must NOT be offered as fresh
+        # credit, and the ads must settle from it.
+        self.tx._customer("adm_dc_customer_9", actors)
+        driver, _ = _create_user(
+            actors["admin"],
+            email="adm-dc-driver-9@tests.albayanhub.com",
+            role="Delivery",
+        )
+        receipt = self.tx._receipt(
+            "adm_dc_rcpt_66610",
+            "adm_dc_customer_9",
+            100,
+            actors,
+            status="Not Paid",
+            isPaid=False,
+            amountLocal=500,
+            exchangeRate=5,
+            debtAmountLocal=500,
+            debtAmountUSD=100,
+            tempReceiptNo="D66610",
+            deliveryStatus="Needs Delivery",
+            deliveryPersonId=driver["id"],
+        )
+        for idx, ad_id in enumerate(["adm_dc_rowless_ad_1", "adm_dc_rowless_ad_2"]):
+            created = self.tx._mutate_ad(
+                ad_id,
+                f"adm-dc-rowless-create-{idx}",
+                {
+                    "customerId": "adm_dc_customer_9",
+                    "paymentStatus": "not_paid",
+                    "collectionMethod": "driver",
+                    "exchangeRate": 5,
+                    "amountUSD": 50,
+                    "spentUSD": 50,
+                    "driverBudgetUSD": 50,
+                    "linkedDeliveryReceiptId": "adm_dc_rcpt_66610",
+                    "receiptId": "adm_dc_rcpt_66610",
+                    "receiptAllocations": [],
+                    "dueAllocations": [],
+                },
+                actors,
+            )
+            assert created.status_code == 200, created.text
+
+        completed = client.patch(
+            "/api/collections/receipts/adm_dc_rcpt_66610",
+            json={
+                "data": self._completion_payload("88779", collected=500),
+                "expectedLastModified": receipt["lastModified"],
+            },
+            cookies=actors["admin"],
+        )
+        assert completed.status_code == 200, completed.text
+        assert abs(float(completed.json()["data"]["amountUSD"]) - 100.0) < 1e-9
+
+        # The collected $100 IS those two ads' settlement: each ad must now be
+        # paid, funded by an explicit allocation row on this receipt.
+        for ad_id in ["adm_dc_rowless_ad_1", "adm_dc_rowless_ad_2"]:
+            stored = client.get(
+                f"/api/collections/ads/{ad_id}", cookies=actors["admin"]
+            ).json()["data"]
+            paid_rows = {
+                str(row.get("receiptId")): float(row.get("amountUSD") or 0)
+                for row in (stored.get("receiptAllocations") or [])
+            }
+            assert abs(paid_rows.get("adm_dc_rcpt_66610", 0) - 50.0) < 1e-9, stored
+            assert str(stored.get("paymentStatus")) == "paid", stored
+
+        # And with the pot fully committed, a new $1 draw must be refused.
+        redraw = self.tx._mutate_ad(
+            "adm_dc_rowless_redraw_ad",
+            "adm-dc-rowless-redraw-001",
+            {
+                "customerId": "adm_dc_customer_9",
+                "paymentStatus": "paid",
+                "exchangeRate": 5,
+                "amountUSD": 1,
+                "spentUSD": 1,
+                "receiptAllocations": [
+                    {"receiptId": "adm_dc_rcpt_66610", "amountUSD": 1}
+                ],
+            },
+            actors,
+        )
+        assert redraw.status_code in (400, 409), redraw.text
+
+    def test_transfer_cannot_move_unsettled_rowless_driver_credit(self, actors):
+        # A Paid delivery receipt whose settlement cascade never ran (the
+        # pre-fix stuck state of the owner's live receipts): its collected
+        # cash belongs to the linked rowless driver ads, so an outgoing
+        # TRANSFER must not be able to move that phantom credit out.
+        self.tx._customer("adm_dc_customer_10", actors)
+        self.tx._customer("adm_dc_customer_10b", actors)
+        driver, _ = _create_user(
+            actors["admin"],
+            email="adm-dc-driver-10@tests.albayanhub.com",
+            role="Delivery",
+        )
+        receipt = self._delivery_receipt(
+            "adm_dc_rcpt_66611", "adm_dc_customer_10", actors, driver["id"], "Needs Delivery"
+        )
+        created = self.tx._mutate_ad(
+            "adm_dc_rowless_stuck_ad",
+            "adm-dc-rowless-stuck-001",
+            {
+                "customerId": "adm_dc_customer_10",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "driver",
+                "exchangeRate": 5,
+                "amountUSD": 100,
+                "spentUSD": 100,
+                "driverBudgetUSD": 100,
+                "linkedDeliveryReceiptId": "adm_dc_rcpt_66611",
+                "receiptId": "adm_dc_rcpt_66611",
+                "receiptAllocations": [],
+                "dueAllocations": [],
+            },
+            actors,
+        )
+        assert created.status_code == 200, created.text
+
+        # Flip the receipt to Paid with a raw write that bypasses the cascade,
+        # reproducing rows settled before the fix existed.
+        with db_conn() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT data_json,last_modified FROM entities "
+                    "WHERE type='receipts' AND id='adm_dc_rcpt_66611'"
+                )
+            ).mappings().first()
+            stuck = json.loads(row["data_json"])
+            stuck.update(
+                {
+                    "status": "Paid",
+                    "isPaid": True,
+                    "deliveryStatus": "Delivered",
+                    "finalReceiptNo": "88780",
+                    "serialNumber": "88780",
+                    "amountUSD": 100,
+                    "amountLocal": 500,
+                }
+            )
+            stuck_modified = int(row["last_modified"]) + 1
+            stuck["_lastModified"] = stuck_modified
+            conn.execute(
+                text(
+                    "UPDATE entities SET data_json=:data,last_modified=:modified "
+                    "WHERE type='receipts' AND id='adm_dc_rcpt_66611'"
+                ),
+                {"data": json_dumps(stuck), "modified": stuck_modified},
+            )
+
+        blocked = client.post(
+            "/api/receipts/transfers",
+            json={
+                "sourceReceiptId": "adm_dc_rcpt_66611",
+                "targetCustomerId": "adm_dc_customer_10b",
+                "targetReceiptId": "adm_dc_transfer_in_66611",
+                "idempotencyKey": "adm-dc-rowless-transfer-001",
+                "expectedSourceLastModified": stuck_modified,
+                "amountMinorUSD": 100,
+                "note": "phantom credit must stay reserved",
+            },
+            cookies=actors["admin"],
+        )
+        assert blocked.status_code == 409, blocked.text
+        assert "Insufficient" in blocked.json()["detail"], blocked.text
+
+    def test_startup_backfill_settles_pre_fix_stuck_receipts(self, actors):
+        # Zero-click healing: a receipt paid BEFORE the cascade fix (rowless
+        # driver ad left unsettled) must be healed by the startup backfill —
+        # and the backfill must be idempotent.
+        from server.main import backfill_settle_rowless_driver_receipts
+
+        self.tx._customer("adm_dc_customer_11", actors)
+        driver, _ = _create_user(
+            actors["admin"],
+            email="adm-dc-driver-11@tests.albayanhub.com",
+            role="Delivery",
+        )
+        receipt = self._delivery_receipt(
+            "adm_dc_rcpt_66612", "adm_dc_customer_11", actors, driver["id"], "Needs Delivery"
+        )
+        created = self.tx._mutate_ad(
+            "adm_dc_rowless_boot_ad",
+            "adm-dc-rowless-boot-001",
+            {
+                "customerId": "adm_dc_customer_11",
+                "paymentStatus": "not_paid",
+                "collectionMethod": "driver",
+                "exchangeRate": 5,
+                "amountUSD": 100,
+                "spentUSD": 100,
+                "driverBudgetUSD": 100,
+                "linkedDeliveryReceiptId": "adm_dc_rcpt_66612",
+                "receiptId": "adm_dc_rcpt_66612",
+                "receiptAllocations": [],
+                "dueAllocations": [],
+            },
+            actors,
+        )
+        assert created.status_code == 200, created.text
+
+        with db_conn() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT data_json,last_modified FROM entities "
+                    "WHERE type='receipts' AND id='adm_dc_rcpt_66612'"
+                )
+            ).mappings().first()
+            stuck = json.loads(row["data_json"])
+            stuck.update(
+                {
+                    "status": "Paid",
+                    "isPaid": True,
+                    "deliveryStatus": "Delivered",
+                    "finalReceiptNo": "88781",
+                    "serialNumber": "88781",
+                    "amountUSD": 100,
+                    "amountLocal": 500,
+                }
+            )
+            stuck_modified = int(row["last_modified"]) + 1
+            stuck["_lastModified"] = stuck_modified
+            conn.execute(
+                text(
+                    "UPDATE entities SET data_json=:data,last_modified=:modified "
+                    "WHERE type='receipts' AND id='adm_dc_rcpt_66612'"
+                ),
+                {"data": json_dumps(stuck), "modified": stuck_modified},
+            )
+
+        healed = backfill_settle_rowless_driver_receipts()
+        assert healed >= 1
+
+        stored = client.get(
+            "/api/collections/ads/adm_dc_rowless_boot_ad", cookies=actors["admin"]
+        ).json()["data"]
+        paid_rows = {
+            str(r.get("receiptId")): float(r.get("amountUSD") or 0)
+            for r in (stored.get("receiptAllocations") or [])
+        }
+        assert abs(paid_rows.get("adm_dc_rcpt_66612", 0) - 100.0) < 1e-9, stored
+        assert str(stored.get("paymentStatus")) == "paid", stored
+
+        # Idempotent: everything already settled, nothing left to heal.
+        assert backfill_settle_rowless_driver_receipts() == 0
+
+    def test_backfill_skips_capacity_exhausted_residue_without_version_churn(self, actors):
+        # Review must-fix: a Paid receipt whose collected cash cannot cover
+        # every linked rowless driver ad settles as far as the cash goes on
+        # the FIRST pass, then must be left completely untouched (healed=0,
+        # no version bump) on every later pass — a permanent residue is
+        # manual-review territory, not an every-boot rewrite that makes all
+        # clients re-sync the row.
+        from server.main import backfill_settle_rowless_driver_receipts
+
+        self.tx._customer("adm_dc_customer_12", actors)
+        driver, _ = _create_user(
+            actors["admin"],
+            email="adm-dc-driver-12@tests.albayanhub.com",
+            role="Delivery",
+        )
+        self._delivery_receipt(
+            "adm_dc_rcpt_66613", "adm_dc_customer_12", actors, driver["id"], "Needs Delivery"
+        )
+        for ad_id, key, amount in (
+            ("adm_dc_residue_ad_a", "adm-dc-residue-001", 80),
+            ("adm_dc_residue_ad_b", "adm-dc-residue-002", 50),
+        ):
+            created = self.tx._mutate_ad(
+                ad_id,
+                key,
+                {
+                    "customerId": "adm_dc_customer_12",
+                    "paymentStatus": "not_paid",
+                    "collectionMethod": "driver",
+                    "exchangeRate": 5,
+                    "amountUSD": amount,
+                    "spentUSD": amount,
+                    "driverBudgetUSD": amount,
+                    "linkedDeliveryReceiptId": "adm_dc_rcpt_66613",
+                    "receiptId": "adm_dc_rcpt_66613",
+                    "receiptAllocations": [],
+                    "dueAllocations": [],
+                },
+                actors,
+            )
+            assert created.status_code == 200, created.text
+
+        # Flip to Paid with a raw write that bypasses the cascade (the pre-fix
+        # stuck state) — but collected cash (100) < linked ad budgets (130).
+        with db_conn() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT data_json,last_modified FROM entities "
+                    "WHERE type='receipts' AND id='adm_dc_rcpt_66613'"
+                )
+            ).mappings().first()
+            stuck = json.loads(row["data_json"])
+            stuck.update(
+                {
+                    "status": "Paid",
+                    "isPaid": True,
+                    "deliveryStatus": "Delivered",
+                    "finalReceiptNo": "88782",
+                    "serialNumber": "88782",
+                    "amountUSD": 100,
+                    "amountLocal": 500,
+                }
+            )
+            stuck_modified = int(row["last_modified"]) + 1
+            stuck["_lastModified"] = stuck_modified
+            conn.execute(
+                text(
+                    "UPDATE entities SET data_json=:data,last_modified=:modified "
+                    "WHERE type='receipts' AND id='adm_dc_rcpt_66613'"
+                ),
+                {"data": json_dumps(stuck), "modified": stuck_modified},
+            )
+
+        assert backfill_settle_rowless_driver_receipts() == 1
+
+        def _receipt_version():
+            with db_conn() as conn:
+                return int(
+                    conn.execute(
+                        text(
+                            "SELECT last_modified FROM entities "
+                            "WHERE type='receipts' AND id='adm_dc_rcpt_66613'"
+                        )
+                    ).scalar()
+                )
+
+        def _ad_allocations(ad_id):
+            data = client.get(
+                f"/api/collections/ads/{ad_id}", cookies=actors["admin"]
+            ).json()["data"]
+            rows = {
+                str(r.get("receiptId")): float(r.get("amountUSD") or 0)
+                for r in (data.get("receiptAllocations") or [])
+            }
+            return data, rows
+
+        first, alloc_a = _ad_allocations("adm_dc_residue_ad_a")
+        second, alloc_b = _ad_allocations("adm_dc_residue_ad_b")
+        assert abs(alloc_a.get("adm_dc_rcpt_66613", 0) - 80.0) < 1e-9, first
+        assert str(first.get("paymentStatus")) == "paid", first
+        assert abs(alloc_b.get("adm_dc_rcpt_66613", 0) - 20.0) < 1e-9, second
+        assert str(second.get("paymentStatus")) == "not_paid", second
+
+        version_after_heal = _receipt_version()
+        # Second pass: capacity is 0, settlement could move nothing. It must
+        # return 0 AND write nothing — same version, same partial allocation.
+        assert backfill_settle_rowless_driver_receipts() == 0
+        assert _receipt_version() == version_after_heal
+        after, alloc_after = _ad_allocations("adm_dc_residue_ad_b")
+        assert abs(alloc_after.get("adm_dc_rcpt_66613", 0) - 20.0) < 1e-9, after
+
+    def test_backfill_one_poisoned_receipt_does_not_block_the_others(self, actors):
+        # Review should-fix: the per-receipt error skip must actually hold —
+        # a receipt whose cascade raises (its linked ad was rewired to another
+        # customer) is skipped and printed, while a healthy receipt in the
+        # same pass still heals; the poisoned one never counts as healed.
+        from server.main import backfill_settle_rowless_driver_receipts
+
+        self.tx._customer("adm_dc_customer_13", actors)
+        self.tx._customer("adm_dc_customer_13b", actors)
+        driver, _ = _create_user(
+            actors["admin"],
+            email="adm-dc-driver-13@tests.albayanhub.com",
+            role="Delivery",
+        )
+        for rid, serial in (("adm_dc_rcpt_66614", "88783"), ("adm_dc_rcpt_66615", "88784")):
+            self._delivery_receipt(
+                rid, "adm_dc_customer_13", actors, driver["id"], "Needs Delivery"
+            )
+        for ad_id, key, rid in (
+            ("adm_dc_poison_ad", "adm-dc-poison-001", "adm_dc_rcpt_66614"),
+            ("adm_dc_healthy_ad", "adm-dc-healthy-001", "adm_dc_rcpt_66615"),
+        ):
+            created = self.tx._mutate_ad(
+                ad_id,
+                key,
+                {
+                    "customerId": "adm_dc_customer_13",
+                    "paymentStatus": "not_paid",
+                    "collectionMethod": "driver",
+                    "exchangeRate": 5,
+                    "amountUSD": 100,
+                    "spentUSD": 100,
+                    "driverBudgetUSD": 100,
+                    "linkedDeliveryReceiptId": rid,
+                    "receiptId": rid,
+                    "receiptAllocations": [],
+                    "dueAllocations": [],
+                },
+                actors,
+            )
+            assert created.status_code == 200, created.text
+
+        with db_conn() as conn:
+            for rid, serial in (
+                ("adm_dc_rcpt_66614", "88783"),
+                ("adm_dc_rcpt_66615", "88784"),
+            ):
+                row = conn.execute(
+                    text(
+                        "SELECT data_json,last_modified FROM entities "
+                        "WHERE type='receipts' AND id=:id"
+                    ),
+                    {"id": rid},
+                ).mappings().first()
+                stuck = json.loads(row["data_json"])
+                stuck.update(
+                    {
+                        "status": "Paid",
+                        "isPaid": True,
+                        "deliveryStatus": "Delivered",
+                        "finalReceiptNo": serial,
+                        "serialNumber": serial,
+                        "amountUSD": 100,
+                        "amountLocal": 500,
+                    }
+                )
+                stuck_modified = int(row["last_modified"]) + 1
+                stuck["_lastModified"] = stuck_modified
+                conn.execute(
+                    text(
+                        "UPDATE entities SET data_json=:data,last_modified=:modified "
+                        "WHERE type='receipts' AND id=:id"
+                    ),
+                    {"data": json_dumps(stuck), "modified": stuck_modified, "id": rid},
+                )
+            # Poison the first receipt's ad: rewire it to a different customer
+            # so the cascade's ownership check raises 409 for that receipt.
+            arow = conn.execute(
+                text(
+                    "SELECT data_json,last_modified FROM entities "
+                    "WHERE type='ads' AND id='adm_dc_poison_ad'"
+                )
+            ).mappings().first()
+            poisoned = json.loads(arow["data_json"])
+            poisoned["customerId"] = "adm_dc_customer_13b"
+            conn.execute(
+                text(
+                    "UPDATE entities SET data_json=:data "
+                    "WHERE type='ads' AND id='adm_dc_poison_ad'"
+                ),
+                {"data": json_dumps(poisoned)},
+            )
+
+        # One pass: the healthy receipt heals, the poisoned one is skipped.
+        assert backfill_settle_rowless_driver_receipts() == 1
+
+        healthy = client.get(
+            "/api/collections/ads/adm_dc_healthy_ad", cookies=actors["admin"]
+        ).json()["data"]
+        healthy_rows = {
+            str(r.get("receiptId")): float(r.get("amountUSD") or 0)
+            for r in (healthy.get("receiptAllocations") or [])
+        }
+        assert abs(healthy_rows.get("adm_dc_rcpt_66615", 0) - 100.0) < 1e-9, healthy
+        assert str(healthy.get("paymentStatus")) == "paid", healthy
+
+        untouched = client.get(
+            "/api/collections/ads/adm_dc_poison_ad", cookies=actors["admin"]
+        ).json()["data"]
+        assert not untouched.get("receiptAllocations"), untouched
+        assert str(untouched.get("paymentStatus")) == "not_paid", untouched
+
+        # Next pass: the poisoned receipt still refuses, still never counts.
+        assert backfill_settle_rowless_driver_receipts() == 0
+
+
+def test_startup_registers_both_healing_backfills():
+    # Deleting either _startup wiring must fail loudly: the money heal runs
+    # synchronously (DB-only, fast); the Meta page-name pass must run on its
+    # own thread so boot can never block on Facebook's network timeouts.
+    import inspect
+
+    from server import main as main_module
+
+    startup_source = inspect.getsource(main_module._startup)
+    assert "backfill_settle_rowless_driver_receipts()" in startup_source
+    assert "_run_page_name_backfill_quietly" in startup_source
+    # Never called inline in the startup hook — that would block boot.
+    assert "backfill_placeholder_page_names()" not in startup_source
+    thread_source = inspect.getsource(main_module._run_page_name_backfill_quietly)
+    assert "backfill_placeholder_page_names()" in thread_source
+
+
+class TestDestroyedReceipts:
+    """A DESTROYED (torn, never-used) paper receipt is ONLY a locked number:
+    it can never carry money, never be revived, and its number can never be
+    reused — until the record itself is deleted, which frees the number."""
+
+    def _destroy(self, rid, number, actors, **extra):
+        return client.post(
+            "/api/collections/receipts",
+            json={
+                "id": rid,
+                "data": {
+                    "recordType": "receipt",
+                    "status": "Destroyed",
+                    "finalReceiptNo": number,
+                    **extra,
+                },
+            },
+            cookies=actors["admin"],
+        )
+
+    def test_destroyed_receipt_locks_its_number_and_cannot_revive(self, actors):
+        created = self._destroy("destroyed_r1", "88790", actors)
+        assert created.status_code == 200, created.text
+        stored = created.json()["data"]
+        assert stored["status"] == "Destroyed"
+        assert stored["isPaid"] is False
+
+        # The torn paper's number is locked across BOTH serial fields.
+        for field in ("serialNumber", "finalReceiptNo"):
+            reuse = client.post(
+                "/api/collections/receipts",
+                json={
+                    "id": f"destroyed_r1_reuse_{field}",
+                    "data": {
+                        "recordType": "receipt",
+                        field: "88790",
+                        "amountUSD": 10,
+                        "amountLocal": 50,
+                        "exchangeRate": 5,
+                        "status": "Paid",
+                        "isPaid": True,
+                    },
+                },
+                cookies=actors["admin"],
+            )
+            assert reuse.status_code == 409, reuse.text
+
+        # No edit can revive it — not a paid flip, not money, not delivery.
+        for updates in (
+            {"status": "Paid", "isPaid": True},
+            {"amountUSD": 100},
+            {"deliveryStatus": "Needs Delivery"},
+        ):
+            blocked = client.patch(
+                "/api/collections/receipts/destroyed_r1",
+                json={"data": updates},
+                cookies=actors["admin"],
+            )
+            assert blocked.status_code == 409, blocked.text
+
+        # And a LIVE receipt can never be flipped into Destroyed.
+        TestReceiptAndAdTransactions._customer("destroyed_cust_1", actors)
+        TestReceiptAndAdTransactions._receipt(
+            "destroyed_live_r1", "destroyed_cust_1", 25, actors, serialNumber="88791"
+        )
+        flipped = client.patch(
+            "/api/collections/receipts/destroyed_live_r1",
+            json={"data": {"status": "Destroyed", "isPaid": False}},
+            cookies=actors["admin"],
+        )
+        assert flipped.status_code == 400, flipped.text
+
+    def test_destroyed_receipt_records_only_a_number(self, actors):
+        # Missing number, money, a customer, payments, delivery or a temp
+        # number all make it more than a locked number: every one is a 400.
+        no_number = client.post(
+            "/api/collections/receipts",
+            json={"id": "destroyed_bad_1", "data": {"recordType": "receipt", "status": "Destroyed"}},
+            cookies=actors["admin"],
+        )
+        assert no_number.status_code == 400, no_number.text
+        rejected = {
+            "destroyed_bad_2": {"amountUSD": 50},
+            "destroyed_bad_3": {"isPaid": True},
+            "destroyed_bad_4": {"customerId": "destroyed_cust_1"},
+            "destroyed_bad_5": {"payments": [{"amountUSD": 5}]},
+            "destroyed_bad_6": {"deliveryPersonId": "someone"},
+            "destroyed_bad_7": {"tempReceiptNo": "D99999"},
+        }
+        for rid, extra in rejected.items():
+            response = self._destroy(rid, "88792", actors, **extra)
+            assert response.status_code == 400, (rid, response.text)
+
+    def test_destroyed_receipt_cannot_fund_ads_or_transfer(self, actors):
+        destroyed = self._destroy("destroyed_r2", "88793", actors)
+        assert destroyed.status_code == 200
+        destroyed_version = int(destroyed.json()["data"]["_lastModified"])
+        TestReceiptAndAdTransactions._customer("destroyed_cust_2", actors)
+        funded = TestReceiptAndAdTransactions._mutate_ad(
+            "destroyed_fund_ad",
+            "destroyed-fund-ad-001",
+            {
+                "customerId": "destroyed_cust_2",
+                "paymentStatus": "paid",
+                "exchangeRate": 5,
+                "amountUSD": 10,
+                "receiptAllocations": [{"receiptId": "destroyed_r2", "amountUSD": 10}],
+            },
+            actors,
+        )
+        assert funded.status_code == 400, funded.text
+        assert "paid receipts" in funded.json()["detail"].lower(), funded.text
+
+        transfer = client.post(
+            "/api/receipts/transfers",
+            json={
+                "sourceReceiptId": "destroyed_r2",
+                "targetCustomerId": "destroyed_cust_2",
+                "targetReceiptId": "destroyed_transfer_in_1",
+                "idempotencyKey": "destroyed-transfer-001",
+                "expectedSourceLastModified": destroyed_version,
+                "amountMinorUSD": 100,
+            },
+            cookies=actors["admin"],
+        )
+        assert transfer.status_code in {400, 409}, transfer.text
+
+    def test_destroyed_receipt_settle_blocked_and_permission_gated(self, actors):
+        destroyed = self._destroy("destroyed_r4", "88795", actors)
+        assert destroyed.status_code == 200
+        version = int(destroyed.json()["data"]["_lastModified"])
+        settled = client.post(
+            "/api/receipts/destroyed_r4/settle",
+            json={
+                "expectedLastModified": version,
+                "idempotencyKey": "destroyed-settle-001",
+                "data": {},
+            },
+            cookies=actors["admin"],
+        )
+        assert settled.status_code == 409, settled.text
+        assert "destroyed" in settled.json()["detail"].lower(), settled.text
+
+        # Destroying a number IS receipt creation: an employee without the
+        # receipts.add grant cannot lock numbers.
+        _employee, employee_cookies = _create_user(
+            actors["admin"],
+            email="destroyed-no-add@tests.albayanhub.com",
+            role="Employee",
+            permissions={"receipts": ["view"]},
+        )
+        denied = client.post(
+            "/api/collections/receipts",
+            json={
+                "id": "destroyed_r5",
+                "data": {
+                    "recordType": "receipt",
+                    "status": "Destroyed",
+                    "finalReceiptNo": "88796",
+                },
+            },
+            cookies=employee_cookies,
+        )
+        assert denied.status_code == 403, denied.text
+
+    def test_deleting_a_destroyed_receipt_frees_its_number(self, actors):
+        assert self._destroy("destroyed_r3", "88794", actors).status_code == 200
+        removed = client.delete(
+            "/api/collections/receipts/destroyed_r3", cookies=actors["admin"]
+        )
+        assert removed.status_code == 200, removed.text
+        TestReceiptAndAdTransactions._customer("destroyed_cust_3", actors)
+        fresh = TestReceiptAndAdTransactions._receipt(
+            "destroyed_r3_after", "destroyed_cust_3", 15, actors, serialNumber="88794"
+        )
+        assert fresh["data"]["serialNumber"] == "88794"

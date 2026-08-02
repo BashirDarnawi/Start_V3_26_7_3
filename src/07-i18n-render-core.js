@@ -165,6 +165,7 @@ const STATUS_TRANSLATIONS_AR = {
   'Canceled': 'ملغي',
   'Cancelled': 'ملغي',
   'Lost': 'ضائع',
+  'Destroyed': 'تالف',
   'Stopped': 'موقوف',
   'posted': 'منشور',
   // Delivery pipeline

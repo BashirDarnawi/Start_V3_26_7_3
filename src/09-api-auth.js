@@ -1706,6 +1706,26 @@ async function apiReviewAdCampaignRequest(campaignId, expectedLastModified, deci
   return entity;
 }
 
+// Wallet payment requests (server-authoritative; confirm is admin/gateway).
+async function apiWalletPaymentRequestCreate(amountMinor, method, idempotencyKey) {
+  return withRetry(() => apiJson('/api/wallet/payment-requests', {
+    method: 'POST',
+    body: { amountMinor, currency: 'USD', method, idempotencyKey }
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 2, 500);
+}
+
+async function apiWalletPaymentRequestList(scope) {
+  const suffix = scope === 'pending' ? '?scope=pending' : '';
+  return apiJson(`/api/wallet/payment-requests${suffix}`, { method: 'GET' });
+}
+
+async function apiWalletPaymentRequestDecide(requestId, action, providerRef) {
+  return apiJson(`/api/wallet/payment-requests/${encodeURIComponent(requestId)}/${encodeURIComponent(action)}`, {
+    method: 'POST',
+    body: action === 'confirm' ? { providerRef: providerRef || null } : {}
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+}
+
 async function apiPatchEntity(collection, id, updates, expectedLastModified) {
   const omitMedia = LIGHTWEIGHT_MEDIA_COLLECTIONS.has(String(collection || ''));
   const local = (Array.isArray(state[collection]) ? state[collection] : [])

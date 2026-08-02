@@ -130,6 +130,21 @@ def actors():
     unsubscribed = _login(UNSUBSCRIBED_EMAIL, UNSUBSCRIBED_PASSWORD)
     _subscribe(owner, "owner")
     _subscribe(other, "other")
+    # Submitting holds the campaign budget in the customer's USD wallet, so
+    # every studio actor gets a comfortably funded wallet for the tests.
+    for uid, tag in ((owner_user["id"], "owner"), (other_user["id"], "other")):
+        funded = client.post(
+            "/api/wallet/top-ups",
+            json={
+                "userId": uid,
+                "amountMinor": 100_000_000,
+                "currency": "USD",
+                "idempotencyKey": f"ad-studio-wallet-{tag}",
+                "memo": "Studio test funding",
+            },
+            cookies=admin,
+        )
+        assert funded.status_code == 200, funded.text
     return {
         "admin": admin,
         "owner": owner,
@@ -819,3 +834,362 @@ class TestAdsStudioWorkflow:
         response = client.get("/api/sync/watermarks", cookies=actors["owner"])
         assert response.status_code == 200, response.text
         assert "adCampaignRequests" in response.json()["watermarks"]
+
+
+def _fresh_funded_customer(actors, tag: str, fund_minor: int) -> tuple[dict, dict]:
+    """A brand-new subscribed studio customer with an exact wallet balance."""
+    user = _create_user(
+        actors["admin"], f"ad-studio-wallet-{tag}@tests.albayanhub.com",
+        f"AdStudioWallet{tag}123!", CUSTOMER_PERMISSIONS,
+    )
+    cookies = _login(f"ad-studio-wallet-{tag}@tests.albayanhub.com", f"AdStudioWallet{tag}123!")
+    _subscribe(cookies, f"wallet-{tag}")
+    if fund_minor > 0:
+        funded = client.post(
+            "/api/wallet/top-ups",
+            json={
+                "userId": user["id"],
+                "amountMinor": fund_minor,
+                "currency": "USD",
+                "idempotencyKey": f"wallet-fund-{tag}",
+            },
+            cookies=actors["admin"],
+        )
+        assert funded.status_code == 200, funded.text
+    return user, cookies
+
+
+def _wallet_rows_for(actors, user_id: str) -> list[dict]:
+    payload = client.get(
+        "/api/collections/walletTransactions", cookies=actors["admin"]
+    ).json()
+    rows = payload if isinstance(payload, list) else (payload.get("items") or [])
+    datas = [r.get("data") or {} for r in rows if isinstance(r, dict)]
+    return [
+        d for d in datas
+        if str(d.get("fromUserId") or "") == user_id
+        or str(d.get("toUserId") or "") == user_id
+    ]
+
+
+def _submit_campaign(cookies, campaign_id: str, last_modified: int, op: str):
+    return client.post(
+        f"/api/ad-studio/campaigns/{campaign_id}/submit",
+        json={"expectedLastModified": last_modified, "operationId": op},
+        cookies=cookies,
+    )
+
+
+def _review_campaign(actors, campaign_id: str, last_modified: int, decision: str, op: str, note: str = ""):
+    return client.post(
+        f"/api/ad-studio/campaigns/{campaign_id}/review",
+        json={
+            "expectedLastModified": last_modified,
+            "decision": decision,
+            "note": note,
+            "operationId": op,
+        },
+        cookies=actors["reviewer"],
+    )
+
+
+class TestStudioWalletPayments:
+    """The customer wallet: gateway-ready charges, holds, and captures."""
+
+    def test_payment_request_lifecycle_credits_exactly_once(self, actors):
+        created = client.post(
+            "/api/wallet/payment-requests",
+            json={
+                "amountMinor": 5000,
+                "currency": "USD",
+                "method": "bank_transfer",
+                "idempotencyKey": "studio-pay-req-001",
+            },
+            cookies=actors["owner"],
+        )
+        assert created.status_code == 200, created.text
+        entity = created.json()
+        rid = entity["id"]
+        assert entity["data"]["status"] == "pending"
+        assert str(entity["data"]["reference"]).startswith("PAY-")
+
+        replay = client.post(
+            "/api/wallet/payment-requests",
+            json={
+                "amountMinor": 5000,
+                "currency": "USD",
+                "method": "bank_transfer",
+                "idempotencyKey": "studio-pay-req-001",
+            },
+            cookies=actors["owner"],
+        )
+        assert replay.status_code == 200 and replay.json()["id"] == rid
+
+        denied = client.post(
+            f"/api/wallet/payment-requests/{rid}/confirm",
+            json={"providerRef": "bank-123"},
+            cookies=actors["owner"],
+        )
+        assert denied.status_code == 403, denied.text
+
+        confirmed = client.post(
+            f"/api/wallet/payment-requests/{rid}/confirm",
+            json={"providerRef": "bank-123"},
+            cookies=actors["admin"],
+        )
+        assert confirmed.status_code == 200, confirmed.text
+        assert confirmed.json()["data"]["status"] == "confirmed"
+
+        again = client.post(
+            f"/api/wallet/payment-requests/{rid}/confirm",
+            json={"providerRef": "bank-123"},
+            cookies=actors["admin"],
+        )
+        assert again.status_code == 200
+        credits = [
+            r for r in _wallet_rows_for(actors, actors["owner_id"])
+            if str(r.get("idempotencyKey") or "") == f"payreq:{rid}"
+        ]
+        assert len(credits) == 1, credits
+        assert credits[0]["amountMinor"] == 5000
+
+    def test_payment_request_cancel_rules(self, actors):
+        created = client.post(
+            "/api/wallet/payment-requests",
+            json={
+                "amountMinor": 2000,
+                "currency": "USD",
+                "method": "qr",
+                "idempotencyKey": "studio-pay-req-002",
+            },
+            cookies=actors["owner"],
+        )
+        rid = created.json()["id"]
+        foreign = client.post(
+            f"/api/wallet/payment-requests/{rid}/cancel", cookies=actors["other"]
+        )
+        assert foreign.status_code == 403, foreign.text
+        canceled = client.post(
+            f"/api/wallet/payment-requests/{rid}/cancel", cookies=actors["owner"]
+        )
+        assert canceled.status_code == 200
+        assert canceled.json()["data"]["status"] == "canceled"
+        confirm_after = client.post(
+            f"/api/wallet/payment-requests/{rid}/confirm",
+            json={},
+            cookies=actors["admin"],
+        )
+        assert confirm_after.status_code == 409, confirm_after.text
+
+        pending_list = client.get(
+            "/api/wallet/payment-requests?scope=pending", cookies=actors["owner"]
+        )
+        assert pending_list.status_code == 403
+        own_list = client.get("/api/wallet/payment-requests", cookies=actors["owner"])
+        assert own_list.status_code == 200
+        assert all(
+            str(r["data"].get("userId")) == actors["owner_id"]
+            for r in own_list.json()["requests"]
+        )
+
+    def test_submitted_budget_is_held_and_protected_from_other_debits(self, actors):
+        user, cookies = _fresh_funded_customer(actors, "hold", 2500)
+        first = _create_campaign(cookies, _complete_campaign("Hold A"), "wallet_hold_a")
+        assert first.status_code == 200, first.text
+        submitted = _submit_campaign(
+            cookies, "wallet_hold_a", first.json()["lastModified"], "wallet-hold-a-01"
+        )
+        assert submitted.status_code == 200, submitted.text
+
+        second = _create_campaign(cookies, _complete_campaign("Hold B"), "wallet_hold_b")
+        assert second.status_code == 200
+        blocked = _submit_campaign(
+            cookies, "wallet_hold_b", second.json()["lastModified"], "wallet-hold-b-01"
+        )
+        assert blocked.status_code == 409, blocked.text
+        assert "wallet" in blocked.json()["detail"].lower()
+
+        # The held money cannot leave through a transfer either.
+        drained = client.post(
+            "/api/wallet/transfers",
+            json={
+                "toUserId": actors["other_id"],
+                "amountMinor": 1,
+                "currency": "USD",
+                "idempotencyKey": "wallet-hold-drain-01",
+            },
+            cookies=cookies,
+        )
+        assert drained.status_code == 409, drained.text
+
+        # Rejecting releases the hold; the second campaign can then submit.
+        rejected = _review_campaign(
+            actors, "wallet_hold_a", submitted.json()["lastModified"],
+            "Rejected", "wallet-hold-reject-01", note="No budget this month",
+        )
+        assert rejected.status_code == 200, rejected.text
+        retry = _submit_campaign(
+            cookies, "wallet_hold_b", second.json()["lastModified"], "wallet-hold-b-02"
+        )
+        assert retry.status_code == 200, retry.text
+
+    def test_approval_captures_the_budget_exactly_once(self, actors):
+        user, cookies = _fresh_funded_customer(actors, "capture", 2500)
+        created = _create_campaign(cookies, _complete_campaign("Capture"), "wallet_capture_a")
+        assert created.status_code == 200
+        submitted = _submit_campaign(
+            cookies, "wallet_capture_a", created.json()["lastModified"], "wallet-capture-01"
+        )
+        assert submitted.status_code == 200, submitted.text
+        approved = _review_campaign(
+            actors, "wallet_capture_a", submitted.json()["lastModified"],
+            "Approved", "wallet-approve-01",
+        )
+        assert approved.status_code == 200, approved.text
+        stored = approved.json()["data"]
+        assert stored["paidMinorUSD"] == 2500
+        assert stored["paymentTransactionId"]
+
+        replay = _review_campaign(
+            actors, "wallet_capture_a", submitted.json()["lastModified"],
+            "Approved", "wallet-approve-01",
+        )
+        assert replay.status_code == 200
+        payments = [
+            r for r in _wallet_rows_for(actors, user["id"])
+            if str(r.get("type") or "") == "campaign_payment"
+        ]
+        assert len(payments) == 1, payments
+        assert payments[0]["amountMinor"] == 2500
+
+        # The wallet is empty now: nothing else can be submitted.
+        third = _create_campaign(cookies, _complete_campaign("Broke"), "wallet_capture_b")
+        assert third.status_code == 200
+        broke = _submit_campaign(
+            cookies, "wallet_capture_b", third.json()["lastModified"], "wallet-capture-02"
+        )
+        assert broke.status_code == 409, broke.text
+
+    def test_capture_key_is_scoped_per_submission_cycle(self, actors):
+        # Reject → edit budget → resubmit → approve must capture the NEW
+        # budget as a NEW payment, never replay the first cycle's key.
+        user, cookies = _fresh_funded_customer(actors, "cycle", 10_000)
+        created = _create_campaign(cookies, _complete_campaign("Cycle"), "wallet_cycle_a")
+        assert created.status_code == 200
+        submitted = _submit_campaign(
+            cookies, "wallet_cycle_a", created.json()["lastModified"], "wallet-cycle-01"
+        )
+        assert submitted.status_code == 200, submitted.text
+        rejected = _review_campaign(
+            actors, "wallet_cycle_a", submitted.json()["lastModified"],
+            "Rejected", "wallet-cycle-reject-01", note="Change the budget",
+        )
+        assert rejected.status_code == 200, rejected.text
+
+        # A rejected campaign cannot be resubmitted; edit a fresh draft copy
+        # with a different budget for the second cycle.
+        second = dict(_complete_campaign("Cycle 2"))
+        second["budgetMinorUSD"] = 4000
+        created2 = _create_campaign(cookies, second, "wallet_cycle_b")
+        assert created2.status_code == 200
+        submitted2 = _submit_campaign(
+            cookies, "wallet_cycle_b", created2.json()["lastModified"], "wallet-cycle-02"
+        )
+        assert submitted2.status_code == 200, submitted2.text
+        approved = _review_campaign(
+            actors, "wallet_cycle_b", submitted2.json()["lastModified"],
+            "Approved", "wallet-cycle-approve-01",
+        )
+        assert approved.status_code == 200, approved.text
+        assert approved.json()["data"]["paidMinorUSD"] == 4000
+        payments = [
+            r for r in _wallet_rows_for(actors, user["id"])
+            if str(r.get("type") or "") == "campaign_payment"
+        ]
+        assert len(payments) == 1 and payments[0]["amountMinor"] == 4000, payments
+        # No refund rows exist: the reject found no orphan capture to release.
+        releases = [
+            r for r in _wallet_rows_for(actors, user["id"])
+            if str(r.get("type") or "") == "campaign_payment_release"
+        ]
+        assert releases == [], releases
+
+    def test_create_replay_is_owner_and_shape_checked(self, actors):
+        first = client.post(
+            "/api/wallet/payment-requests",
+            json={
+                "amountMinor": 3000,
+                "currency": "USD",
+                "method": "card",
+                "idempotencyKey": "studio-pay-shared-key-01",
+            },
+            cookies=actors["owner"],
+        )
+        assert first.status_code == 200, first.text
+        # Same key, DIFFERENT user: must not leak the owner's request.
+        stolen = client.post(
+            "/api/wallet/payment-requests",
+            json={
+                "amountMinor": 3000,
+                "currency": "USD",
+                "method": "card",
+                "idempotencyKey": "studio-pay-shared-key-01",
+            },
+            cookies=actors["other"],
+        )
+        assert stolen.status_code == 409, stolen.text
+        # Same key, same user, different amount: refused, not replayed.
+        reshaped = client.post(
+            "/api/wallet/payment-requests",
+            json={
+                "amountMinor": 9999,
+                "currency": "USD",
+                "method": "card",
+                "idempotencyKey": "studio-pay-shared-key-01",
+            },
+            cookies=actors["owner"],
+        )
+        assert reshaped.status_code == 409, reshaped.text
+
+    def test_cancel_refused_once_the_payment_credit_exists(self, actors):
+        created = client.post(
+            "/api/wallet/payment-requests",
+            json={
+                "amountMinor": 1500,
+                "currency": "USD",
+                "method": "bank_transfer",
+                "idempotencyKey": "studio-pay-req-cancelrace",
+            },
+            cookies=actors["owner"],
+        )
+        rid = created.json()["id"]
+        confirmed = client.post(
+            f"/api/wallet/payment-requests/{rid}/confirm",
+            json={},
+            cookies=actors["admin"],
+        )
+        assert confirmed.status_code == 200
+        # Money arrived: the request can never be canceled afterwards.
+        canceled = client.post(
+            f"/api/wallet/payment-requests/{rid}/cancel", cookies=actors["owner"]
+        )
+        assert canceled.status_code == 409, canceled.text
+
+    def test_generic_routes_cannot_touch_payment_requests(self, actors):
+        created = client.post(
+            "/api/collections/walletPaymentRequests",
+            json={"id": "forged_payment_request", "data": {"status": "confirmed"}},
+            cookies=actors["admin"],
+        )
+        assert created.status_code == 405, created.text
+        patched = client.patch(
+            "/api/collections/walletPaymentRequests/anything",
+            json={"data": {"status": "confirmed"}},
+            cookies=actors["admin"],
+        )
+        assert patched.status_code == 405, patched.text
+        deleted = client.delete(
+            "/api/collections/walletPaymentRequests/anything",
+            cookies=actors["admin"],
+        )
+        assert deleted.status_code == 405, deleted.text

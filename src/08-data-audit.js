@@ -1403,6 +1403,8 @@ function getAlbayanManagerLandingViewForUser(user) {
 }
 
 function getPostLoginLandingViewForUser(user) {
+  // The studio door leads only into the studio — admins included.
+  if (IS_STUDIO_SHELL) return 'ads-studio';
   const roleLower = String(user?.role || '').toLowerCase();
   if (roleLower === 'admin') return 'services-hub';
   return getAlbayanManagerLandingViewForUser(user);
@@ -1411,6 +1413,15 @@ function getPostLoginLandingViewForUser(user) {
 function enforceSecretFeaturesGate() {
   // If not logged in, no gating needed.
   if (!state.currentUser) return;
+  // The studio shell renders the studio view and nothing else.
+  if (IS_STUDIO_SHELL) {
+    if (state.currentView !== 'ads-studio') {
+      state.currentView = 'ads-studio';
+      state.viewData = null;
+      saveState();
+    }
+    return;
+  }
   // Admin can access everything.
   if (isCurrentUserAdmin()) return;
   // Non-admin: block secret platform views.
@@ -1670,6 +1681,9 @@ function getReceiptPaymentState(receipt) {
     .replace(/[\s_-]+/g, '');
 
   if (status === 'canceled' || status === 'cancelled') return 'canceled';
+  // A destroyed (torn, never-used) receipt behaves like a canceled one for
+  // every reader: never unpaid debt, never revenue, never needs attention.
+  if (status === 'destroyed') return 'canceled';
   if (status === 'lost') return 'lost';
   if (status === 'paid') return 'paid';
   if (status === 'notpaid' || status === 'unpaid' || status === 'pending') return 'not_paid';

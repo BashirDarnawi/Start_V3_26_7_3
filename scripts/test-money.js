@@ -409,6 +409,32 @@ async function main() {
     S.receipts[0].deliveryStatus = 'Needs Delivery';
   });
 
+  await must('C1b. a DESTROYED receipt is a locked number: never debt, revenue or transferable credit', () => {
+    resetState();
+    S.receipts.push({
+      id: 'receipt_c1b', recordType: 'receipt', customerId: 'c1',
+      serialNumber: '88799', finalReceiptNo: '88799',
+      amountUSD: 0, amountLocal: 0,
+      status: 'Destroyed', isPaid: false, payments: [], transfers: []
+    });
+    const stats = getCustomerStats('c1');
+    assert(near(stats.receiptDebtUSD, 0) && near(stats.balanceUSD, 0) && near(stats.totalPaidUSD, 0),
+      'a destroyed receipt leaked into customer debt or revenue');
+    assert(sandbox.getReceiptDebtType(S.receipts[0]) === 'none',
+      'a destroyed receipt must never classify as customer debt');
+    assert(sandbox.getReceiptPaymentState(S.receipts[0]) === 'canceled',
+      'a destroyed receipt must read as settled history, not unpaid');
+    assert(sandbox._isTransferableReceipt(S.receipts[0]) === false,
+      'a destroyed receipt must never be transferable');
+    // Even a FORGED destroyed row carrying money must stay invisible to
+    // customer revenue (the server refuses to create this shape at all).
+    S.receipts[0].amountUSD = 100;
+    S.receipts[0].amountLocal = 500;
+    S.receipts[0].isPaid = true;
+    const forged = getCustomerStats('c1');
+    assert(near(forged.totalPaidUSD, 0), 'a forged paid+destroyed receipt leaked into customer revenue');
+  });
+
   await must('C2. a $9 unpaid In-Shop receipt fully backing a $9 unpaid ad stays ONE $9 debt, not $18', () => {
     resetState();
     S.defaultExchangeRate = 9.7;

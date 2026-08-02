@@ -64,7 +64,35 @@ ENABLE_ONLINE_IMPORT = os.getenv("ALBAYAN_ENABLE_ONLINE_IMPORT", "").strip().low
 SETUP_TOKEN = os.getenv("ALBAYAN_SETUP_TOKEN", "")
 
 from .db import db_conn, get_engine, init_db, json_dumps, json_loads, now_ms
-from .rbac import VALID_USER_ROLES, normalize_permissions, user_has_permission
+from .rbac import VALID_USER_ROLES, is_admin_receipt_completion, normalize_permissions, user_has_permission
+from .backfills import backfill_customer_names, backfill_relink_baselines
+from .wallet_payments import (
+    capture_campaign_budget,
+    create_wallet_payments_router,
+    release_orphan_campaign_payment,
+    wallet_campaign_holds_minor,
+)
+from .financial_core import (
+    MAX_EXCHANGE_RATE,
+    MAX_FINANCIAL_AMOUNT,
+    MIN_EXCHANGE_RATE,
+    _financial_ad_committed,
+    _financial_ad_due_usage,
+    _financial_ad_effective_amount,
+    _financial_ad_explicit_usage,
+    _financial_ad_general_usage,
+    _financial_ad_payment_status,
+    _financial_allocation_map,
+    _financial_destroyed_receipt_create_error,
+    _financial_legacy_due_receipt_id,
+    _financial_minor,
+    _financial_outgoing,
+    _financial_rate,
+    _financial_receipt_transferable,
+    _financial_rowless_driver_gap,
+    _financial_rows_from_allocation_map,
+    _financial_usd,
+)
 from .entity_projection import (
     INLINE_MEDIA_FIELDS,
     _project_entity_media,
@@ -696,8 +724,9 @@ MAX_INPUT_LENGTH = 10000  # Maximum length for text inputs
 MAX_DATA_URL_LENGTH = 8 * 1024 * 1024
 MAX_JSON_DEPTH = 20  # Maximum nesting depth for JSON
 
-# Financial validation constants
-MAX_FINANCIAL_AMOUNT = 10_000_000  # $10 million max for any single amount
+# Financial validation constants: MAX_FINANCIAL_AMOUNT / MAX_EXCHANGE_RATE /
+# MIN_EXCHANGE_RATE moved to financial_core.py (imported above) with the pure
+# money readers.
 # A delivery driver enters the cash actually collected. A genuine over-collection
 # (a tip or rounding) is small; an implausibly large amount — whether a fat-finger
 # or an attempt to mint spendable ad credit — must be refused and handled by the
@@ -706,8 +735,6 @@ MAX_FINANCIAL_AMOUNT = 10_000_000  # $10 million max for any single amount
 _DELIVERY_OVERPAY_RATIO = float(os.getenv("ALBAYAN_DELIVERY_OVERPAY_RATIO", "3.0"))
 _DELIVERY_OVERPAY_ABS_LOCAL = float(os.getenv("ALBAYAN_DELIVERY_OVERPAY_ABS_LOCAL", "10000"))
 MIN_FINANCIAL_AMOUNT = 0  # No negative amounts allowed
-MAX_EXCHANGE_RATE = 1000  # Maximum exchange rate (LYD per USD)
-MIN_EXCHANGE_RATE = 0.001  # Minimum exchange rate
 
 # Fields that should be validated as financial amounts (no negatives, reasonable max)
 FINANCIAL_AMOUNT_FIELDS = {
@@ -2313,163 +2340,110 @@ def _bootstrap_first_admin_if_empty():
         print(f"[albayan] Bootstrap admin skipped/failed: {type(e).__name__}")
 
 
-def backfill_customer_names() -> int:
-    """Stamp customerName on legacy receipts/ads that predate the denormalization.
+def backfill_settle_rowless_driver_receipts() -> int:
+    """Settle rowless driver-linked ads on receipts paid BEFORE the paid
+    cascade learned this shape (2026-08 fix).
 
-    Records created before customerName existed still render as "Unknown" for a
-    role that can view receipts/ads but not load the customers collection. This
-    one-time-safe pass fills that gap from the authoritative customers table.
-
-    Idempotent — it only touches a record that (a) is a receipt/ad, (b) has a
-    customerId, (c) lacks a usable customerName, and (d) whose customer resolves
-    to a name — so it is a no-op on every startup after the first and safe to run
-    unconditionally. Only the NAME is copied; phone/contact are never read. The
-    record's last_modified/_lastModified are deliberately left untouched: the
-    client fetches every collection in full on load, so a limited-permission
-    role picks up the stamp on its next login/refresh without a resync storm.
-
-    Returns the number of records stamped.
+    A modern "Not Paid - driver" ad carries no allocation rows: its money is
+    the cash the driver collects through the linked delivery receipt. The
+    cascade now settles such ads the moment the receipt becomes Paid, but
+    receipts paid before the fix kept their ads unsettled, so the collected
+    cash still read as spendable credit. Re-running the atomic PATCH with no
+    updates re-executes the (fixed) paid cascade with full locking, capacity
+    checks and version bumps so clients delta-sync the healed rows.
+    Idempotent: once settled the rowless gap is 0 and the receipt is never
+    selected again. A receipt whose paid balance is ALREADY fully committed
+    (capacity 0 — settlement could move nothing) is skipped BEFORE any write,
+    so a residue never version-bumps rows on every boot; it is printed for
+    manual follow-up, as are closed-period refusals. Never blocks boot.
     """
-    stamped = 0
-    try:
-        with (nullcontext() if str(get_engine().dialect.name or "") == "postgresql" else _SQLITE_FINANCIAL_LOCK), db_conn() as conn:
-            customer_names: dict[str, str] = {}
-            for row in conn.execute(
-                text("SELECT id, data_json FROM entities WHERE type = 'customers'")
-            ).mappings().all():
-                cdata = json_loads(row.get("data_json") or "{}") or {}
-                if isinstance(cdata, dict):
-                    nm = cdata.get("name")
-                    if isinstance(nm, str) and nm.strip():
-                        customer_names[str(row["id"])] = sanitize_str(nm)[:120]
-            if not customer_names:
-                return 0
-            for etype in ("receipts", "ads"):
-                rows = conn.execute(
-                    text("SELECT id, data_json FROM entities WHERE type = :t" + (" FOR UPDATE" if str(conn.engine.dialect.name or "") == "postgresql" else "")),
-                    {"t": etype},
-                ).mappings().all()
-                for row in rows:
-                    data = json_loads(row.get("data_json") or "{}") or {}
-                    if not isinstance(data, dict):
-                        continue
-                    existing_name = data.get("customerName")
-                    if isinstance(existing_name, str) and existing_name.strip():
-                        continue
-                    cid = sanitize_str(str(data.get("customerId") or ""))[:80]
-                    if not cid:
-                        continue
-                    name = customer_names.get(cid)
-                    if not name:
-                        continue
-                    if financial_period_is_closed(etype, data, conn=conn): continue
-                    data["customerName"] = name
-                    conn.execute(
-                        text("UPDATE entities SET data_json = :d WHERE type = :t AND id = :id"),
-                        {"d": json_dumps(data), "t": etype, "id": str(row["id"])},
-                    )
-                    stamped += 1
-        if stamped:
-            print(f"[albayan] Backfilled customerName on {stamped} receipts/ads")
-    except Exception as e:
-        print(f"[albayan] customerName backfill skipped/failed: {type(e).__name__}: {e}")
-    return stamped
 
-
-def backfill_relink_baselines() -> int:
-    """Retarget stale stop/refund baselines left by pre-retarget relinks.
-
-    Ads settled/relinked before the baseline-retarget shipped still carry
-    stop/refund baselines naming the VACATED receipt. _financial_receipt_ids
-    counts baselines as live links, so those fully-freed receipts could never
-    be deleted ("linked to ad funding"). Repair rule — deliberately narrow and
-    unambiguous, mirroring _financial_apply_relink's own retarget:
-      (a) the ad has no active refund (refundType empty/None — refund undo
-          restores from baselines, so refunded ads keep theirs untouched), and
-      (b) its LIVE allocations reference exactly ONE receipt R, and
-      (c) a baseline names some other receipt X != R  ->  rewrite X to R.
-    Amounts are never changed; last_modified is left untouched (display-only
-    linkage data — the delete guard re-reads rows directly). Idempotent: after
-    the first pass no baseline names a non-live receipt, so it is a no-op on
-    every later startup.
-
-    Returns the number of ads repaired.
-    """
-    repaired = 0
-    try:
-        with (nullcontext() if str(get_engine().dialect.name or "") == "postgresql" else _SQLITE_FINANCIAL_LOCK), db_conn() as conn:
-            rows = conn.execute(
-                text("SELECT id, data_json FROM entities WHERE type = 'ads' AND deleted = false" + (" FOR UPDATE" if str(conn.engine.dialect.name or "") == "postgresql" else ""))
+    def _scan_state() -> tuple[dict[str, int], list[dict[str, Any]]]:
+        """One ads-table read: per-receipt rowless gaps + every parsed ad."""
+        with db_conn() as conn:
+            ad_rows = conn.execute(
+                text("SELECT data_json FROM entities WHERE type='ads' AND deleted=false")
             ).mappings().all()
-            for row in rows:
-                data = json_loads(row.get("data_json") or "{}") or {}
-                if not isinstance(data, dict):
-                    continue
-                if financial_period_is_closed("ads", data, conn=conn): continue
-                refund_type = str(data.get("refundType") or "")
-                if refund_type and refund_type != "None":
-                    continue
-                live_ids = {
-                    str(entry.get("receiptId") or "")
-                    for field in ("receiptAllocations", "dueAllocations", "mergedPaidAllocations")
-                    for entry in (data.get(field) or [])
-                    if isinstance(entry, dict) and entry.get("receiptId")
-                }
-                live_ids.discard("")
-                if len(live_ids) != 1:
-                    continue
-                replacement = next(iter(live_ids))
+        gaps: dict[str, int] = {}
+        ads: list[dict[str, Any]] = []
+        for row in ad_rows:
+            try:
+                ad = json_loads(row["data_json"] or "{}") or {}
+            except Exception:
+                continue
+            if not isinstance(ad, dict) or str(ad.get("recordType") or "") == "receipt":
+                continue
+            ads.append(ad)
+            rid = str(ad.get("linkedDeliveryReceiptId") or ad.get("receiptId") or "")
+            if not rid:
+                continue
+            try:
+                gap = _financial_rowless_driver_gap(ad, rid)
+            except HTTPException:
+                continue  # corrupt stored amount: leave the row for manual review
+            if gap > 0:
+                gaps[rid] = gaps.get(rid, 0) + gap
+        return gaps, ads
 
-                changed = False
-
-                def _retarget(rows_value: Any) -> Any:
-                    nonlocal changed
-                    if not isinstance(rows_value, list):
-                        return rows_value
-                    out = []
-                    for entry in rows_value:
-                        if (
-                            isinstance(entry, dict)
-                            and entry.get("receiptId")
-                            and str(entry["receiptId"]) != replacement
-                        ):
-                            changed = True
-                            out.append({**entry, "receiptId": replacement})
-                        else:
-                            out.append(entry)
-                    return out
-
-                for baseline_name in ("refundAllocationBaseline", "refundDueBaseline"):
-                    baseline = data.get(baseline_name)
-                    if isinstance(baseline, list):
-                        data[baseline_name] = _retarget(baseline)
-                    elif isinstance(baseline, dict):
-                        data[baseline_name] = {
-                            key: _retarget(value) for key, value in baseline.items()
-                        }
-                stop_baseline = data.get("stopAllocationBaseline")
-                if isinstance(stop_baseline, dict):
-                    next_baseline = dict(stop_baseline)
-                    for key, value in stop_baseline.items():
-                        if isinstance(value, list):
-                            next_baseline[key] = _retarget(value)
-                    legacy_id = str(next_baseline.get("dueLegacyReceiptId") or "")
-                    if legacy_id and legacy_id != replacement:
-                        next_baseline["dueLegacyReceiptId"] = replacement
-                        changed = True
-                    data["stopAllocationBaseline"] = next_baseline
-                if not changed:
+    candidates: list[str] = []
+    try:
+        receipt_gaps, parsed_ads = _scan_state()
+        with db_conn() as conn:
+            for rid in sorted(receipt_gaps):
+                rrow = conn.execute(
+                    text("SELECT data_json, deleted FROM entities WHERE type='receipts' AND id=:id"),
+                    {"id": rid},
+                ).mappings().first()
+                if not rrow or bool(rrow["deleted"]):
                     continue
-                conn.execute(
-                    text("UPDATE entities SET data_json = :d WHERE type = 'ads' AND id = :id"),
-                    {"d": json_dumps(data), "id": str(row["id"])},
-                )
-                repaired += 1
-        if repaired:
-            print(f"[albayan] Retargeted stale relink baselines on {repaired} ads")
+                try:
+                    receipt = json_loads(rrow["data_json"] or "{}") or {}
+                except Exception:
+                    continue
+                if not isinstance(receipt, dict) or not _financial_receipt_transferable(receipt):
+                    continue
+                # Mirror of the cascade's implied_cap (paid pot minus transfers
+                # and every explicit commitment): if settlement could move 0
+                # cents, calling the PATCH would only rewrite row versions.
+                try:
+                    capacity = _financial_due_total(receipt) - _financial_outgoing(receipt)
+                    for ad in parsed_ads:
+                        capacity -= _financial_ad_committed(ad, rid)
+                except HTTPException:
+                    continue  # corrupt stored money fields: manual review
+                if capacity <= 0:
+                    print(f"[albayan] rowless-settlement stuck {rid}: paid balance already fully used; needs manual review")
+                    continue
+                candidates.append(rid)
     except Exception as e:
-        print(f"[albayan] relink-baseline backfill skipped/failed: {type(e).__name__}: {e}")
-    return repaired
+        print(f"[albayan] rowless-settlement scan skipped/failed: {type(e).__name__}: {e}")
+        return 0
+
+    healed = 0
+    for rid in candidates:
+        try:
+            before_gap = _scan_state()[0].get(rid, 0)
+            _financial_patch_receipt_atomic({"id": "system"}, rid, {}, None)
+            if _scan_state()[0].get(rid, 0) < before_gap:
+                healed += 1
+            else:
+                print(f"[albayan] rowless-settlement stuck {rid}: cascade settled nothing; needs manual review")
+        except HTTPException as e:
+            print(f"[albayan] rowless-settlement skipped {rid}: {e.status_code} {e.detail}")
+        except Exception as e:
+            print(f"[albayan] rowless-settlement skipped {rid}: {type(e).__name__}: {e}")
+    if healed:
+        print(f"[albayan] Settled rowless driver ads on {healed} paid receipt(s)")
+    return healed
+
+
+def _run_page_name_backfill_quietly() -> None:
+    """Thread body for the boot page-name pass: never lets an exception escape."""
+    try:
+        from .meta_ads import backfill_placeholder_page_names
+        backfill_placeholder_page_names()
+    except Exception as e:
+        print(f"[albayan] page-name backfill failed: {type(e).__name__}: {e}")
 
 
 @app.on_event("startup")
@@ -2511,10 +2485,30 @@ def _startup():
     # Denormalize customerName onto legacy receipts/ads so a receipts/ads-only
     # role can read the customer's name. Idempotent — a no-op once complete.
     try:
-        backfill_customer_names()
-        backfill_relink_baselines()
+        backfill_customer_names(_SQLITE_FINANCIAL_LOCK)
+        backfill_relink_baselines(_SQLITE_FINANCIAL_LOCK)
     except Exception as e:
         print(f"[albayan] customerName backfill failed: {e}")
+
+    # Zero-click healing: settle rowless driver-linked ads on receipts that
+    # were already Paid before the paid cascade learned this shape.
+    try:
+        backfill_settle_rowless_driver_receipts()
+    except Exception as e:
+        print(f"[albayan] rowless settlement backfill failed: {e}")
+
+    # Give placeholder-named Meta pages their real Facebook name (bounded;
+    # also re-runs inside the Meta background worker). On a daemon thread:
+    # boot must NEVER block on Facebook's network timeouts — a synchronous
+    # call could hold health probes hostage and crash-loop the container.
+    try:
+        threading.Thread(
+            target=_run_page_name_backfill_quietly,
+            name="albayan-page-name-backfill",
+            daemon=True,
+        ).start()
+    except Exception as e:
+        print(f"[albayan] page-name backfill failed: {e}")
 
 
 @app.on_event("shutdown")
@@ -3916,7 +3910,7 @@ def _action_for_collection(collection: str, op: str) -> str:
 # (they never appear in the frontend's PERMISSION_MODULES), so a module-based
 # check would 403 every non-admin forever — even one holding all permissions.
 # Instead, non-admins get ownership-scoped access to their own rows.
-PERSONAL_SCOPED_COLLECTIONS = {"walletTransactions", "serviceSubscriptions"}
+PERSONAL_SCOPED_COLLECTIONS = {"walletTransactions", "serviceSubscriptions", "walletPaymentRequests"}
 
 WALLET_CURRENCIES = frozenset({"LYD", "USD", "EUR"})
 MAX_WALLET_AMOUNT_MINOR = 1_000_000_000_000
@@ -4065,6 +4059,18 @@ def _wallet_balance_minor(conn: Any, user_id: str, currency: str) -> int:
     return balance
 
 
+def _wallet_available_after_holds(conn: Any, user_id: str, currency: str) -> int:
+    """Ledger balance minus budgets promised to Submitted campaigns (USD).
+
+    Every wallet DEBIT must use this number, or money already promised to a
+    submitted campaign could leave through a transfer or subscription and
+    make the later approval capture fail."""
+    balance = _wallet_balance_minor(conn, user_id, currency)
+    if str(currency or "").upper() == "USD":
+        balance -= wallet_campaign_holds_minor(conn, user_id)
+    return balance
+
+
 def _lock_and_validate_wallet_users(conn: Any, user_ids: list[str], *, postgres: bool) -> None:
     """Validate active wallet participants and lock them in stable order."""
     for uid in sorted({sanitize_str(str(x or ""))[:80] for x in user_ids if x and x != "system"}):
@@ -4151,7 +4157,7 @@ def _wallet_transfer_atomic(
                 if not same:
                     raise HTTPException(status_code=409, detail="Idempotency key was already used for another operation")
                 return prior, False
-            if _wallet_balance_minor(conn, from_uid, cur) < amount:
+            if _wallet_available_after_holds(conn, from_uid, cur) < amount:
                 raise HTTPException(status_code=409, detail="Insufficient wallet balance")
             data = {
                 "type": "transfer",
@@ -4365,7 +4371,7 @@ def _subscription_purchase_atomic(
 
             payment: dict[str, Any] | None = None
             if amount > 0:
-                if _wallet_balance_minor(conn, target_uid, cur) < amount:
+                if _wallet_available_after_holds(conn, target_uid, cur) < amount:
                     raise HTTPException(status_code=409, detail="Insufficient wallet balance")
                 payment_idempotency = f"subpay:{idem}"
                 _lock_idempotency_key(conn, payment_idempotency, postgres=postgres)
@@ -4639,6 +4645,9 @@ AD_CAMPAIGN_WORKFLOW_FIELDS = frozenset(
         "metaAdId",
         "failureReason",
         "spendMinorUSD",
+        "paidMinorUSD",
+        "paymentTransactionId",
+        "paidAt",
         "createdBy",
         "creatorId",
         "createdAt",
@@ -5013,7 +5022,11 @@ def _soft_delete_ad_campaign_atomic(
     campaign_id = validate_entity_id(campaign_id)
     postgres = str(get_engine().dialect.name or "") == "postgresql"
     guard = nullcontext() if postgres else _SQLITE_ENTITY_PATCH_LOCK
-    with guard:
+    # The wallet lock too (SQLite): the orphan-payment release inside must be
+    # serialized against a concurrent approval capture, or a capture landing
+    # after the release scan would be stranded by the tombstone.
+    wallet_guard = nullcontext() if postgres else _SQLITE_WALLET_LOCK
+    with guard, wallet_guard:
         with db_conn() as conn:
             suffix = " FOR UPDATE" if postgres else ""
             row = conn.execute(
@@ -5052,6 +5065,14 @@ def _soft_delete_ad_campaign_atomic(
                 raise HTTPException(
                     status_code=409,
                     detail="Submitted campaigns cannot be deleted while under review",
+                )
+            if str(data.get("status") or "") == "Submitted":
+                # An admin deleting a Submitted campaign: refund any capture a
+                # crashed approval left for this cycle, or the customer's
+                # money would be stranded forever (idempotent, usually no-op).
+                release_orphan_campaign_payment(
+                    conn, _WALLET_PAYMENTS_CTX, {**data, "id": campaign_id},
+                    str(user.get("id") or "system"),
                 )
             data.pop("creativeImages", None)
             modified = max(now_ms(), int(row["last_modified"]) + 1)
@@ -6621,24 +6642,7 @@ RECEIPT_CAPACITY_FIELDS = frozenset(
 )
 
 
-def _financial_minor(value: Any, field: str, *, allow_zero: bool = True) -> int:
-    """Convert a stored/requested USD value to exact cents."""
-    if isinstance(value, bool):
-        raise HTTPException(status_code=400, detail=f"{field} must be a money amount")
-    try:
-        amount = Decimal(str(0 if value is None or value == "" else value))
-    except (InvalidOperation, ValueError, TypeError):
-        raise HTTPException(status_code=400, detail=f"Invalid {field}")
-    if not amount.is_finite() or amount < 0 or amount > Decimal(str(MAX_FINANCIAL_AMOUNT)):
-        raise HTTPException(status_code=400, detail=f"Invalid {field}")
-    minor = int((amount * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-    if not allow_zero and minor <= 0:
-        raise HTTPException(status_code=400, detail=f"{field} must be greater than zero")
-    return minor
-
-
-def _financial_usd(minor: int) -> float:
-    return float((Decimal(int(minor)) / Decimal(100)).quantize(Decimal("0.01")))
+# _financial_minor / _financial_usd moved to financial_core.py.
 
 
 def _financial_confirmed_remaining_minor(ad: dict[str, Any] | None) -> int | None:
@@ -6675,42 +6679,7 @@ def _financial_clear_changed_remaining_confirmation(
         updated.pop("remainingCustomerInformedBy", None)
 
 
-def _financial_rate(value: Any) -> Decimal:
-    try:
-        rate = Decimal(str(value))
-    except (InvalidOperation, ValueError, TypeError):
-        rate = Decimal(1)
-    if not rate.is_finite() or rate <= 0 or rate > Decimal(str(MAX_EXCHANGE_RATE)):
-        rate = Decimal(1)
-    return rate
-
-
-def _financial_ad_payment_status(ad: dict[str, Any] | None) -> str:
-    """Return the canonical payment state for current and historical ads.
-
-    ``paymentStatus`` is authoritative when it contains a recognized value.
-    Older imports used spaces, hyphens, ``unpaid`` and typographic apostrophes,
-    while still older rows only have the compatibility ``isPaid`` boolean.
-    Records predating both fields were created before unpaid ads existed, so
-    their historical default remains Paid.
-    """
-    data = ad if isinstance(ad, dict) else {}
-    raw_status = str(data.get("paymentStatus") or "").strip().lower()
-    normalized = re.sub(r"[\u2018\u2019']", "", raw_status)
-    normalized = re.sub(r"[\s-]+", "_", normalized)
-    normalized = re.sub(r"_+", "_", normalized)
-
-    if normalized == "paid":
-        return "paid"
-    if normalized in {"not_paid", "notpaid", "unpaid"}:
-        return "not_paid"
-    if normalized in {"wont_pay", "wontpay"}:
-        return "wont_pay"
-
-    is_paid = data.get("isPaid")
-    if isinstance(is_paid, bool):
-        return "paid" if is_paid else "not_paid"
-    return "paid"
+# _financial_rate / _financial_ad_payment_status moved to financial_core.py.
 
 
 def _financial_row_data(row: Any) -> dict[str, Any]:
@@ -6814,103 +6783,9 @@ def _financial_allocations(raw: Any, field: str, *, allow_empty: bool = True) ->
     return rows
 
 
-def _financial_allocation_map(raw: Any) -> dict[str, int]:
-    result: dict[str, int] = {}
-    if not isinstance(raw, list):
-        return result
-    for entry in raw:
-        if not isinstance(entry, dict):
-            continue
-        receipt_id = str(entry.get("receiptId") or "")
-        if not receipt_id:
-            continue
-        result[receipt_id] = result.get(receipt_id, 0) + _financial_minor(
-            entry.get("amountUSD"), "stored allocation"
-        )
-    return result
-
-
-def _financial_legacy_due_receipt_id(ad: dict[str, Any]) -> str:
-    """Receipt represented by the scalar dueAmountToUse* legacy mirror.
-
-    Delivery rows historically used linkedDeliveryReceiptId.  In-Shop rows
-    used receiptId instead, so treating the driver field as the only identity
-    loses real customer debt when old rows are stopped, refunded or restored.
-    The oldest driver rows predate linkedDeliveryReceiptId entirely and stored
-    the delivery receipt in receiptId; the settlement predicate and the ad
-    form both honor that fallback, so the due reader must speak for the same
-    money — otherwise capacity checks ignore a promise settlement converts.
-    """
-    if _financial_ad_payment_status(ad) == "not_paid":
-        method = str(ad.get("collectionMethod") or "")
-        if method == "in_shop":
-            return str(ad.get("receiptId") or "")
-        if method == "driver" and not str(ad.get("linkedDeliveryReceiptId") or ""):
-            return str(ad.get("receiptId") or "")
-    return str(ad.get("linkedDeliveryReceiptId") or "")
-
-
-def _financial_ad_general_usage(ad: dict[str, Any], receipt_id: str) -> int:
-    """Mirror getReceiptUsageStats, including legacy records."""
-    receipt_map = _financial_allocation_map(ad.get("receiptAllocations"))
-    receipt_sum = receipt_map.get(receipt_id, 0)
-    explicit = receipt_sum + _financial_ad_due_usage(ad, receipt_id)
-    if explicit > 0:
-        return explicit
-    if isinstance(ad.get("receiptAllocations"), list) or isinstance(ad.get("dueAllocations"), list):
-        return 0
-    references = {
-        str(ad.get("fundingReceiptId") or ""),
-        str(ad.get("receiptId") or ""),
-        str(ad.get("linkedDeliveryReceiptId") or ""),
-    }
-    if receipt_id not in references:
-        return 0
-    fallback = ad.get("spentUSD") if ad.get("spentUSD") is not None else ad.get("amountUSD")
-    return _financial_minor(fallback, "stored legacy ad amount")
-
-
-def _financial_ad_due_usage(ad: dict[str, Any], receipt_id: str) -> int:
-    due_map = _financial_allocation_map(ad.get("dueAllocations"))
-    due = due_map.get(receipt_id, 0)
-    if due > 0:
-        return due
-    # The scalar mirror is standalone money ONLY for rowless ads. Once due
-    # rows exist the writers keep dueAmountToUse* equal to their sum, so
-    # attributing it to the linked receipt as well would count the same
-    # dollars on two receipts at once.
-    if due_map:
-        return 0
-    if _financial_legacy_due_receipt_id(ad) != receipt_id:
-        return 0
-    direct = _financial_minor(ad.get("dueAmountToUseUSD"), "stored due allocation")
-    if direct:
-        return direct
-    local = _financial_minor(ad.get("dueAmountToUseLYD"), "stored due allocation")
-    if not local:
-        return 0
-    return int(
-        (Decimal(local) / _financial_rate(ad.get("exchangeRate"))).quantize(
-            Decimal("1"), rounding=ROUND_HALF_UP
-        )
-    )
-
-
-def _financial_ad_explicit_usage(ad: dict[str, Any], receipt_id: str) -> int:
-    """Money this ad EXPLICITLY commits against a receipt, from either pool.
-
-    Allocation rows (paid + due) plus the legacy due mirror, which only speaks for an ad
-    that has no due row for this receipt. Unlike _financial_ad_general_usage there is NO
-    whole-ad fallback: that fallback charges a pre-allocation ad's entire spend against any
-    receipt it merely REFERENCES, and a driver-collected ad references its delivery receipt
-    while being funded by the customer's cash, not by the receipt's credit.
-    """
-    paid_rows = _financial_allocation_map(ad.get("receiptAllocations")).get(receipt_id, 0)
-    # The due reader covers modern allocation rows plus both historical debt
-    # mirrors: driver links used linkedDeliveryReceiptId, while old In-Shop
-    # rows used receiptId.  Positive legacy debt is a real commitment; a bare
-    # zero-debt link remains provenance only.
-    return paid_rows + _financial_ad_due_usage(ad, receipt_id)
+# _financial_allocation_map / _financial_legacy_due_receipt_id /
+# _financial_ad_general_usage / _financial_ad_due_usage /
+# _financial_ad_explicit_usage moved to financial_core.py.
 
 
 def _financial_explicit_usage(
@@ -6927,34 +6802,7 @@ def _financial_explicit_usage(
     return total
 
 
-def _financial_ad_committed(ad: dict[str, Any], receipt_id: str) -> int:
-    """The money this ad TRULY commits against a receipt — the number the capacity
-    check must count for every OTHER ad.
-
-    Explicit rows + due mirror first (that already covers modern and legacy-due ads).
-    Only a ROWLESS, genuinely receipt-funded ad falls back to its whole spend. A
-    not_paid/driver ad is excluded from that fallback: its receiptId points at the
-    delivery receipt for linkage, but it is funded by the customer's CASH, so charging
-    its amountUSD here would be the same phantom commitment the due reader had to drop.
-    Sits between _financial_ad_explicit_usage (misses legacy PAID ads -> lets a self-draw
-    through) and _financial_ad_general_usage (charges cash-driver ads -> false-blocks).
-    """
-    explicit = _financial_ad_explicit_usage(ad, receipt_id)
-    if explicit > 0:
-        return explicit
-    if isinstance(ad.get("receiptAllocations"), list) or isinstance(ad.get("dueAllocations"), list):
-        return 0
-    if _financial_ad_payment_status(ad) == "not_paid" and str(ad.get("collectionMethod") or "") in {"driver", "in_shop"}:
-        return 0
-    references = {
-        str(ad.get("fundingReceiptId") or ""),
-        str(ad.get("receiptId") or ""),
-        str(ad.get("linkedDeliveryReceiptId") or ""),
-    }
-    if receipt_id not in references:
-        return 0
-    fallback = ad.get("spentUSD") if ad.get("spentUSD") is not None else ad.get("amountUSD")
-    return _financial_minor(fallback, "stored legacy ad amount")
+# _financial_ad_committed moved to financial_core.py.
 
 
 def _financial_committed_usage(
@@ -7026,20 +6874,6 @@ def _financial_validate_combined_capacity(
             raise HTTPException(
                 status_code=409, detail=f"Insufficient balance on receipt {rid}"
             )
-
-
-def _financial_outgoing(data: dict[str, Any]) -> int:
-    transfers = data.get("transfers")
-    if transfers is None:
-        return 0
-    if not isinstance(transfers, list):
-        raise HTTPException(status_code=409, detail="Stored receipt transfers are invalid")
-    total = 0
-    for transfer in transfers:
-        if not isinstance(transfer, dict):
-            raise HTTPException(status_code=409, detail="Stored receipt transfer is invalid")
-        total += _financial_minor(transfer.get("amountUSD"), "stored transfer")
-    return total
 
 
 def _financial_due_total(data: dict[str, Any]) -> int:
@@ -7188,7 +7022,7 @@ def _financial_delivery_collection_target(
 
     raw_status = str(receipt.get("status") or "").strip().lower()
     normalized_status = re.sub(r"[\s_-]+", "", raw_status)
-    if normalized_status in {"canceled", "cancelled"}:
+    if normalized_status in {"canceled", "cancelled", "destroyed"}:
         payment_state = "canceled"
     elif normalized_status == "lost":
         payment_state = "lost"
@@ -7462,7 +7296,7 @@ def _receipt_transfer_atomic(
             source = _financial_row_data(source_row)
             assert_financial_period_open("receipts", source, conn=conn)
             source_status = str(source.get("status") or "")
-            if source_status in {"Canceled", "Lost"} or not (
+            if source_status in {"Canceled", "Lost", "Destroyed"} or not (
                 source_status == "Paid" or source.get("isPaid") is True
             ):
                 raise HTTPException(status_code=400, detail="Only a paid receipt can transfer balance")
@@ -7487,6 +7321,13 @@ def _receipt_transfer_atomic(
             committed = _financial_committed_usage(
                 ad_rows, source_id
             ) + _financial_outgoing(source)
+            # Unsettled rowless driver ads (paid receipt whose settlement
+            # cascade has not run yet) reserve their gap here too — otherwise
+            # a transfer could move out money that belongs to those ads.
+            for _row in ad_rows:
+                _data = _financial_row_data(_row)
+                if str(_data.get("recordType") or "") != "receipt":
+                    committed += _financial_rowless_driver_gap(_data, source_id)
             if committed + int(body.amountMinorUSD) > total:
                 raise HTTPException(status_code=409, detail="Insufficient available receipt balance")
 
@@ -7665,7 +7506,7 @@ def _financial_validate_paid_receipts(
             raise HTTPException(status_code=404, detail=f"Funding receipt not found: {receipt_id}")
         data = _financial_row_data(row)
         status = str(data.get("status") or "")
-        if status in {"Canceled", "Lost"} or not (
+        if status in {"Canceled", "Lost", "Destroyed"} or not (
             status == "Paid" or data.get("isPaid") is True
         ):
             raise HTTPException(status_code=400, detail="Ad funding requires paid receipts")
@@ -7703,7 +7544,7 @@ def _financial_validate_due_receipt(
     if require_pending and (
         not (temp_number.startswith("D") and temp_number[1:].isdigit())
         or delivery_status in {"Delivered", "Office", "Canceled"}
-        or str(data.get("status") or "") in {"Canceled", "Lost"}
+        or str(data.get("status") or "") in {"Canceled", "Lost", "Destroyed"}
         or not str(data.get("deliveryPersonId") or "").strip()
     ):
         raise HTTPException(status_code=400, detail="Linked receipt is not a pending assigned delivery receipt")
@@ -7760,7 +7601,7 @@ def _financial_validate_shop_due_receipt(
         or delivery_status not in {"", "Office"}
     )
     if (
-        status in {"Canceled", "Lost"}
+        status in {"Canceled", "Lost", "Destroyed"}
         or receipt_type == "TRANSFER_IN"
         or is_delivery_receipt
         or not_paid_collection not in {"", "office", "in_shop", "shop"}
@@ -9174,13 +9015,6 @@ def _ad_stop_atomic(
             return saved, False
 
 
-def _financial_receipt_transferable(data: dict[str, Any]) -> bool:
-    status = str(data.get("status") or "")
-    return status not in {"Canceled", "Lost"} and (
-        status == "Paid" or data.get("isPaid") is True
-    )
-
-
 def _financial_release_canceled_due(
     conn: Any,
     receipt_id: str,
@@ -9249,23 +9083,8 @@ def _financial_release_canceled_due(
     return saved
 
 
-def _financial_rows_from_allocation_map(values: dict[str, int]) -> list[dict[str, Any]]:
-    """Return deterministic, exact-cent allocation rows from a minor-unit map."""
-    return [
-        {"receiptId": receipt_id, "amountUSD": _financial_usd(amount)}
-        for receipt_id, amount in sorted(values.items())
-        if amount > 0
-    ]
-
-
-def _financial_ad_effective_amount(ad: dict[str, Any]) -> int:
-    """Amount that still needs funding after stop/refund reconciliation."""
-    value = ad.get("spentUSD") if ad.get("spentUSD") is not None else ad.get("amountUSD")
-    return _financial_minor(value, "ad settlement amount")
-
-
 def _financial_reclassify_ad_for_paid_receipt(
-    ad: dict[str, Any], receipt_id: str, *, actor_id: str
+    ad: dict[str, Any], receipt_id: str, *, actor_id: str, implied_cap: int = 0
 ) -> dict[str, Any] | None:
     """Move one receipt's due promise into paid funding without changing value.
 
@@ -9293,6 +9112,21 @@ def _financial_reclassify_ad_for_paid_receipt(
     moved_minor = due_map.pop(receipt_id, 0)
     if moved_minor == 0 and (is_driver_link or is_shop_link):
         moved_minor = _financial_ad_due_usage(ad, receipt_id)
+    if (
+        moved_minor == 0
+        and is_driver_link
+        and not due_map
+        and (isinstance(ad.get("receiptAllocations"), list) or isinstance(ad.get("dueAllocations"), list))
+    ):
+        # The Meta-import shape: a driver link with NO due row anywhere — the
+        # money is the customer's cash the driver collects. Once the receipt
+        # is PAID that cash IS its balance, so the remainder settles from it,
+        # bounded by remaining capacity (UNDERPAID collections settle only as
+        # far as the cash). Only the MODERN allocation-array shape qualifies —
+        # legacy no-ledger amounts are unreliable and would mint money (same
+        # rule as _financial_rowless_driver_gap).
+        gap = _financial_ad_effective_amount(ad) - sum(paid_map.values())
+        moved_minor = max(min(gap, implied_cap), 0)
     # The direct mirror fallback likewise only speaks for rowless ads: with
     # due rows surviving for other receipts, the scalar is their sum and
     # converting it would mint the same money a second time.
@@ -9513,8 +9347,18 @@ def _financial_prepare_paid_receipt_ad_updates(
             or legacy_shop_due > 0
             or stop_baseline_due > 0
             or refund_baseline_due > 0
+            or _financial_rowless_driver_gap(ad, receipt_id) > 0
         ):
             discovered.append(row)
+
+    # Capacity left for IMPLIED settlements (rowless driver links): the paid
+    # pot minus transfers and every explicit commitment. Due->paid conversions
+    # keep totals unchanged; only implied settlements consume this budget.
+    implied_cap = _financial_due_total(receipt) - _financial_outgoing(receipt)
+    for row in ad_rows:
+        data = _financial_row_data(row)
+        if str(data.get("recordType") or "") != "receipt":
+            implied_cap -= _financial_ad_committed(data, receipt_id)
 
     plans: list[tuple[Any, dict[str, Any]]] = []
     planned_by_id: dict[str, dict[str, Any]] = {}
@@ -9525,10 +9369,15 @@ def _financial_prepare_paid_receipt_ad_updates(
             continue
         ad = _financial_row_data(ad_row)
         plan = _financial_reclassify_ad_for_paid_receipt(
-            ad, receipt_id, actor_id=actor_id
+            ad, receipt_id, actor_id=actor_id, implied_cap=max(implied_cap, 0)
         )
         if plan is None:
             continue
+        implied_cap -= max(
+            _financial_allocation_map(plan.get("receiptAllocations")).get(receipt_id, 0)
+            - _financial_ad_explicit_usage(ad, receipt_id),
+            0,
+        )
         if str(plan.get("customerId") or "") != customer_id:
             raise HTTPException(
                 status_code=409,
@@ -9775,7 +9624,7 @@ def _financial_normalize_receipt_paid_pair(
         else:
             old_status = str(old.get("status") or "")
             updates["status"] = (
-                old_status if old_status in {"Not Paid", "Canceled", "Lost"} else "Not Paid"
+                old_status if old_status in {"Not Paid", "Canceled", "Lost", "Destroyed"} else "Not Paid"
             )
 
 
@@ -9787,6 +9636,7 @@ def _financial_patch_receipt_atomic(
     *,
     idempotency_key: str | None = None,
     convert_funding_to_debt: bool = False,
+    completion_recorded_by: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], bool]:
     receipt_id = validate_entity_id(receipt_id_raw)
     actor_id = validate_entity_id(actor.get("id"))
@@ -9794,6 +9644,8 @@ def _financial_patch_receipt_atomic(
     validate_relationship_ids(clean, "receipt settlement data")
     clean = _normalize_receipt_number_fields(clean)
     _validate_receipt_number_fields(clean)
+    if str(clean.get("status") or "").strip().lower() == "destroyed":
+        clean["status"] = "Destroyed"  # case variants must hit the same guards
     if set(clean) & (RECEIPT_TRANSFER_FIELDS - {"receiptType"}):
         raise HTTPException(status_code=405, detail="Receipt transfer fields are server-controlled")
     idem = sanitize_str(str(idempotency_key or ""), 120)
@@ -9841,6 +9693,12 @@ def _financial_patch_receipt_atomic(
             if expected_last_modified is not None and int(row["last_modified"]) != int(expected_last_modified):
                 raise HTTPException(status_code=409, detail="Conflict: receipt has changed")
             old = _financial_row_data(row)
+            # A DESTROYED receipt is a locked number: no edit may revive it
+            # (only deleting frees the number) and no live receipt may become one.
+            if str(old.get("status") or "") == "Destroyed":
+                raise HTTPException(status_code=409, detail="A destroyed receipt is locked; delete its record to free the number")
+            if str(clean.get("status") or "") == "Destroyed":
+                raise HTTPException(status_code=400, detail="A receipt cannot become destroyed; record the torn paper as a new destroyed receipt")
             _financial_normalize_receipt_paid_pair(old, clean)
             if convert_funding_to_debt:
                 # Explicit paid -> not_paid conversion (the exact REVERSE of the
@@ -9883,8 +9741,9 @@ def _financial_patch_receipt_atomic(
             # it stays readable for a receipts-only role. Dropping it from the
             # incoming payload keeps the stored stamp (merged starts from old);
             # the live customer name still wins on read whenever available.
-            for key in ("id", "_created", "_lastModified", "_deleted", "createdBy", "createdAt", "creatorId", "customerName"):
+            for key in ("id", "_created", "_lastModified", "_deleted", "createdBy", "createdAt", "creatorId", "customerName", "deliveryCompletionRecordedBy"):
                 clean.pop(key, None)
+            if completion_recorded_by: clean["deliveryCompletionRecordedBy"] = completion_recorded_by  # popped above; only the verified completion branch stamps it
             merged.update(clean)
             assert_financial_period_open("receipts", old, conn=conn)
             assert_financial_period_open("receipts", merged, conn=conn)
@@ -10757,6 +10616,23 @@ def submit_ad_campaign_request(
     with _ad_campaign_media_validation_slot(user):
         _prepare_ad_campaign_fields(current, strict=True)
 
+    # Money gate: the requested budget must be AVAILABLE in the owner's USD
+    # wallet — a Submitted campaign holds it, approval captures it. The
+    # capture re-checks under its own lock, so this is the UX gate and that
+    # one is the hard guarantee.
+    try:
+        _budget_minor = max(int(current.get("budgetMinorUSD") or 0), 0)
+    except (TypeError, ValueError, OverflowError):
+        _budget_minor = 0
+    if _budget_minor <= 0:
+        raise HTTPException(status_code=400, detail="A campaign needs a budget greater than zero before submission")
+    with db_conn() as conn:
+        if _wallet_available_after_holds(conn, str(creator or ""), "USD") < _budget_minor:
+            raise HTTPException(
+                status_code=409,
+                detail="Insufficient wallet balance for this budget — charge the wallet first",
+            )
+
     actor_id = str(user.get("id") or "system")
     replayed_after_conflict = False
     try:
@@ -10862,6 +10738,27 @@ def review_ad_campaign_request(
             status_code=400,
             detail="A review note is required when requesting changes or rejecting a campaign",
         )
+    # An approval CAPTURES the held budget before its status write, with a
+    # fresh locked status check inside the capture (at most one payment per
+    # submission cycle). Refunds of crashed-approval captures run only AFTER
+    # a successful non-approval status write — a reject can never refund a
+    # live approval that is still winning the version race.
+    campaign_owner = str(campaign.get("createdBy") or current.get("createdBy") or "")
+    wallet_payment_tx = ""
+    _wallet_guard = (
+        nullcontext()
+        if str(get_engine().dialect.name or "") == "postgresql"
+        else _SQLITE_WALLET_LOCK
+    )
+    if decision == "Approved":
+        with _wallet_guard, db_conn() as conn:
+            wallet_payment_tx = capture_campaign_budget(
+                conn,
+                _WALLET_PAYMENTS_CTX,
+                {**current, "id": campaign_id, "createdBy": campaign_owner},
+                actor_id,
+            )
+
     reviewed_at = _iso_utc()
     history = _ad_campaign_review_history(current.get("reviewHistory"))
     history.append(
@@ -10883,7 +10780,15 @@ def review_ad_campaign_request(
         "lastReviewOperationId": operation_id,
     }
     if decision == "Approved":
-        transition_fields.update({"approvedAt": reviewed_at, "approvedBy": actor_id})
+        transition_fields.update(
+            {
+                "approvedAt": reviewed_at,
+                "approvedBy": actor_id,
+                "paidMinorUSD": int(current.get("budgetMinorUSD") or 0),
+                "paymentTransactionId": wallet_payment_tx,
+                "paidAt": reviewed_at,
+            }
+        )
     elif decision == "Rejected":
         transition_fields.update({"rejectedAt": reviewed_at, "rejectedBy": actor_id})
     replayed_after_conflict = False
@@ -10911,6 +10816,14 @@ def review_ad_campaign_request(
             raise
         saved = latest
         replayed_after_conflict = True
+    if decision != "Approved":
+        # The campaign has now LEFT Submitted, so no new capture can happen
+        # for this cycle (the capture verifies live status under lock): any
+        # capture found here is a crashed approval's orphan — refund it.
+        with _wallet_guard, db_conn() as conn:
+            release_orphan_campaign_payment(
+                conn, _WALLET_PAYMENTS_CTX, {**current, "id": campaign_id}, actor_id
+            )
     if not replayed_after_conflict:
         audit(
             actor_id,
@@ -11725,6 +11638,8 @@ def create_collection_item(
     if collection == AD_CAMPAIGN_COLLECTION:
         _require_ad_maker_subscription(user)
     validate_relationship_ids(body.data)
+    if collection == "walletPaymentRequests":
+        raise HTTPException(status_code=405, detail="Use /api/wallet/payment-requests")
     if collection in CLOTHES_ORDER_SERVER_CONTROLLED_COLLECTIONS:
         raise HTTPException(
             status_code=405,
@@ -11849,6 +11764,10 @@ def create_collection_item(
         data_in = sanitize_json(body.data or {}) or {}
 
         status_in = sanitize_str(str(data_in.get("status") or ""))[:40]
+        # Case variants must not dodge the destroyed-receipt rules.
+        if status_in.strip().lower() == "destroyed":
+            status_in = "Destroyed"
+            data_in["status"] = "Destroyed"
         delivery_status_in = sanitize_str(str(data_in.get("deliveryStatus") or ""))[:40]
         delivery_person_id_in = sanitize_str(str(data_in.get("deliveryPersonId") or ""))[:80]
         status_detail_in = data_in.get("statusDetail") if isinstance(data_in.get("statusDetail"), dict) else {}
@@ -11907,6 +11826,14 @@ def create_collection_item(
             if _receipt_serial_exists(_s):
                 raise HTTPException(status_code=409, detail="serialNumber already exists")
 
+        # A DESTROYED receipt records ONLY its torn paper's number, forever.
+        _destroyed_error = _financial_destroyed_receipt_create_error(data_in)
+        if _destroyed_error:
+            raise HTTPException(status_code=400, detail=_destroyed_error)
+        if status_in == "Destroyed":
+            data_in["isPaid"] = False
+            data_in["receiptType"] = ""
+
         # Persist server-generated/normalized fields
         body_data = data_in
     elif collection == "clothesShipments":
@@ -11957,6 +11884,8 @@ def update_collection_item(
     if collection == AD_CAMPAIGN_COLLECTION:
         _require_ad_maker_subscription(user)
     validate_relationship_ids(body.data)
+    if collection == "walletPaymentRequests":
+        raise HTTPException(status_code=405, detail="Use /api/wallet/payment-requests")
     if collection in CLOTHES_ORDER_SERVER_CONTROLLED_COLLECTIONS:
         raise HTTPException(
             status_code=405,
@@ -12052,12 +11981,14 @@ def update_collection_item(
     # reversal endpoint; nobody may rewrite a posted historical row.
     if collection == "walletTransactions":
         raise HTTPException(status_code=405, detail="Wallet transactions are immutable; create a reversal")
+    if collection == "walletPaymentRequests":
+        raise HTTPException(status_code=405, detail="Payment requests change only through /api/wallet/payment-requests")
 
     role_lower = str(user.get("role") or "").lower()
-    # Delivery users can update ONLY their assigned deliveries.
-    if role_lower == "delivery" and collection in {"ads", "receipts"}:
+    admin_completion = is_admin_receipt_completion(role_lower, collection, sanitize_json(body.data or {}) or {}, existing)
+    if (role_lower == "delivery" or admin_completion) and collection in {"ads", "receipts"}:  # delivery: own assignments only; admin: verified completion entry
         data = existing.get("data") or {}
-        if str(data.get("deliveryPersonId") or "") != str(user.get("id") or ""):
+        if role_lower == "delivery" and str(data.get("deliveryPersonId") or "") != str(user.get("id") or ""):
             raise HTTPException(status_code=403, detail="Forbidden")
 
         updates = sanitize_json(body.data or {}) or {}
@@ -12270,6 +12201,8 @@ def update_collection_item(
 
             if desired and desired != current_status:
                 allowed = VALID_TRANSITIONS.get(current_status, set())
+                if admin_completion and current_status in {"Needs Delivery", "Office", ""}:
+                    allowed = allowed | {"Delivered"}  # admin may record a completion the driver never accepted in-app
                 if desired not in allowed:
                     if current_status in {"Delivered", "Canceled"}:
                         raise HTTPException(
@@ -12435,7 +12368,8 @@ def update_collection_item(
 
         if collection == "receipts":
             saved, _updated_ads, _replayed = _financial_patch_receipt_atomic(
-                user, entity_id, updates, body.expectedLastModified
+                user, entity_id, updates, body.expectedLastModified,
+                completion_recorded_by=(str(user.get("id") or "") if admin_completion else None),
             )
         else:
             saved = patch_entity(
@@ -12445,7 +12379,7 @@ def update_collection_item(
                 str(user.get("id") or "system"),
                 expected_last_modified=body.expectedLastModified,
             )
-        audit(str(user.get("id")), "update", collection, entity_id, f"Updated {collection} {entity_id} (delivery)", {})
+        audit(str(user.get("id")), "update", collection, entity_id, f"Updated {collection} {entity_id} " + ("(admin delivery completion)" if admin_completion else "(delivery)"), {})
         return EntityResponse(**_project_entity_media_for_user(saved, user, include_media))
 
     # Subscription history is server-controlled.  Every role, including
@@ -12566,7 +12500,7 @@ def update_collection_item(
         if desired_delivery_status == "Delivered":
             data0 = existing.get("data") or {}
             if str(data0.get("tempReceiptNo") or "").strip():
-                raise HTTPException(status_code=403, detail="Only the assigned delivery user can mark this receipt delivered")
+                raise HTTPException(status_code=403, detail="Only the assigned delivery user or an admin can mark this receipt delivered")
 
     # Receipt number uniqueness enforcement (server-side, multi-user safe)
     if collection == "receipts":
@@ -12956,6 +12890,12 @@ def admin_bulk_import(
                 continue
             data = sanitize_json(rec) or {}
             data["id"] = rid
+            # A backup obeys the destroyed-receipt shape too: a Destroyed row
+            # carrying money would silently hide it from every reader.
+            if name == "receipts":
+                _destroyed_import_error = _financial_destroyed_receipt_create_error(data)
+                if _destroyed_import_error:
+                    raise HTTPException(status_code=400, detail=f"receipts record '{rid}': {_destroyed_import_error}")
             created_at = _as_int(data.get("_created"))
             created_by = sanitize_str(str(data.get("createdBy") or ""))[:80] or None
             active.append((rid, data, created_at, created_by))
@@ -14124,6 +14064,26 @@ def privacy_anonymize_user(
     )
     return user_row_to_public(updated)
 
+_WALLET_PAYMENTS_CTX = {
+    "wallet_balance_minor": _wallet_balance_minor,
+    "validate_wallet_values": _validate_wallet_values,
+    "find_entity_by_idempotency": _find_entity_by_idempotency,
+    "lock_idempotency_key": _lock_idempotency_key,
+    "insert_entity_in_transaction": _insert_entity_in_transaction,
+    "entity_from_db_row": _entity_from_db_row,
+    "iso_utc": _iso_utc,
+    "audit": audit,
+    "sqlite_wallet_lock": lambda: _SQLITE_WALLET_LOCK,
+    "is_postgres": lambda: str(get_engine().dialect.name or "") == "postgresql",
+}
+app.include_router(
+    create_wallet_payments_router(
+        current_user_dependency=current_user,
+        require_same_origin=require_same_origin,
+        ctx=_WALLET_PAYMENTS_CTX,
+    )
+)
+
 # Register the focused read-only Meta Ads integration before the SPA catch-all.
 app.include_router(
     create_ad_media_router(
@@ -14173,6 +14133,8 @@ FRONTEND_ROUTES = {
     "/smart-systems",
     "/clothes-system",
     "/ads-studio",
+    "/studio",
+    "/studio/",
     "/service",
     "/wallet",
     "/account",
