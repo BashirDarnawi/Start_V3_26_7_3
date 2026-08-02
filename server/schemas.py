@@ -143,6 +143,36 @@ class SubscriptionPurchaseRequest(BaseModel):
     userId: Optional[str] = Field(default=None, min_length=1, max_length=80)
 
 
+class SubscriptionPlanModel(BaseModel):
+    """One sellable plan: a single service or a bundle of services."""
+
+    id: str = Field(min_length=2, max_length=40, pattern=r"^[a-z0-9_:]+$")
+    serviceIds: list[str] = Field(min_length=1, max_length=12)
+    name: str = Field(min_length=1, max_length=80)
+    nameAr: str = Field(min_length=1, max_length=80)
+    priceMinor: int = Field(ge=0, le=1_000_000_000_000)
+    currency: Literal["LYD"]
+    durationDays: int = Field(ge=1, le=3660)
+    badge: Optional[str] = Field(default=None, max_length=40)
+    savingsPct: Optional[int] = Field(default=None, ge=0, le=95)
+    active: bool = True
+    sortOrder: int = 0
+
+
+class PlanCatalogUpdateRequest(BaseModel):
+    """Admin catalog save — appended as one versioned appSettings record."""
+
+    plans: list[SubscriptionPlanModel] = Field(min_length=1, max_length=50)
+
+
+class PlanPurchaseRequest(BaseModel):
+    """Purchase a plan (single service or bundle) at server-owned pricing."""
+
+    planId: str = Field(min_length=2, max_length=40)
+    idempotencyKey: str = Field(min_length=8, max_length=120)
+    userId: Optional[str] = Field(default=None, min_length=1, max_length=80)
+
+
 class ClothesOrderMutationRequest(BaseModel):
     """One idempotent, transactional order + inventory operation."""
 
@@ -220,20 +250,54 @@ class AdCampaignReviewRequest(BaseModel):
     operationId: str = Field(min_length=8, max_length=120)
 
 
+class AdCampaignStopRequest(BaseModel):
+    """Stop an Approved campaign and return unspent budget to the wallet.
+
+    ``refundMinorUSD`` is staff-only: a customer's self-stop always refunds
+    the full captured budget (and is only allowed before the ad starts)."""
+
+    expectedLastModified: int = Field(ge=0)
+    operationId: str = Field(min_length=8, max_length=120)
+    reason: Optional[str] = Field(default=None, max_length=1000)
+    refundMinorUSD: Optional[int] = Field(default=None, ge=0)
+
+
+class AdCampaignPublishStatusRequest(BaseModel):
+    """Staff marker: the ad was actually launched (or paused/cleared) on
+    Meta by hand. Flips the owner's stop from instant-refund to staff-only."""
+
+    expectedLastModified: int = Field(ge=0)
+    operationId: str = Field(min_length=8, max_length=120)
+    publishStatus: Literal["live", "paused", ""]
+    metaCampaignId: Optional[str] = Field(default=None, max_length=120)
+
+
 class WalletPaymentRequestCreate(BaseModel):
     """Customer-initiated wallet charge; credited only when the payment is
-    confirmed (admin today, payment-gateway callback tomorrow)."""
+    confirmed (admin today, payment-gateway callback tomorrow). The method
+    is validated against the server-owned catalog in payment_methods.py."""
 
     amountMinor: int = Field(ge=1, le=1_000_000_000)
     currency: str = Field(min_length=3, max_length=3)
-    method: Literal["card", "bank_transfer", "qr"]
+    method: str = Field(min_length=2, max_length=40)
     idempotencyKey: str = Field(min_length=8, max_length=120)
+    note: Optional[str] = Field(default=None, max_length=500)
 
 
 class WalletPaymentRequestDecision(BaseModel):
     """Confirmation payload; providerRef is the bank/gateway's own id."""
 
     providerRef: Optional[str] = Field(default=None, max_length=120)
+    # Admin verified the transfer through the bank itself even though the
+    # customer never attached the receipt photo.
+    overrideMissingReceipt: bool = False
+
+
+class WalletPaymentReceiptAttach(BaseModel):
+    """The customer's transfer-receipt photo for bank-transfer style methods."""
+
+    photo: str = Field(min_length=32, max_length=8_400_000)
+    note: Optional[str] = Field(default=None, max_length=500)
 
 
 class AdminBulkImportRequest(BaseModel):

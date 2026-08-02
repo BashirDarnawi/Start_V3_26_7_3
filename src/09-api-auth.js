@@ -482,7 +482,8 @@ function mediaAwareTimeoutMs(body) {
 const INLINE_MEDIA_FIELDS_BY_COLLECTION = Object.freeze({
   ads: Object.freeze(['adPhotos', 'photos']),
   receipts: Object.freeze(['photos', 'receiptImage']),
-  adCampaignRequests: Object.freeze(['creativeImages'])
+  adCampaignRequests: Object.freeze(['creativeImages']),
+  walletPaymentRequests: Object.freeze(['receiptPhoto'])
 });
 
 function _inlineMediaFields(collection) {
@@ -1229,6 +1230,31 @@ async function apiPurchaseSubscription({ serviceId, idempotencyKey, userId }) {
   );
 }
 
+async function apiGetSubscriptionPlans() {
+  return apiJson('/api/subscriptions/plans', { method: 'GET' });
+}
+
+async function apiPurchasePlan({ planId, idempotencyKey, userId }) {
+  const body = { planId, idempotencyKey };
+  if (userId) body.userId = userId;
+  const identity = getServerSessionIdentity();
+  const payload = await withRetry(() => apiJson('/api/subscriptions/purchase-plan', {
+    method: 'POST',
+    body
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 2, 500);
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  const rows = Array.isArray(payload?.subscriptions) ? payload.subscriptions : [];
+  for (const row of rows) validateServerEntityResponse('serviceSubscriptions', row, 'purchase-plan');
+  return payload;
+}
+
+async function apiAdminSaveSubscriptionPlans(plans) {
+  return apiJson('/api/admin/subscription-plans', {
+    method: 'PUT',
+    body: { plans }
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+}
+
 // Atomic receipt transfer: source deduction and target TRANSFER_IN receipt are
 // committed by the server together. The caller owns the stable target id and
 // idempotency key so a response-loss retry replays the same result.
@@ -1706,6 +1732,32 @@ async function apiReviewAdCampaignRequest(campaignId, expectedLastModified, deci
   return entity;
 }
 
+async function apiStopAdCampaignRequest(campaignId, expectedLastModified, operationId, reason, refundMinorUSD) {
+  const identity = getServerSessionIdentity();
+  const body = { expectedLastModified, operationId, reason: reason || null };
+  // Absent = server decides (owner: full refund). Staff sends an explicit amount.
+  if (refundMinorUSD !== undefined && refundMinorUSD !== null) body.refundMinorUSD = Number(refundMinorUSD);
+  const entity = await requestValidatedServerEntity('adCampaignRequests', 'stop', () =>
+    apiJson(`/api/ad-studio/campaigns/${encodeURIComponent(campaignId)}/stop`, {
+      method: 'POST', body
+    }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS })
+  );
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  return entity;
+}
+
+async function apiSetAdCampaignPublishStatus(campaignId, expectedLastModified, publishStatus, metaCampaignId, operationId) {
+  const identity = getServerSessionIdentity();
+  const body = { expectedLastModified, operationId, publishStatus, metaCampaignId: metaCampaignId || null };
+  const entity = await requestValidatedServerEntity('adCampaignRequests', 'publish-status', () =>
+    apiJson(`/api/ad-studio/campaigns/${encodeURIComponent(campaignId)}/publish-status`, {
+      method: 'POST', body
+    }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS })
+  );
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  return entity;
+}
+
 // Wallet payment requests (server-authoritative; confirm is admin/gateway).
 async function apiWalletPaymentRequestCreate(amountMinor, method, idempotencyKey) {
   return withRetry(() => apiJson('/api/wallet/payment-requests', {
@@ -1719,11 +1771,30 @@ async function apiWalletPaymentRequestList(scope) {
   return apiJson(`/api/wallet/payment-requests${suffix}`, { method: 'GET' });
 }
 
-async function apiWalletPaymentRequestDecide(requestId, action, providerRef) {
+async function apiWalletPaymentRequestDecide(requestId, action, providerRef, overrideMissingReceipt) {
   return apiJson(`/api/wallet/payment-requests/${encodeURIComponent(requestId)}/${encodeURIComponent(action)}`, {
     method: 'POST',
-    body: action === 'confirm' ? { providerRef: providerRef || null } : {}
+    body: action === 'confirm'
+      ? { providerRef: providerRef || null, overrideMissingReceipt: !!overrideMissingReceipt }
+      : {}
   }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+}
+
+async function apiWalletPaymentMethods() {
+  return apiJson('/api/wallet/payment-requests/methods', { method: 'GET' });
+}
+
+async function apiWalletPaymentRequestGet(requestId) {
+  // Hydrated row carries the base64 receipt photo — allow a slow download.
+  return apiJson(`/api/wallet/payment-requests/${encodeURIComponent(requestId)}`, { method: 'GET' }, { timeoutMs: 60000 });
+}
+
+async function apiWalletPaymentRequestAttachReceipt(requestId, photo, note) {
+  const body = { photo, note: note || null };
+  return apiJson(`/api/wallet/payment-requests/${encodeURIComponent(requestId)}/receipt`, {
+    method: 'POST',
+    body
+  }, { timeoutMs: mediaAwareTimeoutMs(body) });
 }
 
 async function apiPatchEntity(collection, id, updates, expectedLastModified) {

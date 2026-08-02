@@ -3426,7 +3426,9 @@ const PERMISSION_MODULES = {
       deleteOwn: { label: 'Delete Own Requests', description: 'Delete own eligible drafts' },
       submit: { label: 'Submit Any Request', description: 'Submit any eligible campaign for review' },
       submitOwn: { label: 'Submit Own Requests', description: 'Submit own campaigns for staff review' },
-      review: { label: 'Review Requests', description: 'Approve, reject, or request changes' }
+      review: { label: 'Review Requests', description: 'Approve, reject, or request changes' },
+      stop: { label: 'Stop Any Campaign', description: 'Stop any approved campaign and refund its unspent budget' },
+      stopOwn: { label: 'Stop Own Campaigns', description: 'Stop own approved campaigns before they start, with a full refund' }
     }
   }
 };
@@ -3532,7 +3534,7 @@ const PERMISSION_TEMPLATES = {
     icon: 'rocket',
     color: 'cyan',
     permissions: {
-      adCampaignRequests: ['viewOwn', 'add', 'editOwn', 'deleteOwn', 'submitOwn']
+      adCampaignRequests: ['viewOwn', 'add', 'editOwn', 'deleteOwn', 'submitOwn', 'stopOwn']
     }
   },
   adsStudioReviewer: {
@@ -3789,17 +3791,97 @@ function checkServiceAccess(serviceId) {
   return { allowed: false, reason: 'Service not found' };
 }
 
+// Latest future expiry among the current user's active rows for a service
+// (renewals stack rows — the furthest expiry is the real end date).
+function getSubscriptionExpiryForCurrentUser(serviceId) {
+  const uid = String(state.currentUser?.id || '');
+  const sid = String(serviceId || '');
+  if (!uid || !sid) return null;
+  const now = Date.now();
+  const subs = Array.isArray(state.serviceSubscriptions) ? state.serviceSubscriptions : [];
+  let best = null;
+  for (const s of subs) {
+    if (!s || s._deleted || s.userId !== uid || s.serviceId !== sid) continue;
+    if (s.status !== 'active' || !s.expiresAt) continue;
+    const t = new Date(s.expiresAt).getTime();
+    if (Number.isFinite(t) && t > now && (best === null || t > best)) best = t;
+  }
+  return best;
+}
+
+// "Active until <date>" line for service cards, with a Renew link once
+// fewer than 7 days remain. Empty when there is no dated subscription.
+function renderSubscriptionStatusBadge(serviceId, isRTL) {
+  const expiry = getSubscriptionExpiryForCurrentUser(serviceId);
+  if (!expiry) return '';
+  const daysLeft = Math.ceil((expiry - Date.now()) / TIME_CONSTANTS.MILLISECONDS_PER_DAY);
+  let dateLabel = '';
+  try { dateLabel = new Date(expiry).toLocaleDateString(isRTL ? 'ar-LY' : 'en-GB'); } catch (_) { dateLabel = String(expiry); }
+  const soon = daysLeft <= 7;
+  const safeId = Security.escapeHtml(String(serviceId));
+  return `
+    <div class="mt-3 flex flex-wrap items-center gap-2 text-[11px] font-bold ${soon ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}">
+      <i data-lucide="calendar-clock" class="w-3.5 h-3.5"></i>
+      <span>${isRTL ? 'نشط حتى' : 'Active until'} ${Security.escapeHtml(dateLabel)}</span>
+      ${soon ? `<span onclick="event.stopPropagation(); showSubscriptionModal('${safeId}')" role="button" tabindex="0" class="underline cursor-pointer">${isRTL ? 'جدّد الآن' : 'Renew now'}</span>` : ''}
+    </div>`;
+}
+
+// Plans (single service + bundles containing it) for the paywall, smallest
+// first. Server catalog when available; legacy client offer as fallback.
+function getPlansForService(serviceId) {
+  const sid = String(serviceId || '');
+  const plans = Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : [];
+  const matching = plans.filter(p => p && Array.isArray(p.serviceIds) && p.serviceIds.includes(sid));
+  matching.sort((a, b) =>
+    (a.serviceIds.length - b.serviceIds.length)
+    || (Number(a.sortOrder || 0) - Number(b.sortOrder || 0)));
+  return matching;
+}
+
 function showSubscriptionModal(serviceId, subscribeToId = serviceId) {
   const service = SERVICES[serviceId] || SMART_SYSTEMS_CHILDREN[serviceId];
   if (!service) return;
-  
+
   const serviceName = state.language === 'ar' ? service.nameAr : service.name;
-  
+
   state.activeModal = 'subscription-lock';
-  // Idempotency key prevents double-charging if user retries
+  // Idempotency keys prevent double-charging if the user retries; each plan
+  // choice gets its own stable key for this modal session.
   const idem = Security.generateSecureId('idem');
-  state.modalData = { serviceId, serviceName, subscribeToId, idempotencyKey: idem };
+  state.modalData = { serviceId, serviceName, subscribeToId, idempotencyKey: idem, planIdemKeys: {} };
   renderModal();
+  // Fetch the sellable plans, then repaint the open modal with the chooser.
+  if (typeof refreshSubscriptionPlans === 'function' && isServerModeEnabled()) {
+    refreshSubscriptionPlans().then(() => {
+      if (state.activeModal === 'subscription-lock') renderModal();
+    }).catch(() => {});
+  }
+}
+
+async function handleSubscribePlan(planId, navigateToId) {
+  if (!state.currentUser?.id) return;
+  const pid = String(planId || '');
+  if (!pid) return;
+  const keys = state.modalData?.planIdemKeys || {};
+  if (!keys[pid]) keys[pid] = Security.generateSecureId('idem');
+  try {
+    await SUBSCRIPTIONS.purchasePlan(state.currentUser.id, pid, { idempotencyKey: keys[pid] });
+    closeModal();
+    showNotification(
+      state.language === 'ar' ? 'تم الاشتراك' : 'Subscribed',
+      state.language === 'ar' ? 'تم تفعيل الخدمات بنجاح' : 'Your services are now active',
+      'success'
+    );
+    if (navigateToId) openServiceById(navigateToId);
+  } catch (error) {
+    const detail = (error?.payload && error.payload.detail) ? error.payload.detail : (error?.message || '');
+    showNotification(
+      state.language === 'ar' ? 'تعذر الاشتراك' : 'Could not subscribe',
+      String(detail) || (state.language === 'ar' ? 'حاول مرة أخرى.' : 'Please try again.'),
+      'error'
+    );
+  }
 }
 
 function openServiceById(id) {
@@ -4953,6 +5035,23 @@ const WALLET = {
   }
 };
 
+// Session cache of the server's sellable plan catalog (single services +
+// bundles). Fetched at paywall-open; never authoritative for prices — the
+// purchase endpoint re-reads the server catalog inside its transaction.
+async function refreshSubscriptionPlans(force = false) {
+  if (!isServerModeEnabled()) return Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : [];
+  if (!force && Array.isArray(state.subscriptionPlans) && state.subscriptionPlans.length) {
+    return state.subscriptionPlans;
+  }
+  try {
+    const payload = await apiGetSubscriptionPlans();
+    state.subscriptionPlans = Array.isArray(payload?.plans) ? payload.plans : [];
+  } catch (_) {
+    state.subscriptionPlans = Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : [];
+  }
+  return state.subscriptionPlans;
+}
+
 const SUBSCRIPTIONS = {
   // Service subscription records: { id, userId, serviceId, status, startedAt, expiresAt, price, currency }
   getActiveServiceIds: (userId) => {
@@ -5059,6 +5158,35 @@ const SUBSCRIPTIONS = {
     addAuditLog('subscription', rec.id, `Subscribed to ${sid} (${walletFormatMinor(priceMinor, currency)})`, { resourceType: 'serviceSubscriptions', serviceId: sid, userId: uid });
     return rec;
   },
+  // Purchase a PLAN (single service or bundle): the server mints one row per
+  // serviceId + at most one payment, atomically. Renewal-extension included.
+  purchasePlan: async (userId, planId, opts = {}) => {
+    if (!state.currentUser?.id) throw new Error('Not logged in');
+    const uid = String(userId || '');
+    const pid = String(planId || '');
+    if (!uid || !pid) throw new Error('Missing plan purchase data');
+    const isAdmin = isAdminRole(state.currentUser.role);
+    if (!isAdmin && String(state.currentUser.id) !== uid) throw new Error('Forbidden');
+    const idem = ensureOperationIdempotencyKey(opts.idempotencyKey, 'subscription');
+    if (!isServerModeEnabled()) {
+      // No server -> no plan catalog or bundle atomics; the classic
+      // single-service local flow stays available through subscribe().
+      throw new Error(state.language === 'ar'
+        ? 'شراء الباقات يتطلب اتصال الخادم'
+        : 'Plan purchases need the server connection');
+    }
+    const payload = await apiPurchasePlan({
+      planId: pid,
+      idempotencyKey: idem,
+      userId: isAdmin && uid !== String(state.currentUser.id) ? uid : undefined
+    });
+    const rows = Array.isArray(payload?.subscriptions) ? payload.subscriptions : [];
+    const saved = rows.map(row => upsertServerBackedRecord('serviceSubscriptions', row));
+    if (payload?.payment) {
+      try { upsertServerBackedRecord('walletTransactions', payload.payment); } catch (_) {}
+    }
+    return saved;
+  },
   cancel: async (userId, serviceId) => {
     if (!state.currentUser?.id) throw new Error('Not logged in');
     const uid = String(userId || '');
@@ -5069,19 +5197,23 @@ const SUBSCRIPTIONS = {
 
     const now = Date.now();
     const subs = Array.isArray(state.serviceSubscriptions) ? state.serviceSubscriptions : [];
-    const active = subs.find(s =>
+    // Renewals append rows, so a service can have SEVERAL active rows
+    // (current + prepaid extension). Cancel must fold every one of them.
+    const activeRows = subs.filter(s =>
       s && !s._deleted &&
       s.userId === uid &&
       s.serviceId === sid &&
       s.status === 'active' &&
       (!s.expiresAt || new Date(s.expiresAt).getTime() > now)
     );
-    if (!active?.id) throw new Error('No active subscription');
+    if (!activeRows.length) throw new Error('No active subscription');
 
     const ts = new Date().toISOString();
-    const canceledOk = await updateRecord(state.serviceSubscriptions, active.id, { status: 'canceled', canceledAt: ts, expiresAt: ts });
-    if (!canceledOk) throw new Error('Failed to cancel subscription');
-    addAuditLog('subscription', active.id, `Canceled ${sid}`, { resourceType: 'serviceSubscriptions', serviceId: sid, userId: uid });
+    for (const active of activeRows) {
+      const canceledOk = await updateRecord(state.serviceSubscriptions, active.id, { status: 'canceled', canceledAt: ts, expiresAt: ts });
+      if (!canceledOk) throw new Error('Failed to cancel subscription');
+      addAuditLog('subscription', active.id, `Canceled ${sid}`, { resourceType: 'serviceSubscriptions', serviceId: sid, userId: uid });
+    }
 
     // Keep legacy user.subscriptions in sync (optional compatibility)
     const user = Array.isArray(state.users) ? state.users.find(u => u && !u._deleted && String(u.id) === uid) : null;
@@ -9187,7 +9319,8 @@ function mediaAwareTimeoutMs(body) {
 const INLINE_MEDIA_FIELDS_BY_COLLECTION = Object.freeze({
   ads: Object.freeze(['adPhotos', 'photos']),
   receipts: Object.freeze(['photos', 'receiptImage']),
-  adCampaignRequests: Object.freeze(['creativeImages'])
+  adCampaignRequests: Object.freeze(['creativeImages']),
+  walletPaymentRequests: Object.freeze(['receiptPhoto'])
 });
 
 function _inlineMediaFields(collection) {
@@ -9934,6 +10067,31 @@ async function apiPurchaseSubscription({ serviceId, idempotencyKey, userId }) {
   );
 }
 
+async function apiGetSubscriptionPlans() {
+  return apiJson('/api/subscriptions/plans', { method: 'GET' });
+}
+
+async function apiPurchasePlan({ planId, idempotencyKey, userId }) {
+  const body = { planId, idempotencyKey };
+  if (userId) body.userId = userId;
+  const identity = getServerSessionIdentity();
+  const payload = await withRetry(() => apiJson('/api/subscriptions/purchase-plan', {
+    method: 'POST',
+    body
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 2, 500);
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  const rows = Array.isArray(payload?.subscriptions) ? payload.subscriptions : [];
+  for (const row of rows) validateServerEntityResponse('serviceSubscriptions', row, 'purchase-plan');
+  return payload;
+}
+
+async function apiAdminSaveSubscriptionPlans(plans) {
+  return apiJson('/api/admin/subscription-plans', {
+    method: 'PUT',
+    body: { plans }
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+}
+
 // Atomic receipt transfer: source deduction and target TRANSFER_IN receipt are
 // committed by the server together. The caller owns the stable target id and
 // idempotency key so a response-loss retry replays the same result.
@@ -10411,6 +10569,32 @@ async function apiReviewAdCampaignRequest(campaignId, expectedLastModified, deci
   return entity;
 }
 
+async function apiStopAdCampaignRequest(campaignId, expectedLastModified, operationId, reason, refundMinorUSD) {
+  const identity = getServerSessionIdentity();
+  const body = { expectedLastModified, operationId, reason: reason || null };
+  // Absent = server decides (owner: full refund). Staff sends an explicit amount.
+  if (refundMinorUSD !== undefined && refundMinorUSD !== null) body.refundMinorUSD = Number(refundMinorUSD);
+  const entity = await requestValidatedServerEntity('adCampaignRequests', 'stop', () =>
+    apiJson(`/api/ad-studio/campaigns/${encodeURIComponent(campaignId)}/stop`, {
+      method: 'POST', body
+    }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS })
+  );
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  return entity;
+}
+
+async function apiSetAdCampaignPublishStatus(campaignId, expectedLastModified, publishStatus, metaCampaignId, operationId) {
+  const identity = getServerSessionIdentity();
+  const body = { expectedLastModified, operationId, publishStatus, metaCampaignId: metaCampaignId || null };
+  const entity = await requestValidatedServerEntity('adCampaignRequests', 'publish-status', () =>
+    apiJson(`/api/ad-studio/campaigns/${encodeURIComponent(campaignId)}/publish-status`, {
+      method: 'POST', body
+    }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS })
+  );
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  return entity;
+}
+
 // Wallet payment requests (server-authoritative; confirm is admin/gateway).
 async function apiWalletPaymentRequestCreate(amountMinor, method, idempotencyKey) {
   return withRetry(() => apiJson('/api/wallet/payment-requests', {
@@ -10424,11 +10608,30 @@ async function apiWalletPaymentRequestList(scope) {
   return apiJson(`/api/wallet/payment-requests${suffix}`, { method: 'GET' });
 }
 
-async function apiWalletPaymentRequestDecide(requestId, action, providerRef) {
+async function apiWalletPaymentRequestDecide(requestId, action, providerRef, overrideMissingReceipt) {
   return apiJson(`/api/wallet/payment-requests/${encodeURIComponent(requestId)}/${encodeURIComponent(action)}`, {
     method: 'POST',
-    body: action === 'confirm' ? { providerRef: providerRef || null } : {}
+    body: action === 'confirm'
+      ? { providerRef: providerRef || null, overrideMissingReceipt: !!overrideMissingReceipt }
+      : {}
   }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+}
+
+async function apiWalletPaymentMethods() {
+  return apiJson('/api/wallet/payment-requests/methods', { method: 'GET' });
+}
+
+async function apiWalletPaymentRequestGet(requestId) {
+  // Hydrated row carries the base64 receipt photo — allow a slow download.
+  return apiJson(`/api/wallet/payment-requests/${encodeURIComponent(requestId)}`, { method: 'GET' }, { timeoutMs: 60000 });
+}
+
+async function apiWalletPaymentRequestAttachReceipt(requestId, photo, note) {
+  const body = { photo, note: note || null };
+  return apiJson(`/api/wallet/payment-requests/${encodeURIComponent(requestId)}/receipt`, {
+    method: 'POST',
+    body
+  }, { timeoutMs: mediaAwareTimeoutMs(body) });
 }
 
 async function apiPatchEntity(collection, id, updates, expectedLastModified) {
@@ -15624,7 +15827,10 @@ function renderView() {
     case 'control-center': return renderControlCenterView();
     case 'smart-systems': return renderSmartSystems();
     case 'clothes-system': return renderClothesSystemView();
-    case 'ads-studio': return renderAdsStudioView();
+    case 'ads-studio':
+      if (typeof renderAdsStudioView === 'function') return renderAdsStudioView();
+      ensureAdsStudioLoaded();
+      return renderAdsStudioLoadingState();
     case 'service-placeholder': return renderServicePlaceholder();
     case 'wallet': return renderWalletView();
     case 'analytics': return renderAnalyticsView();
@@ -15722,6 +15928,7 @@ function renderServicesHub() {
             <span>${(service.children?.length || 0)} ${isRTL ? 'أنظمة' : 'systems'}</span>
           </div>
         ` : ''}
+        ${service.requiresSubscription && typeof renderSubscriptionStatusBadge === 'function' ? renderSubscriptionStatusBadge(service.id, isRTL) : ''}
       </button>
     `;
   }).join('');
@@ -15824,6 +16031,7 @@ function renderSmartSystems() {
         
         <h3 class="text-2xl font-bold text-slate-800 dark:text-white mb-2">${childName}</h3>
         <p class="text-slate-500 dark:text-slate-400">${childDesc}</p>
+        ${child.requiresSubscription && typeof renderSubscriptionStatusBadge === 'function' ? renderSubscriptionStatusBadge(child.id, isRTL) : ''}
       </button>
     `;
   }).join('');
@@ -22138,11 +22346,154 @@ function renderControlCenterTask(icon, color, title, detail, actionHtml = '') {
     </div>`;
 }
 
+// ---- Subscription plans manager (owner pricing without redeploys) ----
+let _planManager = { loading: false, loadedAt: 0, version: 0, plans: [], error: '', dirty: false };
+// Mirrors the server's KNOWN_SERVICE_IDS; the server re-validates anyway.
+const PLAN_MANAGER_SERVICE_IDS = ['international_shipping', 'local_shipping', 'warehouse', 'smart_systems', 'clothes_system', 'ad_maker'];
+
+async function loadPlanManager(force = false) {
+  if (_planManager.loading || !isServerModeEnabled()) return;
+  if (!force && _planManager.loadedAt && Date.now() - _planManager.loadedAt < 60000) return;
+  if (!force && _planManager.dirty) return; // never clobber unsaved edits
+  _planManager.loading = true;
+  _planManager.error = '';
+  try {
+    const payload = await apiJson('/api/admin/subscription-plans', { method: 'GET' });
+    _planManager.plans = Array.isArray(payload?.plans) ? payload.plans : [];
+    _planManager.version = Number(payload?.version || 0);
+    _planManager.loadedAt = Date.now();
+    _planManager.dirty = false;
+  } catch (error) {
+    _planManager.error = String(error?.payload?.detail || error?.message || 'Could not load the plan catalog');
+  } finally {
+    _planManager.loading = false;
+    if (state.currentView === 'control-center') render();
+  }
+}
+
+function planManagerSetField(index, field, value) {
+  const plan = _planManager.plans[Number(index)];
+  if (!plan) return;
+  if (field === 'priceLYD') plan.priceMinor = Math.max(0, Math.round((Number(String(value).replace(',', '.')) || 0) * 100));
+  else if (field === 'durationDays') plan.durationDays = Math.max(1, Math.min(3660, Math.trunc(Number(value) || 30)));
+  else if (field === 'sortOrder') plan.sortOrder = Math.trunc(Number(value) || 0);
+  else if (field === 'active') plan.active = value === true;
+  else if (field === 'name' || field === 'nameAr') plan[field] = String(value || '').slice(0, 80);
+  _planManager.dirty = true;
+}
+
+function planManagerAddBundle() {
+  const read = id => String(document.getElementById(id)?.value || '').trim();
+  const rawId = read('plan-new-id').toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 40);
+  const name = read('plan-new-name').slice(0, 80);
+  const nameAr = read('plan-new-name-ar').slice(0, 80);
+  const services = PLAN_MANAGER_SERVICE_IDS.filter(sid => document.getElementById(`plan-new-svc-${sid}`)?.checked);
+  if (rawId.length < 2 || !name || !nameAr || !services.length) {
+    showNotification('Missing details', 'A bundle needs an id, both names, and at least one service.', 'warning');
+    return;
+  }
+  if (_planManager.plans.some(p => String(p.id) === rawId)) {
+    showNotification('Duplicate id', 'A plan with this id already exists.', 'warning');
+    return;
+  }
+  _planManager.plans.push({
+    id: rawId,
+    serviceIds: services,
+    name,
+    nameAr,
+    priceMinor: Math.max(0, Math.round((Number(read('plan-new-price').replace(',', '.')) || 0) * 100)),
+    currency: 'LYD',
+    durationDays: Math.max(1, Math.min(3660, Math.trunc(Number(read('plan-new-days')) || 30))),
+    badge: services.length > 1 ? 'best_value' : null,
+    savingsPct: null,
+    active: true,
+    sortOrder: 0
+  });
+  _planManager.dirty = true;
+  render();
+}
+
+async function savePlanManager() {
+  if (!_planManager.plans.length) return;
+  try {
+    const payload = await apiAdminSaveSubscriptionPlans(_planManager.plans.map(p => ({
+      id: String(p.id),
+      serviceIds: Array.isArray(p.serviceIds) ? p.serviceIds : [],
+      name: String(p.name || ''),
+      nameAr: String(p.nameAr || ''),
+      priceMinor: Math.max(0, Math.trunc(Number(p.priceMinor) || 0)),
+      currency: 'LYD',
+      durationDays: Math.max(1, Math.min(3660, Math.trunc(Number(p.durationDays) || 30))),
+      badge: p.badge || null,
+      savingsPct: Number.isFinite(Number(p.savingsPct)) && p.savingsPct !== null && p.savingsPct !== '' ? Math.trunc(Number(p.savingsPct)) : null,
+      active: p.active !== false,
+      sortOrder: Math.trunc(Number(p.sortOrder) || 0)
+    })));
+    _planManager.version = Number(payload?.version || _planManager.version + 1);
+    _planManager.dirty = false;
+    _planManager.loadedAt = 0;
+    showNotification('Plans saved', `Catalog version ${_planManager.version} is live — new purchases use it immediately.`, 'success');
+    if (typeof refreshSubscriptionPlans === 'function') refreshSubscriptionPlans(true).catch(() => {});
+    loadPlanManager(true);
+  } catch (error) {
+    const detail = (error?.payload && error.payload.detail) ? error.payload.detail : (error?.message || 'Save failed');
+    showNotification('Could not save plans', String(detail), 'error');
+  }
+}
+
+function renderPlanManagerSection() {
+  if (!isServerModeEnabled()) return '';
+  const rows = _planManager.plans.map((plan, index) => {
+    const safeName = Security.escapeHtml(String(plan.name || plan.id));
+    const services = (Array.isArray(plan.serviceIds) ? plan.serviceIds : []).join(' + ');
+    return `
+      <div class="grid grid-cols-2 items-center gap-2 rounded-xl bg-slate-100 p-3 text-sm dark:bg-slate-800 sm:grid-cols-[1.2fr_1fr_90px_80px_70px_70px]">
+        <div class="min-w-0">
+          <input value="${safeName}" oninput="planManagerSetField(${index}, 'name', this.value)" class="w-full rounded-lg border border-transparent bg-transparent px-1 font-bold text-slate-800 focus:border-indigo-300 dark:text-white" />
+          <input value="${Security.escapeHtml(String(plan.nameAr || ''))}" dir="rtl" oninput="planManagerSetField(${index}, 'nameAr', this.value)" class="w-full rounded-lg border border-transparent bg-transparent px-1 text-xs text-slate-500 focus:border-indigo-300" />
+        </div>
+        <div class="truncate text-xs text-slate-500" title="${Security.escapeHtml(String(plan.id))}">${Security.escapeHtml(services)}</div>
+        <label class="text-xs text-slate-500 sm:text-right">LYD<input type="number" min="0" step="0.01" value="${(Math.max(0, Number(plan.priceMinor) || 0) / 100).toFixed(2)}" oninput="planManagerSetField(${index}, 'priceLYD', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono font-bold dark:border-slate-700 dark:bg-slate-900" /></label>
+        <label class="text-xs text-slate-500 sm:text-right">Days<input type="number" min="1" max="3660" value="${Math.max(1, Number(plan.durationDays) || 30)}" oninput="planManagerSetField(${index}, 'durationDays', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono dark:border-slate-700 dark:bg-slate-900" /></label>
+        <label class="text-xs text-slate-500 sm:text-right">Order<input type="number" value="${Math.trunc(Number(plan.sortOrder) || 0)}" oninput="planManagerSetField(${index}, 'sortOrder', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono dark:border-slate-700 dark:bg-slate-900" /></label>
+        <label class="flex items-center justify-end gap-1 text-xs font-bold ${plan.active !== false ? 'text-emerald-600' : 'text-slate-400'}"><input type="checkbox" ${plan.active !== false ? 'checked' : ''} onchange="planManagerSetField(${index}, 'active', this.checked)" class="h-5 w-5 accent-emerald-600" />On</label>
+      </div>`;
+  }).join('');
+  return `
+      <section class="glass-panel rounded-3xl p-5 sm:p-6">
+        <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div><div class="flex items-center gap-2"><i data-lucide="badge-dollar-sign" class="h-5 w-5 text-emerald-600"></i><h2 class="text-xl font-black text-slate-900 dark:text-white">Subscription plans & prices</h2></div>
+          <p class="mt-1 text-sm text-slate-500">Prices are LYD and live on the server — saving here changes what customers pay next, never what they already bought. Catalog version: ${Number(_planManager.version) || 0}${_planManager.dirty ? ' · <span class="font-bold text-amber-600">unsaved changes</span>' : ''}</p></div>
+          <div class="flex gap-2">
+            <button type="button" onclick="loadPlanManager(true)" class="min-h-11 rounded-xl border border-slate-300 px-4 font-bold text-slate-600 dark:border-slate-700 dark:text-slate-300">Reload</button>
+            <button type="button" onclick="savePlanManager()" ${_planManager.dirty ? '' : 'disabled'} class="min-h-11 rounded-xl bg-emerald-600 px-4 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">Save all plans</button>
+          </div>
+        </div>
+        ${_planManager.error ? `<div class="mb-3 rounded-xl bg-rose-50 p-3 text-sm font-semibold text-rose-700">${Security.escapeHtml(_planManager.error)}</div>` : ''}
+        <div class="space-y-2">${rows || `<div class="text-sm text-slate-500">${_planManager.loading ? 'Loading plans…' : 'Press Reload to fetch the plan catalog.'}</div>`}</div>
+        <details class="mt-4 rounded-2xl border border-slate-200 p-4 dark:border-slate-700">
+          <summary class="cursor-pointer select-none font-bold text-slate-700 dark:text-slate-200">Add a bundle (one subscription, many systems)</summary>
+          <div class="mt-3 grid gap-3 sm:grid-cols-2">
+            <label class="text-xs font-bold text-slate-500">Bundle id (letters/numbers/underscore)<input id="plan-new-id" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="pro_bundle" /></label>
+            <label class="text-xs font-bold text-slate-500">Price (LYD)<input id="plan-new-price" type="number" min="0" step="0.01" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="150.00" /></label>
+            <label class="text-xs font-bold text-slate-500">Name (English)<input id="plan-new-name" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="Pro Bundle" /></label>
+            <label class="text-xs font-bold text-slate-500">Name (Arabic)<input id="plan-new-name-ar" dir="rtl" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="الباقة الاحترافية" /></label>
+            <label class="text-xs font-bold text-slate-500">Duration (days)<input id="plan-new-days" type="number" min="1" max="3660" value="30" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" /></label>
+            <div class="text-xs font-bold text-slate-500">Included systems<div class="mt-1 grid grid-cols-2 gap-1">${PLAN_MANAGER_SERVICE_IDS.map(sid => `<label class="flex items-center gap-2 rounded-lg bg-slate-100 px-2 py-1.5 dark:bg-slate-800"><input id="plan-new-svc-${sid}" type="checkbox" class="h-4 w-4 accent-indigo-600" /><span class="truncate">${sid}</span></label>`).join('')}</div></div>
+          </div>
+          <button type="button" onclick="planManagerAddBundle()" class="mt-3 min-h-11 rounded-xl bg-indigo-600 px-4 font-bold text-white">Add to list (save to publish)</button>
+        </details>
+      </section>`;
+}
+
 function renderControlCenterView() {
   if (!isAdminRole(state.currentUser?.role)) return renderNoAccessView();
   if (!_controlCenter.period) _controlCenter.period = controlCenterPreviousMonth();
   if (!_controlCenter.loading && (!_controlCenter.loadedAt || Date.now() - _controlCenter.loadedAt > 60000)) {
     setTimeout(() => loadControlCenterStatus(false), 0);
+  }
+  if (isServerModeEnabled() && !_planManager.loading && !_planManager.loadedAt) {
+    setTimeout(() => loadPlanManager(false), 0);
   }
   const facts = getControlCenterFacts();
   const operations = _controlCenter.operations || {};
@@ -22196,6 +22547,8 @@ function renderControlCenterView() {
           <div class="mt-4 space-y-2">${closedPeriods.slice(0, 4).map(row => `<div class="flex items-center justify-between rounded-xl bg-slate-100 p-3 text-sm dark:bg-slate-800"><span><strong>${Security.escapeHtml(row.period || '')}</strong> · Closed</span><button type="button" onclick="unlockControlCenterMonth('${Security.escapeHtml(String(row.period || ''))}')" class="min-h-10 rounded-lg px-3 font-bold text-amber-700">Unlock</button></div>`).join('') || '<div class="text-sm text-slate-500">No months have been closed yet.</div>'}</div>
         </section>
       </div>
+
+      ${renderPlanManagerSection()}
 
       <section class="glass-panel rounded-3xl p-5 sm:p-6"><h2 class="text-xl font-black text-slate-900 dark:text-white">Live connections</h2><div class="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><div class="rounded-2xl bg-slate-100 p-4 dark:bg-slate-800"><div class="text-sm text-slate-500">Meta read connection</div><div class="mt-1 font-black ${meta.configured ? 'text-emerald-600' : 'text-amber-600'}">${meta.configured ? 'Ready' : 'Needs setup'}</div></div><div class="rounded-2xl bg-slate-100 p-4 dark:bg-slate-800"><div class="text-sm text-slate-500">Instant Meta webhook</div><div class="mt-1 font-black ${meta.webhookConfigured ? 'text-emerald-600' : 'text-amber-600'}">${meta.webhookConfigured ? 'Ready' : 'Polling fallback'}</div></div><div class="rounded-2xl bg-slate-100 p-4 dark:bg-slate-800"><div class="text-sm text-slate-500">Backup worker</div><div class="mt-1 font-black ${backup.workerRunning ? 'text-emerald-600' : 'text-amber-600'}">${backup.workerRunning ? 'Running' : 'Not running'}</div></div><div class="rounded-2xl bg-slate-100 p-4 dark:bg-slate-800"><div class="text-sm text-slate-500">Server health</div><div class="mt-1 font-black ${Number(monitoring.error_rate || 0) < 0.05 ? 'text-emerald-600' : 'text-rose-600'}">${Number(monitoring.total_requests || 0) ? `${(Number(monitoring.error_rate || 0) * 100).toFixed(1)}% errors` : 'Collecting data'}</div><div class="mt-1 text-xs text-slate-500">P95 ${Math.round(Number(monitoring.response_ms_p95 || 0))} ms</div></div></div></section>
     </div>`;
@@ -35964,19 +36317,47 @@ function renderModal() {
       `;
       break;
     }
-    case 'subscription-lock':
+    case 'subscription-lock': {
       const lockServiceId = state.modalData?.serviceId || '';
       const lockSubscribeToId = state.modalData?.subscribeToId || lockServiceId;
       const lockServiceName = state.modalData?.serviceName || 'Service';
       const isRTL = state.language === 'ar';
-      const subscribeTarget = SERVICES[lockSubscribeToId];
-      const subscribeTargetName = subscribeTarget ? (isRTL ? subscribeTarget.nameAr : subscribeTarget.name) : '';
-      const offer = getServiceSubscriptionOffer(lockSubscribeToId);
-      const walletBalanceMinor = state.currentUser?.id ? WALLET.getBalanceMinor(state.currentUser.id, offer.currency) : 0;
-      const walletBalanceLabel = walletFormatMinor(walletBalanceMinor, offer.currency);
-      const offerLabel = offer.priceMinor > 0
-        ? `${walletFormatMinor(offer.priceMinor, offer.currency)} / ${offer.durationDays}d`
-        : (isRTL ? 'مجاني' : 'Free');
+      const lockPlans = typeof getPlansForService === 'function' ? getPlansForService(lockSubscribeToId) : [];
+      const lydBalanceMinor = state.currentUser?.id ? WALLET.getBalanceMinor(state.currentUser.id, 'LYD') : 0;
+      const planCards = lockPlans.map(plan => {
+        const planName = Security.escapeHtml(String((isRTL ? plan.nameAr : plan.name) || plan.id));
+        const isBundle = Array.isArray(plan.serviceIds) && plan.serviceIds.length > 1;
+        const price = Math.max(0, Number(plan.priceMinor) || 0);
+        const priceLabel = price > 0
+          ? `${walletFormatMinor(price, 'LYD')} / ${Number(plan.durationDays) || 30}${isRTL ? ' يوم' : 'd'}`
+          : (isRTL ? 'مجاني' : 'Free');
+        const short = price > lydBalanceMinor;
+        const safePlanId = Security.escapeHtml(String(plan.id));
+        return `
+          <div class="rounded-2xl border-2 ${isBundle ? 'border-indigo-400 bg-indigo-50/60 dark:bg-indigo-900/20' : 'border-slate-200 dark:border-slate-700'} p-4 text-start">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div class="min-w-0">
+                <div class="flex items-center gap-2 font-black text-slate-800 dark:text-white">
+                  <i data-lucide="${isBundle ? 'package' : 'circle-check'}" class="w-4 h-4 ${isBundle ? 'text-indigo-600' : 'text-emerald-600'}"></i>${planName}
+                  ${plan.badge === 'best_value' ? `<span class="rounded-full bg-amber-100 dark:bg-amber-900/40 px-2 py-0.5 text-[10px] font-bold text-amber-800 dark:text-amber-200">${isRTL ? 'الأفضل قيمة' : 'Best value'}</span>` : ''}
+                </div>
+                <div class="mt-1 text-xs text-slate-500">
+                  ${isBundle
+                    ? (isRTL ? `${plan.serviceIds.length} خدمات في اشتراك واحد` : `${plan.serviceIds.length} services in one subscription`)
+                    : (isRTL ? 'خدمة واحدة' : 'Single service')}
+                  ${Number(plan.savingsPct) > 0 ? ` · ${isRTL ? 'توفير' : 'save'} ${Number(plan.savingsPct)}%` : ''}
+                </div>
+              </div>
+              <div class="text-end">
+                <div class="font-black text-slate-800 dark:text-white">${priceLabel}</div>
+                <button onclick="handleSubscribePlan('${safePlanId}', '${Security.escapeHtml(String(lockServiceId))}')" ${short ? 'disabled' : ''} class="mt-1 rounded-xl ${short ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed' : 'btn-shine bg-indigo-600 text-white hover:bg-indigo-700'} px-4 py-2 text-sm font-bold">
+                  ${isRTL ? 'اشترك' : 'Subscribe'}
+                </button>
+              </div>
+            </div>
+            ${short ? `<div class="mt-2 text-[11px] font-bold text-rose-600">${isRTL ? 'الرصيد غير كافٍ — اشحن المحفظة أولاً.' : 'Balance is short — charge the wallet first.'}</div>` : ''}
+          </div>`;
+      }).join('');
       modalContent = `
         <div class="text-center">
           <div class="w-16 h-16 rounded-full bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center mx-auto mb-4">
@@ -35985,39 +36366,30 @@ function renderModal() {
           <h2 class="text-2xl font-bold text-slate-800 dark:text-white mb-2">
             ${isRTL ? 'غير مشترك' : 'Not Subscribed'}
           </h2>
-          <p class="text-slate-600 dark:text-slate-300 mb-6">
-            ${isRTL 
-              ? `أنت غير مشترك في <strong>${lockServiceName}</strong>. هل تريد الاشتراك؟`
-              : `You are not subscribed to <strong>${lockServiceName}</strong>. Would you like to subscribe?`
+          <p class="text-slate-600 dark:text-slate-300 mb-4">
+            ${isRTL
+              ? `أنت غير مشترك في <strong>${lockServiceName}</strong>. اختر خطة الاشتراك:`
+              : `You are not subscribed to <strong>${lockServiceName}</strong>. Choose your plan:`
             }
           </p>
-          ${lockSubscribeToId !== lockServiceId && subscribeTargetName ? `
-            <div class="mb-5 text-xs text-slate-500 dark:text-slate-400">
-              ${isRTL ? `سيتم الاشتراك في: <strong>${subscribeTargetName}</strong>` : `You will subscribe to: <strong>${subscribeTargetName}</strong>`}
-            </div>
-          ` : ''}
-          <div class="mb-6 p-4 rounded-2xl bg-white/40 dark:bg-slate-800/30 border border-white/30">
-            <div class="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400 mb-2">
-              <span>${isRTL ? 'رصيد المحفظة' : 'Wallet balance'}</span>
-              <span class="font-bold">${walletBalanceLabel}</span>
-            </div>
-            <div class="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-              <span>${isRTL ? 'سعر الاشتراك' : 'Subscription price'}</span>
-              <span class="font-bold">${offerLabel}</span>
-            </div>
+          <div class="mb-4 flex items-center justify-between rounded-2xl bg-white/40 dark:bg-slate-800/30 border border-white/30 px-4 py-3 text-xs text-slate-500 dark:text-slate-400">
+            <span>${isRTL ? 'رصيد المحفظة (د.ل)' : 'Wallet balance (LYD)'}</span>
+            <span class="font-bold">${walletFormatMinor(lydBalanceMinor, 'LYD')}</span>
           </div>
-          <div class="flex space-x-3">
+          ${planCards ? `<div class="space-y-3 mb-4 max-h-[45dvh] overflow-y-auto custom-scrollbar pr-1">${planCards}</div>` : `
+          <div class="flex space-x-3 mb-1">
             <button onclick="handleSubscribe('${lockSubscribeToId}', '${lockServiceId}')" class="flex-1 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
               <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>
               ${isRTL ? 'اشترك' : 'Subscribe'}
             </button>
-            <button onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300">
-              ${isRTL ? 'إلغاء' : 'Cancel'}
-            </button>
-          </div>
+          </div>`}
+          <button onclick="closeModal()" class="w-full bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300">
+            ${isRTL ? 'إلغاء' : 'Cancel'}
+          </button>
         </div>
       `;
       break;
+    }
 
     case 'data-integrity': {
       const isArIntegrity = state.language === 'ar';
@@ -41638,1352 +42010,99 @@ async function saveClothesOrderFromModal() {
   return true;
 }
 // ==========================================
-// ALBAYAN ADS STUDIO
-// Customer self-service campaign requests for Facebook and Instagram.
-//
-// Safety boundary:
-// - This collection is NOT the internal `ads` accounting collection.
-// - Customers create drafts and submit them for review.
-// - Approval is server-controlled and never spends money or calls Meta.
-// - A future Meta adapter must run on the backend with encrypted tokens.
+// ADS STUDIO LAZY LOADER (main bundle)
 // ==========================================
+// The Ads Studio ships as its own bundle (studio.js, see src/manifest.json
+// "lazy") so the main bundle keeps startup headroom and the studio can grow.
+// This loader stays in the main bundle: it fetches studio.js once, renders a
+// bilingual loading/retry card meanwhile, and re-renders when ready.
 
-let _adsStudioActiveTab = 'dashboard';
-let _adsStudioWizardStep = 1;
-let _adsStudioEditingId = '';
-let _adsStudioDraft = null;
-let _adsStudioSearch = '';
-let _adsStudioPhotoToken = 0;
-let _adsStudioConfirmationChecked = false;
-let _adsStudioSavePromise = null;
-let _adsStudioSaveAndSubmitPromise = null;
-const _adsStudioSubmitPromises = new Map();
-const _adsStudioReviewPromises = new Map();
-const _adsStudioDeletePromises = new Map();
-const _adsStudioReviewNotes = Object.create(null);
-const ADS_STUDIO_ALLOWED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
-const ADS_STUDIO_MAX_SOURCE_IMAGE_BYTES = 20 * 1024 * 1024;
-const ADS_STUDIO_MAX_SELECTED_SOURCE_BYTES = 40 * 1024 * 1024;
-const ADS_STUDIO_MAX_TOTAL_CREATIVE_BYTES = 5 * 1024 * 1024;
+let _studioBundlePromise = null;
+let _studioBundleState = 'unloaded'; // 'loading' | 'ready' | 'failed'
 
-function resetAdsStudioSessionState() {
-  // Invalidate image compression still running for the previous draft/session.
-  _adsStudioPhotoToken++;
-  if (typeof window !== 'undefined' && window._adsStudioSearchTimer) {
-    clearTimeout(window._adsStudioSearchTimer);
-    window._adsStudioSearchTimer = null;
-  }
-  _adsStudioActiveTab = 'dashboard';
-  _adsStudioWizardStep = 1;
-  _adsStudioEditingId = '';
-  _adsStudioDraft = null;
-  _adsStudioSearch = '';
-  _adsStudioConfirmationChecked = false;
-  _adsStudioSavePromise = null;
-  _adsStudioSaveAndSubmitPromise = null;
-  _adsStudioSubmitPromises.clear();
-  _adsStudioReviewPromises.clear();
-  _adsStudioDeletePromises.clear();
-  for (const id of Object.keys(_adsStudioReviewNotes)) delete _adsStudioReviewNotes[id];
-  if (typeof resetAdsStudioWalletCache === 'function') resetAdsStudioWalletCache();
-}
-
-// Wallet + Meta Connection live INSIDE the Overview (owner decision): no tabs.
-const ADS_STUDIO_TABS = [
-  { id: 'dashboard', icon: 'layout-dashboard', label: 'Overview', labelAr: 'نظرة عامة' },
-  { id: 'campaigns', icon: 'megaphone', label: 'My Campaigns', labelAr: 'حملاتي' },
-  { id: 'builder', icon: 'wand-sparkles', label: 'Create Campaign', labelAr: 'إنشاء حملة' }
-];
-
-const ADS_STUDIO_OBJECTIVES = [
-  { id: 'messages', icon: 'message-circle', label: 'Messages', labelAr: 'الرسائل', desc: 'WhatsApp, Messenger or Instagram conversations', descAr: 'محادثات واتساب أو ماسنجر أو إنستغرام' },
-  { id: 'leads', icon: 'contact', label: 'Leads', labelAr: 'عملاء محتملون', desc: 'Collect customer enquiries', descAr: 'جمع استفسارات العملاء' },
-  { id: 'traffic', icon: 'mouse-pointer-click', label: 'Website Traffic', labelAr: 'زيارات الموقع', desc: 'Send people to a website or store', descAr: 'إرسال الأشخاص إلى موقع أو متجر' },
-  { id: 'sales', icon: 'shopping-bag', label: 'Sales', labelAr: 'المبيعات', desc: 'Promote products or conversions', descAr: 'ترويج المنتجات أو عمليات الشراء' },
-  { id: 'engagement', icon: 'heart', label: 'Engagement', labelAr: 'التفاعل', desc: 'Grow reactions, follows and video views', descAr: 'زيادة التفاعل والمتابعين والمشاهدات' }
-];
-
-const ADS_STUDIO_CTA = [
-  ['Send Message', 'إرسال رسالة'],
-  ['Learn More', 'معرفة المزيد'],
-  ['Shop Now', 'تسوق الآن'],
-  ['Contact Us', 'تواصل معنا'],
-  ['Sign Up', 'سجل الآن'],
-  ['Get Quote', 'اطلب عرض سعر'],
-  ['Call Now', 'اتصل الآن']
-];
-
-function adsStudioIsAr() {
-  return state.language === 'ar';
-}
-
-function adsStudioText(en, ar) {
-  return adsStudioIsAr() ? ar : en;
-}
-
-function adsStudioCanReview() {
-  return isCurrentUserAdmin() || currentUserHasPermission('adCampaignRequests', 'review');
-}
-
-function adsStudioCanCreate() {
-  return isCurrentUserAdmin() || currentUserHasPermission('adCampaignRequests', 'add');
-}
-
-function adsStudioCanUse() {
-  // Staff reviewers operate Albayan's review queue; only customer creators
-  // need to activate the customer subscription.
-  return isCurrentUserAdmin() || adsStudioCanReview() || hasSubscription('ad_maker');
-}
-
-function openAdsStudioCustomerAccount() {
-  if (!isCurrentUserAdmin()) return;
-  window._newUserAccessPreset = 'adsStudioCustomer';
-  state.activeModal = 'user';
-  state.modalData = null;
-  try { updateUrlParams({ modal: 'user', id: null }); } catch (_) {}
-  renderModal();
-}
-
-function adsStudioTabsForUser() {
-  const tabs = ADS_STUDIO_TABS.slice();
-  if (adsStudioCanReview()) {
-    tabs.push({ id: 'review', icon: 'badge-check', label: 'Review Queue', labelAr: 'طلبات المراجعة' });
-  }
-  return tabs.filter(tab => tab.id !== 'builder' || adsStudioCanCreate());
-}
-
-function setAdsStudioTab(tabId) {
-  if (!adsStudioTabsForUser().some(tab => tab.id === tabId)) return;
-  if (tabId === 'builder' && !_adsStudioDraft) beginAdsStudioCampaign();
-  _adsStudioActiveTab = tabId;
-  try { updateUrlParams({ tab: tabId }, true); } catch (_) {}
-  render();
-}
-
-function restoreAdsStudioTabFromUrl() {
+function _studioBundleUrl() {
+  // Derive from the script tag that provably loaded: correct under /studio/,
+  // Capacitor (capacitor://localhost), and any static host. Version with the
+  // main bundle's ?v= (same deploy = same version) when present.
   try {
-    const tab = getUrlParams().tab;
-    if (tab && adsStudioTabsForUser().some(item => item.id === tab)) {
-      _adsStudioActiveTab = tab;
-      if (tab === 'builder' && !_adsStudioDraft) beginAdsStudioCampaign();
+    const tags = document.querySelectorAll('script[src]');
+    for (let i = 0; i < tags.length; i++) {
+      const src = String(tags[i].src || '');
+      if (/script(\.min)?\.js(\?|$)/.test(src)) {
+        const parts = src.split('?');
+        const base = parts[0].replace(/script(\.min)?\.js$/, 'studio.js');
+        return parts[1] ? base + '?' + parts[1] : base;
+      }
     }
   } catch (_) {}
+  return 'studio.js';
 }
 
-function _adsStudioDateOffset(days) {
-  const date = new Date();
-  date.setDate(date.getDate() + Number(days || 0));
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+function adsStudioBundleReady() {
+  return typeof renderAdsStudioView === 'function';
 }
 
-function newAdsStudioDraft() {
-  return {
-    name: '',
-    objective: 'messages',
-    platforms: ['facebook', 'instagram'],
-    pageName: '',
-    primaryText: '',
-    headline: '',
-    description: '',
-    callToAction: 'Send Message',
-    destination: '',
-    locations: ['Libya'],
-    ageMin: 18,
-    ageMax: 65,
-    genders: ['all'],
-    languages: ['Arabic'],
-    interests: [],
-    startDate: _adsStudioDateOffset(1),
-    endDate: _adsStudioDateOffset(8),
-    budgetMinorUSD: 1000,
-    budgetType: 'lifetime',
-    notes: '',
-    creativeImages: [],
-    creativeAssetIds: [],
-    specialAdCategories: []
-  };
-}
-
-function getVisibleAdsStudioCampaigns() {
-  let records = getVisibleRecords(state.adCampaignRequests || []);
-  if (!isCurrentUserAdmin() && !currentUserHasPermission('adCampaignRequests', 'view')) {
-    const uid = String(state.currentUser?.id || '');
-    records = records.filter(item => String(item?.createdBy || '') === uid);
+function ensureAdsStudioLoaded() {
+  if (adsStudioBundleReady()) {
+    _studioBundleState = 'ready';
+    return Promise.resolve();
   }
-  // A review-only employee must not browse a customer's unfinished copy or
-  // targeting. Only workflow-visible states belong in the staff portal.
-  if (!isCurrentUserAdmin() && adsStudioCanReview()) {
-    records = records.filter(item => ['Submitted', 'Approved', 'Rejected'].includes(String(item?.status || 'Draft')));
-  }
-  return records.slice().sort((a, b) => Number(b?._created || 0) - Number(a?._created || 0));
-}
-
-function findVisibleAdsStudioCampaign(id) {
-  return getVisibleAdsStudioCampaigns().find(item => String(item?.id || '') === String(id || '')) || null;
-}
-
-function adsStudioCreatorName(campaign) {
-  const uid = String(campaign?.createdBy || '');
-  const user = (state.users || []).find(item => String(item?.id || '') === uid);
-  return user?.name || (uid === String(state.currentUser?.id || '') ? state.currentUser?.name : '') || adsStudioText('Customer', 'عميل');
-}
-
-function adsStudioStatusMeta(status) {
-  const value = String(status || 'Draft');
-  const map = {
-    Draft: { label: 'Draft', labelAr: 'مسودة', icon: 'file-pen-line', cls: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200' },
-    Submitted: { label: 'Under Review', labelAr: 'قيد المراجعة', icon: 'clock-3', cls: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200' },
-    'Changes Requested': { label: 'Changes Requested', labelAr: 'مطلوب تعديل', icon: 'message-square-warning', cls: 'bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-200' },
-    Approved: { label: 'Approved', labelAr: 'تمت الموافقة', icon: 'badge-check', cls: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200' },
-    Rejected: { label: 'Rejected', labelAr: 'مرفوضة', icon: 'circle-x', cls: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-200' }
-  };
-  return map[value] || { label: value, labelAr: value, icon: 'circle-dot', cls: 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-200' };
-}
-
-function adsStudioObjectiveLabel(objective) {
-  const item = ADS_STUDIO_OBJECTIVES.find(row => row.id === objective);
-  return item ? adsStudioText(item.label, item.labelAr) : String(objective || '—');
-}
-
-function adsStudioMoney(minor) {
-  const value = Math.max(0, Math.trunc(Number(minor) || 0));
-  return `$${(value / 100).toFixed(2)}`;
-}
-
-function adsStudioFormatDate(value) {
-  const raw = String(value || '');
-  if (!raw) return '—';
-  try { return new Date(`${raw}T00:00:00`).toLocaleDateString(adsStudioIsAr() ? 'ar-LY' : 'en-GB'); } catch (_) { return raw; }
-}
-
-function adsStudioBackTarget() {
-  // The standalone studio site has nowhere to go "back" to.
-  if (IS_STUDIO_SHELL) return '';
-  if (isCurrentUserAdmin()) return 'smart-systems';
-  const landing = getAlbayanManagerLandingViewForUser(state.currentUser);
-  if (!landing || landing === 'ads-studio' || landing === 'no-access') return '';
-  return userCanAccessView(state.currentUser, landing) ? landing : '';
-}
-
-function renderAdsStudioHeader() {
-  const isAr = adsStudioIsAr();
-  const backTarget = adsStudioBackTarget();
-  return `
-    <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between mb-6">
-      <div class="flex items-center gap-3 min-w-0">
-        ${backTarget ? `
-          <button type="button" onclick="navigateTo('${backTarget}')" class="touch-target w-11 h-11 flex-shrink-0 rounded-xl bg-white/70 dark:bg-slate-800/70 border border-white/60 dark:border-slate-700 flex items-center justify-center text-blue-600" aria-label="${isAr ? 'العودة' : 'Back'}">
-            <i data-lucide="${isAr ? 'arrow-right' : 'arrow-left'}" class="w-5 h-5"></i>
-          </button>
-        ` : ''}
-        <div class="w-12 h-12 sm:w-14 sm:h-14 flex-shrink-0 rounded-2xl bg-gradient-to-br from-blue-600 to-cyan-500 flex items-center justify-center shadow-lg shadow-blue-500/20">
-          <i data-lucide="rocket" class="w-7 h-7 text-white"></i>
-        </div>
-        <div class="min-w-0">
-          <h1 class="text-2xl sm:text-3xl font-black text-slate-900 dark:text-white truncate">${isAr ? 'استوديو إعلانات البيان' : 'Albayan Ads Studio'}</h1>
-          <p class="text-sm text-slate-500 dark:text-slate-400">${isAr ? 'أنشئ حملتك بنفسك، وسنراجعها قبل النشر' : 'Build your campaign; our team reviews it before publishing'}</p>
-        </div>
-      </div>
-      <div class="flex items-center gap-2 self-end sm:self-auto">
-        <button type="button" onclick="toggleLanguage()" class="touch-target min-w-11 h-11 px-3 rounded-xl bg-white/70 dark:bg-slate-800/70 border border-white/60 dark:border-slate-700 font-bold text-sm">${state.language.toUpperCase()}</button>
-        <button type="button" onclick="toggleTheme()" class="touch-target w-11 h-11 rounded-xl bg-white/70 dark:bg-slate-800/70 border border-white/60 dark:border-slate-700 flex items-center justify-center" aria-label="${isAr ? 'المظهر' : 'Theme'}"><i data-lucide="${state.theme === 'dark' ? 'moon' : 'sun'}" class="w-5 h-5"></i></button>
-        <button type="button" onclick="handleLogout()" class="touch-target w-11 h-11 rounded-xl bg-rose-50 dark:bg-rose-900/20 text-rose-600 flex items-center justify-center" aria-label="${isAr ? 'تسجيل الخروج' : 'Log out'}"><i data-lucide="log-out" class="w-5 h-5"></i></button>
-      </div>
-    </div>
-  `;
-}
-
-function renderAdsStudioTabBar() {
-  const isAr = adsStudioIsAr();
-  return `
-    <div class="mb-6 overflow-x-auto custom-scrollbar pb-2">
-      <div class="flex min-w-max gap-2" role="tablist" aria-label="${isAr ? 'أقسام استوديو الإعلانات' : 'Ads Studio sections'}">
-        ${adsStudioTabsForUser().map(tab => {
-          const active = _adsStudioActiveTab === tab.id;
-          return `
-            <button type="button" role="tab" aria-selected="${active}" onclick="setAdsStudioTab('${tab.id}')" class="touch-target inline-flex min-h-11 items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold transition-colors ${active ? 'bg-gradient-to-r from-blue-600 to-cyan-500 text-white shadow-lg' : 'bg-white/70 dark:bg-slate-800/70 text-slate-600 dark:text-slate-300 border border-white/60 dark:border-slate-700'}">
-              <i data-lucide="${tab.icon}" class="w-4 h-4"></i><span>${isAr ? tab.labelAr : tab.label}</span>
-              ${tab.id === 'review' ? `<span class="rounded-full bg-white/20 px-1.5 py-0.5 text-[10px]">${getVisibleAdsStudioCampaigns().filter(item => item.status === 'Submitted').length}</span>` : ''}
-            </button>
-          `;
-        }).join('')}
-      </div>
-    </div>
-  `;
-}
-
-function renderAdsStudioSubscriptionGate() {
-  const isAr = adsStudioIsAr();
-  return `
-    <div class="max-w-2xl mx-auto py-8 sm:py-16">
-      <div class="glass-panel rounded-3xl p-6 sm:p-10 text-center border border-blue-100 dark:border-blue-900/40">
-        <div class="w-20 h-20 mx-auto rounded-3xl bg-gradient-to-br from-blue-600 to-cyan-500 flex items-center justify-center mb-6 shadow-xl"><i data-lucide="lock-keyhole" class="w-9 h-9 text-white"></i></div>
-        <h2 class="text-2xl font-black text-slate-900 dark:text-white mb-3">${isAr ? 'فعّل استوديو الإعلانات' : 'Activate Ads Studio'}</h2>
-        <p class="text-slate-500 dark:text-slate-400 mb-6">${isAr ? 'تحتاج إلى اشتراك نشط لإنشاء حملاتك وحفظها بأمان.' : 'An active subscription is required to create and securely save campaigns.'}</p>
-        <button type="button" onclick="showSubscriptionModal('ad_maker', 'ad_maker')" class="touch-target w-full sm:w-auto min-h-12 px-8 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 text-white font-bold shadow-lg">${isAr ? 'تفعيل الخدمة' : 'Activate service'}</button>
-      </div>
-    </div>
-  `;
-}
-
-function renderAdsStudioView() {
-  const isAr = adsStudioIsAr();
-  if (!adsStudioCanUse()) {
-    return `<div class="max-w-7xl mx-auto" dir="${isAr ? 'rtl' : 'ltr'}">${renderAdsStudioHeader()}${renderAdsStudioSubscriptionGate()}</div>`;
-  }
-
-  let content = '';
-  if (_adsStudioActiveTab === 'campaigns') content = renderAdsStudioCampaigns();
-  else if (_adsStudioActiveTab === 'builder') content = renderAdsStudioBuilder();
-  else if (_adsStudioActiveTab === 'review') content = renderAdsStudioReviewQueue();
-  else content = renderAdsStudioDashboard();
-
-  return `
-    <div class="max-w-7xl mx-auto" dir="${isAr ? 'rtl' : 'ltr'}">
-      ${renderAdsStudioHeader()}
-      ${renderAdsStudioTabBar()}
-      ${content}
-    </div>
-  `;
-}
-
-function renderAdsStudioDashboard() {
-  const campaigns = getVisibleAdsStudioCampaigns();
-  const draftCount = campaigns.filter(item => ['Draft', 'Changes Requested'].includes(String(item.status || 'Draft'))).length;
-  const reviewCount = campaigns.filter(item => item.status === 'Submitted').length;
-  const approvedCount = campaigns.filter(item => item.status === 'Approved').length;
-  const lifetimeBudget = campaigns
-    .filter(item => String(item.budgetType || 'lifetime') !== 'daily')
-    .reduce((sum, item) => sum + Math.max(0, Number(item.budgetMinorUSD) || 0), 0);
-  const dailyBudget = campaigns
-    .filter(item => String(item.budgetType || '') === 'daily')
-    .reduce((sum, item) => sum + Math.max(0, Number(item.budgetMinorUSD) || 0), 0);
-  const isAr = adsStudioIsAr();
-  const stats = [
-    ['layers-3', isAr ? 'كل الحملات' : 'All campaigns', campaigns.length, 'from-blue-600 to-indigo-500'],
-    ['file-pen-line', isAr ? 'تحتاج إكمال' : 'Needs work', draftCount, 'from-slate-500 to-slate-600'],
-    ['clock-3', isAr ? 'قيد المراجعة' : 'Under review', reviewCount, 'from-amber-500 to-orange-500'],
-    ['badge-check', isAr ? 'تمت الموافقة' : 'Approved', approvedCount, 'from-emerald-500 to-teal-500']
-  ];
-  return `
-    <section class="space-y-6">
-      <div class="relative overflow-hidden rounded-3xl bg-gradient-to-br from-blue-700 via-blue-600 to-cyan-500 p-6 sm:p-8 text-white shadow-2xl">
-        <div class="absolute -right-10 -top-16 h-52 w-52 rounded-full bg-white/10"></div>
-        <div class="relative grid gap-6 md:grid-cols-[1fr_auto] md:items-center">
-          <div>
-            <span class="inline-flex items-center gap-2 rounded-full bg-white/15 px-3 py-1 text-xs font-bold"><i data-lucide="shield-check" class="w-4 h-4"></i>${isAr ? 'إنشاء آمن مع مراجعة بشرية' : 'Safe creation with human review'}</span>
-            <h2 class="mt-4 text-2xl sm:text-4xl font-black max-w-2xl">${isAr ? 'أنشئ إعلانك من الهاتف أو الكمبيوتر' : 'Create your next ad from phone or desktop'}</h2>
-            <p class="mt-3 max-w-2xl text-blue-50">${isAr ? 'اختر الهدف والجمهور والميزانية والصور. لن يتم صرف أي مبلغ حتى تتم المراجعة والموافقة.' : 'Choose the objective, audience, budget and creative. No money is spent by this request system.'}</p>
-          </div>
-          <div class="flex flex-col gap-2 sm:flex-row">
-            ${isCurrentUserAdmin() ? `<button type="button" onclick="openAdsStudioCustomerAccount()" class="touch-target min-h-12 rounded-xl border border-white/40 bg-white/10 px-5 py-3 font-black text-white hover:bg-white/20"><span class="inline-flex items-center gap-2"><i data-lucide="user-plus" class="w-5 h-5"></i>${isAr ? 'حساب عميل' : 'Customer login'}</span></button>` : ''}
-            ${adsStudioCanCreate() ? `<button type="button" onclick="beginAdsStudioCampaign(); setAdsStudioTab('builder')" class="touch-target min-h-12 rounded-xl bg-white px-6 py-3 font-black text-blue-700 shadow-xl hover:bg-blue-50"><span class="inline-flex items-center gap-2"><i data-lucide="plus" class="w-5 h-5"></i>${isAr ? 'حملة جديدة' : 'New campaign'}</span></button>` : ''}
-          </div>
-        </div>
-      </div>
-
-      <div class="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        ${stats.map(([icon, label, value, gradient]) => `
-          <div class="glass-panel rounded-2xl p-4 sm:p-5">
-            <div class="w-10 h-10 rounded-xl bg-gradient-to-br ${gradient} flex items-center justify-center text-white mb-3"><i data-lucide="${icon}" class="w-5 h-5"></i></div>
-            <div class="text-2xl font-black text-slate-900 dark:text-white">${value}</div>
-            <div class="text-xs sm:text-sm text-slate-500 dark:text-slate-400">${label}</div>
-          </div>
-        `).join('')}
-      </div>
-
-      <div class="grid gap-6 lg:grid-cols-[1.4fr_1fr]">
-        <div class="glass-panel rounded-2xl p-4 sm:p-6">
-          <div class="flex items-center justify-between gap-3 mb-4"><div><h3 class="font-black text-lg text-slate-900 dark:text-white">${isAr ? 'أحدث الحملات' : 'Recent campaigns'}</h3><p class="text-sm text-slate-500">${isAr ? 'آخر التحديثات والقرارات' : 'Latest updates and decisions'}</p></div><button type="button" onclick="setAdsStudioTab('campaigns')" class="touch-target min-h-11 px-3 text-sm font-bold text-blue-600">${isAr ? 'عرض الكل' : 'View all'}</button></div>
-          <div class="space-y-3">${campaigns.length ? campaigns.slice(0, 3).map(renderAdsStudioCampaignCard).join('') : renderAdsStudioEmptyState()}</div>
-        </div>
-        <div class="glass-panel rounded-2xl p-5 sm:p-6">
-          <h3 class="font-black text-lg text-slate-900 dark:text-white">${isAr ? 'ملخص الميزانيات' : 'Budget summary'}</h3>
-          <p class="text-sm text-slate-500 mt-1">${isAr ? 'ميزانيات الحملات المطلوبة، وليست مصروفاً فعلياً' : 'Requested campaign budgets, not actual spend'}</p>
-          <div class="mt-6 grid gap-3 sm:grid-cols-2">
-            <div class="rounded-2xl bg-blue-50 dark:bg-blue-900/20 p-5"><div class="text-sm font-bold text-blue-700 dark:text-blue-300">${isAr ? 'إجمالي ميزانيات المدة' : 'Lifetime requested'}</div><div class="mt-1 text-2xl font-black text-blue-900 dark:text-blue-100">${adsStudioMoney(lifetimeBudget)}</div></div>
-            <div class="rounded-2xl bg-cyan-50 dark:bg-cyan-900/20 p-5"><div class="text-sm font-bold text-cyan-700 dark:text-cyan-300">${isAr ? 'إجمالي الميزانيات اليومية' : 'Daily requested'}</div><div class="mt-1 text-2xl font-black text-cyan-900 dark:text-cyan-100">${adsStudioMoney(dailyBudget)}<span class="ms-1 text-sm font-bold">${isAr ? 'يومياً' : '/ day'}</span></div></div>
-          </div>
-          <div class="mt-5 flex items-start gap-3 rounded-xl bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-200"><i data-lucide="info" class="w-5 h-5 flex-shrink-0"></i><span>${isAr ? 'الميزانية هنا للتخطيط فقط. الدفع وإطلاق الإعلان يتمان بعد موافقة الإدارة وربط حساب ميتا.' : 'Budgets here are planning values. Payment and launch happen only after staff approval and Meta connection.'}</span></div>
-        </div>
-      </div>
-
-      <div>
-        <h3 class="font-black text-xl text-slate-900 dark:text-white mb-4 flex items-center gap-2"><i data-lucide="wallet" class="w-5 h-5"></i>${isAr ? 'المحفظة' : 'Wallet'}</h3>
-        ${renderAdsStudioWallet()}
-      </div>
-
-      <div>
-        <h3 class="font-black text-xl text-slate-900 dark:text-white mb-4 flex items-center gap-2"><i data-lucide="link-2" class="w-5 h-5"></i>${isAr ? 'ربط ميتا' : 'Meta Connection'}</h3>
-        ${renderAdsStudioConnections()}
-      </div>
-    </section>
-  `;
-}
-
-function renderAdsStudioEmptyState() {
-  const isAr = adsStudioIsAr();
-  return `<div class="rounded-2xl border-2 border-dashed border-slate-200 dark:border-slate-700 p-8 text-center"><i data-lucide="megaphone-off" class="w-10 h-10 mx-auto text-slate-300 mb-3"></i><p class="font-bold text-slate-700 dark:text-slate-200">${isAr ? 'لا توجد حملات بعد' : 'No campaigns yet'}</p><p class="text-sm text-slate-500 mt-1">${isAr ? 'ابدأ بمسودة جديدة عندما تكون جاهزاً.' : 'Start a new draft when you are ready.'}</p></div>`;
-}
-
-function renderAdsStudioCampaignCard(campaign) {
-  const isAr = adsStudioIsAr();
-  const status = adsStudioStatusMeta(campaign.status);
-  const editableStatus = ['Draft', 'Changes Requested'].includes(String(campaign.status || 'Draft'));
-  const canEdit = editableStatus && canActOnRecord('adCampaignRequests', 'edit', campaign.createdBy);
-  const canSubmit = editableStatus && canActOnRecord('adCampaignRequests', 'submit', campaign.createdBy);
-  const canDelete = ['Draft', 'Changes Requested', 'Approved', 'Rejected'].includes(String(campaign.status || 'Draft')) && canActOnRecord('adCampaignRequests', 'delete', campaign.createdBy);
-  const photoCount = getEntityPhotoCountHint('adCampaignRequests', campaign);
-  const safeId = Security.escapeHtml(String(campaign.id || ''));
-  const platforms = (Array.isArray(campaign.platforms) ? campaign.platforms : []).map(item => String(item)).join(' + ');
-  return `
-    <article class="rounded-2xl border border-slate-200/80 dark:border-slate-700 bg-white/70 dark:bg-slate-900/60 p-4 sm:p-5" data-ads-studio-campaign="${safeId}">
-      <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div class="min-w-0">
-          <div class="flex flex-wrap items-center gap-2">
-            <h3 class="font-black text-slate-900 dark:text-white break-words">${Security.escapeHtml(campaign.name || (isAr ? 'حملة بدون اسم' : 'Untitled campaign'))}</h3>
-            <span class="inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-bold ${status.cls}"><i data-lucide="${status.icon}" class="w-3.5 h-3.5"></i>${isAr ? status.labelAr : status.label}</span>
-          </div>
-          <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
-            <span class="inline-flex items-center gap-1"><i data-lucide="target" class="w-3.5 h-3.5"></i>${Security.escapeHtml(adsStudioObjectiveLabel(campaign.objective))}</span>
-            <span class="inline-flex items-center gap-1"><i data-lucide="wallet-cards" class="w-3.5 h-3.5"></i>${adsStudioMoney(campaign.budgetMinorUSD)}</span>
-            <span class="inline-flex items-center gap-1"><i data-lucide="calendar-days" class="w-3.5 h-3.5"></i>${adsStudioFormatDate(campaign.startDate)} → ${adsStudioFormatDate(campaign.endDate)}</span>
-            ${adsStudioCanReview() ? `<span class="inline-flex items-center gap-1"><i data-lucide="user" class="w-3.5 h-3.5"></i>${Security.escapeHtml(adsStudioCreatorName(campaign))}</span>` : ''}
-          </div>
-        </div>
-        <div class="flex flex-wrap items-center gap-2 sm:justify-end">
-          ${photoCount ? `<button type="button" onclick="openAdsStudioCreativeViewer('${safeId}', 0, this)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-cyan-50 dark:bg-cyan-900/20 px-3 text-sm font-bold text-cyan-700 dark:text-cyan-300"><i data-lucide="images" class="w-4 h-4"></i><span>${isAr ? 'الصور' : 'Creative'} ${photoCount}</span></button>` : ''}
-          ${canEdit ? `<button type="button" onclick="startAdsStudioCampaign('${safeId}')" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-blue-50 dark:bg-blue-900/20 px-3 text-sm font-bold text-blue-700 dark:text-blue-300"><i data-lucide="pencil" class="w-4 h-4"></i>${isAr ? 'تعديل' : 'Edit'}</button>` : ''}
-          ${canSubmit ? `<button type="button" onclick="submitAdsStudioCampaign('${safeId}', this)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 px-3 text-sm font-bold text-white disabled:opacity-60"><i data-lucide="send" class="w-4 h-4"></i>${isAr ? 'إرسال' : 'Submit'}</button>` : ''}
-          ${canDelete ? `<button type="button" onclick="deleteAdsStudioCampaign('${safeId}', this)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-rose-50 dark:bg-rose-900/20 px-3 text-sm font-bold text-rose-700 dark:text-rose-300 disabled:opacity-60"><i data-lucide="${editableStatus ? 'trash-2' : 'archive'}" class="w-4 h-4"></i>${editableStatus ? (isAr ? 'حذف' : 'Delete') : (isAr ? 'أرشفة' : 'Archive')}</button>` : ''}
-        </div>
-      </div>
-      ${campaign.reviewNote ? `<div class="mt-4 rounded-xl ${campaign.status === 'Rejected' ? 'bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200' : 'bg-orange-50 dark:bg-orange-900/20 text-orange-800 dark:text-orange-200'} p-3 text-sm"><span class="font-bold">${isAr ? 'ملاحظة المراجع:' : 'Reviewer note:'}</span> ${Security.escapeHtml(campaign.reviewNote)}</div>` : ''}
-      <details class="mt-4 border-t border-slate-200 dark:border-slate-700 pt-3">
-        <summary class="touch-target min-h-11 cursor-pointer select-none text-sm font-bold text-slate-600 dark:text-slate-300 flex items-center gap-2"><i data-lucide="chevron-down" class="w-4 h-4"></i>${isAr ? 'عرض الملخص' : 'View brief'}</summary>
-        <div class="grid gap-3 pt-3 sm:grid-cols-2 text-sm">
-          <div><span class="text-slate-500">${isAr ? 'الصفحة:' : 'Page:'}</span> <span class="font-semibold text-slate-800 dark:text-slate-100">${Security.escapeHtml(campaign.pageName || '—')}</span></div>
-          <div><span class="text-slate-500">${isAr ? 'المنصات:' : 'Platforms:'}</span> <span class="font-semibold capitalize text-slate-800 dark:text-slate-100">${Security.escapeHtml(platforms || '—')}</span></div>
-          <div><span class="text-slate-500">${isAr ? 'الموقع:' : 'Location:'}</span> <span class="font-semibold text-slate-800 dark:text-slate-100">${Security.escapeHtml((campaign.locations || []).join(', ') || '—')}</span></div>
-          <div><span class="text-slate-500">${isAr ? 'العمر:' : 'Age:'}</span> <span class="font-semibold text-slate-800 dark:text-slate-100">${Number(campaign.ageMin) || 18}–${Number(campaign.ageMax) || 65}</span></div>
-          <div class="sm:col-span-2"><span class="text-slate-500">${isAr ? 'النص:' : 'Copy:'}</span> <span class="font-semibold whitespace-pre-wrap text-slate-800 dark:text-slate-100">${Security.escapeHtml(campaign.primaryText || '—')}</span></div>
-        </div>
-      </details>
-      ${renderAdsStudioReviewHistory(campaign)}
-    </article>
-  `;
-}
-
-function deleteAdsStudioCampaign(id, button = null) {
-  const campaignId = String(id || '');
-  if (_adsStudioDeletePromises.has(campaignId)) return _adsStudioDeletePromises.get(campaignId);
-  const campaign = findVisibleAdsStudioCampaign(campaignId);
-  const status = String(campaign?.status || '');
-  if (!campaign || !['Draft', 'Changes Requested', 'Approved', 'Rejected'].includes(status) || !canActOnRecord('adCampaignRequests', 'delete', campaign.createdBy)) return Promise.resolve(false);
-  const isTerminal = status === 'Approved' || status === 'Rejected';
-  const confirmed = confirm(adsStudioText(
-    isTerminal ? 'Archive this campaign and remove its stored creative images?' : 'Delete this campaign draft?',
-    isTerminal ? 'أرشفة هذه الحملة وحذف صورها الإعلانية المخزنة؟' : 'حذف مسودة هذه الحملة؟'
-  ));
-  if (!confirmed) return Promise.resolve(false);
-  setAdsStudioActionButtonBusy(button, true);
-  const operation = (async () => {
-    const deleted = await deleteRecord(state.adCampaignRequests, campaignId);
-    if (!deleted) return false;
-    if (typeof clearTransientEntityMediaCache === 'function') clearTransientEntityMediaCache('adCampaignRequests');
-    delete _adsStudioReviewNotes[campaignId];
-    if (_adsStudioEditingId === campaignId) beginAdsStudioCampaign();
-    showNotification(
-      adsStudioText(isTerminal ? 'Campaign archived' : 'Draft deleted', isTerminal ? 'تمت أرشفة الحملة' : 'تم حذف المسودة'),
-      adsStudioText(isTerminal ? 'The campaign and its stored creative images were removed.' : 'The campaign draft was removed.', isTerminal ? 'تم حذف الحملة وصورها الإعلانية المخزنة.' : 'تم حذف مسودة الحملة.'),
-      'success'
-    );
-    return true;
-  })();
-  _adsStudioDeletePromises.set(campaignId, operation);
-  const cleanup = () => {
-    if (_adsStudioDeletePromises.get(campaignId) === operation) _adsStudioDeletePromises.delete(campaignId);
-    setAdsStudioActionButtonBusy(button, false);
-  };
-  operation.then(cleanup, cleanup);
-  return operation;
-}
-
-function renderAdsStudioReviewHistory(campaign) {
-  const history = Array.isArray(campaign?.reviewHistory) ? campaign.reviewHistory.slice(-5).reverse() : [];
-  if (!history.length) return '';
-  const isAr = adsStudioIsAr();
-  return `<details class="mt-3 border-t border-slate-200 dark:border-slate-700 pt-3"><summary class="touch-target min-h-11 cursor-pointer select-none text-sm font-bold text-slate-600 dark:text-slate-300 flex items-center gap-2"><i data-lucide="history" class="w-4 h-4"></i>${isAr ? 'سجل المراجعة' : 'Review history'}</summary><div class="space-y-2 pt-2">${history.map(entry => {
-    const meta = adsStudioStatusMeta(entry?.decision || entry?.status || 'Reviewed');
-    const when = entry?.reviewedAt ? new Date(entry.reviewedAt) : null;
-    const dateText = when && Number.isFinite(when.getTime()) ? when.toLocaleString(isAr ? 'ar-LY' : 'en-GB') : '';
-    return `<div class="rounded-xl bg-slate-50 dark:bg-slate-800/60 p-3 text-sm"><div class="flex flex-wrap items-center justify-between gap-2"><span class="font-bold text-slate-800 dark:text-slate-100">${Security.escapeHtml(isAr ? meta.labelAr : meta.label)}</span>${dateText ? `<time class="text-xs text-slate-500">${Security.escapeHtml(dateText)}</time>` : ''}</div>${entry?.note ? `<p class="mt-1 whitespace-pre-wrap text-slate-600 dark:text-slate-300">${Security.escapeHtml(String(entry.note))}</p>` : ''}</div>`;
-  }).join('')}</div></details>`;
-}
-
-function renderAdsStudioCampaigns() {
-  const isAr = adsStudioIsAr();
-  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
-  const query = foldSearchText(_adsStudioSearch.trim());
-  const campaigns = getVisibleAdsStudioCampaigns().filter(item => !query || [item.name, item.pageName, item.objective, item.status].some(value => foldSearchText(value).includes(query)));
-  return `
-    <section>
-      <div class="glass-panel rounded-2xl p-4 mb-5 flex flex-col gap-3 sm:flex-row sm:items-center">
-        <div class="relative flex-1"><i data-lucide="search" class="absolute ${isAr ? 'right-3' : 'left-3'} top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400"></i><input type="search" value="${Security.escapeHtml(_adsStudioSearch)}" oninput="onAdsStudioSearch(this.value)" class="glass-input min-h-12 w-full rounded-xl ${isAr ? 'pr-11 pl-4' : 'pl-11 pr-4'}" placeholder="${isAr ? 'ابحث باسم الحملة أو الصفحة...' : 'Search campaign or Page...'}" /></div>
-        ${adsStudioCanCreate() ? `<button type="button" onclick="beginAdsStudioCampaign(); setAdsStudioTab('builder')" class="touch-target min-h-12 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 px-5 font-bold text-white shadow-lg"><span class="inline-flex items-center gap-2"><i data-lucide="plus" class="w-5 h-5"></i>${isAr ? 'حملة جديدة' : 'New campaign'}</span></button>` : ''}
-      </div>
-      <div id="ads-studio-campaign-list" class="space-y-4">${campaigns.length ? campaigns.map(renderAdsStudioCampaignCard).join('') : renderAdsStudioEmptyState()}</div>
-    </section>
-  `;
-}
-
-function onAdsStudioSearch(value) {
-  _adsStudioSearch = Security.sanitizeInput(String(value || ''), { maxLength: 160 });
-  if (window._adsStudioSearchTimer) clearTimeout(window._adsStudioSearchTimer);
-  window._adsStudioSearchTimer = setTimeout(() => {
-    const list = document.getElementById('ads-studio-campaign-list');
-    if (!list || state.currentView !== 'ads-studio' || _adsStudioActiveTab !== 'campaigns') return;
-    const query = foldSearchText(_adsStudioSearch.trim());
-    const campaigns = getVisibleAdsStudioCampaigns().filter(item => !query || [item.name, item.pageName, item.objective, item.status].some(value => foldSearchText(value).includes(query)));
-    list.innerHTML = campaigns.length ? campaigns.map(renderAdsStudioCampaignCard).join('') : renderAdsStudioEmptyState();
-    if (typeof IconQueue !== 'undefined') IconQueue.schedule(list);
-  }, 100);
-}
-
-function beginAdsStudioCampaign() {
-  _adsStudioPhotoToken++;
-  _adsStudioEditingId = '';
-  _adsStudioWizardStep = 1;
-  _adsStudioDraft = newAdsStudioDraft();
-  _adsStudioConfirmationChecked = false;
-}
-
-async function startAdsStudioCampaign(id) {
-  const startToken = ++_adsStudioPhotoToken;
-  const startUserId = String(state.currentUser?.id || '');
-  let campaign = findVisibleAdsStudioCampaign(id);
-  if (!campaign || !['Draft', 'Changes Requested'].includes(String(campaign.status || 'Draft'))) return;
-  try {
-    campaign = await ensureEntityMediaLoaded('adCampaignRequests', campaign.id) || campaign;
-  } catch (_) {
-    showNotification(adsStudioText('Could not load creative', 'تعذر تحميل الصور'), adsStudioText('Your existing images are safe. Check the connection before editing this campaign.', 'صورك الحالية آمنة. تحقق من الاتصال قبل تعديل هذه الحملة.'), 'error');
-    return;
-  }
-  if (startToken !== _adsStudioPhotoToken || startUserId !== String(state.currentUser?.id || '')) return;
-  if (campaign._mediaOmitted === true && getEntityPhotoCountHint('adCampaignRequests', campaign) > 0 && !isEntityMediaHydrated('adCampaignRequests', campaign)) {
-    showNotification(adsStudioText('Could not load creative', 'تعذر تحميل الصور'), adsStudioText('Your existing images are safe. Check the connection before editing this campaign.', 'صورك الحالية آمنة. تحقق من الاتصال قبل تعديل هذه الحملة.'), 'error');
-    return;
-  }
-  _adsStudioEditingId = String(campaign.id || '');
-  _adsStudioWizardStep = 1;
-  _adsStudioConfirmationChecked = false;
-  _adsStudioDraft = {
-    ...newAdsStudioDraft(),
-    ...Security.sanitizeObject(campaign),
-    platforms: Array.isArray(campaign.platforms) ? campaign.platforms.slice() : [],
-    locations: Array.isArray(campaign.locations) ? campaign.locations.slice() : [],
-    genders: Array.isArray(campaign.genders) ? campaign.genders.slice() : ['all'],
-    languages: Array.isArray(campaign.languages) ? campaign.languages.slice() : [],
-    interests: Array.isArray(campaign.interests) ? campaign.interests.slice() : [],
-    specialAdCategories: Array.isArray(campaign.specialAdCategories) ? campaign.specialAdCategories.slice() : [],
-    creativeImages: Array.isArray(campaign.creativeImages) ? campaign.creativeImages.slice(0, 3) : []
-  };
-  _adsStudioActiveTab = 'builder';
-  try { updateUrlParams({ tab: 'builder' }, true); } catch (_) {}
-  render();
-}
-
-function adsStudioSetDraftField(field, value) {
-  if (!_adsStudioDraft) _adsStudioDraft = newAdsStudioDraft();
-  const allowed = new Set(['name', 'objective', 'pageName', 'primaryText', 'headline', 'description', 'callToAction', 'destination', 'ageMin', 'ageMax', 'startDate', 'endDate', 'budgetType', 'budgetMinorUSD', 'notes']);
-  if (!allowed.has(field)) return;
-  if (field === 'budgetMinorUSD') _adsStudioDraft[field] = Math.max(0, Math.round((Number(value) || 0) * 100));
-  else if (field === 'ageMin' || field === 'ageMax') _adsStudioDraft[field] = Math.max(0, Math.trunc(Number(value) || 0));
-  else _adsStudioDraft[field] = String(value ?? '').slice(0, 4000);
-}
-
-function adsStudioToggleDraftArray(field, value, checked, exclusive = false) {
-  if (!_adsStudioDraft) _adsStudioDraft = newAdsStudioDraft();
-  if (!['platforms', 'genders', 'specialAdCategories'].includes(field)) return;
-  let current = Array.isArray(_adsStudioDraft[field]) ? _adsStudioDraft[field].slice() : [];
-  if (exclusive && checked) current = [value];
-  else if (checked && !current.includes(value)) current.push(value);
-  else if (!checked) current = current.filter(item => item !== value);
-  _adsStudioDraft[field] = current;
-}
-
-function adsStudioSetListField(field, raw) {
-  if (!_adsStudioDraft || !['locations', 'languages', 'interests'].includes(field)) return;
-  _adsStudioDraft[field] = String(raw || '').split(',').map(item => Security.sanitizeInput(item.trim(), { maxLength: 80 })).filter(Boolean).slice(0, 30);
-}
-
-function adsStudioWizardSteps() {
-  return [
-    ['1', 'circle-dot', 'Campaign', 'الحملة'],
-    ['2', 'image', 'Creative', 'المحتوى'],
-    ['3', 'users-round', 'Audience', 'الجمهور'],
-    ['4', 'calendar-range', 'Budget', 'الميزانية'],
-    ['5', 'clipboard-check', 'Review', 'المراجعة']
-  ];
-}
-
-function renderAdsStudioWizardProgress() {
-  const isAr = adsStudioIsAr();
-  return `<div class="mb-6 overflow-x-auto pb-2"><div class="flex min-w-[620px] items-center">${adsStudioWizardSteps().map(([num, icon, en, ar], index, all) => `<div class="flex flex-1 items-center"><div class="flex items-center gap-2 ${_adsStudioWizardStep >= Number(num) ? 'text-blue-700 dark:text-cyan-300' : 'text-slate-400'}"><span class="w-9 h-9 rounded-full flex items-center justify-center font-black ${_adsStudioWizardStep >= Number(num) ? 'bg-blue-100 dark:bg-blue-900/40' : 'bg-slate-100 dark:bg-slate-800'}">${num}</span><span class="text-xs font-bold whitespace-nowrap">${isAr ? ar : en}</span></div>${index < all.length - 1 ? `<div class="mx-3 h-0.5 flex-1 ${_adsStudioWizardStep > Number(num) ? 'bg-blue-500' : 'bg-slate-200 dark:bg-slate-700'}"></div>` : ''}</div>`).join('')}</div></div>`;
-}
-
-function renderAdsStudioBuilder() {
-  if (!_adsStudioDraft) beginAdsStudioCampaign();
-  const isAr = adsStudioIsAr();
-  const stepContent = _adsStudioWizardStep === 1 ? renderAdsStudioBasicsStep()
-    : _adsStudioWizardStep === 2 ? renderAdsStudioCreativeStep()
-      : _adsStudioWizardStep === 3 ? renderAdsStudioAudienceStep()
-        : _adsStudioWizardStep === 4 ? renderAdsStudioBudgetStep()
-          : renderAdsStudioReviewStep();
-  return `
-    <section class="max-w-4xl mx-auto">
-      <div class="flex items-center justify-between gap-3 mb-4"><div><h2 class="text-xl sm:text-2xl font-black text-slate-900 dark:text-white">${_adsStudioEditingId ? (isAr ? 'تعديل مسودة الحملة' : 'Edit campaign draft') : (isAr ? 'حملة إعلانية جديدة' : 'New ad campaign')}</h2><p class="text-sm text-slate-500">${isAr ? 'يمكنك الحفظ والعودة في أي وقت' : 'Save now and continue at any time'}</p></div><button type="button" onclick="setAdsStudioTab('campaigns')" class="touch-target min-h-11 rounded-xl px-3 font-bold text-slate-600 dark:text-slate-300"><span class="inline-flex items-center gap-1"><i data-lucide="x" class="w-5 h-5"></i>${isAr ? 'إغلاق' : 'Close'}</span></button></div>
-      <div class="glass-panel rounded-3xl p-4 sm:p-7">
-        ${renderAdsStudioWizardProgress()}
-        <div id="ads-studio-wizard-step">${stepContent}</div>
-        <div class="mt-7 flex flex-col-reverse gap-3 border-t border-slate-200 dark:border-slate-700 pt-5 sm:flex-row sm:items-center sm:justify-between">
-          <div class="flex gap-2">
-            ${_adsStudioWizardStep > 1 ? `<button type="button" onclick="moveAdsStudioWizard(-1)" class="touch-target min-h-12 rounded-xl bg-slate-100 dark:bg-slate-800 px-5 font-bold text-slate-700 dark:text-slate-200"><span class="inline-flex items-center gap-2"><i data-lucide="${isAr ? 'arrow-right' : 'arrow-left'}" class="w-4 h-4"></i>${isAr ? 'السابق' : 'Back'}</span></button>` : ''}
-            <button type="button" onclick="saveAdsStudioDraft(false, this)" class="touch-target min-h-12 rounded-xl border border-blue-200 dark:border-blue-800 px-5 font-bold text-blue-700 dark:text-blue-300 disabled:opacity-60"><span class="inline-flex items-center gap-2"><i data-lucide="save" class="w-4 h-4"></i>${isAr ? 'حفظ المسودة' : 'Save draft'}</span></button>
-          </div>
-          ${_adsStudioWizardStep < 5 ? `<button type="button" onclick="moveAdsStudioWizard(1)" class="touch-target min-h-12 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 px-6 font-black text-white shadow-lg"><span class="inline-flex items-center gap-2">${isAr ? 'التالي' : 'Continue'}<i data-lucide="${isAr ? 'arrow-left' : 'arrow-right'}" class="w-4 h-4"></i></span></button>` : `<button type="button" onclick="saveAndSubmitAdsStudioDraft(this)" class="touch-target min-h-12 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 px-6 font-black text-white shadow-lg disabled:opacity-60"><span class="inline-flex items-center gap-2"><i data-lucide="send" class="w-4 h-4"></i>${isAr ? 'حفظ وإرسال للمراجعة' : 'Save & submit for review'}</span></button>`}
-        </div>
-      </div>
-    </section>
-  `;
-}
-
-function renderAdsStudioBasicsStep() {
-  const d = _adsStudioDraft;
-  const isAr = adsStudioIsAr();
-  return `<div class="space-y-6"><div><h3 class="text-lg font-black text-slate-900 dark:text-white">${isAr ? 'ما الذي تريد تحقيقه؟' : 'What do you want to achieve?'}</h3><p class="text-sm text-slate-500">${isAr ? 'اختر هدفاً واحداً واضحاً للحملة.' : 'Choose one clear objective for this campaign.'}</p></div>
-    <div><label class="block text-sm font-bold mb-2">${isAr ? 'اسم الحملة *' : 'Campaign name *'}</label><input type="text" maxlength="120" value="${Security.escapeHtml(d.name || '')}" oninput="adsStudioSetDraftField('name', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" placeholder="${isAr ? 'مثال: عروض الصيف - رسائل واتساب' : 'e.g. Summer offers — WhatsApp messages'}" /></div>
-    <div class="grid gap-3 sm:grid-cols-2">${ADS_STUDIO_OBJECTIVES.map(item => `<label class="cursor-pointer rounded-2xl border-2 p-4 transition-colors ${d.objective === item.id ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-slate-200 dark:border-slate-700'}"><input type="radio" name="ads-objective" class="sr-only" value="${item.id}" ${d.objective === item.id ? 'checked' : ''} onchange="adsStudioSetDraftField('objective', this.value); render()" /><span class="flex items-start gap-3"><span class="w-10 h-10 rounded-xl bg-white dark:bg-slate-800 flex items-center justify-center text-blue-600"><i data-lucide="${item.icon}" class="w-5 h-5"></i></span><span><span class="block font-black text-slate-900 dark:text-white">${isAr ? item.labelAr : item.label}</span><span class="block text-xs text-slate-500 mt-1">${isAr ? item.descAr : item.desc}</span></span></span></label>`).join('')}</div>
-    <div><label class="block text-sm font-bold mb-2">${isAr ? 'المنصات *' : 'Platforms *'}</label><div class="grid grid-cols-2 gap-3"><label class="touch-target min-h-12 flex items-center gap-3 rounded-xl border border-slate-200 dark:border-slate-700 px-4"><input type="checkbox" ${d.platforms.includes('facebook') ? 'checked' : ''} onchange="adsStudioToggleDraftArray('platforms','facebook',this.checked)" class="w-5 h-5 accent-blue-600" /><i data-lucide="facebook" class="w-5 h-5 text-blue-600"></i><span class="font-bold">Facebook</span></label><label class="touch-target min-h-12 flex items-center gap-3 rounded-xl border border-slate-200 dark:border-slate-700 px-4"><input type="checkbox" ${d.platforms.includes('instagram') ? 'checked' : ''} onchange="adsStudioToggleDraftArray('platforms','instagram',this.checked)" class="w-5 h-5 accent-fuchsia-600" /><i data-lucide="instagram" class="w-5 h-5 text-fuchsia-600"></i><span class="font-bold">Instagram</span></label></div></div>
-    <div><label class="block text-sm font-bold mb-2">${isAr ? 'اسم صفحة فيسبوك أو حساب إنستغرام *' : 'Facebook Page or Instagram account name *'}</label><input type="text" maxlength="160" value="${Security.escapeHtml(d.pageName || '')}" oninput="adsStudioSetDraftField('pageName', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" placeholder="${isAr ? 'اكتب اسم الصفحة التي تريد الإعلان منها' : 'Name of the Page that should run the ad'}" /><p class="mt-2 text-xs text-slate-500">${isAr ? 'سيتم التحقق من ملكية الصفحة عند ربط حساب ميتا.' : 'Ownership will be verified when the Meta account is connected.'}</p></div>
-  </div>`;
-}
-
-function renderAdsStudioCreativeStep() {
-  const d = _adsStudioDraft;
-  const isAr = adsStudioIsAr();
-  return `<div class="space-y-5"><div><h3 class="text-lg font-black text-slate-900 dark:text-white">${isAr ? 'محتوى الإعلان' : 'Ad creative'}</h3><p class="text-sm text-slate-500">${isAr ? 'أضف النص والصور والرابط الذي سيفتحه العميل.' : 'Add the copy, images and destination customers will open.'}</p></div>
-    <div><label class="block text-sm font-bold mb-2">${isAr ? 'النص الأساسي *' : 'Primary text *'}</label><textarea rows="5" maxlength="2200" oninput="adsStudioSetDraftField('primaryText', this.value); updateAdsStudioCreativeCount(this)" class="glass-input w-full rounded-xl px-4 py-3" placeholder="${isAr ? 'اكتب الرسالة التي سيقرأها العميل...' : 'Write the message customers will see...'}">${Security.escapeHtml(d.primaryText || '')}</textarea><div id="ads-studio-copy-count" class="text-end text-xs text-slate-400">${String(d.primaryText || '').length}/2200</div></div>
-    <div class="grid gap-4 sm:grid-cols-2"><div><label class="block text-sm font-bold mb-2">${isAr ? 'العنوان' : 'Headline'}</label><input type="text" maxlength="255" value="${Security.escapeHtml(d.headline || '')}" oninput="adsStudioSetDraftField('headline', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" /></div><div><label class="block text-sm font-bold mb-2">${isAr ? 'زر الدعوة' : 'Call-to-action'}</label><select onchange="adsStudioSetDraftField('callToAction', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4">${ADS_STUDIO_CTA.map(([en, ar]) => `<option value="${en}" ${d.callToAction === en ? 'selected' : ''}>${isAr ? ar : en}</option>`).join('')}</select></div></div>
-    <div><label class="block text-sm font-bold mb-2">${isAr ? 'الوصف القصير' : 'Short description'}</label><input type="text" maxlength="500" value="${Security.escapeHtml(d.description || '')}" oninput="adsStudioSetDraftField('description', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" /></div>
-    <div><label class="block text-sm font-bold mb-2">${isAr ? 'الرابط أو رقم واتساب *' : 'Website, WhatsApp or Messenger destination *'}</label><input type="text" maxlength="500" value="${Security.escapeHtml(d.destination || '')}" oninput="adsStudioSetDraftField('destination', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" placeholder="https://... or +218..." /><p class="mt-2 text-xs text-slate-500">${isAr ? 'سنراجع الرابط قبل إطلاق الإعلان.' : 'The destination is checked during review.'}</p></div>
-    <div data-photo-paste-target="ads-studio" tabindex="0" class="rounded-2xl border border-slate-200 dark:border-slate-700 p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"><div class="flex flex-wrap items-center justify-between gap-3 mb-2"><label class="block text-sm font-bold">${isAr ? 'الصور (حتى 3)' : 'Images (up to 3)'}</label><div class="flex flex-wrap items-center gap-2"><span class="text-xs text-slate-500">${(d.creativeImages || []).length}/3</span><button type="button" onclick="takeNativePhoto('ads-studio')" class="min-h-11 px-3 rounded-xl border border-blue-200 dark:border-blue-800 text-xs font-bold text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/20 flex items-center gap-1.5"><i data-lucide="camera" class="w-3.5 h-3.5"></i>${isAr ? 'الكاميرا' : 'Camera'}</button><button type="button" onclick="pastePhotoFromClipboard('ads-studio')" class="min-h-11 px-3 rounded-xl border border-blue-200 dark:border-blue-800 text-xs font-bold text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/20 flex items-center gap-1.5"><i data-lucide="clipboard-paste" class="w-3.5 h-3.5"></i>${isAr ? 'لصق صورة' : 'Paste photo'}</button></div></div><div id="ads-studio-creative-preview">${renderAdsStudioCreativePreview()}</div><p class="mt-2 text-xs text-slate-500">${isAr ? 'انسخ صورة واضغط Ctrl+V هنا. على iPhone اختر JPEG أو إعداد «الأكثر توافقاً»؛ صور HEIC غير مدعومة حالياً.' : 'Copy an image and press Ctrl+V here. On iPhone, choose JPEG / Most Compatible; HEIC is not supported yet.'}</p><input id="ads-studio-image-input" type="file" accept="image/png,image/jpeg,image/webp" multiple class="hidden" onchange="onAdsStudioCreativeSelected(this)" /></div>
-  </div>`;
-}
-
-function updateAdsStudioCreativeCount(input) {
-  const node = document.getElementById('ads-studio-copy-count');
-  if (node) node.textContent = `${String(input?.value || '').length}/2200`;
-}
-
-function renderAdsStudioCreativePreview() {
-  const images = Array.isArray(_adsStudioDraft?.creativeImages) ? _adsStudioDraft.creativeImages : [];
-  const isAr = adsStudioIsAr();
-  return `<div class="grid grid-cols-2 gap-3 sm:grid-cols-3">${images.map((src, index) => `<div class="relative aspect-square overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-100"><button type="button" onclick="openReceiptPhotoViewerSources(_adsStudioDraft.creativeImages, ${index}, '${isAr ? 'معاينة الإعلان' : 'Creative preview'}')" class="absolute inset-0"><img src="${Security.escapeHtml(src)}" alt="${isAr ? 'صورة الإعلان' : 'Ad creative'} ${index + 1}" class="w-full h-full object-cover" /></button><button type="button" onclick="removeAdsStudioCreative(${index})" class="touch-target absolute top-1 ${isAr ? 'left-1' : 'right-1'} w-11 h-11 rounded-full bg-slate-950/75 text-white flex items-center justify-center" aria-label="${isAr ? 'حذف الصورة' : 'Remove image'}"><i data-lucide="trash-2" class="w-4 h-4"></i></button></div>`).join('')}${images.length < 3 ? `<button type="button" onclick="document.getElementById('ads-studio-image-input').click()" class="aspect-square min-h-32 rounded-2xl border-2 border-dashed border-blue-200 dark:border-blue-800 bg-blue-50/60 dark:bg-blue-900/10 text-blue-700 dark:text-blue-300 flex flex-col items-center justify-center gap-2 font-bold"><i data-lucide="image-plus" class="w-8 h-8"></i><span>${isAr ? 'إضافة صور' : 'Add images'}</span></button>` : ''}</div>`;
-}
-
-function onAdsStudioCreativeSelected(input) {
-  const files = Array.from(input?.files || []);
-  if (input) input.value = '';
-  return uploadAdsStudioCreativeFiles(files);
-}
-
-async function uploadAdsStudioCreativeFiles(fileList) {
-  const candidates = Array.from(fileList || []);
-  // Blank/generic MIME types are real JPEG/PNGs from Android SAF pickers —
-  // let compressImageToDataUrl sniff the magic bytes instead of rejecting
-  // here; isSafeAdsStudioCreativeSource still gates the OUTPUT to normalized
-  // png/jpeg/webp data URLs, so nothing unsupported can get through.
-  const formatFiles = candidates.filter(file => {
-    const t = String(file?.type || '').toLowerCase();
-    return !t || t === 'application/octet-stream' || ADS_STUDIO_ALLOWED_IMAGE_MIME_TYPES.has(t);
-  });
-  const rejectedCount = candidates.length - formatFiles.length;
-  if (rejectedCount > 0) {
-    showNotification(
-      adsStudioText('Unsupported image', 'صيغة صورة غير مدعومة'),
-      adsStudioText('Use PNG, JPEG or WebP images only.', 'استخدم صور PNG أو JPEG أو WebP فقط.'),
-      'warning'
-    );
-  }
-  const oversizedCount = formatFiles.filter(file => Number(file?.size) > ADS_STUDIO_MAX_SOURCE_IMAGE_BYTES).length;
-  const files = formatFiles.filter(file => !(Number(file?.size) > ADS_STUDIO_MAX_SOURCE_IMAGE_BYTES));
-  if (oversizedCount > 0) {
-    showNotification(adsStudioText('Image too large', 'الصورة كبيرة جداً'), adsStudioText('Each original image must be 20 MB or smaller.', 'يجب ألا يتجاوز حجم كل صورة أصلية 20 ميجابايت.'), 'warning');
-  }
-  if (!files.length) return;
-  const draftRef = _adsStudioDraft;
-  const uploadUserId = String(state.currentUser?.id || '');
-  if (!draftRef || !uploadUserId) return;
-  const existing = Array.isArray(draftRef.creativeImages) ? draftRef.creativeImages.slice() : [];
-  const available = Math.max(0, 3 - existing.length);
-  if (!available) return;
-  const token = ++_adsStudioPhotoToken;
-  const selected = files.slice(0, available);
-  if (selected.reduce((sum, file) => sum + Math.max(0, Number(file?.size) || 0), 0) > ADS_STUDIO_MAX_SELECTED_SOURCE_BYTES) {
-    showNotification(adsStudioText('Selection too large', 'الصور المحددة كبيرة جداً'), adsStudioText('Select up to 40 MB of original images at one time.', 'اختر صوراً أصلية بحجم إجمالي لا يتجاوز 40 ميجابايت في المرة الواحدة.'), 'warning');
-    return;
-  }
-  try {
-    const compressed = [];
-    for (const file of selected) {
-      const output = await compressImageToDataUrl(file);
-      if (!isSafeAdsStudioCreativeSource(output)) throw new Error('Unsupported compressed image output');
-      compressed.push(output);
-    }
-    if (
-      token !== _adsStudioPhotoToken ||
-      _adsStudioDraft !== draftRef ||
-      uploadUserId !== String(state.currentUser?.id || '') ||
-      state.currentView !== 'ads-studio' ||
-      _adsStudioActiveTab !== 'builder'
-    ) return;
-    const next = existing.concat(compressed.filter(Boolean));
-    const totalBytes = next.reduce((sum, src) => sum + adsStudioDataUrlDecodedBytes(src), 0);
-    if (totalBytes > ADS_STUDIO_MAX_TOTAL_CREATIVE_BYTES) {
-      showNotification(adsStudioText('Images too large', 'الصور كبيرة جداً'), adsStudioText('Combined images must be 5 MB or less after compression.', 'يجب ألا يتجاوز الحجم الإجمالي للصور 5 ميجابايت بعد الضغط.'), 'error');
-      return;
-    }
-    draftRef.creativeImages = next;
-    const wrap = document.getElementById('ads-studio-creative-preview');
-    if (wrap) { wrap.innerHTML = renderAdsStudioCreativePreview(); if (typeof IconQueue !== 'undefined') IconQueue.schedule(wrap); }
-  } catch (_) {
-    showNotification(adsStudioText('Upload failed', 'تعذر رفع الصورة'), adsStudioText('Please choose another image.', 'يرجى اختيار صورة أخرى.'), 'error');
-  }
-}
-
-function isSafeAdsStudioCreativeSource(value) {
-  const source = String(value || '').trim();
-  return isSafeReceiptPhotoSource(source) && /^data:image\/(?:png|jpe?g|webp);base64,[a-z0-9+/=]+$/i.test(source);
-}
-
-function adsStudioDataUrlDecodedBytes(value) {
-  const payload = String(value || '').split(',', 2)[1] || '';
-  if (!payload) return 0;
-  const padding = payload.endsWith('==') ? 2 : (payload.endsWith('=') ? 1 : 0);
-  return Math.max(0, Math.floor(payload.length * 3 / 4) - padding);
-}
-
-function adsStudioIsValidDestination(value) {
-  const raw = String(value || '').trim();
-  const compactPhone = raw.replace(/[\s().-]/g, '');
-  if (/^\+?[1-9][0-9]{7,14}$/.test(compactPhone)) return true;
-  if (!raw || /\s/.test(raw) || raw.includes('@')) return false;
-  const match = raw.match(/^https:\/\/([A-Za-z0-9.-]+)(?::[0-9]{1,5})?(?:[/?#].*)?$/i);
-  return !!match && match[1].includes('.');
-}
-
-function removeAdsStudioCreative(index) {
-  if (!_adsStudioDraft) return;
-  _adsStudioDraft.creativeImages = (Array.isArray(_adsStudioDraft.creativeImages) ? _adsStudioDraft.creativeImages : []).filter((_, i) => i !== Number(index));
-  _adsStudioPhotoToken++;
-  const wrap = document.getElementById('ads-studio-creative-preview');
-  if (wrap) { wrap.innerHTML = renderAdsStudioCreativePreview(); if (typeof IconQueue !== 'undefined') IconQueue.schedule(wrap); }
-}
-
-function renderAdsStudioAudienceStep() {
-  const d = _adsStudioDraft;
-  const isAr = adsStudioIsAr();
-  const locationText = (d.locations || []).join(', ');
-  const languageText = (d.languages || []).join(', ');
-  const interestText = (d.interests || []).join(', ');
-  return `<div class="space-y-5"><div><h3 class="text-lg font-black text-slate-900 dark:text-white">${isAr ? 'من تريد الوصول إليه؟' : 'Who should see this ad?'}</h3><p class="text-sm text-slate-500">${isAr ? 'ابدأ بجمهور واضح. سيتم التحقق من قيود ميتا أثناء المراجعة.' : 'Start with a clear audience. Meta restrictions are checked during review.'}</p></div>
-    <div><label class="block text-sm font-bold mb-2">${isAr ? 'المدن أو الدول *' : 'Cities or countries *'}</label><input type="text" value="${Security.escapeHtml(locationText)}" oninput="adsStudioSetListField('locations', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" placeholder="Libya, Tripoli, Benghazi" /><p class="mt-1 text-xs text-slate-500">${isAr ? 'افصل بين المواقع بفاصلة.' : 'Separate locations with commas.'}</p></div>
-    <div class="grid grid-cols-2 gap-4"><div><label class="block text-sm font-bold mb-2">${isAr ? 'أقل عمر' : 'Minimum age'}</label><input type="number" min="18" max="65" value="${Number(d.ageMin) || 18}" oninput="adsStudioSetDraftField('ageMin', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" /></div><div><label class="block text-sm font-bold mb-2">${isAr ? 'أعلى عمر' : 'Maximum age'}</label><input type="number" min="18" max="65" value="${Number(d.ageMax) || 65}" oninput="adsStudioSetDraftField('ageMax', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" /></div></div>
-    <div><label class="block text-sm font-bold mb-2">${isAr ? 'الجنس' : 'Gender'}</label><div class="grid grid-cols-3 gap-2">${[['all','All','الكل'],['female','Women','نساء'],['male','Men','رجال']].map(([value,en,ar]) => `<label class="touch-target min-h-12 rounded-xl border ${d.genders.includes(value) ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-slate-200 dark:border-slate-700'} flex items-center justify-center gap-2 font-bold"><input type="radio" name="ads-gender" value="${value}" ${d.genders.includes(value) ? 'checked' : ''} onchange="adsStudioToggleDraftArray('genders','${value}',this.checked,true); render()" class="sr-only" />${isAr ? ar : en}</label>`).join('')}</div></div>
-    <div><label class="block text-sm font-bold mb-2">${isAr ? 'اللغات' : 'Languages'}</label><input type="text" value="${Security.escapeHtml(languageText)}" oninput="adsStudioSetListField('languages', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" placeholder="Arabic, English" /></div>
-    <div><label class="block text-sm font-bold mb-2">${isAr ? 'الاهتمامات المقترحة' : 'Suggested interests'}</label><input type="text" value="${Security.escapeHtml(interestText)}" oninput="adsStudioSetListField('interests', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" placeholder="Online shopping, Fashion, Technology" /><p class="mt-1 text-xs text-slate-500">${isAr ? 'اقتراحات فقط؛ ميتا تحدد الخيارات المتاحة للحساب.' : 'Suggestions only; Meta determines what is available to the account.'}</p></div>
-    <div><label class="block text-sm font-bold mb-2">${isAr ? 'فئة إعلانية خاصة' : 'Special Ad Category'}</label><select onchange="_adsStudioDraft.specialAdCategories = this.value ? [this.value] : []" class="glass-input min-h-12 w-full rounded-xl px-4"><option value="" ${!d.specialAdCategories.length ? 'selected' : ''}>${isAr ? 'لا توجد' : 'None'}</option><option value="credit" ${d.specialAdCategories.includes('credit') ? 'selected' : ''}>${isAr ? 'الائتمان والخدمات المالية' : 'Credit / financial products'}</option><option value="employment" ${d.specialAdCategories.includes('employment') ? 'selected' : ''}>${isAr ? 'التوظيف' : 'Employment'}</option><option value="housing" ${d.specialAdCategories.includes('housing') ? 'selected' : ''}>${isAr ? 'السكن' : 'Housing'}</option><option value="social_issues_elections_politics" ${d.specialAdCategories.includes('social_issues_elections_politics') ? 'selected' : ''}>${isAr ? 'القضايا الاجتماعية أو الانتخابات أو السياسة' : 'Social issues, elections or politics'}</option></select><div class="mt-2 flex items-start gap-2 rounded-xl bg-amber-50 dark:bg-amber-900/20 p-3 text-xs text-amber-800 dark:text-amber-200"><i data-lucide="triangle-alert" class="w-4 h-4 flex-shrink-0"></i><span>${isAr ? 'اختيار الفئة الصحيحة إلزامي وقد يحد من العمر والجنس والاهتمامات.' : 'The correct category is mandatory and may restrict age, gender and interest targeting.'}</span></div></div>
-  </div>`;
-}
-
-function renderAdsStudioBudgetStep() {
-  const d = _adsStudioDraft;
-  const isAr = adsStudioIsAr();
-  return `<div class="space-y-5"><div><h3 class="text-lg font-black text-slate-900 dark:text-white">${isAr ? 'الميزانية والمدة' : 'Budget and schedule'}</h3><p class="text-sm text-slate-500">${isAr ? 'هذه ميزانية مقترحة للمراجعة وليست عملية دفع.' : 'This is a requested planning budget, not a payment.'}</p></div>
-    <div><label class="block text-sm font-bold mb-2">${isAr ? 'نوع الميزانية' : 'Budget type'}</label><div class="grid grid-cols-2 gap-3"><label class="touch-target min-h-14 rounded-xl border-2 px-4 flex items-center gap-3 ${d.budgetType === 'lifetime' ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-slate-200 dark:border-slate-700'}"><input type="radio" name="budget-type" value="lifetime" ${d.budgetType === 'lifetime' ? 'checked' : ''} onchange="adsStudioSetDraftField('budgetType',this.value);render()" class="sr-only" /><i data-lucide="calendar-range" class="w-5 h-5 text-blue-600"></i><span class="font-bold">${isAr ? 'إجمالي الحملة' : 'Lifetime'}</span></label><label class="touch-target min-h-14 rounded-xl border-2 px-4 flex items-center gap-3 ${d.budgetType === 'daily' ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-slate-200 dark:border-slate-700'}"><input type="radio" name="budget-type" value="daily" ${d.budgetType === 'daily' ? 'checked' : ''} onchange="adsStudioSetDraftField('budgetType',this.value);render()" class="sr-only" /><i data-lucide="sun" class="w-5 h-5 text-blue-600"></i><span class="font-bold">${isAr ? 'يومي' : 'Daily'}</span></label></div></div>
-    <div><label class="block text-sm font-bold mb-2">${d.budgetType === 'daily' ? (isAr ? 'الميزانية اليومية بالدولار *' : 'Daily budget in USD *') : (isAr ? 'إجمالي الميزانية بالدولار *' : 'Total budget in USD *')}</label><div class="relative"><span class="absolute ${isAr ? 'right-4' : 'left-4'} top-1/2 -translate-y-1/2 font-black text-blue-600">$</span><input type="number" min="1" max="1000000" step="0.01" value="${(Math.max(0, Number(d.budgetMinorUSD) || 0) / 100).toFixed(2)}" oninput="adsStudioSetDraftField('budgetMinorUSD', this.value)" class="glass-input min-h-14 w-full rounded-xl ${isAr ? 'pr-9 pl-4' : 'pl-9 pr-4'} text-xl font-black" /></div></div>
-    <div class="grid gap-4 sm:grid-cols-2"><div><label class="block text-sm font-bold mb-2">${isAr ? 'تاريخ البدء *' : 'Start date *'}</label><input type="date" value="${Security.escapeHtml(d.startDate || '')}" onchange="adsStudioSetDraftField('startDate',this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" /></div><div><label class="block text-sm font-bold mb-2">${isAr ? 'تاريخ الانتهاء *' : 'End date *'}</label><input type="date" value="${Security.escapeHtml(d.endDate || '')}" onchange="adsStudioSetDraftField('endDate',this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" /></div></div>
-    <div><label class="block text-sm font-bold mb-2">${isAr ? 'ملاحظات لفريق المراجعة' : 'Notes for the review team'}</label><textarea rows="3" maxlength="1000" oninput="adsStudioSetDraftField('notes', this.value)" class="glass-input w-full rounded-xl px-4 py-3" placeholder="${isAr ? 'وقت مفضل، عرض خاص، تفاصيل إضافية...' : 'Preferred time, special offer, extra context...'}">${Security.escapeHtml(d.notes || '')}</textarea></div>
-    <div class="rounded-2xl bg-emerald-50 dark:bg-emerald-900/20 p-4 text-sm text-emerald-800 dark:text-emerald-200 flex items-start gap-3"><i data-lucide="shield-check" class="w-5 h-5 flex-shrink-0"></i><span>${isAr ? 'لن نرفع الميزانية أو نطلق الإعلان دون تأكيد وموافقة. عند إضافة الربط المباشر، سيتم إنشاء إعلانات ميتا في وضع الإيقاف المؤقت أولاً.' : 'We will not increase the budget or launch without confirmation. Future Meta publishing will create campaigns paused first.'}</span></div>
-  </div>`;
-}
-
-function renderAdsStudioReviewStep() {
-  const d = _adsStudioDraft;
-  const isAr = adsStudioIsAr();
-  const objective = adsStudioObjectiveLabel(d.objective);
-  const special = (d.specialAdCategories || []).join(', ') || (isAr ? 'لا توجد' : 'None');
-  const rows = [
-    [isAr ? 'اسم الحملة' : 'Campaign', d.name || '—'],
-    [isAr ? 'الهدف' : 'Objective', objective],
-    [isAr ? 'المنصات' : 'Platforms', (d.platforms || []).join(' + ') || '—'],
-    [isAr ? 'الصفحة' : 'Page', d.pageName || '—'],
-    [isAr ? 'الوجهة' : 'Destination', d.destination || '—'],
-    [isAr ? 'الجمهور' : 'Audience', `${(d.locations || []).join(', ') || '—'} · ${d.ageMin || 18}–${d.ageMax || 65}`],
-    [isAr ? 'الميزانية' : 'Budget', `${adsStudioMoney(d.budgetMinorUSD)} ${d.budgetType === 'daily' ? (isAr ? 'يومياً' : 'daily') : (isAr ? 'إجمالي' : 'lifetime')}`],
-    [isAr ? 'المدة' : 'Schedule', `${adsStudioFormatDate(d.startDate)} → ${adsStudioFormatDate(d.endDate)}`],
-    [isAr ? 'الفئة الخاصة' : 'Special category', special]
-  ];
-  return `<div class="space-y-5"><div><h3 class="text-lg font-black text-slate-900 dark:text-white">${isAr ? 'راجع طلبك قبل الإرسال' : 'Review before submitting'}</h3><p class="text-sm text-slate-500">${isAr ? 'يمكن لفريقنا طلب تعديلات قبل الموافقة.' : 'Our team may request changes before approval.'}</p></div><div class="grid gap-3 sm:grid-cols-2">${rows.map(([label,value]) => `<div class="rounded-xl bg-slate-50 dark:bg-slate-800/60 p-4"><div class="text-xs font-bold uppercase tracking-wide text-slate-400">${label}</div><div class="mt-1 break-words font-bold text-slate-800 dark:text-slate-100">${Security.escapeHtml(String(value))}</div></div>`).join('')}</div><div class="rounded-2xl border border-slate-200 dark:border-slate-700 p-4"><div class="text-xs font-bold uppercase tracking-wide text-slate-400 mb-2">${isAr ? 'معاينة النص' : 'Copy preview'}</div><p class="whitespace-pre-wrap text-slate-800 dark:text-slate-100">${Security.escapeHtml(d.primaryText || '—')}</p></div><label class="flex items-start gap-3 rounded-2xl bg-blue-50 dark:bg-blue-900/20 p-4 text-sm text-blue-900 dark:text-blue-100"><input id="ads-studio-confirm-accurate" type="checkbox" ${_adsStudioConfirmationChecked ? 'checked' : ''} onchange="_adsStudioConfirmationChecked = this.checked" class="mt-0.5 w-5 h-5 accent-blue-600" /><span>${isAr ? 'أؤكد أن المعلومات صحيحة، وأنني أملك حق استخدام الصور والنص والصفحة، وأن الفئة الإعلانية الخاصة محددة بشكل صحيح.' : 'I confirm the information is accurate, I have the right to use this copy, media and Page, and the Special Ad Category is correct.'}</span></label></div>`;
-}
-
-function adsStudioValidateStep(step, draft = _adsStudioDraft) {
-  const errors = [];
-  const d = draft || {};
-  if (step >= 1) {
-    if (!String(d.name || '').trim()) errors.push(adsStudioText('Campaign name is required.', 'اسم الحملة مطلوب.'));
-    if (!ADS_STUDIO_OBJECTIVES.some(item => item.id === d.objective)) errors.push(adsStudioText('Choose a campaign objective.', 'اختر هدف الحملة.'));
-    if (!Array.isArray(d.platforms) || !d.platforms.length) errors.push(adsStudioText('Choose Facebook or Instagram.', 'اختر فيسبوك أو إنستغرام.'));
-    if (!String(d.pageName || '').trim()) errors.push(adsStudioText('Page or account name is required.', 'اسم الصفحة أو الحساب مطلوب.'));
-  }
-  if (step >= 2) {
-    if (!String(d.primaryText || '').trim()) errors.push(adsStudioText('Primary ad text is required.', 'النص الأساسي للإعلان مطلوب.'));
-    if (!String(d.destination || '').trim()) errors.push(adsStudioText('A website, WhatsApp or Messenger destination is required.', 'رابط الموقع أو واتساب أو ماسنجر مطلوب.'));
-    else if (!adsStudioIsValidDestination(d.destination)) errors.push(adsStudioText('Use an HTTPS website/link or an international phone number.', 'استخدم رابط HTTPS أو رقم هاتف دولي صحيح.'));
-    const hasSafeCreative = (Array.isArray(d.creativeImages) && d.creativeImages.some(isSafeAdsStudioCreativeSource)) ||
-      (d._mediaOmitted === true && getEntityPhotoCountHint('adCampaignRequests', d) > 0);
-    if (!hasSafeCreative) errors.push(adsStudioText('Add at least one PNG, JPEG or WebP creative image.', 'أضف صورة إعلانية واحدة على الأقل بصيغة PNG أو JPEG أو WebP.'));
-  }
-  if (step >= 3) {
-    if (!Array.isArray(d.locations) || !d.locations.length) errors.push(adsStudioText('Add at least one location.', 'أضف موقعاً واحداً على الأقل.'));
-    const min = Number(d.ageMin), max = Number(d.ageMax);
-    if (!Number.isInteger(min) || !Number.isInteger(max) || min < 18 || max > 65 || min > max) errors.push(adsStudioText('Age range must be between 18 and 65.', 'يجب أن يكون العمر بين 18 و65.'));
-  }
-  if (step >= 4) {
-    if (!(Number(d.budgetMinorUSD) > 0)) errors.push(adsStudioText('Budget must be greater than zero.', 'يجب أن تكون الميزانية أكبر من صفر.'));
-    if (!String(d.startDate || '') || !String(d.endDate || '') || String(d.startDate) < _adsStudioDateOffset(0) || String(d.endDate) < String(d.startDate)) errors.push(adsStudioText('Choose a start date from today onward and a valid end date.', 'اختر تاريخ بداية من اليوم فصاعداً وتاريخ نهاية صحيحاً.'));
-  }
-  return errors;
-}
-
-function moveAdsStudioWizard(delta) {
-  const direction = Number(delta) || 0;
-  if (direction > 0) {
-    const errors = adsStudioValidateStep(_adsStudioWizardStep);
-    if (errors.length) { showNotification(adsStudioText('Complete this step', 'أكمل هذه الخطوة'), errors[0], 'error'); return; }
-  }
-  _adsStudioWizardStep = Math.min(5, Math.max(1, _adsStudioWizardStep + direction));
-  render();
-  try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (_) {}
-}
-
-function sanitizedAdsStudioDraft() {
-  const d = _adsStudioDraft || newAdsStudioDraft();
-  const text = (value, max) => Security.sanitizeInput(String(value || ''), { maxLength: max }).trim();
-  const list = (values, maxItems = 30) => Array.from(new Set((Array.isArray(values) ? values : []).map(value => text(value, 80)).filter(Boolean))).slice(0, maxItems);
-  return {
-    name: text(d.name, 120),
-    objective: text(d.objective, 40),
-    platforms: list(d.platforms, 3),
-    pageName: text(d.pageName, 160),
-    primaryText: text(d.primaryText, 2200),
-    headline: text(d.headline, 255),
-    description: text(d.description, 500),
-    callToAction: text(d.callToAction, 80),
-    destination: text(d.destination, 500),
-    locations: list(d.locations),
-    ageMin: Math.max(18, Math.min(65, Math.trunc(Number(d.ageMin) || 18))),
-    ageMax: Math.max(18, Math.min(65, Math.trunc(Number(d.ageMax) || 65))),
-    genders: list(d.genders, 3),
-    languages: list(d.languages),
-    interests: list(d.interests),
-    startDate: text(d.startDate, 10),
-    endDate: text(d.endDate, 10),
-    budgetMinorUSD: Math.max(0, Math.min(100000000, Math.trunc(Number(d.budgetMinorUSD) || 0))),
-    budgetType: d.budgetType === 'daily' ? 'daily' : 'lifetime',
-    notes: text(d.notes, 1000),
-    creativeImages: (Array.isArray(d.creativeImages) ? d.creativeImages : []).filter(isSafeAdsStudioCreativeSource).slice(0, 3),
-    creativeAssetIds: list(d.creativeAssetIds, 20),
-    specialAdCategories: list(d.specialAdCategories, 4)
-  };
-}
-
-function setAdsStudioActionButtonBusy(button, busy) {
-  if (!button) return;
-  button.disabled = !!busy;
-  if (busy) button.setAttribute('aria-busy', 'true');
-  else button.removeAttribute('aria-busy');
-}
-
-function saveAdsStudioDraft(closeAfter = true, button = null) {
-  if (_adsStudioSavePromise) return _adsStudioSavePromise;
-  setAdsStudioActionButtonBusy(button, true);
-  const operation = saveAdsStudioDraftOnce(closeAfter);
-  _adsStudioSavePromise = operation;
-  const cleanup = () => {
-    if (_adsStudioSavePromise === operation) _adsStudioSavePromise = null;
-    setAdsStudioActionButtonBusy(button, false);
-  };
-  operation.then(cleanup, cleanup);
-  return operation;
-}
-
-async function saveAdsStudioDraftOnce(closeAfter = true, stabilityAttempt = 0) {
-  if (!adsStudioCanCreate()) return null;
-  const draftAtSaveStart = _adsStudioDraft;
-  const saveUserId = String(state.currentUser?.id || '');
-  const payload = sanitizedAdsStudioDraft();
-  const payloadFingerprint = JSON.stringify(payload);
-  if (!payload.name) {
-    showNotification(adsStudioText('Name required', 'الاسم مطلوب'), adsStudioText('Enter a campaign name before saving.', 'اكتب اسم الحملة قبل الحفظ.'), 'error');
-    return null;
-  }
-  let saved = false;
-  let id = _adsStudioEditingId;
-  if (id) {
-    const current = findVisibleAdsStudioCampaign(id);
-    if (!current || !['Draft', 'Changes Requested'].includes(String(current.status || 'Draft'))) {
-      showNotification(adsStudioText('Cannot save', 'تعذر الحفظ'), adsStudioText('This campaign is no longer editable. Refresh the list.', 'لم تعد هذه الحملة قابلة للتعديل. حدّث القائمة.'), 'error');
-      return null;
-    }
-    saved = await updateRecord(state.adCampaignRequests, id, payload, current._lastModified);
-  } else {
-    id = Security.generateSecureId('campaign');
-    saved = await addRecord(state.adCampaignRequests, { id, ...payload, status: 'Draft', createdAt: new Date().toISOString() });
-  }
-  if (!saved) return null;
-  const current = findVisibleAdsStudioCampaign(id);
-  // Network completion must not overwrite fields typed while this save was in
-  // flight, and must never resurrect a draft after an auth/session reset.
-  const sameSaveContext = _adsStudioDraft === draftAtSaveStart
-    && saveUserId === String(state.currentUser?.id || '');
-  if (!sameSaveContext) return null;
-  _adsStudioEditingId = id;
-  if (current) {
-    const liveDraft = _adsStudioDraft;
-    _adsStudioDraft = {
-      ...current,
-      ...liveDraft,
-      creativeImages: Array.isArray(liveDraft?.creativeImages) ? liveDraft.creativeImages.slice(0, 3) : payload.creativeImages
+  if (_studioBundlePromise) return _studioBundlePromise;
+  _studioBundleState = 'loading';
+  _studioBundlePromise = new Promise((resolve) => {
+    const tag = document.createElement('script');
+    tag.src = _studioBundleUrl();
+    tag.onload = () => {
+      _studioBundleState = adsStudioBundleReady() ? 'ready' : 'failed';
+      if (_studioBundleState === 'ready' && state.currentView === 'ads-studio') {
+        // A deep-linked ?tab= was skipped before the bundle existed.
+        try { if (typeof restoreAdsStudioTabFromUrl === 'function') restoreAdsStudioTabFromUrl(); } catch (_) {}
+        try { render(); } catch (_) {}
+      }
+      resolve();
     };
-  }
-  // A customer can continue typing while a slow mobile upload is in flight.
-  // Save the newest revision before closing or submitting; after three rapid
-  // changes, keep the builder open instead of ever submitting stale content.
-  if (JSON.stringify(sanitizedAdsStudioDraft()) !== payloadFingerprint) {
-    if (stabilityAttempt < 2) return saveAdsStudioDraftOnce(closeAfter, stabilityAttempt + 1);
-    showNotification(
-      adsStudioText('Draft kept open', 'تم إبقاء المسودة مفتوحة'),
-      adsStudioText('Your latest edits are safe here. Pause typing and press Save again.', 'تعديلاتك الأخيرة آمنة هنا. توقف عن الكتابة واضغط حفظ مرة أخرى.'),
-      'warning'
-    );
-    return null;
-  }
-  showNotification(adsStudioText('Draft saved', 'تم حفظ المسودة'), adsStudioText('Your campaign is saved safely.', 'تم حفظ حملتك بأمان.'), 'success');
-  if (closeAfter) setAdsStudioTab('campaigns');
-  return current || findVisibleAdsStudioCampaign(id);
-}
-
-function upsertAdsStudioEntity(entity) {
-  let data = entity?.data ? Security.sanitizeObject(entity.data) : null;
-  if (!data?.id) return null;
-  if (isServerModeEnabled() && typeof makeLightweightMediaRecord === 'function') {
-    data = makeLightweightMediaRecord('adCampaignRequests', data);
-  }
-  const existingIndex = (state.adCampaignRequests || []).findIndex(item => String(item?.id || '') === String(data.id));
-  if (existingIndex === -1) state.adCampaignRequests.unshift(data);
-  else state.adCampaignRequests[existingIndex] = data;
-  clearCollectionCorruption('adCampaignRequests');
-  markCollectionDirty('adCampaignRequests');
-  saveState();
-  return data;
-}
-
-function submitAdsStudioCampaign(id, button = null) {
-  const campaignId = String(id || '');
-  if (_adsStudioSubmitPromises.has(campaignId)) return _adsStudioSubmitPromises.get(campaignId);
-  setAdsStudioActionButtonBusy(button, true);
-  const operation = submitAdsStudioCampaignOnce(campaignId);
-  _adsStudioSubmitPromises.set(campaignId, operation);
-  const cleanup = () => {
-    if (_adsStudioSubmitPromises.get(campaignId) === operation) _adsStudioSubmitPromises.delete(campaignId);
-    setAdsStudioActionButtonBusy(button, false);
-  };
-  operation.then(cleanup, cleanup);
-  return operation;
-}
-
-async function submitAdsStudioCampaignOnce(id) {
-  const campaign = findVisibleAdsStudioCampaign(id);
-  if (!campaign || !['Draft', 'Changes Requested'].includes(String(campaign.status || 'Draft'))) return false;
-  const errors = adsStudioValidateStep(4, campaign);
-  if (errors.length) {
-    showNotification(adsStudioText('Campaign incomplete', 'الحملة غير مكتملة'), errors[0], 'error');
-    await startAdsStudioCampaign(id);
-    return false;
-  }
-  // Client mirror of the server money gate.
-  const _budgetMinor = Math.max(parseInt(campaign.budgetMinorUSD, 10) || 0, 0);
-  if (String(campaign.createdBy || '') === String(state.currentUser?.id || '')
-      && adsStudioWalletAvailableMinor() < _budgetMinor) {
-    showNotification(
-      adsStudioText('Not enough wallet balance', 'رصيد المحفظة غير كافٍ'),
-      adsStudioText('Charge your wallet first — the budget is held from it when you submit.', 'اشحن محفظتك أولاً — الميزانية تُحجز منها عند الإرسال.'),
-      'error'
-    );
-    _adsStudioActiveTab = 'dashboard';
-    try { updateUrlParams({ tab: 'dashboard' }, true); } catch (_) {}
-    render();
-    return false;
-  }
-  try {
-    if (isServerModeEnabled()) {
-      const operationId = Security.generateSecureId('campaign-submit');
-      const entity = await apiSubmitAdCampaignRequest(campaign.id, Number(campaign._lastModified), operationId);
-      upsertAdsStudioEntity(entity);
-    } else {
-      // No server -> no wallet holds/captures: refuse instead of pretending.
-      showNotification(
-        adsStudioText('Server connection required', 'يتطلب اتصال الخادم'),
-        adsStudioText('Campaign budgets are held from the wallet, which needs the server connection.', 'ميزانية الحملة تُحجز من المحفظة، وهذا يتطلب اتصال الخادم.'),
-        'error'
-      );
-      return false;
-    }
-    showNotification(adsStudioText('Sent for review', 'تم الإرسال للمراجعة'), adsStudioText('Your team can now review this campaign.', 'يمكن للفريق الآن مراجعة هذه الحملة.'), 'success');
-    _adsStudioDraft = null;
-    _adsStudioEditingId = '';
-    _adsStudioConfirmationChecked = false;
-    _adsStudioActiveTab = 'campaigns';
-    try { updateUrlParams({ tab: 'campaigns' }, true); } catch (_) {}
-    render();
-    return true;
-  } catch (error) {
-    showNotification(adsStudioText('Could not submit', 'تعذر الإرسال'), error?.message || adsStudioText('Refresh and try again.', 'حدّث الصفحة وحاول مرة أخرى.'), 'error');
-    return false;
-  }
-}
-
-function saveAndSubmitAdsStudioDraft(button = null) {
-  if (_adsStudioSaveAndSubmitPromise) return _adsStudioSaveAndSubmitPromise;
-  setAdsStudioActionButtonBusy(button, true);
-  const operation = saveAndSubmitAdsStudioDraftOnce();
-  _adsStudioSaveAndSubmitPromise = operation;
-  const cleanup = () => {
-    if (_adsStudioSaveAndSubmitPromise === operation) _adsStudioSaveAndSubmitPromise = null;
-    setAdsStudioActionButtonBusy(button, false);
-  };
-  operation.then(cleanup, cleanup);
-  return operation;
-}
-
-async function saveAndSubmitAdsStudioDraftOnce() {
-  const errors = adsStudioValidateStep(4);
-  if (errors.length) { showNotification(adsStudioText('Campaign incomplete', 'الحملة غير مكتملة'), errors[0], 'error'); return; }
-  const confirmation = document.getElementById('ads-studio-confirm-accurate');
-  if (confirmation) _adsStudioConfirmationChecked = !!confirmation.checked;
-  if (!_adsStudioConfirmationChecked) {
-    showNotification(adsStudioText('Confirmation required', 'التأكيد مطلوب'), adsStudioText('Confirm the information and media rights before submitting.', 'أكد صحة المعلومات وحقوق استخدام الصور قبل الإرسال.'), 'warning');
-    return;
-  }
-  const saved = await saveAdsStudioDraft(false);
-  if (saved?.id) await submitAdsStudioCampaign(saved.id);
-}
-
-async function openAdsStudioCreativeViewer(id, index = 0, button = null) {
-  let campaign = findVisibleAdsStudioCampaign(id);
-  if (!campaign) return;
-  const label = button?.querySelector?.('span');
-  const previous = label?.textContent || '';
-  if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
-  if (label) label.textContent = adsStudioText('Loading...', 'جارٍ التحميل...');
-  try {
-    campaign = await ensureEntityMediaLoaded('adCampaignRequests', id) || campaign;
-    openReceiptPhotoViewerSources(Array.isArray(campaign.creativeImages) ? campaign.creativeImages : [], index, adsStudioText('Campaign creative', 'صور الحملة'));
-  } catch (_) {
-    showNotification(adsStudioText('Images unavailable', 'الصور غير متاحة'), adsStudioText('Check the connection and try again.', 'تحقق من الاتصال وحاول مرة أخرى.'), 'error');
-  } finally {
-    if (button) { button.disabled = false; button.removeAttribute('aria-busy'); }
-    if (label) label.textContent = previous;
-  }
-}
-
-function renderAdsStudioReviewQueue() {
-  const isAr = adsStudioIsAr();
-  if (!adsStudioCanReview()) return renderAdsStudioEmptyState();
-  const queue = getVisibleAdsStudioCampaigns().filter(item => item.status === 'Submitted');
-  return `<section><div class="mb-5"><h2 class="text-2xl font-black text-slate-900 dark:text-white">${isAr ? 'طلبات تحتاج المراجعة' : 'Campaign review queue'}</h2><p class="text-sm text-slate-500">${isAr ? 'الموافقة هنا لا تنشر إعلاناً ولا تخصم أي مبلغ.' : 'Approval here does not publish an ad or charge money.'}</p></div><div class="space-y-5">${queue.length ? queue.map(campaign => {
-    const safeId = Security.escapeHtml(String(campaign.id || ''));
-    const note = Security.escapeHtml(String(_adsStudioReviewNotes[String(campaign.id || '')] || ''));
-    return `${renderAdsStudioCampaignCard(campaign)}<div class="-mt-3 rounded-b-2xl border border-t-0 border-blue-200 dark:border-blue-800 bg-blue-50/70 dark:bg-blue-900/10 p-4"><label class="block text-sm font-bold mb-2">${isAr ? 'ملاحظة القرار' : 'Decision note'}</label><textarea id="ads-review-note-${safeId}" rows="2" maxlength="1000" oninput="setAdsStudioReviewNote('${safeId}', this.value)" class="glass-input w-full rounded-xl px-4 py-3" placeholder="${isAr ? 'اشرح أي تعديل مطلوب...' : 'Explain any requested change...'}">${note}</textarea><div class="mt-3 grid gap-2 sm:grid-cols-3"><button type="button" onclick="reviewAdsStudioCampaign('${safeId}','Changes Requested', this)" class="touch-target min-h-12 rounded-xl bg-orange-100 dark:bg-orange-900/30 text-orange-800 dark:text-orange-200 font-bold disabled:opacity-60">${isAr ? 'طلب تعديلات' : 'Request changes'}</button><button type="button" onclick="reviewAdsStudioCampaign('${safeId}','Rejected', this)" class="touch-target min-h-12 rounded-xl bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-200 font-bold disabled:opacity-60">${isAr ? 'رفض' : 'Reject'}</button><button type="button" onclick="reviewAdsStudioCampaign('${safeId}','Approved', this)" class="touch-target min-h-12 rounded-xl bg-emerald-600 text-white font-black disabled:opacity-60">${isAr ? 'موافقة' : 'Approve'}</button></div></div>`;
-  }).join('') : `<div class="glass-panel rounded-2xl p-10 text-center"><i data-lucide="badge-check" class="w-12 h-12 mx-auto text-emerald-400 mb-3"></i><h3 class="font-black text-lg text-slate-900 dark:text-white">${isAr ? 'تمت مراجعة كل الطلبات' : 'Review queue is clear'}</h3><p class="text-sm text-slate-500 mt-1">${isAr ? 'ستظهر الحملات الجديدة هنا بعد الإرسال.' : 'New submitted campaigns will appear here.'}</p></div>`}</div></section>`;
-}
-
-function setAdsStudioReviewNote(id, value) {
-  const campaignId = String(id || '');
-  if (!campaignId) return;
-  _adsStudioReviewNotes[campaignId] = String(value || '').slice(0, 1000);
-}
-
-function reviewAdsStudioCampaign(id, decision, button = null) {
-  const campaignId = String(id || '');
-  if (_adsStudioReviewPromises.has(campaignId)) return _adsStudioReviewPromises.get(campaignId);
-  setAdsStudioActionButtonBusy(button, true);
-  const operation = reviewAdsStudioCampaignOnce(campaignId, decision);
-  _adsStudioReviewPromises.set(campaignId, operation);
-  const cleanup = () => {
-    if (_adsStudioReviewPromises.get(campaignId) === operation) _adsStudioReviewPromises.delete(campaignId);
-    setAdsStudioActionButtonBusy(button, false);
-  };
-  operation.then(cleanup, cleanup);
-  return operation;
-}
-
-async function reviewAdsStudioCampaignOnce(id, decision) {
-  if (!adsStudioCanReview() || !['Approved', 'Changes Requested', 'Rejected'].includes(decision)) return;
-  const campaign = findVisibleAdsStudioCampaign(id);
-  if (!campaign || campaign.status !== 'Submitted') return;
-  const inputValue = document.getElementById(`ads-review-note-${id}`)?.value;
-  if (inputValue !== undefined) setAdsStudioReviewNote(id, inputValue);
-  const note = Security.sanitizeInput(String(_adsStudioReviewNotes[id] || ''), { maxLength: 1000 }).trim();
-  if (decision !== 'Approved' && !note) {
-    showNotification(adsStudioText('Add a note', 'أضف ملاحظة'), adsStudioText('Explain what the customer should change.', 'اشرح للعميل ما الذي يجب تعديله.'), 'warning');
-    return;
-  }
-  if (decision === 'Approved' && !confirm(adsStudioText('Approve this request? This records approval but does not publish or spend money.', 'الموافقة على هذا الطلب؟ سيتم تسجيل الموافقة فقط ولن يتم النشر أو صرف المال.'))) return;
-  try {
-    if (isServerModeEnabled()) {
-      const operationId = Security.generateSecureId('campaign-review');
-      const entity = await apiReviewAdCampaignRequest(campaign.id, Number(campaign._lastModified), decision, note, operationId);
-      upsertAdsStudioEntity(entity);
-    } else {
-      const saved = await updateRecord(state.adCampaignRequests, campaign.id, { status: decision, reviewNote: note, reviewedAt: new Date().toISOString(), reviewedBy: state.currentUser?.id }, campaign._lastModified);
-      if (!saved) return;
-    }
-    delete _adsStudioReviewNotes[id];
-    showNotification(adsStudioText('Decision saved', 'تم حفظ القرار'), adsStudioText(`Campaign marked ${decision}.`, `تم تحديث حالة الحملة: ${decision}.`), 'success');
-    render();
-  } catch (error) {
-    showNotification(adsStudioText('Review failed', 'تعذر حفظ المراجعة'), error?.message || adsStudioText('Refresh and try again.', 'حدّث الصفحة وحاول مرة أخرى.'), 'error');
-  }
-}
-
-// ---- Wallet ----
-let _adsStudioWalletMine = null;
-let _adsStudioWalletPendingAll = null;
-let _adsStudioWalletBusy = false;
-let _adsStudioWalletForUser = '';
-
-function resetAdsStudioWalletCache() {
-  _adsStudioWalletMine = null;
-  _adsStudioWalletPendingAll = null;
-  _adsStudioWalletForUser = '';
-}
-
-function adsStudioWalletHeldMinor() {
-  const uid = String(state.currentUser?.id || '');
-  return (Array.isArray(state.adCampaignRequests) ? state.adCampaignRequests : [])
-    .filter(c => c && !c._deleted && String(c.createdBy || '') === uid && String(c.status || '') === 'Submitted')
-    .reduce((sum, c) => sum + Math.max(parseInt(c.budgetMinorUSD, 10) || 0, 0), 0);
-}
-
-function adsStudioWalletBalanceMinor() {
-  return WALLET.getBalanceMinor(String(state.currentUser?.id || ''), 'USD');
-}
-
-function adsStudioWalletAvailableMinor() {
-  return adsStudioWalletBalanceMinor() - adsStudioWalletHeldMinor();
-}
-
-async function refreshAdsStudioWallet() {
-  if (_adsStudioWalletBusy) return;
-  _adsStudioWalletBusy = true;
-  const forUser = String(state.currentUser?.id || '');
-  try {
-    const mine = await apiWalletPaymentRequestList('mine');
-    let pendingAll = null;
-    if (isCurrentUserAdmin()) {
-      const pending = await apiWalletPaymentRequestList('pending');
-      pendingAll = Array.isArray(pending?.requests) ? pending.requests : [];
-    }
-    // Never show one account's wallet rows to another after a user switch.
-    if (forUser === String(state.currentUser?.id || '')) {
-      _adsStudioWalletMine = Array.isArray(mine?.requests) ? mine.requests : [];
-      _adsStudioWalletPendingAll = pendingAll;
-      _adsStudioWalletForUser = forUser;
-    }
-  } catch (_) {
-    if (forUser === String(state.currentUser?.id || '')) {
-      _adsStudioWalletMine = _adsStudioWalletMine || [];
-    }
-  } finally {
-    _adsStudioWalletBusy = false;
-  }
-  if (state.currentView === 'ads-studio') render();
-}
-
-async function adsStudioCreateWalletCharge() {
-  const input = document.getElementById('ads-studio-charge-amount');
-  const method = String(document.querySelector('input[name="ads-studio-charge-method"]:checked')?.value || 'bank_transfer');
-  const amountUSD = parseFloat(input?.value || '0');
-  const amountMinor = Math.round((Number.isFinite(amountUSD) ? amountUSD : 0) * 100);
-  if (amountMinor < 100) {
-    showNotification(adsStudioText('Invalid amount', 'مبلغ غير صالح'), adsStudioText('Minimum charge is $1.00', 'أقل مبلغ للشحن هو 1 دولار'), 'error');
-    return;
-  }
-  try {
-    const created = await apiWalletPaymentRequestCreate(amountMinor, method, `paycreate-${state.currentUser?.id || 'me'}-${Date.now()}`);
-    showNotification(
-      adsStudioText('Charge request created', 'تم إنشاء طلب الشحن'),
-      adsStudioText(
-        `Pay with reference ${created?.data?.reference || ''} — the wallet fills up as soon as the payment is confirmed.`,
-        `ادفع بذكر الرمز ${created?.data?.reference || ''} — تتعبأ المحفظة فور تأكيد الدفع.`
-      ),
-      'success'
-    );
-  } catch (e) {
-    const detail = (e?.payload && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
-    showNotification(adsStudioText('Could not create the charge', 'تعذر إنشاء طلب الشحن'), String(detail), 'error');
-  }
-  refreshAdsStudioWallet();
-}
-
-async function adsStudioDecideWalletCharge(requestId, action) {
-  try {
-    await apiWalletPaymentRequestDecide(requestId, action);
-    showNotification(
-      adsStudioText(action === 'confirm' ? 'Payment confirmed' : 'Request canceled', action === 'confirm' ? 'تم تأكيد الدفع' : 'تم إلغاء الطلب'),
-      adsStudioText(action === 'confirm' ? 'The wallet has been credited.' : 'The charge request was canceled.', action === 'confirm' ? 'تمت تعبئة المحفظة.' : 'تم إلغاء طلب الشحن.'),
-      'success'
-    );
-  } catch (e) {
-    const detail = (e?.payload && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
-    showNotification(adsStudioText('Action failed', 'فشل الإجراء'), String(detail), 'error');
-  }
-  refreshAdsStudioWallet();
-}
-
-// JS mirror of has-[:checked] for old WebViews without :has().
-function adsStudioMarkWalletMethod(input) {
-  document.querySelectorAll('label.ads-studio-method-label').forEach(l => {
-    l.classList.remove('border-purple-500', 'bg-purple-50', 'dark:bg-purple-900/20');
-    l.classList.add('border-slate-200', 'dark:border-slate-700');
+    tag.onerror = () => {
+      // A failed classic script created no bindings: retry is safe.
+      try { tag.remove(); } catch (_) {}
+      _studioBundleState = 'failed';
+      _studioBundlePromise = null;
+      try { if (state.currentView === 'ads-studio') render(); } catch (_) {}
+      resolve();
+    };
+    document.head.appendChild(tag);
   });
-  const label = input && input.closest ? input.closest('label') : null;
-  if (label) {
-    label.classList.remove('border-slate-200', 'dark:border-slate-700');
-    label.classList.add('border-purple-500', 'bg-purple-50', 'dark:bg-purple-900/20');
+  return _studioBundlePromise;
+}
+
+function retryAdsStudioLoad() {
+  _studioBundleState = 'unloaded';
+  _studioBundlePromise = null;
+  ensureAdsStudioLoaded();
+  render();
+}
+
+function renderAdsStudioLoadingState() {
+  const isAr = state.language === 'ar';
+  if (_studioBundleState === 'failed') {
+    return `
+      <div class="max-w-md mx-auto mt-16 glass-panel rounded-2xl p-8 text-center" dir="${isAr ? 'rtl' : 'ltr'}">
+        <i data-lucide="cloud-off" class="w-10 h-10 mx-auto text-slate-400 mb-3"></i>
+        <p class="font-bold text-slate-800 dark:text-white">${isAr ? 'تعذر تحميل الاستوديو' : "Couldn't load the studio"}</p>
+        <p class="text-sm text-slate-500 mt-1">${isAr ? 'تحقق من الاتصال ثم أعد المحاولة.' : 'Check your connection and try again.'}</p>
+        <button onclick="retryAdsStudioLoad()" class="mt-4 px-5 py-2.5 rounded-xl font-bold text-white bg-blue-600 hover:bg-blue-700">${isAr ? 'إعادة المحاولة' : 'Retry'}</button>
+      </div>`;
   }
-}
-
-function _adsStudioWalletMethodLabel(method) {
-  if (method === 'card') return adsStudioText('Libyan card', 'بطاقة ليبية');
-  if (method === 'qr') return adsStudioText('QR payment', 'دفع QR');
-  return adsStudioText('Bank transfer', 'حوالة مصرفية');
-}
-
-function _adsStudioWalletRequestRow(entity, adminView) {
-  const d = entity?.data || {};
-  const isPending = String(d.status || '') === 'pending';
-  const statusColor = isPending ? 'text-amber-600' : (String(d.status) === 'confirmed' ? 'text-emerald-600' : 'text-slate-400');
   return `
-    <div class="flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40">
-      <div class="min-w-0">
-        <div class="font-mono font-bold text-slate-800 dark:text-white">${Security.escapeHtml(String(d.reference || ''))}</div>
-        <div class="text-xs text-slate-500">${adsStudioMoney(parseInt(d.amountMinor, 10) || 0)} • ${_adsStudioWalletMethodLabel(String(d.method || ''))}</div>
-      </div>
-      <div class="flex items-center gap-2">
-        <span class="text-xs font-bold ${statusColor}">${Security.escapeHtml(String(d.status || ''))}</span>
-        ${isPending && adminView ? `<button onclick="adsStudioDecideWalletCharge('${Security.escapeHtml(String(entity.id))}', 'confirm')" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-100 hover:bg-emerald-200 text-emerald-700">${adsStudioText('Confirm received', 'تأكيد الاستلام')}</button>` : ''}
-        ${isPending ? `<button onclick="adsStudioDecideWalletCharge('${Security.escapeHtml(String(entity.id))}', 'cancel')" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300">${adsStudioText('Cancel', 'إلغاء')}</button>` : ''}
-      </div>
+    <div class="max-w-md mx-auto mt-16 glass-panel rounded-2xl p-8 text-center" dir="${isAr ? 'rtl' : 'ltr'}">
+      <div class="w-8 h-8 mx-auto mb-3 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+      <p class="text-sm text-slate-500">${isAr ? 'جاري تحميل الاستوديو…' : 'Loading the studio…'}</p>
     </div>`;
 }
 
-function renderAdsStudioWallet() {
-  if (_adsStudioWalletForUser !== String(state.currentUser?.id || '')) resetAdsStudioWalletCache();
-  if (_adsStudioWalletMine === null) refreshAdsStudioWallet();
-  const balance = adsStudioWalletBalanceMinor();
-  const held = adsStudioWalletHeldMinor();
-  const available = balance - held;
-  const mine = Array.isArray(_adsStudioWalletMine) ? _adsStudioWalletMine : [];
-  const pendingAll = Array.isArray(_adsStudioWalletPendingAll) ? _adsStudioWalletPendingAll : [];
-  const uid = String(state.currentUser?.id || '');
-  const history = (Array.isArray(state.walletTransactions) ? state.walletTransactions : [])
-    .filter(tx => tx && !tx._deleted && String(tx.currency || '').toUpperCase() === 'USD'
-      && (String(tx.toUserId || '') === uid || String(tx.fromUserId || '') === uid))
-    .slice(-8).reverse();
-  return `
-    <div class="space-y-6">
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div class="glass-panel rounded-2xl p-5"><div class="text-xs text-slate-500 mb-1">${adsStudioText('Wallet balance', 'رصيد المحفظة')}</div><div class="text-2xl font-bold text-slate-800 dark:text-white">${adsStudioMoney(balance)}</div></div>
-        <div class="glass-panel rounded-2xl p-5"><div class="text-xs text-slate-500 mb-1">${adsStudioText('Held for submitted campaigns', 'محجوز للحملات المُرسلة')}</div><div class="text-2xl font-bold text-amber-600">${adsStudioMoney(held)}</div></div>
-        <div class="glass-panel rounded-2xl p-5"><div class="text-xs text-slate-500 mb-1">${adsStudioText('Available to spend', 'متاح للصرف')}</div><div class="text-2xl font-bold text-emerald-600">${adsStudioMoney(available)}</div></div>
-      </div>
-
-      <div class="glass-panel rounded-2xl p-6">
-        <h3 class="font-bold text-slate-800 dark:text-white mb-1">${adsStudioText('Add money', 'إضافة رصيد')}</h3>
-        <p class="text-xs text-slate-500 mb-4">${adsStudioText('Choose how you pay. You get a reference code; the wallet fills up the moment the payment is confirmed — automatically once the payment company is connected.', 'اختر طريقة الدفع. ستحصل على رمز مرجعي، وتتعبأ المحفظة فور تأكيد الدفع — تلقائياً بعد ربط شركة الدفع.')}</p>
-        <div class="flex flex-wrap items-end gap-3">
-          <div>
-            <label class="text-xs text-slate-500 block mb-1">${adsStudioText('Amount (USD)', 'المبلغ (دولار)')}</label>
-            <input id="ads-studio-charge-amount" type="number" min="1" step="0.01" placeholder="50.00"
-              class="w-36 px-3 py-2.5 rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-white font-mono" />
-          </div>
-          ${[['bank_transfer', 'landmark'], ['card', 'credit-card'], ['qr', 'qr-code']].map(([m, icon], i) => `
-            <label class="ads-studio-method-label flex items-center gap-2 px-3 py-2.5 rounded-xl border-2 cursor-pointer has-[:checked]:border-purple-500 has-[:checked]:bg-purple-50 dark:has-[:checked]:bg-purple-900/20 ${i === 0 ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : 'border-slate-200 dark:border-slate-700'}">
-              <input type="radio" name="ads-studio-charge-method" value="${m}" ${i === 0 ? 'checked' : ''} class="accent-purple-600" onchange="adsStudioMarkWalletMethod(this)" />
-              <i data-lucide="${icon}" class="w-4 h-4"></i>
-              <span class="text-sm font-medium">${_adsStudioWalletMethodLabel(m)}</span>
-            </label>`).join('')}
-          <button onclick="adsStudioCreateWalletCharge()" class="px-5 py-2.5 rounded-xl font-bold text-white bg-purple-600 hover:bg-purple-700 transition-all">${adsStudioText('Create charge request', 'إنشاء طلب شحن')}</button>
-        </div>
-      </div>
-
-      ${isCurrentUserAdmin() && pendingAll.length ? `
-      <div class="glass-panel rounded-2xl p-6">
-        <h3 class="font-bold text-slate-800 dark:text-white mb-3">${adsStudioText('Payments waiting for confirmation (all customers)', 'مدفوعات بانتظار التأكيد (كل العملاء)')}</h3>
-        <div class="space-y-2">${pendingAll.map(r => _adsStudioWalletRequestRow(r, true)).join('')}</div>
-      </div>` : ''}
-
-      <div class="glass-panel rounded-2xl p-6">
-        <div class="flex items-center justify-between mb-3">
-          <h3 class="font-bold text-slate-800 dark:text-white">${adsStudioText('My charge requests', 'طلبات الشحن الخاصة بي')}</h3>
-          <button onclick="resetAdsStudioWalletCache(); refreshAdsStudioWallet();" class="inline-flex items-center gap-1 text-xs font-bold text-purple-600 hover:text-purple-700"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>${adsStudioText('Refresh', 'تحديث')}</button>
-        </div>
-        ${mine.length ? `<div class="space-y-2">${mine.map(r => _adsStudioWalletRequestRow(r, false)).join('')}</div>`
-          : `<p class="text-sm text-slate-500">${adsStudioText('No charge requests yet.', 'لا توجد طلبات شحن بعد.')}</p>`}
-      </div>
-
-      <div class="glass-panel rounded-2xl p-6">
-        <h3 class="font-bold text-slate-800 dark:text-white mb-3">${adsStudioText('Recent wallet activity', 'آخر حركات المحفظة')}</h3>
-        ${history.length ? `<div class="space-y-1">${history.map(tx => {
-          const incoming = String(tx.toUserId || '') === uid;
-          return `<div class="flex justify-between text-sm py-1.5 border-b border-slate-100 dark:border-slate-800 last:border-0">
-            <span class="text-slate-600 dark:text-slate-300">${Security.escapeHtml(String(tx.memo || tx.type || ''))}</span>
-            <span class="font-mono font-bold ${incoming ? 'text-emerald-600' : 'text-rose-600'}">${incoming ? '+' : '−'}${adsStudioMoney(Math.abs(parseInt(tx.amountMinor, 10) || 0))}</span>
-          </div>`;
-        }).join('')}</div>`
-          : `<p class="text-sm text-slate-500">${adsStudioText('No wallet activity yet.', 'لا توجد حركات بعد.')}</p>`}
-      </div>
-    </div>`;
-}
-
-function renderAdsStudioConnections() {
-  const isAr = adsStudioIsAr();
-  const checklist = [
-    ['building-2', isAr ? 'التحقق من نشاط البيان التجاري لدى ميتا' : 'Albayan business verification with Meta'],
-    ['shield-check', isAr ? 'مراجعة التطبيق والوصول المتقدم' : 'App Review and Advanced Access'],
-    ['key-round', isAr ? 'تخزين الرموز مشفرة على الخادم فقط' : 'Encrypted server-only token storage'],
-    ['link-2', isAr ? 'ربط العميل لحسابه وصفحته بنفسه' : 'Customer-owned account and Page connection'],
-    ['pause-circle', isAr ? 'إنشاء الحملات الجديدة متوقفة مؤقتاً' : 'Create every new Meta campaign paused'],
-    ['activity', isAr ? 'مزامنة الحالة والأخطاء والنتائج' : 'Status, issue and performance synchronization']
-  ];
-  return `<section class="grid gap-6 lg:grid-cols-[1.1fr_1fr]"><div class="glass-panel rounded-3xl p-5 sm:p-7"><div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-600 to-cyan-500 flex items-center justify-center text-white mb-5"><i data-lucide="facebook" class="w-7 h-7"></i></div><span class="inline-flex rounded-full bg-emerald-100 dark:bg-emerald-900/30 px-3 py-1 text-xs font-bold text-emerald-800 dark:text-emerald-200">${isAr ? 'تتبع Meta للقراءة فقط متاح' : 'Read-only Meta tracking available'}</span><h2 class="mt-4 text-2xl font-black text-slate-900 dark:text-white">${isAr ? 'اربط الإعلان الحقيقي وتابع تغيّراته' : 'Link the real ad and track its changes'}</h2><p class="mt-3 text-slate-500 dark:text-slate-400">${isAr ? 'من صفحة الإعلانات يمكنك ربط إعلان Albayan بإعلان Meta ومزامنة الحالة والميزانية والمصروف والنتائج. تبقى الوصل والأموال والصور داخل Albayan دون تغيير. النشر المباشر سيبقى مغلقاً حتى اكتمال موافقات ميتا.' : 'From the Ads page you can link an Albayan ad to a real Meta ad and sync status, budget, spend and results. Albayan receipts, money and photos stay unchanged. Direct publishing remains locked until Meta approvals are complete.'}</p><button type="button" onclick="navigateTo('ads')" class="mt-5 inline-flex min-h-12 items-center gap-2 rounded-xl bg-blue-600 px-5 py-3 font-black text-white hover:bg-blue-700"><i data-lucide="link" class="h-5 w-5"></i>${isAr ? 'فتح الإعلانات والربط' : 'Open Ads and link'}</button><div class="mt-5 rounded-2xl bg-red-50 dark:bg-red-900/20 p-4 text-sm text-red-800 dark:text-red-200 flex items-start gap-3"><i data-lucide="shield-alert" class="w-5 h-5 flex-shrink-0"></i><span>${isAr ? 'لن نطلب كلمة مرور فيسبوك ولن نخزن رمز ميتا داخل تطبيق الهاتف أو بيانات الحملة.' : 'We will never ask for a Facebook password or store a Meta token in the mobile app or campaign records.'}</span></div></div><div class="glass-panel rounded-3xl p-5 sm:p-7"><h3 class="text-lg font-black text-slate-900 dark:text-white">${isAr ? 'خطة النشر المباشر لاحقاً' : 'Future direct-publishing checklist'}</h3><div class="mt-5 space-y-3">${checklist.map(([icon,label], index) => `<div class="flex items-center gap-3 rounded-xl border border-slate-200 dark:border-slate-700 p-3"><span class="w-9 h-9 rounded-xl ${index < 2 ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-200' : 'bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300'} flex items-center justify-center"><i data-lucide="${icon}" class="w-4 h-4"></i></span><span class="flex-1 text-sm font-bold text-slate-700 dark:text-slate-200">${label}</span><i data-lucide="${index < 2 ? 'clock-3' : 'circle-dashed'}" class="w-4 h-4 text-slate-400"></i></div>`).join('')}</div></div></section>`;
+// Boot kick: the studio shell and studio deep links download the bundle in
+// parallel with init()'s storage work instead of waiting for first render.
+if (IS_STUDIO_SHELL || /^\/(ads-studio|studio)(\/|$)/.test(window.location.pathname || '')) {
+  try { ensureAdsStudioLoaded(); } catch (_) {}
 }
 // ==========================================
 // META ADS — SECURE READ-ONLY SYNCHRONIZATION
@@ -43948,6 +43067,7 @@ function _photoPasteTargetIsAvailable(target) {
     return state.activeModal === 'clothes-product' && Boolean(document.getElementById('clothes-product-photo-input'));
   }
   return state.currentView === 'ads-studio'
+    && typeof uploadAdsStudioCreativeFiles === 'function'
     && Boolean(document.getElementById('ads-studio-image-input'))
     && (typeof _adsStudioActiveTab === 'undefined' || _adsStudioActiveTab === 'builder');
 }

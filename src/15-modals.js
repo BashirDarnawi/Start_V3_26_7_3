@@ -1994,19 +1994,47 @@ function renderModal() {
       `;
       break;
     }
-    case 'subscription-lock':
+    case 'subscription-lock': {
       const lockServiceId = state.modalData?.serviceId || '';
       const lockSubscribeToId = state.modalData?.subscribeToId || lockServiceId;
       const lockServiceName = state.modalData?.serviceName || 'Service';
       const isRTL = state.language === 'ar';
-      const subscribeTarget = SERVICES[lockSubscribeToId];
-      const subscribeTargetName = subscribeTarget ? (isRTL ? subscribeTarget.nameAr : subscribeTarget.name) : '';
-      const offer = getServiceSubscriptionOffer(lockSubscribeToId);
-      const walletBalanceMinor = state.currentUser?.id ? WALLET.getBalanceMinor(state.currentUser.id, offer.currency) : 0;
-      const walletBalanceLabel = walletFormatMinor(walletBalanceMinor, offer.currency);
-      const offerLabel = offer.priceMinor > 0
-        ? `${walletFormatMinor(offer.priceMinor, offer.currency)} / ${offer.durationDays}d`
-        : (isRTL ? 'مجاني' : 'Free');
+      const lockPlans = typeof getPlansForService === 'function' ? getPlansForService(lockSubscribeToId) : [];
+      const lydBalanceMinor = state.currentUser?.id ? WALLET.getBalanceMinor(state.currentUser.id, 'LYD') : 0;
+      const planCards = lockPlans.map(plan => {
+        const planName = Security.escapeHtml(String((isRTL ? plan.nameAr : plan.name) || plan.id));
+        const isBundle = Array.isArray(plan.serviceIds) && plan.serviceIds.length > 1;
+        const price = Math.max(0, Number(plan.priceMinor) || 0);
+        const priceLabel = price > 0
+          ? `${walletFormatMinor(price, 'LYD')} / ${Number(plan.durationDays) || 30}${isRTL ? ' يوم' : 'd'}`
+          : (isRTL ? 'مجاني' : 'Free');
+        const short = price > lydBalanceMinor;
+        const safePlanId = Security.escapeHtml(String(plan.id));
+        return `
+          <div class="rounded-2xl border-2 ${isBundle ? 'border-indigo-400 bg-indigo-50/60 dark:bg-indigo-900/20' : 'border-slate-200 dark:border-slate-700'} p-4 text-start">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div class="min-w-0">
+                <div class="flex items-center gap-2 font-black text-slate-800 dark:text-white">
+                  <i data-lucide="${isBundle ? 'package' : 'circle-check'}" class="w-4 h-4 ${isBundle ? 'text-indigo-600' : 'text-emerald-600'}"></i>${planName}
+                  ${plan.badge === 'best_value' ? `<span class="rounded-full bg-amber-100 dark:bg-amber-900/40 px-2 py-0.5 text-[10px] font-bold text-amber-800 dark:text-amber-200">${isRTL ? 'الأفضل قيمة' : 'Best value'}</span>` : ''}
+                </div>
+                <div class="mt-1 text-xs text-slate-500">
+                  ${isBundle
+                    ? (isRTL ? `${plan.serviceIds.length} خدمات في اشتراك واحد` : `${plan.serviceIds.length} services in one subscription`)
+                    : (isRTL ? 'خدمة واحدة' : 'Single service')}
+                  ${Number(plan.savingsPct) > 0 ? ` · ${isRTL ? 'توفير' : 'save'} ${Number(plan.savingsPct)}%` : ''}
+                </div>
+              </div>
+              <div class="text-end">
+                <div class="font-black text-slate-800 dark:text-white">${priceLabel}</div>
+                <button onclick="handleSubscribePlan('${safePlanId}', '${Security.escapeHtml(String(lockServiceId))}')" ${short ? 'disabled' : ''} class="mt-1 rounded-xl ${short ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed' : 'btn-shine bg-indigo-600 text-white hover:bg-indigo-700'} px-4 py-2 text-sm font-bold">
+                  ${isRTL ? 'اشترك' : 'Subscribe'}
+                </button>
+              </div>
+            </div>
+            ${short ? `<div class="mt-2 text-[11px] font-bold text-rose-600">${isRTL ? 'الرصيد غير كافٍ — اشحن المحفظة أولاً.' : 'Balance is short — charge the wallet first.'}</div>` : ''}
+          </div>`;
+      }).join('');
       modalContent = `
         <div class="text-center">
           <div class="w-16 h-16 rounded-full bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center mx-auto mb-4">
@@ -2015,39 +2043,30 @@ function renderModal() {
           <h2 class="text-2xl font-bold text-slate-800 dark:text-white mb-2">
             ${isRTL ? 'غير مشترك' : 'Not Subscribed'}
           </h2>
-          <p class="text-slate-600 dark:text-slate-300 mb-6">
-            ${isRTL 
-              ? `أنت غير مشترك في <strong>${lockServiceName}</strong>. هل تريد الاشتراك؟`
-              : `You are not subscribed to <strong>${lockServiceName}</strong>. Would you like to subscribe?`
+          <p class="text-slate-600 dark:text-slate-300 mb-4">
+            ${isRTL
+              ? `أنت غير مشترك في <strong>${lockServiceName}</strong>. اختر خطة الاشتراك:`
+              : `You are not subscribed to <strong>${lockServiceName}</strong>. Choose your plan:`
             }
           </p>
-          ${lockSubscribeToId !== lockServiceId && subscribeTargetName ? `
-            <div class="mb-5 text-xs text-slate-500 dark:text-slate-400">
-              ${isRTL ? `سيتم الاشتراك في: <strong>${subscribeTargetName}</strong>` : `You will subscribe to: <strong>${subscribeTargetName}</strong>`}
-            </div>
-          ` : ''}
-          <div class="mb-6 p-4 rounded-2xl bg-white/40 dark:bg-slate-800/30 border border-white/30">
-            <div class="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400 mb-2">
-              <span>${isRTL ? 'رصيد المحفظة' : 'Wallet balance'}</span>
-              <span class="font-bold">${walletBalanceLabel}</span>
-            </div>
-            <div class="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-              <span>${isRTL ? 'سعر الاشتراك' : 'Subscription price'}</span>
-              <span class="font-bold">${offerLabel}</span>
-            </div>
+          <div class="mb-4 flex items-center justify-between rounded-2xl bg-white/40 dark:bg-slate-800/30 border border-white/30 px-4 py-3 text-xs text-slate-500 dark:text-slate-400">
+            <span>${isRTL ? 'رصيد المحفظة (د.ل)' : 'Wallet balance (LYD)'}</span>
+            <span class="font-bold">${walletFormatMinor(lydBalanceMinor, 'LYD')}</span>
           </div>
-          <div class="flex space-x-3">
+          ${planCards ? `<div class="space-y-3 mb-4 max-h-[45dvh] overflow-y-auto custom-scrollbar pr-1">${planCards}</div>` : `
+          <div class="flex space-x-3 mb-1">
             <button onclick="handleSubscribe('${lockSubscribeToId}', '${lockServiceId}')" class="flex-1 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
               <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>
               ${isRTL ? 'اشترك' : 'Subscribe'}
             </button>
-            <button onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300">
-              ${isRTL ? 'إلغاء' : 'Cancel'}
-            </button>
-          </div>
+          </div>`}
+          <button onclick="closeModal()" class="w-full bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300">
+            ${isRTL ? 'إلغاء' : 'Cancel'}
+          </button>
         </div>
       `;
       break;
+    }
 
     case 'data-integrity': {
       const isArIntegrity = state.language === 'ar';

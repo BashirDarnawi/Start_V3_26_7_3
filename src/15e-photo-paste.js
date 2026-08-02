@@ -75,6 +75,7 @@ function _photoPasteTargetIsAvailable(target) {
     return state.activeModal === 'clothes-product' && Boolean(document.getElementById('clothes-product-photo-input'));
   }
   return state.currentView === 'ads-studio'
+    && typeof uploadAdsStudioCreativeFiles === 'function'
     && Boolean(document.getElementById('ads-studio-image-input'))
     && (typeof _adsStudioActiveTab === 'undefined' || _adsStudioActiveTab === 'builder');
 }

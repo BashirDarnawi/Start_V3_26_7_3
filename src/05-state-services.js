@@ -495,6 +495,23 @@ const WALLET = {
   }
 };
 
+// Session cache of the server's sellable plan catalog (single services +
+// bundles). Fetched at paywall-open; never authoritative for prices — the
+// purchase endpoint re-reads the server catalog inside its transaction.
+async function refreshSubscriptionPlans(force = false) {
+  if (!isServerModeEnabled()) return Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : [];
+  if (!force && Array.isArray(state.subscriptionPlans) && state.subscriptionPlans.length) {
+    return state.subscriptionPlans;
+  }
+  try {
+    const payload = await apiGetSubscriptionPlans();
+    state.subscriptionPlans = Array.isArray(payload?.plans) ? payload.plans : [];
+  } catch (_) {
+    state.subscriptionPlans = Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : [];
+  }
+  return state.subscriptionPlans;
+}
+
 const SUBSCRIPTIONS = {
   // Service subscription records: { id, userId, serviceId, status, startedAt, expiresAt, price, currency }
   getActiveServiceIds: (userId) => {
@@ -601,6 +618,35 @@ const SUBSCRIPTIONS = {
     addAuditLog('subscription', rec.id, `Subscribed to ${sid} (${walletFormatMinor(priceMinor, currency)})`, { resourceType: 'serviceSubscriptions', serviceId: sid, userId: uid });
     return rec;
   },
+  // Purchase a PLAN (single service or bundle): the server mints one row per
+  // serviceId + at most one payment, atomically. Renewal-extension included.
+  purchasePlan: async (userId, planId, opts = {}) => {
+    if (!state.currentUser?.id) throw new Error('Not logged in');
+    const uid = String(userId || '');
+    const pid = String(planId || '');
+    if (!uid || !pid) throw new Error('Missing plan purchase data');
+    const isAdmin = isAdminRole(state.currentUser.role);
+    if (!isAdmin && String(state.currentUser.id) !== uid) throw new Error('Forbidden');
+    const idem = ensureOperationIdempotencyKey(opts.idempotencyKey, 'subscription');
+    if (!isServerModeEnabled()) {
+      // No server -> no plan catalog or bundle atomics; the classic
+      // single-service local flow stays available through subscribe().
+      throw new Error(state.language === 'ar'
+        ? 'شراء الباقات يتطلب اتصال الخادم'
+        : 'Plan purchases need the server connection');
+    }
+    const payload = await apiPurchasePlan({
+      planId: pid,
+      idempotencyKey: idem,
+      userId: isAdmin && uid !== String(state.currentUser.id) ? uid : undefined
+    });
+    const rows = Array.isArray(payload?.subscriptions) ? payload.subscriptions : [];
+    const saved = rows.map(row => upsertServerBackedRecord('serviceSubscriptions', row));
+    if (payload?.payment) {
+      try { upsertServerBackedRecord('walletTransactions', payload.payment); } catch (_) {}
+    }
+    return saved;
+  },
   cancel: async (userId, serviceId) => {
     if (!state.currentUser?.id) throw new Error('Not logged in');
     const uid = String(userId || '');
@@ -611,19 +657,23 @@ const SUBSCRIPTIONS = {
 
     const now = Date.now();
     const subs = Array.isArray(state.serviceSubscriptions) ? state.serviceSubscriptions : [];
-    const active = subs.find(s =>
+    // Renewals append rows, so a service can have SEVERAL active rows
+    // (current + prepaid extension). Cancel must fold every one of them.
+    const activeRows = subs.filter(s =>
       s && !s._deleted &&
       s.userId === uid &&
       s.serviceId === sid &&
       s.status === 'active' &&
       (!s.expiresAt || new Date(s.expiresAt).getTime() > now)
     );
-    if (!active?.id) throw new Error('No active subscription');
+    if (!activeRows.length) throw new Error('No active subscription');
 
     const ts = new Date().toISOString();
-    const canceledOk = await updateRecord(state.serviceSubscriptions, active.id, { status: 'canceled', canceledAt: ts, expiresAt: ts });
-    if (!canceledOk) throw new Error('Failed to cancel subscription');
-    addAuditLog('subscription', active.id, `Canceled ${sid}`, { resourceType: 'serviceSubscriptions', serviceId: sid, userId: uid });
+    for (const active of activeRows) {
+      const canceledOk = await updateRecord(state.serviceSubscriptions, active.id, { status: 'canceled', canceledAt: ts, expiresAt: ts });
+      if (!canceledOk) throw new Error('Failed to cancel subscription');
+      addAuditLog('subscription', active.id, `Canceled ${sid}`, { resourceType: 'serviceSubscriptions', serviceId: sid, userId: uid });
+    }
 
     // Keep legacy user.subscriptions in sync (optional compatibility)
     const user = Array.isArray(state.users) ? state.users.find(u => u && !u._deleted && String(u.id) === uid) : null;

@@ -14,6 +14,7 @@ INLINE_MEDIA_FIELDS: dict[str, tuple[str, ...]] = {
     "receipts": ("photos", "receiptImage"),
     "ads": ("adPhotos", "photos"),
     "adCampaignRequests": ("creativeImages",),
+    "walletPaymentRequests": ("receiptPhoto",),
 }
 
 CONTACT_REDACTED_ENTITY_TYPES = frozenset({"customers", "receipts", "ads"})

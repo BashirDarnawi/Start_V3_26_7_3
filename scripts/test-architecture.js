@@ -41,6 +41,26 @@ if (fs.statSync(generatedBundle).size > 2.4 * 1024 * 1024) {
   fail('script.js exceeded the 2.4 MiB startup budget; extract or lazy-load a feature.');
 }
 
+// Lazy bundles have their own budgets: they never block startup, but a
+// runaway studio bundle would still hurt the customer's first tap.
+const studioBundle = path.join(ROOT, 'studio.js');
+if (fs.existsSync(studioBundle) && fs.statSync(studioBundle).size > 1.0 * 1024 * 1024) {
+  fail('studio.js exceeded its 1.0 MiB lazy-bundle budget; split or slim the studio.');
+}
+
+// Every built bundle must ship in the production image. Forgetting a lazy
+// bundle in the Dockerfile made /studio.js 500 on the live site while every
+// local test stayed green (release claude-fixes-20260802T122742Z).
+const dockerfile = fs.readFileSync(path.join(ROOT, 'server', 'Dockerfile'), 'utf8');
+const bundleOutputs = ['script.js', ...Object.keys(manifest.lazy || {})];
+for (const bundle of bundleOutputs) {
+  const copied = dockerfile.split(/\r?\n/).some(line =>
+    /^\s*COPY\s/.test(line) && line.split(/\s+/).includes(bundle));
+  if (!copied) {
+    fail(`server/Dockerfile does not COPY ${bundle}; the live site would 500 on /${bundle}.`);
+  }
+}
+
 const backendMain = path.join(ROOT, 'server', 'main.py');
 const backendLines = lineCount(backendMain);
 if (backendLines > 14200) {

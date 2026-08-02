@@ -66,7 +66,18 @@ SETUP_TOKEN = os.getenv("ALBAYAN_SETUP_TOKEN", "")
 from .db import db_conn, get_engine, init_db, json_dumps, json_loads, now_ms
 from .rbac import VALID_USER_ROLES, is_admin_receipt_completion, normalize_permissions, user_has_permission
 from .backfills import backfill_customer_names, backfill_relink_baselines
+from .ad_campaign_actions import (
+    apply_boost_campaign_fields,
+    create_ad_campaign_actions_router,
+    enforce_boost_submission_rules,
+    normalize_ad_campaign_destination,
+)
+from .subscription_plans import (
+    create_subscription_plans_router,
+    plan_purchase_atomic,
+)
 from .wallet_payments import (
+    campaign_capture_open_minor,
     capture_campaign_budget,
     create_wallet_payments_router,
     release_orphan_campaign_payment,
@@ -1372,7 +1383,7 @@ def list_entities(
 
     where = ["type = :type"]
     params: dict[str, Any] = {"type": entity_type}
-    campaign_safe_statuses = ("Submitted", "Approved", "Rejected")
+    campaign_safe_statuses = ("Submitted", "Approved", "Rejected", "Stopped")
     campaign_status_expr = (
         "COALESCE(data_json::jsonb ->> 'status', 'Draft')"
         if dialect == "postgresql"
@@ -1383,7 +1394,7 @@ def list_entities(
     # Delta reads are handled below with redacted synthetic tombstones so a
     # status transition out of scope also removes a previously visible row.
     if ad_campaign_reviewer_scope:
-        visible_status_sql = "'Submitted','Approved','Rejected'"
+        visible_status_sql = "'Submitted','Approved','Rejected','Stopped'"
         if updated_since is not None:
             # Changes Requested is the only normal visible -> private-editable
             # transition, so delta sync receives it as a redacted tombstone.
@@ -1492,7 +1503,7 @@ def list_entities(
         if campaign_reviewer_delta:
             campaign_json = (
                 "CASE WHEN " + campaign_status_expr +
-                " IN ('Submitted','Approved','Rejected') THEN " + campaign_json +
+                " IN ('Submitted','Approved','Rejected','Stopped') THEN " + campaign_json +
                 " ELSE '{}' END"
             )
         select_clause = (
@@ -1507,7 +1518,7 @@ def list_entities(
         if campaign_reviewer_delta:
             campaign_json = (
                 "CASE WHEN " + campaign_status_expr +
-                " IN ('Submitted','Approved','Rejected') THEN " + campaign_json +
+                " IN ('Submitted','Approved','Rejected','Stopped') THEN " + campaign_json +
                 " ELSE '{}' END"
             )
         select_clause = (
@@ -2997,6 +3008,19 @@ def serve_script(request: Request):
     return FileResponse(str(src), media_type="application/javascript", headers=headers)
 
 
+@app.get("/studio.js")
+def serve_studio_script(request: Request):
+    # The Ads Studio's lazy bundle. The loader reuses the MAIN bundle's ?v=
+    # (both rebuild together on every deploy), so match against that version.
+    studio_path = PROJECT_ROOT / "studio.js"
+    if not studio_path.exists():
+        raise HTTPException(status_code=500, detail="studio.js not found")
+    v = request.query_params.get("v")
+    expected = _asset_version(_select_script_source())
+    headers = _ASSET_CACHE_HEADERS if v and v == expected else _NO_STORE_HEADERS
+    return FileResponse(str(studio_path), media_type="application/javascript", headers=headers)
+
+
 @app.get("/style.css")
 def serve_style(request: Request):
     if not STYLE_PATH.exists():
@@ -4257,6 +4281,12 @@ def _wallet_reversal_atomic(
             od = original.get("data") or {}
             if str(od.get("type") or "") == "reversal":
                 raise HTTPException(status_code=400, detail="A reversal cannot itself be reversed")
+            if str(od.get("type") or "") in {"campaign_payment", "campaign_refund", "campaign_payment_release"}:
+                # A raw reversal would be a second payout beside stop's door.
+                raise HTTPException(
+                    status_code=409,
+                    detail="Campaign budget rows cannot be reversed — stop the campaign to refund it",
+                )
             from_uid = sanitize_str(str(od.get("toUserId") or "system"))[:80] or "system"
             to_uid = sanitize_str(str(od.get("fromUserId") or "system"))[:80] or "system"
             _lock_and_validate_wallet_users(conn, [from_uid, to_uid], postgres=postgres)
@@ -4307,120 +4337,23 @@ def _subscription_purchase_atomic(
     user_id: str | None = None,
     requested_id: str | None = None,
 ) -> tuple[dict[str, Any], bool, dict[str, Any] | None]:
-    actor_uid = sanitize_str(str(actor.get("id") or ""))[:80]
-    target_uid = sanitize_str(str(user_id or actor_uid))[:80]
-    if not actor_uid or not target_uid:
-        raise HTTPException(status_code=400, detail="Missing subscription user")
-    if target_uid != actor_uid and str(actor.get("role") or "").lower() != "admin":
-        raise HTTPException(status_code=403, detail="Cannot subscribe another user")
+    """Legacy single-service purchase = the implicit ``svc:{id}`` plan.
+
+    Same request/response shape as always; repurchasing now EXTENDS from the
+    current expiry (renewal) instead of failing with 'already active'.
+    """
     sid = sanitize_str(str(service_id or ""))[:80]
-    offer = SERVICE_SUBSCRIPTION_CATALOG.get(sid)
-    if not offer:
+    if sid not in SERVICE_SUBSCRIPTION_CATALOG:
         raise HTTPException(status_code=400, detail="Service is not available for subscription")
-    idem = sanitize_str(str(idempotency_key or ""))[:120]
-    if len(idem) < 8:
-        raise HTTPException(status_code=400, detail="idempotencyKey is required (minimum 8 characters)")
-    amount, cur, _ = _validate_wallet_values(
-        max(1, int(offer.get("priceMinor") or 0)), offer.get("currency"), idem
+    rows, created, payment = plan_purchase_atomic(
+        actor,
+        _WALLET_PAYMENTS_CTX,
+        plan_id=f"svc:{sid}",
+        idempotency_key=idempotency_key,
+        user_id=user_id,
+        requested_id=requested_id,
     )
-    price_minor = int(offer.get("priceMinor") or 0)
-    if price_minor < 0:
-        raise HTTPException(status_code=500, detail="Invalid server service price")
-    # _validate_wallet_values requires a positive amount, so restore the
-    # catalog's legitimate zero price after validating currency/idempotency.
-    if price_minor == 0:
-        amount = 0
-    duration_days = int(offer.get("durationDays") or 0)
-    if duration_days < 1 or duration_days > 3660:
-        raise HTTPException(status_code=500, detail="Invalid server subscription duration")
-
-    postgres = str(get_engine().dialect.name or "") == "postgresql"
-    guard = nullcontext() if postgres else _SQLITE_WALLET_LOCK
-    with guard:
-        with db_conn() as conn:
-            _lock_and_validate_wallet_users(conn, [target_uid], postgres=postgres)
-            _lock_idempotency_key(conn, idem, postgres=postgres, namespace="subscription")
-            prior = _find_entity_by_idempotency(conn, "serviceSubscriptions", idem)
-            if prior:
-                d = prior.get("data") or {}
-                if str(d.get("userId") or "") != target_uid or str(d.get("serviceId") or "") != sid:
-                    raise HTTPException(status_code=409, detail="Idempotency key was already used for another operation")
-                payment = None
-                payment_id = str(d.get("paymentTxId") or "")
-                if payment_id:
-                    prow = conn.execute(
-                        text("SELECT * FROM entities WHERE type='walletTransactions' AND id=:id LIMIT 1"),
-                        {"id": payment_id},
-                    ).mappings().first()
-                    payment = _entity_from_db_row(prow) if prow else None
-                return prior, False, payment
-
-            now_dt = datetime.now(timezone.utc)
-            rows = conn.execute(
-                text("SELECT data_json FROM entities WHERE type='serviceSubscriptions' AND deleted=false")
-            ).mappings().all()
-            for row in rows:
-                d = json_loads(row.get("data_json") or "{}") or {}
-                if str(d.get("userId") or "") != target_uid or str(d.get("serviceId") or "") != sid:
-                    continue
-                if str(d.get("status") or "").lower() != "active":
-                    continue
-                expiry = _parse_subscription_expiry(d.get("expiresAt"))
-                if expiry is None or expiry > now_dt:
-                    raise HTTPException(status_code=409, detail="Service subscription is already active")
-
-            payment: dict[str, Any] | None = None
-            if amount > 0:
-                if _wallet_available_after_holds(conn, target_uid, cur) < amount:
-                    raise HTTPException(status_code=409, detail="Insufficient wallet balance")
-                payment_idempotency = f"subpay:{idem}"
-                _lock_idempotency_key(conn, payment_idempotency, postgres=postgres)
-                if _find_entity_by_idempotency(conn, "walletTransactions", payment_idempotency):
-                    # A committed purchase would already have returned through
-                    # the subscription-idempotency branch above.  A lone row
-                    # with this key is therefore a conflicting legacy/manual
-                    # operation and must never be charged again.
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Subscription payment idempotency key is already in use",
-                    )
-                payment_data = {
-                    "type": "service_payment",
-                    "schemaVersion": 2,
-                    "amountMinor": amount,
-                    "amount": amount / 100,
-                    "currency": cur,
-                    "fromUserId": target_uid,
-                    "toUserId": "system",
-                    "memo": f"Subscription: {sid}",
-                    "idempotencyKey": payment_idempotency,
-                    "status": "posted",
-                    "referenceType": "subscription",
-                    "referenceId": sid,
-                    "createdAt": _iso_utc(now_dt),
-                }
-                payment = _insert_entity_in_transaction(
-                    conn, "walletTransactions", None, payment_data, actor_uid
-                )
-
-            expires = now_dt + timedelta(days=duration_days)
-            subscription_data = {
-                "userId": target_uid,
-                "serviceId": sid,
-                "status": "active",
-                "startedAt": _iso_utc(now_dt),
-                "expiresAt": _iso_utc(expires),
-                "priceMinor": amount,
-                "price": amount / 100,
-                "currency": cur,
-                "paymentTxId": payment.get("id") if payment else None,
-                "idempotencyKey": idem,
-                "createdAt": _iso_utc(now_dt),
-            }
-            subscription = _insert_entity_in_transaction(
-                conn, "serviceSubscriptions", requested_id, subscription_data, actor_uid
-            )
-            return subscription, True, payment
+    return rows[0], created, payment
 
 
 def _subscription_cancel_atomic(
@@ -4580,7 +4513,7 @@ AD_CAMPAIGN_SERVICE_ID = "ad_maker"
 AD_CAMPAIGN_EDITABLE_STATUSES = frozenset({"Draft", "Changes Requested"})
 AD_CAMPAIGN_OPEN_STATUSES = frozenset({"Draft", "Submitted", "Changes Requested"})
 AD_CAMPAIGN_DELETABLE_STATUSES = frozenset(
-    {"Draft", "Changes Requested", "Approved", "Rejected"}
+    {"Draft", "Changes Requested", "Approved", "Rejected", "Stopped"}
 )
 AD_CAMPAIGN_REVIEW_DECISIONS = frozenset({"Approved", "Changes Requested", "Rejected"})
 MAX_AD_CAMPAIGN_BUDGET_MINOR_USD = 100_000_000  # USD 1,000,000
@@ -4648,6 +4581,8 @@ AD_CAMPAIGN_WORKFLOW_FIELDS = frozenset(
         "paidMinorUSD",
         "paymentTransactionId",
         "paidAt",
+        "stoppedAt", "stoppedBy", "stopReason", "refundMinorUSD",
+        "refundTransactionId", "lastStopOperationId", "lastPublishOperationId",
         "createdBy",
         "creatorId",
         "createdAt",
@@ -4683,6 +4618,7 @@ AD_CAMPAIGN_ALLOWED_FIELDS = frozenset(
         "creativeImages",
         "creativeAssetIds",
         "specialAdCategories",
+        "boostType", "sourcePostRef", "autoReply", "extendsCampaignId",
     }
 )
 
@@ -4962,34 +4898,6 @@ def _create_ad_campaign_atomic(
     }
 
 
-def _normalize_ad_campaign_destination(value: Any) -> str:
-    raw = _ad_campaign_string(value, "destination", 2048)
-    if not raw:
-        return ""
-    compact_phone = re.sub(r"[\s().-]", "", raw)
-    if re.fullmatch(r"\+?[1-9][0-9]{7,14}", compact_phone):
-        return compact_phone if compact_phone.startswith("+") else f"+{compact_phone}"
-    try:
-        parsed = urlparse(raw)
-    except ValueError:
-        parsed = None
-    if (
-        parsed is None
-        or parsed.scheme.lower() != "https"
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or any(ch.isspace() for ch in raw)
-        or not re.fullmatch(r"[A-Za-z0-9.-]+", parsed.hostname)
-        or "." not in parsed.hostname
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="destination must be an HTTPS website, WhatsApp/Messenger link, or international phone number",
-        )
-    return raw
-
-
 def _ad_campaign_review_history(value: Any) -> list[dict[str, str]]:
     if not isinstance(value, list):
         return []
@@ -5073,6 +4981,15 @@ def _soft_delete_ad_campaign_atomic(
                 release_orphan_campaign_payment(
                     conn, _WALLET_PAYMENTS_CTX, {**data, "id": campaign_id},
                     str(user.get("id") or "system"),
+                )
+            if (
+                str(data.get("status") or "") == "Approved"
+                and campaign_capture_open_minor(conn, _WALLET_PAYMENTS_CTX, {**data, "id": campaign_id}) > 0
+            ):
+                # The tombstone would close the only refund door (stop → 404).
+                raise HTTPException(
+                    status_code=409,
+                    detail="Stop the campaign first so the unspent budget returns to the wallet, then archive it",
                 )
             data.pop("creativeImages", None)
             modified = max(now_ms(), int(row["last_modified"]) + 1)
@@ -5336,7 +5253,7 @@ def _prepare_ad_campaign_fields(
             clean[field] = _ad_campaign_string(data.get(field), field, limit)
 
     if "destination" in data:
-        clean["destination"] = _normalize_ad_campaign_destination(data.get("destination"))
+        clean["destination"] = normalize_ad_campaign_destination(data.get("destination"), _ad_campaign_string)
 
     if "callToAction" in data:
         cta = _ad_campaign_string(data.get("callToAction"), "callToAction", 80)
@@ -5350,6 +5267,8 @@ def _prepare_ad_campaign_fields(
         if budget_type and budget_type not in AD_CAMPAIGN_BUDGET_TYPES:
             raise HTTPException(status_code=400, detail="budgetType must be daily or lifetime")
         clean["budgetType"] = budget_type
+
+    apply_boost_campaign_fields(data, clean, _ad_campaign_string, validate_entity_id)
 
     if clean.get("connectedAssetId"):
         try:
@@ -5522,6 +5441,7 @@ def _prepare_ad_campaign_fields(
                 status_code=400,
                 detail="At least one campaign image is required before submission",
             )
+        enforce_boost_submission_rules(clean)
 
     return clean
 
@@ -10715,7 +10635,16 @@ def review_ad_campaign_request(
             or str(current.get("reviewNote") or "") != note
         ):
             raise HTTPException(status_code=409, detail="operationId was already used for another review")
-        if str(current.get("status") or "Draft") not in {"Submitted", "Approved", "Rejected"}:
+        if str(current.get("reviewDecision") or "") in {"Rejected", "Changes Requested"}:
+            # A crash may have parted the non-approval status write from its
+            # orphan-capture release; rel: is idempotent, so replay it too.
+            _rg = nullcontext() if str(get_engine().dialect.name or "") == "postgresql" else _SQLITE_WALLET_LOCK
+            with _rg, db_conn() as conn:
+                release_orphan_campaign_payment(
+                    conn, _WALLET_PAYMENTS_CTX, {**current, "id": campaign_id},
+                    str(user.get("id") or "system"),
+                )
+        if str(current.get("status") or "Draft") not in {"Submitted", "Approved", "Rejected", "Stopped"}:
             # A repeated review request may arrive after the customer has
             # already edited a Changes Requested draft. Never return those
             # newer private revisions to the reviewer through idempotency.
@@ -10834,7 +10763,7 @@ def review_ad_campaign_request(
             {"decision": decision, "note": note, "operationId": operation_id},
         )
     if replayed_after_conflict and str((saved.get("data") or {}).get("status") or "Draft") not in {
-        "Submitted", "Approved", "Rejected"
+        "Submitted", "Approved", "Rejected", "Stopped"
     }:
         return EntityResponse(**_redacted_ad_campaign_tombstone(saved))
     return EntityResponse(**_project_entity_media_for_user(saved, user, False))
@@ -11365,10 +11294,13 @@ def get_collection(
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
         _require_clothes_subscription(user)
     if collection == AD_CAMPAIGN_COLLECTION:
-        _require_ad_maker_subscription(user)
-        # Campaign thumbnails must not make every sync/list response carry
-        # megabytes of base64. GET-by-id remains the hydration path.
+        # READS are deliberately NOT subscription-gated — an expired customer
+        # must still see the campaigns holding their money (every mutating
+        # route keeps the gate). Campaign thumbnails must not make every
+        # sync/list response carry megabytes of base64: GET-by-id hydrates.
         include_media = False
+    if collection == "walletPaymentRequests":
+        include_media = False  # transfer-receipt photos hydrate by id only
 
     full_pair = before_created_at is not None or before_id is not None
     delta_pair = after_last_modified is not None or after_id is not None
@@ -11555,8 +11487,8 @@ def get_collection_item(
     role_lower = str(user.get("role") or "").lower()
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
         _require_clothes_subscription(user)
-    if collection == AD_CAMPAIGN_COLLECTION:
-        _require_ad_maker_subscription(user)
+    # adCampaignRequests reads stay open after expiry (money visibility);
+    # ownership scoping below still applies.
     if role_lower == "delivery":
         if collection in {"ads", "receipts"}:
             item = get_entity(collection, entity_id)
@@ -11606,7 +11538,7 @@ def get_collection_item(
         and role_lower != "admin"
         and user_has_permission(user, AD_CAMPAIGN_COLLECTION, "review")
         and str((item.get("data") or {}).get("status") or "Draft")
-        not in {"Submitted", "Approved", "Rejected"}
+        not in {"Submitted", "Approved", "Rejected", "Stopped"}
     ):
         # Do not reveal whether a customer's private editable draft exists.
         raise HTTPException(status_code=404, detail="Not found")
@@ -14065,6 +13997,7 @@ def privacy_anonymize_user(
     return user_row_to_public(updated)
 
 _WALLET_PAYMENTS_CTX = {
+    "validate_receipt_image": lambda photo: _validate_ad_campaign_image_source(photo)[0],
     "wallet_balance_minor": _wallet_balance_minor,
     "validate_wallet_values": _validate_wallet_values,
     "find_entity_by_idempotency": _find_entity_by_idempotency,
@@ -14075,9 +14008,36 @@ _WALLET_PAYMENTS_CTX = {
     "audit": audit,
     "sqlite_wallet_lock": lambda: _SQLITE_WALLET_LOCK,
     "is_postgres": lambda: str(get_engine().dialect.name or "") == "postgresql",
+    # Campaign-actions extras (stop / publish-status router):
+    "sqlite_patch_lock": lambda: _SQLITE_ENTITY_PATCH_LOCK,
+    "require_ad_maker_subscription": _require_ad_maker_subscription,
+    "user_has_permission": user_has_permission,
+    "enforce_ad_campaign_rate": _enforce_ad_campaign_mutation_rate,
+    "project_entity_media_for_user": _project_entity_media_for_user,
+    "get_entity": get_entity, "patch_entity": patch_entity,
+    "validate_entity_id": validate_entity_id, "sanitize_str": sanitize_str,
+    # Subscription-plans extras:
+    "wallet_available_after_holds": _wallet_available_after_holds,
+    "lock_and_validate_wallet_users": _lock_and_validate_wallet_users,
+    "parse_subscription_expiry": _parse_subscription_expiry,
+    "service_subscription_catalog": lambda: SERVICE_SUBSCRIPTION_CATALOG,
 }
 app.include_router(
+    create_subscription_plans_router(
+        current_user_dependency=current_user,
+        require_same_origin=require_same_origin,
+        ctx=_WALLET_PAYMENTS_CTX,
+    )
+)
+app.include_router(
     create_wallet_payments_router(
+        current_user_dependency=current_user,
+        require_same_origin=require_same_origin,
+        ctx=_WALLET_PAYMENTS_CTX,
+    )
+)
+app.include_router(
+    create_ad_campaign_actions_router(
         current_user_dependency=current_user,
         require_same_origin=require_same_origin,
         ctx=_WALLET_PAYMENTS_CTX,

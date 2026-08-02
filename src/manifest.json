@@ -20,10 +20,13 @@
     "14-forms.js",
     "15-modals.js",
     "15b-clothes.js",
-    "15c-ads-studio.js",
+    "15c0-ads-studio-loader.js",
     "15d-meta-ads.js",
     "15e-photo-paste.js",
     "16-actions-io.js",
     "17-init.js"
-  ]
+  ],
+  "lazy": {
+    "studio.js": ["15c-ads-studio.js"]
+  }
 }

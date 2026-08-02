@@ -19,7 +19,7 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const WWW = path.join(ROOT, 'www');
 
-const FILES = ['index.html', 'script.js', 'style.css'];
+const FILES = ['index.html', 'script.js', 'studio.js', 'style.css'];
 // The assets/ folder (prebuilt tailwind.css, fonts, lucide) ships to mobile too.
 const ASSET_DIRS = ['assets'];
 

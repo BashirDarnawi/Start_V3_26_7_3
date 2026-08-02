@@ -175,11 +175,154 @@ function renderControlCenterTask(icon, color, title, detail, actionHtml = '') {
     </div>`;
 }
 
+// ---- Subscription plans manager (owner pricing without redeploys) ----
+let _planManager = { loading: false, loadedAt: 0, version: 0, plans: [], error: '', dirty: false };
+// Mirrors the server's KNOWN_SERVICE_IDS; the server re-validates anyway.
+const PLAN_MANAGER_SERVICE_IDS = ['international_shipping', 'local_shipping', 'warehouse', 'smart_systems', 'clothes_system', 'ad_maker'];
+
+async function loadPlanManager(force = false) {
+  if (_planManager.loading || !isServerModeEnabled()) return;
+  if (!force && _planManager.loadedAt && Date.now() - _planManager.loadedAt < 60000) return;
+  if (!force && _planManager.dirty) return; // never clobber unsaved edits
+  _planManager.loading = true;
+  _planManager.error = '';
+  try {
+    const payload = await apiJson('/api/admin/subscription-plans', { method: 'GET' });
+    _planManager.plans = Array.isArray(payload?.plans) ? payload.plans : [];
+    _planManager.version = Number(payload?.version || 0);
+    _planManager.loadedAt = Date.now();
+    _planManager.dirty = false;
+  } catch (error) {
+    _planManager.error = String(error?.payload?.detail || error?.message || 'Could not load the plan catalog');
+  } finally {
+    _planManager.loading = false;
+    if (state.currentView === 'control-center') render();
+  }
+}
+
+function planManagerSetField(index, field, value) {
+  const plan = _planManager.plans[Number(index)];
+  if (!plan) return;
+  if (field === 'priceLYD') plan.priceMinor = Math.max(0, Math.round((Number(String(value).replace(',', '.')) || 0) * 100));
+  else if (field === 'durationDays') plan.durationDays = Math.max(1, Math.min(3660, Math.trunc(Number(value) || 30)));
+  else if (field === 'sortOrder') plan.sortOrder = Math.trunc(Number(value) || 0);
+  else if (field === 'active') plan.active = value === true;
+  else if (field === 'name' || field === 'nameAr') plan[field] = String(value || '').slice(0, 80);
+  _planManager.dirty = true;
+}
+
+function planManagerAddBundle() {
+  const read = id => String(document.getElementById(id)?.value || '').trim();
+  const rawId = read('plan-new-id').toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 40);
+  const name = read('plan-new-name').slice(0, 80);
+  const nameAr = read('plan-new-name-ar').slice(0, 80);
+  const services = PLAN_MANAGER_SERVICE_IDS.filter(sid => document.getElementById(`plan-new-svc-${sid}`)?.checked);
+  if (rawId.length < 2 || !name || !nameAr || !services.length) {
+    showNotification('Missing details', 'A bundle needs an id, both names, and at least one service.', 'warning');
+    return;
+  }
+  if (_planManager.plans.some(p => String(p.id) === rawId)) {
+    showNotification('Duplicate id', 'A plan with this id already exists.', 'warning');
+    return;
+  }
+  _planManager.plans.push({
+    id: rawId,
+    serviceIds: services,
+    name,
+    nameAr,
+    priceMinor: Math.max(0, Math.round((Number(read('plan-new-price').replace(',', '.')) || 0) * 100)),
+    currency: 'LYD',
+    durationDays: Math.max(1, Math.min(3660, Math.trunc(Number(read('plan-new-days')) || 30))),
+    badge: services.length > 1 ? 'best_value' : null,
+    savingsPct: null,
+    active: true,
+    sortOrder: 0
+  });
+  _planManager.dirty = true;
+  render();
+}
+
+async function savePlanManager() {
+  if (!_planManager.plans.length) return;
+  try {
+    const payload = await apiAdminSaveSubscriptionPlans(_planManager.plans.map(p => ({
+      id: String(p.id),
+      serviceIds: Array.isArray(p.serviceIds) ? p.serviceIds : [],
+      name: String(p.name || ''),
+      nameAr: String(p.nameAr || ''),
+      priceMinor: Math.max(0, Math.trunc(Number(p.priceMinor) || 0)),
+      currency: 'LYD',
+      durationDays: Math.max(1, Math.min(3660, Math.trunc(Number(p.durationDays) || 30))),
+      badge: p.badge || null,
+      savingsPct: Number.isFinite(Number(p.savingsPct)) && p.savingsPct !== null && p.savingsPct !== '' ? Math.trunc(Number(p.savingsPct)) : null,
+      active: p.active !== false,
+      sortOrder: Math.trunc(Number(p.sortOrder) || 0)
+    })));
+    _planManager.version = Number(payload?.version || _planManager.version + 1);
+    _planManager.dirty = false;
+    _planManager.loadedAt = 0;
+    showNotification('Plans saved', `Catalog version ${_planManager.version} is live — new purchases use it immediately.`, 'success');
+    if (typeof refreshSubscriptionPlans === 'function') refreshSubscriptionPlans(true).catch(() => {});
+    loadPlanManager(true);
+  } catch (error) {
+    const detail = (error?.payload && error.payload.detail) ? error.payload.detail : (error?.message || 'Save failed');
+    showNotification('Could not save plans', String(detail), 'error');
+  }
+}
+
+function renderPlanManagerSection() {
+  if (!isServerModeEnabled()) return '';
+  const rows = _planManager.plans.map((plan, index) => {
+    const safeName = Security.escapeHtml(String(plan.name || plan.id));
+    const services = (Array.isArray(plan.serviceIds) ? plan.serviceIds : []).join(' + ');
+    return `
+      <div class="grid grid-cols-2 items-center gap-2 rounded-xl bg-slate-100 p-3 text-sm dark:bg-slate-800 sm:grid-cols-[1.2fr_1fr_90px_80px_70px_70px]">
+        <div class="min-w-0">
+          <input value="${safeName}" oninput="planManagerSetField(${index}, 'name', this.value)" class="w-full rounded-lg border border-transparent bg-transparent px-1 font-bold text-slate-800 focus:border-indigo-300 dark:text-white" />
+          <input value="${Security.escapeHtml(String(plan.nameAr || ''))}" dir="rtl" oninput="planManagerSetField(${index}, 'nameAr', this.value)" class="w-full rounded-lg border border-transparent bg-transparent px-1 text-xs text-slate-500 focus:border-indigo-300" />
+        </div>
+        <div class="truncate text-xs text-slate-500" title="${Security.escapeHtml(String(plan.id))}">${Security.escapeHtml(services)}</div>
+        <label class="text-xs text-slate-500 sm:text-right">LYD<input type="number" min="0" step="0.01" value="${(Math.max(0, Number(plan.priceMinor) || 0) / 100).toFixed(2)}" oninput="planManagerSetField(${index}, 'priceLYD', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono font-bold dark:border-slate-700 dark:bg-slate-900" /></label>
+        <label class="text-xs text-slate-500 sm:text-right">Days<input type="number" min="1" max="3660" value="${Math.max(1, Number(plan.durationDays) || 30)}" oninput="planManagerSetField(${index}, 'durationDays', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono dark:border-slate-700 dark:bg-slate-900" /></label>
+        <label class="text-xs text-slate-500 sm:text-right">Order<input type="number" value="${Math.trunc(Number(plan.sortOrder) || 0)}" oninput="planManagerSetField(${index}, 'sortOrder', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono dark:border-slate-700 dark:bg-slate-900" /></label>
+        <label class="flex items-center justify-end gap-1 text-xs font-bold ${plan.active !== false ? 'text-emerald-600' : 'text-slate-400'}"><input type="checkbox" ${plan.active !== false ? 'checked' : ''} onchange="planManagerSetField(${index}, 'active', this.checked)" class="h-5 w-5 accent-emerald-600" />On</label>
+      </div>`;
+  }).join('');
+  return `
+      <section class="glass-panel rounded-3xl p-5 sm:p-6">
+        <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div><div class="flex items-center gap-2"><i data-lucide="badge-dollar-sign" class="h-5 w-5 text-emerald-600"></i><h2 class="text-xl font-black text-slate-900 dark:text-white">Subscription plans & prices</h2></div>
+          <p class="mt-1 text-sm text-slate-500">Prices are LYD and live on the server — saving here changes what customers pay next, never what they already bought. Catalog version: ${Number(_planManager.version) || 0}${_planManager.dirty ? ' · <span class="font-bold text-amber-600">unsaved changes</span>' : ''}</p></div>
+          <div class="flex gap-2">
+            <button type="button" onclick="loadPlanManager(true)" class="min-h-11 rounded-xl border border-slate-300 px-4 font-bold text-slate-600 dark:border-slate-700 dark:text-slate-300">Reload</button>
+            <button type="button" onclick="savePlanManager()" ${_planManager.dirty ? '' : 'disabled'} class="min-h-11 rounded-xl bg-emerald-600 px-4 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">Save all plans</button>
+          </div>
+        </div>
+        ${_planManager.error ? `<div class="mb-3 rounded-xl bg-rose-50 p-3 text-sm font-semibold text-rose-700">${Security.escapeHtml(_planManager.error)}</div>` : ''}
+        <div class="space-y-2">${rows || `<div class="text-sm text-slate-500">${_planManager.loading ? 'Loading plans…' : 'Press Reload to fetch the plan catalog.'}</div>`}</div>
+        <details class="mt-4 rounded-2xl border border-slate-200 p-4 dark:border-slate-700">
+          <summary class="cursor-pointer select-none font-bold text-slate-700 dark:text-slate-200">Add a bundle (one subscription, many systems)</summary>
+          <div class="mt-3 grid gap-3 sm:grid-cols-2">
+            <label class="text-xs font-bold text-slate-500">Bundle id (letters/numbers/underscore)<input id="plan-new-id" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="pro_bundle" /></label>
+            <label class="text-xs font-bold text-slate-500">Price (LYD)<input id="plan-new-price" type="number" min="0" step="0.01" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="150.00" /></label>
+            <label class="text-xs font-bold text-slate-500">Name (English)<input id="plan-new-name" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="Pro Bundle" /></label>
+            <label class="text-xs font-bold text-slate-500">Name (Arabic)<input id="plan-new-name-ar" dir="rtl" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="الباقة الاحترافية" /></label>
+            <label class="text-xs font-bold text-slate-500">Duration (days)<input id="plan-new-days" type="number" min="1" max="3660" value="30" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" /></label>
+            <div class="text-xs font-bold text-slate-500">Included systems<div class="mt-1 grid grid-cols-2 gap-1">${PLAN_MANAGER_SERVICE_IDS.map(sid => `<label class="flex items-center gap-2 rounded-lg bg-slate-100 px-2 py-1.5 dark:bg-slate-800"><input id="plan-new-svc-${sid}" type="checkbox" class="h-4 w-4 accent-indigo-600" /><span class="truncate">${sid}</span></label>`).join('')}</div></div>
+          </div>
+          <button type="button" onclick="planManagerAddBundle()" class="mt-3 min-h-11 rounded-xl bg-indigo-600 px-4 font-bold text-white">Add to list (save to publish)</button>
+        </details>
+      </section>`;
+}
+
 function renderControlCenterView() {
   if (!isAdminRole(state.currentUser?.role)) return renderNoAccessView();
   if (!_controlCenter.period) _controlCenter.period = controlCenterPreviousMonth();
   if (!_controlCenter.loading && (!_controlCenter.loadedAt || Date.now() - _controlCenter.loadedAt > 60000)) {
     setTimeout(() => loadControlCenterStatus(false), 0);
+  }
+  if (isServerModeEnabled() && !_planManager.loading && !_planManager.loadedAt) {
+    setTimeout(() => loadPlanManager(false), 0);
   }
   const facts = getControlCenterFacts();
   const operations = _controlCenter.operations || {};
@@ -233,6 +376,8 @@ function renderControlCenterView() {
           <div class="mt-4 space-y-2">${closedPeriods.slice(0, 4).map(row => `<div class="flex items-center justify-between rounded-xl bg-slate-100 p-3 text-sm dark:bg-slate-800"><span><strong>${Security.escapeHtml(row.period || '')}</strong> · Closed</span><button type="button" onclick="unlockControlCenterMonth('${Security.escapeHtml(String(row.period || ''))}')" class="min-h-10 rounded-lg px-3 font-bold text-amber-700">Unlock</button></div>`).join('') || '<div class="text-sm text-slate-500">No months have been closed yet.</div>'}</div>
         </section>
       </div>
+
+      ${renderPlanManagerSection()}
 
       <section class="glass-panel rounded-3xl p-5 sm:p-6"><h2 class="text-xl font-black text-slate-900 dark:text-white">Live connections</h2><div class="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><div class="rounded-2xl bg-slate-100 p-4 dark:bg-slate-800"><div class="text-sm text-slate-500">Meta read connection</div><div class="mt-1 font-black ${meta.configured ? 'text-emerald-600' : 'text-amber-600'}">${meta.configured ? 'Ready' : 'Needs setup'}</div></div><div class="rounded-2xl bg-slate-100 p-4 dark:bg-slate-800"><div class="text-sm text-slate-500">Instant Meta webhook</div><div class="mt-1 font-black ${meta.webhookConfigured ? 'text-emerald-600' : 'text-amber-600'}">${meta.webhookConfigured ? 'Ready' : 'Polling fallback'}</div></div><div class="rounded-2xl bg-slate-100 p-4 dark:bg-slate-800"><div class="text-sm text-slate-500">Backup worker</div><div class="mt-1 font-black ${backup.workerRunning ? 'text-emerald-600' : 'text-amber-600'}">${backup.workerRunning ? 'Running' : 'Not running'}</div></div><div class="rounded-2xl bg-slate-100 p-4 dark:bg-slate-800"><div class="text-sm text-slate-500">Server health</div><div class="mt-1 font-black ${Number(monitoring.error_rate || 0) < 0.05 ? 'text-emerald-600' : 'text-rose-600'}">${Number(monitoring.total_requests || 0) ? `${(Number(monitoring.error_rate || 0) * 100).toFixed(1)}% errors` : 'Collecting data'}</div><div class="mt-1 text-xs text-slate-500">P95 ${Math.round(Number(monitoring.response_ms_p95 || 0))} ms</div></div></div></section>
     </div>`;

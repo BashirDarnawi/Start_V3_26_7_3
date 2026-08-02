@@ -106,6 +106,14 @@ function makeSandbox() {
 const sandbox = makeSandbox();
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(SCRIPT, 'utf8'), sandbox, { filename: 'script.js' });
+// The Ads Studio ships as a lazy bundle; load it into the same context so the
+// studio assertions keep working exactly as under one concatenation (the vm
+// global lexical environment is shared across runInContext calls).
+vm.runInContext(
+  fs.readFileSync(path.join(__dirname, '..', 'studio.js'), 'utf8'),
+  sandbox,
+  { filename: 'studio.js' }
+);
 
 // `const`/`let` top-level declarations (state, PERMISSION_MODULES, …) live in
 // the context's global LEXICAL scope, not on the global object — pull the ones

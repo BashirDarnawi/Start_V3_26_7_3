@@ -43,7 +43,7 @@ PERMISSION_ALLOWLIST: dict[str, frozenset[str]] = {
     "clothesSettings": frozenset({"viewOwn", "add", "editOwn"}),
     "adCampaignRequests": frozenset({
         "view", "viewOwn", "add", "edit", "editOwn", "delete",
-        "deleteOwn", "submit", "submitOwn", "review",
+        "deleteOwn", "submit", "submitOwn", "review", "stop", "stopOwn",
     }),
 }
 

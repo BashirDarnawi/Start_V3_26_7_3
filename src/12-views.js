@@ -1550,7 +1550,10 @@ function renderView() {
     case 'control-center': return renderControlCenterView();
     case 'smart-systems': return renderSmartSystems();
     case 'clothes-system': return renderClothesSystemView();
-    case 'ads-studio': return renderAdsStudioView();
+    case 'ads-studio':
+      if (typeof renderAdsStudioView === 'function') return renderAdsStudioView();
+      ensureAdsStudioLoaded();
+      return renderAdsStudioLoadingState();
     case 'service-placeholder': return renderServicePlaceholder();
     case 'wallet': return renderWalletView();
     case 'analytics': return renderAnalyticsView();
@@ -1648,6 +1651,7 @@ function renderServicesHub() {
             <span>${(service.children?.length || 0)} ${isRTL ? 'أنظمة' : 'systems'}</span>
           </div>
         ` : ''}
+        ${service.requiresSubscription && typeof renderSubscriptionStatusBadge === 'function' ? renderSubscriptionStatusBadge(service.id, isRTL) : ''}
       </button>
     `;
   }).join('');
@@ -1750,6 +1754,7 @@ function renderSmartSystems() {
         
         <h3 class="text-2xl font-bold text-slate-800 dark:text-white mb-2">${childName}</h3>
         <p class="text-slate-500 dark:text-slate-400">${childDesc}</p>
+        ${child.requiresSubscription && typeof renderSubscriptionStatusBadge === 'function' ? renderSubscriptionStatusBadge(child.id, isRTL) : ''}
       </button>
     `;
   }).join('');

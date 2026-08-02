@@ -253,7 +253,9 @@ const PERMISSION_MODULES = {
       deleteOwn: { label: 'Delete Own Requests', description: 'Delete own eligible drafts' },
       submit: { label: 'Submit Any Request', description: 'Submit any eligible campaign for review' },
       submitOwn: { label: 'Submit Own Requests', description: 'Submit own campaigns for staff review' },
-      review: { label: 'Review Requests', description: 'Approve, reject, or request changes' }
+      review: { label: 'Review Requests', description: 'Approve, reject, or request changes' },
+      stop: { label: 'Stop Any Campaign', description: 'Stop any approved campaign and refund its unspent budget' },
+      stopOwn: { label: 'Stop Own Campaigns', description: 'Stop own approved campaigns before they start, with a full refund' }
     }
   }
 };
@@ -359,7 +361,7 @@ const PERMISSION_TEMPLATES = {
     icon: 'rocket',
     color: 'cyan',
     permissions: {
-      adCampaignRequests: ['viewOwn', 'add', 'editOwn', 'deleteOwn', 'submitOwn']
+      adCampaignRequests: ['viewOwn', 'add', 'editOwn', 'deleteOwn', 'submitOwn', 'stopOwn']
     }
   },
   adsStudioReviewer: {
@@ -616,17 +618,97 @@ function checkServiceAccess(serviceId) {
   return { allowed: false, reason: 'Service not found' };
 }
 
+// Latest future expiry among the current user's active rows for a service
+// (renewals stack rows — the furthest expiry is the real end date).
+function getSubscriptionExpiryForCurrentUser(serviceId) {
+  const uid = String(state.currentUser?.id || '');
+  const sid = String(serviceId || '');
+  if (!uid || !sid) return null;
+  const now = Date.now();
+  const subs = Array.isArray(state.serviceSubscriptions) ? state.serviceSubscriptions : [];
+  let best = null;
+  for (const s of subs) {
+    if (!s || s._deleted || s.userId !== uid || s.serviceId !== sid) continue;
+    if (s.status !== 'active' || !s.expiresAt) continue;
+    const t = new Date(s.expiresAt).getTime();
+    if (Number.isFinite(t) && t > now && (best === null || t > best)) best = t;
+  }
+  return best;
+}
+
+// "Active until <date>" line for service cards, with a Renew link once
+// fewer than 7 days remain. Empty when there is no dated subscription.
+function renderSubscriptionStatusBadge(serviceId, isRTL) {
+  const expiry = getSubscriptionExpiryForCurrentUser(serviceId);
+  if (!expiry) return '';
+  const daysLeft = Math.ceil((expiry - Date.now()) / TIME_CONSTANTS.MILLISECONDS_PER_DAY);
+  let dateLabel = '';
+  try { dateLabel = new Date(expiry).toLocaleDateString(isRTL ? 'ar-LY' : 'en-GB'); } catch (_) { dateLabel = String(expiry); }
+  const soon = daysLeft <= 7;
+  const safeId = Security.escapeHtml(String(serviceId));
+  return `
+    <div class="mt-3 flex flex-wrap items-center gap-2 text-[11px] font-bold ${soon ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}">
+      <i data-lucide="calendar-clock" class="w-3.5 h-3.5"></i>
+      <span>${isRTL ? 'نشط حتى' : 'Active until'} ${Security.escapeHtml(dateLabel)}</span>
+      ${soon ? `<span onclick="event.stopPropagation(); showSubscriptionModal('${safeId}')" role="button" tabindex="0" class="underline cursor-pointer">${isRTL ? 'جدّد الآن' : 'Renew now'}</span>` : ''}
+    </div>`;
+}
+
+// Plans (single service + bundles containing it) for the paywall, smallest
+// first. Server catalog when available; legacy client offer as fallback.
+function getPlansForService(serviceId) {
+  const sid = String(serviceId || '');
+  const plans = Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : [];
+  const matching = plans.filter(p => p && Array.isArray(p.serviceIds) && p.serviceIds.includes(sid));
+  matching.sort((a, b) =>
+    (a.serviceIds.length - b.serviceIds.length)
+    || (Number(a.sortOrder || 0) - Number(b.sortOrder || 0)));
+  return matching;
+}
+
 function showSubscriptionModal(serviceId, subscribeToId = serviceId) {
   const service = SERVICES[serviceId] || SMART_SYSTEMS_CHILDREN[serviceId];
   if (!service) return;
-  
+
   const serviceName = state.language === 'ar' ? service.nameAr : service.name;
-  
+
   state.activeModal = 'subscription-lock';
-  // Idempotency key prevents double-charging if user retries
+  // Idempotency keys prevent double-charging if the user retries; each plan
+  // choice gets its own stable key for this modal session.
   const idem = Security.generateSecureId('idem');
-  state.modalData = { serviceId, serviceName, subscribeToId, idempotencyKey: idem };
+  state.modalData = { serviceId, serviceName, subscribeToId, idempotencyKey: idem, planIdemKeys: {} };
   renderModal();
+  // Fetch the sellable plans, then repaint the open modal with the chooser.
+  if (typeof refreshSubscriptionPlans === 'function' && isServerModeEnabled()) {
+    refreshSubscriptionPlans().then(() => {
+      if (state.activeModal === 'subscription-lock') renderModal();
+    }).catch(() => {});
+  }
+}
+
+async function handleSubscribePlan(planId, navigateToId) {
+  if (!state.currentUser?.id) return;
+  const pid = String(planId || '');
+  if (!pid) return;
+  const keys = state.modalData?.planIdemKeys || {};
+  if (!keys[pid]) keys[pid] = Security.generateSecureId('idem');
+  try {
+    await SUBSCRIPTIONS.purchasePlan(state.currentUser.id, pid, { idempotencyKey: keys[pid] });
+    closeModal();
+    showNotification(
+      state.language === 'ar' ? 'تم الاشتراك' : 'Subscribed',
+      state.language === 'ar' ? 'تم تفعيل الخدمات بنجاح' : 'Your services are now active',
+      'success'
+    );
+    if (navigateToId) openServiceById(navigateToId);
+  } catch (error) {
+    const detail = (error?.payload && error.payload.detail) ? error.payload.detail : (error?.message || '');
+    showNotification(
+      state.language === 'ar' ? 'تعذر الاشتراك' : 'Could not subscribe',
+      String(detail) || (state.language === 'ar' ? 'حاول مرة أخرى.' : 'Please try again.'),
+      'error'
+    );
+  }
 }
 
 function openServiceById(id) {
