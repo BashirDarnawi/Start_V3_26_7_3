@@ -106,14 +106,16 @@ function makeSandbox() {
 const sandbox = makeSandbox();
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(SCRIPT, 'utf8'), sandbox, { filename: 'script.js' });
-// The Ads Studio ships as a lazy bundle; load it into the same context so the
-// studio assertions keep working exactly as under one concatenation (the vm
+// Lazy bundles (Ads Studio, Clothes System) load into the same context so
+// every assertion keeps working exactly as under one concatenation (the vm
 // global lexical environment is shared across runInContext calls).
-vm.runInContext(
-  fs.readFileSync(path.join(__dirname, '..', 'studio.js'), 'utf8'),
-  sandbox,
-  { filename: 'studio.js' }
-);
+for (const lazyBundle of ['studio.js', 'clothes.js']) {
+  vm.runInContext(
+    fs.readFileSync(path.join(__dirname, '..', lazyBundle), 'utf8'),
+    sandbox,
+    { filename: lazyBundle }
+  );
+}
 
 // `const`/`let` top-level declarations (state, PERMISSION_MODULES, …) live in
 // the context's global LEXICAL scope, not on the global object — pull the ones
@@ -573,15 +575,245 @@ check('duplicate pages are found across Arabic spellings and never merged automa
     assert(!ids.some(key => key.includes('dp7')), 'a blank name was grouped');
     assert(!ids.some(key => key.includes('dp8')), 'a deleted page was grouped');
 
-    // Read-only by design: ads carry money and point at a pageId, so nothing
-    // here may merge or delete a page.
+    // The duplicate LIST still never writes. It may only open the merge
+    // confirmation dialog — every page/ad write lives behind that second step.
     const helpers = fs.readFileSync(path.join(__dirname, '..', 'src', '13-filters-helpers.js'), 'utf8');
     const dialog = helpers.slice(helpers.indexOf('function showPageDuplicates('));
     const body = dialog.slice(0, dialog.indexOf('\nfunction '));
-    assert(!/deletePage\(|deleteRecord\(|mergePage/.test(body), 'the duplicate view can destroy or merge pages');
+    assert(!/deletePage\(|deleteRecord\(|updateRecord\(|runPageMerge\(/.test(body), 'the duplicate view can destroy or merge pages directly');
+    assert(body.includes('showPageMergeDialog('), 'the duplicate view offers no way to merge a hand-made page into its Meta page');
   } finally {
     S.pages = originalPages;
   }
+});
+
+console.log('\n=== MERGE TOOLS: one real page, one real ad ===');
+
+check('only a hand-made page may be merged, and only into the single Meta page of its name', () => {
+  loginAs(ADMIN);
+  S.language = 'en';
+  const originalPages = S.pages;
+  const originalAds = S.ads;
+  try {
+    S.pages = [
+      { id: 'pm_manual', name: 'مطعم الشام', customerIds: ['c1'] },
+      { id: 'pm_meta', name: 'مطعم الشام', customerIds: [], metaPageId: '9911' },
+      { id: 'pm_solo', name: 'Only Once', customerIds: [] },
+      // Two Meta rows for one name is a different problem entirely and must
+      // never be guessed at.
+      { id: 'pm_two_a', name: 'Twice Meta', customerIds: [], metaPageId: '1' },
+      { id: 'pm_two_b', name: 'Twice Meta', customerIds: [], metaPageId: '2' },
+      // No Meta row at all: nothing to merge INTO.
+      { id: 'pm_none_a', name: 'Both Manual', customerIds: [] },
+      { id: 'pm_none_b', name: 'Both Manual', customerIds: [] }
+    ];
+    S.ads = [
+      { id: 'pm_ad1', pageId: 'pm_manual', customerId: 'c1', amountUSD: 50, createdBy: 'u-admin' },
+      { id: 'pm_ad2', pageId: 'pm_manual', customerId: 'c1', amountUSD: 20, createdBy: 'u-admin' },
+      { id: 'pm_ad3', pageId: 'pm_meta', customerId: 'c1', amountUSD: 10, createdBy: 'u-admin' }
+    ];
+
+    const groups = sandbox.findPageMergeGroups();
+    assert(groups.length === 1, `expected exactly 1 mergeable group, got ${groups.length}`);
+    assert(String(groups[0].keepPage.id) === 'pm_meta', 'the Meta page is not the survivor');
+    assert(groups[0].manualPages.map(p => p.id).join() === 'pm_manual', 'the hand-made page was not the one offered for merging');
+    assert(sandbox.countPageMergeGroups() === 1, 'the mergeable-group count disagrees with the group list');
+
+    const plan = sandbox.getPageMergePlan('pm_meta', 'pm_manual');
+    assert(!plan.blocked, `a valid merge was blocked: ${plan.blocked}`);
+    assert(plan.ads.map(a => a.id).sort().join() === 'pm_ad1,pm_ad2', 'the plan moves the wrong ads');
+
+    // The dangerous direction: merging the Meta page away would strand every
+    // future imported ad and re-create the duplicate on the next sync.
+    assert(/must be the Meta page|cannot be merged away/i.test(sandbox.getPageMergePlan('pm_manual', 'pm_meta').blocked),
+      'a Meta page was allowed to be merged into a hand-made page');
+    assert(!!sandbox.getPageMergePlan('pm_meta', 'pm_solo').blocked, 'two different names were allowed to merge');
+    assert(!!sandbox.getPageMergePlan('pm_meta', 'pm_meta').blocked, 'a page was allowed to merge into itself');
+    assert(!!sandbox.getPageMergePlan('pm_meta', 'pm_gone').blocked, 'a missing page did not block the merge');
+  } finally {
+    S.pages = originalPages;
+    S.ads = originalAds;
+  }
+});
+
+check('page merge is admin-only and removes the old page only after every ad has moved', () => {
+  const originalPages = S.pages;
+  try {
+    S.pages = [
+      { id: 'pm_manual', name: 'Shared Name', customerIds: [] },
+      { id: 'pm_meta', name: 'Shared Name', customerIds: [], metaPageId: '9911' }
+    ];
+    loginAs(employee({ pages: ['view', 'edit', 'delete'], ads: ['view', 'edit'] }));
+    S.language = 'en';
+    // The count feeding the duplicates dialog is what decides whether a merge is
+    // ever advertised, and it is admin-gated.
+    assert(sandbox.countPageMergeGroups() === 0, 'a non-admin was offered a page merge');
+    clearNotes();
+    sandbox.showPageMergeDialog('pm_meta', 'pm_manual');
+    assert(lastNote() && /Access Denied/i.test(lastNote().t), 'a non-admin was not blocked from the merge dialog');
+    clearNotes();
+    sandbox.runPageMerge('pm_meta', 'pm_manual');
+    assert(lastNote() && /Access Denied/i.test(lastNote().t), 'a non-admin was not blocked from running the merge');
+  } finally {
+    S.pages = originalPages;
+    loginAs(ADMIN);
+  }
+
+  // Order is the safety property: the ads move first and the losing page is
+  // deleted last, so an interrupted merge is always safe to repeat.
+  const merge = fs.readFileSync(path.join(__dirname, '..', 'src', '13b-merge-tools.js'), 'utf8');
+  const runBody = merge.slice(merge.indexOf('async function runPageMerge('));
+  const body = runBody.slice(0, runBody.indexOf('\n// ---'));
+  assert(body.indexOf('updateRecord(state.ads') < body.indexOf('deleteRecord(state.pages'),
+    'the old page is deleted before its ads have moved');
+  assert(/if \(!saved\)/.test(body), 'a failed ad move does not stop the merge');
+  // A browser may never write the server-controlled Meta identity fields, so the
+  // merge repoints ads and adds an owner — nothing else.
+  const pageWrites = merge.match(/updateRecord\(\s*state\.pages/g) || [];
+  assert(pageWrites.length === 1, `expected exactly 1 page write in the merge, found ${pageWrites.length}`);
+  assert(/updateRecord\(\s*state\.pages,[\s\S]{0,160}customerIds:/.test(merge), 'the page write does not carry the owner across');
+  assert(!/updateRecord\(\s*state\.pages,[\s\S]{0,160}metaPage/.test(merge), 'the merge tries to write a server-controlled Meta page field');
+  assert(/updates = \{ pageId:/.test(body), 'the ad move does not repoint pageId');
+});
+
+check('an ad merges with its Meta twin only when the twin is an empty draft on the same page', () => {
+  loginAs(ADMIN);
+  S.language = 'en';
+  S.serverMode = true;
+  const originalPages = S.pages;
+  const originalAds = S.ads;
+  const originalCustomers = S.customers;
+  try {
+    S.customers = [{ id: 'c1', name: 'Cust One', phones: ['0911234567'] }];
+    S.pages = [
+      { id: 'am_manual_page', name: 'متجر الهلالي', customerIds: ['c1'] },
+      { id: 'am_meta_page', name: 'متجر الهلالي', customerIds: [], metaPageId: '5150' },
+      { id: 'am_other_page', name: 'Somewhere Else', customerIds: [] }
+    ];
+    const manualAd = { id: 'am_manual', pageId: 'am_manual_page', customerId: 'c1', amountUSD: 50, isPaid: true, createdBy: 'u-admin' };
+    const draftAd = {
+      id: 'am_draft', pageId: 'am_meta_page', metaAdId: '778899', metaAdName: 'Meta draft',
+      metaImportState: 'needs_completion', metaImportSource: 'meta_ads', paymentStatus: 'pending_setup',
+      amountUSD: 0, createdBy: 'system', creatorId: 'system'
+    };
+    S.ads = [manualAd, draftAd];
+    sandbox.resetAdMergePairCache();
+
+    const entry = sandbox.getAdMergePartnersFor('am_manual');
+    assert(entry, 'the hand-made ad found no Meta twin on the same page');
+    assert(entry.role === 'manual' && entry.partners.length === 1 && String(entry.partners[0].id) === 'am_draft',
+      'the ad holding the money is not the surviving side of the pair');
+    // Both halves offer the same merge, so it can be started from either row.
+    const fromDraft = sandbox.getAdMergePartnersFor('am_draft');
+    assert(fromDraft && fromDraft.role === 'draft' && String(fromDraft.partners[0].id) === 'am_manual',
+      'the draft row does not offer the same merge');
+    assert(!sandbox.getAdMergePlan('am_manual', 'am_draft').blocked, 'a valid ad merge was blocked');
+
+    // A draft that already carries a customer/money is a real ad, not a copy.
+    draftAd.customerId = 'c1';
+    sandbox.resetAdMergePairCache();
+    assert(!sandbox.getAdMergePartnersFor('am_manual'), 'a draft holding a customer was offered for merging');
+    assert(/customer, an amount or a receipt/i.test(sandbox.getAdMergePlan('am_manual', 'am_draft').blocked),
+      'a draft holding money was not refused by name');
+    delete draftAd.customerId;
+
+    // Different page: never paired.
+    draftAd.pageId = 'am_other_page';
+    sandbox.resetAdMergePairCache();
+    assert(!sandbox.getAdMergePartnersFor('am_manual'), 'ads on different pages were paired');
+    assert(/same page/i.test(sandbox.getAdMergePlan('am_manual', 'am_draft').blocked), 'a cross-page merge was not refused by name');
+    draftAd.pageId = 'am_meta_page';
+
+    // Two possible partners: the app must not CHOOSE, but it must still offer
+    // the merge — several same-priced ads on one page is the normal shape here.
+    S.ads = [manualAd, draftAd, { ...draftAd, id: 'am_draft2', metaAdId: '990011' }];
+    sandbox.resetAdMergePairCache();
+    const ambiguous = sandbox.getAdMergePartnersFor('am_manual');
+    assert(ambiguous && ambiguous.partners.length === 2, 'an ambiguous ad was left with no way to merge at all');
+    assert(ambiguous.role === 'manual', 'the hand-made ad was not recognised as the surviving side');
+    assert(/Merge \(2\)/.test(sandbox.renderAdMergeActionButton(manualAd, false)), 'the ads row does not offer a choice of copies');
+    assert(!sandbox.getAdMergePartnersFor('am_missing'), 'an unknown ad reported merge partners');
+    S.ads = [manualAd, draftAd];
+    sandbox.resetAdMergePairCache();
+    assert(/>Merge</.test(sandbox.renderAdMergeActionButton(manualAd, false)), 'the ads row has no merge button for a clean pair');
+    assert(sandbox.renderAdMergeActionButton({ id: 'nope' }, false) === '', 'an unrelated ad was given a merge button');
+
+    // An ad already linked to Meta has nothing to absorb.
+    manualAd.metaAdId = '123';
+    sandbox.resetAdMergePairCache();
+    assert(!sandbox.getAdMergePartnersFor('am_manual'), 'an already-linked ad was offered a merge');
+    assert(/already linked/i.test(sandbox.getAdMergePlan('am_manual', 'am_draft').blocked), 'an already-linked survivor was not refused by name');
+    delete manualAd.metaAdId;
+
+    // Offline the Meta link endpoints do not exist, so the pair is not offered.
+    S.serverMode = false;
+    sandbox.resetAdMergePairCache();
+    assert(!sandbox.getAdMergePartnersFor('am_manual'), 'an ad merge was offered without a server connection');
+    S.serverMode = true;
+
+    // Non-admins never see it, and are refused if they call it anyway.
+    loginAs(employee({ ads: ['view', 'edit', 'delete'] }));
+    S.serverMode = true;
+    sandbox.resetAdMergePairCache();
+    assert(!sandbox.getAdMergePartnersFor('am_manual'), 'a non-admin was offered an ad merge');
+    clearNotes();
+    sandbox.showAdMergeDialog('am_manual', 'am_draft');
+    assert(lastNote() && /Access Denied/i.test(lastNote().t), 'a non-admin was not blocked from the ad merge dialog');
+    clearNotes();
+    sandbox.runAdMerge('am_manual', 'am_draft');
+    assert(lastNote() && /Access Denied/i.test(lastNote().t), 'a non-admin was not blocked from running the ad merge');
+  } finally {
+    S.pages = originalPages;
+    S.ads = originalAds;
+    S.customers = originalCustomers;
+    S.serverMode = false;
+    loginAs(ADMIN);
+  }
+
+  // The Meta link may only move through the transactional endpoints, and the
+  // empty copy is deleted only after the survivor owns the link.
+  const merge = fs.readFileSync(path.join(__dirname, '..', 'src', '13b-merge-tools.js'), 'utf8');
+  const runBody = merge.slice(merge.indexOf('async function runAdMerge('));
+  // metaAdId is server-controlled: the only writers allowed to move it are the
+  // transactional Meta link/unlink endpoints, never an ad PATCH.
+  assert(!/updateRecord\(\s*state\.ads/.test(runBody), 'the ad merge PATCHes the ad instead of using the Meta endpoints');
+  assert(runBody.indexOf('apiUnlinkMetaAd(') < runBody.indexOf('apiLinkMetaAd('),
+    'the draft is not unlinked before the surviving ad claims the Meta id');
+  assert(runBody.indexOf('apiLinkMetaAd(') < runBody.indexOf('deleteRecord(state.ads'),
+    'the empty copy is deleted before the surviving ad owns the link');
+  assert(/if \(released\)/.test(runBody), 'a failed link does not put the draft back the way it was');
+});
+
+check('the ads list shows who created and completed an ad on its own row, never overflowing the next column', () => {
+  loginAs(ADMIN);
+  seedBusinessData();
+  S.language = 'en';
+  S.adSearch = '';
+  S.adFilters = {};
+  S.pages = [{ id: 'p1', name: 'Page One', category: '', customerIds: ['c1'] }];
+  Object.assign(S.ads[0], { pageId: 'p1', recordType: 'ad', status: 'Active', createdBy: 'u-admin' });
+
+  const html = visible(sandbox.renderAdsView());
+  assert(html.includes('class="ad-primary-people"'), 'the attribution has no row of its own');
+  assert(/data-role="ad-creator" class="ad-person-chip ad-person-chip--creator"/.test(html),
+    'the creator is not rendered as a readable chip');
+  // The chips must sit AFTER the photo/name flex row, not inside its narrow
+  // text column — that column is what squeezed them into the Page cell.
+  assert(html.indexOf('class="ad-primary-summary"') < html.indexOf('class="ad-primary-people"'),
+    'the attribution is still trapped inside the narrow summary column');
+
+  const css = fs.readFileSync(path.join(__dirname, '..', 'style.css'), 'utf8');
+  assert(!/\[data-role="ad-completed-by"\][^{]*\{[^}]*white-space:\s*nowrap/.test(css),
+    'the completed-by line can still refuse to wrap and overflow its cell');
+  assert(!/\.ad-primary-summary\s*\{[^}]*min-width:\s*15rem/.test(css),
+    'the summary still forces 15rem into a much narrower fixed column');
+  assert(/\.ad-person-chip\s*\{[^}]*overflow-wrap:\s*anywhere/.test(css), 'a long name can still overflow its chip');
+  assert(/\.dark \.ad-person-chip--completed/.test(css), 'the completed-by chip has no dark-mode colours');
+
+  // table-layout: fixed renormalises every column unless the widths total 100.
+  const widths = [...css.matchAll(/\.ads-summary-table \.ads-col-[a-z]+ \{ width: (\d+)%; \}/g)].map(m => Number(m[1]));
+  assert(widths.length === 10, `expected 10 ads column widths, found ${widths.length}`);
+  assert(widths.reduce((sum, w) => sum + w, 0) === 100, `ads column widths total ${widths.reduce((s, w) => s + w, 0)}%, not 100%`);
 });
 
 check('the ads list names the person who completed an imported Meta ad', () => {
@@ -2491,7 +2723,11 @@ check('first-run UI separates local, token-enabled, and disabled server setup', 
 });
 
 check('server money/subscription calls use dedicated transactional endpoints', () => {
-  const built = fs.readFileSync(SCRIPT, 'utf8');
+  // Clothes (and studio) live in lazy bundles now: source assertions must
+  // scan the WHOLE shipped app, not only the startup bundle.
+  const built = fs.readFileSync(SCRIPT, 'utf8')
+    + fs.readFileSync(path.join(__dirname, '..', 'clothes.js'), 'utf8')
+    + fs.readFileSync(path.join(__dirname, '..', 'studio.js'), 'utf8');
   for (const endpoint of ['/api/wallet/transfers', '/api/wallet/top-ups', '/api/wallet/reversals', '/api/subscriptions/purchase', '/api/clothes/orders/mutate', '/api/receipts/transfers', '/api/ads/mutate', '/stop', '/api/sync/watermarks']) {
     assert(built.includes(endpoint), `missing dedicated endpoint ${endpoint}`);
   }

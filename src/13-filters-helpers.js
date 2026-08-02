@@ -1462,9 +1462,10 @@ function closePageDuplicatesDialog(restoreFocus = true) {
   if (restoreFocus && target?.focus) target.focus();
 }
 
-// Read-only on purpose: it shows what repeats and lets you open each page, but
-// never merges or deletes. Ads carry money and point at a pageId, so combining
-// two pages is a decision a person makes one at a time.
+// Shows what repeats and lets you open each page. Combining two pages stays a
+// decision a person makes one at a time — the Merge button only appears on the
+// hand-made row of a group that has exactly ONE Meta page to merge into, and it
+// opens a dialog that spells out what moves before anything is written.
 function showPageDuplicates(focusPageId, triggerButton) {
   const isAr = state.language === 'ar';
   const wanted = String(focusPageId || '');
@@ -1487,7 +1488,16 @@ function showPageDuplicates(focusPageId, triggerButton) {
       <div class="sticky top-0 z-10 bg-white dark:bg-slate-900 flex items-center justify-between gap-3 p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700">
         <div class="min-w-0">
           <h2 id="page-duplicates-dialog-title" class="text-xl font-bold text-slate-800 dark:text-white truncate">${isAr ? 'صفحات مكررة' : 'Duplicate pages'}</h2>
-          <p class="text-sm text-slate-500 truncate">${groups.length ? (isAr ? `${groups.length} مجموعة متطابقة بالاسم` : `${groups.length} group${groups.length > 1 ? 's' : ''} with the same name`) : (isAr ? 'لا يوجد تكرار' : 'Nothing repeated')}</p>
+          <p class="text-sm text-slate-500 break-words">${groups.length ? (isAr ? `${groups.length} مجموعة متطابقة بالاسم` : `${groups.length} group${groups.length > 1 ? 's' : ''} with the same name`) : (isAr ? 'لا يوجد تكرار' : 'Nothing repeated')}${(() => {
+            // Says up front how many of these can simply be folded into their
+            // Meta page, so the owner does not have to open every group to find
+            // the ones worth acting on.
+            const mergeable = countPageMergeGroups();
+            if (!mergeable) return '';
+            return isAr
+              ? ` — ${mergeable} منها يمكن دمجها في صفحة Meta`
+              : ` — ${mergeable} of them can be merged into their Meta page`;
+          })()}</p>
         </div>
         <button type="button" onclick="closePageDuplicatesDialog()" class="min-w-11 min-h-11 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center flex-shrink-0" aria-label="${isAr ? 'إغلاق' : 'Close'}">
           <span class="text-2xl leading-none" aria-hidden="true">&times;</span>
@@ -1498,11 +1508,21 @@ function showPageDuplicates(focusPageId, triggerButton) {
           <section class="rounded-xl border border-amber-300 dark:border-amber-700 bg-amber-50/60 dark:bg-amber-900/20 p-3">
             <h3 class="font-bold text-slate-800 dark:text-white break-words mb-2">${Security.escapeHtml(group[0]?.name || '')} <span class="text-xs font-normal text-slate-500">(${group.length})</span></h3>
             <div class="space-y-2">
-              ${group.map(page => {
+              ${(() => {
+                // The one Meta row of this group, if the group has exactly one.
+                // It is the only page the others may be merged INTO: it owns the
+                // metaPageId the server keeps writing to.
+                const metaPagesInGroup = group.filter(item => String(item?.metaPageId || '').trim());
+                const mergeTargetId = metaPagesInGroup.length === 1 && isCurrentUserAdmin()
+                  ? String(metaPagesInGroup[0].id)
+                  : '';
+                return group.map(page => {
                 const owners = getPageCustomerIds(page)
                   .map(id => customersById.get(String(id))?.name || '')
                   .filter(Boolean).join(', ');
                 const adCount = can('ads', 'view') ? getAdsForPage(page.id).length : null;
+                const canMergeThisPage = !!mergeTargetId && String(page.id) !== mergeTargetId
+                  && !String(page.metaPageId || '').trim();
                 return `<div class="rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 p-2.5 flex flex-wrap items-center justify-between gap-2">
                   <div class="min-w-0">
                     <div class="text-sm font-semibold text-slate-800 dark:text-white break-words">${Security.escapeHtml(page.name || '')}</div>
@@ -1513,9 +1533,13 @@ function showPageDuplicates(focusPageId, triggerButton) {
                       ${page.metaPageId ? ' • Meta' : ''}
                     </div>
                   </div>
-                  ${can('pages', 'edit') ? `<button type="button" onclick="closePageDuplicatesDialog(false);editPage('${Security.escapeHtml(String(page.id))}')" class="min-h-10 rounded-lg border border-slate-200 dark:border-slate-700 px-3 py-1.5 text-xs font-bold hover:bg-slate-100 dark:hover:bg-slate-800">${isAr ? 'فتح' : 'Open'}</button>` : ''}
+                  <div class="flex flex-wrap items-center gap-2">
+                    ${canMergeThisPage ? `<button type="button" onclick="showPageMergeDialog('${Security.escapeHtml(mergeTargetId)}','${Security.escapeHtml(String(page.id))}', this)" class="min-h-10 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-800 hover:bg-amber-100 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200" title="${isAr ? 'نقل كل إعلانات هذه الصفحة إلى صفحة Meta ثم حذفها' : 'Move every ad on this page to the Meta page, then remove it'}">${isAr ? 'دمج في Meta' : 'Merge into Meta'}</button>` : ''}
+                    ${can('pages', 'edit') ? `<button type="button" onclick="closePageDuplicatesDialog(false);editPage('${Security.escapeHtml(String(page.id))}')" class="min-h-10 rounded-lg border border-slate-200 dark:border-slate-700 px-3 py-1.5 text-xs font-bold hover:bg-slate-100 dark:hover:bg-slate-800">${isAr ? 'فتح' : 'Open'}</button>` : ''}
+                  </div>
                 </div>`;
-              }).join('')}
+                });
+              })().join('')}
             </div>
           </section>
         `).join('') : `<div class="rounded-xl bg-slate-50 dark:bg-slate-800/60 p-6 text-sm text-slate-500 text-center">${isAr ? 'لا توجد صفحات بنفس الاسم.' : 'No two pages share the same name.'}</div>`}

@@ -14,12 +14,14 @@
     "10-live-sync.js",
     "11-routing-cloud.js",
     "12-views.js",
+    "12c-services-wallet.js",
     "12a-analytics-profit.js",
     "12b-control-center.js",
     "13-filters-helpers.js",
+    "13b-merge-tools.js",
     "14-forms.js",
     "15-modals.js",
-    "15b-clothes.js",
+    "15b0-clothes-loader.js",
     "15c0-ads-studio-loader.js",
     "15d-meta-ads.js",
     "15e-photo-paste.js",
@@ -27,6 +29,7 @@
     "17-init.js"
   ],
   "lazy": {
-    "studio.js": ["15c-ads-studio.js"]
+    "studio.js": ["15c-ads-studio.js"],
+    "clothes.js": ["15b-clothes.js"]
   }
 }

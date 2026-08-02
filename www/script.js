@@ -11758,11 +11758,10 @@ function getAuthorizedServerSyncCollections(user = state.currentUser) {
     if (collection.startsWith('clothes') && !isAdminRole(user?.role)) {
       return hasSubscription('clothes_system');
     }
-    if (collection === 'adCampaignRequests' && !isAdminRole(user?.role)) {
-      const isReviewer = Array.isArray(user?.permissions?.adCampaignRequests) &&
-        user.permissions.adCampaignRequests.some(action => String(action).toLowerCase() === 'review');
-      return isReviewer || hasSubscription('ad_maker');
-    }
+    // adCampaignRequests deliberately keeps syncing after a subscription
+    // lapses: those rows can hold the customer's captured budget, and the
+    // server no longer gates reads either (permission scope still decides
+    // what is visible). Purging them would hide the Stop-and-refund path.
     return true;
   });
 }
@@ -13539,9 +13538,10 @@ const MODAL_URL_HANDLERS = {
   // form state. While one is open the URL protects it from delayed startup
   // restoration; revisiting that URL later simply returns to Settings.
   'data-integrity':   { open: () => updateUrlForView(state.currentView, true) },
-  'clothes-product':  { newOpen: () => showClothesProductModal(),  open: (id) => editClothesProduct(id) },
-  'clothes-shipment': { newOpen: () => showClothesShipmentModal(), open: (id) => editClothesShipment(id) },
-  'clothes-order':    { newOpen: () => showClothesOrderModal(),    open: (id) => editClothesOrder(id) }
+  // Clothes lives in a lazy bundle: a cold deep link must download it first.
+  'clothes-product':  { newOpen: () => withClothesSystem(() => showClothesProductModal()),  open: (id) => withClothesSystem(() => editClothesProduct(id)) },
+  'clothes-shipment': { newOpen: () => withClothesSystem(() => showClothesShipmentModal()), open: (id) => withClothesSystem(() => editClothesShipment(id)) },
+  'clothes-order':    { newOpen: () => withClothesSystem(() => showClothesOrderModal()),    open: (id) => withClothesSystem(() => editClothesOrder(id)) }
 };
 
 // Restore modal from URL params (e.g., ?modal=ad&id=123 or ?modal=ad&id=new)
@@ -15826,7 +15826,10 @@ function renderView() {
     case 'services-hub': return renderServicesHub();
     case 'control-center': return renderControlCenterView();
     case 'smart-systems': return renderSmartSystems();
-    case 'clothes-system': return renderClothesSystemView();
+    case 'clothes-system':
+      if (typeof renderClothesSystemView === 'function') return renderClothesSystemView();
+      ensureClothesSystemLoaded();
+      return renderClothesLoadingState();
     case 'ads-studio':
       if (typeof renderAdsStudioView === 'function') return renderAdsStudioView();
       ensureAdsStudioLoaded();
@@ -15878,238 +15881,6 @@ function renderNoAccessView() {
 // SERVICES HUB - Multi-Service Home Page
 // ==========================================
 
-function renderServicesHub() {
-  const userName = state.currentUser?.name || 'User';
-  const isRTL = state.language === 'ar';
-  const walletBalanceMinor = state.currentUser?.id ? WALLET.getBalanceMinor(state.currentUser.id, WALLET.currency) : 0;
-  const walletBalanceLabel = walletFormatMinor(walletBalanceMinor, WALLET.currency);
-
-  const hubServices = Object.values(SERVICES)
-    .slice()
-    .sort((a, b) => (Number(a.order) || 999) - (Number(b.order) || 999));
-
-  const serviceCards = hubServices.map(service => {
-    if (!service || !service.id) return '';
-
-    const serviceName = isRTL ? service.nameAr : service.name;
-    const serviceDesc = isRTL ? service.descriptionAr : service.description;
-    const access = checkServiceAccess(service.id);
-    const disabled = !!service.comingSoon;
-
-    return `
-      <button
-        type="button"
-        onclick="handleServiceClick('${service.id}')"
-        class="group relative glass-panel p-6 rounded-2xl ${isRTL ? 'text-right' : 'text-left'} transition-all duration-300 hover:scale-105 hover:shadow-xl ${disabled ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}"
-        ${disabled ? 'disabled' : ''}
-      >
-        ${disabled ? `
-          <div class="absolute top-3 right-3 px-3 py-1 rounded-full text-[10px] font-bold uppercase bg-gradient-to-r from-amber-400 to-orange-500 text-white shadow-lg">
-            ${isRTL ? 'قريباً' : 'Coming Soon'}
-          </div>
-        ` : ''}
-
-        ${access.reason === 'not_subscribed' && !disabled ? `
-          <div class="absolute top-3 right-3">
-            <i data-lucide="lock" class="w-4 h-4 text-amber-500"></i>
-          </div>
-        ` : ''}
-
-        <div class="w-14 h-14 rounded-2xl bg-gradient-to-br ${service.color} flex items-center justify-center mb-4 group-hover:scale-110 transition-transform shadow-lg">
-          <i data-lucide="${service.icon}" class="w-7 h-7 text-white"></i>
-        </div>
-
-        <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-1">${serviceName}</h3>
-        <p class="text-sm text-slate-500 dark:text-slate-400">${serviceDesc}</p>
-
-        ${service.hasChildren ? `
-          <div class="mt-3 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-50 dark:bg-indigo-900/20 text-indigo-700 dark:text-indigo-300 text-[11px] font-bold">
-            <i data-lucide="layers" class="w-3.5 h-3.5"></i>
-            <span>${(service.children?.length || 0)} ${isRTL ? 'أنظمة' : 'systems'}</span>
-          </div>
-        ` : ''}
-        ${service.requiresSubscription && typeof renderSubscriptionStatusBadge === 'function' ? renderSubscriptionStatusBadge(service.id, isRTL) : ''}
-      </button>
-    `;
-  }).join('');
-  
-  return `
-    <div class="max-w-6xl mx-auto">
-      <!-- Header -->
-      <div class="mb-8 flex items-center justify-between">
-        <div class="flex items-center gap-4">
-          <div class="w-14 h-14 rounded-full bg-gradient-to-br from-pink-400 to-rose-500 flex items-center justify-center text-white text-xl font-bold shadow-lg">
-            ${userName.charAt(0).toUpperCase()}
-          </div>
-          <div>
-            <h1 class="text-2xl font-bold text-slate-800 dark:text-white">
-              ${isRTL ? `مرحبا، ${userName}!` : `Welcome, ${userName}!`}
-            </h1>
-            <p class="text-sm text-slate-500 dark:text-slate-400">
-              ${isRTL ? 'اختر خدمة للبدء' : 'Choose a service to get started'}
-            </p>
-          </div>
-        </div>
-        
-        <div class="flex items-center gap-2">
-          <button onclick="navigateTo('wallet')" class="px-4 py-3 glass-panel rounded-xl hover:scale-105 transition-transform flex items-center gap-2">
-            <i data-lucide="wallet" class="w-5 h-5 text-indigo-600"></i>
-            <span class="text-sm font-bold text-slate-700 dark:text-slate-200">${walletBalanceLabel}</span>
-          </button>
-          <button onclick="toggleTheme()" class="p-3 glass-panel rounded-xl hover:scale-105 transition-transform">
-            <i data-lucide="sun" class="w-5 h-5"></i>
-          </button>
-          <button onclick="toggleLanguage()" class="p-3 glass-panel rounded-xl hover:scale-105 transition-transform text-sm font-bold">
-            ${isRTL ? 'EN' : 'عربي'}
-          </button>
-          <button onclick="handleLogout()" class="p-3 glass-panel rounded-xl hover:scale-105 transition-transform text-rose-500">
-            <i data-lucide="log-out" class="w-5 h-5"></i>
-          </button>
-        </div>
-      </div>
-      
-      <!-- Hero Banner (Optional) -->
-      <div class="glass-panel p-8 rounded-3xl mb-8 alb-hero">
-        <div class="flex items-center justify-between">
-          <div>
-            <h2 class="text-2xl font-bold text-slate-800 dark:text-white mb-2 alb-gradient-text">
-              ${isRTL ? 'فروع جديدة!' : 'New Services!'}
-            </h2>
-            <p class="text-slate-600 dark:text-slate-300">
-              ${isRTL ? 'أهلاً بشركاء النجاح' : 'Welcome to our partner success platform'}
-            </p>
-          </div>
-          <div class="hidden md:block">
-            <i data-lucide="sparkles" class="w-16 h-16 text-indigo-400 opacity-50"></i>
-          </div>
-        </div>
-      </div>
-      
-      <!-- Services Grid -->
-      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-6">
-        ${serviceCards}
-      </div>
-    </div>
-  `;
-}
-
-function renderSmartSystems() {
-  const isRTL = state.language === 'ar';
-  
-  const children = Object.values(SMART_SYSTEMS_CHILDREN)
-    .slice()
-    .sort((a, b) => (Number(a.order) || 999) - (Number(b.order) || 999));
-
-  const childCards = children.map(child => {
-    const childName = isRTL ? child.nameAr : child.name;
-    const childDesc = isRTL ? child.descriptionAr : child.description;
-    const access = checkServiceAccess(child.id);
-    const disabled = child.comingSoon;
-    
-    return `
-      <button 
-        type="button"
-        onclick="handleSmartSystemClick('${child.id}')"
-        class="group relative glass-panel p-8 rounded-2xl ${isRTL ? 'text-right' : 'text-left'} transition-all duration-300 hover:scale-105 hover:shadow-2xl ${disabled ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}"
-        ${disabled ? 'disabled' : ''}
-      >
-        ${child.comingSoon ? `
-          <div class="absolute top-4 right-4 px-3 py-1 rounded-full text-xs font-bold uppercase bg-gradient-to-r from-amber-400 to-orange-500 text-white shadow-lg">
-            ${isRTL ? 'قريباً' : 'Coming Soon'}
-          </div>
-        ` : ''}
-        
-        ${access.reason === 'not_subscribed' && !disabled ? `
-          <div class="absolute top-4 right-4">
-            <i data-lucide="lock" class="w-5 h-5 text-amber-500"></i>
-          </div>
-        ` : ''}
-        
-        <div class="w-20 h-20 rounded-3xl bg-gradient-to-br ${child.color} flex items-center justify-center mb-6 group-hover:scale-110 transition-transform shadow-2xl">
-          <i data-lucide="${child.icon}" class="w-10 h-10 text-white"></i>
-        </div>
-        
-        <h3 class="text-2xl font-bold text-slate-800 dark:text-white mb-2">${childName}</h3>
-        <p class="text-slate-500 dark:text-slate-400">${childDesc}</p>
-        ${child.requiresSubscription && typeof renderSubscriptionStatusBadge === 'function' ? renderSubscriptionStatusBadge(child.id, isRTL) : ''}
-      </button>
-    `;
-  }).join('');
-  
-  return `
-    <div class="max-w-6xl mx-auto">
-      <!-- Back Button -->
-      <button onclick="navigateTo('services-hub')" class="mb-6 flex items-center gap-2 text-indigo-600 hover:text-indigo-700 font-medium">
-        <i data-lucide="${isRTL ? 'arrow-right' : 'arrow-left'}" class="w-5 h-5"></i>
-        <span>${isRTL ? 'العودة للخدمات' : 'Back to Services'}</span>
-      </button>
-      
-      <!-- Header -->
-      <div class="mb-8">
-        <div class="flex items-center gap-4 mb-4">
-          <div class="w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center shadow-2xl">
-            <i data-lucide="cpu" class="w-8 h-8 text-white"></i>
-          </div>
-          <div>
-            <h1 class="text-3xl font-bold text-slate-800 dark:text-white">
-              ${isRTL ? 'الأنظمة الذكية' : 'Smart Systems'}
-            </h1>
-            <p class="text-slate-500 dark:text-slate-400">
-              ${isRTL ? 'أدوات الأعمال المتقدمة' : 'Advanced business tools'}
-            </p>
-          </div>
-        </div>
-      </div>
-      
-      <!-- Systems Grid -->
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        ${childCards}
-      </div>
-    </div>
-  `;
-}
-
-function renderServicePlaceholder() {
-  const serviceId = state.viewData?.serviceId || state.modalData?.serviceId || '';
-  const service = SERVICES[serviceId] || SMART_SYSTEMS_CHILDREN[serviceId];
-  const isRTL = state.language === 'ar';
-  
-  if (!service) {
-    return `<div class="text-center py-12"><p class="text-slate-500">${isRTL ? 'الخدمة غير موجودة' : 'Service not found'}</p></div>`;
-  }
-  
-  const serviceName = isRTL ? service.nameAr : service.name;
-  const serviceDesc = isRTL ? service.descriptionAr : service.description;
-  
-  return `
-    <div class="max-w-4xl mx-auto">
-      <!-- Back Button -->
-      <button onclick="navigateTo('services-hub')" class="mb-6 flex items-center gap-2 text-indigo-600 hover:text-indigo-700 font-medium">
-        <i data-lucide="${isRTL ? 'arrow-right' : 'arrow-left'}" class="w-5 h-5"></i>
-        <span>${isRTL ? 'العودة للخدمات' : 'Back to Services'}</span>
-      </button>
-      
-      <!-- Placeholder Content -->
-      <div class="glass-panel p-12 rounded-3xl text-center">
-        <div class="w-24 h-24 rounded-3xl bg-gradient-to-br ${service.color} flex items-center justify-center mx-auto mb-6 shadow-2xl">
-          <i data-lucide="${service.icon}" class="w-12 h-12 text-white"></i>
-        </div>
-        
-        <h1 class="text-3xl font-bold text-slate-800 dark:text-white mb-3">${serviceName}</h1>
-        <p class="text-lg text-slate-500 dark:text-slate-400 mb-8">${serviceDesc}</p>
-        
-        ${service.comingSoon ? `
-          <div class="inline-flex items-center space-x-3 px-6 py-3 rounded-xl bg-gradient-to-r from-amber-400 to-orange-500 text-white font-bold shadow-lg">
-            <i data-lucide="clock" class="w-5 h-5"></i>
-            <span>${isRTL ? 'قريباً' : 'Coming Soon'}</span>
-          </div>
-        ` : `
-          <p class="text-slate-600 dark:text-slate-300">${isRTL ? 'هذه الخدمة قيد الإنشاء' : 'This service is under construction'}</p>
-        `}
-      </div>
-    </div>
-  `;
-}
 
 function findUserByEmailOrId(value) {
   const raw = String(value || '').trim();
@@ -16239,276 +16010,6 @@ async function walletTopUpFromUi() {
   }
 }
 
-async function cancelSubscriptionFromUi(serviceId) {
-  try {
-    if (!state.currentUser?.id) return;
-    const sid = String(serviceId || '').trim();
-    if (!sid) return;
-    const isRTL = state.language === 'ar';
-    const ok = confirm(isRTL ? 'هل تريد إلغاء الاشتراك؟' : 'Cancel this subscription?');
-    if (!ok) return;
-    await SUBSCRIPTIONS.cancel(state.currentUser.id, sid);
-    showNotification(isRTL ? 'نجاح' : 'Success', isRTL ? 'تم إلغاء الاشتراك' : 'Subscription canceled', 'success');
-    render();
-  } catch (e) {
-    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e?.message || (state.language === 'ar' ? 'فشل إلغاء الاشتراك' : 'Failed to cancel subscription'), 'error');
-  }
-}
-
-function renderWalletView() {
-  const isRTL = state.language === 'ar';
-  const uid = String(state.currentUser?.id || '');
-  const isAdmin = isAdminRole(state.currentUser?.role);
-
-  const balances = [];
-  if (uid) {
-    for (const c of WALLET_SUPPORTED_CURRENCIES) {
-      const m = WALLET.getBalanceMinor(uid, c);
-      if (m !== 0 || c === WALLET.currency) balances.push({ c, m });
-    }
-  }
-  const balancesHtml = balances.length
-    ? balances.map(({ c, m }) => `<div class="text-sm font-black text-slate-800 dark:text-white">${walletFormatMinor(m, c)}</div>`).join('')
-    : `<div class="text-sm font-black text-slate-800 dark:text-white">${walletFormatMinor(0, WALLET.currency)}</div>`;
-  const currencyOptions = WALLET_SUPPORTED_CURRENCIES
-    .map(c => `<option value="${c}" ${c === WALLET.currency ? 'selected' : ''}>${c}</option>`)
-    .join('');
-  const users = Array.isArray(state.users) ? state.users : [];
-  const userById = new Map();
-  for (const u of users) {
-    if (!u || u._deleted || !u.id) continue;
-    userById.set(String(u.id), u);
-  }
-
-  const allTx = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
-  const visibleTx = getVisibleRecords(allTx);
-  const txs = (isAdmin ? visibleTx : visibleTx.filter(t => t && (t.fromUserId === uid || t.toUserId === uid))).slice(0, 50);
-
-  const allSubs = Array.isArray(state.serviceSubscriptions) ? state.serviceSubscriptions : [];
-  const now = Date.now();
-  const activeSubs = getVisibleRecords(allSubs)
-    .filter(s => s && s.userId === uid && s.status === 'active' && (!s.expiresAt || new Date(s.expiresAt).getTime() > now))
-    .slice(0, 50);
-
-  const txRows = txs.map(tx => {
-    const isIn = tx.toUserId === uid;
-    const otherId = isIn ? tx.fromUserId : tx.toUserId;
-    const other =
-      !otherId || otherId === 'system'
-        ? (isRTL ? 'النظام' : 'System')
-        : (userById.get(String(otherId))?.name || userById.get(String(otherId))?.email || String(otherId || ''));
-
-    const amountStr = walletFormatMinor(walletTxAmountMinor(tx), walletTxCurrency(tx));
-    const when = tx.createdAt ? new Date(tx.createdAt).toLocaleString(appDateLocale()) : '';
-    const memo = Security.escapeHtml(String(tx.memo || ''));
-
-    return `
-      <div class="flex items-start justify-between gap-4 py-3 border-b border-slate-200/60 dark:border-slate-700/60">
-        <div class="min-w-0">
-          <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(tx.type || 'tx')}</div>
-          <div class="text-xs text-slate-500 dark:text-slate-400">${Security.escapeHtml(other)} ${when ? `• ${Security.escapeHtml(when)}` : ''}</div>
-          ${memo ? `<div class="text-[11px] text-slate-400 mt-1 break-words">${memo}</div>` : ''}
-        </div>
-        <div class="text-right font-black ${isIn ? 'text-emerald-600' : 'text-rose-600'}">
-          ${isIn ? '+' : '-'}${Security.escapeHtml(amountStr)}
-        </div>
-      </div>
-    `;
-  }).join('') || `<div class="text-sm text-slate-500 dark:text-slate-400 py-6 text-center">${isRTL ? 'لا توجد معاملات بعد' : 'No transactions yet'}</div>`;
-
-  const subsRows = activeSubs.map(s => {
-    const svc = SERVICES[s.serviceId];
-    const name = svc ? (isRTL ? svc.nameAr : svc.name) : s.serviceId;
-    const exp = s.expiresAt ? new Date(s.expiresAt).toLocaleDateString(appDateLocale()) : '';
-    return `
-      <div class="flex items-center justify-between gap-4 py-2 border-b border-slate-200/60 dark:border-slate-700/60">
-        <div class="font-bold text-slate-800 dark:text-white min-w-0 truncate">${Security.escapeHtml(name)}</div>
-        <div class="flex items-center gap-3 shrink-0">
-          <div class="text-xs text-slate-500 dark:text-slate-400">
-            ${exp ? (isRTL ? `ينتهي: ${Security.escapeHtml(exp)}` : `Expires: ${Security.escapeHtml(exp)}`) : ''}
-          </div>
-          <button onclick="cancelSubscriptionFromUi('${s.serviceId}')" class="text-xs font-bold text-rose-600 hover:text-rose-700 bg-rose-50 dark:bg-rose-900/20 px-3 py-1.5 rounded-lg">
-            ${isRTL ? 'إلغاء' : 'Cancel'}
-          </button>
-        </div>
-      </div>
-    `;
-  }).join('') || `<div class="text-sm text-slate-500 dark:text-slate-400 py-4 text-center">${isRTL ? 'لا توجد اشتراكات نشطة' : 'No active subscriptions'}</div>`;
-
-  return `
-    <div class="max-w-6xl mx-auto">
-      <button onclick="navigateTo('services-hub')" class="mb-6 flex items-center gap-2 text-indigo-600 hover:text-indigo-700 font-medium">
-        <i data-lucide="${isRTL ? 'arrow-right' : 'arrow-left'}" class="w-5 h-5"></i>
-        <span>${isRTL ? 'العودة للخدمات' : 'Back to Services'}</span>
-      </button>
-
-      <div class="mb-8 flex items-center justify-between gap-4 flex-wrap">
-        <div class="flex items-center gap-4">
-          <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-xl">
-            <i data-lucide="wallet" class="w-7 h-7 text-white"></i>
-          </div>
-          <div>
-            <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('wallet')}</h1>
-            <p class="text-slate-500 dark:text-slate-400">${isRTL ? 'محفظتك واشتراكاتك' : 'Your balance and subscriptions'}</p>
-          </div>
-        </div>
-        <div class="glass-panel px-5 py-3 rounded-2xl">
-          <div class="text-xs text-slate-500 dark:text-slate-400 mb-1">${t('balance')}</div>
-          <div class="space-y-1 mt-1">${balancesHtml}</div>
-        </div>
-      </div>
-
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-        <div class="glass-panel p-6 rounded-2xl">
-          <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-4">${t('transfer')}</h3>
-          <div class="space-y-4">
-            <div>
-              <label class="block text-sm font-medium mb-2">${t('recipient')}</label>
-              <input id="wallet-transfer-to" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isRTL ? 'بريد المستلم أو المعرّف' : 'Recipient email or ID'}" maxlength="140" />
-            </div>
-            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div>
-                <label class="block text-sm font-medium mb-2">${t('amount')}</label>
-                <input id="wallet-transfer-amount" type="text" inputmode="decimal" min="0" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="0" oninput="sanitizeMoneyInput(this)" />
-              </div>
-              <div>
-                <label class="block text-sm font-medium mb-2">${isRTL ? 'العملة' : 'Currency'}</label>
-                <select id="wallet-transfer-currency" class="w-full px-4 py-3 glass-input rounded-xl">
-                  ${currencyOptions}
-                </select>
-              </div>
-              <div>
-                <label class="block text-sm font-medium mb-2">${t('note')}</label>
-                <input id="wallet-transfer-memo" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isRTL ? 'اختياري' : 'Optional'}" maxlength="180" />
-              </div>
-            </div>
-            <button id="wallet-transfer-submit" onclick="walletTransferFromUi()" class="w-full btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 disabled:opacity-50" type="button">
-              <i data-lucide="send" class="w-4 h-4 inline mr-2"></i>${t('send')}
-            </button>
-            <div class="text-[11px] text-slate-400">
-              ${isRTL ? 'ملاحظة: في الوضع المحلي، هذا للعرض والتجربة فقط.' : 'Note: In local mode this is for testing/demo only.'}
-            </div>
-          </div>
-        </div>
-
-        ${isAdmin ? (isServerModeEnabled() ? `
-          <div class="glass-panel p-6 rounded-2xl">
-            <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-2">${t('topUp')}</h3>
-            <p class="text-sm text-slate-500 dark:text-slate-400">
-              ${isRTL
-                ? 'في وضع السيرفر: شحن الرصيد يتم فقط عبر قنوات التمويل الخارجية (البنك/المعالج) وليس يدوياً.'
-                : 'In server mode: top-ups must come from external funding rails (bank/processor), not manual admin credits.'}
-            </p>
-          </div>
-        ` : `
-          <div class="glass-panel p-6 rounded-2xl">
-            <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-4">${t('topUp')} (${isRTL ? 'أدمن' : 'Admin'})</h3>
-            <div class="space-y-4">
-              <div>
-                <label class="block text-sm font-medium mb-2">${t('recipient')}</label>
-                <input id="wallet-topup-to" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isRTL ? 'بريد المستخدم أو المعرّف' : 'User email or ID'}" maxlength="140" />
-              </div>
-              <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div>
-                  <label class="block text-sm font-medium mb-2">${t('amount')}</label>
-                  <input id="wallet-topup-amount" type="text" inputmode="decimal" min="0" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="0" oninput="sanitizeMoneyInput(this)" />
-                </div>
-                <div>
-                  <label class="block text-sm font-medium mb-2">${isRTL ? 'العملة' : 'Currency'}</label>
-                  <select id="wallet-topup-currency" class="w-full px-4 py-3 glass-input rounded-xl">
-                    ${currencyOptions}
-                  </select>
-                </div>
-                <div>
-                  <label class="block text-sm font-medium mb-2">${t('note')}</label>
-                  <input id="wallet-topup-memo" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isRTL ? 'اختياري' : 'Optional'}" maxlength="180" />
-                </div>
-              </div>
-              <button id="wallet-topup-submit" onclick="walletTopUpFromUi()" class="w-full btn-shine bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700 disabled:opacity-50" type="button">
-                <i data-lucide="plus" class="w-4 h-4 inline mr-2"></i>${t('topUp')}
-              </button>
-            </div>
-          </div>
-        `) : `
-          <div class="glass-panel p-6 rounded-2xl">
-            <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-4">${isRTL ? 'الاشتراكات' : 'Subscriptions'}</h3>
-            ${subsRows}
-            <button onclick="navigateTo('services-hub')" class="mt-4 w-full bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300">
-              ${isRTL ? 'إدارة الخدمات' : 'Manage services'}
-            </button>
-          </div>
-        `}
-      </div>
-
-      <div class="glass-panel p-6 rounded-2xl">
-        <div class="flex items-center justify-between mb-4">
-          <h3 class="text-lg font-bold text-slate-800 dark:text-white">${t('transactions')}</h3>
-          <div class="text-xs text-slate-500 dark:text-slate-400">${isAdmin ? (isRTL ? 'آخر 50 (الكل)' : 'Latest 50 (all)') : (isRTL ? 'آخر 50 (لك فقط)' : 'Latest 50 (yours)')}</div>
-        </div>
-        ${txRows}
-      </div>
-    </div>
-  `;
-}
-
-function handleServiceClick(serviceId) {
-  const service = SERVICES[serviceId];
-  if (!service) return;
-  
-  if (service.comingSoon) {
-    showNotification(
-      state.language === 'ar' ? 'قريباً' : 'Coming Soon',
-      state.language === 'ar' ? 'هذه الخدمة ستكون متاحة قريباً' : 'This service will be available soon',
-      'info'
-    );
-    return;
-  }
-  
-  const access = checkServiceAccess(serviceId);
-  if (!access.allowed) {
-    if (access.reason === 'not_subscribed') {
-      showSubscriptionModal(serviceId, access.subscribeToId || serviceId);
-      return;
-    }
-  }
-  
-  // Navigate to service
-  const targetView = service.openView || (serviceId === 'smart_systems' ? 'smart-systems' : 'service-placeholder');
-  state.currentView = targetView;
-  state.viewData = targetView === 'service-placeholder' ? { serviceId } : null;
-  
-  saveState();
-  render();
-}
-
-function handleSmartSystemClick(systemId) {
-  const system = SMART_SYSTEMS_CHILDREN[systemId];
-  if (!system) return;
-  
-  if (system.comingSoon) {
-    showNotification(
-      state.language === 'ar' ? 'قريباً' : 'Coming Soon',
-      state.language === 'ar' ? 'هذا النظام سيكون متاحاً قريباً' : 'This system will be available soon',
-      'info'
-    );
-    return;
-  }
-  
-  const access = checkServiceAccess(systemId);
-  if (!access.allowed) {
-    if (access.reason === 'not_subscribed') {
-      showSubscriptionModal(systemId, access.subscribeToId || systemId);
-      return;
-    }
-  }
-  
-  // Navigate to system
-  const targetView = system.openView || (systemId === 'albayan_manager' ? 'analytics' : 'service-placeholder');
-  state.currentView = targetView;
-  state.viewData = targetView === 'service-placeholder' ? { serviceId: systemId } : null;
-  saveState();
-  render();
-}
 
 function renderAnalyticsView() {
   const isAr = state.language === 'ar';
@@ -18277,6 +17778,10 @@ function renderAdsView() {
   const receiptsById = new Map(getReceiptsVisibleToCurrentUser().map(r => [String(r.id), r]));
   const usersById = new Map(state.users.map(u => [String(u.id), u]));
   const pagesById = new Map(getPagesVisibleToCurrentUser().map(p => [p.id, p]));
+  // Pairing a hand-made ad with its Meta twin scans every ad, so it is resolved
+  // once per render pass instead of once per row (same shape as the deliveries
+  // view's collection-target cache).
+  resetAdMergePairCache();
   const allAds = getFilteredAds(customersById);
   const adF = state.adFilters || {};
   const isAr = state.language === 'ar';
@@ -18485,15 +17990,23 @@ function renderAdsView() {
                           <div class="break-words font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || ad.customerName || (needsSetup ? (ad.metaAdName || (isAr ? 'إعلان Meta جديد' : 'New Meta ad')) : (isAr ? 'غير معروف' : 'Unknown')))}</div>
                           ${needsSetup ? `<div class="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"><i data-lucide="wand-sparkles" class="h-3 w-3"></i>${isAr ? 'يحتاج العميل والدفع والوصل' : 'Needs customer, payment and receipt'}</div>` : ''}
                           ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
-                          <div data-role="ad-creator" class="mt-1 inline-flex items-center gap-1 text-[11px] font-normal leading-tight text-slate-500 dark:text-slate-400" title="${isAr ? 'تم الإنشاء بواسطة' : 'Created by'}">
-                            <i data-lucide="user" class="h-3 w-3 shrink-0"></i>
-                            <span>${isAr ? 'تم الإنشاء بواسطة' : 'Created by'}: <span class="font-semibold text-slate-700 dark:text-slate-200">${creatorName}</span></span>
-                          </div>
-                          ${completedByName ? `<div data-role="ad-completed-by" class="mt-0.5 flex items-center gap-1 text-[11px] font-normal leading-tight text-emerald-700 dark:text-emerald-300" title="${isAr ? 'الشخص الذي أكمل بيانات الإعلان' : 'The person who completed this ad'}">
-                            <i data-lucide="clipboard-check" class="h-3 w-3 shrink-0"></i>
-                            <span>${isAr ? 'أكمله' : 'Completed by'}: <span class="font-semibold">${completedByName}</span></span>
-                          </div>` : ''}
                         </div>
+                      </div>
+                      <!-- Who touched this ad, on its OWN full-width row under the
+                           photo tiles. Beside them it only had ~110px, so the two
+                           lines were forced to overflow the 13% column and painted
+                           on top of the Page cell; the "Completed by" name ended up
+                           readable only in its hover tooltip. As chips down here
+                           they use the whole cell and wrap instead of colliding. -->
+                      <div class="ad-primary-people">
+                        <span data-role="ad-creator" class="ad-person-chip ad-person-chip--creator" title="${isAr ? 'أنشأ هذا الإعلان' : 'Created this ad'}">
+                          <i data-lucide="user" class="h-3 w-3 shrink-0"></i>
+                          <span>${isAr ? 'تم الإنشاء بواسطة' : 'Created by'}: <span class="font-semibold text-slate-700 dark:text-slate-200">${creatorName}</span></span>
+                        </span>
+                        ${completedByName ? `<span data-role="ad-completed-by" class="ad-person-chip ad-person-chip--completed" title="${isAr ? 'الشخص الذي أكمل بيانات الإعلان' : 'The person who completed this ad'}">
+                          <i data-lucide="clipboard-check" class="h-3 w-3 shrink-0"></i>
+                          <span>${isAr ? 'أكمله' : 'Completed by'}: <span class="font-semibold">${completedByName}</span></span>
+                        </span>` : ''}
                       </div>
                     </td>
                     <td class="py-3 px-2" data-label="${isAr ? 'الصفحة' : 'Page'}">
@@ -18579,6 +18092,7 @@ function renderAdsView() {
                     <td class="py-3 px-2" data-label="${isAr ? 'إجراءات' : 'Actions'}">
                       <div class="ads-table-actions flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
                         ${renderMetaAdActionButton(ad, isAr)}
+                        ${renderAdMergeActionButton(ad, isAr)}
                         ${needsSetup && canEditThisAd ? `<button type="button" onclick="completeMetaImportedAd('${Security.escapeHtml(String(ad.id))}')" class="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-lg bg-amber-100 px-3 py-2 text-xs font-bold text-amber-800 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-200" title="${isAr ? 'إكمال العميل والدفع والوصل' : 'Complete customer, payment and receipt details'}"><i data-lucide="clipboard-check" class="h-4 w-4"></i><span>${isAr ? 'إكمال' : 'Complete'}</span></button>` : ''}
                         ${can('ads', 'viewPhotos') && adPhotoCount > 0 ? `
                         <button type="button" data-action="view-ad-photos" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openAdPhotoViewer(this.dataset.adId, 0, this)" class="ad-photo-view-button inline-flex items-center justify-center gap-1.5 font-bold" title="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}" aria-label="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}">
@@ -21639,6 +21153,549 @@ function renderSettingsView() {
   `;
 }
 // ==========================================
+// SERVICES HUB, SMART SYSTEMS AND WALLET SCREENS
+// ==========================================
+// Split out of 12-views.js when that module passed its 475 KiB cap.
+// These screens form one product area: the service catalogue, its
+// subscription state, and the wallet that pays for it.
+
+function renderServicesHub() {
+  const userName = state.currentUser?.name || 'User';
+  const isRTL = state.language === 'ar';
+  const walletBalanceMinor = state.currentUser?.id ? WALLET.getBalanceMinor(state.currentUser.id, WALLET.currency) : 0;
+  const walletBalanceLabel = walletFormatMinor(walletBalanceMinor, WALLET.currency);
+
+  const hubServices = Object.values(SERVICES)
+    .slice()
+    .sort((a, b) => (Number(a.order) || 999) - (Number(b.order) || 999));
+
+  const serviceCards = hubServices.map(service => {
+    if (!service || !service.id) return '';
+
+    const serviceName = isRTL ? service.nameAr : service.name;
+    const serviceDesc = isRTL ? service.descriptionAr : service.description;
+    const access = checkServiceAccess(service.id);
+    const disabled = !!service.comingSoon;
+
+    return `
+      <button
+        type="button"
+        onclick="handleServiceClick('${service.id}')"
+        class="group relative glass-panel p-6 rounded-2xl ${isRTL ? 'text-right' : 'text-left'} transition-all duration-300 hover:scale-105 hover:shadow-xl ${disabled ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}"
+        ${disabled ? 'disabled' : ''}
+      >
+        ${disabled ? `
+          <div class="absolute top-3 right-3 px-3 py-1 rounded-full text-[10px] font-bold uppercase bg-gradient-to-r from-amber-400 to-orange-500 text-white shadow-lg">
+            ${isRTL ? 'قريباً' : 'Coming Soon'}
+          </div>
+        ` : ''}
+
+        ${access.reason === 'not_subscribed' && !disabled ? `
+          <div class="absolute top-3 right-3">
+            <i data-lucide="lock" class="w-4 h-4 text-amber-500"></i>
+          </div>
+        ` : ''}
+
+        <div class="w-14 h-14 rounded-2xl bg-gradient-to-br ${service.color} flex items-center justify-center mb-4 group-hover:scale-110 transition-transform shadow-lg">
+          <i data-lucide="${service.icon}" class="w-7 h-7 text-white"></i>
+        </div>
+
+        <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-1">${serviceName}</h3>
+        <p class="text-sm text-slate-500 dark:text-slate-400">${serviceDesc}</p>
+
+        ${service.hasChildren ? `
+          <div class="mt-3 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-50 dark:bg-indigo-900/20 text-indigo-700 dark:text-indigo-300 text-[11px] font-bold">
+            <i data-lucide="layers" class="w-3.5 h-3.5"></i>
+            <span>${(service.children?.length || 0)} ${isRTL ? 'أنظمة' : 'systems'}</span>
+          </div>
+        ` : ''}
+        ${service.requiresSubscription && typeof renderSubscriptionStatusBadge === 'function' ? renderSubscriptionStatusBadge(service.id, isRTL) : ''}
+      </button>
+    `;
+  }).join('');
+  
+  return `
+    <div class="max-w-6xl mx-auto">
+      <!-- Header -->
+      <div class="mb-8 flex items-center justify-between">
+        <div class="flex items-center gap-4">
+          <div class="w-14 h-14 rounded-full bg-gradient-to-br from-pink-400 to-rose-500 flex items-center justify-center text-white text-xl font-bold shadow-lg">
+            ${userName.charAt(0).toUpperCase()}
+          </div>
+          <div>
+            <h1 class="text-2xl font-bold text-slate-800 dark:text-white">
+              ${isRTL ? `مرحبا، ${userName}!` : `Welcome, ${userName}!`}
+            </h1>
+            <p class="text-sm text-slate-500 dark:text-slate-400">
+              ${isRTL ? 'اختر خدمة للبدء' : 'Choose a service to get started'}
+            </p>
+          </div>
+        </div>
+        
+        <div class="flex items-center gap-2">
+          <button onclick="navigateTo('wallet')" class="px-4 py-3 glass-panel rounded-xl hover:scale-105 transition-transform flex items-center gap-2">
+            <i data-lucide="wallet" class="w-5 h-5 text-indigo-600"></i>
+            <span class="text-sm font-bold text-slate-700 dark:text-slate-200">${walletBalanceLabel}</span>
+          </button>
+          <button onclick="toggleTheme()" class="p-3 glass-panel rounded-xl hover:scale-105 transition-transform">
+            <i data-lucide="sun" class="w-5 h-5"></i>
+          </button>
+          <button onclick="toggleLanguage()" class="p-3 glass-panel rounded-xl hover:scale-105 transition-transform text-sm font-bold">
+            ${isRTL ? 'EN' : 'عربي'}
+          </button>
+          <button onclick="handleLogout()" class="p-3 glass-panel rounded-xl hover:scale-105 transition-transform text-rose-500">
+            <i data-lucide="log-out" class="w-5 h-5"></i>
+          </button>
+        </div>
+      </div>
+      
+      <!-- Hero Banner (Optional) -->
+      <div class="glass-panel p-8 rounded-3xl mb-8 alb-hero">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-2xl font-bold text-slate-800 dark:text-white mb-2 alb-gradient-text">
+              ${isRTL ? 'فروع جديدة!' : 'New Services!'}
+            </h2>
+            <p class="text-slate-600 dark:text-slate-300">
+              ${isRTL ? 'أهلاً بشركاء النجاح' : 'Welcome to our partner success platform'}
+            </p>
+          </div>
+          <div class="hidden md:block">
+            <i data-lucide="sparkles" class="w-16 h-16 text-indigo-400 opacity-50"></i>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Services Grid -->
+      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-6">
+        ${serviceCards}
+      </div>
+    </div>
+  `;
+}
+
+function renderSmartSystems() {
+  const isRTL = state.language === 'ar';
+  
+  const children = Object.values(SMART_SYSTEMS_CHILDREN)
+    .slice()
+    .sort((a, b) => (Number(a.order) || 999) - (Number(b.order) || 999));
+
+  const childCards = children.map(child => {
+    const childName = isRTL ? child.nameAr : child.name;
+    const childDesc = isRTL ? child.descriptionAr : child.description;
+    const access = checkServiceAccess(child.id);
+    const disabled = child.comingSoon;
+    
+    return `
+      <button 
+        type="button"
+        onclick="handleSmartSystemClick('${child.id}')"
+        class="group relative glass-panel p-8 rounded-2xl ${isRTL ? 'text-right' : 'text-left'} transition-all duration-300 hover:scale-105 hover:shadow-2xl ${disabled ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}"
+        ${disabled ? 'disabled' : ''}
+      >
+        ${child.comingSoon ? `
+          <div class="absolute top-4 right-4 px-3 py-1 rounded-full text-xs font-bold uppercase bg-gradient-to-r from-amber-400 to-orange-500 text-white shadow-lg">
+            ${isRTL ? 'قريباً' : 'Coming Soon'}
+          </div>
+        ` : ''}
+        
+        ${access.reason === 'not_subscribed' && !disabled ? `
+          <div class="absolute top-4 right-4">
+            <i data-lucide="lock" class="w-5 h-5 text-amber-500"></i>
+          </div>
+        ` : ''}
+        
+        <div class="w-20 h-20 rounded-3xl bg-gradient-to-br ${child.color} flex items-center justify-center mb-6 group-hover:scale-110 transition-transform shadow-2xl">
+          <i data-lucide="${child.icon}" class="w-10 h-10 text-white"></i>
+        </div>
+        
+        <h3 class="text-2xl font-bold text-slate-800 dark:text-white mb-2">${childName}</h3>
+        <p class="text-slate-500 dark:text-slate-400">${childDesc}</p>
+        ${child.requiresSubscription && typeof renderSubscriptionStatusBadge === 'function' ? renderSubscriptionStatusBadge(child.id, isRTL) : ''}
+      </button>
+    `;
+  }).join('');
+  
+  return `
+    <div class="max-w-6xl mx-auto">
+      <!-- Back Button -->
+      <button onclick="navigateTo('services-hub')" class="mb-6 flex items-center gap-2 text-indigo-600 hover:text-indigo-700 font-medium">
+        <i data-lucide="${isRTL ? 'arrow-right' : 'arrow-left'}" class="w-5 h-5"></i>
+        <span>${isRTL ? 'العودة للخدمات' : 'Back to Services'}</span>
+      </button>
+      
+      <!-- Header -->
+      <div class="mb-8">
+        <div class="flex items-center gap-4 mb-4">
+          <div class="w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center shadow-2xl">
+            <i data-lucide="cpu" class="w-8 h-8 text-white"></i>
+          </div>
+          <div>
+            <h1 class="text-3xl font-bold text-slate-800 dark:text-white">
+              ${isRTL ? 'الأنظمة الذكية' : 'Smart Systems'}
+            </h1>
+            <p class="text-slate-500 dark:text-slate-400">
+              ${isRTL ? 'أدوات الأعمال المتقدمة' : 'Advanced business tools'}
+            </p>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Systems Grid -->
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        ${childCards}
+      </div>
+    </div>
+  `;
+}
+
+function renderServicePlaceholder() {
+  const serviceId = state.viewData?.serviceId || state.modalData?.serviceId || '';
+  const service = SERVICES[serviceId] || SMART_SYSTEMS_CHILDREN[serviceId];
+  const isRTL = state.language === 'ar';
+  
+  if (!service) {
+    return `<div class="text-center py-12"><p class="text-slate-500">${isRTL ? 'الخدمة غير موجودة' : 'Service not found'}</p></div>`;
+  }
+  
+  const serviceName = isRTL ? service.nameAr : service.name;
+  const serviceDesc = isRTL ? service.descriptionAr : service.description;
+  
+  return `
+    <div class="max-w-4xl mx-auto">
+      <!-- Back Button -->
+      <button onclick="navigateTo('services-hub')" class="mb-6 flex items-center gap-2 text-indigo-600 hover:text-indigo-700 font-medium">
+        <i data-lucide="${isRTL ? 'arrow-right' : 'arrow-left'}" class="w-5 h-5"></i>
+        <span>${isRTL ? 'العودة للخدمات' : 'Back to Services'}</span>
+      </button>
+      
+      <!-- Placeholder Content -->
+      <div class="glass-panel p-12 rounded-3xl text-center">
+        <div class="w-24 h-24 rounded-3xl bg-gradient-to-br ${service.color} flex items-center justify-center mx-auto mb-6 shadow-2xl">
+          <i data-lucide="${service.icon}" class="w-12 h-12 text-white"></i>
+        </div>
+        
+        <h1 class="text-3xl font-bold text-slate-800 dark:text-white mb-3">${serviceName}</h1>
+        <p class="text-lg text-slate-500 dark:text-slate-400 mb-8">${serviceDesc}</p>
+        
+        ${service.comingSoon ? `
+          <div class="inline-flex items-center space-x-3 px-6 py-3 rounded-xl bg-gradient-to-r from-amber-400 to-orange-500 text-white font-bold shadow-lg">
+            <i data-lucide="clock" class="w-5 h-5"></i>
+            <span>${isRTL ? 'قريباً' : 'Coming Soon'}</span>
+          </div>
+        ` : `
+          <p class="text-slate-600 dark:text-slate-300">${isRTL ? 'هذه الخدمة قيد الإنشاء' : 'This service is under construction'}</p>
+        `}
+      </div>
+    </div>
+  `;
+}
+
+async function cancelSubscriptionFromUi(serviceId, paidDaysLeft = 0, paidUntil = '') {
+  try {
+    if (!state.currentUser?.id) return;
+    const sid = String(serviceId || '').trim();
+    if (!sid) return;
+    const isRTL = state.language === 'ar';
+    // Cancelling ends EVERY paid period of this service immediately, and
+    // there is no subscription refund. Say so before it happens — a customer
+    // who renewed early would otherwise lose prepaid days to a one-word Yes.
+    const days = Math.max(0, Math.trunc(Number(paidDaysLeft) || 0));
+    const warning = days > 0
+      ? (isRTL
+        ? `سينتهي وصولك فوراً. أنت مدفوع حتى ${paidUntil} — ستفقد ${days} يوماً مدفوعاً ولا يوجد استرداد. هل أنت متأكد؟`
+        : `Your access ends immediately. You are paid until ${paidUntil} — ${days} paid day(s) will be lost and there is no refund. Are you sure?`)
+      : (isRTL ? 'هل تريد إلغاء الاشتراك؟' : 'Cancel this subscription?');
+    const ok = confirm(warning);
+    if (!ok) return;
+    await SUBSCRIPTIONS.cancel(state.currentUser.id, sid);
+    showNotification(isRTL ? 'نجاح' : 'Success', isRTL ? 'تم إلغاء الاشتراك' : 'Subscription canceled', 'success');
+    render();
+  } catch (e) {
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e?.message || (state.language === 'ar' ? 'فشل إلغاء الاشتراك' : 'Failed to cancel subscription'), 'error');
+  }
+}
+
+function renderWalletView() {
+  const isRTL = state.language === 'ar';
+  const uid = String(state.currentUser?.id || '');
+  const isAdmin = isAdminRole(state.currentUser?.role);
+
+  const balances = [];
+  if (uid) {
+    for (const c of WALLET_SUPPORTED_CURRENCIES) {
+      const m = WALLET.getBalanceMinor(uid, c);
+      if (m !== 0 || c === WALLET.currency) balances.push({ c, m });
+    }
+  }
+  const balancesHtml = balances.length
+    ? balances.map(({ c, m }) => `<div class="text-sm font-black text-slate-800 dark:text-white">${walletFormatMinor(m, c)}</div>`).join('')
+    : `<div class="text-sm font-black text-slate-800 dark:text-white">${walletFormatMinor(0, WALLET.currency)}</div>`;
+  const currencyOptions = WALLET_SUPPORTED_CURRENCIES
+    .map(c => `<option value="${c}" ${c === WALLET.currency ? 'selected' : ''}>${c}</option>`)
+    .join('');
+  const users = Array.isArray(state.users) ? state.users : [];
+  const userById = new Map();
+  for (const u of users) {
+    if (!u || u._deleted || !u.id) continue;
+    userById.set(String(u.id), u);
+  }
+
+  const allTx = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
+  const visibleTx = getVisibleRecords(allTx);
+  const txs = (isAdmin ? visibleTx : visibleTx.filter(t => t && (t.fromUserId === uid || t.toUserId === uid))).slice(0, 50);
+
+  const allSubs = Array.isArray(state.serviceSubscriptions) ? state.serviceSubscriptions : [];
+  const now = Date.now();
+  const activeSubs = getVisibleRecords(allSubs)
+    .filter(s => s && s.userId === uid && s.status === 'active' && (!s.expiresAt || new Date(s.expiresAt).getTime() > now))
+    .slice(0, 50);
+
+  const txRows = txs.map(tx => {
+    const isIn = tx.toUserId === uid;
+    const otherId = isIn ? tx.fromUserId : tx.toUserId;
+    const other =
+      !otherId || otherId === 'system'
+        ? (isRTL ? 'النظام' : 'System')
+        : (userById.get(String(otherId))?.name || userById.get(String(otherId))?.email || String(otherId || ''));
+
+    const amountStr = walletFormatMinor(walletTxAmountMinor(tx), walletTxCurrency(tx));
+    const when = tx.createdAt ? new Date(tx.createdAt).toLocaleString(appDateLocale()) : '';
+    const memo = Security.escapeHtml(String(tx.memo || ''));
+
+    return `
+      <div class="flex items-start justify-between gap-4 py-3 border-b border-slate-200/60 dark:border-slate-700/60">
+        <div class="min-w-0">
+          <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(tx.type || 'tx')}</div>
+          <div class="text-xs text-slate-500 dark:text-slate-400">${Security.escapeHtml(other)} ${when ? `• ${Security.escapeHtml(when)}` : ''}</div>
+          ${memo ? `<div class="text-[11px] text-slate-400 mt-1 break-words">${memo}</div>` : ''}
+        </div>
+        <div class="text-right font-black ${isIn ? 'text-emerald-600' : 'text-rose-600'}">
+          ${isIn ? '+' : '-'}${Security.escapeHtml(amountStr)}
+        </div>
+      </div>
+    `;
+  }).join('') || `<div class="text-sm text-slate-500 dark:text-slate-400 py-6 text-center">${isRTL ? 'لا توجد معاملات بعد' : 'No transactions yet'}</div>`;
+
+  // Renewals APPEND rows, so one service can hold several prepaid periods.
+  // Showing them as separate lines (each with its own Cancel) implied a
+  // per-period control that does not exist — cancel always ends the whole
+  // service. One truthful line per service: the LAST paid date.
+  const subsByService = new Map();
+  for (const s of activeSubs) {
+    const sid = String(s.serviceId || '');
+    const end = s.expiresAt ? new Date(s.expiresAt).getTime() : 0;
+    const seen = subsByService.get(sid);
+    if (!seen) subsByService.set(sid, { serviceId: sid, end, periods: 1 });
+    else { seen.periods += 1; if (end > seen.end) seen.end = end; }
+  }
+  const subsRows = Array.from(subsByService.values()).map(row => {
+    const svc = SERVICES[row.serviceId] || SMART_SYSTEMS_CHILDREN[row.serviceId];
+    const name = svc ? (isRTL ? svc.nameAr : svc.name) : row.serviceId;
+    const exp = row.end ? new Date(row.end).toLocaleDateString(appDateLocale()) : '';
+    const daysLeft = row.end ? Math.max(0, Math.ceil((row.end - now) / TIME_CONSTANTS.MILLISECONDS_PER_DAY)) : 0;
+    return `
+      <div class="flex items-center justify-between gap-4 py-2 border-b border-slate-200/60 dark:border-slate-700/60">
+        <div class="min-w-0">
+          <div class="font-bold text-slate-800 dark:text-white truncate">${Security.escapeHtml(name)}</div>
+          ${row.periods > 1 ? `<div class="text-[11px] text-emerald-600 dark:text-emerald-400 font-bold">${isRTL ? `${row.periods} فترات مدفوعة` : `${row.periods} paid periods`}</div>` : ''}
+        </div>
+        <div class="flex items-center gap-3 shrink-0">
+          <div class="text-xs text-slate-500 dark:text-slate-400">
+            ${exp ? (isRTL ? `مدفوع حتى: ${Security.escapeHtml(exp)}` : `Paid until: ${Security.escapeHtml(exp)}`) : ''}
+          </div>
+          <button onclick="cancelSubscriptionFromUi('${Security.escapeHtml(row.serviceId)}', ${daysLeft}, '${Security.escapeHtml(exp)}')" class="text-xs font-bold text-rose-600 hover:text-rose-700 bg-rose-50 dark:bg-rose-900/20 px-3 py-1.5 rounded-lg">
+            ${isRTL ? 'إلغاء' : 'Cancel'}
+          </button>
+        </div>
+      </div>
+    `;
+  }).join('') || `<div class="text-sm text-slate-500 dark:text-slate-400 py-4 text-center">${isRTL ? 'لا توجد اشتراكات نشطة' : 'No active subscriptions'}</div>`;
+
+  return `
+    <div class="max-w-6xl mx-auto">
+      <button onclick="navigateTo('services-hub')" class="mb-6 flex items-center gap-2 text-indigo-600 hover:text-indigo-700 font-medium">
+        <i data-lucide="${isRTL ? 'arrow-right' : 'arrow-left'}" class="w-5 h-5"></i>
+        <span>${isRTL ? 'العودة للخدمات' : 'Back to Services'}</span>
+      </button>
+
+      <div class="mb-8 flex items-center justify-between gap-4 flex-wrap">
+        <div class="flex items-center gap-4">
+          <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-xl">
+            <i data-lucide="wallet" class="w-7 h-7 text-white"></i>
+          </div>
+          <div>
+            <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('wallet')}</h1>
+            <p class="text-slate-500 dark:text-slate-400">${isRTL ? 'محفظتك واشتراكاتك' : 'Your balance and subscriptions'}</p>
+          </div>
+        </div>
+        <div class="glass-panel px-5 py-3 rounded-2xl">
+          <div class="text-xs text-slate-500 dark:text-slate-400 mb-1">${t('balance')}</div>
+          <div class="space-y-1 mt-1">${balancesHtml}</div>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+        <div class="glass-panel p-6 rounded-2xl">
+          <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-4">${t('transfer')}</h3>
+          <div class="space-y-4">
+            <div>
+              <label class="block text-sm font-medium mb-2">${t('recipient')}</label>
+              <input id="wallet-transfer-to" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isRTL ? 'بريد المستلم أو المعرّف' : 'Recipient email or ID'}" maxlength="140" />
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div>
+                <label class="block text-sm font-medium mb-2">${t('amount')}</label>
+                <input id="wallet-transfer-amount" type="text" inputmode="decimal" min="0" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="0" oninput="sanitizeMoneyInput(this)" />
+              </div>
+              <div>
+                <label class="block text-sm font-medium mb-2">${isRTL ? 'العملة' : 'Currency'}</label>
+                <select id="wallet-transfer-currency" class="w-full px-4 py-3 glass-input rounded-xl">
+                  ${currencyOptions}
+                </select>
+              </div>
+              <div>
+                <label class="block text-sm font-medium mb-2">${t('note')}</label>
+                <input id="wallet-transfer-memo" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isRTL ? 'اختياري' : 'Optional'}" maxlength="180" />
+              </div>
+            </div>
+            <button id="wallet-transfer-submit" onclick="walletTransferFromUi()" class="w-full btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 disabled:opacity-50" type="button">
+              <i data-lucide="send" class="w-4 h-4 inline mr-2"></i>${t('send')}
+            </button>
+            <div class="text-[11px] text-slate-400">
+              ${isRTL ? 'ملاحظة: في الوضع المحلي، هذا للعرض والتجربة فقط.' : 'Note: In local mode this is for testing/demo only.'}
+            </div>
+          </div>
+        </div>
+
+        ${isAdmin ? (isServerModeEnabled() ? `
+          <div class="glass-panel p-6 rounded-2xl">
+            <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-2">${t('topUp')}</h3>
+            <p class="text-sm text-slate-500 dark:text-slate-400">
+              ${isRTL
+                ? 'في وضع السيرفر: شحن الرصيد يتم فقط عبر قنوات التمويل الخارجية (البنك/المعالج) وليس يدوياً.'
+                : 'In server mode: top-ups must come from external funding rails (bank/processor), not manual admin credits.'}
+            </p>
+          </div>
+        ` : `
+          <div class="glass-panel p-6 rounded-2xl">
+            <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-4">${t('topUp')} (${isRTL ? 'أدمن' : 'Admin'})</h3>
+            <div class="space-y-4">
+              <div>
+                <label class="block text-sm font-medium mb-2">${t('recipient')}</label>
+                <input id="wallet-topup-to" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isRTL ? 'بريد المستخدم أو المعرّف' : 'User email or ID'}" maxlength="140" />
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <label class="block text-sm font-medium mb-2">${t('amount')}</label>
+                  <input id="wallet-topup-amount" type="text" inputmode="decimal" min="0" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="0" oninput="sanitizeMoneyInput(this)" />
+                </div>
+                <div>
+                  <label class="block text-sm font-medium mb-2">${isRTL ? 'العملة' : 'Currency'}</label>
+                  <select id="wallet-topup-currency" class="w-full px-4 py-3 glass-input rounded-xl">
+                    ${currencyOptions}
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium mb-2">${t('note')}</label>
+                  <input id="wallet-topup-memo" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isRTL ? 'اختياري' : 'Optional'}" maxlength="180" />
+                </div>
+              </div>
+              <button id="wallet-topup-submit" onclick="walletTopUpFromUi()" class="w-full btn-shine bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700 disabled:opacity-50" type="button">
+                <i data-lucide="plus" class="w-4 h-4 inline mr-2"></i>${t('topUp')}
+              </button>
+            </div>
+          </div>
+        `) : `
+          <div class="glass-panel p-6 rounded-2xl">
+            <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-4">${isRTL ? 'الاشتراكات' : 'Subscriptions'}</h3>
+            ${subsRows}
+            <button onclick="navigateTo('services-hub')" class="mt-4 w-full bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300">
+              ${isRTL ? 'إدارة الخدمات' : 'Manage services'}
+            </button>
+          </div>
+        `}
+      </div>
+
+      <div class="glass-panel p-6 rounded-2xl">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="text-lg font-bold text-slate-800 dark:text-white">${t('transactions')}</h3>
+          <div class="text-xs text-slate-500 dark:text-slate-400">${isAdmin ? (isRTL ? 'آخر 50 (الكل)' : 'Latest 50 (all)') : (isRTL ? 'آخر 50 (لك فقط)' : 'Latest 50 (yours)')}</div>
+        </div>
+        ${txRows}
+      </div>
+    </div>
+  `;
+}
+
+function handleServiceClick(serviceId) {
+  const service = SERVICES[serviceId];
+  if (!service) return;
+  
+  if (service.comingSoon) {
+    showNotification(
+      state.language === 'ar' ? 'قريباً' : 'Coming Soon',
+      state.language === 'ar' ? 'هذه الخدمة ستكون متاحة قريباً' : 'This service will be available soon',
+      'info'
+    );
+    return;
+  }
+  
+  const access = checkServiceAccess(serviceId);
+  if (!access.allowed) {
+    if (access.reason === 'not_subscribed') {
+      showSubscriptionModal(serviceId, access.subscribeToId || serviceId);
+      return;
+    }
+  }
+  
+  // Navigate to service
+  const targetView = service.openView || (serviceId === 'smart_systems' ? 'smart-systems' : 'service-placeholder');
+  state.currentView = targetView;
+  state.viewData = targetView === 'service-placeholder' ? { serviceId } : null;
+  
+  saveState();
+  render();
+}
+
+function handleSmartSystemClick(systemId) {
+  const system = SMART_SYSTEMS_CHILDREN[systemId];
+  if (!system) return;
+  
+  if (system.comingSoon) {
+    showNotification(
+      state.language === 'ar' ? 'قريباً' : 'Coming Soon',
+      state.language === 'ar' ? 'هذا النظام سيكون متاحاً قريباً' : 'This system will be available soon',
+      'info'
+    );
+    return;
+  }
+  
+  const access = checkServiceAccess(systemId);
+  if (!access.allowed) {
+    if (access.reason === 'not_subscribed') {
+      // An expired Ads Studio customer whose campaigns still hold money must
+      // reach the read-only view (and its Stop & refund button) — the view
+      // shows the activate card itself. Everyone else sees the paywall.
+      const moneyRecovery = systemId === 'ad_maker'
+        && typeof adsStudioCanViewOwn === 'function' && adsStudioCanViewOwn()
+        && typeof adsStudioHasRecoverableCampaigns === 'function' && adsStudioHasRecoverableCampaigns();
+      if (!moneyRecovery) {
+        showSubscriptionModal(systemId, access.subscribeToId || systemId);
+        return;
+      }
+    }
+  }
+
+  // Navigate to system
+  const targetView = system.openView || (systemId === 'albayan_manager' ? 'analytics' : 'service-placeholder');
+  state.currentView = targetView;
+  state.viewData = targetView === 'service-placeholder' ? { serviceId: systemId } : null;
+  saveState();
+  render();
+}
+// ==========================================
 // ANALYTICS BREAKDOWNS + META PROFIT LEDGER
 // ==========================================
 
@@ -24017,9 +24074,10 @@ function closePageDuplicatesDialog(restoreFocus = true) {
   if (restoreFocus && target?.focus) target.focus();
 }
 
-// Read-only on purpose: it shows what repeats and lets you open each page, but
-// never merges or deletes. Ads carry money and point at a pageId, so combining
-// two pages is a decision a person makes one at a time.
+// Shows what repeats and lets you open each page. Combining two pages stays a
+// decision a person makes one at a time — the Merge button only appears on the
+// hand-made row of a group that has exactly ONE Meta page to merge into, and it
+// opens a dialog that spells out what moves before anything is written.
 function showPageDuplicates(focusPageId, triggerButton) {
   const isAr = state.language === 'ar';
   const wanted = String(focusPageId || '');
@@ -24042,7 +24100,16 @@ function showPageDuplicates(focusPageId, triggerButton) {
       <div class="sticky top-0 z-10 bg-white dark:bg-slate-900 flex items-center justify-between gap-3 p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700">
         <div class="min-w-0">
           <h2 id="page-duplicates-dialog-title" class="text-xl font-bold text-slate-800 dark:text-white truncate">${isAr ? 'صفحات مكررة' : 'Duplicate pages'}</h2>
-          <p class="text-sm text-slate-500 truncate">${groups.length ? (isAr ? `${groups.length} مجموعة متطابقة بالاسم` : `${groups.length} group${groups.length > 1 ? 's' : ''} with the same name`) : (isAr ? 'لا يوجد تكرار' : 'Nothing repeated')}</p>
+          <p class="text-sm text-slate-500 break-words">${groups.length ? (isAr ? `${groups.length} مجموعة متطابقة بالاسم` : `${groups.length} group${groups.length > 1 ? 's' : ''} with the same name`) : (isAr ? 'لا يوجد تكرار' : 'Nothing repeated')}${(() => {
+            // Says up front how many of these can simply be folded into their
+            // Meta page, so the owner does not have to open every group to find
+            // the ones worth acting on.
+            const mergeable = countPageMergeGroups();
+            if (!mergeable) return '';
+            return isAr
+              ? ` — ${mergeable} منها يمكن دمجها في صفحة Meta`
+              : ` — ${mergeable} of them can be merged into their Meta page`;
+          })()}</p>
         </div>
         <button type="button" onclick="closePageDuplicatesDialog()" class="min-w-11 min-h-11 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center flex-shrink-0" aria-label="${isAr ? 'إغلاق' : 'Close'}">
           <span class="text-2xl leading-none" aria-hidden="true">&times;</span>
@@ -24053,11 +24120,21 @@ function showPageDuplicates(focusPageId, triggerButton) {
           <section class="rounded-xl border border-amber-300 dark:border-amber-700 bg-amber-50/60 dark:bg-amber-900/20 p-3">
             <h3 class="font-bold text-slate-800 dark:text-white break-words mb-2">${Security.escapeHtml(group[0]?.name || '')} <span class="text-xs font-normal text-slate-500">(${group.length})</span></h3>
             <div class="space-y-2">
-              ${group.map(page => {
+              ${(() => {
+                // The one Meta row of this group, if the group has exactly one.
+                // It is the only page the others may be merged INTO: it owns the
+                // metaPageId the server keeps writing to.
+                const metaPagesInGroup = group.filter(item => String(item?.metaPageId || '').trim());
+                const mergeTargetId = metaPagesInGroup.length === 1 && isCurrentUserAdmin()
+                  ? String(metaPagesInGroup[0].id)
+                  : '';
+                return group.map(page => {
                 const owners = getPageCustomerIds(page)
                   .map(id => customersById.get(String(id))?.name || '')
                   .filter(Boolean).join(', ');
                 const adCount = can('ads', 'view') ? getAdsForPage(page.id).length : null;
+                const canMergeThisPage = !!mergeTargetId && String(page.id) !== mergeTargetId
+                  && !String(page.metaPageId || '').trim();
                 return `<div class="rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 p-2.5 flex flex-wrap items-center justify-between gap-2">
                   <div class="min-w-0">
                     <div class="text-sm font-semibold text-slate-800 dark:text-white break-words">${Security.escapeHtml(page.name || '')}</div>
@@ -24068,9 +24145,13 @@ function showPageDuplicates(focusPageId, triggerButton) {
                       ${page.metaPageId ? ' • Meta' : ''}
                     </div>
                   </div>
-                  ${can('pages', 'edit') ? `<button type="button" onclick="closePageDuplicatesDialog(false);editPage('${Security.escapeHtml(String(page.id))}')" class="min-h-10 rounded-lg border border-slate-200 dark:border-slate-700 px-3 py-1.5 text-xs font-bold hover:bg-slate-100 dark:hover:bg-slate-800">${isAr ? 'فتح' : 'Open'}</button>` : ''}
+                  <div class="flex flex-wrap items-center gap-2">
+                    ${canMergeThisPage ? `<button type="button" onclick="showPageMergeDialog('${Security.escapeHtml(mergeTargetId)}','${Security.escapeHtml(String(page.id))}', this)" class="min-h-10 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-800 hover:bg-amber-100 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200" title="${isAr ? 'نقل كل إعلانات هذه الصفحة إلى صفحة Meta ثم حذفها' : 'Move every ad on this page to the Meta page, then remove it'}">${isAr ? 'دمج في Meta' : 'Merge into Meta'}</button>` : ''}
+                    ${can('pages', 'edit') ? `<button type="button" onclick="closePageDuplicatesDialog(false);editPage('${Security.escapeHtml(String(page.id))}')" class="min-h-10 rounded-lg border border-slate-200 dark:border-slate-700 px-3 py-1.5 text-xs font-bold hover:bg-slate-100 dark:hover:bg-slate-800">${isAr ? 'فتح' : 'Open'}</button>` : ''}
+                  </div>
                 </div>`;
-              }).join('')}
+                });
+              })().join('')}
             </div>
           </section>
         `).join('') : `<div class="rounded-xl bg-slate-50 dark:bg-slate-800/60 p-6 text-sm text-slate-500 text-center">${isAr ? 'لا توجد صفحات بنفس الاسم.' : 'No two pages share the same name.'}</div>`}
@@ -28914,6 +28995,778 @@ async function saveRefund() {
   showNotification(state.language === 'ar' ? 'تم الحفظ' : 'Saved', state.language === 'ar' ? `تم تطبيق الاسترجاع (${trStatus(refundType)})` : `Refund ${refundType} applied`, refundType !== 'None' ? 'warning' : 'success');
   closeModal();
   render();
+}
+// ==========================================
+// MERGE TOOLS — one real page, one real ad
+// ==========================================
+// The Meta import leaves two kinds of doubles behind, and both were previously
+// dead ends: showPageDuplicates could only LIST repeated pages, and an imported
+// draft that described an ad the staff had already recorded by hand could only
+// be completed a second time or thrown away.
+//
+//  1. PAGE: the row someone typed by hand before the import existed, beside the
+//     row the Meta sync created. Only the Meta row carries metaPageId, which is
+//     the identity the server writes to, so the hand-made row is always the one
+//     that gives up its ads and goes. The opposite direction would strand every
+//     future imported ad on a fresh page row and re-create the duplicate
+//     immediately (server/meta_ads.py only re-points an imported ad at its own
+//     Meta-derived page, and _ensure_import_page only looks at live pages).
+//
+//  2. AD: the ad the staff recorded with the customer's money, beside the empty
+//     draft the importer created for the same Meta ad. Combining them is really
+//     a RE-LINK: the Meta identity moves onto the record that holds the money,
+//     and the empty draft is removed.
+//
+// Neither flow moves money. Both are built only out of writes the server
+// already accepts on their own: ad.pageId is an ordinary relationship field,
+// and the Meta link travels through the existing transactional
+// /api/meta-ads/ads/{id}/unlink + /link endpoints, which are the only writers
+// allowed to move a metaAdId. Nothing here PATCHes a server-controlled meta*
+// field, so no new backend surface is required.
+//
+// Both flows are also re-runnable on purpose. They do the harmless work first
+// and remove the losing record LAST, so a connection that drops halfway leaves
+// a visibly unfinished merge that finishes correctly when repeated — never a
+// half-deleted one.
+
+// Guards the two dialogs against a double submit (and against a second merge
+// starting while the first is still writing).
+let _mergeToolsBusy = '';
+let _pageMergeReturnFocus = null;
+let _adMergeReturnFocus = null;
+
+function isMergeToolsAdmin() {
+  return typeof isCurrentUserAdmin === 'function' && isCurrentUserAdmin();
+}
+
+function getPageMetaIdValue(page) {
+  return String(page?.metaPageId || '').trim();
+}
+
+// ------------------------------------------------------------------
+// 1. Merge a hand-made page into the Meta page with the same name
+// ------------------------------------------------------------------
+
+// Same grouping key the duplicate finder and the category picker already use
+// (Arabic hamza/ة/ى folding, tashkeel stripped, digits folded, spaces
+// collapsed), so "حج وعمرة" and "حج وعمره" land in one group here too.
+function findPageMergeGroups(pages = getPagesVisibleToCurrentUser()) {
+  const active = getVisibleRecords(Array.isArray(pages) ? pages : [])
+    .filter(page => page && !page._deleted && page.id);
+  const groups = new Map();
+  for (const page of active) {
+    const key = pageCategoryKey(page.name);
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(page);
+  }
+  const mergeable = [];
+  for (const group of groups.values()) {
+    const metaPages = group.filter(page => getPageMetaIdValue(page));
+    const manualPages = group.filter(page => !getPageMetaIdValue(page));
+    // Exactly one Meta row is the only unambiguous case. Two Meta rows for one
+    // name is a different problem (two real Facebook pages, or a server-side
+    // import bug) and must not be guessed at here.
+    if (metaPages.length !== 1 || manualPages.length === 0) continue;
+    mergeable.push({ keepPage: metaPages[0], manualPages });
+  }
+  return mergeable.sort((a, b) => String(a.keepPage?.name || '').localeCompare(String(b.keepPage?.name || '')));
+}
+
+function countPageMergeGroups() {
+  return isMergeToolsAdmin() ? findPageMergeGroups().length : 0;
+}
+
+// Everything the dialog needs, plus the single reason a merge is refused.
+// Recomputed immediately before the write so a dialog left open on a stale
+// screen cannot merge something that changed underneath it.
+function getPageMergePlan(keepPageId, losePageId) {
+  const isAr = state.language === 'ar';
+  const pages = getVisibleRecords(state.pages);
+  const keepPage = pages.find(page => String(page.id) === String(keepPageId || '')) || null;
+  const losePage = pages.find(page => String(page.id) === String(losePageId || '')) || null;
+  const plan = { keepPage, losePage, ads: [], blocked: '' };
+  if (!keepPage || !losePage) {
+    plan.blocked = isAr ? 'إحدى الصفحتين لم تعد موجودة. حدّث الصفحة وحاول مرة أخرى.' : 'One of the two pages no longer exists. Refresh and try again.';
+    return plan;
+  }
+  if (String(keepPage.id) === String(losePage.id)) {
+    plan.blocked = isAr ? 'اختر صفحتين مختلفتين.' : 'Choose two different pages.';
+    return plan;
+  }
+  if (!getPageMetaIdValue(keepPage)) {
+    plan.blocked = isAr ? 'الصفحة الباقية يجب أن تكون صفحة Meta.' : 'The surviving page must be the Meta page.';
+    return plan;
+  }
+  if (getPageMetaIdValue(losePage)) {
+    plan.blocked = isAr ? 'لا يمكن دمج صفحة Meta في صفحة أخرى. تُدمج الصفحة اليدوية فقط.' : 'A Meta page cannot be merged away. Only the hand-made page is merged.';
+    return plan;
+  }
+  if (pageCategoryKey(keepPage.name) !== pageCategoryKey(losePage.name)) {
+    plan.blocked = isAr ? 'الصفحتان ليس لهما نفس الاسم.' : 'The two pages do not share the same name.';
+    return plan;
+  }
+  plan.ads = getAdsForPage(losePage.id);
+  return plan;
+}
+
+function closePageMergeDialog(restoreFocus = true) {
+  document.getElementById('page-merge-dialog')?.remove();
+  const target = _pageMergeReturnFocus?.isConnected === false ? null : _pageMergeReturnFocus;
+  _pageMergeReturnFocus = null;
+  if (restoreFocus && target?.focus) target.focus();
+}
+
+function showPageMergeDialog(keepPageId, losePageId, triggerButton) {
+  const isAr = state.language === 'ar';
+  if (!isMergeToolsAdmin()) {
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'دمج الصفحات متاح للمدير فقط.' : 'Only an administrator can merge pages.', 'error');
+    return;
+  }
+  const plan = getPageMergePlan(keepPageId, losePageId);
+  if (plan.blocked) {
+    showNotification(isAr ? 'تعذّر الدمج' : 'Cannot merge', plan.blocked, 'warning');
+    return;
+  }
+  closePageMergeDialog(false);
+  _pageMergeReturnFocus = triggerButton || document.activeElement;
+
+  const adCount = plan.ads.length;
+  const keepAdCount = getAdsForPage(plan.keepPage.id).length;
+  const customersById = new Map((state.customers || []).map(customer => [String(customer.id), customer]));
+  const describeOwners = page => getPageCustomerIds(page)
+    .map(id => customersById.get(String(id))?.name || '')
+    .filter(Boolean).join(', ');
+  const loseOwners = describeOwners(plan.losePage);
+  const keepOwners = describeOwners(plan.keepPage);
+  const movedOwners = getPageCustomerIds(plan.losePage)
+    .map(String)
+    .filter(id => !getPageCustomerIds(plan.keepPage).map(String).includes(id));
+
+  const dialog = document.createElement('div');
+  dialog.id = 'page-merge-dialog';
+  dialog.className = 'mobile-dialog-overlay fixed inset-0 z-[95] flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
+  dialog.setAttribute('aria-labelledby', 'page-merge-dialog-title');
+  dialog.setAttribute('dir', isAr ? 'rtl' : 'ltr');
+  dialog.tabIndex = -1;
+  dialog.innerHTML = `
+    <div class="glass-panel w-full max-w-2xl max-h-[90dvh] overflow-hidden rounded-2xl shadow-2xl flex flex-col animate-slide-up">
+      <div class="sticky top-0 z-10 bg-white dark:bg-slate-900 flex items-start justify-between gap-3 p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700">
+        <div class="flex items-start gap-3 min-w-0">
+          <span class="w-11 h-11 rounded-xl bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 flex items-center justify-center shrink-0">
+            <i data-lucide="combine" class="w-6 h-6"></i>
+          </span>
+          <div class="min-w-0">
+            <h2 id="page-merge-dialog-title" class="text-xl font-bold text-slate-800 dark:text-white break-words">${isAr ? 'دمج الصفحة القديمة في صفحة Meta' : 'Merge the old page into the Meta page'}</h2>
+            <p class="text-sm text-slate-500 break-words">${isAr ? 'تنتقل كل الإعلانات إلى صفحة Meta، ولا يتغير أي مبلغ.' : 'Every ad moves to the Meta page. No money changes.'}</p>
+          </div>
+        </div>
+        <button type="button" onclick="closePageMergeDialog()" class="min-w-11 min-h-11 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center flex-shrink-0" aria-label="${isAr ? 'إغلاق' : 'Close'}">
+          <span class="text-2xl leading-none" aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-4">
+        <div class="grid gap-3 md:grid-cols-2">
+          <section class="rounded-xl border-2 border-rose-200 dark:border-rose-800 bg-rose-50/60 dark:bg-rose-900/10 p-3">
+            <div class="text-xs font-bold uppercase tracking-wide text-rose-700 dark:text-rose-300">${isAr ? 'ستُزال' : 'Will be removed'}</div>
+            <div class="mt-1 font-bold text-slate-800 dark:text-white break-words">${Security.escapeHtml(plan.losePage.name || '')}</div>
+            <div class="mt-1 text-xs text-slate-600 dark:text-slate-300 break-words">
+              ${Security.escapeHtml(plan.losePage.category || (isAr ? 'بدون فئة' : 'No category'))}
+              ${loseOwners ? ` • ${Security.escapeHtml(loseOwners)}` : ` • ${isAr ? 'بدون مالك' : 'No owner'}`}
+            </div>
+            <div class="mt-2 inline-flex items-center gap-1 rounded-full bg-white/80 dark:bg-slate-900/50 px-2 py-1 text-xs font-bold text-slate-700 dark:text-slate-200">
+              ${isAr ? `${adCount} إعلان سينتقل` : `${adCount} ad${adCount === 1 ? '' : 's'} will move`}
+            </div>
+          </section>
+          <section class="rounded-xl border-2 border-emerald-300 dark:border-emerald-700 bg-emerald-50/60 dark:bg-emerald-900/10 p-3">
+            <div class="text-xs font-bold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">${isAr ? 'ستبقى' : 'Will be kept'}</div>
+            <div class="mt-1 font-bold text-slate-800 dark:text-white break-words">${Security.escapeHtml(plan.keepPage.name || '')}</div>
+            <div class="mt-1 font-mono text-[11px] text-slate-500 break-all">#${Security.escapeHtml(getPageMetaIdValue(plan.keepPage))}</div>
+            <div class="mt-1 text-xs text-slate-600 dark:text-slate-300 break-words">
+              ${Security.escapeHtml(plan.keepPage.category || (isAr ? 'بدون فئة' : 'No category'))}
+              ${keepOwners ? ` • ${Security.escapeHtml(keepOwners)}` : ` • ${isAr ? 'بدون مالك' : 'No owner'}`}
+            </div>
+            <div class="mt-2 inline-flex items-center gap-1 rounded-full bg-white/80 dark:bg-slate-900/50 px-2 py-1 text-xs font-bold text-slate-700 dark:text-slate-200">
+              ${isAr ? `${keepAdCount} إعلان الآن` : `${keepAdCount} ad${keepAdCount === 1 ? '' : 's'} today`}
+            </div>
+          </section>
+        </div>
+
+        <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3 text-sm text-slate-600 dark:text-slate-300 space-y-1">
+          <div class="font-bold text-slate-800 dark:text-white">${isAr ? 'ماذا سيحدث' : 'What will happen'}</div>
+          <div>• ${isAr ? `تنتقل ${adCount} إعلان إلى صفحة Meta.` : `${adCount} ad${adCount === 1 ? '' : 's'} move to the Meta page.`}</div>
+          ${movedOwners.length ? `<div>• ${isAr ? 'يُضاف مالك الصفحة القديمة إلى صفحة Meta.' : 'The old page owner is added to the Meta page.'}</div>` : ''}
+          <div>• ${isAr ? 'تُحذف الصفحة القديمة بعد انتقال كل إعلان.' : 'The old page is removed after every ad has moved.'}</div>
+          <div>• ${isAr ? 'لا يتغير أي مبلغ أو وصل أو صورة.' : 'No amount, receipt or photo changes.'}</div>
+        </div>
+      </div>
+      <div class="sticky bottom-0 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-700 p-4 flex flex-col sm:flex-row gap-2">
+        <button type="button" id="page-merge-confirm" onclick="runPageMerge('${Security.escapeHtml(String(plan.keepPage.id))}','${Security.escapeHtml(String(plan.losePage.id))}')" class="flex-1 btn-shine bg-amber-600 text-white px-4 py-3 rounded-xl font-bold hover:bg-amber-700 min-h-11">
+          <i data-lucide="combine" class="w-4 h-4 inline mr-2"></i>${isAr ? 'دمج الآن' : 'Merge now'}
+        </button>
+        <button type="button" onclick="closePageMergeDialog()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold hover:bg-slate-300 min-h-11">${isAr ? 'إلغاء' : 'Cancel'}</button>
+      </div>
+    </div>`;
+  dialog.addEventListener('click', event => { if (event.target === dialog) closePageMergeDialog(); });
+  document.body.appendChild(dialog);
+  IconQueue.schedule(dialog);
+  dialog.focus();
+}
+
+async function runPageMerge(keepPageId, losePageId) {
+  const isAr = state.language === 'ar';
+  if (!isMergeToolsAdmin()) {
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'دمج الصفحات متاح للمدير فقط.' : 'Only an administrator can merge pages.', 'error');
+    return;
+  }
+  if (_mergeToolsBusy) return;
+  // Re-checked against live state, not against what the dialog was drawn from.
+  const plan = getPageMergePlan(keepPageId, losePageId);
+  if (plan.blocked) {
+    showNotification(isAr ? 'تعذّر الدمج' : 'Cannot merge', plan.blocked, 'warning');
+    return;
+  }
+
+  _mergeToolsBusy = 'page';
+  const confirmButton = document.getElementById('page-merge-confirm');
+  if (confirmButton) {
+    confirmButton.disabled = true;
+    confirmButton.textContent = isAr ? 'جارٍ الدمج…' : 'Merging…';
+  }
+
+  let moved = 0;
+  try {
+    // Ads first. The old page is only removed once every one of them has landed
+    // on the Meta page, so an interrupted merge is always safe to repeat.
+    for (const ad of plan.ads) {
+      const updates = { pageId: String(plan.keepPage.id) };
+      // Only refresh the denormalised copy when the ad actually carries one —
+      // writing it onto rows that never had it would invent a new field.
+      if (String(ad.pageName || '').trim()) updates.pageName = String(plan.keepPage.name || '');
+      const expected = Number(ad._lastModified);
+      const saved = await updateRecord(state.ads, ad.id, updates, Number.isFinite(expected) ? expected : undefined);
+      if (!saved) {
+        showNotification(
+          isAr ? 'توقف الدمج' : 'Merge stopped',
+          isAr
+            ? `تم نقل ${moved} من ${plan.ads.length} إعلان. لم تُحذف الصفحة القديمة، أعد المحاولة لإكمال الباقي.`
+            : `${moved} of ${plan.ads.length} ads moved. The old page was kept — run the merge again to finish the rest.`,
+          'warning'
+        );
+        return;
+      }
+      moved += 1;
+    }
+
+    // Carry the hand-made page's owner across. An imported page arrives with no
+    // owner at all, so this is usually the only place that knowledge exists.
+    const keepOwnerIds = getPageCustomerIds(plan.keepPage).map(String);
+    const addedOwnerIds = getPageCustomerIds(plan.losePage).map(String).filter(id => !keepOwnerIds.includes(id));
+    if (addedOwnerIds.length) {
+      const keepExpected = Number(plan.keepPage._lastModified);
+      await updateRecord(
+        state.pages,
+        plan.keepPage.id,
+        { customerIds: [...keepOwnerIds, ...addedOwnerIds] },
+        Number.isFinite(keepExpected) ? keepExpected : undefined
+      );
+    }
+
+    const removed = await deleteRecord(state.pages, plan.losePage.id);
+    if (!removed) {
+      showNotification(
+        isAr ? 'انتقلت الإعلانات' : 'Ads moved',
+        isAr ? 'انتقلت كل الإعلانات، لكن تعذّر حذف الصفحة القديمة. احذفها يدوياً.' : 'Every ad moved, but the old page could not be removed. Delete it by hand.',
+        'warning'
+      );
+      return;
+    }
+
+    showNotification(
+      isAr ? 'تم الدمج' : 'Merged',
+      isAr
+        ? `تم نقل ${moved} إعلان إلى «${plan.keepPage.name}» وحُذفت الصفحة القديمة.`
+        : `${moved} ad${moved === 1 ? '' : 's'} moved to "${plan.keepPage.name}" and the old page was removed.`,
+      'success'
+    );
+  } catch (error) {
+    showNotification(
+      isAr ? 'تعذّر الدمج' : 'Merge failed',
+      error?.message || (isAr ? 'حدث خطأ أثناء الدمج. أعد المحاولة.' : 'Something went wrong during the merge. Try again.'),
+      'error'
+    );
+  } finally {
+    _mergeToolsBusy = '';
+    closePageMergeDialog(false);
+    closePageDuplicatesDialog(false);
+    render();
+  }
+}
+
+// ------------------------------------------------------------------
+// 2. Link a hand-made ad to the Meta draft that describes the same ad
+// ------------------------------------------------------------------
+
+// A row is "imported" when the automation made it, whatever its current link
+// state. Used to tell the two sides of a pair apart.
+function isImportedMetaAd(ad) {
+  return !!ad && (
+    !!String(ad.metaImportState || '').trim()
+    || !!String(ad.metaImportedAt || '').trim()
+    || !!String(ad.metaImportSource || '').trim()
+  );
+}
+
+// Every way this ad names a page, so the two sides can be recognised as the
+// same page even while the manual ad still points at the old page record and
+// the draft already points at the Meta one.
+function _adPageMergeKeys(ad, pagesById) {
+  const keys = new Set();
+  const pageId = String(ad?.pageId || '').trim();
+  const page = !pageId
+    ? null
+    : (pagesById
+      ? (pagesById.get(pageId) || null)
+      : ((state.pages || []).find(item => item && !item._deleted && String(item.id) === pageId) || null));
+  if (pageId) keys.add(`id:${pageId}`);
+  const metaPageId = String(ad?.metaPageId || page?.metaPageId || '').trim();
+  if (metaPageId) keys.add(`meta:${metaPageId}`);
+  const rawName = String(page?.name || ad?.pageName || ad?.metaPageName || '').trim();
+  // "Facebook Page 1234…" is the importer's stand-in, not a name. Matching on it
+  // would pair two unrelated ads that are both waiting for their real name.
+  if (rawName && !metaAdsIsPlaceholderPageName(rawName, metaPageId || pageId)) {
+    const nameKey = pageCategoryKey(rawName);
+    if (nameKey) keys.add(`name:${nameKey}`);
+  }
+  return keys;
+}
+
+function adsShareAPage(left, right) {
+  const leftKeys = _adPageMergeKeys(left);
+  if (!leftKeys.size) return false;
+  for (const key of _adPageMergeKeys(right)) {
+    if (leftKeys.has(key)) return true;
+  }
+  return false;
+}
+
+// The draft must be genuinely empty. Money on both sides is a decision a person
+// has to make one receipt at a time, so it is refused rather than guessed.
+function metaDraftCarriesMoney(ad) {
+  if (!ad) return false;
+  if ((Number(ad.amountUSD) || 0) > 0) return true;
+  if (getAdLinkedReceiptIds(ad).length > 0) return true;
+  if (Array.isArray(ad.topUps) && ad.topUps.length > 0) return true;
+  return !!String(ad.customerId || '').trim();
+}
+
+// The ads table asks about every row, so the WHOLE pairing is resolved in one
+// pass and cached for the render — never once per row. Comparing each ad with
+// every other ad (and re-finding its page each time) is O(ads² × pages) and was
+// measurably the wrong shape for a list this long. Cleared at the top of
+// renderAdsView and after a merge, so it can never describe stale data.
+let _adMergePairCache = null;
+
+function resetAdMergePairCache() {
+  _adMergePairCache = null;
+}
+
+function _buildAdMergePairIndex() {
+  const pairs = new Map();
+  if (!isMergeToolsAdmin() || !isServerModeEnabled()) return pairs;
+
+  const pagesById = new Map(
+    (state.pages || [])
+      .filter(page => page && !page._deleted && page.id)
+      .map(page => [String(page.id), page])
+  );
+  const manualAds = [];
+  const draftAds = [];
+  const keysByAdId = new Map();
+  for (const ad of getVisibleRecords(state.ads)) {
+    if (!ad || ad.recordType === 'receipt' || !ad.id) continue;
+    const linked = !!String(ad.metaAdId || '').trim();
+    const imported = isImportedMetaAd(ad);
+    if (imported && linked) {
+      // A draft that already grew a customer, an amount or a receipt is a real
+      // ad in its own right and must never be absorbed.
+      if (metaDraftCarriesMoney(ad)) continue;
+      draftAds.push(ad);
+    } else if (!imported && !linked) {
+      manualAds.push(ad);
+    } else {
+      // Already linked by hand, or imported and since unlinked: neither half.
+      continue;
+    }
+    keysByAdId.set(String(ad.id), _adPageMergeKeys(ad, pagesById));
+  }
+  if (!manualAds.length || !draftAds.length) return pairs;
+
+  const draftsByKey = new Map();
+  for (const draft of draftAds) {
+    for (const key of keysByAdId.get(String(draft.id))) {
+      if (!draftsByKey.has(key)) draftsByKey.set(key, []);
+      draftsByKey.get(key).push(draft);
+    }
+  }
+
+  // Several hand-made ads of the same price on one page, beside several drafts,
+  // is the NORMAL shape of this problem — refusing everything that is not a
+  // clean one-to-one would hide the feature exactly where it is needed. So every
+  // ad keeps its full candidate list and the owner picks; only the pick itself
+  // is ever written, and getAdMergePlan re-checks it.
+  for (const manual of manualAds) {
+    const found = new Map();
+    for (const key of keysByAdId.get(String(manual.id))) {
+      for (const draft of draftsByKey.get(key) || []) found.set(String(draft.id), draft);
+    }
+    if (!found.size) continue;
+    const partners = [...found.values()];
+    pairs.set(String(manual.id), { role: 'manual', ad: manual, partners });
+    for (const draft of partners) {
+      const entry = pairs.get(String(draft.id)) || { role: 'draft', ad: draft, partners: [] };
+      entry.partners.push(manual);
+      pairs.set(String(draft.id), entry);
+    }
+  }
+  return pairs;
+}
+
+function getAdMergePartnersFor(adId) {
+  const wanted = String(adId || '');
+  if (!wanted) return null;
+  if (!_adMergePairCache) _adMergePairCache = _buildAdMergePairIndex();
+  const entry = _adMergePairCache.get(wanted) || null;
+  return entry && entry.partners.length ? entry : null;
+}
+
+// One button in the ads-table Actions column, on BOTH halves of a possible pair.
+// "Link" is already taken there by the ad -> Meta connection manager, so this
+// says Merge/دمج like the customer flow does.
+function renderAdMergeActionButton(ad, isAr) {
+  const entry = getAdMergePartnersFor(ad?.id);
+  if (!entry) return '';
+  const count = entry.partners.length;
+  const label = isAr ? 'دمج' : 'Merge';
+  const title = entry.role === 'manual'
+    ? (isAr ? 'دمج هذا الإعلان مع نسخته المستوردة من Meta على نفس الصفحة' : 'Merge this ad with its Meta-imported copy on the same page')
+    : (isAr ? 'دمج هذه النسخة المستوردة مع الإعلان الأصلي على نفس الصفحة' : 'Merge this imported copy into the original ad on the same page');
+  return `<button type="button" data-action="merge-meta-twin" data-ad-id="${Security.escapeHtml(String(ad.id))}" onclick="openAdMergePicker(this.dataset.adId, this)" class="inline-flex min-h-10 items-center justify-center gap-1 rounded-lg border border-purple-200 bg-purple-50 px-2 text-xs font-bold text-purple-700 hover:bg-purple-100 dark:border-purple-800 dark:bg-purple-900/30 dark:text-purple-200" title="${Security.escapeHtml(title)}"><i data-lucide="combine" class="h-4 w-4"></i><span>${label}${count > 1 ? ` (${count})` : ''}</span></button>`;
+}
+
+// One candidate goes straight to the confirmation. Several means the owner has
+// to say which two ads are really the same ad — the app must not guess.
+function openAdMergePicker(adId, triggerButton) {
+  const isAr = state.language === 'ar';
+  if (!isMergeToolsAdmin()) {
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'دمج الإعلانات متاح للمدير فقط.' : 'Only an administrator can merge ads.', 'error');
+    return;
+  }
+  const entry = getAdMergePartnersFor(adId);
+  if (!entry) {
+    showNotification(isAr ? 'لا يوجد ما يُدمج' : 'Nothing to merge', isAr ? 'لم يعد هناك إعلان مطابق على نفس الصفحة.' : 'There is no matching ad on the same page any more.', 'warning');
+    return;
+  }
+  const pairFor = partner => (entry.role === 'manual'
+    ? { keepId: String(entry.ad.id), draftId: String(partner.id) }
+    : { keepId: String(partner.id), draftId: String(entry.ad.id) });
+  if (entry.partners.length === 1) {
+    const only = pairFor(entry.partners[0]);
+    showAdMergeDialog(only.keepId, only.draftId, triggerButton);
+    return;
+  }
+
+  closeAdMergeDialog(false);
+  _adMergeReturnFocus = triggerButton || document.activeElement;
+  const dialog = document.createElement('div');
+  dialog.id = 'ad-merge-dialog';
+  dialog.className = 'mobile-dialog-overlay fixed inset-0 z-[95] flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
+  dialog.setAttribute('aria-labelledby', 'ad-merge-picker-title');
+  dialog.setAttribute('dir', isAr ? 'rtl' : 'ltr');
+  dialog.tabIndex = -1;
+  dialog.innerHTML = `
+    <div class="glass-panel w-full max-w-xl max-h-[90dvh] overflow-hidden rounded-2xl shadow-2xl flex flex-col animate-slide-up">
+      <div class="sticky top-0 z-10 bg-white dark:bg-slate-900 flex items-start justify-between gap-3 p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700">
+        <div class="min-w-0">
+          <h2 id="ad-merge-picker-title" class="text-xl font-bold text-slate-800 dark:text-white break-words">${entry.role === 'manual' ? (isAr ? 'أي نسخة Meta هي نفس هذا الإعلان؟' : 'Which Meta copy is the same ad?') : (isAr ? 'أي إعلان هو نفس هذه النسخة؟' : 'Which ad is this copy?')}</h2>
+          <p class="text-sm text-slate-500 break-words">${isAr ? 'كلها على نفس الصفحة. اختر واحداً لمراجعة الدمج قبل تنفيذه.' : 'They are all on the same page. Pick one to review the merge before it runs.'}</p>
+        </div>
+        <button type="button" onclick="closeAdMergeDialog()" class="min-w-11 min-h-11 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center flex-shrink-0" aria-label="${isAr ? 'إغلاق' : 'Close'}">
+          <span class="text-2xl leading-none" aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-2">
+        ${entry.partners.map(partner => {
+          const ids = pairFor(partner);
+          const money = (Number(partner.amountUSD) || 0).toFixed(2);
+          const when = partner.startDate ? new Date(partner.startDate) : null;
+          const dateText = when && !Number.isNaN(when.getTime()) ? when.toLocaleDateString(appDateLocale()) : '';
+          return `<button type="button" onclick="showAdMergeDialog('${Security.escapeHtml(ids.keepId)}','${Security.escapeHtml(ids.draftId)}', this)" class="w-full text-start rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 hover:border-purple-300 hover:bg-purple-50 dark:hover:bg-purple-900/20">
+            <div class="font-bold text-slate-800 dark:text-white break-words">${Security.escapeHtml(_describeMergeAdCustomer(partner, isAr))}</div>
+            <div class="mt-0.5 text-xs text-slate-500 break-all">
+              ${String(partner.metaAdId || '').trim() ? `Meta #${Security.escapeHtml(String(partner.metaAdId))}` : `${isAr ? 'المبلغ' : 'Amount'}: $${money}`}
+              ${dateText ? ` • ${Security.escapeHtml(dateText)}` : ''}
+            </div>
+          </button>`;
+        }).join('')}
+      </div>
+      <div class="sticky bottom-0 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-700 p-4">
+        <button type="button" onclick="closeAdMergeDialog()" class="w-full bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold hover:bg-slate-300 min-h-11">${isAr ? 'إلغاء' : 'Cancel'}</button>
+      </div>
+    </div>`;
+  dialog.addEventListener('click', event => { if (event.target === dialog) closeAdMergeDialog(); });
+  document.body.appendChild(dialog);
+  IconQueue.schedule(dialog);
+  dialog.focus();
+}
+
+// Re-validates an explicitly chosen pair (the dialog and the write both use it,
+// so a stale dialog can never merge two ads that stopped being a pair).
+function getAdMergePlan(keepAdId, draftAdId) {
+  const isAr = state.language === 'ar';
+  const ads = getVisibleRecords(state.ads);
+  const keepAd = ads.find(item => String(item.id) === String(keepAdId || '')) || null;
+  const draftAd = ads.find(item => String(item.id) === String(draftAdId || '')) || null;
+  const plan = { keepAd, draftAd, metaAdId: '', blocked: '' };
+  if (!keepAd || !draftAd || String(keepAd.id) === String(draftAd.id)) {
+    plan.blocked = isAr ? 'أحد الإعلانين لم يعد موجوداً. حدّث الصفحة وحاول مرة أخرى.' : 'One of the two ads no longer exists. Refresh and try again.';
+    return plan;
+  }
+  if (!isServerModeEnabled()) {
+    plan.blocked = isAr ? 'الدمج يحتاج الاتصال بالخادم.' : 'Merging needs a live server connection.';
+    return plan;
+  }
+  plan.metaAdId = String(draftAd.metaAdId || '').trim();
+  if (!plan.metaAdId || !isImportedMetaAd(draftAd)) {
+    plan.blocked = isAr ? 'الإعلان الثاني ليس نسخة مستوردة من Meta.' : 'The second ad is not a Meta-imported copy.';
+    return plan;
+  }
+  if (String(keepAd.metaAdId || '').trim()) {
+    plan.blocked = isAr ? 'الإعلان الأساسي مرتبط بـ Meta بالفعل. ألغِ ربطه أولاً.' : 'The main ad is already linked to Meta. Unlink it first.';
+    return plan;
+  }
+  if (isImportedMetaAd(keepAd)) {
+    plan.blocked = isAr ? 'الإعلانان كلاهما مستورد من Meta.' : 'Both ads were imported from Meta.';
+    return plan;
+  }
+  if (metaDraftCarriesMoney(draftAd)) {
+    plan.blocked = isAr
+      ? 'النسخة المستوردة عليها عميل أو مبلغ أو وصل. أفرغها أو احذفها بنفسك أولاً.'
+      : 'The imported copy already has a customer, an amount or a receipt. Empty or delete it yourself first.';
+    return plan;
+  }
+  if (!adsShareAPage(keepAd, draftAd)) {
+    plan.blocked = isAr ? 'الإعلانان ليسا على نفس الصفحة.' : 'The two ads are not on the same page.';
+    return plan;
+  }
+  return plan;
+}
+
+function closeAdMergeDialog(restoreFocus = true) {
+  document.getElementById('ad-merge-dialog')?.remove();
+  const target = _adMergeReturnFocus?.isConnected === false ? null : _adMergeReturnFocus;
+  _adMergeReturnFocus = null;
+  if (restoreFocus && target?.focus) target.focus();
+}
+
+function _describeMergeAdCustomer(ad, isAr) {
+  const customer = (state.customers || []).find(item => String(item.id) === String(ad?.customerId || ''));
+  return String(customer?.name || ad?.customerName || ad?.metaAdName || (isAr ? 'بدون عميل' : 'No customer')).trim();
+}
+
+function showAdMergeDialog(keepAdId, draftAdId, triggerButton) {
+  const isAr = state.language === 'ar';
+  if (!isMergeToolsAdmin()) {
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'دمج الإعلانات متاح للمدير فقط.' : 'Only an administrator can merge ads.', 'error');
+    return;
+  }
+  const plan = getAdMergePlan(keepAdId, draftAdId);
+  if (plan.blocked) {
+    showNotification(isAr ? 'تعذّر الدمج' : 'Cannot merge', plan.blocked, 'warning');
+    return;
+  }
+  closeAdMergeDialog(false);
+  _adMergeReturnFocus = triggerButton || document.activeElement;
+
+  const keepAmount = (Number(plan.keepAd.amountUSD) || 0).toFixed(2);
+  const keepReceipts = getAdLinkedReceiptIds(plan.keepAd).length;
+  const dialog = document.createElement('div');
+  dialog.id = 'ad-merge-dialog';
+  dialog.className = 'mobile-dialog-overlay fixed inset-0 z-[95] flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
+  dialog.setAttribute('aria-labelledby', 'ad-merge-dialog-title');
+  dialog.setAttribute('dir', isAr ? 'rtl' : 'ltr');
+  dialog.tabIndex = -1;
+  dialog.innerHTML = `
+    <div class="glass-panel w-full max-w-2xl max-h-[90dvh] overflow-hidden rounded-2xl shadow-2xl flex flex-col animate-slide-up">
+      <div class="sticky top-0 z-10 bg-white dark:bg-slate-900 flex items-start justify-between gap-3 p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700">
+        <div class="flex items-start gap-3 min-w-0">
+          <span class="w-11 h-11 rounded-xl bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 flex items-center justify-center shrink-0">
+            <i data-lucide="combine" class="w-6 h-6"></i>
+          </span>
+          <div class="min-w-0">
+            <h2 id="ad-merge-dialog-title" class="text-xl font-bold text-slate-800 dark:text-white break-words">${isAr ? 'دمج الإعلان مع نسخة Meta' : 'Merge this ad with its Meta copy'}</h2>
+            <p class="text-sm text-slate-500 break-words">${isAr ? 'ينتقل ربط Meta إلى الإعلان الذي يحمل المال، وتُحذف النسخة الفارغة.' : 'The Meta link moves to the ad that holds the money, and the empty copy is removed.'}</p>
+          </div>
+        </div>
+        <button type="button" onclick="closeAdMergeDialog()" class="min-w-11 min-h-11 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center flex-shrink-0" aria-label="${isAr ? 'إغلاق' : 'Close'}">
+          <span class="text-2xl leading-none" aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-4">
+        <div class="grid gap-3 md:grid-cols-2">
+          <section class="rounded-xl border-2 border-emerald-300 dark:border-emerald-700 bg-emerald-50/60 dark:bg-emerald-900/10 p-3">
+            <div class="text-xs font-bold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">${isAr ? 'سيبقى' : 'Will be kept'}</div>
+            <div class="mt-1 font-bold text-slate-800 dark:text-white break-words">${Security.escapeHtml(_describeMergeAdCustomer(plan.keepAd, isAr))}</div>
+            <div class="mt-1 text-xs text-slate-600 dark:text-slate-300">${isAr ? 'المبلغ' : 'Amount'}: $${keepAmount}</div>
+            <div class="text-xs text-slate-600 dark:text-slate-300">${isAr ? `${keepReceipts} وصل مرتبط` : `${keepReceipts} linked receipt${keepReceipts === 1 ? '' : 's'}`}</div>
+            <div class="mt-2 inline-flex items-center gap-1 rounded-full bg-white/80 dark:bg-slate-900/50 px-2 py-1 text-xs font-bold text-slate-700 dark:text-slate-200">${isAr ? 'سيأخذ ربط Meta' : 'Gains the Meta link'}</div>
+          </section>
+          <section class="rounded-xl border-2 border-rose-200 dark:border-rose-800 bg-rose-50/60 dark:bg-rose-900/10 p-3">
+            <div class="text-xs font-bold uppercase tracking-wide text-rose-700 dark:text-rose-300">${isAr ? 'ستُزال' : 'Will be removed'}</div>
+            <div class="mt-1 font-bold text-slate-800 dark:text-white break-words">${Security.escapeHtml(String(plan.draftAd.metaAdName || (isAr ? 'مسودة Meta' : 'Meta draft')))}</div>
+            <div class="mt-1 font-mono text-[11px] text-slate-500 break-all">Meta #${Security.escapeHtml(plan.metaAdId)}</div>
+            <div class="mt-1 text-xs text-slate-600 dark:text-slate-300">${isAr ? 'بدون عميل أو مبلغ أو وصل' : 'No customer, amount or receipt'}</div>
+          </section>
+        </div>
+
+        <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3 text-sm text-slate-600 dark:text-slate-300 space-y-1">
+          <div class="font-bold text-slate-800 dark:text-white">${isAr ? 'ماذا سيحدث' : 'What will happen'}</div>
+          <div>• ${isAr ? 'يُفك ربط Meta عن النسخة الفارغة.' : 'The empty copy releases the Meta link.'}</div>
+          <div>• ${isAr ? 'يُربط الإعلان الباقي بنفس إعلان Meta ويأخذ الصورة والميزانية والمصروف.' : 'The surviving ad is linked to the same Meta ad and picks up its photo, budget and spend.'}</div>
+          <div>• ${isAr ? 'تُحذف النسخة الفارغة في النهاية.' : 'The empty copy is removed last.'}</div>
+          <div>• ${isAr ? 'لا يتغير أي مبلغ أو وصل أو صورة في الإعلان الباقي.' : 'No amount, receipt or photo on the surviving ad changes.'}</div>
+        </div>
+      </div>
+      <div class="sticky bottom-0 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-700 p-4 flex flex-col sm:flex-row gap-2">
+        <button type="button" id="ad-merge-confirm" onclick="runAdMerge('${Security.escapeHtml(String(plan.keepAd.id))}','${Security.escapeHtml(String(plan.draftAd.id))}')" class="flex-1 btn-shine bg-purple-600 text-white px-4 py-3 rounded-xl font-bold hover:bg-purple-700 min-h-11">
+          <i data-lucide="combine" class="w-4 h-4 inline mr-2"></i>${isAr ? 'دمج الآن' : 'Merge now'}
+        </button>
+        <button type="button" onclick="closeAdMergeDialog()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold hover:bg-slate-300 min-h-11">${isAr ? 'إلغاء' : 'Cancel'}</button>
+      </div>
+    </div>`;
+  dialog.addEventListener('click', event => { if (event.target === dialog) closeAdMergeDialog(); });
+  document.body.appendChild(dialog);
+  IconQueue.schedule(dialog);
+  dialog.focus();
+}
+
+function _liveMergeAd(adId) {
+  return (state.ads || []).find(item => item && String(item.id) === String(adId || '')) || null;
+}
+
+async function runAdMerge(keepAdId, draftAdId) {
+  const isAr = state.language === 'ar';
+  if (!isMergeToolsAdmin()) {
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'دمج الإعلانات متاح للمدير فقط.' : 'Only an administrator can merge ads.', 'error');
+    return;
+  }
+  if (_mergeToolsBusy) return;
+  const plan = getAdMergePlan(keepAdId, draftAdId);
+  if (plan.blocked) {
+    showNotification(isAr ? 'تعذّر الدمج' : 'Cannot merge', plan.blocked, 'warning');
+    return;
+  }
+
+  _mergeToolsBusy = 'ad';
+  const confirmButton = document.getElementById('ad-merge-confirm');
+  if (confirmButton) {
+    confirmButton.disabled = true;
+    confirmButton.textContent = isAr ? 'جارٍ الدمج…' : 'Merging…';
+  }
+
+  const metaAdId = plan.metaAdId;
+  const draftId = String(plan.draftAd.id);
+  const keepId = String(plan.keepAd.id);
+  let released = false;
+  try {
+    // 1. Release the link. Meta allows one Albayan ad per Meta ad and the check
+    //    ignores deleted rows, so the draft has to let go before the real ad can
+    //    take over.
+    const draftBefore = _liveMergeAd(draftId);
+    // Without a known version the server cannot detect that someone else edited
+    // the ad first, so refuse rather than overwrite blindly.
+    if (!Number.isFinite(Number(draftBefore?._lastModified))) {
+      throw new Error(isAr ? 'حدّث البيانات ثم أعد المحاولة.' : 'Refresh the data and try again.');
+    }
+    const unlinked = await apiUnlinkMetaAd(
+      draftId,
+      Number(draftBefore._lastModified),
+      Security.generateSecureId('merge_unlink')
+    );
+    applyValidatedServerEntityBatch([{ collection: 'ads', entity: unlinked.ad }], 'adMergeUnlink');
+    released = true;
+
+    // 2. Give the link to the ad that actually holds the money. This also pulls
+    //    the Meta photo, budget, spend and schedule onto it.
+    const keepBefore = _liveMergeAd(keepId);
+    if (!Number.isFinite(Number(keepBefore?._lastModified))) {
+      throw new Error(isAr ? 'حدّث البيانات ثم أعد المحاولة.' : 'Refresh the data and try again.');
+    }
+    const linked = await apiLinkMetaAd(
+      keepId,
+      metaAdId,
+      Number(keepBefore._lastModified),
+      Security.generateSecureId('merge_link')
+    );
+    applyValidatedServerEntityBatch([{ collection: 'ads', entity: linked.ad }], 'adMergeLink');
+    released = false;
+
+    // 3. Only now is the empty draft redundant. A draft carries no money, so
+    //    removing it returns nothing and unwinds nothing.
+    const removed = await deleteRecord(state.ads, draftId);
+    if (!removed) {
+      showNotification(
+        isAr ? 'تم الربط' : 'Linked',
+        isAr ? 'انتقل ربط Meta بنجاح، لكن تعذّر حذف النسخة الفارغة. احذفها يدوياً.' : 'The Meta link moved successfully, but the empty copy could not be removed. Delete it by hand.',
+        'warning'
+      );
+      return;
+    }
+    showNotification(
+      isAr ? 'تم الدمج' : 'Merged',
+      isAr ? 'أصبح الإعلان مرتبطاً بـ Meta وحُذفت النسخة المكررة.' : 'The ad is now linked to Meta and the duplicate copy was removed.',
+      'success'
+    );
+  } catch (error) {
+    // The draft gave up its link and the real ad never took it. Put it back so
+    // the pair is exactly as it was and the merge can simply be retried.
+    if (released) {
+      try {
+        const draftNow = _liveMergeAd(draftId);
+        const restored = await apiLinkMetaAd(
+          draftId,
+          metaAdId,
+          Number(draftNow?._lastModified),
+          Security.generateSecureId('merge_restore')
+        );
+        applyValidatedServerEntityBatch([{ collection: 'ads', entity: restored.ad }], 'adMergeRestore');
+      } catch (_) {
+        showNotification(
+          isAr ? 'يحتاج انتباهك' : 'Needs your attention',
+          isAr
+            ? `لم يكتمل الدمج وبقيت النسخة المستوردة بدون ربط. اربطها يدوياً بإعلان Meta رقم ${metaAdId}.`
+            : `The merge did not finish and the imported copy is left unlinked. Link it back to Meta ad ${metaAdId} by hand.`,
+          'error'
+        );
+      }
+    }
+    showNotification(
+      isAr ? 'تعذّر الدمج' : 'Merge failed',
+      error?.message || (isAr ? 'حدث خطأ أثناء الدمج. أعد المحاولة.' : 'Something went wrong during the merge. Try again.'),
+      'error'
+    );
+  } finally {
+    _mergeToolsBusy = '';
+    resetAdMergePairCache();
+    closeAdMergeDialog(false);
+    render();
+  }
 }
 // ==========================================
 // CUSTOMER SEARCH / DROPDOWN UTILITIES
@@ -36437,16 +37290,20 @@ function renderModal() {
     }
 
     case 'clothes-product':
-      modalContent = renderClothesProductModal();
-      break;
-
     case 'clothes-shipment':
-      modalContent = renderClothesShipmentModal();
+    case 'clothes-order': {
+      // Reachable with the lazy bundle missing only through odd restore
+      // paths — load it and show a small wait card instead of crashing.
+      if (typeof renderClothesProductModal !== 'function') {
+        ensureClothesSystemLoaded().then(() => { try { if (String(state.activeModal || '').indexOf('clothes-') === 0) renderModal(); } catch (_) {} });
+        modalContent = `<div class="p-8 text-center"><div class="w-8 h-8 mx-auto mb-3 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div><p class="text-sm text-slate-500">${state.language === 'ar' ? 'جاري التحميل…' : 'Loading…'}</p></div>`;
+        break;
+      }
+      modalContent = state.activeModal === 'clothes-product' ? renderClothesProductModal()
+        : state.activeModal === 'clothes-shipment' ? renderClothesShipmentModal()
+          : renderClothesOrderModal();
       break;
-
-    case 'clothes-order':
-      modalContent = renderClothesOrderModal();
-      break;
+    }
 
     case 'wallet-topup': {
       const isArW = state.language === 'ar';
@@ -36620,16 +37477,17 @@ function renderModal() {
     }, 100);
   } else if (state.activeModal === 'clothes-product') {
     setTimeout(() => {
+      if (typeof refreshClothesVariantRows !== 'function') return; // bundle still loading
       refreshClothesVariantRows();
       refreshClothesPhotoPreview();
     }, 50);
   } else if (state.activeModal === 'clothes-shipment') {
     setTimeout(() => {
-      refreshClothesShipLines();
+      if (typeof refreshClothesShipLines === 'function') refreshClothesShipLines();
     }, 50);
   } else if (state.activeModal === 'clothes-order') {
     setTimeout(() => {
-      refreshClothesOrderLines();
+      if (typeof refreshClothesOrderLines === 'function') refreshClothesOrderLines();
     }, 50);
   }
   
@@ -37058,16 +37916,19 @@ async function handleModalSubmit() {
   
   switch (state.activeModal) {
     case 'clothes-product': {
+      if (typeof saveClothesProductFromModal !== 'function') return; // bundle still loading
       const saved = await saveClothesProductFromModal();
       if (!saved) return; // keep modal open on validation errors
       break;
     }
     case 'clothes-shipment': {
+      if (typeof saveClothesShipmentFromModal !== 'function') return;
       const saved = await saveClothesShipmentFromModal();
       if (!saved) return; // keep modal open on validation errors
       break;
     }
     case 'clothes-order': {
+      if (typeof saveClothesOrderFromModal !== 'function') return;
       const saved = await saveClothesOrderFromModal();
       if (!saved) return; // keep modal open on validation errors
       break;
@@ -39039,2975 +39900,110 @@ async function deleteAd(id) {
 
 // Stop Ad - Enter spent amount and return remaining to receipts/customer
 // ==========================================
-// CLOTHES SYSTEM (نظام الملابس)
-// Smart Systems child #4 — warehouse stock, incoming shipments
-// from abroad, and customer orders (buy in USD, sell in LYD).
-// Admin-only for now (registered in PLATFORM_ADMIN_ONLY_VIEWS).
-// Collections: state.clothesProducts / clothesShipments / clothesOrders.
+// CLOTHES SYSTEM LAZY LOADER (main bundle)
 // ==========================================
+// The Clothes System ships as its own bundle (clothes.js, see
+// src/manifest.json "lazy") so the main bundle keeps startup headroom.
+// This loader stays in the main bundle: it fetches clothes.js once, renders
+// a bilingual loading/retry card meanwhile, and re-renders when ready.
 
-// Active tab: 'dashboard' | 'products' | 'shipments' | 'orders'
-let _clothesActiveTab = 'dashboard';
+let _clothesBundlePromise = null;
+let _clothesBundleState = 'unloaded'; // 'loading' | 'ready' | 'failed'
 
-const CLOTHES_TABS = [
-  { id: 'dashboard', icon: 'layout-dashboard', label: 'Dashboard', labelAr: 'نظرة عامة' },
-  { id: 'products', icon: 'shirt', label: 'Products', labelAr: 'البضاعة' },
-  { id: 'shipments', icon: 'plane', label: 'Shipments', labelAr: 'الشحنات القادمة' },
-  { id: 'orders', icon: 'shopping-bag', label: 'Orders', labelAr: 'طلبات الزبائن' }
-];
-
-// A variant's stock is "low" at or below this count (and "out" at 0)
-const CLOTHES_LOW_STOCK_THRESHOLD = 2;
-const CLOTHES_PRODUCTS_PAGE_SIZE = 30;
-
-// Keep a failed/response-lost mutation's key stable. If the server committed
-// but the phone lost the response, retrying with a new key can report a false
-// conflict (or duplicate a create); replaying the same key returns the original
-// atomic result instead.
-const _clothesPendingOrderMutations = new Map();
-
-function getClothesOrderMutationAttempt(action, orderId, expectedLastModified, operationData) {
-  const act = String(action || '');
-  const id = String(orderId || '');
-  const slot = act === 'create' ? 'create' : `${act}:${id}`;
-  const fingerprint = JSON.stringify({ act, id, expectedLastModified: expectedLastModified ?? null, operationData });
-  const prior = _clothesPendingOrderMutations.get(slot);
-  if (prior?.fingerprint === fingerprint) return prior;
-  const attempt = {
-    slot,
-    fingerprint,
-    orderId: id || Security.generateSecureId('clothes_order'),
-    idempotencyKey: ensureOperationIdempotencyKey('', `clothes-${act || 'order'}`)
-  };
-  _clothesPendingOrderMutations.set(slot, attempt);
-  return attempt;
-}
-
-function completeClothesOrderMutationAttempt(attempt) {
-  if (attempt && _clothesPendingOrderMutations.get(attempt.slot) === attempt) {
-    _clothesPendingOrderMutations.delete(attempt.slot);
-  }
-}
-
-function getClothesOrderExpectedLastModified(order) {
-  const value = Number(order?._lastModified);
-  if (!Number.isSafeInteger(value) || value < 0) throw new Error('This order is missing its server version. Refresh and try again.');
-  return value;
-}
-
-function applyClothesOrderMutationResponse(response) {
-  const orderEntity = response?.order;
-  const productEntities = Array.isArray(response?.updatedProducts) ? response.updatedProducts : [];
-  if (!orderEntity?.data) throw new Error('Invalid clothes order response');
-  const upsert = (collectionName, entity) => {
-    const saved = Security.sanitizeObject(entity?.data || {});
-    if (!saved.id || !Security.isValidRecordId(saved.id)) throw new Error('Invalid clothes order response');
-    if (!Array.isArray(state[collectionName])) state[collectionName] = [];
-    const array = state[collectionName];
-    const index = array.findIndex(row => row && String(row.id) === String(saved.id));
-    if (index === -1) array.unshift(saved);
-    else array[index] = saved;
-    clearCollectionCorruption(collectionName);
-    markCollectionDirty(collectionName);
-    return saved;
-  };
-  for (const product of productEntities) upsert('clothesProducts', product);
-  const savedOrder = upsert('clothesOrders', orderEntity);
-  saveState();
-  RenderQueue.schedule('clothesOrderMutation');
-  return savedOrder;
-}
-
-function showClothesOrderMutationError(error) {
-  const isAr = clothesIsAr();
-  const detail = Security.sanitizeInput(String(error?.message || ''), { maxLength: 240 });
-  showNotification(
-    isAr ? 'تعذّر حفظ الطلب' : 'Order Not Saved',
-    detail || (isAr ? 'تحقق من الاتصال والمخزون ثم حاول مرة أخرى.' : 'Check your connection and stock, then try again.'),
-    'error'
-  );
-}
-
-function setClothesTab(tabId) {
-  if (!CLOTHES_TABS.some(tab => tab.id === tabId)) return;
-  _clothesActiveTab = tabId;
-  // Each tab is its own address: /clothes-system?tab=orders
-  try { updateUrlParams({ tab: tabId }, true); } catch (_) {}
-  render();
-}
-
-// Restore the active tab from ?tab= when the Clothes System is opened by URL.
-function restoreClothesTabFromUrl() {
+function _clothesBundleUrl() {
+  // Derive from the script tag that provably loaded: correct under any base
+  // path, Capacitor (capacitor://localhost), and any static host. Version
+  // with the main bundle's ?v= (same deploy = same version) when present.
   try {
-    const tab = getUrlParams().tab;
-    if (tab && CLOTHES_TABS.some(t => t.id === tab)) _clothesActiveTab = tab;
+    const tags = document.querySelectorAll('script[src]');
+    for (let i = 0; i < tags.length; i++) {
+      const src = String(tags[i].src || '');
+      if (/script(\.min)?\.js(\?|$)/.test(src)) {
+        const parts = src.split('?');
+        const base = parts[0].replace(/script(\.min)?\.js$/, 'clothes.js');
+        return parts[1] ? base + '?' + parts[1] : base;
+      }
+    }
   } catch (_) {}
+  return 'clothes.js';
 }
 
-// ------------------------------------------
-// Shared helpers
-// ------------------------------------------
-
-function clothesIsAr() {
-  return state.language === 'ar';
+function clothesBundleReady() {
+  return typeof renderClothesSystemView === 'function';
 }
 
-function clothesFmtUSD(n) {
-  const v = Math.round((Number(n) || 0) * 100) / 100;
-  return `$${v.toFixed(2)}`;
-}
-
-function clothesFmtLYD(n) {
-  const v = Math.round((Number(n) || 0) * 100) / 100;
-  return `${v.toFixed(2)} LYD`;
-}
-
-function clothesParseMoney(raw) {
-  // Inputs already run through sanitizeMoneyInput (ASCII digits, one dot),
-  // this is the final defensive parse at save time.
-  const v = parseFloat(String(raw == null ? '' : raw).trim());
-  if (!Number.isFinite(v) || v < 0) return 0;
-  return Math.round(v * 100) / 100;
-}
-
-function getClothesProductTotalQty(product) {
-  const variants = Array.isArray(product?.variants) ? product.variants : [];
-  return variants.reduce((sum, v) => sum + (Math.max(0, Math.floor(Number(v?.qty) || 0))), 0);
-}
-
-// Who may use the Clothes System: admins always; anyone else needs an active
-// clothes_system subscription (the server additionally enforces per-record
-// ownership through viewOwn/editOwn/deleteOwn permissions).
-function clothesCanUse() {
-  if (isCurrentUserAdmin()) return true;
-  return hasSubscription('clothes_system');
-}
-
-// Multi-tenant isolation: subscribers see ONLY their own records.
-// Admin (platform owner) sees everything.
-function _clothesScopeToOwner(records) {
-  const visible = getVisibleRecords(records);
-  if (isCurrentUserAdmin()) return visible;
-  const uid = state.currentUser?.id;
-  return visible.filter(r => r && r.createdBy === uid);
-}
-
-function getVisibleClothesProducts() {
-  return _clothesScopeToOwner(state.clothesProducts);
-}
-
-// Personal settings: ONE record per user, strictly own for everyone
-// (including admin — the platform owner's rate must not pick up a client's).
-function getClothesSettingsRecord() {
-  const uid = state.currentUser?.id;
-  if (!uid) return null;
-  return getVisibleRecords(state.clothesSettings).find(r => r && r.createdBy === uid) || null;
-}
-
-// The USD→LYD rate used for THIS user's profit math. Falls back to the app's
-// global rate for admins; subscribers must set their own (0 = unset → the UI
-// hides profit instead of showing wrong numbers).
-function getClothesExchangeRate() {
-  const own = Number(getClothesSettingsRecord()?.rateLYDperUSD) || 0;
-  if (own > 0) return own;
-  return isCurrentUserAdmin() ? (Number(state.defaultExchangeRate) || 0) : 0;
-}
-
-async function saveClothesExchangeRate() {
-  if (!clothesCanUse()) return;
-  const isAr = clothesIsAr();
-  const value = clothesParseMoney(document.getElementById('clothes-rate-input')?.value);
-  if (!(value > 0)) {
-    showNotification(isAr ? 'تنبيه' : 'Validation', isAr ? 'أدخل سعر صرف أكبر من صفر (كم دينار يساوي الدولار).' : 'Enter a rate greater than zero (how many LYD one USD is worth).', 'error');
-    return;
+function ensureClothesSystemLoaded() {
+  if (clothesBundleReady()) {
+    _clothesBundleState = 'ready';
+    return Promise.resolve();
   }
-  const existing = getClothesSettingsRecord();
-  let saved = false;
-  if (existing) {
-    saved = await updateRecord(state.clothesSettings, existing.id, { rateLYDperUSD: value });
-  } else {
-    saved = await addRecord(state.clothesSettings, { rateLYDperUSD: value, createdAt: new Date().toISOString() });
-  }
-  if (!saved) return;
-  showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? `سعر الصرف الآن: ${value}` : `Exchange rate is now: ${value}`, 'success');
+  if (_clothesBundlePromise) return _clothesBundlePromise;
+  _clothesBundleState = 'loading';
+  _clothesBundlePromise = new Promise((resolve) => {
+    const tag = document.createElement('script');
+    tag.src = _clothesBundleUrl();
+    tag.onload = () => {
+      _clothesBundleState = clothesBundleReady() ? 'ready' : 'failed';
+      if (_clothesBundleState === 'ready' && state.currentView === 'clothes-system') {
+        // A deep-linked ?tab= was skipped before the bundle existed.
+        try { if (typeof restoreClothesTabFromUrl === 'function') restoreClothesTabFromUrl(); } catch (_) {}
+        try { render(); } catch (_) {}
+      }
+      resolve();
+    };
+    tag.onerror = () => {
+      // A failed classic script created no bindings: retry is safe.
+      try { tag.remove(); } catch (_) {}
+      _clothesBundleState = 'failed';
+      _clothesBundlePromise = null;
+      try { if (state.currentView === 'clothes-system') render(); } catch (_) {}
+      resolve();
+    };
+    document.head.appendChild(tag);
+  });
+  return _clothesBundlePromise;
+}
+
+function retryClothesSystemLoad() {
+  _clothesBundleState = 'unloaded';
+  _clothesBundlePromise = null;
+  ensureClothesSystemLoaded();
   render();
 }
 
-// ------------------------------------------
-// Tab bar + view shell
-// ------------------------------------------
-
-function renderClothesTabBar() {
-  const isAr = clothesIsAr();
-  return `
-    <div class="clothes-tab-bar grid grid-cols-2 sm:flex sm:flex-wrap gap-2 mb-8">
-      ${CLOTHES_TABS.map(tab => {
-        const active = _clothesActiveTab === tab.id;
-        return `
-          <button
-            type="button"
-            onclick="setClothesTab('${tab.id}')"
-            class="flex min-w-0 items-center justify-center gap-2 px-3 sm:px-4 py-2.5 rounded-xl font-medium transition-all ${active
-              ? 'bg-gradient-to-r from-rose-500 to-pink-500 text-white shadow-lg'
-              : 'glass-panel text-slate-600 dark:text-slate-300 hover:text-rose-600 dark:hover:text-rose-400'}"
-          >
-            <i data-lucide="${tab.icon}" class="w-4 h-4"></i>
-            <span>${isAr ? tab.labelAr : tab.label}</span>
-          </button>
-        `;
-      }).join('')}
-    </div>
-  `;
-}
-
-// Shared placeholder for tabs not built yet (removed stage by stage)
-function renderClothesComingSoonPanel(icon, title, titleAr, desc, descAr) {
-  const isAr = clothesIsAr();
-  return `
-    <div class="glass-panel rounded-2xl p-12 text-center">
-      <div class="w-20 h-20 mx-auto rounded-3xl bg-gradient-to-br from-rose-500 to-pink-500 flex items-center justify-center mb-6 shadow-2xl">
-        <i data-lucide="${icon}" class="w-10 h-10 text-white"></i>
-      </div>
-      <h3 class="text-2xl font-bold text-slate-800 dark:text-white mb-2">${isAr ? titleAr : title}</h3>
-      <p class="text-slate-500 dark:text-slate-400 max-w-xl mx-auto mb-6">${isAr ? descAr : desc}</p>
-      <span class="inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-bold uppercase bg-gradient-to-r from-amber-400 to-orange-500 text-white shadow-lg">
-        <i data-lucide="hammer" class="w-3.5 h-3.5"></i>
-        ${isAr ? 'يتم البناء الآن — المرحلة القادمة' : 'Under construction — next stage'}
-      </span>
-    </div>
-  `;
-}
-
-function renderClothesDashboardTab() {
-  const isAr = clothesIsAr();
-  const products = getVisibleClothesProducts();
-  const shipments = getVisibleClothesShipments();
-  const orders = getVisibleClothesOrders();
-
-  // Warehouse: pieces + cost value + low-stock list
-  let totalPieces = 0;
-  let stockValueUSD = 0;
-  const lowStock = [];
-  for (const p of products) {
-    const variants = Array.isArray(p.variants) ? p.variants : [];
-    for (const v of variants) {
-      const qty = Math.max(0, Math.floor(Number(v?.qty) || 0));
-      totalPieces += qty;
-      stockValueUSD += qty * (Number(p.costUSD) || 0);
-      if (qty <= CLOTHES_LOW_STOCK_THRESHOLD) {
-        lowStock.push({ name: p.name, color: v?.color, size: v?.size, qty });
-      }
-    }
-  }
-  stockValueUSD = Math.round(stockValueUSD * 100) / 100;
-
-  // Shipments: money still on the way vs already brought in
-  let inTransitUSD = 0, receivedUSD = 0;
-  for (const s of shipments) {
-    const t = getClothesShipmentTotals(s);
-    if (s.status === 'Received') receivedUSD += t.totalUSD;
-    else inTransitUSD += t.totalUSD;
-  }
-  inTransitUSD = Math.round(inTransitUSD * 100) / 100;
-  receivedUSD = Math.round(receivedUSD * 100) / 100;
-
-  // Orders: deliveries in motion + the money picture
-  let outCount = 0, outValueLYD = 0, collectedLYD = 0, owedLYD = 0;
-  for (const o of orders) {
-    const t = getClothesOrderTotals(o);
-    if (o.status === 'On the way') { outCount++; outValueLYD += t.totalLYD; }
-    if (o.status !== 'Canceled' && o.status !== 'Returned') {
-      collectedLYD += t.paidLYD;
-      owedLYD += t.remainingLYD;
-    }
-  }
-  outValueLYD = Math.round(outValueLYD * 100) / 100;
-  collectedLYD = Math.round(collectedLYD * 100) / 100;
-  owedLYD = Math.round(owedLYD * 100) / 100;
-
-  // Profit (needs the exchange rate; hidden gracefully when unset)
-  const rate = getClothesExchangeRate();
-  let profitAllLYD = 0, profitMonthLYD = 0, deliveredThisMonth = 0;
-  const now = new Date();
-  const monthKey = `${now.getFullYear()}-${now.getMonth()}`;
-  if (rate > 0) {
-    for (const o of orders) {
-      if (o.status !== 'Delivered') continue;
-      const p = getClothesOrderProfitLYD(o);
-      if (p === null) continue;
-      profitAllLYD += p;
-      const d = o.deliveredAt ? new Date(o.deliveredAt) : null;
-      if (d && `${d.getFullYear()}-${d.getMonth()}` === monthKey) {
-        profitMonthLYD += p;
-        deliveredThisMonth++;
-      }
-    }
-    profitAllLYD = Math.round(profitAllLYD * 100) / 100;
-    profitMonthLYD = Math.round(profitMonthLYD * 100) / 100;
-  }
-
-  const bigCard = (icon, label, value, sub, gradient) => `
-    <div class="glass-panel rounded-2xl p-5">
-      <div class="flex items-center gap-3">
-        <div class="w-12 h-12 rounded-xl bg-gradient-to-br ${gradient} flex items-center justify-center shadow-lg shrink-0">
-          <i data-lucide="${icon}" class="w-6 h-6 text-white"></i>
-        </div>
-        <div class="min-w-0">
-          <div class="text-xs text-slate-500 dark:text-slate-400">${label}</div>
-          <div class="text-xl font-bold text-slate-800 dark:text-white truncate">${value}</div>
-          ${sub ? `<div class="text-xs text-slate-400 dark:text-slate-500 truncate">${sub}</div>` : ''}
-        </div>
-      </div>
-    </div>
-  `;
-
-  const lowStockList = lowStock.slice(0, 10).map(item => {
-    const variant = [item.color, item.size].map(x => String(x || '').trim()).filter(Boolean).join(' · ');
-    const chip = item.qty === 0
-      ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
-      : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300';
-    return `
-      <div class="flex items-center justify-between gap-3 py-2 border-b border-slate-100 dark:border-slate-800 last:border-0">
-        <div class="min-w-0">
-          <span class="font-medium text-slate-700 dark:text-slate-200">${Security.escapeHtml(String(item.name || ''))}</span>
-          ${variant ? `<span class="text-slate-400 dark:text-slate-500 text-sm"> — ${Security.escapeHtml(variant)}</span>` : ''}
-        </div>
-        <span class="px-2.5 py-0.5 rounded-full text-xs font-bold whitespace-nowrap ${chip}">
-          ${item.qty === 0 ? (isAr ? 'نفد' : 'Out') : item.qty}
-        </span>
-      </div>
-    `;
-  }).join('');
-
-  // First-time guide: shown until the system has any real data
-  const isEmpty = products.length === 0 && shipments.length === 0 && orders.length === 0;
-  const guideStep = (n, icon, title, desc, onclick, btnLabel) => `
-    <div class="flex-1 glass-panel rounded-2xl p-5 text-center">
-      <div class="w-10 h-10 mx-auto rounded-full bg-gradient-to-br from-rose-500 to-pink-500 text-white font-bold flex items-center justify-center mb-3 shadow-lg">${n}</div>
-      <i data-lucide="${icon}" class="w-6 h-6 mx-auto text-rose-400 mb-2"></i>
-      <h4 class="font-bold text-slate-800 dark:text-white mb-1">${title}</h4>
-      <p class="text-xs text-slate-500 dark:text-slate-400 mb-3">${desc}</p>
-      <button onclick="${onclick}" class="text-sm font-bold text-rose-600 hover:text-rose-700">${btnLabel} ←</button>
-    </div>
-  `;
-  const firstRunGuide = !isEmpty ? '' : `
-    <div class="glass-panel rounded-2xl p-6 mb-6">
-      <h3 class="text-xl font-bold text-slate-800 dark:text-white mb-1 text-center">${isAr ? '👋 أهلاً بك! ثلاث خطوات وتبدأ' : '👋 Welcome! Three steps to get going'}</h3>
-      <p class="text-sm text-slate-500 dark:text-slate-400 mb-5 text-center">${isAr ? 'هكذا يعمل النظام — من الشراء إلى البيع' : 'This is how the system works — from buying to selling'}</p>
-      <div class="flex flex-col md:flex-row gap-4" dir="${isAr ? 'rtl' : 'ltr'}">
-        ${guideStep(1, 'shirt', isAr ? 'أضف بضاعتك' : 'Add your products', isAr ? 'كل قطعة: الصورة والسعر والألوان والمقاسات.' : 'Each item: photo, prices, colors and sizes.', "setClothesTab('products'); showClothesProductModal();", isAr ? 'أضف منتجاً' : 'Add a product')}
-        ${guideStep(2, 'plane', isAr ? 'سجّل شحناتك' : 'Record your shipments', isAr ? 'عند الاستلام تُضاف الكميات للمخزون تلقائياً.' : 'Receiving adds the quantities to stock automatically.', "setClothesTab('shipments'); showClothesShipmentModal();", isAr ? 'أضف شحنة' : 'Add a shipment')}
-        ${guideStep(3, 'shopping-bag', isAr ? 'بِع لزبائنك' : 'Sell to your customers', isAr ? 'الطلب يخصم من المخزون ويتابع التوصيل والدفع.' : 'An order deducts stock and tracks delivery and payment.', "setClothesTab('orders'); showClothesOrderModal();", isAr ? 'أنشئ طلباً' : 'Create an order')}
-      </div>
-    </div>
-  `;
-
-  return `
-    <div>
-      ${firstRunGuide}
-      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
-        ${bigCard('warehouse', isAr ? 'قيمة المخزون (تكلفة)' : 'Stock value (cost)', clothesFmtUSD(stockValueUSD), isAr ? `${totalPieces} قطعة في المستودع` : `${totalPieces} pieces in the warehouse`, 'from-rose-500 to-pink-500')}
-        ${bigCard('plane', isAr ? 'بضاعة في الطريق' : 'Goods on the way', clothesFmtUSD(inTransitUSD), isAr ? 'شحنات لم تُستلم بعد' : 'Shipments not yet received', 'from-blue-500 to-cyan-500')}
-        ${bigCard('banknote', isAr ? 'إجمالي ما استوردته' : 'Total imported', clothesFmtUSD(receivedUSD), isAr ? 'الشحنات المستلمة (بضاعة + شحن)' : 'Received shipments (goods + shipping)', 'from-violet-500 to-fuchsia-500')}
-        ${bigCard('truck', isAr ? 'طلبات في الطريق للزبائن' : 'Orders out for delivery', String(outCount), clothesFmtLYD(outValueLYD), 'from-amber-400 to-orange-500')}
-        ${bigCard('circle-check', isAr ? 'المال المحصَّل' : 'Money collected', clothesFmtLYD(collectedLYD), isAr ? 'من الطلبات الفعّالة' : 'From active orders', 'from-emerald-500 to-green-500')}
-        ${bigCard('alert-triangle', isAr ? 'متبقٍ عند الزبائن' : 'Still owed by customers', clothesFmtLYD(owedLYD), isAr ? 'مبالغ غير محصّلة' : 'Uncollected amounts', 'from-red-500 to-rose-500')}
-        ${rate > 0
-          ? bigCard('trending-up', isAr ? 'الربح التقديري (المُسلّم)' : 'Est. profit (delivered)', clothesFmtLYD(profitAllLYD), isAr ? `سعر الصرف: ${rate}` : `Exchange rate: ${rate}`, 'from-emerald-600 to-teal-500')
-          : bigCard('trending-up', isAr ? 'الربح التقديري' : 'Est. profit', '—', isAr ? 'حدّد سعر صرفك في الأسفل أولاً' : 'Set your exchange rate below first', 'from-slate-400 to-slate-500')}
-        ${rate > 0
-          ? bigCard('calendar', isAr ? 'هذا الشهر' : 'This month', clothesFmtLYD(profitMonthLYD), isAr ? `${deliveredThisMonth} طلب مُسلّم` : `${deliveredThisMonth} delivered orders`, 'from-indigo-500 to-purple-500')
-          : ''}
-      </div>
-
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div class="glass-panel rounded-2xl p-5">
-          <h3 class="font-bold text-slate-800 dark:text-white mb-3 flex items-center gap-2">
-            <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-500"></i>
-            ${isAr ? 'مقاسات شارفت على النفاد' : 'Running low'}
-          </h3>
-          ${lowStock.length
-            ? lowStockList + (lowStock.length > 10 ? `<p class="mt-2 text-xs text-slate-400">${isAr ? `+${lowStock.length - 10} أخرى` : `+${lowStock.length - 10} more`}</p>` : '')
-            : `<p class="text-sm text-slate-400 dark:text-slate-500">${isAr ? 'كل المقاسات متوفرة بكمية كافية 🎉' : 'Everything is well stocked 🎉'}</p>`}
-        </div>
-
-        <div class="glass-panel rounded-2xl p-5">
-          <h3 class="font-bold text-slate-800 dark:text-white mb-3 flex items-center gap-2">
-            <i data-lucide="zap" class="w-4 h-4 text-rose-500"></i>
-            ${isAr ? 'إجراءات سريعة' : 'Quick actions'}
-          </h3>
-          <div class="space-y-2">
-            <button onclick="setClothesTab('products'); showClothesProductModal();" class="w-full flex items-center gap-2 px-4 py-2.5 rounded-xl glass-input hover:border-rose-400 font-medium text-slate-700 dark:text-slate-200">
-              <i data-lucide="shirt" class="w-4 h-4 text-rose-500"></i>${isAr ? 'إضافة منتج' : 'Add a product'}
-            </button>
-            <button onclick="setClothesTab('shipments'); showClothesShipmentModal();" class="w-full flex items-center gap-2 px-4 py-2.5 rounded-xl glass-input hover:border-rose-400 font-medium text-slate-700 dark:text-slate-200">
-              <i data-lucide="plane" class="w-4 h-4 text-blue-500"></i>${isAr ? 'إضافة شحنة' : 'Add a shipment'}
-            </button>
-            <button onclick="setClothesTab('orders'); showClothesOrderModal();" class="w-full flex items-center gap-2 px-4 py-2.5 rounded-xl glass-input hover:border-rose-400 font-medium text-slate-700 dark:text-slate-200">
-              <i data-lucide="shopping-bag" class="w-4 h-4 text-emerald-500"></i>${isAr ? 'طلب جديد لزبون' : 'New customer order'}
-            </button>
-          </div>
-
-          <h3 class="font-bold text-slate-800 dark:text-white mt-5 mb-2 flex items-center gap-2">
-            <i data-lucide="banknote" class="w-4 h-4 text-emerald-500"></i>
-            ${isAr ? 'سعر الصرف الخاص بك' : 'Your exchange rate'}
-          </h3>
-          <p class="text-xs text-slate-500 dark:text-slate-400 mb-2">
-            ${isAr ? 'كم ديناراً يساوي الدولار الواحد — يُستخدم لحساب أرباحك أنت فقط.' : 'How many LYD one USD is worth — used only for YOUR profit numbers.'}
-          </p>
-          <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:0.5rem;align-items:center;">
-            <input type="text" inputmode="decimal" id="clothes-rate-input" value="${rate > 0 ? rate : ''}" oninput="sanitizeMoneyInput(this)" placeholder="${isAr ? 'مثال: 5.2' : 'e.g. 5.2'}" style="width:100%;min-width:0;" class="glass-input px-3 py-2 rounded-xl text-sm" />
-            <button onclick="saveClothesExchangeRate()" class="btn-shine bg-gradient-to-r from-emerald-500 to-teal-500 text-white px-4 py-2 rounded-xl text-sm font-bold shadow">
-              ${isAr ? 'حفظ' : 'Save'}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-// ------------------------------------------
-// CSV EXPORTS (Excel-friendly: UTF-8 BOM + en-CA dates, like exportAuditLogs)
-// ------------------------------------------
-
-function _clothesCsvCell(v) {
-  // Delegate to the shared escaper so clothes exports also get the
-  // formula-injection guard (a product name / customer note starting with
-  // = + - @ used to execute as a spreadsheet formula on open).
-  return csvCell(v);
-}
-
-function _clothesDownloadCsv(rows, filenameBase) {
-  const csv = rows.map(r => r.map(_clothesCsvCell).join(',')).join('\n');
-  // downloadFile returns false (with its own warning) inside FB/IG in-app
-  // browsers where blob downloads silently fail — no false success toast.
-  const downloaded = downloadFile('﻿' + csv, `${filenameBase}-${getTodayDateString()}.csv`, 'text/csv;charset=utf-8');
-  if (downloaded === false) return;
-  showNotification(clothesIsAr() ? 'تم التصدير' : 'Exported', clothesIsAr() ? 'تم تنزيل ملف CSV.' : 'CSV file downloaded.', 'success');
-}
-
-function exportClothesProductsCSV() {
-  const isAr = clothesIsAr();
-  const rows = [[
-    isAr ? 'المنتج' : 'Product', isAr ? 'الفئة' : 'Category', isAr ? 'اللون' : 'Color', isAr ? 'المقاس' : 'Size',
-    isAr ? 'الكمية' : 'Qty', isAr ? 'التكلفة $' : 'Cost USD', isAr ? 'سعر البيع د.ل' : 'Price LYD'
-  ]];
-  for (const p of getFilteredClothesProducts()) {
-    const variants = Array.isArray(p.variants) && p.variants.length ? p.variants : [{ color: '', size: '', qty: 0 }];
-    for (const v of variants) {
-      rows.push([p.name || '', p.category || '', v.color || '', v.size || '', Math.max(0, Math.floor(Number(v.qty) || 0)), Number(p.costUSD) || 0, Number(p.priceLYD) || 0]);
-    }
-  }
-  _clothesDownloadCsv(rows, 'clothes-products');
-}
-
-function exportClothesShipmentsCSV() {
-  const isAr = clothesIsAr();
-  const rows = [[
-    isAr ? 'المرجع' : 'Reference', isAr ? 'المورد' : 'Supplier', isAr ? 'الحالة' : 'Status',
-    isAr ? 'تاريخ الطلب' : 'Ordered', isAr ? 'تاريخ الاستلام' : 'Received',
-    isAr ? 'القطع' : 'Pieces', isAr ? 'البضاعة $' : 'Goods USD', isAr ? 'الشحن $' : 'Shipping USD', isAr ? 'الإجمالي $' : 'Total USD',
-    isAr ? 'ملاحظة' : 'Note'
-  ]];
-  for (const s of getFilteredClothesShipments()) {
-    const t = getClothesShipmentTotals(s);
-    const meta = clothesShipmentStatusMeta(s.status);
-    rows.push([
-      s.ref || '', s.supplier || '', isAr ? meta.labelAr : meta.label,
-      s.orderedAt || '', s.receivedAt ? String(s.receivedAt).split('T')[0] : '',
-      t.pieces, t.goodsUSD, t.shippingUSD, t.totalUSD, s.note || ''
-    ]);
-  }
-  _clothesDownloadCsv(rows, 'clothes-shipments');
-}
-
-function exportClothesOrdersCSV() {
-  const isAr = clothesIsAr();
-  const rows = [[
-    isAr ? 'الزبون' : 'Customer', isAr ? 'الهاتف' : 'Phone', isAr ? 'الحالة' : 'Status', isAr ? 'الدفع' : 'Payment',
-    isAr ? 'القطع' : 'Pieces', isAr ? 'البضاعة د.ل' : 'Goods LYD', isAr ? 'التوصيل د.ل' : 'Delivery LYD',
-    isAr ? 'الإجمالي د.ل' : 'Total LYD', isAr ? 'المدفوع د.ل' : 'Paid LYD', isAr ? 'المتبقي د.ل' : 'Remaining LYD',
-    isAr ? 'طريقة الدفع' : 'Method', isAr ? 'تاريخ الإنشاء' : 'Created', isAr ? 'تاريخ التسليم' : 'Delivered',
-    isAr ? 'ملاحظة' : 'Note'
-  ]];
-  for (const o of getFilteredClothesOrders()) {
-    const t = getClothesOrderTotals(o);
-    const meta = clothesOrderStatusMeta(o.status);
-    const payMeta = clothesPaymentStatusMeta(o.paymentStatus);
-    rows.push([
-      o.customerName || '', o.customerPhone || '', isAr ? meta.labelAr : meta.label, isAr ? payMeta.labelAr : payMeta.label,
-      t.pieces, t.goodsLYD, t.feeLYD, t.totalLYD, t.paidLYD, t.remainingLYD,
-      o.paymentMethod || '', o.createdAt ? String(o.createdAt).split('T')[0] : '', o.deliveredAt ? String(o.deliveredAt).split('T')[0] : '',
-      o.note || ''
-    ]);
-  }
-  _clothesDownloadCsv(rows, 'clothes-orders');
-}
-
-// (Shipments tab implemented in the SHIPMENTS section below)
-
-// (Orders tab implemented in the ORDERS section below)
-
-function renderClothesSystemView() {
-  const isAr = clothesIsAr();
-  const isAdmin = isCurrentUserAdmin();
-
-  // Subscription gate for non-admins (view access alone is not enough)
-  if (!isAdmin && !hasSubscription('clothes_system')) {
-    return `
-      <div class="max-w-2xl mx-auto">
-        <div class="glass-panel rounded-2xl p-12 text-center">
-          <div class="w-20 h-20 mx-auto rounded-3xl bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center mb-6 shadow-2xl">
-            <i data-lucide="lock" class="w-10 h-10 text-white"></i>
-          </div>
-          <h3 class="text-2xl font-bold text-slate-800 dark:text-white mb-2">${isAr ? 'الاشتراك مطلوب' : 'Subscription required'}</h3>
-          <p class="text-slate-500 dark:text-slate-400 mb-6">${isAr ? 'نظام الملابس خدمة باشتراك. اشترك لتبدأ إدارة مخزونك وطلباتك.' : 'The Clothes System is a subscription service. Subscribe to start managing your stock and orders.'}</p>
-          <button onclick="showSubscriptionModal('clothes_system', 'clothes_system')" class="btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-8 py-3 rounded-xl font-bold shadow-lg">
-            ${isAr ? 'اشترك الآن' : 'Subscribe now'}
-          </button>
-        </div>
-      </div>
-    `;
-  }
-
-  let tabContent;
-  switch (_clothesActiveTab) {
-    case 'products': tabContent = renderClothesProductsTab(); break;
-    case 'shipments': tabContent = renderClothesShipmentsTab(); break;
-    case 'orders': tabContent = renderClothesOrdersTab(); break;
-    default: tabContent = renderClothesDashboardTab();
-  }
-
-  // Back target: admins return to the Smart Systems hub; employees with other
-  // permissions return to their first allowed manager page; pure subscribers
-  // (this is their whole world) get no back button.
-  const backView = isAdmin ? 'smart-systems' : getAlbayanManagerLandingViewForUser(state.currentUser);
-  const showBack = isAdmin || (backView && backView !== 'clothes-system' && backView !== 'no-access');
-  const backLabel = isAdmin ? (isAr ? 'العودة للأنظمة الذكية' : 'Back to Smart Systems') : (isAr ? 'العودة' : 'Back');
-
-  return `
-    <div class="max-w-6xl mx-auto">
-      ${showBack ? `
-      <!-- Back Button -->
-      <button onclick="navigateTo('${backView}')" class="mb-6 flex items-center gap-2 text-rose-600 hover:text-rose-700 font-medium">
-        <i data-lucide="${isAr ? 'arrow-right' : 'arrow-left'}" class="w-5 h-5"></i>
-        <span>${backLabel}</span>
-      </button>` : ''}
-
-      <!-- Header -->
-      <div class="mb-8">
-        <div class="flex items-start sm:items-center gap-3 sm:gap-4 mb-4">
-          <div class="w-12 h-12 sm:w-16 sm:h-16 flex-shrink-0 rounded-2xl bg-gradient-to-br from-rose-500 to-pink-500 flex items-center justify-center shadow-2xl">
-            <i data-lucide="shirt" class="w-8 h-8 text-white"></i>
-          </div>
-          <div class="min-w-0">
-            <h1 class="text-2xl sm:text-3xl font-bold text-slate-800 dark:text-white break-words">
-              ${isAr ? 'نظام الملابس' : 'Clothes System'}
-            </h1>
-            <p class="text-slate-500 dark:text-slate-400">
-              ${isAr ? 'المستودع والشحنات وطلبات الزبائن' : 'Warehouse, shipments & customer orders'}
-            </p>
-          </div>
-        </div>
-      </div>
-
-      ${renderClothesTabBar()}
-
-      ${tabContent}
-    </div>
-  `;
-}
-
-// ------------------------------------------
-// PRODUCTS TAB — list, search, stock adjust
-// ------------------------------------------
-
-let _clothesProductSearch = '';
-let _clothesProductsShowLimit = CLOTHES_PRODUCTS_PAGE_SIZE;
-let _clothesProductsFilterFingerprint = '';
-
-function loadMoreClothesProducts() {
-  _clothesProductsShowLimit += CLOTHES_PRODUCTS_PAGE_SIZE;
-  updateClothesProductsFiltered();
-}
-
-function onClothesProductSearchInput(el) {
-  const value = Security.sanitizeInput(String(el?.value || ''), { maxLength: 200 });
-  _clothesProductSearch = value;
-  if (window._clothesProductSearchTimer) clearTimeout(window._clothesProductSearchTimer);
-  window._clothesProductSearchTimer = setTimeout(() => updateClothesProductsFiltered(), 80);
-}
-
-function getFilteredClothesProducts() {
-  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
-  const q = foldSearchText(_clothesProductSearch.trim());
-  let items = getVisibleClothesProducts();
-  if (q) {
-    items = items.filter(p => {
-      const name = foldSearchText(p.name);
-      const category = foldSearchText(p.category);
-      if (name.includes(q) || category.includes(q)) return true;
-      const variants = Array.isArray(p.variants) ? p.variants : [];
-      return variants.some(v =>
-        foldSearchText(v?.color).includes(q) ||
-        foldSearchText(v?.size).includes(q)
-      );
-    });
-  }
-  return items;
-}
-
-// Targeted swap (caret-preserving): re-renders only the stats + grid regions,
-// same pattern as updateCustomersViewFiltered.
-function updateClothesProductsFiltered() {
-  const container = document.querySelector('main');
-  if (!container || state.currentView !== 'clothes-system' || _clothesActiveTab !== 'products') {
-    render();
-    return;
-  }
-  const template = document.createElement('template');
-  template.innerHTML = renderClothesProductsTab();
-  const newStats = template.content.querySelector('#clothes-products-stats');
-  const newGrid = template.content.querySelector('#clothes-products-grid');
-  const curStats = document.getElementById('clothes-products-stats');
-  const curGrid = document.getElementById('clothes-products-grid');
-  if (newStats && curStats) curStats.innerHTML = newStats.innerHTML;
-  if (newGrid && curGrid) curGrid.innerHTML = newGrid.innerHTML;
-  if (typeof IconQueue !== 'undefined') IconQueue.schedule(container);
-  else lucide.createIcons();
-}
-
-function renderClothesProductsTab() {
-  const isAr = clothesIsAr();
-  const all = getVisibleClothesProducts();
-  const filtered = getFilteredClothesProducts();
-
-  // Reset pagination when the filter changes
-  const fingerprint = JSON.stringify([_clothesProductSearch]);
-  if (fingerprint !== _clothesProductsFilterFingerprint) {
-    _clothesProductsFilterFingerprint = fingerprint;
-    _clothesProductsShowLimit = CLOTHES_PRODUCTS_PAGE_SIZE;
-  }
-  const shown = filtered.slice(0, _clothesProductsShowLimit);
-  const remaining = Math.max(0, filtered.length - shown.length);
-
-  // Stats
-  let totalPieces = 0;
-  let stockValueUSD = 0;
-  let lowVariants = 0;
-  for (const p of all) {
-    const variants = Array.isArray(p.variants) ? p.variants : [];
-    for (const v of variants) {
-      const qty = Math.max(0, Math.floor(Number(v?.qty) || 0));
-      totalPieces += qty;
-      stockValueUSD += qty * (Number(p.costUSD) || 0);
-      if (qty <= CLOTHES_LOW_STOCK_THRESHOLD) lowVariants++;
-    }
-  }
-  stockValueUSD = Math.round(stockValueUSD * 100) / 100;
-
-  const statCard = (icon, label, value, gradient) => `
-    <div class="glass-panel rounded-2xl p-4 flex items-center gap-3">
-      <div class="w-11 h-11 rounded-xl bg-gradient-to-br ${gradient} flex items-center justify-center shadow-lg shrink-0">
-        <i data-lucide="${icon}" class="w-5 h-5 text-white"></i>
-      </div>
-      <div class="min-w-0">
-        <div class="text-xs text-slate-500 dark:text-slate-400">${label}</div>
-        <div class="text-lg font-bold text-slate-800 dark:text-white truncate">${value}</div>
-      </div>
-    </div>
-  `;
-
-  return `
-    <div>
-      <div id="clothes-products-stats" class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        ${statCard('shirt', isAr ? 'المنتجات' : 'Products', String(all.length), 'from-rose-500 to-pink-500')}
-        ${statCard('boxes', isAr ? 'القطع في المخزون' : 'Pieces in stock', String(totalPieces), 'from-blue-500 to-cyan-500')}
-        ${statCard('banknote', isAr ? 'قيمة المخزون (تكلفة)' : 'Stock value (cost)', clothesFmtUSD(stockValueUSD), 'from-emerald-500 to-green-500')}
-        ${statCard('alert-triangle', isAr ? 'مقاسات شارفت على النفاد' : 'Low-stock variants', String(lowVariants), 'from-amber-400 to-orange-500')}
-      </div>
-
-      <div class="flex flex-col sm:flex-row gap-3 mb-6">
-        <div class="relative flex-1">
-          <i data-lucide="search" class="w-4 h-4 absolute top-1/2 -translate-y-1/2 ${isAr ? 'right-4' : 'left-4'} text-slate-400"></i>
-          <input
-            type="text"
-            id="clothes-product-search"
-            value="${Security.escapeHtml(_clothesProductSearch)}"
-            oninput="onClothesProductSearchInput(this)"
-            placeholder="${isAr ? 'ابحث بالاسم أو الفئة أو اللون أو المقاس...' : 'Search by name, category, color or size...'}"
-            class="w-full glass-input ${isAr ? 'pr-11 pl-4' : 'pl-11 pr-4'} py-2.5 rounded-xl"
-          />
-        </div>
-        <button onclick="exportClothesProductsCSV()" class="glass-panel px-3 py-2.5 rounded-xl text-slate-600 dark:text-slate-300 hover:text-rose-600 flex items-center justify-center" title="${isAr ? 'تصدير CSV (إكسل)' : 'Export CSV (Excel)'}">
-          <i data-lucide="download" class="w-4 h-4"></i>
-        </button>
-        <button onclick="showClothesProductModal()" class="btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-5 py-2.5 rounded-xl font-bold shadow-lg hover:shadow-xl flex items-center justify-center gap-2">
-          <i data-lucide="plus" class="w-4 h-4"></i>
-          ${isAr ? 'إضافة منتج' : 'Add Product'}
-        </button>
-      </div>
-
-      <div id="clothes-products-grid">
-        ${shown.length === 0 ? `
-          <div class="glass-panel rounded-2xl p-12 text-center">
-            <div class="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-rose-500 to-pink-500 flex items-center justify-center mb-4 shadow-xl opacity-80">
-              <i data-lucide="shirt" class="w-8 h-8 text-white"></i>
-            </div>
-            <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-1">
-              ${all.length === 0
-                ? (isAr ? 'لا توجد منتجات بعد' : 'No products yet')
-                : (isAr ? 'لا توجد نتائج للبحث' : 'No results for this search')}
-            </h3>
-            <p class="text-sm text-slate-500 dark:text-slate-400">
-              ${all.length === 0
-                ? (isAr ? 'أضف أول منتج لبدء تتبع المخزون.' : 'Add your first product to start tracking stock.')
-                : (isAr ? 'جرّب كلمة بحث أخرى.' : 'Try a different search term.')}
-            </p>
-          </div>
-        ` : `
-          <div class="text-sm text-slate-500 dark:text-slate-400 mb-3" id="clothes-products-count">
-            ${isAr ? `عرض ${shown.length} من ${filtered.length} منتج` : `Showing ${shown.length} of ${filtered.length} products`}
-          </div>
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            ${shown.map(p => renderClothesProductCard(p)).join('')}
-          </div>
-          ${remaining > 0 ? `
-            <div class="text-center mt-6">
-              <button onclick="loadMoreClothesProducts()" class="glass-panel px-6 py-2.5 rounded-xl font-medium text-slate-600 dark:text-slate-300 hover:text-rose-600">
-                ${isAr ? `عرض المزيد (${remaining} متبقي)` : `Load more (${remaining} remaining)`}
-              </button>
-            </div>
-          ` : ''}
-        `}
-      </div>
-    </div>
-  `;
-}
-
-function renderClothesProductCard(p) {
-  const isAr = clothesIsAr();
-  const variants = Array.isArray(p.variants) ? p.variants : [];
-  const totalQty = getClothesProductTotalQty(p);
-
-  const qtyBadgeClass = totalQty === 0
-    ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
-    : (variants.some(v => (Math.floor(Number(v?.qty) || 0)) <= CLOTHES_LOW_STOCK_THRESHOLD)
-      ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
-      : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300');
-
-  const variantChips = variants.map((v, idx) => {
-    const qty = Math.max(0, Math.floor(Number(v?.qty) || 0));
-    const label = [v?.color, v?.size].map(s => String(s || '').trim()).filter(Boolean).join(' · ') || (isAr ? 'بدون تحديد' : 'unspecified');
-    const chipClass = qty === 0
-      ? 'border-red-300 dark:border-red-700 text-red-600 dark:text-red-400'
-      : (qty <= CLOTHES_LOW_STOCK_THRESHOLD
-        ? 'border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400'
-        : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300');
-    // touch-action: manipulation on the +/- steppers: the page is zoomable
-    // (user-scalable=yes), so without it iOS Safari can eat a rapid second
-    // tap as double-tap smart zoom instead of a second increment.
-    return `
-      <span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium border ${chipClass}">
-        <span>${Security.escapeHtml(label)}</span>
-        <button type="button" onclick="adjustClothesVariantQty('${p.id}', ${idx}, -1)" style="touch-action: manipulation" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-rose-200 dark:hover:bg-rose-800 flex items-center justify-center leading-none" title="-1">−</button>
-        <span class="font-bold">${qty}</span>
-        <button type="button" onclick="adjustClothesVariantQty('${p.id}', ${idx}, 1)" style="touch-action: manipulation" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-emerald-200 dark:hover:bg-emerald-800 flex items-center justify-center leading-none" title="+1">+</button>
-      </span>
-    `;
-  }).join('');
-
-  return `
-    <div class="glass-panel rounded-2xl p-5">
-      <div class="flex items-start gap-4">
-        <div class="w-16 h-16 rounded-xl overflow-hidden bg-gradient-to-br from-rose-100 to-pink-100 dark:from-rose-900/30 dark:to-pink-900/30 flex items-center justify-center shrink-0">
-          ${p.photo
-            ? `<img src="${Security.escapeHtml(p.photo)}" alt="" class="w-full h-full object-cover" />`
-            : `<i data-lucide="shirt" class="w-7 h-7 text-rose-400"></i>`}
-        </div>
-        <div class="flex-1 min-w-0">
-          <div class="flex items-start justify-between gap-2">
-            <div class="min-w-0">
-              <h4 class="font-bold text-slate-800 dark:text-white truncate">${Security.escapeHtml(p.name || '')}</h4>
-              ${p.category ? `<span class="inline-block mt-0.5 px-2 py-0.5 rounded-full text-xs font-medium bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300">${Security.escapeHtml(p.category)}</span>` : ''}
-            </div>
-            <span class="px-2.5 py-1 rounded-full text-xs font-bold whitespace-nowrap ${qtyBadgeClass}">
-              ${totalQty} ${isAr ? 'قطعة' : 'pcs'}
-            </span>
-          </div>
-          <div class="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-sm">
-            <span class="text-slate-500 dark:text-slate-400">${isAr ? 'التكلفة:' : 'Cost:'} <span class="font-bold text-slate-700 dark:text-slate-200">${clothesFmtUSD(p.costUSD)}</span></span>
-            <span class="text-slate-500 dark:text-slate-400">${isAr ? 'البيع:' : 'Sell:'} <span class="font-bold text-emerald-600 dark:text-emerald-400">${clothesFmtLYD(p.priceLYD)}</span></span>
-          </div>
-        </div>
-      </div>
-
-      ${variants.length ? `<div class="flex flex-wrap gap-1.5 mt-4">${variantChips}</div>` : `
-        <div class="mt-4 text-xs text-slate-400 dark:text-slate-500">${isAr ? 'لا توجد ألوان/مقاسات بعد — عدّل المنتج لإضافتها.' : 'No colors/sizes yet — edit the product to add them.'}</div>
-      `}
-
-      ${p.note ? `<p class="mt-3 text-xs text-slate-500 dark:text-slate-400 line-clamp-2">${Security.escapeHtml(p.note)}</p>` : ''}
-
-      <div class="flex gap-2 mt-4 pt-3 border-t border-slate-200 dark:border-slate-700">
-        <button onclick="editClothesProduct('${p.id}')" class="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800">
-          <i data-lucide="pencil" class="w-3.5 h-3.5"></i>${isAr ? 'تعديل' : 'Edit'}
-        </button>
-        <button onclick="deleteClothesProduct('${p.id}')" class="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20">
-          <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>${isAr ? 'حذف' : 'Delete'}
-        </button>
-      </div>
-    </div>
-  `;
-}
-
-async function adjustClothesVariantQty(productId, variantIndex, delta) {
-  if (!clothesCanUse()) return;
-  const product = getVisibleClothesProducts().find(p => p.id === productId);
-  if (!product) return;
-  const variants = (Array.isArray(product.variants) ? product.variants : []).map(v => ({ ...v }));
-  const v = variants[variantIndex];
-  if (!v) return;
-  v.qty = Math.max(0, Math.floor(Number(v.qty) || 0) + (Number(delta) || 0));
-  const saved = await updateRecord(state.clothesProducts, productId, { variants });
-  if (!saved) return;
-  updateClothesProductsFiltered();
-}
-
-async function deleteClothesProduct(id) {
-  if (!clothesCanUse()) return;
-  const isAr = clothesIsAr();
-  const product = getVisibleClothesProducts().find(p => p.id === id);
-  if (!product) return;
-  const name = product.name || (isAr ? 'منتج' : 'product');
-  // Live records that still plan to MOVE this product's stock: a shipment on
-  // the way whose pieces would arrive, and active orders whose pieces would
-  // return to stock on cancel. After deletion those movements are silently
-  // skipped — the user must know before confirming.
-  const pendingShipments = (state.clothesShipments || []).filter(s => s && !s._deleted
-    && String(s.status || '') !== 'Received'
-    && Array.isArray(s.lines) && s.lines.some(l => String(l?.productId || '') === String(id))).length;
-  const activeOrders = (state.clothesOrders || []).filter(o => o && !o._deleted
-    && clothesOrderIsActiveStatus(o.status)
-    && Array.isArray(o.lines) && o.lines.some(l => String(l?.productId || '') === String(id))).length;
-  let msg = isAr
-    ? `هل تريد حذف المنتج "${name}"؟\nسيبقى في الشحنات والطلبات القديمة كسجل فقط.`
-    : `Delete product "${name}"?\nOld shipments and orders will keep it for history only.`;
-  if (pendingShipments > 0) {
-    msg += isAr
-      ? `\n\n⚠️ ${pendingShipments} شحنة لم تصل بعد تحتوي هذا المنتج — قطعها لن تُضاف إلى المخزون عند الاستلام.`
-      : `\n\n⚠️ ${pendingShipments} shipment(s) still on the way contain this product — their pieces will NOT be added to stock on arrival.`;
-  }
-  if (activeOrders > 0) {
-    msg += isAr
-      ? `\n\n⚠️ ${activeOrders} طلب نشط يحتوي هذا المنتج — إلغاؤه أو إرجاعه لن يعيد القطع إلى المخزون.`
-      : `\n\n⚠️ ${activeOrders} active order(s) contain this product — canceling or returning them will NOT put the pieces back in stock.`;
-  }
-  const ok = confirm(msg);
-  if (!ok) return;
-  const deleted = await deleteRecord(state.clothesProducts, id);
-  if (!deleted) return;
-  showNotification(
-    isAr ? 'تم الحذف' : 'Deleted',
-    isAr ? 'تم حذف المنتج.' : 'Product deleted.',
-    'success'
-  );
-  updateClothesProductsFiltered();
-}
-
-// ------------------------------------------
-// PRODUCT MODAL (add / edit)
-// ------------------------------------------
-
-// Temp modal state (seeded on open, cleared in closeModal)
-let _clothesTempVariants = [];
-let _clothesTempPhoto = null;
-// Generation token for async photo compression — bumped on every product modal
-// open/close so a callback that resolves after the modal changed is discarded.
-let _clothesPhotoToken = 0;
-
-function showClothesProductModal() {
-  if (!clothesCanUse()) return;
-  state.activeModal = 'clothes-product';
-  state.modalData = null;
-  _clothesTempVariants = [{ color: '', size: '', qty: 0 }];
-  _clothesTempPhoto = null;
-  _clothesPhotoToken++; // invalidate any pending photo-compression callback
-  updateUrlParams({ modal: 'clothes-product', id: 'new' }); // URL tracking
-  renderModal();
-}
-
-function editClothesProduct(id) {
-  if (!clothesCanUse()) return;
-  const product = getVisibleClothesProducts().find(p => p.id === id);
-  if (!product) return;
-  state.activeModal = 'clothes-product';
-  state.modalData = product;
-  const variants = Array.isArray(product.variants) ? product.variants : [];
-  _clothesTempVariants = variants.length
-    ? variants.map(v => ({ color: String(v?.color || ''), size: String(v?.size || ''), qty: Math.max(0, Math.floor(Number(v?.qty) || 0)) }))
-    : [{ color: '', size: '', qty: 0 }];
-  _clothesTempPhoto = product.photo || null;
-  _clothesPhotoToken++; // invalidate any pending photo callback from a prior modal
-  updateUrlParams({ modal: 'clothes-product', id }); // URL tracking
-  renderModal();
-}
-
-function renderClothesProductModal() {
-  const isAr = clothesIsAr();
-  const data = state.modalData || {};
-  const isEdit = state.modalData !== null;
-  const categories = [...new Set(getVisibleClothesProducts().map(p => String(p.category || '').trim()).filter(Boolean))];
-
-  return `
-    <h2 class="text-2xl font-bold mb-4 flex items-center gap-2">
-      <i data-lucide="shirt" class="w-6 h-6 text-rose-500"></i>
-      ${isEdit ? (isAr ? 'تعديل منتج' : 'Edit Product') : (isAr ? 'إضافة منتج' : 'Add Product')}
-    </h2>
-    <form id="modal-form" class="space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar ${isAr ? 'pl-2' : 'pr-2'}">
-      <!-- Frozen edit target: never trust state.modalData at save time (it can be
-           repointed by URL restore) — same defense as #receipt-editing-id. -->
-      <input type="hidden" id="clothes-product-editing-id" value="${Security.escapeHtml(String(isEdit ? (data.id || '') : ''))}" />
-
-      <div>
-        <label class="block text-sm font-medium mb-2">${isAr ? 'اسم المنتج *' : 'Product name *'}</label>
-        <input type="text" id="clothes-product-name" value="${Security.escapeHtml(data.name || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isAr ? 'مثال: قميص قطن رجالي' : 'e.g. Men cotton shirt'}" />
-      </div>
-
-      <div>
-        <label class="block text-sm font-medium mb-2">${isAr ? 'الفئة' : 'Category'}</label>
-        <input type="text" id="clothes-product-category" list="clothes-categories-list" value="${Security.escapeHtml(data.category || '')}" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isAr ? 'مثال: قمصان، بناطيل، فساتين...' : 'e.g. Shirts, Pants, Dresses...'}" />
-        <datalist id="clothes-categories-list">
-          ${categories.map(c => `<option value="${Security.escapeHtml(c)}"></option>`).join('')}
-        </datalist>
-      </div>
-
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="block text-sm font-medium mb-2">${isAr ? 'سعر التكلفة (دولار) *' : 'Cost price (USD) *'}</label>
-          <input type="text" inputmode="decimal" id="clothes-product-cost" value="${Security.escapeHtml(String(data.costUSD ?? ''))}" oninput="sanitizeMoneyInput(this)" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="0.00" />
-        </div>
-        <div>
-          <label class="block text-sm font-medium mb-2">${isAr ? 'سعر البيع (دينار) *' : 'Selling price (LYD) *'}</label>
-          <input type="text" inputmode="decimal" id="clothes-product-price" value="${Security.escapeHtml(String(data.priceLYD ?? ''))}" oninput="sanitizeMoneyInput(this)" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="0.00" />
-        </div>
-      </div>
-
-      <div>
-        <label class="block text-sm font-medium mb-2">${isAr ? 'الألوان والمقاسات والكمية' : 'Colors, sizes & quantity'}</label>
-        <div id="clothes-variant-rows" class="space-y-2"></div>
-        <button type="button" onclick="addClothesVariantRow()" class="mt-2 flex items-center gap-1.5 text-sm font-medium text-rose-600 hover:text-rose-700">
-          <i data-lucide="plus" class="w-4 h-4"></i>${isAr ? 'إضافة لون/مقاس' : 'Add color/size'}
-        </button>
-      </div>
-
-      <div data-photo-paste-target="clothes-product" tabindex="0" class="rounded-2xl border border-slate-200 dark:border-slate-700 p-3 focus:outline-none focus:ring-2 focus:ring-rose-500">
-        <label class="block text-sm font-medium mb-2">${isAr ? 'صورة (اختياري)' : 'Photo (optional)'}</label>
-        <div id="clothes-photo-preview-wrap"></div>
-        <p class="mt-2 text-xs text-slate-500">${isAr ? 'انسخ صورة واضغط Ctrl+V هنا، أو استخدم زر الرفع.' : 'Copy an image and press Ctrl+V here, or use Upload.'}</p>
-        <input type="file" id="clothes-product-photo-input" accept="image/*" class="hidden" onchange="onClothesProductPhotoSelected(this)" />
-      </div>
-
-      <div>
-        <label class="block text-sm font-medium mb-2">${isAr ? 'ملاحظة' : 'Note'}</label>
-        <textarea id="clothes-product-note" rows="2" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isAr ? 'اختياري' : 'Optional'}">${Security.escapeHtml(data.note || '')}</textarea>
-      </div>
-
-      <div class="flex gap-3 pt-2">
-        <button type="submit" class="flex-1 btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-6 py-3 rounded-xl font-bold shadow-lg">
-          ${isEdit ? (isAr ? 'حفظ التعديلات' : 'Save Changes') : (isAr ? 'إضافة المنتج' : 'Add Product')}
-        </button>
-        <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600">
-          ${isAr ? 'إلغاء' : 'Cancel'}
-        </button>
-      </div>
-    </form>
-  `;
-}
-
-// Variant rows: inputs write straight into _clothesTempVariants (no re-render
-// while typing, so the caret is preserved); add/remove re-render the rows only.
-function refreshClothesVariantRows() {
-  const isAr = clothesIsAr();
-  const wrap = document.getElementById('clothes-variant-rows');
-  if (!wrap) return;
-  const rowStyle = 'display:grid;gap:0.5rem;align-items:center;';
-  const cellStyle = 'width:100%;min-width:0;';
-  wrap.innerHTML = _clothesTempVariants.map((v, idx) => `
-    <div style="${rowStyle}" class="clothes-variant-row">
-      <input type="text" value="${Security.escapeHtml(String(v.color || ''))}" oninput="onClothesVariantField(${idx}, 'color', this.value)" placeholder="${isAr ? 'اللون' : 'Color'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
-      <input type="text" value="${Security.escapeHtml(String(v.size || ''))}" oninput="onClothesVariantField(${idx}, 'size', this.value)" placeholder="${isAr ? 'المقاس' : 'Size'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
-      <input type="number" min="0" step="1" value="${Math.max(0, Math.floor(Number(v.qty) || 0))}" oninput="onClothesVariantField(${idx}, 'qty', this.value)" placeholder="0" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'الكمية' : 'Quantity'}" />
-      <button type="button" onclick="removeClothesVariantRow(${idx})" class="w-8 h-8 rounded-lg flex items-center justify-center text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20" title="${isAr ? 'إزالة' : 'Remove'}">
-        <i data-lucide="x" class="w-4 h-4"></i>
-      </button>
-    </div>
-  `).join('');
-  if (typeof IconQueue !== 'undefined') IconQueue.schedule(wrap);
-}
-
-function onClothesVariantField(idx, field, value) {
-  const v = _clothesTempVariants[idx];
-  if (!v) return;
-  if (field === 'qty') {
-    v.qty = Math.max(0, Math.floor(Number(value) || 0));
-  } else if (field === 'color' || field === 'size') {
-    v[field] = Security.sanitizeInput(String(value || ''), { maxLength: 60 });
-  }
-}
-
-function addClothesVariantRow() {
-  _clothesTempVariants.push({ color: '', size: '', qty: 0 });
-  refreshClothesVariantRows();
-}
-
-function removeClothesVariantRow(idx) {
-  _clothesTempVariants.splice(idx, 1);
-  if (_clothesTempVariants.length === 0) _clothesTempVariants.push({ color: '', size: '', qty: 0 });
-  refreshClothesVariantRows();
-}
-
-function refreshClothesPhotoPreview() {
-  const isAr = clothesIsAr();
-  const wrap = document.getElementById('clothes-photo-preview-wrap');
-  if (!wrap) return;
-  if (_clothesTempPhoto) {
-    wrap.innerHTML = `
-      <div class="flex flex-wrap items-center gap-3">
-        <img src="${Security.escapeHtml(_clothesTempPhoto)}" alt="" class="w-16 h-16 rounded-xl object-cover border border-slate-200 dark:border-slate-700" />
-        <button type="button" onclick="removeClothesProductPhoto()" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20">
-          <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>${isAr ? 'إزالة الصورة' : 'Remove photo'}
-        </button>
-      </div>
-    `;
-  } else {
-    wrap.innerHTML = '';
-  }
-  wrap.insertAdjacentHTML('beforeend', `
-    <div class="mt-2 flex flex-wrap gap-2">
-      <button type="button" onclick="takeNativePhoto('clothes-product')" class="min-h-11 flex items-center gap-2 px-4 py-2 rounded-xl border border-rose-200 dark:border-rose-800 text-sm font-bold text-rose-600 dark:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-900/20">
-        <i data-lucide="camera" class="w-4 h-4"></i>${isAr ? 'الكاميرا' : 'Camera'}
-      </button>
-      <button type="button" onclick="document.getElementById('clothes-product-photo-input').click()" class="min-h-11 flex items-center gap-2 px-4 py-2 rounded-xl border-2 border-dashed border-slate-300 dark:border-slate-600 text-sm font-medium text-slate-500 dark:text-slate-400 hover:border-rose-400 hover:text-rose-500">
-        <i data-lucide="${_clothesTempPhoto ? 'refresh-cw' : 'image-plus'}" class="w-4 h-4"></i>${_clothesTempPhoto ? (isAr ? 'تغيير الصورة' : 'Change photo') : (isAr ? 'رفع صورة' : 'Upload photo')}
-      </button>
-      <button type="button" onclick="pastePhotoFromClipboard('clothes-product')" class="min-h-11 flex items-center gap-2 px-4 py-2 rounded-xl border border-rose-200 dark:border-rose-800 text-sm font-bold text-rose-600 dark:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-900/20">
-        <i data-lucide="clipboard-paste" class="w-4 h-4"></i>${isAr ? 'لصق صورة' : 'Paste photo'}
-      </button>
-    </div>
-  `);
-  if (typeof IconQueue !== 'undefined') IconQueue.schedule(wrap);
-}
-
-function onClothesProductPhotoSelected(input) {
-  const files = Array.from(input?.files || []);
-  if (input) input.value = '';
-  return uploadClothesProductPhotoFiles(files);
-}
-
-function uploadClothesProductPhotoFiles(fileList) {
-  const file = Array.from(fileList || [])[0];
-  if (!file) return;
-  const myToken = ++_clothesPhotoToken;
-  compressImageToDataUrl(file).then((dataUrl) => {
-    if (myToken !== _clothesPhotoToken || state.activeModal !== 'clothes-product') return; // modal changed — discard
-    if (!isSafeReceiptPhotoSource(dataUrl)) {
-      if (isOversizedReceiptPhotoSource(dataUrl)) _showPhotoPayloadLimit();
-      else _showUnsupportedPhotoFormat();
-      return;
-    }
-    _clothesTempPhoto = dataUrl;
-    refreshClothesPhotoPreview();
-  }).catch(() => {
-    if (myToken !== _clothesPhotoToken) return;
-    showNotification('Error', clothesIsAr() ? 'تعذر قراءة الصورة' : 'Could not read the image', 'error');
+// Deep links open clothes modals before the bundle exists (?modal=clothes-*).
+// Load first, then run the modal opener; drop silently on load failure — the
+// view's own retry card is the recovery path.
+function withClothesSystem(run) {
+  if (clothesBundleReady()) { run(); return; }
+  ensureClothesSystemLoaded().then(() => {
+    try { if (clothesBundleReady()) run(); } catch (_) {}
   });
 }
 
-function removeClothesProductPhoto() {
-  _clothesTempPhoto = null;
-  _clothesPhotoToken++; // a pending compression must not undo the removal
-  refreshClothesPhotoPreview();
-}
-
-// Called by handleModalSubmit for state.activeModal === 'clothes-product'.
-// Returns true when saved (modal may close), false to keep the modal open.
-async function saveClothesProductFromModal() {
-  if (!clothesCanUse()) return false;
-  const isAr = clothesIsAr();
-
-  const name = Security.sanitizeInput(String(document.getElementById('clothes-product-name')?.value || ''), { maxLength: 120 }).trim();
-  if (!name) {
-    showNotification(isAr ? 'تنبيه' : 'Validation', isAr ? 'اسم المنتج مطلوب' : 'Product name is required', 'error');
-    return false;
-  }
-  const category = Security.sanitizeInput(String(document.getElementById('clothes-product-category')?.value || ''), { maxLength: 60 }).trim();
-  const note = Security.sanitizeInput(String(document.getElementById('clothes-product-note')?.value || ''), { maxLength: 500 }).trim();
-  const costUSD = clothesParseMoney(document.getElementById('clothes-product-cost')?.value);
-  const priceLYD = clothesParseMoney(document.getElementById('clothes-product-price')?.value);
-
-  // Normalize variants: trim, drop fully-empty rows, merge duplicate color+size
-  const merged = new Map();
-  for (const v of _clothesTempVariants) {
-    const color = String(v?.color || '').trim();
-    const size = String(v?.size || '').trim();
-    const qty = Math.max(0, Math.floor(Number(v?.qty) || 0));
-    if (!color && !size && qty === 0) continue;
-    const key = `${color.toLowerCase()}|${size.toLowerCase()}`;
-    if (merged.has(key)) {
-      merged.get(key).qty += qty;
-    } else {
-      merged.set(key, { color, size, qty });
-    }
-  }
-  const variants = Array.from(merged.values());
-
-  const editingId = String(document.getElementById('clothes-product-editing-id')?.value || '').trim();
-  const editTarget = editingId ? getVisibleClothesProducts().find(p => p.id === editingId) : null;
-  // Editing a record that vanished (deleted on another device mid-edit) must
-  // NOT silently create a duplicate — abort and tell the user to reopen.
-  if (editingId && !editTarget) {
-    showNotification(isAr ? 'تعذّر الحفظ' : 'Cannot save', isAr ? 'تم حذف هذا المنتج. أعد فتح القائمة.' : 'This product was deleted. Please reopen the list.', 'error');
-    return false;
-  }
-
-  const payload = { name, category, note, photo: _clothesTempPhoto, costUSD, priceLYD, variants };
-
-  if (editTarget) {
-    const saved = await updateRecord(state.clothesProducts, editTarget.id, payload);
-    if (!saved) return false;
-    showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? 'تم تحديث المنتج بنجاح.' : 'Product updated successfully.', 'success');
-  } else {
-    const saved = await addRecord(state.clothesProducts, { ...payload, createdAt: new Date().toISOString() });
-    if (!saved) return false;
-    showNotification(isAr ? 'تمت الإضافة' : 'Added', isAr ? 'تمت إضافة المنتج بنجاح.' : 'Product added successfully.', 'success');
-  }
-  return true;
-}
-
-// ------------------------------------------
-// SHIPMENTS TAB — incoming goods from abroad
-// ------------------------------------------
-// Rules that keep stock honest:
-// - Stock is added ONLY when a shipment's status becomes 'Received'
-//   (stockApplied flag makes this happen exactly once).
-// - Moving a Received shipment back to an earlier status removes the same
-//   quantities again (mistake correction, fully reversible).
-// - A Received shipment cannot be edited or deleted — move its status back
-//   first. This prevents silent stock drift.
-
-const CLOTHES_SHIPMENT_STATUSES = [
-  { id: 'Ordered', label: 'Ordered', labelAr: 'مطلوبة', badge: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300' },
-  { id: 'Shipped', label: 'Shipped', labelAr: 'مشحونة', badge: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' },
-  { id: 'Arrived', label: 'Arrived', labelAr: 'وصلت', badge: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' },
-  { id: 'Received', label: 'Received', labelAr: 'استُلمت', badge: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' }
-];
-const CLOTHES_SHIPMENTS_PAGE_SIZE = 30;
-
-let _clothesShipmentSearch = '';
-let _clothesShipmentStatusFilter = 'all';
-let _clothesShipmentsShowLimit = CLOTHES_SHIPMENTS_PAGE_SIZE;
-let _clothesShipmentsFilterFingerprint = '';
-
-function getVisibleClothesShipments() {
-  return _clothesScopeToOwner(state.clothesShipments);
-}
-
-function clothesShipmentStatusMeta(statusId) {
-  return CLOTHES_SHIPMENT_STATUSES.find(s => s.id === statusId) || CLOTHES_SHIPMENT_STATUSES[0];
-}
-
-// Product name lookup that still works for deleted products (history display)
-function clothesProductNameById(productId) {
-  const p = (state.clothesProducts || []).find(x => x.id === productId);
-  return p ? String(p.name || '') : (clothesIsAr() ? '(منتج محذوف)' : '(deleted product)');
-}
-
-function getClothesShipmentTotals(s) {
-  const lines = Array.isArray(s?.lines) ? s.lines : [];
-  let pieces = 0;
-  let goodsUSD = 0;
-  for (const line of lines) {
-    const qty = Math.max(0, Math.floor(Number(line?.qty) || 0));
-    pieces += qty;
-    goodsUSD += qty * (Number(line?.unitCostUSD) || 0);
-  }
-  goodsUSD = Math.round(goodsUSD * 100) / 100;
-  const shippingUSD = Math.round((Number(s?.shippingCostUSD) || 0) * 100) / 100;
-  const totalUSD = Math.round((goodsUSD + shippingUSD) * 100) / 100;
-  return { pieces, goodsUSD, shippingUSD, totalUSD };
-}
-
-// Add (sign=+1) or remove (sign=-1) a shipment's quantities in product stock.
-// One updateRecord per product so every change syncs like any other edit.
-async function applyClothesShipmentStockDelta(shipment, sign) {
-  const lines = Array.isArray(shipment?.lines) ? shipment.lines : [];
-  const byProduct = new Map();
-  for (const line of lines) {
-    const pid = String(line?.productId || '');
-    if (!pid) continue;
-    if (!byProduct.has(pid)) byProduct.set(pid, []);
-    byProduct.get(pid).push(line);
-  }
-  for (const [pid, productLines] of byProduct) {
-    const product = getVisibleClothesProducts().find(p => p.id === pid);
-    if (!product) continue; // product deleted — nothing to update
-    const variants = (Array.isArray(product.variants) ? product.variants : []).map(v => ({ ...v }));
-    for (const line of productLines) {
-      const qty = Math.max(0, Math.floor(Number(line?.qty) || 0));
-      if (qty === 0) continue;
-      const color = String(line?.color || '').trim();
-      const size = String(line?.size || '').trim();
-      const match = variants.find(v =>
-        String(v?.color || '').trim().toLowerCase() === color.toLowerCase() &&
-        String(v?.size || '').trim().toLowerCase() === size.toLowerCase()
-      );
-      if (match) {
-        match.qty = Math.max(0, Math.floor(Number(match.qty) || 0) + sign * qty);
-      } else if (sign > 0) {
-        variants.push({ color, size, qty });
-      }
-    }
-    const saved = await updateRecord(state.clothesProducts, pid, { variants });
-    if (!saved) return false;
-  }
-  return true;
-}
-
-// Which of a shipment's lines can NOT be fully removed from stock because the
-// pieces were already sold (current variant stock < the shipment's quantity).
-// Aggregates per product+variant so multiple lines don't mis-report.
-function _clothesShipmentUnreceiveShortfall(shipment) {
-  const need = new Map(); // pid||color||size -> {productId, color, size, qty}
-  (Array.isArray(shipment?.lines) ? shipment.lines : []).forEach(line => {
-    const color = String(line?.color || '').trim();
-    const size = String(line?.size || '').trim();
-    const key = `${line?.productId || ''}||${color.toLowerCase()}||${size.toLowerCase()}`;
-    const prev = need.get(key) || { productId: line?.productId || '', color, size, qty: 0 };
-    prev.qty += Math.max(0, Math.floor(Number(line?.qty) || 0));
-    need.set(key, prev);
-  });
-  const out = [];
-  for (const { productId, color, size, qty } of need.values()) {
-    if (qty === 0) continue;
-    const product = (state.clothesProducts || []).find(p => p && p.id === productId);
-    const variants = Array.isArray(product?.variants) ? product.variants : [];
-    const match = variants.find(v =>
-      String(v?.color || '').trim().toLowerCase() === color.toLowerCase() &&
-      String(v?.size || '').trim().toLowerCase() === size.toLowerCase()
-    );
-    const available = match ? Math.max(0, Math.floor(Number(match.qty) || 0)) : 0;
-    if (available < qty) {
-      const variant = [color, size].filter(Boolean).join('/');
-      const name = product ? String(product.name || '') : clothesProductNameById(productId);
-      out.push(`${name}${variant ? ' ' + variant : ''}: ${clothesIsAr() ? 'المتوفر' : 'in stock'} ${available}, ${clothesIsAr() ? 'يلزم إرجاع' : 'need to remove'} ${qty}`);
-    }
-  }
-  return out;
-}
-
-async function setClothesShipmentStatus(shipmentId, newStatus) {
-  if (!clothesCanUse()) return;
-  const isAr = clothesIsAr();
-  if (!CLOTHES_SHIPMENT_STATUSES.some(s => s.id === newStatus)) return;
-  const shipment = getVisibleClothesShipments().find(s => s.id === shipmentId);
-  if (!shipment || shipment.status === newStatus) return;
-
-  const updates = { status: newStatus };
-  if (newStatus === 'Received' && !shipment.stockApplied) {
-    const ok = confirm(isAr
-      ? 'تأكيد استلام الشحنة؟ سيتم إضافة الكميات إلى المخزون.'
-      : 'Confirm receiving this shipment? Quantities will be ADDED to stock.');
-    if (!ok) { updateClothesShipmentsFiltered(); return; }
-    if (!await applyClothesShipmentStockDelta(shipment, 1)) return;
-    updates.stockApplied = true;
-    updates.receivedAt = new Date().toISOString();
-  } else if (shipment.status === 'Received' && newStatus !== 'Received' && shipment.stockApplied) {
-    // Un-receiving removes this shipment's pieces from stock. If some of those
-    // pieces were already SOLD, the removal would floor at zero and silently
-    // under-remove — and a later order cancel would then restore full
-    // quantities, inventing phantom stock. Block it: the sale must be reversed
-    // first so the pieces are physically back before the shipment is undone.
-    const short = _clothesShipmentUnreceiveShortfall(shipment);
-    if (short.length) {
-      showNotification(
-        isAr ? 'غير ممكن' : 'Not allowed',
-        (isAr
-          ? 'لا يمكن إرجاع هذه الشحنة لأن بعض قطعها بيعت بالفعل. ألغِ/أرجِع الطلبات التي باعتها أولاً:\n\n'
-          : 'Cannot un-receive: some of its pieces are already sold. Cancel/return the orders that sold them first:\n\n') + short.join('\n'),
-        'error'
-      );
-      updateClothesShipmentsFiltered();
-      return;
-    }
-    const ok = confirm(isAr
-      ? 'إرجاع الشحنة إلى حالة سابقة؟ سيتم خصم كمياتها من المخزون مرة أخرى.'
-      : 'Move this shipment back? Its quantities will be REMOVED from stock again.');
-    if (!ok) { updateClothesShipmentsFiltered(); return; }
-    if (!await applyClothesShipmentStockDelta(shipment, -1)) return;
-    updates.stockApplied = false;
-    updates.receivedAt = null;
-  }
-
-  const saved = await updateRecord(state.clothesShipments, shipmentId, updates);
-  if (!saved) return;
-  const meta = clothesShipmentStatusMeta(newStatus);
-  showNotification(
-    isAr ? 'تم التحديث' : 'Updated',
-    isAr ? `حالة الشحنة الآن: ${meta.labelAr}` : `Shipment status is now: ${meta.label}`,
-    'success'
-  );
-  updateClothesShipmentsFiltered();
-}
-
-async function deleteClothesShipment(id) {
-  if (!clothesCanUse()) return;
-  const isAr = clothesIsAr();
-  const shipment = getVisibleClothesShipments().find(s => s.id === id);
-  if (!shipment) return;
-  if (shipment.status === 'Received') {
-    showNotification(
-      isAr ? 'غير ممكن' : 'Not allowed',
-      isAr ? 'لا يمكن حذف شحنة مستلمة — أرجع حالتها أولاً حتى يُخصم مخزونها.' : 'Cannot delete a Received shipment — move its status back first so its stock is removed.',
-      'error'
-    );
-    return;
-  }
-  const ok = confirm(isAr ? 'هل تريد حذف هذه الشحنة؟' : 'Delete this shipment?');
-  if (!ok) return;
-  const deleted = await deleteRecord(state.clothesShipments, id);
-  if (!deleted) return;
-  showNotification(isAr ? 'تم الحذف' : 'Deleted', isAr ? 'تم حذف الشحنة.' : 'Shipment deleted.', 'success');
-  updateClothesShipmentsFiltered();
-}
-
-function loadMoreClothesShipments() {
-  _clothesShipmentsShowLimit += CLOTHES_SHIPMENTS_PAGE_SIZE;
-  updateClothesShipmentsFiltered();
-}
-
-function onClothesShipmentSearchInput(el) {
-  _clothesShipmentSearch = Security.sanitizeInput(String(el?.value || ''), { maxLength: 200 });
-  if (window._clothesShipmentSearchTimer) clearTimeout(window._clothesShipmentSearchTimer);
-  window._clothesShipmentSearchTimer = setTimeout(() => updateClothesShipmentsFiltered(), 80);
-}
-
-function setClothesShipmentStatusFilter(value) {
-  _clothesShipmentStatusFilter = String(value || 'all');
-  updateClothesShipmentsFiltered();
-}
-
-function getFilteredClothesShipments() {
-  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
-  const q = foldSearchText(_clothesShipmentSearch.trim());
-  let items = getVisibleClothesShipments();
-  if (_clothesShipmentStatusFilter !== 'all') {
-    items = items.filter(s => s.status === _clothesShipmentStatusFilter);
-  }
-  if (q) {
-    items = items.filter(s => {
-      if (foldSearchText(s.ref).includes(q)) return true;
-      if (foldSearchText(s.supplier).includes(q)) return true;
-      const lines = Array.isArray(s.lines) ? s.lines : [];
-      return lines.some(line => foldSearchText(clothesProductNameById(line.productId)).includes(q));
-    });
-  }
-  return items;
-}
-
-function updateClothesShipmentsFiltered() {
-  const container = document.querySelector('main');
-  if (!container || state.currentView !== 'clothes-system' || _clothesActiveTab !== 'shipments') {
-    render();
-    return;
-  }
-  const template = document.createElement('template');
-  template.innerHTML = renderClothesShipmentsTab();
-  const newStats = template.content.querySelector('#clothes-shipments-stats');
-  const newGrid = template.content.querySelector('#clothes-shipments-grid');
-  const curStats = document.getElementById('clothes-shipments-stats');
-  const curGrid = document.getElementById('clothes-shipments-grid');
-  if (newStats && curStats) curStats.innerHTML = newStats.innerHTML;
-  if (newGrid && curGrid) curGrid.innerHTML = newGrid.innerHTML;
-  if (typeof IconQueue !== 'undefined') IconQueue.schedule(container);
-  else lucide.createIcons();
-}
-
-function renderClothesShipmentsTab() {
-  const isAr = clothesIsAr();
-  const all = getVisibleClothesShipments();
-  const filtered = getFilteredClothesShipments();
-
-  const fingerprint = JSON.stringify([_clothesShipmentSearch, _clothesShipmentStatusFilter]);
-  if (fingerprint !== _clothesShipmentsFilterFingerprint) {
-    _clothesShipmentsFilterFingerprint = fingerprint;
-    _clothesShipmentsShowLimit = CLOTHES_SHIPMENTS_PAGE_SIZE;
-  }
-  const shown = filtered.slice(0, _clothesShipmentsShowLimit);
-  const remaining = Math.max(0, filtered.length - shown.length);
-
-  // Stats: money still on the way vs already received
-  let inTransitCount = 0, inTransitUSD = 0, receivedCount = 0, receivedUSD = 0;
-  for (const s of all) {
-    const t = getClothesShipmentTotals(s);
-    if (s.status === 'Received') { receivedCount++; receivedUSD += t.totalUSD; }
-    else { inTransitCount++; inTransitUSD += t.totalUSD; }
-  }
-  inTransitUSD = Math.round(inTransitUSD * 100) / 100;
-  receivedUSD = Math.round(receivedUSD * 100) / 100;
-
-  const statCard = (icon, label, value, gradient) => `
-    <div class="glass-panel rounded-2xl p-4 flex items-center gap-3">
-      <div class="w-11 h-11 rounded-xl bg-gradient-to-br ${gradient} flex items-center justify-center shadow-lg shrink-0">
-        <i data-lucide="${icon}" class="w-5 h-5 text-white"></i>
-      </div>
-      <div class="min-w-0">
-        <div class="text-xs text-slate-500 dark:text-slate-400">${label}</div>
-        <div class="text-lg font-bold text-slate-800 dark:text-white truncate">${value}</div>
-      </div>
-    </div>
-  `;
-
-  return `
-    <div>
-      <div id="clothes-shipments-stats" class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        ${statCard('plane', isAr ? 'في الطريق' : 'On the way', String(inTransitCount), 'from-blue-500 to-cyan-500')}
-        ${statCard('banknote', isAr ? 'قيمة ما في الطريق' : 'Value on the way', clothesFmtUSD(inTransitUSD), 'from-amber-400 to-orange-500')}
-        ${statCard('package-check', isAr ? 'شحنات مستلمة' : 'Received shipments', String(receivedCount), 'from-emerald-500 to-green-500')}
-        ${statCard('boxes', isAr ? 'قيمة المستلم' : 'Received value', clothesFmtUSD(receivedUSD), 'from-rose-500 to-pink-500')}
-      </div>
-
-      <div class="flex flex-col sm:flex-row gap-3 mb-6">
-        <div class="relative flex-1">
-          <i data-lucide="search" class="w-4 h-4 absolute top-1/2 -translate-y-1/2 ${isAr ? 'right-4' : 'left-4'} text-slate-400"></i>
-          <input
-            type="text"
-            id="clothes-shipment-search"
-            value="${Security.escapeHtml(_clothesShipmentSearch)}"
-            oninput="onClothesShipmentSearchInput(this)"
-            placeholder="${isAr ? 'ابحث بالمرجع أو المورد أو المنتج...' : 'Search by reference, supplier or product...'}"
-            class="w-full glass-input ${isAr ? 'pr-11 pl-4' : 'pl-11 pr-4'} py-2.5 rounded-xl"
-          />
-        </div>
-        <select onchange="setClothesShipmentStatusFilter(this.value)" class="glass-input px-4 py-2.5 rounded-xl">
-          <option value="all" ${_clothesShipmentStatusFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All statuses'}</option>
-          ${CLOTHES_SHIPMENT_STATUSES.map(s => `<option value="${s.id}" ${_clothesShipmentStatusFilter === s.id ? 'selected' : ''}>${isAr ? s.labelAr : s.label}</option>`).join('')}
-        </select>
-        <button onclick="exportClothesShipmentsCSV()" class="glass-panel px-3 py-2.5 rounded-xl text-slate-600 dark:text-slate-300 hover:text-rose-600 flex items-center justify-center" title="${isAr ? 'تصدير CSV (إكسل)' : 'Export CSV (Excel)'}">
-          <i data-lucide="download" class="w-4 h-4"></i>
-        </button>
-        <button onclick="showClothesShipmentModal()" class="btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-5 py-2.5 rounded-xl font-bold shadow-lg hover:shadow-xl flex items-center justify-center gap-2">
-          <i data-lucide="plus" class="w-4 h-4"></i>
-          ${isAr ? 'إضافة شحنة' : 'Add Shipment'}
-        </button>
-      </div>
-
-      <div id="clothes-shipments-grid">
-        ${shown.length === 0 ? `
-          <div class="glass-panel rounded-2xl p-12 text-center">
-            <div class="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-rose-500 to-pink-500 flex items-center justify-center mb-4 shadow-xl opacity-80">
-              <i data-lucide="plane" class="w-8 h-8 text-white"></i>
-            </div>
-            <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-1">
-              ${all.length === 0 ? (isAr ? 'لا توجد شحنات بعد' : 'No shipments yet') : (isAr ? 'لا توجد نتائج' : 'No results')}
-            </h3>
-            <p class="text-sm text-slate-500 dark:text-slate-400">
-              ${all.length === 0
-                ? (isAr ? 'أضف شحنة عندما تشتري بضاعة من الخارج.' : 'Add a shipment when you buy goods from abroad.')
-                : (isAr ? 'جرّب بحثاً أو فلتراً آخر.' : 'Try a different search or filter.')}
-            </p>
-          </div>
-        ` : `
-          <div class="text-sm text-slate-500 dark:text-slate-400 mb-3">
-            ${isAr ? `عرض ${shown.length} من ${filtered.length} شحنة` : `Showing ${shown.length} of ${filtered.length} shipments`}
-          </div>
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            ${shown.map(s => renderClothesShipmentCard(s)).join('')}
-          </div>
-          ${remaining > 0 ? `
-            <div class="text-center mt-6">
-              <button onclick="loadMoreClothesShipments()" class="glass-panel px-6 py-2.5 rounded-xl font-medium text-slate-600 dark:text-slate-300 hover:text-rose-600">
-                ${isAr ? `عرض المزيد (${remaining} متبقي)` : `Load more (${remaining} remaining)`}
-              </button>
-            </div>
-          ` : ''}
-        `}
-      </div>
-    </div>
-  `;
-}
-
-function renderClothesShipmentCard(s) {
-  const isAr = clothesIsAr();
-  const meta = clothesShipmentStatusMeta(s.status);
-  const totals = getClothesShipmentTotals(s);
-  const lines = Array.isArray(s.lines) ? s.lines : [];
-  const isReceived = s.status === 'Received';
-
-  const lineSummary = lines.slice(0, 3).map(line => {
-    const bits = [clothesProductNameById(line.productId)];
-    const variant = [line.color, line.size].map(x => String(x || '').trim()).filter(Boolean).join('/');
-    if (variant) bits.push(variant);
-    return `${Security.escapeHtml(bits.join(' '))} ×${Math.max(0, Math.floor(Number(line.qty) || 0))}`;
-  }).join(isAr ? '، ' : ', ') + (lines.length > 3 ? (isAr ? ` +${lines.length - 3} أخرى` : ` +${lines.length - 3} more`) : '');
-
-  return `
-    <div class="glass-panel rounded-2xl p-5">
-      <div class="flex items-start justify-between gap-3">
-        <div class="min-w-0">
-          <h4 class="font-bold text-slate-800 dark:text-white truncate">
-            ${Security.escapeHtml(s.ref || (isAr ? 'شحنة' : 'Shipment'))}
-          </h4>
-          ${s.supplier ? `<p class="text-sm text-slate-500 dark:text-slate-400 truncate">${Security.escapeHtml(s.supplier)}</p>` : ''}
-        </div>
-        <span class="px-2.5 py-1 rounded-full text-xs font-bold whitespace-nowrap ${meta.badge}">
-          ${isAr ? meta.labelAr : meta.label}
-        </span>
-      </div>
-
-      <div class="mt-3 space-y-1.5 text-sm">
-        <div class="flex justify-between gap-2">
-          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'تاريخ الطلب' : 'Ordered'}</span>
-          <span class="font-medium text-slate-700 dark:text-slate-200">${Security.escapeHtml(s.orderedAt || '—')}</span>
-        </div>
-        <div class="flex justify-between gap-2">
-          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'القطع' : 'Pieces'}</span>
-          <span class="font-medium text-slate-700 dark:text-slate-200">${totals.pieces}</span>
-        </div>
-        <div class="flex justify-between gap-2">
-          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'البضاعة + الشحن' : 'Goods + shipping'}</span>
-          <span class="font-medium text-slate-700 dark:text-slate-200">${clothesFmtUSD(totals.goodsUSD)} + ${clothesFmtUSD(totals.shippingUSD)}</span>
-        </div>
-        <div class="flex justify-between gap-2">
-          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'الإجمالي' : 'Total'}</span>
-          <span class="font-bold text-rose-600 dark:text-rose-400">${clothesFmtUSD(totals.totalUSD)}</span>
-        </div>
-        ${s.receivedAt ? `
-        <div class="flex justify-between gap-2">
-          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'تاريخ الاستلام' : 'Received at'}</span>
-          <span class="font-medium text-emerald-600 dark:text-emerald-400">${Security.escapeHtml(String(s.receivedAt).split('T')[0])}</span>
-        </div>` : ''}
-      </div>
-
-      ${lines.length ? `<p class="mt-3 text-xs text-slate-500 dark:text-slate-400">${lineSummary}</p>` : ''}
-      ${s.note ? `<p class="mt-2 text-xs text-slate-400 dark:text-slate-500 line-clamp-2">${Security.escapeHtml(s.note)}</p>` : ''}
-
-      <div class="flex items-center gap-2 mt-4 pt-3 border-t border-slate-200 dark:border-slate-700">
-        <select onchange="setClothesShipmentStatus('${s.id}', this.value)" class="glass-input px-2 py-1.5 rounded-lg text-sm flex-1" title="${isAr ? 'تغيير الحالة' : 'Change status'}">
-          ${CLOTHES_SHIPMENT_STATUSES.map(st => `<option value="${st.id}" ${s.status === st.id ? 'selected' : ''}>${isAr ? st.labelAr : st.label}</option>`).join('')}
-        </select>
-        ${isReceived ? `
-          <span class="text-xs text-slate-400 dark:text-slate-500 px-2" title="${isAr ? 'أرجع الحالة أولاً للتعديل أو الحذف' : 'Move status back to edit or delete'}">
-            <i data-lucide="lock" class="w-4 h-4"></i>
-          </span>
-        ` : `
-          <button onclick="editClothesShipment('${s.id}')" class="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800" title="${isAr ? 'تعديل' : 'Edit'}">
-            <i data-lucide="pencil" class="w-4 h-4"></i>
-          </button>
-          <button onclick="deleteClothesShipment('${s.id}')" class="p-2 rounded-lg text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20" title="${isAr ? 'حذف' : 'Delete'}">
-            <i data-lucide="trash-2" class="w-4 h-4"></i>
-          </button>
-        `}
-      </div>
-    </div>
-  `;
-}
-
-// ------------------------------------------
-// SHIPMENT MODAL (add / edit)
-// ------------------------------------------
-
-// Variant helpers shared by shipment + order line editors.
-// "Pick, don't type": color/size come from a dropdown fed by the chosen
-// product, so a typo can never send stock to the wrong place.
-function clothesVariantOptionLabel(v, withStock) {
-  const isAr = clothesIsAr();
-  const label = [v?.color, v?.size].map(x => String(x || '').trim()).filter(Boolean).join(' · ') || (isAr ? 'بدون تحديد' : 'unspecified');
-  if (!withStock) return label;
-  const qty = Math.max(0, Math.floor(Number(v?.qty) || 0));
-  return `${label} (${qty} ${isAr ? 'متبقي' : 'left'})`;
-}
-
-function findClothesVariantIndex(product, color, size) {
-  const variants = Array.isArray(product?.variants) ? product.variants : [];
-  const c = String(color || '').trim().toLowerCase();
-  const s = String(size || '').trim().toLowerCase();
-  return variants.findIndex(v =>
-    String(v?.color || '').trim().toLowerCase() === c &&
-    String(v?.size || '').trim().toLowerCase() === s
-  );
-}
-
-let _clothesTempShipLines = [];
-
-function showClothesShipmentModal() {
-  if (!clothesCanUse()) return;
-  state.activeModal = 'clothes-shipment';
-  state.modalData = null;
-  _clothesTempShipLines = [{ productId: '', color: '', size: '', qty: 0, unitCostUSD: '' }];
-  updateUrlParams({ modal: 'clothes-shipment', id: 'new' }); // URL tracking
-  renderModal();
-}
-
-function editClothesShipment(id) {
-  if (!clothesCanUse()) return;
-  const shipment = getVisibleClothesShipments().find(s => s.id === id);
-  if (!shipment) return;
-  if (shipment.status === 'Received') {
-    showNotification(
-      clothesIsAr() ? 'غير ممكن' : 'Not allowed',
-      clothesIsAr() ? 'لا يمكن تعديل شحنة مستلمة — أرجع حالتها أولاً.' : 'Cannot edit a Received shipment — move its status back first.',
-      'error'
-    );
-    return;
-  }
-  state.activeModal = 'clothes-shipment';
-  state.modalData = shipment;
-  updateUrlParams({ modal: 'clothes-shipment', id }); // URL tracking
-  const lines = Array.isArray(shipment.lines) ? shipment.lines : [];
-  _clothesTempShipLines = lines.length
-    ? lines.map(l => ({
-        productId: String(l?.productId || ''),
-        color: String(l?.color || ''),
-        size: String(l?.size || ''),
-        qty: Math.max(0, Math.floor(Number(l?.qty) || 0)),
-        unitCostUSD: String(l?.unitCostUSD ?? '')
-      }))
-    : [{ productId: '', color: '', size: '', qty: 0, unitCostUSD: '' }];
-  renderModal();
-}
-
-function renderClothesShipmentModal() {
-  const isAr = clothesIsAr();
-  const data = state.modalData || {};
-  const isEdit = state.modalData !== null;
-
-  return `
-    <h2 class="text-2xl font-bold mb-4 flex items-center gap-2">
-      <i data-lucide="plane" class="w-6 h-6 text-rose-500"></i>
-      ${isEdit ? (isAr ? 'تعديل شحنة' : 'Edit Shipment') : (isAr ? 'إضافة شحنة' : 'Add Shipment')}
-    </h2>
-    <form id="modal-form" class="space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar ${isAr ? 'pl-2' : 'pr-2'}">
-      <input type="hidden" id="clothes-shipment-editing-id" value="${Security.escapeHtml(String(isEdit ? (data.id || '') : ''))}" />
-
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="block text-sm font-medium mb-2">${isAr ? 'مرجع الشحنة' : 'Reference'}</label>
-          <input type="text" id="clothes-shipment-ref" value="${Security.escapeHtml(data.ref || '')}" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isAr ? 'مثال: شحنة تركيا يوليو' : 'e.g. Turkey July batch'}" />
-        </div>
-        <div>
-          <label class="block text-sm font-medium mb-2">${isAr ? 'المورد / البلد' : 'Supplier / country'}</label>
-          <input type="text" id="clothes-shipment-supplier" value="${Security.escapeHtml(data.supplier || '')}" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isAr ? 'مثال: مورد إسطنبول' : 'e.g. Istanbul supplier'}" />
-        </div>
-      </div>
-
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="block text-sm font-medium mb-2">${isAr ? 'تاريخ الطلب' : 'Order date'}</label>
-          <input type="date" id="clothes-shipment-date" value="${Security.escapeHtml(data.orderedAt || getTodayDateString())}" class="w-full glass-input px-4 py-2 rounded-xl" />
-        </div>
-        <div>
-          <label class="block text-sm font-medium mb-2">${isAr ? 'تكلفة الشحن (دولار)' : 'Shipping cost (USD)'}</label>
-          <input type="text" inputmode="decimal" id="clothes-shipment-shipping" value="${Security.escapeHtml(String(data.shippingCostUSD ?? ''))}" oninput="sanitizeMoneyInput(this)" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="0.00" />
-        </div>
-      </div>
-
-      <div>
-        <label class="block text-sm font-medium mb-2">${isAr ? 'محتويات الشحنة *' : 'Shipment contents *'}</label>
-        <div id="clothes-ship-lines" class="space-y-2"></div>
-        <button type="button" onclick="addClothesShipLine()" class="mt-2 flex items-center gap-1.5 text-sm font-medium text-rose-600 hover:text-rose-700">
-          <i data-lucide="plus" class="w-4 h-4"></i>${isAr ? 'إضافة صنف' : 'Add item'}
-        </button>
-        <p class="mt-1 text-xs text-slate-400 dark:text-slate-500">
-          ${isAr ? 'أضف المنتج أولاً في تبويب البضاعة إن لم يكن موجوداً.' : 'If a product is missing, add it first in the Products tab.'}
-        </p>
-      </div>
-
-      <div>
-        <label class="block text-sm font-medium mb-2">${isAr ? 'ملاحظة' : 'Note'}</label>
-        <textarea id="clothes-shipment-note" rows="2" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isAr ? 'اختياري' : 'Optional'}">${Security.escapeHtml(data.note || '')}</textarea>
-      </div>
-
-      <div class="flex gap-3 pt-2">
-        <button type="submit" class="flex-1 btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-6 py-3 rounded-xl font-bold shadow-lg">
-          ${isEdit ? (isAr ? 'حفظ التعديلات' : 'Save Changes') : (isAr ? 'إضافة الشحنة' : 'Add Shipment')}
-        </button>
-        <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600">
-          ${isAr ? 'إلغاء' : 'Cancel'}
-        </button>
-      </div>
-    </form>
-  `;
-}
-
-function refreshClothesShipLines() {
-  const isAr = clothesIsAr();
-  const wrap = document.getElementById('clothes-ship-lines');
-  if (!wrap) return;
-  const products = getVisibleClothesProducts();
-  // Two rows per line keep these controls usable in narrow webviews:
-  // row 1 = product + remove, row 2 = variant picker / qty / unit cost
-  // (+ a color/size text row only when "new color/size" is chosen).
-  const rowStyle = 'display:grid;gap:0.5rem;align-items:center;';
-  const subStyle = 'grid-column:1 / -1;display:grid;gap:0.5rem;align-items:center;';
-  const newStyle = 'grid-column:1 / -1;display:grid;gap:0.5rem;align-items:center;';
-  const cellStyle = 'width:100%;min-width:0;';
-  wrap.innerHTML = _clothesTempShipLines.map((line, idx) => {
-    const product = products.find(p => p.id === line.productId);
-    const variants = Array.isArray(product?.variants) ? product.variants : [];
-    const matchIdx = product ? findClothesVariantIndex(product, line.color, line.size) : -1;
-    // "new" mode stays sticky while the user is typing a brand-new color/size
-    const isNew = line._newVariant === true || (matchIdx === -1 && !!(String(line.color || '').trim() || String(line.size || '').trim()));
-    const selectVal = (matchIdx >= 0 && !line._newVariant) ? `v:${matchIdx}` : (isNew ? 'new' : '');
+function renderClothesLoadingState() {
+  const isAr = state.language === 'ar';
+  if (_clothesBundleState === 'failed') {
     return `
-    <div style="${rowStyle}" class="clothes-line-row pb-2 border-b border-slate-100 dark:border-slate-800">
-      <select oninput="onClothesShipLineField(${idx}, 'productId', this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm">
-        <option value="">${isAr ? '— اختر المنتج —' : '— choose product —'}</option>
-        ${products.map(p => `<option value="${p.id}" ${line.productId === p.id ? 'selected' : ''}>${Security.escapeHtml(p.name || '')}</option>`).join('')}
-      </select>
-      <button type="button" onclick="removeClothesShipLine(${idx})" class="w-8 h-8 rounded-lg flex items-center justify-center text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20" title="${isAr ? 'إزالة' : 'Remove'}">
-        <i data-lucide="x" class="w-4 h-4"></i>
-      </button>
-      <div style="${subStyle}" class="clothes-shipment-subgrid">
-        <select oninput="onClothesShipLineVariantPick(${idx}, this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" ${product ? '' : 'disabled'} title="${isAr ? 'اللون والمقاس' : 'Color & size'}">
-          <option value="" ${selectVal === '' ? 'selected' : ''}>${product ? (isAr ? '— اللون والمقاس —' : '— color & size —') : (isAr ? 'اختر المنتج أولاً' : 'choose product first')}</option>
-          ${variants.map((v, vi) => `<option value="v:${vi}" ${selectVal === `v:${vi}` ? 'selected' : ''}>${Security.escapeHtml(clothesVariantOptionLabel(v, false))}</option>`).join('')}
-          ${product ? `<option value="new" ${selectVal === 'new' ? 'selected' : ''}>${isAr ? '+ لون/مقاس جديد' : '+ new color/size'}</option>` : ''}
-        </select>
-        <input type="number" min="0" step="1" value="${Math.max(0, Math.floor(Number(line.qty) || 0))}" oninput="onClothesShipLineField(${idx}, 'qty', this.value)" placeholder="${isAr ? 'كمية' : 'Qty'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'الكمية' : 'Quantity'}" />
-        <input type="text" inputmode="decimal" value="${Security.escapeHtml(String(line.unitCostUSD ?? ''))}" oninput="sanitizeMoneyInput(this); onClothesShipLineField(${idx}, 'unitCostUSD', this.value)" placeholder="$/1" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'تكلفة القطعة بالدولار' : 'Unit cost USD'}" />
-      </div>
-      ${isNew ? `
-      <div style="${newStyle}" class="clothes-new-variant-grid">
-        <input type="text" value="${Security.escapeHtml(String(line.color || ''))}" oninput="onClothesShipLineField(${idx}, 'color', this.value)" placeholder="${isAr ? 'اللون الجديد' : 'New color'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
-        <input type="text" value="${Security.escapeHtml(String(line.size || ''))}" oninput="onClothesShipLineField(${idx}, 'size', this.value)" placeholder="${isAr ? 'المقاس الجديد' : 'New size'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" />
-      </div>` : ''}
-    </div>
-  `;
-  }).join('');
-  if (typeof IconQueue !== 'undefined') IconQueue.schedule(wrap);
-}
-
-function onClothesShipLineVariantPick(idx, value) {
-  const line = _clothesTempShipLines[idx];
-  if (!line) return;
-  const product = getVisibleClothesProducts().find(p => p.id === line.productId);
-  if (String(value).startsWith('v:')) {
-    const v = (product?.variants || [])[Number(String(value).slice(2))];
-    if (v) {
-      line.color = String(v.color || '');
-      line.size = String(v.size || '');
-      line._newVariant = false;
-    }
-  } else if (value === 'new') {
-    line.color = '';
-    line.size = '';
-    line._newVariant = true;
-  } else {
-    line.color = '';
-    line.size = '';
-    line._newVariant = false;
+      <div class="max-w-md mx-auto mt-16 glass-panel rounded-2xl p-8 text-center" dir="${isAr ? 'rtl' : 'ltr'}">
+        <i data-lucide="cloud-off" class="w-10 h-10 mx-auto text-slate-400 mb-3"></i>
+        <p class="font-bold text-slate-800 dark:text-white">${isAr ? 'تعذر تحميل نظام الملابس' : "Couldn't load the Clothes System"}</p>
+        <p class="text-sm text-slate-500 mt-1">${isAr ? 'تحقق من الاتصال ثم أعد المحاولة.' : 'Check your connection and try again.'}</p>
+        <button onclick="retryClothesSystemLoad()" class="mt-4 px-5 py-2.5 rounded-xl font-bold text-white bg-blue-600 hover:bg-blue-700">${isAr ? 'إعادة المحاولة' : 'Retry'}</button>
+      </div>`;
   }
-  refreshClothesShipLines();
-}
-
-function onClothesShipLineField(idx, field, value) {
-  const line = _clothesTempShipLines[idx];
-  if (!line) return;
-  if (field === 'qty') {
-    line.qty = Math.max(0, Math.floor(Number(value) || 0));
-  } else if (field === 'unitCostUSD') {
-    line.unitCostUSD = String(value || '');
-  } else if (field === 'productId') {
-    line.productId = String(value || '');
-    // New product = new variant list: reset the picked color/size
-    line.color = '';
-    line.size = '';
-    line._newVariant = false;
-    // Convenience: prefill unit cost from the product's cost price when empty
-    if (!String(line.unitCostUSD || '').trim()) {
-      const p = getVisibleClothesProducts().find(x => x.id === line.productId);
-      if (p && Number(p.costUSD) > 0) line.unitCostUSD = String(p.costUSD);
-    }
-    refreshClothesShipLines();
-  } else if (field === 'color' || field === 'size') {
-    line[field] = Security.sanitizeInput(String(value || ''), { maxLength: 60 });
-  }
-}
-
-function addClothesShipLine() {
-  _clothesTempShipLines.push({ productId: '', color: '', size: '', qty: 0, unitCostUSD: '' });
-  refreshClothesShipLines();
-}
-
-function removeClothesShipLine(idx) {
-  _clothesTempShipLines.splice(idx, 1);
-  if (_clothesTempShipLines.length === 0) _clothesTempShipLines.push({ productId: '', color: '', size: '', qty: 0, unitCostUSD: '' });
-  refreshClothesShipLines();
-}
-
-// Called by handleModalSubmit for state.activeModal === 'clothes-shipment'.
-async function saveClothesShipmentFromModal() {
-  if (!clothesCanUse()) return false;
-  const isAr = clothesIsAr();
-
-  const ref = Security.sanitizeInput(String(document.getElementById('clothes-shipment-ref')?.value || ''), { maxLength: 120 }).trim();
-  const supplier = Security.sanitizeInput(String(document.getElementById('clothes-shipment-supplier')?.value || ''), { maxLength: 120 }).trim();
-  const orderedAt = String(document.getElementById('clothes-shipment-date')?.value || '').trim();
-  const shippingCostUSD = clothesParseMoney(document.getElementById('clothes-shipment-shipping')?.value);
-  const note = Security.sanitizeInput(String(document.getElementById('clothes-shipment-note')?.value || ''), { maxLength: 500 }).trim();
-
-  // Valid lines: a chosen product and a positive quantity
-  const lines = [];
-  for (const l of _clothesTempShipLines) {
-    const productId = String(l?.productId || '').trim();
-    const qty = Math.max(0, Math.floor(Number(l?.qty) || 0));
-    if (!productId || qty === 0) continue;
-    lines.push({
-      productId,
-      color: String(l?.color || '').trim(),
-      size: String(l?.size || '').trim(),
-      qty,
-      unitCostUSD: clothesParseMoney(l?.unitCostUSD)
-    });
-  }
-  if (lines.length === 0) {
-    showNotification(
-      isAr ? 'تنبيه' : 'Validation',
-      isAr ? 'أضف صنفاً واحداً على الأقل (منتج + كمية).' : 'Add at least one item (product + quantity).',
-      'error'
-    );
-    return false;
-  }
-
-  const editingId = String(document.getElementById('clothes-shipment-editing-id')?.value || '').trim();
-  const editTarget = editingId ? getVisibleClothesShipments().find(s => s.id === editingId) : null;
-  if (editingId && !editTarget) {
-    showNotification(isAr ? 'تعذّر الحفظ' : 'Cannot save', isAr ? 'تم حذف هذه الشحنة. أعد فتح القائمة.' : 'This shipment was deleted. Please reopen the list.', 'error');
-    return false;
-  }
-  if (editTarget && editTarget.status === 'Received') {
-    showNotification(isAr ? 'غير ممكن' : 'Not allowed', isAr ? 'لا يمكن تعديل شحنة مستلمة.' : 'Cannot edit a Received shipment.', 'error');
-    return false;
-  }
-
-  const payload = { ref, supplier, orderedAt, shippingCostUSD, note, lines };
-
-  if (editTarget) {
-    const saved = await updateRecord(state.clothesShipments, editTarget.id, payload);
-    if (!saved) return false;
-    showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? 'تم تحديث الشحنة.' : 'Shipment updated.', 'success');
-  } else {
-    const saved = await addRecord(state.clothesShipments, {
-      ...payload,
-      status: 'Ordered',
-      stockApplied: false,
-      receivedAt: null,
-      createdAt: new Date().toISOString()
-    });
-    if (!saved) return false;
-    showNotification(isAr ? 'تمت الإضافة' : 'Added', isAr ? 'تمت إضافة الشحنة.' : 'Shipment added.', 'success');
-  }
-  return true;
-}
-
-// ------------------------------------------
-// ORDERS TAB — outgoing customer orders
-// ------------------------------------------
-// Rules that keep stock honest (mirror of shipments, in reverse):
-// - Creating an order takes its pieces OUT of stock immediately
-//   (stockDeducted flag makes this happen exactly once).
-// - 'Returned' / 'Canceled' puts the pieces BACK; moving the order back to an
-//   active status takes them out again (fully reversible).
-// - Editing an order's lines restores the old pieces first, then deducts the
-//   new ones — stock never drifts.
-// - Returned/Canceled orders cannot be edited (re-activate first).
-
-const CLOTHES_ORDER_STATUSES = [
-  { id: 'New', label: 'New', labelAr: 'جديد', active: true, badge: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300' },
-  { id: 'On the way', label: 'On the way', labelAr: 'في الطريق', active: true, badge: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' },
-  { id: 'Delivered', label: 'Delivered', labelAr: 'تم التسليم', active: true, badge: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' },
-  { id: 'Returned', label: 'Returned', labelAr: 'مرتجع', active: false, badge: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' },
-  { id: 'Canceled', label: 'Canceled', labelAr: 'ملغى', active: false, badge: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' }
-];
-
-const CLOTHES_PAYMENT_STATUSES = [
-  { id: 'Not Paid', label: 'Not Paid', labelAr: 'غير مدفوع', badge: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' },
-  { id: 'Partially Paid', label: 'Partially Paid', labelAr: 'مدفوع جزئياً', badge: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' },
-  { id: 'Paid', label: 'Paid', labelAr: 'مدفوع', badge: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' }
-];
-
-const CLOTHES_ORDERS_PAGE_SIZE = 30;
-
-let _clothesOrderSearch = '';
-let _clothesOrderStatusFilter = 'all';
-let _clothesOrderPaymentFilter = 'all';
-let _clothesOrdersShowLimit = CLOTHES_ORDERS_PAGE_SIZE;
-let _clothesOrdersFilterFingerprint = '';
-
-function getVisibleClothesOrders() {
-  return _clothesScopeToOwner(state.clothesOrders);
-}
-
-function clothesOrderStatusMeta(statusId) {
-  return CLOTHES_ORDER_STATUSES.find(s => s.id === statusId) || CLOTHES_ORDER_STATUSES[0];
-}
-
-function clothesPaymentStatusMeta(statusId) {
-  return CLOTHES_PAYMENT_STATUSES.find(s => s.id === statusId) || CLOTHES_PAYMENT_STATUSES[0];
-}
-
-function clothesOrderIsActiveStatus(statusId) {
-  return clothesOrderStatusMeta(statusId).active === true;
-}
-
-function getClothesOrderTotals(o) {
-  const lines = Array.isArray(o?.lines) ? o.lines : [];
-  let pieces = 0;
-  let goodsLYD = 0;
-  for (const line of lines) {
-    const qty = Math.max(0, Math.floor(Number(line?.qty) || 0));
-    pieces += qty;
-    goodsLYD += qty * (Number(line?.priceLYD) || 0);
-  }
-  goodsLYD = Math.round(goodsLYD * 100) / 100;
-  const feeLYD = Math.round((Number(o?.deliveryFeeLYD) || 0) * 100) / 100;
-  const totalLYD = Math.round((goodsLYD + feeLYD) * 100) / 100;
-  const paidLYD = Math.round((Number(o?.amountPaidLYD) || 0) * 100) / 100;
-  const remainingLYD = Math.max(0, Math.round((totalLYD - paidLYD) * 100) / 100);
-  return { pieces, goodsLYD, feeLYD, totalLYD, paidLYD, remainingLYD };
-}
-
-// Estimated profit of an order in LYD: goods revenue minus goods cost
-// (cost is the USD snapshot taken at sale time, converted with the app's
-// exchange rate). Delivery fee excluded — it usually covers the courier.
-// Returns null when no exchange rate is set (never show wrong numbers).
-function getClothesOrderProfitLYD(order) {
-  const rate = getClothesExchangeRate();
-  if (rate <= 0) return null;
-  const lines = Array.isArray(order?.lines) ? order.lines : [];
-  let profit = 0;
-  for (const line of lines) {
-    const qty = Math.max(0, Math.floor(Number(line?.qty) || 0));
-    const price = Number(line?.priceLYD) || 0;
-    const costUSD = Number(line?.costUSDAtSale) || 0;
-    profit += qty * (price - costUSD * rate);
-  }
-  return Math.round(profit * 100) / 100;
-}
-
-// Add (sign=+1, restore) or remove (sign=-1, sell) an order's pieces in stock.
-async function applyClothesOrderStockDelta(order, sign) {
-  const lines = Array.isArray(order?.lines) ? order.lines : [];
-  const byProduct = new Map();
-  for (const line of lines) {
-    const pid = String(line?.productId || '');
-    if (!pid) continue;
-    if (!byProduct.has(pid)) byProduct.set(pid, []);
-    byProduct.get(pid).push(line);
-  }
-  for (const [pid, productLines] of byProduct) {
-    const product = getVisibleClothesProducts().find(p => p.id === pid);
-    if (!product) continue; // product deleted — nothing to update
-    const variants = (Array.isArray(product.variants) ? product.variants : []).map(v => ({ ...v }));
-    for (const line of productLines) {
-      const qty = Math.max(0, Math.floor(Number(line?.qty) || 0));
-      if (qty === 0) continue;
-      const color = String(line?.color || '').trim();
-      const size = String(line?.size || '').trim();
-      const match = variants.find(v =>
-        String(v?.color || '').trim().toLowerCase() === color.toLowerCase() &&
-        String(v?.size || '').trim().toLowerCase() === size.toLowerCase()
-      );
-      if (sign < 0) {
-        // Selling: the warehouse can only give what it actually has, so
-        // remember the amount REALLY removed. Restoring later puts back only
-        // that amount — an oversold order (stock floored at zero) can no
-        // longer invent phantom pieces when it is canceled or deleted.
-        const available = match ? Math.max(0, Math.floor(Number(match.qty) || 0)) : 0;
-        const taken = Math.min(qty, available);
-        if (match) match.qty = available - taken;
-        line.deductedQty = taken;
-      } else {
-        // Restoring: put back what was really removed. Orders saved before
-        // deductedQty existed restore the full quantity (old behavior).
-        const back = Number.isFinite(Number(line?.deductedQty))
-          ? Math.max(0, Math.floor(Number(line.deductedQty)))
-          : qty;
-        if (back === 0) continue;
-        if (match) {
-          match.qty = Math.max(0, Math.floor(Number(match.qty) || 0) + back);
-        }
-        // else: the variant was renamed/removed from the product AFTER this
-        // sale. Do NOT recreate it — pushing it back resurrected the deleted
-        // variant as phantom stock in the products grid. The merchant changed
-        // the variant set on purpose, so the restored pieces are dropped.
-      }
-    }
-    const productSaved = await updateRecord(state.clothesProducts, pid, { variants });
-    if (!productSaved) return false;
-  }
-  // Persist the per-line deducted amounts when the order already lives in
-  // state (new orders save their lines right after this call anyway).
-  if (order && order.id && (state.clothesOrders || []).some(o => o && o.id === order.id)) {
-    const orderSaved = await updateRecord(state.clothesOrders, order.id, { lines });
-    if (!orderSaved) return false;
-  }
-  return true;
-}
-
-async function setClothesOrderStatus(orderId, newStatus) {
-  if (!clothesCanUse()) return;
-  const isAr = clothesIsAr();
-  if (!CLOTHES_ORDER_STATUSES.some(s => s.id === newStatus)) return;
-  const order = getVisibleClothesOrders().find(o => o.id === orderId);
-  if (!order || order.status === newStatus) return;
-
-  const wasActive = clothesOrderIsActiveStatus(order.status);
-  const willBeActive = clothesOrderIsActiveStatus(newStatus);
-  const updates = { status: newStatus };
-
-  if (wasActive && !willBeActive && order.stockDeducted) {
-    const ok = confirm(isAr
-      ? 'سيتم إرجاع قطع هذا الطلب إلى المخزون. متابعة؟'
-      : 'This order\'s pieces will be RETURNED to stock. Continue?');
-    if (!ok) { updateClothesOrdersFiltered(); return; }
-    if (!isServerModeEnabled() && !await applyClothesOrderStockDelta(order, 1)) return;
-    updates.stockDeducted = false;
-  } else if (!wasActive && willBeActive && !order.stockDeducted) {
-    const ok = confirm(isAr
-      ? 'سيتم خصم قطع هذا الطلب من المخزون مرة أخرى. متابعة؟'
-      : 'This order\'s pieces will be TAKEN from stock again. Continue?');
-    if (!ok) { updateClothesOrdersFiltered(); return; }
-    if (!isServerModeEnabled() && !await applyClothesOrderStockDelta(order, -1)) return;
-    updates.stockDeducted = true;
-  }
-
-  if (newStatus === 'Delivered' && !order.deliveredAt) {
-    updates.deliveredAt = new Date().toISOString();
-  }
-
-  if (isServerModeEnabled()) {
-    let attempt = null;
-    try {
-      const expectedLastModified = getClothesOrderExpectedLastModified(order);
-      attempt = getClothesOrderMutationAttempt('status', orderId, expectedLastModified, { status: newStatus });
-      const response = await apiMutateClothesOrder({
-        action: 'status',
-        orderId,
-        expectedLastModified,
-        status: newStatus,
-        idempotencyKey: attempt.idempotencyKey
-      });
-      applyClothesOrderMutationResponse(response);
-      completeClothesOrderMutationAttempt(attempt);
-    } catch (e) {
-      showClothesOrderMutationError(e);
-      updateClothesOrdersFiltered();
-      return;
-    }
-  } else {
-    const saved = await updateRecord(state.clothesOrders, orderId, updates);
-    if (!saved) return;
-  }
-  const meta = clothesOrderStatusMeta(newStatus);
-  showNotification(
-    isAr ? 'تم التحديث' : 'Updated',
-    isAr ? `حالة الطلب الآن: ${meta.labelAr}` : `Order status is now: ${meta.label}`,
-    'success'
-  );
-  updateClothesOrdersFiltered();
-}
-
-async function setClothesOrderPayment(orderId, newPaymentStatus) {
-  if (!clothesCanUse()) return;
-  const isAr = clothesIsAr();
-  if (!CLOTHES_PAYMENT_STATUSES.some(s => s.id === newPaymentStatus)) return;
-  const order = getVisibleClothesOrders().find(o => o.id === orderId);
-  if (!order || order.paymentStatus === newPaymentStatus) return;
-
-  const totals = getClothesOrderTotals(order);
-  const updates = { paymentStatus: newPaymentStatus };
-  if (newPaymentStatus === 'Paid') {
-    updates.amountPaidLYD = totals.totalLYD; // fully paid
-    updates.paidAt = order.paidAt || new Date().toISOString();
-  } else if (newPaymentStatus === 'Not Paid') {
-    updates.amountPaidLYD = 0;
-  }
-  // 'Partially Paid' keeps the recorded amount — edit it in the order form.
-
-  if (isServerModeEnabled()) {
-    let attempt = null;
-    try {
-      const expectedLastModified = getClothesOrderExpectedLastModified(order);
-      attempt = getClothesOrderMutationAttempt('payment', orderId, expectedLastModified, { paymentStatus: newPaymentStatus });
-      const response = await apiMutateClothesOrder({
-        action: 'payment',
-        orderId,
-        expectedLastModified,
-        paymentStatus: newPaymentStatus,
-        idempotencyKey: attempt.idempotencyKey
-      });
-      applyClothesOrderMutationResponse(response);
-      completeClothesOrderMutationAttempt(attempt);
-    } catch (e) {
-      showClothesOrderMutationError(e);
-      updateClothesOrdersFiltered();
-      return;
-    }
-  } else {
-    const saved = await updateRecord(state.clothesOrders, orderId, updates);
-    if (!saved) return;
-  }
-  const meta = clothesPaymentStatusMeta(newPaymentStatus);
-  showNotification(
-    isAr ? 'تم التحديث' : 'Updated',
-    isAr ? `حالة الدفع الآن: ${meta.labelAr}` : `Payment status is now: ${meta.label}`,
-    'success'
-  );
-  updateClothesOrdersFiltered();
-}
-
-async function deleteClothesOrder(id) {
-  if (!clothesCanUse()) return;
-  const isAr = clothesIsAr();
-  const order = getVisibleClothesOrders().find(o => o.id === id);
-  if (!order) return;
-  const willRestore = order.stockDeducted === true;
-  const ok = confirm(isAr
-    ? (willRestore ? 'هل تريد حذف هذا الطلب؟ ستعود قطعه إلى المخزون.' : 'هل تريد حذف هذا الطلب؟')
-    : (willRestore ? 'Delete this order? Its pieces will return to stock.' : 'Delete this order?'));
-  if (!ok) return;
-  if (isServerModeEnabled()) {
-    let attempt = null;
-    try {
-      const expectedLastModified = getClothesOrderExpectedLastModified(order);
-      attempt = getClothesOrderMutationAttempt('delete', id, expectedLastModified, { delete: true });
-      const response = await apiMutateClothesOrder({
-        action: 'delete',
-        orderId: id,
-        expectedLastModified,
-        idempotencyKey: attempt.idempotencyKey
-      });
-      applyClothesOrderMutationResponse(response);
-      completeClothesOrderMutationAttempt(attempt);
-      showNotification(isAr ? 'تم الحذف' : 'Deleted', isAr ? 'تم حذف الطلب.' : 'Order deleted.', 'success');
-      updateClothesOrdersFiltered();
-    } catch (e) {
-      showClothesOrderMutationError(e);
-      updateClothesOrdersFiltered();
-    }
-    return;
-  }
-  if (willRestore) {
-    if (!await applyClothesOrderStockDelta(order, 1)) return;
-    if (!await updateRecord(state.clothesOrders, id, { stockDeducted: false })) return;
-  }
-  if (!await deleteRecord(state.clothesOrders, id)) return;
-  showNotification(isAr ? 'تم الحذف' : 'Deleted', isAr ? 'تم حذف الطلب.' : 'Order deleted.', 'success');
-  updateClothesOrdersFiltered();
-}
-
-function loadMoreClothesOrders() {
-  _clothesOrdersShowLimit += CLOTHES_ORDERS_PAGE_SIZE;
-  updateClothesOrdersFiltered();
-}
-
-function onClothesOrderSearchInput(el) {
-  _clothesOrderSearch = Security.sanitizeInput(String(el?.value || ''), { maxLength: 200 });
-  if (window._clothesOrderSearchTimer) clearTimeout(window._clothesOrderSearchTimer);
-  window._clothesOrderSearchTimer = setTimeout(() => updateClothesOrdersFiltered(), 80);
-}
-
-function setClothesOrderStatusFilter(value) {
-  _clothesOrderStatusFilter = String(value || 'all');
-  updateClothesOrdersFiltered();
-}
-
-function setClothesOrderPaymentFilter(value) {
-  _clothesOrderPaymentFilter = String(value || 'all');
-  updateClothesOrdersFiltered();
-}
-
-function getFilteredClothesOrders() {
-  // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
-  const q = foldSearchText(_clothesOrderSearch.trim());
-  let items = getVisibleClothesOrders();
-  if (_clothesOrderStatusFilter !== 'all') {
-    items = items.filter(o => o.status === _clothesOrderStatusFilter);
-  }
-  if (_clothesOrderPaymentFilter !== 'all') {
-    items = items.filter(o => o.paymentStatus === _clothesOrderPaymentFilter);
-  }
-  if (q) {
-    items = items.filter(o => {
-      if (foldSearchText(o.customerName).includes(q)) return true;
-      if (foldSearchText(o.customerPhone).includes(q)) return true;
-      const lines = Array.isArray(o.lines) ? o.lines : [];
-      return lines.some(line => foldSearchText(clothesProductNameById(line.productId)).includes(q));
-    });
-  }
-  return items;
-}
-
-function updateClothesOrdersFiltered() {
-  const container = document.querySelector('main');
-  if (!container || state.currentView !== 'clothes-system' || _clothesActiveTab !== 'orders') {
-    render();
-    return;
-  }
-  const template = document.createElement('template');
-  template.innerHTML = renderClothesOrdersTab();
-  const newStats = template.content.querySelector('#clothes-orders-stats');
-  const newGrid = template.content.querySelector('#clothes-orders-grid');
-  const curStats = document.getElementById('clothes-orders-stats');
-  const curGrid = document.getElementById('clothes-orders-grid');
-  if (newStats && curStats) curStats.innerHTML = newStats.innerHTML;
-  if (newGrid && curGrid) curGrid.innerHTML = newGrid.innerHTML;
-  if (typeof IconQueue !== 'undefined') IconQueue.schedule(container);
-  else lucide.createIcons();
-}
-
-function renderClothesOrdersTab() {
-  const isAr = clothesIsAr();
-  const all = getVisibleClothesOrders();
-  const filtered = getFilteredClothesOrders();
-
-  const fingerprint = JSON.stringify([_clothesOrderSearch, _clothesOrderStatusFilter, _clothesOrderPaymentFilter]);
-  if (fingerprint !== _clothesOrdersFilterFingerprint) {
-    _clothesOrdersFilterFingerprint = fingerprint;
-    _clothesOrdersShowLimit = CLOTHES_ORDERS_PAGE_SIZE;
-  }
-  const shown = filtered.slice(0, _clothesOrdersShowLimit);
-  const remaining = Math.max(0, filtered.length - shown.length);
-
-  // Stats: where the orders and the money stand
-  let onTheWay = 0, deliveredCount = 0, collectedLYD = 0, owedLYD = 0;
-  for (const o of all) {
-    const t = getClothesOrderTotals(o);
-    if (o.status === 'On the way') onTheWay++;
-    if (o.status === 'Delivered') deliveredCount++;
-    if (o.status !== 'Canceled' && o.status !== 'Returned') {
-      collectedLYD += t.paidLYD;
-      owedLYD += t.remainingLYD;
-    }
-  }
-  collectedLYD = Math.round(collectedLYD * 100) / 100;
-  owedLYD = Math.round(owedLYD * 100) / 100;
-
-  const statCard = (icon, label, value, gradient) => `
-    <div class="glass-panel rounded-2xl p-4 flex items-center gap-3">
-      <div class="w-11 h-11 rounded-xl bg-gradient-to-br ${gradient} flex items-center justify-center shadow-lg shrink-0">
-        <i data-lucide="${icon}" class="w-5 h-5 text-white"></i>
-      </div>
-      <div class="min-w-0">
-        <div class="text-xs text-slate-500 dark:text-slate-400">${label}</div>
-        <div class="text-lg font-bold text-slate-800 dark:text-white truncate">${value}</div>
-      </div>
-    </div>
-  `;
-
   return `
-    <div>
-      <div id="clothes-orders-stats" class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        ${statCard('truck', isAr ? 'في الطريق للزبون' : 'On the way', String(onTheWay), 'from-blue-500 to-cyan-500')}
-        ${statCard('package-check', isAr ? 'طلبات مُسلّمة' : 'Delivered', String(deliveredCount), 'from-emerald-500 to-green-500')}
-        ${statCard('banknote', isAr ? 'المال المحصَّل' : 'Money collected', clothesFmtLYD(collectedLYD), 'from-rose-500 to-pink-500')}
-        ${statCard('alert-triangle', isAr ? 'متبقٍ عند الزبائن' : 'Still owed', clothesFmtLYD(owedLYD), 'from-amber-400 to-orange-500')}
-      </div>
-
-      <div class="flex flex-col sm:flex-row gap-3 mb-6">
-        <div class="relative flex-1">
-          <i data-lucide="search" class="w-4 h-4 absolute top-1/2 -translate-y-1/2 ${isAr ? 'right-4' : 'left-4'} text-slate-400"></i>
-          <input
-            type="text"
-            id="clothes-order-search"
-            value="${Security.escapeHtml(_clothesOrderSearch)}"
-            oninput="onClothesOrderSearchInput(this)"
-            placeholder="${isAr ? 'ابحث باسم الزبون أو الهاتف أو المنتج...' : 'Search by customer, phone or product...'}"
-            class="w-full glass-input ${isAr ? 'pr-11 pl-4' : 'pl-11 pr-4'} py-2.5 rounded-xl"
-          />
-        </div>
-        <select onchange="setClothesOrderStatusFilter(this.value)" class="glass-input px-4 py-2.5 rounded-xl">
-          <option value="all" ${_clothesOrderStatusFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All statuses'}</option>
-          ${CLOTHES_ORDER_STATUSES.map(s => `<option value="${s.id}" ${_clothesOrderStatusFilter === s.id ? 'selected' : ''}>${isAr ? s.labelAr : s.label}</option>`).join('')}
-        </select>
-        <select onchange="setClothesOrderPaymentFilter(this.value)" class="glass-input px-4 py-2.5 rounded-xl">
-          <option value="all" ${_clothesOrderPaymentFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل حالات الدفع' : 'All payments'}</option>
-          ${CLOTHES_PAYMENT_STATUSES.map(s => `<option value="${s.id}" ${_clothesOrderPaymentFilter === s.id ? 'selected' : ''}>${isAr ? s.labelAr : s.label}</option>`).join('')}
-        </select>
-        <button onclick="exportClothesOrdersCSV()" class="glass-panel px-3 py-2.5 rounded-xl text-slate-600 dark:text-slate-300 hover:text-rose-600 flex items-center justify-center" title="${isAr ? 'تصدير CSV (إكسل)' : 'Export CSV (Excel)'}">
-          <i data-lucide="download" class="w-4 h-4"></i>
-        </button>
-        <button onclick="showClothesOrderModal()" class="btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-5 py-2.5 rounded-xl font-bold shadow-lg hover:shadow-xl flex items-center justify-center gap-2">
-          <i data-lucide="plus" class="w-4 h-4"></i>
-          ${isAr ? 'طلب جديد' : 'New Order'}
-        </button>
-      </div>
-
-      <div id="clothes-orders-grid">
-        ${shown.length === 0 ? `
-          <div class="glass-panel rounded-2xl p-12 text-center">
-            <div class="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-rose-500 to-pink-500 flex items-center justify-center mb-4 shadow-xl opacity-80">
-              <i data-lucide="shopping-bag" class="w-8 h-8 text-white"></i>
-            </div>
-            <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-1">
-              ${all.length === 0 ? (isAr ? 'لا توجد طلبات بعد' : 'No orders yet') : (isAr ? 'لا توجد نتائج' : 'No results')}
-            </h3>
-            <p class="text-sm text-slate-500 dark:text-slate-400">
-              ${all.length === 0
-                ? (isAr ? 'أنشئ طلباً عندما يشتري منك زبون.' : 'Create an order when a customer buys from you.')
-                : (isAr ? 'جرّب بحثاً أو فلتراً آخر.' : 'Try a different search or filter.')}
-            </p>
-          </div>
-        ` : `
-          <div class="text-sm text-slate-500 dark:text-slate-400 mb-3">
-            ${isAr ? `عرض ${shown.length} من ${filtered.length} طلب` : `Showing ${shown.length} of ${filtered.length} orders`}
-          </div>
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            ${shown.map(o => renderClothesOrderCard(o)).join('')}
-          </div>
-          ${remaining > 0 ? `
-            <div class="text-center mt-6">
-              <button onclick="loadMoreClothesOrders()" class="glass-panel px-6 py-2.5 rounded-xl font-medium text-slate-600 dark:text-slate-300 hover:text-rose-600">
-                ${isAr ? `عرض المزيد (${remaining} متبقي)` : `Load more (${remaining} remaining)`}
-              </button>
-            </div>
-          ` : ''}
-        `}
-      </div>
-    </div>
-  `;
-}
-
-function renderClothesOrderCard(o) {
-  const isAr = clothesIsAr();
-  const meta = clothesOrderStatusMeta(o.status);
-  const payMeta = clothesPaymentStatusMeta(o.paymentStatus);
-  const totals = getClothesOrderTotals(o);
-  const lines = Array.isArray(o.lines) ? o.lines : [];
-  const editable = clothesOrderIsActiveStatus(o.status);
-
-  const lineSummary = lines.slice(0, 3).map(line => {
-    const bits = [clothesProductNameById(line.productId)];
-    const variant = [line.color, line.size].map(x => String(x || '').trim()).filter(Boolean).join('/');
-    if (variant) bits.push(variant);
-    return `${Security.escapeHtml(bits.join(' '))} ×${Math.max(0, Math.floor(Number(line.qty) || 0))}`;
-  }).join(isAr ? '، ' : ', ') + (lines.length > 3 ? (isAr ? ` +${lines.length - 3} أخرى` : ` +${lines.length - 3} more`) : '');
-
-  return `
-    <div class="glass-panel rounded-2xl p-5">
-      <div class="flex items-start justify-between gap-3">
-        <div class="min-w-0">
-          <h4 class="font-bold text-slate-800 dark:text-white truncate">
-            ${o.orderNo ? `<span class="text-rose-500">#${String(Math.floor(Number(o.orderNo))).padStart(4, '0')}</span> ` : ''}${Security.escapeHtml(o.customerName || '')}
-          </h4>
-          ${o.customerPhone ? `<p class="text-sm text-slate-500 dark:text-slate-400 truncate" dir="ltr">${Security.escapeHtml(o.customerPhone)}</p>` : ''}
-        </div>
-        <div class="flex flex-col items-end gap-1">
-          <span class="px-2.5 py-1 rounded-full text-xs font-bold whitespace-nowrap ${meta.badge}">${isAr ? meta.labelAr : meta.label}</span>
-          <span class="px-2.5 py-1 rounded-full text-xs font-bold whitespace-nowrap ${payMeta.badge}">${isAr ? payMeta.labelAr : payMeta.label}</span>
-        </div>
-      </div>
-
-      <div class="mt-3 space-y-1.5 text-sm">
-        <div class="flex justify-between gap-2">
-          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'القطع' : 'Pieces'}</span>
-          <span class="font-medium text-slate-700 dark:text-slate-200">${totals.pieces}</span>
-        </div>
-        <div class="flex justify-between gap-2">
-          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'البضاعة + التوصيل' : 'Goods + delivery'}</span>
-          <span class="font-medium text-slate-700 dark:text-slate-200">${clothesFmtLYD(totals.goodsLYD)} + ${clothesFmtLYD(totals.feeLYD)}</span>
-        </div>
-        <div class="flex justify-between gap-2">
-          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'الإجمالي' : 'Total'}</span>
-          <span class="font-bold text-rose-600 dark:text-rose-400">${clothesFmtLYD(totals.totalLYD)}</span>
-        </div>
-        <div class="flex justify-between gap-2">
-          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'المدفوع / المتبقي' : 'Paid / remaining'}</span>
-          <span class="font-medium">
-            <span class="text-emerald-600 dark:text-emerald-400">${clothesFmtLYD(totals.paidLYD)}</span>
-            <span class="text-slate-400"> / </span>
-            <span class="${totals.remainingLYD > 0 ? 'text-red-600 dark:text-red-400 font-bold' : 'text-slate-500'}">${clothesFmtLYD(totals.remainingLYD)}</span>
-          </span>
-        </div>
-        ${(() => {
-          const profit = getClothesOrderProfitLYD(o);
-          if (profit === null) return '';
-          return `
-        <div class="flex justify-between gap-2">
-          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'الربح التقديري' : 'Est. profit'}</span>
-          <span class="font-bold ${profit >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}">${clothesFmtLYD(profit)}</span>
-        </div>`;
-        })()}
-        ${o.deliveredAt ? `
-        <div class="flex justify-between gap-2">
-          <span class="text-slate-500 dark:text-slate-400">${isAr ? 'تاريخ التسليم' : 'Delivered at'}</span>
-          <span class="font-medium text-emerald-600 dark:text-emerald-400">${Security.escapeHtml(String(o.deliveredAt).split('T')[0])}</span>
-        </div>` : ''}
-      </div>
-
-      ${lines.length ? `<p class="mt-3 text-xs text-slate-500 dark:text-slate-400">${lineSummary}</p>` : ''}
-      ${o.note ? `<p class="mt-2 text-xs text-slate-400 dark:text-slate-500 line-clamp-2">${Security.escapeHtml(o.note)}</p>` : ''}
-
-      <div class="flex items-center gap-2 mt-4 pt-3 border-t border-slate-200 dark:border-slate-700">
-        <select onchange="setClothesOrderStatus('${o.id}', this.value)" class="glass-input px-2 py-1.5 rounded-lg text-sm flex-1" title="${isAr ? 'حالة التوصيل' : 'Delivery status'}">
-          ${CLOTHES_ORDER_STATUSES.map(st => `<option value="${st.id}" ${o.status === st.id ? 'selected' : ''}>${isAr ? st.labelAr : st.label}</option>`).join('')}
-        </select>
-        <select onchange="setClothesOrderPayment('${o.id}', this.value)" class="glass-input px-2 py-1.5 rounded-lg text-sm flex-1" title="${isAr ? 'حالة الدفع' : 'Payment status'}">
-          ${CLOTHES_PAYMENT_STATUSES.map(st => `<option value="${st.id}" ${o.paymentStatus === st.id ? 'selected' : ''}>${isAr ? st.labelAr : st.label}</option>`).join('')}
-        </select>
-        <button onclick="printClothesOrderSlip('${o.id}')" class="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800" title="${isAr ? 'طباعة إيصال' : 'Print slip'}">
-          <i data-lucide="printer" class="w-4 h-4"></i>
-        </button>
-        ${editable ? `
-          <button onclick="editClothesOrder('${o.id}')" class="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800" title="${isAr ? 'تعديل' : 'Edit'}">
-            <i data-lucide="pencil" class="w-4 h-4"></i>
-          </button>
-        ` : ''}
-        <button onclick="deleteClothesOrder('${o.id}')" class="p-2 rounded-lg text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20" title="${isAr ? 'حذف' : 'Delete'}">
-          <i data-lucide="trash-2" class="w-4 h-4"></i>
-        </button>
-      </div>
-    </div>
-  `;
-}
-
-// ------------------------------------------
-// ORDER MODAL (add / edit)
-// ------------------------------------------
-
-let _clothesTempOrderLines = [];
-
-function showClothesOrderModal() {
-  if (!clothesCanUse()) return;
-  state.activeModal = 'clothes-order';
-  state.modalData = null;
-  _clothesTempOrderLines = [{ productId: '', color: '', size: '', qty: 1, priceLYD: '' }];
-  updateUrlParams({ modal: 'clothes-order', id: 'new' }); // URL tracking
-  renderModal();
-}
-
-function editClothesOrder(id) {
-  if (!clothesCanUse()) return;
-  const order = getVisibleClothesOrders().find(o => o.id === id);
-  if (!order) return;
-  if (!clothesOrderIsActiveStatus(order.status)) {
-    showNotification(
-      clothesIsAr() ? 'غير ممكن' : 'Not allowed',
-      clothesIsAr() ? 'لا يمكن تعديل طلب مرتجع أو ملغى — أعد تفعيله أولاً.' : 'Cannot edit a Returned/Canceled order — re-activate it first.',
-      'error'
-    );
-    return;
-  }
-  state.activeModal = 'clothes-order';
-  state.modalData = order;
-  updateUrlParams({ modal: 'clothes-order', id }); // URL tracking
-  const lines = Array.isArray(order.lines) ? order.lines : [];
-  _clothesTempOrderLines = lines.length
-    ? lines.map(l => ({
-        productId: String(l?.productId || ''),
-        color: String(l?.color || ''),
-        size: String(l?.size || ''),
-        qty: Math.max(0, Math.floor(Number(l?.qty) || 0)),
-        priceLYD: String(l?.priceLYD ?? ''),
-        // Carry the historical cost snapshot: if this line's product was
-        // deleted meanwhile, saving the edit must NOT wipe the cost to 0
-        // (which would inflate the order's profit numbers).
-        costUSDAtSale: Number(l?.costUSDAtSale) || 0
-      }))
-    : [{ productId: '', color: '', size: '', qty: 1, priceLYD: '' }];
-  renderModal();
-}
-
-function renderClothesOrderModal() {
-  const isAr = clothesIsAr();
-  const data = state.modalData || {};
-  const isEdit = state.modalData !== null;
-  const payStatus = data.paymentStatus || 'Not Paid';
-
-  return `
-    <h2 class="text-2xl font-bold mb-4 flex items-center gap-2">
-      <i data-lucide="shopping-bag" class="w-6 h-6 text-rose-500"></i>
-      ${isEdit ? (isAr ? 'تعديل طلب' : 'Edit Order') : (isAr ? 'طلب جديد' : 'New Order')}
-    </h2>
-    <form id="modal-form" class="space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar ${isAr ? 'pl-2' : 'pr-2'}">
-      <input type="hidden" id="clothes-order-editing-id" value="${Security.escapeHtml(String(isEdit ? (data.id || '') : ''))}" />
-
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="block text-sm font-medium mb-2">${isAr ? 'اسم الزبون *' : 'Customer name *'}</label>
-          <input type="text" id="clothes-order-customer" value="${Security.escapeHtml(data.customerName || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isAr ? 'الاسم' : 'Name'}" />
-        </div>
-        <div>
-          <label class="block text-sm font-medium mb-2">${isAr ? 'الهاتف' : 'Phone'}</label>
-          <input type="text" id="clothes-order-phone" value="${Security.escapeHtml(data.customerPhone || '')}" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="09..." dir="ltr" />
-        </div>
-      </div>
-
-      <div>
-        <label class="block text-sm font-medium mb-2">${isAr ? 'القطع المطلوبة *' : 'Order items *'}</label>
-        <div id="clothes-order-lines" class="space-y-2"></div>
-        <button type="button" onclick="addClothesOrderLine()" class="mt-2 flex items-center gap-1.5 text-sm font-medium text-rose-600 hover:text-rose-700">
-          <i data-lucide="plus" class="w-4 h-4"></i>${isAr ? 'إضافة قطعة' : 'Add item'}
-        </button>
-      </div>
-
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="block text-sm font-medium mb-2">${isAr ? 'رسوم التوصيل (دينار)' : 'Delivery fee (LYD)'}</label>
-          <input type="text" inputmode="decimal" id="clothes-order-fee" value="${Security.escapeHtml(String(data.deliveryFeeLYD ?? ''))}" oninput="sanitizeMoneyInput(this); updateClothesOrderModalTotal()" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="0.00" />
-        </div>
-        <div>
-          <label class="block text-sm font-medium mb-2">${isAr ? 'الإجمالي' : 'Total'}</label>
-          <div id="clothes-order-modal-total" class="w-full px-4 py-2 rounded-xl bg-rose-50 dark:bg-rose-900/20 font-bold text-rose-600 dark:text-rose-400">0.00 LYD</div>
-        </div>
-      </div>
-
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="block text-sm font-medium mb-2">${isAr ? 'حالة الدفع' : 'Payment status'}</label>
-          <select id="clothes-order-paystatus" class="w-full glass-input px-4 py-2 rounded-xl">
-            ${CLOTHES_PAYMENT_STATUSES.map(s => `<option value="${s.id}" ${payStatus === s.id ? 'selected' : ''}>${isAr ? s.labelAr : s.label}</option>`).join('')}
-          </select>
-        </div>
-        <div>
-          <label class="block text-sm font-medium mb-2">${isAr ? 'المبلغ المدفوع (دينار)' : 'Amount paid (LYD)'}</label>
-          <input type="text" inputmode="decimal" id="clothes-order-paid" value="${Security.escapeHtml(String(data.amountPaidLYD ?? ''))}" oninput="sanitizeMoneyInput(this)" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="0.00" />
-        </div>
-      </div>
-
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="block text-sm font-medium mb-2">${isAr ? 'طريقة الدفع' : 'Payment method'}</label>
-          <input type="text" id="clothes-order-method" list="clothes-pay-methods" value="${Security.escapeHtml(data.paymentMethod || '')}" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isAr ? 'نقداً، تحويل...' : 'Cash, transfer...'}" />
-          <datalist id="clothes-pay-methods">
-            <option value="${isAr ? 'نقداً' : 'Cash'}"></option>
-            <option value="${isAr ? 'تحويل بنكي' : 'Bank transfer'}"></option>
-            <option value="${isAr ? 'بطاقة' : 'Card'}"></option>
-          </datalist>
-        </div>
-        <div>
-          <label class="block text-sm font-medium mb-2">${isAr ? 'ملاحظة' : 'Note'}</label>
-          <input type="text" id="clothes-order-note" value="${Security.escapeHtml(data.note || '')}" class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${isAr ? 'اختياري' : 'Optional'}" />
-        </div>
-      </div>
-
-      <div class="flex gap-3 pt-2">
-        <button type="submit" class="flex-1 btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-6 py-3 rounded-xl font-bold shadow-lg">
-          ${isEdit ? (isAr ? 'حفظ التعديلات' : 'Save Changes') : (isAr ? 'إنشاء الطلب' : 'Create Order')}
-        </button>
-        <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600">
-          ${isAr ? 'إلغاء' : 'Cancel'}
-        </button>
-      </div>
-    </form>
-  `;
-}
-
-function refreshClothesOrderLines() {
-  const isAr = clothesIsAr();
-  const wrap = document.getElementById('clothes-order-lines');
-  if (!wrap) return;
-  const products = getVisibleClothesProducts();
-  const rowStyle = 'display:grid;gap:0.5rem;align-items:center;';
-  const subStyle = 'grid-column:1 / -1;display:grid;gap:0.5rem;align-items:center;';
-  const cellStyle = 'width:100%;min-width:0;';
-  wrap.innerHTML = _clothesTempOrderLines.map((line, idx) => {
-    const product = products.find(p => p.id === line.productId);
-    const variants = Array.isArray(product?.variants) ? product.variants : [];
-    const matchIdx = product ? findClothesVariantIndex(product, line.color, line.size) : -1;
-    return `
-    <div style="${rowStyle}" class="clothes-line-row pb-2 border-b border-slate-100 dark:border-slate-800">
-      <select oninput="onClothesOrderLineField(${idx}, 'productId', this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm">
-        <option value="">${isAr ? '— اختر المنتج —' : '— choose product —'}</option>
-        ${products.map(p => `<option value="${p.id}" ${line.productId === p.id ? 'selected' : ''}>${Security.escapeHtml(p.name || '')}</option>`).join('')}
-      </select>
-      <button type="button" onclick="removeClothesOrderLine(${idx})" class="w-8 h-8 rounded-lg flex items-center justify-center text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20" title="${isAr ? 'إزالة' : 'Remove'}">
-        <i data-lucide="x" class="w-4 h-4"></i>
-      </button>
-      <div style="${subStyle}" class="clothes-order-subgrid">
-        <select oninput="onClothesOrderLineVariantPick(${idx}, this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" ${product && variants.length ? '' : 'disabled'} title="${isAr ? 'اللون والمقاس' : 'Color & size'}">
-          <option value="" ${matchIdx < 0 ? 'selected' : ''}>${!product
-            ? (isAr ? 'اختر المنتج أولاً' : 'choose product first')
-            : (variants.length ? (isAr ? '— اللون والمقاس —' : '— color & size —') : (isAr ? 'لا مخزون لهذا المنتج' : 'no stock for this product'))}</option>
-          ${variants.map((v, vi) => `<option value="v:${vi}" ${matchIdx === vi ? 'selected' : ''}>${Security.escapeHtml(clothesVariantOptionLabel(v, true))}</option>`).join('')}
-        </select>
-        <input type="number" min="0" step="1" value="${Math.max(0, Math.floor(Number(line.qty) || 0))}" oninput="onClothesOrderLineField(${idx}, 'qty', this.value)" placeholder="${isAr ? 'كمية' : 'Qty'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'الكمية' : 'Quantity'}" />
-        <input type="text" inputmode="decimal" value="${Security.escapeHtml(String(line.priceLYD ?? ''))}" oninput="sanitizeMoneyInput(this); onClothesOrderLineField(${idx}, 'priceLYD', this.value)" placeholder="${isAr ? 'سعر/1' : 'LYD/1'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'سعر القطعة بالدينار' : 'Unit price LYD'}" />
-      </div>
-    </div>
-  `;
-  }).join('');
-  if (typeof IconQueue !== 'undefined') IconQueue.schedule(wrap);
-  updateClothesOrderModalTotal();
-}
-
-function onClothesOrderLineVariantPick(idx, value) {
-  const line = _clothesTempOrderLines[idx];
-  if (!line) return;
-  const product = getVisibleClothesProducts().find(p => p.id === line.productId);
-  if (String(value).startsWith('v:')) {
-    const v = (product?.variants || [])[Number(String(value).slice(2))];
-    if (v) {
-      line.color = String(v.color || '');
-      line.size = String(v.size || '');
-    }
-  } else {
-    line.color = '';
-    line.size = '';
-  }
-  refreshClothesOrderLines();
-}
-
-function onClothesOrderLineField(idx, field, value) {
-  const line = _clothesTempOrderLines[idx];
-  if (!line) return;
-  if (field === 'qty') {
-    line.qty = Math.max(0, Math.floor(Number(value) || 0));
-  } else if (field === 'priceLYD') {
-    line.priceLYD = String(value || '');
-  } else if (field === 'productId') {
-    line.productId = String(value || '');
-    // New product = new variant list: reset the picked color/size
-    line.color = '';
-    line.size = '';
-    // A different product has a different cost — drop the frozen cost snapshot
-    // so saveClothesOrderFromModal re-snapshots from the NEW product's cost.
-    // Without this, swapping a line's product on an existing order kept the old
-    // product's cost and reported wrong (even sign-flipped) profit.
-    delete line.costUSDAtSale;
-    // Convenience: prefill unit price from the product's selling price when empty
-    if (!String(line.priceLYD || '').trim()) {
-      const p = getVisibleClothesProducts().find(x => x.id === line.productId);
-      if (p && Number(p.priceLYD) > 0) line.priceLYD = String(p.priceLYD);
-    }
-    refreshClothesOrderLines();
-    return;
-  }
-  updateClothesOrderModalTotal();
-}
-
-function addClothesOrderLine() {
-  _clothesTempOrderLines.push({ productId: '', color: '', size: '', qty: 1, priceLYD: '' });
-  refreshClothesOrderLines();
-}
-
-function removeClothesOrderLine(idx) {
-  _clothesTempOrderLines.splice(idx, 1);
-  if (_clothesTempOrderLines.length === 0) _clothesTempOrderLines.push({ productId: '', color: '', size: '', qty: 1, priceLYD: '' });
-  refreshClothesOrderLines();
-}
-
-function updateClothesOrderModalTotal() {
-  const el = document.getElementById('clothes-order-modal-total');
-  if (!el) return;
-  let goods = 0;
-  for (const line of _clothesTempOrderLines) {
-    goods += Math.max(0, Math.floor(Number(line.qty) || 0)) * (clothesParseMoney(line.priceLYD) || 0);
-  }
-  const fee = clothesParseMoney(document.getElementById('clothes-order-fee')?.value);
-  el.textContent = clothesFmtLYD(Math.round((goods + fee) * 100) / 100);
-}
-
-// Printable bilingual order slip (uses the app's print-single/.print-target
-// mechanism — see printReceiptCard for the original pattern).
-function printClothesOrderSlip(orderId) {
-  const order = getVisibleClothesOrders().find(o => o.id === orderId);
-  if (!order) return;
-  const isAr = clothesIsAr();
-  // FB/IG in-app browsers silently no-op window.print(); warn instead of
-  // arming print listeners that will never fire (same guard as printReceiptCard).
-  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
-    if (typeof notifyInAppBrowserLimitation === 'function') notifyInAppBrowserLimitation('print');
-    return;
-  }
-  const totals = getClothesOrderTotals(order);
-  const lines = Array.isArray(order.lines) ? order.lines : [];
-  const payMeta = clothesPaymentStatusMeta(order.paymentStatus);
-  const orderNoLabel = order.orderNo ? `#${String(Math.floor(Number(order.orderNo))).padStart(4, '0')}` : '';
-  const dateLabel = String(order.createdAt || '').split('T')[0] || '';
-
-  const rowsHtml = lines.map((line, i) => {
-    const variant = [line.color, line.size].map(x => String(x || '').trim()).filter(Boolean).join(' · ');
-    const qty = Math.max(0, Math.floor(Number(line.qty) || 0));
-    const price = Number(line.priceLYD) || 0;
-    return `
-      <tr>
-        <td style="border:1px solid #cbd5e1;padding:6px 8px;text-align:center;">${i + 1}</td>
-        <td style="border:1px solid #cbd5e1;padding:6px 8px;">${Security.escapeHtml(clothesProductNameById(line.productId))}${variant ? ` — ${Security.escapeHtml(variant)}` : ''}</td>
-        <td style="border:1px solid #cbd5e1;padding:6px 8px;text-align:center;">${qty}</td>
-        <td style="border:1px solid #cbd5e1;padding:6px 8px;text-align:center;">${price.toFixed(2)}</td>
-        <td style="border:1px solid #cbd5e1;padding:6px 8px;text-align:center;">${(qty * price).toFixed(2)}</td>
-      </tr>`;
-  }).join('');
-
-  const moneyRow = (label, value, bold) => `
-    <div style="display:flex;justify-content:space-between;padding:3px 0;${bold ? 'font-weight:bold;font-size:15px;border-top:1px solid #cbd5e1;margin-top:4px;padding-top:6px;' : ''}">
-      <span>${label}</span><span>${value}</span>
+    <div class="max-w-md mx-auto mt-16 glass-panel rounded-2xl p-8 text-center" dir="${isAr ? 'rtl' : 'ltr'}">
+      <div class="w-8 h-8 mx-auto mb-3 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+      <p class="text-sm text-slate-500">${isAr ? 'جاري تحميل نظام الملابس…' : 'Loading the Clothes System…'}</p>
     </div>`;
-
-  document.querySelectorAll('.clothes-print-slip').forEach(el => el.remove());
-  const slip = document.createElement('div');
-  slip.className = 'clothes-print-slip print-target';
-  slip.dir = isAr ? 'rtl' : 'ltr';
-  slip.innerHTML = `
-    <div style="padding:18px;font-family:inherit;font-size:13px;">
-      <div style="display:flex;justify-content:space-between;align-items:baseline;border-bottom:2px solid #0f172a;padding-bottom:8px;margin-bottom:10px;">
-        <div style="font-size:20px;font-weight:bold;">${isAr ? 'إيصال طلب' : 'Order Slip'} ${orderNoLabel}</div>
-        <div>${Security.escapeHtml(dateLabel)}</div>
-      </div>
-      <div style="margin-bottom:10px;">
-        <div><strong>${isAr ? 'الزبون:' : 'Customer:'}</strong> ${Security.escapeHtml(order.customerName || '')}</div>
-        ${order.customerPhone ? `<div><strong>${isAr ? 'الهاتف:' : 'Phone:'}</strong> <span dir="ltr">${Security.escapeHtml(order.customerPhone)}</span></div>` : ''}
-      </div>
-      <table style="width:100%;border-collapse:collapse;margin-bottom:10px;">
-        <thead>
-          <tr style="background:#f1f5f9;">
-            <th style="border:1px solid #cbd5e1;padding:6px 8px;">#</th>
-            <th style="border:1px solid #cbd5e1;padding:6px 8px;text-align:${isAr ? 'right' : 'left'};">${isAr ? 'الصنف' : 'Item'}</th>
-            <th style="border:1px solid #cbd5e1;padding:6px 8px;">${isAr ? 'الكمية' : 'Qty'}</th>
-            <th style="border:1px solid #cbd5e1;padding:6px 8px;">${isAr ? 'السعر' : 'Price'}</th>
-            <th style="border:1px solid #cbd5e1;padding:6px 8px;">${isAr ? 'المجموع' : 'Total'}</th>
-          </tr>
-        </thead>
-        <tbody>${rowsHtml}</tbody>
-      </table>
-      <div style="max-width:280px;margin-${isAr ? 'right' : 'left'}:auto;">
-        ${moneyRow(isAr ? 'البضاعة' : 'Goods', clothesFmtLYD(totals.goodsLYD), false)}
-        ${moneyRow(isAr ? 'التوصيل' : 'Delivery', clothesFmtLYD(totals.feeLYD), false)}
-        ${moneyRow(isAr ? 'الإجمالي' : 'TOTAL', clothesFmtLYD(totals.totalLYD), true)}
-        ${moneyRow(isAr ? 'المدفوع' : 'Paid', clothesFmtLYD(totals.paidLYD), false)}
-        ${moneyRow(isAr ? 'المتبقي' : 'Remaining', clothesFmtLYD(totals.remainingLYD), false)}
-        ${moneyRow(isAr ? 'حالة الدفع' : 'Payment', `${isAr ? payMeta.labelAr : payMeta.label}${order.paymentMethod ? ` (${Security.escapeHtml(order.paymentMethod)})` : ''}`, false)}
-      </div>
-      <div style="text-align:center;margin-top:16px;color:#64748b;">${isAr ? 'شكراً لتسوقكم معنا' : 'Thank you for your business'}</div>
-    </div>
-  `;
-  document.body.appendChild(slip);
-  document.body.classList.add('print-single');
-  // Phones don't block on window.print(): the native print sheet stays open
-  // while page JS keeps running, afterprint fires during pagination (sheet
-  // still up), and WebKit/Blink re-paginate from the LIVE DOM whenever the
-  // user picks a printer or changes paper/range in that sheet. The old
-  // afterprint/3s-timer cleanup therefore tore the slip down mid-preview and
-  // a re-paginated print regressed to the full app page. Instead: re-apply
-  // the print markup on every beforeprint pass, and only tear down on the
-  // first user interaction with the page — impossible while the native sheet
-  // covers it — with a long timer as the last-resort fallback for webviews
-  // that fire no print events at all. Harmless meanwhile: every
-  // .print-single/.print-target rule lives inside @media print and the slip
-  // node is parked off-screen, so the lingering markup has zero on-screen
-  // effect.
-  const applyPrintMarkup = () => {
-    if (!slip.isConnected) document.body.appendChild(slip);
-    document.body.classList.add('print-single');
-  };
-  let cleanupTimer = 0;
-  const cleanup = () => {
-    document.body.classList.remove('print-single');
-    slip.remove();
-    window.removeEventListener('beforeprint', applyPrintMarkup);
-    window.removeEventListener('pointerdown', cleanup, true);
-    window.removeEventListener('keydown', cleanup, true);
-    clearTimeout(cleanupTimer);
-  };
-  window.addEventListener('beforeprint', applyPrintMarkup);
-  // keydown also disarms so a follow-up Ctrl+P prints the full page again.
-  window.addEventListener('pointerdown', cleanup, { once: true, capture: true });
-  window.addEventListener('keydown', cleanup, { once: true, capture: true });
-  cleanupTimer = setTimeout(cleanup, 60000);
-  window.print();
 }
 
-// Checks stock for the requested lines; returns a human list of shortages.
-function getClothesOrderStockShortages(lines) {
-  // Aggregate requested quantity per product+variant BEFORE comparing to
-  // stock. Two lines for the same Red/M each ≤ stock individually still
-  // oversell when their sum exceeds stock — the deduction is cumulative, so
-  // the check must be too.
-  const requestedByKey = new Map();
-  for (const line of lines) {
-    const key = `${line.productId}||${String(line.color || '').trim().toLowerCase()}||${String(line.size || '').trim().toLowerCase()}`;
-    const prev = requestedByKey.get(key) || { line, qty: 0 };
-    prev.qty += Math.max(0, Math.floor(Number(line.qty) || 0));
-    requestedByKey.set(key, prev);
-  }
-  const shortages = [];
-  for (const { line, qty } of requestedByKey.values()) {
-    const product = getVisibleClothesProducts().find(p => p.id === line.productId);
-    if (!product) continue;
-    const variants = Array.isArray(product.variants) ? product.variants : [];
-    const match = variants.find(v =>
-      String(v?.color || '').trim().toLowerCase() === String(line.color || '').trim().toLowerCase() &&
-      String(v?.size || '').trim().toLowerCase() === String(line.size || '').trim().toLowerCase()
-    );
-    const available = match ? Math.max(0, Math.floor(Number(match.qty) || 0)) : 0;
-    if (qty > available) {
-      const variant = [line.color, line.size].filter(Boolean).join('/');
-      shortages.push(`${product.name}${variant ? ' ' + variant : ''}: ${available} ${clothesIsAr() ? 'متوفر' : 'available'}, ${qty} ${clothesIsAr() ? 'مطلوب' : 'requested'}`);
-    }
-  }
-  return shortages;
-}
-
-// Called by handleModalSubmit for state.activeModal === 'clothes-order'.
-async function saveClothesOrderFromModal() {
-  if (!clothesCanUse()) return false;
-  const isAr = clothesIsAr();
-
-  const customerName = Security.sanitizeInput(String(document.getElementById('clothes-order-customer')?.value || ''), { maxLength: 120 }).trim();
-  if (!customerName) {
-    showNotification(isAr ? 'تنبيه' : 'Validation', isAr ? 'اسم الزبون مطلوب' : 'Customer name is required', 'error');
-    return false;
-  }
-  const customerPhone = Security.sanitizeInput(String(document.getElementById('clothes-order-phone')?.value || ''), { maxLength: 40 }).trim();
-  const deliveryFeeLYD = clothesParseMoney(document.getElementById('clothes-order-fee')?.value);
-  const paymentStatus = String(document.getElementById('clothes-order-paystatus')?.value || 'Not Paid');
-  let amountPaidLYD = clothesParseMoney(document.getElementById('clothes-order-paid')?.value);
-  const paymentMethod = Security.sanitizeInput(String(document.getElementById('clothes-order-method')?.value || ''), { maxLength: 60 }).trim();
-  const note = Security.sanitizeInput(String(document.getElementById('clothes-order-note')?.value || ''), { maxLength: 500 }).trim();
-
-  const lines = [];
-  for (const l of _clothesTempOrderLines) {
-    const productId = String(l?.productId || '').trim();
-    const qty = Math.max(0, Math.floor(Number(l?.qty) || 0));
-    if (!productId || qty === 0) continue;
-    const product = getVisibleClothesProducts().find(p => p.id === productId)
-      // Deleted products keep their historical cost for the snapshot.
-      || (state.clothesProducts || []).find(p => p && p.id === productId);
-    // Cost snapshot: FROZEN at sale time so profit stays correct even if the
-    // product's cost price changes later. An existing line already carries its
-    // snapshot — keep it, so editing an order for an unrelated reason (e.g.
-    // fixing a phone number) never silently rewrites historical profit. Only a
-    // newly-added line takes the current product cost. (A line whose product
-    // was deleted also keeps its snapshot via the same branch.)
-    const prevSnap = Number(l?.costUSDAtSale);
-    const hasPrevSnap = Number.isFinite(prevSnap);
-    lines.push({
-      productId,
-      color: String(l?.color || '').trim(),
-      size: String(l?.size || '').trim(),
-      qty,
-      priceLYD: clothesParseMoney(l?.priceLYD),
-      costUSDAtSale: hasPrevSnap
-        ? Math.round(prevSnap * 100) / 100
-        : (product ? Math.round(((Number(product.costUSD) || 0)) * 100) / 100 : 0)
-    });
-  }
-  if (lines.length === 0) {
-    showNotification(isAr ? 'تنبيه' : 'Validation', isAr ? 'أضف قطعة واحدة على الأقل (منتج + كمية).' : 'Add at least one item (product + quantity).', 'error');
-    return false;
-  }
-
-  // A product that has colors/sizes must have one picked (dropdown), so the
-  // deduction can never land on a variant that does not exist.
-  for (const line of lines) {
-    const product = getVisibleClothesProducts().find(p => p.id === line.productId);
-    const variants = Array.isArray(product?.variants) ? product.variants : [];
-    if (variants.length && findClothesVariantIndex(product, line.color, line.size) === -1) {
-      showNotification(
-        isAr ? 'تنبيه' : 'Validation',
-        isAr ? `اختر اللون والمقاس للمنتج "${product.name}".` : `Choose a color & size for "${product.name}".`,
-        'error'
-      );
-      return false;
-    }
-  }
-
-  const editingId = String(document.getElementById('clothes-order-editing-id')?.value || '').trim();
-  const editTarget = editingId ? getVisibleClothesOrders().find(o => o.id === editingId) : null;
-  if (editingId && !editTarget) {
-    showNotification(isAr ? 'تعذّر الحفظ' : 'Cannot save', isAr ? 'تم حذف هذا الطلب. أعد فتح القائمة.' : 'This order was deleted. Please reopen the list.', 'error');
-    return false;
-  }
-  if (editTarget && !clothesOrderIsActiveStatus(editTarget.status)) {
-    showNotification(isAr ? 'غير ممكن' : 'Not allowed', isAr ? 'لا يمكن تعديل طلب مرتجع أو ملغى.' : 'Cannot edit a Returned/Canceled order.', 'error');
-    return false;
-  }
-
-  const totalsProbe = { lines, deliveryFeeLYD };
-  const total = getClothesOrderTotals(totalsProbe).totalLYD;
-  if (paymentStatus === 'Paid') amountPaidLYD = total;
-  if (paymentStatus === 'Not Paid') amountPaidLYD = 0;
-
-  const payload = { customerName, customerPhone, note, lines, deliveryFeeLYD, paymentStatus, amountPaidLYD, paymentMethod };
-
-  if (isServerModeEnabled()) {
-    let attempt = null;
-    try {
-      const action = editTarget ? 'update' : 'create';
-      const expectedLastModified = editTarget ? getClothesOrderExpectedLastModified(editTarget) : null;
-      attempt = getClothesOrderMutationAttempt(action, editTarget?.id || '', expectedLastModified, payload);
-      const request = {
-        action,
-        orderId: attempt.orderId,
-        idempotencyKey: attempt.idempotencyKey,
-        data: payload
-      };
-      if (editTarget) request.expectedLastModified = expectedLastModified;
-      const response = await apiMutateClothesOrder(request);
-      applyClothesOrderMutationResponse(response);
-      completeClothesOrderMutationAttempt(attempt);
-      showNotification(
-        editTarget ? (isAr ? 'تم الحفظ' : 'Saved') : (isAr ? 'تم الإنشاء' : 'Created'),
-        editTarget
-          ? (isAr ? 'تم تحديث الطلب والمخزون معاً.' : 'Order and stock updated together.')
-          : (isAr ? 'تم إنشاء الطلب وخصم القطع من المخزون.' : 'Order created and pieces taken from stock.'),
-        'success'
-      );
-      return true;
-    } catch (e) {
-      // Do not mutate local stock on failure. In particular, a 409 means the
-      // authoritative server rejected insufficient stock or a stale edit.
-      // Keeping the attempt lets a response-loss retry replay safely.
-      showClothesOrderMutationError(e);
-      return false;
-    }
-  }
-
-  // For stock checking on edit: the old pieces come back first, so check
-  // against stock as it would be AFTER restoring them.
-  if (editTarget && editTarget.stockDeducted) {
-    if (!await applyClothesOrderStockDelta(editTarget, 1)) return false; // restore old pieces
-  }
-  const shortages = getClothesOrderStockShortages(lines);
-  if (shortages.length) {
-    const ok = confirm((isAr
-      ? 'تنبيه: المخزون غير كافٍ للقطع التالية:\n\n'
-      : 'Warning: not enough stock for these items:\n\n') + shortages.join('\n') + (isAr
-      ? '\n\nهل تريد المتابعة رغم ذلك؟ (سيصبح المخزون صفراً)'
-      : '\n\nContinue anyway? (stock will floor at zero)'));
-    if (!ok) {
-      // Put the old pieces back the way they were and abort
-      if (editTarget && editTarget.stockDeducted) await applyClothesOrderStockDelta(editTarget, -1);
-      return false;
-    }
-  }
-
-  if (editTarget) {
-    if (!await applyClothesOrderStockDelta({ lines }, -1)) return false; // deduct the new pieces
-    const saved = await updateRecord(state.clothesOrders, editTarget.id, { ...payload, stockDeducted: true });
-    if (!saved) return false;
-    showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? 'تم تحديث الطلب.' : 'Order updated.', 'success');
-  } else {
-    if (!await applyClothesOrderStockDelta({ lines }, -1)) return false; // pieces leave the warehouse
-    // Sequential order number; max over ALL records (deleted included) so a
-    // number is never reused after a delete.
-    const nextNo = 1 + (state.clothesOrders || []).reduce((m, x) => Math.max(m, Math.floor(Number(x?.orderNo) || 0)), 0);
-    const saved = await addRecord(state.clothesOrders, {
-      ...payload,
-      orderNo: nextNo,
-      status: 'New',
-      stockDeducted: true,
-      deliveredAt: null,
-      paidAt: paymentStatus === 'Paid' ? new Date().toISOString() : null,
-      createdAt: new Date().toISOString()
-    });
-    if (!saved) return false;
-    showNotification(isAr ? 'تم الإنشاء' : 'Created', isAr ? 'تم إنشاء الطلب وخصم القطع من المخزون.' : 'Order created and pieces taken from stock.', 'success');
-  }
-  return true;
+// Boot kick: clothes deep links download the bundle in parallel with init()'s
+// storage work instead of waiting for first render.
+if (/^\/clothes-system(\/|$)/.test(window.location.pathname || '')
+  || /modal=clothes-/.test(window.location.search || '')) {
+  try { ensureClothesSystemLoaded(); } catch (_) {}
 }
 // ==========================================
 // ADS STUDIO LAZY LOADER (main bundle)
@@ -43064,7 +41060,9 @@ function _photoPasteTargetIsAvailable(target) {
     return state.activeModal === 'receipt' && Boolean(document.getElementById('receipt-photo-previews'));
   }
   if (target === 'clothes-product') {
-    return state.activeModal === 'clothes-product' && Boolean(document.getElementById('clothes-product-photo-input'));
+    return state.activeModal === 'clothes-product'
+      && typeof uploadClothesProductPhotoFiles === 'function'
+      && Boolean(document.getElementById('clothes-product-photo-input'));
   }
   return state.currentView === 'ads-studio'
     && typeof uploadAdsStudioCreativeFiles === 'function'

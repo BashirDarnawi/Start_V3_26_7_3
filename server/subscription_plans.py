@@ -162,11 +162,17 @@ def validate_plan_catalog(
     return clean
 
 
-def _newest_plan_record(conn: Any) -> dict[str, Any] | None:
+def _plan_records_newest_first(conn: Any) -> list[dict[str, Any]]:
+    """Every catalog record, newest first, with a DETERMINISTIC tie-break.
+
+    Two admins saving at the same moment can mint the same version number;
+    ordering by (version, id) makes every process agree on which one is live
+    instead of letting row-scan order decide.
+    """
     rows = conn.execute(
-        text("SELECT data_json FROM entities WHERE type='appSettings' AND deleted=false")
+        text("SELECT id, data_json FROM entities WHERE type='appSettings' AND deleted=false")
     ).mappings().all()
-    best: dict[str, Any] | None = None
+    found: list[tuple[int, str, dict[str, Any]]] = []
     for row in rows:
         data = json_loads(row.get("data_json") or "{}") or {}
         if str(data.get("settingKey") or "") != PLAN_SETTINGS_KEY:
@@ -175,31 +181,51 @@ def _newest_plan_record(conn: Any) -> dict[str, Any] | None:
             version = int(data.get("version") or 0)
         except (TypeError, ValueError):
             continue
-        if best is None or version > int(best.get("version") or 0):
-            best = data
-    return best
+        found.append((version, str(row.get("id") or ""), data))
+    found.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [item[2] for item in found]
+
+
+def _newest_plan_record(conn: Any) -> dict[str, Any] | None:
+    records = _plan_records_newest_first(conn)
+    return records[0] if records else None
 
 
 def load_subscription_plans(ctx: dict[str, Any], conn: Any | None = None) -> dict[str, dict[str, Any]]:
     """Defaults overlaid by the newest VALID admin catalog record.
 
-    A corrupt overlay (e.g. written through the generic route) is skipped
-    entirely — plans are never partially applied. Implicit svc:* plans stay
-    available unless the overlay explicitly redefines them.
+    Falling back to the hardcoded defaults would make every priced plan FREE,
+    so a corrupt or forged newest record is skipped in favour of the newest
+    record that still validates — the owner's real prices keep selling. Only
+    when no record ever validates do the (free) defaults apply.
     """
     if conn is not None:
-        record = _newest_plan_record(conn)
+        records = _plan_records_newest_first(conn)
     else:
         with db_conn() as own_conn:
-            record = _newest_plan_record(own_conn)
+            records = _plan_records_newest_first(own_conn)
     defaults = default_subscription_plans(ctx)
-    if not record:
-        return defaults
-    try:
-        overlay = validate_plan_catalog(record.get("plans"), None, ctx)
-    except HTTPException:
-        return defaults
-    return {**defaults, **overlay}
+    for record in records:
+        try:
+            overlay = validate_plan_catalog(record.get("plans"), None, ctx)
+        except HTTPException:
+            continue  # never let a bad record silently restore free pricing
+        return {**defaults, **overlay}
+    return defaults
+
+
+def _newest_valid_overlay(ctx: dict[str, Any], conn: Any) -> dict[str, dict[str, Any]]:
+    """Just the admin-saved plans of the newest VALID record (no defaults).
+
+    These are the ids a new save must not drop: dropping one would restore
+    its free hardcoded default.
+    """
+    for record in _plan_records_newest_first(conn):
+        try:
+            return validate_plan_catalog(record.get("plans"), None, ctx)
+        except HTTPException:
+            continue
+    return {}
 
 
 def _max_active_expiry(
@@ -235,7 +261,12 @@ def _find_purchase_group(conn: Any, idem: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for row in rows:
         data = json_loads(row.get("data_json") or "{}") or {}
-        if str(data.get("purchaseGroupId") or "") == idem or str(data.get("idempotencyKey") or "") == idem:
+        group = str(data.get("purchaseGroupId") or "")
+        # Bundle members carry a per-service key "{idem}:{serviceId}"; matching
+        # on idempotencyKey alone would let "K:clothes_system" replay ONE row of
+        # group K as a whole purchase. The second branch is only for legacy
+        # rows minted before purchaseGroupId existed.
+        if group == idem or (not group and str(data.get("idempotencyKey") or "") == idem):
             out.append(dict(row))
     return out
 
@@ -271,32 +302,15 @@ def plan_purchase_atomic(
     guard = nullcontext() if postgres else ctx["sqlite_wallet_lock"]()
     with guard:
         with db_conn() as conn:
-            plan = load_subscription_plans(ctx, conn).get(wanted_plan)
-            if not plan:
-                raise HTTPException(status_code=400, detail="Plan is not available for subscription")
-            if plan.get("active") is False:
-                raise HTTPException(status_code=409, detail="Plan is no longer sold")
-            # Currency/idempotency validation with the zero-price restore trick.
-            amount, cur, _ = ctx["validate_wallet_values"](
-                max(1, int(plan.get("priceMinor") or 0)), plan.get("currency"), idem
-            )
-            price_minor = int(plan.get("priceMinor") or 0)
-            if price_minor < 0:
-                raise HTTPException(status_code=500, detail="Invalid server plan price")
-            if price_minor == 0:
-                amount = 0
-            duration_days = int(plan.get("durationDays") or 0)
-            if duration_days < 1 or duration_days > 3660:
-                raise HTTPException(status_code=500, detail="Invalid server plan duration")
-            service_ids = [str(s) for s in (plan.get("serviceIds") or [])]
-            if not service_ids:
-                raise HTTPException(status_code=500, detail="Plan has no services")
-
             ctx["lock_and_validate_wallet_users"](conn, [target_uid], postgres=postgres)
             ctx["lock_idempotency_key"](conn, idem, postgres=postgres, namespace="subscription")
 
-            # Whole-group replay: all inserts commit in one transaction, so a
-            # replay can never observe a partial bundle.
+            # Whole-group replay FIRST, before the catalog is consulted: a
+            # committed purchase must stay confirmable even if the plan was
+            # archived or repriced afterwards, or a lost response would leave
+            # the customer charged and told the purchase failed. All inserts
+            # commit in one transaction, so a replay never sees a partial
+            # bundle.
             prior_rows = _find_purchase_group(conn, idem)
             if prior_rows:
                 entities = [ctx["entity_from_db_row"](r) for r in prior_rows]
@@ -318,6 +332,28 @@ def plan_purchase_atomic(
                     ).mappings().first()
                     payment = ctx["entity_from_db_row"](prow) if prow else None
                 return entities, False, payment
+
+            # No prior purchase: this is a NEW sale, so the live catalog rules.
+            plan = load_subscription_plans(ctx, conn).get(wanted_plan)
+            if not plan:
+                raise HTTPException(status_code=400, detail="Plan is not available for subscription")
+            if plan.get("active") is False:
+                raise HTTPException(status_code=409, detail="Plan is no longer sold")
+            # Currency/idempotency validation with the zero-price restore trick.
+            amount, cur, _ = ctx["validate_wallet_values"](
+                max(1, int(plan.get("priceMinor") or 0)), plan.get("currency"), idem
+            )
+            price_minor = int(plan.get("priceMinor") or 0)
+            if price_minor < 0:
+                raise HTTPException(status_code=500, detail="Invalid server plan price")
+            if price_minor == 0:
+                amount = 0
+            duration_days = int(plan.get("durationDays") or 0)
+            if duration_days < 1 or duration_days > 3660:
+                raise HTTPException(status_code=500, detail="Invalid server plan duration")
+            service_ids = [str(s) for s in (plan.get("serviceIds") or [])]
+            if not service_ids:
+                raise HTTPException(status_code=500, detail="Plan has no services")
 
             now_dt = datetime.now(timezone.utc)
             # Renewal math per service BEFORE any money moves.
@@ -487,10 +523,26 @@ def create_subscription_plans_router(
         guard = nullcontext() if postgres else ctx["sqlite_wallet_lock"]()
         with guard:
             with db_conn() as conn:
+                # Serialize read-version -> insert-version+1 so two admins
+                # saving at once cannot mint the same version (sqlite is
+                # already serialized by the wallet lock above).
+                ctx["lock_idempotency_key"](conn, PLAN_SETTINGS_KEY, postgres=postgres, namespace="appSettings")
                 previous_record = _newest_plan_record(conn)
                 previous = load_subscription_plans(ctx, conn)
                 raw_plans = [p.model_dump() for p in body.plans]
                 catalog = validate_plan_catalog(raw_plans, previous, ctx)
+                # A previously PRICED plan that simply disappears from the body
+                # would fall back to its hardcoded default — free and sellable.
+                # Retiring one must be explicit (active: false), never an
+                # omission. Plans that only ever existed as defaults are not
+                # "dropped": the defaults remain their source of truth.
+                dropped = sorted(set(_newest_valid_overlay(ctx, conn)) - set(catalog))
+                if dropped:
+                    listed = ", ".join(dropped[:3]) + ("…" if len(dropped) > 3 else "")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"These saved plans are missing: {listed}. Send every plan; set active:false to retire one.",
+                    )
                 version = int((previous_record or {}).get("version") or 0) + 1
                 record = {
                     "settingKey": PLAN_SETTINGS_KEY,

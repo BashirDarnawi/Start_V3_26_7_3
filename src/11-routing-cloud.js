@@ -288,9 +288,10 @@ const MODAL_URL_HANDLERS = {
   // form state. While one is open the URL protects it from delayed startup
   // restoration; revisiting that URL later simply returns to Settings.
   'data-integrity':   { open: () => updateUrlForView(state.currentView, true) },
-  'clothes-product':  { newOpen: () => showClothesProductModal(),  open: (id) => editClothesProduct(id) },
-  'clothes-shipment': { newOpen: () => showClothesShipmentModal(), open: (id) => editClothesShipment(id) },
-  'clothes-order':    { newOpen: () => showClothesOrderModal(),    open: (id) => editClothesOrder(id) }
+  // Clothes lives in a lazy bundle: a cold deep link must download it first.
+  'clothes-product':  { newOpen: () => withClothesSystem(() => showClothesProductModal()),  open: (id) => withClothesSystem(() => editClothesProduct(id)) },
+  'clothes-shipment': { newOpen: () => withClothesSystem(() => showClothesShipmentModal()), open: (id) => withClothesSystem(() => editClothesShipment(id)) },
+  'clothes-order':    { newOpen: () => withClothesSystem(() => showClothesOrderModal()),    open: (id) => withClothesSystem(() => editClothesOrder(id)) }
 };
 
 // Restore modal from URL params (e.g., ?modal=ad&id=123 or ?modal=ad&id=new)

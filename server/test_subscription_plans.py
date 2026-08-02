@@ -127,7 +127,17 @@ def actors():
     }
 
 
-def _save_plans(admin, plans: list[dict]):
+def _save_plans(admin, plans: list[dict], exact: bool = False):
+    """Save a catalog the way the manager UI does: the FULL current catalog
+    with these plans overlaid. ``exact`` sends only what is given (used to
+    test that dropping a priced plan is refused)."""
+    if not exact:
+        current = client.get("/api/admin/subscription-plans", cookies=admin)
+        if current.status_code == 200:
+            merged = {p["id"]: p for p in current.json()["plans"]}
+            for plan in plans:
+                merged[plan["id"]] = plan
+            plans = list(merged.values())
     return client.put(
         "/api/admin/subscription-plans", json={"plans": plans}, cookies=admin
     )
@@ -340,6 +350,112 @@ class TestPlanPurchase:
             if s.get("serviceId") == "smart_systems"
         ]
         assert len(rows) == 2
+
+    def test_replay_still_works_after_the_plan_is_archived(self, actors):
+        """A committed purchase must stay confirmable even if the plan is
+        retired before the client's retry arrives (lost-response window)."""
+        assert _save_plans(actors["admin"], [_paid_bundle(5000)]).status_code == 200
+        _fund(actors["admin"], actors["customer_id"], 6000, "LYD", "replayarchive")
+        before = _balance(actors["admin"], actors["customer_id"], "LYD")
+        bought = client.post(
+            "/api/subscriptions/purchase-plan",
+            json={"planId": "test_bundle", "idempotencyKey": "plans-archive-replay-01"},
+            cookies=actors["customer"],
+        )
+        assert bought.status_code == 200, bought.text
+        archived = dict(_paid_bundle(5000))
+        archived["active"] = False
+        assert _save_plans(actors["admin"], [archived]).status_code == 200
+        replay = client.post(
+            "/api/subscriptions/purchase-plan",
+            json={"planId": "test_bundle", "idempotencyKey": "plans-archive-replay-01"},
+            cookies=actors["customer"],
+        )
+        assert replay.status_code == 200, replay.text
+        assert len(replay.json()["subscriptions"]) == 2
+        # Replay charges nothing extra; the archive still blocks NEW sales.
+        assert _balance(actors["admin"], actors["customer_id"], "LYD") == before - 5000
+        fresh = client.post(
+            "/api/subscriptions/purchase-plan",
+            json={"planId": "test_bundle", "idempotencyKey": "plans-archive-fresh-01"},
+            cookies=actors["customer"],
+        )
+        assert fresh.status_code == 409, fresh.text
+        assert _save_plans(actors["admin"], [_paid_bundle(5000)]).status_code == 200
+
+    def test_corrupt_newest_record_keeps_the_last_valid_prices(self, actors):
+        """A forged/broken newest record must never silently make paid plans
+        free — the newest VALID catalog keeps selling."""
+        assert _save_plans(actors["admin"], [_paid_bundle(5000)]).status_code == 200
+        with db_conn() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO entities (type,id,data_json,deleted,created_at,created_by,last_modified) "
+                    "VALUES ('appSettings',:id,:d,false,:now,:uid,:now)"
+                ),
+                {
+                    "id": new_id("appSet"),
+                    "d": json_dumps({
+                        "settingKey": "subscriptionPlans",
+                        "version": 10_000_000,
+                        "plans": [{"id": "test_bundle", "serviceIds": ["ad_maker"], "priceMinor": "free"}],
+                    }),
+                    "now": now_ms(),
+                    "uid": actors["admin_id"],
+                },
+            )
+        listed = client.get("/api/subscriptions/plans", cookies=actors["customer"])
+        plans = {p["id"]: p for p in listed.json()["plans"]}
+        assert plans["test_bundle"]["priceMinor"] == 5000, "corrupt record reverted prices to free"
+        _fund(actors["admin"], actors["customer_id"], 5000, "LYD", "corruptprice")
+        before = _balance(actors["admin"], actors["customer_id"], "LYD")
+        bought = client.post(
+            "/api/subscriptions/purchase-plan",
+            json={"planId": "test_bundle", "idempotencyKey": "plans-corrupt-price-01"},
+            cookies=actors["customer"],
+        )
+        assert bought.status_code == 200, bought.text
+        assert _balance(actors["admin"], actors["customer_id"], "LYD") == before - 5000
+
+    def test_dropping_a_priced_plan_from_a_save_is_refused(self, actors):
+        """Omitting a priced plan would resurrect its free default."""
+        assert _save_plans(actors["admin"], [_paid_bundle(5000)]).status_code == 200
+        other = {
+            "id": "other_bundle", "serviceIds": ["warehouse"],
+            "name": "Other", "nameAr": "أخرى",
+            "priceMinor": 2500, "currency": "LYD", "durationDays": 30,
+            "active": True, "sortOrder": 3,
+        }
+        refused = _save_plans(actors["admin"], [other], exact=True)
+        assert refused.status_code == 400, refused.text
+        assert "missing" in refused.json()["detail"]
+        # Retiring explicitly is fine, and keeps the plan out of the store.
+        archived = dict(_paid_bundle(5000))
+        archived["active"] = False
+        assert _save_plans(actors["admin"], [archived, other]).status_code == 200
+        public = client.get("/api/subscriptions/plans", cookies=actors["customer"])
+        ids = [p["id"] for p in public.json()["plans"]]
+        assert "test_bundle" not in ids and "other_bundle" in ids
+        assert _save_plans(actors["admin"], [_paid_bundle(5000), other]).status_code == 200
+
+    def test_member_key_cannot_replay_a_partial_bundle(self, actors):
+        """"{idem}:{serviceId}" must not look like a whole purchase group."""
+        assert _save_plans(actors["admin"], [_paid_bundle(5000)]).status_code == 200
+        _fund(actors["admin"], actors["customer_id"], 10_000, "LYD", "memberkey")
+        first = client.post(
+            "/api/subscriptions/purchase-plan",
+            json={"planId": "test_bundle", "idempotencyKey": "plans-memberkey-001"},
+            cookies=actors["customer"],
+        )
+        assert first.status_code == 200, first.text
+        crafted = client.post(
+            "/api/subscriptions/purchase-plan",
+            json={"planId": "test_bundle", "idempotencyKey": "plans-memberkey-001:ad_maker"},
+            cookies=actors["customer"],
+        )
+        # A real, separate purchase (2 rows) — never a 1-row partial replay.
+        assert crafted.status_code == 200, crafted.text
+        assert len(crafted.json()["subscriptions"]) == 2
 
     def test_lyd_wallet_charge_requests_are_now_accepted(self, actors):
         created = client.post(

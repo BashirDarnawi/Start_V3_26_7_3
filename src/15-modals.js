@@ -2114,16 +2114,20 @@ function renderModal() {
     }
 
     case 'clothes-product':
-      modalContent = renderClothesProductModal();
-      break;
-
     case 'clothes-shipment':
-      modalContent = renderClothesShipmentModal();
+    case 'clothes-order': {
+      // Reachable with the lazy bundle missing only through odd restore
+      // paths — load it and show a small wait card instead of crashing.
+      if (typeof renderClothesProductModal !== 'function') {
+        ensureClothesSystemLoaded().then(() => { try { if (String(state.activeModal || '').indexOf('clothes-') === 0) renderModal(); } catch (_) {} });
+        modalContent = `<div class="p-8 text-center"><div class="w-8 h-8 mx-auto mb-3 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div><p class="text-sm text-slate-500">${state.language === 'ar' ? 'جاري التحميل…' : 'Loading…'}</p></div>`;
+        break;
+      }
+      modalContent = state.activeModal === 'clothes-product' ? renderClothesProductModal()
+        : state.activeModal === 'clothes-shipment' ? renderClothesShipmentModal()
+          : renderClothesOrderModal();
       break;
-
-    case 'clothes-order':
-      modalContent = renderClothesOrderModal();
-      break;
+    }
 
     case 'wallet-topup': {
       const isArW = state.language === 'ar';
@@ -2297,16 +2301,17 @@ function renderModal() {
     }, 100);
   } else if (state.activeModal === 'clothes-product') {
     setTimeout(() => {
+      if (typeof refreshClothesVariantRows !== 'function') return; // bundle still loading
       refreshClothesVariantRows();
       refreshClothesPhotoPreview();
     }, 50);
   } else if (state.activeModal === 'clothes-shipment') {
     setTimeout(() => {
-      refreshClothesShipLines();
+      if (typeof refreshClothesShipLines === 'function') refreshClothesShipLines();
     }, 50);
   } else if (state.activeModal === 'clothes-order') {
     setTimeout(() => {
-      refreshClothesOrderLines();
+      if (typeof refreshClothesOrderLines === 'function') refreshClothesOrderLines();
     }, 50);
   }
   
@@ -2735,16 +2740,19 @@ async function handleModalSubmit() {
   
   switch (state.activeModal) {
     case 'clothes-product': {
+      if (typeof saveClothesProductFromModal !== 'function') return; // bundle still loading
       const saved = await saveClothesProductFromModal();
       if (!saved) return; // keep modal open on validation errors
       break;
     }
     case 'clothes-shipment': {
+      if (typeof saveClothesShipmentFromModal !== 'function') return;
       const saved = await saveClothesShipmentFromModal();
       if (!saved) return; // keep modal open on validation errors
       break;
     }
     case 'clothes-order': {
+      if (typeof saveClothesOrderFromModal !== 'function') return;
       const saved = await saveClothesOrderFromModal();
       if (!saved) return; // keep modal open on validation errors
       break;

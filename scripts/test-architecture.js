@@ -42,10 +42,12 @@ if (fs.statSync(generatedBundle).size > 2.4 * 1024 * 1024) {
 }
 
 // Lazy bundles have their own budgets: they never block startup, but a
-// runaway studio bundle would still hurt the customer's first tap.
-const studioBundle = path.join(ROOT, 'studio.js');
-if (fs.existsSync(studioBundle) && fs.statSync(studioBundle).size > 1.0 * 1024 * 1024) {
-  fail('studio.js exceeded its 1.0 MiB lazy-bundle budget; split or slim the studio.');
+// runaway bundle would still hurt the first tap into that feature.
+for (const lazyOut of Object.keys(manifest.lazy || {})) {
+  const bundlePath = path.join(ROOT, lazyOut);
+  if (fs.existsSync(bundlePath) && fs.statSync(bundlePath).size > 1.0 * 1024 * 1024) {
+    fail(`${lazyOut} exceeded its 1.0 MiB lazy-bundle budget; split or slim it.`);
+  }
 }
 
 // Every built bundle must ship in the production image. Forgetting a lazy

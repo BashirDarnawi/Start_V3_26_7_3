@@ -72,7 +72,9 @@ function _photoPasteTargetIsAvailable(target) {
     return state.activeModal === 'receipt' && Boolean(document.getElementById('receipt-photo-previews'));
   }
   if (target === 'clothes-product') {
-    return state.activeModal === 'clothes-product' && Boolean(document.getElementById('clothes-product-photo-input'));
+    return state.activeModal === 'clothes-product'
+      && typeof uploadClothesProductPhotoFiles === 'function'
+      && Boolean(document.getElementById('clothes-product-photo-input'));
   }
   return state.currentView === 'ads-studio'
     && typeof uploadAdsStudioCreativeFiles === 'function'

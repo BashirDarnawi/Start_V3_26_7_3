@@ -151,11 +151,10 @@ function getAuthorizedServerSyncCollections(user = state.currentUser) {
     if (collection.startsWith('clothes') && !isAdminRole(user?.role)) {
       return hasSubscription('clothes_system');
     }
-    if (collection === 'adCampaignRequests' && !isAdminRole(user?.role)) {
-      const isReviewer = Array.isArray(user?.permissions?.adCampaignRequests) &&
-        user.permissions.adCampaignRequests.some(action => String(action).toLowerCase() === 'review');
-      return isReviewer || hasSubscription('ad_maker');
-    }
+    // adCampaignRequests deliberately keeps syncing after a subscription
+    // lapses: those rows can hold the customer's captured budget, and the
+    // server no longer gates reads either (permission scope still decides
+    // what is visible). Purging them would hide the Stop-and-refund path.
     return true;
   });
 }

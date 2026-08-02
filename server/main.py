@@ -3008,17 +3008,26 @@ def serve_script(request: Request):
     return FileResponse(str(src), media_type="application/javascript", headers=headers)
 
 
-@app.get("/studio.js")
-def serve_studio_script(request: Request):
-    # The Ads Studio's lazy bundle. The loader reuses the MAIN bundle's ?v=
-    # (both rebuild together on every deploy), so match against that version.
-    studio_path = PROJECT_ROOT / "studio.js"
-    if not studio_path.exists():
-        raise HTTPException(status_code=500, detail="studio.js not found")
+def _serve_lazy_bundle(request: Request, name: str):
+    # A lazy bundle's loader reuses the MAIN bundle's ?v= (all bundles rebuild
+    # together on every deploy), so cache-match against that version.
+    bundle_path = PROJECT_ROOT / name
+    if not bundle_path.exists():
+        raise HTTPException(status_code=500, detail=f"{name} not found")
     v = request.query_params.get("v")
     expected = _asset_version(_select_script_source())
     headers = _ASSET_CACHE_HEADERS if v and v == expected else _NO_STORE_HEADERS
-    return FileResponse(str(studio_path), media_type="application/javascript", headers=headers)
+    return FileResponse(str(bundle_path), media_type="application/javascript", headers=headers)
+
+
+@app.get("/studio.js")
+def serve_studio_script(request: Request):
+    return _serve_lazy_bundle(request, "studio.js")
+
+
+@app.get("/clothes.js")
+def serve_clothes_script(request: Request):
+    return _serve_lazy_bundle(request, "clothes.js")
 
 
 @app.get("/style.css")

@@ -98,6 +98,23 @@ function adsStudioCanUse() {
   return isCurrentUserAdmin() || adsStudioCanReview() || hasSubscription('ad_maker');
 }
 
+// A LAPSED customer keeps read access to their own campaigns: those rows may
+// still hold captured money, and the Stop-and-refund button lives on them.
+// The server agrees (reads are not subscription-gated; a self-stop skips the
+// subscription check) — money must never be held hostage by an expiry.
+function adsStudioCanViewOwn() {
+  return adsStudioCanUse()
+    || currentUserHasPermission('adCampaignRequests', 'viewOwn')
+    || currentUserHasPermission('adCampaignRequests', 'view');
+}
+
+function adsStudioHasRecoverableCampaigns() {
+  const uid = String(state.currentUser?.id || '');
+  if (!uid) return false;
+  return (Array.isArray(state.adCampaignRequests) ? state.adCampaignRequests : [])
+    .some(c => c && !c._deleted && String(c.createdBy || '') === uid);
+}
+
 function openAdsStudioCustomerAccount() {
   if (!isCurrentUserAdmin()) return;
   window._newUserAccessPreset = 'adsStudioCustomer';
@@ -323,6 +340,22 @@ function renderAdsStudioSubscriptionGate() {
 function renderAdsStudioView() {
   const isAr = adsStudioIsAr();
   if (!adsStudioCanUse()) {
+    // Expired, but their campaigns may still hold their money: show those
+    // read-only (Stop & refund stays available) above the activate card.
+    if (adsStudioCanViewOwn() && adsStudioHasRecoverableCampaigns()) {
+      return `
+        <div class="max-w-7xl mx-auto" dir="${isAr ? 'rtl' : 'ltr'}">
+          ${renderAdsStudioHeader()}
+          <div class="mb-5 rounded-2xl bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-200 flex items-start gap-3">
+            <i data-lucide="info" class="w-5 h-5 flex-shrink-0"></i>
+            <span>${isAr
+              ? 'انتهى اشتراكك. لا يزال بإمكانك رؤية حملاتك وإيقاف أي حملة لاسترداد ما لم يُصرف إلى محفظتك. فعّل الخدمة لإنشاء حملات جديدة.'
+              : 'Your subscription has ended. You can still see your campaigns and stop any of them to return the unspent budget to your wallet. Activate the service to create new campaigns.'}</span>
+          </div>
+          ${renderAdsStudioCampaigns()}
+          <div class="mt-6">${renderAdsStudioSubscriptionGate()}</div>
+        </div>`;
+    }
     return `<div class="max-w-7xl mx-auto" dir="${isAr ? 'rtl' : 'ltr'}">${renderAdsStudioHeader()}${renderAdsStudioSubscriptionGate()}</div>`;
   }
 
