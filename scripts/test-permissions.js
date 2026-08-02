@@ -636,6 +636,71 @@ check('only a hand-made page may be merged, and only into the single Meta page o
   }
 });
 
+check('every duplicate can be merged in one run, and one bad page never blocks the rest', () => {
+  loginAs(ADMIN);
+  S.language = 'en';
+  const originalPages = S.pages;
+  const originalAds = S.ads;
+  try {
+    S.pages = [
+      { id: 'ma_meta_a', name: 'Alpha', customerIds: [], metaPageId: '11' },
+      { id: 'ma_old_a', name: 'Alpha', customerIds: ['c1'] },
+      { id: 'ma_meta_b', name: 'Beta', customerIds: [], metaPageId: '22' },
+      { id: 'ma_old_b1', name: 'Beta', customerIds: [] },
+      // A second hand-made row in the same group must become its OWN job, not
+      // be silently dropped because the group was already counted once.
+      { id: 'ma_old_b2', name: 'beta', customerIds: [] },
+      // No Meta twin: never queued.
+      { id: 'ma_lonely', name: 'Gamma', customerIds: [] }
+    ];
+    S.ads = [
+      { id: 'ma_ad1', pageId: 'ma_old_a', customerId: 'c1', amountUSD: 10, createdBy: 'u-admin' },
+      { id: 'ma_ad2', pageId: 'ma_old_a', customerId: 'c1', amountUSD: 20, createdBy: 'u-admin' },
+      { id: 'ma_ad3', pageId: 'ma_old_b1', customerId: 'c1', amountUSD: 5, createdBy: 'u-admin' },
+      { id: 'ma_ad4', pageId: 'ma_meta_a', customerId: 'c1', amountUSD: 7, createdBy: 'u-admin' }
+    ];
+
+    const jobs = sandbox.buildAllPageMergeJobs();
+    assert(jobs.length === 3, `expected 3 merge jobs, got ${jobs.length}`);
+    const byLoser = new Map(jobs.map(job => [job.loseId, job]));
+    assert(byLoser.has('ma_old_a') && byLoser.has('ma_old_b1') && byLoser.has('ma_old_b2'),
+      'a hand-made page was left out of the run');
+    assert(!jobs.some(job => job.loseId === 'ma_lonely'), 'a page with no Meta twin was queued');
+    assert(!jobs.some(job => job.loseId === job.keepId), 'a page was queued to merge into itself');
+    // Every job must merge INTO a Meta page, never out of one.
+    assert(jobs.every(job => String(S.pages.find(p => p.id === job.keepId).metaPageId || '')),
+      'a job would merge a page into a non-Meta page');
+    assert(byLoser.get('ma_old_a').ads === 2, 'the ad count shown before the run is wrong');
+    assert(byLoser.get('ma_old_b2').ads === 0, 'an empty page reported ads to move');
+
+    // Non-admins get nothing and are refused if they call it anyway.
+    loginAs(employee({ pages: ['view', 'edit', 'delete'], ads: ['view', 'edit'] }));
+    assert(sandbox.buildAllPageMergeJobs().length === 0, 'a non-admin was handed a bulk merge list');
+    clearNotes();
+    sandbox.showMergeAllDialog();
+    assert(lastNote() && /Access Denied/i.test(lastNote().t), 'a non-admin was not blocked from the bulk merge dialog');
+    clearNotes();
+    sandbox.runAllPageMerges();
+    assert(lastNote() && /Access Denied/i.test(lastNote().t), 'a non-admin was not blocked from running the bulk merge');
+  } finally {
+    S.pages = originalPages;
+    S.ads = originalAds;
+    loginAs(ADMIN);
+  }
+
+  const merge = fs.readFileSync(path.join(__dirname, '..', 'src', '13b-merge-tools.js'), 'utf8');
+  const runAll = merge.slice(merge.indexOf('async function runAllPageMerges('));
+  // A failure must be collected and the loop must continue; a throw that
+  // escaped would abandon every remaining page.
+  assert(/catch \(error\)[\s\S]{0,200}problems\.push|problems\.push/.test(runAll), 'bulk merge does not collect failures');
+  assert(/if \(_mergeAllStopRequested\) break;/.test(runAll), 'the bulk merge cannot be stopped');
+  // Both the single and the bulk path must share ONE write sequence, or the
+  // safety ordering could drift apart between them.
+  assert((merge.match(/deleteRecord\(state\.pages/g) || []).length === 1,
+    'the page delete is written in more than one place');
+  assert(/_mergeOnePageIntoMeta\(/.test(runAll), 'the bulk run does not reuse the single-page merge');
+});
+
 check('page merge is admin-only and removes the old page only after every ad has moved', () => {
   const originalPages = S.pages;
   try {

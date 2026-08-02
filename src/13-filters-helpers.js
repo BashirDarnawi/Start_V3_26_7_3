@@ -1499,9 +1499,20 @@ function showPageDuplicates(focusPageId, triggerButton) {
               : ` — ${mergeable} of them can be merged into their Meta page`;
           })()}</p>
         </div>
-        <button type="button" onclick="closePageDuplicatesDialog()" class="min-w-11 min-h-11 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center flex-shrink-0" aria-label="${isAr ? 'إغلاق' : 'Close'}">
-          <span class="text-2xl leading-none" aria-hidden="true">&times;</span>
-        </button>
+        <div class="flex items-center gap-2 flex-shrink-0">
+          ${(() => {
+            // 48 groups is far too many to confirm one at a time, which is the
+            // whole reason this button exists.
+            const mergeableNow = countPageMergeGroups();
+            if (!mergeableNow) return '';
+            return `<button type="button" onclick="showMergeAllDialog(this)" class="min-h-11 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-bold text-amber-800 hover:bg-amber-100 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200 inline-flex items-center gap-2" aria-haspopup="dialog">
+              <i data-lucide="layers" class="h-4 w-4"></i><span>${isAr ? `دمج الكل (${mergeableNow})` : `Merge all (${mergeableNow})`}</span>
+            </button>`;
+          })()}
+          <button type="button" onclick="closePageDuplicatesDialog()" class="min-w-11 min-h-11 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center" aria-label="${isAr ? 'إغلاق' : 'Close'}">
+            <span class="text-2xl leading-none" aria-hidden="true">&times;</span>
+          </button>
+        </div>
       </div>
       <div class="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-4">
         ${groups.length ? groups.map(group => `
@@ -1547,6 +1558,9 @@ function showPageDuplicates(focusPageId, triggerButton) {
     </div>`;
   dialog.addEventListener('click', event => { if (event.target === dialog) closePageDuplicatesDialog(); });
   document.body.appendChild(dialog);
+  // The Merge all button carries a lucide icon, so this dialog now needs the
+  // same icon pass every other injected panel does.
+  IconQueue.schedule(dialog);
   dialog.focus();
 }
 

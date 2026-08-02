@@ -24111,9 +24111,20 @@ function showPageDuplicates(focusPageId, triggerButton) {
               : ` — ${mergeable} of them can be merged into their Meta page`;
           })()}</p>
         </div>
-        <button type="button" onclick="closePageDuplicatesDialog()" class="min-w-11 min-h-11 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center flex-shrink-0" aria-label="${isAr ? 'إغلاق' : 'Close'}">
-          <span class="text-2xl leading-none" aria-hidden="true">&times;</span>
-        </button>
+        <div class="flex items-center gap-2 flex-shrink-0">
+          ${(() => {
+            // 48 groups is far too many to confirm one at a time, which is the
+            // whole reason this button exists.
+            const mergeableNow = countPageMergeGroups();
+            if (!mergeableNow) return '';
+            return `<button type="button" onclick="showMergeAllDialog(this)" class="min-h-11 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-bold text-amber-800 hover:bg-amber-100 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200 inline-flex items-center gap-2" aria-haspopup="dialog">
+              <i data-lucide="layers" class="h-4 w-4"></i><span>${isAr ? `دمج الكل (${mergeableNow})` : `Merge all (${mergeableNow})`}</span>
+            </button>`;
+          })()}
+          <button type="button" onclick="closePageDuplicatesDialog()" class="min-w-11 min-h-11 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center" aria-label="${isAr ? 'إغلاق' : 'Close'}">
+            <span class="text-2xl leading-none" aria-hidden="true">&times;</span>
+          </button>
+        </div>
       </div>
       <div class="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-4">
         ${groups.length ? groups.map(group => `
@@ -24159,6 +24170,9 @@ function showPageDuplicates(focusPageId, triggerButton) {
     </div>`;
   dialog.addEventListener('click', event => { if (event.target === dialog) closePageDuplicatesDialog(); });
   document.body.appendChild(dialog);
+  // The Merge all button carries a lucide icon, so this dialog now needs the
+  // same icon pass every other injected panel does.
+  IconQueue.schedule(dialog);
   dialog.focus();
 }
 
@@ -29034,6 +29048,7 @@ async function saveRefund() {
 let _mergeToolsBusy = '';
 let _pageMergeReturnFocus = null;
 let _adMergeReturnFocus = null;
+let _mergeAllReturnFocus = null;
 
 function isMergeToolsAdmin() {
   return typeof isCurrentUserAdmin === 'function' && isCurrentUserAdmin();
@@ -29236,61 +29251,19 @@ async function runPageMerge(keepPageId, losePageId) {
     confirmButton.textContent = isAr ? 'جارٍ الدمج…' : 'Merging…';
   }
 
-  let moved = 0;
   try {
-    // Ads first. The old page is only removed once every one of them has landed
-    // on the Meta page, so an interrupted merge is always safe to repeat.
-    for (const ad of plan.ads) {
-      const updates = { pageId: String(plan.keepPage.id) };
-      // Only refresh the denormalised copy when the ad actually carries one —
-      // writing it onto rows that never had it would invent a new field.
-      if (String(ad.pageName || '').trim()) updates.pageName = String(plan.keepPage.name || '');
-      const expected = Number(ad._lastModified);
-      const saved = await updateRecord(state.ads, ad.id, updates, Number.isFinite(expected) ? expected : undefined);
-      if (!saved) {
-        showNotification(
-          isAr ? 'توقف الدمج' : 'Merge stopped',
-          isAr
-            ? `تم نقل ${moved} من ${plan.ads.length} إعلان. لم تُحذف الصفحة القديمة، أعد المحاولة لإكمال الباقي.`
-            : `${moved} of ${plan.ads.length} ads moved. The old page was kept — run the merge again to finish the rest.`,
-          'warning'
-        );
-        return;
-      }
-      moved += 1;
-    }
-
-    // Carry the hand-made page's owner across. An imported page arrives with no
-    // owner at all, so this is usually the only place that knowledge exists.
-    const keepOwnerIds = getPageCustomerIds(plan.keepPage).map(String);
-    const addedOwnerIds = getPageCustomerIds(plan.losePage).map(String).filter(id => !keepOwnerIds.includes(id));
-    if (addedOwnerIds.length) {
-      const keepExpected = Number(plan.keepPage._lastModified);
-      await updateRecord(
-        state.pages,
-        plan.keepPage.id,
-        { customerIds: [...keepOwnerIds, ...addedOwnerIds] },
-        Number.isFinite(keepExpected) ? keepExpected : undefined
-      );
-    }
-
-    const removed = await deleteRecord(state.pages, plan.losePage.id);
-    if (!removed) {
+    const result = await _mergeOnePageIntoMeta(keepPageId, losePageId);
+    if (result.ok) {
       showNotification(
-        isAr ? 'انتقلت الإعلانات' : 'Ads moved',
-        isAr ? 'انتقلت كل الإعلانات، لكن تعذّر حذف الصفحة القديمة. احذفها يدوياً.' : 'Every ad moved, but the old page could not be removed. Delete it by hand.',
-        'warning'
+        isAr ? 'تم الدمج' : 'Merged',
+        isAr
+          ? `تم نقل ${result.moved} إعلان إلى «${result.keepName}» وحُذفت الصفحة القديمة.`
+          : `${result.moved} ad${result.moved === 1 ? '' : 's'} moved to "${result.keepName}" and the old page was removed.`,
+        'success'
       );
-      return;
+    } else {
+      showNotification(isAr ? 'لم يكتمل الدمج' : 'Merge did not finish', result.reason, 'warning');
     }
-
-    showNotification(
-      isAr ? 'تم الدمج' : 'Merged',
-      isAr
-        ? `تم نقل ${moved} إعلان إلى «${plan.keepPage.name}» وحُذفت الصفحة القديمة.`
-        : `${moved} ad${moved === 1 ? '' : 's'} moved to "${plan.keepPage.name}" and the old page was removed.`,
-      'success'
-    );
   } catch (error) {
     showNotification(
       isAr ? 'تعذّر الدمج' : 'Merge failed',
@@ -29300,6 +29273,244 @@ async function runPageMerge(keepPageId, losePageId) {
   } finally {
     _mergeToolsBusy = '';
     closePageMergeDialog(false);
+    closePageDuplicatesDialog(false);
+    render();
+  }
+}
+
+// The write sequence for ONE page. Returns a plain result instead of showing a
+// toast, so merging 48 pages can report once at the end instead of 48 times.
+// Order is the safety property: every ad lands on the Meta page BEFORE the old
+// page is removed, so an interrupted run is always safe to repeat.
+async function _mergeOnePageIntoMeta(keepPageId, losePageId) {
+  const isAr = state.language === 'ar';
+  const plan = getPageMergePlan(keepPageId, losePageId);
+  if (plan.blocked) return { ok: false, moved: 0, total: 0, name: '', keepName: '', reason: plan.blocked };
+  const name = String(plan.losePage.name || '');
+  const keepName = String(plan.keepPage.name || '');
+  let moved = 0;
+
+  for (const ad of plan.ads) {
+    const updates = { pageId: String(plan.keepPage.id) };
+    // Only refresh the denormalised copy when the ad actually carries one —
+    // writing it onto rows that never had it would invent a new field.
+    if (String(ad.pageName || '').trim()) updates.pageName = keepName;
+    const expected = Number(ad._lastModified);
+    const saved = await updateRecord(state.ads, ad.id, updates, Number.isFinite(expected) ? expected : undefined);
+    if (!saved) {
+      return {
+        ok: false, moved, total: plan.ads.length, name, keepName,
+        reason: isAr
+          ? `«${name}»: تم نقل ${moved} من ${plan.ads.length} إعلان. لم تُحذف الصفحة القديمة، أعد المحاولة لإكمال الباقي.`
+          : `"${name}": ${moved} of ${plan.ads.length} ads moved. The old page was kept — run it again to finish the rest.`
+      };
+    }
+    moved += 1;
+  }
+
+  // Carry the hand-made page's owner across. An imported page arrives with no
+  // owner at all, so this is usually the only place that knowledge exists.
+  const keepOwnerIds = getPageCustomerIds(plan.keepPage).map(String);
+  const addedOwnerIds = getPageCustomerIds(plan.losePage).map(String).filter(id => !keepOwnerIds.includes(id));
+  if (addedOwnerIds.length) {
+    const keepExpected = Number(plan.keepPage._lastModified);
+    await updateRecord(
+      state.pages,
+      plan.keepPage.id,
+      { customerIds: [...keepOwnerIds, ...addedOwnerIds] },
+      Number.isFinite(keepExpected) ? keepExpected : undefined
+    );
+  }
+
+  const removed = await deleteRecord(state.pages, plan.losePage.id);
+  if (!removed) {
+    return {
+      ok: false, moved, total: plan.ads.length, name, keepName,
+      reason: isAr
+        ? `«${name}»: انتقلت كل الإعلانات، لكن تعذّر حذف الصفحة القديمة. احذفها يدوياً.`
+        : `"${name}": every ad moved, but the old page could not be removed. Delete it by hand.`
+    };
+  }
+  return { ok: true, moved, total: plan.ads.length, name, keepName, reason: '' };
+}
+
+// ---- Merge every duplicate in one run -----------------------------------
+// 48 groups is far too many to confirm one at a time. This does the identical
+// per-page work in a loop, keeps going when one page fails (one bad page must
+// not block the other 47), and can be stopped between pages.
+
+let _mergeAllStopRequested = false;
+
+function stopAllPageMerges() {
+  _mergeAllStopRequested = true;
+  const button = document.getElementById('merge-all-stop');
+  if (button) button.textContent = state.language === 'ar' ? 'جارٍ الإيقاف…' : 'Stopping…';
+}
+
+// Every (Meta page <- hand-made page) move that is currently possible, flattened
+// out of the groups so a group holding three hand-made rows contributes three.
+function buildAllPageMergeJobs() {
+  const jobs = [];
+  if (!isMergeToolsAdmin()) return jobs;
+  for (const group of findPageMergeGroups()) {
+    for (const losePage of group.manualPages) {
+      jobs.push({
+        keepId: String(group.keepPage.id),
+        loseId: String(losePage.id),
+        name: String(losePage.name || ''),
+        ads: getAdsForPage(losePage.id).length
+      });
+    }
+  }
+  return jobs;
+}
+
+function closeMergeAllDialog(restoreFocus = true) {
+  document.getElementById('merge-all-dialog')?.remove();
+  const target = _mergeAllReturnFocus?.isConnected === false ? null : _mergeAllReturnFocus;
+  _mergeAllReturnFocus = null;
+  if (restoreFocus && target?.focus) target.focus();
+}
+
+function showMergeAllDialog(triggerButton) {
+  const isAr = state.language === 'ar';
+  if (!isMergeToolsAdmin()) {
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'دمج الصفحات متاح للمدير فقط.' : 'Only an administrator can merge pages.', 'error');
+    return;
+  }
+  const jobs = buildAllPageMergeJobs();
+  if (!jobs.length) {
+    showNotification(isAr ? 'لا يوجد ما يُدمج' : 'Nothing to merge', isAr ? 'لا توجد صفحة يدوية لها صفحة Meta بنفس الاسم.' : 'No hand-made page has a Meta page of the same name.', 'success');
+    return;
+  }
+  closeMergeAllDialog(false);
+  _mergeAllReturnFocus = triggerButton || document.activeElement;
+  const totalAds = jobs.reduce((sum, job) => sum + job.ads, 0);
+
+  const dialog = document.createElement('div');
+  dialog.id = 'merge-all-dialog';
+  dialog.className = 'mobile-dialog-overlay fixed inset-0 z-[96] flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
+  dialog.setAttribute('aria-labelledby', 'merge-all-title');
+  dialog.setAttribute('dir', isAr ? 'rtl' : 'ltr');
+  dialog.tabIndex = -1;
+  dialog.innerHTML = `
+    <div class="glass-panel w-full max-w-lg max-h-[90dvh] overflow-hidden rounded-2xl shadow-2xl flex flex-col animate-slide-up">
+      <div class="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700 flex items-start gap-3">
+        <span class="w-11 h-11 rounded-xl bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 flex items-center justify-center shrink-0">
+          <i data-lucide="layers" class="w-6 h-6"></i>
+        </span>
+        <div class="min-w-0">
+          <h2 id="merge-all-title" class="text-xl font-bold text-slate-800 dark:text-white break-words">${isAr ? 'دمج كل الصفحات المكررة' : 'Merge every duplicate page'}</h2>
+          <p class="text-sm text-slate-500 break-words">${isAr ? 'يتم تنفيذها واحدة بعد الأخرى، ويمكنك الإيقاف في أي وقت.' : 'Done one after another. You can stop at any point.'}</p>
+        </div>
+      </div>
+      <div class="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-3">
+        <div class="grid grid-cols-2 gap-3 text-center">
+          <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
+            <div class="text-2xl font-bold text-slate-800 dark:text-white">${jobs.length}</div>
+            <div class="text-xs text-slate-500">${isAr ? 'صفحة قديمة ستُزال' : 'old pages removed'}</div>
+          </div>
+          <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
+            <div class="text-2xl font-bold text-slate-800 dark:text-white">${totalAds}</div>
+            <div class="text-xs text-slate-500">${isAr ? 'إعلان سينتقل' : 'ads will move'}</div>
+          </div>
+        </div>
+        <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3 text-sm text-slate-600 dark:text-slate-300 space-y-1">
+          <div>• ${isAr ? 'لا يتغير أي مبلغ أو وصل أو صورة.' : 'No amount, receipt or photo changes.'}</div>
+          <div>• ${isAr ? 'كل صفحة تُحذف فقط بعد انتقال كل إعلاناتها.' : 'Each page is removed only after all of its ads have moved.'}</div>
+          <div>• ${isAr ? 'إذا فشلت صفحة، تستمر البقية وتظهر لك قائمة بما لم يكتمل.' : 'If one page fails the rest continue, and you get a list of what did not finish.'}</div>
+        </div>
+        <div id="merge-all-progress" class="hidden rounded-xl bg-slate-50 dark:bg-slate-800/60 p-3 text-sm font-bold text-slate-700 dark:text-slate-200" role="status" aria-live="polite"></div>
+        <div id="merge-all-report" class="hidden rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-3 text-xs text-amber-800 dark:text-amber-200 space-y-1 max-h-48 overflow-y-auto"></div>
+      </div>
+      <div class="p-4 border-t border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row gap-2">
+        <button type="button" id="merge-all-start" onclick="runAllPageMerges()" class="flex-1 btn-shine bg-amber-600 text-white px-4 py-3 rounded-xl font-bold hover:bg-amber-700 min-h-11">
+          <i data-lucide="layers" class="w-4 h-4 inline mr-2"></i>${isAr ? `دمج الكل (${jobs.length})` : `Merge all (${jobs.length})`}
+        </button>
+        <button type="button" id="merge-all-stop" onclick="stopAllPageMerges()" class="hidden flex-1 bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-200 px-4 py-3 rounded-xl font-bold min-h-11">${isAr ? 'إيقاف' : 'Stop'}</button>
+        <button type="button" id="merge-all-close" onclick="closeMergeAllDialog()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold hover:bg-slate-300 min-h-11">${isAr ? 'إلغاء' : 'Cancel'}</button>
+      </div>
+    </div>`;
+  dialog.addEventListener('click', event => { if (event.target === dialog && !_mergeToolsBusy) closeMergeAllDialog(); });
+  document.body.appendChild(dialog);
+  IconQueue.schedule(dialog);
+  dialog.focus();
+}
+
+async function runAllPageMerges() {
+  const isAr = state.language === 'ar';
+  if (!isMergeToolsAdmin()) {
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'دمج الصفحات متاح للمدير فقط.' : 'Only an administrator can merge pages.', 'error');
+    return;
+  }
+  if (_mergeToolsBusy) return;
+  const jobs = buildAllPageMergeJobs();
+  if (!jobs.length) {
+    showNotification(isAr ? 'لا يوجد ما يُدمج' : 'Nothing to merge', isAr ? 'لا توجد صفحة يدوية لها صفحة Meta بنفس الاسم.' : 'No hand-made page has a Meta page of the same name.', 'success');
+    return;
+  }
+
+  _mergeToolsBusy = 'page-all';
+  _mergeAllStopRequested = false;
+  const startButton = document.getElementById('merge-all-start');
+  const stopButton = document.getElementById('merge-all-stop');
+  const closeButton = document.getElementById('merge-all-close');
+  const progress = document.getElementById('merge-all-progress');
+  if (startButton) startButton.classList.add('hidden');
+  if (closeButton) closeButton.classList.add('hidden');
+  if (stopButton) stopButton.classList.remove('hidden');
+  if (progress) progress.classList.remove('hidden');
+
+  let done = 0;
+  let movedAds = 0;
+  const problems = [];
+  try {
+    for (const job of jobs) {
+      if (_mergeAllStopRequested) break;
+      if (progress) {
+        progress.textContent = isAr
+          ? `جارٍ الدمج ${done + 1} من ${jobs.length}: ${job.name}`
+          : `Merging ${done + 1} of ${jobs.length}: ${job.name}`;
+      }
+      let result;
+      try {
+        result = await _mergeOnePageIntoMeta(job.keepId, job.loseId);
+      } catch (error) {
+        result = { ok: false, moved: 0, reason: `"${job.name}": ${error?.message || 'unexpected error'}` };
+      }
+      // One page failing must never stop the other 47 — collect and carry on.
+      if (result.ok) {
+        done += 1;
+        movedAds += result.moved;
+      } else {
+        problems.push(result.reason);
+      }
+    }
+  } finally {
+    _mergeToolsBusy = '';
+    _mergeAllStopRequested = false;
+    if (stopButton) stopButton.classList.add('hidden');
+    if (closeButton) closeButton.classList.remove('hidden');
+    if (progress) {
+      progress.textContent = isAr
+        ? `تم دمج ${done} صفحة ونقل ${movedAds} إعلان.`
+        : `Merged ${done} page${done === 1 ? '' : 's'} and moved ${movedAds} ad${movedAds === 1 ? '' : 's'}.`;
+    }
+    const report = document.getElementById('merge-all-report');
+    if (report && problems.length) {
+      report.classList.remove('hidden');
+      report.innerHTML = `<div class="font-bold">${isAr ? `${problems.length} لم تكتمل:` : `${problems.length} did not finish:`}</div>`
+        + problems.map(text => `<div>• ${Security.escapeHtml(String(text))}</div>`).join('');
+    }
+    showNotification(
+      problems.length ? (isAr ? 'اكتمل الدمج جزئياً' : 'Merged with some left over') : (isAr ? 'تم دمج الكل' : 'All merged'),
+      isAr
+        ? `تم دمج ${done} صفحة ونقل ${movedAds} إعلان.${problems.length ? ` ${problems.length} لم تكتمل.` : ''}`
+        : `Merged ${done} page${done === 1 ? '' : 's'} and moved ${movedAds} ad${movedAds === 1 ? '' : 's'}.${problems.length ? ` ${problems.length} did not finish.` : ''}`,
+      problems.length ? 'warning' : 'success'
+    );
     closePageDuplicatesDialog(false);
     render();
   }

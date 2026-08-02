@@ -39,9 +39,10 @@ COPY server /app/server
 COPY index.html script.js studio.js clothes.js style.css privacy.html delete-account.html alembic.ini /app/
 COPY assets /app/assets
 
-# Generate the production bundle while the build user can still write /app.
-# Runtime minification is retained as a fallback for local development only.
-RUN python -c "from pathlib import Path; from rjsmin import jsmin; p=Path('/app/script.js'); Path('/app/script.min.js').write_text(jsmin(p.read_text(encoding='utf-8')), encoding='utf-8')"
+# NO minification step. rjsmin cannot parse nested template literals and was
+# silently corrupting the served bundle's text and class attributes — see
+# _ensure_minified_script in server/main.py for the full explanation. script.js
+# is shipped and served exactly as npm built it.
 
 # Production defaults (can be overridden via docker-compose or env vars).
 # ALBAYAN_COOKIE_SECURE is deliberately NOT set: unset means "auto" — the
@@ -54,12 +55,12 @@ ENV ALBAYAN_DB_PATH=/var/lib/albayan/albayan.db
 ENV ALBAYAN_DEBUG_MODE=false
 
 # Run the service without root privileges. Only the data directory and the
-# generated minified file and runtime log directory need to be writable by the
-# application user.
+# runtime log directory need to be writable by the application user (there is no
+# generated minified bundle to own any more).
 RUN groupadd --system albayan \
     && useradd --system --gid albayan --home-dir /app --no-create-home albayan \
     && mkdir -p /var/lib/albayan /app/logs \
-    && chown -R albayan:albayan /var/lib/albayan /app/logs /app/script.min.js
+    && chown -R albayan:albayan /var/lib/albayan /app/logs
 
 EXPOSE 8000
 

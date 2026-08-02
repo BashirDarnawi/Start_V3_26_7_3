@@ -63,6 +63,25 @@ for (const bundle of bundleOutputs) {
   }
 }
 
+// The bundle must ship EXACTLY as npm built it. rjsmin cannot parse nested
+// template literals: at the inner backtick it thinks it is back in code and
+// deletes "redundant" whitespace out of string content, so the container served
+// `${n} group` as `${n}group` ("48groupswith the same name") and, worse, turned
+// class="x ${c ? 'a' : ''} y" into class="x ay", welding two CSS classes into
+// one. It only ever broke inside the image, which is why every local test and
+// the whole dev workflow stayed green while production was wrong.
+// Comments are stripped first: the Dockerfile deliberately NAMES rjsmin to
+// explain why it must never come back.
+const dockerfileCode = dockerfile.split(/\r?\n/).filter(line => !/^\s*#/.test(line)).join('\n');
+if (/rjsmin|jsmin/.test(dockerfileCode)) {
+  fail('server/Dockerfile minifies the bundle again; rjsmin corrupts nested template literals.');
+}
+const serverMainSource = fs.readFileSync(path.join(ROOT, 'server', 'main.py'), 'utf8');
+const selectScript = serverMainSource.slice(serverMainSource.indexOf('def _select_script_source('));
+if (/return SCRIPT_MIN_PATH|src = SCRIPT_MIN_PATH/.test(selectScript.slice(0, selectScript.indexOf('\ndef ', 1)))) {
+  fail('server/main.py can serve script.min.js again; that file is corrupted by rjsmin.');
+}
+
 const backendMain = path.join(ROOT, 'server', 'main.py');
 const backendLines = lineCount(backendMain);
 if (backendLines > 14200) {

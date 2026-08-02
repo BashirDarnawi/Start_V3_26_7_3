@@ -946,27 +946,34 @@ def sanitize_json(obj: Any, depth: int = 0, parent_key: str = "") -> Any:
 
 def _ensure_minified_script() -> None:
     """
-    Minify the frontend JS so the served file is much harder to read.
-    NOTE: This does NOT "hide" code from a determined attacker (browsers must download JS),
-    but it significantly reduces readability/copy/paste.
+    Delete any script.min.js left behind by an older image.
+
+    Minification is DISABLED and must not come back through rjsmin. rjsmin is an
+    ES5-era minifier that cannot parse NESTED template literals: at the inner
+    backtick it believes it is back in code and starts deleting "redundant"
+    whitespace from what is really string content. This bundle is one big nested
+    template literal, so it silently corrupted the served file:
+
+        `${n} group${n > 1 ? 's' : ''} with the same name`
+            -> `${n}group${n > 1 ? 's' : ''}with the same name`   ("48groupswith")
+
+    It is not only cosmetic — the same rule eats the space in
+    `class="x ${cond ? 'a' : ''} y"`, welding two CSS classes into one and
+    breaking styling. Only script.js is affected (studio.js/clothes.js were
+    never minified), and only in the container, which is why it never showed up
+    in local development or in the test suite.
+
+    Serving script.js raw costs about 184 KB more per gzipped load. Correct text
+    is worth more than that; a template-literal-aware minifier (esbuild/terser at
+    npm build time) can win the bytes back later without risking the content.
     """
-    if not SCRIPT_PATH.exists():
-        return
     try:
-        if SCRIPT_MIN_PATH.exists() and SCRIPT_MIN_PATH.stat().st_mtime >= SCRIPT_PATH.stat().st_mtime:
-            return
-        try:
-            from rjsmin import jsmin  # type: ignore
-        except Exception:
-            # Keep the app running even if rjsmin isn't installed (e.g., local dev).
-            print("[albayan] rjsmin not installed; serving script.js unminified")
-            return
-        src = SCRIPT_PATH.read_text(encoding="utf-8")
-        SCRIPT_MIN_PATH.write_text(jsmin(src), encoding="utf-8")
-        print("[albayan] Minified script.js -> script.min.js")
+        if SCRIPT_MIN_PATH.exists():
+            SCRIPT_MIN_PATH.unlink()
+            print("[albayan] Removed stale script.min.js (minification disabled)")
     except Exception as e:
-        # Fail open: do not break app startup if minification fails.
-        print(f"[albayan] Script minify skipped/failed: {type(e).__name__}")
+        # Fail open: a leftover file must never stop the app from starting.
+        print(f"[albayan] Could not remove script.min.js: {type(e).__name__}")
 
 
 def parse_permissions_json(permissions_json: str | None) -> dict[str, list[str]]:
@@ -2694,21 +2701,11 @@ def _asset_version(path: Path) -> str:
 
 def _select_script_source() -> Path:
     """
-    Serve minified JS only if it's up-to-date; otherwise serve script.js.
-    This prevents stale deployments when rjsmin isn't installed but an old
-    script.min.js exists.
+    Always the real bundle. Never script.min.js — see _ensure_minified_script:
+    rjsmin corrupts nested template literals, and preferring the minified file
+    "when it is newer" meant the container ALWAYS served the corrupted copy.
     """
-    src = SCRIPT_PATH
-    try:
-        if SCRIPT_MIN_PATH.exists() and SCRIPT_PATH.exists():
-            if SCRIPT_MIN_PATH.stat().st_mtime >= SCRIPT_PATH.stat().st_mtime:
-                src = SCRIPT_MIN_PATH
-        elif SCRIPT_MIN_PATH.exists() and not SCRIPT_PATH.exists():
-            src = SCRIPT_MIN_PATH
-    except Exception:
-        # Fail open to script.js
-        src = SCRIPT_PATH
-    return src
+    return SCRIPT_PATH
 
 
 # Long-lived caching for correctly-versioned asset URLs. index.html itself is
