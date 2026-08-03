@@ -66,6 +66,11 @@ function getReceiptPhoneRows() {
   }
   const rows = [];
   getCustomersVisibleToCurrentUser().forEach(c => {
+    // phones is not always there. The server REMOVES every contact field from
+    // customer rows for anyone without customers.viewContacts, so for those
+    // staff c.phones is undefined and the unguarded loop threw, killing the
+    // whole picker. Very old rows predate the field too.
+    if (!c || !Array.isArray(c.phones)) return;
     c.phones.forEach(phone => {
       rows.push({ phone, customer: c });
     });
@@ -930,7 +935,9 @@ function filterPageCustomersNow() {
 
   const filtered = customers.filter(c =>
     foldSearchText(c.name).includes(searchTerm) ||
-    c.phones.some(p => foldSearchText(p).includes(searchTerm)) ||
+    // Guarded like the row below it: staff without customers.viewContacts get
+    // customer rows with the phone fields removed, and searching threw for them.
+    (Array.isArray(c.phones) && c.phones.some(p => foldSearchText(p).includes(searchTerm))) ||
     foldSearchText(c.platform).includes(searchTerm)
   );
   

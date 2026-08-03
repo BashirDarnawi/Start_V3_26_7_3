@@ -1115,6 +1115,10 @@ function renderModal() {
         // Build phone list for search
         const phoneCustomerMap = [];
         receiptCustomers.forEach(c => {
+          // Not every customer carries phones: the server strips all contact
+          // fields for staff without customers.viewContacts, and the loop
+          // threw for them instead of just showing no phone suggestions.
+          if (!c || !Array.isArray(c.phones)) return;
           c.phones.forEach(phone => {
             phoneCustomerMap.push({ phone, customer: c });
           });

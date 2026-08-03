@@ -8110,6 +8110,12 @@ function deleteRecord(array, id, opts) {
     const old = { ...array[index] };
     array[index]._deleted = true;
     array[index]._lastModified = getMonotonicTime();
+    // Identity of the exact object this call marked deleted. Every rollback
+    // below may only restore the slot while it STILL holds this object: if
+    // live-sync installed a fresh copy mid-flight, writing the stale open-time
+    // snapshot back would clobber a newer committed change (the same guard
+    // updateRecord already uses).
+    const _optimisticRecord = array[index];
     if (collectionName) markCollectionDirty(collectionName);
     saveState();
     addAuditLog('Delete', id, `Deleted ${getRecordType(array[index])}`);
@@ -8120,7 +8126,7 @@ function deleteRecord(array, id, opts) {
     // (see flushBatchDeletes). Local state above is already updated.
     if (opts && Array.isArray(opts.collectServerOps)) {
       if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
-        opts.collectServerOps.push({ collection: collectionName, id, old, array });
+        opts.collectServerOps.push({ collection: collectionName, id, old, array, record: _optimisticRecord });
       }
       return Promise.resolve(true);
     }
@@ -8134,9 +8140,10 @@ function deleteRecord(array, id, opts) {
           return true;
         })
         .catch((e) => {
-          // Rollback on failure
+          // Rollback on failure, only while the slot still holds this call's
+          // own object (see _optimisticRecord above).
           const idx = array.findIndex(x => x && x.id === id);
-          if (idx !== -1) array[idx] = old;
+          if (idx !== -1 && array[idx] === _optimisticRecord) array[idx] = old;
           if (collectionName) markCollectionDirty(collectionName);
           saveState();
           // Handle 401 - session expired, prompt re-login
@@ -8158,7 +8165,7 @@ function deleteRecord(array, id, opts) {
         })
         .catch((e) => {
           const idx = array.findIndex(x => x && x.id === id);
-          if (idx !== -1) array[idx] = old;
+          if (idx !== -1 && array[idx] === _optimisticRecord) array[idx] = old;
           if (collectionName) markCollectionDirty(collectionName);
           saveState();
           // Handle 401 - session expired, prompt re-login
@@ -8196,10 +8203,13 @@ async function flushBatchDeletes(ops) {
         // commit only part of a cascade while the UI claimed full success.
       }
       // The server refused the whole batch: roll back every local soft-delete
-      // so nothing is half-deleted anywhere.
+      // so nothing is half-deleted anywhere. Each slot is restored only while
+      // it still holds the object that cascade marked deleted — a record that
+      // live-sync refreshed mid-flight keeps the newer committed copy instead
+      // of being overwritten with a stale snapshot.
       ops.forEach(o => {
         const idx = o.array.findIndex(x => x && x.id === o.id);
-        if (idx !== -1) o.array[idx] = o.old;
+        if (idx !== -1 && (!o.record || o.array[idx] === o.record)) o.array[idx] = o.old;
         markCollectionDirty(o.collection);
       });
       saveState();
@@ -17661,9 +17671,12 @@ function renderPagesView() {
           .some(value => foldSearchText(value).includes(pageSearch));
       })
     : allPages;
-  // Reset the reveal limit whenever the result set changes, so a new search
-  // starts at its top matches instead of inheriting a huge previous limit.
-  const pagesFilterFingerprint = `${pageSearch}|${allFilteredPages.length}`;
+  // Reset the reveal limit whenever the SEARCH changes, so a new search starts
+  // at its top matches instead of inheriting a huge previous limit. Keyed on
+  // the search only: including the result count meant a background Meta sync
+  // adding or removing one page silently threw the user back to the first 50
+  // rows after they had pressed "Load more" several times.
+  const pagesFilterFingerprint = String(pageSearch);
   if (pagesFilterFingerprint !== _pagesFilterFingerprint) {
     _pagesFilterFingerprint = pagesFilterFingerprint;
     _pagesShowLimit = PAGES_PAGE_SIZE;
@@ -43307,7 +43320,9 @@ async function downloadFullServerBackup(button = null) {
   }
   // Packaged app buffers whole responses in memory, and FB/IG webviews cannot
   // download at all — both would fail confusingly on a huge file.
-  if (typeof Platform !== 'undefined' && (Platform.isNative || Platform.isInAppBrowser)) {
+  // isCapacitor, not isNative: Platform exposes no isNative getter, so the
+  // packaged-app half of this guard read undefined and never fired.
+  if (typeof Platform !== 'undefined' && (Platform.isCapacitor || Platform.isInAppBrowser)) {
     if (typeof notifyInAppBrowserLimitation === 'function') notifyInAppBrowserLimitation('download');
     else showNotification(isAr ? 'افتح في المتصفح' : 'Open in a browser', isAr ? 'نزّل النسخة الكاملة من متصفح على الكمبيوتر.' : 'Download the full backup from a browser on a computer.', 'warning');
     return;

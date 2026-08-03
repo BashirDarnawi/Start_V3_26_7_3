@@ -491,6 +491,29 @@ check('with viewContacts, phone numbers are shown', () => {
   assert(html.includes('0911234567'), 'phone number missing for permitted user');
 });
 
+check('a customer with contacts redacted does not crash the phone pickers', () => {
+  // The SERVER removes every contact field from customer rows for staff
+  // without customers.viewContacts, so `phones` is absent — not empty. Code
+  // that iterated it threw a TypeError and took the whole picker (and the
+  // receipt form it lives in) down for exactly those users.
+  loginAs(employee({ customers: ['view'], receipts: ['view', 'create'] }));
+  const saved = S.customers;
+  try {
+    S.customers = saved.map(c => {
+      const copy = { ...c };
+      delete copy.phones;
+      return copy;
+    });
+    sandbox.invalidateReceiptPhoneRows?.();
+    const rows = sandbox.getReceiptPhoneRows();
+    assert(Array.isArray(rows), 'getReceiptPhoneRows did not return rows');
+    assert(rows.length === 0, 'redacted customers should contribute no phone rows');
+  } finally {
+    S.customers = saved;
+    sandbox.invalidateReceiptPhoneRows?.();
+  }
+});
+
 check('without viewBalance, balances are hidden', () => {
   loginAs(employee({ customers: ['view', 'viewContacts'] }));
   const html = visible(sandbox.renderCustomersGrid(S.customers));
