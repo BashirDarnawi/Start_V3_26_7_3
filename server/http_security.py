@@ -32,6 +32,17 @@ async def apply_security_headers(
     else:
         response = await call_next(request)
 
+    set_security_headers(request, response)
+    return response
+
+
+def set_security_headers(request: Request, response: Response) -> Response:
+    """Apply the browser defences to one response.
+
+    Factored out of the middleware so the unhandled-exception handler can use
+    it too: that handler runs OUTSIDE the middleware chain, so a 500 used to
+    be the one reply that carried no CSP, no nosniff and no no-store.
+    """
     response.headers.update(
         {
             "X-Content-Type-Options": "nosniff",

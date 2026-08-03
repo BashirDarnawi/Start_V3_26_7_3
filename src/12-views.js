@@ -2262,6 +2262,7 @@ function updateCustomersViewFiltered() {
   const newCount = src.querySelector('#customers-count');
   if (newGrid) grid.innerHTML = newGrid.innerHTML;
   if (newCount) countEl.textContent = newCount.textContent;
+  _lastViewHTML = null; // scoped swap left the DOM unknown to render()
   if (window.lucide) lucide.createIcons();
 }
 
@@ -3276,6 +3277,7 @@ function updatePagesViewFiltered() {
   const newCount = tpl.content.querySelector('#pages-count');
   if (newGrid) grid.innerHTML = newGrid.innerHTML;
   if (newCount) countEl.textContent = newCount.textContent;
+  _lastViewHTML = null; // scoped swap left the DOM unknown to render()
   if (window.lucide) lucide.createIcons();
 }
 
@@ -3544,6 +3546,7 @@ function updateAdsViewFiltered() {
   const newCount = src.querySelector('#ads-count');
   if (newContainer) container.innerHTML = newContainer.innerHTML;
   if (countEl && newCount) countEl.textContent = newCount.textContent;
+  _lastViewHTML = null; // scoped swap left the DOM unknown to render()
   if (window.lucide) lucide.createIcons();
 }
 
@@ -5602,6 +5605,7 @@ function updateUsersViewFiltered() {
   const newCount = tpl.content.querySelector('#users-count');
   if (newGrid) grid.innerHTML = newGrid.innerHTML;
   if (newCount) countEl.textContent = newCount.textContent;
+  _lastViewHTML = null; // scoped swap left the DOM unknown to render()
   if (window.lucide) lucide.createIcons();
 }
 
@@ -6271,6 +6275,7 @@ function updateAuditViewFiltered() {
   const clearEl = document.getElementById('audit-search-clear');
   const newClear = tpl.content.querySelector('#audit-search-clear');
   if (clearEl && newClear) clearEl.innerHTML = newClear.innerHTML;
+  _lastViewHTML = null; // scoped swap left the DOM unknown to render()
   if (window.lucide) lucide.createIcons();
 }
 

@@ -6,6 +6,52 @@ from types import SimpleNamespace
 
 import pytest
 
+from server import rate_limiter as _rl
+
+
+def test_key_flood_cannot_wash_out_a_login_lockout():
+    """An attacker must not be able to delete a real lockout by making noise.
+
+    Unauthenticated endpoints mint limiter keys from attacker-supplied values
+    (one per made-up email). Evicting oldest-first used to delete exactly the
+    bucket that was holding a brute-force attempt at bay.
+    """
+    _rl._MEMORY_STORE.clear()
+    _rl._MEMORY_WINDOWS.clear()
+    victim = "login:1.2.3.4|owner@albayanhub.com"
+    for _ in range(20):
+        _rl.check_rate_limit(victim, max_attempts=20, window_ms=15 * 60 * 1000)
+    allowed, _left, _retry = _rl.check_rate_limit(victim, max_attempts=20, window_ms=15 * 60 * 1000)
+    assert allowed is False, "victim should be locked out before the flood"
+
+    # Flood well past the cap with cheap throwaway keys.
+    for i in range(_rl._MAX_MEMORY_STORE_KEYS + 2000):
+        _rl.check_rate_limit(f"reset:9.9.9.9|junk{i}@x.tld", max_attempts=15, window_ms=15 * 60 * 1000)
+
+    allowed, _left, _retry = _rl.check_rate_limit(victim, max_attempts=20, window_ms=15 * 60 * 1000)
+    assert allowed is False, "the flood washed out the login lockout"
+    _rl._MEMORY_STORE.clear()
+    _rl._MEMORY_WINDOWS.clear()
+
+
+def test_a_short_window_check_does_not_expire_a_long_window_bucket():
+    """The daily full-backup cap must not be pruned by a 15-minute endpoint."""
+    _rl._MEMORY_STORE.clear()
+    _rl._MEMORY_WINDOWS.clear()
+    day = 86_400_000
+    for _ in range(3):
+        _rl.check_rate_limit("full-backup:admin", max_attempts=3, window_ms=day)
+    allowed, _left, _retry = _rl.check_rate_limit("full-backup:admin", max_attempts=3, window_ms=day)
+    assert allowed is False, "quota should be spent"
+
+    # Force a sweep from a short-window endpoint.
+    _rl._cleanup_memory_store(15 * 60 * 1000, force=True)
+
+    allowed, _left, _retry = _rl.check_rate_limit("full-backup:admin", max_attempts=3, window_ms=day)
+    assert allowed is False, "a 15-minute sweep reset the daily quota"
+    _rl._MEMORY_STORE.clear()
+    _rl._MEMORY_WINDOWS.clear()
+
 from server import rate_limiter
 
 

@@ -9365,20 +9365,41 @@ function mediaAwareTimeoutMs(body) {
   return TIME_CONSTANTS.API_TIMEOUT_LONG_MS;
 }
 const INLINE_MEDIA_FIELDS_BY_COLLECTION = Object.freeze({
+  // metaThumbnailData / metaPagePictureData are our OWN stored copies of the
+  // Facebook images (the fbcdn links beside them expire). Same handling as any
+  // inline photo: hydrated by id, never carried in a list response.
+  ads: Object.freeze(['adPhotos', 'photos', 'metaThumbnailData']),
+  receipts: Object.freeze(['photos', 'receiptImage']),
+  adCampaignRequests: Object.freeze(['creativeImages']),
+  walletPaymentRequests: Object.freeze(['receiptPhoto']),
+  pages: Object.freeze(['metaPagePictureData'])
+});
+
+// Stripped from lists, but NOT counted as a photo someone attached: the
+// archived Facebook images are ours, not uploads. Counting them made
+// Meta-linked ads with no uploads claim a photo and refuse to open for edit
+// when hydration failed. Mirrors COUNTED_MEDIA_FIELDS on the server.
+const COUNTED_MEDIA_FIELDS_BY_COLLECTION = Object.freeze({
   ads: Object.freeze(['adPhotos', 'photos']),
   receipts: Object.freeze(['photos', 'receiptImage']),
   adCampaignRequests: Object.freeze(['creativeImages']),
-  walletPaymentRequests: Object.freeze(['receiptPhoto'])
+  walletPaymentRequests: Object.freeze(['receiptPhoto']),
+  pages: Object.freeze([])
 });
 
 function _inlineMediaFields(collection) {
   return INLINE_MEDIA_FIELDS_BY_COLLECTION[String(collection || '')] || [];
 }
 
+function _countedMediaFields(collection) {
+  const key = String(collection || '');
+  return COUNTED_MEDIA_FIELDS_BY_COLLECTION[key] || _inlineMediaFields(key);
+}
+
 function getEntityPhotoCountHint(collection, record) {
   if (!record || typeof record !== 'object') return 0;
   const seen = new Set();
-  for (const field of _inlineMediaFields(collection)) {
+  for (const field of _countedMediaFields(collection)) {
     const value = record[field];
     const values = Array.isArray(value) ? value : [value];
     for (const source of values) {
@@ -16598,6 +16619,7 @@ function updateCustomersViewFiltered() {
   const newCount = src.querySelector('#customers-count');
   if (newGrid) grid.innerHTML = newGrid.innerHTML;
   if (newCount) countEl.textContent = newCount.textContent;
+  _lastViewHTML = null; // scoped swap left the DOM unknown to render()
   if (window.lucide) lucide.createIcons();
 }
 
@@ -17612,6 +17634,7 @@ function updatePagesViewFiltered() {
   const newCount = tpl.content.querySelector('#pages-count');
   if (newGrid) grid.innerHTML = newGrid.innerHTML;
   if (newCount) countEl.textContent = newCount.textContent;
+  _lastViewHTML = null; // scoped swap left the DOM unknown to render()
   if (window.lucide) lucide.createIcons();
 }
 
@@ -17880,6 +17903,7 @@ function updateAdsViewFiltered() {
   const newCount = src.querySelector('#ads-count');
   if (newContainer) container.innerHTML = newContainer.innerHTML;
   if (countEl && newCount) countEl.textContent = newCount.textContent;
+  _lastViewHTML = null; // scoped swap left the DOM unknown to render()
   if (window.lucide) lucide.createIcons();
 }
 
@@ -19938,6 +19962,7 @@ function updateUsersViewFiltered() {
   const newCount = tpl.content.querySelector('#users-count');
   if (newGrid) grid.innerHTML = newGrid.innerHTML;
   if (newCount) countEl.textContent = newCount.textContent;
+  _lastViewHTML = null; // scoped swap left the DOM unknown to render()
   if (window.lucide) lucide.createIcons();
 }
 
@@ -20607,6 +20632,7 @@ function updateAuditViewFiltered() {
   const clearEl = document.getElementById('audit-search-clear');
   const newClear = tpl.content.querySelector('#audit-search-clear');
   if (clearEl && newClear) clearEl.innerHTML = newClear.innerHTML;
+  _lastViewHTML = null; // scoped swap left the DOM unknown to render()
   if (window.lucide) lucide.createIcons();
 }
 
@@ -27223,6 +27249,7 @@ function updateReceiptsViewFiltered() {
   if (chipsEl && newChips) chipsEl.innerHTML = newChips.innerHTML;
   if (clearEl && newClear) clearEl.innerHTML = newClear.innerHTML;
   if (clearFiltersEl && newClearFilters) clearFiltersEl.innerHTML = newClearFilters.innerHTML;
+  _lastViewHTML = null; // scoped swap left the DOM unknown to render()
   if (window.lucide) lucide.createIcons();
 }
 
@@ -36825,14 +36852,14 @@ function renderModal() {
               <div>
                 <label class="block text-xs font-medium text-slate-500 mb-2">${isArR ? 'اختر الهاتف أولاً...' : 'Select phone first...'}</label>
                 <input type="text" id="receipt-customer-name" readonly class="w-full glass-input px-3 py-2 rounded-lg text-sm bg-slate-100 dark:bg-slate-800" placeholder="${isArR ? 'سيظهر العميل هنا' : 'Customer will appear here'}" />
-                <input type="hidden" id="receipt-customer-id" value="${receiptData.customerId || ''}" />
+                <input type="hidden" id="receipt-customer-id" value="${Security.escapeHtml(String(receiptData.customerId || ''))}" />
               </div>
             </div>
 
             <!-- Receipt Number -->
             <div class="px-1">
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1.5">${isArR ? 'رقم الوصل' : 'Receipt Number'}</label>
-              <input type="text" id="receipt-serial" value="${receiptData.serialNumber || receiptData.finalReceiptNo || receiptData.tempReceiptNo || ''}" 
+              <input type="text" id="receipt-serial" value="${Security.escapeHtml(String(receiptData.serialNumber || receiptData.finalReceiptNo || receiptData.tempReceiptNo || ''))}" 
                 class="w-full glass-input px-3 py-2 rounded-lg text-sm" 
                 placeholder="${isArR ? 'مثال: 12345' : 'e.g., 12345'}"
                 oninput="validateReceiptNumberInput(this)"
@@ -36850,7 +36877,7 @@ function renderModal() {
                 <button type="button" onclick="setReceiptStatus(this, 'Canceled')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Canceled' ? 'bg-rose-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Canceled">${isArR ? 'ملغي' : 'Canceled'}</button>
                 <button type="button" onclick="setReceiptStatus(this, 'Lost')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Lost' ? 'bg-slate-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Lost">${isArR ? 'مفقود' : 'Lost'}</button>
               </div>
-              <input type="hidden" id="receipt-status" value="${receiptData.status || 'Paid'}" />
+              <input type="hidden" id="receipt-status" value="${Security.escapeHtml(String(receiptData.status || 'Paid'))}" />
 
               <!-- Paid controls -->
               <div id="status-paid" class="${(!receiptData.status || receiptData.status === 'Paid') ? '' : 'hidden'} mt-3 p-4 rounded-2xl border-2 border-blue-200 dark:border-blue-800 bg-gradient-to-br from-blue-50 via-indigo-50 to-cyan-50 dark:from-blue-900/40 dark:via-indigo-900/30 dark:to-cyan-900/20 shadow-lg space-y-4">
@@ -36866,7 +36893,7 @@ function renderModal() {
                   </div>
                 </div>
 
-                <input type="hidden" id="paid-collection-value" value="${receiptData.statusDetail?.paidCollection || 'office'}" />
+                <input type="hidden" id="paid-collection-value" value="${Security.escapeHtml(String(receiptData.statusDetail?.paidCollection || 'office'))}" />
 
                 <div class="grid grid-cols-2 gap-3">
                   <button type="button" onclick="selectPaidCollection('office')" class="paid-collection-btn group relative overflow-hidden p-4 rounded-xl text-center transition-all duration-300 ${(!receiptData.statusDetail?.paidCollection || receiptData.statusDetail?.paidCollection === 'office') ? 'bg-gradient-to-br from-blue-500 to-indigo-600 text-white shadow-xl shadow-blue-500/30 scale-[1.02]' : 'bg-white/80 dark:bg-slate-800/60 hover:bg-white dark:hover:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 hover:border-blue-400 dark:hover:border-blue-600 hover:shadow-lg'}" data-value="office">
@@ -36936,7 +36963,7 @@ function renderModal() {
                     <i data-lucide="map-pin" class="w-3 h-3"></i>
                     <span>${isArR ? 'كيف سيدفع العميل؟' : 'How will customer pay?'}</span>
                   </div>
-                  <input type="hidden" id="notpaid-collection-value" value="${receiptData.statusDetail?.notPaidCollection || 'office'}" />
+                  <input type="hidden" id="notpaid-collection-value" value="${Security.escapeHtml(String(receiptData.statusDetail?.notPaidCollection || 'office'))}" />
                         <div class="grid grid-cols-2 gap-3">
                     <button type="button" onclick="selectNotPaidCollection('office')" class="notpaid-collection-btn group relative overflow-hidden p-4 rounded-xl text-center transition-all duration-300 ${!receiptData.statusDetail?.notPaidCollection || receiptData.statusDetail?.notPaidCollection === 'office' ? 'bg-gradient-to-br from-blue-500 to-indigo-600 text-white shadow-xl shadow-blue-500/30 scale-[1.02]' : 'bg-white/80 dark:bg-slate-800/60 hover:bg-white dark:hover:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 hover:border-blue-400 dark:hover:border-blue-600 hover:shadow-lg'}" data-value="office">
                       <div class="flex flex-col items-center space-y-2">
@@ -36988,7 +37015,7 @@ function renderModal() {
                     </div>
                     <div>
                       <label class="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1">${isArR ? 'سعر التوصيل المتفق عليه (دينار) *' : 'Quoted delivery fee (LYD) *'}</label>
-                      <input type="text" inputmode="decimal" id="receipt-quoted-delivery-fee" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="0.00" value="${(receiptData.quotedDeliveryFee ?? '')}" oninput="sanitizeMoneyInput(this)" />
+                      <input type="text" inputmode="decimal" id="receipt-quoted-delivery-fee" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="0.00" value="${Security.escapeHtml(String((receiptData.quotedDeliveryFee ?? '')))}" oninput="sanitizeMoneyInput(this)" />
                     </div>
                     <div>
                       <label class="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1">${isArR ? 'تعليمات (اختياري)' : 'Instructions (optional)'}</label>
@@ -37009,7 +37036,7 @@ function renderModal() {
                     <div class="text-xs text-rose-600/80 dark:text-rose-300/80">${isArR ? 'اختر نتيجة الإلغاء' : 'Choose the cancellation outcome'}</div>
                           </div>
                           </div>
-                <input type="hidden" id="status-cancel-refund-action" value="${receiptData.statusDetail?.refundAction || ''}" />
+                <input type="hidden" id="status-cancel-refund-action" value="${Security.escapeHtml(String(receiptData.statusDetail?.refundAction || ''))}" />
                 <div class="grid grid-cols-2 gap-2">
                   <button type="button" onclick="selectCancelOption('full')" class="cancel-option-btn group relative overflow-hidden px-4 py-3 rounded-xl text-left transition-all duration-300 ${receiptData.statusDetail?.refundAction === 'full' ? 'bg-gradient-to-r from-emerald-500 to-teal-500 text-white shadow-lg shadow-emerald-500/30 scale-[1.02]' : 'bg-white/80 dark:bg-slate-800/60 hover:bg-white dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-emerald-300 dark:hover:border-emerald-700 hover:shadow-md'}" data-value="full">
                     <div class="flex items-center space-x-3">
@@ -37061,7 +37088,7 @@ function renderModal() {
                     <i data-lucide="loader" class="w-3 h-3"></i>
                     <span>${isArR ? 'حالة الاسترجاع' : 'Refund Progress'}</span>
               </div>
-                  <input type="hidden" id="status-cancel-refund-status" value="${receiptData.statusDetail?.refundStatus || 'pending'}" />
+                  <input type="hidden" id="status-cancel-refund-status" value="${Security.escapeHtml(String(receiptData.statusDetail?.refundStatus || 'pending'))}" />
                   <div class="flex space-x-2">
                     <button type="button" onclick="selectRefundStatus('pending')" class="refund-status-btn flex-1 py-2.5 px-4 rounded-xl text-sm font-bold transition-all duration-300 ${receiptData.statusDetail?.refundStatus !== 'refunded' ? 'bg-gradient-to-r from-amber-400 to-orange-500 text-white shadow-lg shadow-amber-500/30' : 'bg-white/60 dark:bg-slate-800/60 text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-slate-700 hover:border-amber-300'}" data-value="pending">
                       <i data-lucide="hourglass" class="w-4 h-4 inline mr-1.5"></i>${trStatus('Pending')}
@@ -37084,7 +37111,7 @@ function renderModal() {
                     <div class="text-xs text-indigo-600/80 dark:text-indigo-300/80">${isArR ? 'هل كان هذا الوصل مدفوعاً أم فارغاً؟' : 'Was this receipt paid or empty?'}</div>
                   </div>
                 </div>
-                <input type="hidden" id="status-lost-resolution" value="${receiptData.statusDetail?.lostResolution || ''}" />
+                <input type="hidden" id="status-lost-resolution" value="${Security.escapeHtml(String(receiptData.statusDetail?.lostResolution || ''))}" />
                 <div class="grid grid-cols-2 gap-3">
                   <button type="button" onclick="selectLostOption('empty')" class="lost-option-btn group relative overflow-hidden p-4 rounded-xl text-center transition-all duration-300 ${receiptData.statusDetail?.lostResolution === 'empty' ? 'bg-gradient-to-br from-slate-600 to-slate-700 text-white shadow-xl shadow-slate-500/30 scale-[1.02]' : 'bg-white/80 dark:bg-slate-800/60 hover:bg-white dark:hover:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-500 hover:shadow-lg'}" data-value="empty">
                     <div class="flex flex-col items-center space-y-2">
@@ -40734,11 +40761,22 @@ function renderMetaAdPageSummary(ad, adPage, adPageDeleted, isAr) {
 }
 
 function adPagePictureUrl(ad, adPage) {
+  // Our OWN archived copy wins: signed fbcdn links expire (and stop working
+  // entirely once the Meta link is gone), the stored data URL does not.
+  const stored = String(adPage?.metaPagePictureData || ad?.metaPagePictureData || '').trim();
+  if (stored.indexOf('data:image/') === 0) return stored;
   // Server-synced Facebook Page profile picture: the ad's own copy first
   // (refreshed by every Meta sync pass, so its signed URL stays fresh), then
   // the linked page record's copy for ads the sync has not revisited yet.
   const url = String(ad?.metaPagePictureUrl || adPage?.metaPagePictureUrl || '').trim();
   return /^https:\/\//i.test(url) ? url : '';
+}
+
+// The ad creative to display: archived copy first, signed link as fallback.
+function metaAdThumbnailSrc(ad) {
+  const stored = String(ad?.metaThumbnailData || '').trim();
+  if (stored.indexOf('data:image/') === 0) return stored;
+  return String(ad?.metaThumbnailUrl || '').trim();
 }
 
 function renderAdPageAvatar(ad, adPage, isAr, besideTile = true) {
@@ -40770,7 +40808,7 @@ function adPageAvatarError(img) {
 
 function renderMetaAdThumbnail(ad, isAr) {
   if (!ad?.metaAdId) return '';
-  if (!ad.metaThumbnailUrl) {
+  if (!metaAdThumbnailSrc(ad)) {
     // A linked ad whose real photo has not been resolved yet: show an honest
     // "photo loading" tile instead of nothing (and never the page logo).
     // Admins see the technical trace (which Meta doors were closed) in the
@@ -40786,7 +40824,7 @@ function renderMetaAdThumbnail(ad, isAr) {
     ? (isAr ? 'صورة الصفحة — صورة الإعلان الأصلية غير متاحة من Meta' : "Page picture — Meta does not expose this ad's original photo")
     : (isAr ? 'عرض صورة إعلان Meta' : 'View Meta ad image');
   return `<button type="button" data-meta-preview-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openMetaAdPreview(this.dataset.metaPreviewAdId)" class="meta-ad-thumbnail-button" title="${Security.escapeHtml(label)}" aria-label="${Security.escapeHtml(label)}">
-    <img src="${Security.escapeHtml(String(ad.metaThumbnailUrl))}" alt="${label}" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="metaAdsThumbnailError(this)">
+    <img src="${Security.escapeHtml(metaAdThumbnailSrc(ad))}" alt="${label}" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="metaAdsThumbnailError(this)">
     <span class="meta-ad-thumbnail-badge"><i data-lucide="maximize-2" class="h-3 w-3"></i></span>
   </button>`;
 }
@@ -40852,7 +40890,7 @@ function metaAdsThumbnailError(img) {
 
 function openMetaAdPreview(adId) {
   const ad = metaAdsFindLocalAd(adId);
-  if (!ad?.metaThumbnailUrl) return;
+  if (!metaAdThumbnailSrc(ad)) return;
   const isAr = metaAdsIsArabic();
   document.getElementById('meta-ad-preview-modal')?.remove();
   const title = ad.metaAdName || (isAr ? 'صورة إعلان Meta' : 'Meta ad image');
@@ -40862,7 +40900,7 @@ function openMetaAdPreview(adId) {
         <div class="min-w-0"><h2 id="meta-ad-preview-title" class="truncate font-black text-slate-800 dark:text-white">${Security.escapeHtml(title)}</h2><p class="truncate text-xs text-slate-500">${Security.escapeHtml(ad.metaAdAccountName || '')}</p></div>
         <button type="button" onclick="document.getElementById('meta-ad-preview-modal').remove()" class="touch-target inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${isAr ? 'إغلاق' : 'Close'}"><i data-lucide="x" class="h-5 w-5"></i></button>
       </div>
-      <div class="flex max-h-[75dvh] items-center justify-center overflow-auto bg-slate-100 p-2 dark:bg-slate-950 sm:p-4"><img src="${Security.escapeHtml(String(ad.metaThumbnailUrl))}" alt="${Security.escapeHtml(title)}" class="max-h-[70dvh] max-w-full rounded-xl object-contain" referrerpolicy="no-referrer"></div>
+      <div class="flex max-h-[75dvh] items-center justify-center overflow-auto bg-slate-100 p-2 dark:bg-slate-950 sm:p-4"><img src="${Security.escapeHtml(metaAdThumbnailSrc(ad))}" alt="${Security.escapeHtml(title)}" class="max-h-[70dvh] max-w-full rounded-xl object-contain" referrerpolicy="no-referrer"></div>
     </div>
   </div>`);
   lucide.createIcons();
@@ -43285,6 +43323,11 @@ async function downloadFullServerBackup(button = null) {
     if (!ok) return;
     const link = document.createElement('a');
     link.href = `${getServerBaseUrl()}/api/admin/backup/full`;
+    // Both attributes matter: an ERROR reply (rate limit, another backup
+    // already running) is JSON with no attachment header, and without these
+    // the browser would navigate the running app away and lose its state.
+    link.download = 'albayan-full-backup.ndjson.gz';
+    link.target = '_blank';
     link.rel = 'noopener';
     link.style.display = 'none';
     document.body.appendChild(link);

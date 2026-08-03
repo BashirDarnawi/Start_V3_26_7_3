@@ -72,6 +72,7 @@ from .ad_campaign_actions import (
     enforce_boost_submission_rules,
     normalize_ad_campaign_destination,
 )
+from .delivery_ops import create_delivery_ops_router
 from .full_backup import create_full_backup_router
 from .subscription_plans import (
     PLAN_SETTINGS_KEY,
@@ -167,7 +168,7 @@ from .security import (
     new_session_cookie_value, parse_session_cookie_value, verify_password,
 )
 from .auth_security import upgrade_password_hash_after_login
-from .http_security import apply_security_headers
+from .http_security import apply_security_headers, set_security_headers
 from .profitability import validate_dollar_purchase
 from .operations import FINANCIAL_CLOSE_COLLECTION, create_operations_router, assert_financial_bulk_import_open, assert_financial_period_open, financial_period_is_closed, lock_financial_period_for_redaction
 # A throwaway PBKDF2 hash used to spend the SAME ~verify time on a login attempt
@@ -548,6 +549,11 @@ PASSWORD_RESET_DEV_RETURN_CODE = os.getenv("ALBAYAN_DEV_PASSWORD_RESET_RETURN_CO
 _RESET_WINDOW_MS = int(os.getenv("ALBAYAN_RESET_WINDOW_MS", str(15 * 60 * 1000)))
 _RESET_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_RESET_MAX_ATTEMPTS", "5"))
 _RESET_EMAIL_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_RESET_EMAIL_MAX_ATTEMPTS", "15"))
+# Ceiling on reset requests from ONE source address, whatever email they name.
+# Deliberately roomy so a whole office behind a single NAT/Cloudflare address
+# is never locked out of a legitimate reset, while still bounding the limiter
+# keys and audit rows an unauthenticated stranger can create.
+_RESET_IP_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_RESET_IP_MAX_ATTEMPTS", "60"))
 _SETUP_WINDOW_MS = int(os.getenv("ALBAYAN_SETUP_WINDOW_MS", str(15 * 60 * 1000)))
 _SETUP_IP_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_SETUP_IP_MAX_ATTEMPTS", "10"))
 _SETUP_GLOBAL_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_SETUP_GLOBAL_MAX_ATTEMPTS", "100"))
@@ -642,6 +648,18 @@ def _reset_rate_check(request: Request, email: str) -> tuple[bool, int]:
         - wait_ms: Milliseconds to wait if rate limited
     """
     from .rate_limiter import check_rate_limit
+
+    # Global per-IP ceiling FIRST. Without it this unauthenticated endpoint
+    # mints two brand-new limiter keys per request from an attacker-chosen
+    # email — unbounded noise that both floods the limiter store and writes an
+    # audit row per attempt. Sized generously (a whole office behind one NAT
+    # address stays well under it) but finite. Mirrors reset-confirm:ip:.
+    ip_ceiling_key = f"reset:ip:{_client_ip(request)}"
+    ip_ok, _ip_left, ip_retry = check_rate_limit(
+        ip_ceiling_key, _RESET_IP_MAX_ATTEMPTS, _RESET_WINDOW_MS
+    )
+    if not ip_ok:
+        return False, int(ip_retry or 0)
 
     key = f"reset:{_rate_key(request, email)}"
     is_allowed, attempts_left, retry_after_ms = check_rate_limit(key, _RESET_MAX_ATTEMPTS, _RESET_WINDOW_MS)
@@ -1371,6 +1389,7 @@ def list_entities(
     after_id: str | None = None,
     include_media: bool = True,
     ad_campaign_reviewer_scope: bool = False,
+    campaign_owner_id: str | None = None,
 ) -> list[dict[str, Any]]:
     entity_type = sanitize_str(entity_type)[:40]
     if not entity_type:
@@ -1410,7 +1429,16 @@ def list_entities(
             # Brand-new Drafts never enter the reviewer query at all (even ids
             # and activity timestamps are private).
             visible_status_sql += ",'Changes Requested'"
-        where.append(f"{campaign_status_expr} IN ({visible_status_sql})")
+        owner_uid = sanitize_str(str(campaign_owner_id or ""))[:80]
+        if owner_uid:
+            # A customer must still see their OWN drafts. Everyone else only
+            # ever sees the workflow-visible states.
+            where.append(
+                f"({campaign_status_expr} IN ({visible_status_sql}) OR created_by = :campaign_owner)"
+            )
+            params["campaign_owner"] = owner_uid
+        else:
+            where.append(f"{campaign_status_expr} IN ({visible_status_sql})")
     # For delta sync (updated_since), we intentionally include deleted rows as tombstones
     # so clients can remove them without requiring a full refresh.
     if not include_deleted and updated_since is None:
@@ -2280,20 +2308,43 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         print(traceback.format_exc())
     except Exception:
         pass
+    # This handler runs OUTSIDE the middleware chain, so nothing else will add
+    # the browser defences or record the failure: a 500 used to be the one
+    # reply carrying no CSP, no nosniff and no no-store, and it never reached
+    # the monitor, so the error-rate alert could not fire on real crashes.
+    try:
+        from .monitoring import observe_request
+        observe_request(500, 0)
+    except Exception:
+        pass
+    try:
+        print(json_dumps({
+            "ts": now_ms(), "type": "access", "request_id": request_id,
+            "method": request.method, "path": request.url.path, "status": 500,
+            "error_id": err_id,
+        }))
+    except Exception:
+        pass
     # SECURITY: In production, don't leak exception details to clients
     # Keep response safe and short; avoid leaking large stack traces to clients.
     if DEBUG_MODE:
         safe_msg = sanitize_str(str(exc)).replace("\n", " ").replace("\r", " ")[:240]
-        return JSONResponse(
+        response = JSONResponse(
             {"detail": f"Internal error ({err_id}): {type(exc).__name__}: {safe_msg}"},
             status_code=500,
         )
     else:
         # Production: return generic error without details
-        return JSONResponse(
+        response = JSONResponse(
             {"detail": f"Internal error ({err_id}). Please contact support."},
             status_code=500,
         )
+    try:
+        set_security_headers(request, response)
+        response.headers["X-Request-ID"] = str(request_id)
+    except Exception:
+        pass
+    return response
 
 
 def _bootstrap_first_admin_if_empty():
@@ -4130,6 +4181,13 @@ def _lock_idempotency_key(conn: Any, key: str, *, postgres: bool, namespace: str
     )
 
 
+# Key prefixes the SERVER mints for money it controls. A caller must never be
+# able to occupy one of these; see _validate_wallet_values below.
+_RESERVED_IDEMPOTENCY_PREFIXES = frozenset(
+    {"cpay:", "rel:", "stoprefund:", "rev:", "payreq:", "subpay:"}
+)
+
+
 def _validate_wallet_values(amount_minor: Any, currency: Any, idempotency_key: Any) -> tuple[int, str, str]:
     if isinstance(amount_minor, bool):
         raise HTTPException(status_code=400, detail="amountMinor must be an integer")
@@ -4147,6 +4205,16 @@ def _validate_wallet_values(amount_minor: Any, currency: Any, idempotency_key: A
     idem = sanitize_str(str(idempotency_key or ""))[:120]
     if len(idem) < 8:
         raise HTTPException(status_code=400, detail="idempotencyKey is required (minimum 8 characters)")
+    # The server derives its OWN keys for money it controls: cpay: (campaign
+    # capture), rel: (crashed-approval release), stoprefund: (stop refund),
+    # rev: (admin reversal), payreq: (confirmed charge), subpay: (subscription
+    # payment). Those keys are predictable from data the customer can see, so
+    # a caller allowed to pick one could pre-create a 1-cent row that the
+    # server later mistakes for its own committed payment — and get an
+    # approved campaign, or a second refund, for free. Legitimate clients send
+    # generated ids, so nothing real uses these prefixes.
+    if idem.split(":", 1)[0] + ":" in _RESERVED_IDEMPOTENCY_PREFIXES:
+        raise HTTPException(status_code=400, detail="idempotencyKey uses a reserved prefix")
     return amount, cur, idem
 
 
@@ -6537,6 +6605,7 @@ AD_FUNDING_FIELDS = frozenset(
         "refundDueBaseline",
         "refundBaselinePaymentStatus",
         "preRefundStatus",
+        "preRefundSpentUSD",
         "refundType",
         "refundAmount",
         "refundStatus",
@@ -6827,13 +6896,29 @@ def _financial_due_total(data: dict[str, Any]) -> int:
     if local_value is None:
         local_value = data.get("amountLocal")
     local = _financial_minor(local_value, "receipt due amount")
-    rate = _financial_rate(data.get("exchangeRate"))
-    if local > 0 and rate > 0:
-        return int((Decimal(local) / rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     usd_value = data.get("debtAmountUSD")
     if usd_value is None:
         usd_value = data.get("amountUSD")
-    return _financial_minor(usd_value, "receipt due amount")
+    usd_minor = _financial_minor(usd_value, "receipt due amount")
+    # NEVER divide the local amount by an invented rate. _financial_rate falls
+    # back to 1 for junk, and validate_exchange_rate CLAMPS a blank/zero rate
+    # up to MIN_EXCHANGE_RATE (0.001) before storing it — so a 500 LYD debt
+    # with no Rate 2 used to divide by 0.001 and advertise $500,000 of
+    # spendable ad credit. The receipt's own USD figure is the truthful
+    # answer whenever it exists; only a rate we actually trust may convert.
+    if usd_minor > 0:
+        return usd_minor
+    raw_rate = data.get("exchangeRate")
+    rate = _financial_rate(raw_rate)
+    trusted_rate = (
+        raw_rate is not None
+        and str(raw_rate) != ""
+        and rate > Decimal(str(MIN_EXCHANGE_RATE))
+        and rate != Decimal(1)
+    )
+    if local > 0 and trusted_rate:
+        return int((Decimal(local) / rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return usd_minor
 
 
 def _financial_valid_rate(value: Any) -> Decimal | None:
@@ -7586,6 +7671,7 @@ def _financial_derive_ad(
         "refundDueBaseline",
         "refundBaselinePaymentStatus",
         "preRefundStatus",
+        "preRefundSpentUSD",
         "remainingCustomerInformed",
         "remainingCustomerInformedAt",
         "remainingCustomerInformedBy",
@@ -7966,13 +8052,26 @@ def _financial_apply_refund(
     if refund_type not in {"None", "Full", "Partial"}:
         raise HTTPException(status_code=400, detail="Invalid refundType")
     ad_amount = _financial_minor(existing.get("amountUSD"), "ad amount")
+    # A STOPPED ad is only worth what it actually spent, not its original
+    # budget. Refunding against the budget recomputed spentUSD upward — an ad
+    # stopped at $10 of $100, refunded $20, recorded $80 of spend and let
+    # settlement draw that phantom amount from the receipt. Ads that were
+    # never stopped have no effective amount of their own, so this falls back
+    # to amountUSD and their behaviour is unchanged.
+    # _financial_ad_effective_amount already returns MINOR units (it is
+    # spentUSD when the ad was stopped, else amountUSD) — converting it again
+    # would multiply by 100 and silently restore the old behaviour.
+    try:
+        effective_minor = min(ad_amount, _financial_ad_effective_amount(existing))
+    except Exception:
+        effective_minor = ad_amount
     refund_amount = 0 if refund_type == "None" else _financial_minor(
         requested.get("refundAmount"), "refundAmount"
     )
     if refund_type == "Full":
-        refund_amount = ad_amount
-    if refund_amount > ad_amount:
-        raise HTTPException(status_code=400, detail="Refund exceeds ad amount")
+        refund_amount = effective_minor
+    if refund_amount > effective_minor:
+        raise HTTPException(status_code=400, detail="Refund exceeds the ad's unrefunded amount")
 
     current_paid = _financial_allocations(existing.get("receiptAllocations"), "receiptAllocations")
     current_due = _financial_allocations(existing.get("dueAllocations"), "dueAllocations")
@@ -8033,7 +8132,17 @@ def _financial_apply_refund(
         result["refundType"] = "None"
         result["refundAmount"] = 0
         result.pop("refundStatus", None)
-        result.pop("spentUSD", None)
+        # Undo restores the spend the ad carried before the refund. Popping it
+        # unconditionally made a stopped ad return to "Stopped" with NO spend,
+        # so its spend read as the full budget and FIFO consumed dollar lots
+        # for money that was never spent. Only trust the stamp inside an
+        # active refund lifecycle, exactly like preRefundStatus.
+        restored_spend = existing.get("preRefundSpentUSD") if existing_refund_active else None
+        if restored_spend is not None:
+            result["spentUSD"] = restored_spend
+        else:
+            result.pop("spentUSD", None)
+        result.pop("preRefundSpentUSD", None)
         # Undo returns to the status that existed before the refund. Legacy
         # rows did not save it, so Active is the conservative usable default.
         result["status"] = str(
@@ -8092,7 +8201,12 @@ def _financial_apply_refund(
         )
         result["status"] = "Canceled"
         result["canceledBy"] = str(actor.get("id") or "")
-        result["spentUSD"] = _financial_usd(ad_amount - refund_amount)
+        # Remember the spend the ad carried BEFORE the refund, so undo can put
+        # it back. Without this, undoing a refund on a stopped ad dropped
+        # spentUSD entirely and its spend jumped to the full budget.
+        if not existing_refund_active and existing.get("spentUSD") is not None:
+            result["preRefundSpentUSD"] = existing.get("spentUSD")
+        result["spentUSD"] = _financial_usd(max(effective_minor - refund_amount, 0))
     paid = _financial_allocations(result.get("receiptAllocations"), "receiptAllocations")
     due = _financial_allocations(result.get("dueAllocations"), "dueAllocations")
     result["receiptAllocations"] = paid
@@ -11415,10 +11529,14 @@ def get_collection(
         include_deleted = False
 
     created_by_filter = None if can_view_all else str(user.get("id") or "")
+    # Campaign privacy belongs to the RECORD, not to who is asking. Keying it
+    # on the "review" permission meant a staff account granted plain
+    # adCampaignRequests.view (no review) skipped the scope entirely and read
+    # every customer's private Draft. Every non-admin now gets the workflow
+    # scope; their OWN drafts stay visible via the owner exemption below.
     ad_campaign_reviewer_scope = (
         collection == AD_CAMPAIGN_COLLECTION
         and role_lower != "admin"
-        and user_has_permission(user, AD_CAMPAIGN_COLLECTION, "review")
     )
     items = list_entities(
         collection,
@@ -11433,6 +11551,7 @@ def get_collection(
         after_id=after_id,
         include_media=include_media,
         ad_campaign_reviewer_scope=ad_campaign_reviewer_scope,
+        campaign_owner_id=str(user.get("id") or "") if ad_campaign_reviewer_scope else None,
     )
     return [
         EntityResponse(**_project_entity_contacts_for_user(i, user))
@@ -11544,7 +11663,11 @@ def get_collection_item(
     if (
         collection == AD_CAMPAIGN_COLLECTION
         and role_lower != "admin"
-        and user_has_permission(user, AD_CAMPAIGN_COLLECTION, "review")
+        # Keyed on the RECORD, not on holding "review": a view-only staff
+        # account used to skip this guard entirely. The owner still reads
+        # their own draft.
+        and str(item.get("createdBy") or (item.get("data") or {}).get("createdBy") or "")
+        != str(user.get("id") or "")
         and str((item.get("data") or {}).get("status") or "Draft")
         not in {"Submitted", "Approved", "Rejected", "Stopped"}
     ):
@@ -13314,107 +13437,6 @@ def audit_stats(user: dict[str, Any] = Depends(current_user)):
     }
 
 
-@app.post("/api/deliveries/check-stuck")
-def check_stuck_deliveries(
-    request: Request,
-    hours_threshold: int = 72,
-    payload: dict[str, Any] | None = Body(default=None),
-    user: dict[str, Any] = Depends(current_user),
-):
-    """
-    Find deliveries that have been 'In Progress' for more than X hours (default: 72h = 3 days).
-    Requires the deliveries.assign permission (admins pass automatically) —
-    matching the client-side gate. Returns stuck delivery receipts for review.
-    """
-    require_same_origin(request)
-    if not user_has_permission(user, "deliveries", "assign"):
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-    # The client sends hours_threshold in the JSON body; also accept the query
-    # param for backwards compatibility (body wins).
-    if isinstance(payload, dict) and payload.get("hours_threshold") is not None:
-        try:
-            hours_threshold = int(payload.get("hours_threshold"))
-        except (TypeError, ValueError):
-            hours_threshold = 72
-
-    hours_threshold = max(1, min(int(hours_threshold), 720))  # Min 1 hour, max 30 days
-    cutoff_ts = now_ms() - (hours_threshold * 60 * 60 * 1000)
-    
-    stuck_deliveries = []
-    
-    with db_conn() as conn:
-        # Get receipts with deliveryStatus = 'In Progress'. Production receipts
-        # carry inline base64 photos (up to 8MB each), so loading EVERY receipt's
-        # data_json to filter in Python could materialize gigabytes and OOM-kill
-        # the small ECS task. On Postgres, filter deliveryStatus in SQL so only
-        # candidate rows load their data_json. Cap results as a backstop.
-        dialect = str(get_engine().dialect.name or "")
-        if dialect == "postgresql":
-            rows = (
-                conn.execute(
-                    text("""
-                        SELECT id, data_json, created_at, last_modified
-                        FROM entities
-                        WHERE type = 'receipts' AND deleted = false
-                          AND (data_json::jsonb ->> 'deliveryStatus') = 'In Progress'
-                        LIMIT 5000
-                    """)
-                )
-                .mappings()
-                .all()
-            )
-        else:
-            # SQLite (dev): no JSON operator dependency; bounded scan.
-            rows = (
-                conn.execute(
-                    text("""
-                        SELECT id, data_json, created_at, last_modified
-                        FROM entities
-                        WHERE type = 'receipts' AND deleted = false
-                        LIMIT 5000
-                    """)
-                )
-                .mappings()
-                .all()
-            )
-        
-        for row in rows:
-            data = json_loads(row.get("data_json") or "{}") or {}
-            delivery_status = str(data.get("deliveryStatus") or "").strip()
-            
-            if delivery_status == "In Progress":
-                # Check when it was accepted or last modified
-                accepted_date = data.get("acceptedDate")
-                if accepted_date:
-                    try:
-                        from datetime import datetime
-                        accepted_dt = datetime.fromisoformat(accepted_date.replace('Z', '+00:00'))
-                        accepted_ts = int(accepted_dt.timestamp() * 1000)
-                    except:
-                        accepted_ts = int(row.get("created_at") or 0)
-                else:
-                    accepted_ts = int(row.get("created_at") or 0)
-                
-                if accepted_ts < cutoff_ts:
-                    stuck_deliveries.append({
-                        "id": row.get("id"),
-                        "tempReceiptNo": data.get("tempReceiptNo"),
-                        "finalReceiptNo": data.get("finalReceiptNo"),
-                        "customerId": data.get("customerId"),
-                        "deliveryPersonId": data.get("deliveryPersonId"),
-                        "acceptedDate": accepted_date,
-                        "hoursStuck": int((now_ms() - accepted_ts) / (1000 * 60 * 60)),
-                        "amountLocal": data.get("amountLocal"),
-                        "amountUSD": data.get("amountUSD")
-                    })
-    
-    return {
-        "ok": True,
-        "stuck_count": len(stuck_deliveries),
-        "hours_threshold": hours_threshold,
-        "stuck_deliveries": stuck_deliveries
-    }
 
 
 @app.get("/api/users", response_model=list[UserPublic])
@@ -14084,6 +14106,13 @@ app.include_router(
         current_user_dependency=current_user,
         audit_fn=audit,
         release_sha=RELEASE_SHA,
+    )
+)
+app.include_router(
+    create_delivery_ops_router(
+        current_user_dependency=current_user,
+        require_same_origin=require_same_origin,
+        ctx={"user_has_permission": user_has_permission},
     )
 )
 

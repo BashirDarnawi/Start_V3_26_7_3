@@ -2166,6 +2166,69 @@ def test_failed_results_read_never_zeroes_stored_spend(actors):
             )
 
 
+def test_meta_images_are_archived_into_our_own_rows(actors, monkeypatch):
+    """fbcdn links expire; the stored copy is what survives.
+
+    Also pins the failure behaviour: a URL that cannot be fetched is stamped
+    as attempted so it is not retried on every pass forever, and the row keeps
+    the link it already had.
+    """
+    ad_id = "meta_test_media_archive"
+    meta_id = "777000111333444"
+    photo = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR42mP4//8/AAX+Av4zEpUUAAAAAElFTkSuQmCC"
+    )
+    _insert_ad(ad_id, actors["admin_id"], metaImportSource="meta_ads")
+    try:
+        meta_ads.apply_meta_snapshot(
+            ad_id, _snapshot(meta_id), actor_id=None,
+            actor_name="Meta automatic sync", expected_last_modified=None,
+            operation_id=None, action="automatic_sync",
+        )
+        stored, _ = _stored_ad(ad_id)
+        assert stored.get("metaThumbnailUrl"), "fixture needs a thumbnail URL"
+
+        monkeypatch.setattr(meta_ads, "_archive_meta_image", lambda url: photo)
+        assert meta_ads.archive_meta_media(limit=10) >= 1
+        stored, _ = _stored_ad(ad_id)
+        assert stored["metaThumbnailData"] == photo
+        assert stored["metaThumbnailArchivedFrom"] == stored["metaThumbnailUrl"]
+
+        # A second pass is a no-op while the URL is unchanged (no re-download).
+        calls = {"n": 0}
+
+        def _counting(url):
+            calls["n"] += 1
+            return photo
+
+        monkeypatch.setattr(meta_ads, "_archive_meta_image", _counting)
+        meta_ads.archive_meta_media(limit=10)
+        assert calls["n"] == 0, "unchanged URL was re-downloaded"
+
+        # A download that fails leaves the previous copy and stops retrying.
+        with db_conn() as conn:
+            row = conn.execute(
+                text("SELECT type,id,data_json,deleted,created_at,created_by,last_modified "
+                     "FROM entities WHERE type='ads' AND id=:i"),
+                {"i": ad_id},
+            ).mappings().first()
+            data = json_loads(row["data_json"])
+            data["metaThumbnailUrl"] = "https://scontent.xx.fbcdn.net/v/t39/changed_9.jpg"
+            meta_ads._write_entity_data(conn, row, data)
+        monkeypatch.setattr(meta_ads, "_archive_meta_image", lambda url: "")
+        meta_ads.archive_meta_media(limit=10)
+        stored, _ = _stored_ad(ad_id)
+        assert stored["metaThumbnailData"] == photo, "a failed fetch destroyed the archived copy"
+        assert stored["metaThumbnailArchivedFrom"] == "https://scontent.xx.fbcdn.net/v/t39/changed_9.jpg"
+    finally:
+        with db_conn() as conn:
+            conn.execute(
+                text("DELETE FROM entities WHERE type='ads' AND id=:id"),
+                {"id": ad_id},
+            )
+
+
 def test_page_meta_name_is_never_blanked_by_another_ads_sync(actors):
     """An ad carrying the page id but no page details must not empty the
     stored page name/category — that text is also what the placeholder-name

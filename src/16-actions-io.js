@@ -1591,6 +1591,11 @@ async function downloadFullServerBackup(button = null) {
     if (!ok) return;
     const link = document.createElement('a');
     link.href = `${getServerBaseUrl()}/api/admin/backup/full`;
+    // Both attributes matter: an ERROR reply (rate limit, another backup
+    // already running) is JSON with no attachment header, and without these
+    // the browser would navigate the running app away and lose its state.
+    link.download = 'albayan-full-backup.ndjson.gz';
+    link.target = '_blank';
     link.rel = 'noopener';
     link.style.display = 'none';
     document.body.appendChild(link);

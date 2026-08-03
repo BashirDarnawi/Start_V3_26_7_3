@@ -260,6 +260,62 @@ class TestAdsStudioAllowlistAndSubscription:
         assert reviewer_listing.status_code == 200
 
 
+class TestAdsStudioViewOnlyStaffPrivacy:
+    """A staff account with plain .view (no .review) must not read drafts.
+
+    The privacy scope used to switch on only for holders of the review
+    permission, so a view-only employee skipped it entirely and read every
+    customer's private Draft.
+    """
+
+    def test_view_without_review_cannot_see_private_drafts(self, actors):
+        email = "ad-studio-viewonly@tests.albayanhub.com"
+        password = "AdStudioViewOnly123!"
+        _create_user(actors["admin"], email, password, {"adCampaignRequests": ["view"]})
+        viewer = _login(email, password)
+
+        draft = _create_campaign(
+            actors["owner"], _complete_campaign("Private Draft vs viewer"), "ad_studio_viewonly_draft"
+        )
+        assert draft.status_code == 200, draft.text
+
+        listed = client.get("/api/collections/adCampaignRequests", cookies=viewer)
+        assert listed.status_code == 200, listed.text
+        rows = listed.json()
+        rows = rows if isinstance(rows, list) else rows.get("items") or []
+        assert all(r.get("id") != "ad_studio_viewonly_draft" for r in rows), (
+            "a view-only employee can see a customer's private draft"
+        )
+        direct = client.get(
+            "/api/collections/adCampaignRequests/ad_studio_viewonly_draft", cookies=viewer
+        )
+        assert direct.status_code == 404, direct.text
+
+        # Once submitted it becomes workflow-visible, exactly as before.
+        submitted = _submit_campaign(
+            actors["owner"], "ad_studio_viewonly_draft", draft.json()["lastModified"], "viewonly-submit-01"
+        )
+        assert submitted.status_code == 200, submitted.text
+        listed = client.get("/api/collections/adCampaignRequests", cookies=viewer)
+        rows = listed.json()
+        rows = rows if isinstance(rows, list) else rows.get("items") or []
+        assert any(r.get("id") == "ad_studio_viewonly_draft" for r in rows), (
+            "submitted campaigns must stay visible to staff"
+        )
+
+    def test_owner_still_sees_their_own_draft(self, actors):
+        own = _create_campaign(
+            actors["owner"], _complete_campaign("Owner reads own draft"), "ad_studio_owner_reads"
+        )
+        assert own.status_code == 200
+        listed = client.get("/api/collections/adCampaignRequests", cookies=actors["owner"])
+        rows = listed.json()
+        rows = rows if isinstance(rows, list) else rows.get("items") or []
+        assert any(r.get("id") == "ad_studio_owner_reads" for r in rows), (
+            "the customer lost sight of their own draft"
+        )
+
+
 class TestAdsStudioPublicUserPrivacy:
     def test_owner_only_account_receives_only_its_own_public_user(self, actors):
         response = client.get("/api/users/public", cookies=actors["owner"])
@@ -340,7 +396,10 @@ class TestAdsStudioDraftSecurity:
         other_get = client.get(
             f"/api/collections/adCampaignRequests/{entity_id}", cookies=actors["other"]
         )
-        assert other_get.status_code == 403
+        # 404, not 403: a private draft must not even confirm it exists to a
+        # non-owner (the draft guard now keys on the record, so it fires for
+        # every non-admin who is not the creator — not only for reviewers).
+        assert other_get.status_code == 404, other_get.text
 
         escalate = client.patch(
             f"/api/collections/adCampaignRequests/{entity_id}",

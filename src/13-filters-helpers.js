@@ -4476,6 +4476,7 @@ function updateReceiptsViewFiltered() {
   if (chipsEl && newChips) chipsEl.innerHTML = newChips.innerHTML;
   if (clearEl && newClear) clearEl.innerHTML = newClear.innerHTML;
   if (clearFiltersEl && newClearFilters) clearFiltersEl.innerHTML = newClearFilters.innerHTML;
+  _lastViewHTML = null; // scoped swap left the DOM unknown to render()
   if (window.lucide) lucide.createIcons();
 }
 

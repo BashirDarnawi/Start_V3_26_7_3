@@ -480,20 +480,41 @@ function mediaAwareTimeoutMs(body) {
   return TIME_CONSTANTS.API_TIMEOUT_LONG_MS;
 }
 const INLINE_MEDIA_FIELDS_BY_COLLECTION = Object.freeze({
+  // metaThumbnailData / metaPagePictureData are our OWN stored copies of the
+  // Facebook images (the fbcdn links beside them expire). Same handling as any
+  // inline photo: hydrated by id, never carried in a list response.
+  ads: Object.freeze(['adPhotos', 'photos', 'metaThumbnailData']),
+  receipts: Object.freeze(['photos', 'receiptImage']),
+  adCampaignRequests: Object.freeze(['creativeImages']),
+  walletPaymentRequests: Object.freeze(['receiptPhoto']),
+  pages: Object.freeze(['metaPagePictureData'])
+});
+
+// Stripped from lists, but NOT counted as a photo someone attached: the
+// archived Facebook images are ours, not uploads. Counting them made
+// Meta-linked ads with no uploads claim a photo and refuse to open for edit
+// when hydration failed. Mirrors COUNTED_MEDIA_FIELDS on the server.
+const COUNTED_MEDIA_FIELDS_BY_COLLECTION = Object.freeze({
   ads: Object.freeze(['adPhotos', 'photos']),
   receipts: Object.freeze(['photos', 'receiptImage']),
   adCampaignRequests: Object.freeze(['creativeImages']),
-  walletPaymentRequests: Object.freeze(['receiptPhoto'])
+  walletPaymentRequests: Object.freeze(['receiptPhoto']),
+  pages: Object.freeze([])
 });
 
 function _inlineMediaFields(collection) {
   return INLINE_MEDIA_FIELDS_BY_COLLECTION[String(collection || '')] || [];
 }
 
+function _countedMediaFields(collection) {
+  const key = String(collection || '');
+  return COUNTED_MEDIA_FIELDS_BY_COLLECTION[key] || _inlineMediaFields(key);
+}
+
 function getEntityPhotoCountHint(collection, record) {
   if (!record || typeof record !== 'object') return 0;
   const seen = new Set();
-  for (const field of _inlineMediaFields(collection)) {
+  for (const field of _countedMediaFields(collection)) {
     const value = record[field];
     const values = Array.isArray(value) ? value : [value];
     for (const source of values) {

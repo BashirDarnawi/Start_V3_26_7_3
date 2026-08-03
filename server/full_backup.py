@@ -137,6 +137,13 @@ def create_full_backup_router(
     def download_full_backup(request: Request, user: dict[str, Any] = Depends(admin_user)):
         from .rate_limiter import check_rate_limit
 
+        # This is a cookie-authenticated GET, so a SameSite=lax session cookie
+        # IS sent on a top-level navigation: any page the admin opens could
+        # point at this URL and pull the entire database onto their disk (and
+        # burn the daily quota). Browsers label such a navigation cross-site;
+        # native clients send no Sec-Fetch-Site and are unaffected.
+        if str(request.headers.get("sec-fetch-site") or "").lower() == "cross-site":
+            raise HTTPException(status_code=403, detail="Cross-site backup download blocked")
         admin_id = str(user.get("id") or "")
         allowed, _left, retry_after_ms = check_rate_limit(
             f"full-backup:{admin_id}", max_attempts=3, window_ms=86_400_000

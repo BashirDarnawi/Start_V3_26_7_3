@@ -140,11 +140,22 @@ function renderMetaAdPageSummary(ad, adPage, adPageDeleted, isAr) {
 }
 
 function adPagePictureUrl(ad, adPage) {
+  // Our OWN archived copy wins: signed fbcdn links expire (and stop working
+  // entirely once the Meta link is gone), the stored data URL does not.
+  const stored = String(adPage?.metaPagePictureData || ad?.metaPagePictureData || '').trim();
+  if (stored.indexOf('data:image/') === 0) return stored;
   // Server-synced Facebook Page profile picture: the ad's own copy first
   // (refreshed by every Meta sync pass, so its signed URL stays fresh), then
   // the linked page record's copy for ads the sync has not revisited yet.
   const url = String(ad?.metaPagePictureUrl || adPage?.metaPagePictureUrl || '').trim();
   return /^https:\/\//i.test(url) ? url : '';
+}
+
+// The ad creative to display: archived copy first, signed link as fallback.
+function metaAdThumbnailSrc(ad) {
+  const stored = String(ad?.metaThumbnailData || '').trim();
+  if (stored.indexOf('data:image/') === 0) return stored;
+  return String(ad?.metaThumbnailUrl || '').trim();
 }
 
 function renderAdPageAvatar(ad, adPage, isAr, besideTile = true) {
@@ -176,7 +187,7 @@ function adPageAvatarError(img) {
 
 function renderMetaAdThumbnail(ad, isAr) {
   if (!ad?.metaAdId) return '';
-  if (!ad.metaThumbnailUrl) {
+  if (!metaAdThumbnailSrc(ad)) {
     // A linked ad whose real photo has not been resolved yet: show an honest
     // "photo loading" tile instead of nothing (and never the page logo).
     // Admins see the technical trace (which Meta doors were closed) in the
@@ -192,7 +203,7 @@ function renderMetaAdThumbnail(ad, isAr) {
     ? (isAr ? 'صورة الصفحة — صورة الإعلان الأصلية غير متاحة من Meta' : "Page picture — Meta does not expose this ad's original photo")
     : (isAr ? 'عرض صورة إعلان Meta' : 'View Meta ad image');
   return `<button type="button" data-meta-preview-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openMetaAdPreview(this.dataset.metaPreviewAdId)" class="meta-ad-thumbnail-button" title="${Security.escapeHtml(label)}" aria-label="${Security.escapeHtml(label)}">
-    <img src="${Security.escapeHtml(String(ad.metaThumbnailUrl))}" alt="${label}" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="metaAdsThumbnailError(this)">
+    <img src="${Security.escapeHtml(metaAdThumbnailSrc(ad))}" alt="${label}" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="metaAdsThumbnailError(this)">
     <span class="meta-ad-thumbnail-badge"><i data-lucide="maximize-2" class="h-3 w-3"></i></span>
   </button>`;
 }
@@ -258,7 +269,7 @@ function metaAdsThumbnailError(img) {
 
 function openMetaAdPreview(adId) {
   const ad = metaAdsFindLocalAd(adId);
-  if (!ad?.metaThumbnailUrl) return;
+  if (!metaAdThumbnailSrc(ad)) return;
   const isAr = metaAdsIsArabic();
   document.getElementById('meta-ad-preview-modal')?.remove();
   const title = ad.metaAdName || (isAr ? 'صورة إعلان Meta' : 'Meta ad image');
@@ -268,7 +279,7 @@ function openMetaAdPreview(adId) {
         <div class="min-w-0"><h2 id="meta-ad-preview-title" class="truncate font-black text-slate-800 dark:text-white">${Security.escapeHtml(title)}</h2><p class="truncate text-xs text-slate-500">${Security.escapeHtml(ad.metaAdAccountName || '')}</p></div>
         <button type="button" onclick="document.getElementById('meta-ad-preview-modal').remove()" class="touch-target inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${isAr ? 'إغلاق' : 'Close'}"><i data-lucide="x" class="h-5 w-5"></i></button>
       </div>
-      <div class="flex max-h-[75dvh] items-center justify-center overflow-auto bg-slate-100 p-2 dark:bg-slate-950 sm:p-4"><img src="${Security.escapeHtml(String(ad.metaThumbnailUrl))}" alt="${Security.escapeHtml(title)}" class="max-h-[70dvh] max-w-full rounded-xl object-contain" referrerpolicy="no-referrer"></div>
+      <div class="flex max-h-[75dvh] items-center justify-center overflow-auto bg-slate-100 p-2 dark:bg-slate-950 sm:p-4"><img src="${Security.escapeHtml(metaAdThumbnailSrc(ad))}" alt="${Security.escapeHtml(title)}" class="max-h-[70dvh] max-w-full rounded-xl object-contain" referrerpolicy="no-referrer"></div>
     </div>
   </div>`);
   lucide.createIcons();

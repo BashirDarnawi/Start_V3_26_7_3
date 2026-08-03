@@ -12,9 +12,27 @@ from typing import Any
 
 INLINE_MEDIA_FIELDS: dict[str, tuple[str, ...]] = {
     "receipts": ("photos", "receiptImage"),
+    # metaThumbnailData / metaPagePictureData are our OWN stored copies of the
+    # Facebook images: the fbcdn links beside them expire, these do not. They
+    # are stripped from list responses like any other inline image, or every
+    # sync would carry tens of megabytes.
+    "ads": ("adPhotos", "photos", "metaThumbnailData"),
+    "adCampaignRequests": ("creativeImages",),
+    "walletPaymentRequests": ("receiptPhoto",),
+    "pages": ("metaPagePictureData",),
+}
+
+# Stripping and COUNTING are different questions. _photoCount answers "how
+# many photos did a person attach", which drives the photo badge and the
+# hydration guard that refuses to edit an ad whose images failed to load.
+# An archived Facebook creative is neither: counting it made Meta-linked ads
+# with no uploads claim a photo and become uneditable when hydration failed.
+COUNTED_MEDIA_FIELDS: dict[str, tuple[str, ...]] = {
+    "receipts": ("photos", "receiptImage"),
     "ads": ("adPhotos", "photos"),
     "adCampaignRequests": ("creativeImages",),
     "walletPaymentRequests": ("receiptPhoto",),
+    "pages": (),
 }
 
 CONTACT_REDACTED_ENTITY_TYPES = frozenset({"customers", "receipts", "ads"})
@@ -66,9 +84,12 @@ def _without_inline_media(entity_type: str, data: dict[str, Any]) -> dict[str, A
     if not fields:
         return data
     lean = dict(data)
+    counted_fields = COUNTED_MEDIA_FIELDS.get(entity_type, fields)
     seen: set[str] = set()
     for field in fields:
         value = lean.pop(field, None)
+        if field not in counted_fields:
+            continue  # stripped, but it is not a photo a person attached
         values = value if isinstance(value, list) else [value]
         for source in values:
             if isinstance(source, str) and source.strip():

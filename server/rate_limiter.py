@@ -17,6 +17,15 @@ from typing import Any, Optional
 
 # In-memory storage (fallback for single-instance deployments)
 _MEMORY_STORE: dict[str, list[int]] = {}
+# Each bucket's own window, so a sweep triggered by a short-window endpoint
+# cannot expire a long-window bucket early (a 15-minute check used to shrink
+# the full backup's 3-per-day cap to 3 per 15 minutes).
+_MEMORY_WINDOWS: dict[str, int] = {}
+# Buckets that exist to STOP an attacker. When the store is flooded these are
+# evicted last, so cheap throwaway keys cannot wash out a real lockout.
+_PROTECTED_KEY_PREFIXES = frozenset(
+    {"login:", "reset:", "reset-confirm:", "setup:", "applogin-exchange:", "full-backup:"}
+)
 _MEMORY_LOCK = threading.Lock()
 _LAST_CLEANUP = 0
 _CLEANUP_INTERVAL_MS = 5 * 60 * 1000  # Run cleanup every 5 minutes
@@ -121,35 +130,47 @@ def _cleanup_memory_store(window_ms: int = 15 * 60 * 1000, force: bool = False):
         return
     
     _LAST_CLEANUP = now
-    cutoff = now - window_ms
-    
+
     with _MEMORY_LOCK:
-        # Find keys to delete (can't modify dict during iteration)
+        # Expire each bucket against ITS OWN window, not the window of whichever
+        # endpoint happened to trigger this sweep. Using the caller's window
+        # pruned long-window buckets early — a 15-minute endpoint quietly
+        # reduced the full backup's 3-per-DAY cap to 3 per 15 minutes.
         keys_to_delete = []
         for key, attempts in _MEMORY_STORE.items():
-            # Filter out old attempts
-            valid_attempts = [ts for ts in attempts if ts > cutoff]
+            key_window = _MEMORY_WINDOWS.get(key, window_ms)
+            key_cutoff = now - key_window
+            valid_attempts = [ts for ts in attempts if ts > key_cutoff]
             if not valid_attempts:
                 keys_to_delete.append(key)
             else:
                 _MEMORY_STORE[key] = valid_attempts
-        
+
         # Delete empty keys
         for key in keys_to_delete:
             del _MEMORY_STORE[key]
-        
-        # SECURITY: If store is still too large after cleanup, remove oldest entries
+            _MEMORY_WINDOWS.pop(key, None)
+
+        # SECURITY: if the store is STILL too large, something is flooding it.
+        # Evicting oldest-first deleted exactly the buckets worth keeping: an
+        # attacker could fill the store with cheap throwaway keys (one per
+        # made-up email on an unauthenticated endpoint) and wash out the
+        # lockout protecting a real account. Protected prefixes are evicted
+        # last, and within a group the LEAST-used bucket goes first, so a
+        # bucket holding many recent failures is the last thing dropped.
         if len(_MEMORY_STORE) > _MAX_MEMORY_STORE_KEYS:
-            # Sort by oldest attempt time and remove excess
-            sorted_keys = sorted(
-                _MEMORY_STORE.keys(),
-                key=lambda k: min(_MEMORY_STORE[k]) if _MEMORY_STORE[k] else 0
-            )
+            def _evict_rank(k: str) -> tuple[int, int, int]:
+                attempts = _MEMORY_STORE.get(k) or []
+                protected = 1 if k.split(":", 1)[0] + ":" in _PROTECTED_KEY_PREFIXES else 0
+                return (protected, len(attempts), max(attempts) if attempts else 0)
+
+            sorted_keys = sorted(_MEMORY_STORE.keys(), key=_evict_rank)
             excess_count = len(_MEMORY_STORE) - _MAX_MEMORY_STORE_KEYS
             for k in sorted_keys[:excess_count]:
                 del _MEMORY_STORE[k]
-            print(f"[rate_limiter] Memory store exceeded limit, removed {excess_count} oldest entries")
-        
+                _MEMORY_WINDOWS.pop(k, None)
+            print(f"[rate_limiter] Memory store exceeded limit, removed {excess_count} least-active entries")
+
         if keys_to_delete:
             print(f"[rate_limiter] Cleaned up {len(keys_to_delete)} expired rate limit entries")
 
@@ -209,7 +230,9 @@ def check_rate_limit(key: str, max_attempts: int, window_ms: int) -> tuple[bool,
     with _MEMORY_LOCK:
         if key not in _MEMORY_STORE:
             _MEMORY_STORE[key] = []
-        
+        # Remember this bucket's window so cleanup expires it correctly.
+        _MEMORY_WINDOWS[key] = int(window_ms)
+
         attempts = _MEMORY_STORE[key]
         
         # Remove old attempts
@@ -253,6 +276,7 @@ def reset_rate_limit(key: str):
     with _MEMORY_LOCK:
         if key in _MEMORY_STORE:
             del _MEMORY_STORE[key]
+        _MEMORY_WINDOWS.pop(key, None)
 
 
 def get_rate_limit_status(key: str, window_ms: int) -> int:

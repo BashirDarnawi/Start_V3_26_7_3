@@ -7,6 +7,7 @@ exchange-rate, or accounting status fields.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import ipaddress
@@ -326,6 +327,10 @@ META_AD_SERVER_FIELDS = frozenset(
         "metaActivityCursorAt",
         "metaActivityLastCheckedAt",
         "metaMediaRepairVersion",
+        # Our stored copy of the creative and the URL it came from. Server
+        # written only: a browser that could set these could plant any image.
+        "metaThumbnailData",
+        "metaThumbnailArchivedFrom",
     }
 )
 
@@ -341,6 +346,9 @@ META_PAGE_SERVER_FIELDS = frozenset(
         "metaImportState",
         "metaImportedAt",
         "metaImportSource",
+        # Stored copy of the page avatar + the URL it came from (server only).
+        "metaPagePictureData",
+        "metaPagePictureArchivedFrom",
     }
 )
 
@@ -391,7 +399,15 @@ def _local_id(value: Any) -> str:
 
 
 def _clean_text(value: Any, maximum: int = 240) -> str:
-    text_value = str(value or "").replace("\x00", "").strip()
+    # Angle brackets are stripped for the same reason sanitize_str strips them
+    # on every other write path: the frontend interpolates stored text into
+    # HTML in ~1000 places, and "no markup ever reaches storage" is the
+    # invariant that makes that safe. The Meta sync does not go through
+    # sanitize_json, so without this, imported Facebook text (page names, ad
+    # names, campaign names) would be the one source that breaks it.
+    text_value = (
+        str(value or "").replace("\x00", "").replace("<", "").replace(">", "").strip()
+    )
     return text_value[:maximum]
 
 
@@ -554,9 +570,13 @@ def _preview_page_name_candidates(html_text: str, page_id: str) -> list[str]:
                 value.encode("utf-8")
             except Exception:
                 continue
-            value = _clean_text(value, 240)
+            # Reject markup on the RAW value: _clean_text now strips angle
+            # brackets (the storage invariant), so checking afterwards would
+            # let "<b>Bold</b>" through as the harmless-looking "bBold/b".
+            # Rendered markup here means we scraped layout, not a page name.
             if "<" in value or ">" in value:
                 continue
+            value = _clean_text(value, 240)
             if value and not _is_placeholder_page_name(value, page_id) and value not in names:
                 names.append(value)
     return names
@@ -4230,6 +4250,122 @@ _PAGE_NAME_FAILURE_COOLDOWN_SECONDS = 3600
 _PAGE_NAME_FAILURE_UNTIL: dict[str, float] = {}
 
 
+# --- Archiving Facebook images so they outlive the link -------------------
+# metaThumbnailUrl / metaPagePictureUrl are SIGNED fbcdn links. Facebook
+# expires them on its own schedule, so an ad's picture goes blank even while
+# everything is healthy, and permanently once the token is gone. These helpers
+# fetch the bytes once and keep them in our own row, exactly like adPhotos.
+# The URL stays beside the copy as a fallback and as the change-detector.
+_META_MEDIA_MAX_BYTES = 600 * 1024  # a 1280px JPEG lands far below this
+_META_MEDIA_ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+
+
+def _archive_meta_image(url: str) -> str:
+    """Download one fbcdn image and return it as a data URL ('' on any doubt).
+
+    No access token is sent: these URLs are pre-signed and public. Anything
+    unexpected — wrong content type, oversized, redirect, network error —
+    returns '' so the caller simply keeps the link it already had.
+    """
+    clean = _clean_https_url(url)
+    if not clean:
+        return ""
+    try:
+        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+            response = client.get(clean)
+        if int(response.status_code or 0) != 200:
+            return ""
+        content_type = str(response.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if content_type not in _META_MEDIA_ALLOWED_TYPES:
+            return ""
+        payload = response.content or b""
+        if not payload or len(payload) > _META_MEDIA_MAX_BYTES:
+            return ""
+        return f"data:{content_type};base64," + base64.b64encode(payload).decode("ascii")
+    except Exception:
+        return ""
+
+
+def archive_meta_media(limit: int = 20) -> int:
+    """Store our own copy of ad creatives and page avatars, a few per pass.
+
+    Deliberately a separate slow lane rather than part of the sync: a download
+    failure must never make a sync look broken, and the work is spread out so
+    a first run over hundreds of ads cannot stall the worker. Each row is
+    re-archived only when its fbcdn URL actually changes (tracked by
+    metaThumbnailArchivedFrom), so a steady state costs nothing.
+    """
+    if limit <= 0:
+        return 0
+    stored = 0
+    targets: list[tuple[str, str, str, str, str]] = []  # (type, id, url, data_key, from_key)
+    with db_conn() as conn:
+        for row in _entity_rows(conn, "ads"):
+            if len(targets) >= limit:
+                break
+            data = json_loads(row.get("data_json") or "{}") or {}
+            if not isinstance(data, dict) or not _clean_text(data.get("metaAdId"), 40):
+                continue
+            url = _clean_https_url(data.get("metaThumbnailUrl"))
+            if not url or data.get("metaThumbnailArchivedFrom") == url:
+                continue
+            targets.append(("ads", str(row["id"]), url, "metaThumbnailData", "metaThumbnailArchivedFrom"))
+        for row in _entity_rows(conn, "pages"):
+            if len(targets) >= limit:
+                break
+            data = json_loads(row.get("data_json") or "{}") or {}
+            if not isinstance(data, dict) or not _clean_text(data.get("metaPageId"), 40):
+                continue
+            url = _clean_https_url(data.get("metaPagePictureUrl"))
+            if not url or data.get("metaPagePictureArchivedFrom") == url:
+                continue
+            targets.append(("pages", str(row["id"]), url, "metaPagePictureData", "metaPagePictureArchivedFrom"))
+
+    skipped = 0
+    for entity_type, entity_id, url, data_key, from_key in targets:
+        encoded = _archive_meta_image(url)
+        try:
+            _store_archived_image(entity_type, entity_id, url, data_key, from_key, encoded)
+            if encoded:
+                stored += 1
+        except Exception:
+            # One row must never kill the pass. _write_entity_data legitimately
+            # raises for an ad in a CLOSED accounting period, and for a lost
+            # optimistic-lock race against a concurrent sync — both are normal,
+            # and letting either abort the loop meant nothing was ever archived.
+            skipped += 1
+            continue
+    if skipped:
+        print(f"[albayan] Meta media archive skipped {skipped} row(s); they retry next pass.")
+    return stored
+
+
+def _store_archived_image(
+    entity_type: str, entity_id: str, url: str, data_key: str, from_key: str, encoded: str
+) -> None:
+    """Write one archived image. Raises on a closed period or a lock race, and
+    the caller treats that as a skip."""
+    with db_conn() as conn:
+        row = conn.execute(
+            text(
+                "SELECT type,id,data_json,deleted,created_at,created_by,last_modified "
+                "FROM entities WHERE type=:t AND id=:i AND deleted=false LIMIT 1"
+            ),
+            {"t": entity_type, "i": entity_id},
+        ).mappings().first()
+        if not row:
+            return
+        data = json_loads(row.get("data_json") or "{}") or {}
+        if not isinstance(data, dict):
+            return
+        # Stamp the attempt either way: a URL that cannot be fetched must not
+        # be retried on every pass forever.
+        data[from_key] = url
+        if encoded:
+            data[data_key] = encoded
+        _write_entity_data(conn, row, data)
+
+
 def backfill_placeholder_page_names(direct_lookup_limit: int = 25) -> int:
     """Give placeholder-named Meta import pages their real Facebook name.
 
@@ -4444,6 +4580,14 @@ def _worker_loop() -> None:
             # cheap when there is nothing to do (one local pages scan).
             if current - last_page_names_monotonic >= 600:
                 backfill_placeholder_page_names()
+                # Same slow lane: keep our own copies of the Facebook images
+                # so they survive the signed fbcdn URLs expiring. A few per
+                # pass, so a first run over hundreds of ads never stalls this
+                # worker or hammers the CDN.
+                try:
+                    archive_meta_media(limit=20)
+                except Exception:
+                    print("[albayan] Meta media archive pass failed; it will retry.")
                 last_page_names_monotonic = current
         except Exception:
             print("[albayan] Meta Ads background pass failed; it will retry.")

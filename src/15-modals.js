@@ -1169,14 +1169,14 @@ function renderModal() {
               <div>
                 <label class="block text-xs font-medium text-slate-500 mb-2">${isArR ? 'اختر الهاتف أولاً...' : 'Select phone first...'}</label>
                 <input type="text" id="receipt-customer-name" readonly class="w-full glass-input px-3 py-2 rounded-lg text-sm bg-slate-100 dark:bg-slate-800" placeholder="${isArR ? 'سيظهر العميل هنا' : 'Customer will appear here'}" />
-                <input type="hidden" id="receipt-customer-id" value="${receiptData.customerId || ''}" />
+                <input type="hidden" id="receipt-customer-id" value="${Security.escapeHtml(String(receiptData.customerId || ''))}" />
               </div>
             </div>
 
             <!-- Receipt Number -->
             <div class="px-1">
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1.5">${isArR ? 'رقم الوصل' : 'Receipt Number'}</label>
-              <input type="text" id="receipt-serial" value="${receiptData.serialNumber || receiptData.finalReceiptNo || receiptData.tempReceiptNo || ''}" 
+              <input type="text" id="receipt-serial" value="${Security.escapeHtml(String(receiptData.serialNumber || receiptData.finalReceiptNo || receiptData.tempReceiptNo || ''))}" 
                 class="w-full glass-input px-3 py-2 rounded-lg text-sm" 
                 placeholder="${isArR ? 'مثال: 12345' : 'e.g., 12345'}"
                 oninput="validateReceiptNumberInput(this)"
@@ -1194,7 +1194,7 @@ function renderModal() {
                 <button type="button" onclick="setReceiptStatus(this, 'Canceled')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Canceled' ? 'bg-rose-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Canceled">${isArR ? 'ملغي' : 'Canceled'}</button>
                 <button type="button" onclick="setReceiptStatus(this, 'Lost')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Lost' ? 'bg-slate-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Lost">${isArR ? 'مفقود' : 'Lost'}</button>
               </div>
-              <input type="hidden" id="receipt-status" value="${receiptData.status || 'Paid'}" />
+              <input type="hidden" id="receipt-status" value="${Security.escapeHtml(String(receiptData.status || 'Paid'))}" />
 
               <!-- Paid controls -->
               <div id="status-paid" class="${(!receiptData.status || receiptData.status === 'Paid') ? '' : 'hidden'} mt-3 p-4 rounded-2xl border-2 border-blue-200 dark:border-blue-800 bg-gradient-to-br from-blue-50 via-indigo-50 to-cyan-50 dark:from-blue-900/40 dark:via-indigo-900/30 dark:to-cyan-900/20 shadow-lg space-y-4">
@@ -1210,7 +1210,7 @@ function renderModal() {
                   </div>
                 </div>
 
-                <input type="hidden" id="paid-collection-value" value="${receiptData.statusDetail?.paidCollection || 'office'}" />
+                <input type="hidden" id="paid-collection-value" value="${Security.escapeHtml(String(receiptData.statusDetail?.paidCollection || 'office'))}" />
 
                 <div class="grid grid-cols-2 gap-3">
                   <button type="button" onclick="selectPaidCollection('office')" class="paid-collection-btn group relative overflow-hidden p-4 rounded-xl text-center transition-all duration-300 ${(!receiptData.statusDetail?.paidCollection || receiptData.statusDetail?.paidCollection === 'office') ? 'bg-gradient-to-br from-blue-500 to-indigo-600 text-white shadow-xl shadow-blue-500/30 scale-[1.02]' : 'bg-white/80 dark:bg-slate-800/60 hover:bg-white dark:hover:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 hover:border-blue-400 dark:hover:border-blue-600 hover:shadow-lg'}" data-value="office">
@@ -1280,7 +1280,7 @@ function renderModal() {
                     <i data-lucide="map-pin" class="w-3 h-3"></i>
                     <span>${isArR ? 'كيف سيدفع العميل؟' : 'How will customer pay?'}</span>
                   </div>
-                  <input type="hidden" id="notpaid-collection-value" value="${receiptData.statusDetail?.notPaidCollection || 'office'}" />
+                  <input type="hidden" id="notpaid-collection-value" value="${Security.escapeHtml(String(receiptData.statusDetail?.notPaidCollection || 'office'))}" />
                         <div class="grid grid-cols-2 gap-3">
                     <button type="button" onclick="selectNotPaidCollection('office')" class="notpaid-collection-btn group relative overflow-hidden p-4 rounded-xl text-center transition-all duration-300 ${!receiptData.statusDetail?.notPaidCollection || receiptData.statusDetail?.notPaidCollection === 'office' ? 'bg-gradient-to-br from-blue-500 to-indigo-600 text-white shadow-xl shadow-blue-500/30 scale-[1.02]' : 'bg-white/80 dark:bg-slate-800/60 hover:bg-white dark:hover:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 hover:border-blue-400 dark:hover:border-blue-600 hover:shadow-lg'}" data-value="office">
                       <div class="flex flex-col items-center space-y-2">
@@ -1332,7 +1332,7 @@ function renderModal() {
                     </div>
                     <div>
                       <label class="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1">${isArR ? 'سعر التوصيل المتفق عليه (دينار) *' : 'Quoted delivery fee (LYD) *'}</label>
-                      <input type="text" inputmode="decimal" id="receipt-quoted-delivery-fee" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="0.00" value="${(receiptData.quotedDeliveryFee ?? '')}" oninput="sanitizeMoneyInput(this)" />
+                      <input type="text" inputmode="decimal" id="receipt-quoted-delivery-fee" class="w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="0.00" value="${Security.escapeHtml(String((receiptData.quotedDeliveryFee ?? '')))}" oninput="sanitizeMoneyInput(this)" />
                     </div>
                     <div>
                       <label class="block text-[10px] font-bold text-slate-600 dark:text-slate-400 mb-1">${isArR ? 'تعليمات (اختياري)' : 'Instructions (optional)'}</label>
@@ -1353,7 +1353,7 @@ function renderModal() {
                     <div class="text-xs text-rose-600/80 dark:text-rose-300/80">${isArR ? 'اختر نتيجة الإلغاء' : 'Choose the cancellation outcome'}</div>
                           </div>
                           </div>
-                <input type="hidden" id="status-cancel-refund-action" value="${receiptData.statusDetail?.refundAction || ''}" />
+                <input type="hidden" id="status-cancel-refund-action" value="${Security.escapeHtml(String(receiptData.statusDetail?.refundAction || ''))}" />
                 <div class="grid grid-cols-2 gap-2">
                   <button type="button" onclick="selectCancelOption('full')" class="cancel-option-btn group relative overflow-hidden px-4 py-3 rounded-xl text-left transition-all duration-300 ${receiptData.statusDetail?.refundAction === 'full' ? 'bg-gradient-to-r from-emerald-500 to-teal-500 text-white shadow-lg shadow-emerald-500/30 scale-[1.02]' : 'bg-white/80 dark:bg-slate-800/60 hover:bg-white dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-emerald-300 dark:hover:border-emerald-700 hover:shadow-md'}" data-value="full">
                     <div class="flex items-center space-x-3">
@@ -1405,7 +1405,7 @@ function renderModal() {
                     <i data-lucide="loader" class="w-3 h-3"></i>
                     <span>${isArR ? 'حالة الاسترجاع' : 'Refund Progress'}</span>
               </div>
-                  <input type="hidden" id="status-cancel-refund-status" value="${receiptData.statusDetail?.refundStatus || 'pending'}" />
+                  <input type="hidden" id="status-cancel-refund-status" value="${Security.escapeHtml(String(receiptData.statusDetail?.refundStatus || 'pending'))}" />
                   <div class="flex space-x-2">
                     <button type="button" onclick="selectRefundStatus('pending')" class="refund-status-btn flex-1 py-2.5 px-4 rounded-xl text-sm font-bold transition-all duration-300 ${receiptData.statusDetail?.refundStatus !== 'refunded' ? 'bg-gradient-to-r from-amber-400 to-orange-500 text-white shadow-lg shadow-amber-500/30' : 'bg-white/60 dark:bg-slate-800/60 text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-slate-700 hover:border-amber-300'}" data-value="pending">
                       <i data-lucide="hourglass" class="w-4 h-4 inline mr-1.5"></i>${trStatus('Pending')}
@@ -1428,7 +1428,7 @@ function renderModal() {
                     <div class="text-xs text-indigo-600/80 dark:text-indigo-300/80">${isArR ? 'هل كان هذا الوصل مدفوعاً أم فارغاً؟' : 'Was this receipt paid or empty?'}</div>
                   </div>
                 </div>
-                <input type="hidden" id="status-lost-resolution" value="${receiptData.statusDetail?.lostResolution || ''}" />
+                <input type="hidden" id="status-lost-resolution" value="${Security.escapeHtml(String(receiptData.statusDetail?.lostResolution || ''))}" />
                 <div class="grid grid-cols-2 gap-3">
                   <button type="button" onclick="selectLostOption('empty')" class="lost-option-btn group relative overflow-hidden p-4 rounded-xl text-center transition-all duration-300 ${receiptData.statusDetail?.lostResolution === 'empty' ? 'bg-gradient-to-br from-slate-600 to-slate-700 text-white shadow-xl shadow-slate-500/30 scale-[1.02]' : 'bg-white/80 dark:bg-slate-800/60 hover:bg-white dark:hover:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-500 hover:shadow-lg'}" data-value="empty">
                     <div class="flex flex-col items-center space-y-2">
