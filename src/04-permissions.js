@@ -658,6 +658,9 @@ function renderSubscriptionStatusBadge(serviceId, isRTL) {
 // first. Server catalog when available; legacy client offer as fallback.
 function getPlansForService(serviceId) {
   const sid = String(serviceId || '');
+  // Plan purchases are server-only. If the app dropped to local mode, cached
+  // cards would offer a purchase that always fails — show the legacy path.
+  if (!isServerModeEnabled()) return [];
   const plans = Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : [];
   const matching = plans.filter(p => p && Array.isArray(p.serviceIds) && p.serviceIds.includes(sid));
   matching.sort((a, b) =>
@@ -680,16 +683,26 @@ function showSubscriptionModal(serviceId, subscribeToId = serviceId) {
   renderModal();
   // Fetch the sellable plans, then repaint the open modal with the chooser.
   if (typeof refreshSubscriptionPlans === 'function' && isServerModeEnabled()) {
-    refreshSubscriptionPlans().then(() => {
+    // FORCE a fresh catalog: this is the moment money is about to be decided,
+    // and the server re-reads its own catalog inside the purchase transaction.
+    // A session-cached price would show one number and charge another after
+    // the owner changes prices.
+    refreshSubscriptionPlans(true).then(() => {
       if (state.activeModal === 'subscription-lock') renderModal();
     }).catch(() => {});
   }
 }
 
+let _subscribePlanBusy = false;
 async function handleSubscribePlan(planId, navigateToId) {
   if (!state.currentUser?.id) return;
   const pid = String(planId || '');
   if (!pid) return;
+  // One purchase at a time. The per-plan idempotency key stops a double tap on
+  // the SAME card, but two different cards carry two different keys — without
+  // this guard an impatient tap on each would commit both.
+  if (_subscribePlanBusy) return;
+  _subscribePlanBusy = true;
   const keys = state.modalData?.planIdemKeys || {};
   if (!keys[pid]) keys[pid] = Security.generateSecureId('idem');
   try {
@@ -708,6 +721,8 @@ async function handleSubscribePlan(planId, navigateToId) {
       String(detail) || (state.language === 'ar' ? 'حاول مرة أخرى.' : 'Please try again.'),
       'error'
     );
+  } finally {
+    _subscribePlanBusy = false;
   }
 }
 

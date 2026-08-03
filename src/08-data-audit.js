@@ -1455,8 +1455,36 @@ function isTransferInReceipt(r) {
   return String(r?.receiptType || '') === 'TRANSFER_IN';
 }
 
+// receiptId -> ads that name it as a funding source, built in ONE pass.
+// getReceiptUsageStats used to re-scan every ad for every receipt card
+// (O(cards x ads)), which froze the Receipts screen on phones once the
+// business had a few thousand ads. The predicate below MUST stay in lockstep
+// with the .filter() inside getReceiptUsageStats, and the ads are visited in
+// array order so fundedAds keeps the same order (lastUsedAt depends on it).
+function buildReceiptUsageAdIndex(ads = state.ads) {
+  const index = new Map();
+  getVisibleRecords(Array.isArray(ads) ? ads : []).forEach(ad => {
+    if (ad.recordType === 'receipt') return;
+    // A Set: one ad can name the same receipt twice (funding + allocation),
+    // and the original .filter() yields it once.
+    const ids = new Set();
+    const add = value => { const id = String(value || ''); if (id) ids.add(id); };
+    add(ad.fundingReceiptId);
+    add(ad.receiptId);
+    add(ad.linkedDeliveryReceiptId);
+    if (Array.isArray(ad.receiptAllocations)) ad.receiptAllocations.forEach(a => add(a && a.receiptId));
+    if (Array.isArray(ad.dueAllocations)) ad.dueAllocations.forEach(a => add(a && a.receiptId));
+    ids.forEach(id => {
+      const bucket = index.get(id);
+      if (bucket) bucket.push(ad);
+      else index.set(id, [ad]);
+    });
+  });
+  return index;
+}
+
 // Compute usage stats for a receipt based on ads funded by this receipt
-function getReceiptUsageStats(receipt) {
+function getReceiptUsageStats(receipt, adsByReceiptId = null) {
   // Handle both receipt object and receipt ID
   const receiptObj = typeof receipt === 'string'
     ? (state.receipts || []).find(r => r.id === receipt)
@@ -1479,15 +1507,20 @@ function getReceiptUsageStats(receipt) {
 
   // Ads that reference this receipt as a funding source
   // Include both regular receiptAllocations AND dueAllocations (for delivery receipts that became Paid)
-  const fundedAds = getVisibleRecords(state.ads || []).filter(
-    ad => ad.recordType !== 'receipt' && (
-      String(ad.fundingReceiptId || '') === receiptId ||
-      String(ad.receiptId || '') === receiptId ||
-      (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.some(a => String(a.receiptId || '') === receiptId)) ||
-      (Array.isArray(ad.dueAllocations) && ad.dueAllocations.some(a => String(a.receiptId || '') === receiptId)) ||
-      String(ad.linkedDeliveryReceiptId || '') === receiptId
-    )
-  );
+  // The index is only consulted for a real receipt id. An id-less record
+  // currently matches every ad that has no link at all; keeping it on the
+  // slow path preserves that (odd) result exactly.
+  const fundedAds = (adsByReceiptId instanceof Map && receiptId)
+    ? (adsByReceiptId.get(receiptId) || [])
+    : getVisibleRecords(state.ads || []).filter(
+      ad => ad.recordType !== 'receipt' && (
+        String(ad.fundingReceiptId || '') === receiptId ||
+        String(ad.receiptId || '') === receiptId ||
+        (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.some(a => String(a.receiptId || '') === receiptId)) ||
+        (Array.isArray(ad.dueAllocations) && ad.dueAllocations.some(a => String(a.receiptId || '') === receiptId)) ||
+        String(ad.linkedDeliveryReceiptId || '') === receiptId
+      )
+    );
 
   // Calculate used amount from both receiptAllocations and dueAllocations
   // When a delivery receipt is marked Delivered, ads that used its due amount via dueAllocations

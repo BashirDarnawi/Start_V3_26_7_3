@@ -3831,6 +3831,9 @@ function renderSubscriptionStatusBadge(serviceId, isRTL) {
 // first. Server catalog when available; legacy client offer as fallback.
 function getPlansForService(serviceId) {
   const sid = String(serviceId || '');
+  // Plan purchases are server-only. If the app dropped to local mode, cached
+  // cards would offer a purchase that always fails — show the legacy path.
+  if (!isServerModeEnabled()) return [];
   const plans = Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : [];
   const matching = plans.filter(p => p && Array.isArray(p.serviceIds) && p.serviceIds.includes(sid));
   matching.sort((a, b) =>
@@ -3853,16 +3856,26 @@ function showSubscriptionModal(serviceId, subscribeToId = serviceId) {
   renderModal();
   // Fetch the sellable plans, then repaint the open modal with the chooser.
   if (typeof refreshSubscriptionPlans === 'function' && isServerModeEnabled()) {
-    refreshSubscriptionPlans().then(() => {
+    // FORCE a fresh catalog: this is the moment money is about to be decided,
+    // and the server re-reads its own catalog inside the purchase transaction.
+    // A session-cached price would show one number and charge another after
+    // the owner changes prices.
+    refreshSubscriptionPlans(true).then(() => {
       if (state.activeModal === 'subscription-lock') renderModal();
     }).catch(() => {});
   }
 }
 
+let _subscribePlanBusy = false;
 async function handleSubscribePlan(planId, navigateToId) {
   if (!state.currentUser?.id) return;
   const pid = String(planId || '');
   if (!pid) return;
+  // One purchase at a time. The per-plan idempotency key stops a double tap on
+  // the SAME card, but two different cards carry two different keys — without
+  // this guard an impatient tap on each would commit both.
+  if (_subscribePlanBusy) return;
+  _subscribePlanBusy = true;
   const keys = state.modalData?.planIdemKeys || {};
   if (!keys[pid]) keys[pid] = Security.generateSecureId('idem');
   try {
@@ -3881,6 +3894,8 @@ async function handleSubscribePlan(planId, navigateToId) {
       String(detail) || (state.language === 'ar' ? 'حاول مرة أخرى.' : 'Please try again.'),
       'error'
     );
+  } finally {
+    _subscribePlanBusy = false;
   }
 }
 
@@ -8458,8 +8473,36 @@ function isTransferInReceipt(r) {
   return String(r?.receiptType || '') === 'TRANSFER_IN';
 }
 
+// receiptId -> ads that name it as a funding source, built in ONE pass.
+// getReceiptUsageStats used to re-scan every ad for every receipt card
+// (O(cards x ads)), which froze the Receipts screen on phones once the
+// business had a few thousand ads. The predicate below MUST stay in lockstep
+// with the .filter() inside getReceiptUsageStats, and the ads are visited in
+// array order so fundedAds keeps the same order (lastUsedAt depends on it).
+function buildReceiptUsageAdIndex(ads = state.ads) {
+  const index = new Map();
+  getVisibleRecords(Array.isArray(ads) ? ads : []).forEach(ad => {
+    if (ad.recordType === 'receipt') return;
+    // A Set: one ad can name the same receipt twice (funding + allocation),
+    // and the original .filter() yields it once.
+    const ids = new Set();
+    const add = value => { const id = String(value || ''); if (id) ids.add(id); };
+    add(ad.fundingReceiptId);
+    add(ad.receiptId);
+    add(ad.linkedDeliveryReceiptId);
+    if (Array.isArray(ad.receiptAllocations)) ad.receiptAllocations.forEach(a => add(a && a.receiptId));
+    if (Array.isArray(ad.dueAllocations)) ad.dueAllocations.forEach(a => add(a && a.receiptId));
+    ids.forEach(id => {
+      const bucket = index.get(id);
+      if (bucket) bucket.push(ad);
+      else index.set(id, [ad]);
+    });
+  });
+  return index;
+}
+
 // Compute usage stats for a receipt based on ads funded by this receipt
-function getReceiptUsageStats(receipt) {
+function getReceiptUsageStats(receipt, adsByReceiptId = null) {
   // Handle both receipt object and receipt ID
   const receiptObj = typeof receipt === 'string'
     ? (state.receipts || []).find(r => r.id === receipt)
@@ -8482,15 +8525,20 @@ function getReceiptUsageStats(receipt) {
 
   // Ads that reference this receipt as a funding source
   // Include both regular receiptAllocations AND dueAllocations (for delivery receipts that became Paid)
-  const fundedAds = getVisibleRecords(state.ads || []).filter(
-    ad => ad.recordType !== 'receipt' && (
-      String(ad.fundingReceiptId || '') === receiptId ||
-      String(ad.receiptId || '') === receiptId ||
-      (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.some(a => String(a.receiptId || '') === receiptId)) ||
-      (Array.isArray(ad.dueAllocations) && ad.dueAllocations.some(a => String(a.receiptId || '') === receiptId)) ||
-      String(ad.linkedDeliveryReceiptId || '') === receiptId
-    )
-  );
+  // The index is only consulted for a real receipt id. An id-less record
+  // currently matches every ad that has no link at all; keeping it on the
+  // slow path preserves that (odd) result exactly.
+  const fundedAds = (adsByReceiptId instanceof Map && receiptId)
+    ? (adsByReceiptId.get(receiptId) || [])
+    : getVisibleRecords(state.ads || []).filter(
+      ad => ad.recordType !== 'receipt' && (
+        String(ad.fundingReceiptId || '') === receiptId ||
+        String(ad.receiptId || '') === receiptId ||
+        (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.some(a => String(a.receiptId || '') === receiptId)) ||
+        (Array.isArray(ad.dueAllocations) && ad.dueAllocations.some(a => String(a.receiptId || '') === receiptId)) ||
+        String(ad.linkedDeliveryReceiptId || '') === receiptId
+      )
+    );
 
   // Calculate used amount from both receiptAllocations and dueAllocations
   // When a delivery receipt is marked Delivered, ads that used its due amount via dueAllocations
@@ -10085,10 +10133,14 @@ async function apiPurchasePlan({ planId, idempotencyKey, userId }) {
   return payload;
 }
 
-async function apiAdminSaveSubscriptionPlans(plans) {
+async function apiAdminSaveSubscriptionPlans(plans, expectedVersion = null) {
+  // expectedVersion is the version this editor loaded: the server refuses the
+  // save if another admin published in between, instead of erasing their work.
+  const body = { plans };
+  if (expectedVersion !== null && expectedVersion !== undefined) body.expectedVersion = Number(expectedVersion);
   return apiJson('/api/admin/subscription-plans', {
     method: 'PUT',
-    body: { plans }
+    body
   }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
 }
 
@@ -14693,19 +14745,19 @@ function renderFirstRunSetup() {
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('email')}</label>
-            <input type="email" id="first-email" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="name@company.com" maxlength="120" />
+            <input type="email" id="first-email" dir="ltr" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="name@company.com" maxlength="120" />
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('password')}</label>
-            <input type="password" id="first-password" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? '8 أحرف على الأقل' : 'Min. 8 characters'}" minlength="8" />
+            <input type="password" id="first-password" dir="ltr" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'على الأقل 8 أحرف' : 'Min. 8 characters'}" minlength="8" />
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
-            <input type="password" id="first-password-confirm" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'أعد كتابة كلمة المرور' : 'Repeat password'}" minlength="8" />
+            <input type="password" id="first-password-confirm" dir="ltr" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'أعد كتابة كلمة المرور' : 'Repeat password'}" minlength="8" />
           </div>
           ${serverSetup ? `<div>
             <label class="block text-sm font-medium mb-2">${isAr ? 'رمز إعداد الخادم' : 'Server Setup Token'}</label>
-            <input type="password" id="first-setup-token" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="ALBAYAN_SETUP_TOKEN" minlength="16" maxlength="256" autocomplete="off" />
+            <input type="password" id="first-setup-token" dir="ltr" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="ALBAYAN_SETUP_TOKEN" minlength="16" maxlength="256" autocomplete="off" />
             <p class="mt-1 text-xs text-slate-500">${isAr ? 'أدخل الرمز الذي أضافه مشغل الخادم.' : 'Enter the random token configured by the server operator.'}</p>
           </div>` : ''}
           <button type="submit" class="w-full btn-shine alb-btn-primary text-white font-bold py-3 rounded-xl transition-all">
@@ -14767,7 +14819,7 @@ function attachFirstRunHandlers() {
         return;
       }
       if (!password || String(password).length < 8) {
-        showNotification(_vErr, state.language === 'ar' ? 'يجب أن تكون كلمة المرور 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
+        showNotification(_vErr, state.language === 'ar' ? 'يجب أن تكون كلمة المرور على الأقل 8 أحرف' : 'Password must be at least 8 characters', 'error');
         return;
       }
       if (password !== confirm) {
@@ -15288,7 +15340,7 @@ function renderLogin() {
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${t('email')}</label>
               <div class="relative">
                 <i data-lucide="mail" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
-                <input type="email" id="login-email" required class="w-full pl-10 pr-4 py-3 glass-input rounded-xl" placeholder="name@company.com" autocomplete="username" />
+                <input type="email" id="login-email" dir="ltr" required class="w-full pl-10 pr-4 py-3 glass-input rounded-xl" placeholder="name@company.com" autocomplete="username" />
               </div>
             </div>`;
 
@@ -15305,7 +15357,7 @@ function renderLogin() {
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${t('password')}</label>
               <div class="relative">
                 <i data-lucide="lock" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
-                <input type="password" id="login-password" required class="w-full pl-10 pr-4 py-3 glass-input rounded-xl" placeholder="••••••••" autocomplete="current-password" />
+                <input type="password" id="login-password" dir="ltr" required class="w-full pl-10 pr-4 py-3 glass-input rounded-xl" placeholder="••••••••" autocomplete="current-password" />
               </div>
             </div>
 
@@ -16729,6 +16781,20 @@ function loadMoreCustomers() {
   updateCustomersViewFiltered();
 }
 
+// Same reason as the customers grid: every page card carries spend figures and
+// icons, and drawing all of them at once is what a phone actually chokes on
+// (the per-card scanning is indexed now, the DOM work is not). The limit
+// resets whenever the search changes, so a search always shows its best
+// matches from the top.
+const PAGES_PAGE_SIZE = 50;
+let _pagesShowLimit = PAGES_PAGE_SIZE;
+let _pagesFilterFingerprint = '';
+
+function loadMorePages() {
+  _pagesShowLimit += PAGES_PAGE_SIZE;
+  render();
+}
+
 function applyCustomerQuickFilter(mode) {
   state.customerFinancialFilter = mode === 'debt' ? 'hasDebt' : (mode === 'credit' ? 'hasCredit' : 'all');
   render();
@@ -16917,6 +16983,13 @@ function renderReceiptsView() {
     : null;
   const filteredReceiptNumber = String(filteredReceipt?.finalReceiptNo || filteredReceipt?.serialNumber || filteredReceipt?.tempReceiptNo || '').trim();
   const filteredReceiptLabel = Security.escapeHtml(filteredReceiptNumber ? `#${filteredReceiptNumber}` : (isArV ? 'الوصل المحدد' : 'Selected receipt'));
+  // ONE ads pass for the whole card list, instead of a fresh scan per card.
+  // Deliberately built from getVisibleRecords (soft-delete only, NOT
+  // permission-scoped): receipt money must never change with who is looking.
+  // This is a DIFFERENT, narrower index than linkedAdCountByReceipt below —
+  // that one follows more link kinds and IS permission-scoped, so the two
+  // must never be swapped for each other.
+  const receiptUsageAdIndex = buildReceiptUsageAdIndex(state.ads);
   const canSeeReceiptAds = canOpenWorkspaceView('ads');
   const linkedAdCountByReceipt = new Map();
   if (canSeeReceiptAds) {
@@ -17187,7 +17260,7 @@ function renderReceiptsView() {
 
           // Calculate total paid as sum of R1 values (amount × rate)
           const totalPaid = payments.reduce((sum, p) => sum + ((p.amount || 0) * (p.rate || 1)), 0) || receipt.amountLocal;
-          const usage = getReceiptUsageStats(receipt);
+          const usage = getReceiptUsageStats(receipt, receiptUsageAdIndex);
           const hasTransfers = (receipt.transfers && receipt.transfers.length > 0);
           const lastTransfer = hasTransfers ? receipt.transfers[receipt.transfers.length - 1] : null;
           const lastTransferName = lastTransfer ? (customersById.get(lastTransfer.toCustomerId)?.name || lastTransfer.toCustomerName || (isArV ? 'غير معروف' : 'Unknown')) : '';
@@ -17541,8 +17614,15 @@ function renderPagesView() {
   const pageDisplayNumberById = new Map(allPages.map((page, index) => [String(page.id), allPages.length - index]));
   // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
   const pageSearch = foldSearchText(String(state.pageSearch || '').trim());
-  const customersById = new Map((state.customers || []).map(customer => [String(customer.id), customer]));
-  const visiblePages = pageSearch
+  // FIRST-wins, matching the Array.find() this replaces in the card loop
+  // below (new Map(array.map(...)) would be last-wins). Identical while ids
+  // are unique; this only decides which record wins if they ever collide.
+  const customersById = new Map();
+  (state.customers || []).forEach(customer => {
+    const key = String(customer.id);
+    if (!customersById.has(key)) customersById.set(key, customer);
+  });
+  const allFilteredPages = pageSearch
     ? allPages.filter(page => {
         const ownerNames = getPageCustomerIds(page)
           .map(customerId => customersById.get(String(customerId))?.name || '')
@@ -17551,6 +17631,15 @@ function renderPagesView() {
           .some(value => foldSearchText(value).includes(pageSearch));
       })
     : allPages;
+  // Reset the reveal limit whenever the result set changes, so a new search
+  // starts at its top matches instead of inheriting a huge previous limit.
+  const pagesFilterFingerprint = `${pageSearch}|${allFilteredPages.length}`;
+  if (pagesFilterFingerprint !== _pagesFilterFingerprint) {
+    _pagesFilterFingerprint = pagesFilterFingerprint;
+    _pagesShowLimit = PAGES_PAGE_SIZE;
+  }
+  const visiblePages = allFilteredPages.slice(0, _pagesShowLimit);
+  const remainingPages = Math.max(0, allFilteredPages.length - visiblePages.length);
   // Pages repeat when a Meta import lands beside a hand-made row, or the same
   // name is typed two ways. Flag them so they can be resolved by hand.
   const duplicatePageGroups = findDuplicatePageGroups(allPages);
@@ -17559,13 +17648,17 @@ function renderPagesView() {
   const canSeePageFinancials = canSeePageAds
     && can('analytics', 'viewFinancials')
     && can('analytics', 'viewSensitive');
-  
+  // ONE ads+pages pass for the whole grid: getPageSpendSummary used to run two
+  // full collection scans per card, so this screen was quadratic and (unlike
+  // Receipts/Ads/Customers) is not paginated.
+  const pageSpendIndex = canSeePageAds ? buildPageSpendIndex(state.pages, state.ads) : null;
+
   return `
     <div class="space-y-6 animate-fade-in-up">
       <div class="page-header flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('pages')}</h1>
-          <p id="pages-count" class="text-sm text-slate-500 mt-1">${isAr ? `${visiblePages.length}${pageSearch ? ` من ${allPages.length}` : ''} صفحة فيسبوك` : `${visiblePages.length}${pageSearch ? ` of ${allPages.length}` : ''} Facebook pages`}</p>
+          <p id="pages-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allFilteredPages.length}${pageSearch ? ` من ${allPages.length}` : ''} صفحة فيسبوك` : `${allFilteredPages.length}${pageSearch ? ` of ${allPages.length}` : ''} Facebook pages`}</p>
         </div>
         <div class="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
           <button type="button" onclick="showPageDuplicates('', this)" class="w-full sm:w-auto min-h-11 border ${duplicatePageGroups.length > 0 ? 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-300' : 'border-slate-200 bg-white/60 text-slate-600 dark:border-slate-700 dark:bg-slate-900/30 dark:text-slate-300'} px-4 py-2 rounded-xl font-bold flex items-center justify-center gap-2" aria-haspopup="dialog">
@@ -17591,13 +17684,13 @@ function renderPagesView() {
       <div id="pages-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         ${visiblePages.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${pageSearch ? 'search-x' : 'file-text'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${pageSearch ? (isAr ? 'لا توجد صفحات تطابق البحث' : 'No pages match your search') : (isAr ? 'لا توجد صفحات بعد' : 'No pages yet')}</p></div>` : visiblePages.map((p) => {
           const linkedCustomers = getPageCustomerIds(p)
-            .map(cid => state.customers.find(c => String(c.id) === String(cid)))
+            .map(cid => customersById.get(String(cid)))
             .filter(Boolean);
           const isMetaImportedPage = !!String(p.metaPageId || '').trim();
           const needsPageOwner = isMetaImportedPage && linkedCustomers.length === 0;
           // Page activity is only authoritative for accounts that can see all
           // ads. Money additionally needs the business financial permission.
-          const pageStats = canSeePageAds ? getPageSpendSummary(p.id) : null;
+          const pageStats = canSeePageAds ? getPageSpendSummary(p.id, pageSpendIndex) : null;
           const lastAdText = pageStats?.lastAdDate
             ? new Date(pageStats.lastAdDate).toLocaleDateString(appDateLocale())
             : (isAr ? 'أبداً' : 'Never');
@@ -17693,6 +17786,14 @@ function renderPagesView() {
             </div>
           `;
         }).join('')}
+        ${remainingPages > 0 ? `
+          <div class="col-span-full flex justify-center py-2">
+            <button onclick="loadMorePages()" class="px-6 py-3 glass-panel rounded-xl text-sm font-bold text-indigo-600 dark:text-indigo-400 hover:scale-105 transition-transform flex items-center gap-2">
+              <i data-lucide="chevron-down" class="w-4 h-4"></i>
+              <span>${isAr ? `عرض المزيد (${remainingPages} متبقي)` : `Load more (${remainingPages} remaining)`}</span>
+            </button>
+          </div>
+        ` : ''}
       </div>
     </div>
   `;
@@ -22491,7 +22592,7 @@ async function savePlanManager() {
       savingsPct: Number.isFinite(Number(p.savingsPct)) && p.savingsPct !== null && p.savingsPct !== '' ? Math.trunc(Number(p.savingsPct)) : null,
       active: p.active !== false,
       sortOrder: Math.trunc(Number(p.sortOrder) || 0)
-    })));
+    })), _planManager.version);
     _planManager.version = Number(payload?.version || _planManager.version + 1);
     _planManager.dirty = false;
     _planManager.loadedAt = 0;
@@ -22953,7 +23054,48 @@ function normalizeCustomerPhoneKey(value) {
 //    tatweel).
 // NFKC first folds full-width digits and Arabic presentation forms; guarded
 // because very old engines lack String.normalize.
+// Memo in front of the folder below. It is a PURE function of one string, so
+// caching cannot change which records match. It runs per FIELD per RECORD on
+// every debounced keystroke (the ads filter folds up to 11 fields per ad),
+// measured at ~19 ms per pass over 3000 ads on a desktop — several times that
+// on a phone, and that cost lands between keypresses.
+// TWO generations instead of one capped Map: a cache smaller than the working
+// set thrashes and ends up no faster than no cache at all. On overflow the
+// current generation becomes the old one and lookups fall through to it, so it
+// degrades gracefully. Memory stays bounded at 2 x MAX entries.
+// `var` + lazy creation, and the limits inlined as literals, ON PURPOSE:
+// foldSearchText is a hoisted function declaration, so it is callable from the
+// moment the bundle starts executing — earlier than this line. With `const`
+// state it would throw "cannot access before initialization" for any caller
+// that runs during startup. `var` hoists, and the null check builds the maps
+// on first real use, so the memo is safe no matter who calls first.
+var _foldCache = null; // { cur: Map, prev: Map }
+
 function foldSearchText(value) {
+  // Only strings are keyable, and very long free text is folded but not
+  // stored; everything else goes straight through so the String() coercion
+  // in the folder below stays the single source of truth.
+  if (typeof value !== 'string' || value.length > 512) {
+    return _foldSearchTextUncached(value);
+  }
+  if (!_foldCache) _foldCache = { cur: new Map(), prev: new Map() };
+  const hit = _foldCache.cur.get(value);
+  if (hit !== undefined) return hit;
+  const older = _foldCache.prev.get(value);
+  if (older !== undefined) {
+    _foldCache.cur.set(value, older); // promote so the hot set survives a roll
+    return older;
+  }
+  const folded = _foldSearchTextUncached(value);
+  if (_foldCache.cur.size >= 30000) {
+    _foldCache.prev = _foldCache.cur;
+    _foldCache.cur = new Map();
+  }
+  _foldCache.cur.set(value, folded);
+  return folded;
+}
+
+function _foldSearchTextUncached(value) {
   let s = String(value === null || value === undefined ? '' : value);
   try { s = s.normalize('NFKC'); } catch (_) {}
   return normalizeDigitsAscii(s)
@@ -23578,14 +23720,39 @@ function getCustomerPageSpendSummary(customerId, pageId) {
   };
 }
 
-function getPageSpendSummary(pageId) {
+// pageId -> its ads, plus the set of live page ids: ONE pass for a whole page
+// list instead of two full collection scans per card. Same predicate and same
+// array order as the per-call filter below, so the float sums stay identical.
+function buildPageSpendIndex(pages = state.pages, ads = state.ads) {
+  const adsByPageId = new Map();
+  getVisibleRecords(Array.isArray(ads) ? ads : []).forEach(ad => {
+    if (ad.recordType === 'receipt') return;
+    const key = String(ad.pageId || ad.page || '');
+    if (!key) return;
+    const bucket = adsByPageId.get(key);
+    if (bucket) bucket.push(ad);
+    else adsByPageId.set(key, [ad]);
+  });
+  const livePageIds = new Set(
+    getVisibleRecords(Array.isArray(pages) ? pages : []).map(item => String(item.id))
+  );
+  return { adsByPageId, livePageIds };
+}
+
+function getPageSpendSummary(pageId, spendIndex = null) {
   const normalizedPageId = String(pageId || '').trim();
   if (!Security.isValidRecordId(normalizedPageId)) return null;
-  const page = getVisibleRecords(state.pages || []).find(item => String(item.id) === normalizedPageId);
-  if (!page) return null;
-  const ads = getVisibleRecords(state.ads || []).filter(ad =>
-    ad.recordType !== 'receipt' && String(ad.pageId || ad.page || '') === normalizedPageId
-  );
+  if (spendIndex) {
+    if (!spendIndex.livePageIds.has(normalizedPageId)) return null;
+  } else {
+    const page = getVisibleRecords(state.pages || []).find(item => String(item.id) === normalizedPageId);
+    if (!page) return null;
+  }
+  const ads = spendIndex
+    ? (spendIndex.adsByPageId.get(normalizedPageId) || [])
+    : getVisibleRecords(state.ads || []).filter(ad =>
+      ad.recordType !== 'receipt' && String(ad.pageId || ad.page || '') === normalizedPageId
+    );
   const dates = ads
     .map(ad => new Date(ad.startDate || ad.date || ad.createdAt || '').getTime())
     .filter(Number.isFinite);
@@ -30011,20 +30178,71 @@ document.addEventListener('click', function(e) {
 // RECEIPT MODAL HELPER FUNCTIONS
 // ==========================================
 
+// These two pickers run on EVERY keystroke of an oninput handler, and "09" is
+// the prefix of nearly every Libyan number — so the first characters typed
+// each rebuild the largest possible dropdown. Debouncing on the same 80 ms as
+// the list searches keeps the keyboard responsive; it changes nothing about
+// which records match.
+let _receiptPhoneFilterTimer = null;
+let _pageCustomerFilterTimer = null;
+// The phone list is rebuilt from every customer's every phone — it was being
+// rebuilt on every keystroke. It is cached from the moment the picker opens,
+// with a short lifetime so a customer arriving through background sync still
+// appears while the field stays focused (the old code caught that on the next
+// keystroke; this keeps the same guarantee within a few seconds).
+// Rows inserted into a picker dropdown at once. Matching more than this is
+// normal (typing "09" matches everyone); the user narrows instead of scrolling.
+const PICKER_DROPDOWN_LIMIT = 50;
+
+// The "N more — keep typing" footer, so a capped list never looks complete.
+function renderPickerOverflowRow(hiddenCount) {
+  const hidden = Math.max(0, Number(hiddenCount) || 0);
+  if (!hidden) return '';
+  const isAr = state.language === 'ar';
+  return `<div class="px-3 py-2 text-xs text-slate-500 border-t border-slate-100 dark:border-slate-800">${
+    isAr ? `و${hidden} أخرى — تابع الكتابة لتضييق النتائج` : `${hidden} more — keep typing to narrow`
+  }</div>`;
+}
+
+const _RECEIPT_PHONE_ROWS_TTL_MS = 3000;
+let _receiptPhoneRowsCache = null;
+let _receiptPhoneRowsCacheAt = 0;
+
+function invalidateReceiptPhoneRows() {
+  _receiptPhoneRowsCache = null;
+  _receiptPhoneRowsCacheAt = 0;
+}
+
+function getReceiptPhoneRows() {
+  const now = Date.now();
+  if (_receiptPhoneRowsCache && (now - _receiptPhoneRowsCacheAt) < _RECEIPT_PHONE_ROWS_TTL_MS) {
+    return _receiptPhoneRowsCache;
+  }
+  const rows = [];
+  getCustomersVisibleToCurrentUser().forEach(c => {
+    c.phones.forEach(phone => {
+      rows.push({ phone, customer: c });
+    });
+  });
+  _receiptPhoneRowsCache = rows;
+  _receiptPhoneRowsCacheAt = now;
+  return rows;
+}
+
 function filterReceiptPhones() {
+  if (_receiptPhoneFilterTimer) clearTimeout(_receiptPhoneFilterTimer);
+  _receiptPhoneFilterTimer = setTimeout(filterReceiptPhonesNow, 80);
+}
+
+function filterReceiptPhonesNow() {
   const searchInput = document.getElementById('receipt-phone-search');
   const dropdown = document.getElementById('receipt-phone-dropdown');
+  if (!searchInput || !dropdown) return; // modal closed while the timer waited
   // foldSearchText on BOTH sides: Arabic-keyboard digits and unhamza'd
   // spellings must match the stored ASCII phones / hamza-form names.
   const searchTerm = foldSearchText(searchInput.value);
 
-  const customers = getCustomersVisibleToCurrentUser();
-  const phoneCustomerMap = [];
-  customers.forEach(c => {
-    c.phones.forEach(phone => {
-      phoneCustomerMap.push({ phone, customer: c });
-    });
-  });
+  const phoneCustomerMap = getReceiptPhoneRows();
 
   const filtered = phoneCustomerMap.filter(item =>
     foldSearchText(item.phone).includes(searchTerm) ||
@@ -30032,12 +30250,17 @@ function filterReceiptPhones() {
   );
   
   if (filtered.length > 0 && searchTerm) {
-    dropdown.innerHTML = filtered.map(item => `
+    // Cap what goes into the DOM. "09" starts nearly every Libyan number, so
+    // the first characters typed used to insert thousands of rows — the rows
+    // past the fiftieth were never realistically scrolled to anyway.
+    const shown = filtered.slice(0, PICKER_DROPDOWN_LIMIT);
+    const hidden = filtered.length - shown.length;
+    dropdown.innerHTML = shown.map(item => `
       <div class="px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer phone-option rounded transition-colors" data-phone="${Security.escapeHtml(item.phone)}" data-customer-id="${Security.escapeHtml(item.customer.id)}" onclick="selectReceiptPhone(this.dataset.phone, this.dataset.customerId)">
         <div class="text-sm font-medium">${Security.escapeHtml(item.phone)}</div>
         <div class="text-xs text-slate-500">${Security.escapeHtml(item.customer.name)} - ${Security.escapeHtml(item.customer.platform)}</div>
       </div>
-    `).join('');
+    `).join('') + renderPickerOverflowRow(hidden);
     dropdown.classList.remove('hidden');
   } else {
     dropdown.classList.add('hidden');
@@ -30045,7 +30268,10 @@ function filterReceiptPhones() {
 }
 
 function showReceiptPhoneDropdown() {
-  filterReceiptPhones();
+  // Opening is a direct action, not typing: no debounce, and rebuild the rows
+  // so a customer added since the last open shows up.
+  invalidateReceiptPhoneRows();
+  filterReceiptPhonesNow();
 }
 
 // ==========================================
@@ -30843,8 +31069,14 @@ document.addEventListener('keydown', (e) => {
 // ==========================================
 
 function filterPageCustomers() {
+  if (_pageCustomerFilterTimer) clearTimeout(_pageCustomerFilterTimer);
+  _pageCustomerFilterTimer = setTimeout(filterPageCustomersNow, 80);
+}
+
+function filterPageCustomersNow() {
   const searchInput = document.getElementById('page-customer-search');
   const dropdown = document.getElementById('page-customer-dropdown');
+  if (!searchInput || !dropdown) return; // modal closed while the timer waited
   // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
   const searchTerm = foldSearchText(searchInput?.value || '');
 
@@ -30857,12 +31089,13 @@ function filterPageCustomers() {
   );
   
   if (filtered.length > 0 && searchTerm) {
-    dropdown.innerHTML = filtered.map(c => `
+    const shown = filtered.slice(0, PICKER_DROPDOWN_LIMIT);
+    dropdown.innerHTML = shown.map(c => `
       <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" data-record-action="select-page-customer" data-record-id="${Security.escapeHtml(String(c.id || ''))}" data-admin="${isAdminRole(state.currentUser?.role)}">
         <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
         <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (state.language === 'ar' ? 'لا يوجد هاتف' : 'No phone'))}</div>
       </div>
-    `).join('');
+    `).join('') + renderPickerOverflowRow(filtered.length - shown.length);
     dropdown.classList.remove('hidden');
   } else {
     dropdown.classList.add('hidden');
@@ -30872,14 +31105,16 @@ function filterPageCustomers() {
 function showPageCustomerDropdown() {
   const dropdown = document.getElementById('page-customer-dropdown');
   const customers = getVisibleRecords(state.customers);
-  
+
   if (customers.length > 0) {
-    dropdown.innerHTML = customers.map(c => `
+    // Opening with an empty box would otherwise insert every customer.
+    const shown = customers.slice(0, PICKER_DROPDOWN_LIMIT);
+    dropdown.innerHTML = shown.map(c => `
       <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" data-record-action="select-page-customer" data-record-id="${Security.escapeHtml(String(c.id || ''))}" data-admin="${isAdminRole(state.currentUser?.role)}">
         <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
         <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (state.language === 'ar' ? 'لا يوجد هاتف' : 'No phone'))}</div>
       </div>
-    `).join('');
+    `).join('') + renderPickerOverflowRow(customers.length - shown.length);
     dropdown.classList.remove('hidden');
   }
 }
@@ -36257,14 +36492,14 @@ function renderModal() {
             </div>
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? 'البريد الإلكتروني *' : 'Email Address *'}</label>
-              <input type="email" id="user-email" value="${Security.escapeHtml(userData.email || '')}" required class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="john@company.com" />
+              <input type="email" id="user-email" dir="ltr" value="${Security.escapeHtml(userData.email || '')}" required class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="john@company.com" />
             </div>
           </div>
           
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? `كلمة المرور ${isEdit ? '(اتركها فارغة للإبقاء عليها)' : '*'}` : `Password ${isEdit ? '(leave blank to keep)' : '*'}`}</label>
-              <input type="password" id="user-password" ${!isEdit ? 'required' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : (isArU ? '8 أحرف على الأقل' : 'Min. 8 characters')}" />
+              <input type="password" id="user-password" dir="ltr" ${!isEdit ? 'required' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : (isArU ? 'على الأقل 8 أحرف' : 'Min. 8 characters')}" />
             </div>
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? 'الدور *' : 'Role *'}</label>
@@ -36431,7 +36666,7 @@ function renderModal() {
                   onfocus="showPageCustomerDropdown()"
                 />
                 <div id="page-customer-dropdown" class="absolute z-20 mt-1 w-full glass-panel rounded-lg shadow-xl max-h-60 overflow-y-auto hidden">
-                  ${pageCustomers.map(c => `
+                  ${pageCustomers.slice(0, PICKER_DROPDOWN_LIMIT).map(c => `
                     <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" data-record-action="select-page-customer" data-record-id="${Security.escapeHtml(String(c.id || ''))}" data-admin="${isAdminPage}">
                       <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
                       <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (isArP ? 'لا يوجد هاتف' : 'No phone'))}</div>
@@ -36551,7 +36786,7 @@ function renderModal() {
                   onfocus="showReceiptPhoneDropdown()"
                 />
                 <div id="receipt-phone-dropdown" class="absolute z-20 mt-1 w-full sm:w-80 max-w-[calc(100vw-2rem)] glass-panel rounded-lg shadow-xl max-h-40 overflow-y-auto hidden">
-                  ${phoneCustomerMap.map(item => `
+                  ${phoneCustomerMap.slice(0, PICKER_DROPDOWN_LIMIT).map(item => `
                     <div class="touch-target px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer phone-option" role="button" tabindex="0" data-phone="${Security.escapeHtml(item.phone)}" data-customer-id="${Security.escapeHtml(item.customer.id)}" onclick="selectReceiptPhone(this.dataset.phone, this.dataset.customerId)" onkeydown="if(event.key === 'Enter' || event.key === ' '){ event.preventDefault(); selectReceiptPhone(this.dataset.phone, this.dataset.customerId); }">
                       <div class="text-sm font-medium">${Security.escapeHtml(item.phone)}</div>
                       <div class="text-xs text-slate-500">${Security.escapeHtml(item.customer.name)} - ${Security.escapeHtml(item.customer.platform)}</div>
@@ -37246,15 +37481,15 @@ function renderModal() {
             <div class="space-y-4">
               <div>
                 <label class="block text-sm font-medium mb-2">${t('resetCode')}</label>
-                <input type="text" id="pwreset-token" value="${Security.escapeHtml(tokenVal)}" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'أدخل الرمز' : 'Enter code'}" />
+                <input type="text" id="pwreset-token" dir="ltr" value="${Security.escapeHtml(tokenVal)}" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'أدخل الرمز' : 'Enter code'}" />
               </div>
               <div>
                 <label class="block text-sm font-medium mb-2">${t('newPassword')}</label>
-                <input type="password" id="pwreset-new" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? '8 أحرف على الأقل' : 'Min. 8 characters'}" minlength="8" />
+                <input type="password" id="pwreset-new" dir="ltr" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'على الأقل 8 أحرف' : 'Min. 8 characters'}" minlength="8" />
               </div>
               <div>
                 <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
-                <input type="password" id="pwreset-confirm" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" minlength="8" />
+                <input type="password" id="pwreset-confirm" dir="ltr" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" minlength="8" />
               </div>
               <div class="flex space-x-3 pt-2">
                 <button type="button" onclick="passwordResetConfirmServer()" class="flex-1 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
@@ -37279,7 +37514,7 @@ function renderModal() {
             <div class="space-y-4">
               <div>
                 <label class="block text-sm font-medium mb-2">${t('email')}</label>
-                <input type="email" id="pwreset-email" value="${Security.escapeHtml(emailVal)}" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="name@company.com" />
+                <input type="email" id="pwreset-email" dir="ltr" value="${Security.escapeHtml(emailVal)}" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="name@company.com" />
               </div>
               <div class="flex space-x-3 pt-2">
                 <button type="button" onclick="passwordResetRequestServer()" class="flex-1 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
@@ -37317,19 +37552,19 @@ function renderModal() {
           <div class="space-y-4">
             <div>
               <label class="block text-sm font-medium mb-2">${t('email')}</label>
-              <input type="email" id="pwreset-email" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="name@company.com" />
+              <input type="email" id="pwreset-email" dir="ltr" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="name@company.com" />
             </div>
             <div>
               <label class="block text-sm font-medium mb-2">${t('recoveryKey')}</label>
-              <input type="text" id="pwreset-recovery" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'ألصق مفتاح الاستعادة' : 'Paste recovery key'}" ${hasRecovery ? '' : 'disabled'} />
+              <input type="text" id="pwreset-recovery" dir="ltr" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'ألصق مفتاح الاستعادة' : 'Paste recovery key'}" ${hasRecovery ? '' : 'disabled'} />
             </div>
             <div>
               <label class="block text-sm font-medium mb-2">${t('newPassword')}</label>
-              <input type="password" id="pwreset-new" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? '8 أحرف على الأقل' : 'Min. 8 characters'}" minlength="8" ${hasRecovery ? '' : 'disabled'} />
+              <input type="password" id="pwreset-new" dir="ltr" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'على الأقل 8 أحرف' : 'Min. 8 characters'}" minlength="8" ${hasRecovery ? '' : 'disabled'} />
             </div>
             <div>
               <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
-              <input type="password" id="pwreset-confirm" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" minlength="8" ${hasRecovery ? '' : 'disabled'} />
+              <input type="password" id="pwreset-confirm" dir="ltr" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" minlength="8" ${hasRecovery ? '' : 'disabled'} />
             </div>
             <div class="flex space-x-3 pt-2">
               <button type="button" onclick="passwordResetConfirmLocal()" class="flex-1 btn-shine bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700 ${hasRecovery ? '' : 'opacity-50 cursor-not-allowed'}" ${hasRecovery ? '' : 'disabled'}>
@@ -37360,15 +37595,15 @@ function renderModal() {
         <form id="modal-form" class="space-y-4">
           <div>
             <label class="block text-sm font-medium mb-2">${t('currentPassword')}</label>
-            <input type="password" id="cp-current" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" />
+            <input type="password" id="cp-current" dir="ltr" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" />
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('newPassword')}</label>
-            <input type="password" id="cp-new" required minlength="8" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? '8 أحرف على الأقل' : 'Min. 8 characters'}" />
+            <input type="password" id="cp-new" dir="ltr" required minlength="8" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'على الأقل 8 أحرف' : 'Min. 8 characters'}" />
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
-            <input type="password" id="cp-confirm" required minlength="8" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" />
+            <input type="password" id="cp-confirm" dir="ltr" required minlength="8" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" />
           </div>
           <div class="flex space-x-3 pt-2">
             <button type="submit" class="flex-1 btn-shine bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700">
@@ -37446,13 +37681,25 @@ function renderModal() {
             <span>${isRTL ? 'رصيد المحفظة (د.ل)' : 'Wallet balance (LYD)'}</span>
             <span class="font-bold">${walletFormatMinor(lydBalanceMinor, 'LYD')}</span>
           </div>
-          ${planCards ? `<div class="space-y-3 mb-4 max-h-[45dvh] overflow-y-auto custom-scrollbar pr-1">${planCards}</div>` : `
+          ${planCards ? `<div class="space-y-3 mb-4 max-h-[45dvh] overflow-y-auto custom-scrollbar pr-1">${planCards}</div>` : (isServerModeEnabled() ? `
+          <!-- Server mode with no plans yet: the catalog is still loading or the
+               fetch failed. NEVER offer a purchase button here — it would take
+               real money while showing no price at all. -->
+          <div class="mb-4 rounded-2xl border border-slate-200 dark:border-slate-700 p-5 text-sm text-slate-500">
+            <div class="w-6 h-6 mx-auto mb-2 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+            ${isRTL ? 'جاري تحميل الأسعار…' : 'Loading prices…'}
+            <div class="mt-3">
+              <button onclick="refreshSubscriptionPlans(true).then(() => { if (state.activeModal === 'subscription-lock') renderModal(); })" class="text-xs font-bold text-indigo-600 hover:text-indigo-700 underline">
+                ${isRTL ? 'إعادة المحاولة' : 'Retry'}
+              </button>
+            </div>
+          </div>` : `
           <div class="flex space-x-3 mb-1">
-            <button onclick="handleSubscribe('${lockSubscribeToId}', '${lockServiceId}')" class="flex-1 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
+            <button onclick="handleSubscribe('${Security.escapeHtml(String(lockSubscribeToId))}', '${Security.escapeHtml(String(lockServiceId))}')" class="flex-1 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
               <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>
               ${isRTL ? 'اشترك' : 'Subscribe'}
             </button>
-          </div>`}
+          </div>`)}
           <button onclick="closeModal()" class="w-full bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300">
             ${isRTL ? 'إلغاء' : 'Cancel'}
           </button>
@@ -38192,7 +38439,7 @@ async function handleModalSubmit() {
         return;
       }
       if (!newPw || newPw.length < 8) {
-        showNotification(isArCP ? 'تنبيه' : 'Validation', isArCP ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
+        showNotification(isArCP ? 'تنبيه' : 'Validation', isArCP ? 'كلمة المرور يجب أن تكون على الأقل 8 أحرف' : 'Password must be at least 8 characters', 'error');
         return;
       }
       if (newPw !== confirmPw) {
@@ -39277,7 +39524,7 @@ async function handleModalSubmit() {
         const newPassword = document.getElementById('user-password').value;
           if (newPassword) {
             if (String(newPassword).length < 8) {
-              showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
+              showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون على الأقل 8 أحرف' : 'Password must be at least 8 characters', 'error');
               return;
             }
             if (isSelfEdit && !isAdminEditor) {
@@ -39309,7 +39556,7 @@ async function handleModalSubmit() {
         } else {
           const rawPassword = document.getElementById('user-password').value;
           if (!rawPassword || String(rawPassword).length < 8) {
-            showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
+            showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون على الأقل 8 أحرف' : 'Password must be at least 8 characters', 'error');
             return;
           }
 
@@ -39349,7 +39596,7 @@ async function handleModalSubmit() {
         const newPassword = document.getElementById('user-password').value;
         if (newPassword) {
           if (String(newPassword).length < 8) {
-            showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
+            showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون على الأقل 8 أحرف' : 'Password must be at least 8 characters', 'error');
             return;
           }
           const hashed = await Security.hashPassword(newPassword, null, { algo: 'pbkdf2-sha256' });
@@ -39384,7 +39631,7 @@ async function handleModalSubmit() {
         }
         const rawPassword = document.getElementById('user-password').value;
         if (!rawPassword || String(rawPassword).length < 8) {
-          showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
+          showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون على الأقل 8 أحرف' : 'Password must be at least 8 characters', 'error');
           return;
         }
         const hashed = await Security.hashPassword(rawPassword, null, { algo: 'pbkdf2-sha256' });

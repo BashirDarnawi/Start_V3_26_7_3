@@ -73,6 +73,7 @@ from .ad_campaign_actions import (
     normalize_ad_campaign_destination,
 )
 from .subscription_plans import (
+    PLAN_SETTINGS_KEY,
     create_subscription_plans_router,
     plan_purchase_atomic,
 )
@@ -11667,6 +11668,11 @@ def create_collection_item(
         or set(generic_data) & (RECEIPT_TRANSFER_FIELDS - {"receiptType"})
     ):
         raise HTTPException(status_code=405, detail="Transferred receipts must use /api/receipts/transfers")
+    if collection == "appSettings" and str(generic_data.get("settingKey") or "") == PLAN_SETTINGS_KEY:
+        # The plan catalog decides what customers are charged. Its own endpoint
+        # enforces serviceIds immutability, version sequencing and an audit
+        # entry; a raw record here would bypass all three.
+        raise HTTPException(status_code=405, detail="Use PUT /api/admin/subscription-plans to change plan pricing")
 
     entity_id = validate_entity_id(body.id or new_id(collection[:10] or "id"))
 

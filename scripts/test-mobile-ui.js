@@ -661,7 +661,12 @@ check('receipt edits preserve the saved collection date (liquidity window integr
 // zero results against the ASCII/hamza-form stored values.
 check('search folds Arabic-Indic digits and Arabic spelling variants on both sides',
   helpers.includes('function foldSearchText(value)') &&
-  /function foldSearchText[\s\S]{0,400}normalizeDigitsAscii\(/.test(helpers) &&
+  // foldSearchText is a memo in front of the real folder (a pure-string cache,
+  // proven match-identical). Both halves are pinned: the entry point must
+  // delegate every uncacheable value, and the folder itself must still
+  // normalize Arabic-Indic digits.
+  helpers.includes('return _foldSearchTextUncached(value);') &&
+  /function _foldSearchTextUncached[\s\S]{0,400}normalizeDigitsAscii\(/.test(helpers) &&
   // customers view: folded term feeds the digit-only phone key match (the
   // /\D/ strip must never see unfolded ٠-٩, which it would delete)
   helpers.includes("const searchTerm = foldSearchText(state.customerSearch || '').trim();") &&

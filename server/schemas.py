@@ -160,9 +160,14 @@ class SubscriptionPlanModel(BaseModel):
 
 
 class PlanCatalogUpdateRequest(BaseModel):
-    """Admin catalog save — appended as one versioned appSettings record."""
+    """Admin catalog save — appended as one versioned appSettings record.
+
+    ``expectedVersion`` is the optimistic-concurrency guard: send the version
+    the editor loaded and a second admin's save cannot silently erase yours.
+    """
 
     plans: list[SubscriptionPlanModel] = Field(min_length=1, max_length=50)
+    expectedVersion: Optional[int] = Field(default=None, ge=0)
 
 
 class PlanPurchaseRequest(BaseModel):

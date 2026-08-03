@@ -50,7 +50,11 @@ EXTRA_PLAN_DEFAULTS: dict[str, dict[str, Any]] = {
         "durationDays": 30,
         "badge": "best_value",
         "savingsPct": 20,
-        "active": True,
+        # Ships INACTIVE and unpriced on purpose. An active zero-priced bundle
+        # would hand out every service inside it for free the moment the owner
+        # prices the single-service plans and forgets this one. The owner turns
+        # it on in Control Center after setting its price.
+        "active": False,
         "sortOrder": 5,
     },
 }
@@ -528,6 +532,17 @@ def create_subscription_plans_router(
                 # already serialized by the wallet lock above).
                 ctx["lock_idempotency_key"](conn, PLAN_SETTINGS_KEY, postgres=postgres, namespace="appSettings")
                 previous_record = _newest_plan_record(conn)
+                current_version = int((previous_record or {}).get("version") or 0)
+                if body.expectedVersion is not None and int(body.expectedVersion) != current_version:
+                    # Someone else saved between this editor loading and saving.
+                    # Overwriting would delete their prices with no trace.
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"The plan catalog changed (now version {current_version}). "
+                            "Reload the plans, re-apply your edits, then save."
+                        ),
+                    )
                 previous = load_subscription_plans(ctx, conn)
                 raw_plans = [p.model_dump() for p in body.plans]
                 catalog = validate_plan_catalog(raw_plans, previous, ctx)
@@ -543,7 +558,7 @@ def create_subscription_plans_router(
                         status_code=400,
                         detail=f"These saved plans are missing: {listed}. Send every plan; set active:false to retire one.",
                     )
-                version = int((previous_record or {}).get("version") or 0) + 1
+                version = current_version + 1
                 record = {
                     "settingKey": PLAN_SETTINGS_KEY,
                     "version": version,

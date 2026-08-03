@@ -416,19 +416,19 @@ function renderFirstRunSetup() {
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('email')}</label>
-            <input type="email" id="first-email" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="name@company.com" maxlength="120" />
+            <input type="email" id="first-email" dir="ltr" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="name@company.com" maxlength="120" />
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('password')}</label>
-            <input type="password" id="first-password" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? '8 أحرف على الأقل' : 'Min. 8 characters'}" minlength="8" />
+            <input type="password" id="first-password" dir="ltr" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'على الأقل 8 أحرف' : 'Min. 8 characters'}" minlength="8" />
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
-            <input type="password" id="first-password-confirm" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'أعد كتابة كلمة المرور' : 'Repeat password'}" minlength="8" />
+            <input type="password" id="first-password-confirm" dir="ltr" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'أعد كتابة كلمة المرور' : 'Repeat password'}" minlength="8" />
           </div>
           ${serverSetup ? `<div>
             <label class="block text-sm font-medium mb-2">${isAr ? 'رمز إعداد الخادم' : 'Server Setup Token'}</label>
-            <input type="password" id="first-setup-token" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="ALBAYAN_SETUP_TOKEN" minlength="16" maxlength="256" autocomplete="off" />
+            <input type="password" id="first-setup-token" dir="ltr" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="ALBAYAN_SETUP_TOKEN" minlength="16" maxlength="256" autocomplete="off" />
             <p class="mt-1 text-xs text-slate-500">${isAr ? 'أدخل الرمز الذي أضافه مشغل الخادم.' : 'Enter the random token configured by the server operator.'}</p>
           </div>` : ''}
           <button type="submit" class="w-full btn-shine alb-btn-primary text-white font-bold py-3 rounded-xl transition-all">
@@ -490,7 +490,7 @@ function attachFirstRunHandlers() {
         return;
       }
       if (!password || String(password).length < 8) {
-        showNotification(_vErr, state.language === 'ar' ? 'يجب أن تكون كلمة المرور 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
+        showNotification(_vErr, state.language === 'ar' ? 'يجب أن تكون كلمة المرور على الأقل 8 أحرف' : 'Password must be at least 8 characters', 'error');
         return;
       }
       if (password !== confirm) {
@@ -1011,7 +1011,7 @@ function renderLogin() {
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${t('email')}</label>
               <div class="relative">
                 <i data-lucide="mail" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
-                <input type="email" id="login-email" required class="w-full pl-10 pr-4 py-3 glass-input rounded-xl" placeholder="name@company.com" autocomplete="username" />
+                <input type="email" id="login-email" dir="ltr" required class="w-full pl-10 pr-4 py-3 glass-input rounded-xl" placeholder="name@company.com" autocomplete="username" />
               </div>
             </div>`;
 
@@ -1028,7 +1028,7 @@ function renderLogin() {
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${t('password')}</label>
               <div class="relative">
                 <i data-lucide="lock" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
-                <input type="password" id="login-password" required class="w-full pl-10 pr-4 py-3 glass-input rounded-xl" placeholder="••••••••" autocomplete="current-password" />
+                <input type="password" id="login-password" dir="ltr" required class="w-full pl-10 pr-4 py-3 glass-input rounded-xl" placeholder="••••••••" autocomplete="current-password" />
               </div>
             </div>
 
@@ -2452,6 +2452,20 @@ function loadMoreCustomers() {
   updateCustomersViewFiltered();
 }
 
+// Same reason as the customers grid: every page card carries spend figures and
+// icons, and drawing all of them at once is what a phone actually chokes on
+// (the per-card scanning is indexed now, the DOM work is not). The limit
+// resets whenever the search changes, so a search always shows its best
+// matches from the top.
+const PAGES_PAGE_SIZE = 50;
+let _pagesShowLimit = PAGES_PAGE_SIZE;
+let _pagesFilterFingerprint = '';
+
+function loadMorePages() {
+  _pagesShowLimit += PAGES_PAGE_SIZE;
+  render();
+}
+
 function applyCustomerQuickFilter(mode) {
   state.customerFinancialFilter = mode === 'debt' ? 'hasDebt' : (mode === 'credit' ? 'hasCredit' : 'all');
   render();
@@ -2640,6 +2654,13 @@ function renderReceiptsView() {
     : null;
   const filteredReceiptNumber = String(filteredReceipt?.finalReceiptNo || filteredReceipt?.serialNumber || filteredReceipt?.tempReceiptNo || '').trim();
   const filteredReceiptLabel = Security.escapeHtml(filteredReceiptNumber ? `#${filteredReceiptNumber}` : (isArV ? 'الوصل المحدد' : 'Selected receipt'));
+  // ONE ads pass for the whole card list, instead of a fresh scan per card.
+  // Deliberately built from getVisibleRecords (soft-delete only, NOT
+  // permission-scoped): receipt money must never change with who is looking.
+  // This is a DIFFERENT, narrower index than linkedAdCountByReceipt below —
+  // that one follows more link kinds and IS permission-scoped, so the two
+  // must never be swapped for each other.
+  const receiptUsageAdIndex = buildReceiptUsageAdIndex(state.ads);
   const canSeeReceiptAds = canOpenWorkspaceView('ads');
   const linkedAdCountByReceipt = new Map();
   if (canSeeReceiptAds) {
@@ -2910,7 +2931,7 @@ function renderReceiptsView() {
 
           // Calculate total paid as sum of R1 values (amount × rate)
           const totalPaid = payments.reduce((sum, p) => sum + ((p.amount || 0) * (p.rate || 1)), 0) || receipt.amountLocal;
-          const usage = getReceiptUsageStats(receipt);
+          const usage = getReceiptUsageStats(receipt, receiptUsageAdIndex);
           const hasTransfers = (receipt.transfers && receipt.transfers.length > 0);
           const lastTransfer = hasTransfers ? receipt.transfers[receipt.transfers.length - 1] : null;
           const lastTransferName = lastTransfer ? (customersById.get(lastTransfer.toCustomerId)?.name || lastTransfer.toCustomerName || (isArV ? 'غير معروف' : 'Unknown')) : '';
@@ -3264,8 +3285,15 @@ function renderPagesView() {
   const pageDisplayNumberById = new Map(allPages.map((page, index) => [String(page.id), allPages.length - index]));
   // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
   const pageSearch = foldSearchText(String(state.pageSearch || '').trim());
-  const customersById = new Map((state.customers || []).map(customer => [String(customer.id), customer]));
-  const visiblePages = pageSearch
+  // FIRST-wins, matching the Array.find() this replaces in the card loop
+  // below (new Map(array.map(...)) would be last-wins). Identical while ids
+  // are unique; this only decides which record wins if they ever collide.
+  const customersById = new Map();
+  (state.customers || []).forEach(customer => {
+    const key = String(customer.id);
+    if (!customersById.has(key)) customersById.set(key, customer);
+  });
+  const allFilteredPages = pageSearch
     ? allPages.filter(page => {
         const ownerNames = getPageCustomerIds(page)
           .map(customerId => customersById.get(String(customerId))?.name || '')
@@ -3274,6 +3302,15 @@ function renderPagesView() {
           .some(value => foldSearchText(value).includes(pageSearch));
       })
     : allPages;
+  // Reset the reveal limit whenever the result set changes, so a new search
+  // starts at its top matches instead of inheriting a huge previous limit.
+  const pagesFilterFingerprint = `${pageSearch}|${allFilteredPages.length}`;
+  if (pagesFilterFingerprint !== _pagesFilterFingerprint) {
+    _pagesFilterFingerprint = pagesFilterFingerprint;
+    _pagesShowLimit = PAGES_PAGE_SIZE;
+  }
+  const visiblePages = allFilteredPages.slice(0, _pagesShowLimit);
+  const remainingPages = Math.max(0, allFilteredPages.length - visiblePages.length);
   // Pages repeat when a Meta import lands beside a hand-made row, or the same
   // name is typed two ways. Flag them so they can be resolved by hand.
   const duplicatePageGroups = findDuplicatePageGroups(allPages);
@@ -3282,13 +3319,17 @@ function renderPagesView() {
   const canSeePageFinancials = canSeePageAds
     && can('analytics', 'viewFinancials')
     && can('analytics', 'viewSensitive');
-  
+  // ONE ads+pages pass for the whole grid: getPageSpendSummary used to run two
+  // full collection scans per card, so this screen was quadratic and (unlike
+  // Receipts/Ads/Customers) is not paginated.
+  const pageSpendIndex = canSeePageAds ? buildPageSpendIndex(state.pages, state.ads) : null;
+
   return `
     <div class="space-y-6 animate-fade-in-up">
       <div class="page-header flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('pages')}</h1>
-          <p id="pages-count" class="text-sm text-slate-500 mt-1">${isAr ? `${visiblePages.length}${pageSearch ? ` من ${allPages.length}` : ''} صفحة فيسبوك` : `${visiblePages.length}${pageSearch ? ` of ${allPages.length}` : ''} Facebook pages`}</p>
+          <p id="pages-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allFilteredPages.length}${pageSearch ? ` من ${allPages.length}` : ''} صفحة فيسبوك` : `${allFilteredPages.length}${pageSearch ? ` of ${allPages.length}` : ''} Facebook pages`}</p>
         </div>
         <div class="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
           <button type="button" onclick="showPageDuplicates('', this)" class="w-full sm:w-auto min-h-11 border ${duplicatePageGroups.length > 0 ? 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-300' : 'border-slate-200 bg-white/60 text-slate-600 dark:border-slate-700 dark:bg-slate-900/30 dark:text-slate-300'} px-4 py-2 rounded-xl font-bold flex items-center justify-center gap-2" aria-haspopup="dialog">
@@ -3314,13 +3355,13 @@ function renderPagesView() {
       <div id="pages-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         ${visiblePages.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${pageSearch ? 'search-x' : 'file-text'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${pageSearch ? (isAr ? 'لا توجد صفحات تطابق البحث' : 'No pages match your search') : (isAr ? 'لا توجد صفحات بعد' : 'No pages yet')}</p></div>` : visiblePages.map((p) => {
           const linkedCustomers = getPageCustomerIds(p)
-            .map(cid => state.customers.find(c => String(c.id) === String(cid)))
+            .map(cid => customersById.get(String(cid)))
             .filter(Boolean);
           const isMetaImportedPage = !!String(p.metaPageId || '').trim();
           const needsPageOwner = isMetaImportedPage && linkedCustomers.length === 0;
           // Page activity is only authoritative for accounts that can see all
           // ads. Money additionally needs the business financial permission.
-          const pageStats = canSeePageAds ? getPageSpendSummary(p.id) : null;
+          const pageStats = canSeePageAds ? getPageSpendSummary(p.id, pageSpendIndex) : null;
           const lastAdText = pageStats?.lastAdDate
             ? new Date(pageStats.lastAdDate).toLocaleDateString(appDateLocale())
             : (isAr ? 'أبداً' : 'Never');
@@ -3416,6 +3457,14 @@ function renderPagesView() {
             </div>
           `;
         }).join('')}
+        ${remainingPages > 0 ? `
+          <div class="col-span-full flex justify-center py-2">
+            <button onclick="loadMorePages()" class="px-6 py-3 glass-panel rounded-xl text-sm font-bold text-indigo-600 dark:text-indigo-400 hover:scale-105 transition-transform flex items-center gap-2">
+              <i data-lucide="chevron-down" class="w-4 h-4"></i>
+              <span>${isAr ? `عرض المزيد (${remainingPages} متبقي)` : `Load more (${remainingPages} remaining)`}</span>
+            </button>
+          </div>
+        ` : ''}
       </div>
     </div>
   `;

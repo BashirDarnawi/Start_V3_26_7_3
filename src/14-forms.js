@@ -24,20 +24,71 @@ document.addEventListener('click', function(e) {
 // RECEIPT MODAL HELPER FUNCTIONS
 // ==========================================
 
+// These two pickers run on EVERY keystroke of an oninput handler, and "09" is
+// the prefix of nearly every Libyan number — so the first characters typed
+// each rebuild the largest possible dropdown. Debouncing on the same 80 ms as
+// the list searches keeps the keyboard responsive; it changes nothing about
+// which records match.
+let _receiptPhoneFilterTimer = null;
+let _pageCustomerFilterTimer = null;
+// The phone list is rebuilt from every customer's every phone — it was being
+// rebuilt on every keystroke. It is cached from the moment the picker opens,
+// with a short lifetime so a customer arriving through background sync still
+// appears while the field stays focused (the old code caught that on the next
+// keystroke; this keeps the same guarantee within a few seconds).
+// Rows inserted into a picker dropdown at once. Matching more than this is
+// normal (typing "09" matches everyone); the user narrows instead of scrolling.
+const PICKER_DROPDOWN_LIMIT = 50;
+
+// The "N more — keep typing" footer, so a capped list never looks complete.
+function renderPickerOverflowRow(hiddenCount) {
+  const hidden = Math.max(0, Number(hiddenCount) || 0);
+  if (!hidden) return '';
+  const isAr = state.language === 'ar';
+  return `<div class="px-3 py-2 text-xs text-slate-500 border-t border-slate-100 dark:border-slate-800">${
+    isAr ? `و${hidden} أخرى — تابع الكتابة لتضييق النتائج` : `${hidden} more — keep typing to narrow`
+  }</div>`;
+}
+
+const _RECEIPT_PHONE_ROWS_TTL_MS = 3000;
+let _receiptPhoneRowsCache = null;
+let _receiptPhoneRowsCacheAt = 0;
+
+function invalidateReceiptPhoneRows() {
+  _receiptPhoneRowsCache = null;
+  _receiptPhoneRowsCacheAt = 0;
+}
+
+function getReceiptPhoneRows() {
+  const now = Date.now();
+  if (_receiptPhoneRowsCache && (now - _receiptPhoneRowsCacheAt) < _RECEIPT_PHONE_ROWS_TTL_MS) {
+    return _receiptPhoneRowsCache;
+  }
+  const rows = [];
+  getCustomersVisibleToCurrentUser().forEach(c => {
+    c.phones.forEach(phone => {
+      rows.push({ phone, customer: c });
+    });
+  });
+  _receiptPhoneRowsCache = rows;
+  _receiptPhoneRowsCacheAt = now;
+  return rows;
+}
+
 function filterReceiptPhones() {
+  if (_receiptPhoneFilterTimer) clearTimeout(_receiptPhoneFilterTimer);
+  _receiptPhoneFilterTimer = setTimeout(filterReceiptPhonesNow, 80);
+}
+
+function filterReceiptPhonesNow() {
   const searchInput = document.getElementById('receipt-phone-search');
   const dropdown = document.getElementById('receipt-phone-dropdown');
+  if (!searchInput || !dropdown) return; // modal closed while the timer waited
   // foldSearchText on BOTH sides: Arabic-keyboard digits and unhamza'd
   // spellings must match the stored ASCII phones / hamza-form names.
   const searchTerm = foldSearchText(searchInput.value);
 
-  const customers = getCustomersVisibleToCurrentUser();
-  const phoneCustomerMap = [];
-  customers.forEach(c => {
-    c.phones.forEach(phone => {
-      phoneCustomerMap.push({ phone, customer: c });
-    });
-  });
+  const phoneCustomerMap = getReceiptPhoneRows();
 
   const filtered = phoneCustomerMap.filter(item =>
     foldSearchText(item.phone).includes(searchTerm) ||
@@ -45,12 +96,17 @@ function filterReceiptPhones() {
   );
   
   if (filtered.length > 0 && searchTerm) {
-    dropdown.innerHTML = filtered.map(item => `
+    // Cap what goes into the DOM. "09" starts nearly every Libyan number, so
+    // the first characters typed used to insert thousands of rows — the rows
+    // past the fiftieth were never realistically scrolled to anyway.
+    const shown = filtered.slice(0, PICKER_DROPDOWN_LIMIT);
+    const hidden = filtered.length - shown.length;
+    dropdown.innerHTML = shown.map(item => `
       <div class="px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer phone-option rounded transition-colors" data-phone="${Security.escapeHtml(item.phone)}" data-customer-id="${Security.escapeHtml(item.customer.id)}" onclick="selectReceiptPhone(this.dataset.phone, this.dataset.customerId)">
         <div class="text-sm font-medium">${Security.escapeHtml(item.phone)}</div>
         <div class="text-xs text-slate-500">${Security.escapeHtml(item.customer.name)} - ${Security.escapeHtml(item.customer.platform)}</div>
       </div>
-    `).join('');
+    `).join('') + renderPickerOverflowRow(hidden);
     dropdown.classList.remove('hidden');
   } else {
     dropdown.classList.add('hidden');
@@ -58,7 +114,10 @@ function filterReceiptPhones() {
 }
 
 function showReceiptPhoneDropdown() {
-  filterReceiptPhones();
+  // Opening is a direct action, not typing: no debounce, and rebuild the rows
+  // so a customer added since the last open shows up.
+  invalidateReceiptPhoneRows();
+  filterReceiptPhonesNow();
 }
 
 // ==========================================
@@ -856,8 +915,14 @@ document.addEventListener('keydown', (e) => {
 // ==========================================
 
 function filterPageCustomers() {
+  if (_pageCustomerFilterTimer) clearTimeout(_pageCustomerFilterTimer);
+  _pageCustomerFilterTimer = setTimeout(filterPageCustomersNow, 80);
+}
+
+function filterPageCustomersNow() {
   const searchInput = document.getElementById('page-customer-search');
   const dropdown = document.getElementById('page-customer-dropdown');
+  if (!searchInput || !dropdown) return; // modal closed while the timer waited
   // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
   const searchTerm = foldSearchText(searchInput?.value || '');
 
@@ -870,12 +935,13 @@ function filterPageCustomers() {
   );
   
   if (filtered.length > 0 && searchTerm) {
-    dropdown.innerHTML = filtered.map(c => `
+    const shown = filtered.slice(0, PICKER_DROPDOWN_LIMIT);
+    dropdown.innerHTML = shown.map(c => `
       <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" data-record-action="select-page-customer" data-record-id="${Security.escapeHtml(String(c.id || ''))}" data-admin="${isAdminRole(state.currentUser?.role)}">
         <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
         <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (state.language === 'ar' ? 'لا يوجد هاتف' : 'No phone'))}</div>
       </div>
-    `).join('');
+    `).join('') + renderPickerOverflowRow(filtered.length - shown.length);
     dropdown.classList.remove('hidden');
   } else {
     dropdown.classList.add('hidden');
@@ -885,14 +951,16 @@ function filterPageCustomers() {
 function showPageCustomerDropdown() {
   const dropdown = document.getElementById('page-customer-dropdown');
   const customers = getVisibleRecords(state.customers);
-  
+
   if (customers.length > 0) {
-    dropdown.innerHTML = customers.map(c => `
+    // Opening with an empty box would otherwise insert every customer.
+    const shown = customers.slice(0, PICKER_DROPDOWN_LIMIT);
+    dropdown.innerHTML = shown.map(c => `
       <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" data-record-action="select-page-customer" data-record-id="${Security.escapeHtml(String(c.id || ''))}" data-admin="${isAdminRole(state.currentUser?.role)}">
         <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
         <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (state.language === 'ar' ? 'لا يوجد هاتف' : 'No phone'))}</div>
       </div>
-    `).join('');
+    `).join('') + renderPickerOverflowRow(customers.length - shown.length);
     dropdown.classList.remove('hidden');
   }
 }

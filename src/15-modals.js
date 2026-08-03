@@ -864,14 +864,14 @@ function renderModal() {
             </div>
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? 'البريد الإلكتروني *' : 'Email Address *'}</label>
-              <input type="email" id="user-email" value="${Security.escapeHtml(userData.email || '')}" required class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="john@company.com" />
+              <input type="email" id="user-email" dir="ltr" value="${Security.escapeHtml(userData.email || '')}" required class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="john@company.com" />
             </div>
           </div>
           
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? `كلمة المرور ${isEdit ? '(اتركها فارغة للإبقاء عليها)' : '*'}` : `Password ${isEdit ? '(leave blank to keep)' : '*'}`}</label>
-              <input type="password" id="user-password" ${!isEdit ? 'required' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : (isArU ? '8 أحرف على الأقل' : 'Min. 8 characters')}" />
+              <input type="password" id="user-password" dir="ltr" ${!isEdit ? 'required' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : (isArU ? 'على الأقل 8 أحرف' : 'Min. 8 characters')}" />
             </div>
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? 'الدور *' : 'Role *'}</label>
@@ -1038,7 +1038,7 @@ function renderModal() {
                   onfocus="showPageCustomerDropdown()"
                 />
                 <div id="page-customer-dropdown" class="absolute z-20 mt-1 w-full glass-panel rounded-lg shadow-xl max-h-60 overflow-y-auto hidden">
-                  ${pageCustomers.map(c => `
+                  ${pageCustomers.slice(0, PICKER_DROPDOWN_LIMIT).map(c => `
                     <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" data-record-action="select-page-customer" data-record-id="${Security.escapeHtml(String(c.id || ''))}" data-admin="${isAdminPage}">
                       <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
                       <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (isArP ? 'لا يوجد هاتف' : 'No phone'))}</div>
@@ -1158,7 +1158,7 @@ function renderModal() {
                   onfocus="showReceiptPhoneDropdown()"
                 />
                 <div id="receipt-phone-dropdown" class="absolute z-20 mt-1 w-full sm:w-80 max-w-[calc(100vw-2rem)] glass-panel rounded-lg shadow-xl max-h-40 overflow-y-auto hidden">
-                  ${phoneCustomerMap.map(item => `
+                  ${phoneCustomerMap.slice(0, PICKER_DROPDOWN_LIMIT).map(item => `
                     <div class="touch-target px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer phone-option" role="button" tabindex="0" data-phone="${Security.escapeHtml(item.phone)}" data-customer-id="${Security.escapeHtml(item.customer.id)}" onclick="selectReceiptPhone(this.dataset.phone, this.dataset.customerId)" onkeydown="if(event.key === 'Enter' || event.key === ' '){ event.preventDefault(); selectReceiptPhone(this.dataset.phone, this.dataset.customerId); }">
                       <div class="text-sm font-medium">${Security.escapeHtml(item.phone)}</div>
                       <div class="text-xs text-slate-500">${Security.escapeHtml(item.customer.name)} - ${Security.escapeHtml(item.customer.platform)}</div>
@@ -1853,15 +1853,15 @@ function renderModal() {
             <div class="space-y-4">
               <div>
                 <label class="block text-sm font-medium mb-2">${t('resetCode')}</label>
-                <input type="text" id="pwreset-token" value="${Security.escapeHtml(tokenVal)}" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'أدخل الرمز' : 'Enter code'}" />
+                <input type="text" id="pwreset-token" dir="ltr" value="${Security.escapeHtml(tokenVal)}" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'أدخل الرمز' : 'Enter code'}" />
               </div>
               <div>
                 <label class="block text-sm font-medium mb-2">${t('newPassword')}</label>
-                <input type="password" id="pwreset-new" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? '8 أحرف على الأقل' : 'Min. 8 characters'}" minlength="8" />
+                <input type="password" id="pwreset-new" dir="ltr" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'على الأقل 8 أحرف' : 'Min. 8 characters'}" minlength="8" />
               </div>
               <div>
                 <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
-                <input type="password" id="pwreset-confirm" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" minlength="8" />
+                <input type="password" id="pwreset-confirm" dir="ltr" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" minlength="8" />
               </div>
               <div class="flex space-x-3 pt-2">
                 <button type="button" onclick="passwordResetConfirmServer()" class="flex-1 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
@@ -1886,7 +1886,7 @@ function renderModal() {
             <div class="space-y-4">
               <div>
                 <label class="block text-sm font-medium mb-2">${t('email')}</label>
-                <input type="email" id="pwreset-email" value="${Security.escapeHtml(emailVal)}" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="name@company.com" />
+                <input type="email" id="pwreset-email" dir="ltr" value="${Security.escapeHtml(emailVal)}" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="name@company.com" />
               </div>
               <div class="flex space-x-3 pt-2">
                 <button type="button" onclick="passwordResetRequestServer()" class="flex-1 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
@@ -1924,19 +1924,19 @@ function renderModal() {
           <div class="space-y-4">
             <div>
               <label class="block text-sm font-medium mb-2">${t('email')}</label>
-              <input type="email" id="pwreset-email" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="name@company.com" />
+              <input type="email" id="pwreset-email" dir="ltr" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="name@company.com" />
             </div>
             <div>
               <label class="block text-sm font-medium mb-2">${t('recoveryKey')}</label>
-              <input type="text" id="pwreset-recovery" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'ألصق مفتاح الاستعادة' : 'Paste recovery key'}" ${hasRecovery ? '' : 'disabled'} />
+              <input type="text" id="pwreset-recovery" dir="ltr" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'ألصق مفتاح الاستعادة' : 'Paste recovery key'}" ${hasRecovery ? '' : 'disabled'} />
             </div>
             <div>
               <label class="block text-sm font-medium mb-2">${t('newPassword')}</label>
-              <input type="password" id="pwreset-new" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? '8 أحرف على الأقل' : 'Min. 8 characters'}" minlength="8" ${hasRecovery ? '' : 'disabled'} />
+              <input type="password" id="pwreset-new" dir="ltr" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'على الأقل 8 أحرف' : 'Min. 8 characters'}" minlength="8" ${hasRecovery ? '' : 'disabled'} />
             </div>
             <div>
               <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
-              <input type="password" id="pwreset-confirm" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" minlength="8" ${hasRecovery ? '' : 'disabled'} />
+              <input type="password" id="pwreset-confirm" dir="ltr" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" minlength="8" ${hasRecovery ? '' : 'disabled'} />
             </div>
             <div class="flex space-x-3 pt-2">
               <button type="button" onclick="passwordResetConfirmLocal()" class="flex-1 btn-shine bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700 ${hasRecovery ? '' : 'opacity-50 cursor-not-allowed'}" ${hasRecovery ? '' : 'disabled'}>
@@ -1967,15 +1967,15 @@ function renderModal() {
         <form id="modal-form" class="space-y-4">
           <div>
             <label class="block text-sm font-medium mb-2">${t('currentPassword')}</label>
-            <input type="password" id="cp-current" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" />
+            <input type="password" id="cp-current" dir="ltr" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" />
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('newPassword')}</label>
-            <input type="password" id="cp-new" required minlength="8" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? '8 أحرف على الأقل' : 'Min. 8 characters'}" />
+            <input type="password" id="cp-new" dir="ltr" required minlength="8" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'على الأقل 8 أحرف' : 'Min. 8 characters'}" />
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
-            <input type="password" id="cp-confirm" required minlength="8" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" />
+            <input type="password" id="cp-confirm" dir="ltr" required minlength="8" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" />
           </div>
           <div class="flex space-x-3 pt-2">
             <button type="submit" class="flex-1 btn-shine bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700">
@@ -2053,13 +2053,25 @@ function renderModal() {
             <span>${isRTL ? 'رصيد المحفظة (د.ل)' : 'Wallet balance (LYD)'}</span>
             <span class="font-bold">${walletFormatMinor(lydBalanceMinor, 'LYD')}</span>
           </div>
-          ${planCards ? `<div class="space-y-3 mb-4 max-h-[45dvh] overflow-y-auto custom-scrollbar pr-1">${planCards}</div>` : `
+          ${planCards ? `<div class="space-y-3 mb-4 max-h-[45dvh] overflow-y-auto custom-scrollbar pr-1">${planCards}</div>` : (isServerModeEnabled() ? `
+          <!-- Server mode with no plans yet: the catalog is still loading or the
+               fetch failed. NEVER offer a purchase button here — it would take
+               real money while showing no price at all. -->
+          <div class="mb-4 rounded-2xl border border-slate-200 dark:border-slate-700 p-5 text-sm text-slate-500">
+            <div class="w-6 h-6 mx-auto mb-2 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+            ${isRTL ? 'جاري تحميل الأسعار…' : 'Loading prices…'}
+            <div class="mt-3">
+              <button onclick="refreshSubscriptionPlans(true).then(() => { if (state.activeModal === 'subscription-lock') renderModal(); })" class="text-xs font-bold text-indigo-600 hover:text-indigo-700 underline">
+                ${isRTL ? 'إعادة المحاولة' : 'Retry'}
+              </button>
+            </div>
+          </div>` : `
           <div class="flex space-x-3 mb-1">
-            <button onclick="handleSubscribe('${lockSubscribeToId}', '${lockServiceId}')" class="flex-1 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
+            <button onclick="handleSubscribe('${Security.escapeHtml(String(lockSubscribeToId))}', '${Security.escapeHtml(String(lockServiceId))}')" class="flex-1 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
               <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>
               ${isRTL ? 'اشترك' : 'Subscribe'}
             </button>
-          </div>`}
+          </div>`)}
           <button onclick="closeModal()" class="w-full bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300">
             ${isRTL ? 'إلغاء' : 'Cancel'}
           </button>
@@ -2799,7 +2811,7 @@ async function handleModalSubmit() {
         return;
       }
       if (!newPw || newPw.length < 8) {
-        showNotification(isArCP ? 'تنبيه' : 'Validation', isArCP ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
+        showNotification(isArCP ? 'تنبيه' : 'Validation', isArCP ? 'كلمة المرور يجب أن تكون على الأقل 8 أحرف' : 'Password must be at least 8 characters', 'error');
         return;
       }
       if (newPw !== confirmPw) {
@@ -3884,7 +3896,7 @@ async function handleModalSubmit() {
         const newPassword = document.getElementById('user-password').value;
           if (newPassword) {
             if (String(newPassword).length < 8) {
-              showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
+              showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون على الأقل 8 أحرف' : 'Password must be at least 8 characters', 'error');
               return;
             }
             if (isSelfEdit && !isAdminEditor) {
@@ -3916,7 +3928,7 @@ async function handleModalSubmit() {
         } else {
           const rawPassword = document.getElementById('user-password').value;
           if (!rawPassword || String(rawPassword).length < 8) {
-            showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
+            showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون على الأقل 8 أحرف' : 'Password must be at least 8 characters', 'error');
             return;
           }
 
@@ -3956,7 +3968,7 @@ async function handleModalSubmit() {
         const newPassword = document.getElementById('user-password').value;
         if (newPassword) {
           if (String(newPassword).length < 8) {
-            showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
+            showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون على الأقل 8 أحرف' : 'Password must be at least 8 characters', 'error');
             return;
           }
           const hashed = await Security.hashPassword(newPassword, null, { algo: 'pbkdf2-sha256' });
@@ -3991,7 +4003,7 @@ async function handleModalSubmit() {
         }
         const rawPassword = document.getElementById('user-password').value;
         if (!rawPassword || String(rawPassword).length < 8) {
-          showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters', 'error');
+          showNotification(isArSubU ? 'خطأ في الإدخال' : 'Validation Error', isArSubU ? 'كلمة المرور يجب أن تكون على الأقل 8 أحرف' : 'Password must be at least 8 characters', 'error');
           return;
         }
         const hashed = await Security.hashPassword(rawPassword, null, { algo: 'pbkdf2-sha256' });

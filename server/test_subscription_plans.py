@@ -209,6 +209,80 @@ class TestPlanCatalog:
         public = client.get("/api/subscriptions/plans", cookies=actors["customer"])
         assert all(p["id"] != "archived_probe" for p in public.json()["plans"])
 
+    def test_concurrent_admin_save_cannot_silently_erase_the_other(self, actors):
+        """Two admins editing prices: the stale one is refused, not applied."""
+        current = client.get("/api/admin/subscription-plans", cookies=actors["admin"]).json()
+        stale_version = int(current["version"])
+        plans = [dict(p) for p in current["plans"]]
+        # Admin A publishes.
+        first = client.put(
+            "/api/admin/subscription-plans",
+            json={"plans": plans, "expectedVersion": stale_version},
+            cookies=actors["admin"],
+        )
+        assert first.status_code == 200, first.text
+        new_version = int(first.json()["version"])
+        assert new_version == stale_version + 1
+        # Admin B saves from the version they loaded BEFORE A published.
+        second = client.put(
+            "/api/admin/subscription-plans",
+            json={"plans": plans, "expectedVersion": stale_version},
+            cookies=actors["admin"],
+        )
+        assert second.status_code == 409, second.text
+        assert "changed" in second.json()["detail"]
+        # Reloading and re-saving works.
+        retry = client.put(
+            "/api/admin/subscription-plans",
+            json={"plans": plans, "expectedVersion": new_version},
+            cookies=actors["admin"],
+        )
+        assert retry.status_code == 200, retry.text
+        # Omitting the guard stays allowed (older clients keep working).
+        legacy = client.put(
+            "/api/admin/subscription-plans", json={"plans": plans}, cookies=actors["admin"]
+        )
+        assert legacy.status_code == 200, legacy.text
+
+    def test_shipped_bundle_is_inactive_until_the_owner_prices_it(self, actors):
+        """A zero-priced ACTIVE bundle would give away every service in it."""
+        full = client.get("/api/admin/subscription-plans", cookies=actors["admin"]).json()
+        shipped = {p["id"]: p for p in full["plans"]}.get("smart_bundle")
+        assert shipped is not None, "smart_bundle default disappeared"
+        if shipped["priceMinor"] == 0:
+            assert shipped["active"] is False, "free bundle must not ship sellable"
+        public = client.get("/api/subscriptions/plans", cookies=actors["customer"]).json()
+        assert all(p["id"] != "smart_bundle" for p in public["plans"])
+        blocked = client.post(
+            "/api/subscriptions/purchase-plan",
+            json={"planId": "smart_bundle", "idempotencyKey": "plans-freebundle-01"},
+            cookies=actors["customer"],
+        )
+        assert blocked.status_code == 409, blocked.text
+
+    def test_plan_catalog_cannot_be_forged_through_the_generic_route(self, actors):
+        """The audited endpoint enforces immutability, versioning and audit."""
+        forged = client.post(
+            "/api/collections/appSettings",
+            json={
+                "id": "forged_plan_catalog",
+                "data": {
+                    "settingKey": "subscriptionPlans",
+                    "version": 9_999_999,
+                    "plans": [{
+                        "id": "svc:ad_maker", "serviceIds": ["ad_maker", "clothes_system"],
+                        "name": "Widened", "nameAr": "موسّع", "priceMinor": 1,
+                        "currency": "LYD", "durationDays": 30, "active": True, "sortOrder": 1,
+                    }],
+                },
+            },
+            cookies=actors["admin"],
+        )
+        assert forged.status_code == 405, forged.text
+        listed = client.get("/api/subscriptions/plans", cookies=actors["customer"]).json()
+        ad_maker = {p["id"]: p for p in listed["plans"]}["svc:ad_maker"]
+        assert ad_maker["serviceIds"] == ["ad_maker"], "shipped plan composition was widened"
+
     def test_corrupt_generic_appsettings_record_never_bricks_purchasing(self, actors):
         with db_conn() as conn:
             conn.execute(

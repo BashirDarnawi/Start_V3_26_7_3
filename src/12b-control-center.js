@@ -257,7 +257,7 @@ async function savePlanManager() {
       savingsPct: Number.isFinite(Number(p.savingsPct)) && p.savingsPct !== null && p.savingsPct !== '' ? Math.trunc(Number(p.savingsPct)) : null,
       active: p.active !== false,
       sortOrder: Math.trunc(Number(p.sortOrder) || 0)
-    })));
+    })), _planManager.version);
     _planManager.version = Number(payload?.version || _planManager.version + 1);
     _planManager.dirty = false;
     _planManager.loadedAt = 0;

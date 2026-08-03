@@ -335,7 +335,48 @@ function normalizeCustomerPhoneKey(value) {
 //    tatweel).
 // NFKC first folds full-width digits and Arabic presentation forms; guarded
 // because very old engines lack String.normalize.
+// Memo in front of the folder below. It is a PURE function of one string, so
+// caching cannot change which records match. It runs per FIELD per RECORD on
+// every debounced keystroke (the ads filter folds up to 11 fields per ad),
+// measured at ~19 ms per pass over 3000 ads on a desktop — several times that
+// on a phone, and that cost lands between keypresses.
+// TWO generations instead of one capped Map: a cache smaller than the working
+// set thrashes and ends up no faster than no cache at all. On overflow the
+// current generation becomes the old one and lookups fall through to it, so it
+// degrades gracefully. Memory stays bounded at 2 x MAX entries.
+// `var` + lazy creation, and the limits inlined as literals, ON PURPOSE:
+// foldSearchText is a hoisted function declaration, so it is callable from the
+// moment the bundle starts executing — earlier than this line. With `const`
+// state it would throw "cannot access before initialization" for any caller
+// that runs during startup. `var` hoists, and the null check builds the maps
+// on first real use, so the memo is safe no matter who calls first.
+var _foldCache = null; // { cur: Map, prev: Map }
+
 function foldSearchText(value) {
+  // Only strings are keyable, and very long free text is folded but not
+  // stored; everything else goes straight through so the String() coercion
+  // in the folder below stays the single source of truth.
+  if (typeof value !== 'string' || value.length > 512) {
+    return _foldSearchTextUncached(value);
+  }
+  if (!_foldCache) _foldCache = { cur: new Map(), prev: new Map() };
+  const hit = _foldCache.cur.get(value);
+  if (hit !== undefined) return hit;
+  const older = _foldCache.prev.get(value);
+  if (older !== undefined) {
+    _foldCache.cur.set(value, older); // promote so the hot set survives a roll
+    return older;
+  }
+  const folded = _foldSearchTextUncached(value);
+  if (_foldCache.cur.size >= 30000) {
+    _foldCache.prev = _foldCache.cur;
+    _foldCache.cur = new Map();
+  }
+  _foldCache.cur.set(value, folded);
+  return folded;
+}
+
+function _foldSearchTextUncached(value) {
   let s = String(value === null || value === undefined ? '' : value);
   try { s = s.normalize('NFKC'); } catch (_) {}
   return normalizeDigitsAscii(s)
@@ -960,14 +1001,39 @@ function getCustomerPageSpendSummary(customerId, pageId) {
   };
 }
 
-function getPageSpendSummary(pageId) {
+// pageId -> its ads, plus the set of live page ids: ONE pass for a whole page
+// list instead of two full collection scans per card. Same predicate and same
+// array order as the per-call filter below, so the float sums stay identical.
+function buildPageSpendIndex(pages = state.pages, ads = state.ads) {
+  const adsByPageId = new Map();
+  getVisibleRecords(Array.isArray(ads) ? ads : []).forEach(ad => {
+    if (ad.recordType === 'receipt') return;
+    const key = String(ad.pageId || ad.page || '');
+    if (!key) return;
+    const bucket = adsByPageId.get(key);
+    if (bucket) bucket.push(ad);
+    else adsByPageId.set(key, [ad]);
+  });
+  const livePageIds = new Set(
+    getVisibleRecords(Array.isArray(pages) ? pages : []).map(item => String(item.id))
+  );
+  return { adsByPageId, livePageIds };
+}
+
+function getPageSpendSummary(pageId, spendIndex = null) {
   const normalizedPageId = String(pageId || '').trim();
   if (!Security.isValidRecordId(normalizedPageId)) return null;
-  const page = getVisibleRecords(state.pages || []).find(item => String(item.id) === normalizedPageId);
-  if (!page) return null;
-  const ads = getVisibleRecords(state.ads || []).filter(ad =>
-    ad.recordType !== 'receipt' && String(ad.pageId || ad.page || '') === normalizedPageId
-  );
+  if (spendIndex) {
+    if (!spendIndex.livePageIds.has(normalizedPageId)) return null;
+  } else {
+    const page = getVisibleRecords(state.pages || []).find(item => String(item.id) === normalizedPageId);
+    if (!page) return null;
+  }
+  const ads = spendIndex
+    ? (spendIndex.adsByPageId.get(normalizedPageId) || [])
+    : getVisibleRecords(state.ads || []).filter(ad =>
+      ad.recordType !== 'receipt' && String(ad.pageId || ad.page || '') === normalizedPageId
+    );
   const dates = ads
     .map(ad => new Date(ad.startDate || ad.date || ad.createdAt || '').getTime())
     .filter(Number.isFinite);

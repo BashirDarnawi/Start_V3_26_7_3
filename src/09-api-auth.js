@@ -1248,10 +1248,14 @@ async function apiPurchasePlan({ planId, idempotencyKey, userId }) {
   return payload;
 }
 
-async function apiAdminSaveSubscriptionPlans(plans) {
+async function apiAdminSaveSubscriptionPlans(plans, expectedVersion = null) {
+  // expectedVersion is the version this editor loaded: the server refuses the
+  // save if another admin published in between, instead of erasing their work.
+  const body = { plans };
+  if (expectedVersion !== null && expectedVersion !== undefined) body.expectedVersion = Number(expectedVersion);
   return apiJson('/api/admin/subscription-plans', {
     method: 'PUT',
-    body: { plans }
+    body
   }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
 }
 
