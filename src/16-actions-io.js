@@ -1560,6 +1560,56 @@ async function clearAllData() {
 }
 let _dataIntegrityAuditInFlight = false;
 
+// The owner's own complete copy: every server row, media included, streamed
+// straight to disk. Deliberately a plain navigation, not an apiFetch: the
+// request timeout would abort a several-hundred-MB download.
+async function downloadFullServerBackup(button = null) {
+  const isAr = state.language === 'ar';
+  if (!isCurrentUserAdmin()) {
+    showNotification(isAr ? 'غير مسموح' : 'Not Allowed', isAr ? 'النسخة الكاملة للمدير فقط.' : 'Only an administrator can download the full backup.', 'error');
+    return;
+  }
+  if (!isServerModeEnabled()) {
+    showNotification(isAr ? 'يتطلب الخادم' : 'Server required', isAr ? 'النسخة الكاملة تأتي من الخادم.' : 'The full backup comes from the server.', 'error');
+    return;
+  }
+  // Packaged app buffers whole responses in memory, and FB/IG webviews cannot
+  // download at all — both would fail confusingly on a huge file.
+  if (typeof Platform !== 'undefined' && (Platform.isNative || Platform.isInAppBrowser)) {
+    if (typeof notifyInAppBrowserLimitation === 'function') notifyInAppBrowserLimitation('download');
+    else showNotification(isAr ? 'افتح في المتصفح' : 'Open in a browser', isAr ? 'نزّل النسخة الكاملة من متصفح على الكمبيوتر.' : 'Download the full backup from a browser on a computer.', 'warning');
+    return;
+  }
+  if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
+  try {
+    const estimate = await apiFullBackupEstimate();
+    const mb = Math.max(1, Math.round(Number(estimate?.approxDownloadBytes || 0) / (1024 * 1024)));
+    const records = Number(estimate?.records || 0);
+    const ok = confirm(isAr
+      ? `تنزيل نسخة كاملة؟\n\n${records} سجل، بحجم تقريبي ${mb} ميجابايت.\n\nالملف يحتوي أسماء العملاء وأرقامهم وصور الوصولات بدون تشفير — احفظه في مكان آمن ولا ترسله في محادثة.`
+      : `Download the full backup?\n\n${records} records, roughly ${mb} MB.\n\nThe file contains customer names, phone numbers and receipt photos in the clear — keep it somewhere safe and do not send it in a chat.`);
+    if (!ok) return;
+    const link = document.createElement('a');
+    link.href = `${getServerBaseUrl()}/api/admin/backup/full`;
+    link.rel = 'noopener';
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => { try { link.remove(); } catch (_) {} }, 60000);
+    showNotification(
+      isAr ? 'بدأ التنزيل' : 'Download started',
+      isAr ? `قد يستغرق عدة دقائق (~${mb} ميجابايت). اترك التبويب مفتوحاً حتى ينتهي.` : `This can take several minutes (~${mb} MB). Keep this tab open until it finishes.`,
+      'success'
+    );
+    addAuditLog('backup', 'full-backup', 'Requested a full server backup download', { resourceType: 'backup' });
+  } catch (error) {
+    const detail = (error?.payload && error.payload.detail) ? error.payload.detail : (error?.message || '');
+    showNotification(isAr ? 'تعذر بدء النسخة' : 'Could not start the backup', String(detail) || (isAr ? 'حاول مرة أخرى.' : 'Please try again.'), 'error');
+  } finally {
+    if (button) { button.disabled = false; button.removeAttribute('aria-busy'); }
+  }
+}
+
 async function runDataIntegrityAudit() {
   const isAr = state.language === 'ar';
   if (!isCurrentUserAdmin()) {

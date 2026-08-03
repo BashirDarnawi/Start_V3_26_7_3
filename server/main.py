@@ -72,6 +72,7 @@ from .ad_campaign_actions import (
     enforce_boost_submission_rules,
     normalize_ad_campaign_destination,
 )
+from .full_backup import create_full_backup_router
 from .subscription_plans import (
     PLAN_SETTINGS_KEY,
     create_subscription_plans_router,
@@ -14076,6 +14077,13 @@ app.include_router(
         current_user_dependency=current_user,
         require_same_origin=require_same_origin,
         audit_fn=audit,
+    )
+)
+app.include_router(
+    create_full_backup_router(
+        current_user_dependency=current_user,
+        audit_fn=audit,
+        release_sha=RELEASE_SHA,
     )
 )
 

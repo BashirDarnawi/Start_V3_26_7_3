@@ -2091,6 +2091,111 @@ def test_degraded_resync_never_writes_stale_page_picture_back(actors):
             )
 
 
+def test_failed_results_read_never_zeroes_stored_spend(actors):
+    """A pass that could not READ the results must not store zeros.
+
+    The ad node stays readable while /insights is throttled or refused, so
+    the snapshot carries spend 0 with NO error code — a silent success that
+    used to overwrite real money. Spend feeds reconciliation and profit, so
+    the last known figures must survive until a healthy pass replaces them.
+    """
+    ad_id = "meta_test_insights_zeroing"
+    meta_id = "777000111222999"
+    _insert_ad(ad_id, actors["admin_id"], metaImportSource="meta_ads")
+    try:
+        def _apply(snapshot):
+            meta_ads.apply_meta_snapshot(
+                ad_id,
+                snapshot,
+                actor_id=None,
+                actor_name="Meta automatic sync",
+                expected_last_modified=None,
+                operation_id=None,
+                action="automatic_sync",
+            )
+
+        healthy = _snapshot(meta_id)
+        healthy.update({
+            "metaSpend": 30.0,
+            "metaSpendMinor": 3000,
+            "metaReach": 1200,
+            "metaImpressions": 4500,
+            "metaClicks": 90,
+            "metaPrimaryResultType": "messaging_conversation_started_7d",
+            "metaPrimaryResultValue": 12.0,
+            "metaActions": [{"type": "link_click", "value": 90.0}],
+        })
+        _apply(healthy)
+        stored, _ = _stored_ad(ad_id)
+        assert stored["metaSpendMinor"] == 3000
+
+        # Same Meta ad, results unreadable: zeros carrying the marker.
+        degraded = _snapshot(meta_id)
+        degraded.update({
+            "metaSpend": 0.0, "metaSpendMinor": 0, "metaReach": 0,
+            "metaImpressions": 0, "metaClicks": 0, "metaActions": [],
+            "metaPrimaryResultType": "", "metaPrimaryResultValue": 0.0,
+            "_insightsUnavailable": True,
+        })
+        _apply(degraded)
+        stored, _ = _stored_ad(ad_id)
+        assert stored["metaSpendMinor"] == 3000, "a failed results read wiped real spend"
+        assert stored["metaSpend"] == 30.0
+        assert stored["metaReach"] == 1200
+        assert stored["metaImpressions"] == 4500
+        assert stored["metaClicks"] == 90
+        assert stored["metaPrimaryResultValue"] == 12.0
+        assert stored["metaActions"] == [{"type": "link_click", "value": 90.0}]
+        # The internal marker must never reach storage.
+        assert "_insightsUnavailable" not in stored
+
+        # A genuine zero from a HEALTHY pass still writes through.
+        real_zero = _snapshot(meta_id)
+        real_zero.update({
+            "metaSpend": 0.0, "metaSpendMinor": 0, "metaReach": 0,
+            "metaImpressions": 0, "metaClicks": 0, "metaActions": [],
+        })
+        _apply(real_zero)
+        stored, _ = _stored_ad(ad_id)
+        assert stored["metaSpendMinor"] == 0, "a healthy zero must still be stored"
+    finally:
+        with db_conn() as conn:
+            conn.execute(
+                text("DELETE FROM entities WHERE type='ads' AND id=:id"),
+                {"id": ad_id},
+            )
+
+
+def test_page_meta_name_is_never_blanked_by_another_ads_sync(actors):
+    """An ad carrying the page id but no page details must not empty the
+    stored page name/category — that text is also what the placeholder-name
+    repair reads later."""
+    with db_conn() as conn:
+        page = meta_ads._ensure_import_page(
+            conn,
+            {
+                "metaPageId": "777777777000111",
+                "metaPageName": "Real Page Name",
+                "metaPageCategory": "Shopping",
+            },
+        )
+    page_id = page[0]
+    assert page_id
+    with db_conn() as conn:
+        meta_ads._ensure_import_page(
+            conn,
+            {"metaPageId": "777777777000111", "metaPageName": "", "metaPageCategory": ""},
+        )
+        row = conn.execute(
+            text("SELECT data_json FROM entities WHERE type='pages' AND id=:id"),
+            {"id": page_id},
+        ).mappings().first()
+    stored = json_loads(row["data_json"])
+    assert stored["metaPageName"] == "Real Page Name"
+    assert stored["metaPageCategory"] == "Shopping"
+    assert stored["name"] == "Real Page Name"
+
+
 def test_enrichment_respects_manual_page_choice_and_avoids_noop_page_writes(actors):
     _clear_auto_import_rows()
     ad_id = "meta_test_page_stick"

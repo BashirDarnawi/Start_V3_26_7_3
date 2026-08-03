@@ -2116,7 +2116,12 @@ class MetaAdsClient:
                     },
                 )
             except MetaAdsError:
-                insights_payload = {}
+                # The results read failed (throttle, permission, transient).
+                # That is NOT the same as "this ad has spent nothing", and the
+                # difference decides whether real spend gets overwritten with
+                # zeros. Flag it so apply_meta_snapshot keeps what it knows.
+                insights_payload = {"_albayan_insights_unavailable": True}
+        insights_unavailable = bool(insights_payload.get("_albayan_insights_unavailable"))
         insights_rows = insights_payload.get("data") if isinstance(insights_payload.get("data"), list) else []
         insights = insights_rows[0] if insights_rows and isinstance(insights_rows[0], dict) else {}
         spend, spend_minor = _decimal_amount(insights.get("spend"))
@@ -2212,6 +2217,9 @@ class MetaAdsClient:
             "metaSyncFailureCount": 0,
             "metaNextSyncAt": next_sync,
             "metaUnlinkedAt": "",
+            # Internal marker, stripped before storage: results could not be
+            # read this pass, so the zeros above mean "unknown", not "zero".
+            "_insightsUnavailable": insights_unavailable,
         }
 
 
@@ -2619,8 +2627,15 @@ def _ensure_import_page(
         ):
             updated["category"] = meta_category
         updated["metaPageId"] = meta_page_id
-        updated["metaPageName"] = meta_name
-        updated["metaPageCategory"] = meta_category
+        # Only overwrite with something we actually learned. A sync of a
+        # DIFFERENT ad that happens to carry this page id but no page details
+        # would otherwise blank the stored name/category — and metaPageName is
+        # one of the local sources the placeholder-name repair reads, so
+        # emptying it makes a "Facebook Page <id>" page harder to heal later.
+        if meta_name:
+            updated["metaPageName"] = meta_name
+        if meta_category:
+            updated["metaPageCategory"] = meta_category
         meta_picture = _clean_https_url(snapshot.get("metaPagePictureUrl"))
         existing_picture = _clean_https_url(updated.get("metaPagePictureUrl"))
         # Signed avatar URLs rotate their query parameters on every Graph
@@ -3679,6 +3694,30 @@ def apply_meta_snapshot(
         # avatar backwards — and bump its version — every time this ad's
         # avatar read fails transiently.
         fresh_page_picture = _clean_https_url(snapshot.get("metaPagePictureUrl"))
+        # Never persist the internal marker; read it first, then drop it.
+        insights_unavailable = bool(snapshot.pop("_insightsUnavailable", False))
+        if previous_meta_ad_id == meta_ad_id and insights_unavailable:
+            # The ad node was readable but its RESULTS were not. Writing the
+            # zeros from that pass would silently destroy real money figures
+            # (spend feeds reconciliation and profit), and it would look like
+            # a successful sync because no error code is set. Keep what we
+            # know; the next healthy pass updates it.
+            snapshot = dict(snapshot)
+            for results_key in (
+                "metaSpend",
+                "metaSpendMinor",
+                "metaReach",
+                "metaImpressions",
+                "metaClicks",
+                "metaActions",
+                "metaPrimaryResultType",
+                "metaPrimaryResultValue",
+            ):
+                if results_key in data:
+                    snapshot[results_key] = data[results_key]
+            snapshot["metaTotalRemainingBudgetMinor"] = _total_remaining_budget(
+                snapshot.get("metaTotalBudgetMinor"), snapshot.get("metaSpendMinor")
+            )
         if previous_meta_ad_id == meta_ad_id:
             # Re-syncing the same Meta ad: a pass that could not resolve the
             # photo or page identity this time must not erase values an

@@ -10333,6 +10333,13 @@ async function apiOperationsStatus() {
   return await apiJson('/api/admin/operations/status', { method: 'GET' }, { timeoutMs: 20000 });
 }
 
+// Size preflight for the full backup. Only the ESTIMATE goes through apiJson —
+// the download itself must be a plain browser navigation, because apiFetch's
+// AbortController would kill a multi-hundred-MB stream at the request timeout.
+async function apiFullBackupEstimate() {
+  return await apiJson('/api/admin/backup/full/estimate', { method: 'GET' }, { timeoutMs: 30000 });
+}
+
 async function apiPreviewFinancialPeriod(period) {
   const safe = String(period || '').trim();
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(safe)) throw new Error('Choose a valid month');
@@ -21208,11 +21215,32 @@ function renderSettingsView() {
           ` : ''}
           ` : ''}
         </div>
+        ${isServerModeEnabled() && isCurrentUserAdmin() ? `
+        <div class="mt-4 rounded-xl border-2 border-emerald-200 dark:border-emerald-800 bg-emerald-50/60 dark:bg-emerald-900/20 p-4">
+          <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div class="min-w-0">
+              <div class="flex items-center gap-2 font-bold text-emerald-900 dark:text-emerald-100">
+                <i data-lucide="database-backup" class="w-5 h-5"></i>
+                ${isAr ? 'نسخة احتياطية كاملة' : 'Full backup'}
+              </div>
+              <p class="mt-1 text-sm text-emerald-800 dark:text-emerald-200">
+                ${isAr
+                  ? 'كل بياناتك من الخادم في ملف واحد: الوصولات والإعلانات والصفحات والعملاء والملابس والمحفظة والاشتراكات وسجل التدقيق — مع كل الصور.'
+                  : 'Everything on the server in one file: receipts, ads, pages, customers, clothes, wallet, subscriptions and the audit trail — with all photos.'}
+              </p>
+            </div>
+            <button onclick="downloadFullServerBackup(this)" class="shrink-0 btn-shine bg-emerald-600 text-white px-5 py-3 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-emerald-700 disabled:opacity-60">
+              <i data-lucide="download" class="w-5 h-5"></i>
+              <span>${isAr ? 'تنزيل نسخة كاملة' : 'Download full backup'}</span>
+            </button>
+          </div>
+        </div>
+        ` : ''}
         <div class="mt-4 p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl">
           <p class="text-sm text-slate-600 dark:text-slate-400">
             <i data-lucide="info" class="w-4 h-4 inline mr-1"></i>
             ${isServerModeEnabled()
-              ? (isAr ? 'وضع الخادم: التصدير تقرير غير معتمد وغير قابل للاستعادة، ولا يتضمن بيانات الملابس. الاستعادة تتطلب صيانة آمنة خارج التطبيق.' : 'Server mode: export is a non-authoritative, non-restorable report and omits clothes data. Restore requires a safe offline maintenance workflow.')
+              ? (isAr ? 'وضع الخادم: زر التصدير أعلاه تقرير سريع من هذا الجهاز فقط — بدون صور وبدون بيانات الملابس. للنسخة الكاملة استخدم «تنزيل نسخة كاملة». الاستعادة تتطلب صيانة آمنة خارج التطبيق.' : 'Server mode: the export button above is a quick report from this device only — no photos, no clothes data. For a complete copy use Download full backup. Restore still requires a safe offline maintenance workflow.')
               : (isAr ? 'بياناتك مخزنة محلياً في متصفحك. صدِّر بانتظام لإنشاء نسخ احتياطية.' : 'Your data is stored locally in your browser. Export regularly to create backups.')}
           </p>
         </div>
@@ -43225,6 +43253,56 @@ async function clearAllData() {
   }
 }
 let _dataIntegrityAuditInFlight = false;
+
+// The owner's own complete copy: every server row, media included, streamed
+// straight to disk. Deliberately a plain navigation, not an apiFetch: the
+// request timeout would abort a several-hundred-MB download.
+async function downloadFullServerBackup(button = null) {
+  const isAr = state.language === 'ar';
+  if (!isCurrentUserAdmin()) {
+    showNotification(isAr ? 'غير مسموح' : 'Not Allowed', isAr ? 'النسخة الكاملة للمدير فقط.' : 'Only an administrator can download the full backup.', 'error');
+    return;
+  }
+  if (!isServerModeEnabled()) {
+    showNotification(isAr ? 'يتطلب الخادم' : 'Server required', isAr ? 'النسخة الكاملة تأتي من الخادم.' : 'The full backup comes from the server.', 'error');
+    return;
+  }
+  // Packaged app buffers whole responses in memory, and FB/IG webviews cannot
+  // download at all — both would fail confusingly on a huge file.
+  if (typeof Platform !== 'undefined' && (Platform.isNative || Platform.isInAppBrowser)) {
+    if (typeof notifyInAppBrowserLimitation === 'function') notifyInAppBrowserLimitation('download');
+    else showNotification(isAr ? 'افتح في المتصفح' : 'Open in a browser', isAr ? 'نزّل النسخة الكاملة من متصفح على الكمبيوتر.' : 'Download the full backup from a browser on a computer.', 'warning');
+    return;
+  }
+  if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
+  try {
+    const estimate = await apiFullBackupEstimate();
+    const mb = Math.max(1, Math.round(Number(estimate?.approxDownloadBytes || 0) / (1024 * 1024)));
+    const records = Number(estimate?.records || 0);
+    const ok = confirm(isAr
+      ? `تنزيل نسخة كاملة؟\n\n${records} سجل، بحجم تقريبي ${mb} ميجابايت.\n\nالملف يحتوي أسماء العملاء وأرقامهم وصور الوصولات بدون تشفير — احفظه في مكان آمن ولا ترسله في محادثة.`
+      : `Download the full backup?\n\n${records} records, roughly ${mb} MB.\n\nThe file contains customer names, phone numbers and receipt photos in the clear — keep it somewhere safe and do not send it in a chat.`);
+    if (!ok) return;
+    const link = document.createElement('a');
+    link.href = `${getServerBaseUrl()}/api/admin/backup/full`;
+    link.rel = 'noopener';
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => { try { link.remove(); } catch (_) {} }, 60000);
+    showNotification(
+      isAr ? 'بدأ التنزيل' : 'Download started',
+      isAr ? `قد يستغرق عدة دقائق (~${mb} ميجابايت). اترك التبويب مفتوحاً حتى ينتهي.` : `This can take several minutes (~${mb} MB). Keep this tab open until it finishes.`,
+      'success'
+    );
+    addAuditLog('backup', 'full-backup', 'Requested a full server backup download', { resourceType: 'backup' });
+  } catch (error) {
+    const detail = (error?.payload && error.payload.detail) ? error.payload.detail : (error?.message || '');
+    showNotification(isAr ? 'تعذر بدء النسخة' : 'Could not start the backup', String(detail) || (isAr ? 'حاول مرة أخرى.' : 'Please try again.'), 'error');
+  } finally {
+    if (button) { button.disabled = false; button.removeAttribute('aria-busy'); }
+  }
+}
 
 async function runDataIntegrityAudit() {
   const isAr = state.language === 'ar';

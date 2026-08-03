@@ -1448,6 +1448,13 @@ async function apiOperationsStatus() {
   return await apiJson('/api/admin/operations/status', { method: 'GET' }, { timeoutMs: 20000 });
 }
 
+// Size preflight for the full backup. Only the ESTIMATE goes through apiJson —
+// the download itself must be a plain browser navigation, because apiFetch's
+// AbortController would kill a multi-hundred-MB stream at the request timeout.
+async function apiFullBackupEstimate() {
+  return await apiJson('/api/admin/backup/full/estimate', { method: 'GET' }, { timeoutMs: 30000 });
+}
+
 async function apiPreviewFinancialPeriod(period) {
   const safe = String(period || '').trim();
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(safe)) throw new Error('Choose a valid month');

@@ -6879,11 +6879,32 @@ function renderSettingsView() {
           ` : ''}
           ` : ''}
         </div>
+        ${isServerModeEnabled() && isCurrentUserAdmin() ? `
+        <div class="mt-4 rounded-xl border-2 border-emerald-200 dark:border-emerald-800 bg-emerald-50/60 dark:bg-emerald-900/20 p-4">
+          <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div class="min-w-0">
+              <div class="flex items-center gap-2 font-bold text-emerald-900 dark:text-emerald-100">
+                <i data-lucide="database-backup" class="w-5 h-5"></i>
+                ${isAr ? 'نسخة احتياطية كاملة' : 'Full backup'}
+              </div>
+              <p class="mt-1 text-sm text-emerald-800 dark:text-emerald-200">
+                ${isAr
+                  ? 'كل بياناتك من الخادم في ملف واحد: الوصولات والإعلانات والصفحات والعملاء والملابس والمحفظة والاشتراكات وسجل التدقيق — مع كل الصور.'
+                  : 'Everything on the server in one file: receipts, ads, pages, customers, clothes, wallet, subscriptions and the audit trail — with all photos.'}
+              </p>
+            </div>
+            <button onclick="downloadFullServerBackup(this)" class="shrink-0 btn-shine bg-emerald-600 text-white px-5 py-3 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-emerald-700 disabled:opacity-60">
+              <i data-lucide="download" class="w-5 h-5"></i>
+              <span>${isAr ? 'تنزيل نسخة كاملة' : 'Download full backup'}</span>
+            </button>
+          </div>
+        </div>
+        ` : ''}
         <div class="mt-4 p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl">
           <p class="text-sm text-slate-600 dark:text-slate-400">
             <i data-lucide="info" class="w-4 h-4 inline mr-1"></i>
             ${isServerModeEnabled()
-              ? (isAr ? 'وضع الخادم: التصدير تقرير غير معتمد وغير قابل للاستعادة، ولا يتضمن بيانات الملابس. الاستعادة تتطلب صيانة آمنة خارج التطبيق.' : 'Server mode: export is a non-authoritative, non-restorable report and omits clothes data. Restore requires a safe offline maintenance workflow.')
+              ? (isAr ? 'وضع الخادم: زر التصدير أعلاه تقرير سريع من هذا الجهاز فقط — بدون صور وبدون بيانات الملابس. للنسخة الكاملة استخدم «تنزيل نسخة كاملة». الاستعادة تتطلب صيانة آمنة خارج التطبيق.' : 'Server mode: the export button above is a quick report from this device only — no photos, no clothes data. For a complete copy use Download full backup. Restore still requires a safe offline maintenance workflow.')
               : (isAr ? 'بياناتك مخزنة محلياً في متصفحك. صدِّر بانتظام لإنشاء نسخ احتياطية.' : 'Your data is stored locally in your browser. Export regularly to create backups.')}
           </p>
         </div>
