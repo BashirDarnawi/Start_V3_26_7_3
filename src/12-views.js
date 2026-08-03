@@ -3304,9 +3304,12 @@ function renderPagesView() {
           .some(value => foldSearchText(value).includes(pageSearch));
       })
     : allPages;
-  // Reset the reveal limit whenever the result set changes, so a new search
-  // starts at its top matches instead of inheriting a huge previous limit.
-  const pagesFilterFingerprint = `${pageSearch}|${allFilteredPages.length}`;
+  // Reset the reveal limit whenever the SEARCH changes, so a new search starts
+  // at its top matches instead of inheriting a huge previous limit. Keyed on
+  // the search only: including the result count meant a background Meta sync
+  // adding or removing one page silently threw the user back to the first 50
+  // rows after they had pressed "Load more" several times.
+  const pagesFilterFingerprint = String(pageSearch);
   if (pagesFilterFingerprint !== _pagesFilterFingerprint) {
     _pagesFilterFingerprint = pagesFilterFingerprint;
     _pagesShowLimit = PAGES_PAGE_SIZE;

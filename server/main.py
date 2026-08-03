@@ -1,6 +1,7 @@
 import base64
 import binascii
 import io
+import ipaddress
 import json
 import hashlib
 import math
@@ -63,7 +64,7 @@ RELEASE_SHA = (os.getenv("ALBAYAN_RELEASE_SHA") or "development").strip()[:64]
 ENABLE_ONLINE_IMPORT = os.getenv("ALBAYAN_ENABLE_ONLINE_IMPORT", "").strip().lower() in {"1", "true", "yes"}
 SETUP_TOKEN = os.getenv("ALBAYAN_SETUP_TOKEN", "")
 
-from .db import db_conn, get_engine, init_db, json_dumps, json_loads, now_ms
+from .db import db_conn, get_engine, init_db, json_dumps, json_field_sql, json_loads, now_ms
 from .rbac import VALID_USER_ROLES, is_admin_receipt_completion, normalize_permissions, user_has_permission
 from .backfills import backfill_customer_names, backfill_relink_baselines
 from .ad_campaign_actions import (
@@ -73,6 +74,21 @@ from .ad_campaign_actions import (
     normalize_ad_campaign_destination,
 )
 from .delivery_ops import create_delivery_ops_router
+from .receipt_references import (
+    build_receipt_reference_index as _build_receipt_reference_index,
+    receipt_reference_reason as _receipt_reference_reason,
+)
+from .auth_limits import (
+    _app_exchange_rate_check,
+    _app_handoff_rate_check,
+    _client_ip,
+    _rate_check,
+    _rate_key,
+    _reset_confirm_rate_check,
+    _reset_rate_check,
+    _setup_rate_check,
+)
+from .app_links import WELL_KNOWN_PATHS, create_app_links_router
 from .full_backup import create_full_backup_router
 from .subscription_plans import (
     PLAN_SETTINGS_KEY,
@@ -511,13 +527,11 @@ def _cookie_secure_for(request: Request) -> bool:
 ORIGIN_SECRET_HEADER = os.getenv("ALBAYAN_ORIGIN_HEADER", "X-Albayan-Origin").strip() or "X-Albayan-Origin"
 # Allow a comma-separated list to support secret rotation with zero downtime.
 ORIGIN_SECRETS = [s.strip() for s in os.getenv("ALBAYAN_ORIGIN_SECRET", "").split(",") if s.strip()]
-# Forwarded client-IP headers are trustworthy only when every request reaches
-# us through a configured proxy that overwrites them. Direct deployments must
-# default to the socket peer address so clients cannot rotate limiter buckets.
-TRUST_PROXY_HEADERS = os.getenv("ALBAYAN_TRUST_PROXY_HEADERS", "").strip().lower() in {"1", "true", "yes"}
-# Health checks and the two Google Play policy URLs must remain reachable
-# without the private reverse-proxy header.  Use exact paths, not prefixes:
-# a prefix check such as ``/privacy...`` could accidentally expose a future API.
+# Health checks, the two Google Play policy URLs, and the app-link
+# verification files must remain reachable without the private reverse-proxy
+# header (Google's and Apple's crawlers cannot send it).  Use exact paths, not
+# prefixes: a prefix check such as ``/privacy...`` could accidentally expose a
+# future API.
 ORIGIN_BYPASS_PATHS = frozenset(
     {
         "/api/health",
@@ -525,221 +539,17 @@ ORIGIN_BYPASS_PATHS = frozenset(
         "/api/health/ready",
         "/privacy",
         "/delete-account",
+        *WELL_KNOWN_PATHS,
     }
 )
 
-# Rate limiting configuration (supports both in-memory and Redis)
-# SECURITY: Rate limit login attempts to prevent brute force attacks
-# Default: 20 attempts per 15 minutes per IP+email (increased from 10 for better UX on flaky networks)
-_LOGIN_WINDOW_MS = int(os.getenv("ALBAYAN_LOGIN_WINDOW_MS", str(15 * 60 * 1000)))
-_LOGIN_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_LOGIN_MAX_ATTEMPTS", "20"))
-# IP-independent per-account cap (defense against IP rotation). Higher than the
-# per-IP cap so a shared office IP with a few users' honest mistakes never trips
-# it, but far below what brute-forcing a password would need.
-_LOGIN_EMAIL_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_LOGIN_EMAIL_MAX_ATTEMPTS", "60"))
-# Global per-IP ceiling across ALL emails. The (ip,email) bucket above does not
-# stop one IP from spreading a password guess across many distinct accounts
-# (horizontal credential stuffing). Set well above a shared office's honest
-# traffic but far below a stuffing run.
-_LOGIN_IP_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_LOGIN_IP_MAX_ATTEMPTS", "120"))
-
+# Client identity and every auth rate-limit bucket live in server/auth_limits.py
+# (main.py line cap). Imported at the top because the login, reset, setup and
+# app-login routes below call them, and the tuning knobs travelled with them.
+# The reset-token lifetime is not a rate limit, so it stayed here with the
+# route that mints the token.
 PASSWORD_RESET_TOKEN_MS = int(os.getenv("ALBAYAN_PASSWORD_RESET_TOKEN_MS", str(15 * 60 * 1000)))
 PASSWORD_RESET_DEV_RETURN_CODE = os.getenv("ALBAYAN_DEV_PASSWORD_RESET_RETURN_CODE", "").strip().lower() in {"1", "true", "yes"}
-
-_RESET_WINDOW_MS = int(os.getenv("ALBAYAN_RESET_WINDOW_MS", str(15 * 60 * 1000)))
-_RESET_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_RESET_MAX_ATTEMPTS", "5"))
-_RESET_EMAIL_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_RESET_EMAIL_MAX_ATTEMPTS", "15"))
-# Ceiling on reset requests from ONE source address, whatever email they name.
-# Deliberately roomy so a whole office behind a single NAT/Cloudflare address
-# is never locked out of a legitimate reset, while still bounding the limiter
-# keys and audit rows an unauthenticated stranger can create.
-_RESET_IP_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_RESET_IP_MAX_ATTEMPTS", "60"))
-_SETUP_WINDOW_MS = int(os.getenv("ALBAYAN_SETUP_WINDOW_MS", str(15 * 60 * 1000)))
-_SETUP_IP_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_SETUP_IP_MAX_ATTEMPTS", "10"))
-_SETUP_GLOBAL_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_SETUP_GLOBAL_MAX_ATTEMPTS", "100"))
-
-# System-browser app-login limiter knobs. Handoff is authenticated (per-user
-# and per-IP buckets); exchange is anonymous (per-IP bucket). Codes carry
-# 256 bits of entropy, so these limits exist to bound abuse noise, not as the
-# security boundary.
-_APP_LOGIN_WINDOW_MS = int(os.getenv("ALBAYAN_APP_LOGIN_WINDOW_MS", str(15 * 60 * 1000)))
-_APP_LOGIN_HANDOFF_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_APP_LOGIN_HANDOFF_MAX_ATTEMPTS", "10"))
-_APP_LOGIN_EXCHANGE_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_APP_LOGIN_EXCHANGE_MAX_ATTEMPTS", "30"))
-
-
-def _client_ip(request: Request) -> str:
-    """Real client IP for rate limiting, behind Cloudflare + ALB.
-
-    SECURITY: the old version returned the LEFTMOST X-Forwarded-For entry, which
-    is fully client-controlled — proxies APPEND, so a client-supplied
-    `X-Forwarded-For: <random>` survives as element [0]. An attacker could then
-    rotate that value each request and get a fresh (ip,email) rate-limit bucket,
-    bypassing brute-force protection entirely. We now prefer Cloudflare's
-    CF-Connecting-IP (Cloudflare overwrites any client-supplied value at its
-    edge), and for the XFF fallback we take the RIGHTMOST entry (added by the
-    closest trusted proxy) which a client cannot forge, rather than the spoofable
-    leftmost one.
-    """
-    if TRUST_PROXY_HEADERS:
-        try:
-            cf = request.headers.get("cf-connecting-ip")
-            if cf and cf.strip():
-                return cf.strip()
-            xff = request.headers.get("x-forwarded-for")
-            if xff:
-                parts = [p.strip() for p in xff.split(",") if p.strip()]
-                if parts:
-                    return parts[-1]
-        except Exception:
-            pass
-    return request.client.host if request.client else "unknown"
-
-
-def _rate_key(request: Request, email: str) -> str:
-    """Generate rate limit key from IP + email"""
-    return f"{_client_ip(request)}|{email.lower()}"
-
-
-def _rate_check(request: Request, email: str) -> tuple[bool, int]:
-    """
-    Check login rate limit using Redis (if configured) or in-memory.
-    
-    Returns:
-        (is_allowed, wait_ms)
-        - is_allowed: True if request should proceed
-        - wait_ms: Milliseconds to wait if rate limited
-    """
-    from .rate_limiter import check_rate_limit
-
-    key = f"login:{_rate_key(request, email)}"
-    is_allowed, attempts_left, retry_after_ms = check_rate_limit(key, _LOGIN_MAX_ATTEMPTS, _LOGIN_WINDOW_MS)
-
-    if not is_allowed:
-        return False, int(retry_after_ms or 0)
-
-    # Global per-IP ceiling across all emails: stops one IP from spreading a
-    # single password guess over many accounts (horizontal credential stuffing),
-    # which the per-(ip,email) bucket alone does not cover.
-    ip_key = f"login:ip:{_client_ip(request)}"
-    ok_ip, _left_ip, retry_ip = check_rate_limit(ip_key, _LOGIN_IP_MAX_ATTEMPTS, _LOGIN_WINDOW_MS)
-    if not ok_ip:
-        return False, int(retry_ip or 0)
-
-    # Defense in depth: an IP-independent per-account bucket. Even if an
-    # attacker rotates IPs (or a forged proxy header) to dodge the (ip,email)
-    # bucket above, a single account still can't be guessed more than
-    # _LOGIN_EMAIL_MAX_ATTEMPTS times per window. Set high enough not to lock
-    # out a legitimate user's honest mistakes across a shared office IP.
-    email_key = f"login:email:{email.lower()}"
-    ok2, _left2, retry2 = check_rate_limit(email_key, _LOGIN_EMAIL_MAX_ATTEMPTS, _LOGIN_WINDOW_MS)
-    if not ok2:
-        return False, int(retry2 or 0)
-
-    return True, 0
-
-
-def _reset_rate_check(request: Request, email: str) -> tuple[bool, int]:
-    """
-    Check password reset rate limit using Redis (if configured) or in-memory.
-    
-    Returns:
-        (is_allowed, wait_ms)
-        - is_allowed: True if request should proceed
-        - wait_ms: Milliseconds to wait if rate limited
-    """
-    from .rate_limiter import check_rate_limit
-
-    # Global per-IP ceiling FIRST. Without it this unauthenticated endpoint
-    # mints two brand-new limiter keys per request from an attacker-chosen
-    # email — unbounded noise that both floods the limiter store and writes an
-    # audit row per attempt. Sized generously (a whole office behind one NAT
-    # address stays well under it) but finite. Mirrors reset-confirm:ip:.
-    ip_ceiling_key = f"reset:ip:{_client_ip(request)}"
-    ip_ok, _ip_left, ip_retry = check_rate_limit(
-        ip_ceiling_key, _RESET_IP_MAX_ATTEMPTS, _RESET_WINDOW_MS
-    )
-    if not ip_ok:
-        return False, int(ip_retry or 0)
-
-    key = f"reset:{_rate_key(request, email)}"
-    is_allowed, attempts_left, retry_after_ms = check_rate_limit(key, _RESET_MAX_ATTEMPTS, _RESET_WINDOW_MS)
-
-    if not is_allowed:
-        return False, int(retry_after_ms or 0)
-
-    # IP-independent per-account bucket (see _rate_check) so IP rotation can't
-    # grant unlimited reset requests against one email.
-    email_key = f"reset:email:{email.lower()}"
-    ok2, _left2, retry2 = check_rate_limit(email_key, _RESET_EMAIL_MAX_ATTEMPTS, _RESET_WINDOW_MS)
-    if not ok2:
-        return False, int(retry2 or 0)
-
-    return True, 0
-
-
-def _reset_confirm_rate_check(request: Request, token_hash: str) -> tuple[bool, int]:
-    """Limit confirms by peer IP and one-way token hash, never a global key."""
-    from .rate_limiter import check_rate_limit
-
-    ip_key = f"reset-confirm:ip:{_client_ip(request)}"
-    allowed, _left, retry = check_rate_limit(
-        ip_key, _RESET_EMAIL_MAX_ATTEMPTS, _RESET_WINDOW_MS
-    )
-    if not allowed:
-        return False, int(retry or 0)
-    token_key = f"reset-confirm:token:{token_hash}"
-    allowed, _left, retry = check_rate_limit(
-        token_key, _RESET_MAX_ATTEMPTS, _RESET_WINDOW_MS
-    )
-    return bool(allowed), 0 if allowed else int(retry or 0)
-
-
-def _setup_rate_check(request: Request) -> tuple[bool, int]:
-    """Dedicated bootstrap limiter; never consumes login/account buckets."""
-    from .rate_limiter import check_rate_limit
-
-    allowed, _left, retry = check_rate_limit(
-        f"setup:ip:{_client_ip(request)}", _SETUP_IP_MAX_ATTEMPTS, _SETUP_WINDOW_MS
-    )
-    if not allowed:
-        return False, int(retry or 0)
-    allowed, _left, retry = check_rate_limit(
-        "setup:global", _SETUP_GLOBAL_MAX_ATTEMPTS, _SETUP_WINDOW_MS
-    )
-    return bool(allowed), 0 if allowed else int(retry or 0)
-
-
-def _app_handoff_rate_check(request: Request, user_id: str) -> tuple[bool, int]:
-    """Limit app-login handoff-code minting per IP and per authenticated user."""
-    from .rate_limiter import check_rate_limit
-
-    allowed, _left, retry = check_rate_limit(
-        f"applogin-handoff:ip:{_client_ip(request)}",
-        _APP_LOGIN_HANDOFF_MAX_ATTEMPTS,
-        _APP_LOGIN_WINDOW_MS,
-    )
-    if not allowed:
-        return False, int(retry or 0)
-    allowed, _left, retry = check_rate_limit(
-        f"applogin-handoff:user:{user_id}",
-        _APP_LOGIN_HANDOFF_MAX_ATTEMPTS,
-        _APP_LOGIN_WINDOW_MS,
-    )
-    return bool(allowed), 0 if allowed else int(retry or 0)
-
-
-def _app_exchange_rate_check(request: Request) -> tuple[bool, int]:
-    """Limit anonymous app-login code exchanges per peer IP."""
-    from .rate_limiter import check_rate_limit
-
-    allowed, _left, retry = check_rate_limit(
-        f"applogin-exchange:ip:{_client_ip(request)}",
-        _APP_LOGIN_EXCHANGE_MAX_ATTEMPTS,
-        _APP_LOGIN_WINDOW_MS,
-    )
-    return bool(allowed), 0 if allowed else int(retry or 0)
-
-
 BLOCKED_KEYS = {"__proto__", "prototype", "constructor"}
 # Response-only hints used by lightweight collection sync. Never accept these
 # from a client or persist them in data_json; the server always recomputes them
@@ -2010,7 +1820,14 @@ def upsert_entity(
             deleted = False
             clean["id"] = entity_id
             clean["_created"] = clean.get("_created") or created_at
-            clean["createdBy"] = clean.get("createdBy") or created_by
+            # The ACTOR owns this stamp on a create. Honouring a client-supplied
+            # createdBy let any account with an "add" grant attribute its record
+            # to someone else (the name is then resolved from the users table,
+            # so it read as genuine) — and an admin restore later copies that
+            # value into the authoritative created_by column, which is what
+            # ownership checks use. A legacy import path supplies its own
+            # creator through admin_bulk_import, not through this route.
+            clean["createdBy"] = created_by or clean.get("createdBy")
             assert_financial_period_open(entity_type, clean, conn=conn)
             # Stamp the creator's display name so the record keeps showing who
             # created it even after that user account is soft-deleted (deleted
@@ -3861,6 +3678,12 @@ def app_login_exchange(body: AppLoginExchangeRequest, request: Request):
     return resp
 
 
+# A single collection can never contribute more than this to one bootstrap.
+# Without a ceiling the loop below follows the table however large it grows,
+# so one request's memory is bounded only by the database size.
+_PAGE_ALL_MAX_ROWS = 20000
+
+
 def _page_all(collection: str, **kwargs: Any) -> list[dict[str, Any]]:
     # list_entities caps a single call at 1000 rows; page through so callers
     # keep a "returns all records" contract instead of silently truncating.
@@ -3870,6 +3693,12 @@ def _page_all(collection: str, **kwargs: Any) -> list[dict[str, Any]]:
         page = list_entities(collection, limit=1000, offset=offset, **kwargs)
         out.extend(page)
         if len(page) < 1000:
+            return out
+        if len(out) >= _PAGE_ALL_MAX_ROWS:
+            print(
+                f"[albayan] bootstrap truncated {collection} at {len(out)} rows; "
+                "the client pages the remainder through delta sync."
+            )
             return out
         offset += 1000
 
@@ -3882,7 +3711,13 @@ def _bootstrap_fetch_scoped(collection: str, user: dict[str, Any]) -> list[dict[
     get_collection's delivery scoping and view/viewOwn permission checks.
     """
     role_lower = str(user.get("role") or "").lower()
-    include_media = _can_include_entity_media(user, collection, True)
+    # NEVER inline media in the startup payload. Receipts, ads and campaigns
+    # carry base64 photos up to 8 MB each, and this route pages through the
+    # WHOLE table — one login could stream hundreds of megabytes and pin the
+    # container's memory. Nothing is lost: photos hydrate on demand through
+    # GET /api/collections/{c}/{id} and the primary-photo route, which is what
+    # the shipped client already does (LIGHTWEIGHT_MEDIA_COLLECTIONS).
+    include_media = False
 
     # Delivery users: only records assigned to them (mirror get_collection).
     if role_lower == "delivery" and collection in {"ads", "receipts", "customers"}:
@@ -4103,15 +3938,38 @@ def _insert_entity_in_transaction(
 
 
 def _find_entity_by_idempotency(conn: Any, collection: str, key: str) -> dict[str, Any] | None:
-    rows = conn.execute(
-        text("SELECT * FROM entities WHERE type = :type AND deleted = false"),
-        {"type": collection},
-    ).mappings().all()
-    for row in rows:
-        data = json_loads(row.get("data_json") or "{}") or {}
-        if str(data.get("idempotencyKey") or "") == key:
-            return _entity_from_db_row(row)
-    return None
+    # A blank key matches nothing. Without this it would match the first row
+    # that has NO idempotencyKey at all (both this query and the old Python
+    # scan compare against ""), and a caller would read that unrelated row as
+    # "this payment already happened" and skip a real one. Wallet callers can
+    # never get here blank (_validate_wallet_values demands 8+ characters);
+    # this makes the guarantee independent of the caller.
+    if not str(key or "").strip():
+        return None
+    # Filter in SQL. This runs on the money paths while FOR UPDATE locks are
+    # held, and the old form loaded EVERY row of the collection (photos and
+    # all) to compare one string. The Python scan stays as a fallback so a
+    # dialect without JSON support still behaves identically.
+    try:
+        key_expr = json_field_sql("idempotencyKey")
+        rows = conn.execute(
+            text(
+                "SELECT * FROM entities WHERE type = :type AND deleted = false "
+                f"AND COALESCE({key_expr}, '') = :key"
+            ),
+            {"type": collection, "key": key},
+        ).mappings().all()
+        return _entity_from_db_row(rows[0]) if rows else None
+    except Exception:
+        rows = conn.execute(
+            text("SELECT * FROM entities WHERE type = :type AND deleted = false"),
+            {"type": collection},
+        ).mappings().all()
+        for row in rows:
+            data = json_loads(row.get("data_json") or "{}") or {}
+            if str(data.get("idempotencyKey") or "") == key:
+                return _entity_from_db_row(row)
+        return None
 
 
 def _wallet_amount_minor(data: dict[str, Any]) -> int:
@@ -4126,10 +3984,28 @@ def _wallet_amount_minor(data: dict[str, Any]) -> int:
 
 
 def _wallet_balance_minor(conn: Any, user_id: str, currency: str) -> int:
+    # Only this user's rows in this currency are needed, so let the database
+    # do the filtering. Every wallet debit calls this while holding FOR UPDATE
+    # locks, and reading the WHOLE ledger there means each transfer parses
+    # every transaction ever made while other writers queue behind the lock.
+    # The comparisons below mirror the Python fallback exactly, including
+    # comparing the stored currency uppercased against `currency` as given.
+    try:
+        rows = conn.execute(
+            text(
+                "SELECT data_json FROM entities "
+                "WHERE type = 'walletTransactions' AND deleted = false "
+                f"AND UPPER(COALESCE({json_field_sql('currency')}, '')) = :cur "
+                f"AND (COALESCE({json_field_sql('toUserId')}, '') = :uid "
+                f"OR COALESCE({json_field_sql('fromUserId')}, '') = :uid)"
+            ),
+            {"cur": currency, "uid": user_id},
+        ).mappings().all()
+    except Exception:
+        rows = conn.execute(
+            text("SELECT data_json FROM entities WHERE type = 'walletTransactions' AND deleted = false")
+        ).mappings().all()
     balance = 0
-    rows = conn.execute(
-        text("SELECT data_json FROM entities WHERE type = 'walletTransactions' AND deleted = false")
-    ).mappings().all()
     for row in rows:
         data = json_loads(row.get("data_json") or "{}") or {}
         if str(data.get("currency") or "").upper() != currency:
@@ -6746,11 +6622,41 @@ def _financial_insert_marker(
 
 
 def _financial_active_rows(conn: Any, collection: str) -> list[Any]:
+    """Every live row of a collection, for MONEY MATH ONLY — media stripped.
+
+    These scans run on the write paths while FOR UPDATE locks are held, so
+    every byte read here is time other writers spend queued behind the lock.
+    The callers only ever read money fields and ids, but the rows carried each
+    ad's and receipt's base64 photos — by far the largest part of a row, and
+    pure waste to ship and parse. The database drops those keys instead.
+
+    Because the images are missing, a row from here must NEVER be written
+    back; doing so would erase the photos. Callers that write re-read the row
+    with _clothes_lock_row first (see _financial_release_canceled_due), which
+    is also what the row locking requires. server/test_money_scan_projection.py
+    pins that the stripped rows give the same answers as the full ones.
+    """
+    media_fields = INLINE_MEDIA_FIELDS.get(collection) or ()
+    columns = "type,id,data_json,deleted,created_at,created_by,last_modified"
+    if media_fields:
+        try:
+            if str(get_engine().dialect.name or "") == "postgresql":
+                stripped = "data_json::jsonb" + "".join(f" - '{f}'" for f in media_fields)
+                data_expr = f"({stripped})::text AS data_json"
+            else:
+                paths = "".join(f", '$.{f}'" for f in media_fields)
+                data_expr = f"json_remove(data_json{paths}) AS data_json"
+            return conn.execute(
+                text(
+                    f"SELECT type,id,{data_expr},deleted,created_at,created_by,last_modified "
+                    "FROM entities WHERE type=:type AND deleted=false"
+                ),
+                {"type": collection},
+            ).mappings().all()
+        except Exception:
+            pass
     return conn.execute(
-        text(
-            "SELECT type,id,data_json,deleted,created_at,created_by,last_modified "
-            "FROM entities WHERE type=:type AND deleted=false"
-        ),
+        text(f"SELECT {columns} FROM entities WHERE type=:type AND deleted=false"),
         {"type": collection},
     ).mappings().all()
 
@@ -9986,33 +9892,32 @@ def _receipt_payments_credit_minor(payments: Any) -> int | None:
     return total if saw_line else None
 
 
-def _financial_receipt_reference_reason(
-    conn: Any, receipt_id: str, data: dict[str, Any] | None = None
-) -> str | None:
-    receipt = data
-    if receipt is None:
-        row = _clothes_lock_row(conn, "receipts", receipt_id, postgres=False)
-        if not row or bool(row["deleted"]):
-            return None
-        receipt = _financial_row_data(row)
-    if _financial_outgoing(receipt) > 0:
-        return "outgoing transfer"
-    if str(receipt.get("receiptType") or "") == "TRANSFER_IN" or receipt.get("transferFromReceiptId"):
-        return "incoming transfer"
-    for ad_row in _financial_active_rows(conn, "ads"):
-        if receipt_id in _financial_receipt_ids(_financial_row_data(ad_row)):
-            return "ad funding"
-    for other_row in _financial_active_rows(conn, "receipts"):
-        if str(other_row.get("id") or "") == receipt_id:
-            continue
-        other = _financial_row_data(other_row)
-        if str(other.get("transferFromReceiptId") or "") == receipt_id:
-            return "linked transfer receipt"
-        for transfer in other.get("transfers") or []:
-            if isinstance(transfer, dict) and str(transfer.get("toReceiptId") or "") == receipt_id:
-                return "linked transfer"
-    return None
+# Receipt-reference logic lives in server/receipt_references.py (main.py line
+# cap). These wrappers keep every existing call site unchanged and supply the
+# main-owned helpers the module needs.
+_RECEIPT_REFERENCE_CTX = {
+    "financial_active_rows": lambda conn, collection: _financial_active_rows(conn, collection),
+    "financial_row_data": lambda row: _financial_row_data(row),
+    "financial_receipt_ids": lambda data: _financial_receipt_ids(data),
+    "clothes_lock_row": lambda conn, collection, entity_id, postgres=False: _clothes_lock_row(
+        conn, collection, entity_id, postgres=postgres
+    ),
+}
 
+
+def build_receipt_reference_index(conn: Any) -> dict[str, dict[str, str]]:
+    return _build_receipt_reference_index(conn, _RECEIPT_REFERENCE_CTX)
+
+
+def _financial_receipt_reference_reason(
+    conn: Any,
+    receipt_id: str,
+    data: dict[str, Any] | None = None,
+    reference_index: dict[str, dict[str, str]] | None = None,
+) -> str | None:
+    return _receipt_reference_reason(
+        conn, _RECEIPT_REFERENCE_CTX, receipt_id, data, reference_index=reference_index
+    )
 
 def _financial_delete_receipt_atomic(receipt_id_raw: str) -> dict[str, Any]:
     receipt_id = validate_entity_id(receipt_id_raw)
@@ -13158,6 +13063,18 @@ def batch_delete_entities(
     guard = (nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK) if financial_batch else nullcontext()
     with guard:
         with db_conn() as conn:
+            # A clothesProduct that an order or shipment still references may
+            # not be deleted — the single-item route refuses with 409. The
+            # batch route skipped that check entirely, so deleting through it
+            # left orders pointing at a product that no longer exists, which
+            # cannot be undone from the UI.
+            batch_product_ids = [eid for col, eid in normalized if col == "clothesProducts"]
+            for product_id in batch_product_ids:
+                if _clothes_product_is_referenced(conn, product_id):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"clothesProducts/{product_id} is used by an order or shipment",
+                    )
             if financial_batch:
                 receipt_ids = {eid for col, eid in normalized if col == "receipts"}
                 customer_ids = {eid for col, eid in normalized if col == "customers"}
@@ -13167,11 +13084,19 @@ def batch_delete_entities(
                         if str(receipt_data.get("customerId") or "") in customer_ids:
                             receipt_ids.add(str(receipt_row["id"]))
                 locked_receipts = _financial_lock_receipts(conn, receipt_ids, postgres=postgres)
+                # ONE pass for the whole batch. Per receipt this helper scans
+                # BOTH the ads and receipts tables, so a 500-item delete used
+                # to run 1,000 unbounded scans inside this locked transaction,
+                # each materializing every row's base64 photos.
+                reference_index = (
+                    build_receipt_reference_index(conn) if locked_receipts else None
+                )
                 for receipt_id, receipt_row in locked_receipts.items():
                     if not receipt_row or bool(receipt_row["deleted"]):
                         continue
                     reason = _financial_receipt_reference_reason(
-                        conn, receipt_id, _financial_row_data(receipt_row)
+                        conn, receipt_id, _financial_row_data(receipt_row),
+                        reference_index=reference_index,
                     )
                     if reason:
                         raise HTTPException(
@@ -14115,6 +14040,9 @@ app.include_router(
         ctx={"user_has_permission": user_has_permission},
     )
 )
+# Must be registered before the SPA catch-all, or index.html would answer the
+# verification requests and both platforms would reject the association.
+app.include_router(create_app_links_router())
 
 
 # ==========================================

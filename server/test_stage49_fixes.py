@@ -20,6 +20,7 @@ from sqlalchemy import text
 os.environ["DATABASE_URL"] = "sqlite+pysqlite:///:memory:"
 
 import server.main as main_module
+import server.auth_limits as auth_limits_module
 from server.main import app, _client_ip
 from server.db import db_conn, init_db, json_dumps, now_ms
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
@@ -240,12 +241,12 @@ class TestClientIpNotSpoofable:
         return r
 
     def test_cf_connecting_ip_preferred(self, monkeypatch):
-        monkeypatch.setattr(main_module, "TRUST_PROXY_HEADERS", True)
+        monkeypatch.setattr(auth_limits_module, "TRUST_PROXY_HEADERS", True)
         req = self._req({"cf-connecting-ip": "203.0.113.9", "x-forwarded-for": "1.2.3.4, 5.6.7.8"})
         assert _client_ip(req) == "203.0.113.9"
 
     def test_xff_uses_rightmost_not_spoofable_leftmost(self, monkeypatch):
-        monkeypatch.setattr(main_module, "TRUST_PROXY_HEADERS", True)
+        monkeypatch.setattr(auth_limits_module, "TRUST_PROXY_HEADERS", True)
         # A client-forged leftmost entry must NOT be returned.
         req = self._req({"x-forwarded-for": "66.66.66.66, 5.6.7.8"})
         assert _client_ip(req) == "5.6.7.8"

@@ -100,6 +100,28 @@ This protects your logins and data traffic **even without a domain/HTTPS**.
   with `openssl rand -hex 32`, enter it in the setup form, then remove it after
   the first Admin exists. Without it, initialize with `python -m server.create_admin`
 
+### Verified app sign-in links (optional, recommended once the apps ship)
+
+The phone apps receive their sign-in result at `albayan://auth?code=...`. Any
+app on the phone can register that scheme, so the sign-in can be claimed by an
+impostor app. Setting these publishes the files Android and iOS use to verify
+that only the real Albayan app may handle links for this domain. Each route
+returns 404 until its variable is set, so leaving them unset changes nothing.
+
+- **ALBAYAN_ANDROID_PACKAGE**: defaults to `com.albayan.app`
+- **ALBAYAN_ANDROID_CERT_FINGERPRINTS**: the app's SHA-256 signing
+  fingerprints, comma separated, exactly as the Play Console shows them under
+  *App signing* (`AB:CD:...`, 32 byte pairs). Include both the upload and the
+  Play app-signing certificate. Serves `/.well-known/assetlinks.json`.
+- **ALBAYAN_IOS_APP_ID**: `<TeamID>.<bundle id>`, e.g.
+  `ABCDE12345.com.albayan.app`. Serves `/.well-known/apple-app-site-association`.
+
+A malformed value is dropped rather than published, because a file that fails
+to parse would silently leave verification off. Publishing the files is only
+half of the change: the Android manifest also needs an `autoVerify` https
+intent-filter and the iOS build needs the Associated Domains entitlement, so
+both apps must be rebuilt and resubmitted before verification takes effect.
+
 Example:
 
 ```bash

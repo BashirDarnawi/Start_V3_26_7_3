@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import threading
 import time
 from contextlib import contextmanager, nullcontext
@@ -182,6 +183,30 @@ def json_dumps(obj) -> str:
 
 def json_loads(s: str):
     return json.loads(s) if s else None
+
+
+_JSON_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def json_field_sql(field: str) -> str:
+    """SQL reading one TOP-LEVEL field of data_json as text, for this dialect.
+
+    Lets a query filter on a JSON field in the database instead of loading
+    every row of a collection and filtering in Python. That matters most on
+    the money paths: they run inside a transaction holding FOR UPDATE locks,
+    so a full scan there parses every row's data_json — receipt photos and all
+    — while other writers wait behind the lock.
+
+    Returns NULL-safe text, so callers should wrap in COALESCE to match
+    Python's ``str(data.get(field) or "")``. The field name is interpolated,
+    never a parameter (it is part of the expression), so it is restricted to
+    plain identifiers; every caller passes a hard-coded literal.
+    """
+    if not _JSON_FIELD_RE.match(str(field or "")):
+        raise ValueError(f"unsafe JSON field name: {field!r}")
+    if str(get_engine().dialect.name or "") == "postgresql":
+        return f"(data_json::jsonb ->> '{field}')"
+    return f"json_extract(data_json, '$.{field}')"
 
 
 @contextmanager

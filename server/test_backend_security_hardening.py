@@ -20,6 +20,7 @@ from starlette.requests import Request
 os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
 
 from server.db import db_conn, init_db, json_dumps, now_ms
+import server.auth_limits as auth_limits_module
 import server.main as main_module
 from server.main import (
     SERVICE_SUBSCRIPTION_CATALOG,
@@ -488,7 +489,7 @@ class TestAuthenticationRateLimitReset:
     def test_success_resets_ip_and_account_login_buckets(self, actors, monkeypatch):
         reset_keys: list[str] = []
         monkeypatch.setattr(rate_limiter, "reset_rate_limit", reset_keys.append)
-        monkeypatch.setattr(main_module, "TRUST_PROXY_HEADERS", True)
+        monkeypatch.setattr(auth_limits_module, "TRUST_PROXY_HEADERS", True)
 
         response = client.post(
             "/api/auth/login",
@@ -506,9 +507,9 @@ class TestAuthenticationRateLimitReset:
             "203.0.113.10",
             {"X-Forwarded-For": "198.51.100.1, 198.51.100.2"},
         )
-        monkeypatch.setattr(main_module, "TRUST_PROXY_HEADERS", False)
+        monkeypatch.setattr(auth_limits_module, "TRUST_PROXY_HEADERS", False)
         assert _client_ip(request) == "203.0.113.10"
-        monkeypatch.setattr(main_module, "TRUST_PROXY_HEADERS", True)
+        monkeypatch.setattr(auth_limits_module, "TRUST_PROXY_HEADERS", True)
         assert _client_ip(request) == "198.51.100.2"
 
     def test_successful_login_upgrades_legacy_password_hash(self, actors):

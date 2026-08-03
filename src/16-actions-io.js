@@ -1575,7 +1575,9 @@ async function downloadFullServerBackup(button = null) {
   }
   // Packaged app buffers whole responses in memory, and FB/IG webviews cannot
   // download at all — both would fail confusingly on a huge file.
-  if (typeof Platform !== 'undefined' && (Platform.isNative || Platform.isInAppBrowser)) {
+  // isCapacitor, not isNative: Platform exposes no isNative getter, so the
+  // packaged-app half of this guard read undefined and never fired.
+  if (typeof Platform !== 'undefined' && (Platform.isCapacitor || Platform.isInAppBrowser)) {
     if (typeof notifyInAppBrowserLimitation === 'function') notifyInAppBrowserLimitation('download');
     else showNotification(isAr ? 'افتح في المتصفح' : 'Open in a browser', isAr ? 'نزّل النسخة الكاملة من متصفح على الكمبيوتر.' : 'Download the full backup from a browser on a computer.', 'warning');
     return;

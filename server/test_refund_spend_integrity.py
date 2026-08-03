@@ -70,6 +70,63 @@ def test_undo_restores_the_pre_refund_spend_instead_of_deleting_it():
     )
 
 
+def test_batch_reference_index_matches_the_per_receipt_scan():
+    """The batch shortcut must reach the SAME verdict as scanning per receipt.
+
+    Batch delete used to run two whole-table scans PER receipt (1,000 for a
+    500-item batch, inside one locked transaction). The prebuilt index is only
+    safe if it answers identically, including the precedence of ad funding
+    over transfer links.
+    """
+    from server.db import db_conn, init_db, json_dumps, now_ms
+    from server.main import (
+        _financial_receipt_reference_reason,
+        build_receipt_reference_index,
+    )
+    from sqlalchemy import text
+
+    init_db()
+    rows = [
+        ("receipts", "ref_probe_plain", {"amountUSD": 10}),
+        ("receipts", "ref_probe_funded", {"amountUSD": 20}),
+        ("receipts", "ref_probe_linked", {"amountUSD": 30}),
+        ("receipts", "ref_probe_child", {"amountUSD": 30, "transferFromReceiptId": "ref_probe_linked"}),
+        ("ads", "ref_probe_ad", {"amountUSD": 20, "fundingReceiptId": "ref_probe_funded"}),
+    ]
+    with db_conn() as conn:
+        for etype, eid, data in rows:
+            conn.execute(
+                text(
+                    "INSERT INTO entities (type,id,data_json,deleted,created_at,created_by,last_modified) "
+                    "VALUES (:t,:i,:d,false,:now,'system',:now)"
+                ),
+                {"t": etype, "i": eid, "d": json_dumps(data), "now": now_ms()},
+            )
+    try:
+        with db_conn() as conn:
+            index = build_receipt_reference_index(conn)
+            for _etype, rid, data in rows:
+                if _etype != "receipts":
+                    continue
+                scanned = _financial_receipt_reference_reason(conn, rid, data)
+                indexed = _financial_receipt_reference_reason(
+                    conn, rid, data, reference_index=index
+                )
+                assert scanned == indexed, f"{rid}: scan said {scanned!r}, index said {indexed!r}"
+            assert _financial_receipt_reference_reason(
+                conn, "ref_probe_funded", {"amountUSD": 20}, reference_index=index
+            ) == "ad funding"
+            assert _financial_receipt_reference_reason(
+                conn, "ref_probe_plain", {"amountUSD": 10}, reference_index=index
+            ) is None
+    finally:
+        with db_conn() as conn:
+            for etype, eid, _data in rows:
+                conn.execute(
+                    text("DELETE FROM entities WHERE type=:t AND id=:i"), {"t": etype, "i": eid}
+                )
+
+
 def test_a_never_stopped_ad_still_refunds_against_its_full_amount():
     """The common case must be unchanged."""
     active = {

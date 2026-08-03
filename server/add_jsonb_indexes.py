@@ -41,6 +41,14 @@ def add_jsonb_indexes():
         # Customers: commonly searched by name (using jsonb_path_ops for GIN)
         ("idx_customers_name", "customers", "((data_json::jsonb->>'name'))"),  # B-tree index for exact/prefix matches
         ("idx_customers_phone", "customers", "((data_json::jsonb->>'phones'))"),  # Phone search
+
+        # Wallet ledger: a balance read filters by the two party columns, and
+        # every money write looks its idempotency key up first. Both run inside
+        # a transaction holding FOR UPDATE locks, so a sequential scan there
+        # stalls other writers; the ledger only grows.
+        ("idx_wallet_to_user", "walletTransactions", "((data_json::jsonb->>'toUserId'))"),
+        ("idx_wallet_from_user", "walletTransactions", "((data_json::jsonb->>'fromUserId'))"),
+        ("idx_wallet_idempotency", "walletTransactions", "((data_json::jsonb->>'idempotencyKey'))"),
     ]
     
     # FINANCIAL-INTEGRITY GUARANTEE: receipt numbers must be unique.
